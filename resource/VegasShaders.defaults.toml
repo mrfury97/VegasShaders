@@ -1251,6 +1251,21 @@ FlutterSpeed = 0.8                   # [0.0-6.0] (2026-10-21) Indoors: the small
 FlutterAmount = 0.1                  # [0.0-1.0] (2026-10-21) Indoors: how strong that quiver is (outdoors 0.35). Applies immediately
 RippleAmount = 0.3                   # [0.0-1.0] (2026-10-21) Indoors: how much the cloth billows out of its own plane (outdoors 0.5). Applies immediately
 
+[_Shaders.PipboyFit.Main]
+Enabled = true                       # UNOFFICIAL (2026-11-03): NEEDS A RESTART to switch on or off (Save, then restart the game). In first person, armor sleeves are pulled in under the arm-mounted Pip-Boy so they no longer poke through its casing (done in the vertex shader after skinning; only vertices on the left forearm move). The values below apply immediately
+Strength = 1.0                       # How much of the pull is applied (0 = none, 1 = sleeves end on the ellipse below)
+Knee = 0.7                           # Where the soft pull starts, as a share of the ellipse radius: sleeves inside it never move, past it they are eased in so nothing passes the ellipse
+Falloff = 2.0                        # Units over which the pull fades in at the elbow end and out past the wrist end (avoids a step in the sleeve)
+Start = 4.5                          # Where the Pip-Boy casing starts along the forearm (units from the elbow, in the "Bip01 L ForeTwist" bone's frame; the vanilla casing spans 4.4 to 17.1, the wrist is at 18.1)
+End = 17.0                           # Where the casing ends along the forearm
+CenterY = 0.1                        # The casing's inner ellipse: its centre across the forearm (bone y, units)
+CenterZ = 0.4                        # Its centre across the forearm (bone z, units; +z is the screen side)
+RadiusY = 2.6                        # Its radius along bone y (units; the vanilla casing's inside is about 2.7-3.6). Smaller = sleeves pulled in further
+RadiusZ = 2.6                        # Its radius along bone z (units; about 2.7-3.5 inside)
+WristScale = 0.6                     # The casing narrows towards the wrist (inside about 2 units across its last 4): the radius is scaled down to this at End
+Axis = 0                             # Which axis of the ForeTwist bone runs along the forearm (0 x, the vanilla skeleton's; 1 y, 2 z)
+ThirdPerson = true                   # Also fit your own sleeves in third person (only your character; NPCs are never changed)
+Exclude = "pipboy"                   # Meshes whose name holds one of these (comma-separated) are never squeezed: the Pip-Boy itself
 [_Shaders.PBR.Linear]
 LinearScene = true                  # UNOFFICIAL (2026-10-28; on by default since 2026-10-28: user, it "completely resolved the pop in issue"), needs a restart (then live), with linear lighting: THE fix for pieces looking lighter than the same surface next to them (floor tiles, rubble, road pieces, by day and at night): the game draws some surfaces in several passes (light, extra lamps, texture, highlights) and adds them in the picture, and each pass used to add its own already-encoded colour, which comes out too bright. On, the world is kept in linear light while it is drawn, so the passes add up exactly, and encoded once afterwards; LampSums, HighlightSums and ExactPassSums are then not needed (switched off by themselves). Surfaces drawn in one pass look as before; the game's own shaders (texture passes, signs, sky, water, glass) draw as before. Costs a few full-screen steps a frame (the log's "LinearScene" line counts them). Eyes keep the mod's shader while it is on. false = as before.
 ExactPassSums = 0                    # UNOFFICIAL TEST (2026-10-16): objects lit in several passes add them up in linear light (the extra lamp passes and the highlight passes were each added in the stored curve: up to 3.7x too bright indoors). 0 off, 1 lamps, 2 highlights, 3 both (the numbers were listed the other way round until 2026-10-25). Test only (a full-screen fold-in per run); LampSums and HighlightSums are the play versions. Applies immediately

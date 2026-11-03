@@ -49,6 +49,7 @@ struct VS_OUTPUT {	// vertex to pixel
     float4 ObjToCubeSpace[3] : register(c8);
 #else
     #include "includes/SkinHelpers.hlsl"	// shared code
+    #include "includes/PipboyFit.hlsl"	// UNOFFICIAL 2026-11-03 PipboyFit
     row_major float4x4 SkinModelViewProj : register(c1);	// bone space to clip space
     float4 ObjToCubeSpace[3] : register(c9);    // the game's SkinToCubeSpace
     float4 Bones[54] : register(c44);	// three rows a bone
@@ -69,6 +70,7 @@ VS_OUTPUT main(VS_INPUT vin) {
         float3 axisT = tbn[0], axisB = tbn[1], axisN = tbn[2];
         pos.w = 1;
         pos.xyz = BonesTransformPosition(Bones, boneOff, boneW, pos);
+        pos.xyz = PipboyFitPosition(pos.xyz, boneOff, boneW);	// UNOFFICIAL 2026-11-03 PipboyFit (includes/PipboyFit.hlsl)
         vout.clipPos = mul(SkinModelViewProj, pos);
     #endif
     axisT *= 0.1f;

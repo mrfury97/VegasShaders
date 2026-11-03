@@ -104,12 +104,25 @@ void AttachHooks() {
 	// UNOFFICIAL 2026-10-19 cloth round 5 (core/ClothWind.h DrawPartition): the game's two per-partition draw calls in
 	// BSBatchRenderer::RenderPassImmediately_Skinned, so worn cloth can have its per-vertex weights in vertex stream 1. Only when the
 	// cloth code is compiled in ([Shaders.Cloth.Main] Enabled at startup) and both calls are the game's; otherwise mask 4 stays.
-	if (TheSettingManager->GetSettingI("Shaders.Cloth.Main", "Enabled")) {
+	// UNOFFICIAL 2026-11-03 PipboyFit (core/PipboyFit.h) sends its constants from the same partition draw, so either one hooks it.
+	const bool clothOn = TheSettingManager->GetSettingI("Shaders.Cloth.Main", "Enabled") != 0;
+	if (!clothOn && TheSettingManager->GetSettingI("Shaders.PipboyFit.Main", "Enabled")) {
+		auto isDrawPartition = [](UInt32 site) { return *(UInt8*)site == 0xE8 && site + 5 + *(SInt32*)(site + 1) == 0x00E6D310; };
+		if (isDrawPartition(0x00B992E3) && isDrawPartition(0x00B99339)) {
+			WriteRelCall(0x00B992E3, (UInt32)&ClothWind::DrawPartitionHook);
+			WriteRelCall(0x00B99339, (UInt32)&ClothWind::DrawPartitionHook);
+			PipboyFit::HookOn = true;
+			Logger::Log("UNOFFICIAL PipboyFit: the skinned partition draws are hooked");
+		}
+		else Logger::Log("UNOFFICIAL PipboyFit: the calls at 00B992E3 / 00B99339 are not the game's partition draw (another plugin?); sleeves are not fitted");
+	}
+	if (clothOn) {
 		auto isDrawPartition = [](UInt32 site) { return *(UInt8*)site == 0xE8 && site + 5 + *(SInt32*)(site + 1) == 0x00E6D310; };
 		if (isDrawPartition(0x00B992E3) && isDrawPartition(0x00B99339)) {
 			WriteRelCall(0x00B992E3, (UInt32)&ClothWind::DrawPartitionHook);
 			WriteRelCall(0x00B99339, (UInt32)&ClothWind::DrawPartitionHook);
 			ClothWind::DrawHookOn = true;
+			PipboyFit::HookOn = true;
 			Logger::Log("UNOFFICIAL cloth wind: the skinned partition draws are hooked (per-vertex weights of worn cloth, [Shaders.Cloth.Main] UseWeights)");
 		}
 		else Logger::Log("UNOFFICIAL cloth wind: the calls at 00B992E3 / 00B99339 are not the game's partition draw (another plugin?); worn cloth keeps the skeleton mask");

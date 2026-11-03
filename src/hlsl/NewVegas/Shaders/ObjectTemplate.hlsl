@@ -503,6 +503,7 @@ float3 ApplyBarrelHeat(float3 color, float mask) {
 
 #ifdef SKIN
     #include "includes/SkinHelpers.hlsl"
+    #include "includes/PipboyFit.hlsl"	// UNOFFICIAL 2026-11-03 PipboyFit
 #endif
 
 // UNOFFICIAL 2026-10-16 cloth wind (Includes/ClothWind.hlsl, core/ClothWind.h): compiled into the vertex shaders only when
@@ -735,6 +736,7 @@ VS_OUTPUT main(VS_INPUT vin) {
     
         pos.w = 1;
         pos.xyz = BonesTransformPosition(Bones, boneOff, boneW, pos);
+        pos.xyz = PipboyFitPosition(pos.xyz, boneOff, boneW);	// UNOFFICIAL 2026-11-03 PipboyFit (includes/PipboyFit.hlsl)
         #ifdef CLOTH_WIND
             float3 clothOut = 0.0f;	// mask 5's billow direction, carried by the same bones
             float4 clothLegL = 0.0f, clothLegR = 0.0f;	// mask 5 (round 8): each leg (ClothLegBind), carried by the same bones
@@ -913,6 +915,7 @@ VS_OUTPUT main(VS_INPUT vin) {
     
         pos.w = 1;
         pos.xyz = BonesTransformPosition(Bones, boneOff, boneW, pos);
+        pos.xyz = PipboyFitPosition(pos.xyz, boneOff, boneW);	// UNOFFICIAL 2026-11-03 PipboyFit (includes/PipboyFit.hlsl)
         #ifdef CLOTH_WIND
             float3 clothOut = 0.0f;	// mask 5's billow direction, carried by the same bones
             float4 clothLegL = 0.0f, clothLegR = 0.0f;	// mask 5 (round 8): each leg (ClothLegBind), carried by the same bones

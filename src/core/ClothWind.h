@@ -38,6 +38,7 @@
 #include <mutex>
 #include <condition_variable>
 #include <deque>
+#include "PipboyFit.h"	// UNOFFICIAL 2026-11-03 PipboyFit: its constants go out from DrawPartition too
 #include <memory>
 #include <atomic>
 #include "ClothWeights.h"	// 2026-10-19 round 5: per-vertex weights of worn meshes (mask 5)
@@ -798,6 +799,8 @@ namespace ClothWind {
 	inline void DrawPartition(void* renderer, NiGeometryBufferData* buffer, NiSkinPartition::Partition* partition, void* unused) {
 		MeshWeights* m = ActiveWeights;
 		IDirect3DDevice9* device = TheRenderManager ? TheRenderManager->device : nullptr;
+		PipboyFit::ForPartition(device, partition);	// UNOFFICIAL 2026-11-03 PipboyFit: this partition's constants (or off)
+		if (!S.CompiledIn) { DrawPartitionOriginal(renderer, buffer, partition, unused); return; }	// (the hook is on for the Pip-Boy fit only)
 		if (!m || !device || !partition) { DrawPartitionOriginal(renderer, buffer, partition, unused); return; }
 		PartBuf* pb = nullptr;
 		for (PartBuf& p : m->parts) if (p.partition == partition) { pb = &p; break; }
