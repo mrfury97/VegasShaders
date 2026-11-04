@@ -447,7 +447,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 			D3DXHANDLE fusedTechnique = Effects.SunShadows->TechniqueHandle(fusedCache, "ForwardContactShadows");
 			const bool fusedForwardContact = Effects.ShadowsExteriors->Settings.Exteriors.ForwardShadows &&
 				fusedTechnique != NULL && Effects.SunShadows->Effect->GetTechnique(1) == fusedTechnique &&
-				!RtSunShadows::Replacing();	// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1: the deferred technique (its apply fades the cascades out near)
+				!RtSunShadows::Deferred();	// UNOFFICIAL 2026-10-28 RT sun shadows: the deferred technique (Mode 1: its apply fades the cascades out near)
 			// UNOFFICIAL Sharp ([Shaders.ShadowsExteriors.ScreenSpace]): the one-march technique (third in SunShadows.fx.hlsl).
 			static EffectRecord::CachedHandle sharpCache;
 			D3DXHANDLE sharpTechnique = Effects.SunShadows->TechniqueHandle(sharpCache, "ForwardContactSharp");
@@ -468,6 +468,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 				// the forward lookups are off for the fade: it gets the forward value, as without the switch.
 				const float forwardWas = sunShadows->Constants.ForwardData.x;
 				if (sunShadows->SunFaded && sunShadows->Settings.Exteriors.ForwardShadows) sunShadows->Constants.ForwardData.x = 0.0f;
+				RtSunShadows::ReplaceRange();	// UNOFFICIAL 2026-11-04: Mode 1 fades the cascades only when this frame was traced
 				RenderEffectToRT(sunShadows->Textures.ShadowPassSurface, Effects.SunShadows, false, sharpContact ? 2 : fusedForwardContact ? 1 : 0);
 				sunShadows->Constants.ForwardData.x = forwardWas;
 				RtSunShadows::Apply(Device);	// UNOFFICIAL 2026-10-28: the traced sun visibility into the red channel (nothing when not traced)

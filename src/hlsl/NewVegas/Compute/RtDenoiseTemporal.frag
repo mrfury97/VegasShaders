@@ -26,7 +26,8 @@ layout(push_constant) uniform Push {
     vec4 rect;           // (2026-11-03) RenderScale < 1: xy this frame's RenderRect scale (the signal is in the top-left xy part),
                          // zw last frame's (its history's part); 1 when off
     uint samplerIndex;   // the point-clamp sampler (written by the binding)
-    uint pad[3];
+    uint clampHistory;   // UNOFFICIAL 2026-11-04 (Settings.ClampHistory): 1 = the history is pulled into this frame's 3 x 3 range
+    uint pad[2];
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -55,10 +56,27 @@ void main() {
                 const vec4 history = textureLod(sampler2D(t_history, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
                 // the same surface: last frame's depth there matches this point's depth as seen from last frame
                 if (abs(history.a - clip.w) <= pc.params.y * max(clip.w, 1.0) && history.b > 0.0) {
-                    const float length = min(history.b + 1.0, pc.params.x);
+                    float length = min(history.b + 1.0, pc.params.x);
+                    vec4 kept = history;
+                    // UNOFFICIAL 2026-11-04 history clamp (RT sun shadows): the history pulled into the range this frame's noisy signal
+                    // spans over the 3 x 3 around the pixel, widened by 0.5 / 3 (one-ray answers are 0 or 1: a few lit rays in a soft
+                    // edge must not snap it); a moved shadow then does not trail for MaxHistory frames. Pulled by more than 0.25: the
+                    // mean restarts from this frame's value.
+                    if (pc.clampHistory != 0u) {
+                        float lo = value, hi = value;
+                        for (int y = -1; y <= 1; y++)
+                            for (int x = -1; x <= 1; x++) {
+                                const float v = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv + vec2(x, y) * pc.params.zw, 0.0).r;
+                                lo = min(lo, v); hi = max(hi, v);
+                            }
+                        const float c = clamp(history.r, lo - 0.1666667, hi + 0.1666667);
+                        if (abs(c - history.r) > 0.25) length = 1.0;
+                        kept.g += c * c - history.r * history.r;
+                        kept.r = c;
+                    }
                     const float alpha = 1.0 / length;
-                    result.r = mix(history.r, value, alpha);
-                    result.g = mix(history.g, value * value, alpha);
+                    result.r = mix(kept.r, value, alpha);
+                    result.g = mix(kept.g, value * value, alpha);
                     result.b = length;
                 }
             }

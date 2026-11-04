@@ -21,7 +21,7 @@ import argparse, os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DEFAULTS = os.path.join(ROOT, "resource", "VegasShaders.defaults.toml")
-TABLES = ["src/effects/PBR.h", "src/effects/POM.h", "src/effects/Terrain.h", "src/effects/Skin.h"]
+TABLES = ["src/effects/PBR/PBR.h", "src/effects/POM/POM.h", "src/effects/Terrain/Terrain.h", "src/effects/Skin/Skin.h"]  # 2026-11-04: the effect folders
 
 # ---------------------------------------------------------------- settings
 def parse_toml(path, into):
