@@ -20,6 +20,7 @@
 // amounts times their traced visibility instead of the cube maps; the rest count unshadowed, as that pass's tracked lamps do.
 // The ranking then uses that amount. glslangValidator -V --target-env vulkan1.2 -DEXTERIOR -o RtLampTraceExterior.spv RtLampTrace.comp
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : enable
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -50,6 +51,11 @@ layout(set = 0, binding = 4, rg32f) uniform writeonly image2D resultImage;
 // The lamp table, 4 texels a lamp, lamp = cube slot s at x = 4s: (x, y), (z, reach), (intensity, the game's radius), (stop, disc radius)
 // (scene space; reach 0 = no lamp in that slot)
 layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
+// UNOFFICIAL 2026-11-04 alpha-tested casters (all variants): with the far cull mask holding 0x10 (the host sets it only with the core's
+// AlphaTested and binding 12 the alpha atlas; else a stand-in, never read) fences, grates and foliage are tested by their diffuse alpha
+layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
 #ifdef SPLIT
 layout(set = 0, binding = 6, r32f) uniform writeonly image2D vis0Image;
 layout(set = 0, binding = 7, r32f) uniform writeonly image2D vis1Image;
@@ -93,8 +99,13 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	if (!(tMax > tMin)) return false;
 	rayQueryEXT q;
 	bool oneSided = p.flags.x > 0.5;
-	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | gl_RayFlagsOpaqueEXT, mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q)) { }
+	bool testAlpha = (mask & 0x10u) != 0u;	// 2026-11-04: the alpha-tested casters come as candidates (RtAlpha.glsl)
+	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT), mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q))
+		if (testAlpha && rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
 	// OneSided: the ray runs from the surface toward the lamp, so a caster facing the lamp is hit on its BACK face
 	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
@@ -192,7 +203,8 @@ void main() {
 				vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
 				float invLen = inversesqrt(dot(segment, segment));
 				float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
-				float tMin = min(offset * invLen, tEnd);
+				// 2026-11-04: the origin is already `offset` off the surface along the normal; only a quarter more along the ray
+				float tMin = min(0.25 * offset * invLen, tEnd);
 				float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
 				if (!blocked(origin, segment, tMin, tSplit, farMask) && !blocked(origin, segment, tSplit, tEnd, nearMask))
 					lit++;

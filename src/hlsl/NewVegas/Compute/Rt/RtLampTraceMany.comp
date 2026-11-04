@@ -84,7 +84,8 @@ bool reaches(vec3 origin, float offset, int s, float rr, float ang) {
 	vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
 	float invLen = inversesqrt(dot(segment, segment));
 	float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
-	float tMin = min(offset * invLen, tEnd);
+	// 2026-11-04: the origin is already `offset` off the surface along the normal; only a quarter more along the ray
+	float tMin = min(0.25 * offset * invLen, tEnd);
 	float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
 	return !blocked(origin, segment, tMin, tSplit, uint(p.params2.y)) && !blocked(origin, segment, tSplit, tEnd, uint(p.params2.z));
 }

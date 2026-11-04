@@ -735,6 +735,7 @@ void SettingManager::LoadSettings() {
 		SettingsMain.Main.HDRScreenshot = GetSettingI(sec, "HDRScreenshot");
 		SettingsMain.Main.ReplaceIntro = GetSettingI(sec, "ReplaceIntro");
 		SettingsMain.Main.ForceMSAA = GetSettingI(sec, "ForceMSAA");
+		SettingsMain.Main.BlockGameMSAA = GetSettingI(sec, "BlockGameMSAA");
 		SettingsMain.Main.SkipFog = GetSettingI(sec, "SkipFog");
 		SettingsMain.Main.RenderEffects = GetSettingI(sec, "RenderEffects");
 		SettingsMain.Main.RenderPreTonemapping = GetSettingI(sec, "RenderPreTonemapping");

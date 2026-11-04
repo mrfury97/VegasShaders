@@ -10,6 +10,9 @@ namespace RtSunShadows {
 	void	Register();						// once: the core user
 	void	Apply(IDirect3DDevice9* Device);	// after the sun contact shadows: the traced visibility into ShadowPassSurface's red
 	bool	Replacing();					// Mode 1 is in force (the forward lookups off, the deferred technique, TESR_RtSunReplace)
+	int		DepthImage();					// 2026-11-04 the helper's depth / normals images (RtLampShadows shares them), -1 before Setup
+	int		NormalsImage();
+	bool	Deferred();					// 2026-11-04 the cascades in the deferred apply (forward lookups off): Mode 1, and Mode 0 without KeepForward
 	float	ReplaceRange();					// the RT range while Replacing, else 0 (TESR_RtSunReplace.x, SunShadows' flags.w)
 	D3DXVECTOR4* ReplaceConstant();			// TESR_RtSunReplace
 	// UNOFFICIAL 2026-11-01 (core/Diagnostics.cpp, the REPORT block; a tester's "Mode 1 turns the exterior shadows off entirely"): the

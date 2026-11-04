@@ -10,6 +10,7 @@ struct SettingsMainStruct
 {
 	struct MainStruct {	// [Main.Main.*]
 		bool	RemoveUnderwater, ForceMSAA, ForceReflections;	// [Main.Main.Water] / [Main.Main.Misc]
+		bool	BlockGameMSAA;	// [Main.Main.Misc] UNOFFICIAL 2026-11-04: the INIs' iMultiSample / iWaterMultiSamples read as 0
 		bool	GameShadersInReflections; // [Main.Main.Water] diagnostic: the reflection pass uses the game's own shaders
 		bool	ReflectionClipFix; // [Main.Main.Water] UNOFFICIAL: the water reflection's clip plane rebuilt by NVR at every draw of the reflection pass
 		bool	RemovePrecipitations;	// [Main.Main.Precipitations]

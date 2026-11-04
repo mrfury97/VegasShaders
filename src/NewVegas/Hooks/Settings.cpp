@@ -75,6 +75,14 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 		if (nvr.ForceMSAA) {
 			if (Setting->iValue < 2) Setting->iValue = 2;
 		}
+		else if (nvr.BlockGameMSAA) {
+			// UNOFFICIAL 2026-11-04 BlockGameMSAA: read as 0 (TESRenderer::Init then leaves eMode 0: no multisampled frame buffer, and
+			// bTransparencyMultisampling needs iMultiSample > 1, so the grass takes GRASS23x00n, which NVR also replaces). The earlier
+			// try (header) left the water reflection multisampled: that one is iWaterMultiSamples (below). Its grass problem was b30GrassVS.
+			if (Setting->iValue > 0)
+				Logger::Log("UNOFFICIAL BlockGameMSAA: the INI asks for the game's anti-aliasing (iMultiSample %d): read as 0 (MSAA off; the INI file is not changed)", Setting->iValue);
+			Setting->iValue = 0;
+		}
 		else if (Setting->iValue > 0) {
 			if (!GameMSAAWarned)
 				Logger::Log("WARNING: the game's own anti-aliasing is on (iMultiSample %d). NVR's effects read one depth sample per pixel, which with "
@@ -82,6 +90,12 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 					"Antialiasing off in the game's launcher (Options); NVR's TAA / FSR / DLSS smooth the edges instead.", Setting->iValue);
 			GameMSAAWarned = Setting->iValue;
 		}
+	}
+	// UNOFFICIAL 2026-11-04 BlockGameMSAA: the water reflection's own MSAA (BSShaderManager::iWaterReflectionMultisample, read once at start)
+	else if (SameKey(key, "iWaterMultiSamples:Display") && nvr.BlockGameMSAA && !nvr.ForceMSAA) {
+		if (Setting->iValue > 0)
+			Logger::Log("UNOFFICIAL BlockGameMSAA: iWaterMultiSamples %d read as 0", Setting->iValue);
+		Setting->iValue = 0;
 	}
 	// UNOFFICIAL 2026-10-27 (user: "still no grass shadows"): NVR's grass shaders replace the game's shader model 3 grass (GRASS23x000-007);
 	// with b30GrassVS 0 the game takes its older GRASS2000-2023 set, which NVR leaves alone: no NVR lighting, shadow or wind on grass at all.
@@ -101,8 +115,34 @@ bool __fastcall WriteSettingHook(INISettingCollection* This, UInt32 edx, GameSet
 	for (const char* kept : kKeptFromWrite) {
 		if (SameKey(Setting->Name, kept)) return true;	// reported as written, file untouched
 	}
+	// UNOFFICIAL 2026-11-04 BlockGameMSAA: the 0 read in above stays in memory; the INI keeps the player's value
+	SettingsMainStruct::MainStruct& nvr = TheSettingManager->SettingsMain.Main;
+	if (nvr.BlockGameMSAA && !nvr.ForceMSAA && (SameKey(Setting->Name, "iMultiSample:Display") || SameKey(Setting->Name, "iWaterMultiSamples:Display")))
+		return true;
 	return WriteSetting(This, Setting);
 
+}
+
+// UNOFFICIAL 2026-11-04 BlockGameMSAA, part 2: the renderer's own settings (RendererSettingCollection), set to 0 just before
+// TESRenderer::Init reads them (called from InitializeRendererHook = TESMain::InitRenderer, after every INI file is read).
+// The read hook above did not see every route: FalloutCustom.ini's iMultiSample 4 still reached the renderer (user test 16:09, the
+// frame 4x). TESRenderer::Init: eMode (the frame buffer's MSAA) from gs_iMultiSample, BSShaderManager::iWaterReflectionMultisample
+// from gs_iWaterMultiSamples, bTransparencyMultisampling needs gs_iMultiSample > 1.
+void BlockGameMSAABeforeRenderer() {
+	const SettingsMainStruct::MainStruct& nvr = TheSettingManager->SettingsMain.Main;
+	if (!nvr.BlockGameMSAA || nvr.ForceMSAA) return;
+	struct Entry { UInt32 address; const char* name; };
+	const Entry entries[] = { { 0x011C73F4, "iMultiSample:Display" }, { 0x011C7284, "iWaterMultiSamples:Display" } };
+	for (const Entry& e : entries) {
+		GameSetting* s = (GameSetting*)e.address;
+		if (!s->Name || strcmp(s->Name, e.name) != 0) {	// not this game build's layout: leave it
+			Logger::Log("UNOFFICIAL BlockGameMSAA: the renderer's %s is not at %08X (found '%s'): not changed", e.name, e.address, s->Name ? s->Name : "(none)");
+			continue;
+		}
+		if (s->iValue != 0)
+			Logger::Log("UNOFFICIAL BlockGameMSAA: the renderer's %s was %d (the INIs, FalloutCustom.ini included): set to 0 before the renderer starts", e.name, s->iValue);
+		s->iValue = 0;
+	}
 }
 
 // Replaces the game's main-menu music path with NVR's track (called from two places, see Hooks.cpp).

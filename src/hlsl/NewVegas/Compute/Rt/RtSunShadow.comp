@@ -30,6 +30,12 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 cloudCentre;   // xy the map's centre (m, on the cloud base), z metres per unit (1 / 70)
 	vec4 cloudLight;    // xyz the light the map was drawn along (z >= 0.25)
 	vec4 camera;        // xyz the camera's world position (units): the scene is camera relative
+	// UNOFFICIAL 2026-11-04 blocker history (Penumbra): last frame's camera, as forward / right / up above, and its world position;
+	// prevCamera.w 1 = the history pair (bindings 8, 9) holds last frame's blockers
+	vec4 prevForward;
+	vec4 prevRight;
+	vec4 prevUp;
+	vec4 prevCamera;
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // TESR_DepthBuffer's red: view z / farZ
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // TESR_NormalsBuffer: view-space normal * 0.5 + 0.5
@@ -37,6 +43,10 @@ layout(set = 0, binding = 4, r16f) uniform writeonly image2D visibilityImage;
 layout(set = 0, binding = 5, r16f) uniform readonly image2D alphaAtlas;          // RtCore::AlphaAtlasImage() (or a stand-in, alpha.x 0)
 layout(set = 0, binding = 6, rgba16f) uniform readonly image2D cloudImage;       // the clouds' shadow map, red = sunlight let through (cloud.x > 0)
 layout(set = 0, binding = 7, r16f) uniform writeonly image2D hitImage;          // 2026-10-31 Penumbra: the blocker's distance (units), 0 = free / not traced
+// UNOFFICIAL 2026-11-04 the blockers over frames (traced size): x the mean blocker distance of the rays that hit, y how often rays hit
+// lately (0..1), z view z (the same surface next frame); last frame's in, this frame's out (ping-pong; stand-ins without Penumbra)
+layout(set = 0, binding = 8, rgba16f) uniform readonly image2D blockerHistoryIn;
+layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D blockerHistoryOut;
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
 
@@ -60,6 +70,32 @@ float cloudTransmittance(vec3 position) {
 	return mix(1.0, mix(mix(a, b, f.x), mix(c, d, f.x), f.y), inside);
 }
 
+// UNOFFICIAL 2026-11-04 the surface's own (geometric) normal from the depth: the buffer's normal is normal mapped and smoothed, so a
+// pixel whose bumped normal turned from the sun inside a real shadow was never traced (lit there), and the start offset went along it.
+// Each axis takes the neighbour nearer in depth (not across an edge); none valid: the buffer's normal.
+vec3 scenePoint(ivec2 s) {
+	const float d = imageLoad(depthImage, s).r;
+	if (!(d > 0.0 && d < 0.9999)) return vec3(1.0e30);
+	const vec2 u = (vec2(s) + 0.5) / p.full.xy + p.full.zw;	// + the depth's jitter, as main()'s uv
+	return p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * u.x - 1.0) - p.up.xyz * (2.0 * u.y - 1.0)) * (d * p.forward.w);
+}
+vec3 geometricNormal(ivec2 s, vec3 fallback) {
+	// the centre rebuilt the same way as its neighbours (main()'s point is built from the traced pixel's uv, up to half a pixel off)
+	const vec3 centre = scenePoint(s);
+	if (!(dot(centre, centre) < 1.0e20)) return fallback;
+	const ivec2 last = ivec2(p.full.xy) - 1;
+	const vec3 l = scenePoint(clamp(s - ivec2(1, 0), ivec2(0), last)), r = scenePoint(clamp(s + ivec2(1, 0), ivec2(0), last));
+	const vec3 a = scenePoint(clamp(s - ivec2(0, 1), ivec2(0), last)), b = scenePoint(clamp(s + ivec2(0, 1), ivec2(0), last));
+	const vec3 dx = dot(centre - l, centre - l) < dot(r - centre, r - centre) ? centre - l : r - centre;
+	const vec3 dy = dot(centre - a, centre - a) < dot(b - centre, b - centre) ? centre - a : b - centre;
+	if (!(dot(dx, dx) < 1.0e20 && dot(dy, dy) < 1.0e20)) return fallback;
+	vec3 n = cross(dx, dy);
+	const float len = length(n);
+	if (!(len > 1.0e-6)) return fallback;
+	n /= len;
+	return dot(n, centre - p.origin.xyz) > 0.0 ? -n : n;	// toward the camera
+}
+
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y))
@@ -68,7 +104,9 @@ void main() {
 	float result = 1.0;
 	float blocker = 0.0;	// 2026-10-31 Penumbra: the hit's distance along the sun ray (0: free, or not traced)
 	// the full-size pixel this traced pixel stands for (the same one at full resolution)
-	const ivec2 source = ivec2((vec2(pixel) + 0.5) * p.full.xy * p.size.zw);
+	// 2026-11-04: an integer scale (the float form landed on 2p + 1.0 exactly at half size and could round either way)
+	const int scale = max(int(p.full.x * p.size.z + 0.5), 1);
+	const ivec2 source = min(pixel * scale + scale / 2, ivec2(p.full.xy) - 1);
 	float linear01 = imageLoad(depthImage, source).r;
 	float viewZ = linear01 * p.forward.w;
 	// (2026-11-03) + the jitter the depth was drawn with (TAA / FSR / DLSS; full.zw, screen uv): the depth pixel lies on the unjittered
@@ -105,10 +143,14 @@ void main() {
 		vec3 right = normalize(p.right.xyz), up = normalize(p.up.xyz), forward = normalize(p.forward.xyz);
 		vec3 normal = normalize(right * n.x + up * n.y + forward * n.z);
 
-		float facing = dot(normal, p.sun.xyz);
+		const vec3 geometric = geometricNormal(source, normal);
+		const float geometricFacing = dot(geometric, p.sun.xyz);
+		// 2026-11-04: traced when either the bumped or the geometric normal faces the sun (was the bumped one alone)
+		float facing = max(dot(normal, p.sun.xyz), geometricFacing);
 		if (facing > 0.0) {
-			// Bias: along the normal (grows with distance: depth and normal precision), then a little toward the sun
-			vec3 start = position + normal * (p.bias.x + p.bias.y * viewZ) + p.sun.xyz * p.bias.z;
+			// Bias: along the geometric normal (grows with distance: depth precision), then toward the sun, more at a grazing sun
+			// (2026-11-04: x 1 / facing up to 4; a ray almost along the surface started too close to it and hit it in streaks)
+			vec3 start = position + geometric * (p.bias.x + p.bias.y * viewZ) + p.sun.xyz * (p.bias.z * clamp(1.0 / max(geometricFacing, 0.001), 1.0, 4.0));
 			rayQueryEXT q;
 			// Soft shadows: one ray a pixel toward a point of the sun's disc, a different one each pixel and frame (the denoiser averages)
 			vec3 toSun = p.sun.xyz;
@@ -116,8 +158,10 @@ void main() {
 				const vec3 t1 = normalize(abs(toSun.z) < 0.9 ? cross(toSun, vec3(0.0, 0.0, 1.0)) : cross(toSun, vec3(1.0, 0.0, 0.0)));
 				const vec3 t2 = cross(toSun, t1);
 				// interleaved gradient noise + the frame's golden-ratio step: a low-discrepancy disc point
-				const float n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
-				const float n2 = fract(n1 * 1.618034 + 0.7548777 * p.alpha.y + 0.5 * float((pixel.x ^ pixel.y) & 1));
+				// 2026-11-04: two independent coordinates (an R2 step a frame on two IGN patterns); n2 was a function of n1, so each
+				// pixel's points lay on one curve across the disc
+				const float n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.7548776662 * p.alpha.y);
+				const float n2 = fract(52.9829189 * fract(0.06711056 * float(pixel.x + 37) + 0.00583715 * float(pixel.y + 17)) + 0.5698402909 * p.alpha.y);
 				const float r = sqrt(n1) * p.alpha.z, phi = 6.2831853 * n2;
 				toSun = normalize(toSun + (t1 * cos(phi) + t2 * sin(phi)) * r);
 			}
@@ -162,5 +206,33 @@ void main() {
 		if (facing > 0.0) result *= mix(1.0, cloudTransmittance(position), p.cloud.x * facing);
 	}
 	imageStore(visibilityImage, pixel, vec4(debug == 2 ? state : result, 0.0, 0.0, 0.0));
-	if (p.alpha.w > 0.5) imageStore(hitImage, pixel, vec4(min(blocker, 60000.0), 0.0, 0.0, 0.0));
+	if (p.alpha.w > 0.5) {
+		// UNOFFICIAL 2026-11-04 the blocker over frames: one jittered ray a frame misses in about half a penumbra, so this frame's
+		// distance alone came and went and the penumbra's width (RtSunPenumbra) flickered. Kept per surface point (reprojected through
+		// last frame's camera, same view z): the mean distance of the rays that hit (a hit far off the mean restarts it: another caster)
+		// and how often rays hit lately; the penumbra pass gets the mean while rays still hit now and then.
+		const bool traced = state > 0.5;		// 0.6 hit, 0.8 free
+		const bool hit = blocker > 0.0;
+		float mean = hit ? blocker : 0.0, often = hit ? 1.0 : 0.0;
+		if (traced && p.prevCamera.w > 0.5) {
+			const vec3 position = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * viewZ;
+			const vec3 then = position + (p.camera.xyz - p.prevCamera.xyz);	// camera relative last frame
+			const float z = dot(then, p.prevForward.xyz);
+			if (z > 1.0) {
+				const vec2 ndc = vec2(dot(then, p.prevRight.xyz) / dot(p.prevRight.xyz, p.prevRight.xyz), dot(then, p.prevUp.xyz) / dot(p.prevUp.xyz, p.prevUp.xyz)) / z;
+				const ivec2 prev = ivec2(floor(vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) * p.size.xy));
+				if (all(greaterThanEqual(prev, ivec2(0))) && prev.x < int(p.size.x) && prev.y < int(p.size.y)) {
+					const vec4 h = imageLoad(blockerHistoryIn, prev);
+					if (h.z > 0.0 && abs(h.z - z) <= 0.03 * z) {
+						often = mix(h.y, often, 0.125);
+						if (!hit) mean = h.x;
+						else if (h.x > 0.0 && abs(blocker - h.x) < 0.5 * max(blocker, h.x)) mean = mix(h.x, blocker, 0.25);
+					}
+				}
+			}
+		}
+		if (!traced) { mean = 0.0; often = 0.0; }
+		imageStore(blockerHistoryOut, pixel, vec4(min(mean, 60000.0), often, traced ? min(viewZ, 60000.0) : 0.0, 0.0));
+		imageStore(hitImage, pixel, vec4(often > 0.03 ? min(mean, 60000.0) : 0.0, 0.0, 0.0, 0.0));
+	}
 }

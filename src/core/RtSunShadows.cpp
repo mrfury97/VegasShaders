@@ -27,6 +27,7 @@ namespace {
 		bool	cloudShadows = false;	// 2026-10-30: the volumetric clouds' shadow map in the traced visibility
 		bool	penumbra = false;		// 2026-10-31: contact-hardening soft shadows (RtSunPenumbra.frag; SunAngle 0 = the real sun, 0.53 deg)
 		float	penumbraMaxRadius = 32.0f;	// the widest penumbra filter (full-size pixels)
+		bool	keepForward = false;	// 2026-11-04 Mode 0: true = the object shaders' own cascade lookups stay (the old way: darker where both shadow)
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
 	} S;
 
@@ -34,6 +35,7 @@ namespace {
 	struct PassConstants {
 		float size[4], forward[4], right[4], up[4], origin[4], sun[4], bias[4], range[4], alpha[4], full[4];
 		float cloud[4], cloudCentre[4], cloudLight[4], camera[4];	// 2026-10-30 CloudShadows (cloud.x 0: none); camera: its world position
+		float prevForward[4], prevRight[4], prevUp[4], prevCamera[4];	// 2026-11-04 the blocker history: last traced frame's camera (w 1: valid)
 	};
 
 	int			imageDepth = -1, imageNormals = -1, imageVisibility = -1, shader = -1, hitDebugShader = -1;
@@ -56,6 +58,13 @@ namespace {
 	D3DXVECTOR4	replaceConstant = { 0.0f, 0.0f, 0.0f, 0.0f };
 	// 2026-10-31 Penumbra: the traced blocker distances (helper image + its copy here) and the contact-hardening filter's output
 	int			imageHit = -1;
+	// UNOFFICIAL 2026-11-04 the blockers over frames (RtSunShadow.comp bindings 8, 9; ping-pong) and the camera they were traced with
+	int			imageBlocker[2] = { -1, -1 };
+	int			blockerParity = 0;
+	UInt32		blockerFrame = 0xFFFFFFFF;		// the frame whose trace wrote imageBlocker[blockerParity]
+	UINT		blockerWidth = 0, blockerHeight = 0;
+	float		blockerCamera[4][4] = {};		// forward, right, up, world position of that frame
+	UInt32		sunUpFrame = 0;					// 2026-11-04 the last frame the sun's shadows were not fully faded
 	IDirect3DTexture9*	hitTexture = nullptr;
 	IDirect3DSurface9*	hitSurface = nullptr;
 	bool		hitThisFrame = false;
@@ -85,6 +94,7 @@ namespace {
 		S.penumbra = TheSettingManager->GetSettingI(kSection, "Penumbra") != 0;
 		S.penumbraMaxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "PenumbraMaxRadius"), 2.0f), 64.0f);
 		if (S.penumbra && S.sunAngle <= 0.0f) S.sunAngle = 0.53f;	// the sun's real angular diameter
+		S.keepForward = TheSettingManager->GetSettingI(kSection, "KeepForward") != 0;
 	}
 
 	const D3DXVECTOR4* Constant(const char* name) {
@@ -102,7 +112,11 @@ namespace {
 		ReadSettings();
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		if (S.enabled && HitView()) return true;	// 2026-10-30: the hit texture / glow checks run indoors too (the neon is in casinos)
-		return S.enabled && TheShaderManager->GameState.isExterior && shadows && shadows->Enabled && shadows->Settings.Exteriors.Enabled;
+		if (!(S.enabled && TheShaderManager->GameState.isExterior && shadows && shadows->Enabled && shadows->Settings.Exteriors.Enabled)) return false;
+		// UNOFFICIAL 2026-11-04: not while the sun's shadows are fully faded (night, the turn of dusk and dawn: every pixel came out free)
+		const UInt32 now = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		if (shadows->Constants.ShadowFade.x < 1.0f) sunUpFrame = now;
+		return now - sunUpFrame < 300 || S.debugView != 0;
 	}
 
 	void Setup() {
@@ -111,6 +125,9 @@ namespace {
 		imageNormals = RtCore::AddImage("NVR RT sun normals", w, h, NVR_EXT_SHARED_RGBA16F);
 		imageVisibility = RtCore::AddImage("NVR RT sun visibility", w, h, NVR_EXT_SHARED_R16F);
 		imageHit = RtCore::AddImage("NVR RT sun hit distance", w, h, NVR_EXT_SHARED_R16F);	// 2026-10-31 Penumbra (always: the switch is live)
+		imageBlocker[0] = RtCore::AddImage("NVR RT sun blockers 0", w, h, NVR_EXT_SHARED_RGBA16F);	// 2026-11-04 the blocker history
+		imageBlocker[1] = RtCore::AddImage("NVR RT sun blockers 1", w, h, NVR_EXT_SHARED_RGBA16F);
+		blockerFrame = 0xFFFFFFFF;
 		// 2026-10-30 CloudShadows: the clouds' shadow map (A16B16G16R16F, ShadowResolution x ShadowResolution), if it exists by now
 		imageCloud = -1;
 		imageCloudSize = 0;
@@ -141,7 +158,7 @@ namespace {
 			if (hitTexture) { hitTexture->Release(); hitTexture = nullptr; }
 		}
 		hitThisFrame = false;
-		const bool wantHit = S.penumbra && imageHit >= 0 && S.debugView != 7 && S.debugView != 8;
+		const bool wantHit = S.penumbra && imageHit >= 0 && imageBlocker[0] >= 0 && imageBlocker[1] >= 0 && S.debugView != 7 && S.debugView != 8;
 		if (wantHit && !hitTexture) TheTextureManager->InitTexture("TESR_RtSunBlocker", &hitTexture, &hitSurface, w, h, D3DFMT_R16F);
 		IDirect3DBaseTexture9* depth = Texture("TESR_DepthBuffer");
 		IDirect3DBaseTexture9* normals = Texture("TESR_NormalsBuffer");
@@ -183,7 +200,8 @@ namespace {
 		c.alpha[1] = (float)(frames & 1023);								// the jitter's frame
 		c.alpha[2] = tanf(0.5f * S.sunAngle * 0.0174532925f);				// the sun cone's half-angle tangent (0: hard)
 		c.alpha[3] = wantHit && hitSurface ? 1.0f : 0.0f;					// 2026-10-31 Penumbra: write the blocker distances (binding 7)
-		c.range[0] = S.range; c.range[1] = 0.15f * S.range; c.range[2] = 255.0f; c.range[3] = S.debugView == 3 ? 1.0f : S.debugView == 5 ? 2.0f : S.debugView == 6 ? 3.0f :
+		c.range[0] = S.range; c.range[1] = 0.075f * S.range;	// 2026-11-04 the last 7.5% (Mode 1's cascades come in over the 7.5% before)
+		 c.range[2] = 255.0f; c.range[3] = S.debugView == 3 ? 1.0f : S.debugView == 5 ? 2.0f : S.debugView == 6 ? 3.0f :
 			S.debugView == 9 ? 5.0f : S.debugView == 10 ? 6.0f : 0.0f;	// 9, 10 (2026-10-30): CloudShadows checks
 
 		if (!RtCore::CopyIn(imageDepth, depth) || !RtCore::CopyIn(imageNormals, normals)) return;
@@ -221,10 +239,30 @@ namespace {
 			if (!RtCore::AddPass(hitDebugShader, images, 4, 0x1, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
 		}
 		else {
-			const int images[6] = { imageDepth, imageNormals, imageVisibility, c.alpha[0] > 0.0f && atlas >= 0 ? atlas : imageVisibility,	// [3]: binding 5
+			// 2026-11-04 the blocker history: last frame's camera when last frame's trace wrote the pair's other half at this size
+			const UInt32 now = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+			const bool hit = c.alpha[3] > 0.0f;
+			if (hit && blockerFrame + 1 == now && blockerWidth == tw && blockerHeight == th) {
+				memcpy(c.prevForward, blockerCamera[0], sizeof(c.prevForward));
+				memcpy(c.prevRight, blockerCamera[1], sizeof(c.prevRight));
+				memcpy(c.prevUp, blockerCamera[2], sizeof(c.prevUp));
+				memcpy(c.prevCamera, blockerCamera[3], sizeof(c.prevCamera));
+				c.prevCamera[3] = 1.0f;
+			}
+			const int images[8] = { imageDepth, imageNormals, imageVisibility, c.alpha[0] > 0.0f && atlas >= 0 ? atlas : imageVisibility,	// [3]: binding 5
 				cloudsInTrace ? imageCloud : imageNormals,	// [4]: binding 6, the clouds' shadow map (a stand-in with cloud.x 0)
-				c.alpha[3] > 0.0f ? imageHit : imageVisibility };	// [5]: binding 7, the blocker distances (a stand-in, not written, with alpha.w 0)
-			if (!RtCore::AddPass(shader, images, 6, 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) { cloudsInTrace = false; return; }
+				hit ? imageHit : imageVisibility,	// [5]: binding 7, the blocker distances (a stand-in, not written, with alpha.w 0)
+				hit ? imageBlocker[blockerParity] : imageNormals, hit ? imageBlocker[1 - blockerParity] : imageNormals };	// [6], [7]: bindings 8, 9 (not used with alpha.w 0)
+			if (!RtCore::AddPass(shader, images, 8, hit ? 0xA4 : 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) { cloudsInTrace = false; return; }
+			if (hit) {
+				blockerParity = 1 - blockerParity;	// the half just written is the next frame's input
+				blockerFrame = now;
+				blockerWidth = tw; blockerHeight = th;
+				memcpy(blockerCamera[0], c.forward, sizeof(c.forward));
+				memcpy(blockerCamera[1], c.right, sizeof(c.right));
+				memcpy(blockerCamera[2], c.up, sizeof(c.up));
+				memcpy(blockerCamera[3], c.camera, sizeof(c.camera));
+			}
 		}
 		tracedThisFrame = RtCore::CopyOut(imageVisibility, visibilitySurface, tw, th);
 		static int rectLogs = 0;
@@ -391,6 +429,22 @@ namespace RtSunShadows {
 			RtDenoise::Settings settings;
 			settings.Downscale = S.halfResolution ? 2 : 1;
 			settings.Kernel = S.denoiseKernel;
+			// UNOFFICIAL 2026-11-04: the history clamped to this frame's rays (a moved shadow does not trail); its own denoiser under DLSS
+			// Ray Reconstruction too (else the raw one-ray signal went on and the Penumbra pass never ran); a sun on the move (its
+			// glide between steps) keeps 4 frames, a jump or a gap in the tracing restarts the history
+			settings.ClampHistory = true;
+			settings.IgnoreRr = true;
+			{
+				static D3DXVECTOR4 lastSun = { 0.0f, 0.0f, 0.0f, 0.0f };
+				static UInt32 lastFrame = 0;
+				const D3DXVECTOR4& sun = TheShaderManager->Effects.ShadowsExteriors->Constants.SmoothedSunDir;
+				const UInt32 now = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+				const float turn = sun.x * lastSun.x + sun.y * lastSun.y + sun.z * lastSun.z;
+				if (now - lastFrame > 2 || turn < 0.99939f) settings.Reset = true;			// over 2 degrees in a frame, or not traced lately
+				else if (turn < 0.9999999f) settings.MaxHistory = 4.0f;					// moving
+				lastSun = sun;
+				lastFrame = now;
+			}
 			const bool penumbra = S.penumbra && hitThisFrame;
 			if (penumbra) settings.Iterations = 0;	// 2026-10-31 Penumbra: temporal only, the spatial part is RtSunPenumbra's (sized per pixel)
 			if (denoisedSurface && RtDenoise::Run(denoiser, Device, visibilityTexture, denoisedSurface, settings)) {
@@ -470,6 +524,13 @@ namespace RtSunShadows {
 
 	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior; }
 
+	// UNOFFICIAL 2026-11-04: the cascades in the deferred apply (the object shaders' own lookups off) whenever the traced shadow is applied:
+	// Mode 1, and Mode 0 unless KeepForward. With the forward lookups the objects had already lost the sun in a cascade shadow and the
+	// traced shadow, multiplied into the whole picture, darkened them a second time; now both go through the one buffer.
+	bool Deferred() {
+		return S.enabled && (S.mode == 1 || !S.keepForward) && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior;
+	}
+
 	// UNOFFICIAL 2026-11-01 (the REPORT block's ray tracing line)
 	std::string StatusText() {
 		if (!S.enabled) return "RT sun shadows off ([Shaders.ShadowsExteriors.RT] Enabled false): the cascades alone";
@@ -486,9 +547,14 @@ namespace RtSunShadows {
 	IDirect3DSurface9* VisibilitySurface() { return lastTracedFrame != 0xFFFFFFFF ? visibilitySurface : nullptr; }
 
 	float ReplaceRange() {
-		replaceConstant.x = Replacing() ? S.range : 0.0f;
+		// 2026-11-04: only when this frame was traced (EffectChain calls this again right before the apply): a frame the helper fell
+		// behind keeps its cascades instead of losing every sun shadow inside the range
+		replaceConstant.x = Replacing() && tracedThisFrame ? S.range : 0.0f;
 		return replaceConstant.x;
 	}
 
 	D3DXVECTOR4* ReplaceConstant() { return &replaceConstant; }
+
+	int DepthImage() { return imageDepth; }
+	int NormalsImage() { return imageNormals; }
 }

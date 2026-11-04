@@ -13,6 +13,7 @@
 //     (V0's lamp may have been V1's last frame), a running mean over up to ManyLightsHistory (max 31) frames.
 // Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampTraceRestir.spv RtLampTraceRestir.comp
 #extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : enable
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -42,6 +43,11 @@ layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D historyOut;
 layout(set = 0, binding = 8, rgba16f) uniform readonly image2D historyIdsIn;  // id0, id1 (255 none), n0 + 32 n1, nR (frames averaged)
 layout(set = 0, binding = 9, rgba16f) uniform writeonly image2D historyIdsOut;
 layout(set = 0, binding = 12, rgba16f) uniform readonly image2D motionImage;  // ObjectMotion: xyz the world move since last frame
+// UNOFFICIAL 2026-11-04 alpha-tested casters: with the far cull mask holding 0x10 (the host sets it only with the core's AlphaTested
+// and binding 13 the alpha atlas; else a stand-in, never read) fences, grates and foliage are tested by their diffuse alpha
+layout(set = 0, binding = 13, r16f) uniform readonly image2D alphaAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
 
 const int MaxLamps = 255;
 shared vec4 lampA[MaxLamps];    // x y z (scene space), reach
@@ -66,8 +72,13 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	if (!(tMax > tMin)) return false;
 	rayQueryEXT q;
 	bool oneSided = p.flags.x > 0.5;
-	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | gl_RayFlagsOpaqueEXT, mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q)) { }
+	bool testAlpha = (mask & 0x10u) != 0u;	// 2026-11-04: the alpha-tested casters come as candidates (RtAlpha.glsl)
+	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT), mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q))
+		if (testAlpha && rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
 	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
 }
@@ -84,7 +95,9 @@ bool reaches(vec3 origin, float offset, int s, float rr, float ang) {
 	vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
 	float invLen = inversesqrt(dot(segment, segment));
 	float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
-	float tMin = min(offset * invLen, tEnd);
+	// 2026-11-04: the origin is already `offset` off the surface along the normal; only a quarter more along the ray (was the full
+	// offset again: about twice the gap, thin contact shadows lost)
+	float tMin = min(0.25 * offset * invLen, tEnd);
 	float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
 	return !blocked(origin, segment, tMin, tSplit, uint(p.params2.y)) && !blocked(origin, segment, tSplit, tEnd, uint(p.params2.z));
 }
@@ -115,8 +128,13 @@ void main() {
 	}
 	barrier();
 
-	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
-	bool inside = pixel.x < int(p.size.x) && pixel.y < int(p.size.y);
+	// UNOFFICIAL 2026-11-04 moving tiles: many.x < 0 (the host then dispatches one more group each way) shifts the 8 x 8 groups by
+	// (-many.x - 1) = 0..63 -> (0..7, 0..7) pixels, a different shift each frame, so the groups' edges (where the neighbour reuse and
+	// the history clamp see fewer samples) do not stay in one place and make a grid. many.x >= 0: no shift (an older host)
+	ivec2 shift = ivec2(0);
+	if (p.many.x < 0.0) { int s = int(-p.many.x + 0.5) - 1; shift = ivec2(s & 7, (s >> 3) & 7); }
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy) - shift;
+	bool inside = pixel.x >= 0 && pixel.y >= 0 && pixel.x < int(p.size.x) && pixel.y < int(p.size.y);
 	float linear01 = inside ? imageLoad(depthImage, pixel).r : 0.0;
 	float viewZ = linear01 * p.forward.w;
 	bool valid = inside && linear01 > 0.0 && linear01 < 0.9999 && viewZ >= 1.0;
@@ -157,14 +175,21 @@ void main() {
 
 	// This frame's job: 0 V0, 1 V1, 2 R, in turn over a 3 x 3; an empty job falls back to the one below
 	int job = (pixel.x + 2 * pixel.y + int(p.many2.x)) % 3;
-	if (job == 2 && !hasRest) job = 1;
+	// 2026-11-04: an empty rest job goes to the strongest lamp (was the second: it got 2/3 of the rays, the strongest 1/3)
+	if (job == 2 && !hasRest) job = 0;
 	if (job == 1 && best1 < 0) job = 0;
 	int target = !valid || best0 < 0 ? -1 : job == 0 ? best0 : job == 1 ? best1 : chosen;
 	float v = 1.0;
 	if (target >= 0) {
-		float u = fract(hash12(vec2(pixel) + 17.0) + p.params.w);
+		// 2026-11-04: the disc point from a 2-D R2 sequence over frames (two independent offsets), each pixel shifted by its own hash
+		// pair; was the same offset on both axes, so over time a pixel only ever sampled one line across the lamp (fixed grain)
+		uint frameNumber = uint(p.many2.x);
+		bool jitter = p.params.w > 0.0;
+		float j1 = jitter ? float((frameNumber * 3242174889u) >> 8) * (1.0 / 16777216.0) : 0.0;	// frame x 0.7548777
+		float j2 = jitter ? float((frameNumber * 2447445414u) >> 8) * (1.0 / 16777216.0) : 0.0;	// frame x 0.5698403
+		float u = fract(hash12(vec2(pixel) + 17.0) + j1);
 		float rr = lampB[target].w * sqrt(job == 2 ? random01() : u);
-		float ang = 6.2831853 * (job == 2 ? random01() : fract(hash12(vec2(pixel)) + p.params.w));
+		float ang = 6.2831853 * (job == 2 ? random01() : fract(hash12(vec2(pixel)) + j2));
 		v = reaches(origin, offset, target, rr, ang) ? 1.0 : 0.0;
 	}
 
@@ -177,10 +202,14 @@ void main() {
 	barrier();
 	float sum0 = 0.0, tot0 = 0.0, sum1 = 0.0, tot1 = 0.0, sumR = 0.0, totR = 0.0;
 	int radius = clamp(int(p.many.z), 0, 2);
+	// UNOFFICIAL 2026-11-04 history clamp: this frame's range of each answer over the 5 x 5 (same surface), whatever the spatial
+	// radius; the history is pulled into it below so a shadow that moved away (or in) does not trail for ManyLightsHistory frames
+	vec2 box0 = vec2(1.0, 0.0), box1 = vec2(1.0, 0.0), boxR = vec2(1.0, 0.0);
+	float cnt0 = 0.0, cnt1 = 0.0, cntR = 0.0;
 	if (valid && best0 >= 0) {
 		ivec2 at = ivec2(gl_LocalInvocationID.xy);
-		for (int dy = -radius; dy <= radius; dy++)
-			for (int dx = -radius; dx <= radius; dx++) {
+		for (int dy = -2; dy <= 2; dy++)
+			for (int dx = -2; dx <= 2; dx++) {
 				ivec2 q = at + ivec2(dx, dy);
 				if (q.x < 0 || q.y < 0 || q.x > 7 || q.y > 7) continue;
 				int i = q.y * 8 + q.x;
@@ -189,9 +218,11 @@ void main() {
 				float nw = max(dot(groupN[i], normal), 0.0);
 				nw *= nw; nw *= nw;
 				if (!(nw > 0.0)) continue;
-				if (lamp == best0) { sum0 += groupV[i] * nw; tot0 += nw; }
-				else if (lamp == best1) { sum1 += groupV[i] * nw; tot1 += nw; }
-				else if (groupRest[i] > 0.5 && hasRest) { sumR += groupV[i] * nw; totR += nw; }
+				float vi = groupV[i];
+				bool near = abs(dx) <= radius && abs(dy) <= radius;
+				if (lamp == best0) { box0 = vec2(min(box0.x, vi), max(box0.y, vi)); cnt0 += 1.0; if (near) { sum0 += vi * nw; tot0 += nw; } }
+				else if (lamp == best1) { box1 = vec2(min(box1.x, vi), max(box1.y, vi)); cnt1 += 1.0; if (near) { sum1 += vi * nw; tot1 += nw; } }
+				else if (groupRest[i] > 0.5 && hasRest) { boxR = vec2(min(boxR.x, vi), max(boxR.y, vi)); cntR += 1.0; if (near) { sumR += vi * nw; totR += nw; } }
 			}
 	}
 
@@ -216,6 +247,12 @@ void main() {
 			}
 		}
 	}
+	// The clamp: the box widened by 0.5 / sqrt(samples) (one-ray answers are 0 or 1, so a few lit rays in a soft edge must not
+	// snap it to fully lit; 2026-11-04: at least 3 samples, fewer collapse the box by chance); a history pulled in by more than 0.25
+	// restarts its mean: with this frame's rays it is replaced outright (n 0, then 1 below), without them the clamped value counts once
+	if (cnt0 >= 3.0) { float m = 0.5 * inversesqrt(cnt0), c = clamp(h0, box0.x - m, box0.y + m); if (abs(c - h0) > 0.25) n0 = tot0 > 0.0 ? 0.0 : min(n0, 1.0); h0 = c; }
+	if (cnt1 >= 3.0) { float m = 0.5 * inversesqrt(cnt1), c = clamp(h1, box1.x - m, box1.y + m); if (abs(c - h1) > 0.25) n1 = tot1 > 0.0 ? 0.0 : min(n1, 1.0); h1 = c; }
+	if (cntR >= 3.0) { float m = 0.5 * inversesqrt(cntR), c = clamp(hR, boxR.x - m, boxR.y + m); if (abs(c - hR) > 0.25) nR = totR > 0.0 ? 0.0 : min(nR, 1.0); hR = c; }
 	float cap = clamp(p.many.y, 1.0, 31.0);
 	if (tot0 > 0.0) { n0 = min(n0 + 1.0, cap); h0 = mix(h0, sum0 / tot0, 1.0 / n0); }
 	if (tot1 > 0.0) { n1 = min(n1 + 1.0, cap); h1 = mix(h1, sum1 / tot1, 1.0 / n1); }
@@ -234,9 +271,13 @@ void main() {
 		imageStore(resultImage, pixel, vec4(none + 4096.0 * none, none, 0.0, 0.0));   // depth code 0 never matches
 		return;
 	}
-	float entry0 = best0 >= 0 ? float(best0) + 256.0 * floor(15.0 * h0 + 0.5) : none;
-	float entry1 = best1 >= 0 ? float(best1) + 256.0 * floor(15.0 * h1 + 0.5) : none;
-	float restCode = hasRest ? clamp(floor(hR * 4095.0 + 0.5), 0.0, 4095.0) : 4095.0;
+	// 2026-11-04: a lamp with no answer yet (no history here and no ray to it in the neighbourhood this frame, n 0) is written as
+	// "none": the lamp shaders then give it R, the traced share of the pixel's other lamps, instead of fully lit (a bright flash
+	// where history was lost); R without an answer of its own (or with no other lamps) takes the strongest answered lamp's
+	float entry0 = best0 >= 0 && n0 > 0.0 ? float(best0) + 256.0 * floor(15.0 * h0 + 0.5) : none;
+	float entry1 = best1 >= 0 && n1 > 0.0 ? float(best1) + 256.0 * floor(15.0 * h1 + 0.5) : none;
+	float rest = nR > 0.0 ? hR : n0 > 0.0 ? h0 : n1 > 0.0 ? h1 : 1.0;
+	float restCode = clamp(floor(rest * 4095.0 + 0.5), 0.0, 4095.0);
 	float depthCode = clamp(floor(log2(viewZ) * p.origin.w + 0.5), 1.0, 4095.0);
 	imageStore(resultImage, pixel, vec4(entry0 + 4096.0 * entry1, restCode + 4096.0 * depthCode, 0.0, 0.0));
 }

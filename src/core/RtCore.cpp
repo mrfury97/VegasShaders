@@ -603,6 +603,8 @@ namespace {
 		inSetup = true;
 		for (const RtCore::User& user : users) if (user.Setup) user.Setup();
 		inSetup = false;
+		// UNOFFICIAL 2026-11-04: the count in the line (33 of 32 turned every RT effect off without saying by how much)
+		Logger::Log("UNOFFICIAL NVR DXVK: RT core: %u shared images asked for (the protocol holds %u)", (UINT)imageDescs.size(), (UINT)NVR_RT_MAX_IMAGES);
 		if (imageDescs.size() > NVR_RT_MAX_IMAGES) { TurnOff("the RT effects asked for more shared images than the protocol holds"); return false; }
 		char why[320];
 		images.assign(imageDescs.size(), nullptr);

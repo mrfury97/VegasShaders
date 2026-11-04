@@ -99,7 +99,7 @@ void ShadowsExteriorEffect::UpdateConstants() {
 		Constants.ForwardData.x = (!Settings.Exteriors.ForwardShadows || SunFaded) ? 1.0f : 0.0f;
 		// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1 (replace): the object shaders' cascade lookups off; the deferred apply does the
 		// cascades (faded out inside the RT range) and the traced visibility is multiplied in after it (core/RtSunShadows.cpp).
-		if (RtSunShadows::Replacing()) Constants.ForwardData.x = 1.0f;
+		if (RtSunShadows::Deferred()) Constants.ForwardData.x = 1.0f;	// 2026-11-04: Mode 0 too (RtSunShadows::Deferred)
 		RtSunShadows::ReplaceRange();
 #if NVR_TEST_TOOLS
 		// DIAGNOSTIC SkipWhenFadedCheck 3: the lookups off at any hour (what they cost; by day the sun shadows leave the lit
