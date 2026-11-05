@@ -9,6 +9,8 @@
 // Third person (ThirdPerson; user: 'just do player only'): only meshes under the player's own body (Player->GetNode()), never an NPC's.
 // The third-person skeleton and casing (pipboyarmnpc.nif) measure the same in that frame (wrist at x 18.1, casing x 4.6..17.0), so
 // one set of values serves both.
+// Power armor (PowerArmor; user: 'add a toggle to PA armor'): while the player wears a power armor torso (the game's own flag,
+// MiddleHighProcess::IsWearingPowerArmorTorso 0x8D8290) nothing is fitted unless PowerArmor is on: the bulky gauntlets would be crushed.
 // Per skinned partition draw (ClothWind::DrawPartition calls ForPartition), c182-c187:
 //   c182 xyz: palette row offsets (slot * 3) of L ForeTwist, L Forearm, L Hand in this partition (-1: not in it); only vertices weighted
 //             to them move; w: the radius scale at the wrist end (the casing narrows over its last 4 units)
@@ -29,6 +31,7 @@ namespace PipboyFit {
 		bool CompiledIn = false;	// Enabled at startup (PIPBOY_FIT_ON in the shaders)
 		bool On = false;
 		bool ThirdPerson = true;	// the player's own body in third person too
+		bool PowerArmor = false;	// also fit while wearing power armor
 		int Axis = 0;				// which axis of the ForeTwist bone runs along the forearm (0 x, 1 y, 2 z)
 		float Strength = 1.0f, Knee = 0.7f, Falloff = 2.0f;
 		float Start = 4.5f, End = 17.0f, CenterY = 0.1f, CenterZ = 0.4f, RadiusY = 2.6f, RadiusZ = 2.6f, WristScale = 0.6f;	// measured on pipboyarm.nif (ForeTwist frame, wrist at x 18.1)
@@ -44,6 +47,7 @@ namespace PipboyFit {
 	inline bool ActiveFirst = false;		// the object being drawn is the first-person one
 	inline UInt32 Draws[2] = {}, Skipped = 0, Frames = 0;	// partitions fitted (third, first person) and left alone (no forearm bone in them)
 	inline int ChecksLogged[2] = {};
+	inline bool InPowerArmor = false;		// the player wears a power armor torso (this frame)
 
 	inline std::string Lower(const char* s) { std::string r = s ? s : ""; for (char& c : r) c = (char)std::tolower((unsigned char)c); return r; }
 
@@ -73,6 +77,10 @@ namespace PipboyFit {
 		}
 		if (!S.On) return;
 		S.ThirdPerson = TheSettingManager->GetSettingI(section, "ThirdPerson") != 0;
+		S.PowerArmor = TheSettingManager->GetSettingI(section, "PowerArmor") != 0;
+		const bool wasInPowerArmor = InPowerArmor;
+		InPowerArmor = Player && Player->process && ((bool(__thiscall*)(BaseProcess*))0x008D8290)(Player->process);	// the player's process is always a high one
+		if (InPowerArmor != wasInPowerArmor) Logger::Log("UNOFFICIAL PipboyFit: power armor %s (%s)", InPowerArmor ? "on" : "off", InPowerArmor && !S.PowerArmor ? "sleeves not fitted, PowerArmor is off" : "sleeves fitted");
 		S.Axis = std::clamp(TheSettingManager->GetSettingI(section, "Axis"), 0, 2);
 		S.Strength = std::clamp(TheSettingManager->GetSettingF(section, "Strength"), 0.0f, 1.0f);
 		S.Knee = std::clamp(TheSettingManager->GetSettingF(section, "Knee"), 0.0f, 0.98f);
@@ -99,6 +107,7 @@ namespace PipboyFit {
 	inline void ForGeometry(NiGeometry* geometry, bool firstPerson) {
 		Active = nullptr;
 		if (!S.On || !geometry || !geometry->skinInstance) return;
+		if (InPowerArmor && !S.PowerArmor) return;	// only the player is ever fitted, so the player's armor decides
 		if (!firstPerson && (!S.ThirdPerson || !OnPlayer(geometry))) return;
 		const NiSkinInstance* si = geometry->skinInstance;
 		const NiSkinData* sd = si->SkinData;
