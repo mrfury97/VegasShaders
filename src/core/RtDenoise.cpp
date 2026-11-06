@@ -296,6 +296,7 @@ namespace RtDenoise {
 		t.up[0] = view._12 / proj._22; t.up[1] = view._22 / proj._22; t.up[2] = view._32 / proj._22;
 		t.move[0] = move.x; t.move[1] = move.y; t.move[2] = move.z; t.move[3] = cut ? 1.0f : 0.0f;
 		t.params[0] = (std::max)(S.MaxHistory, 1.0f); t.params[1] = S.DepthTolerance; t.params[2] = 1.0f / w; t.params[3] = 1.0f / h;
+		t.pad[0] = S.ClampHistory && S.Channels == 1 ? 1u : 0u;	// UNOFFICIAL 2026-11-04 RtDenoiseTemporal.frag clampHistory
 
 		GpuProfileScope gpu(*d->timer, Device);
 		IDirect3DSurface9* current = nullptr;

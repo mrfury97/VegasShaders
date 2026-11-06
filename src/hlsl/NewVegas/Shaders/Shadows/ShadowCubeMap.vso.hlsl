@@ -2,8 +2,8 @@
 uniform row_major float4x4 TESR_ShadowWorldTransform : register(c0);
 uniform row_major float4x4 TESR_ShadowViewProjTransform : register(c4);
 uniform float4 TESR_ShadowData : register(c8);
-uniform float4 Bones[54] : register(c9);
-uniform float4 TESR_ShadowCubeMapLightPosition : register(c63);
+uniform float4 Bones[120] : register(c9);	// UNOFFICIAL 2026-11-05 (Balebandro ad32a3b) up to 40 bones (was 54 rows, 18: see ShadowMap.vso)
+uniform float4 TESR_ShadowCubeMapLightPosition : register(c129);	// (set by name; c63 was overwritten by a 19th bone and on)
 
 struct VtxAttrs {
     float4 f_position : POSITION;

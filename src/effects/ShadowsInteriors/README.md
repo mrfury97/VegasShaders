@@ -261,3 +261,21 @@ Descriptor binding: textures are bound in set 1, binding i, in the order listed 
 - Generic path binding: RESOLVED in wave 3 by the shader's design. The chain binds the current image to s0 for each pass
   (EffectRecord::RebindSlotTextures), and the scene copy into s1 happens once at the start of the effect (EffectRecord::Render,
   usesSourceBuffer). So pass 2 reads the blurred term from s0 and the scene from s1.
+
+## 10. RT lamp shadow changes - UNOFFICIAL 2026-11-04 (rt-audit, mrfury97 fork)
+
+Details: `F:\Claude Brain\VegasShaders-study-RT-INTERIOR-AUDIT.md` (outside the repo).
+- RtLampTraceRestir.comp (ManyLights one-ray):
+  - History clamp: a 5x5 same-surface range of this frame's rays, at least 3 samples. A pull of more than 0.25 restarts the mean.
+  - Alpha-tested casters (binding 13, when the masks hold 0x10).
+  - R2 disc sampling.
+  - An empty job goes to V0. Lamps with n = 0 are written "none", which falls back to R.
+  - Moving tiles: many.x < 0 shifts the 8x8 groups each frame, with one extra group each way.
+- RtLampTrace / Many / Restir: the start gap along the ray is a quarter of the old one. RtLampTrace tests alpha with the atlas at
+  binding 12.
+- RtLampShadows.h:
+  - Stable ManyLights ids (IdOwner, StableIds, TableTop).
+  - ForgetTraced on an interior cell change and in Setup.
+  - SlotLamp.invisible: InvisibleLightRadius works.
+  - `GlowStopMax` (default 24): the most a lamp's own glow may add to the ray's stop distance.
+- Setup reuses RtSunShadows' depth and normals images, so the shared-image count stays under NVR_RT_MAX_IMAGES.

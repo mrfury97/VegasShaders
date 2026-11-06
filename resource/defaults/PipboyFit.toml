@@ -11,5 +11,6 @@ RadiusY = 2.6                        # Its radius along bone y (units; the vanil
 RadiusZ = 2.6                        # Its radius along bone z (units; about 2.7-3.5 inside)
 WristScale = 0.6                     # The casing narrows towards the wrist (inside about 2 units across its last 4): the radius is scaled down to this at End
 Axis = 0                             # Which axis of the ForeTwist bone runs along the forearm (0 x, the vanilla skeleton's; 1 y, 2 z)
+PowerArmor = false                   # Also fit while you wear power armor (off: power armor arms are left as they are, its gauntlets are too bulky to squeeze). Live
 ThirdPerson = true                   # Also fit your own sleeves in third person (only your character; NPCs are never changed)
 Exclude = "pipboy"                   # Meshes whose name holds one of these (comma-separated) are never squeezed: the Pip-Boy itself

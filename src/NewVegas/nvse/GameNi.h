@@ -646,6 +646,7 @@ public:
 class NiShadeProperty : public NiProperty {	// 0x20 bytes
 public:
 	enum ShaderPropType : UInt32 {
+		kProp_TallGrass = 0x4,	// UNOFFICIAL 2026-11-05 TallGrassShaderProperty (GrassShaders::OnGrassShape; from Balebandro's fork)
 		kProp_Lighting = 0x1, kProp_SpeedTreeLeaf = 0x6, kProp_PPLighting = 0x8,
 		kProp_Hair = 0x9, kProp_SpeedTreeBranch = 0xA, kProp_Lighting30 = 0xC,
 		kProp_Water = 0xE,	// m_eShaderType

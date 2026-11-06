@@ -32,6 +32,7 @@ float4 TESR_SunColor;          // its colour
 float4 TESR_SunAmount;         // x: day 0..1
 float4 TESR_SkyColor;          // the sky's top colour
 float4 TESR_SkyLowColor;
+float4 TESR_GameMultisample;  // UNOFFICIAL 2026-11-05 (Balebandro 256de14) x: the game's MSAA samples (iMultiSample as read; 0 or 1 = off)
 float4 TESR_HorizonColor;
 float4 TESR_CloudsShape;       // x: base altitude (m), y: thickness (m), z: coverage 0..1, w: density
 float4 TESR_CloudsNoise;       // x: shape tile (m), y: detail tile (m), z: detail erosion 0..1, w: weather map tile (m)
@@ -137,6 +138,10 @@ VSOUT FrameVS(VSIN IN) { VSOUT OUT = (VSOUT)0.0f; OUT.vertPos = IN.vertPos; OUT.
 
 #include "Includes/Helpers.hlsl"
 #include "Includes/Depth.hlsl"
+// UNOFFICIAL 2026-11-05 (Balebandro 256de14) the game's MSAA: sky edges. s14: free in both sky variants (s13 is NVR_CloudLayerProbe,
+// bound by hand in VolumetricClouds.cpp; the fork's s13 with PHYSICAL_SKY_ON took its stage). EffectRecord binds TESR_ samplers by register.
+#define MSAA_SKY_EDGE_REG s14
+#include "Includes/MsaaSkyEdge.hlsl"
 #if PHYSICAL_SKY_ON
     #include "Includes/Atmosphere.hlsl"
 #endif
@@ -654,6 +659,31 @@ float CloudShadowAt(float3 world) {
 }
 
 // ---- 0: Composite, full resolution ----
+// The clouds of this pixel from the history: rgb the light they send, a how much of the sky shows through.
+float4 CloudsHere(float2 huv) {
+	// UNOFFICIAL 2026-10-15 Resolution 3-5 (larger than the screen): each pixel averages the history texels it covers (four
+	// bilinear reads a quarter of a pixel out); Catmull-Rom would read only the few nearest.
+	float4 clouds;
+	[branch] if (LowTexel.x < TESR_ReciprocalResolution.x * 0.99) {
+		float2 q = 0.25 * TESR_ReciprocalResolution.xy * TESR_RenderScale.zw;	// a quarter of this pixel (larger in a RenderScale frame)
+		clouds = 0.25 * (tex2Dlod(TESR_CloudHistory, float4(huv + float2(-q.x, -q.y), 0, 0)) + tex2Dlod(TESR_CloudHistory, float4(huv + float2(q.x, -q.y), 0, 0)) +
+			tex2Dlod(TESR_CloudHistory, float4(huv + float2(-q.x, q.y), 0, 0)) + tex2Dlod(TESR_CloudHistory, float4(huv + q, 0, 0)));
+	}
+	else clouds = CatmullRom(huv);
+	[branch] if (Sharpness > 0.0) {
+		// UNOFFICIAL 2026-10-15 Sharpness: contrast-adaptive sharpening of the clouds against their four neighbours a march texel
+		// away, held within what those show (crisper edges and inner detail, no dark or bright halos).
+		float4 n0 = tex2Dlod(TESR_CloudHistory, float4(huv + float2(LowTexel.x, 0.0), 0, 0));
+		float4 n1 = tex2Dlod(TESR_CloudHistory, float4(huv - float2(LowTexel.x, 0.0), 0, 0));
+		float4 n2 = tex2Dlod(TESR_CloudHistory, float4(huv + float2(0.0, LowTexel.y), 0, 0));
+		float4 n3 = tex2Dlod(TESR_CloudHistory, float4(huv - float2(0.0, LowTexel.y), 0, 0));
+		float4 lo = min(min(min(n0, n1), min(n2, n3)), clouds), hi = max(max(max(n0, n1), max(n2, n3)), clouds);
+		float4 sharpened = clouds + (clouds - 0.25 * (n0 + n1 + n2 + n3)) * (1.5 * Sharpness);
+		clouds = clamp(sharpened, lo, hi);
+	}
+	return clouds;
+}
+
 float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 uv = IN.UVCoord;
 	// UNOFFICIAL 2026-10-27: the clouds' history is drawn whole in every frame (RenderClouds runs the march as in a native frame), so in
@@ -663,6 +693,17 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 huv = rectToScreen(uv) + TESR_CloudsHistoryScale.zw;
 	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
 	float depth = readDepthLod(uv);
+	// UNOFFICIAL 2026-11-05 (Balebandro) the game's MSAA (Includes/MsaaSkyEdge.hlsl): a pixel on an edge against the sky took no clouds, and its sky
+	// share kept the clear sky (a bright rim round every leaf and branch). It gets the clouds over that share.
+	[branch] if (depth < farZ * 0.996) {
+		float3 sky;
+		float share = SkyShare(uv, color.rgb, sky);
+		[branch] if (share > 0.0) {
+			float4 clouds = CloudsHere(huv);
+			float3 lin = linearize(max(color.rgb, 0.0)) + share * (sky * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
+			return float4(delinearize(max(lin, 0.0)), color.a);
+		}
+	}
 	[branch] if (depth < farZ * 0.996) {
 		// not sky: the clouds' shadow, and their reflection on water
 		[branch] if (ShadowStrength <= 0.0) return color;
@@ -694,26 +735,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 		}
 		return color;
 	}
-	// UNOFFICIAL 2026-10-15 Resolution 3-5 (larger than the screen): each pixel averages the history texels it covers (four
-	// bilinear reads a quarter of a pixel out); Catmull-Rom would read only the few nearest.
-	float4 clouds;
-	[branch] if (LowTexel.x < TESR_ReciprocalResolution.x * 0.99) {
-		float2 q = 0.25 * TESR_ReciprocalResolution.xy * TESR_RenderScale.zw;	// a quarter of this pixel (larger in a RenderScale frame)
-		clouds = 0.25 * (tex2Dlod(TESR_CloudHistory, float4(huv + float2(-q.x, -q.y), 0, 0)) + tex2Dlod(TESR_CloudHistory, float4(huv + float2(q.x, -q.y), 0, 0)) +
-			tex2Dlod(TESR_CloudHistory, float4(huv + float2(-q.x, q.y), 0, 0)) + tex2Dlod(TESR_CloudHistory, float4(huv + q, 0, 0)));
-	}
-	else clouds = CatmullRom(huv);
-	[branch] if (Sharpness > 0.0) {
-		// UNOFFICIAL 2026-10-15 Sharpness: contrast-adaptive sharpening of the clouds against their four neighbours a march texel
-		// away, held within what those show (crisper edges and inner detail, no dark or bright halos).
-		float4 n0 = tex2Dlod(TESR_CloudHistory, float4(huv + float2(LowTexel.x, 0.0), 0, 0));
-		float4 n1 = tex2Dlod(TESR_CloudHistory, float4(huv - float2(LowTexel.x, 0.0), 0, 0));
-		float4 n2 = tex2Dlod(TESR_CloudHistory, float4(huv + float2(0.0, LowTexel.y), 0, 0));
-		float4 n3 = tex2Dlod(TESR_CloudHistory, float4(huv - float2(0.0, LowTexel.y), 0, 0));
-		float4 lo = min(min(min(n0, n1), min(n2, n3)), clouds), hi = max(max(max(n0, n1), max(n2, n3)), clouds);
-		float4 sharpened = clouds + (clouds - 0.25 * (n0 + n1 + n2 + n3)) * (1.5 * Sharpness);
-		clouds = clamp(sharpened, lo, hi);
-	}
+	float4 clouds = CloudsHere(huv);
 	float3 lin = linearize(max(color.rgb, 0.0)) * clouds.a + clouds.rgb * TESR_CloudsLayout.w;
 	return float4(delinearize(max(lin, 0.0)), color.a);
 }

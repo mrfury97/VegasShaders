@@ -16,10 +16,11 @@ void CalculateAnimationRotation(in float4 params, in float leafIndex, out float 
     sincos(angle, s, c);
 }
 
-// windMatrices: 4 rows per matrix (w = 0); leafBase: per-leaf corner vectors (x and w = 0).
+// regs: the shadow shader's one register array (UNOFFICIAL 2026-11-05, Balebandro ad32a3b: it holds the bones too, ShadowMap.vso); in it
+// from windBase the wind matrices, 4 rows per matrix (w = 0), and from leafBase the per-leaf corner vectors (x and w = 0).
 // blendIndices: x wind weight, y wind matrix index, z leaf index, w leaf scale.
 float4 SpeedTreeTransform(float4 billboardUp, float4 billboardRight, float4 rockParams, float4 rustleParams,
-                          float4 windMatrices[16], float4 leafBase[48], float4 blendIndices, float4 position) {
+                          float4 regs[122], float windBase, float leafBase, float4 blendIndices, float4 position) {
     float zs, zc;	// rustle: rotation about Z
     CalculateAnimationRotation(rustleParams, blendIndices.z, zs, zc);
     float3 zRow0 = float3(zc, -zs, 0.0f);
@@ -31,7 +32,7 @@ float4 SpeedTreeTransform(float4 billboardUp, float4 billboardRight, float4 rock
     float3 xRow2 = float3(0.0f, xs, xc);
 
     float2 slot = blendIndices.zy - frac(blendIndices.zy);	// integer leaf / wind slots
-    float4 corner = leafBase[slot.x] * blendIndices.w;
+    float4 corner = regs[leafBase + slot.x] * blendIndices.w;
 
     // Z rotation leaves z alone, so only x and y of the billboard axes are rotated
     float rightX = dot(zRow0, billboardRight.xyz);
@@ -52,10 +53,10 @@ float4 SpeedTreeTransform(float4 billboardUp, float4 billboardRight, float4 rock
     float4 placed = position + alongRight + alongUp;
 
     float4 blown;
-    blown.x = dot(windMatrices[0 + slot.y], placed);
-    blown.y = dot(windMatrices[1 + slot.y], placed);
-    blown.z = dot(windMatrices[2 + slot.y], placed);
-    blown.w = dot(windMatrices[3 + slot.y], placed);
+    blown.x = dot(regs[windBase + 0 + slot.y], placed);
+    blown.y = dot(regs[windBase + 1 + slot.y], placed);
+    blown.z = dot(regs[windBase + 2 + slot.y], placed);
+    blown.w = dot(regs[windBase + 3 + slot.y], placed);
 
     return lerp(placed, blown, blendIndices.x);
 }

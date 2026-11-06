@@ -21,7 +21,7 @@ import argparse, os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DEFAULTS = os.path.join(ROOT, "resource", "VegasShaders.defaults.toml")
-TABLES = ["src/effects/PBR.h", "src/effects/POM.h", "src/effects/Terrain.h", "src/effects/Skin.h"]
+TABLES = ["src/effects/PBR/PBR.h", "src/effects/POM/POM.h", "src/effects/Terrain/Terrain.h", "src/effects/Skin/Skin.h"]  # 2026-11-04: the effect folders
 
 # ---------------------------------------------------------------- settings
 def parse_toml(path, into):
@@ -106,6 +106,10 @@ def build(settings, template_pairs, overrides, opt):
     on = lambda sec, key: "1" if s.i(sec, key) else "0"
     if opt.reversed_depth: d.append("REVERSED_DEPTH", "")
     d.append("FORWARD_SHADOWS", on("Shaders.ShadowsExteriors.Main", "ForwardShadows"))
+    # 2026-11-06 Bend forward contact shadows: appended only when on (Bend && InLighting && ForwardShadows), default true for both keys
+    ss = "Shaders.ShadowsExteriors.ScreenSpace"
+    flag = lambda key: s.raw(ss, key) is None or s.i(ss, key)
+    if flag("Bend") and flag("InLighting") and s.i("Shaders.ShadowsExteriors.Main", "ForwardShadows"): d.append("SUN_CONTACT_FORWARD", "1")
     d.append("CONTACT_HARDENING", on("Shaders.ContactHardening.Status", "Enabled"))
     d.append("SHADOW_SLACK_CAP_ALL", on("Shaders.ShadowsExteriors.Main", "CasterReachEverywhere"))
     d.append("POINT_SHADOW_SMOOTH", on("Shaders.ShadowsInteriors.Forward", "SmoothEdges"))

@@ -9,6 +9,7 @@
 // that day was b30GrassVS, below.) 2026-11-04: [Main.Main.Misc] BlockGameMSAA (default true) switches it off for real: both settings
 // read as 0 here, the renderer's copies set to 0 before it starts (BlockGameMSAABeforeRenderer), and neither written back to the INIs.
 static int GameMSAAWarned = 0;	// the iMultiSample the INI asks for, when it is on (0: off)
+D3DXVECTOR4 NvrGameMultisample(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-05 (Balebandro) TESR_GameMultisample (ShaderManager): x = iMultiSample as the game reads it
 void NvrMsaaWarningTick() {
 	static bool shown = false;
 	if (!GameMSAAWarned || shown || !Player || !Player->parentCell || !InterfaceManager) return;
@@ -92,6 +93,7 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 					"Antialiasing off in the game's launcher (Options); Vegas Shaders' TAA / FSR / DLSS smooth the edges instead.", Setting->iValue);
 			GameMSAAWarned = Setting->iValue;
 		}
+		NvrGameMultisample.x = (float)(Setting->iValue > 0 ? Setting->iValue : 0);	// UNOFFICIAL 2026-11-05 (after BlockGameMSAA: 0 while it blocks)
 	}
 	// UNOFFICIAL 2026-11-04 BlockGameMSAA: the water reflection's own MSAA (BSShaderManager::iWaterReflectionMultisample, read once at start)
 	else if (SameKey(key, "iWaterMultiSamples:Display") && nvr.BlockGameMSAA && !nvr.ForceMSAA) {

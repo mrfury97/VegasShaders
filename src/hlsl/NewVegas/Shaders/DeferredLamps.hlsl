@@ -37,6 +37,7 @@ float4 DL_Debug  : register(c9);	// x DebugView: 0 the light, 1 lamp colour x fa
                                 	// zw tiles across / down the lists' viewport (Shadows off, a test: DeferredLamps::Apply sends shadow strength 0 in c180.x)
 float4 DL_Shadow : register(c10);	// x the shadow pass's first lamp of the list (0, 4, 8, 12), y 1 = the lighting pass has the shadow targets (s9-s12),
 								// z PrecisionBias x 0.001 (2026-11-01: the shadow lookup's push off the surface per unit of camera distance)
+float4 DL_Depth  : register(c11);	// UNOFFICIAL 2026-11-05 (lighting pass) x, y the projection's _33, _43 (depth = x + y / view z), z the share and w the units the surface is pulled nearer
 
 #define LIGHT_COMMON_ROWS DL_Table.x
 #include "includes/LightCommon.hlsl"
@@ -130,10 +131,20 @@ float4 main(PS_IN IN) : COLOR0 {
 }
 #else
 
-float4 main(PS_IN IN) : COLOR0 {
+float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     // Only the position, the lamp list and the sum stay live across the lamp loop; the surface is read again inside it (cached fetches): the
     // specular PBR() and the filtered shadow together need every temp register ps_3_0 has (X4505 otherwise).
     const float4 uv4 = float4(IN.uv, 0.0f, 0.0f);
+    // UNOFFICIAL 2026-11-05 (Balebandro 256de14): a draw that does not write the G-buffer (hair, and anything else drawn over a deferred draw
+    // in the span) leaves that draw's surface behind it there, which was lit through it. The pass is depth-tested at the G-buffer's surface
+    // (a little nearer, for its precision; per sample under MSAA): where something nearer was drawn, it fails and the pixel is left as it is.
+    // From the stored distance alone, before the lamp loop (no temp register kept).
+    {
+        const float2 local = (IN.vpos - DL_View.zw + 0.5f) * DL_View.xy;
+        const float3 view = DL_Fwd.xyz + DL_Right.xyz * ((local.x * 2.0f - 1.0f) * DL_Right.w) + DL_Up.xyz * ((1.0f - local.y * 2.0f) * DL_Up.w);
+        const float viewZ = max(tex2Dlod(DL_Normals, uv4).b * rsqrt(dot(view, view)) * (1.0f - DL_Depth.z) - DL_Depth.w, 1.0f);	// (the ray's forward share: 1 / its length)
+        depth = saturate(DL_Depth.x + DL_Depth.y / viewZ);
+    }
     const float4 material0 = tex2Dlod(DL_Material, uv4);
     clip(material0.a - 1.005f);
     clip(1.995f - material0.a);
@@ -185,8 +196,10 @@ float4 main(PS_IN IN) : COLOR0 {
     }
     light *= keep;
     [branch] if (DL_Fwd.w > 0.5f) return float4(light, 0.0f);	// linear frame: ONE / ONE add, exact per sample
-    // the frame left in the stored curve: replace with enc(dec(v) + L) (blend off for this path)
-    const float3 stored = tex2Dlod(DL_Frame, float4(IN.uv, 0.0f, 0.0f)).rgb;
-    return float4(pow(max(pow(max(stored, 0.0f), DL_Table.z) + light, 0.0f), DL_Table.w), 1.0f);
+    // the frame left in the stored curve: enc(dec(v) + L). UNOFFICIAL 2026-11-05 (Balebandro 256de14): ADDED as the difference it makes
+    // (ONE / ONE), not written over the pixel: written, every sample of a multisampled pixel took the resolved copy's one value
+    // (alpha-to-coverage edges and terrain blending's per-sample blend flattened, even where the light was nothing); added, each keeps its own.
+    const float3 stored = max(tex2Dlod(DL_Frame, float4(IN.uv, 0.0f, 0.0f)).rgb, 0.0f);
+    return float4(max(pow(pow(stored, DL_Table.z) + light, DL_Table.w) - stored, 0.0f), 0.0f);
 }
 #endif

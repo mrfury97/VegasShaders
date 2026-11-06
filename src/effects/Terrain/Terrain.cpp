@@ -2,6 +2,7 @@
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-27 (NVR DXVK 1.7-displace): DisplaceTick
 #include "../../core/DisplaceShadows.h"	// UNOFFICIAL 2026-10-27 displacement shadows: the land's draws taken, the depth copy's camera
+#include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-05 (Balebandro) FixBlendDepth
 
 // Set by SettingManager::Configuration::UpdateOldDefaults (settings version 65) when a saved config already had ParallaxLite
 // on, from builds that forced its distance cap every frame; UpdateSettings then writes the suggested distance once.
@@ -68,6 +69,9 @@ bool TerrainShaders::CopySceneDepth() {
 		static GpuTimer copyTimer("Terrain blend depth copy");	// F10
 		GpuProfileScope gpu(copyTimer, TheRenderManager->device);
 		TheRenderManager->ResolveDepthBuffer(TheTextureManager->TerrainBlendDepthTexture);
+		// UNOFFICIAL 2026-11-05 (from Balebandro's fork, 8c9017b) the game's MSAA: the pixels objects cover only in part read as nothing there
+		// in the copy, so the land stays solid in them (white blotches at the foot of bushes before). Nothing without the game's MSAA.
+		SkyCoverage::FixBlendDepth(TheRenderManager->device, TheTextureManager->TerrainBlendDepthTexture);
 		BlendDepthState = 2;
 		DisplaceShadows::NoteDepthCopy();	// UNOFFICIAL 2026-10-27: its camera, for the next frame's displaced land shadows (ObjectBlend)
 		// The first few scenes, then every 3600th (about a minute): the blend needs objects drawn before the land.

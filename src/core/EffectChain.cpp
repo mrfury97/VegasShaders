@@ -165,6 +165,7 @@
 #include "../effects/CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness and snow
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
+#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
 #include "EffectChain.h"
@@ -447,7 +448,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 			D3DXHANDLE fusedTechnique = Effects.SunShadows->TechniqueHandle(fusedCache, "ForwardContactShadows");
 			const bool fusedForwardContact = Effects.ShadowsExteriors->Settings.Exteriors.ForwardShadows &&
 				fusedTechnique != NULL && Effects.SunShadows->Effect->GetTechnique(1) == fusedTechnique &&
-				!RtSunShadows::Replacing();	// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1: the deferred technique (its apply fades the cascades out near)
+				!RtSunShadows::Deferred();	// UNOFFICIAL 2026-10-28 RT sun shadows: the deferred technique (Mode 1: its apply fades the cascades out near)
 			// UNOFFICIAL Sharp ([Shaders.ShadowsExteriors.ScreenSpace]): the one-march technique (third in SunShadows.fx.hlsl).
 			static EffectRecord::CachedHandle sharpCache;
 			D3DXHANDLE sharpTechnique = Effects.SunShadows->TechniqueHandle(sharpCache, "ForwardContactSharp");
@@ -468,7 +469,15 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 				// the forward lookups are off for the fade: it gets the forward value, as without the switch.
 				const float forwardWas = sunShadows->Constants.ForwardData.x;
 				if (sunShadows->SunFaded && sunShadows->Settings.Exteriors.ForwardShadows) sunShadows->Constants.ForwardData.x = 0.0f;
+				RtSunShadows::ReplaceRange();	// UNOFFICIAL 2026-11-04: Mode 1 fades the cascades only when this frame was traced
+				// UNOFFICIAL 2026-11-06 forward Bend contact shadows (core/BendContact.h): Bend's march for next frame's lit shaders;
+				// when it ran, the old pass writes "no contact" (its ScreenSpaceData.x test) so nothing is darkened twice.
+				const bool bendRan = fusedForwardContact && sunShadows->Constants.ScreenSpaceData.x != 0.0f && BendContact::Produce(Device);
+				if (!bendRan) BendContact::Invalidate();	// the old pass has the contact this frame: next frame's lit shaders take none
+				const float screenSpaceWas = sunShadows->Constants.ScreenSpaceData.x;
+				if (bendRan) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
 				RenderEffectToRT(sunShadows->Textures.ShadowPassSurface, Effects.SunShadows, false, sharpContact ? 2 : fusedForwardContact ? 1 : 0);
+				sunShadows->Constants.ScreenSpaceData.x = screenSpaceWas;
 				sunShadows->Constants.ForwardData.x = forwardWas;
 				RtSunShadows::Apply(Device);	// UNOFFICIAL 2026-10-28: the traced sun visibility into the red channel (nothing when not traced)
 			}
@@ -491,6 +500,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 		// others), so reset it to the neutral "no shadow" value rather than leaving
 		// stale exterior data for them to read.
 		if (!shadowBufferClear) { Effects.ShadowsExteriors->clearShadowsBuffer(); shadowBufferClear = true; }
+		BendContact::Invalidate();	// UNOFFICIAL 2026-11-06: no Bend result made (the effect's UpdateConstants may not run either)
 	}
 }
 
@@ -895,7 +905,7 @@ void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 		GpuProfileScope gpu(materialEffectsTimer, Device);
 		// UNOFFICIAL HudDrops: the camera's cover test while it rains outdoors (Render.cpp HudRain reads its answer).
 		if (Effects.WetWorld->Enabled && Effects.WetWorld->Constants.Data.x > 0.0f && GameState.isExterior && !GameState.isUnderwater &&
-			TheSettingManager->GetSettingF("Shaders.WetWorld.Main", "HudDrops") > 0.0f) {
+			(TheSettingManager->GetSettingF("Shaders.WetWorld.Main", "HudDrops") > 0.0f || Effects.Rain->LensWantsCover())) {	// UNOFFICIAL 2026-11-05: also for the rain's lens drops
 			Effects.WetWorld->RenderCoverTest(Device);
 			Device->SetRenderTarget(0, RenderTarget);
 		}
@@ -1285,7 +1295,7 @@ void ShaderManager::PostStep_WeatherAndLegacyBloom(ChainContext& ctx) {
 	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
 	{
 		GpuProfileScope gpu(weatherTimer, Device);
-		{ Effects.Rain->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Rain); }
+		{ Effects.Rain->RenderFrame(Device, RenderTarget, SourceSurface); PixelInspector::AfterFrame(Effects.Rain); }	// UNOFFICIAL 2026-11-05: Mode 1 = the rain system (far pass + main pass)
 		{ Effects.Snow->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Snow); }
 		// UNOFFICIAL 2026-10-26: GPU-simulated rain / snow drops (off by default; needs NVR DXVK 1.5-particles, nothing without it)
 		{

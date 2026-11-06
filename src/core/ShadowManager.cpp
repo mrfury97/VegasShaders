@@ -8,6 +8,7 @@
 #include "DisplaceShadows.h"	// UNOFFICIAL 2026-10-27 displacement shadows: the land drawn with its bumps into the sun cascades
 #include "ShadowAtlas.h"	// UNOFFICIAL 2026-10-30 ShadowAtlas (INTERIOR-SHADOWS-MODERN step 1)
 #include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows (steps 2-3): DropActors
+#include "PipboyFit.h"	// UNOFFICIAL 2026-11-05: RenderShadowMaps lets the fit's object go
 
 // UNOFFICIAL SkinnedShadowFaceTest ([Main.Main.Performance], default on, 2026-10-07). An animated (skinned) mesh's own
 // world bound is stale, so skinned casters used to be drawn into all six faces of every lamp cube map near them; with a
@@ -2198,6 +2199,9 @@ static bool DrawSunLayer(IDirect3DDevice9* Device, ShadowsExteriorEffect* Shadow
 }
 
 void ShadowManager::RenderShadowMaps() {
+	// UNOFFICIAL 2026-11-05 (from Balebandro's fork, ad32a3b): no Pip-Boy fit in the shadow passes; their partition draws read its object
+	// (PipboyFit::ForPartition), maybe freed since its draw (a load, a weapon switch). Render.cpp also lets it go after every draw.
+	PipboyFit::Active = nullptr;
 	PointShadowForward::Begin();	// UNOFFICIAL: idle unless the cube maps below are published
 	if (!TheSettingManager->SettingsMain.Main.RenderEffects) return; // cancel out if rendering effects is disabled
 	// UNOFFICIAL SkinnedShadowFaceTest: skeleton bounds are rebuilt once per frame; forget meshes not seen for a while.
@@ -3384,6 +3388,338 @@ void ShadowManager::RenderCharacterShadowMap(const D3DXVECTOR3& SunDir) {
 		}
 	}
 }
+
+// UNOFFICIAL 2026-11-05 ViewModelShadows (from Balebandro's VegasShaders fork, mo2-dxvk-loader ad32a3b; first in Physically-Based-Reloaded f8b6114a): the first-person arms and weapon casting their sun
+// shadows on themselves. The sun cascades never hold the viewmodel (its own scene graph, posed for the frame only as its render starts),
+// and in first person the character map has nothing to do (or, with CharacterShadowMapTarget, an NPC's draws are done with it by then).
+// So just before the game's first-person render (Render.cpp RenderFirstPersonHook) the viewmodel alone is drawn into the character map
+// with its own light box, an ortho box fitted round its parts in the sun's frame, and the first-person draws read it through
+// CharacterMapShadow with TESR_CharShadowData.w = 0.5 (a 6 x 6 tent PCF there, Includes/Shadow.hlsl); the caller uploads the constants
+// and puts them back after that render. The game draws the viewmodel moved to the origin (0x874C10) and camera-relative to the camera
+// drawing it (NiRenderer::kPosAdjust, set by Do_SetCameraData), here still the world camera's: for this draw both kPosAdjust and NVR's
+// camera position are the first-person camera's, so the map holds what the first-person draw sees and the bone matrices computed now
+// are the ones that draw uses (made with the world camera's, the arms were drawn far off). Called inside the game's scene: the targets,
+// viewport, render states, shaders, buffers, textures and shader constants the draws change are put back after. False when nothing was
+// drawn (the Character* constants are then unchanged).
+
+// The viewmodel's parts as spheres relative to Eye, for the light box: skinned meshes by the bound NiSkinData keeps for each bone's
+// vertices (in that bone's space), rigid ones by their model bound. Walked as AccumChildren walks it; anything far from the camera (the
+// first-person skeleton's lower body) is left out.
+// UNOFFICIAL 2026-11-04 CharacterShadowMapLog: this frame's viewmodel map as drawn, for ViewModelLogDraw (the first-person draws read it).
+static struct {
+	bool valid = false;
+	UInt32 frame = 0;
+	NiPoint3 eye = {};
+	D3DXMATRIX lightView;
+	float cx = 0.0f, cy = 0.0f, half = 0.0f, zNear = 0.0f, zFar = 0.0f;
+	std::unordered_map<const void*, NiPoint3> posAtMap;	// each geometry's world position when the map was drawn
+	int lines = 0;
+} ViewModelLog;
+
+static void ViewModelLogPositions(NiAVObject* Object) {
+	if (!Object) return;
+	if (Object->IsGeometry()) { ViewModelLog.posAtMap[Object] = Object->m_worldTransform.pos; return; }
+	if (NiNode* Node = Object->IsNiNode()) for (int i = 0; i < Node->m_children.end; i++) ViewModelLogPositions(Node->m_children.data[i]);
+}
+
+static void ViewModelSpheres(NiAVObject* Object, const NiPoint3& Eye, std::vector<D3DXVECTOR4>& Spheres);
+
+// Render.cpp ForwardShadowsForPass, every first-person pass: how far the part drawn sits outside the map's box (in the sun's frame, world
+// units; 0 inside), whether it moved since the map was drawn, and the character-map switch the shaders read (w: 0.5 the viewmodel map).
+void ShadowManager::ViewModelLogDraw(NiGeometry* Geometry) {
+	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
+	if (!Geometry || !Shadows || !Shadows->Settings.ShadowMaps.CharacterMapLog || ViewModelLog.lines >= 4000) return;
+	const UInt32 frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u;
+	// Only the draws that could lose the shadow are written, and a summary every 120 frames (all draws would fill the log in two seconds).
+	static UInt32 summaryFrame = 0, draws = 0, flagged = 0;
+	draws++;
+	if (frame >= summaryFrame + 120) {
+		ViewModelLog.lines++;
+		Logger::Log("VIEWMODEL DRAW f%u: summary: %u first-person draws since f%u, %u flagged", frame, draws, summaryFrame, flagged);
+		summaryFrame = frame; draws = 0; flagged = 0;
+	}
+	if (!ViewModelLog.valid || ViewModelLog.frame != frame) {
+		flagged++; ViewModelLog.lines++;
+		Logger::Log("VIEWMODEL DRAW f%u: '%s' with no map this frame (last map f%u) | shaders read w %.2f", frame, Geometry->m_pcName ? Geometry->m_pcName : "?",
+			ViewModelLog.frame, Shadows->Constants.CharacterData.w);
+		return;
+	}
+	static std::vector<D3DXVECTOR4> spheres;
+	spheres.clear();
+	ViewModelSpheres(Geometry, ViewModelLog.eye, spheres);
+	float over = 0.0f;
+	for (const D3DXVECTOR4& s : spheres) {
+		D3DXVECTOR3 v;
+		D3DXVec3TransformCoord(&v, (const D3DXVECTOR3*)&s, &ViewModelLog.lightView);
+		over = max(over, fabsf(v.x - ViewModelLog.cx) + s.w - ViewModelLog.half);
+		over = max(over, fabsf(v.y - ViewModelLog.cy) + s.w - ViewModelLog.half);
+		over = max(over, max(-v.z + s.w - ViewModelLog.zFar, ViewModelLog.zNear - (-v.z - s.w)));
+	}
+	auto at = ViewModelLog.posAtMap.find(Geometry);
+	const NiPoint3& p = Geometry->m_worldTransform.pos;
+	const float moved = at == ViewModelLog.posAtMap.end() ? -1.0f :
+		sqrtf((p.x - at->second.x) * (p.x - at->second.x) + (p.y - at->second.y) * (p.y - at->second.y) + (p.z - at->second.z) * (p.z - at->second.z));
+	const float w = Shadows->Constants.CharacterData.w;
+	if (over <= 0.1f && moved >= 0.0f && moved <= 0.05f && w > 0.49f && w < 0.51f) return;	// (0.1: a texel's snap of the box centre)
+	flagged++; ViewModelLog.lines++;
+	Logger::Log("VIEWMODEL DRAW f%u: '%s' %u spheres | outside the box by %.2f | moved %.2f since the map (-1: not in it) | shaders read w %.2f",
+		frame, Geometry->m_pcName ? Geometry->m_pcName : "?", (unsigned)spheres.size(), max(over, 0.0f), moved, w);
+}
+
+static void ViewModelSpheres(NiAVObject* Object, const NiPoint3& Eye, std::vector<D3DXVECTOR4>& Spheres) {
+	if (!Object || Object->m_flags & NiAVObject::NiFlags::APP_CULLED) return;
+	auto Add = [&](const NiTransform& T, const NiBound& B) {
+		const NiPoint3 c = T.rot * B.Center;
+		const D3DXVECTOR4 s(T.pos.x + c.x * T.scale - Eye.x, T.pos.y + c.y * T.scale - Eye.y, T.pos.z + c.z * T.scale - Eye.z, B.Radius * T.scale);
+		if (s.x * s.x + s.y * s.y + s.z * s.z < 150.0f * 150.0f) Spheres.push_back(s);
+	};
+	if (Object->IsGeometry()) {
+		NiGeometry* Geo = static_cast<NiGeometry*>(Object);
+		NiSkinInstance* Skin = Geo->skinInstance;
+		if (Skin && Skin->SkinData && Skin->SkinData->BoneData && Skin->BoneObjects) {
+			for (UInt32 i = 0; i < Skin->SkinData->Bones; i++)
+				if (Skin->BoneObjects[i] && Skin->SkinData->BoneData[i].Verts) Add(Skin->BoneObjects[i]->m_worldTransform, Skin->SkinData->BoneData[i].Bound);
+		}
+		else if (Geo->geomData) Add(Geo->m_worldTransform, Geo->geomData->m_kBound);
+		return;
+	}
+	NiNode* Node = Object->IsNiNode();
+	if (!Node) return;
+	if (Node->IsKindOf<NiSwitchNode>()) {
+		NiSwitchNode* SwitchNode = static_cast<NiSwitchNode*>(Node);
+		if (SwitchNode->m_iIndex >= 0 && SwitchNode->m_iIndex < Node->m_children.end) ViewModelSpheres(Node->m_children.data[SwitchNode->m_iIndex], Eye, Spheres);
+		return;
+	}
+	for (int i = 0; i < Node->m_children.end; i++) ViewModelSpheres(Node->m_children.data[i], Eye, Spheres);
+}
+
+bool ShadowManager::RenderViewModelShadowMap(NiCamera* FirstPersonCamera) {
+	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
+	if (!Shadows || !ShadowShadersLoaded || !TheSettingManager->SettingsMain.Main.RenderEffects) return false;
+	// UNOFFICIAL 2026-11-04 [Shaders.ShadowsExteriors.ShadowMaps] CharacterShadowMapLog: each first-person frame, made or why not, and where
+	// (user: the arms' and weapon's shadows flicker in and out on a jump). At most 4000 lines a session.
+	static int viewModelLogLines = 0;
+	const bool logThis = Shadows->Settings.ShadowMaps.CharacterMapLog && viewModelLogLines < 4000;
+	auto skip = [&](const char* why) { if (logThis) { viewModelLogLines++; Logger::Log("VIEWMODEL SHADOW f%u: skipped (%s)", TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u, why); } return false; };
+	if (!Shadows->Settings.ShadowMaps.ViewModelShadows) return false;	// UNOFFICIAL 2026-11-05 our switch (no log line: off on purpose)
+	if (!Shadows->Settings.ShadowMaps.CharacterMap || !Shadows->CharacterMapCompiled || !Shadows->EnsureCharacterMap()) return skip("character map off or not made");
+	if (!TheShaderManager->GameState.isExterior || !Shadows->Enabled || !Shadows->Settings.Exteriors.Enabled) return skip("indoors or exterior shadows off");
+	if (Shadows->Constants.ShadowFade.y <= 0.0f || Shadows->Constants.ForwardData.x != 0.0f) return skip(Shadows->Constants.ShadowFade.y <= 0.0f ? "sun shadow maps inactive" : "forward sun shadows off this frame");
+	if (!Player || !Player->firstPersonNiNode || !FirstPersonCamera) return skip("no first-person model or camera");
+
+	IDirect3DDevice9* Device = TheRenderManager->device;
+	NiDX9RenderState* RenderState = TheRenderManager->renderState;
+	static GpuTimer viewModelMapTimer("View model shadow map");
+	GpuProfileScope gpu(viewModelMapTimer, Device);
+	IDirect3DSurface9* DepthSurface = NULL;
+	IDirect3DSurface9* RenderSurface = NULL;
+	D3DVIEWPORT9 viewport;
+	Device->GetDepthStencilSurface(&DepthSurface);
+	Device->GetRenderTarget(0, &RenderSurface);
+	Device->GetViewport(&viewport);
+	static const D3DRENDERSTATETYPE kStates[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ZFUNC, D3DRS_CULLMODE, D3DRS_ALPHABLENDENABLE,
+		D3DRS_ALPHATESTENABLE, D3DRS_ALPHAREF, D3DRS_ALPHAFUNC, D3DRS_DEPTHBIAS, D3DRS_SLOPESCALEDEPTHBIAS, D3DRS_STENCILENABLE, D3DRS_STENCILREF,
+		D3DRS_STENCILFUNC, D3DRS_COLORWRITEENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_CLIPPLANEENABLE, D3DRS_NORMALIZENORMALS, D3DRS_POINTSIZE };
+	DWORD saved[_countof(kStates)];
+	for (int i = 0; i < _countof(kStates); i++) Device->GetRenderState(kStates[i], &saved[i]);
+	// The rest of the device state the draws below change, as the flashlight's MaterialPass keeps it (in the middle of the game's own
+	// draws): shaders, vertex layout, buffers, textures and their sampling, and every shader constant (the skinned pass writes bones
+	// from c9, the game sets some of its constants once per pass).
+	static const D3DSAMPLERSTATETYPE kSamplerStates[] = { D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER };
+	IDirect3DVertexShader9* savedVS = NULL; IDirect3DPixelShader9* savedPS = NULL; IDirect3DVertexDeclaration9* savedDecl = NULL;
+	IDirect3DIndexBuffer9* savedIB = NULL; DWORD savedFVF = 0;
+	IDirect3DVertexBuffer9* savedVB[8] = {}; UINT savedOffset[8] = {}, savedStride[8] = {};
+	IDirect3DBaseTexture9* savedTex[16] = {}; DWORD savedSampler[16][_countof(kSamplerStates)];
+	static float savedVSConst[256][4], savedPSConst[224][4];
+	Device->GetVertexShader(&savedVS); Device->GetPixelShader(&savedPS); Device->GetVertexDeclaration(&savedDecl);
+	Device->GetIndices(&savedIB); Device->GetFVF(&savedFVF);
+	for (UINT i = 0; i < 8; i++) Device->GetStreamSource(i, &savedVB[i], &savedOffset[i], &savedStride[i]);
+	for (DWORD i = 0; i < 16; i++) {
+		Device->GetTexture(i, &savedTex[i]);
+		for (int s = 0; s < _countof(kSamplerStates); s++) Device->GetSamplerState(i, kSamplerStates[s], &savedSampler[i][s]);
+	}
+	Device->GetVertexShaderConstantF(0, &savedVSConst[0][0], 256);
+	Device->GetPixelShaderConstantF(0, &savedPSConst[0][0], 224);
+	const D3DXVECTOR4 savedData = Shadows->Constants.Data;
+	const D3DXMATRIX savedViewProj = Shadows->Constants.ShadowViewProj;
+	ShadowsExteriorEffect::ShadowMapSettings& map = Shadows->CharacterMap;
+	const float res = map.ShadowMapResolution;
+
+	// Camera-relative to the first-person camera (see above), put back at the end.
+	NiPoint3* PosAdjust = (NiPoint3*)0x011F474C;	// NiRenderer::kPosAdjust
+	const NiPoint3 savedPosAdjust = *PosAdjust;
+	const D3DXVECTOR4 savedCameraPosition = TheRenderManager->CameraPosition;
+	const NiPoint3 eye = FirstPersonCamera->m_worldTransform.pos;
+	*PosAdjust = eye;
+	TheRenderManager->CameraPosition = D3DXVECTOR4(eye.x, eye.y, eye.z, 1.0f);
+
+	// The light transform: an ortho box fitted, in the sun's frame, round the parts drawn (ViewModelSpheres; the viewmodel's root bound
+	// has no size), so the map's texels cover only the arms and weapon. Square, its size in 8-unit steps and its centre snapped to whole
+	// texels: the texel grid holds still while the weapon sways and the shadow edges do not crawl. At least as deep as it is wide
+	// (CharacterMapShadow's receiver-plane slack takes one texel of depth as one texel across).
+	static std::vector<D3DXVECTOR4> spheres;
+	spheres.clear();
+	ViewModelSpheres(Player->firstPersonNiNode, eye, spheres);
+	D3DXVECTOR3 sunDir(Shadows->Constants.SmoothedSunDir.x, Shadows->Constants.SmoothedSunDir.y, Shadows->Constants.SmoothedSunDir.z);
+	D3DXVec3Normalize(&sunDir, &sunDir);
+	const D3DXVECTOR3 origin(0.0f, 0.0f, 0.0f);
+	const D3DXVECTOR3 upDir = fabsf(sunDir.z) > 0.99f ? D3DXVECTOR3(0.0f, 1.0f, 0.0f) : D3DXVECTOR3(0.0f, 0.0f, 1.0f);
+	D3DXMATRIX lightView, lightProj;
+	D3DXMatrixLookAtRH(&lightView, &sunDir, &origin, &upDir);
+	D3DXVECTOR3 lo(FLT_MAX, FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+	for (const D3DXVECTOR4& s : spheres) {
+		D3DXVECTOR3 v;
+		D3DXVec3TransformCoord(&v, (const D3DXVECTOR3*)&s, &lightView);
+		lo.x = min(lo.x, v.x - s.w); lo.y = min(lo.y, v.y - s.w); lo.z = min(lo.z, v.z - s.w);
+		hi.x = max(hi.x, v.x + s.w); hi.y = max(hi.y, v.y + s.w); hi.z = max(hi.z, v.z + s.w);
+	}
+	if (spheres.empty()) { lo = D3DXVECTOR3(-1.0f, -1.0f, -1.0f); hi = D3DXVECTOR3(1.0f, 1.0f, 1.0f); }
+	const float extent = max(8.0f, ceilf(max(hi.x - lo.x, hi.y - lo.y) / 8.0f) * 8.0f);
+	const float texelWorld = extent / res;
+	const float cx = floorf((lo.x + hi.x) * 0.5f / texelWorld) * texelWorld;
+	const float cy = floorf((lo.y + hi.y) * 0.5f / texelWorld) * texelWorld;
+	float zNear = -hi.z - 1.0f, zFar = -lo.z + 1.0f;	// right-handed: in front is -z
+	if (zFar - zNear < extent) { const float grow = 0.5f * (extent - (zFar - zNear)); zNear -= grow; zFar += grow; }
+	D3DXMatrixOrthoOffCenterRH(&lightProj, cx - 0.5f * extent, cx + 0.5f * extent, cy - 0.5f * extent, cy + 0.5f * extent, zNear, zFar);
+	D3DXMATRIX viewProj = lightView * lightProj;
+
+	// The lookup's space is not the one drawn here: the object and skin shaders rebuild their position from the clip position with NVR's
+	// inverse view and projection (Includes/Shadow.hlsl GetShadowWorldPos), made from the world camera when the world scene began
+	// (RenderManager::SetupSceneCamera), and the viewmodel is projected with the first-person camera's own field of view (by the time of
+	// this call the world camera's frustum already reads the first-person one, so the inverse projection is the only true record of the
+	// world's). Along each view ray at the same view depth, the rebuilt point is the true one with its view x and y scaled by
+	// InvProj._11 * 2 / first-person width (and _22 for y): 1.092 measured at the default FOVs, enough to put every lookup behind the
+	// viewmodel's own surfaces in a box texels of 0.06 units. So the lookup undoes it before the light transform: the inverse view's
+	// translation off, NVR's view rotation, that scale inverted, the first-person camera's inverse view rotation.
+	auto viewRotation = [](NiCamera* camera) {
+		const NiMatrix33& axes = camera->m_worldTransform.rot;
+		D3DXMATRIX m;
+		D3DXMatrixIdentity(&m);
+		for (int r = 0; r < 3; r++) {	// columns side, up, forward (RenderManager::SetupSceneCamera)
+			m.m[r][0] = axes.data[r][2];
+			m.m[r][1] = axes.data[r][1];
+			m.m[r][2] = axes.data[r][0];
+		}
+		return m;
+	};
+	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
+	const D3DXMATRIX& invProj = TheRenderManager->InvProjMatrix;
+	const NiFrustum& f = FirstPersonCamera->Frustum;
+	D3DXMATRIX untranslate, nvrView, scale, firstPersonView, firstPersonInverse;
+	D3DXMatrixTranslation(&untranslate, -invView._41, -invView._42, -invView._43);
+	D3DXMatrixTranspose(&nvrView, &invView);	// the rotation's inverse (the translation row is dropped below)
+	nvrView._14 = nvrView._24 = nvrView._34 = 0.0f;
+	nvrView._41 = nvrView._42 = nvrView._43 = 0.0f;
+	const float scaleX = invProj._11 * 2.0f / max(f.Right - f.Left, 1e-6f), scaleY = invProj._22 * 2.0f / max(f.Top - f.Bottom, 1e-6f);
+	D3DXMatrixScaling(&scale, 1.0f / scaleX, 1.0f / scaleY, 1.0f);
+	firstPersonView = viewRotation(FirstPersonCamera);
+	D3DXMatrixTranspose(&firstPersonInverse, &firstPersonView);
+	const D3DXMATRIX rebuiltToTrue = untranslate * nvrView * scale * firstPersonInverse;
+
+	// The lookup's constants (CharacterMapShadow): w 0.5 = this map, read with the tent; a band of 0.01 (the box is fitted round the
+	// parts, no hand-over at its edge); a depth bias of two texels' worth.
+	Shadows->Constants.CharacterCameraToLight = rebuiltToTrue * viewProj;
+	Shadows->Constants.CharacterCenter = D3DXVECTOR4(cx, cy, 0.0f, 0.5f * extent);
+	Shadows->Constants.CharacterData = D3DXVECTOR4(1.0f / res, 0.01f, max(2.0f * texelWorld, 0.03f) / (zFar - zNear), 
+		Shadows->Settings.ShadowMaps.CharacterMapDebug ? 1.0f + (float)Shadows->Settings.ShadowMaps.CharacterMapDebug : 0.5f);	// (CharacterShadowMapDebug: its views, Shadow.hlsl)
+
+	Shadows->Constants.Data.z = 1.0f;	// plain depth (as RenderCharacterShadowMap)
+	Shadows->Constants.ShadowViewProj = viewProj;
+	if (Shadows->Settings.ShadowMaps.CharacterMapLog) {	// for ViewModelLogDraw
+		ViewModelLog.valid = true;
+		ViewModelLog.frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u;
+		ViewModelLog.eye = eye;
+		ViewModelLog.lightView = lightView;
+		ViewModelLog.cx = cx; ViewModelLog.cy = cy; ViewModelLog.half = 0.5f * extent;
+		ViewModelLog.zNear = zNear; ViewModelLog.zFar = zFar;
+		ViewModelLog.posAtMap.clear();
+		ViewModelLogPositions(Player->firstPersonNiNode);
+	}
+	if (logThis) {
+		viewModelLogLines++;
+		Logger::Log("VIEWMODEL SHADOW f%u: made | eye %.1f %.1f %.1f | world camera %.1f %.1f %.1f (eye - world %.2f %.2f %.2f) | inv view t %.2f %.2f %.2f | "
+			"%u parts, box centre %.2f %.2f, extent %.1f, depth %.1f..%.1f | sun %.3f %.3f %.3f",
+			TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u, eye.x, eye.y, eye.z, savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z,
+			eye.x - savedCameraPosition.x, eye.y - savedCameraPosition.y, eye.z - savedCameraPosition.z, invView._41, invView._42, invView._43,
+			(unsigned)spheres.size(), cx, cy, extent, zNear, zFar, sunDir.x, sunDir.y, sunDir.z);
+	}
+	geometryPass->VertexShader = alphaPass->VertexShader = skinnedGeoPass->VertexShader = ShadowMapVertex;
+	geometryPass->PixelShader = ShadowMapOpaquePixel;
+	alphaPass->PixelShader = ShadowMapPixel;
+	skinnedGeoPass->PixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowMapPixel : ShadowMapOpaquePixel;
+
+	// Any other targets the game's scene left bound (multiple render targets) would not match the map's size, which drops every draw;
+	// put back at the end.
+	IDirect3DSurface9* savedRT[3] = {};
+	for (DWORD i = 1; i < 4; i++) { Device->GetRenderTarget(i, &savedRT[i - 1]); if (savedRT[i - 1]) Device->SetRenderTarget(i, NULL); }
+	Device->SetRenderTarget(0, Shadows->CharacterMapSurface);
+	Device->SetDepthStencilSurface(Shadows->CharacterMapDepthSurface);
+	// The states RenderShadowMaps draws every map with, on the device as well: the first-person scene arrives with colour writes off,
+	// and NiDX9RenderState may believe it already holds a value the device does not. The depth test is LESSEQUAL whatever the scene's
+	// depth convention: ShadowMap.vso writes plain depth (0 at the light) and DrawShadowMap clears to 1, so nearest wins (with the
+	// reversed scene's GREATEREQUAL set on the device too, every draw failed here: an empty map).
+	const DWORD zFunc = D3DCMP_LESSEQUAL;
+	const struct { D3DRENDERSTATETYPE type; DWORD value; } kMapStates[] = {
+		{ D3DRS_ZFUNC, zFunc }, { D3DRS_STENCILENABLE, 1 }, { D3DRS_STENCILREF, 0 }, { D3DRS_STENCILFUNC, D3DCMP_ALWAYS }, { D3DRS_NORMALIZENORMALS, 1 },
+		{ D3DRS_POINTSIZE, 810365505 }, { D3DRS_COLORWRITEENABLE, 0xF }, { D3DRS_SCISSORTESTENABLE, FALSE }, { D3DRS_CLIPPLANEENABLE, 0 },
+		{ D3DRS_ZENABLE, D3DZB_TRUE }, { D3DRS_ZWRITEENABLE, TRUE } };
+	for (const auto& entry : kMapStates) {
+		RenderState->SetRenderState(entry.type, entry.value, RenderStateArgs);
+		Device->SetRenderState(entry.type, entry.value);
+	}
+
+	// Every part of the viewmodel, however small (fingers and sights), alpha tested parts included.
+	map.Forms = {};
+	map.Forms.Actors = true;
+	map.Forms.AlphaEnabled = true;
+	// The Pip-Boy fit's object is the game's last first-person draw: last frame's here (this map comes before this frame's draws), maybe gone
+	// since (a weapon switch, the Pip-Boy): ClothWind's partition draws read it (crashed in PipboyFit::ForPartition). Off for this map.
+	PipboyFit::Active = nullptr;
+	map.CustomClearRequired = false;
+	BeginShadowMap(&map, &viewProj);
+	AccumChildren(Player->firstPersonNiNode, &map.Forms, false, false, nullptr);
+	DrawShadowMap(&map);
+
+	for (int i = 0; i < _countof(kStates); i++) {
+		RenderState->SetRenderState(kStates[i], saved[i], RenderStateArgs);
+		Device->SetRenderState(kStates[i], saved[i]);	// (the cache may already hold it and skip the device)
+	}
+	*PosAdjust = savedPosAdjust;
+	TheRenderManager->CameraPosition = savedCameraPosition;
+	Shadows->Constants.Data = savedData;
+	Shadows->Constants.ShadowViewProj = savedViewProj;
+	Device->SetDepthStencilSurface(DepthSurface);
+	Device->SetRenderTarget(0, RenderSurface);
+	for (DWORD i = 1; i < 4; i++) if (savedRT[i - 1]) { Device->SetRenderTarget(i, savedRT[i - 1]); savedRT[i - 1]->Release(); }
+	Device->SetViewport(&viewport);
+	if (DepthSurface) DepthSurface->Release();
+	if (RenderSurface) RenderSurface->Release();
+	// (through NiDX9RenderState where it keeps its own idea of the state, so it and the device agree again)
+	RenderState->SetVertexShader(savedVS, false);
+	RenderState->SetPixelShader(savedPS, false);
+	if (savedDecl) RenderState->SetVertexDeclaration(savedDecl, false);
+	else RenderState->SetFVF(savedFVF, false);
+	Device->SetIndices(savedIB);
+	for (UINT i = 0; i < 8; i++) Device->SetStreamSource(i, savedVB[i], savedOffset[i], savedStride[i]);
+	for (DWORD i = 0; i < 16; i++) {
+		RenderState->SetTexture(i, savedTex[i]);
+		Device->SetTexture(i, savedTex[i]);	// (the cache may already hold it and skip the device)
+		for (int s = 0; s < _countof(kSamplerStates); s++) {
+			TheRenderManager->SetSamplerState(i, kSamplerStates[s], savedSampler[i][s]);
+			Device->SetSamplerState(i, kSamplerStates[s], savedSampler[i][s]);
+		}
+	}
+	Device->SetVertexShaderConstantF(0, &savedVSConst[0][0], 256);
+	Device->SetPixelShaderConstantF(0, &savedPSConst[0][0], 224);
+	if (savedVS) savedVS->Release();
+	if (savedPS) savedPS->Release();
+	if (savedDecl) savedDecl->Release();
+	if (savedIB) savedIB->Release();
+	for (UINT i = 0; i < 8; i++) if (savedVB[i]) savedVB[i]->Release();
+	for (DWORD i = 0; i < 16; i++) if (savedTex[i]) savedTex[i]->Release();
+	return true;
+}
+
 
 /*
  * Clear a part of the shadow map atlas based on the shadow mapping mode.

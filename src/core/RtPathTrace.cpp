@@ -337,12 +337,22 @@ namespace {
 		imageAlbedoOut = RtCore::AddImage("NVR RT path trace first albedo", w, h, NVR_EXT_SHARED_RGBA16F);	// (2026-11-03) PTDenoise's demodulation
 		imageLamps = RtCore::AddImage("NVR RT path trace lamps", kLightTexels, 1 + kGridRows, NVR_EXT_SHARED_RG32F);
 		// (2026-11-04 d) PTRestirGI's images (9: the shared block holds 48, 37 were in use)
-		imageGIResult = RtCore::AddImage("NVR RT path trace GI result", w, h, NVR_EXT_SHARED_RGBA16F);
-		for (int i = 0; i < 2; i++) {
-			imageResA[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir A1" : "NVR RT path trace GI reservoir A0", w, h, NVR_EXT_SHARED_RG32F);
-			imageResB[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir B1" : "NVR RT path trace GI reservoir B0", w, h, NVR_EXT_SHARED_RG32F);
-			imageResC[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir C1" : "NVR RT path trace GI reservoir C0", w, h, NVR_EXT_SHARED_RGBA16F);
-			imageSurf[i] = RtCore::AddImage(i ? "NVR RT path trace GI surface 1" : "NVR RT path trace GI surface 0", w, h, NVR_EXT_SHARED_RG32F);
+		// UNOFFICIAL 2026-11-05: only when PTRestirGI is on at the helper's start (as RtLampShadows' optional images). Always taking them
+		// put the user's set at 51 of 48 with HitTextures + GlowTextures + NormalTextures + AlphaTested on: the core refused to start and
+		// PTRealtime did nothing. Without them the GI branch in Record stays off (it checks imageGIResult / imageResA[1]).
+		imageGIResult = -1;
+		for (int i = 0; i < 2; i++) imageResA[i] = imageResB[i] = imageResC[i] = imageSurf[i] = -1;
+		giHistory = false;
+		if (TheSettingManager->GetSettingI(kSection, "PTRestirGI") == 0)
+			Logger::Log("UNOFFICIAL RT path tracer: PTRestirGI off at the RT helper's start: its 9 shared images are not taken (switching it on needs a game restart)");
+		else {
+			imageGIResult = RtCore::AddImage("NVR RT path trace GI result", w, h, NVR_EXT_SHARED_RGBA16F);
+			for (int i = 0; i < 2; i++) {
+				imageResA[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir A1" : "NVR RT path trace GI reservoir A0", w, h, NVR_EXT_SHARED_RG32F);
+				imageResB[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir B1" : "NVR RT path trace GI reservoir B0", w, h, NVR_EXT_SHARED_RG32F);
+				imageResC[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir C1" : "NVR RT path trace GI reservoir C0", w, h, NVR_EXT_SHARED_RGBA16F);
+				imageSurf[i] = RtCore::AddImage(i ? "NVR RT path trace GI surface 1" : "NVR RT path trace GI surface 0", w, h, NVR_EXT_SHARED_RG32F);
+			}
 		}
 		giHistory = false;	// (2026-11-04: + the light grid's rows)	// (2026-11-03) all the frame's lamps	// (2026-11-02 c) the game's frame at the core's point
 		samples = 0;	// new images: the mean starts over

@@ -19,13 +19,17 @@ uniform float4 TESR_CameraPosition : register(c134);
 uniform row_major float4x4 TESR_ShadowWorldTransform : register(c0);
 uniform row_major float4x4 TESR_ShadowViewProjTransform : register(c4);
 uniform float4 TESR_ShadowData : register(c8);
-uniform float4 Bones[54] : register(c9);
-uniform float4 BillboardRight : register(c63);
-uniform float4 BillboardUp : register(c64);
-uniform float4 RockParams : register(c65);
-uniform float4 RustleParams : register(c66);
-uniform float4 WindMatrices[16] : register(c67);
-uniform float4 LeafBase[48] : register(c83);
+// UNOFFICIAL 2026-11-05 (from Balebandro's fork, mo2-dxvk-loader ad32a3b) one array for the bones and the SpeedTree leaf constants
+// (same registers as before: the leaves' c63-c130 are set by number, RenderPass.cpp). With Bones[54] and the leaf constants declared
+// after it, a skinned partition's bones past the 18th (ghoul arms have 20 and 21) read wrong under DXVK although the registers held
+// them: those vertices were thrown towards the light and drew long bars into shadow maps. As one array the bones run to c130 (40).
+uniform float4 Bones[122] : register(c9);
+#define BillboardRight Bones[54]	// c63
+#define BillboardUp Bones[55]		// c64
+#define RockParams Bones[56]		// c65
+#define RustleParams Bones[57]		// c66
+#define WIND_MATRICES_BASE 58		// c67, 16 rows
+#define LEAF_BASE_BASE 74			// c83, 48 rows
 
 // Terrain LOD params for hiding it under normal terrain.
 uniform row_major float4x4 WorldTranspose : register(c140);
@@ -156,7 +160,7 @@ VtxVaryings main(VtxAttrs va) {
             const float rise_f = saturate(va.f_position.z * TESR_PlantLeafWind2.z);
             plant_lean = TESR_PlantLeafWind2.y * gust_f * rise_f * rise_f;
         }
-        tmp_r0 = SpeedTreeTransform(BillboardUp, BillboardRight, rock_params, rustle_params, WindMatrices, LeafBase, va.f_blendindexes, tmp_r0);
+        tmp_r0 = SpeedTreeTransform(BillboardUp, BillboardRight, rock_params, rustle_params, Bones, WIND_MATRICES_BASE, LEAF_BASE_BASE, va.f_blendindexes, tmp_r0);
     }
     else if (TESR_ShadowData.x == 3.0f) { // Terrain LOD.
         float4 tmp_r1 = va.f_position;

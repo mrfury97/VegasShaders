@@ -52,6 +52,8 @@ public:
 	// after the sun cascades from the same sun direction; actors only (the player, optionally other actors inside it). Sets
 	// Constants.CharacterData.w = 1 when the map holds this frame's draw.
 	void					RenderCharacterShadowMap(const D3DXVECTOR3& SunDir);
+	bool					RenderViewModelShadowMap(NiCamera* FirstPersonCamera);	// UNOFFICIAL 2026-11-05 (Balebandro) ViewModelShadows: the first-person arms and weapon into the character map
+	static void				ViewModelLogDraw(NiGeometry* Geometry);	// CharacterShadowMapLog: a first-person draw against this frame's viewmodel map
 	void					ClearShadowCascade(D3DVIEWPORT9* Rect, D3DXVECTOR4* Color);	// fills a map's rectangle with a colour (ShadowMapClear.pso)
 	void                    BlurShadowAtlas(unsigned cascadeMask);
 

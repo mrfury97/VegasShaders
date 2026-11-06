@@ -23,6 +23,7 @@
 #include "RtCore.h"
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
+#include "RtSunShadows.h"	// UNOFFICIAL 2026-11-04 the shared depth / normals images
 
 namespace RtLampShadows {
 
@@ -77,7 +78,8 @@ namespace RtLampShadows {
 	// This frame's lamps (Submit, from PointShadowForward::Publish) for Record
 	// stop: past the lamp's own glowing part (0 none); intensity: luminance x dimmer (the per-pixel ranking); radius: the game's (Spec.r)
 	// light: the ShadowSceneLight (ManyLights' id map; never dereferenced from here)
-	struct SlotLamp { int slot; D3DXVECTOR3 position; float reach; float fade; float stop; float intensity; float radius; const void* light = nullptr; };
+	struct SlotLamp { int slot; D3DXVECTOR3 position; float reach; float fade; float stop; float intensity; float radius; const void* light = nullptr;
+		bool invisible = false; };	// 2026-11-04 invisible: one of the game's invisible lights (LampFixtures::Invisible), traced with InvisibleLightRadius
 	inline SlotLamp Lamps[ManyIds] = {};
 	inline int LampCount = 0;
 	inline bool LampsThisFrame = false;
@@ -176,6 +178,19 @@ namespace RtLampShadows {
 	inline std::unordered_map<const void*, ManyId> PendingIds, TracedIds;	// light -> id: this frame's table / the newest result's
 	inline int ExtraCount = 0;				// lamps noted at ids 64+ this frame
 	inline int RefusedCount = 0;			// lamps the draws used past ManyLightsMax this frame (no id: cube map or unshadowed)
+	// UNOFFICIAL 2026-11-04 stable ids: a lamp keeps its id 64+ from frame to frame (the one-ray trace matches its history by id; ids
+	// handed out first-come each frame changed whenever the draw order did, and the lamp's history was lost). An id stays its lamp's
+	// for IdHold frames after it was last noted; a new lamp takes the lowest free id, else the one unused longest.
+	inline constexpr UInt32 IdHold = 120;
+	inline const void* IdOwner[ManyIds] = {};
+	inline UInt32 IdLastFrame[ManyIds] = {};
+	inline UInt32 NoteFrame = 1;			// Submit's count
+	inline int TableTop = 64;				// this frame's highest noted id + 1: the trace's table length
+	inline std::unordered_map<const void*, int> StableIds;
+	inline void ForgetIds() {
+		StableIds.clear();
+		for (int i = 0; i < ManyIds; i++) { IdOwner[i] = nullptr; IdLastFrame[i] = 0; }
+	}
 	inline UInt32 ManyTraces = 0, ManyLogCell = 0, ManyCellTraces = 0;	// the collected-lamps log (Record)
 	inline bool ManyNoting = false;			// this frame's draws note their lamps (Submit: ManyLights on, indoors)
 	inline bool ManyReady() { return CompiledIn && manyShader >= 0 && imageHistory[0] >= 0 && imageHistory[1] >= 0; }
@@ -204,12 +219,39 @@ namespace RtLampShadows {
 	inline void NoteLamp(const void* light, const SlotLamp& data) {
 		if (!Noting(light)) return;
 		const int limit = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsMax"), 64), ManyIds);
-		if (64 + ExtraCount >= limit || LampCount >= ManyIds) {
+		int id = -1;
+		if (LampCount < ManyIds) {
+			auto kept = StableIds.find(light);
+			if (kept != StableIds.end() && kept->second < limit && IdOwner[kept->second] == light) id = kept->second;
+			else {
+				if (kept != StableIds.end()) {	// its old id is past ManyLightsMax now (or was taken): let it go
+					if (kept->second >= 0 && kept->second < ManyIds && IdOwner[kept->second] == light) IdOwner[kept->second] = nullptr;
+					StableIds.erase(kept);
+				}
+				int oldest = -1;
+				for (int i = 64; i < limit; i++) {
+					if (!IdOwner[i] || NoteFrame - IdLastFrame[i] > IdHold) { id = i; break; }
+					if (IdLastFrame[i] != NoteFrame && (oldest < 0 || NoteFrame - IdLastFrame[i] > NoteFrame - IdLastFrame[oldest])) oldest = i;
+				}
+				if (id < 0) id = oldest;
+				if (id >= 0) {
+					if (IdOwner[id]) {
+						auto owner = StableIds.find(IdOwner[id]);
+						if (owner != StableIds.end() && owner->second == id) StableIds.erase(owner);
+					}
+					IdOwner[id] = light;
+					StableIds[light] = id;
+				}
+			}
+		}
+		if (id < 0) {
 			PendingIds.emplace(light, ManyId{ -1, data.reach });	// counted once (ManyIdOf: -1, no id)
 			RefusedCount++;
 			return;
 		}
-		const int id = 64 + ExtraCount++;
+		IdLastFrame[id] = NoteFrame;
+		ExtraCount++;
+		TableTop = (std::max)(TableTop, id + 1);
 		Lamps[LampCount] = data;
 		Lamps[LampCount].slot = id;
 		Lamps[LampCount].light = light;
@@ -271,6 +313,16 @@ namespace RtLampShadows {
 		return found == TheTextureManager->TextureNames.end() || !found->second ? nullptr : *found->second;
 	}
 
+	// UNOFFICIAL 2026-11-04: forget the newest result (cell change, helper start): the draws use the cube maps until the next trace
+	inline UInt32 SubmitCell = 0;
+	inline void ForgetTraced() {
+		Traced.valid = false;
+		for (int i = 0; i < MapSlots; i++) TracedMap[i] = -1;
+		TracedIds.clear();
+		TracedMany = false;
+		ForgetIds();
+	}
+
 	// PointShadowForward::Publish, once a frame indoors after the slots are known (before the world draws): this frame's lamps for
 	// the trace, and the reprojection into the newest result for this frame's draws.
 	inline void Submit(const SlotLamp* lamps, int count) {
@@ -280,9 +332,16 @@ namespace RtLampShadows {
 		PendingIds.clear();
 		RefusedCount = 0;
 		ExtraCount = 0;
+		TableTop = 64;
+		NoteFrame++;
 		ManyNoting = false;
 		ScreenSourceFrame = false;
 		if (!CompiledIn) return;
+		// UNOFFICIAL 2026-11-04: a new interior cell (a load door) drops the newest result and the ids: the lamps are other lamps there
+		{
+			const UInt32 cell = TheShaderManager->GameState.isExterior ? 0xFFFFFFFF : (Player && Player->parentCell ? Player->parentCell->refID : 0);
+			if (cell != SubmitCell) { SubmitCell = cell; ForgetTraced(); }
+		}
 		MaxLamps = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "MaxLamps"), 0), TableSlots);
 		const bool many = ManyOn() && TheSettingManager->GetSettingI(kSection, "Live") != 0;
 		// The table: every published lamp in cube slots 0-62, in NVR's order (its ranking), up to MaxLamps
@@ -455,9 +514,14 @@ namespace RtLampShadows {
 	inline bool ExteriorReplacing() { return (ExteriorLive || ExteriorForwardFrame) && TheShaderManager->GameState.isExterior && RtCore::Running(); }
 
 	inline void Setup() {
+		ForgetTraced();	// 2026-11-04: a (re)started helper has none of the old images' contents
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
-		imageDepth = RtCore::AddImage("NVR RT lamps depth", w, h, NVR_EXT_SHARED_R32F);
-		imageNormals = RtCore::AddImage("NVR RT lamps normals", w, h, NVR_EXT_SHARED_RGBA16F);
+		// UNOFFICIAL 2026-11-04: the depth and normals the RT sun shadows registered (the same screen-size copies of the same buffers,
+		// R32F and RGBA16F; its Setup runs first), so the two effects take 2 of the core's 32 shared images, not 4 (with the sun's
+		// blocker history the set was 33: the core refused to start and no RT effect ran)
+		const int sunDepth = RtSunShadows::DepthImage(), sunNormals = RtSunShadows::NormalsImage();
+		imageDepth = sunDepth >= 0 ? sunDepth : RtCore::AddImage("NVR RT lamps depth", w, h, NVR_EXT_SHARED_R32F);
+		imageNormals = sunNormals >= 0 ? sunNormals : RtCore::AddImage("NVR RT lamps normals", w, h, NVR_EXT_SHARED_RGBA16F);
 		imageResult = RtCore::AddImage("NVR RT lamps", w, h, NVR_EXT_SHARED_RG32F);
 		imageTable = RtCore::AddImage("NVR RT lamp table", TableWidth, 1, NVR_EXT_SHARED_RG32F);
 		imageAlphaStandIn = RtCore::AddImage("NVR RT lamps alpha stand-in", 1, 1, NVR_EXT_SHARED_R16F);	// (2026-11-03 rtalpha)
@@ -481,7 +545,7 @@ namespace RtLampShadows {
 	}
 
 	// The lamp table into its GPU texture (scene space = world minus CameraPosition), for the copy into imageTable
-	inline bool WriteTable(const D3DXVECTOR4& camera, float discRadius, float invisibleRadius) {
+	inline bool WriteTable(const D3DXVECTOR4& camera, float discRadius, float invisibleRadius, float stopCap = 0.0f) {
 		IDirect3DDevice9* device = TheRenderManager->device;
 		if (!TableTexture) {
 			TheTextureManager->InitTexture("TESR_RtLampTable", &TableTexture, &TableSurface, TableWidth, 1, D3DFMT_G32R32F);
@@ -502,7 +566,10 @@ namespace RtLampShadows {
 			e[0] = l.position.x - camera.x; e[1] = l.position.y - camera.y;
 			e[2] = l.position.z - camera.z; e[3] = l.reach;
 			e[4] = (std::max)(l.intensity, 0.001f); e[5] = (std::max)(l.radius, 1.0f);
-			e[6] = l.stop; e[7] = l.fade < 0.0f && invisibleRadius >= 0.0f ? invisibleRadius : discRadius;	// negative fade: an invisible light
+			// 2026-11-04: GlowStopMax caps the stop from the lamp's glow (it can reach 40-80 units: shelves and ceilings by the lamp
+			// never blocked it); the invisible flag, not a negative fade (that only came with [Forward] InvisibleLightSize > 0)
+			e[6] = stopCap > 0.0f ? (std::min)(l.stop, stopCap) : l.stop;
+			e[7] = l.invisible && invisibleRadius >= 0.0f ? invisibleRadius : discRadius;
 		}
 		TableStaging->UnlockRect(0);
 		IDirect3DSurface9* staging = nullptr;
@@ -613,7 +680,7 @@ namespace RtLampShadows {
 		c.flags[3] = (float)(frame % (UInt32)interleave);
 		const float radius = (std::max)(TheSettingManager->GetSettingF(kSection, "LampRadius"), 0.0f);
 		const float invisible = TheSettingManager->GetSettingF(kSection, "InvisibleLightRadius");
-		if (!WriteTable(camera, radius, invisible)) {
+		if (!WriteTable(camera, radius, invisible, (std::max)(TheSettingManager->GetSettingF(kSection, "GlowStopMax"), 0.0f))) {
 			static bool logged = false;
 			if (!logged) { logged = true; Logger::Log("UNOFFICIAL RT lamp shadows: the lamp table could not be written; not traced"); }
 			return;
@@ -642,7 +709,7 @@ namespace RtLampShadows {
 		}
 		// UNOFFICIAL 2026-10-31 ManyLights: the many-light variant (its own packing, its R history pair); Filter and Denoise do not apply
 		if (ManyNoting) {
-			c.params2[3] = (float)(64 + ExtraCount);	// ids 0 .. 63 + the other lamps (empty slots have reach 0)
+			c.params2[3] = (float)TableTop;	// ids 0 .. 63 + the other lamps up to the highest noted id (empty slots have reach 0)
 			// ManyLightsOneRay: one ray a pixel (RtLampTraceRestir.spv), else RtLampTraceMany.spv; the history only from the same variant
 			const bool oneRay = OneRayReady() && TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
 			// (2026-11-04) and only at the scale it was traced at: a RenderScale change or a rect <-> native frame restarts the history
@@ -676,9 +743,12 @@ namespace RtLampShadows {
 				const bool moved = motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageMotion, motion);
 				c.many2[3] = moved ? 1.0f : 0.0f;
 				if (moved) MotionFrames++;
+				// moving tiles: the 8 x 8 groups shifted by 0..7 pixels each way, another shift each frame (many.x = -1 - shift), one more
+				// group each way to cover the edge
+				c.many[0] = -1.0f - (float)((frame * 37u) & 63u);
 				const int images[10] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity],
 					imageHistoryIds[HistoryParity], imageHistoryIds[1 - HistoryParity], moved ? imageMotion : imageNormals, AlphaImage() };	// [9]: binding 13 (rtalpha)
-				if (!RtCore::AddPass(restirShader, images, 10, 0xA4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+				if (!RtCore::AddPass(restirShader, images, 10, 0xA4, &c, sizeof(c), (tw + 7) / 8 + 1, (th + 7) / 8 + 1)) return;
 			} else {
 				// [8]: binding 12, the alpha atlas (rtalpha); [6], [7] unused
 				const int manyImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity], imageDepth, imageDepth, AlphaImage() };

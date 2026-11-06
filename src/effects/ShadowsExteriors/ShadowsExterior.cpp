@@ -4,6 +4,7 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/SunDepthFit.h"	// UNOFFICIAL 2026-10-27 FitToDepth
 #include "../../core/RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
+#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
 
 // UNOFFICIAL 2026-10-16 lamp contact shadows (PointShadows.fx LampContactPS, technique 2; drawn by ShaderManager after the lamp
 // pass): every number the shader needs (see the constants' comments there). Kept out of ShadowsExterior.h (widely included).
@@ -27,6 +28,7 @@ static float ScreenSpaceNearFade = 0.0f;	// the setting (UpdateSettings); Screen
 
 void ShadowsExteriorEffect::UpdateConstants() {
 	// Contact-shadow start and end: NearFade, pushed out to where the land's bumps end while those are on (DxvkCompute::DisplaceContactFade).
+	BendContact::UpdateConstants();	// UNOFFICIAL 2026-11-06: last frame's Bend result, reprojected for this frame's lit shaders
 	ScreenSpaceFade = D3DXVECTOR4(ScreenSpaceNearFade * 0.5f, ScreenSpaceNearFade, 0.0f, 0.0f);
 	float displaceBegin = 0.0f, displaceEnd = 0.0f;
 	if (DxvkCompute::DisplaceContactFade(displaceBegin, displaceEnd)) {
@@ -99,7 +101,7 @@ void ShadowsExteriorEffect::UpdateConstants() {
 		Constants.ForwardData.x = (!Settings.Exteriors.ForwardShadows || SunFaded) ? 1.0f : 0.0f;
 		// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1 (replace): the object shaders' cascade lookups off; the deferred apply does the
 		// cascades (faded out inside the RT range) and the traced visibility is multiplied in after it (core/RtSunShadows.cpp).
-		if (RtSunShadows::Replacing()) Constants.ForwardData.x = 1.0f;
+		if (RtSunShadows::Deferred()) Constants.ForwardData.x = 1.0f;	// 2026-11-04: Mode 0 too (RtSunShadows::Deferred)
 		RtSunShadows::ReplaceRange();
 #if NVR_TEST_TOOLS
 		// DIAGNOSTIC SkipWhenFadedCheck 3: the lookups off at any hour (what they cost; by day the sun shadows leave the lit
@@ -433,6 +435,7 @@ void ShadowsExteriorEffect::UpdateSettings() {
 		maps.CharacterMapBias = std::clamp(ShadowSettingF(shadowMapsSection, "CharacterShadowMapBias"), 0.0f, 4.0f);
 		maps.CharacterMapOthers = ShadowSettingI(shadowMapsSection, "CharacterShadowMapOthers") != 0;
 		maps.CharacterMapLog = ShadowSettingI(shadowMapsSection, "CharacterShadowMapLog") != 0;
+		maps.ViewModelShadows = ShadowSettingI(shadowMapsSection, "ViewModelShadows") != 0;	// UNOFFICIAL 2026-11-05
 		maps.CharacterMapDebug = std::clamp(ShadowSettingI(shadowMapsSection, "CharacterShadowMapDebug"), 0, 3);
 		if (maps.CharacterMap && !CharacterMapCompiled) {
 			static bool hinted = false;
@@ -525,7 +528,6 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	interiors.Quality = ShadowSettingI(interiorSection, "Quality");
 	interiors.LightPoints = (std::max)(0, (std::min)(ShadowSettingI(interiorSection, "LightPoints"), ShadowCubeMapsMax));
 	interiors.ExteriorLightPoints = (std::max)(0, (std::min)(ShadowSettingI(interiorSection, "ExteriorLightPoints"), ExteriorBatchedMax));
-	interiors.TorchesCastShadows = ShadowSettingI(interiorSection, "TorchesCastShadows");
 	// UNOFFICIAL 2026-10-16 (bug hunt): clamped -- 12 R32F cubes at 4096 are about 4.8 GB, and the size sets every cube's memory.
 	interiors.ShadowCubeMapSize = std::clamp(ShadowSettingI(interiorSection, "ShadowCubeMapSize"), 64, 2048);
 	interiors.Darkness = ShadowSettingF(interiorSection, "Darkness");
@@ -782,6 +784,7 @@ void ShadowsExteriorEffect::RegisterConstants() {
 	// Each name is bound to the memory the shaders read it from, in the order they were always bound.
 	const auto bind = [](const char* name, D3DXVECTOR4* value) { TheShaderManager->RegisterConstant(name, value); };
 	bind("TESR_SmoothedSunDir", &Constants.SmoothedSunDir);
+	BendContact::RegisterConstants();	// UNOFFICIAL 2026-11-06 TESR_ContactReproject, TESR_ContactForwardData
 	bind("TESR_RtSunReplace", RtSunShadows::ReplaceConstant());	// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1
 	bind("TESR_ShadowData", &Constants.Data);
 	bind("TESR_ShadowFormatData", &Constants.FormatData);
@@ -870,6 +873,7 @@ static void MakeCascadeSurfaces(ShadowsExteriorEffect& fx, ULONG cascadeSize, UL
 
 void ShadowsExteriorEffect::RegisterTextures() {
 	TerrainShadows.RegisterTextures();	// UNOFFICIAL 2026-10-19
+	BendContact::RegisterTextures();	// UNOFFICIAL 2026-11-06 TESR_ContactForward
 	const ULONG cascadeSize = Settings.ShadowMaps.CascadeResolution;
 	const ULONG cubeSize = Settings.Interiors.ShadowCubeMapSize;
 	const ULONG atlasSize = cascadeSize * 2;

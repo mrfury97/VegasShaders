@@ -229,13 +229,15 @@ namespace DeferredLamps {
 		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 8, 9, 10, 11, 12, 15 };	// 15: (2026-11-03 rtfwd) the RT lamp trace's result
 		IDirect3DBaseTexture9* tex[11] = {};
 		for (int s = 0; s < 11; s++) d->GetTexture(kStages[s], &tex[s]);
-		// every constant the pass sets, saved and put back (c0-c9, c32-c36, c135, c168, c180-c189, c191, c205, c206-c209, c211, c215-c217, c223)
-		struct Range { UINT reg, count; float v[16][4]; } saved[] = { { 0, 11 }, { 32, 5 }, { 135, 1 }, { 168, 1 }, { 180, 10 }, { 191, 1 }, { 205, 1 }, { 206, 4 }, { 211, 1 }, { 215, 3 }, { 223, 1 } };
+		// every constant the pass sets, saved and put back (c0-c11, c32-c36, c135, c168, c180-c189, c191, c205, c206-c209, c211, c215-c217, c223)
+		struct Range { UINT reg, count; float v[16][4]; } saved[] = { { 0, 12 }, { 32, 5 }, { 135, 1 }, { 168, 1 }, { 180, 10 }, { 191, 1 }, { 205, 1 }, { 206, 4 }, { 211, 1 }, { 215, 3 }, { 223, 1 } };
 		for (Range& r : saved) d->GetPixelShaderConstantF(r.reg, &r.v[0][0], r.count);
 		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_CULLMODE, D3DRS_STENCILENABLE,
 			D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_COLORWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_SRCBLEND, D3DRS_DESTBLEND,
 			D3DRS_BLENDOP, D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_FOGENABLE };
-		const bool add = linear && DebugView < 2;	// the debug views of the inputs write over the frame (2026-11-03: and 7, the lamps alone)
+		// UNOFFICIAL 2026-11-05 (Balebandro 256de14): the copy path adds too (DeferredLamps.hlsl: the difference it makes), so every MSAA
+		// sample keeps its own value; written over, each sample took the resolved copy's one value (edges and terrain blending flattened).
+		const bool add = DebugView < 2;	// the debug views of the inputs write over the frame (2026-11-03: and 7, the lamps alone)
 		const DWORD want[] = { D3DZB_FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, FALSE, FALSE, 0x7, add ? (DWORD)TRUE : (DWORD)FALSE, D3DBLEND_ONE, D3DBLEND_ONE,
 			D3DBLENDOP_ADD, FALSE, FALSE };
 		DWORD savedRS[sizeof(kRS) / sizeof(kRS[0])];
@@ -337,7 +339,18 @@ namespace DeferredLamps {
 		}
 		const float c10[4] = { 0.0f, vis ? 1.0f : 0.0f, bias, 0.0f };
 		d->SetPixelShaderConstantF(10, c10, 1);
+		// UNOFFICIAL 2026-11-05 (Balebandro 256de14) the lighting draw depth-tested, not written, at each pixel's G-buffer surface (the
+		// shader's own depth, DeferredLamps.hlsl): what was drawn over it without writing the G-buffer (hair) is not lit as the surface
+		// behind, and under MSAA each sample is tested. Only this draw: the shadow passes above write their own targets.
+		const D3DXMATRIX& proj = NiDX9Renderer::GetSingleton()->projMatrix;
+		const float c11[4] = { proj._33, proj._43, 0.01f, 2.0f };	// DL_Depth: the depth of a view z, and the pull nearer (1 % and 2 units)
+		d->SetPixelShaderConstantF(11, c11, 1);
+		DWORD zEnable = 0, zFunc = 0;
+		d->GetRenderState(D3DRS_ZENABLE, &zEnable); d->GetRenderState(D3DRS_ZFUNC, &zFunc);
+		d->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+		d->SetRenderState(D3DRS_ZFUNC, (1.0 - NiDX9Renderer::GetSingleton()->m_fZClear) ? D3DCMP_GREATEREQUAL : D3DCMP_LESSEQUAL);	// reversed while it clears to 0
 		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
+		d->SetRenderState(D3DRS_ZENABLE, zEnable); d->SetRenderState(D3DRS_ZFUNC, zFunc);
 		StatPasses++;
 
 		for (int s = 0; s < 11; s++) {

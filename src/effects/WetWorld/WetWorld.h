@@ -14,7 +14,7 @@ public:
 		Animator		PuddlesAnimator;
 		D3DXVECTOR4		Coeffs;
 		D3DXVECTOR4		Data;
-		D3DXVECTOR4		Look = D3DXVECTOR4(1.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL x: KeepHighlights (1 = the wet pass clamps only below 0)
+		D3DXVECTOR4		Look = D3DXVECTOR4(1.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL x: KeepHighlights (1 = the wet pass clamps only below 0); y (2026-11-05 Model 1): 1 = the material and albedo buffers match the frame the effects see
 	};
 	WetWorldStruct	Constants;
 
@@ -49,6 +49,18 @@ public:
 		if (fixedTrace && Effect && Effect->GetTechnique(fastPaths ? 4 : 3)) return fastPaths ? 4 : 3;
 		return fastPaths && Effect && Effect->GetTechnique(2) ? 2 : 0;
 	}
+
+	// UNOFFICIAL 2026-11-05 Model ([Shaders.WetWorld.Main] Model, default 1): 1 = the physically based, material-dependent wet surface
+	// (WetWorld.fx.hlsl WetPBR, techniques 7 to 10: FastPaths, fixed trace, Persistent, Persistent + fixed trace); 0 = techniques 0 to 6, the
+	// look as it was. Render maps the index its callers pick (MainTechnique, CoverMap's WetTechnique) to the Model 1 twin; the cover test (1),
+	// Model 0 and a shader file without the twins keep the index. Model 1 has no Vulkan pass yet: ExtRender declines 7 to 10 (D3D9 draws).
+	// 2026-11-05 (QA finding 15): a frame without a valid material buffer (Model1Unavailable) keeps the Model 0 technique, logged once per
+	// reason: WetPBR would see every pixel as class 0, and characters would get the full darkening and film.
+	int		model = 1;
+	UInt32	model1FallbackLogged = 0;	// bit n: reason n of Model1Unavailable logged
+	int		Model1Unavailable() const;
+	UINT	ModelTechnique(UINT techniqueIndex);
+	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) override;
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): techniques 2, 3 and 4 as Vulkan passes (WetWorld.cpp ExtRender; Compute\WetWorldMap.frag and
 	// Compute\WetWorld.frag). Technique 0 (FastPaths off, the original trace) and the cover test (1) stay on the D3D9 passes.

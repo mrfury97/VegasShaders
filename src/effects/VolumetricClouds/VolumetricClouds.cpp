@@ -3,6 +3,7 @@
 #include "../../core/FrameClock.h"
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (the game's MSAA samples)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/RtSunShadows.h"	// UNOFFICIAL 2026-10-30 RT sun CloudShadows
 
@@ -964,6 +965,9 @@ bool VolumetricCloudsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	default: return false;	// 3 / 9 Reflection (drawn by hand), 5 LayerProbe (a game texture on stage 12): D3D9
 	}
 	if (ClearRenderTarget || (pass != 0 && RenderTarget != RenderedSurface)) return false;
+	// UNOFFICIAL 2026-11-05: with the game's MSAA the composite is the D3D9 one, which takes each edge pixel's sky share (SkyCoverage,
+	// Includes/MsaaSkyEdge.hlsl); the Vulkan composite has no such read yet.
+	if (pass == 0 && NvrGameMultisample.x > 1.0f) return false;
 	static const char* const SpvNames[5] = { "VolumetricCloudsComposite", "VolumetricCloudsMarch", "VolumetricCloudsTemporal", "VolumetricCloudsShadowMap",
 		"VolumetricCloudsSkyProbe" };
 

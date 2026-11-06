@@ -168,3 +168,36 @@ Changes from the old behaviour described above:
   which the core registers; the spec's list did not include them).
 
 Open: the Vulkan frag (Compute/ShadowsExteriors.frag) is not written; the file is not in this worktree.
+
+## 11. RT sun changes - UNOFFICIAL 2026-11-04 (rt-audit, mrfury97 fork)
+
+Details: `F:\Claude Brain\VegasShaders-study-RT-EXTERIOR-AUDIT.md` (outside the repo).
+- `[Shaders.ShadowsExteriors.RT] KeepForward` (default false): Mode 0 with false runs the cascades through the deferred apply while the
+  traced shadow is applied (each shadow darkens once). true keeps the object shaders' own cascade lookups. Measured in game on 2026-11-04:
+  the deferred cascade pass shimmers inside shadows (frame-to-frame change 3.8-4.8, against 2.7-2.8 with true). The darkening difference
+  was negligible, so true looks steadier.
+- Mode 1 cascades fade in over 85-92.5% of Range. ReplaceRange is applied only on traced frames: a frame the trace missed keeps the
+  cascades.
+- RtSunShadow.comp:
+  - R2 disc sampling: two independent coordinates.
+  - Facing and start bias use the geometric normal, rebuilt from the depth with the depth's jitter.
+  - The start toward the sun grows at a grazing sun, up to x4.
+  - Integer source pixel.
+  - Blocker history pair (bindings 8 and 9, RGBA16F) for a steadier Penumbra.
+- The denoiser's ClampHistory (sun only) pulls the history into this frame's 3x3 range. IgnoreRr is set for the sun. A sun move resets
+  or shortens the history. No trace runs while the sun is faded (ShadowFade, 300-frame hysteresis).
+- The sun's depth and normals images are shared with the RT lamp shadows (RtSunShadows::DepthImage / NormalsImage). Each new shared
+  image counts against NVR_RT_MAX_IMAGES; RtCore logs the count.
+- Distant false self-shadow on rocks and ground: raise `NormalBiasPerUnit` (0.004) and `StartBias` (4). These are setting values, not
+  code defaults.
+
+## Viewmodel shadows (2026-11-05, from Balebandro's fork)
+- `[_Shaders.ShadowsExteriors.ShadowMaps] ViewModelShadows` (live, needs `CharacterShadowMap`): outdoors in first person, just before the
+  game's first-person render (Render.cpp RenderFirstPersonHook), `ShadowManager::RenderViewModelShadowMap` draws the arms and weapon alone
+  into the character map with an ortho box fitted round them in the sun's frame (texel-snapped, 8-unit steps). The first-person draws
+  read it through `CharacterMapShadow` with `TESR_CharShadowData.w = 0.5`: a 6 x 6 tent PCF (Includes/Shadow.hlsl). After that render the
+  Character* constants go back and w is set to 0 (nothing later in the frame reads that map).
+- The lookup undoes the first-person camera's own field of view: the object shaders rebuild positions with the world camera's inverse
+  view/projection, so the light transform starts with `rebuiltToTrue` (see the comment in ShadowManager.cpp).
+- Uses `TESMain::sp1stPersonAdjustedCamera` (Main::camera, +0xA0; LayoutCheck.h). `CharacterShadowMapLog` logs each map and any
+  first-person draw outside its box (`VIEWMODEL SHADOW` / `VIEWMODEL DRAW` lines).

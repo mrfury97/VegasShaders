@@ -74,7 +74,7 @@ namespace {
 		"Main.CameraMode.Main", "Main.CameraMode.Positioning",
 		"Main.Develop.Main", "Main.Develop.PixelInspector", "Main.Develop.ShaderCounters",	// UNOFFICIAL 2026-10-26: debugging tools
 		"Main.FlyCam.Main", "Main.FrameRate.SmartControl", "Main.FrameRate.Stuttering", "Main.LowHFSound.Main",
-		"Main.Main.Misc", "Main.Menu.Keys", "Main.Menu.Style", "Main.SleepingMode.Main",
+		"Main.Main.Misc", "Main.Menu.Keys", "Main.Menu.Style",
 		// UNOFFICIAL 2026-10-19: this build's own machine / player preferences, same reason as above (a location preset, or
 		// the defaults applied where none exists, must never switch the player's speed, quality or gun-effect choices).
 		"Main.GunFX.Main",

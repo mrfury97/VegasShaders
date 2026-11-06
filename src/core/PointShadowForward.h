@@ -553,7 +553,8 @@ namespace PointShadowForward {
 				// The per-pixel ranking's intensity (luminance x dimmer) and the game's radius
 				const float intensity = source ? (0.2126f * source->Diff.r + 0.7152f * source->Diff.g + 0.0722f * source->Diff.b) * source->Dimmer : 1.0f;
 				const float gameRadius = source ? source->Spec.r : Slots[s].radius;
-				traced[s] = { Slots[s].slot, Slots[s].position, Slots[s].radius, Slots[s].fade, stop, intensity, gameRadius, Slots[s].light };
+				traced[s] = { Slots[s].slot, Slots[s].position, Slots[s].radius, Slots[s].fade, stop, intensity, gameRadius, Slots[s].light,
+					source && LampFixtures::Invisible(source, fixture) };	// 2026-11-04: InvisibleLightRadius
 			}
 			RtLampShadows::Submit(traced, SlotCount);
 		}
@@ -705,7 +706,7 @@ namespace PointShadowForward {
 		}
 		const float intensity = (0.2126f * source->Diff.r + 0.7152f * source->Diff.g + 0.0722f * source->Diff.b) * source->Dimmer;
 		RtLampShadows::SlotLamp lamp = { 0, D3DXVECTOR3(p.x, p.y, p.z), source->Spec.r * interiors.LightRadiusMult, ManyLampFade(source), stop,
-			(std::max)(intensity, 0.001f), source->Spec.r };
+			(std::max)(intensity, 0.001f), source->Spec.r, nullptr, LampFixtures::Invisible(source, interiors.Forward.FixtureDistance) };
 		RtLampShadows::NoteLamp(light, lamp);
 	}
 

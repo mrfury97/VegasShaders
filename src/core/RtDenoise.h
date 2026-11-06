@@ -27,6 +27,7 @@ namespace RtDenoise {
 		int		Downscale = 1;
 		IDirect3DBaseTexture9* Ids = nullptr;
 		int		Kernel = 5;				// 5: a 5 x 5 a-trous kernel (25 taps a pass), 3: 3 x 3 (9 taps; ~2.5x cheaper, a bit less smooth)	// optional: .r = a source id per pixel (e.g. which lamp); the spatial passes only mix equal ids			// 1 full screen, 2 half (Noisy and Output must then be w/2 x h/2; ~4x cheaper; the caller upsamples)
+		bool	ClampHistory = false;	// UNOFFICIAL 2026-11-04 (one channel): the history pulled into this frame's 3 x 3 range (RT sun: moved shadows do not trail)
 		int		MovingHistory = 0;		// UNOFFICIAL 2026-10-31 (RGB mode, with DenoiseBackbone and B1's object motion): pixels whose surface moves
 										// itself (> 0.25 units a frame) keep at most this many frames of history (0 = no cap; RT GI: GIMovingHistory)
 	};

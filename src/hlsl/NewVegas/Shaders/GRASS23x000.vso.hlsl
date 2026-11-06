@@ -57,7 +57,15 @@ struct VtxVaryings {
 #ifdef GRASS_POINT_LIGHT
     float4 f_att            : TEXCOORD2;   // the lamp's AttMap coordinates (xy, z with w = 0.5)
 #endif
+#ifndef GRASS_POINT_LIGHT
+    // UNOFFICIAL 2026-11-05 grass lamps and normal maps (GRASS23x000TMS.pso; from Balebandro's fork): the normal the sun lights
+    // the grass by and its N.L, the sun's direction, and the sun amount before N.L and the translucency apart.
+    float4 f_light_normal   : TEXCOORD2;
+    float3 f_sun_dir        : TEXCOORD3;
+    float4 f_amount         : TEXCOORD6;   // UNOFFICIAL: x ambient amount, y sun amount, z the sun amount before N.L, w the translucency
+#else
     float2 f_amount         : TEXCOORD6;   // UNOFFICIAL: x ambient amount, y sun amount (plain numbers, see below)
+#endif
     float4 f_fog            : COLOR0;      // .w = fog amount
 };
 
@@ -184,9 +192,11 @@ VtxVaryings main(VtxAttrs va) {
     // UNOFFICIAL 2026-10-17: the game's grass PS reads no shadow position: skip its two matrix transforms unless NVR's PS or the
     // translucency needs it.
     float3 shadow_world_pos = 0.0f;
+    float translucent_f = 0.0f;	// UNOFFICIAL 2026-11-05 (the PS bends the sun's N.L by a normal map without it)
     [branch] if (GrassPairing.x > 0.5f || TESR_Translucency.x > 0.0f) shadow_world_pos = GetShadowWorldPos(vr.f_position);
     [branch] if (TESR_Translucency.x > 0.0f) {
-        n_dot_l += FoliageTranslucency(loc_orient, DiffuseDir, shadow_world_pos, DiffuseDir);
+        translucent_f = FoliageTranslucency(loc_orient, DiffuseDir, shadow_world_pos, DiffuseDir);
+        n_dot_l += translucent_f;
     }
 
     // UNOFFICIAL linear lighting (2026-10-14): colours and plain numbers apart. The PS decodes the colours (sun, vertex colour,
@@ -203,7 +213,13 @@ VtxVaryings main(VtxAttrs va) {
         vr.f_ambient = light_scale * AmbientColor;
         vr.f_sun.xyz = ((light_scale * va.f_color.rgb) * n_dot_l) * DiffuseColor * AddlParams.x;
     }
+#ifndef GRASS_POINT_LIGHT
+    vr.f_amount = float4(light_scale, light_scale * n_dot_l * AddlParams.x, light_scale * AddlParams.x, translucent_f);	// UNOFFICIAL 2026-11-05
+    vr.f_light_normal = float4(loc_orient, n_dot_l - translucent_f);
+    vr.f_sun_dir = DiffuseDir;
+#else
     vr.f_amount = float2(light_scale, light_scale * n_dot_l * AddlParams.x);
+#endif
 
     float fog_dist = length(float3(vr.f_position.xy, vr.f_position.w - vr.f_position.z));
     float fog_strength = 1.0f - saturate((FogParam.x - fog_dist) / FogParam.y);

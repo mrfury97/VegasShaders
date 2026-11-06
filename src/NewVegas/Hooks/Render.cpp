@@ -56,6 +56,8 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/ShadowAtlas.h"	// UNOFFICIAL 2026-10-30 ShadowAtlas (WorldStartConvert)
 #include "../../core/LandLamps.h"	// UNOFFICIAL 2026-10-30 LandAllLamps: the land lit by all of its own lamps (plan C)
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
+#include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-05 (Balebandro) SkyCoverage: the game's MSAA, exact sky shares
+#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (LodOnly, per draw)
 
 namespace RmaosDraw { static void Upload(); }	// UNOFFICIAL _rmaos maps (below)
 
@@ -2196,6 +2198,7 @@ namespace GrassFirst {
 	// UNOFFICIAL 2026-10-28 grass shadows with terrain blending on (ShadowOnlyEarly): the early call records the grass passes without
 	// drawing them; GrassShadows draws them into the near sun cascade, and the late part draws them whole at the game's place.
 	static bool ShadowOnly = false;
+	static bool ShadowOnlyRecords = false;	// UNOFFICIAL 2026-11-05 (Balebandro): Records came from ShadowOnlyEarly (terrain blending): GPU grass takes them in the late replay
 	static unsigned ShadowOnlyFrames = 0;
 	// UNOFFICIAL 2026-10-28 (tester: "i think grass shadows go away after fast traveling"; his log: after a trip every grass pass
 	// went "whole after the land", none early, for the rest of the session, and grass shadows with them, since only the passes drawn
@@ -2584,6 +2587,7 @@ namespace GrassFirst {
 			Restore();
 			ActiveAccumulator = accumulator;
 			RecordedFrame = TheFrameRateManager->FrameNumber;
+			ShadowOnlyRecords = true;
 			if (++ShadowOnlyFrames <= 3 || ShadowOnlyFrames % 3600 == 0)
 				Logger::Log("UNOFFICIAL grass shadows (terrain blending on): frame %u: %u grass passes taken before the land into the sun shadow map only, drawn on screen after the land as the game does",
 					ShadowOnlyFrames, (unsigned)recorded);
@@ -2647,6 +2651,7 @@ namespace GrassFirst {
 				Restore();
 				ActiveAccumulator = accumulator;
 				RecordedFrame = TheFrameRateManager->FrameNumber;	// fixes-b #29: the late part replays these pass pointers in this frame only
+				ShadowOnlyRecords = false;
 			}
 			for (unsigned i = 0; i < count; i++) Rewrite(lists[i], false);	// ascending again, whatever happened
 		}
@@ -2668,17 +2673,43 @@ namespace GrassFirst {
 			ActiveAccumulator = nullptr;
 			NiDX9RenderState* state = TheRenderManager->renderState;
 			((void(__cdecl*)())kEndPass)();
+			// UNOFFICIAL 2026-11-05 (from Balebandro's fork, 8c9017b) GPU grass with terrain blending on: no grass is drawn before the land
+			// then (Allowed), so the card draws are caught here, in this replay after the land, as the early part catches them otherwise.
+			// A caught pass is drawn whole (c19.w = 0) and its cards skipped; one with fading tufts too (not all near, Classify) is drawn
+			// again with only those (c19.w = 2), as the early part leaves them to this replay. The strands are drawn right after the grass
+			// (EndEarly), the device state put back around them as around the early part. Only while ShadowOnlyEarly recorded the passes.
+			const bool gpuGrass = ShadowOnlyRecords && !Records.empty() &&
+				GpuGrass::BeginEarly(TheRenderManager->device, TheShaderManager->Shaders.Grass->Enabled);
+			ShadowOnlyRecords = false;
 			int part = -1;
 			for (const Record& r : Records) {
 				const int want = r.drawnEarly ? 2 : 0;
 				if (want != part) { ((void(__cdecl*)())kEndPass)(); part = want; GrassShaders::DrawPart = want; }	// re-bind: c19.w
 				state->SetRenderState(D3DRS_CULLMODE, r.cull, RenderStateArgs);
 				state->SetRenderState(D3DRS_ALPHATESTENABLE, r.alphaTest, RenderStateArgs);
+				int kind = kMixed;
+				const bool arm = gpuGrass && !r.drawnEarly && r.passId <= kSplitLastId && !GameVertexShader[r.passId - kGrassFirstId] &&
+					(kind = Classify(r.pass)) != kAllFading;
+				if (arm) GpuGrass::Arm(r.pass, kind == kAllNear ? 0 : 1, NearestDistance(r.pass));
 				// fixes-b #28: alpha-to-coverage (transparency multisampling) needs no restore here: BSBatchRenderer::RenderPassImmediately
 				// 0x00B994F0 itself calls BSRenderState::SetAlphaToCoverageEnable(pass wants it, 0) for every pass when the game's
 				// TMS flag (0x011F9421) is set (Ghidra dump of the exe, psycho-master graphics_fnv_atmosphere_alpha_coverage_state_followup).
 				RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
 				NoteRtGrass(r.pass, r.passId);	// UNOFFICIAL 2026-10-30 RT grass (a pass drawn early is noted once: RtCore skips the repeat)
+				if (gpuGrass) {	// UNOFFICIAL 2026-11-05 (Balebandro, above)
+					const bool took = arm && GpuGrass::Took();
+					GpuGrass::Disarm();
+					float alpha[4] = {};	// AlphaParam (c5) of NVR's grass VS: z = the fade start, for Classify (learned early otherwise)
+					if (GrassShaders::LastBindNVR && SUCCEEDED(TheRenderManager->device->GetVertexShaderConstantF(5, alpha, 1)) && alpha[2] > 0.0f)
+						FadeStart = alpha[2];
+					if (took && kind != kAllNear && !GpuGrass::KeepsCards() && GrassShaders::LastBindNVR) {
+						((void(__cdecl*)())kEndPass)();
+						GrassShaders::DrawPart = 2;
+						RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
+						((void(__cdecl*)())kEndPass)();
+						GrassShaders::DrawPart = part;
+					}
+				}
 				if (r.drawnEarly) StatLate++; else StatWhole++;
 				// UNOFFICIAL 2026-10-28 (tester: grass shadows gone after a fast travel; log: from then on every grass draw "whole after
 				// it", none early): right after the load a grass pass was drawn with the game's vertex shader, which was learned for the
@@ -2703,6 +2734,12 @@ namespace GrassFirst {
 			((void(__cdecl*)(char, int))0x00B98540)(0, 0);	// BSRenderState::SetAlphaToCoverageEnable(0, 0), as RenderNextRenderPass after a bucket
 			((void(__cdecl*)())kEndPass)();
 			GrassShaders::DrawPart = 0;
+			if (gpuGrass) {	// UNOFFICIAL 2026-11-05 (Balebandro) the strands of the passes caught above (terrain blending on)
+				RestoreMask = (unsigned)TheShaderManager->Shaders.Grass->DrawFirstRestore;
+				Save();
+				GpuGrass::EndEarly(TheRenderManager->device);
+				Restore();
+			}
 			// What the game's grass call leaves in c19 without GrassFirst: the last grass bind's value, w = 0.
 			if (!Records.empty()) {
 				const float leave[4] = { GrassShaders::LastPairing[0], GrassShaders::LastPairing[1], GrassShaders::LastPairing[2], 0.0f };
@@ -3303,6 +3340,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
 	DustDraw::ForDraw(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// 2026-11-04: a static mesh in the world scene takes dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
+	BendContact::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-06 LodOnly
 	ForwardShadowsForPass(Pass);
 	if (LampScissor::Before((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World, BarrelHeat::Active) == LampScissor::Skip) {
 		HiddenObjectCulling::Abandon();	// (a lamp-only pass is never an object's first pass in practice; if it was, its query is not used)
@@ -3383,7 +3421,9 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
 	DustDraw::ForDraw(TheRenderManager->device, false);	// 2026-11-04: skinned (people, creatures, armour, arms): no dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
+	BendContact::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-06 LodOnly
 	ForwardShadowsForPass(Pass);
+	if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) ShadowManager::ViewModelLogDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry);	// UNOFFICIAL 2026-11-05 CharacterShadowMapLog (ViewModelShadows)
 	ClothWind::PassGeometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-10-19 cloth: SetShadersHook notes this object
 #if NVR_TEST_TOOLS
 	PassFamilyView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
@@ -3412,6 +3452,10 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 #endif
 	ClothWind::PassGeometry = nullptr;
 	ClothWind::AfterDraw(TheRenderManager->device);	// UNOFFICIAL 2026-10-19: no cloth values left behind for other draws
+	// UNOFFICIAL 2026-11-05 (from Balebandro's fork, mo2-dxvk-loader ad32a3b, made at the source): the Pip-Boy fit's object is let go
+	// after its draw. Left set, the shadow passes' partition draws (RenderPass.cpp -> ClothWind::DrawPartition) read it in ForPartition
+	// after a load or a weapon switch had freed it: a crash right after a load.
+	PipboyFit::AfterDraw();
 	HiddenObjectCulling::After();
 	PointShadowForward::NoteDraw((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// LogLamps diagnostic
 }
@@ -3663,6 +3707,9 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	static GpuTimer depthResolveTimer("Depth resolves");
 	GpuProfileScope gpuResolve(depthResolveTimer, TheRenderManager->device);
 	if (!pipboyOpen || pipboyLive) {
+		// UNOFFICIAL 2026-11-05 (Balebandro) SkyCoverage (core/SkyCoverage.h): with the game's MSAA, each pixel's sky share from the world's
+		// depth samples, after every world draw (the distant land and objects come after the main list) and before the resolve below.
+		if (FrameWorldCalls == 1) SkyCoverage::Draw(TheRenderManager->device);
 		TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);	// the world buffer is left alone while the Pip-Boy is out
 		// UNOFFICIAL 2026-10-30 ReactiveMask (core/ReactiveMask.h): what was drawn over the main list, now that this frame's world depth is
 		// readable (before the first-person weapon and the RenderScale v2 upscale; a v1 upscale has read FSR's inputs already)
@@ -3692,9 +3739,41 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	// UNOFFICIAL: the first-person model's metal strength ([Shaders.PBR.Metal] FirstPerson) for this pass only.
 	PBRShaders* pbr = TheShaderManager->Shaders.PBR;
 	if (pbr) pbr->BeginFirstPerson(TheRenderManager->device);
+	// UNOFFICIAL 2026-11-05 ViewModelShadows (from Balebandro's fork; ShadowManager::RenderViewModelShadowMap): the arms and weapon alone
+	// into the character map, between draws, before the game's first-person render. They are posed for the frame by now (moved to the
+	// origin and updated in 0x874C10, which also queued their cull task); the game clears the root's APP_CULLED only inside that render,
+	// so it is cleared here for the map's walk and put back. The map's constants go to the device at once (a shader the game keeps bound
+	// from the world render would not upload them; c206-c209 and c213-c214, CharacterMapShadow's, outdoors only) and are put back after.
+	ShadowsExteriorEffect* vmShadows = TheShaderManager->Effects.ShadowsExteriors;
+	bool viewModelShadows = false;
+	D3DXMATRIX savedCharacterCameraToLight;
+	D3DXVECTOR4 savedCharacterCenter, savedCharacterData;
+	if (vmShadows && Player && Player->firstPersonNiNode && Player->IsFirstPerson()) {
+		savedCharacterCameraToLight = vmShadows->Constants.CharacterCameraToLight;
+		savedCharacterCenter = vmShadows->Constants.CharacterCenter;
+		savedCharacterData = vmShadows->Constants.CharacterData;
+		NiNode* viewModel = Player->firstPersonNiNode;
+		const UInt32 culled = viewModel->m_flags & NiAVObject::NiFlags::APP_CULLED;
+		viewModel->m_flags &= ~NiAVObject::NiFlags::APP_CULLED;
+		viewModelShadows = TheShadowManager->RenderViewModelShadowMap(This->camera);
+		viewModel->m_flags |= culled;
+		if (viewModelShadows) {
+			IDirect3DDevice9* device = TheRenderManager->device;
+			device->SetPixelShaderConstantF(206, (const float*)&vmShadows->Constants.CharacterCameraToLight, 4);
+			device->SetPixelShaderConstantF(213, (const float*)&vmShadows->Constants.CharacterCenter, 1);
+			device->SetPixelShaderConstantF(214, (const float*)&vmShadows->Constants.CharacterData, 1);
+		}
+	}
 	PbrPop::ActorPasses::FirstPersonNow = 1;	// UNOFFICIAL ActorsInOnePass: the first-person model's passes are built in here
 	RenderFirstPerson(This, Renderer, Geo, SkySun, RenderedTexture);
+	SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-05 (Balebandro): the weapon out of the sky share (core/SkyCoverage.h)
 	PbrPop::ActorPasses::FirstPersonNow = 0;
+	if (viewModelShadows) {	// UNOFFICIAL 2026-11-05: the map holds the viewmodel now, not what the world's draws read: nothing later this frame reads it (w 0)
+		vmShadows->Constants.CharacterCameraToLight = savedCharacterCameraToLight;
+		vmShadows->Constants.CharacterCenter = savedCharacterCenter;
+		vmShadows->Constants.CharacterData = savedCharacterData;
+		vmShadows->Constants.CharacterData.w = 0.0f;
+	}
 	if (TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->Unbind();	// UNOFFICIAL the skin blur
 	if (pbr) pbr->EndFirstPerson(TheRenderManager->device);
 	BarrelHeat::EndContext();

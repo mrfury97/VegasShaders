@@ -14,6 +14,9 @@
 // exactly as the game's own grass pixel shader lights the cards, in NVR's grass wind ([Shaders.Grass.Wind]) or the game's sway.
 // The fading tufts past the fade start stay the game's cards (drawn after the land as before), as does every piece farther than
 // BladeDistance, any grass that is not a cut-out card (rocks and debris placed as grass) and all grass while GrassFirst does not run.
+// UNOFFICIAL 2026-11-05 (from Balebandro's fork): with terrain blending on (GrassFirst draws no grass before the land then) the same is
+// done in GrassFirst's late replay after the land (Render.cpp GrassListHook), while grass shadows recorded the passes (ShadowOnlyEarly):
+// the card draws caught there, a mixed pass's fading tufts drawn again as cards, and the strands drawn right after the grass.
 //
 // Needs the NVR DXVK d3d9.dll with ID3D9NvrExtGeometryScene (1.7-grass); without it (native D3D9, stock DXVK, an older NVR DXVK)
 // nothing is caught or skipped and the grass is the game's. Off: no code path touches the device.
@@ -24,5 +27,7 @@ namespace GpuGrass {
 	bool	BeginEarly(IDirect3DDevice9* Device, bool GrassEnabled);
 	void	Arm(void* Pass, int Part, float Nearest);	// one early grass pass about to be drawn (part 0 every tuft, 1 the near ones)
 	void	Disarm();
+	bool	Took();									// UNOFFICIAL 2026-11-05 (Balebandro): the armed pass's card draw was caught (before Disarm)
+	bool	KeepsCards();								// KeepCards: the caught cards are drawn too
 	void	EndEarly(IDirect3DDevice9* Device);			// unhooks; the GPU work (cull + draws) for what was caught
 }

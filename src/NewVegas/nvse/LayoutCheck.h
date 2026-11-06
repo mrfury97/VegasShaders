@@ -280,6 +280,7 @@ static_assert(offsetof(NiDX9Renderer, renderState) == 0x8B8, "NiDX9Renderer::ren
 static_assert(offsetof(NiDX9Renderer, worldMatrix) == 0x940, "NiDX9Renderer::worldMatrix");
 static_assert(offsetof(NiDX9Renderer, viewMatrix) == 0x980, "NiDX9Renderer::viewMatrix");
 static_assert(offsetof(NiDX9Renderer, projMatrix) == 0x9C0, "NiDX9Renderer::projMatrix");
+static_assert(offsetof(Main, camera) == 0xA0, "Main::camera");	// UNOFFICIAL 2026-11-05 ViewModelShadows
 static_assert(offsetof(NiDX9Renderer, invViewMatrix) == 0xA40, "NiDX9Renderer::invViewMatrix");
 static_assert(offsetof(NiDX9Renderer, width) == 0xA98, "NiDX9Renderer::width");
 static_assert(offsetof(NiDX9Renderer, height) == 0xA9C, "NiDX9Renderer::height");

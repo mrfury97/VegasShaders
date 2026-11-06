@@ -22,6 +22,7 @@
 // The frame here is gamma encoded HDR (VolumetricFog linearises it the same way): the light is added in linear light.
 
 float4 TESR_ReciprocalResolution;
+float4 TESR_GameMultisample;  // UNOFFICIAL 2026-11-05 (Balebandro 256de14) x: the game's MSAA samples (Includes/MsaaSkyEdge.hlsl)
 float4 TESR_SunColor;
 float4 TESR_ShadowFade;              // read by Includes/Shadows.hlsl (point lights; unused here)
 float4 TESR_VolumetricLightData;     // x: strength, y: shade darkening, z: air density per game unit, w: march distance
@@ -77,6 +78,10 @@ VSOUT FrameVS(VSIN IN) { VSOUT OUT = (VSOUT)0.0f; OUT.vertPos = IN.vertPos; OUT.
 
 #include "Includes/Helpers.hlsl"
 #include "Includes/Depth.hlsl"
+// UNOFFICIAL 2026-11-05 (Balebandro 256de14) the game's MSAA: sky edges. s10: s9 is NVR_FogNoise (bound by hand, VolumetricLight.cpp;
+// the fork's s9 took its stage). EffectRecord binds TESR_ samplers by register.
+#define MSAA_SKY_EDGE_REG s10
+#include "Includes/MsaaSkyEdge.hlsl"
 #include "Includes/Shadows.hlsl"
 #include "Includes/SunCascades.hlsl"
 #include "Includes/FrameNoise.hlsl"	// UNOFFICIAL 2026-11-01 the shared noise code (the same pattern as before)
@@ -241,12 +246,24 @@ float4 CompositeAir(float2 uv, float4 color, float2 air) {
 }
 
 // ---- 0: Composite, full resolution ----
+float2 MarchAirAt(float2 uv, float depth);
+
 float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 uv = IN.UVCoord;
 	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
 	float depth = readDepthLod(uv);
+	float2 air = MarchAirAt(uv, depth);
+	// UNOFFICIAL 2026-11-04 the game's MSAA: as CompositeGridPS (Includes/MsaaSkyEdge.hlsl).
+	[branch] if (depth < farZ * 0.996) {
+		float3 sky;
+		float share = SkyShare(uv, color.rgb, sky);
+		[branch] if (share > 0.0) air = lerp(air, MarchAirAt(uv, farZ), share);
+	}
+	return CompositeAir(uv, color, air);
+}
 
-	// Depth-aware bilinear upsample from the half-resolution buffer (texel k stands for its centre).
+// Depth-aware bilinear upsample from the half-resolution buffer (texel k stands for its centre), at this depth.
+float2 MarchAirAt(float2 uv, float depth) {
 	float2 position = uv / LowTexel - 0.5;
 	float2 base = floor(position);
 	float2 fraction = position - base;
@@ -263,8 +280,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 			weights += weight;
 		}
 	}
-	air /= weights;
-	return CompositeAir(uv, color, air);
+	return air / weights;
 }
 
 // ---- UNOFFICIAL 2026-10-14: froxel grid ([Shaders.VolumetricLight.Main] Froxels) ----
@@ -358,19 +374,30 @@ float4 GridCarryPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	return sum;
 }
 
-float4 CompositeGridPS(VSOUT IN) : COLOR0 {
-	float2 uv = IN.UVCoord;
-	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
-	float depth = readDepthLod(uv);
+// The lit share and the share of all the air from the eye to depth along this pixel's view.
+float2 GridAirAt(float2 uv, float depth) {
 	float planar = depth >= farZ * 0.996 ? MarchDistance : min(depth, MarchDistance);
-
 	float s = sqrt(planar / MarchDistance) * 64.0;   // slice coordinate of the pixel's depth
 	float z = min(floor(s), 63.0);
 	float2 local = uv * GridSize;
 	float farSide = tex2Dlod(TESR_VolumetricLightGrid, float4(GridUV(z, local), 0, 0)).r;
 	float nearSide = z > 0.5 ? tex2Dlod(TESR_VolumetricLightGrid, float4(GridUV(z - 1.0, local), 0, 0)).r : 0.0;
 	float sigma = Density * length(toWorld(uv));
-	float2 air = float2(lerp(nearSide, farSide, saturate(s - z)) / TESR_VolumetricLightGridData.y, 1.0 - exp(-sigma * planar));
+	return float2(lerp(nearSide, farSide, saturate(s - z)) / TESR_VolumetricLightGridData.y, 1.0 - exp(-sigma * planar));
+}
+
+float4 CompositeGridPS(VSOUT IN) : COLOR0 {
+	float2 uv = IN.UVCoord;
+	float4 color = tex2Dlod(TESR_RenderedBuffer, float4(uv, 0, 0));
+	float depth = readDepthLod(uv);
+	float2 air = GridAirAt(uv, depth);
+	// UNOFFICIAL 2026-11-04 the game's MSAA (Includes/MsaaSkyEdge.hlsl): a pixel on an edge against the sky took the air only up to the
+	// surface, its sky share too (a rim round every leaf and branch against the lit air): that share takes the air of the whole view.
+	[branch] if (depth < farZ * 0.996) {
+		float3 sky;
+		float share = SkyShare(uv, color.rgb, sky);
+		[branch] if (share > 0.0) air = lerp(air, GridAirAt(uv, farZ), share);
+	}
 	return CompositeAir(uv, color, air);
 }
 

@@ -102,7 +102,110 @@ The Vulkan pass binds, in descriptor set 1: binding 0 source picture, 1 depth, 2
 - The shadow-test sense differs between Rain (points outside the ortho map show no rain) and Snow (points outside count as open). Both are the current behaviour; it was not checked whether the difference is intended.
 
 ## 10. Status of the wave 3 rewrite (2026-11-02, branch claude/rw3-weather)
+Note (2026-11-05): this section is historical. The shipped `Precipitations.fx.hlsl` technique 0 is still the original 14-layer shader described in sections 2-8, and the Vulkan pass (`Compute/Precipitations.frag`, `.spv`, `RainEffect::ExtRender`) does exist and covers technique 0.
 - New D3D9 effect: src/hlsl/NewVegas/Effects/Precipitations.fx.hlsl. One technique, the same sampler order (source, rendered, depth, ortho, bloom), the same constant names. Compiles (fx_2_0, all four defines).
 - Settings are read as before. SkipHiddenLayers now only saves work: the picture is the same with it on or off (the layers behind the pixel contribute nothing).
 - Chosen here, not in the spec: the refraction scale (0.004 of the total times Refraction in screen units), the drop cell grid (64 by 32 per layer), the drop hash and its 0.55 presence threshold, the streak shape, and the drop size as the spec's formula. The spec's division guard does not apply, because this shader has no division by a fractional product.
 - Vulkan path (Compute/Precipitations.frag, .spv): NOT written yet. Without it the C++ falls back to D3D9.
+
+## 11. Rain system (technique 1, UNOFFICIAL 2026-11-05, branch rain-system)
+Design: `docs/rain/DESIGN.md`. Research: `docs/rain/research/`. Shader: `Effects/Includes/RainSystem.hlsl`, included by `Precipitations.fx.hlsl` as techniques `RainSystemTechnique` (index 1, the main pass) and `RainFarTechnique` (index 2, the far bands at half resolution). QA review: `docs/rain/research/06-07-qa-performance-review.md`.
+
+### When it runs
+- `[Shaders.Precipitations.System] Mode = 1` (the default) picks technique 1. `Mode = 0` gives the original layers (sections 2-8), and every `[Shaders.Precipitations.Main]` look key applies only to Mode 0.
+- It is gated like Mode 0 (enabled, outdoors, not underwater, rain amount above 0). It also keeps drawing while drops are still drying on the lens.
+- The passes sit in the same post-tonemap place as Mode 0 (after TAA). `EffectChain.cpp` calls `RainEffect::RenderFrame`. In Mode 1 with Quality 1-2 that first draws technique 2 into `TESR_RainFarBuffer` (half resolution, G16R16F, x = coverage of the far bands; `RenderEffectToRT`), then the main pass through the frame chain. Mode 0 draws technique 0 only.
+- The rain now requests the ortho map itself while it rains (`orthoRequired`). Before, it relied on WetWorld to request it.
+
+### What it draws
+1. **Streak volume.** Drops sit in world-anchored vertical columns, sheared by the wind. Each pixel walks the columns along its view in up to three bands: cells of 32/96/288 units, reaching NearDistance / 30 % of the rest / FarDistance. The near band runs at full resolution in the main pass; the far bands run at half resolution in technique 2 (Quality 1-2) or in the main pass (Quality 3). The steps per pixel are the cells the view really crosses (at most 96 a band). A column's two drop slots are worked out side by side (float2), from one hash, with a cheap reject before the streak maths, and the walk stops once the coverage is opaque. Per drop, the shader works out analytically where the view passes it:
+   - The streak is the drop's path during Exposure, so it is perspective-correct: near drops are longer and wider.
+   - Streaks tilt with the wind and never stick to the screen.
+   - Drops seen end-on, looking up or down, become dots.
+   - Drop sizes 1, 2 and 3.4 mm fall at 4.0, 6.5 and 8.5 m/s.
+   - A drop thinner than a pixel is drawn a pixel wide and dimmer.
+   - Drops behind the scene are cut softly (12 units). Drops under cover are cut by the ortho map, one read per hit. Points outside the ortho map count as open, which differs from Mode 0.
+2. **Lighting.** A drop shows its environment: 4 picture taps above the pixel, mixed with the fog colour by SkyShare, times 1 + EnvironmentLift. On top of that come forward-scattered sun or moon light (Henyey-Greenstein, g 0.75) and the light of the nearest 8 lamps (g 0.7, lit at the streaks' mean position).
+3. **Rain haze.** Heavy rain greys out the distance toward the same environment colour, in drifting curtains.
+4. **Lens drops** (LensDrops, off by default; third person unless LensDropsFirstPerson). Drops bead up on the lens while the camera is out in the rain, more when looking up. They linger, some slide, and they dry in about 20 s under cover (WetWorld's cover test) or after the rain. Each drop refracts the picture as a small inverted lens.
+
+### Inputs
+- Samplers: as Mode 0 (s0 source, s2 depth, s3 ortho map; the bloom sampler is not read in techniques 1-2), plus s5 `TESR_RainFarBuffer` (technique 1).
+- Constants (registered in `Rain.cpp`):
+
+  | Name | Contents |
+  |---|---|
+  | `TESR_RainBand[3]` | cell, period, start, end |
+  | `TESR_RainOrigin[3]` | camera in the band lattice, wrapped; repeat |
+  | `TESR_RainFall[3]` | fall offsets of the 3 sizes; max steps |
+  | `TESR_RainStreak` | streak lengths; width scale |
+  | `TESR_RainShape` | shear xy; radians per pixel; drop chance |
+  | `TESR_RainLight` | opacity, environment lift, sun glint, lamp glint |
+  | `TESR_RainHaze` | amount, extinction, curtains, curtain size |
+  | `TESR_RainHazeDrift` | the eye plus the curtains' drift in curtain cells, wrapped at 256 (the noise repeats there); sky share; DebugView |
+  | `TESR_RainLens` | wetness, drop size, clock, refraction |
+  | `TESR_RainMisc` | lamps used, soft range, far buffer in use (1/0), aspect |
+  | `TESR_RainPass` | pixel size scale (2 in the far pass), first band, bands end; set per pass by RenderFrame |
+  | `TESR_RainLampPosition[8]`, `TESR_RainLampColor[8]` | lamps |
+
+  Engine constants: `TESR_FogColor`, `TESR_SunDirection`, `TESR_SunColor`, the camera matrices (Depth.hlsl) and `TESR_ShadowCameraToLightTransformOrtho`.
+- Wind: `Sky::windSpeed` (0..1) and `Sky::windDirection`, the same pair grass and cloth use. The drift is (sin a, cos a) × speed × Wind units/s, plus Gusts. Rain space is x' = x + shear·z + offset; when the shear changes, the offset takes the change at the eye's height, so the drops round the eye never slide (QA finding 4).
+
+### Settings ([Shaders.Precipitations.System]; all live)
+| Key | Default | What it changes |
+|---|---|---|
+| Mode | 1 | 1 rain system, 0 original layers |
+| Quality | 2 | 0: near band only. 1: plus one far band to FarDistance (half resolution). 2: plus two far bands (half resolution). 3: as 2, to 1.5 × FarDistance, far bands at full resolution |
+| Intensity | 1.0 | multiplies the weather's rain amount |
+| Density | 0.55 | chance per drop slot at full rain |
+| Exposure | 0.025 s | streak length = fall speed × this |
+| StreakLength | 1.0 | multiplier on the length |
+| Width | 1.5 | multiplier on the drops' real width |
+| Opacity | 0.45 | strength of a streak over the picture |
+| EnvironmentLift | 0.6 | drop brightness above its surroundings |
+| SunGlint | 1.0 | sun or moon light scattered forward |
+| LampGlint | 1.0 | lamp light scattered (0 skips the lamp loop) |
+| SkyShare | 0.35 | fog colour share of the environment |
+| FallSpeed | 1.0 | multiplier on the physical fall speeds |
+| Wind | 400 units/s | drift at the weather's full wind |
+| Gusts | 0.5 | gust strength |
+| Haze | 0.35 | maximum haze in heavy rain |
+| HazeExtinction | 0.00012 /unit | how fast haze builds |
+| Curtains | 0.6 | how much the haze gathers in drifting curtains |
+| NearDistance | 600 | the near band's depth, the main cost |
+| FarDistance | 5000 | where streaks end |
+| LensDrops | 0.0 | lens drops on/strength |
+| LensDropsFirstPerson | false | lens drops in first person too |
+| LensDropSize | 0.06 | lens drop cell size, as a share of the screen height |
+| DebugView | 0 | 1: red near-band coverage, green far-band coverage, blue haze + lens wetness |
+
+The game's own rain particles are still drawn unless `[Main.Main.Precipitations] RemovePrecipitations = true` (restart). With Mode 1 that setting is recommended, or the game's sprites fall on top.
+
+### Passes, cost, guards
+- Quality 1-2: a half-resolution far pass, then the full-resolution main pass. Quality 0 and 3: the main pass only. One render target of its own, `TESR_RainFarBuffer` (half size, G16R16F, about 3.7 MB at 2560x1440), made in RegisterTextures like DustMotes' buffer.
+- Static size per fxc 10.0.19041: main pass 815 ps_3_0 slots (17 texture), far pass 290 (4 texture). The column step's common path is about 77 slots (it was about 212 before the QA rework). The band loop, the column walk and the lens 3×3 are all `[loop]` with int counters and fixed bounds (the game's D3DX 9 compiler takes minutes over a float-counted loop), and every read inside them is `tex2Dlod`.
+- The game compiles the effect once (about 40 s per variant with D3DX 9.43 on this PC, measured with tests/effect_compile) and caches it.
+- Per pixel cost:
+  - the column walk: up to about 90 steps on sky pixels at Quality 2, fewer where geometry stops the view;
+  - one ortho read per drop hit;
+  - 4 environment taps where rain or haze shows;
+  - the lamp loop once.
+- Guards: divisions floored (1e-8 horizontal ray, 1e-4 phase), zero-direction DDA steps clamped to 1e-6, unused lamps get radius 1.
+- Vulkan: none for techniques 1-2. ExtRender returns false and the D3D9 passes run, under DXVK too.
+- Lens drops: the lens clock wraps at 100 s and every drop runs a whole number of cycles in it (no pop); a sliding drop moves less than a cell (the 3×3 search always finds it). Their cover test is WetWorld's: EffectChain runs it while `LensWantsCover()` even without HudDrops (it still needs WetWorld on).
+- Known limits (QA risks 6, 9): the sun glint has no sun-shadow test (rain in the shade of a building still glints toward the sun, bounded by 1 − exp); lamps light a pixel's near drops at their coverage-weighted mean position.
+- Not measured in game yet. Static estimate after the rework, Quality 2 at 2560x1440 on an RTX 4070 Ti class GPU: roughly 1–1.5 ms (the QA review estimated about 5.7 ms before it); Mode 0 about 0.2 ms. The timer is "Weather + legacy bloom" in the F10 GPU profile; compare Mode 0 and 1, and Quality 0–3.
+
+### Look: right vs wrong
+- **Right:**
+  - fine streaks, denser and fainter with distance;
+  - they tilt with the wind and keep their place in the world when you turn or walk;
+  - none under roofs, none in front of near walls;
+  - bright toward the sun and round lamps at night, faint against a bright sky;
+  - grey curtains in heavy rain.
+- **Wrong:**
+  - streaks that move with the camera (lattice origin wrong);
+  - rain under roofs (ortho map not requested or test inverted);
+  - sparkle or flicker at distance (minimum pixel width broken);
+  - horizontal jumps in the rain (shear pivot or origin wrap wrong);
+  - a grey film over everything (haze or opacity too high).

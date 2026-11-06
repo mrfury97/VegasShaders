@@ -1,6 +1,7 @@
 #include "WetWorld.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-05 Model 1 fallback (the material buffer's state this frame)
 
 void WetWorldEffect::UpdateConstants() {
 	Animator& puddles = Constants.PuddlesAnimator;
@@ -18,6 +19,9 @@ void WetWorldEffect::UpdateConstants() {
 	Constants.Data.x = TheShaderManager->Effects.Rain->Constants.RainAnimator.GetValue();
 	Constants.Data.y = raining;
 	Constants.Data.z = puddles.GetValue();
+	// UNOFFICIAL 2026-11-05 Model 1: the material and albedo buffers are drawn at the internal resolution; a frame upscaled before the
+	// effects (RenderScale with LowResEffects off) no longer matches them (as CapturedNormals, EffectChain.cpp): WetPBR guesses then.
+	Constants.Look.y = TAAEffect::UpscaledBeforeEffects() ? 0.0f : 1.0f;
 
 	// the ortho shadow map is needed while it rains or puddles stand
 	if (Constants.Data.x || Constants.Data.z) TheShaderManager->orthoRequired = true;
@@ -39,6 +43,51 @@ void WetWorldEffect::UpdateSettings() {
 	Constants.Look.x = cfg->GetSettingI(section, "KeepHighlights") ? 1.0f : 0.0f;
 	fastPaths = cfg->GetSettingI(section, "FastPaths") != 0;
 	fixedTrace = cfg->GetSettingI(section, "FixedReflectionTrace") != 0;
+	model = cfg->GetSettingI(section, "Model");	// UNOFFICIAL 2026-11-05 (WetWorld.h)
+}
+
+// UNOFFICIAL 2026-11-05 (QA finding 15): why Model 1 cannot run this frame (1 to 3), or 0. WetPBR tells characters (worn gear 2, skin 6)
+// and materials apart by TESR_MaterialBuffer; without this frame's buffer every pixel is class 0, so characters would be darkened and
+// filmed like the ground. CapturedNormals::Data.x is reset every frame (MaterialData.x is not: it keeps its last value while the capture
+// is off), and EffectChain zeroes it in a frame upscaled before the effects.
+int WetWorldEffect::Model1Unavailable() const {
+	if (TAAEffect::UpscaledBeforeEffects()) return 1;
+	if (!CapturedNormals::MaterialTexture || CapturedNormals::Data.x < 0.5f || CapturedNormals::MaterialData.x < 0.5f) return 2;
+	if (TheSettingManager->GetSettingI("Main.Main.Quality", "MaterialBufferSkin") == 0) return 3;	// skin would stay class 0
+	return 0;
+}
+
+// UNOFFICIAL 2026-11-05 Model 1 (WetWorld.h): techniques 0 and 2 -> 7, 3 and 4 -> 8 (the fixed trace), 5 -> 9, 6 -> 10 (Persistent). Model 1
+// always takes the FastPaths structure (FastPaths off only changes which Model 0 program runs). A frame Model 1 cannot read (above) keeps
+// the Model 0 technique (the old look; techniques 2 to 4 may then take the Vulkan path as before).
+UINT WetWorldEffect::ModelTechnique(UINT techniqueIndex) {
+	if (model != 1 || !Effect) return techniqueIndex;
+	UINT twin;
+	switch (techniqueIndex) {
+		case 0: case 2: twin = 7; break;
+		case 3: case 4: twin = 8; break;
+		case 5: twin = 9; break;
+		case 6: twin = 10; break;
+		default: return techniqueIndex;
+	}
+	if (!Effect->GetTechnique(twin)) return techniqueIndex;
+	const int why = Model1Unavailable();
+	if (why) {
+		if (!(model1FallbackLogged & (1u << why))) {
+			model1FallbackLogged |= 1u << why;
+			static const char* const reasons[4] = { "",
+				"the frame is upscaled before the effects (RenderScale with LowResEffects off: the material buffer has another size)",
+				"the material buffer holds nothing this frame (needs [Main.Main.Quality] CapturedNormals and MaterialBuffer; not with the game's own MSAA on native D3D9)",
+				"[Main.Main.Quality] MaterialBufferSkin is off (skin would not be known as a character)" };
+			Logger::Log("WetWorld: Model 1 needs this frame's material buffer, but %s: the Model 0 technique %u runs instead (logged once per reason)", reasons[why], techniqueIndex);
+		}
+		return techniqueIndex;
+	}
+	return twin;
+}
+
+void WetWorldEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) {
+	EffectRecord::Render(Device, Target, Rendered, ModelTechnique(techniqueIndex), ClearTarget, Source);
 }
 
 void WetWorldEffect::RegisterConstants() {
@@ -163,6 +212,7 @@ static UINT WetBindings(NVR_EXT_BINDING_DESC* out, UINT textures, UINT samplers)
 // once by the first pass. Every pipeline and the constants are made before anything is drawn, so a refused one leaves the frame as
 // it was (the D3D9 technique runs). Once the first pass has drawn, a later failure keeps what is there (as SkinScattering does).
 bool WetWorldEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	// (2026-11-05: Model 1's techniques 7 to 10 have no Vulkan pass yet: declined here, so the D3D9 pass draws them.)
 	if (ClearRenderTarget || (techniqueIndex != 2 && techniqueIndex != 3 && techniqueIndex != 4)) return false;
 	if (!SourceBuffer || SourceBuffer == RenderTarget || SourceBuffer != TheTextureManager->SourceSurface || !TheTextureManager->SourceTexture) return false;
 	const bool fast = techniqueIndex != 3;		// techniques 2 and 4 (FastPaths)

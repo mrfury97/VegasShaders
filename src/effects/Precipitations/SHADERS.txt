@@ -3,3 +3,4 @@
 src/hlsl/NewVegas/Compute/Precipitations.frag
 src/hlsl/NewVegas/Compute/Precipitations.spv
 src/hlsl/NewVegas/Effects/Precipitations.fx.hlsl
+src/hlsl/NewVegas/Effects/Includes/RainSystem.hlsl

@@ -544,6 +544,8 @@ void Arm(void* Pass, int Part, float Nearest) {
 }
 
 void Disarm() { Armed = Replaced = false; ArmPass = nullptr; }
+bool Took() { return Armed && Replaced; }	// UNOFFICIAL 2026-11-05 (Balebandro; GrassFirst's late replay with terrain blending on)
+bool KeepsCards() { return S.KeepCards; }
 
 void EndEarly(IDirect3DDevice9* Device) {
 	Armed = Replaced = false;

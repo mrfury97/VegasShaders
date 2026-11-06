@@ -29,6 +29,7 @@
 #include "EffectChain.h"	// UNOFFICIAL 2026-11-02 the post-process chain as step tables
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the cell serial its latches wait for
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
+extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample)
 
 /**
 * Initializes the Shader Manager Singleton.
@@ -174,6 +175,7 @@ void ShaderManager::Initialize() {
 		{ "TESR_ViewSpaceLightDir", &sm->ShaderConst.ViewSpaceLightDir },
 		{ "TESR_ScreenSpaceLightDir", &sm->ShaderConst.ScreenSpaceLightDir },
 		{ "TESR_ReciprocalResolution", &sm->ShaderConst.ReciprocalResolution },
+		{ "TESR_GameMultisample", &NvrGameMultisample },	// UNOFFICIAL 2026-11-05 (Balebandro): x = the game's MSAA samples (Hooks/Settings.cpp)
 		// UNOFFICIAL 2026-10-27 RenderScale (effects\TAAUpscale.cpp): xy = the internal resolution / the screen's while the world is drawn
 		// smaller, else 1 (always registered: an unregistered TESR_ constant would read 0). The water shaders' refraction lookup uses it.
 		{ "TESR_RenderScale", &TAAEffect::RenderScaleConstant },
@@ -462,7 +464,6 @@ void ShaderManager::UpdateConstants() {
 	for (UInt32 menu : overlayMenus) overlay = overlay || ui->IsActive(menu);
 	GameState.OverlayIsOn = overlay;
 	GameState.isDialog = ui->IsActive(Menu::kMenuType_Dialog);
-	GameState.isPersuasion = ui->IsActive(Menu::kMenuType_Persuasion);
 	// UNOFFICIAL 2026-11-01 LockpickEffects (user: the lock is black in the lockpick view; "it's pbr"): while the lockpick screen is open the
 	// objects are drawn with the game's own shaders, as the menu's PBR switch does (the lock is lit by the menu's own light, which NVR's
 	// object shaders do not light it with). Back as they were when it closes. LockpickEffects = true: as before.
@@ -2018,7 +2019,13 @@ void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
 	// effects-off run still logs its real frame time for comparison. This is the last NVR call
 	// of the frame, after the pre-tonemap chain, so the toggle takes effect from the next frame.
 	static CpuTimer frameIntervalTimer("Frame interval (CPU)");
-	if (Player->parentCell && !InterfaceManager->IsActive(Menu::kMenuType_Loading) && Global->OnKeyDown(0x44)) {
+	// UNOFFICIAL 2026-11-05 (test aid): [Main.Main.Performance] GpuProfile, live, switches the same profile from the settings, so an
+	// unattended bench (console NVRSetSetting "Main.Main.Performance" "GpuProfile" 1/0) can measure effects without pressing F10.
+	static int profileSetting = -1;
+	const int profileNow = TheSettingManager->GetSettingI("Main.Main.Performance", "GpuProfile") != 0 ? 1 : 0;
+	const bool profileFlip = profileSetting >= 0 && profileNow != profileSetting && (profileNow != 0) != GpuTimer::Enabled;
+	profileSetting = profileNow;
+	if (Player->parentCell && !InterfaceManager->IsActive(Menu::kMenuType_Loading) && (Global->OnKeyDown(0x44) || profileFlip)) {
 		GpuTimer::Enabled = !GpuTimer::Enabled;
 		Logger::Log("GPU PROFILE P78 test (forward quality + culling + lamp trims) %s (F10), effects %s, D3D9 runtime: %s", GpuTimer::Enabled ? "enabled" : "paused",
 			TheSettingManager->SettingsMain.Main.RenderEffects ? "on" : "OFF", TheRenderManager->D3D9RuntimeDescription());

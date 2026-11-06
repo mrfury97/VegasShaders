@@ -2,6 +2,7 @@
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (the game's MSAA samples)
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (only while Diagnostics::VLCapturing)
 
 static void ReadLook(const char* section, VolumetricLightEffect::LookStruct& look) {
@@ -279,6 +280,9 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 		"VolumetricLightBlur", "VolumetricLightGridLight", "VolumetricLightGridRow", "VolumetricLightGridCarry", "VolumetricLightCompositeGrid" };
 	const bool frame = techniqueIndex == 0 || techniqueIndex == 8;	// the composites write the frame; the rest the effect's own buffers
 	if (!frame && RenderTarget != RenderedSurface) return false;
+	// UNOFFICIAL 2026-11-05: with the game's MSAA the composites are the D3D9 ones, which take each edge pixel's sky share (SkyCoverage,
+	// Includes/MsaaSkyEdge.hlsl); the Vulkan composites have no such read yet.
+	if (frame && NvrGameMultisample.x > 1.0f) return false;
 	IDirect3DTexture9* depth = TheShaderManager->Effects.CombineDepth ? TheShaderManager->Effects.CombineDepth->Textures.CombinedDepthTexture : nullptr;
 	IDirect3DTexture9* atlas = TheShaderManager->Effects.ShadowsExteriors ? TheShaderManager->Effects.ShadowsExteriors->ShadowAtlasTexture : nullptr;
 	IDirect3DBaseTexture9* textures[3] = {};

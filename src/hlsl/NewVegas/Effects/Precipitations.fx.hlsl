@@ -147,3 +147,25 @@ technique
 		PixelShader = compile ps_3_0 Rain();
 	}
 }
+
+// UNOFFICIAL 2026-11-05 Rain system ([Shaders.Precipitations.System] Mode 1): technique 1 (Includes/RainSystem.hlsl).
+#include "Includes/RainSystem.hlsl"
+
+technique RainSystemTechnique
+{
+	pass
+	{
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 RainSystem();
+	}
+}
+
+// UNOFFICIAL 2026-11-05: technique 2, the rain system's far bands at half resolution into TESR_RainFarBuffer.
+technique RainFarTechnique
+{
+	pass
+	{
+		VertexShader = compile vs_3_0 FrameVS();
+		PixelShader = compile ps_3_0 RainFar();
+	}
+}

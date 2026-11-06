@@ -457,7 +457,9 @@ float4 Shadow(VSOUT IN) : COLOR0
 	float cascades = GetLightAmount(worldPos, normal);
 	// UNOFFICIAL 2026-10-28 RT sun shadows, Mode 1 (replace): the cascades only from where the traced shadows fade out (the last 15% of
 	// the RT range) on; the traced visibility is multiplied in afterwards (core/RtSunShadows.cpp, RtSunCombine).
-	if (TESR_RtSunReplace.x > 0.0f) cascades = lerp(1.0f, cascades, saturate((viewDepth - 0.85f * TESR_RtSunReplace.x) / (0.15f * TESR_RtSunReplace.x)));
+	// 2026-11-04: in over 85-92.5% of the range, while the traced result fades out over 92.5-100% (was both over 85-100%: their product
+	// let a band of light through a shadow both held)
+	if (TESR_RtSunReplace.x > 0.0f) cascades = lerp(1.0f, cascades, saturate((viewDepth - 0.85f * TESR_RtSunReplace.x) / (0.075f * TESR_RtSunReplace.x)));
 	Shadow.r = min(Shadow.r, cascades); // darkest of screenspace & sun
 
 	return Shadow;

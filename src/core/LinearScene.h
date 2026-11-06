@@ -233,6 +233,21 @@ namespace LinearScene {
 	// GrassFirst::MainListHook, around the world's main list (world context only).
 	inline void BeginSpan(IDirect3DDevice9* d) {
 		if (!Live || InSpan) return;
+		// UNOFFICIAL 2026-11-05 (Balebandro 256de14): not with the game's MSAA. Convert can only add one difference per pixel to all of its
+		// samples (worked out from their resolved average), so where a pixel holds two surfaces -- every edge, and all over grass and leaves
+		// with transparency multisampling -- the darker samples were pushed below zero (the target is float) and resolved black: a black
+		// speckled outline on every bush and grass tuft (seen at 8x, gone with LinearScene off). The span is skipped: the main list stays in
+		// the stored curve, as with LinearScene off.
+		{
+			IDirect3DSurface9* target = nullptr;
+			D3DSURFACE_DESC desc = {};
+			if (SUCCEEDED(d->GetRenderTarget(0, &target)) && target) { target->GetDesc(&desc); target->Release(); }
+			if (desc.MultiSampleType != D3DMULTISAMPLE_NONE) {
+				static bool told = false;
+				if (!told) { told = true; Logger::Log("UNOFFICIAL LinearScene: the world is multisampled (the game's MSAA %u): off while it is (its conversion cannot be exact per sample)", (unsigned)desc.MultiSampleType); }
+				return;
+			}
+		}
 		InSpan = true;
 		Linear = false;
 		LastPS = nullptr;

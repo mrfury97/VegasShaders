@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals
 #include "ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion
+#include "SkyCoverage.h"	// UNOFFICIAL 2026-11-05 (Balebandro)
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth
 
 namespace {
@@ -42,6 +43,7 @@ void TextureManager::Initialize() {
 	mgr->RegisterTexture("TESR_AlbedoBuffer", (IDirect3DBaseTexture9**)&CapturedNormals::AlbedoTexture);	// UNOFFICIAL 2026-10-31 AlbedoBuffer (made on first use)
 	mgr->RegisterTexture("TESR_BackDepthBuffer", (IDirect3DBaseTexture9**)&BackDepth::Texture);	// UNOFFICIAL 2026-10-31 BackDepth	// UNOFFICIAL 2026-10-29 MaterialBuffer
 	mgr->RegisterTexture("TESR_ObjectMotionBuffer", (IDirect3DBaseTexture9**)&ObjectMotion::Texture);	// UNOFFICIAL 2026-10-29 ObjectMotion (made on first use)
+	mgr->RegisterTexture("TESR_SkyCoverage", (IDirect3DBaseTexture9**)&SkyCoverage::Texture);	// UNOFFICIAL 2026-11-05 (Balebandro) SkyCoverage (the game's MSAA; made on first use)
 
 	// let NVAPI see the two depth textures (for the depth copies)
 	NvAPI_D3D9_RegisterResource(mgr->DepthTexture);
