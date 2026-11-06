@@ -16,6 +16,11 @@
     #define LINEAR_LIGHTING
 #endif
 #include "includes/Terrain.hlsl"	// shared code
+#ifdef PS
+    #define SHADOW_SUN_CONTACT_ALWAYS 1
+    #define SHADOW_SUN_CONTACT_IN 1     // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl), land registers s13 / c183-c187
+    #define SHADOW_SUN_CONTACT_LAND 1
+#endif
 #include "includes/Shadow.hlsl"	// shared code
 #include "includes/TerrainErosion.hlsl"
 // UNOFFICIAL 2026-11-04 macro variation ([Shaders.Terrain.Macro], Includes/TerrainMacro.hlsl): compiled in only when on at startup.

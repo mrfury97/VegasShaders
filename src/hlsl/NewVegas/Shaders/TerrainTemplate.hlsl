@@ -50,6 +50,7 @@
 // default. s14/s15 are the only free sampler slots in ps_3_0 here.
 #define SHADOW_ATLAS_SAMPLER_REG s14
 #define SHADOW_OLD_ATLAS_SAMPLER_REG s15 // the sun cross-fade's kept atlas (SUN_CROSSFADE only)
+// (2026-11-06 Bend contact shadows: the LOD land only, TerrainLODTemplate / TerrainFadeTemplate; not this full-detail land)
 #include "includes/Shadow.hlsl"	// shared code
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)
 // UNOFFICIAL 2026-11-04 macro variation ([Shaders.Terrain.Macro], Includes/TerrainMacro.hlsl): compiled in only when on at startup.

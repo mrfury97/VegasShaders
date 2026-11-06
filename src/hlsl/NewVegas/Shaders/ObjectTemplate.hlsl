@@ -343,6 +343,10 @@
 #if defined(PS) && !defined(NVR_SLOT_TIGHT) && !(defined(LIGHTS) && LIGHTS > 3)
     #define SHADOW_CHARACTER_MAP_IN 1
 #endif
+#if defined(PS) && !defined(NVR_SLOT_TIGHT)
+    #define SHADOW_SUN_CONTACT_PERDRAW 1
+    #define SHADOW_SUN_CONTACT_IN 1   // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl): one lookup, so the 4+ lamp ones too
+#endif
 #include "includes/Shadow.hlsl"
 // 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
 #ifndef DUST_ON
