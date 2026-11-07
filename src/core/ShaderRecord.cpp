@@ -16,6 +16,7 @@
 #include <unordered_set>	// SetCT's once-only "not bound" notes
 #include "GpuProfiler.h"
 #include "LinearPreDecode.h"	// UNOFFICIAL 2026-10-17
+#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (SUN_CONTACT_FORWARD)
 #include "ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (ALPHA_HASH_ON)
 #include "LandLight.h"	// UNOFFICIAL 2026-10-25 (SunFar)
@@ -164,6 +165,8 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// alters the preprocessed source, so CheckPreprocessResult recompiles on next load.
 	const bool forwardShadows = TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") != 0;
 	AppendDefine("FORWARD_SHADOWS", forwardShadows ? "1" : "0");
+	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (core/BendContact.h): the lookup in GetSunShadow, only when on at start
+	if (BendContact::WantedAtStart()) AppendDefine("SUN_CONTACT_FORWARD", "1");
 
 	// UNOFFICIAL sun shadow cross-fade (SunSmoothing CrossFade): compiled in only when on, so that otherwise the
 	// shaders are exactly what they were. Read here for the same reason as FORWARD_SHADOWS; takes effect on restart.

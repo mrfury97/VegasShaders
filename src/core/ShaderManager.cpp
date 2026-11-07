@@ -466,7 +466,6 @@ void ShaderManager::UpdateConstants() {
 	for (UInt32 menu : overlayMenus) overlay = overlay || ui->IsActive(menu);
 	GameState.OverlayIsOn = overlay;
 	GameState.isDialog = ui->IsActive(Menu::kMenuType_Dialog);
-	GameState.isPersuasion = ui->IsActive(Menu::kMenuType_Persuasion);
 	// UNOFFICIAL 2026-11-01 LockpickEffects (user: the lock is black in the lockpick view; "it's pbr"): while the lockpick screen is open the
 	// objects are drawn with the game's own shaders, as the menu's PBR switch does (the lock is lit by the menu's own light, which NVR's
 	// object shaders do not light it with). Back as they were when it closes. LockpickEffects = true: as before.
@@ -2023,7 +2022,13 @@ void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
 	// effects-off run still logs its real frame time for comparison. This is the last NVR call
 	// of the frame, after the pre-tonemap chain, so the toggle takes effect from the next frame.
 	static CpuTimer frameIntervalTimer("Frame interval (CPU)");
-	if (Player->parentCell && !InterfaceManager->IsActive(Menu::kMenuType_Loading) && Global->OnKeyDown(0x44)) {
+	// UNOFFICIAL 2026-11-05 (test aid): [Main.Main.Performance] GpuProfile, live, switches the same profile from the settings, so an
+	// unattended bench (console NVRSetSetting "Main.Main.Performance" "GpuProfile" 1/0) can measure effects without pressing F10.
+	static int profileSetting = -1;
+	const int profileNow = TheSettingManager->GetSettingI("Main.Main.Performance", "GpuProfile") != 0 ? 1 : 0;
+	const bool profileFlip = profileSetting >= 0 && profileNow != profileSetting && (profileNow != 0) != GpuTimer::Enabled;
+	profileSetting = profileNow;
+	if (Player->parentCell && !InterfaceManager->IsActive(Menu::kMenuType_Loading) && (Global->OnKeyDown(0x44) || profileFlip)) {
 		GpuTimer::Enabled = !GpuTimer::Enabled;
 		Logger::Log("GPU PROFILE P78 test (forward quality + culling + lamp trims) %s (F10), effects %s, D3D9 runtime: %s", GpuTimer::Enabled ? "enabled" : "paused",
 			TheSettingManager->SettingsMain.Main.RenderEffects ? "on" : "OFF", TheRenderManager->D3D9RuntimeDescription());

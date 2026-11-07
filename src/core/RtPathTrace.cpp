@@ -327,6 +327,19 @@ namespace {
 
 	void Setup() {
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
+		// UNOFFICIAL 2026-11-07 (mrfury97 fork): the path tracer's 20 shared images only when it is on as the core starts. Registered
+		// on or off, they left too few of the protocol's 48 for the other RT effects together (RT lamp shadows with ManyLights: 57 asked,
+		// "the RT effects asked for more shared images than the protocol holds", the whole core off). Turning PT on later needs a restart
+		// (StatusText says so); Record already does nothing without its images.
+		ReadSettings();
+		if (!S.enabled) {
+			imageA = imageB = imageDisplay = imageDepth = imageNormals = imageAlbedo = imagePano = imageFrame = imageMaterial = imageAlbedoOut = imageLamps = -1;
+			imageGIResult = -1;
+			for (int i = 0; i < 2; i++) imageResA[i] = imageResB[i] = imageResC[i] = imageSurf[i] = -1;
+			haveImage = false;
+			Logger::Log("UNOFFICIAL RT reference path tracer: off as the RT core starts, so its 20 shared images are not reserved (turning ReferencePT / PTRealtime on needs a restart).");
+			return;
+		}
 		imageA = RtCore::AddImage("NVR RT path trace mean rg", w, h, NVR_EXT_SHARED_RG32F);
 		imageB = RtCore::AddImage("NVR RT path trace mean b", w, h, NVR_EXT_SHARED_RG32F);
 		imageDisplay = RtCore::AddImage("NVR RT path trace", w, h, NVR_EXT_SHARED_RGBA16F);
@@ -687,6 +700,7 @@ namespace RtPathTrace {
 
 	std::string StatusText() {
 		if (!S.enabled) return "RT reference path tracer off ([Main.Main.RayTracing] ReferencePT false)";
+		if (imageA < 0 && RtCore::Running()) return "RT reference path tracer turned on after the RT core started: restart the game (its images are reserved only when it is on at start)";
 		char t[300];
 		sprintf_s(t, "RT reference path tracer on | %s | %ux%u, %u samples a pixel (of PTMaxSamples %d), %u restarts, %d bounces, %d paths a frame, PTDebugView %d",
 			RtCore::Running() ? "the core runs" : "the RT core is not running: nothing traced", textureWidth, textureHeight, samples, S.maxSamples, resets,

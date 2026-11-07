@@ -341,7 +341,7 @@ namespace {
 		const ShaderManager::GameStateStruct& g = TheShaderManager->GameState;
 		if (g.PipBoyIsOn) return "Pip-Boy";
 		if (g.VATSIsOn) return "VATS";
-		if (g.isDialog || g.isPersuasion) return "dialogue";
+		if (g.isDialog) return "dialogue";
 		if (g.OverlayIsOn) return "overlay";
 		if (frame < F.quietUntil) return "just after a load / cell change";
 		if (!TemporalBackbone::HistoryValid()) return "history reset (cut, jump, gap or size change)";

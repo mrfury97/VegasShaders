@@ -165,6 +165,7 @@
 #include "../effects/CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness and snow
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
+#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
 #include "EffectChain.h"
@@ -468,7 +469,14 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 				// the forward lookups are off for the fade: it gets the forward value, as without the switch.
 				const float forwardWas = sunShadows->Constants.ForwardData.x;
 				if (sunShadows->SunFaded && sunShadows->Settings.Exteriors.ForwardShadows) sunShadows->Constants.ForwardData.x = 0.0f;
+				// UNOFFICIAL 2026-11-06 forward Bend contact shadows (core/BendContact.h): Bend's march for next frame's lit shaders;
+				// when it ran, the old pass writes "no contact" (its ScreenSpaceData.x test) so nothing is darkened twice.
+				const bool bendRan = fusedForwardContact && sunShadows->Constants.ScreenSpaceData.x != 0.0f && BendContact::Produce(Device);
+				if (!bendRan) BendContact::Invalidate();	// the old pass has the contact this frame: next frame's lit shaders take none
+				const float screenSpaceWas = sunShadows->Constants.ScreenSpaceData.x;
+				if (bendRan) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
 				RenderEffectToRT(sunShadows->Textures.ShadowPassSurface, Effects.SunShadows, false, sharpContact ? 2 : fusedForwardContact ? 1 : 0);
+				sunShadows->Constants.ScreenSpaceData.x = screenSpaceWas;
 				sunShadows->Constants.ForwardData.x = forwardWas;
 				RtSunShadows::Apply(Device);	// UNOFFICIAL 2026-10-28: the traced sun visibility into the red channel (nothing when not traced)
 			}
@@ -491,6 +499,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 		// others), so reset it to the neutral "no shadow" value rather than leaving
 		// stale exterior data for them to read.
 		if (!shadowBufferClear) { Effects.ShadowsExteriors->clearShadowsBuffer(); shadowBufferClear = true; }
+		BendContact::Invalidate();	// UNOFFICIAL 2026-11-06: no Bend result made (the effect's UpdateConstants may not run either)
 	}
 }
 

@@ -62,6 +62,24 @@ static const int UnofficialSettingsVersion = 75;  // 53 was an enhanced-water st
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
 // load; a whole unknown section is one line. [_Unofficial] is NVR's own bookkeeping, never in the defaults.
 // 2026-11-03: also returns them (section.key), for the install check (InstallCheck.h)
+// 2026-11-05: settings this build removed on purpose (the Oblivion-era leftovers: the old text menu's fonts, colours, layout and keys,
+// SleepingMode, TorchesCastShadows). Older settings files still hold them; they are skipped quietly instead of counted as unknown.
+static bool Retired(const std::string& Name) {
+	static const char* const kSections[] = { "Main.SleepingMode" };
+	static const char* const kKeys[] = { "Shaders.ShadowsInteriors.Main.TorchesCastShadows", "Shaders.ShadowsExteriors.ScreenSpace.LodOnly",	// (2026-11-06: always on now)
+		"Main.Menu.Keys.KeyAdd", "Main.Menu.Keys.KeyDown", "Main.Menu.Keys.KeyEditing", "Main.Menu.Keys.KeyLeft", "Main.Menu.Keys.KeyPageDown",
+		"Main.Menu.Keys.KeyPageUp", "Main.Menu.Keys.KeyRight", "Main.Menu.Keys.KeySave", "Main.Menu.Keys.KeySubtract", "Main.Menu.Keys.KeyUp",
+		"Main.Menu.Keys.EntryUseNumpad", "Main.Menu.Style.ItemColumnSize", "Main.Menu.Style.MainItemColumnSize", "Main.Menu.Style.PositionX",
+		"Main.Menu.Style.PositionY", "Main.Menu.Style.RowSpace", "Main.Menu.Style.RowsPerPage", "Main.Menu.Style.TextColorEditing",
+		"Main.Menu.Style.TextColorEnabled", "Main.Menu.Style.TextColorNormal", "Main.Menu.Style.TextColorSelected", "Main.Menu.Style.TextFont",
+		"Main.Menu.Style.TextFontStatus", "Main.Menu.Style.TextShadowColorEditing", "Main.Menu.Style.TextShadowColorEnabled",
+		"Main.Menu.Style.TextShadowColorNormal", "Main.Menu.Style.TextShadowColorSelected", "Main.Menu.Style.TextSizeStatus",
+		"Main.Menu.Style.TitleColumnSize" };
+	for (const char* k : kKeys) if (Name == k) return true;
+	for (const char* sec : kSections) if (Name.compare(0, strlen(sec), sec) == 0) return true;
+	return false;
+}
+
 static std::vector<std::string> WarnUnknownKeys(const tomlValue& User, const tomlValue& Defaults) {
 	std::vector<std::string> unknown;
 	if (!User.is_table() || !Defaults.is_table()) return unknown;
@@ -76,6 +94,7 @@ static std::vector<std::string> WarnUnknownKeys(const tomlValue& User, const tom
 			const bool known = defaults.contains(key);
 			if (known && value.is_table() && defaults.at(key).is_table()) { self(self, value, defaults.at(key), name(path, key)); continue; }
 			if (known) continue;
+			if (Retired(name(path, key))) continue;	// 2026-11-05: removed on purpose, not worth a warning
 			unknown.push_back(name(path, key));
 			if (logged >= 40) { more++; continue; }
 			logged++;
@@ -890,20 +909,6 @@ void SettingManager::LoadSettings() {
 	}
 
 	{
-		const char* sec = "Main.OcclusionCulling.Main";
-		SettingsMain.OcclusionCulling.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.OcclusionCulling.OcclusionMapRatio = GetSettingI(sec, "OcclusionMapRatio");
-		SettingsMain.OcclusionCulling.OccludingStatic = GetSettingI(sec, "OccludingStatic");
-		SettingsMain.OcclusionCulling.OccludedStatic = GetSettingI(sec, "OccludedStatic");
-		SettingsMain.OcclusionCulling.OccludedDistantStatic = GetSettingI(sec, "OccludedDistantStatic");
-		SettingsMain.OcclusionCulling.OccludedDistantStaticIC = GetSettingI(sec, "OccludedDistantStaticIC");
-		SettingsMain.OcclusionCulling.OccludingStaticMin = GetSettingF(sec, "OccludingStaticMin");
-		SettingsMain.OcclusionCulling.OccludedStaticMin = GetSettingF(sec, "OccludedStaticMin");
-		SettingsMain.OcclusionCulling.OccludedStaticMax = GetSettingF(sec, "OccludedStaticMax");
-		SettingsMain.OcclusionCulling.OccludedDistantStaticMax = GetSettingF(sec, "OccludedDistantStaticMax");
-	}
-
-	{
 		const char* sec = "Main.CameraMode.Main";
 		SettingsMain.CameraMode.Enabled = GetSettingI(sec, "Enabled");
 		SettingsMain.CameraMode.Crosshair = GetSettingI(sec, "Crosshair");
@@ -925,102 +930,6 @@ void SettingManager::LoadSettings() {
 	}
 
 	{
-		const char* sec = "Main.IKFoot.Main";
-		SettingsMain.IKFoot.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.IKFoot.Coeff = GetSettingF(sec, "Coeff");
-		SettingsMain.IKFoot.CoeffThigh = GetSettingF(sec, "CoeffThigh");
-		SettingsMain.IKFoot.CoeffCalf = GetSettingF(sec, "CoeffCalf");
-		SettingsMain.IKFoot.CoeffFoot = GetSettingF(sec, "CoeffFoot");
-		SettingsMain.IKFoot.CoeffToe = GetSettingF(sec, "CoeffToe");
-	}
-
-	{
-		const char* sec = "Main.EquipmentMode.Main";
-		SettingsMain.EquipmentMode.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.EquipmentMode.TorchKey = GetSettingI(sec, "TorchKey");
-		SettingsMain.EquipmentMode.SleepingEquipment = GetSettingI(sec, "SleepingEquipment");
-		SettingsMain.EquipmentMode.SwimmingEquipment = GetSettingI(sec, "SwimmingEquipment");
-		SettingsMain.EquipmentMode.CombatEquipmentKey = GetSettingI(sec, "CombatEquipmentKey");
-		SettingsMain.EquipmentMode.DualBlockDelay = GetSettingF(sec, "DualBlockDelay");
-	}
-	{
-		const char* sec = "Main.EquipmentMode.Positioning";
-		SettingsMain.EquipmentMode.ShieldOnBackPos.x = GetSettingF(sec, "ShieldOnBackPosX");
-		SettingsMain.EquipmentMode.ShieldOnBackPos.y = GetSettingF(sec, "ShieldOnBackPosY");
-		SettingsMain.EquipmentMode.ShieldOnBackPos.z = GetSettingF(sec, "ShieldOnBackPosZ");
-		SettingsMain.EquipmentMode.ShieldOnBackRot.x = GetSettingF(sec, "ShieldOnBackRotX");
-		SettingsMain.EquipmentMode.ShieldOnBackRot.y = GetSettingF(sec, "ShieldOnBackRotY");
-		SettingsMain.EquipmentMode.ShieldOnBackRot.z = GetSettingF(sec, "ShieldOnBackRotZ");
-		SettingsMain.EquipmentMode.WeaponOnBackPos.x = GetSettingF(sec, "WeaponOnBackPosX");
-		SettingsMain.EquipmentMode.WeaponOnBackPos.y = GetSettingF(sec, "WeaponOnBackPosY");
-		SettingsMain.EquipmentMode.WeaponOnBackPos.z = GetSettingF(sec, "WeaponOnBackPosZ");
-		SettingsMain.EquipmentMode.WeaponOnBackRot.x = GetSettingF(sec, "WeaponOnBackRotX");
-		SettingsMain.EquipmentMode.WeaponOnBackRot.y = GetSettingF(sec, "WeaponOnBackRotY");
-		SettingsMain.EquipmentMode.WeaponOnBackRot.z = GetSettingF(sec, "WeaponOnBackRotZ");
-		SettingsMain.EquipmentMode.TwoHandWeaponOnBackPos.x = GetSettingF(sec, "TwoHandWeaponOnBackPosX");
-		SettingsMain.EquipmentMode.TwoHandWeaponOnBackPos.y = GetSettingF(sec, "TwoHandWeaponOnBackPosY");
-		SettingsMain.EquipmentMode.TwoHandWeaponOnBackPos.z = GetSettingF(sec, "TwoHandWeaponOnBackPosZ");
-		SettingsMain.EquipmentMode.TwoHandWeaponOnBackRot.x = GetSettingF(sec, "TwoHandWeaponOnBackRotX");
-		SettingsMain.EquipmentMode.TwoHandWeaponOnBackRot.y = GetSettingF(sec, "TwoHandWeaponOnBackRotY");
-		SettingsMain.EquipmentMode.TwoHandWeaponOnBackRot.z = GetSettingF(sec, "TwoHandWeaponOnBackRotZ");
-		SettingsMain.EquipmentMode.BowOnBackPos.x = GetSettingF(sec, "BowOnBackPosX");
-		SettingsMain.EquipmentMode.BowOnBackPos.y = GetSettingF(sec, "BowOnBackPosY");
-		SettingsMain.EquipmentMode.BowOnBackPos.z = GetSettingF(sec, "BowOnBackPosZ");
-		SettingsMain.EquipmentMode.BowOnBackRot.x = GetSettingF(sec, "BowOnBackRotX");
-		SettingsMain.EquipmentMode.BowOnBackRot.y = GetSettingF(sec, "BowOnBackRotY");
-		SettingsMain.EquipmentMode.BowOnBackRot.z = GetSettingF(sec, "BowOnBackRotZ");
-		SettingsMain.EquipmentMode.StaffOnBackPos.x = GetSettingF(sec, "StaffOnBackPosX");
-		SettingsMain.EquipmentMode.StaffOnBackPos.y = GetSettingF(sec, "StaffOnBackPosY");
-		SettingsMain.EquipmentMode.StaffOnBackPos.z = GetSettingF(sec, "StaffOnBackPosZ");
-		SettingsMain.EquipmentMode.StaffOnBackRot.x = GetSettingF(sec, "StaffOnBackRotX");
-		SettingsMain.EquipmentMode.StaffOnBackRot.y = GetSettingF(sec, "StaffOnBackRotY");
-		SettingsMain.EquipmentMode.StaffOnBackRot.z = GetSettingF(sec, "StaffOnBackRotZ");
-		SettingsMain.EquipmentMode.TorchOnBeltPos.x = GetSettingF(sec, "TorchOnBeltPosX");
-		SettingsMain.EquipmentMode.TorchOnBeltPos.y = GetSettingF(sec, "TorchOnBeltPosY");
-		SettingsMain.EquipmentMode.TorchOnBeltPos.z = GetSettingF(sec, "TorchOnBeltPosZ");
-		SettingsMain.EquipmentMode.TorchOnBeltRot.x = GetSettingF(sec, "TorchOnBeltRotX");
-		SettingsMain.EquipmentMode.TorchOnBeltRot.y = GetSettingF(sec, "TorchOnBeltRotY");
-		SettingsMain.EquipmentMode.TorchOnBeltRot.z = GetSettingF(sec, "TorchOnBeltRotZ");
-	}
-
-	{
-		const char* sec = "Main.MountedCombat.Main";
-		SettingsMain.MountedCombat.Enabled = GetSettingI(sec, "Enabled");
-	}
-	{
-		const char* sec = "Main.MountedCombat.Positioning";
-		SettingsMain.MountedCombat.WeaponOnBackPos.x = GetSettingF(sec, "WeaponOnBackPosX");
-		SettingsMain.MountedCombat.WeaponOnBackPos.y = GetSettingF(sec, "WeaponOnBackPosY");
-		SettingsMain.MountedCombat.WeaponOnBackPos.z = GetSettingF(sec, "WeaponOnBackPosZ");
-		SettingsMain.MountedCombat.WeaponOnBackRot.x = GetSettingF(sec, "WeaponOnBackRotX");
-		SettingsMain.MountedCombat.WeaponOnBackRot.y = GetSettingF(sec, "WeaponOnBackRotY");
-		SettingsMain.MountedCombat.WeaponOnBackRot.z = GetSettingF(sec, "WeaponOnBackRotZ");
-		SettingsMain.MountedCombat.TwoHandWeaponOnBackPos.x = GetSettingF(sec, "TwoHandWeaponOnBackPosX");
-		SettingsMain.MountedCombat.TwoHandWeaponOnBackPos.y = GetSettingF(sec, "TwoHandWeaponOnBackPosY");
-		SettingsMain.MountedCombat.TwoHandWeaponOnBackPos.z = GetSettingF(sec, "TwoHandWeaponOnBackPosZ");
-		SettingsMain.MountedCombat.TwoHandWeaponOnBackRot.x = GetSettingF(sec, "TwoHandWeaponOnBackRotX");
-		SettingsMain.MountedCombat.TwoHandWeaponOnBackRot.y = GetSettingF(sec, "TwoHandWeaponOnBackRotY");
-		SettingsMain.MountedCombat.TwoHandWeaponOnBackRot.z = GetSettingF(sec, "TwoHandWeaponOnBackRotZ");
-		SettingsMain.MountedCombat.BowOnBackPos.x = GetSettingF(sec, "BowOnBackPosX");
-		SettingsMain.MountedCombat.BowOnBackPos.y = GetSettingF(sec, "BowOnBackPosY");
-		SettingsMain.MountedCombat.BowOnBackPos.z = GetSettingF(sec, "BowOnBackPosZ");
-		SettingsMain.MountedCombat.BowOnBackRot.x = GetSettingF(sec, "BowOnBackRotX");
-		SettingsMain.MountedCombat.BowOnBackRot.y = GetSettingF(sec, "BowOnBackRotY");
-		SettingsMain.MountedCombat.BowOnBackRot.z = GetSettingF(sec, "BowOnBackRotZ");
-		SettingsMain.MountedCombat.StaffOnBackPos.x = GetSettingF(sec, "StaffOnBackPosX");
-		SettingsMain.MountedCombat.StaffOnBackPos.y = GetSettingF(sec, "StaffOnBackPosY");
-		SettingsMain.MountedCombat.StaffOnBackPos.z = GetSettingF(sec, "StaffOnBackPosZ");
-		SettingsMain.MountedCombat.StaffOnBackRot.x = GetSettingF(sec, "StaffOnBackRotX");
-		SettingsMain.MountedCombat.StaffOnBackRot.y = GetSettingF(sec, "StaffOnBackRotY");
-		SettingsMain.MountedCombat.StaffOnBackRot.z = GetSettingF(sec, "StaffOnBackRotZ");
-	}
-
-	{
-		const char* sec = "Main.GrassMode.Main";
-		SettingsMain.GrassMode.Enabled = GetSettingI(sec, "Enabled");
-	}
-
-	{
 		const char* sec = "Main.WeatherMode.Main";
 		SettingsMain.WeatherMode.Enabled = GetSettingI(sec, "Enabled");
 	}
@@ -1038,74 +947,10 @@ void SettingManager::LoadSettings() {
 	}
 
 	{
-		const char* sec = "Main.ShadowMode.Main";
-		SettingsMain.ShadowMode.NearQuality = GetSettingF(sec, "NearQuality");
-	}
-
-	{
-		const char* sec = "Main.Menu.Style";
-		strcpy(SettingsMain.Menu.TextFont, GetSettingS(sec, "TextFont", text));
-		SettingsMain.Menu.TextSize = GetSettingI(sec, "TextSize");
-		strcpy(SettingsMain.Menu.TextFontStatus, GetSettingS(sec, "TextFontStatus", text));
-		SettingsMain.Menu.TextSizeStatus = GetSettingI(sec, "TextSizeStatus");
-		FillFromString(GetSettingS(sec, "TextColorNormal", text), ",", SettingsMain.Menu.TextColorNormal);
-		FillFromString(GetSettingS(sec, "TextShadowColorNormal", text), ",", SettingsMain.Menu.TextShadowColorNormal);
-		FillFromString(GetSettingS(sec, "TextColorSelected", text), ",", SettingsMain.Menu.TextColorSelected);
-		FillFromString(GetSettingS(sec, "TextShadowColorSelected", text), ",", SettingsMain.Menu.TextShadowColorSelected);
-		FillFromString(GetSettingS(sec, "TextColorEditing", text), ",", SettingsMain.Menu.TextColorEditing);
-		FillFromString(GetSettingS(sec, "TextShadowColorEditing", text), ",", SettingsMain.Menu.TextShadowColorEditing);
-		FillFromString(GetSettingS(sec, "TextColorEnabled", text), ",", SettingsMain.Menu.TextColorEnabled);
-		FillFromString(GetSettingS(sec, "TextShadowColorEnabled", text), ",", SettingsMain.Menu.TextShadowColorEnabled);
-	}
-
-	{
-		const char* sec = "Main.Menu.Style";
-		SettingsMain.Menu.PositionX = GetSettingI(sec, "PositionX");
-		SettingsMain.Menu.PositionY = GetSettingI(sec, "PositionY");
-		SettingsMain.Menu.TitleColumnSize = GetSettingI(sec, "TitleColumnSize");
-		SettingsMain.Menu.MainItemColumnSize = GetSettingI(sec, "MainItemColumnSize");
-		SettingsMain.Menu.ItemColumnSize = GetSettingI(sec, "ItemColumnSize");
-		SettingsMain.Menu.RowSpace = GetSettingI(sec, "RowSpace");
-		SettingsMain.Menu.RowsPerPage = GetSettingI(sec, "RowsPerPage");
-	}
-	{
-		const char* sec = "Main.Menu.Keys";
-		SettingsMain.Menu.KeyEnable = GetSettingI(sec, "KeyEnable");
-		SettingsMain.Menu.KeyUp = GetSettingI(sec, "KeyUp");
-		SettingsMain.Menu.KeyDown = GetSettingI(sec, "KeyDown");
-		SettingsMain.Menu.KeyLeft = GetSettingI(sec, "KeyLeft");
-		SettingsMain.Menu.KeyRight = GetSettingI(sec, "KeyRight");
-		SettingsMain.Menu.KeyPageUp = GetSettingI(sec, "KeyPageUp");
-		SettingsMain.Menu.KeyPageDown = GetSettingI(sec, "KeyPageDown");
-		SettingsMain.Menu.KeyAdd = GetSettingI(sec, "KeyAdd");
-		SettingsMain.Menu.KeySubtract = GetSettingI(sec, "KeySubtract");
-		SettingsMain.Menu.KeySave = GetSettingI(sec, "KeySave");
-		SettingsMain.Menu.KeyEditing = GetSettingI(sec, "KeyEditing");
-		SettingsMain.Menu.UseNumpadForEditing = GetSettingI(sec, "EntryUseNumpad");
-		SettingsMain.Menu.MasterSwitchModifier = GetSettingI(sec, "MasterSwitchModifier");
-	}
-
-	{
-		const char* sec = "Main.Purger.Main";
-		SettingsMain.Purger.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.Purger.Time = GetSettingI(sec, "Time");
-		SettingsMain.Purger.PurgeTextures = GetSettingI(sec, "PurgeTextures");
-		SettingsMain.Purger.PurgeCells = GetSettingI(sec, "PurgeCells");
-		SettingsMain.Purger.Key = GetSettingI(sec, "Key");
-	}
-
-	{
-		const char* sec = "Main.Gravity.Main";
-		SettingsMain.Gravity.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.Gravity.Value = GetSettingF(sec, "text");
-	}
-
-	{
-		const char* sec = "Main.Dodge.Main";
-		SettingsMain.Dodge.Enabled = GetSettingI(sec, "Enabled");
-		SettingsMain.Dodge.AcrobaticsLevel = GetSettingI(sec, "AcrobaticsLevel");
-		SettingsMain.Dodge.DoubleTap = GetSettingI(sec, "DoubleTap");
-		SettingsMain.Dodge.DoubleTapTime = GetSettingF(sec, "DoubleTapTime");
+		// 2026-11-05: only what the ImGui menu reads (the old text menu's fonts, colours, layout and keys are gone)
+		SettingsMain.Menu.TextSize = GetSettingI("Main.Menu.Style", "TextSize");
+		SettingsMain.Menu.KeyEnable = GetSettingI("Main.Menu.Keys", "KeyEnable");
+		SettingsMain.Menu.MasterSwitchModifier = GetSettingI("Main.Menu.Keys", "MasterSwitchModifier");
 	}
 
 	{

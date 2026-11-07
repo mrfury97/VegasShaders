@@ -937,6 +937,89 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
 #endif
 
 // ---------------------------------------------------------------------------
+// UNOFFICIAL 2026-11-06 forward screen-space contact shadows ([Shaders.ShadowsExteriors.ScreenSpace] Bend + InLighting): GetSunShadow
+// takes the sun contact visibility itself, so contact takes away the SUN only (ambient and lamps stay) instead of darkening the whole
+// finished pixel in the composite. The contact pass runs after the world is drawn, so these shaders read LAST frame's result
+// (TESR_ContactForward: r visibility 1 lit .. 0 shadowed, g linear view depth in game units at that pixel, 0 = nothing / sky),
+// reprojected through that frame's camera (TESR_ContactReproject: camera-relative point -> last frame's clip, w = view depth; render
+// scale, jitter and half texel are folded in by the DLL); where that frame did not see this point (off screen, another depth there)
+// no contact (1). Compiled in only when SUN_CONTACT_FORWARD (ShaderRecord::BuildDefines: Bend && InLighting && ForwardShadows) AND the
+// including shader opts in (SHADOW_SUN_CONTACT_IN); not in the interior records; not with the sun cross-fade except in the land shaders
+// (the cross-fade owns c146-c166). Registers: s10 (s3 with LiveCube) / c148-c151 / c152 (+ b13 per draw); the land includers define SHADOW_SUN_CONTACT_LAND: s13 / c183-c187.
+// ---------------------------------------------------------------------------
+#ifndef SHADOW_SUN_CONTACT_IN
+    #define SHADOW_SUN_CONTACT_IN 0
+#endif
+#ifndef SHADOW_SUN_CONTACT_LAND
+    #define SHADOW_SUN_CONTACT_LAND 0
+#endif
+#if defined(SUN_CONTACT_FORWARD) && SHADOW_SUN_CONTACT_IN && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS) && (SHADOW_SUN_CONTACT_LAND || !SUN_CROSSFADE)
+    #define SHADOW_SUN_CONTACT 1
+#else
+    #define SHADOW_SUN_CONTACT 0
+#endif
+#if SHADOW_SUN_CONTACT
+#if SHADOW_SUN_CONTACT_LAND && defined(SHADOW_SUN_CONTACT_S15)
+    #define SUN_CONTACT_SAMPLER_REG s15
+    #define SUN_CONTACT_MATRIX_REG c183
+    #define SUN_CONTACT_DATA_REG c187
+#elif SHADOW_SUN_CONTACT_LAND
+    #define SUN_CONTACT_SAMPLER_REG s13
+    #define SUN_CONTACT_MATRIX_REG c183
+    #define SUN_CONTACT_DATA_REG c187
+#else
+    // (1.0.5: s12 is HUD raindrops' ortho cover map) s10, or s3 where the live metal cube (LiveCube.hlsl) holds s10
+    #ifdef NVR_LIVE_CUBE
+        #define SUN_CONTACT_SAMPLER_REG s3
+    #else
+        #define SUN_CONTACT_SAMPLER_REG s10
+    #endif
+    #define SUN_CONTACT_MATRIX_REG c148
+    #define SUN_CONTACT_DATA_REG c152
+#endif
+row_major float4x4 TESR_ContactReproject : register(SUN_CONTACT_MATRIX_REG); // camera-relative world -> last frame's clip (w = view depth)
+float4 TESR_ContactForwardData : register(SUN_CONTACT_DATA_REG); // x 1 = use it (2 / 3: BendDebug 1 / 2), y depth match tolerance (fraction of depth), z start distance (view units; at least 64, the view model), w 1 / fade-in length
+// One line, like TESR_ShadowAtlas above; POINT lifted round it as for TESR_CharShadowMap.
+#ifdef POINT
+    #undef POINT
+    #define NVR_CONTACT_POINT_WAS_DEFINED
+#endif
+sampler2D TESR_ContactForward : register(SUN_CONTACT_SAMPLER_REG) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+#ifdef NVR_CONTACT_POINT_WAS_DEFINED
+    #define POINT
+    #undef NVR_CONTACT_POINT_WAS_DEFINED
+#endif
+
+// Last frame's sun contact visibility at camera-relative point P: 1 lit, towards 0 in contact shadow. 1 where that frame did not see P.
+#if defined(SHADOW_SUN_CONTACT_PERDRAW)
+bool NVR_ContactDraw : register(b13); // (LodOnly) true = this draw is object LOD (written per draw by BendContact::ForDraw; a bool register: 1.0.5's HUD raindrops took c153)
+#endif
+float SunContactForwardLookup(float3 P);
+float SunContactForward(float3 P) {
+    [branch] if (TESR_ContactForwardData.x < 0.5f) return 1.0f;
+    // LOD only (2026-11-06): the LOD land shaders always; an object draw only when it is object LOD (NVR_ContactDraw, a bool
+    // register: only as a plain if, X4509 otherwise)
+#if defined(SHADOW_SUN_CONTACT_PERDRAW)
+    float v = 1.0f;
+    if (NVR_ContactDraw) v = SunContactForwardLookup(P);
+    return v;
+#else
+    return SunContactForwardLookup(P);
+#endif
+}
+float SunContactForwardLookup(float3 P) {
+    float4 clip = mul(float4(P, 1.0f), TESR_ContactReproject);
+    [branch] if (clip.w <= TESR_ContactForwardData.z) return 1.0f;   // nearer than the start (the shadow maps' range; the view model)
+    float2 uv = float2(0.5f, -0.5f) * clip.xy / clip.w + 0.5f;
+    const float miss = TESR_ContactForwardData.x > 2.5f ? 0.0f : 1.0f;   // BendDebug 2: misses black
+    [branch] if (any(abs(uv - 0.5f) > 0.5f)) return miss;
+    float2 c = tex2Dlod(TESR_ContactForward, float4(uv, 0.0f, 0.0f)).rg;
+    [branch] if (c.g <= 0.0f || abs(c.g - clip.w) > abs(TESR_ContactForwardData.y) * clip.w) return miss;
+    return TESR_ContactForwardData.x > 2.5f ? 1.0f : lerp(1.0f, c.r, saturate((clip.w - TESR_ContactForwardData.z) * TESR_ContactForwardData.w));
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // 1.0 in full light, towards 0 in shadow. Multiply the SUN term by it, before ambient.
 // ---------------------------------------------------------------------------
 float GetSunShadow(float3 P, float3 Nw) {
@@ -1162,6 +1245,12 @@ float GetSunShadow(float3 P, float3 Nw) {
     // UNOFFICIAL 2026-10-23 CharacterShadowMap: the darker of the cascades' shadow and the player's own map's, inside its box.
     [branch] if (TESR_CharShadowData.w > 0.0f)
         sh = CharacterMapShadow(P, Nw, nDL, sh);
+#endif
+
+#if SHADOW_SUN_CONTACT
+    // UNOFFICIAL 2026-11-06 forward contact shadows: last frame's sun contact, reprojected (1 where unseen)
+    float sunContact = SunContactForward(P);
+    sh = TESR_ContactForwardData.x > 1.5f ? sunContact : sh * sunContact;	// BendDebug 1 / 2: the contact (coverage) alone
 #endif
 
     // Fade out as the sun approaches the horizon, matching SunShadows.fx.

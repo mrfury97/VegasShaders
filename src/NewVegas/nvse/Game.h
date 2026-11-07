@@ -787,7 +787,7 @@ public:
 		kMenuType_BigFour		= 1,		// F1 - F4
 		kMenuType_Console = 3, kMenuType_Main = 4, kMenuType_Loading = 0x3EF,
 		kMenuType_Dialog = 0x3F1, kMenuType_Start = 0x3F5, kMenuType_LockPick = 0x3F6,
-		kMenuType_Persuasion = 0x40A, kMenuType_Surgery = 0x41E, kMenuType_Hacking = 0x41F,
+		kMenuType_Surgery = 0x41E, kMenuType_Hacking = 0x41F,
 		kMenuType_VATS = 0x420, kMenuType_Computers = 0x421, kMenuType_SlotMachine = 0x438,
 		kMenuType_Blackjack = 0x439, kMenuType_Roulette = 0x43A, kMenuType_Caravan = 0x43B,
 	};

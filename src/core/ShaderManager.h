@@ -284,7 +284,7 @@ public:
 		float					isDayTime;			// 0 night .. 1 day
 		bool					isDayTimeChanged;	// crossed day/night this frame
 		float					transitionCurve, dayLight;
-		bool					isExterior, isUnderwater, isDialog, isPersuasion, isCellChanged;
+		bool					isExterior, isUnderwater, isDialog, isCellChanged;
 		bool					isCameraCut;	// UNOFFICIAL 2026-10-27: the cell changed by a jump (a door, fast travel), not by walking over a border
 		bool					VATSIsOn, PipBoyIsOn, OverlayIsOn;
 		bool					isRainy, isSnow, isCloudy;

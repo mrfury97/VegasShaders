@@ -1,0 +1,184 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+
+// UNOFFICIAL 2026-11-06 forward contact shadows ([Shaders.ShadowsExteriors.ScreenSpace] Bend + InLighting; core/BendContact.h).
+// Bend Studio's screen-space shadows as Skyrim Community Shaders runs them (Features/ScreenSpaceShadows: RaymarchCS.hlsl +
+// bend_sss_gpu.hlsli; Bend's code Copyright 2023 Sony Interactive Entertainment, Apache License 2.0,
+// http://www.apache.org/licenses/LICENSE-2.0), ported to GLSL for the NVR DXVK extension. One wavefront of 64 threads walks one
+// line of pixels toward the sun; each thread reads its own depths and shares them in groupshared memory. The dispatches come
+// from Bend's BuildDispatchList (core/BendDispatch.h).
+//
+// CS multiplies the result into the sun term of its lit shaders. New Vegas has no depth before its lit pass, so this runs after
+// the frame's world (step 11 of the effect chain) and writes, per pixel, the visibility AND the view depth it was made at
+// (TESR_ContactForward, rg16f: r visibility 1 = lit, g view depth in game units, 0 = no data). Next frame the lit shaders
+// project their point into this frame's camera and take r where g matches their own depth (Includes/Shadow.hlsl).
+//
+// Differences from CS, none of which change Bend's result for a pixel it shades:
+//   - the depth is linear (CombineDepth R32F, view depth / far): made non-linear here as Depth.hlsl's projectedDepthFromLinear
+//     does (near 1, far 0: FarDepthValue 0, NearDepthValue 1, so z_sign -1); the sun is at -near / (far - near) in it;
+//   - reads off the render rect (Bend's clamp-to-border sampler) return the far depth by an explicit test;
+//   - the sample count is a push constant (CS compiles one shader per count);
+//   - the first-person weapon (its own depth buffer, as Hi-Z tells it apart) casts nothing on the world, and its pixels are
+//     written "no data" (they are drawn with their own projection and never match a world point);
+//   - pixels Bend returns early on (sky, near plane) are written lit with no data (CS clears its mask to 1 first).
+
+#define WAVE_SIZE 64
+#define MAX_SAMPLES 248
+#define MAX_READS (MAX_SAMPLES / WAVE_SIZE + 2)
+
+layout(local_size_x = WAVE_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_depth;          // CombineDepth: x view depth / far
+layout(set = 1, binding = 1) uniform texture2D t_viewModel;      // the first-person weapon's raw depth (TextureManager DepthTextureViewModel)
+layout(set = 1, binding = 2, rg16f) uniform writeonly image2D i_out;
+
+layout(push_constant) uniform Push {
+    vec4  lightCoordinate;    // Bend's: xy the sun on the render rect (pixels), z its depth, w +1 / -1 (BuildDispatchList)
+    ivec2 waveOffset;         // this dispatch's (BuildDispatchList)
+    ivec2 size;               // the render rect (pixels)
+    float surfaceThickness;
+    float bilinearThreshold;
+    float shadowContrast;
+    float nearZ;
+    float farZ;
+    float invertedDepth;      // TESR_DepthConstants.z: 1 when the depth buffers are reversed (the weapon test, as HiZBuild.comp)
+    uint  sampleCount;
+    uint  readCount;
+} pc;
+
+shared float DepthData[MAX_READS * WAVE_SIZE];
+shared float DepthDataWorld[MAX_READS * WAVE_SIZE];   // the same without the weapon's pixels (they cast nothing on the world)
+
+bool Inside(ivec2 p) { return p.x >= 0 && p.y >= 0 && p.x < pc.size.x && p.y < pc.size.y; }
+
+bool Weapon(ivec2 p) {
+    float w = texelFetch(t_viewModel, p, 0).x;
+    return pc.invertedDepth == 0.0 ? w < 1.0 : w > 0.0;   // as CombineDepth takes the view model's depth
+}
+
+// Depth.hlsl's projectedDepthFromLinear of what the texel holds; off the render rect the far depth (0).
+float ReadDepth(vec2 xy) {
+    ivec2 p = ivec2(floor(xy));
+    if (!Inside(p)) return 0.0;
+    float viewZ = max(texelFetch(t_depth, p, 0).x * pc.farZ, 1.0e-6);
+    return pc.nearZ * (pc.farZ - viewZ) / (viewZ * (pc.farZ - pc.nearZ));
+}
+
+void main() {
+    ivec3 inGroupID = ivec3(gl_WorkGroupID);
+    int inGroupThreadID = int(gl_LocalInvocationID.x);
+
+    // --- ComputeWavefrontExtents ---------------------------------------------------------------
+    ivec2 xy = inGroupID.yz * WAVE_SIZE + pc.waveOffset.xy;
+
+    vec2 light_xy = floor(pc.lightCoordinate.xy) + 0.5;
+    vec2 light_xy_fraction = pc.lightCoordinate.xy - light_xy;
+    bool reverse_direction = pc.lightCoordinate.w > 0.0;
+
+    ivec2 sign_xy = ivec2(sign(vec2(xy)));
+    bool horizontal = abs(xy.x + sign_xy.y) < abs(xy.y - sign_xy.x);
+
+    ivec2 axis;
+    axis.x = horizontal ? (+sign_xy.y) : 0;
+    axis.y = horizontal ? 0 : (-sign_xy.x);
+
+    xy = axis * inGroupID.x + xy;
+    vec2 xy_f = vec2(xy);
+
+    bool x_axis_major = abs(xy_f.x) > abs(xy_f.y);
+    float major_axis = x_axis_major ? xy_f.x : xy_f.y;
+
+    float major_axis_start = abs(major_axis);
+    float major_axis_end = abs(major_axis) - float(WAVE_SIZE);
+
+    float ma_light_frac = x_axis_major ? light_xy_fraction.x : light_xy_fraction.y;
+    ma_light_frac = major_axis > 0.0 ? -ma_light_frac : ma_light_frac;
+
+    vec2 start_xy = xy_f + light_xy;
+    vec2 end_xy = mix(pc.lightCoordinate.xy, start_xy, (major_axis_end + ma_light_frac) / (major_axis_start + ma_light_frac));
+    vec2 xy_delta = start_xy - end_xy;
+
+    float thread_step = float(inGroupThreadID ^ (reverse_direction ? 0 : (WAVE_SIZE - 1)));
+
+    vec2 pixel_xy = mix(start_xy, end_xy, thread_step / float(WAVE_SIZE));
+    float pixel_distance = major_axis_start - thread_step + ma_light_frac;
+
+    // --- WriteScreenSpaceShadow ----------------------------------------------------------------
+    float sampling_depth0 = 0.0;
+    float depth_thickness_scale0 = 1.0;
+    float sample_distance0 = 0.0;
+    bool weapon0 = false;
+
+    const float direction = -pc.lightCoordinate.w;
+    const float z_sign = -1.0;   // NearDepthValue 1 > FarDepthValue 0
+    const float FarDepthValue = 0.0;
+
+    vec2 write_xy = floor(pixel_xy);
+
+    for (int i = 0; i < int(pc.readCount); i++) {
+        vec2 read_xy = floor(pixel_xy);
+        float minor_axis = x_axis_major ? pixel_xy.y : pixel_xy.x;
+        float bilinear = fract(minor_axis) - 0.5;
+        read_xy += 0.5;   // USE_HALF_PIXEL_OFFSET
+        float bias = bilinear > 0.0 ? 1.0 : -1.0;
+        vec2 offset_xy = vec2(x_axis_major ? 0.0 : bias, x_axis_major ? bias : 0.0);
+
+        vec2 depths = vec2(ReadDepth(read_xy), ReadDepth(read_xy + offset_xy));
+
+        float thickness_scale = max(abs(FarDepthValue - depths.x), 1e-4);   // (CS: the 1e-4 floor)
+        bool use_point_filter = abs(depths.x - depths.y) > thickness_scale * pc.bilinearThreshold;
+        float shadow_depth = depths.x + abs(depths.x - depths.y) * z_sign;
+        float shadowing_depth = use_point_filter ? depths.x : shadow_depth;   // IgnoreEdgePixels false (CS)
+        float sample_distance = pixel_distance + float(WAVE_SIZE * i) * direction;
+
+        ivec2 read_p = ivec2(floor(read_xy));
+        bool weapon = Inside(read_p) && Weapon(read_p);
+        if (i == 0) {
+            sampling_depth0 = depths.x;
+            depth_thickness_scale0 = thickness_scale;
+            sample_distance0 = sample_distance;
+            weapon0 = weapon;
+        }
+
+        // Perspective correct the shadowing depth: in this space all light rays are parallel. For pixels within
+        // sampling distance of the light, extended reads can overshoot the light coordinate: ignored.
+        float stored_depth = (shadowing_depth - pc.lightCoordinate.z) / sample_distance;
+        if (i != 0) stored_depth = sample_distance > 0.0 ? stored_depth : 1e10;
+
+        int idx = i * WAVE_SIZE + inGroupThreadID;
+        DepthData[idx] = stored_depth;
+        DepthDataWorld[idx] = weapon ? 1e10 : stored_depth;
+
+        pixel_xy += xy_delta * direction;
+    }
+
+    barrier();
+
+    ivec2 write_p = ivec2(write_xy);
+    bool inside = Inside(write_p);
+    float start_depth = sampling_depth0;
+    if (start_depth == 0.0 || start_depth == 1.0 || weapon0) {
+        if (inside) imageStore(i_out, write_p, vec4(1.0, 0.0, 0.0, 0.0));
+        return;
+    }
+
+    start_depth = mix(start_depth, FarDepthValue, -1.0 / 65535.0);   // UsePrecisionOffset (CS sets it)
+    start_depth = (start_depth - pc.lightCoordinate.z) / sample_distance0;
+
+    int sample_index = inGroupThreadID + 1;
+    vec4 shadow_value = vec4(1.0);
+    float depth_scale = min(sample_distance0 + direction, 1.0 / pc.surfaceThickness) * sample_distance0 / depth_thickness_scale0;
+    start_depth = start_depth * depth_scale - z_sign;
+
+    for (int i = 0; i < int(pc.sampleCount); i++) {
+        float depth_delta = abs(start_depth - DepthDataWorld[sample_index + i] * depth_scale);
+        shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta);
+    }
+
+    shadow_value = clamp(shadow_value * pc.shadowContrast + (1.0 - pc.shadowContrast), 0.0, 1.0);
+    float result = dot(shadow_value, vec4(0.25));
+
+    // The view depth this pixel was made at (the lit shaders compare theirs with it next frame)
+    float viewZ = texelFetch(t_depth, write_p, 0).x * pc.farZ;
+    if (inside) imageStore(i_out, write_p, vec4(result, viewZ, 0.0, 0.0));
+}

@@ -8,12 +8,12 @@ void CinemaEffect::UpdateConstants() {
 	Constants.Data.x = 1.0f;
 	if (!Enabled) return;
 
-	// Mode 0: always on; 1: off in dialog/persuasion; 2: dialog only; 3: persuasion only; 4: either of the two
+	// Mode 0: always on; 1: off in dialogue; 2: dialogue only; 3: never (it was Oblivion's persuasion only; New Vegas has no
+	// persuasion menu); 4: dialogue only (it was dialogue or persuasion)
 	bool suppressed = false;
-	if (Mode == 1) suppressed = game.isDialog || game.isPersuasion;
-	else if (Mode == 2) suppressed = !game.isDialog;
-	else if (Mode == 3) suppressed = !game.isPersuasion;
-	else if (Mode == 4) suppressed = !(game.isDialog || game.isPersuasion);
+	if (Mode == 1) suppressed = game.isDialog;
+	else if (Mode == 2 || Mode == 4) suppressed = !game.isDialog;
+	else if (Mode == 3) suppressed = true;
 
 	if (!suppressed) Constants.Data.x = aspectRatio;
 }

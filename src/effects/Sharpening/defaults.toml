@@ -1,13 +1,12 @@
 [_Shaders.Sharpening.Main]
-Clamp = 0.1
-Offset = 2.0
-Strength = 0.75
+Clamp = 0.1                         # Unused (kept for older tomls): AMD CAS limits itself, it cannot overshoot.
+Offset = 2.0                        # [0-50] The distance the sharpening fades out by, in thousands of units (2.0 = 2000 units, about 28 m): full at the camera, none past it, so far land and the sky are left alone. 0 = off.
+Strength = 0.5                      # [0-1] UNOFFICIAL (2026-11-04): AMD FidelityFX CAS sharpness (Contrast Adaptive Sharpening). 0 = the lightest CAS (not off: use Enabled), 1 = the strongest. Low-contrast detail is sharpened most; strong edges are left nearly alone, so no halos. Outdoors.
 
 [_Shaders.Sharpening.Interiors]
-Clamp = 0.1                         # UNOFFICIAL: the same settings for interiors (Main is outdoors).
-Offset = 2.0
-Strength = 0.75
+Clamp = 0.1                         # Unused (as Main).
+Offset = 2.0                        # [0-50] As Main, indoors.
+Strength = 0.5                      # [0-1] As Main (CAS sharpness), indoors.
 
 [_Shaders.Sharpening.Status]
-Enabled = false                     # Edge contrast shader to increase detail sharpness.
-
+Enabled = false                     # AMD FidelityFX Contrast Adaptive Sharpening (CAS) on the finished picture, faded out with distance.

@@ -118,6 +118,7 @@ LampCapsCensus = 0           # TEST (2026-10-31), development builds only, needs
 PbrPopSpecLODEnd = 0.0       # TEST (2026-10-18), development builds only: moves the game's highlight distance to this many units (its fade range kept) and rebuilds every object's passes, to see objects cross it with a still camera. 0 = the game's own.
 
 [_Main.Main.Performance]
+GpuProfile = false             # UNOFFICIAL TEST AID (2026-11-05), live: switching this on or off does what F10 does (the GPU PROFILE lines in the log, per effect), for unattended benches that cannot press keys. Leave off for play.
 SkipRedundantConstants = true # UNOFFICIAL: skip shader-constant uploads that set exactly what the graphics device already holds (measured indoors: about 9 in 10 of them). Same picture; less work for the CPU, which indoors is what limits the frame rate. Live: F10 logs a CONSTANT FILTER line. Turn off if anything ever renders wrong.
 SettingsCache = true         # UNOFFICIAL (2026-10-30), live: each setting's value is read from the settings file's tree once and kept until any setting changes (the effects read theirs every frame; about 2 % of the main thread). Same values. false = every read walks the tree as before.
 SkinnedShadowFaceTest = true # UNOFFICIAL: lamp shadows (interior cube maps) draw characters only into the cube faces their skeleton can reach, instead of all six; bounds rebuilt from the bones each frame, so the shadows are the same. Big CPU saving with many NPCs near lamps. Live: F10 logs a POINT SHADOWS skinned casters line. Turn off if a character's shadow ever goes missing near a lamp.
@@ -298,37 +299,10 @@ RemoveUnderwater = false    # Disables fog underwater. Not compatible with custo
 ReflectionClipFix = true # UNOFFICIAL, BUG FIX (on by default): water reflections lost the far buildings and showed below-water ground when you looked level or up. The game sets the reflection's water-height clip plane once, before the reflection pass binds a vertex shader, and the driver then applies it wrongly to that pass's draws; the mod re-issues the same plane at every draw of the pass so it takes. Off = the game's behaviour. Applies immediately.
 
 [_Main.Menu.Keys]
-KeyAdd = 78                 # Keycode for increment value shortcut in menu.
-KeyDown = 208               # Keycode for the hotkey to navigate down in the main menu.
-KeyEditing = 156            # Keycode for the hotkey to toggle custom value entry mode in menu.
 KeyEnable = 24              # Keycode for the hotkey to activate the main menu.
-KeyLeft = 203               # Keycode for the hotkey to navigate left in the main menu.
-KeyPageDown = 209           # Keycode for the hotkey to go to next page of options in the main menu.
-KeyPageUp = 201             # Keycode for the hotkey to go to previous page of options in the main menu.
-KeyRight = 205              # Keycode for the hotkey to navigate right in the main menu.
-KeySave = 28                # Keycode for the hotkey to save changes done in the main menu (if not used, will revert upon restart).
-KeySubtract = 74            # Keycode for decrement value shortcut in menu.
-KeyUp = 200                 # Keycode for the hotkey to navigate up in the main menu.
-EntryUseNumpad = true       # Wether to use the numpad numbers or the other numbers. Start entry with "=" or numpad "Enter"
 MasterSwitchModifier = 2    # Modifier for RenderEffects hotkey (toggle key + modifier): 0=off, 1=ctrl, 2=alt, 3=shift
 
 [_Main.Menu.Style]
-ItemColumnSize = 300                    # Custom size for menu columns.
-MainItemColumnSize = 100                # Custom size for menu leftmost column.
-PositionX = 60                          # Left position of the menu on the screen.
-PositionY = 60                          # Top position of the menu on the screen.
-RowSpace = 0                            # Custom padding between rows for the menu.
-RowsPerPage = 35                        # Max amount of items to display per page on the menu.
-TextColorEditing = '255,100,50'         # Custom color for value being edited during value entry.
-TextColorEnabled = '100,170,90'         # Custom color for active effects.
-TextColorNormal = '240,200,80'          # Custom color for normal menu text.
-TextColorSelected = '255,255,255'       # Custom color for selected menu text.
-TextFont = 'Calibri'                    # Custom font for menu text.
-TextFontStatus = 'Consolas'             # Custom font for enabled/disabled shader text.
-TextShadowColorEditing = '50,50,50'     # Custom shadow color for value being edited during value entry.
-TextShadowColorEnabled = '50,50,50'     # Custom shadow color for enabled/disabled text.
-TextShadowColorNormal = '50,50,50'      # Custom shadow color for normal text.
-TextShadowColorSelected = '50,50,50'    # Custom shadow color for selected text.
 TextSize = 22                           # Font size for normal text.
 SidebarWidth = 260                      # UNOFFICIAL (2026-10-25): width of the menu's left column (effects and shaders) in pixels. Drag the gap between the two columns to change it; double-click it for 260 again.
 Skin = "Default"                        # (2026-11-02) the menu's look: Default, Pip-Boy, Vault-Tec, Amber Terminal, NCR, Legion, Brotherhood, Strip Neon, Midnight, High Contrast, Light, or the Name of a skin file in Data\VegasShaders\Skins\ (View > Skin > Export writes one to start from: colours, rounding, a background picture). The Custom keys below change single parts on top of whichever skin is picked.
@@ -346,8 +320,6 @@ CustomOpacity = 0.0                     # (2026-11-02) your own opacity for the 
 CustomImage = ""                        # (2026-11-02) your own background picture for the menu: a file in Data\VegasShaders\Skins\ or a full path (png, jpg, dds, bmp). "none" = no picture, empty = the skin's.
 CustomImageOpacity = -1.0               # (2026-11-02) how strongly the background picture shows (0-1). -1 = the skin's.
 CustomImageFit = ""                     # (2026-11-02) how the background picture fills the window: cover, contain or stretch. Empty = the skin's.
-TextSizeStatus = 12                     # Font size for enabled/disabled text.
-TitleColumnSize = 850                   # Custom size for title column.
 
 [_Main.Menu.NewInPatch]
 NewSince = "2026-10-19"      # UNOFFICIAL, hidden in the menu and read from this file only (never saved to your own settings): the menu tab "New in this patch" lists every setting whose description in this file holds a date (like "(2026-10-17)") on or after this day. It is the day after the last release (P81 playtest v8, 2026-10-18). Change it here when a new patch ships. Empty = no date rule.
@@ -1326,6 +1298,7 @@ RadiusY = 2.6                        # Its radius along bone y (units; the vanil
 RadiusZ = 2.6                        # Its radius along bone z (units; about 2.7-3.5 inside)
 WristScale = 0.6                     # The casing narrows towards the wrist (inside about 2 units across its last 4): the radius is scaled down to this at End
 Axis = 0                             # Which axis of the ForeTwist bone runs along the forearm (0 x, the vanilla skeleton's; 1 y, 2 z)
+PowerArmor = false                   # Also fit while you wear power armor (off: power armor arms are left as they are, its gauntlets are too bulky to squeeze). Live
 ThirdPerson = true                   # Also fit your own sleeves in third person (only your character; NPCs are never changed)
 Exclude = "pipboy"                   # Meshes whose name holds one of these (comma-separated) are never squeezed: the Pip-Boy itself
 [_Shaders.PBR.Linear]
@@ -1495,6 +1468,16 @@ RenderDistance = 180000              # Max distance at which to compute screen s
 Intensity = 0.315                    # Rescale the intensity of screenspace shadows, to combat jitter and blur making them very faint even at maximum brightness.
 NearFade = 400.0                     # UNOFFICIAL (2026-10-27), applies immediately: contact shadows fade in with distance from the camera, none nearer than half of this, full from this (game units, 70 = 1 m). Up close the sharp sun shadows already show the real shapes, and the contact shadows drew low-poly noses, brows and collars as hard triangles on characters (the 'facets', worst with Sharp). 0 = everywhere, as before.
 Sharp = false                        # UNOFFICIAL: sharper, steadier contact shadows for less: the ray toward the sun followed in 16 even steps instead of 4 random ones smoothed by two big blurs (about a third of the cost). With forward shadows (the default). BlurRadius is not used with it on.
+Bend = true                          # UNOFFICIAL (2026-11-06), turning on needs a restart: Skyrim Community Shaders' screen-space shadows (Bend Studio's), as CS uses them: in the lit shaders, darkening only the sun's light (not the ambient, as the old contact shadows did). Needs InLighting, ForwardShadows and the Vegas Shaders DXVK (fork) d3d9.dll; without them the old contact shadows are used. Each pixel takes last frame's result where it is the same surface, so things that move get theirs a frame late. Enabled (above) switches them off live.
+InLighting = true                    # UNOFFICIAL (2026-11-06), turning on needs a restart: with Bend, the contact shadows are applied inside the lit shaders to the sun only. false = the old contact shadows (a pass over the finished picture).
+SampleMultiplier = 1                 # UNOFFICIAL (2026-11-06) [1-4], with Bend, live: CS's Sample Count Multiplier. How far each contact shadow reaches across the screen (60 samples per ray at 1080p, times this); more costs more GPU.
+SurfaceThickness = 0.02              # UNOFFICIAL (2026-11-06) [0.005-0.05], with Bend, live: CS's Surface Thickness: how thick each surface is assumed to be behind what the screen shows. Larger = more and longer shadows, also behind thin things where there should be none.
+BilinearThreshold = 0.02             # UNOFFICIAL (2026-11-06) [0.02-1.0], with Bend, live: CS's Bilinear Threshold: depth steps bigger than this (relative) are read sharp instead of smoothed, so edges of objects cast and do not bleed.
+ShadowContrast = 1.0                 # UNOFFICIAL (2026-11-06) [0.0-4.0], with Bend, live: CS's Shadow Contrast: above 1 the contact shadows get darker and harder, below 1 lighter.
+DepthTolerance = 0.02                # UNOFFICIAL (2026-11-06) [0.002-0.2], with Bend, live: how close (fraction of the distance) a pixel must be to where last frame's contact shadow was made to take it. Smaller = fewer wrong shadows at the edges of moving things, larger = fewer holes on surfaces seen at a grazing angle.
+StartDistance = 0.0                  # UNOFFICIAL (2026-11-06) [0-40000], with Bend, live (menu slider): the Bend contact shadows start this far from the camera (game units, 70 = 1 m) and are full FadeLength further; nearer, the sun's shadow maps alone shade. 0 = where the shadow maps end ([ShadowMaps] Distance minus FadeLength). 64 = everywhere (as Community Shaders).
+FadeLength = 1000.0                  # UNOFFICIAL (2026-11-06) [100-10000], with Bend, live (menu slider): how far the Bend contact shadows take to fade in after StartDistance (game units).
+BendDebug = 0                        # UNOFFICIAL (2026-11-06), diagnostic, with Bend, live: 1 = the sun's light shows the Bend contact shadows alone (the shadow maps left out), 2 = where last frame's result was taken (white) and where not (black: no contact there).
 FastPaths = true                     # UNOFFICIAL (2026-10-17): the same contact shadows for less GPU time: the march's early exits (too far, surface turned away from the sun) really skip work (the shader compiler had turned them into work every pixel did). Off = the original pass. Applies immediately
 
 [_Shaders.ShadowsExteriors.ShadowMaps]
@@ -1602,7 +1585,6 @@ PlayerLampMargin = 16.0              # [0-64] How close (world units, about 70 t
 Quality = 1                          # Not currently used.
 ShadowCubeMapSize = 512              # The resolution of one face for the point light shadow cubemaps.
 Statics = true                       # Wether to include objects with "Statics" flag when rendering shadowmaps.
-TorchesCastShadows = true            # Used in Oblivion to enable shadows on torches.
 SkinnedAlphaTest = true              # UNOFFICIAL BUG FIX (2026-11-02), live: in lamp shadows, characters' alpha-tested parts (hair cards, fringes, ragged cloth) cast only where their texture is solid. Before, the whole card cast, so hair under a lamp sat in its own shadow and came out near black. false = as before.
 TwoSidedCasters = false              # UNOFFICIAL (2026-10-29), live, TEST: lamp shadows drawn from both sides of every object, as the sun's are. Without it a lamp's shadow map kept the side of each object turned AWAY from the lamp, so open or thin things (cups, glasses, bowls, characters near a lamp) cast rings or shadows that trace the inside of the mesh. false = as before.
 DrawDistance = 4000                  # Max distance for point light shadow rendering.
@@ -1794,18 +1776,17 @@ ShowHudMask = false                  # UNOFFICIAL, test only: tint green the pix
 CaptureFrame = 0                     # UNOFFICIAL, test only: each new non-zero value saves, 60 frames later, one frame of the HDR output (as sent to the display, in nits) to VegasShaders-Logs\NeonSelfTest_HdrCapture_<value>.pfm.world (a PFM image) and logs its brightness.
 
 [_Shaders.Sharpening.Main]
-Clamp = 0.1
-Offset = 2.0
-Strength = 0.75
+Clamp = 0.1                         # Unused (kept for older tomls): AMD CAS limits itself, it cannot overshoot.
+Offset = 2.0                        # [0-50] The distance the sharpening fades out by, in thousands of units (2.0 = 2000 units, about 28 m): full at the camera, none past it, so far land and the sky are left alone. 0 = off.
+Strength = 0.5                      # [0-1] UNOFFICIAL (2026-11-04): AMD FidelityFX CAS sharpness (Contrast Adaptive Sharpening). 0 = the lightest CAS (not off: use Enabled), 1 = the strongest. Low-contrast detail is sharpened most; strong edges are left nearly alone, so no halos. Outdoors.
 
 [_Shaders.Sharpening.Interiors]
-Clamp = 0.1                         # UNOFFICIAL: the same settings for interiors (Main is outdoors).
-Offset = 2.0
-Strength = 0.75
+Clamp = 0.1                         # Unused (as Main).
+Offset = 2.0                        # [0-50] As Main, indoors.
+Strength = 0.5                      # [0-1] As Main (CAS sharpness), indoors.
 
 [_Shaders.Sharpening.Status]
-Enabled = false                     # Edge contrast shader to increase detail sharpness.
-
+Enabled = false                     # AMD FidelityFX Contrast Adaptive Sharpening (CAS) on the finished picture, faded out with distance.
 [_Shaders.HeatHaze.Main]
 Strength = 2.5                         # [0.0-8.0] How far the haze displaces the image at its hottest, in pixels (at 1080p). It follows the heat: zero at night, building from sunrise to PeakHour, fading to zero by sunset; full in clear weather, CloudyScale of it when cloudy, none in rain or snow or while the ground is still wet.
 StartDistance = 1500.0                 # [0-20000] No haze nearer than this (game units), so nearby things never waver.
@@ -2723,7 +2704,6 @@ PersistentDebugView = 0             # (Persistent wetness and snow) Test view. 1
 
 [_Shaders.WetWorld.Status]
 Enabled = true                      # Water ripples on surfaces, and puddles based on physical terrain pockets during rainy weathers. 
-
 [_Shaders.WetnessEffects.Status]
 Enabled = false                     # UNOFFICIAL (2026-11-04), restart: Wetness Effects (from Physically-Based-Reloaded, after Community Shaders), in place of WetWorld's screen-space wet pass: in the rain surfaces darken and gain a glossy water film, puddles form on flat ground, drops ripple on the land, nothing gets wet under cover. Needs the sun cross-fade off ([Shaders.ShadowsExteriors.SunSmoothing] CrossFade). While on, WetWorld draws nothing (its rain tracking still drives the weapon drops, the persistent wet cover and PBR's rain).
 

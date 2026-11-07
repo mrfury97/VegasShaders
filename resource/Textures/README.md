@@ -19,9 +19,7 @@ original file's size, mip count, pixel format and channel layout, so the shaders
 | `Water/water_NRM_LOD.dds` | 4096x128 R8G8B8, no mips | 32 looping 128x128 frames: RG wave normal xy, B crest height | none at present |
 | `Water/watercalm_NRM.dds` | 4096 DXT5, 13 mips | calm-water normal map (long swells, fine ripples) | WATER001, WATER018 |
 | `Water/caust_001.dds` | 256 DXT1, 9 mips | caustics: light refracted through a tiling wave surface onto a floor (red used) | Underwater |
-| `Precipitations/puddles.dds` | 2048 DXT5, 12 mips | three soft puddle masks in R, G, B (1 = dry) | none at present |
 | `Precipitations/ripples.dds` | 256 A8R8G8B8, 9 mips | rain drops: R = 1 at centre to 0 at rim, GB = outward direction (x right, y up) as 0.5+0.5*dir, A = phase | water shaders (ComputeRipple), WetWorld |
-| `Precipitations/snow.dds` | 512 DXT5, 10 mips | blue-white snow with fine grain | none at present |
 | `Precipitations/snow_NRM.dds` | 512 R8G8B8, no mips | snow grain + soft drift normal map | SnowAccumulation |
 | `VegasShaders/LUTs/neutral_lut.png` | 256x16 RGB | exact identity LUT strip (16 slices of 16x16) | LUT (skipped when it is the identity) |
 

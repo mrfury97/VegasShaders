@@ -29,7 +29,6 @@ PlayerLampMargin = 16.0              # [0-64] How close (world units, about 70 t
 Quality = 1                          # Not currently used.
 ShadowCubeMapSize = 512              # The resolution of one face for the point light shadow cubemaps.
 Statics = true                       # Wether to include objects with "Statics" flag when rendering shadowmaps.
-TorchesCastShadows = true            # Used in Oblivion to enable shadows on torches.
 SkinnedAlphaTest = true              # UNOFFICIAL BUG FIX (2026-11-02), live: in lamp shadows, characters' alpha-tested parts (hair cards, fringes, ragged cloth) cast only where their texture is solid. Before, the whole card cast, so hair under a lamp sat in its own shadow and came out near black. false = as before.
 TwoSidedCasters = false              # UNOFFICIAL (2026-10-29), live, TEST: lamp shadows drawn from both sides of every object, as the sun's are. Without it a lamp's shadow map kept the side of each object turned AWAY from the lamp, so open or thin things (cups, glasses, bowls, characters near a lamp) cast rings or shadows that trace the inside of the mesh. false = as before.
 DrawDistance = 4000                  # Max distance for point light shadow rendering.

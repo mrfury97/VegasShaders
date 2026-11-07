@@ -24,7 +24,7 @@ namespace {
 		"Effects\\BloodDrops.dds", "Effects\\bloodlens.dds", "Effects\\BloodRuns.dds", "Effects\\BloodSpatterSmall.dds", "Effects\\bluenoise256.dds",
 		"Effects\\CloudDetail.dds", "Effects\\CloudShape.dds", "Effects\\CloudWeather.dds", "Effects\\noise.dds", "Effects\\NoiseVolume.dds",
 		"Effects\\SMAA_AreaTex.dds", "Effects\\SMAA_SearchTex.dds", "Effects\\Snownoise256.dds", "Effects\\water_NRM_lens.dds",
-		"Precipitations\\puddles.dds", "Precipitations\\ripples.dds", "Precipitations\\snow.dds", "Precipitations\\snow_NRM.dds",
+		"Precipitations\\ripples.dds", "Precipitations\\snow_NRM.dds",	// (2026-11-05: puddles.dds and snow.dds, read by nothing, removed)
 		"Precipitations\\splash.dds", "Precipitations\\splash_n.dds", "Precipitations\\water-streaks_n.dds",
 		"Water\\caust_001.dds", "Water\\watercalm_NRM.dds", "Water\\water_d.dds", "Water\\water_NRM.dds", "Water\\water_NRM_LOD.dds" };
 

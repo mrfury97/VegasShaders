@@ -37,7 +37,6 @@ public:
 	struct RenderInterface { static const UInt32 Hook = 0x007144D3; };
 	struct Shadows {	// shadow caster selection
 		static const UInt32 RenderShadowMap1Hook = 0x0087084E;	// (patch currently disabled)
-		static const UInt32 AddCastShadowFlagHook = 0x0050DD06, AddCastShadowFlagReturn = 0x0050DD0B;
 		static const UInt32 LeavesNodeNameHook = 0x0066A112, LeavesNodeNameReturn = 0x0066A11E;
 	};
 	struct SetTileShaderConstants { static const UInt32 Hook = 0x00BCAAD7, Return = 0x00BCAADE; };
