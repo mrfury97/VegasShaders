@@ -14,6 +14,71 @@ bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal);	// 
 #include "GpuProfiler.h"
 #include "PlantWind.h"	// (2026-10-30) PlantSway: a wind-bent plant's traced instance leans with it
 #include "../../tools/nvr-rt-helper/NvrRtProtocol.h"
+#include "RtScenePick.h"	// (2026-11-06) the scene picking rules (tested by tools/nvr-rt-host)
+
+// UNOFFICIAL 2026-11-05 (rtrefl-only: the demo room's ceiling met by no reflection ray) the first 64 distinct meshes a cell that the
+// traced scene leaves out, with why.
+static void LogLeftOut(const NiGeometry* geo, const char* why, int shaderType) {
+	static std::vector<std::string> told;
+	static std::unordered_map<const void*, bool> seen;	// geometries met this cell (cheap: this runs for every left-out mesh every frame)
+	static const void* toldCell = nullptr;
+	if (Player && Player->parentCell != toldCell) { toldCell = Player->parentCell; told.clear(); seen.clear(); }
+	if (told.size() >= 64 || seen.size() > 4096 || !seen.emplace(geo, true).second) return;
+	char what[192];
+	_snprintf_s(what, _TRUNCATE, "'%s' %s%s", geo && geo->m_pcName ? geo->m_pcName : "", why, shaderType >= 0 ? " (shader type " : "");
+	std::string key(what);
+	if (shaderType >= 0) key += std::to_string(shaderType) + ")";
+	if (std::find(told.begin(), told.end(), key) != told.end()) return;
+	told.push_back(key);
+	Logger::Log("RT CORE: left out of the traced scene: %s", key.c_str());
+}
+
+// UNOFFICIAL 2026-11-06 (alpha lamp shadows: VS-AlphaLampTest's chain-link fence cast no traced shadow) the first 64 meshes (by name) a
+// cell that the traced scene takes, alpha-tested ones with their atlas slot and alpha reference: with LogLeftOut, which meshes rays can meet.
+static void LogAlphaTaken(const NiGeometry* geo, int slot, unsigned ref, bool blended) {
+	static std::unordered_map<const void*, bool> seen;		// geometries met this cell (cheap: this runs for every taken mesh every frame)
+	static std::unordered_map<std::string, bool> names;	// (2026-11-06 b) one line a mesh name + slot: a room's 40 copies of one wall filled the cap
+	static const void* toldCell = nullptr;
+	static int told = 0;
+	if (Player && Player->parentCell != toldCell) { toldCell = Player->parentCell; seen.clear(); names.clear(); told = 0; }
+	if (told >= 64 || seen.size() > 8192 || !seen.emplace(geo, true).second) return;
+	if (!names.emplace(std::string(geo && geo->m_pcName ? geo->m_pcName : "") + "#" + std::to_string(slot), true).second) return;
+	told++;
+	// (2026-11-06 c, the demo room's missing office-kit ceiling) every taken mesh, not only alpha-tested ones (slot -1 / ref 999: opaque),
+	// with its world bound's centre (camera relative) and radius: which part of a kit piece is the ceiling, and is it taken
+	const NiBound* b = geo ? geo->m_kWorldBound : nullptr;
+	const float cz = b ? b->Center.z - TheRenderManager->CameraPosition.z : 0.0f, r = b ? b->Radius : 0.0f;
+	if (ref > 255u) Logger::Log("RT CORE: in the traced scene: '%s' opaque, bound centre z %+.0f (camera relative), r %.0f", geo && geo->m_pcName ? geo->m_pcName : "", cz, r);
+	else {
+		// (2026-11-06 d) the alpha property's test function (flags bits 10-12: 0 ALWAYS, 1 LESS, 2 EQUAL, 3 LEQUAL, 4 GREATER, 5 NOTEQUAL,
+		// 6 GEQUAL, 7 NEVER); the RT test assumes GREATER
+		const NiAlphaProperty* ap = geo ? (const NiAlphaProperty*)const_cast<NiGeometry*>(geo)->GetProperty(NiProperty::PropertyType::kType_Alpha) : nullptr;
+		static const char* const funcs[8] = { "ALWAYS", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "NEVER" };
+		Logger::Log("RT CORE: alpha-tested in the traced scene: '%s' atlas slot %d, alpha ref %u, test %s (flags %04X)%s, bound centre z %+.0f, r %.0f",
+			geo && geo->m_pcName ? geo->m_pcName : "", slot, ref, ap ? funcs[(ap->flags >> 10) & 7] : "?", ap ? (unsigned)ap->flags : 0u, blended ? " (also blended)" : "", cz, r);
+	}
+}
+
+// UNOFFICIAL 2026-11-06 (gs-hill: PTPrimary 0 showed a huge rounded mesh with huge texels just left of the camera in Goodsprings, drawn
+// by no raster pass; the 64-name cap above never reached it) every LARGE taken mesh (world bound radius 300+), once a cell, up to 256:
+// its bound centre (camera relative, x y z) and radius, its world scale and its parents' names (the NIF's nodes), so a mesh far bigger
+// than it should be, or standing where the game draws nothing, can be named.
+static void LogBigTaken(const NiGeometry* geo) {
+	const NiBound* b = geo ? geo->m_kWorldBound : nullptr;
+	if (!b || b->Radius < 300.0f) return;
+	static std::unordered_map<const void*, bool> seen;
+	static const void* toldCell = nullptr;
+	static int told = 0;
+	if (Player && Player->parentCell != toldCell) { toldCell = Player->parentCell; seen.clear(); told = 0; }
+	if (told >= 256 || !seen.emplace(geo, true).second) return;
+	told++;
+	const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+	std::string parents;
+	const NiNode* p = geo->m_parent;
+	for (int k = 0; p && k < 3; k++, p = p->m_parent) { parents += " < '"; parents += p->m_pcName ? p->m_pcName : ""; parents += "'"; }
+	Logger::Log("RT CORE: big mesh in the traced scene: '%s' bound centre %+.0f %+.0f %+.0f (camera relative), r %.0f, scale %.2f%s",
+		geo->m_pcName ? geo->m_pcName : "", b->Center.x - cam.x, b->Center.y - cam.y, b->Center.z - cam.z, b->Radius, geo->m_worldTransform.scale, parents.c_str());
+}
 
 namespace {
 	const UINT64 kReleaseMargin = 1ull << 20;	// the watchdog / Stop release every wait that could still be recorded
@@ -55,8 +120,13 @@ namespace {
 		const void*	vb;
 		const void*	ib;
 		UInt32		vertCount, triCount, baseVertex;
+		// (2026-11-06) skinned partitions: the actor's skin instance. Actors cloned from one body / armour mesh SHARE the partition data
+		// (BuffData, VB, IB), so two NPCs in the same outfit got one id: both posed into one structure in the same frame (two builds of
+		// one destination in one call: the NVIDIA device-lost crashes, found by the validation layer) and both drawn in the last pose
+		const void*	owner = nullptr;
 		bool operator==(const GeometryKey& o) const {
-			return buffData == o.buffData && vb == o.vb && ib == o.ib && vertCount == o.vertCount && triCount == o.triCount && baseVertex == o.baseVertex;
+			return buffData == o.buffData && vb == o.vb && ib == o.ib && vertCount == o.vertCount && triCount == o.triCount && baseVertex == o.baseVertex &&
+				owner == o.owner;
 		}
 	};
 	struct GeometryKeyHash {
@@ -65,6 +135,7 @@ namespace {
 			h ^= (size_t)k.vb + 0x9e3779b9 + (h << 6) + (h >> 2);
 			h ^= (size_t)k.ib + 0x9e3779b9 + (h << 6) + (h >> 2);
 			h ^= (size_t)(k.vertCount * 31u + k.triCount * 17u + k.baseVertex) + 0x9e3779b9 + (h << 6) + (h >> 2);
+			h ^= (size_t)k.owner + 0x9e3779b9 + (h << 6) + (h >> 2);
 			return h;
 		}
 	};
@@ -212,6 +283,8 @@ namespace {
 		enum State { Idle, Starting, Running, Off };
 		State		state = Idle;
 		std::vector<RtCore::User> users;
+		std::vector<const char*> leftOut;				// (2026-11-05) users whose images did not fit (NVR_RT_MAX_IMAGES) at this helper start
+		bool		Out(const RtCore::User& user) const { for (const char* n : leftOut) if (n == user.Name) return true; return false; }
 		ID3D9NvrExtShare*		share = nullptr;
 		ID3D9NvrExtRt*			rt = nullptr;
 		ID3D9NvrExtRtSkin*		rtSkin = nullptr;	// fork patch 0033 (skinned actors); null without it
@@ -289,8 +362,13 @@ namespace {
 		int			atlasImage = -1;
 		UInt32		atlasUsed = 0, atlasThisFrame = 0, glowSlots = 0;	// glowSlots: slots with a glow map (GlowTextures)
 		std::unordered_map<UInt64, int> alphaSlots;			// diffuse texture | glow texture << 32 -> slot (-1: unreadable)
-		IDirect3DTexture9* alphaUpload = nullptr;			// 64 x 64 R16F, dynamic: one slot's alpha on its way to the atlas
+		IDirect3DTexture9* alphaUpload = nullptr;			// 64 x 64 R16F: the colour pass's alpha target (a scratch since 2026-11-06)
+		IDirect3DTexture9* alphaDetailUpload = nullptr;	// (2026-11-06) AlphaDetail x AlphaDetail R16F: one slot's alpha on its way to the alpha atlas
+		UInt32		alphaDetail = 256;				// (2026-11-06) [Main.Main.RayTracing] AlphaDetail (64 / 128 / 256, restart): the alpha atlas' texels a texture
 		IDirect3DTexture9* albedoUpload = nullptr;			// 64 x 64 A8R8G8B8: one slot's colour on its way to the albedo atlas
+		IDirect3DTexture9* albedoDetailUpload = nullptr;	// (2026-11-06) AlbedoDetail x AlbedoDetail A8R8G8B8: the colour at the albedo atlas' size
+		IDirect3DTexture9* albedoDetailScratch = nullptr;	// (2026-11-06) its alpha target (R16F, same size; the alpha atlas has its own pass)
+		UInt32		albedoDetail = 128;				// (2026-11-06) [Main.Main.RayTracing] AlbedoDetail (64 / 128 / 256, restart): the albedo atlas' texels a texture
 		bool		hitTextures = false;				// [Main.Main.RayTracing] HitTextures (read at each helper start)
 		bool		plantSway = true;					// [Main.Main.RayTracing] PlantSway (2026-10-30, read each frame)
 		UInt32		swayed = 0;							// plant instances leaned (exchanges 1-60, the scene log)
@@ -393,11 +471,14 @@ namespace {
 		static bool triedPipelines[2] = {};
 		const int which = albedoAtlasImage >= 0 ? 1 : 0;
 		ID3D9NvrExtPipeline*& pipeline = pipelines[which];
-		if (!triedPipelines[which]) {
-			triedPipelines[which] = true;
+		// (2026-11-06) the alpha-only pass always too: it fills the alpha atlas at AlphaDetail texels (the colour pass stays at 64)
+		for (int want = 0; want <= which; want += which ? 1 : 2) {
+		ID3D9NvrExtPipeline*& made = pipelines[want];
+		if (!triedPipelines[want]) {
+			triedPipelines[want] = true;
 			std::vector<char> spirv;
 			ID3D9NvrExt* ext = DxvkCompute::Extension();
-			if (ext && DxvkCompute::LoadSpirv(which ? "RtTextureToAtlas" : "RtAlphaToAtlas", spirv)) {
+			if (ext && DxvkCompute::LoadSpirv(want ? "RtTextureToAtlas" : "RtAlphaToAtlas", spirv)) {
 				NVR_EXT_BINDING_DESC bindings[2] = {
 					{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
 					{ 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 4 },
@@ -411,16 +492,19 @@ namespace {
 				desc.UsesSamplerHeap = TRUE;
 				desc.SamplerHeapSet = 0;
 				desc.SamplerHeapBinding = 0;
-				desc.ColorTargetCount = which ? 2 : 1;
+				desc.ColorTargetCount = want ? 2 : 1;
 				desc.Blend = NVR_EXT_BLEND_NONE;
 				desc.ColorWriteMask = 0xFu;
-				desc.pDebugName = which ? "RtTextureToAtlas" : "RtAlphaToAtlas";
-				if (FAILED(ext->CreateGraphicsPipeline(&desc, &pipeline))) pipeline = nullptr;
+				desc.pDebugName = want ? "RtTextureToAtlas" : "RtAlphaToAtlas";
+				if (FAILED(ext->CreateGraphicsPipeline(&desc, &made))) made = nullptr;
 			}
-			if (!pipeline) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT alpha-tested casters: the alpha pass could not be made (Compute\\RtAlphaToAtlas.spv; the DXVK log says why)");
+			if (!made) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT alpha-tested casters: the alpha pass could not be made (Compute\\RtAlphaToAtlas.spv; the DXVK log says why)");
+		}
 		}
 		int slot = -1;
 		if (!alphaUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R16F, D3DPOOL_DEFAULT, &alphaUpload, nullptr);
+		const UInt32 D = alphaDetail;
+		if (!alphaDetailUpload) TheRenderManager->device->CreateTexture(D, D, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R16F, D3DPOOL_DEFAULT, &alphaDetailUpload, nullptr);
 		if (which && !albedoUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &albedoUpload, nullptr);
 		if (glow && !glowUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &glowUpload, nullptr);
 		if (normal && !normalUpload) TheRenderManager->device->CreateTexture(S, S, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &normalUpload, nullptr);
@@ -445,8 +529,41 @@ namespace {
 			const RECT all = { 0, 0, (LONG)S, (LONG)S };
 			const UInt32 at = atlasUsed;
 			const UInt32 x = (at % NVR_RT_ALPHA_ATLAS_SLOTS) * S, y = (at / NVR_RT_ALPHA_ATLAS_SLOTS) * S;
-			if (SUCCEEDED(DxvkCompute::Extension()->Draw(&draw)) && SUCCEEDED(share->CopyToShared(images[atlasImage], x, y, alphaUpload, &all)) &&
-				(!which || SUCCEEDED(share->CopyToShared(images[albedoAtlasImage], x, y, albedoUpload, &all)))) {
+			// (2026-11-06) the alpha atlas at AlphaDetail texels a texture: the alpha-only pass into its own target (the 64-texel colour pass
+			// above keeps the albedo / glow / normal atlases; its alpha target is a scratch). Thin cut-outs (chain-link wires) survive at 256.
+			auto detailAlpha = [&]() {
+				IDirect3DSurface9* dt = nullptr;
+				if (!pipelines[0] || !alphaDetailUpload || FAILED(alphaDetailUpload->GetSurfaceLevel(0, &dt))) return false;
+				NVR_EXT_DRAW_DESC d2 = draw;
+				d2.pPipeline = pipelines[0]; d2.TargetCount = 1; d2.Targets[0].pResource = dt; d2.Targets[1].pResource = nullptr;
+				const RECT allD = { 0, 0, (LONG)D, (LONG)D };
+				const bool okD = SUCCEEDED(DxvkCompute::Extension()->Draw(&d2)) &&
+					SUCCEEDED(share->CopyToShared(images[atlasImage], (at % NVR_RT_ALPHA_ATLAS_SLOTS) * D, (at / NVR_RT_ALPHA_ATLAS_SLOTS) * D, alphaDetailUpload, &allD));
+				dt->Release();
+				return okD;
+			};
+			// (2026-11-06) the albedo atlas at AlbedoDetail texels a texture: the colour pass into targets of that size (glow / normal stay 64).
+			// What mirrors show off screen (a person's front, their face) came from a 64 x 64 copy of the texture: smeared.
+			auto detailAlbedo = [&]() {
+				const UInt32 A = albedoDetail;
+				if (A == S) return SUCCEEDED(DxvkCompute::Extension()->Draw(&draw)) && SUCCEEDED(share->CopyToShared(images[albedoAtlasImage], x, y, albedoUpload, &all));
+				if (!albedoDetailUpload) TheRenderManager->device->CreateTexture(A, A, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &albedoDetailUpload, nullptr);
+				if (!albedoDetailScratch) TheRenderManager->device->CreateTexture(A, A, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R16F, D3DPOOL_DEFAULT, &albedoDetailScratch, nullptr);
+				IDirect3DSurface9* ta = nullptr;
+				IDirect3DSurface9* tc = nullptr;
+				bool ok = albedoDetailUpload && albedoDetailScratch && SUCCEEDED(albedoDetailScratch->GetSurfaceLevel(0, &ta)) && SUCCEEDED(albedoDetailUpload->GetSurfaceLevel(0, &tc));
+				if (ok) {
+					NVR_EXT_DRAW_DESC dA = draw;
+					dA.Targets[0].pResource = ta; dA.Targets[1].pResource = tc;
+					const RECT allA = { 0, 0, (LONG)A, (LONG)A };
+					ok = SUCCEEDED(DxvkCompute::Extension()->Draw(&dA)) &&
+						SUCCEEDED(share->CopyToShared(images[albedoAtlasImage], (at % NVR_RT_ALPHA_ATLAS_SLOTS) * A, (at / NVR_RT_ALPHA_ATLAS_SLOTS) * A, albedoDetailUpload, &allA));
+				}
+				if (ta) ta->Release();
+				if (tc) tc->Release();
+				return ok;
+			};
+			if ((!which || detailAlbedo()) && detailAlpha()) {
 				slot = (int)at;
 				if (glow) {	// the same pass on the glow map: its alpha into the alpha upload (already copied, in stream order: a scratch now)
 					IDirect3DSurface9* glowTarget = nullptr;
@@ -578,16 +695,23 @@ namespace {
 		if (alphaOn || hitTextures) {	// the slots are shared: hit textures keep the alpha atlas too
 			atlasImage = (int)imageDescs.size();
 			imageNames.push_back("NVR RT alpha atlas");
-			const UINT side = NVR_RT_ALPHA_SLOT_SIZE * NVR_RT_ALPHA_ATLAS_SLOTS;
+			// (2026-11-06) AlphaDetail texels a texture (64 / 128 / 256; the shaders read the slot size off the image: RtAlpha.glsl). 256 = an
+			// 8192 x 8192 R16F atlas (128 MB): chain-link wires keep their pattern (test host scene chainlink: 81 % of the exact shadow vs 33 % at 64)
+			{ const int ad = TheSettingManager->GetSettingI("Main.Main.RayTracing", "AlphaDetail"); alphaDetail = ad >= 256 ? 256u : ad >= 128 ? 128u : 64u; }
+			const UINT side = alphaDetail * NVR_RT_ALPHA_ATLAS_SLOTS;
 			imageDescs.push_back({ side, side, NVR_EXT_SHARED_R16F, nullptr });
 			imageSizes.push_back({ side, side });
 		}
 		if (hitTextures) {
 			albedoAtlasImage = (int)imageDescs.size();
 			imageNames.push_back("NVR RT albedo atlas");
+			// (2026-11-06) AlbedoDetail texels a texture (64 / 128 / 256; RtHit.glsl reads the slot size off the image): 128 = 4096 x 4096
+			// RGBA8 (64 MB), 256 = 256 MB. The glow and normal atlases stay at 64.
+			{ const int ad = TheSettingManager->GetSettingI("Main.Main.RayTracing", "AlbedoDetail"); albedoDetail = ad >= 256 ? 256u : ad >= 128 ? 128u : 64u; }
+			const UINT albedoSide = albedoDetail * NVR_RT_ALPHA_ATLAS_SLOTS;
+			imageDescs.push_back({ albedoSide, albedoSide, NVR_EXT_SHARED_RGBA8, nullptr });
+			imageSizes.push_back({ albedoSide, albedoSide });
 			const UINT side = NVR_RT_ALPHA_SLOT_SIZE * NVR_RT_ALPHA_ATLAS_SLOTS;
-			imageDescs.push_back({ side, side, NVR_EXT_SHARED_RGBA8, nullptr });
-			imageSizes.push_back({ side, side });
 			if (TheSettingManager->GetSettingI("Main.Main.RayTracing", "GlowTextures") != 0) {
 				glowAtlasImage = (int)imageDescs.size();
 				imageNames.push_back("NVR RT glow atlas");
@@ -602,8 +726,33 @@ namespace {
 			}
 		}
 		inSetup = true;
-		for (const RtCore::User& user : users) if (user.Setup) user.Setup();
+		// (2026-11-05) users in their Order; one whose images take the count past the protocol's NVR_RT_MAX_IMAGES is left out for the
+		// session (its images rolled back) instead of the whole core turning off (rtext-land 11-05: lamps + sun + AO + reflections + the
+		// path tracer's 20 asked for more than 48, so nothing traced)
+		leftOut.clear();
+		const size_t coreImages = imageDescs.size();
+		std::vector<const RtCore::User*> order;
+		for (const RtCore::User& user : users) order.push_back(&user);
+		std::stable_sort(order.begin(), order.end(), [](const RtCore::User* a, const RtCore::User* b) { return a->Order < b->Order; });
+		std::string counts;
+		for (const RtCore::User* user : order) {
+			if (!user->Setup) continue;
+			const size_t before = imageDescs.size();
+			user->Setup();
+			char part[96];
+			if (imageDescs.size() > NVR_RT_MAX_IMAGES) {
+				_snprintf_s(part, _TRUNCATE, "%s%s %u LEFT OUT", counts.empty() ? "" : ", ", user->Name, (unsigned)(imageDescs.size() - before));
+				imageNames.resize(before); imageDescs.resize(before); imageSizes.resize(before);
+				leftOut.push_back(user->Name);
+				Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: RT: %s is left out this session: its shared images do not fit the %u the protocol holds "
+					"(turn off another RT effect and restart the game to get it back).", user->Name, (unsigned)NVR_RT_MAX_IMAGES);
+			}
+			else _snprintf_s(part, _TRUNCATE, "%s%s %u", counts.empty() ? "" : ", ", user->Name, (unsigned)(imageDescs.size() - before));
+			counts += part;
+		}
 		inSetup = false;
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT shared images %u of %u (the core's %u; %s)", (unsigned)imageDescs.size(), (unsigned)NVR_RT_MAX_IMAGES,
+			(unsigned)coreImages, counts.c_str());
 		if (imageDescs.size() > NVR_RT_MAX_IMAGES) { TurnOff("the RT effects asked for more shared images than the protocol holds"); return false; }
 		char why[320];
 		images.assign(imageDescs.size(), nullptr);
@@ -758,7 +907,10 @@ namespace {
 		pendingReleases.clear();
 		alphaSlots.clear();
 		if (alphaUpload) { alphaUpload->Release(); alphaUpload = nullptr; }
+		if (alphaDetailUpload) { alphaDetailUpload->Release(); alphaDetailUpload = nullptr; }
 		if (albedoUpload) { albedoUpload->Release(); albedoUpload = nullptr; }
+		if (albedoDetailUpload) { albedoDetailUpload->Release(); albedoDetailUpload = nullptr; }
+		if (albedoDetailScratch) { albedoDetailScratch->Release(); albedoDetailScratch = nullptr; }
 		if (glowUpload) { glowUpload->Release(); glowUpload = nullptr; }
 	}
 
@@ -933,6 +1085,7 @@ namespace {
 			NVR_EXT_RT_GEOMETRY_DESC desc;
 			GeometryKey key;
 			if (!DescribeData(part.BuffData, geo->m_pcName, desc, ranges, key)) { skip[kDescribe]++; partitionFate[2]++; continue; }
+			key.owner = skin;	// (2026-11-06) one entry per actor (clones share the partition data)
 			const PositionElement& e = lastElement;
 			if (e.weightStream != e.stream || e.indexStream != e.stream || e.format == NVR_EXT_RT_POSITION_HALF4) { skip[kDescribe]++; partitionFate[3]++; continue; }
 			// the palette: partition bone k = the skin's bone part.pBones[k]
@@ -1296,45 +1449,55 @@ namespace {
 	void Core::AddGeometry(NiGeometry* geo, bool land, bool lod) {
 		UInt32* skip = skips[lod ? 2 : land ? 1 : 0];
 		skip[kSeen]++;
+		// (2026-11-06) The decisions are RtScenePick::Classify's (RtScenePick.h: no game types, so tools/nvr-rt-host tests every rule); this
+		// reads their inputs off the geometry and keeps the counters and log lines per fate.
 		float distance = 0.0f;	// the bound's centre from the camera (objects only: land's bounds are not usable)
+		RtScenePick::Geometry pick;
+		pick.land = land;
+		pick.farLod = walkingFar;
 		if (!land && geo->m_kWorldBound) {
 			const NiBound* b = geo->m_kWorldBound;
 			const float dx = b->Center.x - TheRenderManager->CameraPosition.x, dy = b->Center.y - TheRenderManager->CameraPosition.y,
 				dz = b->Center.z - TheRenderManager->CameraPosition.z;
 			distance = sqrtf(dx * dx + dy * dy + dz * dz);
-			if (cullAngle > 0.0f && distance > b->Radius && b->Radius < cullAngle * distance) { culledSmall++; return; }
+			pick.hasBound = true; pick.distance = distance; pick.radius = b->Radius;
 		}
-		if (!geo->shader || !geo->geomData || !geo->geomData->m_pkBuffData) { skip[kNoShader]++; return; }
-		if (geo->skinInstance) { skip[kSkinned]++; return; }
-		BSShaderProperty* shaderProperty = (BSShaderProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Shade);
-		if (leafPlanes && !land && shaderProperty && static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf) {
-			AddLeaves(geo, shaderProperty, distance);	// (2026-10-30) LeafCards
-			return;
-		}
-		if (!shaderProperty || !shaderProperty->IsLightingProperty()) { skip[kNotLighting]++; return; }
-		if (shaderProperty->GetFlag(BSSP_REFRACTION) || shaderProperty->GetFlag(BSSP_FIRE_REFRACTION) || shaderProperty->GetFlag(BSSP_DECAL) ||
-			shaderProperty->GetFlag(BSSP_DYNAMIC_DECAL)) { skip[kFlags]++; return; }
-		if (static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf) { skip[kLeaf]++; return; }
-		// Alpha-tested and blended geometry (foliage cards, fences, glass) is not traced yet: the cascades keep it (FORK-RT-SUN.md).
-		NiAlphaProperty* alpha = (NiAlphaProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Alpha);
-		// Alpha-tested casters (AlphaTested on): traced with their diffuse alpha (RtAlpha.glsl); blended-only (glass, fx) stays out
+		pick.hasShaderAndData = geo->shader && geo->geomData && geo->geomData->m_pkBuffData;
+		pick.skinned = geo->skinInstance != nullptr;
+		BSShaderProperty* shaderProperty = pick.hasShaderAndData && !pick.skinned ? (BSShaderProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Shade) : nullptr;
+		const int shaderType = shaderProperty ? (int)static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType : -1;
+		pick.hasShaderProperty = shaderProperty != nullptr;
+		pick.speedTreeLeaf = shaderType == NiShadeProperty::kProp_SpeedTreeLeaf;
+		pick.lightingProperty = shaderProperty && shaderProperty->IsLightingProperty();
+		pick.decalOrRefraction = shaderProperty && (shaderProperty->GetFlag(BSSP_REFRACTION) || shaderProperty->GetFlag(BSSP_FIRE_REFRACTION) ||
+			shaderProperty->GetFlag(BSSP_DECAL) || shaderProperty->GetFlag(BSSP_DYNAMIC_DECAL));
+		// Alpha-tested casters (AlphaTested on): traced with their diffuse alpha (RtAlpha.glsl); blended-only (glass, fx) stays out.
+		// (FarObjectLOD, 2026-10-31 / 11-03: far object LOD's alpha property is its distance fade, it goes in opaque; far tree / billboard LOD
+		// is cut out (TEST_ENABLE) and takes the alpha-tested path: RtScenePick::Classify)
+		NiAlphaProperty* alpha = pick.hasShaderAndData && !pick.skinned ? (NiAlphaProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Alpha) : nullptr;
+		pick.hasAlphaProperty = alpha != nullptr;
+		pick.alphaFlags = alpha ? (uint16_t)alpha->flags : 0;
+		RtScenePick::Switches pickSwitches;
+		pickSwitches.cullAngle = cullAngle; pickSwitches.alphaTested = alphaOn; pickSwitches.leafCards = leafPlanes != 0;
 		bool alphaTested = false;
-		// (UNOFFICIAL 2026-10-31 FarObjectLOD: the object LOD meshes all carry an alpha property for their distance fade, not cut-outs:
-		// rtrefl-20 met 30 a frame, all refused as alpha. Past SceneRadius they go in as opaque.)
-		// (UNOFFICIAL 2026-11-03: but far tree / billboard LOD IS cut out (TEST_ENABLE): it takes the alpha-tested path like near geometry;
-		// as opaque quads it traced as solid black boards over the skyline, rtpt-4. Blend-only far LOD (the fade) stays opaque.)
-		if (alpha && (!walkingFar || (alpha->flags & NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK)) &&
-			(alpha->flags & (NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK | NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK))) {
-			if (!(alpha->flags & NiAlphaProperty::AlphaFlags::TEST_ENABLE_MASK)) { skip[kAlpha]++; alphaFate[0]++; return; }
-			if (!alphaOn) { skip[kAlpha]++; alphaFate[1]++; return; }
-			alphaTested = true;
+		switch (RtScenePick::Classify(pick, pickSwitches, alphaTested)) {
+		case RtScenePick::Taken: break;
+		case RtScenePick::Culled: culledSmall++; LogLeftOut(geo, "small at its distance (CullAngle)", -1); return;
+		case RtScenePick::NoShader: skip[kNoShader]++; LogLeftOut(geo, "no shader / buffer data", -1); return;
+		case RtScenePick::Skinned: skip[kSkinned]++; if (!land) LogLeftOut(geo, "skinned (not an actor)", -1); return;	// (2026-11-06: was silent)
+		case RtScenePick::Leaves: AddLeaves(geo, shaderProperty, distance); return;	// (2026-10-30) LeafCards
+		case RtScenePick::NotLighting: skip[kNotLighting]++; LogLeftOut(geo, shaderProperty ? "not a lighting shader" : "no shader property", shaderType); return;
+		case RtScenePick::DecalOrRefraction: skip[kFlags]++; LogLeftOut(geo, "decal / refraction", -1); return;
+		case RtScenePick::SpeedTreeLeaf: skip[kLeaf]++; return;
+		case RtScenePick::BlendedOnly: skip[kAlpha]++; alphaFate[0]++; LogLeftOut(geo, "blended only (no alpha test)", -1); return;
+		case RtScenePick::AlphaOff: skip[kAlpha]++; alphaFate[1]++; return;
 		}
 
 		NVR_EXT_RT_GEOMETRY_DESC desc;
 		static std::vector<NVR_EXT_RT_RANGE> ranges;
 		GeometryKey key;
 		if (!Describe(geo, desc, ranges, key)) {
-			if (alphaTested) { skip[kAlpha]++; alphaFate[2]++; return; }
+			if (alphaTested) { skip[kAlpha]++; alphaFate[2]++; LogLeftOut(geo, "alpha-tested, not described", -1); return; }
 			skip[kDescribe]++;
 			static int told = 0;
 			NiGeometryBufferData* bd = geo->geomData->m_pkBuffData;
@@ -1343,19 +1506,22 @@ namespace {
 				Logger::Log("RT CORE: land geometry '%s' not described: VertCount %u, IB %p, streams %u, FVF %X, declaration %p, primitive %d, arrays %u, tris %u",
 					geo->m_pcName ? geo->m_pcName : "", bd->VertCount, bd->IB, bd->StreamCount, bd->FVF, bd->VertexDeclaration, (int)bd->PrimitiveType, bd->NumArrays, bd->TriCount);
 			}
+			if (!land) LogLeftOut(geo, "not described (vertex layout / primitive)", -1);	// (2026-11-06: objects were silent)
 			return;
 		}
 
 		int alphaSlot = -1;
 		if (alphaTested) {
 			// the texcoords must sit in the position's stream; the diffuse alpha must be readable
-			if (lastElement.uvStream != lastElement.stream || !shaderProperty->IsLightingProperty()) { skip[kAlpha]++; alphaFate[3]++; return; }
+			// (2026-11-06 alpha lamp shadows: these four fates were silent, so a fence missing from the scene left no trace in the log)
+			if (lastElement.uvStream != lastElement.stream || !shaderProperty->IsLightingProperty()) {
+				skip[kAlpha]++; alphaFate[3]++; LogLeftOut(geo, lastElement.uvStream != lastElement.stream ? "alpha-tested, texcoords not in the position's stream" : "alpha-tested, not a lighting property", -1); return; }
 			NiSourceTexture** textures = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[0];
 			NiTexture* texture = textures ? *textures : nullptr;
-			if (!texture || !texture->rendererData || !texture->rendererData->dTexture) { skip[kAlpha]++; alphaFate[4]++; return; }
+			if (!texture || !texture->rendererData || !texture->rendererData->dTexture) { skip[kAlpha]++; alphaFate[4]++; LogLeftOut(geo, "alpha-tested, no diffuse texture", -1); return; }
 			alphaSlot = AlphaSlotOf(texture->rendererData->dTexture, GlowTextureOf(shaderProperty), NormalTextureOf(shaderProperty));
 			if (alphaSlot == -2) { waiting++; alphaFate[6]++; return; }	// this frame's uploads are used up: next frame
-			if (alphaSlot < 0) { skip[kAlpha]++; alphaFate[5]++; return; }
+			if (alphaSlot < 0) { skip[kAlpha]++; alphaFate[5]++; LogLeftOut(geo, "alpha-tested, alpha unreadable or atlas full", -1); return; }
 			desc.Flags = NVR_EXT_RT_TEXCOORD_FLAGS((int)lastElement.uvOffset - (int)lastElement.offset, lastElement.uvHalf);
 		}
 		// Hit textures ([Main.Main.RayTracing] HitTextures): opaque geometry with a diffuse texture keeps its texcoords and gets an atlas
@@ -1374,12 +1540,12 @@ namespace {
 			}
 		}
 		GeometryEntry& entry = geometries[key];
-		if (entry.refused) return;
+		if (entry.refused) { LogLeftOut(geo, "refused by the fork (measure / stage failed earlier)", -1); return; }	// (2026-11-06: was silent)
 		entry.lastSeen = sceneFrame;
 		if (!entry.sent) {
 			if (!entry.id) entry.id = nextId++ & 0xFFFFFF;
 			NVR_EXT_RT_GEOMETRY_INFO info = {};
-			if (FAILED(rt->MeasureGeometry(&desc, &info))) { entry.refused = true; skip[kMeasure]++; return; }
+			if (FAILED(rt->MeasureGeometry(&desc, &info))) { entry.refused = true; skip[kMeasure]++; LogLeftOut(geo, "refused by the fork (MeasureGeometry failed)", -1); return; }
 			if ((alphaTested || textured) && info.Texels != 3u * (info.VertexCount + info.TriangleCount) + 2u * info.VertexCount) {
 				hitTextures = false;
 				alphaOn = false;	// a fork without 1.8-rt-uv (patch 0029): no texcoords staged, so no alpha-tested casters this session
@@ -1390,7 +1556,7 @@ namespace {
 			if (buildBudget && !land && distance > buildNear && trianglesThisFrame && trianglesThisFrame + info.TriangleCount > buildBudget) {
 				waiting++; budgetWaits++; return;	// far: a later frame (BuildTrianglesPerFrame)
 			}
-			if (FAILED(rt->StageGeometry(&desc, images[0], arenaUsed, &info))) { entry.refused = true; return; }
+			if (FAILED(rt->StageGeometry(&desc, images[0], arenaUsed, &info))) { entry.refused = true; skip[kMeasure]++; LogLeftOut(geo, "refused by the fork (StageGeometry failed)", -1); return; }
 			trianglesThisFrame += info.TriangleCount;
 			NvrRtGeometryOp& op = record->ops[record->opCount++];
 			op = NvrRtGeometryOp();
@@ -1399,8 +1565,8 @@ namespace {
 			op.vertexCount = info.VertexCount;
 			op.triangleCount = info.TriangleCount;
 			op.arenaTexel = arenaUsed;
-			op.flags = alphaTested ? (NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA) : textured ? NVR_RT_OP_FLAG_TEXCOORDS : 0u;
-			if (compactOn) op.flags |= NVR_RT_OP_FLAG_COMPACT;
+			RtScenePick::Record po; po.alphaTested = alphaTested; po.textured = textured; po.compact = compactOn;
+			op.flags = RtScenePick::OpFlags(po);	// (2026-11-06 RtScenePick.h)
 			arenaUsed += info.Texels;
 			entry.sent = true;
 			static int probes = 0;
@@ -1427,17 +1593,18 @@ namespace {
 		NvrRtInstanceRecord& extra = record->records[record->instanceCount];
 		const Albedo& albedo = AlbedoOf(geo, shaderProperty);
 		extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; extra.albedo[3] = 1.0f;
-		extra.flags = (land ? NVR_RT_RECORD_LAND : 0u) | (albedo.known ? NVR_RT_RECORD_ALBEDO_KNOWN : 0u) | (HasGlowMap(shaderProperty) ? NVR_RT_RECORD_GLOW : 0u);
-		if (alphaTested) extra.flags |= NVR_RT_RECORD_ALPHA_TESTED | ((UInt32)alpha->alphaTestRef << 8) | ((UInt32)alphaSlot << 16);
-		else if (textured) extra.flags |= NVR_RT_RECORD_TEXTURED | ((UInt32)alphaSlot << 16);
-		if ((alphaTested || textured) && normalAtlasImage >= 0 && NormalTextureOf(shaderProperty)) extra.flags |= NVR_RT_RECORD_NORMAL;	// UNOFFICIAL 2026-11-02
-		if (alphaTested || textured) {	// UNOFFICIAL 2026-11-03 the material rule's roughness / metal (bits 26-31; NvrRtProtocol.h)
-			float rough = -1.0f, metal = -1.0f;
-			if (RtMaterialRuleOf(geo, &rough, &metal)) {
-				if (rough >= 0.0f) extra.flags |= (UInt32)(std::min)((std::max)((int)(rough * 7.0f + 0.5f), 1), 7) << NVR_RT_RECORD_ROUGH_SHIFT;
-				if (metal >= 0.0f) extra.flags |= (UInt32)(std::min)((int)(metal * 6.0f + 0.5f) + 1, 7) << NVR_RT_RECORD_METAL_SHIFT;
-			}
-		}
+		// (2026-11-06) packed by RtScenePick::RecordFlags / InstanceMask / OpFlags (RtScenePick.h; tested bit for bit by tools/nvr-rt-host)
+		RtScenePick::Record pr;
+		pr.land = land; pr.albedoKnown = albedo.known; pr.glowMap = HasGlowMap(shaderProperty);
+		pr.alphaTested = alphaTested; pr.alphaRef = alphaTested ? (UInt32)alpha->alphaTestRef : 0u;
+		pr.textured = textured; pr.slot = alphaSlot;
+		pr.normalMap = (alphaTested || textured) && normalAtlasImage >= 0 && NormalTextureOf(shaderProperty) != nullptr;	// UNOFFICIAL 2026-11-02
+		if (alphaTested || textured) pr.materialRule = RtMaterialRuleOf(geo, &pr.rough, &pr.metal);	// UNOFFICIAL 2026-11-03 (bits 26-31)
+		pr.hookMask = MaskHook ? (int)(MaskHook(geo, land) & 0xFFu) : -1;
+		pr.player = walkingPlayer; pr.farLod = walkingFar;
+		extra.flags = RtScenePick::RecordFlags(pr);
+		LogAlphaTaken(geo, alphaTested ? alphaSlot : -1, alphaTested ? alpha->alphaTestRef : 999u, alphaTested && (alpha->flags & NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK) != 0);
+		LogBigTaken(geo);
 		if ((extra.flags & NVR_RT_RECORD_GLOW) && geo->m_kWorldBound && glows.size() < 4096) {	// (2026-10-30) GlowLights()
 			const NiBound* b = geo->m_kWorldBound;
 			glows.push_back({ { b->Center.x - TheRenderManager->CameraPosition.x, b->Center.y - TheRenderManager->CameraPosition.y,
@@ -1466,10 +1633,7 @@ namespace {
 		}
 		instance.geometryId = entry.id;
 		instance.customIndex = land ? 1u : 0u;
-		instance.mask = MaskHook ? (MaskHook(geo, land) & 0xFFu) : (land ? 0x01u : 0x02u);	// default: bit 0 land, bit 1 objects
-		if (alphaTested) instance.mask = NVR_RT_MASK_ALPHA;	// only rays that test alpha (RtAlpha.glsl) see it
-		else if (walkingPlayer) instance.mask = NVR_RT_MASK_PLAYER;	// the player's rigid parts: every ray sees them but the gun's (rt-refl)
-		else if (walkingFar) instance.mask = NVR_RT_MASK_FAR;	// UNOFFICIAL 2026-10-31: far object LOD (the skyline for reflections)
+		instance.mask = RtScenePick::InstanceMask(pr);	// (2026-11-06 RtScenePick.h) 0x01 land / 0x02 objects or the hook's; 0x10 alpha-tested, 0x40 the player's, 0x80 far LOD
 		instance.flags = 0x1u;	// both faces (the game's two-sided and one-sided meshes alike: shadows need the back faces too)
 	}
 
@@ -1637,6 +1801,9 @@ namespace {
 			// are not flagged): that one node is walked anyway, so the body shows in reflections, casts its sun shadow and darkens its feet
 			// ("RT CORE: player: first person; body node CULLED; 0.0 body instances a frame" before, rtfull-lake / -int)
 			const bool playerRoot = walkingPlayer && firstPersonBody && object == root;
+			// (2026-11-06, the demo room's missing ceiling) the walk's own silent skips, named: culled objects (with LogLeftOut's per-cell limit)
+			if (object && !land && !walkingFar && (object->m_flags & NiAVObject::NiFlags::APP_CULLED) && !playerRoot)
+				LogLeftOut(static_cast<NiGeometry*>(object), object->IsGeometry() ? "APP_CULLED (the walk)" : "APP_CULLED node (the walk: its whole subtree)", -1);
 			if (!object || ((object->m_flags & NiAVObject::NiFlags::APP_CULLED) && !playerRoot) || ((!land || lod) && !inReach(object))) continue;
 			// UNOFFICIAL 2026-11-03 FarLandLOD: a far LOD land quad whose area reaches into the loaded cells stays out: the ring test above
 			// lets in coarse quads (4-cell blocks and up, bound radius ~11600) that cover the loaded land, and where they stand above it they
@@ -1659,7 +1826,7 @@ namespace {
 			// Faded out: not drawn. Land ignores it, as the cascades' walk does (rt-reflections' og-lake run met no land with it).
 			// A tree's root fade node reads 0 on most trees the game draws (rtleaf-4: 630 of 668 SpeedTree leaf meshes under one); the cascades'
 			// walk never tests a ref's root, so a tree's root is not tested here either (LeafCards)
-			if (node->IsFadeNode() && static_cast<BSFadeNode*>(node)->FadeAlpha <= 0.0f && !(walkTree && object == root)) { if (land) { if (!lod) landWalk[3]++; } else continue; }
+			if (node->IsFadeNode() && static_cast<BSFadeNode*>(node)->FadeAlpha <= 0.0f && !(walkTree && object == root)) { if (land) { if (!lod) landWalk[3]++; } else { if (!walkingFar) LogLeftOut(static_cast<NiGeometry*>(object), "faded-out fade node (the walk: its whole subtree)", -1); continue; } }
 			if (node->IsKindOf<NiSwitchNode>()) {
 				if (land && !lod) landWalk[4]++;
 				NiSwitchNode* sw = static_cast<NiSwitchNode*>(node);
@@ -1923,7 +2090,7 @@ namespace {
 	bool Core::Ready() {
 		if (state == Core::Off) return false;
 		bool wanted = false;
-		for (const RtCore::User& user : users) wanted = wanted || (user.Wants && user.Wants());
+		for (const RtCore::User& user : users) wanted = wanted || (!Out(user) && user.Wants && user.Wants());
 		if (!wanted) return false;	// a running helper stays up (idle); it exits with the game
 		if (state == Core::Idle) { Start(); return false; }
 		Poll();
@@ -1981,7 +2148,7 @@ namespace {
 			f.instanceCount = (uint32_t)c.frameInstances.size();
 		}
 		if (only) { if (only->Record) only->Record(Device); }
-		else for (const RtCore::User& user : c.users) if (user.Point == 0 && user.Wants && user.Wants() && user.Record) user.Record(Device);
+		else for (const RtCore::User& user : c.users) if (user.Point == 0 && !c.Out(user) && user.Wants && user.Wants() && user.Record) user.Record(Device);
 		const bool recorded = f.passCount > 0;
 
 		LARGE_INTEGER written;
@@ -2086,16 +2253,18 @@ namespace {
 					"no alpha slot %u, waited %u; CPU %.3f ms a frame noting + %.3f ms gathering", c.grassRadius, c.grassMax, g[0], g[1], g[5], g[11], g[2], g[3],
 					g[4], g[10], g[6], g[7], g[8], g[9], c.grassNoteMs / 60.0, c.grassGatherMs / 60.0);
 			}
-			if (n == 60)
+			// (2026-11-05) also every 600 exchanges, counted since the last line (the demo room's scene after a cell change was not logged)
+			if (n == 60 || (n % 600) == 0)
 				for (int k = 0; k < 3; k++) {
 					const UInt32* m = c.skips[k];
 					char cells[256] = "";
 					if (k == 1) sprintf_s(cells, "; cells walked %u, without a land node %u, land node culled %u; land subtree: objects %u, culled %u, nodes %u, "
 						"faded %u, switch %u", c.landCells[0], c.landCells[1], c.landCells[2], c.landWalk[0], c.landWalk[1], c.landWalk[2], c.landWalk[3], c.landWalk[4]);
-					Logger::Log("RT CORE: %s geometry met (exchanges 1-60): %u, taken %u; left out: no shader/data %u, skinned %u, not a lighting shader %u, "
-						"decal/refraction %u, tree leaves %u, alpha %u, not described %u, refused by the fork %u%s", k == 2 ? "LOD land" : k ? "land" : "object", m[kSeen], m[kTaken],
+					Logger::Log("RT CORE: %s geometry met (exchanges %u-%u): %u, taken %u; left out: no shader/data %u, skinned %u, not a lighting shader %u, "
+						"decal/refraction %u, tree leaves %u, alpha %u, not described %u, refused by the fork %u%s", k == 2 ? "LOD land" : k ? "land" : "object", n == 60 ? 1u : (unsigned)(n - 599), (unsigned)n, m[kSeen], m[kTaken],
 						m[kNoShader], m[kSkinned], m[kNotLighting], m[kFlags], m[kLeaf], m[kAlpha], m[kDescribe], m[kMeasure],
 						cells);
+					if (k == 2) { memset(c.skips, 0, sizeof(c.skips)); memset(c.landCells, 0, sizeof(c.landCells)); memset(c.landWalk, 0, sizeof(c.landWalk)); }
 				}
 		}
 		return recorded;
@@ -2107,7 +2276,7 @@ void RtCore::Frame(IDirect3DDevice9* Device) {
 	if (!c.Ready()) return;
 	// UNOFFICIAL 2026-10-28: only the Point-0 users exchange here; with none on, a Point-1 user's Exchange gathers the scene itself.
 	bool pointZero = false;
-	for (const User& user : c.users) pointZero = pointZero || (user.Point == 0 && user.Wants && user.Wants());
+	for (const User& user : c.users) pointZero = pointZero || (user.Point == 0 && !c.Out(user) && user.Wants && user.Wants());
 	if (!pointZero) return;
 	static GpuTimer timer("Ray tracing (copies + helper + waits)");
 	GpuProfileScope gpu(timer, Device);
@@ -2118,11 +2287,12 @@ void RtCore::Frame(IDirect3DDevice9* Device) {
 bool RtCore::Exchange(IDirect3DDevice9* Device, const User& user) {
 	Core& c = TheCore;
 	if (c.state != Core::Running || !c.shared || TheRenderManager->width != c.width || TheRenderManager->height != c.height) return false;
-	if (!user.Wants || !user.Wants()) return false;
+	if (c.Out(user) || !user.Wants || !user.Wants()) return false;
 	return c.Exchange(Device, &user);
 }
 
 bool RtCore::Running() { return TheCore.state == Core::Running; }
+bool RtCore::LeftOut(const char* Name) { for (const char* n : TheCore.leftOut) if (n == Name || (n && Name && !strcmp(n, Name))) return true; return false; }
 void RtCore::Restart(const char* Why) {	// UNOFFICIAL 2026-11-02: as a screen-size change (Core::Ready)
 	Core& c = TheCore;
 	if (c.state == Core::Off || c.state == Core::Idle) return;

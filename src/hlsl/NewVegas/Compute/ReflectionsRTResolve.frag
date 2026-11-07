@@ -202,6 +202,7 @@ void main() {
                 vec3(1.0, 0.0, 1.0) * rtGuessShare + vec3(0.5) * (cubeShare + gridShare + skyShare);
         }
         else if (RtDebugView < 2.5) colour = rtT < 0.0 ? vec3(0.0) : rtT == 0.0 ? vec3(1.0, 0.0, 0.0) : vec3(1.0 - saturate(rtT / RtDistance) * 0.9);
+        else if (RtDebugView > 6.5) colour = rayCast ? worldR * 0.5 + 0.5 : vec3(0.0);   // 7 (2026-11-05) the reflected direction (world axes: blue = up)
         else if (RtDebugView > 5.5) {
             // 6 (2026-10-30) the fallbacks split: red the sky gradient (no clouds), blue the surroundings cube (holds the clouds where it
             // saw them), grey the light grid, green everything the screen march or the rays answered.

@@ -86,18 +86,32 @@ namespace ShadowAtlas {
 		if (NearTiles < 0) NearTiles = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Atlas", "NearTiles") > 0 ? 8 : 0;
 		return NearTiles;
 	}
-	// Rows of units the live tiles take (the pool starts below them).
-	inline int LiveRows(int liveSlots) {
+	// Rows of units the live tiles of slots 0-31 take.
+	inline int LiveRows32(int liveSlots) {
 		const int live = (std::min)(liveSlots, 32);
 		if (!Near()) return 2 * ((live + 7) / 8);
 		const int bigRows = 4 * (((std::min)(live, Near()) + 3) / 4);		// 4 big tiles a band of 4 rows
 		const int rest = (std::max)(0, live - Near());
 		return bigRows + 2 * ((rest + 7) / 8);
 	}
+	// Rows of units the live tiles take (the pool starts below them). UNOFFICIAL 2026-11-06: live slots 32-63 (LightPoints above 32, up to
+	// 64) get 1 x 1 unit tiles (512 texels at Size 8192, as the pool's) right after slots 0-31's; they had none, so those lamps cast no
+	// shadow at all with the atlas on (and, before 43d5cf53, not even their traced one). The pool gets what is left (none with 64 live
+	// slots and NearTiles 8: the lamps past the 64th then go unshadowed, as past the pool before).
+	inline int LiveRows(int liveSlots) {
+		const int extra = (std::max)(0, (std::min)(liveSlots, 64) - 32);
+		return LiveRows32(liveSlots) + (extra + 15) / 16;
+	}
 	// A live slot's tile (2 x 2 units, or 4 x 4 for the first NearTiles slots) or a pool entry's (1 unit), in atlas texels; false when it has none.
 	inline bool LiveRect(int slot, int liveSlots, UINT& x, UINT& y, UINT& n) {
 		const UINT unit = Size / 16;
-		if (slot < 0 || slot >= 32 || slot >= liveSlots) return false;
+		if (slot < 0 || slot >= 64 || slot >= liveSlots) return false;
+		if (slot >= 32) {	// (2026-11-06) 1 x 1 unit tiles after slots 0-31's (LiveRows)
+			const int at = LiveRows32(liveSlots) * 16 + (slot - 32);
+			if (at >= 256) return false;
+			x = unit * (at % 16); y = unit * (at / 16); n = unit;
+			return true;
+		}
 		if (slot < Near()) { x = 4 * unit * (slot % 4); y = 4 * unit * (slot / 4); n = 4 * unit; return true; }
 		const int k = slot - Near();
 		const int top = Near() ? 4 * ((Near() + 3) / 4) : 0;

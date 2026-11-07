@@ -214,7 +214,7 @@ std::string InstallCheck::BugReport() {
 	if (!gLoadOrder.empty()) r += "Load order: " + gLoadOrder + "\r\n";
 	std::string log = Logger::FilePath;
 	if (log.size() > 2 && log[1] != ':' && log[0] != '\\') log = Paths::GameRoot() + "\\" + log;	// relative to the game folder
-	r += "Log file (attach it): " + (log.empty() ? std::string("(none)") : log) + "\r\n";
+	r += "Log file (its text follows the report): " + (log.empty() ? std::string("(none)") : log) + "\r\n";
 
 	r += "\r\nInstall check:\r\n";
 	if (gResults.empty()) r += "  nothing found\r\n";

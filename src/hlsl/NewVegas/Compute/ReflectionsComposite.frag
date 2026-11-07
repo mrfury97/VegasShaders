@@ -56,21 +56,21 @@ void main() {
     vec3 share;
     // UNOFFICIAL 2026-11-05 [Shaders.Reflections.Main] Mirror (cb.grid3.w, 0..1): the non-metal F0, 0.04 (stone, tile, polished floors:
     // ~4 % of the reflection looking down, so only bright lamps show) up to 1 (a true mirror: people and objects show at any angle).
-    float dielectricF0 = mix(0.04, 1.0, saturate(cb.grid3.w));
+    float dielectricF0 = mix(0.04, 1.0, SurfaceMirror);   // (2026-11-06: per surface, MirrorSmoothOnly; Reflections.glsl)
     if (MaterialOn) {
         // MaterialAware: metal reflects in its own colour (F0 = its albedo, guessed from the lit colour's hue), the rest at the F0 above.
         vec3 litColour = linearize(color.rgb);
         vec3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
         share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), mix(vec3(dielectricF0), tint, SurfaceMetal))) * saturate(reflection.a);
     }
-    else if (cb.grid3.w > 0.0) share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), vec3(dielectricF0))) * saturate(reflection.a);
+    else if (SurfaceMirror > 0.0) share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), vec3(dielectricF0))) * saturate(reflection.a);
     else share = vec3(saturate(amount * EnvironmentFresnel(roughness, saturate(dot(-V, N)))) * saturate(reflection.a));
     vec3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
     if (any(isnan(reflected)) || any(isinf(reflected)) || isnan(reflection.a)) { o_color = color; return; }   // (UNOFFICIAL 2026-10-30)
     // REFL_SPECOCC_ON: SpecularOcclusion.
     // (2026-11-05: Mirror turns it off as it rises: a mirror, above all a black polished one, is darker than what it shows, so the
     // occlusion took people and objects out of the demo floor's reflection entirely and left only the lamps.)
-    float specOcc = cb.data4.w * (1.0 - saturate(cb.grid3.w));
+    float specOcc = cb.data4.w * (1.0 - SurfaceMirror);
     if (SpecOccOn && specOcc > 0.0) {
         float surfaceLight = luma(linearize(color.rgb));
         float reflectedLight = max(luma(reflected) * cb.layoutData.z, 1.0e-6);

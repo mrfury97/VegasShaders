@@ -16,6 +16,7 @@
 // the draw's lights' cube slots (when in the table), the result on s15 (the sixth lamp's cube stage: see the shader).
 
 #include <algorithm>
+#include <cstddef>	// offsetof (the block layout checks)
 #include <unordered_map>
 #include "PointShadowSchedule.h"	// PointShadowSlotState (KeepCube)
 #include "LampFixtures.h"
@@ -57,12 +58,14 @@ namespace RtLampShadows {
 	}
 	inline char Status[200] = "not checked yet";
 
-	// The trace pass's uniform block (RtLampTrace.comp, std140, 128 bytes); the lamps are in the lamp table image
+	// The trace passes' uniform block (RtLampTrace / Many / Restir .comp, std140, 272 bytes); the lamps are in the lamp table image.
+	// Every variant reads jitter at vec4 15: the shaders without ManyLights declare the 6 vec4s before it as manyUnused[6] (2026-11-06:
+	// RtLampTrace.comp had [7] from 120cb59d to e66e766b, so its AlphaTest read 0). The static_asserts below pin those offsets.
 	struct PassConstants {
 		float size[4], forward[4], right[4], up[4], origin[4], params[4], params2[4];
 		float flags[4];							// x: OneSided (diagnostic), y: lamps a pixel traces (LampsPerPixel 1-3), z: Interleave, w: its phase
 		float mask[4];							// Exteriors: x EdgeFade, y LampReachMask (TESR_PointShadowNear.y, .z)
-		// UNOFFICIAL 2026-10-31 ManyLights only (RtLampTraceMany.comp; the other variants' blocks end above)
+		// UNOFFICIAL 2026-10-31 ManyLights' fields (RtLampTraceMany / Restir); the other variants skip them as manyUnused[6] but read jitter
 		float many[4];							// x reservoirs, y history frames, z spatial radius, w 1 = history valid
 		float reproject[4][4];					// scene-space point -> the previous trace's clip space (Reproject)
 		float many2[4];							// x frame number, y history depth tolerance
@@ -73,6 +76,8 @@ namespace RtLampShadows {
 		float rect[4];
 	};
 	static_assert(sizeof(PassConstants) <= 512, "RtCore: 512 bytes of constants a pass");
+	static_assert(offsetof(PassConstants, many) == 9 * 16 && offsetof(PassConstants, jitter) == 15 * 16 && offsetof(PassConstants, rect) == 16 * 16,
+		"RtLampShadows: the shaders' blocks (RtLampTrace.comp manyUnused[6], RtLampTraceMany / Restir) expect many at vec4 9, jitter 15, rect 16");
 
 	// This frame's lamps (Submit, from PointShadowForward::Publish) for Record
 	// stop: past the lamp's own glowing part (0 none); intensity: luminance x dimmer (the per-pixel ranking); radius: the game's (Spec.r)
@@ -588,7 +593,13 @@ namespace RtLampShadows {
 		c.mask[3] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffsetPerUnit"), 0.0f);	// 2026-10-30: x the view depth
 		c.mask[2] = (float)TheSettingManager->GetSettingI(kSection, "RankBy");	// 2026-10-30 (the mask variant sets its ExteriorDebug there)
 		c.params[2] = (std::max)(TheSettingManager->GetSettingF(kSection, "LampStop"), 0.0f);
-		c.params[3] = TheSettingManager->GetSettingI(kSection, "Jitter") ? fmodf((float)frame * 0.61803399f, 1.0f) : 0.0f;
+		// (2026-11-06) Jitter -1 (the default) = automatic: the pattern turns every frame only while TAA / FSR / DLSS average frames.
+		// With TAA off (the default) a turning pattern is new noise every frame: the soft edges and the fence's hashed alpha shimmered in
+		// motion and at rest. A fixed pattern holds still (the Filter, also automatic, smooths it spatially).
+		const int jitterSetting = TheSettingManager->GetSettingI(kSection, "Jitter");
+		TAAEffect* taaJitter = TheShaderManager->Effects.TAA;
+		const bool turnPattern = jitterSetting > 0 || (jitterSetting < 0 && taaJitter && taaJitter->IsJitterActive());
+		c.params[3] = turnPattern ? fmodf((float)frame * 0.61803399f, 1.0f) : 0.0f;
 		// Lamp models skip their own light over the last LampModelDistance of each ray, as LampModelShadows false does for the cube maps
 		const bool skipModels = TheSettingManager->GetSettingI(kSection, "SkipLampModels") != 0;
 		c.params2[0] = skipModels ? (std::max)(TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Forward", "LampModelDistance"), 0.0f) : 0.0f;
@@ -714,7 +725,12 @@ namespace RtLampShadows {
 			return;
 		}
 		// UNOFFICIAL 2026-10-29 Filter: the soft edges' noise (LampRadius, 1 ray) smoothed per lamp (RtLampFilter.comp) before the copy out
-		const bool filter =imageRaw >= 0 && filterShader >= 0 && TheSettingManager->GetSettingI(kSection, "Filter");
+		// (2026-11-06) Filter -1 (the default) = automatic: on while nothing averages frames (TAA / FSR / DLSS off: TAA is off by default,
+		// so the 1-ray soft edges and the hashed alpha test's stipple showed raw; the fence's traced shadow was speckled), off while it does
+		const int filterSetting = TheSettingManager->GetSettingI(kSection, "Filter");
+		TAAEffect* taaNow = TheShaderManager->Effects.TAA;
+		const bool temporal = taaNow && taaNow->IsJitterActive();
+		const bool filter = imageRaw >= 0 && filterShader >= 0 && (filterSetting > 0 || (filterSetting < 0 && !temporal));
 		// Denoise: the split variant also writes ranks 0 and 1 apart (images 6-9), copied out for RtDenoise (Denoise() below)
 		bool split = !filter && splitShader >= 0 && imageSplit[3] >= 0 && TheSettingManager->GetSettingI(kSection, "Denoise");
 		static UINT splitWidth = 0, splitHeight = 0;

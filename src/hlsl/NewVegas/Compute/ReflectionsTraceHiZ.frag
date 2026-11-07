@@ -57,6 +57,7 @@ void main() {
     vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
     vec3 R = reflect(V, H);
     if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
+    R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
 
     // ---- The hierarchical march ----
     vec2 fullSize = 1.0 / cb.reciprocalResolution.xy;

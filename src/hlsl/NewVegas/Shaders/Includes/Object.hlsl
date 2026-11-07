@@ -41,10 +41,20 @@ static float BridgeTMap = 0.0f;	// VanillaBridgeOverMaps: BridgeT where an _rmao
 #endif
 // The highlight's F0 (before Reflectivity): the old one where BridgeT is 0, the authored strength where it is 1 (metal: tinted by
 // its colour's hue, normalised to its brightest channel, so the strength stays the authored one).
+// UNOFFICIAL 2026-11-06 VanillaBridgeDielectricMax ([Shaders.PBR.Main], restart: VANILLA_BRIDGE_DIELECTRIC_MAX, defined only below 1;
+// report: cliffs and other rough stone very shiny). Matching the game's peak gives F0 = 8 mask / (n + 2): a WIDE authored lobe (low
+// glossiness n, about 10 on many meshes) with a bright mask (or a normal map with no alpha, which reads as 1) came out at F0 0.3-0.7 on
+// rock, concrete, wood and plaster, near a metal's, spread over a broad sheen. Non-metal surfaces reflect 2-8 % head-on, so the non-metal
+// share of the bridged strength is capped there; metal keeps the full authored strength (power armour's glints are its metal share).
+// Sharp authored glints (high n) are under the cap anyway (n 100, mask 0.5: 0.04), so they are unchanged.
 float3 BridgeSpecF0(float3 baseColor, float metal) {
     const float3 plain = lerp(PBR_DIELECTRIC_F0, baseColor, metal);
     const float3 hue = baseColor / max(max(baseColor.r, max(baseColor.g, baseColor.b)), 1e-4f);
-    return lerp(plain, BridgeF0 * lerp(1.0f, hue, metal), BridgeT);
+    #ifdef VANILLA_BRIDGE_DIELECTRIC_MAX
+        return lerp(plain, lerp(min(BridgeF0, VANILLA_BRIDGE_DIELECTRIC_MAX).xxx, BridgeF0 * hue, metal), BridgeT);
+    #else
+        return lerp(plain, BridgeF0 * lerp(1.0f, hue, metal), BridgeT);
+    #endif
 }
 #define PBR_SPEC_F0(baseColor, metal) BridgeSpecF0((baseColor), (metal))
 #else

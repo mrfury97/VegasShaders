@@ -286,7 +286,9 @@ namespace RtDenoise {
 			float forward[4], right[4], up[4], move[4], params[4];
 			float backbone[4];	// 2026-10-31 DenoiseBackbone: x object motion, y the shared disocclusion mask
 			float rect[4];		// (2026-11-03) xy this frame's RenderRect scale, zw last frame's
-			UInt32 samplerIndex, pad[3];
+			UInt32 samplerIndex;
+			float clampK;		// (2026-11-06) RGB mode: HistoryClamp
+			UInt32 pad[2];
 		} t = {};
 		t.rect[0] = scaleX; t.rect[1] = scaleY; t.rect[2] = rescaled ? scaleX : d->lastScale[0]; t.rect[3] = rescaled ? scaleY : d->lastScale[1];
 		d->lastScale[0] = scaleX; d->lastScale[1] = scaleY;
@@ -296,6 +298,7 @@ namespace RtDenoise {
 		t.up[0] = view._12 / proj._22; t.up[1] = view._22 / proj._22; t.up[2] = view._32 / proj._22;
 		t.move[0] = move.x; t.move[1] = move.y; t.move[2] = move.z; t.move[3] = cut ? 1.0f : 0.0f;
 		t.params[0] = (std::max)(S.MaxHistory, 1.0f); t.params[1] = S.DepthTolerance; t.params[2] = 1.0f / w; t.params[3] = 1.0f / h;
+		t.clampK = (std::max)(S.HistoryClamp, 0.0f);
 
 		GpuProfileScope gpu(*d->timer, Device);
 		IDirect3DSurface9* current = nullptr;

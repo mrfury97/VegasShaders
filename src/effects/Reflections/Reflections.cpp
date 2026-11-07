@@ -25,6 +25,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.InteriorFloors = std::clamp(TheSettingManager->GetSettingF(section, "InteriorFloors"), 0.0f, 2.0f);
 	Settings.Roughness = std::clamp(TheSettingManager->GetSettingF(section, "Roughness"), 0.02f, 1.0f);
 	Settings.Mirror = std::clamp(TheSettingManager->GetSettingF(section, "Mirror"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-05
+	Settings.MirrorSmoothOnly = TheSettingManager->GetSettingI(section, "MirrorSmoothOnly") != 0;	// UNOFFICIAL 2026-11-06	// UNOFFICIAL 2026-11-05
 	Settings.WetRoughness = std::clamp(TheSettingManager->GetSettingF(section, "WetRoughness"), 0.02f, 1.0f);
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
@@ -64,10 +65,11 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtEnabled = TheSettingManager->GetSettingI(rt, "Enabled") != 0;
 	Settings.RtMaxRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "MaxRoughness"), 0.02f, 1.0f);
 	Settings.RtDistance = std::clamp(TheSettingManager->GetSettingF(rt, "Distance"), 200.0f, 30000.0f);
-	Settings.RtDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DebugView"), 0, 6);
+	Settings.RtDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DebugView"), 0, 7);	// 7 (2026-11-05) the reflected direction
 	Settings.RtScreenTolerance = std::clamp(TheSettingManager->GetSettingF(rt, "ScreenTolerance"), 0.002f, 0.2f);
 	Settings.RtEstimate = std::clamp(TheSettingManager->GetSettingF(rt, "EstimateBrightness"), 0.0f, 4.0f);
 	Settings.RtSunShadows = TheSettingManager->GetSettingI(rt, "SunShadows") != 0;
+	Settings.RtAlphaSolid = TheSettingManager->GetSettingI(rt, "AlphaSolid") != 0;	// UNOFFICIAL 2026-11-06 diagnostic (missing key: off)
 	Settings.RtSplitTest = TheSettingManager->GetSettingI(rt, "SplitTest") != 0;	// test only
 	Settings.RtVndf = TheSettingManager->GetSettingI(rt, "VisibleNormals") != 0;	// UNOFFICIAL 2026-10-29 glossy rays
 	Settings.RtHitLamps = TheSettingManager->GetSettingI(rt, "HitLamps") != 0;
@@ -271,7 +273,7 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		// Width / Height of them, the part the D3D9 passes' ApplyViewport draws); RayGen wrote "no ray" past it.
 		RtTraceWidth = RenderRect::Width(RtWidth());
 		RtTraceHeight = RenderRect::Height(RtHeight());
-		RtPending.size = D3DXVECTOR4((float)RtTraceWidth, (float)RtTraceHeight, reach, Settings.RtSunShadows ? 1.0f : 0.0f);
+		RtPending.size = D3DXVECTOR4((float)RtTraceWidth, (float)RtTraceHeight, reach, (Settings.RtSunShadows ? 1.0f : 0.0f) + (Settings.RtAlphaSolid ? 2.0f : 0.0f));	// w: + 2 AlphaSolid
 		RtPending.forward = D3DXVECTOR4(view._13, view._23, view._33, 0.0f);
 		RtPending.right = D3DXVECTOR4(view._11 / proj._11, view._21 / proj._11, view._31 / proj._11, 1.0f / WeaponFovScale());	// w: the weapon's
 		RtPending.up = D3DXVECTOR4(view._12 / proj._22, view._22 / proj._22, view._32 / proj._22, 0.0f);
@@ -1006,7 +1008,8 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	uniforms.grid = Constants.Grid;
 	uniforms.grid2 = Constants.Grid2;
 	uniforms.grid3 = Constants.Grid3;
-	uniforms.grid3.w = Settings.Mirror;	// UNOFFICIAL 2026-11-05 Mirror: the reflecting surfaces' F0 floor, 0.04 .. 1 (ReflectionsComposite.frag)
+	// (2026-11-06) MirrorSmoothOnly: the sign tells the shaders (Reflections.glsl Reflectivity): negative = only surfaces under roughness 0.05
+	uniforms.grid3.w = Settings.MirrorSmoothOnly ? -Settings.Mirror : Settings.Mirror;	// UNOFFICIAL 2026-11-05 Mirror: the reflecting surfaces' F0 floor, 0.04 .. 1 (ReflectionsComposite.frag)
 	uniforms.material = Constants.Material;
 	uniforms.material.w = GlassMask::ThisFrame() ? Settings.GlassReflect * (TheShaderManager->GameState.isExterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior) : 0.0f;	// UNOFFICIAL 2026-10-29
 	uniforms.depthConstants = *depthConstants;

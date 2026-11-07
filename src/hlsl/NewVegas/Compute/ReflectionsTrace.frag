@@ -25,11 +25,16 @@ void main() {
     vec3 tangent = normalize(abs(N.z) < 0.999 ? cross(N, vec3(0, 0, 1)) : cross(N, vec3(1, 0, 0)));
     vec3 bitangent = cross(N, tangent);
     vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
+    // (2026-11-06) a mirror (roughness under 0.03) traces the exact mirror ray, the same every frame (no spread, a fixed march offset
+    // below): no noise to average, so ReflectionsTemporal keeps no history there (the history smeared what mirrors show)
+    const bool mirrorPixel = roughness < 0.03;
+    if (mirrorPixel) H = N;
     vec3 R = reflect(V, H);
     if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
+    R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
 
     // March: steps that grow along the ray (fine near the surface, coarse far off), the first one shifted by the noise.
-    float jitter = GradientNoise(vpos + vec2(11.0, 71.0));
+    float jitter = mirrorPixel ? 0.5 : GradientNoise(vpos + vec2(11.0, 71.0));
     float lastT = 0.0;
     float lastZ = position.z;
     float hitT = -1.0;

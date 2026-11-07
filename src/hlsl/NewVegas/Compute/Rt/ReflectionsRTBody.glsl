@@ -16,7 +16,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 
 layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
 layout(set = 0, binding = 1, std140) uniform Pass {
-	vec4 size;          // x width, y height (of the images), z Distance, w 1 = sun shadow rays
+	vec4 size;          // x width, y height (of the images), z Distance, w 1 = sun shadow rays, + 2 (2026-11-06) AlphaSolid: alpha-tested hits solid (diagnostic)
 	vec4 forward;       // xyz camera forward (scene space), w the lamp count (0..12) + RoughReach (the fraction)
 	vec4 right;         // xyz camera right / projection[0][0], w (2026-10-30) the first-person weapon's offset scale (1 / Reflections.glsl's cb.weapon.y)
 	vec4 up;            // xyz camera up / projection[1][1]
@@ -86,7 +86,7 @@ const uint RecordLand = 0x01u, RecordGlow = 0x04u, RecordAlbedoKnown = 0x10u;
 // Every query's loop (a macro: a ray query cannot be passed to a function): alpha-tested candidates are confirmed where their texel
 // passes; opaque geometry commits by itself.
 #ifdef RT_ALPHA
-#define RtProceed(q) while (rayQueryProceedEXT(q)) { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false))) 			rayQueryConfirmIntersectionEXT(q); }
+#define RtProceed(q) while (rayQueryProceedEXT(q)) { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false)) || p.size.w > 1.5) 			rayQueryConfirmIntersectionEXT(q); }
 #else
 #define RtProceed(q) while (rayQueryProceedEXT(q)) { }
 #endif
@@ -128,6 +128,15 @@ void main() {
 	// Start a little way along the ray: past the depth buffer's own error far away (no hit on the surface itself).
 	float tMin = 1.0 + ray.x * 0.0015;
 	vec3 start = surface;
+	// (2026-11-05 rtrefl-only, the demo room's marble at a grazing angle) a ray that leaves the surface low hardly rises over tMin, so the
+	// depth buffer's error put its start under the traced floor and it hit that floor at once: a blurred copy of the tiles in place of
+	// the room. Start it off the surface along the surface normal (the reflection's half vector: dir - view, exact for a mirror, the
+	// sampled microfacet's for a glossy ray), by the same error budget.
+	{
+		const vec3 halfVector = dir - normalize(surface - p.origin.xyz);
+		const float halfLength = length(halfVector);
+		if (halfLength > 1.0e-3) start = surface + halfVector * ((0.5 + ray.x * 0.002) / halfLength);
+	}
 	// Ray budget by roughness: a rough reflection blurs far detail away, so its rays need not go as far. The reach share at
 	// roughness 1 (RoughReach) is forward.w's fraction (its integer part is the lamp count).
 	float roughness = ray.y - (weapon ? 6.0 : 2.0);   // (cast pixels: roughness + 2; weapon pixels + 6)
@@ -191,7 +200,7 @@ void main() {
 	float sun = 1.0;
 	vec3 hitPos = start + dir * t;
 	vec3 off = hitPos + normal * max(1.0, t * 0.001);
-	if (p.size.w > 0.5 && p.sun.w > 0.5 && p.origin.w < 0.5) {
+	if (mod(p.size.w, 2.0) > 0.5 && p.sun.w > 0.5 && p.origin.w < 0.5) {
 		if (dot(normal, p.sun.xyz) > 0.0) {
 			rayQueryEXT s;
 			rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, p.sun.xyz, 30000.0);
@@ -199,7 +208,7 @@ void main() {
 			sun = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
 		}
 	}
-	else if (p.size.w > 0.5 && p.origin.w < 0.5) {
+	else if (mod(p.size.w, 2.0) > 0.5 && p.origin.w < 0.5) {
 		int key = -1;
 		float best = 0.0;
 		int count = int(floor(p.forward.w));

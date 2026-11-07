@@ -41,8 +41,9 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    // z ExteriorDebug (diagnostic: 1 = the mask 0 everywhere, 2 = 1 everywhere); the other variants: RankBy
 	                    //   (0 the light a lamp brings, 1 the game's own falloff: as the game picks a draw's lamps by distance),
 	                    // w StartOffsetPerUnit (all variants): the start offset grows by this x the view depth
-	vec4 manyUnused[7]; // (RtLampTraceMany's many, reproject[4], many2: the C++ block is shared)
-	vec4 jitter;        // (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray;
+	vec4 manyUnused[6]; // (RtLampTraceMany's many, reproject[4], many2: the C++ block is shared. 2026-11-06: was [7] since 120cb59d, so jitter read
+	                    // the C++ rect (0): alpha-tested casters never tested in lamp shadows (AlphaTest did nothing) and no depth jitter)
+	vec4 jitter;        // (vec4 15: RtLampShadows.h asserts it) (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray;
 	                    // z (rtalpha) 1 = alpha-tested casters tested (binding 12, the alpha atlas)
 	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
 } p;

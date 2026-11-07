@@ -209,6 +209,15 @@ namespace {
 		app.apiVersion = VK_API_VERSION_1_2;
 		VkInstanceCreateInfo instanceInfo = { VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
 		instanceInfo.pApplicationInfo = &app;
+		// (2026-11-06, NVIDIA device-lost hunt) dev switch: a file NvrRtHelper.validate next to the exe turns on the Khronos validation
+		// layer for this process only (the loader's VK_LOADER_LAYERS_ENABLE also hit the 32-bit game's DXVK, which crashed in it). Its
+		// settings (log file, GPU-assisted / sync checks) come from vk_layer_settings.txt as usual (VK_LAYER_SETTINGS_PATH or the cwd).
+		const char* validationLayer = "VK_LAYER_KHRONOS_validation";
+		if (GetFileAttributesW((g_exeDir + L"\\NvrRtHelper.validate").c_str()) != INVALID_FILE_ATTRIBUTES) {
+			instanceInfo.enabledLayerCount = 1;
+			instanceInfo.ppEnabledLayerNames = &validationLayer;
+			Log("validation: the Khronos validation layer is asked for (NvrRtHelper.validate)");
+		}
 		VK_CHECK(vkCreateInstance(&instanceInfo, nullptr, &vk.instance), "vkCreateInstance");
 
 		uint32_t count = 0;
@@ -657,6 +666,7 @@ namespace {
 		uint64_t		passUs[NVR_RT_MAX_SHADERS] = {};		// per shader: GPU time of its passes, summed until the next report
 		uint32_t		passRuns[NVR_RT_MAX_SHADERS] = {};
 		uint64_t		refits = 0, fullBuilds = 0;	// dynamic (actor) geometry: in-place updates / full builds
+		uint64_t		duplicateBuilds = 0;		// (2026-11-06) BUILD ops skipped: a later op for the same id this frame
 		VkQueryPool		compactQueries = VK_NULL_HANDLE;	// compacted sizes, kCompactPerSlot a slot (2026-10-30)
 		// The arena guard (RtArenaGuard.comp, 2026-10-30): indices clamped before every build; a stale arena (sequence texel) emptied
 		VkPipelineLayout guardLayout = VK_NULL_HANDLE;
@@ -1293,9 +1303,18 @@ namespace {
 			std::vector<VkDeviceSize> scratchOffsets;
 			std::vector<VkBufferCopy> dataCopies;
 			const VkDeviceSize align = h.vk.asProperties.minAccelerationStructureScratchOffsetAlignment;
+			// (2026-11-06, the NVIDIA device-lost crashes) one build per geometry id a frame: the game can send the same id twice in a
+			// frame (an actor partition met twice), and both then went into the one vkCmdBuildAccelerationStructuresKHR call with the same
+			// destination (a full build and a refit of it, or two refits): VUID-...-dstAccelerationStructure-03698, found by the Khronos
+			// validation layer (NvrRtHelper.validate). AMD's builder survived it; NVIDIA's lost the device. Only the LAST op for an id is
+			// built (the newest pose / data); the earlier ones are skipped (counted in h.duplicateBuilds, logged every 600 frames).
+			std::unordered_map<uint32_t, uint32_t> lastBuildOf;
+			for (uint32_t i = 0; i < f.opCount; i++)
+				if (f.ops[i].op == NVR_RT_OP_BUILD && f.ops[i].id) lastBuildOf[f.ops[i].id] = i;
 			for (uint32_t i = 0; i < f.opCount; i++) {
 				const NvrRtGeometryOp& op = f.ops[i];
 				if (op.op != NVR_RT_OP_BUILD) continue;
+				if (op.id) { auto last = lastBuildOf.find(op.id); if (last != lastBuildOf.end() && last->second != i) { h.duplicateBuilds++; continue; } }
 				const bool uv = (op.flags & NVR_RT_OP_FLAG_TEXCOORDS) != 0;
 				const uint64_t texels = 3ull * ((uint64_t)op.vertexCount + op.triangleCount) + (uv ? 2ull * op.vertexCount : 0ull);
 				if (!op.id || !op.vertexCount || !op.triangleCount || (uint64_t)op.arenaTexel + texels > std::min<uint64_t>(capacity, arenaTexels) ||
@@ -1659,6 +1678,9 @@ namespace {
 		if (frameNumber % 600 == 0 && (h.refits || h.fullBuilds))
 			Log("frame %llu: dynamic (actor) geometry: %llu refits in place, %llu full builds so far", (unsigned long long)frameNumber,
 				(unsigned long long)h.refits, (unsigned long long)h.fullBuilds);
+		if (frameNumber % 600 == 0 && h.duplicateBuilds)
+			Log("frame %llu: %llu duplicate builds skipped so far (the same geometry id twice in a frame: only the last is built)",
+				(unsigned long long)frameNumber, (unsigned long long)h.duplicateBuilds);
 		return true;
 	}
 
@@ -1777,6 +1799,37 @@ namespace {
 			VkDeviceSize offset = 0;
 			if (h.structures.Allocate(h.vk, 256, block, offset)) h.structures.Free(h.vk, block, offset, 256);
 			if (!EnsureScratch(h, 16ull << 20)) return fail(nullptr);
+		}
+		// (2026-11-06, validation: "expects ... VK_IMAGE_LAYOUT_GENERAL, instead current layout is VK_IMAGE_LAYOUT_UNDEFINED") the shared
+		// images are used in GENERAL from the first frame but were never put there: one transition, now, before the game writes anything
+		// (it waits for READY), so dropping the old (empty) contents is harmless. NVIDIA is the stricter driver about layouts.
+		{
+			std::vector<VkImageMemoryBarrier> to;
+			for (uint32_t i = 0; i < h.imageCount; i++) {
+				if (!h.images[i].image) continue;
+				VkImageMemoryBarrier b = { VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+				b.srcAccessMask = 0;
+				b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+				b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+				b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+				b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				b.image = h.images[i].image;
+				b.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
+				to.push_back(b);
+			}
+			VkCommandBuffer cmd = h.slots[0].cmd;
+			VkCommandBufferBeginInfo begin = { VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+			begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+			if (!to.empty() && vkBeginCommandBuffer(cmd, &begin) == VK_SUCCESS) {
+				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, (uint32_t)to.size(), to.data());
+				if (vkEndCommandBuffer(cmd) == VK_SUCCESS) {
+					VkSubmitInfo submit = { VK_STRUCTURE_TYPE_SUBMIT_INFO };
+					submit.commandBufferCount = 1;
+					submit.pCommandBuffers = &cmd;
+					if (vkQueueSubmit(h.vk.queue, 1, &submit, VK_NULL_HANDLE) == VK_SUCCESS) vkQueueWaitIdle(h.vk.queue);
+				}
+				vkResetCommandBuffer(cmd, 0);
+			}
 		}
 		Status("ready: ray tracing on %s, the game's GPU (found by %s; %u shared images, arena %ux%u)", h.vk.properties.deviceName, h.vk.matchedBy,
 			h.imageCount, arena.width, arena.height);

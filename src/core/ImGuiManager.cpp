@@ -25,6 +25,7 @@
 #include <ctime>
 #include <unordered_set>
 #include <algorithm>
+#include <share.h>	// _SH_DENYNO (Copy bug report reads the open log)
 
 // The settings overlay (ImGui on the game's D3D9 device). Layout, top to bottom: a menu bar (File / View / Tools and the
 // global switches), the sidebar of sections next to the page of the selected section, and a one-line status bar. Input
@@ -652,6 +653,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.PBR.Dust",                     "Enabled",            RestartRule::Changed },	// DUST_ON (2026-11-04)
 	{ "Shaders.PBR.MicroShadow",              "Enabled",            RestartRule::Changed },	// MICRO_SHADOW_ON (2026-11-04)
 	{ "Shaders.PBR.Main",                     "VanillaBridge",      RestartRule::Changed },	// VANILLA_BRIDGE_ON (2026-11-05)
+	{ "Shaders.PBR.Main",                     "VanillaBridgeDielectricMax", RestartRule::Changed },	// VANILLA_BRIDGE_DIELECTRIC_MAX (2026-11-06)
 	{ "Shaders.HandBlood.Status",             "Enabled",            RestartRule::Changed },
 	{ "Shaders.Cloth.Main",                   "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.WetnessEffects.HudRaindrops",  "Enabled",            RestartRule::TurnOn },	// HUD_RAIN_ON: on at start
@@ -4378,6 +4380,7 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Shaders.WetWorld.Main", "PersistentDebugView", "Wet world" },
 	{ "Shaders.WetnessEffects.HudRaindrops", "DebugView", "Raindrops on screen" },
 	{ "Shaders.WetnessEffects.Reflections", "DebugView", "Wet reflections" },
+	{ "Main.Main.Quality", "MsaaEdgeDebugView", "MSAA edge fix" },
 };
 
 static float SettingF(const char* section, const char* key) { return TheSettingManager->GetSettingF(section, key); }
@@ -4422,6 +4425,15 @@ static const HidingNote kHidingNotes[] = {
 	{ []() { return RtReflectionsOn() && !SettingOn("Main.Main.RayTracing", "AlphaTested"); },
 		"Fences, leaves, grates and other see-through meshes are missing from ray-traced reflections and shadows.", "Put them in",
 		"Main.Main.RayTracing/AlphaTested=true" },
+	// (2026-11-05 rtrefl-lake: without it the lake mirrored only the sky; the cliffs across it stand past SceneRadius)
+	{ []() { return RtReflectionsOn() && TheShaderManager->GameState.isExterior && !SettingOn("Main.Main.RayTracing", "FarObjectLOD"); },
+		"Outdoors, ray-traced reflections only reach what is near you (SceneRadius): distant cliffs, hills and buildings are missing, so "
+		"a lake shows only the sky where it should mirror the far shore.", "Put the distance in",
+		"Main.Main.RayTracing/FarObjectLOD=true Main.Main.RayTracing/FarLandLOD=true" },
+	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && RtCore::LeftOut("RT reference path tracer") &&
+			(SettingOn("Main.Main.RayTracing", "ReferencePT") || SettingOn("Main.Main.RayTracing", "PTRealtime")); },
+		"Path tracing is on but it was left out at start: the other ray-traced effects took all the shared images it needs. Turn one "
+		"of them off (or PTRestirGI) and restart the game.", nullptr, nullptr },
 	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && AnyRtOn() && !RtCore::Running(); },
 		"A ray-traced effect is on but ray tracing is not running (see the Ray tracing page's first line for why): it shows nothing.",
 		nullptr, nullptr },
@@ -4874,15 +4886,40 @@ static int InstallIssueCount() {
 	return n;
 }
 
-// Help > Copy bug report: the report on the clipboard, and in the log (so a report without the paste still has it)
+// 2026-11-05: this session's whole log, as written so far (already scrubbed line by line by Logger). User: Copy bug report "should copy the
+// entire log from that session": players paste the report and forget the attachment. Over kLogCap the end is kept (the crash is at the end).
+static std::string SessionLogText() {
+	static const size_t kLogCap = 8u << 20;
+	std::string path = Logger::FilePath;
+	if (path.empty()) return "(no log file)\r\n";
+	if (path.size() > 2 && path[1] != ':' && path[0] != '\\') path = Paths::GameRoot() + "\\" + path;	// relative to the game folder
+	FILE* in = _fsopen(path.c_str(), "rb", _SH_DENYNO);	// the logger keeps it open for writing
+	if (!in) return "(the log file could not be read)\r\n";
+	std::string text;
+	fseek(in, 0, SEEK_END);
+	const long size = ftell(in);
+	if (size > 0) {
+		const size_t keep = (std::min)((size_t)size, kLogCap);
+		fseek(in, (long)((size_t)size - keep), SEEK_SET);
+		text.resize(keep);
+		text.resize(fread(&text[0], 1, keep, in));
+		if (keep < (size_t)size) text = "(the first " + std::to_string((size_t)size - keep) + " bytes left out)\r\n" + text.substr(text.find('\n') + 1);
+	}
+	fclose(in);
+	return text;
+}
+
+// Help > Copy bug report: the report on the clipboard, and in the log (so a report without the paste still has it); then the whole session log
+// on the clipboard after it (not into the log again)
 static void CopyBugReport() {
 	const std::string report = InstallCheck::BugReport();
-	ImGui::SetClipboardText(report.c_str());
 	gMenu.reportCopiedAt = ImGui::GetTime();
 	size_t lines = 0, start = 0;
 	for (size_t end; (end = report.find("\r\n", start)) != std::string::npos; start = end + 2, lines++)
 		Logger::Log("INSTALL report | %s", report.substr(start, end - start).c_str());
-	Logger::Log("INSTALL bug report copied to the clipboard (%zu lines)", lines);
+	Logger::Log("INSTALL bug report copied to the clipboard (%zu lines + this session's log)", lines);
+	const std::string full = report + "\r\n---------- " + Branding::ProductName + " log of this session ----------\r\n" + SessionLogText();
+	ImGui::SetClipboardText(full.c_str());
 }
 
 static void RenderInstallNotice(bool mainMenu) {
@@ -4948,9 +4985,9 @@ static void DrawInstallCheckWindow() {
 		if (ImGui::Button("Copy bug report")) CopyBugReport();
 		ImGui::SameLine();
 		if (gMenu.reportCopiedAt >= 0.0 && ImGui::GetTime() - gMenu.reportCopiedAt < 4.0)
-			ImGui::TextColored(MenuSkin::Heading(0.25f), "Copied: paste it into your report and attach the log file it names.");
+			ImGui::TextColored(MenuSkin::Heading(0.25f), "Copied: paste it into your report (this session's log is included).");
 		else
-			ImGui::TextDisabled("version, GPU, DXVK, log file name, these results and your changed settings");
+			ImGui::TextDisabled("version, GPU, DXVK, these results, your changed settings and this session's log");
 		ImGui::Separator();
 		if (InstallCheck::Results().empty()) ImGui::TextUnformatted("Nothing found.");
 		for (const InstallCheck::Result& r : InstallCheck::Results()) {
@@ -5155,7 +5192,7 @@ static void DrawHelpMenu() {
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("What the start-up check found: old or missing files, the settings file, DXVK.");
 	if (ImGui::MenuItem("Copy bug report")) CopyBugReport();
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Copies the version, GPU, DXVK, the log file's name, the install check and every setting you changed.\nPaste it into your report and attach that log file.");
+		ImGui::SetTooltip("Copies the version, GPU, DXVK, the install check, every setting you changed and this session's whole log.\nPaste it into your report.");
 	ImGui::Separator();
 	ImGui::MenuItem("About Vegas Shaders", nullptr, &MenuTools::AboutOpen);
 	ImGui::EndMenu();

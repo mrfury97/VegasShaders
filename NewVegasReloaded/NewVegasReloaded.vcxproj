@@ -298,6 +298,8 @@
     <ClInclude Include="..\src\core\Sm6Pass.h" />
     <ClInclude Include="..\src\core\DxvkCompute.h" />
     <ClInclude Include="..\src\core\RtCore.h" />
+    <ClInclude Include="..\src\core\RtScenePick.h" />
+    <ClInclude Include="..\src\core\RtLightGrid.h" />
     <ClInclude Include="..\src\core\RtSunShadows.h" />
     <ClInclude Include="..\src\core\RtPathTrace.h" />
     <ClInclude Include="..\src\core\RtDenoise.h" />

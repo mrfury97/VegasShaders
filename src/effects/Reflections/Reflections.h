@@ -14,6 +14,7 @@ public:
 		float	RainWetness;	// outdoors: how much the rain's wetness adds
 		float	InteriorFloors;	// indoors: how much floors reflect
 		float	Roughness;		// dry surfaces (0 mirror .. 1 matte)
+		bool	MirrorSmoothOnly;	// 2026-11-06: Mirror only on surfaces whose own roughness is under 0.05 (the test room's mirror panels)
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	MaxDistance;	// ray length, game units
@@ -49,6 +50,7 @@ public:
 		float	RtMaxRoughness;		// rougher surfaces keep the old fallbacks (cube, grid, sky)
 		float	RtDistance;			// ray length, game units
 		int		RtDebugView;		// 1 sources, 2 hit distance, 3 RT without the screen march, 4 hit instance
+		bool	RtAlphaSolid;		// UNOFFICIAL 2026-11-06 diagnostic: alpha-tested hits taken as solid (is the alpha test what the rays miss?)
 		float	RtScreenTolerance;	// a hit counts as the screen's pixel when their depths differ by less than this share
 		float	RtEstimate;			// brightness of the estimate for hits neither the screen nor the cube can show
 		bool	RtSunShadows;		// the estimate's sun goes through a shadow ray

@@ -32,6 +32,8 @@ public:
 		void		(*Setup)();							// registers its images (AddImage) before each helper start
 		void		(*Record)(IDirect3DDevice9* Device);	// this frame's CopyIn / AddPass / CopyOut
 		UINT		Point = 0;							// (2026-10-28 RT reflections) 0: recorded in Frame; 1: only through Exchange
+		UINT		Order = 0;							// (2026-11-05) Setup order at a helper start, low first: a user whose images do not fit
+												// the protocol's NVR_RT_MAX_IMAGES is left out for the session (the others keep tracing)
 	};
 
 	static void			AddUser(const User& user);
@@ -67,6 +69,7 @@ public:
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).
 	static D3DXVECTOR3	Eye();
 	static bool			Running();							// the helper is ready (users trace from the frame after it got ready)
+	static bool			LeftOut(const char* Name);			// (2026-11-05) this user's images did not fit at the helper start: it does not trace
 	// UNOFFICIAL 2026-11-02 (bench warm slot, shot command reloadshaders): stop a running helper; it starts again on the next frame an RT
 	// effect wants it, so it loads every Compute\Rt\*.spv again (and settings read at its start: HitTextures ...). Users' Setup runs again.
 	static void			Restart(const char* Why);

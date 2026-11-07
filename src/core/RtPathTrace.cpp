@@ -1,6 +1,7 @@
 // UNOFFICIAL 2026-11-02 the reference path tracer: RtPathTrace.h; the trace shader is Compute\Rt\RtPathTrace.comp (run by the helper),
 // the display pass Compute\RtPathTraceShow.frag (a fork pass in the game).
 
+#include "RtLightGrid.h"	// (2026-11-06) PTLightGrid's builder (shared with tools/nvr-rt-host)
 #include "RtPathTrace.h"
 #include "RtCore.h"
 #include "DxvkCompute.h"
@@ -14,6 +15,7 @@
 
 namespace {
 	const char* const kSection = "Main.Main.RayTracing";
+	const char* const kUserName = "RT reference path tracer";	// (2026-11-05) RtCore::LeftOut
 
 	struct Settings {
 		bool	enabled = false;		// ReferencePT
@@ -39,6 +41,13 @@ namespace {
 		int		bounceAlpha = 1;		// PTBounceAlpha (2026-11-04 b): bounce rays' alpha test: 1 as the camera's, 0 cut-outs solid, 2 cut-outs left out, 3 the nearest card's texel
 		float	bounceDistance = 0.0f;	// PTBounceDistance (2026-11-04 b): bounce rays' length (0 = 60000, as the camera's)
 		float	indirectClamp = 0.0f;	// PTIndirectClamp (2026-11-04 c): light through a bounce, luminance cap (0 = none)
+		int		lastSky = 0;			// (2026-11-06) PTLastSky: the last hit's sky light (flag 32768)
+		int		lastBounce = 0;		// (2026-11-06 b) PTLastBounce: the last hit's further bounces, estimated from its own direct light (flag 65536)
+		int		lampFalloff = 0;	// (2026-11-06 c) PTLampFalloff: 0 the game's (1 - (d/r)^2)^2.2, 1 physical (windowed inverse square, reach x 2; flag 131072)
+		float	lampGain = 1.6f;	// (2026-11-06 c) PTLampGain: the physical falloff's lamp brightness (1 = the game's total light per lamp)
+		int		bounceHalf = 0;			// (2026-11-06) PTBounceHalf: -1 auto (on under PTRealtime), 0 off, 1 on
+		float	denoiseSigma = 1.0f;	// (2026-11-06) PTDenoiseSigma: the a-trous passes' luminance edge stop (RtDenoise ValueSigma)
+		float	denoiseClamp = 0.0f;	// (2026-11-06) PTDenoiseClamp
 		int		denoiseIterations = 2;	// PTDenoiseIterations / PTDenoiseHistory (2026-11-04 c, test only): PTDenoise's a-trous passes (2: section 30; was 4), history frames
 		float	denoiseHistory = 32.0f;
 		bool	restirGI = false;		// PTRestirGI (2026-11-04 d): ReSTIR GI on the first bounce (with PTDenoise; RtPathTraceGI.spv + RtRestirGI.spv)
@@ -135,6 +144,13 @@ namespace {
 		S.indirectClamp = f("PTIndirectClamp", 0.0f, 1000.0f);
 		S.denoiseIterations = i("PTDenoiseIterations", 0, 5);
 		S.denoiseHistory = f("PTDenoiseHistory", 1.0f, 256.0f);
+		S.denoiseClamp = f("PTDenoiseClamp", 0.0f, 8.0f);
+		S.lastSky = i("PTLastSky", -1, 1);
+		S.lastBounce = i("PTLastBounce", -1, 1);
+		S.lampFalloff = i("PTLampFalloff", 0, 1);
+		S.lampGain = f("PTLampGain", 0.1f, 8.0f);
+		S.bounceHalf = i("PTBounceHalf", -1, 1);	// (2026-11-06) the bounce for half the pixels a frame
+		S.denoiseSigma = f("PTDenoiseSigma", 0.25f, 16.0f);	// (2026-11-06) the a-trous luminance edge stop
 		S.restirGI = TheSettingManager->GetSettingI(kSection, "PTRestirGI") != 0;
 		S.restirMaxM = f("PTRestirMaxM", 1.0f, 255.0f);
 		S.restirSpatial = f("PTRestirSpatial", 0.0f, 16.0f);
@@ -151,8 +167,16 @@ namespace {
 			S.denoise = true;
 			S.samples = 1;
 			if (S.bounceAlpha == 1) S.bounceAlpha = 3;
+			// (2026-11-06, RT-PATH-TRACING.md section 34) one bounce unless PTBounces was changed from its default 4: replays of Goodsprings and
+			// Lucky 38 (48 paths each): 4 -> 1 bounce halves the trace (337 -> 172 ms), the picture 0.2 % darker, RMSE 0.27 / 1.20 against a
+			// 2.32 / 7.62 noise floor (deeper bounces carry almost nothing after Russian roulette)
+			if (S.bounces == 4) S.bounces = 1;
+			if (S.bounceHalf < 0) S.bounceHalf = 1;	// (2026-11-06, section 35) the bounce for half the pixels a frame
+			if (S.lastSky < 0) S.lastSky = 1;	// (2026-11-06, section 39) PTLastSky: the last hit's sky light
+			if (S.lastBounce < 0) S.lastBounce = 1;	// (2026-11-06, section 44) PTLastBounce: the last hit's further bounces
 		}
 		S.gameLamps = std::clamp(TheSettingManager->GetSettingI(kSection, "PTGameLamps"), 0, 4);
+		if (S.enabled && RtCore::LeftOut(kUserName)) S.enabled = false;	// (2026-11-05) its images did not fit at the helper start: no picture of its own
 	}
 
 	float Lin(float v) { return powf((std::max)(v, 0.0f), 2.2f); }
@@ -165,6 +189,9 @@ namespace {
 	// first, at most 8; scene space (world minus CameraPosition), colour linear x dimmer (as AmbientOcclusion.cpp RtGILamps).
 	int Lamps(PassConstants& c) {
 		struct Lamp { D3DXVECTOR4 pos, colour; float distance; };
+		// (2026-11-06 c) PTLampFalloff 1: the lamp reaches twice as far (the inverse-square tail; RtPathTrace.comp LampFall) and its colour is
+		// x PTLampGain; the cull, the lamp image and the light grid all see the stretched reach
+		auto physical = [&](Lamp& l) { if (S.lampFalloff == 1) { l.pos.w *= 2.0f; l.colour *= S.lampGain; l.distance = (std::max)(D3DXVec3Length((const D3DXVECTOR3*)&l.pos) - l.pos.w, 0.0f); } };
 		Lamp lamps[ShadowCubeMapsMax + TrackedLightsMax];
 		int found = 0;
 		const D3DXVECTOR4& eye = TheRenderManager->CameraPosition;
@@ -195,6 +222,7 @@ namespace {
 				table.push_back({ D3DXVECTOR4(rel.x, rel.y, rel.z, a.reach), D3DXVECTOR4(a.colour[0] * ls, a.colour[1] * ls, a.colour[2] * ls, 0.0f),
 					(std::max)(D3DXVec3Length(&rel) - a.reach, 0.0f) });
 			}
+			for (Lamp& l : table) physical(l);
 			std::sort(table.begin(), table.end(), [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
 			lampCount = (std::min)((int)table.size(), kLampsMax);
 			for (int i = 0; i < lampCount; i++) { memcpy(lampData[i].pos, &table[i].pos, 16); memcpy(lampData[i].colour, &table[i].colour, 16); }
@@ -204,6 +232,7 @@ namespace {
 		}
 		for (int s = 0; s < ShadowCubeMapsMax; s++) add(sm->BatchLightPosition[s], sm->BatchLightColor[s]);
 		for (int t = 0; t < TrackedLightsMax; t++) add(sm->LightPosition[t], sm->LightColor[ShadowCubeMapsScreen + t]);
+		for (int i = 0; i < found; i++) physical(lamps[i]);
 		std::sort(lamps, lamps + found, [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
 		lampCount = (std::min)(found, kLampsMax);	// (2026-11-03) all of them for the lamp image
 		for (int i = 0; i < lampCount; i++) { memcpy(lampData[i].pos, &lamps[i].pos, 16); memcpy(lampData[i].colour, &lamps[i].colour, 16); }
@@ -254,69 +283,17 @@ namespace {
 	// (kGridTexels float pairs) and the constants; false (the trace loops over every lamp) when the lists do not fit.
 	struct GridInfo { int cells = 0, entries = 0; float cell[3] = {}; int dims[3] = {}; };
 	GridInfo	gridInfo;
-	bool BuildGrid(PassConstants& c, float* out) {
+	bool BuildGrid(PassConstants& c, float* out) {	// (2026-11-06) the builder is RtLightGrid::Build (RtLightGrid.h, tested by tools/nvr-rt-host)
 		gridInfo = {};
 		if (lampCount < S.lightGridMin) return false;
-		float lo[3] = { FLT_MAX, FLT_MAX, FLT_MAX }, hi[3] = { -FLT_MAX, -FLT_MAX, -FLT_MAX };
-		for (int i = 0; i < lampCount; i++)
-			for (int a = 0; a < 3; a++) { lo[a] = (std::min)(lo[a], lampData[i].pos[a] - lampData[i].pos[3]); hi[a] = (std::max)(hi[a], lampData[i].pos[a] + lampData[i].pos[3]); }
-		int dims[3];
-		float cell[3];
-		for (int a = 0; a < 3; a++) {
-			const float extent = (std::max)(hi[a] - lo[a], 1.0f);
-			const int most = a == 2 ? kGridZ : kGridXY;
-			dims[a] = std::clamp((int)ceilf(extent / 64.0f), 1, most);
-			cell[a] = extent / dims[a];	// (the cells span the bounds exactly)
+		RtLightGrid::Info info;
+		if (!RtLightGrid::Build(lampData[0].pos, lampCount, (int)(sizeof(LampData) / sizeof(float)), out, kGridTexels, kLightTexels, c.grid, info)) {
+			static int logged = 0;
+			if (logged++ < 4) Logger::Log("UNOFFICIAL RT path trace: the light grid does not fit (%d lamps, %d cells, %d list entries): every hit weighs every lamp this frame.", lampCount, info.cells, info.entries);
+			return false;
 		}
-		const int cells = dims[0] * dims[1] * dims[2];
-		static std::vector<int> count, start;
-		count.assign(cells, 0);
-		// the sphere against the cell's box (the box's nearest point within reach, with float slack: never leave out a lamp that reaches it)
-		auto touches = [&](int i, const int idx[3]) {
-			float d2 = 0.0f;
-			for (int a = 0; a < 3; a++) {
-				const float b0 = lo[a] + idx[a] * cell[a], b1 = b0 + cell[a], p = lampData[i].pos[a];
-				const float d = p < b0 ? b0 - p : p > b1 ? p - b1 : 0.0f;
-				d2 += d * d;
-			}
-			const float r = lampData[i].pos[3] * 1.001f + 0.01f;
-			return d2 <= r * r;
-		};
-		int entries = 0;
-		for (int pass = 0; pass < 2; pass++) {
-			if (pass == 1) {
-				if (cells + (entries + 1) / 2 > kGridTexels) {
-					static int logged = 0;
-					if (logged++ < 4) Logger::Log("UNOFFICIAL RT path trace: the light grid does not fit (%d lamps, %d cells, %d list entries): every hit weighs every lamp this frame.", lampCount, cells, entries);
-					return false;
-				}
-				start.assign(cells, 0);
-				for (int k = 0, sum = 0; k < cells; k++) { start[k] = sum; sum += count[k]; }
-				for (int k = 0; k < cells; k++) { out[2 * k] = (float)start[k]; out[2 * k + 1] = (float)count[k]; }
-				count.assign(cells, 0);
-			}
-			for (int i = 0; i < lampCount; i++) {	// (rising lamp order: each list keeps the all-lamp loop's order)
-				int r0[3], r1[3];
-				for (int a = 0; a < 3; a++) {
-					r0[a] = std::clamp((int)floorf((lampData[i].pos[a] - lampData[i].pos[3] - lo[a]) / cell[a]) - 1, 0, dims[a] - 1);
-					r1[a] = std::clamp((int)floorf((lampData[i].pos[a] + lampData[i].pos[3] - lo[a]) / cell[a]) + 1, 0, dims[a] - 1);
-				}
-				int idx[3];
-				for (idx[2] = r0[2]; idx[2] <= r1[2]; idx[2]++)
-					for (idx[1] = r0[1]; idx[1] <= r1[1]; idx[1]++)
-						for (idx[0] = r0[0]; idx[0] <= r1[0]; idx[0]++) {
-							if (!touches(i, idx)) continue;
-							const int k = (idx[2] * dims[1] + idx[1]) * dims[0] + idx[0];
-							if (pass == 0) { count[k]++; entries++; }
-							else out[2 * cells + start[k] + count[k]++] = (float)i;	// (entry e: float 2 x cells + e = texel cells + e / 2, channel e % 2)
-						}
-			}
-		}
-		c.grid[0][0] = lo[0]; c.grid[0][1] = lo[1]; c.grid[0][2] = lo[2]; c.grid[0][3] = (float)dims[0];
-		c.grid[1][0] = 1.0f / cell[0]; c.grid[1][1] = 1.0f / cell[1]; c.grid[1][2] = 1.0f / cell[2]; c.grid[1][3] = (float)dims[1];
-		c.grid[2][0] = (float)dims[2]; c.grid[2][1] = (float)kLightTexels;
-		gridInfo.cells = cells; gridInfo.entries = entries;
-		for (int a = 0; a < 3; a++) { gridInfo.cell[a] = cell[a]; gridInfo.dims[a] = dims[a]; }
+		gridInfo.cells = info.cells; gridInfo.entries = info.entries;
+		for (int a = 0; a < 3; a++) { gridInfo.cell[a] = info.cell[a]; gridInfo.dims[a] = info.dims[a]; }
 		return true;
 	}
 
@@ -351,13 +328,18 @@ namespace {
 		imageMaterial = RtCore::AddImage("NVR RT path trace material", w, h, NVR_EXT_SHARED_RGBA16F);	// (2026-11-02 e) TESR_MaterialBuffer
 		imageAlbedoOut = RtCore::AddImage("NVR RT path trace first albedo", w, h, NVR_EXT_SHARED_RGBA16F);	// (2026-11-03) PTDenoise's demodulation
 		imageLamps = RtCore::AddImage("NVR RT path trace lamps", kLightTexels, 1 + kGridRows, NVR_EXT_SHARED_RG32F);
-		// (2026-11-04 d) PTRestirGI's images (9: the shared block holds 48, 37 were in use)
-		imageGIResult = RtCore::AddImage("NVR RT path trace GI result", w, h, NVR_EXT_SHARED_RGBA16F);
-		for (int i = 0; i < 2; i++) {
-			imageResA[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir A1" : "NVR RT path trace GI reservoir A0", w, h, NVR_EXT_SHARED_RG32F);
-			imageResB[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir B1" : "NVR RT path trace GI reservoir B0", w, h, NVR_EXT_SHARED_RG32F);
-			imageResC[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir C1" : "NVR RT path trace GI reservoir C0", w, h, NVR_EXT_SHARED_RGBA16F);
-			imageSurf[i] = RtCore::AddImage(i ? "NVR RT path trace GI surface 1" : "NVR RT path trace GI surface 0", w, h, NVR_EXT_SHARED_RG32F);
+		// (2026-11-04 d) PTRestirGI's images (9). (2026-11-05) Only when PTRestirGI is on at the helper start (off by default; turning it on
+		// later needs a restart): the protocol holds 48 shared images and lamps + sun + AO + reflections + the path tracer asked for more.
+		imageGIResult = -1;
+		for (int i = 0; i < 2; i++) imageResA[i] = imageResB[i] = imageResC[i] = imageSurf[i] = -1;
+		if (TheSettingManager->GetSettingI(kSection, "PTRestirGI") != 0) {
+			imageGIResult = RtCore::AddImage("NVR RT path trace GI result", w, h, NVR_EXT_SHARED_RGBA16F);
+			for (int i = 0; i < 2; i++) {
+				imageResA[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir A1" : "NVR RT path trace GI reservoir A0", w, h, NVR_EXT_SHARED_RG32F);
+				imageResB[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir B1" : "NVR RT path trace GI reservoir B0", w, h, NVR_EXT_SHARED_RG32F);
+				imageResC[i] = RtCore::AddImage(i ? "NVR RT path trace GI reservoir C1" : "NVR RT path trace GI reservoir C0", w, h, NVR_EXT_SHARED_RGBA16F);
+				imageSurf[i] = RtCore::AddImage(i ? "NVR RT path trace GI surface 1" : "NVR RT path trace GI surface 0", w, h, NVR_EXT_SHARED_RG32F);
+			}
 		}
 		giHistory = false;	// (2026-11-04: + the light grid's rows)	// (2026-11-03) all the frame's lamps	// (2026-11-02 c) the game's frame at the core's point
 		samples = 0;	// new images: the mean starts over
@@ -371,7 +353,7 @@ namespace {
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
-		const float key[8] = { (float)S.bounces, S.sky, S.ambient, S.glow, S.clamp + 1000.0f * S.indirectClamp, (float)S.debugView + (S.primary ? 16.0f : 0.0f) + (S.specular ? 32.0f : 0.0f) + (S.glowLights ? 64.0f : 0.0f) + 128.0f * (float)S.gameLamps + (S.lightGrid ? 1024.0f : 0.0f) + 2048.0f * (float)S.bounceAlpha + 8192.0f * floorf(S.bounceDistance), proj._11, proj._22 };	// (2026-11-04: PTLightGrid too, so an A/B starts each mean fresh)
+		const float key[8] = { (float)S.bounces + 100.0f * (float)S.bounceHalf + 1000.0f * (float)S.lastSky + 10000.0f * (float)S.lastBounce + 100000.0f * (float)S.lampFalloff + 1000000.0f * S.lampGain, S.sky, S.ambient, S.glow, S.clamp + 1000.0f * S.indirectClamp, (float)S.debugView + (S.primary ? 16.0f : 0.0f) + (S.specular ? 32.0f : 0.0f) + (S.glowLights ? 64.0f : 0.0f) + 128.0f * (float)S.gameLamps + (S.lightGrid ? 1024.0f : 0.0f) + 2048.0f * (float)S.bounceAlpha + 8192.0f * floorf(S.bounceDistance), proj._11, proj._22 };	// (2026-11-04: PTLightGrid too, so an A/B starts each mean fresh)
 		bool moved = !lastValid;
 		for (int i = 0; i < 16 && !moved; i++) moved = fabsf(((const float*)&view)[i] - ((const float*)&lastView)[i]) > 1.0e-4f;
 		if (!moved) moved = fabsf(camera.x - lastCamera.x) > 0.05f || fabsf(camera.y - lastCamera.y) > 0.05f || fabsf(camera.z - lastCamera.z) > 0.05f;
@@ -447,6 +429,10 @@ namespace {
 		if (S.specular) flags |= 128u;
 		if ((S.gameLamps & 1) || S.gameLamps == 4) flags |= 2048u;	// (2026-11-03 rtspec) PTGameLamps: the game's falloff
 		if (S.glowFromFrame) flags |= 8192u;	// (2026-11-05) PTGlowFromFrame
+		if (S.bounceHalf > 0 && !S.restirGI) flags |= 16384u;	// (2026-11-06) PTBounceHalf (not with PTRestirGI: it moves the first direct light first)
+		if (S.lastSky > 0) flags |= 32768u;	// (2026-11-06) PTLastSky
+		if (S.lastBounce > 0) flags |= 65536u;	// (2026-11-06 b) PTLastBounce
+		if (S.lampFalloff == 1) flags |= 131072u;	// (2026-11-06 c) PTLampFalloff physical
 		if (S.denoise && imageAlbedoOut >= 0) flags |= 512u;	// (2026-11-03) demodulated for the denoiser
 		// (2026-11-02 b) the sky on misses: RT reflections' SkyPanorama (the sky as the screen saw it, clouds and all; needs the Reflections
 		// effect with [Shaders.Reflections.RT] SkyPanorama), last frame's, while it is fresh; else the 2-colour gradient
@@ -592,7 +578,9 @@ namespace {
 		desc.SamplerHeapBinding = 0;
 		desc.ColorTargetCount = 1;
 		desc.Blend = NVR_EXT_BLEND_NONE;
-		desc.ColorWriteMask = 0xFu;
+		// (2026-11-06) colour only: under PTReplace the scene's alpha carries the materials MaterialAware reflections read (roughness, metal;
+		// ReflectionsMaterial.frag); writing 1 there wiped them, so with PTRealtime the test room's mirrors reflected as rough grey stone
+		desc.ColorWriteMask = 0x7u;
 		desc.pDebugName = "RtPathTraceShow";
 		if (FAILED(ext->CreateGraphicsPipeline(&desc, &showPipeline))) {
 			showPipeline = nullptr;
@@ -630,8 +618,10 @@ namespace {
 			RtDenoise::Settings settings;
 			settings.Channels = 3;
 			settings.IgnoreRr = true;
-			settings.MaxHistory = S.denoiseHistory;	// (2026-11-04 c: test keys; 32 frames as before, 2 a-trous passes since section 30, was 4)
+			settings.MaxHistory = S.denoiseHistory;
+			settings.HistoryClamp = S.denoiseClamp;	// (2026-11-06)	// (2026-11-04 c: test keys; 32 frames as before, 2 a-trous passes since section 30, was 4)
 			settings.Iterations = S.denoiseIterations;
+			settings.ValueSigma = S.denoiseSigma;	// (2026-11-06) PTDenoiseSigma (4 = RtDenoise's default, as before)
 			if (denoisedSurface && RtDenoise::Run(denoiser, Device, displayTexture, denoisedSurface, settings)) shown = denoisedTexture;
 		}
 		ID3D9NvrExtPipeline* pipeline = ShowPipeline();
@@ -678,7 +668,7 @@ namespace RtPathTrace {
 		shaderGrid = RtCore::AddShader("RtPathTraceGrid");	// (2026-11-04) PTLightGrid
 		shaderGI = RtCore::AddShader("RtPathTraceGI");		// (2026-11-04 d) PTRestirGI
 		shaderReuse = RtCore::AddShader("RtRestirGI");
-		RtCore::AddUser({ "RT reference path tracer", Wants, Setup, Record });
+		RtCore::AddUser({ kUserName, Wants, Setup, Record, 0, 1 });	// Order 1: set up last (the first left out when the images do not fit)
 	}
 
 	void RenderDebug(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget) {

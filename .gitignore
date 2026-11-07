@@ -13,3 +13,4 @@ src/hlsl/NewVegas/Compute/Replace/
 # the RT helper's own build output (msbuild of tools/nvr-rt-helper/NvrRtHelper.vcxproj)
 tools/nvr-rt-helper/bin/
 tools/nvr-rt-helper/obj/
+tools/nvr-rt-host/fork-path.txt

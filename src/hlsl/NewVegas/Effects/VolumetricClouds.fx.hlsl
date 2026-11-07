@@ -686,6 +686,18 @@ float4 CloudsHere(float2 huv) {
 	return clouds;
 }
 
+// UNOFFICIAL 2026-11-06 (report: black bands round trees with the clouds and the game's MSAA): a mixed pixel's colour is the MSAA resolve's
+// average of the STORED (gamma) samples, not a linear-light mix, so it holds far less linear sky than share * behind. The old blend took
+// share * behind * (1 - clouds.a) away in linear light, went below zero under thick cloud and clamped to black. Swapped in the space the
+// resolve averaged: the sky share's stored colour out, the clouded sky's stored colour in, and never more taken out than the pixel holds.
+// behind: the sky there before the clouds (linear, as MsaaSkyBehind / SkyShare give it).
+float3 MsaaCloudsOverShare(float3 color, float share, float3 behind, float4 clouds) {
+	float3 skyBefore = delinearize(max(behind, 0.0));
+	float3 skyAfter = delinearize(max(behind * clouds.a + clouds.rgb * TESR_CloudsLayout.w, 0.0));
+	float3 c = max(color, 0.0);
+	return c - min(share * skyBefore, c) + share * skyAfter;
+}
+
 float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 uv = IN.UVCoord;
 	// UNOFFICIAL 2026-10-27: the clouds' history is drawn whole in every frame (RenderClouds runs the march as in a native frame), so in
@@ -704,8 +716,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 		[branch] if (share > MsaaNoSky && share < MsaaAllSky) {
 			float4 clouds = CloudsHere(huv);
 			float3 behind = MsaaSkyBehind(uv, color.rgb);
-			float3 lin = linearize(max(color.rgb, 0.0)) + share * (behind * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
-			return float4(delinearize(max(lin, 0.0)), color.a);
+			return float4(MsaaCloudsOverShare(color.rgb, share, behind, clouds), color.a);
 		}
 		sky = share >= MsaaAllSky;
 	}
@@ -716,8 +727,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 		float share = SkyShare(uv, color.rgb, skyBefore);
 		[branch] if (share > 0.0) {
 			float4 clouds = CloudsHere(huv);
-			float3 lin = linearize(max(color.rgb, 0.0)) + share * (skyBefore * (clouds.a - 1.0) + clouds.rgb * TESR_CloudsLayout.w);
-			return float4(delinearize(max(lin, 0.0)), color.a);
+			return float4(MsaaCloudsOverShare(color.rgb, share, skyBefore, clouds), color.a);
 		}
 	}
 	[branch] if (!sky) {

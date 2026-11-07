@@ -2193,7 +2193,7 @@ namespace {
 		}
 	}
 
-	struct Options { bool flash = true; int reportKey = 27; unsigned reportFrames = 16; double lastRead = -10.0; } O;
+	struct Options { bool flash = true; double lastRead = -10.0; } O;
 }
 
 // --- EffectStatus ---
@@ -2272,9 +2272,6 @@ void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* pi
 		if (flash != O.flash) { Logger::Log("FLASH detector %s ([Main.Main.Misc] FlashDetect)", flash ? "on" : "off"); if (!flash) ReleaseFlash(); }
 		O.flash = flash;
 		F.on = flash;
-		O.reportKey = TheSettingManager->GetSettingI("Main.Main.Misc", "ReportKey");
-		const int frames = TheSettingManager->GetSettingI("Main.Main.Misc", "ReportFrames");	// (0: missing from the file -> 16)
-		O.reportFrames = frames <= 0 ? 16u : (unsigned)(std::min)(frames, (int)MaxBurst);
 		// UNOFFICIAL 2026-11-01 the self-test (a one-frame dropout of one effect every N frames)
 		const int every = TheSettingManager->GetSettingI("Main.Develop.Main", "FlashSelfTestEvery");
 		if (every != T.every) {
@@ -2306,21 +2303,8 @@ void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* pi
 		Wt.on = watch;
 	}
 
-	// The report key: the same game key check as the screenshot key (Global->OnKeyDown, DirectInput: works under DXVK; user 2026-11-01:
-	// the first version polled GetAsyncKeyState with a foreground-window test and never fired), not while typing in an NVR text box.
-	if (O.reportKey > 0 && O.reportKey < 256 && Global->OnKeyDown(O.reportKey) && !(ImGuiManager::IsVisible() && ImGuiManager::TextInputActive())) {
-		if (B.phase != Burst::Idle)
-			Logger::Log("REPORT key pressed during report %u's burst (%s): ignored", B.n, B.phase == Burst::Capturing ? "capturing" : "writing its pictures");
-		else if (device) {
-			const unsigned count = O.reportFrames;
-			const time_t clock = time(NULL);
-			strftime(B.date, sizeof(B.date), "%Y-%m-%d_%H-%M-%S", localtime(&clock));
-			MakeReportFolder(Reports + 1);	// UNOFFICIAL 2026-11-01: the report's own folder (WriteReport numbers it Reports + 1 and names it)
-			WriteReport(frame, count);
-			StartBurst(device, picture, Reports, count);
-			StagesArm("the report key");	// UNOFFICIAL 2026-11-01: a flash in the next 60 s is attributed to its stage
-		}
-	}
+	// 2026-11-05: the report key ([Main.Main.Misc] ReportKey ']', ReportFrames) is gone (user: "doesn't seem like anyone wants to use it";
+	// Help > Copy bug report now carries the whole session log). The REPORT block / burst code below it is no longer started from here.
 	// The burst (this frame's capture, or the read-back / writing after it); the flash detector below keeps running meanwhile
 	if (device) BurstStep(device, picture, frame);
 

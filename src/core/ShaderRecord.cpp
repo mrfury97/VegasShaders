@@ -212,7 +212,17 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	if (TheSettingManager->GetSettingI("Shaders.PBR.MicroShadow", "Enabled")) AppendDefine("MICRO_SHADOW_ON", "1");
 	// UNOFFICIAL 2026-11-05 VanillaBridge (Includes/Object.hlsl, ObjectTemplate / ParallaxTemplate): the object highlights take the authored
 	// Blinn-Phong highlight's width and strength. Defined only when on, so that off the define list and the shaders are exactly as before.
-	if (TheSettingManager->GetSettingI("Shaders.PBR.Main", "VanillaBridge")) AppendDefine("VANILLA_BRIDGE_ON", "1");
+	if (TheSettingManager->GetSettingI("Shaders.PBR.Main", "VanillaBridge")) {
+		AppendDefine("VANILLA_BRIDGE_ON", "1");
+		// 2026-11-06 VanillaBridgeDielectricMax: the cap on the non-metal share of the bridged highlight strength (Object.hlsl BridgeSpecF0).
+		// Defined only below 1 (1 = no cap, the 1.0.5 bridge exactly).
+		const float dielectricMax = TheSettingManager->GetSettingF("Shaders.PBR.Main", "VanillaBridgeDielectricMax");
+		if (dielectricMax > 0.0f && dielectricMax < 1.0f) {
+			static char cap[24];
+			sprintf_s(cap, "%.4ff", (std::max)(dielectricMax, 0.01f));
+			AppendDefine("VANILLA_BRIDGE_DIELECTRIC_MAX", cap);
+		}
+	}
 	// UNOFFICIAL 2026-11-02 SpecularFromMap (Includes/Object.hlsl): the maps' alpha (specular level) is used unless switched off; defined
 	// only when off, so the define list is unchanged by default.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "Enabled") && !TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "SpecularFromMap"))

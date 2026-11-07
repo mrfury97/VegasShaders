@@ -24,7 +24,8 @@ layout(push_constant) uniform Push {
     vec4 rect;           // (2026-11-03) RenderScale < 1: xy this frame's RenderRect scale (the signal is in the top-left xy part),
                          // zw last frame's (its history's part); 1 when off
     uint samplerIndex;
-    uint pad[3];
+    float clampK;        // (2026-11-06) HistoryClamp: the history clamped to the new frame's 3 x 3 mean +- clampK x its deviation (0 off)
+    uint pad[2];
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -59,9 +60,23 @@ void main() {
         if (clip.w > 0.0) {
             const vec2 prevUv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
             if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)))) {
-                const vec4 ha = textureLod(sampler2D(t_historyA, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
+                vec4 ha = textureLod(sampler2D(t_historyA, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
                 const vec4 hb = textureLod(sampler2D(t_historyB, NVR_SAMPLER(pc.samplerIndex)), prevUv * pc.rect.zw, 0.0);
                 if (abs(hb.g - clip.w) <= pc.params.y * max(clip.w, 1.0) && ha.a > 0.0) {
+                    // (2026-11-06) HistoryClamp (PTDenoiseClamp): a moving camera / light leaves the history describing light that is no
+                    // longer there (a trailing shadow, a lamp's pool lagging); clamp it to what this frame's 3 x 3 neighbourhood allows,
+                    // wide (clampK deviations: one noisy path a pixel has a wide spread) so a still picture keeps accumulating.
+                    if (pc.clampK > 0.0) {
+                        vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+                        for (int dy = -1; dy <= 1; dy++)
+                            for (int dx = -1; dx <= 1; dx++) {
+                                const vec3 c = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv + vec2(dx, dy) * pc.params.zw, 0.0).rgb;
+                                m1 += c; m2 += c * c;
+                            }
+                        m1 /= 9.0; m2 /= 9.0;
+                        const vec3 dev = sqrt(max(m2 - m1 * m1, vec3(0.0)));
+                        ha.rgb = clamp(ha.rgb, max(m1 - pc.clampK * dev, vec3(0.0)), m1 + pc.clampK * dev);
+                    }
                     const float length = min(min(ha.a, cap) + 1.0, pc.params.x);
                     const float alpha = 1.0 / length;
                     a = vec4(mix(ha.rgb, value, alpha), length);

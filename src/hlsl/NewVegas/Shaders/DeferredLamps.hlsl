@@ -92,17 +92,28 @@ float DLShadow(float i, float3 position, float att, float4 uv4) {
     const float tileY = (DL_Table.y + 0.5f) / DL_Table.x;
     const float4 sTile = tex2Dlod(NVR_LampTable, float4(x, tileY, 0.0f, 0.0f));
     float shadow = DL_Grid.w;
-    [branch] if (sTile.z > 0.0f) {
-        const float4 sLight = tex2Dlod(NVR_LampTable, float4(x + 1.0f / LIGHT_COMMON_TEXELS, tileY, 0.0f, 0.0f));
 #if POINT_SHADOW_RT && DL_SHADOW_PASS
-        // UNOFFICIAL 2026-11-03 (rtfwd) the lamp's traced shadow where the RT lamp trace has it (the table's tile row + 1, .y: ManyLamps.h PutTiles,
-        // the cube slot the trace knows it by, -1 none), as the forward shaders take it; the atlas where it has none (was always the atlas: RT lamp
-        // shadows did nothing on the deferred pixels, most of an interior). The shadow passes only (a pixel's first 16 lamps, its strongest): the
-        // lighting pass's own lookups (lamps past the 16th) have no temp registers left for the traced read (X4505), they keep the atlas.
-        const float rtId = tex2Dlod(NVR_LampTable, float4((i + 0.5f) / LIGHT_COMMON_TEXELS, (DL_Table.y + 1.5f) / DL_Table.x, 0.0f, 0.0f)).y;
+    // UNOFFICIAL 2026-11-03 (rtfwd) the lamp's traced shadow where the RT lamp trace has it (the table's tile row + 1, .y: ManyLamps.h PutTiles,
+    // the cube slot the trace knows it by, -1 none), as the forward shaders take it; the atlas where it has none (was always the atlas: RT lamp
+    // shadows did nothing on the deferred pixels, most of an interior). The shadow passes only (a pixel's first 16 lamps, its strongest): the
+    // lighting pass's own lookups (lamps past the 16th) have no temp registers left for the traced read (X4505), they keep the atlas.
+    // (2026-11-06) read before the tile test: a traced lamp without an atlas tile (cube slots 32-63) takes its traced value too (span 0 = no
+    // map: PointShadowCube lit where the traced frame did not see the point); it was unshadowed.
+    const float rtId = tex2Dlod(NVR_LampTable, float4((i + 0.5f) / LIGHT_COMMON_TEXELS, (DL_Table.y + 1.5f) / DL_Table.x, 0.0f, 0.0f)).y;
+    // UNOFFICIAL 2026-11-06 DebugView 8 (diagnostic, VS-AlphaLampTest): which way this lamp's shadow went, as a code the lighting pass shows
+    // (lamps 0-2 in r, g, b): 0.05 no atlas tile and not traced (unshadowed), 0.25 no trace id, 0.15 off the traced frame, 0.35 the pixel
+    // traced other lamps, 0.45 the traced depth did not match, 0.5 + 0.5 x the traced visibility where it was used
+    [branch] if (DL_Debug.x > 7.5f) {
+        [branch] if (rtId < 0.0f) return sTile.z > 0.0f ? 0.25f : 0.05f;
+        const float t = PointShadowTraced(rtId, position);
+        return t >= 0.0f ? 0.5f + 0.5f * t : t > -1.5f ? 0.15f : t < -3.5f ? 0.35f : 0.45f;
+    }
+    [branch] if (sTile.z > 0.0f || rtId >= 0.0f) {
 #else
-        const float rtId = -1.0f;
+    const float rtId = -1.0f;
+    [branch] if (sTile.z > 0.0f) {
 #endif
+        const float4 sLight = tex2Dlod(NVR_LampTable, float4(x + 1.0f / LIGHT_COMMON_TEXELS, tileY, 0.0f, 0.0f));
         shadow = PointShadowCube(sTile, sLight, sTile.w, position, ShadowDecodeNormal(tex2Dlod(DL_Normals, uv4).rg), att POINT_SHADOW_RT_ARG(rtId));
     }
     return shadow;
@@ -186,6 +197,8 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     // the inputs as the pass sees them (written over the frame, blend off: DeferredLamps::Apply)
     // (2026-11-03 rtspec) DebugView 7: the lamps' light ALONE over the frame (the game's ambient, emittance and other light left out), in the
     // frame's encoding: the direct lamp light to set beside the reference path tracer's PTDebugView 3 (with PTReplace: the same post chain)
+    // UNOFFICIAL 2026-11-06 DebugView 8: the shadow pass's codes for the pixel's lamps 0-2 (DLShadow above; 0.05 no atlas tile), black = no lamp
+    [branch] if (DL_Debug.x > 7.5f) return float4(tex2Dlod(DL_Vis0, uv4).rgb, 1.0f);
     [branch] if (DL_Debug.x > 6.5f) return float4(DL_Fwd.w > 0.5f ? light * keep : pow(max(light * keep, 0.0f), DL_Table.w), 1.0f);
     [branch] if (DL_Debug.x > 1.5f) {
         const float3 cell = floor(position / 64.0f);

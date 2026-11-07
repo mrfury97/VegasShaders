@@ -657,6 +657,24 @@ namespace PointShadowForward {
 	inline bool Bound = false;				// the pixel shader the game bound last is one of the records that read c174-c188
 	inline float Uploaded[16][4] = {};		// c174-c189 as last written
 
+	// (2026-11-05) the land shaders with lamps (TerrainTemplate SLS2092-2146, even numbers, 6 / 12 / 24 slots: Render.cpp TerrainLampSlots)
+	inline unsigned LandLampSlots(const char* name) {
+		if (!name || strncmp(name, "SLS", 3)) return 0;
+		const int number = atoi(name + 3);
+		if (number < 2092 || number > 2146 || (number & 1)) return 0;
+		static const unsigned slots[4] = { 0, 6, 12, 24 };
+		return slots[((number - 2092) / 2) % 4];
+	}
+	inline unsigned LandCensus[4] = {};	// land lamp draws while ExteriorActive: no record, record not bound (other handle), not a land record, bound
+	inline unsigned LandCensusFrames = 0;
+	inline void LandCensusFrame() {
+		if (++LandCensusFrames < 600) return;
+		if (LandCensus[0] | LandCensus[1] | LandCensus[2] | LandCensus[3])
+			Logger::Log("UNOFFICIAL RT lamp shadows: the land's lamp draws over %u frames: %u with the RT record bound, %u with no record, "
+				"%u whose record was not the bound shader, %u not land records", LandCensusFrames, LandCensus[3], LandCensus[0], LandCensus[1], LandCensus[2]);
+		LandCensusFrames = 0; LandCensus[0] = LandCensus[1] = LandCensus[2] = LandCensus[3] = 0;
+	}
+
 	// UNOFFICIAL 2026-10-30 ExteriorForward: ShadowManager, outdoors after RtLampShadows::SubmitExterior: the shadow lamps as slots
 	// (slot = their index in ShadowLights, as in the trace's table; no cube maps), for the outdoor records' per-draw lookups
 	inline void PublishExterior(ShadowSceneLight* const* lights, int count) {
@@ -678,6 +696,7 @@ namespace PointShadowForward {
 		}
 		Focus = -1;
 		Active = ExteriorActive = SlotCount > 0;
+		LandCensusFrame();
 	}
 
 	// UNOFFICIAL 2026-10-31 ManyLights: a lamp without a shadow map of its own gets Publish's fill / invisible light rules (no FadeIn)
@@ -751,7 +770,17 @@ namespace PointShadowForward {
 					// red for cube slot 0 alone (DebugView 3's lamp); the other slots share the other ten colours
 					memcpy(constants[8 + k], palette[Slots[s].slot == 0 ? 0 : 1 + (Slots[s].slot - 1) % 10], 3 * sizeof(float));
 					if (AtlasTexture) {	// UNOFFICIAL 2026-10-30 ShadowAtlas: the tile instead of the debug colour; no tile, no shadow
-						if (!(Slots[s].tile[2] > 0.0f)) { constants[k][0] = constants[k][1] = constants[k][2] = constants[k][3] = 0.0f; constants[8 + k][0] = constants[8 + k][1] = constants[8 + k][2] = 1.0f; break; }
+						if (!(Slots[s].tile[2] > 0.0f)) {
+							// UNOFFICIAL 2026-11-06: no tile (an atlas without room; before 2026-11-06 b cube slots 32-63 had none) but the trace has the lamp: its traced
+							// shadow (span 0 = no map: PointShadowCube is lit where the traced frame did not see the point). Was: unshadowed even
+							// though traced (VS-AlphaLampTest: the fence lamps in slots 39 / 44 cast nothing).
+							const float traced = RtLampShadows::TracedMany ? -1.0f : RtLampShadows::TracedSlot(Slots[s].slot);
+							if (traced >= 0.0f) {
+								constants[8 + k][0] = constants[8 + k][1] = constants[8 + k][2] = 0.0f; constants[8 + k][3] = Slots[s].fade;
+								tracedSlots[k] = traced; matched++; done = true; break;
+							}
+							constants[k][0] = constants[k][1] = constants[k][2] = constants[k][3] = 0.0f; constants[8 + k][0] = constants[8 + k][1] = constants[8 + k][2] = 1.0f; break;
+						}
 						memcpy(constants[8 + k], Slots[s].tile, 3 * sizeof(float));
 					}
 					constants[8 + k][3] = Slots[s].fade;	// FadeIn
@@ -867,6 +896,13 @@ namespace PointShadowForward {
 		if (!ours && ExteriorActive) {	// UNOFFICIAL 2026-10-30 ExteriorForward: the outdoor record
 			auto found = ExteriorRecords.find(pixelShader);
 			ours = found != ExteriorRecords.end() && pixelShader->ShaderHandle == found->second->ShaderHandle;
+			// (2026-11-05 rtext-land) census of the land's lamp draws: the land debug view showed nothing where the land is lamp-lit
+			if (const unsigned landSlots = LandLampSlots(pixelShader->Name)) {
+				if (found == ExteriorRecords.end()) LandCensus[0]++;
+				else if (!ours) LandCensus[1]++;
+				else if (!TerrainRecords.count(pixelShader)) LandCensus[2]++;
+				else LandCensus[3]++;
+			}
 			if (ours && TerrainRecords.count(pixelShader)) { BindTerrain(); return; }	// the land: its own constants, no per-object lamps
 		}
 		if (!ours)

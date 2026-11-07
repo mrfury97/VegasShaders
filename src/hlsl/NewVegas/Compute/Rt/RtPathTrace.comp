@@ -107,7 +107,13 @@ bool LampImage() { return (uint(p.accum.w) & 1024u) != 0u; }
 bool GlowFromFrame() { return (uint(p.accum.w) & 8192u) != 0u; }
 // (2026-11-03 rtspec) PTGameLamps (flag 2048): a lamp falls off as the game lights it (Pointlights.hlsl vanillaAtt 1 - (d/r)^2, decoded
 // like a colour by LinFalloff: FalloffMatch 1, gamma 2.2; LampFalloff's shape off, the default); else (1 - d/r)^2, as RT GI
-float LampFall(float x) { return (uint(p.accum.w) & 2048u) != 0u ? pow(max(1.0 - x * x, 0.0), 2.2) : (1.0 - x) * (1.0 - x); }
+// (2026-11-06 c) PTLampFalloff 1 (flag 131072): physical, windowed inverse square. The reach is the game's x 2 here (RtPathTrace.cpp), so x =
+// d / (2 r) and the game's own x is 2x: K / ((2x)^2 + e^2) x (1 - x^4)^2, e = 0.2 of the game radius (a lamp's size: no spike at it),
+// K = 0.0612 = the same total light over the sphere as (1 - x^2)^2.2 out to r (RT-PATH-TRACING section 45). No rim: it fades to 0 at 2 r.
+float LampFall(float x) {
+	if ((uint(p.accum.w) & 131072u) != 0u) { const float w = max(1.0 - x * x * x * x, 0.0); return 0.0612 / (4.0 * x * x + 0.04) * w * w; }
+	return (uint(p.accum.w) & 2048u) != 0u ? pow(max(1.0 - x * x, 0.0), 2.2) : (1.0 - x) * (1.0 - x);
+}
 int GlowLightCount() { return LampImage() ? int(p.rect.z + 0.5) : 0; }
 #ifdef PT_LIGHT_GRID
 vec2 GridTexel(int t) { const int width = int(p.grid[2].y + 0.5); return imageLoad(lampImage, ivec2(t % width, 1 + t / width)).rg; }
@@ -590,9 +596,23 @@ vec3 Path(vec3 dir) {
 		// from it drawn from the GGX lobe alone (weight = the specular BRDF x cos / its pdf), deeper hits as the picture
 		const bool reflection = view == 9 && bounce == 0;
 		gSpecOnly = view == 8 && bounce == 0;
-		if (!arriving && !reflection) radiance += bounce > 0 ? Indirect(throughput * Direct(hit, n, t, v, surf)) : throughput * Direct(hit, n, t, v, surf);
+		if (!arriving && !reflection) {
+			const vec3 lit = Direct(hit, n, t, v, surf);
+			radiance += bounce > 0 ? Indirect(throughput * lit) : throughput * lit;
+			// (2026-11-06, section 44) PTLastBounce (flag 65536): the path ends here (PTRealtime: 1 bounce), so the light of further bounces is
+			// missing (~3 % of the picture indoors and out once textured meshes kept their colour, section 43). Estimated as if this hit's
+			// surroundings were lit as it is: its albedo x its own direct light x 0.75 (replays against 4-bounce means: brightness 0.994 /
+			// 0.996, tiles p5 0.89 .. p95 1.05; x 1 overshot near lamps, worst tile 1.17). No rays.
+			if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 65536u) != 0u && view == 0)
+				radiance += Indirect(throughput * surf.albedo * lit * 0.75);
+		}
 		else gGlowTotal = 0.0;
 		gSpecOnly = false;
+		// (2026-11-06, section 39) PTLastSky (flag 32768): the path ends here (PTRealtime traces 1 bounce), so this hit lacks the light of
+		// further bounces; outdoors most of it is the sky's. Add it as if one more diffuse bounce ray (cosine-weighted, unoccluded) left to
+		// the sky: albedo x Sky(l). Overestimates where something covers this hit; indoors Sky() is the interior ambient (PTAmbient, 0).
+		if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 32768u) != 0u && view == 0 && p.skyZenith.w > 0.5)
+			radiance += Indirect(throughput * surf.albedo * Sky(CosineDirection(n, vec2(Rand(), Rand()))));
 		if (bounce == bounces || view == 3 || view == 8) break;
 		vec3 l, w;
 		float pdf;
@@ -646,6 +666,13 @@ vec3 Path(vec3 dir) {
 		}
 #endif
 		else if (!NextDirection(n, v, surf, l, w, pdf)) break;
+		// (2026-11-06, section 35) PTBounceHalf (flag 16384): the bounce traced for half the pixels a frame, whole 8 x 8 tiles in a checkerboard
+		// that swaps every frame (whole waves skip: no divergence), the traced pixels' indirect light x 2 (unbiased; the denoiser's history
+		// fills the rest). Replays: -34 % of the pass, the mean unchanged, +10 % noise a frame.
+		if (bounce == 0 && (uint(p.accum.w) & 16384u) != 0u) {
+			if ((((gPixel.x >> 3) + (gPixel.y >> 3) + int(uint(p.origin.w))) & 1) != 0) break;
+			throughput *= 2.0;
+		}
 		prevHit = hit; prevN = n; prevPdf = pdf; prevGlowTotal = gGlowTotal;
 		throughput *= w;
 		if (bounce >= 2) {   // Russian roulette: keep the path in proportion to what it still carries

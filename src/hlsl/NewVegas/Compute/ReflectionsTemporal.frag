@@ -32,5 +32,12 @@ void main() {
     vec4 history = textureLod(sampler2D(t_history, POINT_S), last, 0.0);
     if (any(isnan(history)) || any(isinf(history))) history = current;   // (2026-10-30: a bad texel never survives)
     history = clamp(history, low, high);
-    o_color = mix(current, history, HistoryWeight * inside);
+    // (2026-11-06) mirrors (roughness under 0.03) take no history: RayGen / Trace trace them the same every frame (no noise), and the
+    // history is re-found where the MIRROR's surface was, not where the reflected thing was, so it smeared what a mirror shows.
+    // Rough surfaces keep it all (their rays scatter). Vulkan pass only.
+    vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
+    float roughness;
+    float amount = Reflectivity(pixelUV, depth, ViewNormal(pixelUV), roughness);
+    float keep = amount > 0.0 && roughness < 0.03 ? 0.0 : 1.0;
+    o_color = mix(current, history, HistoryWeight * inside * keep);
 }

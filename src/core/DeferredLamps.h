@@ -314,7 +314,7 @@ namespace DeferredLamps {
 		bool vis = false;
 		// UNOFFICIAL 2026-11-01 PrecisionBias (DeferredLamps.hlsl DLShadow): the shadow lookup's push off the surface per unit of distance
 		const float bias = (std::max)(TheSettingManager->GetSettingF(kSection, "PrecisionBias"), 0.0f) * 0.001f;
-		if ((DebugView < 2 || DebugView == 7) && EnsureShadowPass(t.Width, t.Height)) {
+		if ((DebugView < 2 || DebugView == 7 || DebugView == 8) && EnsureShadowPass(t.Width, t.Height)) {	// (8, 2026-11-06: the shadow passes write its codes)
 			static GpuTimer shadowTimer("Deferred lamp shadows");
 			GpuProfileScope shadowGpu(shadowTimer, d);
 			d->SetPixelShader(ShadowPass->ShaderHandle);

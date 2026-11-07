@@ -185,6 +185,27 @@ vec3 SurfacePosition(vec2 uv, float depth) {
     return p;
 }
 
+// UNOFFICIAL 2026-11-05 (rtrefl-dir, the demo room's polished marble): a normal map with tilted tiles (ULInnerFloor) sends the mirror
+// direction under the floor at a low view angle (half the disc's rays went down: the screen march found the floor itself, a blurred copy
+// of the tiles, and RT rays met nothing). The reflected direction is kept above the real surface, the plane the depth buffer shows (from
+// the neighbours' depths, the side with the smaller step at an edge): a direction under it is bent to just over it. Directions above
+// the surface are unchanged. p: this pixel's view position (ViewPosition), R: the reflected direction, both view space.
+vec3 AboveSurface(vec2 uv, vec3 p, vec3 R) {
+    vec2 dx = vec2(LowTexel.x, 0.0), dy = vec2(0.0, LowTexel.y);
+    vec3 xp = ViewPosition(uv + dx, readDepthLod(uv + dx)), xm = ViewPosition(uv - dx, readDepthLod(uv - dx));
+    vec3 yp = ViewPosition(uv + dy, readDepthLod(uv + dy)), ym = ViewPosition(uv - dy, readDepthLod(uv - dy));
+    vec3 ddx = abs(xp.z - p.z) < abs(p.z - xm.z) ? xp - p : p - xm;
+    vec3 ddy = abs(yp.z - p.z) < abs(p.z - ym.z) ? yp - p : p - ym;
+    vec3 n = cross(ddx, ddy);
+    float len = length(n);
+    if (!(len > 1.0e-6)) return R;
+    n /= len;
+    if (dot(n, p) > 0.0) n = -n;   // toward the eye
+    float above = dot(R, n);
+    const float minAbove = 0.03;   // ~2 degrees over the plane
+    return above >= minAbove ? R : normalize(R + n * (minAbove - above));
+}
+
 // UNOFFICIAL 2026-10-31 RT water ([Shaders.Reflections.RT] Water): on a frame RT traces the water, water pixels reflect (RayGen casts,
 // Resolve shades, the blurs run), but the composite leaves them alone: the water shaders read Buffer next frame in place of the planar map.
 #define WaterRtOn (cb.sky.z > 0.5)
@@ -221,7 +242,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
 const float GlassRoughness = 0.03;
 
 // How much a surface reflects (before Fresnel) and how rough it is. 0 where it never reflects.
-float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
+float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
     roughness = DryRoughness;
     if (MaterialOn) SurfaceMetal = 0.0;
     // UNOFFICIAL 2026-10-31 RT water: the water (flat, at the water height) at any distance, before DrawDistance's cut.
@@ -281,6 +302,24 @@ float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
     roughness = mix(dryRoughness, WetRoughness, wetness / max(amount, 1.0e-4));
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
+}
+
+// UNOFFICIAL 2026-11-05 [Shaders.Reflections.Main] Mirror (cb.grid3.w): the roughness the surface's own material gives (the game's
+// shader in TESR_MaterialBuffer, MaterialAware's maps) used to win over the Look's Roughness, so "Mirror (showcase)" left the demo room's
+// marble rough tile by tile (its gloss map): rays scattered, most pixels borrowed a neighbour's, their reach cut by RoughReach, and with RT
+// alone almost nothing showed (rtrefl-only). With Mirror on, every reflecting surface but the water and the weapon is pulled toward the
+// Look's Roughness by Mirror (only ever smoother). Mirror 0: as before.
+// (2026-11-06) MirrorSmoothOnly (cb.grid3.w negative): only surfaces whose own roughness is under 0.05 (a mirror panel, roughness 0.02 by
+// RoughnessOverrides) get Mirror; the rest reflect as with Mirror 0. SurfaceMirror carries the surface's share to the composite.
+float SurfaceMirror = 0.0;
+float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
+    float amount = ReflectivityOwn(uv, depth, viewNormal, roughness);
+    float mirror = saturate(abs(cb.grid3.w));
+    if (cb.grid3.w < 0.0 && roughness >= 0.05) mirror = 0.0;
+    if (amount <= 0.0 || SurfaceWater || IsWeapon(uv)) mirror = cb.grid3.w < 0.0 ? 0.0 : mirror;
+    SurfaceMirror = mirror;
+    if (mirror > 0.0 && amount > 0.0 && !SurfaceWater && !IsWeapon(uv)) roughness = mix(roughness, min(roughness, DryRoughness), mirror);
+    return amount;
 }
 
 // Split-sum environment BRDF (Karis's fit) for a dielectric (F0 0.04).

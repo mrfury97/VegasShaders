@@ -1,6 +1,6 @@
 // UNOFFICIAL 2026-10-29 shading a ray's hit in the ray tracing scene (FORK-RT-CORE.md "Hit shading"): for any trace shader in the
 // helper. rtHitAlbedo() is the hit's diffuse colour (linear): with [Main.Main.RayTracing] HitTextures the texture's colour at the hit's
-// texcoords (the albedo atlas: RGBA8, 64 x 64 a texture, 32 slots a row; slot = flags >> 16), else the record's average colour.
+// texcoords (the albedo atlas: RGBA8, 64 x 64 a texture, 32 slots a row; slot = (flags >> 16) & 0x3FF), else the record's average colour.
 // Before including: #define RT_ALBEDO_ATLAS <the albedo atlas: a layout(rgba8) readonly image2D> when the pass binds it
 // (RtCore::AlbedoAtlasImage() among its images; leave it undefined: averages only). The records (binding 10) and geometry data
 // (binding 11) are declared here unless RT_RECORDS_DECLARED is defined (RtAlpha.glsl defines it; either order works).
@@ -46,9 +46,12 @@ vec2 rtHitTexcoord(uint instance, uint primitive, vec2 bary) {
 vec3 rtHitAlbedo(uint instance, uint primitive, vec2 bary) {
 #ifdef RT_ALBEDO_ATLAS
 	if (rtHitHasTexcoords(instance)) {
-		const uint slot = records[instance].flags >> 16;
-		const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
-		const ivec2 texel = origin + clamp(ivec2(fract(rtHitTexcoord(instance, primitive, bary)) * 64.0), ivec2(0), ivec2(63));
+		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
+		// (2026-11-06) the slot size off the image: [Main.Main.RayTracing] AlbedoDetail (64 / 128 / 256): what mirrors show of things
+		// off screen (people's skin, faces) was a 64 x 64 copy of their texture: smeared
+		const int slotSize = imageSize(RT_ALBEDO_ATLAS).x / 32;
+		const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * slotSize;
+		const ivec2 texel = origin + clamp(ivec2(fract(rtHitTexcoord(instance, primitive, bary)) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
 		const vec3 c = imageLoad(RT_ALBEDO_ATLAS, texel).rgb;   // as the texture stores it (sRGB-encoded)
 		return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
 	}
@@ -65,7 +68,7 @@ vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 	if ((records[instance].flags & RT_HIT_GLOW_FLAG) == 0u) return vec3(0.0);
 #ifdef RT_GLOW_ATLAS
 	if (rtHitHasTexcoords(instance)) {
-		const uint slot = records[instance].flags >> 16;
+		const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
 		const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
 		const ivec2 texel = origin + clamp(ivec2(fract(rtHitTexcoord(instance, primitive, bary)) * 64.0), ivec2(0), ivec2(63));
 		const vec3 c = imageLoad(RT_GLOW_ATLAS, texel).rgb;   // as the glow map stores it (sRGB-encoded)
@@ -84,7 +87,7 @@ vec3 rtHitGlow(uint instance, uint primitive, vec2 bary) {
 #ifdef RT_NORMAL_ATLAS
 vec3 rtHitNormalMapped(uint instance, uint primitive, vec2 bary, vec3 n, mat3 toScene) {
 	if ((records[instance].flags & RT_HIT_NORMAL_FLAG) == 0u || !rtHitHasTexcoords(instance) || records[instance].vertexOffset == 0xFFFFFFFFu) return n;
-	const uint slot = records[instance].flags >> 16;
+	const uint slot = (records[instance].flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25 (26-31: the material rule)
 	const ivec2 origin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
 	const vec2 uv = rtHitTexcoord(instance, primitive, bary);
 	const vec3 m = imageLoad(RT_NORMAL_ATLAS, origin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;

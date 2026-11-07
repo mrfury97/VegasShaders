@@ -554,7 +554,8 @@ float4 BlurAxis(sampler2D source, float2 vpos, float2 axis) {
 	[branch] if (amount <= 0.0) return centre;
 
 	// Wider on rough ground, narrow on wet ground, so puddles stay sharp.
-	float radius = BlurRadius * saturate(0.5 + roughness * 2.0);
+	// (2026-11-06) mirrors get no blur: none below roughness 0.03, full from 0.15 (as Compute/ReflectionsBlur.frag)
+	float radius = BlurRadius * saturate(0.5 + roughness * 2.0) * smoothstep(0.03, 0.15, roughness);
 	float sigma = max(radius * 0.5, 0.5);
 	float falloff = -0.5 / (sigma * sigma);
 	float tolerance = depth * 0.03 + 4.0;

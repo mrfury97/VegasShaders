@@ -81,7 +81,16 @@ namespace FlashlightDeferred {
 	inline void Apply(IDirect3DDevice9* d) {
 		FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
 		if (!Usable() || !f->spotLightActive || !f->SpotLight) return;
-		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture || !EnsurePass()) { StatSkipped++; return; }
+		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture || !EnsurePass()) {
+			// UNOFFICIAL 2026-11-06 (tester log, native D3D9 + iMultiSample 4: Cookie 0 -> 1 changed nothing, "0 objects in the G-buffer"): say once
+			// why the beam has no shadow or cookie, so a log shows it.
+			static bool told = false;
+			if (!told && CapturedNormals::MsaaWarned) {
+				told = true;
+				Logger::Log("[WARNING] UNOFFICIAL FlashlightDeferred: the flashlight's light pass needs the G-buffer, which the game's MSAA turns off on native D3D9 (see the CapturedNormals warning): the beam lights through the game lamp only, with no shadow and no cookie. For the full beam: Vegas Shaders DXVK, or iMultiSample=0 in the game's INIs");
+			}
+			StatSkipped++; return;
+		}
 		D3DXVECTOR4 params[3];
 		if (!LightParams(params)) { StatSkipped++; return; }
 		IDirect3DSurface9* target = nullptr;

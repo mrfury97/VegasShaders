@@ -24,7 +24,9 @@ void main() {
     if (amount <= 0.0) { o_color = centre; return; }
 
     // Wider on rough ground, narrow on wet ground, so puddles stay sharp.
-    float radius = BlurRadius * saturate(0.5 + roughness * 2.0);
+    // (2026-11-06) mirrors get no blur: below roughness 0.03 none, full from 0.15 (a mirror needs no denoising: its rays do not scatter;
+    // the old 0.5 floor blurred a perfect mirror ~6 half-res pixels each way). Rough floors keep the full radius.
+    float radius = BlurRadius * saturate(0.5 + roughness * 2.0) * smoothstep(0.03, 0.15, roughness);
     if (pc.cube.w > 0.0) radius *= mix(pc.cube.w, 1.0, textureLod(sampler2D(t_rtSpread, POINT_S), uv, 0.0).r);   // RT: sharp at contact
     float sigma = max(radius * 0.5, 0.5);
     float falloff = -0.5 / (sigma * sigma);

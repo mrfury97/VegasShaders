@@ -59,6 +59,13 @@ Switches: `VanillaBridge` (restart; off = the shaders exactly as before, `VANILL
 Shaders' generated maps guess roughness from the colour and carry no glossiness: on an install with them (power armour has one),
 the bridge changes nothing on those objects unless this is on.
 
+`VanillaBridgeDielectricMax` (restart, default 0.08; 1 = no cap, the 1.0.5 bridge exactly; `VANILLA_BRIDGE_DIELECTRIC_MAX`, defined
+only below 1). 2026-11-06 report (Bale, 1.0.5): cliffs very shiny. The peak match gives F0 = 8 mask / (n + 2), so a wide authored lobe
+(glossiness about 10, common on world meshes) with a bright mask, or a normal map with no alpha (reads as 1), came out at F0 0.3-0.7
+on rock, concrete, wood and plaster: a near-metal sheen. The non-metal share of the bridged F0 is capped (real non-metals: 0.02-0.08);
+the metal share keeps the full authored strength. Unseen on our own install: there the generated `_rmaos` maps cover the rock and
+the bridge stays out (VanillaBridgeOverMaps off), so the case only shows on installs without the maps.
+
 Measured (2026-11-05, bench slot, Goodsprings 13:00, the player in T-45d power armour in third person, 1920x1080; region = the
 armour; "glint px" = pixels standing more than 40 levels above their 31x31 neighbourhood mean; lists `pbrbridge-s1b/s2/s3`):
 

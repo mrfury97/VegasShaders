@@ -60,8 +60,11 @@ vec4 Composite() {
         if (share > MsaaNoSky && share < MsaaAllSky) {
             vec4 clouds = CloudsHere(uv);
             vec3 behind = MsaaSkyBehind(uv, color.rgb);
-            vec3 lin = linearize(max(color.rgb, vec3(0.0))) + share * (behind * (clouds.a - 1.0) + clouds.rgb * cb.cloudLayout.w);
-            return vec4(delinearize(max(lin, vec3(0.0))), color.a);
+            // UNOFFICIAL 2026-11-06: as the .fx's MsaaCloudsOverShare (the resolve averaged stored values: swap the share there, no black bands).
+            vec3 skyBefore = delinearize(max(behind, vec3(0.0)));
+            vec3 skyAfter = delinearize(max(behind * clouds.a + clouds.rgb * cb.cloudLayout.w, vec3(0.0)));
+            vec3 c = max(color.rgb, vec3(0.0));
+            return vec4(c - min(share * skyBefore, c) + share * skyAfter, color.a);
         }
         sky = share >= MsaaAllSky;
     }

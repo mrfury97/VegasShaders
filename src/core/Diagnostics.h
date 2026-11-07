@@ -13,7 +13,7 @@
 //      as short lines (at most one a second, 300 a session) and counted in the HEARTBEAT. Skipped around loads, cell changes, menus,
 //      the Pip-Boy, VATS, dialogue, the NVR overlay's "overlay on" state, fast turns (over 5 degrees a frame) and history resets.
 //      If it ever costs over 0.5 ms a frame on average (a driver whose GetRenderTargetData waits) it turns itself off (logged).
-//   2. the report key ([Main.Main.Misc] ReportKey, DIK, default 27 = ']', 0 = off; the game's key check Global->OnKeyDown on the
+//   2. (REMOVED 2026-11-05: no key starts it any more; Help > Copy bug report carries the session log) the report key ([Main.Main.Misc] ReportKey, DIK, default 27 = ']', 0 = off; the game's key check Global->OnKeyDown on the
 //      render thread, not while an NVR menu text box has the keyboard): a REPORT block (where, weather, game hour, camera, the upscaler
 //      path, the last 5 s of events and frame times, every effect's state, levels / fallbacks, counters), then a BURST (2026-11-01):
 //      the press frame and the next ReportFrames-1 rendered frames (16, 1..32), each with one "REPORT n frame k/N f<frame>" line

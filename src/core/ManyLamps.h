@@ -366,7 +366,8 @@ namespace ManyLamps {
 		static std::unordered_map<const ShadowSceneLight*, int> slotOf;
 		slotOf.clear();
 		for (int s = 0; s < PointShadowForward::SlotCount; s++)
-			if (PointShadowForward::Slots[s].light && PointShadowForward::Slots[s].tile[2] > 0.0f) slotOf.emplace(PointShadowForward::Slots[s].light, s);
+			if (PointShadowForward::Slots[s].light && (PointShadowForward::Slots[s].tile[2] > 0.0f ||	// UNOFFICIAL 2026-11-06: or traced (no tile: slots 32-63)
+				(!RtLampShadows::TracedMany && RtLampShadows::TracedSlot(PointShadowForward::Slots[s].slot) >= 0.0f))) slotOf.emplace(PointShadowForward::Slots[s].light, s);
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		for (size_t n = 0; n < order.size(); n++) {
 			auto found = slotOf.find(order[n]);

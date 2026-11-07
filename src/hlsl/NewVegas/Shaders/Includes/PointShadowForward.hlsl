@@ -511,6 +511,12 @@ float PointShadowCube(PS_CUBE_T cube, float4 light, float fade, float3 worldPos,
 #if POINT_SHADOW_RT_ONLY
     return rayLit >= 0.0f ? lerp(1.0f, rayLit, NVR_PointShadowParams.x * abs(fade)) : 1.0f;   // not traced here: lit (as before)
 #else
+#if POINT_SHADOW_ATLAS && POINT_SHADOW_RT
+    // UNOFFICIAL 2026-11-06 a traced lamp with no atlas tile (ShadowAtlas::LiveRect has tiles for cube slots 0-31 only; slots 32-63 have
+    // none): it came here for its traced value alone (PointShadowForward.h / ManyLamps.h PutTiles); where the traced frame did not see the
+    // point there is no map to read: lit, as such a lamp always was
+    [branch] if (!(cube.z > 0.0f)) return POINT_SHADOW_DONE(1.0f);
+#endif
 
     // Normal offset: a cube texel's world size grows with the distance, so does the push off the surface.
     float3 p = toPixel + normal * (NVR_PointShadowParams.z * len);
