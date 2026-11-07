@@ -44,9 +44,15 @@ if ($Compile) {
 	$spv = Join-Path $bin "spv\Rt"
 	New-Item -ItemType Directory -Force $spv | Out-Null
 	# trace shaders (+ the -D variants the scenes use, as tools/nvr-dxvk/compile-compute.sh builds them)
-	$jobs = @(@("RtPathTrace", "RtPathTrace", ""), @("RtPathTraceGrid", "RtPathTrace", "-DPT_LIGHT_GRID"), @("RtPathTraceGI", "RtPathTrace", "-DPT_RESTIR_GI"),
+	$jobs = @(@("RtPathTrace", "RtPathTrace", ""), @("RtPathTraceGrid", "RtPathTrace", "-DPT_LIGHT_GRID"), @("RtPathTraceGI", "RtPathTrace", "-DPT_RESTIR_GI"), @("RtPathTraceCache", "RtPathTraceCache", ""),
 		@("RtRestirGI", "RtRestirGI", ""), @("RtLampTrace", "RtLampTrace", ""), @("RtLampTraceMany", "RtLampTraceMany", ""), @("RtLampTraceRestir", "RtLampTraceRestir", ""),
-		@("ReflectionsRT", "ReflectionsRT", ""), @("RtSunShadow", "RtSunShadow", ""), @("RtAOTrace", "RtAOTrace", ""))
+		@("ReflectionsRT", "ReflectionsRT", ""), @("RtSunShadow", "RtSunShadow", ""), @("RtAOTrace", "RtAOTrace", ""),
+		# (2026-11-07) the RT shadow denoiser's scenes (sigmalamps, sigmasun): the trace variant, the old filter, the module's stages
+		@("RtLampTraceSigma", "RtLampTrace", "-DSIGMA"), @("RtLampFilter", "RtLampFilter", ""), @("RtShadowDenoise", "RtShadowDenoise", ""),
+		@("RtShadowDenoiseTemporalSun", "RtShadowDenoiseTemporal", "-DSUN"), @("RtShadowDenoiseTemporalLamps", "RtShadowDenoiseTemporal", "-DLAMPS"),
+		@("RtShadowDenoiseBlur", "RtShadowDenoiseBlur", ""), @("RtShadowDenoisePostBlur", "RtShadowDenoiseBlur", "-DPOST"),
+		@("RtShadowDenoiseStabilize", "RtShadowDenoiseStabilize", ""), @("RtShadowDenoisePackSun", "RtShadowDenoisePack", "-DSUN"),
+		@("RtShadowDenoisePackLamps", "RtShadowDenoisePack", "-DLAMPS"), @("RtLampPrimary", "RtLampPrimary", ""))
 	foreach ($j in $jobs) {
 		$a = @("-V", "--target-env", "vulkan1.2", "-I$rt", "-o", "$spv\$($j[0]).spv")
 		if ($j[2]) { $a += $j[2] }
@@ -56,7 +62,9 @@ if ($Compile) {
 	}
 	# the denoiser's fork passes (D3D9 side)
 	$cs = Join-Path $repo "src\hlsl\NewVegas\Compute"
-	foreach ($name in "RtDenoiseTemporal", "RtDenoiseAtrous") {
+	# (2026-11-07) + the RT reflection denoiser's passes (refldenoise: core/RtReflDenoise.h)
+	foreach ($name in "RtDenoiseTemporal", "RtDenoiseAtrous", "RtReflDenoiseReproject", "RtReflDenoiseAverage", "RtReflDenoisePrefilter", "RtReflDenoiseTemporal",
+		"RtReflDenoiseOursReproject", "RtReflDenoiseOursBlur", "RtReflDenoiseOursTemporal") {
 		& $glslang.FullName -V --target-env vulkan1.1 "-I$cs" -o "$bin\spv\$name.spv" "$cs\$name.frag" | Out-Null
 		if ($LASTEXITCODE -ne 0) { throw "compile $name failed" }
 	}

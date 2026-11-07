@@ -17,6 +17,7 @@ layout(set = 1, binding = 18) uniform texture2D t_rtDir;      // RayGen out 1: t
 layout(set = 1, binding = 19) uniform texture2D t_rtRay;      // RayGen out 2: x the surface's view z (0: nothing reflects), y roughness (+2: a ray)
 layout(set = 1, binding = 20) uniform texture2D t_rtHit;      // the helper: x hit distance (-1 no ray, 0 nothing within Distance),
                                                               // y flags (1 land, 2 albedo known, 4 normal known, 8 glow map), zw the hit's normal (octahedral)
+layout(set = 1, binding = 22) uniform texture2D t_rtMarchHit;  // 2026-11-07 RayGen out 3 (R16F): the march's hit distance (0: none)
 layout(set = 1, binding = 21) uniform texture2D t_rtShade;    // the helper: rgb the hit draw's albedo (linear), a sun visible at the hit (0..1)
 
 layout(set = 2, binding = 1, std140) uniform RtConstants {
@@ -30,9 +31,12 @@ layout(set = 2, binding = 1, std140) uniform RtConstants {
                     // 2026-10-31: y 1 = RayReuse (rough pixels reuse their neighbours' hits), z its lowest roughness;
                     // 2026-11-05: w 1 = ShadeOffscreen (a hit out of view shaded from itself, not the cube)
     vec4 lamps[24]; // 2026-10-29: the 12 nearest scene lamps: [2i] xyz camera-relative position, w reach; [2i + 1] rgb colour x dimmer (gamma)
+    vec4 rt5;       // 2026-11-07: x 1 = the RT reflection denoiser runs this frame (core/RtReflDenoise.h): RayGen's second noise number
+                    // decorrelated, RayGen writes the march's hit distance, Resolve the hit distance (Spread .y)
 } rtc;
 
 #define RtOn (rtc.rt.x > 0.5)
+#define RtDenoiserOn (rtc.rt5.x > 0.5)
 #define RtMaxRoughness rtc.rt.y
 #define RtDistance rtc.rt.z
 #define RtDebugView rtc.rt.w

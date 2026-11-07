@@ -86,7 +86,15 @@ Every key this effect reads, with where it is read:
 | `[_Shaders.ShadowsInteriors.Forward]` | MaskHalfRes | bool | on/off | not confirmed | Half-resolution mask for the room darkening (affects the mask it reads, not the apply). |
 
 Notes: the C++ also reads `[Shaders.ShadowsInteriors.Main] Enabled` into the interior settings, but no such key is in the
-defaults file (see section 9). The `Darkness` value is shared with the lamp-shadow code that writes the mask.
+defaults file (see section 9). `[_Shaders.ShadowsInteriors.RT]` (traced lamp shadows) lives in this folder's defaults fragment but is
+read by `src/core/RtLampShadows.h`, not by this effect: docs/next/FORK-RT-LAMPS.md (2026-11-07: `SameFrame`, on = this frame's trace
+before the world draw, with the helper pass `Compute/Rt/RtLampPrimary.comp`; `MovingCasterHistory` 2 = ManyLights' histories follow
+people's moving shadows). The `Darkness` value is shared with the lamp-shadow code that writes the mask.
+
+The ray-traced lamp shadows (`[_Shaders.ShadowsInteriors.RT]`, core/RtLampShadows.h) feed the per-object lamp shadows, not this pass.
+Since 2026-11-07 their `ShadowDenoiser` (default true; a restart to come on, off is live) traces the `DenoiseLamps` lamps that matter
+most with one ray at their physical size (`PhysicalLampSize`, `PhysicalLampScale/Min/Max`) and denoises them in the RT helper
+(`Denoiser*` keys): docs/next/RT-DENOISER.md. Nothing here changes.
 
 ## 5. Passes and outputs
 

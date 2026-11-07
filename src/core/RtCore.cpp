@@ -284,6 +284,7 @@ namespace {
 		State		state = Idle;
 		std::vector<RtCore::User> users;
 		std::vector<const char*> leftOut;				// (2026-11-05) users whose images did not fit (NVR_RT_MAX_IMAGES) at this helper start
+		UINT		scratchMB = 0;					// (2026-11-07) AskScratch's largest ask this helper start
 		bool		Out(const RtCore::User& user) const { for (const char* n : leftOut) if (n == user.Name) return true; return false; }
 		ID3D9NvrExtShare*		share = nullptr;
 		ID3D9NvrExtRt*			rt = nullptr;
@@ -291,6 +292,7 @@ namespace {
 		ID3D9NvrExtRtSeq*		rtSeq = nullptr;	// fork patch 0034 (the arena's sequence texel, 2026-10-30); null without it
 		bool		actorsOn = false;					// [Main.Main.RayTracing] Actors (read at each helper start)
 		bool		walkingPlayer = false;				// Gather's walk of the player's own node (NVR_RT_MASK_PLAYER on its rigid parts)
+		bool		playerHidden = false;				// (2026-11-07) ... in first person: its instances get NVR_RT_CUSTOM_HIDDEN (not drawn)
 		bool		firstPersonBody = true;				// UNOFFICIAL 2026-11-05 [Main.Main.RayTracing] FirstPersonBody: the body is traced in first person too
 		bool		walkingFar = false;					// UNOFFICIAL 2026-10-31: Gather's walk of the far object LOD (FarObjectLOD; NVR_RT_MASK_FAR)
 		bool		farLodOn = false;					// [Main.Main.RayTracing] FarObjectLOD (live)
@@ -302,10 +304,10 @@ namespace {
 		UInt32		farWalk[8] = {};					// the far walk's fates (the scene log): seen, culled, out of the ring, geometries, faded, nodes,
 														// switch nodes, root missing frames
 		float		actorRadius = 3000.0f;				// [Main.Main.RayTracing] ActorRadius (live)
-		UInt32		actorInterval = 2;					// [Main.Main.RayTracing] ActorUpdateInterval (live)
+		UInt32		actorInterval = 1;					// [Main.Main.RayTracing] ActorUpdateInterval (live)
 		bool		actorStillSkip = false;				// [Main.Main.RayTracing] ActorStillSkip (live, 2026-10-31)
 		float		actorStillThreshold = 0.05f;		// [Main.Main.RayTracing] ActorStillThreshold (live)
-		UInt32		actorRebuild = 0;					// [Main.Main.RayTracing] ActorRebuildInterval (live; 0 never)
+		UInt32		actorRebuild = 8;					// [Main.Main.RayTracing] ActorRebuildInterval (live; 0 never)
 		UInt32		actorUpdates[4] = {};				// since the last line: posed, still (not posed), between poses (ActorUpdateInterval), rebuilds
 		UInt32		actorPartitions = 0;				// skinned partitions staged (exchanges 1-60)
 		UInt32		partitionFate[5] = {};
@@ -730,6 +732,7 @@ namespace {
 		// session (its images rolled back) instead of the whole core turning off (rtext-land 11-05: lamps + sun + AO + reflections + the
 		// path tracer's 20 asked for more than 48, so nothing traced)
 		leftOut.clear();
+		scratchMB = 0;
 		const size_t coreImages = imageDescs.size();
 		std::vector<const RtCore::User*> order;
 		for (const RtCore::User& user : users) order.push_back(&user);
@@ -784,6 +787,7 @@ namespace {
 		shared->version = NVR_RT_PROTOCOL_VERSION;
 		shared->size = sizeof(NvrRtShared);
 		shared->parentPid = GetCurrentProcessId();
+		shared->scratchMB = scratchMB;	// (2026-11-07, protocol 6)
 		shared->vendorId = info.VendorId;
 		memcpy(shared->deviceLuid, info.DeviceLUID, 8);
 		shared->deviceLuidValid = info.DeviceLUIDValid ? 1u : 0u;
@@ -1200,7 +1204,7 @@ namespace {
 			instance.transform[1][3] = entry.poseCamera[1] - cy;
 			instance.transform[2][3] = entry.poseCamera[2] - cz;
 			instance.geometryId = entry.id;
-			instance.customIndex = 0;
+			instance.customIndex = walkingPlayer && playerHidden ? NVR_RT_CUSTOM_HIDDEN : 0u;	// (2026-11-07) the first-person body: not drawn
 			instance.mask = NVR_RT_MASK_ACTOR;
 			instance.flags = 0x1u;
 			skip[kTaken]++;
@@ -1632,7 +1636,7 @@ namespace {
 			swayed++;
 		}
 		instance.geometryId = entry.id;
-		instance.customIndex = land ? 1u : 0u;
+		instance.customIndex = (land ? NVR_RT_CUSTOM_LAND : 0u) | (walkingPlayer && playerHidden ? NVR_RT_CUSTOM_HIDDEN : 0u);
 		instance.mask = RtScenePick::InstanceMask(pr);	// (2026-11-06 RtScenePick.h) 0x01 land / 0x02 objects or the hook's; 0x10 alpha-tested, 0x40 the player's, 0x80 far LOD
 		instance.flags = 0x1u;	// both faces (the game's two-sided and one-sided meshes alike: shadows need the back faces too)
 	}
@@ -1991,6 +1995,7 @@ namespace {
 		// so indoors the player was never in the RT scene, first or third person: rtfull-body2 at Lucky 38, 0.0 body instances)
 		if (actorsOn && rtSkin && Player && Player->GetNode()) {
 			walkingPlayer = true;
+			playerHidden = !Player->isThirdPerson;	// (2026-11-07) first person: the body is traced (FirstPersonBody) but not drawn
 			const UInt32 before = record->instanceCount;
 			Walk(Player->GetNode(), false);
 			playerInstances += record->instanceCount - before;	// (2026-10-30) the scene log: is the body traced in first person?
@@ -2028,6 +2033,8 @@ int RtCore::AddImage(const char* Name, UINT Width, UINT Height, NVR_EXT_SHARED_F
 	return (int)TheCore.imageDescs.size() - 1;
 }
 
+void RtCore::AskScratch(UINT Megabytes) { if (TheCore.inSetup && Megabytes > TheCore.scratchMB) TheCore.scratchMB = Megabytes; }
+
 int RtCore::AddShader(const char* Name) {
 	for (size_t i = 0; i < TheCore.shaders.size(); i++) if (TheCore.shaders[i] == Name) return (int)i;
 	if (TheCore.shaders.size() >= NVR_RT_MAX_SHADERS) return -1;
@@ -2048,6 +2055,11 @@ int RtCore::AddShader(const char* Name) {
 bool RtCore::CopyIn(int Image, IUnknown* Source, const RECT* Rect) {
 	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Source) return false;
 	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, Rect));
+}
+
+UINT RtCore::PassesLeft() {	// UNOFFICIAL 2026-11-07
+	const NvrRtFrame* f = TheCore.record;
+	return TheCore.recording && f && f->passCount < NVR_RT_MAX_PASSES ? NVR_RT_MAX_PASSES - f->passCount : 0;
 }
 
 bool RtCore::AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteMask, const void* Constants, UINT ConstantsSize, UINT GroupsX, UINT GroupsY) {
@@ -2289,6 +2301,13 @@ bool RtCore::Exchange(IDirect3DDevice9* Device, const User& user) {
 	if (c.state != Core::Running || !c.shared || TheRenderManager->width != c.width || TheRenderManager->height != c.height) return false;
 	if (c.Out(user) || !user.Wants || !user.Wants()) return false;
 	return c.Exchange(Device, &user);
+}
+
+bool RtCore::ExchangeEarly(IDirect3DDevice9* Device, const User& user) {	// UNOFFICIAL 2026-11-07 (RtCore.h)
+	Core& c = TheCore;
+	if (c.grassOn && TheShaderManager->GameState.isExterior) return false;	// this frame's grass is noted by the world's draws
+	if (!c.Ready()) return false;
+	return Exchange(Device, user);
 }
 
 bool RtCore::Running() { return TheCore.state == Core::Running; }

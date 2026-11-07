@@ -2,6 +2,7 @@
 // the display pass Compute\RtPathTraceShow.frag (a fork pass in the game).
 
 #include "RtLightGrid.h"	// (2026-11-06) PTLightGrid's builder (shared with tools/nvr-rt-host)
+#include "RtRestirRow.h"	// (2026-11-07) PTRestirDI's frame row (shared with tools/nvr-rt-host)
 #include "RtPathTrace.h"
 #include "RtCore.h"
 #include "DxvkCompute.h"
@@ -52,6 +53,19 @@ namespace {
 		float	denoiseHistory = 32.0f;
 		bool	restirGI = false;		// PTRestirGI (2026-11-04 d): ReSTIR GI on the first bounce (with PTDenoise; RtPathTraceGI.spv + RtRestirGI.spv)
 		float	restirMaxM = 20.0f, restirSpatial = 4.0f, restirRadius = 16.0f, restirDepth = 0.03f, restirNormal = 0.9f;	// its test keys
+		// UNOFFICIAL 2026-11-07 PTRestirDI (RT-PATH-TRACING.md section 47): ReSTIR DI for the lamps at the first hit, reservoirs in the helper's
+		// scratch store (protocol 6). -1 auto = on under PTRealtime; its test keys: neighbours, their radius (pixels), the reservoirs' count cap,
+		// the normal test (cos) and the plane test (share of the hit's distance)
+		int		restirDI = -1;
+		int		restirDISpatial = 4;
+		float	restirDIRadius = 16.0f, restirDIMaxM = 20.0f, restirDINormal = 0.9f, restirDIPlane = 0.05f;
+		// UNOFFICIAL 2026-11-07 PTRadianceCache (section 48): the world-space radiance cache for the path's last hit (-1 auto: on under PTRealtime);
+		// its cell near the camera (units), how many samples deep a cell's mean is, the samples a cell needs before it is read, the frames an
+		// unwritten cell lives, log2 of the entries (test key)
+		int		radianceCache = -1;
+		float	cacheCell = 8.0f, cacheMaxSamples = 256.0f, cacheMinSamples = 8.0f, cacheMaxAge = 120.0f, cacheMaxFrames = 8.0f;
+		int		cacheLog2 = 20;
+		int		allLamps = -1;		// (2026-11-07) PTAllLamps: -1 auto (on under PTRealtime), 0 the game's lamps of this view, 1 every lamp not hidden
 		int		gameLamps = 4;			// PTGameLamps (2026-11-03 rtspec): the lamps as the game lights them: 1 its falloff ((1 - (d/r)^2)^2.2), 2 its colour
 										// (colour x dimmer decoded together), 3 both, 4 the game's own lamp table (its lamps, reach and colour) + its falloff,
 										// 0 neither (the older guess, as RT GI)
@@ -67,7 +81,9 @@ namespace {
 	static_assert(sizeof(PassConstants) <= 512, "RtCore: 512 bytes of constants a pass");
 
 	int			imageA = -1, imageB = -1, imageDisplay = -1, shader = -1;
-	int			shaderGrid = -1;	// (2026-11-04) PTLightGrid's variant (RtPathTraceGrid.spv: RtPathTrace.comp with PT_LIGHT_GRID)
+	int			shaderGrid = -1;
+	int			shaderCache = -1;	// (2026-11-07) PTRadianceCache's resolve pass (RtPathTraceCache.spv)
+	int			cacheLog2Setup = 0;	// (2026-11-07) the cache's entries (log2) the scratch store was sized for at this helper start (0: none)	// (2026-11-04) PTLightGrid's variant (RtPathTraceGrid.spv: RtPathTrace.comp with PT_LIGHT_GRID)
 	// UNOFFICIAL 2026-11-04 d PTRestirGI (RT-PATH-TRACING.md section 29): the trace's variant (the first bounce written out), the reuse pass,
 	// the result image (the path's other light in, the picture out), the reservoirs (point xy | point z, normal + M | light, W) and the
 	// first hits (distance, normal) of this frame and the last (ping-pong), and last frame's camera for the reprojection
@@ -84,6 +100,14 @@ namespace {
 	// list starts, how many), then the lists (two lamp numbers a texel). 32 x 32 x 16 cells at most; kGridRows rows of kLightTexels.
 	constexpr int kGridRows = 48;
 	constexpr int kGridTexels = kLightTexels * kGridRows;
+	// (2026-11-07) the lamp image's FRAME ROW after the grid rows (RtPathTrace.comp kFrameRow = 49: keep them equal): per-frame values the
+	// full constant block has no room for (last frame's camera, the reservoir set, the camera's world position, PTRestirDI's keys)
+	constexpr int kFrameRow = 1 + kGridRows;
+	constexpr int kLampRows = kFrameRow + 1;
+	static_assert(kFrameRow == 49, "RtPathTrace.comp kFrameRow");
+	RtRestirRow::State restirState;
+	// (2026-11-07) the scratch store's layout: the ReSTIR DI reservoirs (two sets of w x h x 4 words) at word 0, the radiance cache from here
+	unsigned long long CacheBaseWords(UINT w, UINT h) { return ((8ull * w * h + 4095ull) / 4096ull) * 4096ull; }	// (2026-11-07) PTRestirDI: last frame's camera, rect, lamps (RtRestirRow.h, shared with tools/nvr-rt-host)
 	constexpr int kGridXY = 32, kGridZ = 16;
 	// Below this many lamps the plain shader is cheaper (RtPathTrace.comp: every thread reads the same lamp; the grid's per-thread lists
 	// are divergent, dependent loads): helper replays of a Lucky 38 frame (iGPU 720p, 4 bounces) cost the loop ~0.92 ms a lamp and the
@@ -130,7 +154,7 @@ namespace {
 		S.clamp = f("PTClamp", 0.0f, 1000.0f);
 		S.exposure = f("PTExposure", 0.01f, 64.0f);
 		S.split = f("PTSplit", 0.0f, 1.0f);
-		S.debugView = i("PTDebugView", 0, 9);
+		S.debugView = i("PTDebugView", 0, 10);	// (2026-11-07: 10 the radiance cache at the first hit)
 		S.primary = TheSettingManager->GetSettingI(kSection, "PTPrimary") != 0;
 		S.specular = TheSettingManager->GetSettingI(kSection, "PTSpecular") != 0;
 		S.denoise = TheSettingManager->GetSettingI(kSection, "PTDenoise") != 0;
@@ -157,6 +181,20 @@ namespace {
 		S.restirRadius = f("PTRestirRadius", 1.0f, 64.0f);
 		S.restirDepth = f("PTRestirDepth", 0.001f, 1.0f);
 		S.restirNormal = f("PTRestirNormal", -1.0f, 1.0f);
+		S.restirDI = i("PTRestirDI", -1, 1);
+		S.allLamps = i("PTAllLamps", -1, 1);
+		S.radianceCache = i("PTRadianceCache", -1, 1);
+		S.cacheCell = f("PTCacheCell", 1.0f, 256.0f);
+		S.cacheMaxSamples = f("PTCacheMaxSamples", 1.0f, 65536.0f);
+		S.cacheMinSamples = f("PTCacheMinSamples", 0.0f, 1024.0f);
+		S.cacheMaxAge = f("PTCacheMaxAge", 1.0f, 100000.0f);
+		S.cacheMaxFrames = f("PTCacheMaxFrames", 1.0f, 1024.0f);
+		S.cacheLog2 = i("PTCacheEntriesLog2", 12, 22);
+		S.restirDISpatial = i("PTRestirDISpatial", 0, 8);
+		S.restirDIRadius = f("PTRestirDIRadius", 1.0f, 64.0f);
+		S.restirDIMaxM = f("PTRestirDIMaxM", 1.0f, 255.0f);
+		S.restirDINormal = f("PTRestirDINormal", -1.0f, 1.0f);
+		S.restirDIPlane = f("PTRestirDIPlane", 0.001f, 1.0f);
 		// UNOFFICIAL 2026-11-04 PTRealtime: one switch for the path traced game (RT-PATH-TRACING.md section 31): the path tracer on, its picture
 		// into the scene (PTReplace) through the shared denoiser (PTDenoise, 2 a-trous passes unless set), one path a pixel and frame, and the
 		// bounce rays testing only the nearest cut-out card (PTBounceAlpha 3: -31 % outdoors, the same picture indoors; section 27) unless
@@ -170,11 +208,23 @@ namespace {
 			// (2026-11-06, RT-PATH-TRACING.md section 34) one bounce unless PTBounces was changed from its default 4: replays of Goodsprings and
 			// Lucky 38 (48 paths each): 4 -> 1 bounce halves the trace (337 -> 172 ms), the picture 0.2 % darker, RMSE 0.27 / 1.20 against a
 			// 2.32 / 7.62 noise floor (deeper bounces carry almost nothing after Russian roulette)
-			if (S.bounces == 4) S.bounces = 1;
-			if (S.bounceHalf < 0) S.bounceHalf = 1;	// (2026-11-06, section 35) the bounce for half the pixels a frame
-			if (S.lastSky < 0) S.lastSky = 1;	// (2026-11-06, section 39) PTLastSky: the last hit's sky light
-			if (S.lastBounce < 0) S.lastBounce = 1;	// (2026-11-06, section 44) PTLastBounce: the last hit's further bounces
+			// (2026-11-07, section 46) QUALITY FIRST (the users are RTX 40 / 50 owners): 3 bounces unless PTBounces was changed from its default
+			// 4 (was 1: outdoors the ground 1.2 % dark, indoors 2.5 %, patched by PTLastSky / PTLastBounce estimates); PTBounceHalf no longer on
+			// by itself (its 8 x 8 tile checkerboard showed as a TILE GRID while the camera turned: the denoiser's history lags the half-rate
+			// tiles); set PTBounceHalf 1 to get it back
+			if (S.bounces == 4) S.bounces = 3;
+			if (S.bounceHalf < 0) S.bounceHalf = 0;
+			// PTLastSky / PTLastBounce estimate the light of the bounces a 1-bounce path leaves out: on by themselves only at 1 bounce
+			if (S.lastSky < 0) S.lastSky = S.bounces == 1 ? 1 : 0;	// (2026-11-06, section 39) PTLastSky: the last hit's sky light
+			if (S.lastBounce < 0) S.lastBounce = S.bounces == 1 ? 1 : 0;	// (2026-11-06, section 44) PTLastBounce: the last hit's further bounces
+			if (S.restirDI < 0) S.restirDI = 1;	// (2026-11-07, section 47) PTRestirDI
+			if (S.allLamps < 0) S.allLamps = 1;	// (2026-11-07, section 47) PTAllLamps
+			if (S.radianceCache < 0) S.radianceCache = 1;	// (2026-11-07, section 48) PTRadianceCache
 		}
+		if (S.radianceCache < 0) S.radianceCache = 0;
+		if (S.allLamps < 0) S.allLamps = 0;
+		if (S.restirDI < 0) S.restirDI = 0;
+		if (!S.denoise) S.restirDI = 0;	// (a running mean of reused samples would converge to the reuse's own picture: the reference stays plain)
 		S.gameLamps = std::clamp(TheSettingManager->GetSettingI(kSection, "PTGameLamps"), 0, 4);
 		if (S.enabled && RtCore::LeftOut(kUserName)) S.enabled = false;	// (2026-11-05) its images did not fit at the helper start: no picture of its own
 	}
@@ -212,10 +262,12 @@ namespace {
 		};
 		ShaderManager* sm = TheShaderManager;
 		// (rtspec) PTGameLamps 4: the game's lamp table's active lamps this frame (the deferred pass's lamps), nearest first, kLampsMax at most
-		if (S.gameLamps == 4 && ManyLamps::TableFrame + 1 >= ManyLamps::FrameId && !ManyLamps::ActiveLamps.empty()) {
+		// (2026-11-07) PTAllLamps: every table lamp that is not hidden, not only those the game lit this view with (section 47)
+		const std::vector<ManyLamps::ActiveLamp>& source = S.allLamps > 0 ? ManyLamps::AllLamps : ManyLamps::ActiveLamps;
+		if (S.gameLamps == 4 && ManyLamps::TableFrame + 1 >= ManyLamps::FrameId && !source.empty()) {
 			static std::vector<Lamp> table;
 			table.clear();
-			for (const ManyLamps::ActiveLamp& a : ManyLamps::ActiveLamps) {
+			for (const ManyLamps::ActiveLamp& a : source) {
 				if (a.reach <= 0.0f) continue;
 				const D3DXVECTOR3 rel(a.pos[0] - eye.x, a.pos[1] - eye.y, a.pos[2] - eye.z);
 				const float ls = GameLightScale();	// (2026-11-04 rtgap) as the game's lamps: x LIN_SCALE_LIGHT
@@ -281,6 +333,22 @@ namespace {
 	// and the reservoir draws a random number only for lamps of weight > 0, so the pick (and the picture) is the same as the loop over
 	// every lamp, bit for bit. Only with PTLightGridMinLamps (kGridMinLamps) lamps or more (below, the all-lamp loop is cheaper). Writes the cells (one texel each: first entry, count) then the lists (two lamp numbers a texel) into `out`
 	// (kGridTexels float pairs) and the constants; false (the trace loops over every lamp) when the lists do not fit.
+	// UNOFFICIAL 2026-11-07 PTRestirDI: the lamp image's frame row and the lamp numbers' remap (RtRestirRow.h has the layout)
+	void FrameRow(const PassConstants& c, float* row, float* lamps, UINT tw, UINT th) {
+		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+		const D3DXVECTOR3 eye = RtCore::Eye();
+		const double camWorld[3] = { cam.x, cam.y, cam.z };
+		const float eyeScene[3] = { eye.x, eye.y, eye.z };
+		RtRestirRow::Keys keys;
+		keys.maxM = S.restirDIMaxM; keys.spatial = (float)S.restirDISpatial; keys.radius = S.restirDIRadius; keys.normal = S.restirDINormal; keys.plane = S.restirDIPlane;
+		if (cacheLog2Setup > 0) {	// (2026-11-07) PTRadianceCache
+			keys.cacheLog2 = (float)cacheLog2Setup;
+			keys.cacheBase4096 = (float)(CacheBaseWords(TheRenderManager->width, TheRenderManager->height) / 4096ull);
+			keys.cacheCell = S.cacheCell; keys.cacheMaxSamples = S.cacheMaxSamples; keys.cacheMinSamples = S.cacheMinSamples;
+		}
+		RtRestirRow::Build(restirState, row, lamps, lampData[0].pos, lampCount, (int)(sizeof(LampData) / sizeof(float)), camWorld, eyeScene, c.forward, c.right, c.up, tw, th, keys);
+	}
+
 	struct GridInfo { int cells = 0, entries = 0; float cell[3] = {}; int dims[3] = {}; };
 	GridInfo	gridInfo;
 	bool BuildGrid(PassConstants& c, float* out) {	// (2026-11-06) the builder is RtLightGrid::Build (RtLightGrid.h, tested by tools/nvr-rt-host)
@@ -327,7 +395,12 @@ namespace {
 		imageFrame = RtCore::AddImage("NVR RT path trace frame", w, h, NVR_EXT_SHARED_RGBA16F);
 		imageMaterial = RtCore::AddImage("NVR RT path trace material", w, h, NVR_EXT_SHARED_RGBA16F);	// (2026-11-02 e) TESR_MaterialBuffer
 		imageAlbedoOut = RtCore::AddImage("NVR RT path trace first albedo", w, h, NVR_EXT_SHARED_RGBA16F);	// (2026-11-03) PTDenoise's demodulation
-		imageLamps = RtCore::AddImage("NVR RT path trace lamps", kLightTexels, 1 + kGridRows, NVR_EXT_SHARED_RG32F);
+		imageLamps = RtCore::AddImage("NVR RT path trace lamps", kLightTexels, kLampRows, NVR_EXT_SHARED_RG32F);
+		// (2026-11-07) the scratch store (binding 20): PTRestirDI's reservoirs, two sets of 16 bytes a pixel at the screen's size
+		// + (2026-11-07) PTRadianceCache's table after them (64 bytes an entry; its size is fixed at the helper start: PTCacheEntriesLog2 needs a restart)
+		cacheLog2Setup = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "PTCacheEntriesLog2"), 12), 22);
+		RtCore::AskScratch((UINT)((CacheBaseWords(w, h) * 4ull + (64ull << cacheLog2Setup) + (1ull << 20) - 1) >> 20) + 1u);
+		restirState.valid = false;
 		// (2026-11-04 d) PTRestirGI's images (9). (2026-11-05) Only when PTRestirGI is on at the helper start (off by default; turning it on
 		// later needs a restart): the protocol holds 48 shared images and lamps + sun + AO + reflections + the path tracer asked for more.
 		imageGIResult = -1;
@@ -466,8 +539,11 @@ namespace {
 		// (2026-11-03) all the lamps through the lamp image (G32R32F, 4 texels a lamp), when it can be filled and copied this frame
 		// (2026-11-03 b) PTGlowLights: the glow lights after the lamps (rect.z = how many)
 		const int glowCount = Glows();
-		if (imageLamps >= 0 && (lampCount > 8 || glowCount > 0)) {
-			if (!lampTexture) TheRenderManager->device->CreateTexture(kLightTexels, 1 + kGridRows, 1, D3DUSAGE_DYNAMIC, D3DFMT_G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr);
+		const bool restir = S.restirDI > 0 && (flags & 512u) && !S.restirGI;	// (2026-11-07) PTRestirDI needs the lamp image (its frame row)
+		const bool cache = S.radianceCache > 0 && shaderCache >= 0 && cacheLog2Setup > 0 && !S.restirGI;	// (2026-11-07) PTRadianceCache too
+		const bool energy = S.specular;	// (2026-11-07) PTSpecular's energy table rides in the frame row (section 49)
+		if (imageLamps >= 0 && (lampCount > 8 || glowCount > 0 || restir || cache || energy)) {
+			if (!lampTexture) TheRenderManager->device->CreateTexture(kLightTexels, kLampRows, 1, D3DUSAGE_DYNAMIC, D3DFMT_G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr);
 			D3DLOCKED_RECT r = {};
 			if (lampTexture && SUCCEEDED(lampTexture->LockRect(0, &r, nullptr, D3DLOCK_DISCARD))) {
 				float* t = (float*)r.pBits;
@@ -490,10 +566,13 @@ namespace {
 					const float v[8] = { d.pos[0], d.pos[1], d.pos[2], d.pos[3], d.colour[0], d.colour[1], d.colour[2], 0.0f };
 					memcpy(t + 8 * (lampCount + i), v, sizeof(v));
 				}
+				if (restir || cache || energy) FrameRow(c, (float*)((char*)r.pBits + (size_t)r.Pitch * kFrameRow), t, tw, th);
 				lampTexture->UnlockRect(0);
-				if (RtCore::CopyIn(imageLamps, lampTexture)) { flags |= 1024u | (gridOn ? 4096u : 0u); c.misc[0] = (float)lampCount; c.rect[2] = (float)glowCount; }
+				if (RtCore::CopyIn(imageLamps, lampTexture)) { flags |= 1024u | (gridOn ? 4096u : 0u) | (restir ? 262144u : 0u) | (cache ? 524288u : 0u) | (restir || cache || energy ? 1048576u : 0u); c.misc[0] = (float)lampCount; c.rect[2] = (float)glowCount; }
+				else restirState.valid = false;
 			}
 		}
+		if (!(flags & 262144u)) restirState.valid = false;
 		c.accum[3] = (float)flags;	// (the lamp image's flag 1024 comes after the reset check: a lamp list change does not restart the mean)
 		// (2026-11-03 b) FIX: these three were inside the comment above since 940b1ef2 (the lamp image), so the ray length was 0: no
 		// traced hit at all (bounce rays all "missed": outdoors they took the sky, indoors nothing), PTClamp and PTDebugView did nothing
@@ -532,6 +611,14 @@ namespace {
 		else {
 			giHistory = false;
 			if (!RtCore::AddPass(flags & 4096u ? shaderGrid : shader, images, 15, 0x7u | (flags & 512u ? 1u << 13 : 0u), &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+			if (flags & 524288u) {	// (2026-11-07) PTRadianceCache: fold this frame's samples into the cells (RtPathTraceCache.comp)
+				const UINT entries = 1u << cacheLog2Setup;
+				const float params[8] = { (float)entries, (float)(CacheBaseWords(w, h) / 4096ull), S.cacheMaxSamples, S.cacheMaxAge, S.cacheMaxFrames, 0.0f, 0.0f, 0.0f };
+				if (!RtCore::AddPass(shaderCache, nullptr, 0, 0u, params, sizeof(params), (entries + 63) / 64, 1)) {
+					static int logged = 0;
+					if (logged++ < 4) Logger::Log("UNOFFICIAL RT path trace: the radiance cache's resolve pass did not fit this frame (the frame's passes are full): the cache keeps last frame's light.");
+				}
+			}
 			if (!RtCore::CopyOut(imageDisplay, displaySurface, tw, th)) return;
 		}
 		tracedScale[0] = (float)tw / (float)w; tracedScale[1] = (float)th / (float)h;
@@ -546,10 +633,10 @@ namespace {
 		if (samples == (UInt32)S.samples && logged < 8) {
 			logged++;
 			Logger::Log("UNOFFICIAL RT path trace: started (%ux%u, %d bounces, %d paths a pixel and frame, %s, %d lamps, sun %s, albedo %s, glow %s, alpha test %s, "
-				"first hit %s, sky %s, %d glow lights, light grid %s %dx%dx%d cells of %.0fx%.0fx%.0f, %d list entries).", w, h, S.bounces, S.samples, exterior ? "outdoors: sky on misses" : "indoors", (int)c.misc[0], sunUp ? "up" : "down / indoors",
+				"first hit %s, sky %s, %d glow lights, light grid %s %dx%dx%d cells of %.0fx%.0fx%.0f, %d list entries; the game's lamps: %d lit this view, %d not hidden; ReSTIR DI %s, radiance cache %s).", w, h, S.bounces, S.samples, exterior ? "outdoors: sky on misses" : "indoors", (int)c.misc[0], sunUp ? "up" : "down / indoors",
 				flags & 2u ? "atlas" : "averages", flags & 4u ? "atlas" : "none", flags & 1u ? "on" : "off", flags & 8u ? "the screen's G-buffer" : "traced",
 				flags & 16u ? "the reflections' panorama" : "gradient", (int)c.rect[2], flags & 4096u ? "on" : "off", gridInfo.dims[0], gridInfo.dims[1], gridInfo.dims[2],
-				gridInfo.cell[0], gridInfo.cell[1], gridInfo.cell[2], gridInfo.entries);
+				gridInfo.cell[0], gridInfo.cell[1], gridInfo.cell[2], gridInfo.entries, (int)ManyLamps::ActiveLamps.size(), (int)ManyLamps::AllLamps.size(), flags & 262144u ? "on" : "off", flags & 524288u ? "on" : "off");
 		}
 		if (samples == 64u || samples == 256u || samples == 1024u || samples == 4096u)
 			Logger::Log("UNOFFICIAL RT path trace: %u samples a pixel (camera still; %u restarts so far).", samples, resets);
@@ -666,6 +753,7 @@ namespace RtPathTrace {
 	void Register() {
 		shader = RtCore::AddShader("RtPathTrace");
 		shaderGrid = RtCore::AddShader("RtPathTraceGrid");	// (2026-11-04) PTLightGrid
+		shaderCache = RtCore::AddShader("RtPathTraceCache");	// (2026-11-07) PTRadianceCache's resolve pass
 		shaderGI = RtCore::AddShader("RtPathTraceGI");		// (2026-11-04 d) PTRestirGI
 		shaderReuse = RtCore::AddShader("RtRestirGI");
 		RtCore::AddUser({ kUserName, Wants, Setup, Record, 0, 1 });	// Order 1: set up last (the first left out when the images do not fit)

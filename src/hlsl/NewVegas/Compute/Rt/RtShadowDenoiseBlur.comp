@@ -1,0 +1,87 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT shadow denoiser, stages 2 and 3: the penumbra-sized blur (RtShadowDenoise.glsl has the design).
+// 16 taps on a rotated disc whose radius is the penumbra's width in pixels (the accumulated half-width over the pixel's world size),
+// so a shadow is blurred only as much as it is really soft: none where the caster touches the receiver, wide far from it. Taps on
+// another surface (plane distance) or facing another way (normal) count less. A pixel that saw no blocker yet looks for one nearby
+// (the lit side of a penumbra). While the history is short a minimum radius adds a little more blur.
+// The post-blur (-DPOST) runs again over the first one's output at half the radius with another rotation.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtShadowDenoiseBlur.spv RtShadowDenoiseBlur.comp
+//          glslangValidator -V --target-env vulkan1.2 -DPOST -o RtShadowDenoisePostBlur.spv RtShadowDenoiseBlur.comp
+#extension GL_GOOGLE_include_directive : require
+#include "RtShadowDenoise.glsl"
+
+layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
+layout(set = 0, binding = 14, rgba16f) uniform readonly image2D inImage;     // x visibility, y second moment, z penumbra half-width, w history
+layout(set = 0, binding = 15, rgba16f) uniform writeonly image2D outImage;
+
+Surface tapSurface(ivec2 q) {
+	ivec2 qs = sourceOf(q);
+	return surfaceAt(q, qs, imageLoad(depthImage, qs).r, imageLoad(normalImage, qs).xyz);
+}
+
+void main() {
+	ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+	int layer = g.y / TILE_H;
+	ivec2 pixel = ivec2(g.x, g.y - layer * TILE_H);
+	if (g.x >= TILE_W || layer >= layers()) return;
+	ivec2 offset = ivec2(0, layer * TILE_H);
+	vec4 c = imageLoad(inImage, g);
+	Surface s = tapSurface(pixel);
+	if (!s.valid) { imageStore(outImage, g, c); return; }
+
+#ifdef POST
+	float rotation = 6.2831853 * hash12(vec2(pixel) + vec2(17.0, 59.0) + fract(p.params2.z * 0.61803399) * 97.0);
+#else
+	float rotation = 6.2831853 * hash12(vec2(pixel) + fract(p.params2.z * 0.61803399) * 97.0);
+#endif
+	float maxRadius = max(p.params.y, 1.0);
+	float plane = max(p.params.z, 1.0e-4) * s.viewZ;
+	float width = c.z;
+#ifndef POST
+	// No blocker seen here yet (the lit side of a penumbra): a penumbra around that reaches this pixel (8 taps up to half the widest
+	// radius, on the same surface; a tap counts only when this pixel lies within ITS penumbra radius, so the lit floor next to a
+	// pole's foot does not borrow the wide penumbra further along the shadow)
+	if (!(width > 0.0)) {
+		for (int i = 0; i < 8; i++) {
+			vec2 o = discTap(2 * i + 1, rotation) * maxRadius * 0.5;
+			ivec2 q = pixel + ivec2(round(o));
+			if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(TILE_W, TILE_H)))) continue;
+			Surface t = tapSurface(q);
+			if (!t.valid || abs(dot(s.normal, t.position - s.position)) > 4.0 * plane) continue;
+			float tw = imageLoad(inImage, q + offset).z;
+			// (+ the short-history allowance: a new surface's lit samples next to blocked ones are still noise, not light)
+			if (tw > 0.0 && length(vec2(q - pixel)) <= tw / pixelWorld(t.viewZ) + 1.0 + p.light.y * newness(c.w, historyCap(tw, t.viewZ))) width = max(width, tw);
+		}
+	}
+#endif
+	float radius = width > 0.0 ? min(width / pixelWorld(s.viewZ), maxRadius) : 0.0;
+	// the longer the history, the less spatial help it needs: x sqrt(BlurFrames / history), at least BlurMinScale (the penumbra's shape
+	// is kept instead of being smeared by a full-width blur once the frames have averaged the noise)
+	if (p.antiLag.z > 0.0) radius *= clamp(sqrt(p.antiLag.z / max(c.w, 1.0)), p.antiLag.w, 1.0);
+#ifdef POST
+	radius *= 0.5;
+#endif
+	// a little more while the history is short (a new surface's first frames are raw one-ray noise)
+	bool mixed = c.x > 0.001 && c.x < 0.999;
+	if (width > 0.0 || mixed) radius = max(radius, p.light.x + p.light.y * newness(c.w, historyCap(width, s.viewZ)));
+	if (radius < 0.5) { imageStore(outImage, g, vec4(c.x, c.y, width, c.w)); return; }
+
+	float sum = c.x, weights = 1.0;
+	float normalPower = max(p.light.z, 0.0);
+	for (int i = 0; i < 16; i++) {
+		vec2 o = discTap(i, rotation) * radius;
+		ivec2 q = pixel + ivec2(round(o));
+		if (q == pixel || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(TILE_W, TILE_H)))) continue;
+		Surface t = tapSurface(q);
+		if (!t.valid) continue;
+		float geometry = clamp(1.0 - abs(dot(s.normal, t.position - s.position)) / plane, 0.0, 1.0);
+		float facing = pow(max(dot(s.normal, t.normal), 0.0), normalPower);
+		float kernel = exp(-2.0 * dot(o, o) / (radius * radius));
+		float w = geometry * facing * kernel;
+		if (!(w > 1.0e-4)) continue;
+		sum += w * imageLoad(inImage, q + offset).x;
+		weights += w;
+	}
+	imageStore(outImage, g, vec4(sum / weights, c.y, width, c.w));
+}

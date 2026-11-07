@@ -7,6 +7,7 @@
 #include "DxvkCompute.h"
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1: the trace over the frame's top-left rect (docs/next/RT-RENDERSCALE.md)
 #include "GpuProfiler.h"
+#include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
 
 namespace {
 	const char* const kSection = "Shaders.ShadowsExteriors.RT";
@@ -27,6 +28,9 @@ namespace {
 		bool	cloudShadows = false;	// 2026-10-30: the volumetric clouds' shadow map in the traced visibility
 		bool	penumbra = false;		// 2026-10-31: contact-hardening soft shadows (RtSunPenumbra.frag; SunAngle 0 = the real sun, 0.53 deg)
 		float	penumbraMaxRadius = 32.0f;	// the widest penumbra filter (full-size pixels)
+		int		shadowDenoiser = 0;		// 2026-11-07: 1 = the helper's RT shadow denoiser (RtShadowDenoise.spv) instead of RtDenoise + Penumbra
+		int		denoiserDebugView = 0;
+		float	denoiserHistory = 32.0f, denoiserMaxRadius = 32.0f, denoiserStabilize = 4.0f;
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
 	} S;
 
@@ -56,6 +60,12 @@ namespace {
 	D3DXVECTOR4	replaceConstant = { 0.0f, 0.0f, 0.0f, 0.0f };
 	// 2026-10-31 Penumbra: the traced blocker distances (helper image + its copy here) and the contact-hardening filter's output
 	int			imageHit = -1;
+	// 2026-11-07 ShadowDenoiser: the helper's denoiser (one pass after the trace, in place on the visibility), ObjectMotion's copy, the
+	// denoiser's last camera; denoisedInHelper: this frame's visibility is final (Apply skips RtDenoise + Penumbra)
+	int			denoiseShader = -1, imageMotion = -1;
+	RtShadowDenoise::View denoiseView;
+	bool		denoisedInHelper = false;
+	UInt32		denoisedFrames = 0;
 	IDirect3DTexture9*	hitTexture = nullptr;
 	IDirect3DSurface9*	hitSurface = nullptr;
 	bool		hitThisFrame = false;
@@ -87,7 +97,12 @@ namespace {
 		S.cloudShadows = TheSettingManager->GetSettingI(kSection, "CloudShadows") != 0;
 		S.penumbra = TheSettingManager->GetSettingI(kSection, "Penumbra") != 0;
 		S.penumbraMaxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "PenumbraMaxRadius"), 2.0f), 64.0f);
-		if (S.penumbra && S.sunAngle <= 0.0f) S.sunAngle = 0.53f;	// the sun's real angular diameter
+		S.shadowDenoiser = TheSettingManager->GetSettingI(kSection, "ShadowDenoiser");
+		S.denoiserDebugView = TheSettingManager->GetSettingI(kSection, "DenoiserDebugView");
+		S.denoiserHistory = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserHistory"), 1.0f), 64.0f);
+		S.denoiserMaxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);
+		S.denoiserStabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
+		if ((S.penumbra || S.shadowDenoiser) && S.sunAngle <= 0.0f) S.sunAngle = 0.53f;	// the sun's real angular diameter
 	}
 
 	const D3DXVECTOR4* Constant(const char* name) {
@@ -114,6 +129,10 @@ namespace {
 		imageNormals = RtCore::AddImage("NVR RT sun normals", w, h, NVR_EXT_SHARED_RGBA16F);
 		imageVisibility = RtCore::AddImage("NVR RT sun visibility", w, h, NVR_EXT_SHARED_R16F);
 		imageHit = RtCore::AddImage("NVR RT sun hit distance", w, h, NVR_EXT_SHARED_R16F);	// 2026-10-31 Penumbra (always: the switch is live)
+		// 2026-11-07 ShadowDenoiser: ObjectMotion's buffer for the denoiser's history (with the denoiser on at the helper's start; without
+		// it the history follows the camera alone)
+		imageMotion = TheSettingManager->GetSettingI(kSection, "ShadowDenoiser") != 0 ? RtCore::AddImage("NVR RT sun motion", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
+		denoiseView.valid = false;
 		// 2026-10-30 CloudShadows: the clouds' shadow map (A16B16G16R16F, ShadowResolution x ShadowResolution), if it exists by now
 		imageCloud = -1;
 		imageCloudSize = 0;
@@ -144,7 +163,11 @@ namespace {
 			if (hitTexture) { hitTexture->Release(); hitTexture = nullptr; }
 		}
 		hitThisFrame = false;
-		const bool wantHit = S.penumbra && imageHit >= 0 && S.debugView != 7 && S.debugView != 8;
+		denoisedInHelper = false;
+		// 2026-11-07 ShadowDenoiser: needs the blocker distances in the helper (not copied out: the denoiser reads them there)
+		const bool helperDenoise = S.shadowDenoiser != 0 && denoiseShader >= 0 && imageHit >= 0 && S.sunAngle > 0.0f && S.debugView != 7 && S.debugView != 8 &&
+			S.debugView != 3 && S.debugView != 5 && S.debugView != 6 && S.debugView != 9 && S.debugView != 10;
+		const bool wantHit = !helperDenoise && S.penumbra && imageHit >= 0 && S.debugView != 7 && S.debugView != 8;
 		if (wantHit && !hitTexture) TheTextureManager->InitTexture("TESR_RtSunBlocker", &hitTexture, &hitSurface, w, h, D3DFMT_R16F);
 		IDirect3DBaseTexture9* depth = Texture("TESR_DepthBuffer");
 		IDirect3DBaseTexture9* normals = Texture("TESR_NormalsBuffer");
@@ -187,7 +210,7 @@ namespace {
 		c.alpha[0] = RtCore::AlphaTested() ? 1.0f : 0.0f;
 		c.alpha[1] = (float)(frames & 1023);								// the jitter's frame
 		c.alpha[2] = tanf(0.5f * S.sunAngle * 0.0174532925f);				// the sun cone's half-angle tangent (0: hard)
-		c.alpha[3] = wantHit && hitSurface ? 1.0f : 0.0f;					// 2026-10-31 Penumbra: write the blocker distances (binding 7)
+		c.alpha[3] = (wantHit && hitSurface) || helperDenoise ? 1.0f : 0.0f;	// 2026-10-31 Penumbra / 2026-11-07 ShadowDenoiser: the blocker distances (binding 7)
 		c.range[0] = S.range; c.range[1] = 0.15f * S.range; c.range[2] = 255.0f; c.range[3] = S.debugView == 3 ? 1.0f : S.debugView == 5 ? 2.0f : S.debugView == 6 ? 3.0f :
 			S.debugView == 9 ? 5.0f : S.debugView == 10 ? 6.0f : 0.0f;	// 9, 10 (2026-10-30): CloudShadows checks
 
@@ -229,7 +252,41 @@ namespace {
 			const int images[6] = { imageDepth, imageNormals, imageVisibility, c.alpha[0] > 0.0f && atlas >= 0 ? atlas : imageVisibility,	// [3]: binding 5
 				cloudsInTrace ? imageCloud : imageNormals,	// [4]: binding 6, the clouds' shadow map (a stand-in with cloud.x 0)
 				c.alpha[3] > 0.0f ? imageHit : imageVisibility };	// [5]: binding 7, the blocker distances (a stand-in, not written, with alpha.w 0)
+			const bool roomForDenoiser = RtCore::PassesLeft() >= 2;	// 2026-11-07: the trace + the denoiser (else the old path this frame)
 			if (!RtCore::AddPass(shader, images, 6, 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) { cloudsInTrace = false; return; }
+			// 2026-11-07 ShadowDenoiser: the helper's RT shadow denoiser over the visibility, in place (docs/next/RT-DENOISER.md)
+			if (helperDenoise && roomForDenoiser) {
+				RtShadowDenoise::View now;
+				for (int i = 0; i < 3; i++) { now.forward[i] = c.forward[i]; now.right[i] = c.right[i]; now.up[i] = c.up[i]; }
+				const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+				now.eye[0] = (double)cam.x + eye.x; now.eye[1] = (double)cam.y + eye.y; now.eye[2] = (double)cam.z + eye.z;
+				now.jitter[0] = c.full[2]; now.jitter[1] = c.full[3]; now.farZ = cameraData->y; now.valid = true;
+				static UINT lastW = 0, lastH = 0;
+				static UInt32 lastFrame = 0;
+				const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+				RtShadowDenoise::View before = denoiseView;
+				before.valid = denoiseView.valid && lastW == tw && lastH == th && frameNow - lastFrame <= 2;
+				lastW = tw; lastH = th; lastFrame = frameNow;
+				IDirect3DBaseTexture9* motion = Texture("TESR_ObjectMotionBuffer");
+				const D3DXVECTOR4* motionData = Constant("TESR_ObjectMotionData");
+				// (ObjectMotion is full size: only with a full-size trace, where the denoiser's pixels are its pixels)
+				const bool moved = imageMotion >= 0 && tw == rw && th == rh && motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageMotion, motion);
+				RtShadowDenoise::Settings ds;
+				ds.maxHistory = S.denoiserHistory; ds.maxRadius = S.denoiserMaxRadius / (float)scale; ds.stabilize = S.denoiserStabilize;
+				ds.debugView = S.denoiserDebugView;
+				ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
+				RtShadowDenoise::DenoiseConstants d;
+				RtShadowDenoise::Fill(d, now, before, tw, th, rw, rh, 0, 1, frames, ds, moved, c.alpha[2]);
+				d.layerReset[0][0] = before.valid ? 0.0f : 1.0f;
+				const int denoiseImages[5] = { imageDepth, imageNormals, moved ? imageMotion : imageNormals, imageVisibility, imageHit };
+				denoisedInHelper = RtCore::AddPass(denoiseShader, denoiseImages, 5, 0x8, &d, sizeof(d), 1, 1);
+				denoiseView = now;
+				denoiseView.valid = denoisedInHelper;
+				if (denoisedInHelper && denoisedFrames++ % 1200 == 0)
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun shadows: ShadowDenoiser frame %u (%ux%u, sun disc %.2f deg, ObjectMotion %s, history %s)",
+						denoisedFrames, tw, th, S.sunAngle, moved ? "yes" : "no", before.valid ? "kept" : "restarted");
+			}
+			else denoiseView.valid = false;
 		}
 		tracedThisFrame = RtCore::CopyOut(imageVisibility, visibilitySurface, tw, th);
 		static int rectLogs = 0;
@@ -384,6 +441,7 @@ namespace RtSunShadows {
 	void Register() {
 		shader = RtCore::AddShader("RtSunShadow");
 		hitDebugShader = RtCore::AddShader("RtHitDebug");
+		denoiseShader = RtCore::AddShader("RtShadowDenoise");	// UNOFFICIAL 2026-11-07 ShadowDenoiser
 		RtCore::AddUser({ "RT sun shadows", Wants, Setup, Record });
 	}
 
@@ -397,7 +455,9 @@ namespace RtSunShadows {
 		}
 		signalTexture = visibilityTexture;
 		// Soft shadows: the jittered one-ray visibility through the shared denoiser (RtDenoise.h)
-		if (traced && visibilityTexture && S.sunAngle > 0.0f && S.denoise) {
+		const bool helperDenoised = denoisedInHelper;	// 2026-11-07 ShadowDenoiser: the helper denoised it already
+		denoisedInHelper = false;
+		if (traced && visibilityTexture && S.sunAngle > 0.0f && S.denoise && !helperDenoised) {
 			const UINT w = textureWidth, h = textureHeight;	// the traced size (half with HalfResolution)
 			static UINT denoisedWidth = 0, denoisedHeight = 0;
 			if (!denoisedTexture || denoisedWidth != w || denoisedHeight != h) {

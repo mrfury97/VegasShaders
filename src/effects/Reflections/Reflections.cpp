@@ -13,6 +13,7 @@
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (the D3D9 effect's material copy)
 #include "../../core/RtCore.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections
+#include "../../core/RtReflDenoise.h"	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT resolve unblurred, no history)
 
 void ReflectionsEffect::UpdateSettings() {
@@ -66,6 +67,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtMaxRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "MaxRoughness"), 0.02f, 1.0f);
 	Settings.RtDistance = std::clamp(TheSettingManager->GetSettingF(rt, "Distance"), 200.0f, 30000.0f);
 	Settings.RtDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DebugView"), 0, 7);	// 7 (2026-11-05) the reflected direction
+	Settings.RtRaysOnly = TheSettingManager->GetSettingI(rt, "RaysOnly") != 0;	// 2026-11-07
 	Settings.RtScreenTolerance = std::clamp(TheSettingManager->GetSettingF(rt, "ScreenTolerance"), 0.002f, 0.2f);
 	Settings.RtEstimate = std::clamp(TheSettingManager->GetSettingF(rt, "EstimateBrightness"), 0.0f, 4.0f);
 	Settings.RtSunShadows = TheSettingManager->GetSettingI(rt, "SunShadows") != 0;
@@ -90,6 +92,15 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtWaterRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WaterRoughness"), 0.0f, 0.5f);
 	Settings.RtWeaponRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponRoughness"), 0.02f, 1.0f);
 	Settings.RtWeaponMetal = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponMetal"), 0.0f, 1.0f);
+	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (docs/next/RT-REFLECTION-DENOISER.md)
+	Settings.RtDenoiser = TheSettingManager->GetSettingI(rt, "Denoiser") != 0;
+	Settings.RtDenoiserCore = std::clamp(TheSettingManager->GetSettingI(rt, "DenoiserCore"), 0, 1);
+	Settings.RtDenoiserHistory = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserHistory"), 1.0f, 128.0f);
+	Settings.RtDenoiserMirrorHistory = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserMirrorHistory"), 1.0f, 128.0f);
+	Settings.RtDenoiserBlur = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserBlur"), 0.0f, 32.0f);
+	Settings.RtDenoiserAntiLag = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserAntiLag"), 0.5f, 16.0f);
+	Settings.RtDenoiserClip = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserClip"), 0.1f, 4.0f);
+	Settings.RtDenoiserDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DenoiserDebugView"), 0, 6);
 }
 
 // --- UNOFFICIAL 2026-10-28 RT reflections (docs/next/FORK-RT-REFLECTIONS.md; Compute\ReflectionsRT.glsl has the whole frame) -----------
@@ -222,12 +233,13 @@ float ReflectionsEffect::RtSunAmount() const {
 
 // The four half-resolution RT images, made the first time RT runs (no memory spent when it never does). Any failure: RT off for the session.
 bool ReflectionsEffect::RtImages() {
-	if (Rt.Spread) return true;
+	if (Rt.MarchHit) return true;
 	IDirect3DDevice9* device = TheRenderManager->device;
-	struct { IDirect3DTexture9** texture; IDirect3DSurface9** surface; D3DFORMAT format; } images[6] = {
+	struct { IDirect3DTexture9** texture; IDirect3DSurface9** surface; D3DFORMAT format; } images[7] = {
 		{ &Rt.March, &Rt.MarchSurface, D3DFMT_A16B16G16R16F }, { &Rt.Dir, &Rt.DirSurface, D3DFMT_G32R32F },
 		{ &Rt.Ray, &Rt.RaySurface, D3DFMT_G32R32F }, { &Rt.Hit, &Rt.HitSurface, D3DFMT_A16B16G16R16F },
-		{ &Rt.Shade, &Rt.ShadeSurface, D3DFMT_A16B16G16R16F }, { &Rt.Spread, &Rt.SpreadSurface, D3DFMT_R16F } };
+		{ &Rt.Shade, &Rt.ShadeSurface, D3DFMT_A16B16G16R16F }, { &Rt.Spread, &Rt.SpreadSurface, D3DFMT_G16R16F },	// (2026-11-07: + y the hit distance)
+		{ &Rt.MarchHit, &Rt.MarchHitSurface, D3DFMT_R16F } };	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 	for (auto& i : images)
 		if (FAILED(device->CreateTexture(RtWidth(), RtHeight(), 1, D3DUSAGE_RENDERTARGET, i.format, D3DPOOL_DEFAULT, i.texture, NULL)) ||
 			FAILED((*i.texture)->GetSurfaceLevel(0, i.surface))) {
@@ -522,6 +534,9 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	// (below). A frame the helper traced nothing draws the normal trace, which still gets the blurs.
 	const bool rrRaw = Upscaler::RayReconstructionWantsRaw() && RtWanted();
 	const bool temporal = Settings.Temporal > 0.0f && !rrRaw;
+	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h): on frames the RT trace runs, native (rect frames keep the
+	// old chain: their passes are D3D9), not under DLSS RR (it wants the raw signal). Decided before RayGen (it changes RayGen's noise).
+	rtDenoiseFrame = Settings.RtDenoiser && RtWanted() && RtCoreClient::Ready() && !rrRaw && !RenderRect::Active() && !Settings.RtSplitTest;
 	const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
 
@@ -540,11 +555,16 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastRect = RenderRect::Active();
 	const double move[3] = { (double)invView._41 - lastInvView._41, (double)invView._42 - lastInvView._42,
 		(double)invView._43 - lastInvView._43 };
-	if (usable) usable = move[0] * move[0] + move[1] * move[1] + move[2] * move[2] < 500.0 * 500.0;
+	const bool cameraKept = move[0] * move[0] + move[1] * move[1] + move[2] * move[2] < 500.0 * 500.0;
+	if (usable) usable = cameraKept;
+	// (2026-11-07) the RT reflection denoiser keeps its own history: it needs last frame's camera whatever Temporal says
+	const bool denoiseHistory = rtDenoiseFrame && drewLastFrame && cameraKept && !RenderRect::ScaleChanged() && !TheShaderManager->GameState.isCameraCut &&
+		!(sharedNoise && !TemporalBackbone::HistoryValid());
 	stats.Note(temporal, haveHistory, drewLastFrame, usable);
 	EffectStatus::History(StatusSlot, Name, EffectStatus::HistoryWhy(temporal, haveHistory, drewLastFrame, usable));	// UNOFFICIAL 2026-11-01
 	if (GpuTimer::Enabled && stats.drawn >= 240) ReportHistory("240 frames");
-	if (usable) {
+	D3DXMATRIX reprojectNow;
+	if (usable || denoiseHistory) {
 		// Camera-relative world -> last frame's view, in double round the two camera positions (see VolumetricLight.cpp).
 		D3DXMATRIX toLastView;
 		for (int i = 0; i < 3; i++) {
@@ -554,13 +574,14 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		for (int j = 0; j < 3; j++)
 			toLastView.m[3][j] = (float)(move[0] * lastView.m[0][j] + move[1] * lastView.m[1][j] + move[2] * lastView.m[2][j]);
 		toLastView.m[3][3] = 1.0f;
-		D3DXMatrixMultiply(&Constants.Reproject, &toLastView, &lastProj);
+		D3DXMatrixMultiply(&reprojectNow, &toLastView, &lastProj);
+		if (usable) Constants.Reproject = reprojectNow;
 	}
 	Constants.Data3.x = usable ? Settings.Temporal : 0.0f;
 	// UNOFFICIAL 2026-11-01 SharedNoise: with Temporal the shared index (own offset); without (and under DLSS RR, a temporal resolve) the
 	// trace's noise moves only while TAA / FSR / DLSS averages frames, else frame 0. Off: FrameNumber % 64 with Temporal or RR, else 0.
 	Constants.Data2.w = sharedNoise ? (float)(temporal ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetReflections, 64) : TemporalBackbone::NoiseIndex() % 64) :
-		temporal || rrRaw ? (float)(now % 64) : 0.0f;
+		temporal || rrRaw || rtDenoiseFrame ? (float)(now % 64) : 0.0f;	// (2026-11-07: the denoiser needs moving noise)
 
 	// The surroundings cube, before the trace reads it; the light grid's constants.
 	CubeStep(Device);
@@ -597,14 +618,19 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		IDirect3DSurface9* traceTarget = temporal ? Textures.TraceSurface : Textures.TempSurface;
 		if (!RtTrace(Device, traceTarget)) pass(traceTarget, 1);	// UNOFFICIAL 2026-10-28: RT reflections, or the trace as before
 	}
-	if (temporal) {
+	// UNOFFICIAL 2026-11-07 the RT reflection denoiser in place of Temporal + Blur X / Y (its result into Buffer); not run: the old chain
+	const bool denoised = rtDenoiseFrame && rtResolved &&
+		RunRtDenoiser(Device, temporal ? Textures.TraceTexture : Textures.TempTexture, denoiseHistory ? &reprojectNow : nullptr);
+	if (!denoised) RtDenoiseIdle();
+	if (!denoised && temporal) {
 		// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer on stage 11 for Temporal only (the ortho map's stage; the trace above has read it,
 		// and the composite's SetCT binds the ortho map again). TemporalPS reads it while TESR_ObjectMotionData.x is 1.
 		if (ObjectMotion::Data.x > 0.0f && ObjectMotion::Texture) SetPassTexture(11, ObjectMotion::Texture);
 		pass(Textures.TempSurface, 3);
 		Device->StretchRect(Textures.TempSurface, NULL, Textures.HistorySurface, NULL, D3DTEXF_NONE);
 	}
-	if (rrRaw && rtResolved) {
+	if (denoised) {}
+	else if (rrRaw && rtResolved) {
 		// UNOFFICIAL 2026-10-30 DLSS RR (above): the resolve (in Temp, as with Temporal 0) copied into Buffer, what the composite reads.
 		// (Resolve cannot draw into Buffer itself: every pass binds Buffer as an input.)
 		Device->StretchRect(Textures.TempSurface, NULL, Textures.BufferSurface, NULL, D3DTEXF_NONE);
@@ -627,7 +653,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		rtWaterScaleY = RenderRect::Active() ? RenderRect::ScaleY : 1.0f;
 	}
 
-	haveHistory = temporal;
+	haveHistory = temporal && !denoised;	// (2026-11-07: the old history was not kept on a denoised frame)
 	lastRenderedFrame = now;
 	lastView = view;
 	lastInvView = invView;
@@ -844,7 +870,7 @@ namespace {
 	// three outputs and the helper's hits (set 1, bindings 17-20, image slots 16-19).
 	const UINT RtUniformSlot = 2;
 	const NVR_EXT_BINDING_DESC ReflRtUniformBinding = { 2, 1, NVR_EXT_BIND_UNIFORM_BUFFER, RtUniformSlot, NVR_EXT_VIEW_2D, FALSE, 0 };
-	struct ReflRtUniforms { D3DXVECTOR4 rt, rt2, sunDir, sunColor, rt3, rt4, lamps[24]; };	// ReflectionsRT.glsl RtConstants (std140)
+	struct ReflRtUniforms { D3DXVECTOR4 rt, rt2, sunDir, sunColor, rt3, rt4, lamps[24], rt5; };	// ReflectionsRT.glsl RtConstants (std140; rt5 2026-11-07)
 	ReflRtUniforms RtUploaded;
 
 	IDirect3DBaseTexture9* SlotTexture(const char* name) {
@@ -919,13 +945,13 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		else if (rtPass) {
 			// UNOFFICIAL 2026-10-28: the same bindings + RtConstants + RayGen's outputs and the helper's hits (both passes declare all).
 			static const char* const rtNames[2] = { "ReflectionsRayGen", "ReflectionsRTResolve" };
-			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 6];
+			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 7];
 			memcpy(bindings, ReflBindings, sizeof(ReflBindings));
 			bindings[_countof(ReflBindings)] = ReflRtUniformBinding;
-			for (UINT i = 0; i < 5; i++) bindings[_countof(ReflBindings) + 1 + i] = { 1, 17 + i, NVR_EXT_BIND_SAMPLED_IMAGE, ReflTextureCount + i, NVR_EXT_VIEW_2D, FALSE, 0 };
+			for (UINT i = 0; i < 6; i++) bindings[_countof(ReflBindings) + 1 + i] = { 1, 17 + i, NVR_EXT_BIND_SAMPLED_IMAGE, ReflTextureCount + i, NVR_EXT_VIEW_2D, FALSE, 0 };
 			if (DxvkCompute::HasSpirv(rtNames[techniqueIndex - 8]))
 				pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(rtNames[techniqueIndex - 8], bindings, _countof(bindings), sizeof(ReflPush), true,
-					techniqueIndex == 8 ? 3 : 2, NVR_EXT_BLEND_NONE, false);	// a refusal must not turn the other Vulkan passes off (Resolve: + Rt.Spread)
+					techniqueIndex == 8 ? 4 : 2, NVR_EXT_BLEND_NONE, false);	// (2026-11-07: RayGen + Rt.MarchHit)	// a refusal must not turn the other Vulkan passes off (Resolve: + Rt.Spread)
 			if (!pass.Pipeline) {
 				rtTraceFailed = true;
 				Logger::Log("UNOFFICIAL Reflections: the RT pass %s could not be set up; the normal trace is used.", rtNames[techniqueIndex - 8]);
@@ -1061,7 +1087,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		ReflUploaded = uniforms;
 	}
 
-	NVR_EXT_RESOURCE_BINDING resources[_countof(ReflBindings) + 6] = {};
+	NVR_EXT_RESOURCE_BINDING resources[_countof(ReflBindings) + 7] = {};
 	for (UINT i = 0; i < ReflTextureCount; i++) {
 		resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = textures[i];
 	}
@@ -1085,7 +1111,10 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		// UNOFFICIAL 2026-10-28 RT reflections: the RtConstants block (ReflectionsRT.glsl) and the RT images (RayGen: placeholders).
 		const ShaderConstants& sc = TheShaderManager->ShaderConst;
 		ReflRtUniforms rtu = {};
-		rtu.rt = D3DXVECTOR4(rtRays ? 1.0f : 0.0f, Settings.RtMaxRoughness, Settings.RtDistance, (float)Settings.RtDebugView);
+		// (2026-11-07) RaysOnly (default on): what RT DebugView 3 did, as the normal mode: every reflecting pixel smooth enough for RT
+		// (MaxRoughness) takes a ray and the screen march's answer is dropped (the screen showed the backs of things in mirrors, smeared)
+		const int rtView = (Settings.RtDebugView == 0 && Settings.RtRaysOnly) ? 3 : Settings.RtDebugView;
+		rtu.rt = D3DXVECTOR4(rtRays ? 1.0f : 0.0f, Settings.RtMaxRoughness, Settings.RtDistance, (float)rtView);
 		rtu.rt2 = D3DXVECTOR4(Settings.RtScreenTolerance, Settings.RtEstimate, RtSunAmount(), 0.0f);
 		rtu.sunDir = sc.SunDir;
 		rtu.sunColor = sc.sunColor;	// as the game gives it (gamma); ReflectionsRT.glsl linearizes
@@ -1093,6 +1122,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		rtu.rt3 = D3DXVECTOR4(Settings.RtVndf ? 1.0f : 0.0f, Settings.RtRoughShare, Settings.RtContactSpread, Settings.RtGlowBrightness);
 		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, Settings.RtShadeOffscreen ? 1.0f : 0.0f);	// UNOFFICIAL 2026-10-30 / 31; w 2026-11-05 ShadeOffscreen
 		memcpy(rtu.lamps, RtLampData, sizeof(RtLampData));
+		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 		ID3D9NvrExtBuffer* rtBuffer = extRtUniforms.Buffer;
 		if (!rtBuffer || memcmp(&rtu, &RtUploaded, sizeof(rtu))) {
 			rtBuffer = ExtUniforms(extRtUniforms, &rtu, sizeof(rtu));
@@ -1101,8 +1131,8 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		}
 		resources[resourceCount].Slot = RtUniformSlot; resources[resourceCount].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[resourceCount].pResource = rtBuffer;
 		resourceCount++;
-		IDirect3DBaseTexture9* rtImages[5] = { Rt.March, Rt.Dir, Rt.Ray, Rt.Hit, Rt.Shade };
-		for (UINT i = 0; i < 5; i++) {
+		IDirect3DBaseTexture9* rtImages[6] = { Rt.March, Rt.Dir, Rt.Ray, Rt.Hit, Rt.Shade, Rt.MarchHit };
+		for (UINT i = 0; i < 6; i++) {
 			if (!rtImages[i]) return false;
 			resources[resourceCount].Slot = ReflTextureCount + i; resources[resourceCount].Type = NVR_EXT_BIND_SAMPLED_IMAGE;
 			resources[resourceCount].pResource = techniqueIndex == 8 ? depth : rtImages[i];
@@ -1126,9 +1156,9 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	if (techniqueIndex == 0)
 		return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pass.Pipeline, resources, resourceCount, &push, sizeof(push));
 	// (RayGen: its three targets, RtTrace's own; RenderTarget is the first.)
-	IDirect3DSurface9* rayGenTargets[3] = { Rt.MarchSurface, Rt.DirSurface, Rt.RaySurface };
+	IDirect3DSurface9* rayGenTargets[4] = { Rt.MarchSurface, Rt.DirSurface, Rt.RaySurface, Rt.MarchHitSurface };
 	IDirect3DSurface9* resolveTargets[2] = { RenderTarget, Rt.SpreadSurface };
-	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 3, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
+	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 4, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
 		techniqueIndex == 9 ? ExtDrawTo(pass.Pipeline, resolveTargets, 2, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
 		ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad);	// FrameVS into a smaller target
 	if (counters) HiZCounters.End();	// UNOFFICIAL 2026-10-26: queued for the non-waiting readback
@@ -1148,4 +1178,64 @@ std::string ReflectionsEffect::RtStatusText() const {
 		why ? why : "running", rtResolved ? "the RT trace was drawn" : "the normal trace was drawn", rtTraceFrames, rtFallbackFrames, Settings.RtMaxRoughness, Settings.RtDistance,
 		Settings.RtScreenTolerance, Settings.RtWeapon, Settings.RtWater ? "on" : "off", Settings.RtSplitTest ? "on" : "off", Settings.RtDebugView);
 	return t;
+}
+
+// --- UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h, docs/next/RT-REFLECTION-DENOISER.md) ---------------------
+// Four NVR DXVK passes on the half-size grid after Resolve: the signal (Resolve's output), RayGen's Ray image (view z, roughness),
+// Resolve's hit distance (Spread .y), the normals and ObjectMotion. Its histories live in the denoiser; the result goes into Buffer.
+namespace {
+	RtReflDenoise::Denoiser RtDenoiser;
+	bool RtDenoiserFailed = false;
+	UINT RtDenoiserFrames = 0;
+}
+void ReflectionsEffect::RtDenoiseIdle() { RtDenoiser.Restart(); }	// a frame without it: the next one starts over
+bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture9* signal, const D3DXMATRIX* reproject) {
+	if (RtDenoiserFailed) return false;
+	ID3D9NvrExt* ext = DxvkCompute::Extension();
+	IDirect3DBaseTexture9* normals = SlotTexture("TESR_NormalsBuffer");
+	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
+	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+	if (!ext || !normals || !signal || !Rt.Ray || !Rt.Spread || !Textures.BufferSurface || !linear || !point) return false;
+	const UINT w = RtWidth(), h = RtHeight();
+	auto loader = [](const char* name, std::vector<char>& words) { return DxvkCompute::LoadSpirv(name, words); };
+	if (!RtDenoiser.Init(Device, ext, w, h, linear, point, loader)) {
+		RtDenoiserFailed = true;
+		Logger::Log("UNOFFICIAL Reflections: the RT reflection denoiser's images could not be made; Temporal + Blur are used.");
+		return false;
+	}
+	const D3DXMATRIX& view = TheRenderManager->viewMatrix;
+	const D3DXMATRIX& proj = TheRenderManager->projMatrix;
+	RtReflDenoise::Frame f = {};
+	if (reproject) memcpy(f.reproject, reproject, sizeof(f.reproject));	// (D3DX rows read as GLSL columns: clip = M * p, as Reflections.glsl)
+	const float fw[3] = { view._13, view._23, view._33 }, rt[3] = { view._11 / proj._11, view._21 / proj._11, view._31 / proj._11 },
+		up[3] = { view._12 / proj._22, view._22 / proj._22, view._32 / proj._22 };
+	memcpy(f.forward, fw, sizeof(fw)); memcpy(f.right, rt, sizeof(rt)); memcpy(f.up, up, sizeof(up));
+	f.farZ = 0.0f;	// (unused by the passes)
+	// RayGen's pixel: the grid pixel's uv - 0.5 x (one grid texel - one full-size pixel)
+	f.fullUvX = -0.5f * (Constants.Layout.x - 1.0f / TheRenderManager->width);
+	f.fullUvY = -0.5f * (Constants.Layout.y - 1.0f / TheRenderManager->height);
+	f.historyUsable = reproject != nullptr;
+	RtReflDenoise::Settings s;
+	s.Core = Settings.RtDenoiserCore;
+	s.MaxSamples = Settings.RtDenoiserHistory;
+	s.MirrorHistory = Settings.RtDenoiserMirrorHistory;
+	s.BlurRadius = Settings.RtDenoiserBlur;
+	s.AntiLag = Settings.RtDenoiserAntiLag;
+	s.ClipWeight = Settings.RtDenoiserClip;
+	s.DebugView = Settings.RtDenoiserDebugView;
+	IDirect3DBaseTexture9* motion = ObjectMotion::Ready() && ObjectMotion::Data.x > 0.0f && ObjectMotion::Texture ? (IDirect3DBaseTexture9*)ObjectMotion::Texture : nullptr;
+	{
+		static GpuTimer timer("  Reflections RT denoiser");
+		GpuProfileScope gpu(timer, Device);
+		if (!RtDenoiser.Run(signal, Rt.Ray, Rt.Spread, normals, motion, f, s)) {
+			RtDenoiserFailed = true;
+			Logger::Log("UNOFFICIAL Reflections: the RT reflection denoiser's passes could not run (a shader file RtReflDenoise*.spv missing or refused); Temporal + Blur are used.");
+			return false;
+		}
+		Device->StretchRect(RtDenoiser.ResultSurface(), NULL, Textures.BufferSurface, NULL, D3DTEXF_NONE);
+	}
+	if (++RtDenoiserFrames == 1)
+		Logger::Log("UNOFFICIAL Reflections: the RT reflection denoiser runs (core %s, %ux%u, history %.0f / %.0f near mirrors, blur %.1f, ObjectMotion %s).",
+			s.Core == 1 ? "1 = AMD FidelityFX Reflections (port)" : "0 = ours", w, h, s.MaxSamples, s.MirrorHistory, s.BlurRadius, motion ? "yes" : "no");
+	return true;
 }

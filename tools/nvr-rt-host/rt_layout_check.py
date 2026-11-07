@@ -23,14 +23,19 @@ RT = "src/hlsl/NewVegas/Compute/Rt/"
 # (C++ file, struct name) -> shader files whose `uniform Pass` block it fills
 PAIRS = [
     (("src/core/RtLampShadows.h", "PassConstants"), [RT + "RtLampTrace.comp", RT + "RtLampTraceMany.comp", RT + "RtLampTraceRestir.comp"]),
+    (("src/core/RtLampShadows.h", "PrimaryConstants"), [RT + "RtLampPrimary.comp"]),   # 2026-11-07 SameFrame
     (("src/core/RtPathTrace.cpp", "PassConstants"), [RT + "RtPathTrace.comp"]),
     (("src/core/RtPathTrace.cpp", "RestirConstants"), [RT + "RtRestirGI.comp"]),
     (("src/core/RtSunShadows.cpp", "PassConstants"), [RT + "RtSunShadow.comp"]),
     (("src/effects/Reflections/Reflections.cpp", "RtPassConstants"), [RT + "ReflectionsRTBody.glsl"]),
+    # (2026-11-07) the game's own fork passes: RT reflections' RayGen / Resolve block, and the RT reflection denoiser's push block
+    (("src/effects/Reflections/Reflections.cpp", "ReflRtUniforms"), ["src/hlsl/NewVegas/Compute/ReflectionsRT.glsl"]),
+    (("src/core/RtReflDenoise.h", "Push"), ["src/hlsl/NewVegas/Compute/RtReflDenoise.glsl"]),
 ]
 # the host's mirrors -> the game's structs
 MIRRORS = [
     (("tools/nvr-rt-host/rt_host.cpp", "LampConstants"), ("src/core/RtLampShadows.h", "PassConstants")),
+    (("tools/nvr-rt-host/rt_host_sameframe.inl", "PrimaryConstantsHost"), ("src/core/RtLampShadows.h", "PrimaryConstants")),
     (("tools/nvr-rt-host/rt_host.cpp", "PathConstants"), ("src/core/RtPathTrace.cpp", "PassConstants")),
     (("tools/nvr-rt-host/rt_host.cpp", "ReflConstants"), ("src/effects/Reflections/Reflections.cpp", "RtPassConstants")),
 ]
@@ -65,7 +70,12 @@ def cpp_layout(path, name):
         decl = decl.strip()
         if not decl:
             continue
-        t = re.match(r"(float|D3DXVECTOR4)\s+(.*)$", decl, re.S)
+        t = re.match(r"(float|D3DXVECTOR4|uint32_t)\s+(.*)$", decl, re.S)
+        if t and t.group(1) == "uint32_t":   # (2026-11-07) 4-byte scalars (a push block's sampler indices)
+            for d in t.group(2).split(","):
+                members.append((d.strip(), offset, 4))
+                offset += 4
+            continue
         if not t:
             raise ValueError(f"{path} {name}: member '{decl}' is not float[4]-based (check it by hand)")
         for d in t.group(2).split(","):
@@ -74,7 +84,9 @@ def cpp_layout(path, name):
             if not dm:
                 raise ValueError(f"{path} {name}: cannot read '{d}'")
             dims = [int(x) for x in re.findall(r"\d+", dm.group(2))]
-            if t.group(1) == "float":
+            if t.group(1) == "float" and len(dims) == 1 and dims[0] == 16:
+                vec4s = 4   # (2026-11-07) float[16]: a mat4 (the push block's reprojection)
+            elif t.group(1) == "float":
                 if not dims or dims[-1] != 4:
                     raise ValueError(f"{path} {name}: '{d}' is not a float[...][4] (std140 would pad it): check by hand")
                 vec4s = 1
@@ -92,12 +104,20 @@ def cpp_layout(path, name):
 def glsl_layout(path):
     text = strip_comments(open(os.path.join(ROOT, path), encoding="utf-8", errors="replace").read())
     blocks = list(re.finditer(r"std140\)\s*uniform\s+\w+\s*\{", text))
+    if not blocks:   # (2026-11-07) or the push block (vec4 / mat4 / uint members: no std140 padding differences then)
+        blocks = list(re.finditer(r"push_constant\)\s*uniform\s+\w+\s*\{", text))
     if len(blocks) != 1:
         raise ValueError(f"{path}: {len(blocks)} std140 blocks (variants by #ifdef: check by hand)")
     members, offset = [], 0
     for decl in body_after(text, blocks[0].start()).split(";"):
         decl = decl.strip()
         if not decl:
+            continue
+        u = re.match(r"uint\s+([\w\s,]+)$", decl)
+        if u:
+            for n in u.group(1).split(","):
+                members.append((n.strip(), offset, 4))
+                offset += 4
             continue
         t = re.match(r"(vec4|mat4)\s+(\w+)\s*(?:\[\s*(\d+)\s*\])?$", decl)
         if not t:

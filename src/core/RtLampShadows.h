@@ -24,6 +24,7 @@
 #include "RtCore.h"
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
+#include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
 
 namespace RtLampShadows {
 
@@ -73,16 +74,30 @@ namespace RtLampShadows {
 		// UNOFFICIAL 2026-11-04 RenderScale < 1 (docs/next/RT-RENDERSCALE.md), ManyLights' two variants: xy the result / history images'
 		// full size. Reproject's uv is pre-scaled into the previous trace's rect of the full-size images (Submit), so the history texel
 		// is uv x this (not x size, the rect's); the history is only used at the same scale, so that rect is this frame's (size.xy).
+		// (2026-11-07) z MovingCasterHistory (frames of history where people's shadow is or was), w the people's mask (0x60)
 		float rect[4];
 	};
 	static_assert(sizeof(PassConstants) <= 512, "RtCore: 512 bytes of constants a pass");
 	static_assert(offsetof(PassConstants, many) == 9 * 16 && offsetof(PassConstants, jitter) == 15 * 16 && offsetof(PassConstants, rect) == 16 * 16,
 		"RtLampShadows: the shaders' blocks (RtLampTrace.comp manyUnused[6], RtLampTraceMany / Restir) expect many at vec4 9, jitter 15, rect 16");
 
+	// UNOFFICIAL 2026-11-07 SameFrame ([Shaders.ShadowsInteriors.RT] SameFrame, on; docs/next/FORK-RT-LAMPS.md "Same-frame lamp shadows"):
+	// RtLampPrimary.comp's block (std140; rt_layout_check.py checks it). Before the world draw there is no depth buffer of this frame: the
+	// helper's own camera rays through this frame's scene write the lamp trace's depth and normals, then the trace runs as usual, all in
+	// the frame's first exchange (RtCore::ExchangeEarly), and this frame's draws read this frame's result.
+	struct PrimaryConstants {
+		float size[4], forward[4], right[4], up[4], origin[4];	// as PassConstants
+		float jitter[4];						// xy the depth's jitter (screen uv), z 1 = alpha-tested surfaces tested (the atlas)
+		float masks[4];							// x every instance but people, y people (0x20 actors, 0x40 the player's parts)
+	};
+	static_assert(sizeof(PrimaryConstants) == 7 * 16, "RtLampPrimary.comp's block: 7 vec4s");
+
 	// This frame's lamps (Submit, from PointShadowForward::Publish) for Record
 	// stop: past the lamp's own glowing part (0 none); intensity: luminance x dimmer (the per-pixel ranking); radius: the game's (Spec.r)
 	// light: the ShadowSceneLight (ManyLights' id map; never dereferenced from here)
-	struct SlotLamp { int slot; D3DXVECTOR3 position; float reach; float fade; float stop; float intensity; float radius; const void* light = nullptr; };
+	// size (2026-11-07 ShadowDenoiser's PhysicalLampSize): the radius of the lamp's own glowing part (its bulb, globe, sconce glass: the
+	// LampFixtures glow mesh at its light), 0 = none known (an invisible light, an outdoor lamp)
+	struct SlotLamp { int slot; D3DXVECTOR3 position; float reach; float fade; float stop; float intensity; float radius; const void* light = nullptr; float size = 0.0f; };
 	inline SlotLamp Lamps[ManyIds] = {};
 	inline int LampCount = 0;
 	inline bool LampsThisFrame = false;
@@ -111,6 +126,14 @@ namespace RtLampShadows {
 	inline bool UploadedValid = false;
 
 	inline int imageDepth = -1, imageNormals = -1, imageResult = -1, imageTable = -1, shader = -1;
+	// UNOFFICIAL 2026-11-07 SameFrame: RtLampPrimary.spv; SameFrameTraced: this frame's result was traced before the world draw (TraceBeforeWorld),
+	// so RtCore::Frame does not trace the lamps again; InPrimary: Record runs for TraceBeforeWorld (the camera rays stand in for the depth)
+	inline int primaryShader = -1;
+	inline UInt32 SameFrameTracedAt = 0xFFFFFFFF;	// TheFrameRateManager->FrameNumber of the last trace before the world
+	inline bool InPrimary = false;
+	inline bool SameFrameTraced() { return SameFrameTracedAt == TheFrameRateManager->FrameNumber; }
+	inline UInt32 SameFrames = 0, LateFrames = 0;	// traces before the world / after it (a frame late), for the log
+	inline bool SameFrameOn() { return primaryShader >= 0 && TheSettingManager->GetSettingI(kSection, "SameFrame") != 0; }
 	inline int imageAlphaStandIn = -1;	// (2026-11-03 rtalpha) 1 x 1 R16F: the alpha atlas binding when the core has no atlas (jitter.z 0)
 	// the alpha atlas when the core tests alpha (RtCore::AlphaTested), else the stand-in; Record sets jitter.z to match
 	inline int AlphaImage() {
@@ -119,7 +142,17 @@ namespace RtLampShadows {
 		return imageAlphaStandIn >= 0 ? imageAlphaStandIn : imageDepth;	// (no stand-in: any image; jitter.z 0, never read)
 	}
 	inline bool AlphaOn() { const int atlas = RtCore::AlphaAtlasImage(); return RtCore::AlphaTested() && atlas >= 0; }
-	inline int imageRaw = -1, filterShader = -1;	// Filter: the trace writes imageRaw, RtLampFilter.comp imageResult
+	inline int imageRaw = -1, filterShader = -1;
+	// UNOFFICIAL 2026-11-07 ShadowDenoiser ([Shaders.ShadowsInteriors.RT] ShadowDenoiser, needs a restart; docs/next/RT-DENOISER.md): the
+	// DenoiseLamps lamps that matter most on screen are traced with ONE ray each at every pixel they light, aimed at their physical size
+	// (RtLampTraceSigma.spv: visibility + the penumbra width per lamp into imageSigma, stacked), then the helper's RT shadow denoiser
+	// (a pass of RtShadowDenoise.spv: temporal + penumbra-sized blur + stabilization) writes their visibility into the result's entries.
+	// The other lamps are traced as before. Filter, Denoise and Interleave stand aside meanwhile.
+	inline int imageSigma = -1, sigmaShader = -1, denoiseShader = -1, DenoiserLayers = 0;
+	inline RtShadowDenoise::Layers DenoiseLayers;
+	inline RtShadowDenoise::View DenoiseView;		// the camera of the last denoised frame (its history's)
+	inline UInt32 DenoisedFrames = 0;
+	inline bool DenoiserReady() { return imageSigma >= 0 && sigmaShader >= 0 && denoiseShader >= 0 && DenoiserLayers > 0; }	// Filter: the trace writes imageRaw, RtLampFilter.comp imageResult
 	// UNOFFICIAL 2026-10-29 Denoise: RtLampTraceSplit.spv also writes ranks 0 and 1 apart (visibility, cube slot) for the shared
 	// RtDenoise (run per rank with the slot as its id); RtLampRepack.frag writes the result again with them (RepackTexture -> s15)
 	inline int imageSplit[4] = { -1, -1, -1, -1 }, splitShader = -1;	// vis0, vis1, id0, id1 (R32F)
@@ -198,9 +231,26 @@ namespace RtLampShadows {
 		return found->second.id;
 	}
 	// SetForPass, ManyLights: a draw's point light into the next trace's table (once a frame each; its data copied now)
-	inline bool Noting(const void* light) { return ManyNoting && !PendingIds.count(light); }
+	// (2026-11-07) SameFrame: the trace runs before this frame's draws note their lamps, so the lamps LAST frame's draws noted are carried
+	// into this frame's table (Submit, same ids: ManyLightsOneRay's id history stays valid); a lamp drawn for the first time is noted for
+	// the next frame's table and takes R / its cube map this frame (TracedIds has no id for it). NotedLights: noted this frame.
+	inline std::unordered_map<const void*, int> NotedLights;
+	inline SlotLamp Carried[ManyIds] = {};
+	inline int CarriedCount = 0;
+	inline UInt32 CarriedFrame = 0xFFFFFFFF;
+	inline bool Noting(const void* light) {
+		if (!ManyNoting || NotedLights.count(light)) return false;
+		auto found = PendingIds.find(light);
+		return found == PendingIds.end() || found->second.id >= 64;	// a cube-slot lamp is in the table anyway; -1: refused once already
+	}
 	inline void NoteLamp(const void* light, const SlotLamp& data) {
 		if (!Noting(light)) return;
+		NotedLights.emplace(light, 1);
+		if (PendingIds.count(light)) {	// carried from last frame (SameFrame): its data refreshed for the next carry, its id kept
+			for (int i = 0; i < LampCount; i++)
+				if (Lamps[i].light == light) { const int id = Lamps[i].slot; Lamps[i] = data; Lamps[i].slot = id; Lamps[i].light = light; break; }
+			return;
+		}
 		const int limit = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsMax"), 64), ManyIds);
 		if (64 + ExtraCount >= limit || LampCount >= ManyIds) {
 			PendingIds.emplace(light, ManyId{ -1, data.reach });	// counted once (ManyIdOf: -1, no id)
@@ -271,7 +321,18 @@ namespace RtLampShadows {
 
 	// PointShadowForward::Publish, once a frame indoors after the slots are known (before the world draws): this frame's lamps for
 	// the trace, and the reprojection into the newest result for this frame's draws.
+	inline void Aim(bool rtSource);
 	inline void Submit(const SlotLamp* lamps, int count) {
+		// (2026-11-07) SameFrame + ManyLights: at the frame's first Submit, the lamps last frame's draws noted (ids 64+) are kept for this
+		// frame's table (the trace runs before this frame's draws note theirs)
+		if (CarriedFrame != TheFrameRateManager->FrameNumber) {
+			CarriedFrame = TheFrameRateManager->FrameNumber;
+			CarriedCount = 0;
+			if (SameFrameOn())
+				for (int i = 0; i < LampCount; i++)
+					if (Lamps[i].slot >= 64 && Lamps[i].light && NotedLights.count(Lamps[i].light)) Carried[CarriedCount++] = Lamps[i];
+			NotedLights.clear();
+		}
 		Mode = 0.0f;
 		LampCount = 0;
 		LampsThisFrame = false;
@@ -292,11 +353,36 @@ namespace RtLampShadows {
 				if (many && lamps[i].light) PendingIds.emplace(lamps[i].light, ManyId{ lamps[i].slot, lamps[i].reach });
 			}
 		ManyNoting = many;
+		if (many && CarriedCount > 0 && SameFrameOn()) {	// (2026-11-07) last frame's noted lamps, their ids kept; new notes after them
+			const int limit = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsMax"), 64), ManyIds);
+			int top = 63, kept = 0;
+			for (int i = 0; i < CarriedCount; i++) {
+				const SlotLamp& l = Carried[i];
+				if (LampCount >= ManyIds || l.slot >= limit || PendingIds.count(l.light)) continue;	// (now in a cube slot: there already)
+				Lamps[LampCount++] = l;
+				PendingIds.emplace(l.light, ManyId{ l.slot, l.reach });
+				top = (std::max)(top, l.slot);
+				kept++;
+			}
+			// lamps come and go: the ids climb; near the limit they are given again from 64 (the one-ray id history restarts there once)
+			if (top + 8 >= limit && 64 + kept + 8 < limit) {
+				int next = 64;
+				for (int i = 0; i < LampCount; i++)
+					if (Lamps[i].slot >= 64) { Lamps[i].slot = next; PendingIds[Lamps[i].light] = ManyId{ next, Lamps[i].reach }; next++; }
+				top = next - 1;
+			}
+			ExtraCount = top - 63;
+		}
 		LampsThisFrame = RtEnabled && TheSettingManager->GetSettingI(kSection, "Live") != 0;
 		// UNOFFICIAL 2026-10-31 CapsuleShadows: the pass writes the buffer when the RT path is not running (no RT GPU, or RT off)
 		const bool rtSource = RtEnabled && RtCore::Running();
 		if (!rtSource && ScreenWants() && count > 0) { ScreenSourceFrame = true; LampsThisFrame = true; }
+		Aim(rtSource);
+	}
 
+	// The draws' lookup into the newest result: Submit (the result traced last frame, which ManyLights' history also reprojects into)
+	// and, with SameFrame, TraceBeforeWorld again once this frame's result is recorded (this frame's camera: only the jitter moves it)
+	inline void Aim(bool rtSource) {
 		// The newest result: traced last frame (Record moves Pending to Traced once its copy-out is recorded)
 		if (!Traced.valid || !ResultTexture || !LampsThisFrame || !(rtSource || ScreenSourceFrame)) return;
 		const D3DXMATRIX& v = Traced.view;
@@ -397,7 +483,8 @@ namespace RtLampShadows {
 
 	// --- The RT core user -----------------------------------------------------------------------------------------------------------
 	inline bool Wants() {
-		return (RtEnabled && !ScreenSourceFrame && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) || FlashWanted();
+		return (RtEnabled && !ScreenSourceFrame && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
+			FlashWanted();
 	}
 
 	// Exteriors: ShadowManager, every frame outdoors right after GetNearbyLights: the mask's lamps (the shadow lamps, then the tracked
@@ -459,10 +546,22 @@ namespace RtLampShadows {
 		imageResult = RtCore::AddImage("NVR RT lamps", w, h, NVR_EXT_SHARED_RG32F);
 		imageTable = RtCore::AddImage("NVR RT lamp table", TableWidth, 1, NVR_EXT_SHARED_RG32F);
 		imageAlphaStandIn = RtCore::AddImage("NVR RT lamps alpha stand-in", 1, 1, NVR_EXT_SHARED_R16F);	// (2026-11-03 rtalpha)
+		// UNOFFICIAL 2026-11-07 ShadowDenoiser: the denoised lamps' signals, DenoiseLamps of them stacked (images stay within 16384 texels)
+		imageSigma = -1; DenoiserLayers = 0;
+		if (TheSettingManager->GetSettingI(kSection, "ShadowDenoiser") != 0) {
+			int layers = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiseLamps"), 1), RtShadowDenoise::MaxLayers);
+			while (layers > 1 && h * (UINT)layers > 16384) layers--;
+			imageSigma = RtCore::AddImage("NVR RT lamps denoiser signal", w, h * layers, NVR_EXT_SHARED_RG16F);
+			if (imageSigma >= 0) DenoiserLayers = layers;
+		}
+		const bool shadowDenoiser = imageSigma >= 0;
+		DenoiseView.valid = false;
+		DenoiseLayers.Clear();
 		// optional images only when asked for at the helper's start (the core holds 32 shared images for every RT effect)
+		// (2026-11-07: Denoise not with ShadowDenoiser, which replaces it; Filter's image stays, so ShadowDenoiser false is a live A/B)
 		imageRaw = TheSettingManager->GetSettingI(kSection, "Filter") ? RtCore::AddImage("NVR RT lamps unfiltered", w, h, NVR_EXT_SHARED_RG32F) : -1;
 		static const char* splitNames[4] = { "NVR RT lamps vis 0", "NVR RT lamps vis 1", "NVR RT lamps id 0", "NVR RT lamps id 1" };
-		const bool denoise = TheSettingManager->GetSettingI(kSection, "Denoise") != 0;
+		const bool denoise = !shadowDenoiser && TheSettingManager->GetSettingI(kSection, "Denoise") != 0;
 		for (int i = 0; i < 4; i++) imageSplit[i] = denoise ? RtCore::AddImage(splitNames[i], w, h, NVR_EXT_SHARED_R32F) : -1;
 		imageMask = TheSettingManager->GetSettingI(kSection, "Exteriors") ? RtCore::AddImage("NVR RT lamps mask", w, h, NVR_EXT_SHARED_R32F) : -1;
 		imageFlash = TheSettingManager->GetSettingI(kSection, "Flashlight") ? RtCore::AddImage("NVR RT flashlight", w, h, NVR_EXT_SHARED_R32F) : -1;
@@ -474,12 +573,15 @@ namespace RtLampShadows {
 		const bool oneRay = many && TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
 		imageHistoryIds[0] = oneRay ? RtCore::AddImage("NVR RT lamps ids history 0", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		imageHistoryIds[1] = oneRay ? RtCore::AddImage("NVR RT lamps ids history 1", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
-		imageMotion = oneRay ? RtCore::AddImage("NVR RT lamps motion", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
+		// (2026-11-07) also ShadowDenoiser's (the denoiser's history follows each surface's own move)
+		imageMotion = oneRay || shadowDenoiser ? RtCore::AddImage("NVR RT lamps motion", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		TracedMany = false;
 	}
 
 	// The lamp table into its GPU texture (scene space = world minus CameraPosition), for the copy into imageTable
-	inline bool WriteTable(const D3DXVECTOR4& camera, float discRadius, float invisibleRadius) {
+	// (2026-11-07) physical: the denoised lamps (ShadowDenoiser) get their glowing part's size x physicalScale as the disc (PhysicalLampSize)
+	inline bool WriteTable(const D3DXVECTOR4& camera, float discRadius, float invisibleRadius, const RtShadowDenoise::Layers* physical = nullptr,
+		float physicalScale = 1.0f, float physicalMin = 1.0f, float physicalMax = 48.0f) {
 		IDirect3DDevice9* device = TheRenderManager->device;
 		if (!TableTexture) {
 			TheTextureManager->InitTexture("TESR_RtLampTable", &TableTexture, &TableSurface, TableWidth, 1, D3DFMT_G32R32F);
@@ -501,6 +603,9 @@ namespace RtLampShadows {
 			e[2] = l.position.z - camera.z; e[3] = l.reach;
 			e[4] = (std::max)(l.intensity, 0.001f); e[5] = (std::max)(l.radius, 1.0f);
 			e[6] = l.stop; e[7] = l.fade < 0.0f && invisibleRadius >= 0.0f ? invisibleRadius : discRadius;	// negative fade: an invisible light
+			if (physical && l.size > 0.0f && l.fade >= 0.0f)
+				for (int k = 0; k < RtShadowDenoise::MaxLayers; k++)
+					if (physical->slot[k] == l.slot) { e[7] = (std::min)((std::max)(l.size * physicalScale, physicalMin), physicalMax); break; }
 		}
 		TableStaging->UnlockRect(0);
 		IDirect3DSurface9* staging = nullptr;
@@ -530,7 +635,7 @@ namespace RtLampShadows {
 		IDirect3DBaseTexture9* normals = Texture("TESR_NormalsBuffer");
 		const D3DXVECTOR4* cameraData = Constant("TESR_CameraData");
 		FlashThisFrame = false;
-		if (!depth || !normals || !cameraData) { FlashLive = false; return; }
+		if ((!InPrimary && (!depth || !normals)) || !cameraData) { FlashLive = false; return; }	// (SameFrame: the camera rays make them)
 		// Flashlight: its own pass, before (and without) the lamps
 		bool inputsIn = false;
 		if (FlashWanted()) {
@@ -570,6 +675,10 @@ namespace RtLampShadows {
 		}
 		FlashLive = FlashThisFrame;
 		if (!(CompiledIn && LampsThisFrame && LampCount > 0)) return;
+		if (InPrimary) SameFrames++; else LateFrames++;
+		if (((SameFrames + LateFrames) % 1200) == 1)
+			Logger::Log("UNOFFICIAL RT lamp shadows: SameFrame %s: %u traces before the world (this frame's), %u after it (a frame late) so far",
+				SameFrameOn() ? "on" : "off", SameFrames, LateFrames);
 
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
@@ -617,13 +726,48 @@ namespace RtLampShadows {
 		c.flags[3] = (float)(frame % (UInt32)interleave);
 		const float radius = (std::max)(TheSettingManager->GetSettingF(kSection, "LampRadius"), 0.0f);
 		const float invisible = TheSettingManager->GetSettingF(kSection, "InvisibleLightRadius");
-		if (!WriteTable(camera, radius, invisible)) {
+		// UNOFFICIAL 2026-11-07 ShadowDenoiser: this frame's denoised lamps (the plain path only: not the outdoor mask, not ManyLights)
+		const bool shadowDenoiser = DenoiserReady() && TheSettingManager->GetSettingI(kSection, "ShadowDenoiser") != 0 && !ManyNoting &&
+			!(TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) && RtCore::PassesLeft() >= 2;	// (the trace + the denoiser)
+		if (shadowDenoiser) {
+			// the lamps worth it: intensity x reach over the distance from the camera (near, bright, far-reaching lamps first)
+			RtShadowDenoise::Candidate candidates[TableSlots];
+			int n = 0;
+			const D3DXVECTOR3 eyeWorld(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z);
+			for (int i = 0; i < LampCount && n < TableSlots; i++) {
+				const SlotLamp& l = Lamps[i];
+				if (l.slot < 0 || l.slot >= TableSlots || !(l.reach > 0.0f)) continue;
+				const D3DXVECTOR3 d = l.position - eyeWorld;
+				const float distance = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
+				candidates[n++] = { l.slot, (std::max)(l.intensity, 0.001f) * l.reach / (std::max)(distance, 0.25f * l.reach), { l.position.x, l.position.y, l.position.z } };
+			}
+			const int wanted = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiseLamps"), 1), DenoiserLayers);
+			DenoiseLayers.Update(candidates, n, wanted);
+			c.flags[2] = 1.0f; c.flags[3] = 0.0f;	// every pixel every frame (the denoiser's history is per pixel)
+		}
+		const bool physicalSize = shadowDenoiser && TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
+		if (!WriteTable(camera, radius, invisible, physicalSize ? &DenoiseLayers : nullptr, TheSettingManager->GetSettingF(kSection, "PhysicalLampScale"),
+			(std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMin"), 0.0f), (std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMax"), 1.0f))) {
 			static bool logged = false;
 			if (!logged) { logged = true; Logger::Log("UNOFFICIAL RT lamp shadows: the lamp table could not be written; not traced"); }
 			return;
 		}
 
-		if ((!inputsIn && (!RtCore::CopyIn(imageDepth, depth) || !RtCore::CopyIn(imageNormals, normals))) || !RtCore::CopyIn(imageTable, TableTexture)) return;
+		if (InPrimary) {
+			// (2026-11-07) SameFrame: this frame's camera rays through this frame's scene write the depth and normals the trace reads
+			// (RtLampPrimary.comp: the game's encodings, the same rays through the pixel centres + the depth's jitter)
+			PrimaryConstants pc = {};
+			memcpy(pc.size, c.size, sizeof(pc.size)); memcpy(pc.forward, c.forward, sizeof(pc.forward));
+			memcpy(pc.right, c.right, sizeof(pc.right)); memcpy(pc.up, c.up, sizeof(pc.up));
+			pc.origin[0] = eye.x; pc.origin[1] = eye.y; pc.origin[2] = eye.z;
+			pc.jitter[0] = jitter.x; pc.jitter[1] = jitter.y; pc.jitter[2] = AlphaOn() ? 1.0f : 0.0f;	// cut-outs as drawn (the raster's test)
+			pc.masks[0] = (float)(0xFFu & ~0x60u);	// everything drawn but people (0x20 actors, 0x40 the player's parts: their own query)
+			pc.masks[1] = (float)0x60u;
+			const int primaryImages[9] = { imageDepth, imageNormals, imageDepth, imageDepth, imageDepth, imageDepth, imageDepth, imageDepth, AlphaImage() };
+			if (!RtCore::AddPass(primaryShader, primaryImages, 9, 0x3, &pc, sizeof(pc), (tw + 7) / 8, (th + 7) / 8)) return;
+		}
+		else if (!inputsIn && (!RtCore::CopyIn(imageDepth, depth) || !RtCore::CopyIn(imageNormals, normals))) return;
+		if (!RtCore::CopyIn(imageTable, TableTexture)) return;
 		// Exteriors: the mask variant, its result copied out for ApplyExteriorMask this frame; nothing is reprojected
 		if (TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) {
 			static UINT maskWidth = 0, maskHeight = 0;
@@ -660,6 +804,10 @@ namespace RtLampShadows {
 					Traced.sx, Traced.sy, (float)tw / (float)w, (float)th / (float)h);
 			}
 			c.rect[0] = (float)w; c.rect[1] = (float)h;
+			// (2026-11-07) MovingCasterHistory: where people's shadow is or just was, the history keeps at most this many frames (rays
+			// blocked by a person, mask 0x60, mark the pixel and its neighbours for 8 frames); 0 = no limit (their shadows smear)
+			c.rect[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "MovingCasterHistory"), 0), 64);
+			c.rect[3] = (float)0x60u;
 			static int rectLogs = 0;
 			if (tw < w && rectLogs < 2) {
 				rectLogs++;
@@ -698,7 +846,8 @@ namespace RtLampShadows {
 			for (int i = 0; i < LampCount; i++)	// (2026-11-03 rtext) the land's slots 0-19 by position (BindTerrain), as the other variants
 				if (Lamps[i].slot >= 0 && Lamps[i].slot < TableSlots)
 					TracedLampWorld[Lamps[i].slot] = D3DXVECTOR4(Lamps[i].position.x, Lamps[i].position.y, Lamps[i].position.z, 1.0f);
-			TracedIds.swap(PendingIds);
+			if (InPrimary) TracedIds = PendingIds;	// (SameFrame) this frame's draws look up this table; their notes go on into PendingIds
+			else TracedIds.swap(PendingIds);
 			TracedMany = true;
 			// The collected lamps: on the 3rd ManyLights trace in each cell (the draws have noted their lamps by then) and every
 			// 1200th; the others listed (up to 16) with where they are, so a run's log says which lamps the trace took
@@ -730,9 +879,16 @@ namespace RtLampShadows {
 		const int filterSetting = TheSettingManager->GetSettingI(kSection, "Filter");
 		TAAEffect* taaNow = TheShaderManager->Effects.TAA;
 		const bool temporal = taaNow && taaNow->IsJitterActive();
-		const bool filter = imageRaw >= 0 && filterShader >= 0 && (filterSetting > 0 || (filterSetting < 0 && !temporal));
+		const bool filter = !shadowDenoiser && imageRaw >= 0 && filterShader >= 0 && (filterSetting > 0 || (filterSetting < 0 && !temporal));
 		// Denoise: the split variant also writes ranks 0 and 1 apart (images 6-9), copied out for RtDenoise (Denoise() below)
-		bool split = !filter && splitShader >= 0 && imageSplit[3] >= 0 && TheSettingManager->GetSettingI(kSection, "Denoise");
+		bool split = !filter && !shadowDenoiser && splitShader >= 0 && imageSplit[3] >= 0 && TheSettingManager->GetSettingI(kSection, "Denoise");
+		// (2026-11-07) SameFrame: no Denoise (its D3D9 passes need this frame's depth, drawn after the lookups, and their output was
+		// read a frame later): the raw (or Filtered) trace instead
+		if (split && InPrimary) {
+			static bool told = false;
+			if (!told) { told = true; Logger::Log("UNOFFICIAL RT lamp shadows: Denoise is not used with SameFrame (it needs the frame's depth, drawn after the lookups); Filter 1 smooths instead"); }
+			split = false;
+		}
 		static UINT splitWidth = 0, splitHeight = 0;
 		const bool resized = split && (splitWidth != w || splitHeight != h);
 		if (split) { splitWidth = w; splitHeight = h; }
@@ -748,7 +904,51 @@ namespace RtLampShadows {
 		// [8]: binding 12, the alpha atlas (rtalpha); [4]-[7] the split targets (unused without Denoise)
 		const int images[9] = { imageDepth, imageNormals, filter ? imageRaw : imageResult, imageTable, split ? imageSplit[0] : imageDepth, split ? imageSplit[1] : imageDepth,
 			split ? imageSplit[2] : imageDepth, split ? imageSplit[3] : imageDepth, AlphaImage() };
-		if (!RtCore::AddPass(split ? splitShader : shader, images, 9, split ? 0xF4 : 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+		if (shadowDenoiser) {
+			// the trace: the result's entries + each denoised lamp's one-ray signal (images [4] = imageSigma; c.many / reproject[0..1] =
+			// RtLampTraceSigma's sigma / sigmaSlots)
+			c.many[0] = (float)DenoiseLayers.count; c.many[1] = (float)(frame & 0xFFFF); c.many[2] = c.many[3] = 0.0f;
+			for (int k = 0; k < RtShadowDenoise::MaxLayers; k++) c.reproject[k / 4][k % 4] = (float)DenoiseLayers.slot[k];
+			const int sigmaImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageSigma, imageDepth, imageDepth, imageDepth, AlphaImage() };
+			if (!RtCore::AddPass(sigmaShader, sigmaImages, 9, 0x14, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+			// the denoiser: its camera now and at its last run (a RenderScale change or a skipped frame restarts the history)
+			RtShadowDenoise::View now;
+			for (int i = 0; i < 3; i++) { now.forward[i] = c.forward[i]; now.right[i] = c.right[i]; now.up[i] = c.up[i]; }
+			now.eye[0] = (double)camera.x + eye.x; now.eye[1] = (double)camera.y + eye.y; now.eye[2] = (double)camera.z + eye.z;
+			now.jitter[0] = jitter.x; now.jitter[1] = jitter.y; now.farZ = cameraData->y; now.valid = true;
+			static UINT lastW = 0, lastH = 0;
+			static UInt32 lastFrame = 0;
+			const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+			const bool continuous = DenoiseView.valid && lastW == tw && lastH == th && frameNow - lastFrame <= 2;
+			RtShadowDenoise::View before = DenoiseView;
+			before.valid = continuous;
+			lastW = tw; lastH = th; lastFrame = frameNow;
+			IDirect3DBaseTexture9* motion = Texture("TESR_ObjectMotionBuffer");
+			const D3DXVECTOR4* motionData = Constant("TESR_ObjectMotionData");
+			const bool moved = imageMotion >= 0 && motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageMotion, motion);
+			RtShadowDenoise::Settings ds;
+			ds.maxHistory = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserHistory"), 1.0f), 64.0f);
+			ds.maxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);
+			ds.stabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
+			ds.debugView = TheSettingManager->GetSettingI(kSection, "DenoiserDebugView");
+			ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
+			RtShadowDenoise::DenoiseConstants d;
+			RtShadowDenoise::Fill(d, now, before, tw, th, tw, th, 1, DenoiseLayers.count, frame, ds, moved, 0.0f);
+			DenoiseLayers.Write(d);
+			const int denoiseImages[5] = { imageDepth, imageNormals, moved ? imageMotion : imageNormals, imageSigma, imageResult };
+			if (!RtCore::AddPass(denoiseShader, denoiseImages, 5, 0x10, &d, sizeof(d), 1, 1)) { DenoiseView.valid = false; return; }
+			DenoiseView = now;
+			if (DenoisedFrames++ % 1200 == 0) {
+				char list[200] = ""; int used = 0;
+				for (int k = 0; k < DenoiseLayers.count; k++) used += sprintf_s(list + used, sizeof(list) - used, " %d", DenoiseLayers.slot[k]);
+				Logger::Log("UNOFFICIAL RT lamp shadows: ShadowDenoiser frame %u: %d lamp(s) denoised (cube slots%s), %s, ObjectMotion %s, history %s",
+					DenoisedFrames, DenoiseLayers.count, list, physicalSize ? "physical lamp sizes" : "LampRadius", moved ? "yes" : "no", continuous ? "kept" : "restarted");
+			}
+		}
+		else {
+			DenoiseView.valid = false;
+			if (!RtCore::AddPass(split ? splitShader : shader, images, 9, split ? 0xF4 : 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+		}
 		for (int i = 0; split && i < 4; i++) split = RtCore::CopyOut(imageSplit[i], SplitSurface[i]);
 		SplitThisFrame = split;
 		if (filter) {
@@ -941,18 +1141,40 @@ namespace RtLampShadows {
 		if (applied++ == 0) Logger::Log("UNOFFICIAL RT lamp shadows: Exteriors: the traced lamp mask is applied outdoors (%d lamps in the table)", LampCount);
 	}
 
+	inline const RtCore::User TheUser = { "RT lamp shadows", Wants, Setup, Record };
 	// ShaderManager, once before the first RtCore::Frame (next to RtSunShadows::Register)
 	inline void Register() {
 		if (!CompiledIn) return;
 		RtCore::SetMaskHook(MaskHook);
 		shader = RtCore::AddShader("RtLampTrace");
 		splitShader = RtCore::AddShader("RtLampTraceSplit");
+		sigmaShader = RtCore::AddShader("RtLampTraceSigma");		// UNOFFICIAL 2026-11-07 ShadowDenoiser
+		denoiseShader = RtCore::AddShader("RtShadowDenoise");
 		exteriorShader = RtCore::AddShader("RtLampTraceExterior");
 		flashShader = RtCore::AddShader("RtFlashTrace");
 		filterShader = RtCore::AddShader("RtLampFilter");
 		manyShader = RtCore::AddShader("RtLampTraceMany");
 		restirShader = RtCore::AddShader("RtLampTraceRestir");
-		RtCore::AddUser({ "RT lamp shadows", Wants, Setup, Record });
+		primaryShader = RtCore::AddShader("RtLampPrimary");	// (2026-11-07) SameFrame
+		RtCore::AddUser(TheUser);
+	}
+
+	// UNOFFICIAL 2026-11-07 SameFrame: RenderWorldSceneGraphHook, the frame's first world scene right after TAA's jitter (the camera, the
+	// jitter and the RenderScale rect of this frame are set; nothing of the world is drawn yet). The frame's first RT exchange: the scene
+	// gathered now (this frame's actors' poses), the camera rays, the lamp trace, its copy out; the GPU waits for it before the world's draws,
+	// which then look this frame's result up (Aim: this frame's camera). When the helper is not running or refuses (outdoors with Grass),
+	// nothing happens and RtCore::Frame traces after the world as before (the next frame's draws reproject into it).
+	inline void TraceBeforeWorld(IDirect3DDevice9* Device) {
+		if (!CompiledIn || !RtEnabled || SameFrameTraced() || !SameFrameOn()) return;
+		if (ScreenSourceFrame || !LampsThisFrame || LampCount <= 0) return;
+		if (TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) return;	// the outdoor mask: a screen pass after the world
+		const UInt32 before = FramesTraced;
+		InPrimary = true;
+		const bool exchanged = RtCore::ExchangeEarly(Device, TheUser);
+		InPrimary = false;
+		if (!exchanged || FramesTraced == before) return;	// (Record counts a trace once its result is copied out)
+		SameFrameTracedAt = TheFrameRateManager->FrameNumber;
+		Aim(true);
 	}
 
 }

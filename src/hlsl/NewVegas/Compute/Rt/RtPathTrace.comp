@@ -18,6 +18,9 @@
 // grid. A variant, not a branch: with the grid code in the same shader its plain path cost ~6 % more (RT-PATH-TRACING.md section 25)
 // (2026-11-04 d) variant RtPathTraceGI.spv: -DPT_RESTIR_GI (PTRestirGI with PTDenoise): the first bounce is a cosine sample written out
 // for ReSTIR GI's reuse pass (RtRestirGI.comp), not added in here (section 29)
+// (2026-11-07) PTRestirDI (flag 262144, not in the GI variant): the lamps at the first hit through ReSTIR DI, reservoirs kept in the
+// helper's scratch store (binding 20, protocol 6) from frame to frame (section 47); PTRadianceCache (flag 524288): a world-space radiance
+// cache in the same store gives the path's last hit the light of all further bounces (section 48; RtPathTraceCache.comp resolves it)
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : enable
 
@@ -79,6 +82,21 @@ layout(set = 0, binding = 17, rgba16f) uniform writeonly image2D albedoOut;  // 
 // per cell (z x cells y + y) x cells x + x one texel (its list's first entry, how many), then the lists, two lamp numbers a texel (entry
 // e at float 2 x cells + e). Each cell lists, in rising order, every lamp whose reach meets it (core\RtPathTrace.cpp BuildGrid)
 layout(set = 0, binding = 18, rg32f) uniform readonly image2D lampImage;     // (pass image 14)
+#ifndef PT_RESTIR_GI
+// UNOFFICIAL 2026-11-07 the helper's scratch store (protocol 6, NVR_RT_BINDING_SCRATCH): zero at the helper's start, kept between frames.
+// Words [0, 8 w h): the ReSTIR DI reservoirs, two sets of w x h (the traced rect's size) x 4 words, this frame writing set FrameParity();
+// a reservoir: [0] lamp + 1 (0: none) | M << 16, [1] W (float bits), [2] the surface's distance from that frame's eye (float bits), [3]
+// its normal (octahedral, 2 x snorm16). From word CacheBase() on: the radiance cache (section 48).
+layout(set = 0, binding = 20, std430) buffer Scratch { uint words[]; } scratch;
+#endif
+// (2026-11-07) the lamp image's FRAME ROW (row 1 + kGridRows = 49; core\RtPathTrace.cpp FrameRow): per-frame values the full constant
+// block has no room for, two floats a texel: 0-1 last frame's forward (xyz, w 1 = its reservoirs are valid), 2-3 right, 4-5 up (as the
+// pass's: / P00, / P11), 6-7 last frame's eye in this frame's scene space + this frame's reservoir set (0 / 1), 8-9 the camera's world
+// position (the scene's origin in the world: the cache's cells are world cells) + log2 of the cache's entries, 10 PTRestirMaxM,
+// PTRestirDISpatial (neighbours), 11 their radius (pixels), the normal test (cos), 12 the plane test (share of the distance), the
+// cache's first word / 4096
+const int kFrameRow = 49;
+vec2 FrameTexel(int i) { return imageLoad(lampImage, ivec2(i, kFrameRow)).rg; }
 #ifdef PT_RESTIR_GI
 // (2026-11-04 d) PTRestirGI: the path's light WITHOUT what came through the first bounce (the first hit's glow and direct light, or the
 // whole path where there is no first surface), for RtRestirGI.comp. The first-bounce sample itself goes into the mean images (unused
@@ -189,6 +207,24 @@ vec3 FresnelF0(Surface s) { return mix(vec3(0.04), s.albedo, s.metal); }
 float GgxD(float nh, float a2) { float d = nh * nh * (a2 - 1.0) + 1.0; return a2 / (3.14159265 * d * d); }
 float SmithG1(float x, float a2) { return 2.0 * x / (x + sqrt(a2 + (1.0 - a2) * x * x)); }
 
+// UNOFFICIAL 2026-11-07 (RT-PATH-TRACING.md section 49) multiple-scattering energy compensation: a single-scattering GGX lobe loses the light
+// that bounces between microfacets (at roughness 1 a metal kept only 35-60 % of what it should reflect: rough metal came out too dark). The
+// table is E(nv, rough), this BRDF's own albedo with Fresnel 1 (tools/nvr-rt-host/ggx_energy_table.py); the lobe is scaled by
+// 1 + F0 (1 / E - 1) (Turquin 2019, Fdez-Aguera 2019). Host scene specfurnace: a white metal box under a uniform sky = the sky everywhere.
+
+// (the table rides in the lamp image's frame row, texels 32-287 (RtRestirRow.h kGgxEnergy; flag 1048576): as a constant array here it cost
+// ~12 s of pipeline compile per variant on the AMD driver)
+float EnergyAt(int k) { const vec2 t = imageLoad(lampImage, ivec2(32 + (k >> 1), kFrameRow)).rg; return (k & 1) != 0 ? t.y : t.x; }
+float SpecE(float nv, float rough) {
+	if ((uint(p.accum.w) & 1048576u) == 0u) return 1.0;   // no table this frame: no compensation
+	const vec2 f = vec2(clamp(nv, 0.0, 1.0) * 31.0, clamp(rough, 0.0, 1.0) * 15.0);
+	const ivec2 i = min(ivec2(f), ivec2(30, 14));
+	const vec2 w = f - vec2(i);
+	const float e00 = EnergyAt(i.y * 32 + i.x), e10 = EnergyAt(i.y * 32 + i.x + 1);
+	const float e01 = EnergyAt((i.y + 1) * 32 + i.x), e11 = EnergyAt((i.y + 1) * 32 + i.x + 1);
+	return max(mix(mix(e00, e10, w.x), mix(e01, e11, w.x), w.y), 0.05);
+}
+
 bool gSpecOnly = false;   // (2026-11-03 rtspec) PTDebugView 8 / 9: BrdfPi without the diffuse part
 
 // pi x the BRDF toward l (seen from v), both away from the surface
@@ -201,7 +237,26 @@ vec3 BrdfPi(Surface s, vec3 n, vec3 v, vec3 l) {
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a;
 	vec3 F = FresnelF0(s) + (1.0 - FresnelF0(s)) * pow(1.0 - vh, 5.0);
 	vec3 spec = F * (GgxD(nh, a2) * SmithG1(nl, a2) * SmithG1(nv, a2) / (4.0 * nl * nv));
+	spec *= 1.0 + FresnelF0(s) * (1.0 / SpecE(nv, s.rough) - 1.0);   // (2026-11-07) the light of multiple scattering
 	return (gSpecOnly ? vec3(0.0) : diffuse * (1.0 - F)) + 3.14159265 * spec;
+}
+
+// (2026-11-07) a half vector from GGX's VISIBLE normals (Heitz 2018, "Sampling the GGX distribution of visible normals"): every sample faces
+// v, so far fewer go under the surface than with the plain NDF (rough metal at grazing angles was the noisiest), and the path weight
+// becomes G1(l) x the compensation. Its density for l: G1(v) D(h) / (4 nv) (BsdfPdf).
+vec3 SampleVndf(vec3 n, vec3 v, float a, vec2 u) {
+	vec3 b, t = Basis(n, b);
+	const vec3 vl = vec3(dot(v, t), dot(v, b), max(dot(v, n), 1.0e-4));
+	const vec3 vh = normalize(vec3(a * vl.x, a * vl.y, vl.z));
+	const float lensq = vh.x * vh.x + vh.y * vh.y;
+	const vec3 t1 = lensq > 0.0 ? vec3(-vh.y, vh.x, 0.0) * inversesqrt(lensq) : vec3(1.0, 0.0, 0.0);
+	const vec3 t2 = cross(vh, t1);
+	const float r = sqrt(u.x), phi = 6.2831853 * u.y;
+	const float p1 = r * cos(phi), s = 0.5 * (1.0 + vh.z);
+	const float p2 = (1.0 - s) * sqrt(max(1.0 - p1 * p1, 0.0)) + s * (r * sin(phi));
+	const vec3 nh = p1 * t1 + p2 * t2 + sqrt(max(1.0 - p1 * p1 - p2 * p2, 0.0)) * vh;
+	const vec3 hl = normalize(vec3(a * nh.x, a * nh.y, max(nh.z, 0.0)));
+	return normalize(t * hl.x + b * hl.y + n * hl.z);
 }
 
 // The specular lobe's share of the one-sample mixture NextDirection uses
@@ -215,8 +270,8 @@ float BsdfPdf(vec3 n, vec3 v, Surface s, vec3 l) {
 	if (!Specular()) return nl / 3.14159265;
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a, ps = SpecularShare(s);
 	vec3 h = normalize(v + l);
-	float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 1.0e-4);
-	return ps * GgxD(nh, a2) * nh / (4.0 * vh) + (1.0 - ps) * nl / 3.14159265;
+	float nh = max(dot(n, h), 0.0), nv = max(dot(n, v), 1.0e-4);
+	return ps * GgxD(nh, a2) * SmithG1(nv, a2) / (4.0 * nv) + (1.0 - ps) * nl / 3.14159265;   // (2026-11-07: the VNDF's density)
 }
 
 // The next direction from a hit: the diffuse or the specular lobe (one-sample mixture), the throughput's factor (BRDF x cos / pdf).
@@ -227,11 +282,8 @@ bool NextDirection(vec3 n, vec3 v, Surface s, out vec3 l, out vec3 weight, out f
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a;
 	float ps = SpecularShare(s);
 	if (Rand() < ps) {
-		float u = Rand(), phi = 6.2831853 * Rand();
-		float cosT = sqrt((1.0 - u) / (1.0 + (a2 - 1.0) * u)), sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
-		vec3 b, tg = Basis(n, b);
-		vec3 h = normalize(tg * (sinT * cos(phi)) + b * (sinT * sin(phi)) + n * cosT);
-		l = reflect(-v, h);
+		const vec2 u = vec2(Rand(), Rand());
+		l = reflect(-v, SampleVndf(n, v, a, u));   // (2026-11-07: visible normals, was the plain NDF)
 	}
 	else l = CosineDirection(n, vec2(Rand(), Rand()));
 	float nl = dot(n, l);
@@ -319,6 +371,272 @@ vec3 GlowSample(vec3 lift, vec3 n, vec3 v, Surface s, vec4 sphere, int index, fl
 }
 
 float gGlowTotal;   // (2026-11-03 b) the last Direct()'s glow pick total (the bounce ray's MIS weight at the next hit needs it)
+ivec2 gPixel;   // the pixel this thread traces (ScreenHit)
+
+#ifndef PT_RESTIR_GI
+// ---- UNOFFICIAL 2026-11-07 PTRestirDI: ReSTIR DI for the lamps at the first hit (RT-PATH-TRACING.md section 47; Bitterli et al. 2020,
+// as RTXDI does it). The lamp loop's pick stays the first candidate (resampled importance sampling over EVERY lamp in reach: the source
+// density is its unshadowed diffuse light / the total), resampled to the target p = the luminance of its light through the full BRDF
+// (GGX highlights included). Its shadow ray is traced at once: an occluded candidate keeps its count M, not its weight (RTXDI's initial
+// visibility), so the reservoirs remember lamps that really light the pixel. Then last frame's reservoir at the reprojected pixel and
+// PTRestirDISpatial of its neighbours (within PTRestirDIRadius pixels) are merged, each where its surface is this one (plane distance and
+// normal tests), its lamp still in the list (the CPU's remap of lamp numbers) and its count capped at PTRestirMaxM. The chosen lamp gets
+// one shadow ray (none when it is the visible first candidate): occluded, the reservoir is kept with W = 0. 1 / M weights (the classic
+// estimator; section 47 measures it against the exact sum).
+bool RestirDI() { return (uint(p.accum.w) & 262144u) != 0u && LampImage(); }
+bool gRestirFirst = false;   // Direct() at the path's first hit, the picture views (PTRestirDI)
+int FrameParity() { return int(FrameTexel(7).y + 0.5) & 1; }
+
+// Lamp k's light at a surface point (colour x falloff x cos): false out of its reach or behind the surface
+bool LampAt(int k, vec3 hit, vec3 n, out vec3 light, out vec3 pos) {
+	vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
+	vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
+	pos = vec3(a, b.x);
+	light = vec3(0.0);
+	vec3 l = pos - hit;
+	const float dist = length(l), reach = b.y;
+	if (dist >= reach || dist < 1.0e-3) return false;
+	light = vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
+}
+float RestirTarget(vec3 light, vec3 pos, vec3 hit, Surface s, vec3 n, vec3 v) {
+	return dot(light * BrdfPi(s, n, v, normalize(pos - hit)), vec3(0.2126, 0.7152, 0.0722));
+}
+vec2 OctEncode(vec3 n) {
+	n /= abs(n.x) + abs(n.y) + abs(n.z);
+	return n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+}
+vec3 OctDecode(vec2 e) {
+	vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+	if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+	return normalize(n);
+}
+uint ReservoirWord(int set, ivec2 px) { return 4u * (uint(set) * uint(p.size.x) * uint(p.size.y) + uint(px.y) * uint(p.size.x) + uint(px.x)); }
+void StoreReservoir(int lamp, float M, float W, float dist, vec3 n) {
+	const uint at = ReservoirWord(FrameParity(), gPixel);
+	scratch.words[at] = uint(lamp + 1) | (uint(clamp(M, 0.0, 65535.0)) << 16);
+	scratch.words[at + 1u] = floatBitsToUint(W);
+	scratch.words[at + 2u] = floatBitsToUint(dist);
+	scratch.words[at + 3u] = packSnorm2x16(OctEncode(n));
+}
+void ClearReservoir() { scratch.words[ReservoirWord(FrameParity(), gPixel)] = 0u; }
+
+// The lamps' light leaving the first hit toward v (shadowed), by ReSTIR DI. k0: the lamp loop's pick (-1: none), total / w0 its weights.
+// Every target includes VISIBILITY (a lamp is only picked after a shadow ray from here says it is seen), so the chosen lamp needs no
+// final ray. Three steps:
+//   1. the canonical reservoir: the lamp loop's pick (resampled importance sampling, M = 1);
+//   2. temporal: last frame's reservoir at the reprojected pixel, merged with 1 / Z (Z = the counts of the two whose surface could have
+//      produced the chosen lamp: it reaches it and is not shadowed there);
+//   3. spatial: PTRestirDISpatial of last frame's neighbours around the reprojected pixel, merged by PAIRWISE MIS (Lin et al. 2022, as
+//      RTXDI does): each neighbour i is weighed against the canonical one only, by the balance heuristic over the unshadowed light x
+//      visibility at both surfaces, so a neighbour whose lamp barely reached it (huge weight W) cannot dominate here.
+// Two shadow rays per neighbour at most (its lamp from here, the canonical lamp from there). Unbiased with these targets.
+const int kRestirNeighbours = 8;
+float LampLuma(int k, vec3 at, vec3 n) { vec3 light, pos; return LampAt(k, at, n, light, pos) ? dot(light, vec3(0.2126, 0.7152, 0.0722)) : 0.0; }
+bool LampVisibleFrom(int k, vec3 at, vec3 n) {
+	vec3 light, pos;
+	if (!LampAt(k, at, n, light, pos)) return false;
+	const vec3 from = at + n * (1.0 + 0.002 * length(at));
+	const vec3 l = pos - from;
+	const float d = length(l);
+	return Visible(from, l / d, max(d - 16.0, 0.0));
+}
+vec3 RestirLamps(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float total, float w0) {
+	const float maxM = FrameTexel(10).x;
+	// 1. canonical
+	int y = -1;
+	float yTarget = 0.0;
+	vec3 yLight = vec3(0.0), yPos = vec3(0.0);
+	float W = 0.0, M = 1.0;
+	if (k0 >= 0 && w0 > 0.0 && total > 0.0) {
+		vec3 light, pos;
+		if (LampAt(k0, hit, n, light, pos)) {
+			const float t = RestirTarget(light, pos, hit, s, n, v);
+			const vec3 l = pos - lift;
+			const float dist = length(l);
+			if (t > 0.0 && Visible(lift, l / dist, max(dist - 16.0, 0.0))) {   // (short of its fixture, as Direct)
+				y = k0; yTarget = t; yLight = light; yPos = pos; W = total / w0;   // (RIS weight t x total / w0, over the target t)
+			}
+		}
+	}
+	const vec2 f1 = FrameTexel(1);
+	if (f1.y > 0.5) {   // last frame's reservoirs are valid
+		const vec3 pf = vec3(FrameTexel(0), f1.x), pr = vec3(FrameTexel(2), FrameTexel(3).x), pu = vec3(FrameTexel(4), FrameTexel(5).x);
+		const vec3 pe = vec3(FrameTexel(6), FrameTexel(7).x);
+		const vec2 sp = FrameTexel(10), sr = FrameTexel(11), sq = FrameTexel(12);
+		const vec3 here = hit + p.origin.xyz, rel = here - pe;
+		const float depth = dot(rel, pf);
+		if (depth > 1.0e-3) {
+			const vec2 ndc = vec2(dot(rel, pr) / (dot(pr, pr) * depth), -dot(rel, pu) / (dot(pu, pu) * depth));
+			const vec2 at = (ndc * 0.5 + 0.5) * p.size.xy;
+			const int count = min(1 + int(sp.y + 0.5), 1 + kRestirNeighbours);
+			const float dist = length(rel);
+			int nb = 0;
+			int nLamp[kRestirNeighbours];
+			float nW[kRestirNeighbours], nM[kRestirNeighbours];
+			vec3 nPoint[kRestirNeighbours], nN[kRestirNeighbours];
+			for (int i = 0; i < count; i++) {
+				vec2 q = at;
+				if (i > 0) { const float r = sr.x * sqrt(Rand()), a = 6.2831853 * Rand(); q += r * vec2(cos(a), sin(a)); }
+				const ivec2 px = ivec2(floor(q));
+				if (any(lessThan(px, ivec2(0))) || any(greaterThanEqual(px, ivec2(p.size.xy)))) continue;
+				const uint w = ReservoirWord(FrameParity() ^ 1, px);
+				const uint head = scratch.words[w];
+				if (head == 0u) continue;   // no surface there last frame
+				const int oldLamp = int(head & 0xFFFFu) - 1;   // (-1: a reservoir that found no lit lamp: its count still counts)
+				const float oldW = uintBitsToFloat(scratch.words[w + 1u]), oldDist = uintBitsToFloat(scratch.words[w + 2u]);
+				const vec3 oldN = OctDecode(unpackSnorm2x16(scratch.words[w + 3u]));
+				// the same surface: its normal within the test, and its point (last frame's centre ray through that pixel) on this hit's plane
+				if (dot(oldN, n) < sr.y) continue;
+				const vec2 ouv = (vec2(px) + 0.5) / p.size.xy;
+				const vec3 oldPoint = pe + normalize(pf + pr * (2.0 * ouv.x - 1.0) - pu * (2.0 * ouv.y - 1.0)) * oldDist;
+				if (abs(dot(oldPoint - here, n)) > sq.x * dist) continue;
+				const float oldM = min(float(head >> 16), maxM);
+				if (!(oldM > 0.0)) continue;
+				int lamp = oldLamp < 0 ? -1 : int(imageLoad(lampImage, ivec2(4 * oldLamp + 3, 0)).g + 0.5) - 1;   // last frame's number -> this frame's
+				if (!(oldW > 0.0) || !(oldW < 3.0e38)) lamp = -1;
+				const vec3 src = oldPoint - p.origin.xyz;
+				if (i == 0) {
+					// 2. temporal, 1 / Z
+					float wSum = y >= 0 ? yTarget * W : 0.0;   // (the canonical's weight, M = 1)
+					vec3 light, pos;
+					if (lamp >= 0 && LampAt(lamp, hit, n, light, pos)) {
+						const float t = RestirTarget(light, pos, hit, s, n, v);
+						const float wi = t * oldW * oldM;
+						if (wi > 0.0 && (lamp == y || LampVisibleFrom(lamp, hit, n))) {
+							wSum += wi;
+							if (Rand() * wSum < wi) { y = lamp; yTarget = t; yLight = light; yPos = pos; }
+						}
+					}
+					if (y >= 0) {   // Z: this pixel (y is seen here) + last frame's if it could have produced y
+						const float Z = 1.0 + (lamp == y || LampVisibleFrom(y, src, oldN) ? oldM : 0.0);
+						W = wSum / (Z * yTarget);
+					}
+					M += oldM;
+					continue;
+				}
+				if (nb < kRestirNeighbours) { nLamp[nb] = lamp; nW[nb] = oldW; nM[nb] = oldM; nPoint[nb] = src; nN[nb] = oldN; nb++; }
+			}
+			// 3. spatial, pairwise MIS against the canonical (y, W, M)
+			if (nb > 0) {
+				const float k = float(nb), Mc = M;
+				const float qcy = y >= 0 ? LampLuma(y, hit, n) : 0.0;   // the canonical lamp here (seen)
+				float mc = 0.0, sumM = Mc;
+				float nWeight[kRestirNeighbours];
+				for (int i = 0; i < nb; i++) {
+					// the canonical's share in pair i: does neighbour i's surface see the canonical lamp?
+					if (y >= 0) {
+						const float qiy = nLamp[i] == y || LampVisibleFrom(y, nPoint[i], nN[i]) ? LampLuma(y, nPoint[i], nN[i]) : 0.0;
+						mc += Mc * qcy / max(Mc * qcy + nM[i] * qiy, 1.0e-30);
+					}
+					sumM += nM[i];
+					nWeight[i] = 0.0;
+					if (nLamp[i] < 0) continue;
+					vec3 light, pos;
+					if (!LampAt(nLamp[i], hit, n, light, pos)) continue;
+					const float t = RestirTarget(light, pos, hit, s, n, v);
+					if (!(t > 0.0) || !(nLamp[i] == y || LampVisibleFrom(nLamp[i], hit, n))) continue;
+					const float qii = LampLuma(nLamp[i], nPoint[i], nN[i]);   // its own lamp there (seen there: its weight was kept)
+					const float qci = dot(light, vec3(0.2126, 0.7152, 0.0722));
+					const float mi = nM[i] * qii / max(nM[i] * qii + Mc * qci, 1.0e-30) / k;
+					nWeight[i] = mi * t * nW[i];
+				}
+				mc /= k;
+				// stream: the canonical first, then the neighbours
+				float sum = y >= 0 ? mc * yTarget * W : 0.0;
+				int ny = y;
+				for (int i = 0; i < nb; i++) {
+					const float wi = nWeight[i];
+					if (!(wi > 0.0)) continue;
+					sum += wi;
+					if (Rand() * sum < wi) ny = i + 1000;
+				}
+				if (ny >= 1000) {
+					const int i = ny - 1000;
+					vec3 light, pos;
+					LampAt(nLamp[i], hit, n, light, pos);
+					y = nLamp[i]; yTarget = RestirTarget(light, pos, hit, s, n, v); yLight = light; yPos = pos;
+				}
+				W = y >= 0 && yTarget > 0.0 ? sum / yTarget : 0.0;
+				M = sumM;
+			}
+		}
+	}
+	if (!(W < 3.0e38)) W = 0.0;
+	// the surface as next frame rebuilds it: the distance along this pixel's CENTRE ray (no jitter) to the hit's tangent plane, so the
+	// rebuilt point lies on the surface (the jittered hit's own distance put it up to a pixel's footprint under a slanted floor)
+	const vec2 cuv = (vec2(gPixel) + 0.5) * p.size.zw;
+	const vec3 centre = normalize(p.forward.xyz + p.right.xyz * (2.0 * cuv.x - 1.0) - p.up.xyz * (2.0 * cuv.y - 1.0));
+	const float facing = dot(centre, n);
+	StoreReservoir(y, min(M, maxM), W, abs(facing) > 0.05 ? dot(hit, n) / facing : length(hit), n);   // (from this frame's eye)
+	return y >= 0 && W > 0.0 ? yLight * W * BrdfPi(s, n, v, normalize(yPos - hit)) : vec3(0.0);
+}
+
+// ---- UNOFFICIAL 2026-11-07 PTRadianceCache (flag 524288, RT-PATH-TRACING.md section 48): a world-space radiance cache in the helper's scratch
+// store, as NVIDIA's SHaRC does it. Cells: world position (the hit + the camera's world position) / a size that grows with the distance from
+// the camera (PTCacheCell near it, x 2 per level, ~ distance / 32), x 6 normal directions; a hash table of 2^n entries (16 words each, from
+// word CacheBase()): [0] the cell's check hash (0 = empty), [1-3] this frame's sum of samples (fixed point x 256, atomics), [4] their count,
+// [5] frames since the last sample, [6] the resolved sample count (float), [8-10] the resolved light (float).
+//   - every path vertex that goes on (all but the last) adds what came back through it: the light the rest of the path gathered / the
+//     throughput that reached it = the OUTGOING INDIRECT light of that surface (its albedo included);
+//   - the path's LAST hit takes its indirect light from the cache (its own direct light is traced as before), at a point jittered inside its
+//     cell (no blocks): the cache's own values came from paths that also ended in the cache, so the bounces never stop (multi-bounce light
+//     carried by the cache), where 3 traced bounces left the rest out;
+//   - RtPathTraceCache.comp (a pass after this one) folds each cell's frame sum into its resolved light (a running mean, at most
+//     PTCacheMaxSamples samples deep: it follows changing light) and frees cells nobody wrote for PTCacheMaxAge frames.
+// A cell with fewer than PTCacheMinSamples samples is a miss (then PTLastSky / PTLastBounce if set).
+bool CacheOn() { return (uint(p.accum.w) & 524288u) != 0u && LampImage(); }
+uint Hash32(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
+// The cell of a point (hit: from the camera, scene axes), its table slot and check hash
+void CacheKey(vec3 hit, vec3 n, vec3 offset, out uint slot, out uint check) {
+	const float cell0 = max(FrameTexel(13).x, 1.0);
+	const float level = clamp(ceil(log2(max(length(hit), 1.0) / (cell0 * 32.0))), 0.0, 15.0);
+	const float size = cell0 * exp2(level);
+	const vec3 world = hit + offset * size + vec3(FrameTexel(8), FrameTexel(9).x);
+	const ivec3 c = ivec3(floor(world / size));
+	const vec3 a = abs(n);
+	const uint axis = a.x >= a.y && a.x >= a.z ? 0u : a.y >= a.z ? 1u : 2u;
+	const uint face = axis * 2u + ((axis == 0u ? n.x : axis == 1u ? n.y : n.z) < 0.0 ? 1u : 0u);
+	const uint h = Hash32(uint(c.x) * 73856093u ^ Hash32(uint(c.y) * 19349663u ^ Hash32(uint(c.z) * 83492791u ^ (uint(level) << 3u | face))));
+	slot = h & ((1u << uint(FrameTexel(9).y + 0.5)) - 1u);
+	check = Hash32(h ^ 0x9E3779B9u) | 1u;
+}
+uint CacheEntry(uint slot, uint i) {
+	const uint mask = (1u << uint(FrameTexel(9).y + 0.5)) - 1u;
+	return uint(FrameTexel(12).y + 0.5) * 4096u + ((slot + i) & mask) * 16u;
+}
+// The cell's resolved indirect light at a point (jittered inside its cell along the surface); false: no cell / too few samples yet
+bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
+	light = vec3(0.0);
+	vec3 b, t = Basis(n, b);
+	uint slot, check;
+	CacheKey(hit, n, t * (Rand() - 0.5) + b * (Rand() - 0.5), slot, check);
+	for (uint i = 0u; i < 4u; i++) {
+		const uint e = CacheEntry(slot, i), k = scratch.words[e];
+		if (k == 0u) return false;
+		if (k != check) continue;
+		if (uintBitsToFloat(scratch.words[e + 6u]) < FrameTexel(14).y) return false;
+		light = vec3(uintBitsToFloat(scratch.words[e + 8u]), uintBitsToFloat(scratch.words[e + 9u]), uintBitsToFloat(scratch.words[e + 10u]));
+		return true;
+	}
+	return false;
+}
+void CacheAdd(vec3 hit, vec3 n, vec3 light) {
+	if (any(isnan(light)) || any(isinf(light))) return;
+	uint slot, check;
+	CacheKey(hit, n, vec3(0.0), slot, check);
+	const uvec3 q = uvec3(clamp(light, vec3(0.0), vec3(1024.0)) * 256.0 + 0.5);
+	for (uint i = 0u; i < 4u; i++) {
+		const uint e = CacheEntry(slot, i);
+		const uint k = atomicCompSwap(scratch.words[e], 0u, check);
+		if (k != 0u && k != check) continue;
+		atomicAdd(scratch.words[e + 1u], q.x); atomicAdd(scratch.words[e + 2u], q.y); atomicAdd(scratch.words[e + 3u], q.z);
+		atomicAdd(scratch.words[e + 4u], 1u);
+		return;
+	}
+}
+const int kCacheVerts = 4;   // the vertices a path writes (the first ones)
+#endif
 
 // The sun, one lamp and (PTGlowLights) one glow light at a hit (next event estimation): the light that leaves it toward v
 vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
@@ -350,7 +668,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	float total = 0.0, chosenWeight = 0.0, gTotal = 0.0, gChosenWeight = 0.0;
 	vec3 chosenLight = vec3(0.0), chosenPos = vec3(0.0);
 	vec4 gChosen = vec4(0.0);
-	int gIndex = -1;
+	int gIndex = -1, chosenK = -1;
 	for (int j = 0; j < listed; j++) {
 		const int e = first + j;
 		const vec2 two = GridTexel(e >> 1);
@@ -365,7 +683,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
-		if (Rand() * total < w) { chosenWeight = w; chosenLight = light; chosenPos = pos.xyz; }
+		if (Rand() * total < w) { chosenWeight = w; chosenLight = light; chosenPos = pos.xyz; chosenK = k; }
 	}
 	for (int g = 0; g < glows; g++) {   // a glow light: pos = its sphere, guess its guessed light
 		const int k = lamps + g;
@@ -381,7 +699,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	float total = 0.0, chosenWeight = 0.0, gTotal = 0.0, gChosenWeight = 0.0;
 	vec3 chosenLight = vec3(0.0), chosenPos = vec3(0.0);
 	vec4 gChosen = vec4(0.0);
-	int gIndex = -1;
+	int gIndex = -1, chosenK = -1;
 	for (int k = 0; k < lights; k++) {
 		vec4 pos, colour;
 		if (LampImage()) {
@@ -405,8 +723,12 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
-		if (Rand() * total < w) { chosenWeight = w; chosenLight = light; chosenPos = pos.xyz; }
+		if (Rand() * total < w) { chosenWeight = w; chosenLight = light; chosenPos = pos.xyz; chosenK = k; }
 	}
+#endif
+#ifndef PT_RESTIR_GI
+	if (gRestirFirst) e += RestirLamps(hit, lift, n, v, s, chosenK, total, chosenWeight);
+	else
 #endif
 	if (total > 0.0 && chosenWeight > 0.0) {
 		vec3 l = chosenPos - lift;
@@ -461,7 +783,6 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	return true;
 }
 
-ivec2 gPixel;   // the pixel this thread traces (ScreenHit)
 #ifdef PT_RESTIR_GI
 bool gGIFirst = false;   // (2026-11-04 d) the path left its first surface by the reuse's cosine sample
 bool gGISurface = false; // a first surface (also when its glossy lobe was taken: then no sample, the light stays in the rest)
@@ -484,6 +805,12 @@ vec3 Path(vec3 dir) {
 	// (2026-11-03 b) PTGlowLights: the previous hit (where this bounce ray left) for the MIS weight of the glow it meets
 	vec3 prevHit = vec3(0.0), prevN = vec3(0.0, 0.0, 1.0);
 	float prevPdf = 0.0, prevGlowTotal = 0.0;
+#ifndef PT_RESTIR_GI
+	// (2026-11-07) PTRadianceCache: the vertices that go on (where, the throughput that reached them, the light gathered up to their own)
+	const bool cache = CacheOn() && view == 0;
+	vec3 cvHit[kCacheVerts], cvN[kCacheVerts], cvT[kCacheVerts], cvR[kCacheVerts];
+	int cvCount = 0;
+#endif
 	for (int bounce = 0; bounce <= bounces; bounce++) {
 		rayQueryEXT q;
 		// (2026-11-04 b) bounce rays: the alpha test is ~30 % of the pass outdoors (helper replays, section 25): PTBounceAlpha 0 / 2 skip it
@@ -588,6 +915,10 @@ vec3 Path(vec3 dir) {
 		if (view == 1) return surf.albedo;
 		if (view == 2) return n * 0.5 + 0.5;
 		if (view == 4) return vec3(surf.rough, surf.metal, 0.0);
+#ifndef PT_RESTIR_GI
+		// (2026-11-07) PTDebugView 10: the radiance cache's light at the first hit (0 where it has no cell yet)
+		if (view == 10) { vec3 cl; return CacheOn() && CacheRead(hit, n, cl) ? cl : vec3(0.0); }
+#endif
 		// UNOFFICIAL 2026-11-03 (rtgi-cal) PTDebugView 5: the first hit's ARRIVING indirect light, as RT GI's bounce returns it (a cosine
 		// ray, the hit's albedo x what lights it, no first surface colour): no direct light at the first hit, a diffuse cosine ray with
 		// throughput 1 from it; deeper hits as the picture (PTBounces 1 = one bounce, PTSky 0 = RT GI's misses)
@@ -596,14 +927,24 @@ vec3 Path(vec3 dir) {
 		// from it drawn from the GGX lobe alone (weight = the specular BRDF x cos / its pdf), deeper hits as the picture
 		const bool reflection = view == 9 && bounce == 0;
 		gSpecOnly = view == 8 && bounce == 0;
+		bool cached = false;   // (2026-11-07) PTRadianceCache: the last hit's further bounces came from the cache
+#ifndef PT_RESTIR_GI
+		if (cache && bounce == bounces && bounce > 0) { vec3 cl; if (CacheRead(hit, n, cl)) { radiance += Indirect(throughput * cl); cached = true; } }
+#endif
 		if (!arriving && !reflection) {
+#ifndef PT_RESTIR_GI
+			gRestirFirst = bounce == 0 && (view == 0 || view == 3) && RestirDI();   // (2026-11-07) PTRestirDI at the first hit
+#endif
 			const vec3 lit = Direct(hit, n, t, v, surf);
+#ifndef PT_RESTIR_GI
+			gRestirFirst = false;
+#endif
 			radiance += bounce > 0 ? Indirect(throughput * lit) : throughput * lit;
 			// (2026-11-06, section 44) PTLastBounce (flag 65536): the path ends here (PTRealtime: 1 bounce), so the light of further bounces is
 			// missing (~3 % of the picture indoors and out once textured meshes kept their colour, section 43). Estimated as if this hit's
 			// surroundings were lit as it is: its albedo x its own direct light x 0.75 (replays against 4-bounce means: brightness 0.994 /
 			// 0.996, tiles p5 0.89 .. p95 1.05; x 1 overshot near lamps, worst tile 1.17). No rays.
-			if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 65536u) != 0u && view == 0)
+			if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 65536u) != 0u && view == 0 && !cached)
 				radiance += Indirect(throughput * surf.albedo * lit * 0.75);
 		}
 		else gGlowTotal = 0.0;
@@ -611,8 +952,11 @@ vec3 Path(vec3 dir) {
 		// (2026-11-06, section 39) PTLastSky (flag 32768): the path ends here (PTRealtime traces 1 bounce), so this hit lacks the light of
 		// further bounces; outdoors most of it is the sky's. Add it as if one more diffuse bounce ray (cosine-weighted, unoccluded) left to
 		// the sky: albedo x Sky(l). Overestimates where something covers this hit; indoors Sky() is the interior ambient (PTAmbient, 0).
-		if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 32768u) != 0u && view == 0 && p.skyZenith.w > 0.5)
+		if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 32768u) != 0u && view == 0 && p.skyZenith.w > 0.5 && !cached)
 			radiance += Indirect(throughput * surf.albedo * Sky(CosineDirection(n, vec2(Rand(), Rand()))));
+#ifndef PT_RESTIR_GI
+		if (cache && bounce < bounces && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
+#endif
 		if (bounce == bounces || view == 3 || view == 8) break;
 		vec3 l, w;
 		float pdf;
@@ -683,6 +1027,13 @@ vec3 Path(vec3 dir) {
 		pos = hit + n * (1.0 + 0.002 * t);
 		dir = l;
 	}
+#ifndef PT_RESTIR_GI
+	// (2026-11-07) PTRadianceCache: each vertex that went on gets what came back through it (its outgoing indirect light)
+	for (int i = 0; i < cvCount; i++) {
+		const vec3 rest = radiance - cvR[i], T = cvT[i];
+		CacheAdd(cvHit[i], cvN[i], max(vec3(T.x > 1.0e-4 ? rest.x / T.x : 0.0, T.y > 1.0e-4 ? rest.y / T.y : 0.0, T.z > 1.0e-4 ? rest.z / T.z : 0.0), vec3(0.0)));
+	}
+#endif
 	return radiance;
 }
 
@@ -716,6 +1067,9 @@ void main() {
 		const vec2 uv = (vec2(pixel) + vec2(Rand(), Rand())) * p.size.zw;
 		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
 		gPixel = pixel;
+#ifndef PT_RESTIR_GI
+		if (s == 0 && RestirDI()) ClearReservoir();   // (2026-11-07) no first surface this frame: no reservoir (RestirLamps overwrites it)
+#endif
 		gFirstAlbedo = vec3(1.0);
 		gFirstSurface = 0.0;
 		vec3 c = Path(dir);

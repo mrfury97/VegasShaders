@@ -75,6 +75,9 @@ Every key read by this pass or by its producer that changes what this pass draws
 - `[_Shaders.ShadowsExteriors.Main] Enabled`, `TwoSidedCasters`, `FitToDepth`, `SunCascade*`, `OverheadSunFix`, `SmoothCharacterShadows`, `CharacterShadowSoftness`, `CharacterShadowReach` and the `CharacterShadowMap*` keys under `[_Shaders.ShadowsExteriors.ShadowMaps]`: these control the sun producers, not this pass. They change the shadow buffer's content only.
 - `[_Shaders.ShadowsExteriors.ScreenSpace] Enabled`, `Intensity`, `NearFade`, `Sharp`, `BlurRadius`, `RenderDistance`: contact-shadow producer settings. They change the content of the sun buffer's red channel, not this pass's arithmetic.
 - `[_Shaders.ShadowsExteriors.RT] Enabled` (bool, default false) and its keys (`SunAngle`, `Denoise`, `Mode` and others): an optional ray-traced sun term that is combined into the sun buffer by the producer. Not read by this pass.
+  Since 2026-11-07 `ShadowDenoiser` (bool, default true, live) denoises that term in the RT helper (one ray over the sun's disc, SunAngle 0 =
+  the real 0.53 degrees; a penumbra-sized blur: sharp at contact, softer away) and `Denoise` / `Penumbra` stand aside while it runs; its
+  `Denoiser*` keys tune it. docs/next/RT-DENOISER.md. Still not read by this pass.
 - `[_Shaders.ShadowsExteriors.Ortho]` and `[_Shaders.ShadowsExteriors.TerrainShadows]`: producer settings only.
 - `[_Shaders.ShadowsExteriors.SunSmoothing]`: producer settings only (quantised sun direction and cross-fade).
 - Interior settings under `[_Shaders.ShadowsInteriors.*]` do not affect this pass.

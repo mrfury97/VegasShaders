@@ -26,7 +26,7 @@ static bool registerMore(Host& h, const std::string& spv, const std::string& com
 	gM.aoGi = h.AddImage("ao gi", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.aoLight = h.AddImage("ao frame light", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.albedoAtlas = h.AddImage("albedo atlas", 2048, 2048, NVR_EXT_SHARED_RGBA8);
-	gM.ptLamps = h.AddImage("pt lamps", kLightTexels, 1 + kGridRows, NVR_EXT_SHARED_RG32F);
+	gM.ptLamps = h.AddImage("pt lamps", kLightTexels, 2 + kGridRows, NVR_EXT_SHARED_RG32F);   // (2026-11-07: + the frame row)
 	gM.ptAlbedoOut = h.AddImage("pt first albedo", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.giResult = h.AddImage("pt gi result", S, S, NVR_EXT_SHARED_RGBA16F);
 	for (int i = 0; i < 2; i++) {
@@ -342,7 +342,7 @@ static bool scenePathTextures(Ctx& c) {
 	std::vector<V3> lampPos; std::vector<float> reach;
 	for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) { lampPos.push_back({ -1400 + x * 400.0f, -1400 + y * 400.0f, 150.0f + 10.0f * ((x + y) % 3) }); reach.push_back(520.0f + 15.0f * ((x * 3 + y) % 5)); }
 	const int lamps = int(lampPos.size());
-	std::vector<float> image(size_t(kLightTexels) * (1 + kGridRows) * 2, 0.0f);
+	std::vector<float> image(size_t(kLightTexels) * (2 + kGridRows) * 2, 0.0f);
 	std::vector<float> scene(size_t(lamps) * 8);
 	for (int i = 0; i < lamps; i++) {
 		const V3 q = lampPos[i] - cam.eye;

@@ -9,11 +9,13 @@
 
 layout(location = 1) out vec4 o_dir;   // G32R32F: xy octahedral direction
 layout(location = 2) out vec4 o_ray;   // G32R32F: x view z, y roughness (+2: a ray)
+layout(location = 3) out vec4 o_marchHit;   // 2026-11-07 R16F: the march's hit distance along R (0: none), for the RT reflection denoiser
 
 void main() {
     vec2 vpos = floor(gl_FragCoord.xy);
     vec2 uv = (vpos + 0.5) * LowTexel;
     vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);   // a pixel centre in the block
+    o_marchHit = vec4(0.0);
     // UNOFFICIAL 2026-11-03 RenderScale < 1: past this frame's rect nothing reflects (no ray: Resolve's neighbour taps skip it there).
     if (any(greaterThanEqual(uv, cb.renderScale.xy))) { o_color = vec4(0.0); o_dir = vec4(0.0); o_ray = vec4(0.0); return; }
     float depth = readDepthLod(pixelUV);
@@ -29,6 +31,11 @@ void main() {
     // Spread the reflected direction by the roughness: a GGX half vector round the normal, a new one every frame.
     float a = roughness * roughness;
     float u1 = GradientNoise(vpos), u2 = GradientNoise(vpos + vec2(37.0, 17.0));
+    // UNOFFICIAL 2026-11-07 (with the RT reflection denoiser): u2 above is u1 shifted by a constant (one of two values, for every pixel
+    // and frame: the gradient noise is linear in the pixel), so a lobe was only ever sampled along one line of (u1, u2) and no amount of
+    // averaging reached the right glossy reflection (the RT host's refldenoise scene: 64-frame mean 0.028 off the exact vs 0.009). From
+    // the swapped pixel + NoiseFrame x the golden ratio the pairs fill the square per pixel over 64 frames and across a block.
+    if (RtDenoiserOn) u2 = fract(GradientNoise(vpos.yx + vec2(37.0, 17.0)) + NoiseFrame * 0.61803398875);
     float cosTheta = sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1));
     float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
     float phi = 6.2831853 * u2;
@@ -99,6 +106,7 @@ void main() {
         float hitDepth = readDepthLod(hit);
         bool selfWater = SurfaceWater && abs(cb.cameraPosition.z + toWorld(hit).z * hitDepth - cb.waterSettings.x) < max(2.0, hitDepth * 0.002);
         if (!IsWeapon(hit) && dot(hitNormal, R) < 0.2 && !selfWater) {
+            o_marchHit = vec4(hi, 0.0, 0.0, 0.0);   // (2026-11-07)
             colour = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), hit, 0.0).rgb);
             vec2 edge = min(rectToScreen(hit), 1.0 - rectToScreen(hit));   // (2026-11-03: the screen's edges, as the .fx)
             confidence = saturate(min(edge.x, edge.y) * 12.0) * (1.0 - smoothstep(0.75, 1.0, hi / RayLength));

@@ -5,3 +5,9 @@ src/hlsl/NewVegas/Compute/ShadowsInteriorsApply.spv
 src/hlsl/NewVegas/Compute/ShadowsInteriorsBlur.frag
 src/hlsl/NewVegas/Compute/ShadowsInteriorsBlur.spv
 src/hlsl/NewVegas/Effects/ShadowsInteriors.fx.hlsl
+# (2026-11-07) the traced lamp shadows (src/core/RtLampShadows.h, [_Shaders.ShadowsInteriors.RT] in this folder's defaults) run in the RT helper:
+src/hlsl/NewVegas/Compute/Rt/RtLampPrimary.comp
+src/hlsl/NewVegas/Compute/Rt/RtLampTrace.comp
+src/hlsl/NewVegas/Compute/Rt/RtLampTraceMany.comp
+src/hlsl/NewVegas/Compute/Rt/RtLampTraceRestir.comp
+src/hlsl/NewVegas/Compute/Rt/RtLampFilter.comp

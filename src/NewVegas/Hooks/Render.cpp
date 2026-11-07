@@ -3660,6 +3660,8 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	TerrainShaders::BeginWorldScene();
 	ParticleShaders::BeginWorldScene();	// UNOFFICIAL 2026-11-04 soft particles: the same, at the first alpha-blended NoLighting draw
 	if (FrameWorldCalls == 1) ShadowAtlas::WorldStart(TheRenderManager->device);	// UNOFFICIAL 2026-10-30 ShadowAtlas WorldStartConvert (test)
+	// UNOFFICIAL 2026-11-07 SameFrame RT lamp shadows: this frame's trace before the world's first draw (after the jitter: the rays use it)
+	if (FrameWorldCalls == 1) RtLampShadows::TraceBeforeWorld(TheRenderManager->device);
 	{
 		// Game geometry drawn with NVR's replacement shaders, including per-object sun shadows.
 		static GpuTimer worldTimer("World scene (game)");

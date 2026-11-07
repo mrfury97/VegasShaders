@@ -35,6 +35,8 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
 	vec4 rect;          // UNOFFICIAL 2026-11-04 RenderScale < 1: xy the images' full size (reproject's uv is pre-scaled into the previous
 	                    // trace's rect of them; the history is used only at the same scale, so that rect is size.xy). Native: = size.xy
+	                    // (2026-11-07) z MovingCasterHistory: frames of history kept where people cast the shadow (0 = no limit), w the
+	                    // people's cull mask (0x60: actors 0x20, the player's parts 0x40; 0 = never tested)
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
@@ -56,6 +58,7 @@ shared vec4 lampB[MaxLamps];    // intensity, the game's radius, stop, disc radi
 shared int groupLamp[64];       // the lamp this pixel traced (-1 none)
 shared float groupV[64], groupRest[64], groupZ[64];
 shared vec3 groupN[64];
+shared float groupPeople[64];   // (2026-11-07) this pixel's ray was blocked by a person this frame
 
 float hash12(vec2 q) {
 	vec3 h = fract(vec3(q.xyx) * 0.1031);
@@ -87,6 +90,18 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
 }
 
+// (2026-11-07) MovingCasterHistory: a blocked ray asks again with only the people's mask: was it a person (actors move, so their
+// shadows on still walls and floors move: the history there would smear them; a tester's ghost silhouettes)
+bool peopleBlock = false;
+bool blockedByPeople(vec3 origin, vec3 segment, float tMin, float tMax) {
+	uint people = uint(p.rect.w) & (uint(p.params2.y) | uint(p.params2.z));
+	if (people == 0u || !(tMax > tMin)) return false;
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, people, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q)) {}
+	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
 // One ray from the point to a point of lamp s's disc (radius rr, angle ang): true when it reaches the lamp (as RtLampTrace.comp)
 bool reaches(vec3 origin, float offset, int s, float rr, float ang) {
 	vec3 toLamp = lampA[s].xyz - origin;
@@ -101,7 +116,9 @@ bool reaches(vec3 origin, float offset, int s, float rr, float ang) {
 	float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
 	float tMin = min(offset * invLen, tEnd);
 	float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
-	return !blocked(origin, segment, tMin, tSplit, uint(p.params2.y)) && !blocked(origin, segment, tSplit, tEnd, uint(p.params2.z));
+	bool lit = !blocked(origin, segment, tMin, tSplit, uint(p.params2.y)) && !blocked(origin, segment, tSplit, tEnd, uint(p.params2.z));
+	if (!lit && !peopleBlock && blockedByPeople(origin, segment, tMin, tEnd)) peopleBlock = true;
+	return lit;
 }
 
 // The light lamp s brings the point unshadowed (RtLampTrace.comp's ranking weight), 0 when none
@@ -189,7 +206,17 @@ void main() {
 	groupRest[local] = target >= 0 && job == 2 ? 1.0 : 0.0;
 	groupZ[local] = viewZ;
 	groupN[local] = normal;
+	groupPeople[local] = peopleBlock ? 1.0 : 0.0;
 	barrier();
+	bool peopleNear = false;   // (2026-11-07) people's shadow at or next to this pixel this frame (the 3 x 3 inside the group)
+	{
+		ivec2 at = ivec2(gl_LocalInvocationID.xy);
+		for (int dy = -1; dy <= 1; dy++)
+			for (int dx = -1; dx <= 1; dx++) {
+				ivec2 q = at + ivec2(dx, dy);
+				if (q.x >= 0 && q.y >= 0 && q.x <= 7 && q.y <= 7 && groupPeople[q.y * 8 + q.x] > 0.5) peopleNear = true;
+			}
+	}
 	float sum0 = 0.0, tot0 = 0.0, sum1 = 0.0, tot1 = 0.0, sumR = 0.0, totR = 0.0;
 	int radius = clamp(int(p.many.z), 0, 2);
 	if (valid && best0 >= 0) {
@@ -212,6 +239,9 @@ void main() {
 
 	// Temporal reuse: the point's place in the previous trace (the camera's reprojection, less the surface's own move)
 	float h0 = 1.0, h1 = 1.0, hR = 1.0, n0 = 0.0, n1 = 0.0, nR = 0.0;
+	// (2026-11-07) people's shadow here now or in the last 8 frames (counting down, kept as nR + 64 x recent in the ids history's w):
+	// V0, V1 and R keep at most MovingCasterHistory (rect.z) frames there (up to 31 otherwise: a person's moving shadow smeared)
+	float recent = peopleNear ? 8.0 : 0.0;
 	if (valid && best0 >= 0 && p.many.w > 0.5) {
 		vec3 was = position;
 		if (p.many2.w > 0.5) was -= imageLoad(motionImage, pixel).xyz;
@@ -226,12 +256,15 @@ void main() {
 					float c1 = floor(hb.z / 32.0 + 0.01), c0 = hb.z - 32.0 * c1;
 					if (id0 == best0) { h0 = ha.x; n0 = c0; } else if (id1 == best0) { h0 = ha.y; n0 = c1; }
 					if (best1 >= 0) { if (id1 == best1) { h1 = ha.y; n1 = c1; } else if (id0 == best1) { h1 = ha.x; n1 = c0; } }
-					if (hasRest) { hR = ha.z; nR = hb.w; }
+					float wasRecent = floor(hb.w / 64.0 + 0.01);
+					recent = max(recent, wasRecent - 1.0);
+					if (hasRest) { hR = ha.z; nR = hb.w - 64.0 * wasRecent; }
 				}
 			}
 		}
 	}
 	float cap = clamp(p.many.y, 1.0, 31.0);
+	if (recent > 0.5 && p.rect.z > 0.5) { cap = min(cap, p.rect.z); n0 = min(n0, cap); n1 = min(n1, cap); nR = min(nR, cap); }
 	if (tot0 > 0.0) { n0 = min(n0 + 1.0, cap); h0 = mix(h0, sum0 / tot0, 1.0 / n0); }
 	if (tot1 > 0.0) { n1 = min(n1 + 1.0, cap); h1 = mix(h1, sum1 / tot1, 1.0 / n1); }
 	if (totR > 0.0) { nR = min(nR + 1.0, cap); hR = mix(hR, sumR / totR, 1.0 / nR); }
@@ -240,7 +273,7 @@ void main() {
 	if (!hasRest) nR = 0.0;
 	if (inside) {
 		imageStore(historyOut, pixel, vec4(h0, h1, hR, valid ? viewZ : 0.0));
-		imageStore(historyIdsOut, pixel, vec4(best0 >= 0 ? float(best0) : 255.0, best1 >= 0 ? float(best1) : 255.0, n0 + 32.0 * n1, nR));
+		imageStore(historyIdsOut, pixel, vec4(best0 >= 0 ? float(best0) : 255.0, best1 >= 0 ? float(best1) : 255.0, n0 + 32.0 * n1, nR + 64.0 * recent));
 	}
 
 	if (!inside) return;

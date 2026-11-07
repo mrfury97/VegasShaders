@@ -1,0 +1,7 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT shadow denoiser: the game's pass name. The RT helper (tools/nvr-rt-helper/NvrRtShadowDenoise.inl) runs a pass
+// of this shader as its denoiser module (the RtShadowDenoise*.spv stages next to this file); this file itself does nothing, so a helper
+// without the module leaves the traced signal as it is. docs/next/RT-DENOISER.md.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtShadowDenoise.spv RtShadowDenoise.comp
+layout(local_size_x = 8, local_size_y = 8) in;
+void main() { }

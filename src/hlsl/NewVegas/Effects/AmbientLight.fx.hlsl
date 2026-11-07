@@ -1043,7 +1043,28 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	}
 	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.z): the bounce light x the surface colour, after the occlusion, as
 	// AmbientLightApply-gi adds it (that one takes SurfaceColour's guess; here SurfaceAlbedo, the same guess unless AlbedoBuffer wrote the pixel)
-	[branch] if (giApply) lin += giLight * albedo;
+	// (2026-11-07, user: "RT GI at a high strength overrides the normal maps, looks extremely weird") SurfaceColour divides the lit
+	// colour by the ambient and caps it at MaxReflectance; under a lamp nearly every pixel is over the cap, so dark grout, bright tiles
+	// and the normal map's shading all got one colour and the bounce laid a flat milky layer over them (bench shipfix, demo room: GI High
+	// lifted the floor 28 %, its contrast down 9 %). The guess now takes the cap on a small local average (4 taps 4 px out, same surface
+	// only; the source before the sun shadow, its ratio carried over) and puts each pixel's own detail back on top (at most 2x).
+	[branch] if (giApply) {
+		float3 c0 = linearize(tex2Dlod(TESR_SourceBuffer, float4(IN.UVCoord, 0.0f, 0.0f)).rgb);
+		float3 localSum = c0;
+		float localWeight = 1.0f;
+		for (int t = 0; t < 4; t++) {
+			float2 o = float2((t == 1 || t == 3) ? 4.0f : -4.0f, t >= 2 ? 4.0f : -4.0f) * px;
+			float w = step(abs(readDepthLod(IN.UVCoord + o) - depth), max(depth * 0.02f, 1.0f));
+			localSum += linearize(tex2Dlod(TESR_SourceBuffer, float4(IN.UVCoord + o, 0.0f, 0.0f)).rgb) * w;
+			localWeight += w;
+		}
+		float3 localLin = localSum / localWeight;
+		float shade = luma(linearize(color.rgb)) / max(luma(c0), 1.0e-4f);	// the sun shadow on this pixel
+		float detail = clamp(luma(c0) / max(luma(localLin), 1.0e-4f), 0.0f, 2.0f);
+		float3 guess = SurfaceColour(localLin * shade) * detail;
+		float4 a = tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord, 0.0f, 0.0f));
+		lin += giLight * lerp(guess, max(a.rgb, 0.0f), step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a));
+	}
 	return delinearize(float4(lin, color.a));
 }
 

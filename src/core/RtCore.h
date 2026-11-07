@@ -44,6 +44,9 @@ public:
 	// with both sides rounded up to 256 texels (the game's and the helper's drivers agree on the layout only then): the content is the
 	// top-left Width x Height; give the logical size to the pass in its constants. CopyOut copies only that rectangle.
 	static int			AddImage(const char* Name, UINT Width, UINT Height, NVR_EXT_SHARED_FORMAT Format);
+	// (2026-11-07, protocol 6) in Setup: this many megabytes of the helper's scratch store (binding 20: zero at start, kept between frames,
+	// never shared with the game) are needed; the helper makes the largest any user asked for
+	static void			AskScratch(UINT Megabytes);
 	// A trace shader, Data\Shaders\VegasShaders\Compute\Rt\<Name>.spv (the helper compiles it once); any time; -1 if full.
 	static int			AddShader(const char* Name);
 
@@ -53,6 +56,9 @@ public:
 	// a helper older than 2026-10-30 skips a pass with more than 8)
 	static bool			AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteMask, const void* Constants, UINT ConstantsSize,
 							UINT GroupsX, UINT GroupsY);
+	// UNOFFICIAL 2026-11-07 (ShadowDenoiser): passes this frame record still has room for (NVR_RT_MAX_PASSES a frame), so a user that
+	// needs two passes in a row (a trace and its denoiser) can take its one-pass path instead of losing the second
+	static UINT			PassesLeft();
 	static bool			CopyOut(int Image, IUnknown* Target);
 	static bool			CopyOut(int Image, IUnknown* Target, UINT Width, UINT Height);	// only the top-left Width x Height (a pass that wrote less)
 
@@ -64,6 +70,13 @@ public:
 	// outputs are recorded (ready for any pass recorded after this call).
 	static bool			Exchange(IDirect3DDevice9* Device, const User& user);
 #define NVR_RTCORE_EXCHANGE 1
+	// UNOFFICIAL 2026-11-07 (SameFrame lamp shadows, docs/next/FORK-RT-LAMPS.md) the frame's FIRST exchange, before the world draw, for
+	// one user, where that user calls it (RtLampShadows: right after TAA's jitter, before the world's first draw). It does Frame's start
+	// checks itself (starts / polls the helper, the screen size) and gathers the frame's scene: the frame's later exchanges (Frame's
+	// Point-0 users, a Point-1 user) reuse it. Outdoors with [Main.Main.RayTracing] Grass on it refuses (false): the grass is noted by
+	// the world's own draws, which have not run yet; the user then traces at Frame as before. True: the user's outputs are recorded
+	// (ready for the world's draws).
+	static bool			ExchangeEarly(IDirect3DDevice9* Device, const User& user);
 	// The eye in scene space. The scene is world minus TheRenderManager->CameraPosition, the NiCamera's world translation (the eye), so
 	// this is (0, 0, 0). Use it for every ray origin from the camera: Pointers::Generic::CameraLocation is NOT the eye (it read ~0
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).

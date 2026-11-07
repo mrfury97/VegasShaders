@@ -127,7 +127,26 @@ vec4 Apply(vec2 uv, bool sky) {
     }
     float busy = saturate((bendX + bendY) / depth * 20.0 - 0.1);
 #ifdef NVR_GI_APPLY
-    vec3 screenBounce = ambient.rgb * (cb.data.z * SurfaceColour(lin));
+    // (2026-11-07, user: "RT GI at a high strength overrides the normal maps, looks extremely weird") SurfaceColour divides the lit
+    // colour by the ambient light and caps it at MaxReflectance; under a lamp nearly every pixel is over the cap, so dark grout, bright
+    // tiles and the normal map's shading all got the same colour and the bounce laid one flat milky layer over them (bench shipfix,
+    // demo room: GI High lifted the floor 35 % and greyed the dark tiles). The cap now applies to a small local average (4 taps, 4 px
+    // out, same surface only) and each pixel's own detail (its brightness against that average, at most 2x) goes back on top, so the
+    // bounce keeps the texture and the normal map's light and dark like the game's own light does.
+    vec3 localLin = lin;
+    float localWeight = 1.0;
+    for (int i = 0; i < 4; i++) {
+        vec2 o = vec2((i & 1) != 0 ? 4.0 : -4.0, (i & 2) != 0 ? 4.0 : -4.0) * cb.reciprocalResolution.xy;
+        float d = readDepthLod(t_depth, uv + o);
+        if (abs(d - depth) > max(depth * 0.02, 1.0)) continue;   // another surface
+        vec3 tap = texture(sampler2D(t_source, LINEAR_S), uv + o).rgb;
+        if (cb.alFlags.x > 0.5) tap = SunShadowApply(tap, uv + o);
+        localLin += linearize(tap);
+        localWeight += 1.0;
+    }
+    localLin /= localWeight;
+    float detail = clamp(luma(lin) / max(luma(localLin), 1.0e-4), 0.0, 2.0);
+    vec3 screenBounce = ambient.rgb * (cb.data.z * SurfaceColour(localLin) * detail);
     if (DebugView > 12.5) return delinearize(vec4(ambient.rgb * cb.data.z, 1.0));   // the light arriving (before the surface colour)
 #endif
     if (DebugView > 11.5) {

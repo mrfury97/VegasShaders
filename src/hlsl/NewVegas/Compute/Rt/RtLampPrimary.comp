@@ -1,0 +1,98 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT lamp shadows, SameFrame ([Shaders.ShadowsInteriors.RT] SameFrame, core\RtLampShadows.h; docs\next\FORK-RT-LAMPS.md
+// "Same-frame lamp shadows"). Runs in the 64-bit RT helper before the lamp trace, in the same frame record.
+//
+// The object shaders light each pixel with the traced lamp shadows while the world is drawn, so the trace they read must exist BEFORE the
+// world draw: there is no depth buffer of this frame yet. Without SameFrame the trace runs after the world on that frame's depth and the
+// next frame's draws reproject into it (a moving caster's shadow then lags a frame: a tester's ghost silhouettes, 2026-11-07). With it,
+// this pass makes the lamp trace's inputs itself: one camera ray a pixel through THIS frame's scene (this frame's camera, this frame's
+// actors' poses), written exactly as the game's buffers would hold them:
+//   depth   (binding 2, R32F)    TESR_DepthBuffer's red: view z / farZ (1 = nothing hit)
+//   normals (binding 3, RGBA16F) TESR_NormalsBuffer: the view-space normal x 0.5 + 0.5, facing the camera (x right, y up, z forward)
+// so RtLampTrace / Many / Restir / RtLampFilter run unchanged after it. The draws then look the result up with this frame's camera; a
+// pixel the rays saw differently from the raster (blended glass, a decal, something not in the RT scene) fails the depth-code test and
+// takes its cube map, as before.
+// The ray goes through the pixel's centre + the depth's jitter (TAA / FSR / DLSS), as RtLampTrace rebuilds a position from the depth.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampPrimary.spv RtLampPrimary.comp
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {   // RtLampShadows.h PrimaryConstants (rt_layout_check.py)
+	vec4 size;          // x width, y height, z 1 / width, w 1 / height (the traced rect)
+	vec4 forward;       // xyz camera forward (scene space, unit), w farZ
+	vec4 right;         // xyz camera right / projection[0][0]
+	vec4 up;            // xyz camera up / projection[1][1]
+	vec4 origin;        // xyz the eye in scene space (RtCore::Eye, 0)
+	vec4 jitter;        // xy the depth's jitter (screen uv), z 1 = alpha-tested surfaces tested (binding 12, the alpha atlas)
+	vec4 masks;         // x the cull mask of everything but people, y the people's (actors 0x20, the player's parts 0x40); zw unused
+	                    // People are tested one by one (no opaque shortcut): an instance with custom index bit NVR_RT_CUSTOM_HIDDEN (2),
+	                    // the player's own body and gear in first person (traced for shadows and reflections, not drawn), never stops a
+	                    // camera ray.
+} p;
+layout(set = 0, binding = 2, r32f) uniform writeonly image2D depthImage;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D normalImage;
+layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#define RT_ALPHA_PLAIN   // the raster's own alpha test (not the shadow rays' hashed one): the camera ray's surface is the drawn one
+#include "RtAlpha.glsl"
+#include "RtHit.glsl"
+
+struct Primary { bool hit; float t; uint instance; uint primitive; mat4x3 toScene; };
+
+#define NVR_RT_CUSTOM_HIDDEN 2u
+// people: every hit is a candidate (gl_RayFlagsNoOpaqueEXT) so the hidden first-person body can be passed over
+Primary closest(vec3 origin, vec3 dir, uint mask, bool alpha, bool people) {
+	Primary r;
+	r.hit = false; r.t = 1e30; r.instance = 0u; r.primitive = 0u; r.toScene = mat4x3(1.0);
+	if (mask == 0u) return r;
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, people ? gl_RayFlagsNoOpaqueEXT : alpha ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT, mask, origin, 0.5, dir, 1e7);
+	while (rayQueryProceedEXT(q)) {
+		if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+		if (people && (rayQueryGetIntersectionInstanceCustomIndexEXT(q, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
+		if (!alpha || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+		                          rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
+	}
+	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+		r.hit = true;
+		r.t = rayQueryGetIntersectionTEXT(q, true);
+		r.instance = rayQueryGetIntersectionInstanceIdEXT(q, true);
+		r.primitive = rayQueryGetIntersectionPrimitiveIndexEXT(q, true);
+		r.toScene = rayQueryGetIntersectionObjectToWorldEXT(q, true);
+	}
+	return r;
+}
+
+void main() {
+	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y))
+		return;
+	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.jitter.xy;
+	// RtLampTrace: position = origin + (forward + right (2u - 1) - up (2v - 1)) x viewZ
+	vec3 ray = p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0);
+	float rayLength = length(ray);
+	vec3 dir = ray / rayLength;
+	bool alpha = p.jitter.z > 0.5;
+	uint staticMask = uint(p.masks.x) & (alpha ? 0xFFu : 0xEFu);   // 0x10: alpha-tested, only with the atlas (else not seen: as RtLampTrace)
+	uint peopleMask = uint(p.masks.y);
+	Primary a = closest(p.origin.xyz, dir, staticMask, alpha, false);
+	Primary b = closest(p.origin.xyz, dir, peopleMask, alpha, true);   // people: their own query (the hidden body passed over)
+	if (b.hit && (!a.hit || b.t < a.t)) a = b;
+	if (!a.hit) {
+		imageStore(depthImage, pixel, vec4(1.0));
+		imageStore(normalImage, pixel, vec4(0.5, 0.5, 0.5, 1.0));
+		return;
+	}
+	float viewZ = a.t / rayLength;   // the ray's forward part is 1: t along the unit dir = viewZ x |ray|
+	vec3 objectNormal = rtHitObjectNormal(a.instance, a.primitive);
+	mat3 m = mat3(a.toScene);
+	vec3 n = normalize(transpose(inverse(m)) * objectNormal);
+	if (dot(n, dir) > 0.0) n = -n;   // face the camera (both faces are in the scene)
+	vec3 viewNormal = vec3(dot(n, normalize(p.right.xyz)), dot(n, normalize(p.up.xyz)), dot(n, p.forward.xyz));
+	imageStore(depthImage, pixel, vec4(viewZ / p.forward.w));
+	imageStore(normalImage, pixel, vec4(viewNormal * 0.5 + 0.5, 1.0));
+}

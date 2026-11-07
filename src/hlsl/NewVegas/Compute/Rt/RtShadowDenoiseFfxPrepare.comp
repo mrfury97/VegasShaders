@@ -1,0 +1,36 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT shadow denoiser, core 1 (AMD FidelityFX Shadows, RtShadowDenoiseFfx.hlsl): the traced visibility as FFX's
+// 1-bit mask, one R32UI texel per 8 x 4 pixels (bit (y % 4) x 8 + (x % 8) set = the ray reached the light), layers along z.
+// (AMD's own prepare pass packs the same bits with wave operations; one thread a tile here.)
+// Compile: glslangValidator -V --target-env vulkan1.2 -DSUN   -o RtShadowDenoiseFfxPrepareSun.spv   RtShadowDenoiseFfxPrepare.comp
+//          glslangValidator -V --target-env vulkan1.2 -DLAMPS -o RtShadowDenoiseFfxPrepareLamps.spv RtShadowDenoiseFfxPrepare.comp
+#extension GL_GOOGLE_include_directive : require
+#include "RtShadowDenoise.glsl"
+
+#ifdef SUN
+layout(set = 0, binding = 5, r16f) uniform readonly image2D visImage;
+#else
+layout(set = 0, binding = 5, rg16f) uniform readonly image2D signalImage;
+#endif
+layout(set = 0, binding = 12, r32ui) uniform writeonly uimage2D maskImage;
+
+void main() {
+	ivec2 tile = ivec2(gl_GlobalInvocationID.xy);
+	int layer = int(gl_GlobalInvocationID.z);
+	int tilesX = (TILE_W + 7) / 8, rows = (TILE_H + 3) / 4;
+	if (tile.x >= tilesX || tile.y >= rows || layer >= layers()) return;
+	uint mask = 0u;
+	for (int i = 0; i < 32; i++) {
+		ivec2 q = tile * ivec2(8, 4) + ivec2(i % 8, i / 8);
+		bool lit = true;
+		if (q.x < TILE_W && q.y < TILE_H) {
+#ifdef SUN
+			lit = imageLoad(visImage, q).r >= 0.5;
+#else
+			lit = imageLoad(signalImage, q + ivec2(0, layer * TILE_H)).r >= 0.5;
+#endif
+		}
+		if (lit) mask |= 1u << uint(i);
+	}
+	imageStore(maskImage, tile + ivec2(0, layer * rows), uvec4(mask));
+}

@@ -13,6 +13,12 @@
 // each in two segments: the whole ray with the far mask, the last LampModelDistance next to the lamp with the near mask (lamp models
 // skipped too), stopping max(LampStop, the lamp's own stop) short of the lamp, starting off the surface along its normal.
 // Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampTrace.spv RtLampTrace.comp
+// 2026-11-07 ShadowDenoiser 1 (docs/next/RT-DENOISER.md): RtLampTraceSigma.spv (-DSIGMA) also traces the lamps the RT shadow denoiser
+// takes (sigma.x of them, cube slots in sigmaSlots) with ONE ray each at every pixel they light, aimed at a uniform point of the lamp's
+// disc (its physical size: the table's disc radius), and writes per lamp (binding 6, RG16F, the lamps stacked: rows k H .. (k + 1) H - 1)
+// x = visibility (0 / 1), y = the penumbra half-width that ray implies here (lamp radius x blocker distance / (lamp distance - blocker
+// distance); 0 = free). Those lamps are not traced again in the three entries (their visibility is the denoiser's, RtShadowDenoisePack).
+// glslangValidator -V --target-env vulkan1.2 -DSIGMA -o RtLampTraceSigma.spv RtLampTrace.comp
 // 2026-10-29 Denoise: the variant RtLampTraceSplit.spv (-DSPLIT) also writes ranks 0 and 1 apart for the shared denoiser (bindings 6-9:
 // visibility 0..1 and the cube slot, 63 = none): glslangValidator -V --target-env vulkan1.2 -DSPLIT -o RtLampTraceSplit.spv RtLampTrace.comp
 // 2026-10-29 Exteriors: RtLampTraceExterior.spv (-DEXTERIOR) writes the screen-space lamp mask instead (binding 6, R32F): what
@@ -41,8 +47,11 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    // z ExteriorDebug (diagnostic: 1 = the mask 0 everywhere, 2 = 1 everywhere); the other variants: RankBy
 	                    //   (0 the light a lamp brings, 1 the game's own falloff: as the game picks a draw's lamps by distance),
 	                    // w StartOffsetPerUnit (all variants): the start offset grows by this x the view depth
-	vec4 manyUnused[6]; // (RtLampTraceMany's many, reproject[4], many2: the C++ block is shared. 2026-11-06: was [7] since 120cb59d, so jitter read
-	                    // the C++ rect (0): alpha-tested casters never tested in lamp shadows (AlphaTest did nothing) and no depth jitter)
+	// (RtLampTraceMany's many, reproject[4], many2: the C++ block is shared. 2026-11-06: was manyUnused[7] since 120cb59d, so jitter read
+	// the C++ rect (0): alpha-tested casters never tested in lamp shadows (AlphaTest did nothing) and no depth jitter)
+	vec4 sigma;         // (2026-11-07, -DSIGMA: the C++ many) x lamps denoised (layers, 0-8), y frame number (the ray pattern)
+	vec4 sigmaSlots[2]; // (-DSIGMA: the C++ reproject[0..1]) layer k's cube slot (-1 none)
+	vec4 manyUnused[3];
 	vec4 jitter;        // (vec4 15: RtLampShadows.h asserts it) (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray;
 	                    // z (rtalpha) 1 = alpha-tested casters tested (binding 12, the alpha atlas)
 	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
@@ -71,6 +80,15 @@ void storeSplit(ivec2 pixel, float e0, float e1) {
 }
 #else
 void storeSplit(ivec2 pixel, float e0, float e1) { }
+#endif
+#ifdef SIGMA
+layout(set = 0, binding = 6, rg16f) uniform writeonly image2D signalImage;
+int sigmaLayers() { return clamp(int(p.sigma.x + 0.5), 0, 8); }
+int sigmaSlot(int k) { return int(floor((k < 4 ? p.sigmaSlots[0][k] : p.sigmaSlots[1][k - 4]) + 0.5)); }
+bool sigmaLamp(int s) { for (int k = 0; k < sigmaLayers(); k++) if (sigmaSlot(k) == s) return true; return false; }
+void storeSigmaNone(ivec2 pixel) { for (int k = 0; k < sigmaLayers(); k++) imageStore(signalImage, pixel + ivec2(0, k * int(p.size.y)), vec4(1.0, 0.0, 0.0, 0.0)); }
+#else
+#define storeSigmaNone(pixel)
 #endif
 #ifdef EXTERIOR
 layout(set = 0, binding = 6, r32f) uniform writeonly image2D maskImage;
@@ -115,6 +133,25 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
 }
 
+#ifdef SIGMA
+// (2026-11-07) The CLOSEST blocker on the segment (t in segment units), -1 = free: the denoiser sizes the penumbra from it
+float closestBlocker(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
+	if (!(tMax > tMin)) return -1.0;
+	rayQueryEXT q;
+	bool oneSided = p.flags.x > 0.5;
+	const bool testAlpha = p.jitter.z > 0.5;
+	rayQueryInitializeEXT(q, scene, testAlpha ? 0u : gl_RayFlagsOpaqueEXT, testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
+	while (rayQueryProceedEXT(q))
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
+	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return -1.0;
+	if (oneSided && rayQueryGetIntersectionFrontFaceEXT(q, true)) return -1.0;
+	return rayQueryGetIntersectionTEXT(q, true);
+}
+#endif
+
 void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y))
@@ -133,6 +170,7 @@ void main() {
 	if (!(linear01 > 0.0) || linear01 >= 0.9999 || viewZ < 1.0) {
 		imageStore(resultImage, pixel, vec4(none + 1024.0 * none, none, 0.0, 0.0));   // sky / nothing: depth code 0 never matches
 		storeSplit(pixel, none, none);
+		storeSigmaNone(pixel);
 #ifdef EXTERIOR
 		imageStore(maskImage, pixel, vec4(0.0));
 #endif
@@ -183,6 +221,43 @@ void main() {
 		}
 	}
 
+#ifdef SIGMA
+	// The denoised lamps: one ray each at every pixel they light (not only where they rank in the top three), so each lamp's signal
+	// is whole over the screen for the denoiser's spatial filter
+	{
+		float u1 = hash12(vec2(pixel) * 1.37 + 11.0), u2 = hash12(vec2(pixel.yx) * 0.71 + 3.0);
+		for (int k = 0; k < sigmaLayers(); k++) {
+			vec2 signal = vec2(1.0, 0.0);
+			int s = sigmaSlot(k);
+			if (s >= 0 && s < count) {
+				vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), e = imageLoad(lampTable, ivec2(4 * s + 3, 0));
+				vec3 toLamp = vec3(a.xy, b.x) - origin;
+				float d2 = dot(toLamp, toLamp);
+				float stop = max(p.params.z, e.x);
+				if (b.y > 0.0 && d2 < b.y * b.y && dot(toLamp, normal) > 0.0 && sqrt(d2) > stop + offset) {
+					vec3 dir = toLamp * inversesqrt(d2);
+					vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
+					vec3 bt = cross(dir, t);
+					// a uniform point of the disc: a per-pixel pattern stepped per frame and decorrelated per lamp (golden ratios)
+					float rr = e.y * sqrt(fract(u1 + p.sigma.y * 0.61803399 + float(k) * 0.38196601));
+					float ang = 6.2831853 * fract(u2 + p.sigma.y * 0.75487767 + float(k) * 0.56984029);
+					vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
+					float invLen = inversesqrt(dot(segment, segment));
+					float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
+					float tMin = min(offset * invLen, tEnd);
+					float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
+					float th = closestBlocker(origin, segment, tMin, tSplit, uint(p.params2.y));
+					if (th < 0.0) th = closestBlocker(origin, segment, tSplit, tEnd, uint(p.params2.z));
+					if (th >= 0.0) {
+						float lampDistance = 1.0 / invLen, blocker = th * lampDistance;
+						signal = vec2(0.0, max(e.y * blocker / max(lampDistance - blocker, 0.02 * lampDistance), 1.0e-3));
+					}
+				}
+			}
+			imageStore(signalImage, pixel + ivec2(0, k * int(p.size.y)), vec4(signal, 0.0, 0.0));
+		}
+	}
+#endif
 	uint rays = uint(clamp(p.params.x, 1.0, 8.0));
 	float spin = 6.2831853 * fract(hash12(vec2(pixel)) + p.params.w);
 	uint farMask = uint(p.params2.y), nearMask = uint(p.params2.z);
@@ -196,6 +271,9 @@ void main() {
 		float dist = length(toLamp);
 		float stop = max(p.params.z, e.x);
 		float steps = 15.0;                                   // lit: at the lamp (within its stop)
+#ifdef SIGMA
+		if (sigmaLamp(s)) { entry[k] = float(s) + 64.0 * steps; continue; }   // the denoiser's (RtShadowDenoisePack)
+#endif
 		if (dist > stop + offset) {
 			vec3 dir = toLamp / dist;
 			vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));

@@ -1,0 +1,106 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT shadow denoiser, stage 1: temporal accumulation (RtShadowDenoise.glsl has the design).
+// Per layer pixel: the reprojected history (mean, second moment, penumbra width, length), restarted on a new surface, cut short where it
+// disagrees with this frame's neighbourhood (anti-lag), then this frame's sample added.
+// Compile (two variants: what the trace wrote):
+//   glslangValidator -V --target-env vulkan1.2 -DSUN   -o RtShadowDenoiseTemporalSun.spv   RtShadowDenoiseTemporal.comp
+//   glslangValidator -V --target-env vulkan1.2 -DLAMPS -o RtShadowDenoiseTemporalLamps.spv RtShadowDenoiseTemporal.comp
+#extension GL_GOOGLE_include_directive : require
+#include "RtShadowDenoise.glsl"
+
+layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // view z / farZ (full size)
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // view-space normal * 0.5 + 0.5 (full size)
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D motionImage;  // ObjectMotion: xyz the world move since last frame (prevRight.w)
+#ifdef SUN
+layout(set = 0, binding = 5, r16f) uniform readonly image2D visImage;        // RtSunShadow.comp: visibility (traced size)
+layout(set = 0, binding = 6, r16f) uniform readonly image2D hitImage;        // its blocker distance (units, 0 free)
+#else
+layout(set = 0, binding = 5, rg16f) uniform readonly image2D signalImage;    // RtLampTraceSigma: x visibility, y penumbra half-width (layers stacked)
+#endif
+layout(set = 0, binding = 12, rgba16f) uniform readonly image2D histPrev;    // x mean, y second moment, z penumbra half-width, w length
+layout(set = 0, binding = 13, rgba16f) uniform writeonly image2D histNext;
+layout(set = 0, binding = 18, r32f) uniform readonly image2D prevDepth;      // the previous frame's view z (units) per traced pixel
+
+vec2 signalAt(ivec2 pixel, int layer) {
+#ifdef SUN
+	float v = imageLoad(visImage, pixel).r;
+	float d = imageLoad(hitImage, pixel).r;
+	return vec2(v, d > 0.0 ? d * p.light.w : 0.0);
+#else
+	return imageLoad(signalImage, pixel + ivec2(0, layer * TILE_H)).rg;
+#endif
+}
+
+void main() {
+	ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+	int layer = g.y / TILE_H;
+	ivec2 pixel = ivec2(g.x, g.y - layer * TILE_H);
+	if (g.x >= TILE_W || layer >= layers()) return;
+
+	ivec2 src = sourceOf(pixel);
+	Surface s = surfaceAt(pixel, src, imageLoad(depthImage, src).r, imageLoad(normalImage, src).xyz);
+	vec2 sig = signalAt(pixel, layer);
+	if (!s.valid) { imageStore(histNext, g, vec4(1.0, 1.0, 0.0, 0.0)); return; }
+
+	// This frame's 5 x 5 neighbourhood on the same surface: the mean and spread of the raw samples (anti-lag)
+	float sum = 0.0, sum2 = 0.0, count = 0.0;
+	float plane = p.params.z * 4.0 * s.viewZ;
+	for (int y = -2; y <= 2; y++)
+		for (int x = -2; x <= 2; x++) {
+			ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), ivec2(TILE_W - 1, TILE_H - 1));
+			ivec2 qs = sourceOf(q);
+			float z = imageLoad(depthImage, qs).r;
+			Surface t = surfaceAt(q, qs, z, imageLoad(normalImage, qs).xyz);
+			if (!t.valid || abs(dot(s.normal, t.position - s.position)) > plane) continue;
+			float v = signalAt(q, layer).x;
+			sum += v; sum2 += v * v; count += 1.0;
+		}
+	float mean = sum / max(count, 1.0);
+	float sigma = sqrt(max(sum2 / max(count, 1.0) - mean * mean, 0.0));
+
+	// The history where this surface was last frame
+	vec4 h = vec4(0.0);
+	float hlen = 0.0;
+	bool reset = p.prevForward.w < 0.5 || layerResetOf(layer);
+	vec3 move = p.prevRight.w > 0.5 ? imageLoad(motionImage, src).xyz : vec3(0.0);
+	vec2 prevPixel;
+	float prevZ;
+	if (!reset && reproject(s.position, move, prevPixel, prevZ)) {
+		vec2 f = prevPixel - 0.5;
+		ivec2 base = ivec2(floor(f));
+		vec2 fr = f - vec2(base);
+		float facing = abs(dot(s.normal, normalize(-s.position)));
+		float wsum = 0.0;
+		for (int i = 0; i < 4; i++) {
+			ivec2 o = ivec2(i & 1, i >> 1);
+			ivec2 t = base + o;
+			if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(TILE_W, TILE_H)))) continue;
+			if (!sameSurface(imageLoad(prevDepth, t).r, prevZ, facing)) continue;
+			float w = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
+			h += w * imageLoad(histPrev, t + ivec2(0, layer * TILE_H));
+			wsum += w;
+		}
+		if (wsum > 0.05) { h /= wsum; hlen = h.w; }
+	}
+
+	// Anti-lag: history further from this frame's neighbourhood than its noise allows (a shadow that moved, a light switched) is
+	// shortened in proportion, so the new answer shows within a frame or two
+	if (hlen > 0.0 && p.antiLag.x > 0.0) {
+		float allowed = p.antiLag.x * sigma + p.antiLag.y;
+		float off = abs(h.x - mean);
+		if (off > allowed) hlen = max(hlen * allowed / off, 0.0);
+	}
+
+	// The history this pixel may keep: all of MaxHistory where the penumbra spans HistoryRadius pixels or more, down to MinHistory
+	// where it is under a pixel (a hard edge: each frame's ray is already the answer there, and a long history only drags the edge
+	// along behind a moving camera through the reprojection's resampling)
+	float width0 = sig.y > 0.0 ? sig.y : (h.w > 0.0 ? h.z : 0.0);
+	hlen = min(hlen + 1.0, historyCap(width0, s.viewZ));
+	float a = 1.0 / hlen;
+	float m1 = mix(h.x, sig.x, a);
+	float m2 = mix(h.y, sig.x * sig.x, a);
+	// the penumbra width: from the blocked samples only (a lit sample says nothing about the blocker)
+	float width = h.w > 0.0 && hlen > 1.0 ? h.z : 0.0;
+	if (sig.y > 0.0) width = width > 0.0 ? mix(width, sig.y, max(a, 0.2)) : sig.y;
+	imageStore(histNext, g, vec4(m1, m2, width, hlen));
+}

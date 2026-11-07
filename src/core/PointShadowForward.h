@@ -543,9 +543,10 @@ namespace PointShadowForward {
 			const float fixture = TheShaderManager->Effects.ShadowsExteriors->Settings.Interiors.Forward.FixtureDistance;
 			for (int s = 0; s < SlotCount; s++) {
 				// The lamp's own glowing part round its light (a globe, a bulb, a shade's glass): the rays stop before its far side
-				float stop = 0.0f;
+				float stop = 0.0f, size = 0.0f;
 				const NiPointLight* source = Slots[s].light ? Slots[s].light->sourceLight : nullptr;
 				if (const LampFixtures::Glow* g = source ? LampFixtures::NearestLampPart(source, fixture) : nullptr) {
+					size = g->radius;	// UNOFFICIAL 2026-11-07 ShadowDenoiser's PhysicalLampSize: the glowing part is the emitter
 					const NiPoint3& p = source->m_worldTransform.pos;
 					const float dx = g->x - p.x, dy = g->y - p.y, dz = g->z - p.z;
 					stop = sqrtf(dx * dx + dy * dy + dz * dz) + g->radius + 2.0f;
@@ -553,7 +554,7 @@ namespace PointShadowForward {
 				// The per-pixel ranking's intensity (luminance x dimmer) and the game's radius
 				const float intensity = source ? (0.2126f * source->Diff.r + 0.7152f * source->Diff.g + 0.0722f * source->Diff.b) * source->Dimmer : 1.0f;
 				const float gameRadius = source ? source->Spec.r : Slots[s].radius;
-				traced[s] = { Slots[s].slot, Slots[s].position, Slots[s].radius, Slots[s].fade, stop, intensity, gameRadius, Slots[s].light };
+				traced[s] = { Slots[s].slot, Slots[s].position, Slots[s].radius, Slots[s].fade, stop, intensity, gameRadius, Slots[s].light, size };
 			}
 			RtLampShadows::Submit(traced, SlotCount);
 		}

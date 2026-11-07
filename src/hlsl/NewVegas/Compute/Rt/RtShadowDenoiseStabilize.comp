@@ -1,0 +1,67 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT shadow denoiser, stage 4: temporal stabilization (RtShadowDenoise.glsl has the design).
+// A short second history (Stabilize frames) of the blurred result, reprojected as stage 1 does, clamped to this frame's 3 x 3 range
+// of the blurred result before it is blended: the leftover flicker of the blur averages out, a real change is never held back.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtShadowDenoiseStabilize.spv RtShadowDenoiseStabilize.comp
+#extension GL_GOOGLE_include_directive : require
+#include "RtShadowDenoise.glsl"
+
+layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
+layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
+layout(set = 0, binding = 4, rgba16f) uniform readonly image2D motionImage;
+layout(set = 0, binding = 14, rgba16f) uniform readonly image2D inImage;     // the post-blur's output (x visibility)
+layout(set = 0, binding = 16, rg16f) uniform readonly image2D stabPrev;      // x the stabilized visibility, y its history length
+layout(set = 0, binding = 17, rg16f) uniform writeonly image2D stabNext;
+layout(set = 0, binding = 18, r32f) uniform readonly image2D prevDepth;
+
+void main() {
+	ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+	int layer = g.y / TILE_H;
+	ivec2 pixel = ivec2(g.x, g.y - layer * TILE_H);
+	if (g.x >= TILE_W || layer >= layers()) return;
+	ivec2 offset = ivec2(0, layer * TILE_H);
+	vec4 cur = imageLoad(inImage, g);
+	float current = cur.x;
+	ivec2 src = sourceOf(pixel);
+	Surface s = surfaceAt(pixel, src, imageLoad(depthImage, src).r, imageLoad(normalImage, src).xyz);
+	// as the history (historyCap): all of Stabilize frames from HistoryRadius pixels of penumbra on, none on a hard edge (a binary edge's
+	// 3 x 3 range holds both 0 and 1, so the clamp cannot stop the stabilized edge lagging behind a moving camera)
+	float frames = p.params.w;
+	if (p.history.y > 0.0) frames *= cur.z > 0.0 ? clamp(cur.z / pixelWorld(s.viewZ) / p.history.y, 0.0, 1.0) : 1.0;
+	if (!s.valid || frames < 0.5) { imageStore(stabNext, g, vec4(current, 0.0, 0.0, 0.0)); return; }
+
+	float lo = current, hi = current;
+	for (int y = -1; y <= 1; y++)
+		for (int x = -1; x <= 1; x++) {
+			ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), ivec2(TILE_W - 1, TILE_H - 1));
+			float v = imageLoad(inImage, q + offset).x;
+			lo = min(lo, v); hi = max(hi, v);
+		}
+
+	bool reset = p.prevForward.w < 0.5 || layerResetOf(layer);
+	vec3 move = p.prevRight.w > 0.5 ? imageLoad(motionImage, src).xyz : vec3(0.0);
+	vec2 prevPixel;
+	float prevZ;
+	vec2 h = vec2(0.0);
+	float wsum = 0.0;
+	if (!reset && reproject(s.position, move, prevPixel, prevZ)) {
+		vec2 f = prevPixel - 0.5;
+		ivec2 base = ivec2(floor(f));
+		vec2 fr = f - vec2(base);
+		float facing = abs(dot(s.normal, normalize(-s.position)));
+		for (int i = 0; i < 4; i++) {
+			ivec2 o = ivec2(i & 1, i >> 1);
+			ivec2 t = base + o;
+			if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(TILE_W, TILE_H)))) continue;
+			if (!sameSurface(imageLoad(prevDepth, t).r, prevZ, facing)) continue;
+			float w = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
+			h += w * imageLoad(stabPrev, t + offset).xy;
+			wsum += w;
+		}
+	}
+	if (!(wsum > 0.05)) { imageStore(stabNext, g, vec4(current, 0.0, 0.0, 0.0)); return; }
+	h /= wsum;
+	float n = min(h.y + 1.0, frames);
+	float result = mix(clamp(h.x, lo, hi), current, 1.0 / (n + 1.0));
+	imageStore(stabNext, g, vec4(result, n, 0.0, 0.0));
+}

@@ -42,7 +42,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [PointShadows](PointShadows/) | - | yes | 15 | 0 | PointShadows.cpp, PointShadows.h | This pass builds one grey mask for the whole screen that says how much of the nearby point lights (lamps) and the one spot light reach each visible surface. A l |
 | [PointShadows2](PointShadows2/) | - | yes | 3 | 0 | PointShadows2.cpp, PointShadows2.h | PointShadows2 darkens or lights the scene for point lamps that PointShadows does not handle. It is a screen-space pass over the point-shadow buffer: for every p |
 | [Precipitations](Precipitations/) | true | yes | 1 | 2 | Rain.cpp, Rain.h | While it rains outdoors, the picture gets falling rain streaks laid over the view. Drops are drawn in layers at increasing distance from the camera, so near str |
-| [Reflections](Reflections/) | false | - | 26 | 3 | Reflections.cpp, Reflections.h |  |
+| [Reflections](Reflections/) | false | yes | 42 | 3 | Reflections.cpp, Reflections.h |  |
 | [SMAA](SMAA/) | true | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
 | [ShadowsExteriors](ShadowsExteriors/) | true | yes | 1 | 13 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |

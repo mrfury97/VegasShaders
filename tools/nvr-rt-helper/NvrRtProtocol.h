@@ -25,7 +25,7 @@
 #include <stdint.h>
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 5u            // 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images
+#define NVR_RT_PROTOCOL_VERSION 6u            // 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
 #define NVR_RT_MAX_IMAGES       48u           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
 #define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
@@ -43,6 +43,11 @@
 #define NVR_RT_BINDING_RECORDS  10u           // readonly std430 SSBO: NvrRtInstanceRecord per instance, by rayQueryGetIntersectionInstanceIdEXT
 #define NVR_RT_BINDING_GEOMETRY 11u           // readonly std430 SSBO: uint words; a record's vertexOffset / indexOffset point into it
 #define NVR_RT_NO_DATA          0xFFFFFFFFu   // vertexOffset / indexOffset when the helper had no room for the geometry's data
+// UNOFFICIAL 2026-11-07 (protocol 6) the scratch store: a std430 buffer of uint words the HELPER owns (never shared with the game), bound to
+// every pass at binding 20, zero when the helper starts and kept from frame to frame: state a pass keeps for itself (the path tracer's
+// ReSTIR DI reservoirs and radiance cache, RtPathTrace.comp). NvrRtShared::scratchMB megabytes (at least 1). Who uses which words is the
+// passes' business (today only RtPathTrace.comp: docs/next/RT-PATH-TRACING.md section 47 has the layout).
+#define NVR_RT_BINDING_SCRATCH  20u
 
 // NvrRtInstanceRecord::flags (NVR sets them; bits 8.. are free for the effects)
 #define NVR_RT_RECORD_LAND          0x01u
@@ -72,6 +77,11 @@
                                               // held and holstered weapons, rigid armour): rays leaving from the player's gun leave it out
 #define NVR_RT_MASK_FAR             0x80u     // UNOFFICIAL 2026-10-31: far object LOD past SceneRadius ([Main.Main.RayTracing] FarObjectLOD,
                                               // rt-reflections: the skyline in reflections); a ray that should not see it drops 0x80
+// UNOFFICIAL 2026-11-07 NvrRtInstance::customIndex bits (no trace shader read the custom index before): bit 0 = land (since 2026-10-28),
+// bit 1 = hidden: the player's own body and gear in first person, traced (shadows, reflections) but not drawn; camera rays pass over it
+// (RtLampPrimary.comp, SameFrame lamp shadows)
+#define NVR_RT_CUSTOM_LAND          0x1u
+#define NVR_RT_CUSTOM_HIDDEN        0x2u
 #define NVR_RT_ALPHA_SLOT_SIZE      64u
 #define NVR_RT_ALPHA_ATLAS_SLOTS    32u       // a row (and rows): 2048 x 2048 texels, 1024 slots
 
@@ -202,7 +212,7 @@ struct NvrRtShared {
 	uint64_t	semInputsReady;      // HANDLE values valid in the helper's process (timeline semaphores, OPAQUE_WIN32)
 	uint64_t	semOutputReady;
 	uint32_t	setupDone;           // 1 once everything above is filled in
-	uint32_t	pad1;
+	uint32_t	scratchMB;           // (protocol 6, was pad1) the scratch store's size the passes need, megabytes (NVR_RT_BINDING_SCRATCH; 0 = 1)
 
 	// ---- written by NVR any time (shaderCount last, with a release barrier); paths are full, ANSI
 	volatile uint32_t	shaderCount;

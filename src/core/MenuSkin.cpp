@@ -5,6 +5,14 @@
 #include <vector>
 #include <algorithm>
 #include <string>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <commdlg.h>
+#include <shellapi.h>
+#include "ImGuiManager.h"
+#pragma comment(lib, "comdlg32.lib")
+#pragma comment(lib, "shell32.lib")
 
 // 2026-11-02 menu skins (MenuSkin.h). A skin file, Data\VegasShaders\Skins\<anything>.toml (Paths::DataRoot):
 //
@@ -290,7 +298,8 @@ namespace {
 		std::string all;
 		char v[80];
 		for (const Part& p : Parts) { all += TheSettingManager->GetSettingS(Section, p.key, v); all += '|'; }
-		for (const char* k : OtherKeys) { all += TheSettingManager->GetSettingS(Section, k, v); all += '|'; }
+		char big[1024];
+		for (const char* k : OtherKeys) { all += TheSettingManager->GetSettingS(Section, k, big); all += '|'; }
 		return all;
 	}
 
@@ -306,7 +315,8 @@ namespace {
 		if (rounding >= 0.0f) Active.rounding = ImClamp(rounding, 0.0f, 16.0f);
 		const float opacity = TheSettingManager->GetSettingF(Section, "CustomOpacity");
 		if (opacity > 0.0f) Active.opacity = ImClamp(opacity, 0.5f, 1.0f);
-		const std::string image = TheSettingManager->GetSettingS(Section, "CustomImage", v);
+		char imageText[1024];	// may be a full path
+		const std::string image = TheSettingManager->GetSettingS(Section, "CustomImage", imageText);
 		if (_stricmp(image.c_str(), "none") == 0) Active.image.clear();
 		else if (!image.empty()) { Active.image = image; Active.file = SkinDir() + "(own picture)"; }	// relative to the Skins folder
 		const float imageOpacity = TheSettingManager->GetSettingF(Section, "CustomImageOpacity");
@@ -382,6 +392,118 @@ namespace {
 		ImGui::PopID();
 	}
 
+	// 2026-11-07 background picture chooser (View > Skin > Own colours). Pictures live in Data\VegasShaders\Skins\Backgrounds\;
+	// CustomImage stores them relative to the Skins folder ("Backgrounds\<file>"). Browse... copies the picked file there, so the
+	// setting stays short and the install keeps its own copy. The file dialog runs on its own thread: the game keeps drawing.
+	std::string BackgroundDir() { return SkinDir() + "Backgrounds\\"; }
+	bool IsPictureFile(const std::filesystem::path& f) {
+		std::string ext = f.extension().string();
+		for (char& c : ext) c = (char)tolower((unsigned char)c);
+		return ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".dds" || ext == ".bmp" || ext == ".tga";
+	}
+	std::vector<std::string> BackgroundFiles;	// "Backgrounds\x.png" (and pictures straight in the Skins folder: "x.png")
+	void ScanBackgrounds() {
+		BackgroundFiles.clear();
+		std::error_code ec;
+		std::filesystem::create_directories(BackgroundDir(), ec);
+		for (const auto& e : std::filesystem::directory_iterator(BackgroundDir(), ec))
+			if (e.is_regular_file(ec) && IsPictureFile(e.path())) BackgroundFiles.push_back("Backgrounds\\" + e.path().filename().string());
+		for (const auto& e : std::filesystem::directory_iterator(SkinDir(), ec))
+			if (e.is_regular_file(ec) && IsPictureFile(e.path())) BackgroundFiles.push_back(e.path().filename().string());
+		std::sort(BackgroundFiles.begin(), BackgroundFiles.end(), [](const std::string& a, const std::string& b) { return _stricmp(a.c_str(), b.c_str()) < 0; });
+	}
+	std::atomic<int> BrowseState{ 0 };	// 0 idle, 1 dialog open, 2 a file was picked (BrowsedFile)
+	std::mutex BrowseLock;
+	std::string BrowsedFile, BrowseMessage;
+	void StartBrowse() {
+		int idle = 0;
+		if (!BrowseState.compare_exchange_strong(idle, 1)) return;
+		const HWND owner = ImGuiManager::GetWindow();
+		std::thread([owner]() {
+			char file[MAX_PATH] = {};
+			OPENFILENAMEA ofn = {};
+			ofn.lStructSize = sizeof(ofn);
+			ofn.hwndOwner = owner;
+			ofn.lpstrFilter = "Pictures (png, jpg, dds, bmp, tga)\0*.png;*.jpg;*.jpeg;*.dds;*.bmp;*.tga\0All files\0*.*\0";
+			ofn.lpstrFile = file;
+			ofn.nMaxFile = MAX_PATH;
+			ofn.lpstrTitle = "Vegas Shaders: menu background picture (best 1920x1080 or your screen size)";
+			ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_HIDEREADONLY;	// NOCHANGEDIR: the game's folder stays the current one
+			if (GetOpenFileNameA(&ofn)) {
+				std::lock_guard<std::mutex> lock(BrowseLock);
+				BrowsedFile = file;
+				BrowseState = 2;
+			}
+			else BrowseState = 0;
+		}).detach();
+	}
+	// On the render thread: copy a picked file into the Backgrounds folder and use it.
+	void FinishBrowse() {
+		if (BrowseState != 2) return;
+		std::string picked;
+		{ std::lock_guard<std::mutex> lock(BrowseLock); picked = BrowsedFile; }
+		BrowseState = 0;
+		std::error_code ec;
+		const std::filesystem::path from(picked);
+		std::filesystem::create_directories(BackgroundDir(), ec);
+		const std::filesystem::path to = std::filesystem::path(BackgroundDir()) / from.filename();
+		ec.clear();
+		const bool same = std::filesystem::equivalent(from, to, ec);
+		ec.clear();
+		if (!same) std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, ec);
+		if (ec) {
+			BrowseMessage = "Could not copy " + picked + " (" + ec.message() + ")";
+			Logger::Log("MenuSkin: %s", BrowseMessage.c_str());
+			return;
+		}
+		BrowseMessage.clear();
+		ScanBackgrounds();
+		Store("CustomImage", "Backgrounds\\" + from.filename().string());
+		if (!Picture) BrowseMessage = "Could not load " + from.filename().string() + " (png, jpg, dds, bmp or tga only)";
+	}
+
+	void DrawBackgroundPicker() {
+		FinishBrowse();
+		static bool scanned = false;
+		if (!scanned) { ScanBackgrounds(); scanned = true; }
+		char text[1024];
+		const std::string image = TheSettingManager->GetSettingS(Section, "CustomImage", text);
+		const bool none = _stricmp(image.c_str(), "none") == 0;
+		const std::string shown = image.empty() ? "the skin's" : none ? "no picture" : std::filesystem::path(image).filename().string();
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 11.0f + ImGui::GetFrameHeight() + ImGui::GetStyle().ItemInnerSpacing.x);
+		if (ImGui::BeginCombo("Background picture", shown.c_str())) {
+			if (ImGui::Selectable("the skin's", image.empty())) Store("CustomImage", "");
+			if (ImGui::Selectable("no picture", none)) Store("CustomImage", "none");
+			for (const std::string& f : BackgroundFiles) {
+				const std::string name = std::filesystem::path(f).filename().string();
+				if (ImGui::Selectable((name + "##" + f).c_str(), _stricmp(f.c_str(), image.c_str()) == 0)) Store("CustomImage", f);
+			}
+			if (BackgroundFiles.empty()) ImGui::TextDisabled("No pictures yet: put some in %s", BackgroundDir().c_str());
+			ImGui::EndCombo();
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Pictures in %s\n(png, jpg, dds, bmp or tga). Best size: your screen size, e.g. 1920x1080 (16:9);\n"
+			"with Picture fit = cover any size works, the overflow is cropped. Above 2560x1440 only costs memory.", BackgroundDir().c_str());
+		const bool open = BrowseState == 1;
+		if (open) ImGui::BeginDisabled();
+		if (ImGui::Button(open ? "Choosing..." : "Browse...")) StartBrowse();
+		if (open) ImGui::EndDisabled();
+		if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+			ImGui::SetTooltip("Pick a picture anywhere on your PC: it is copied into the Backgrounds folder and used.\n"
+				"In exclusive fullscreen the window may open behind the game: Alt+Tab to it, or use the folder instead.");
+		ImGui::SameLine();
+		if (ImGui::Button("Open folder")) {
+			std::error_code ec;
+			std::filesystem::create_directories(BackgroundDir(), ec);
+			ShellExecuteA(nullptr, "open", BackgroundDir().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		}
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip("Opens %s: drop pictures there, then Refresh.", BackgroundDir().c_str());
+		ImGui::SameLine();
+		if (ImGui::Button("Refresh")) ScanBackgrounds();
+		ImGui::TextDisabled("Best size: your screen size, e.g. 1920x1080 (16:9).");
+		if (Picture) ImGui::TextDisabled("Now showing: %d x %d", (int)PictureSize.x, (int)PictureSize.y);
+		if (!BrowseMessage.empty()) ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.4f, 1.0f), "%s", BrowseMessage.c_str());
+	}
+
 	// View > Skin > Own colours: every part of the look, each on top of whichever skin is picked.
 	void DrawOwnColours() {
 		ImGui::TextDisabled("Ticked parts replace the skin's own, whichever skin is picked.");
@@ -391,6 +513,7 @@ namespace {
 		const Skin& base = Skins[Current];
 		NumberControl("CustomRounding", "Corner rounding", base.rounding, -1.0f, 0.0f, 16.0f, "%.1f px", "Corner radius in pixels, 0 = square.");
 		NumberControl("CustomOpacity", "Window opacity", base.opacity, 0.0f, 0.5f, 1.0f, "%.2f", "How solid the window is (0.5-1).");
+		DrawBackgroundPicker();
 		NumberControl("CustomImageOpacity", "Picture strength", base.imageOpacity, -1.0f, 0.0f, 1.0f, "%.2f",
 			"How strongly the background picture shows (a skin file's Image, or CustomImage on the Main.Menu.Style page).");
 		static const char* const fits[] = { "cover", "contain", "stretch" };

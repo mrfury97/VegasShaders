@@ -651,6 +651,8 @@ namespace {
 		VkDeviceSize	tlasScratch = 0;
 		StructurePool	structures;
 		Buffer			geometryData;		// binding 11
+		Buffer			scratchStore;		// (2026-11-07, protocol 6) binding 20: the passes' own state, zero at start, kept between frames
+		bool			scratchCleared = false;
 		WordPool		dataWords;
 		std::unordered_map<uint32_t, Geometry> geometries;
 		std::vector<PendingFree> pendingFrees;
@@ -720,9 +722,9 @@ namespace {
 	}
 
 	bool CreatePipelineLayout(Helper& h) {
-		const uint32_t bindingCount = 2 + NVR_RT_PASS_IMAGES_MAX + 2;
-		VkDescriptorSetLayoutBinding bindings[2 + NVR_RT_PASS_IMAGES_MAX + 2] = {};
-		VkDescriptorBindingFlags flags[2 + NVR_RT_PASS_IMAGES_MAX + 2] = {};
+		const uint32_t bindingCount = 2 + NVR_RT_PASS_IMAGES_MAX + 3;
+		VkDescriptorSetLayoutBinding bindings[2 + NVR_RT_PASS_IMAGES_MAX + 3] = {};
+		VkDescriptorBindingFlags flags[2 + NVR_RT_PASS_IMAGES_MAX + 3] = {};
 		bindings[0] = { 0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 		bindings[1] = { 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 		for (uint32_t i = 0; i < NVR_RT_PASS_IMAGES_MAX; i++) {	// images 0..7 at 2..9, 8..11 at 12..15 (records / geometry stay 10 / 11)
@@ -732,6 +734,7 @@ namespace {
 		}
 		bindings[2 + NVR_RT_PASS_IMAGES] = { NVR_RT_BINDING_RECORDS, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
 		bindings[3 + NVR_RT_PASS_IMAGES] = { NVR_RT_BINDING_GEOMETRY, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };
+		bindings[2 + NVR_RT_PASS_IMAGES_MAX + 2] = { NVR_RT_BINDING_SCRATCH, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr };	// (protocol 6)
 		VkDescriptorSetLayoutBindingFlagsCreateInfo bindingFlags = { VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO };
 		bindingFlags.bindingCount = bindingCount;
 		bindingFlags.pBindingFlags = flags;
@@ -748,7 +751,7 @@ namespace {
 			{ VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR, sets },
 			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, sets },
 			{ VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, sets * NVR_RT_PASS_IMAGES_MAX },
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 2 } };
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, sets * 3 } };
 		VkDescriptorPoolCreateInfo poolInfo = { VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO };
 		poolInfo.maxSets = sets;
 		poolInfo.poolSizeCount = 4;
@@ -1208,6 +1211,8 @@ namespace {
 		return true;
 	}
 
+#include "NvrRtShadowDenoise.inl"	// UNOFFICIAL 2026-11-07 the RT shadow denoiser module (docs/next/RT-DENOISER.md)
+
 	// Records this frame's work into s.cmd (open). False: something could not be recorded (logged); the caller still submits.
 	bool RecordFrame(Helper& h, Slot& s, uint64_t frameNumber) {
 		const NvrRtFrame& f = h.frame;
@@ -1507,8 +1512,23 @@ namespace {
 		if (h.queries) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, slot * kQueriesPerSlot + 2);
 
 		// 3. the passes
+		if (!h.scratchCleared && h.scratchStore.buffer && f.passCount) {	// (2026-11-07) the scratch store starts at zero (the passes' "empty")
+			vkCmdFillBuffer(cmd, h.scratchStore.buffer, 0, VK_WHOLE_SIZE, 0u);
+			FullBarrier(cmd);
+			h.scratchCleared = true;
+		}
 		for (uint32_t p = 0; p < std::min<uint32_t>(f.passCount, NVR_RT_MAX_PASSES); p++) {
 			const NvrRtPass& pass = f.passes[p];
+			// UNOFFICIAL 2026-11-07 the RT shadow denoiser (NvrRtShadowDenoise.inl): a pass of RtShadowDenoise.spv runs the module
+			if (ShadowDenoise::IsModulePass(h, pass.shader)) {
+				if (!ShadowDenoise::Run(h, slot, cmd, p, pass)) continue;
+				s.measured[2] = true;
+				if (h.queries && s.passesStamped < NVR_RT_MAX_PASSES) {
+					vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, slot * kQueriesPerSlot + 4 + s.passesStamped);
+					s.passShaders[s.passesStamped++] = pass.shader;
+				}
+				continue;
+			}
 			VkPipeline pipeline = Pipeline(h, pass.shader);
 			if (!pipeline || pass.imageCount > NVR_RT_PASS_IMAGES_MAX) continue;
 			bool imagesOk = true;
@@ -1521,9 +1541,10 @@ namespace {
 			asWrite.pAccelerationStructures = &h.tlas;
 			VkDescriptorBufferInfo ubo = { s.constants.buffer, (VkDeviceSize)p * NVR_RT_PASS_CONSTANTS, NVR_RT_PASS_CONSTANTS };
 			VkDescriptorImageInfo imageInfos[NVR_RT_PASS_IMAGES_MAX] = {};
-			VkWriteDescriptorSet writes[2 + NVR_RT_PASS_IMAGES_MAX + 2] = {};
+			VkWriteDescriptorSet writes[2 + NVR_RT_PASS_IMAGES_MAX + 3] = {};
 			VkDescriptorBufferInfo recordInfo = { s.records.buffer, 0, VK_WHOLE_SIZE };
 			VkDescriptorBufferInfo dataInfo = { h.geometryData.buffer, 0, VK_WHOLE_SIZE };
+			VkDescriptorBufferInfo scratchInfo = { h.scratchStore.buffer, 0, VK_WHOLE_SIZE };	// (protocol 6)
 			writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &asWrite, s.sets[p], 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR };
 			writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ubo };
 			for (uint32_t i = 0; i < pass.imageCount; i++) {
@@ -1532,7 +1553,8 @@ namespace {
 			}
 			writes[2 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_RECORDS, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &recordInfo };
 			writes[3 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_GEOMETRY, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dataInfo };
-			vkUpdateDescriptorSets(h.vk.device, 4 + pass.imageCount, writes, 0, nullptr);
+			writes[4 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_SCRATCH, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &scratchInfo };
+			vkUpdateDescriptorSets(h.vk.device, 5 + pass.imageCount, writes, 0, nullptr);
 			vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.pipelineLayout, 0, 1, &s.sets[p], 0, nullptr);
 			vkCmdDispatch(cmd, std::max(1u, pass.groupsX), std::max(1u, pass.groupsY), std::max(1u, pass.groupsZ));
@@ -1785,6 +1807,12 @@ namespace {
 				VK_BUFFER_USAGE_TRANSFER_SRC_BIT, false, h.geometryData) ||	// (TRANSFER_SRC: the capture copies it out, 2026-11-03)
 			!CreateTlas(h) || !EnsureScratch(h, h.tlasScratch) || !CreatePipelineLayout(h))
 			return fail(nullptr);
+		{	// (2026-11-07, protocol 6) the scratch store (binding 20): as big as NVR asked, at least 1 MB, cleared before the first pass
+			const uint32_t mb = std::min<uint32_t>(std::max<uint32_t>(shared->scratchMB, 1u), 1024u);
+			if (!CreateBuffer(h.vk, (VkDeviceSize)mb << 20, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, h.scratchStore))
+				return fail("Vulkan: the scratch store could not be made");
+			Log("scratch store: %u MB (binding %u)", mb, NVR_RT_BINDING_SCRATCH);
+		}
 		if (!CreateBuffer(h.vk, 3 * 4096, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, h.probe)) h.probe = Buffer();	// the probe is optional
 
 		// The shaders NVR registered at setup are compiled now (a first use mid-game would hold the game's GPU ~2 s on the iGPU)

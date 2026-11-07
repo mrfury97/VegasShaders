@@ -32,6 +32,7 @@
 #include "NvrRtProtocol.h"
 #include "RtScenePick.h"     // the game's record / mask packing (src/core)
 #include "RtLightGrid.h"     // the game's PTLightGrid builder (src/core)
+#include "RtReflDenoise.h"   // (2026-11-07) the RT reflection denoiser (src/core), run by the refldenoise scene
 #include <d3dcompiler.h>
 
 #pragma comment(lib, "d3d9.lib")
@@ -116,6 +117,7 @@ struct Object {               // one instance of one mesh
 	int hookMask = -1;
 	V3 albedo = { 0.5f, 0.5f, 0.5f };
 	bool alphaTested = false;
+	bool hidden = false;      // (2026-11-07) custom index NVR_RT_CUSTOM_HIDDEN: the first-person body (camera rays pass over it)
 	int alphaSlot = -1;       // atlas slot (bits 16-25)
 	uint32_t alphaRef = 128;  // bits 8-15 (D3DCMP_GREATER)
 	int id = 0;               // the host's own object id (CPU reference)
@@ -292,6 +294,7 @@ struct Host {
 		std::memset(shared, 0, sizeof(NvrRtShared));
 		shared->magic = NVR_RT_MAGIC; shared->version = NVR_RT_PROTOCOL_VERSION; shared->size = sizeof(NvrRtShared);
 		shared->parentPid = GetCurrentProcessId();
+		shared->scratchMB = 64;   // (2026-11-07, protocol 6) the scratch store: the path tracer's reservoirs + radiance cache at 128 x 128
 		shared->vendorId = si.VendorId;
 		std::memcpy(shared->deviceLuid, si.DeviceLUID, 8); shared->deviceLuidValid = si.DeviceLUIDValid;
 		std::memcpy(shared->deviceUuid, si.DeviceUUID, 16); std::memcpy(shared->driverUuid, si.DriverUUID, 16);
@@ -383,6 +386,17 @@ struct Host {
 		g.vertices = gi.VertexCount; g.triangles = gi.TriangleCount;
 		staged.push_back(g);
 		live[id] = g;
+		return true;
+	}
+	// (2026-11-07) a mesh restaged under an id it already has (an actor's new pose: DYNAMIC, REBUILD every Nth), as RtCore::AddSkinned
+	bool StageAs(const Mesh& m, uint32_t id, uint32_t opFlags) {
+		const uint32_t keep = nextGeometry;
+		uint32_t got = 0;
+		nextGeometry = id;
+		const bool ok = Stage(m, false, got);
+		nextGeometry = keep;
+		if (!ok) return false;
+		ops.back().flags = opFlags;
 		return true;
 	}
 	void Release(uint32_t id) {
@@ -493,7 +507,7 @@ struct Host {
 			in.transform[0][0] = in.transform[1][1] = in.transform[2][2] = 1.0f;
 			in.transform[0][3] = o.offset.x - eye.x; in.transform[1][3] = o.offset.y - eye.y; in.transform[2][3] = o.offset.z - eye.z;
 			in.geometryId = geometryOf[o.mesh];
-			in.customIndex = o.land ? 1u : 0u;
+			in.customIndex = (o.land ? NVR_RT_CUSTOM_LAND : 0u) | (o.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u);
 			in.mask = o.mask();
 			in.flags = 0x1u;   // both faces (RtCore)
 			NvrRtInstanceRecord r = {};
@@ -1143,7 +1157,13 @@ static bool sceneCameraMove(Ctx& c) {
 
 #include "rt_host_more.inl"
 #include "rt_host_alpha.inl"
+#include "rt_host_sameframe.inl"	// (2026-11-07) SameFrame lamp shadows
+#include "rt_host_movingrest.inl"	// (2026-11-07) MovingCasterHistory
+#include "rt_host_sigma.inl"	// (2026-11-07) the RT shadow denoiser vs the exact soft shadow (docs/next/RT-DENOISER.md)
+#include "rt_host_sigma_sun.inl"
+#include "rt_host_refl.inl"	// (2026-11-07) the RT reflection denoiser vs the exact glossy reflection (docs/next/RT-REFLECTION-DENOISER.md)
 #include "rt_host_light.inl"	// (2026-11-06) the path tracer's lamp falloff: game vs physical (PTLampFalloff)	// (2026-11-06) chain-link: fine cut-outs through the 64 x 64 atlas slot
+#include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1161,7 +1181,7 @@ int main(int argc, char** argv) {
 		else if (a == "--scene" && i + 1 < argc) only.push_back(argv[++i]);
 		else if (a == "--keep-going") keepGoing = true;
 		else { std::printf("usage: NvrRtHost.exe --helper <NvrRtHelper.exe> --spv <folder> [--out <folder>] [--device <name part>] [--scene <name>]...\n"
-			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick\n"); return 2; }
+			"scenes: furnace alphacard material chainlink manylamps mirror cameramove sun ao pathtex falloff restirlamps restirgi denoise lamplookup scenepick sameframe movingrest\n"); return 2; }
 	}
 	if (helperExe.empty() || spv.empty()) { std::printf("--helper and --spv are required\n"); return 2; }
 	{ char full[MAX_PATH]; GetFullPathNameA(spv.c_str(), MAX_PATH, full, nullptr); spv = full; }
@@ -1199,7 +1219,9 @@ int main(int argc, char** argv) {
 	c.shLamp = host.AddShader(spv + "\\RtLampTrace.spv");
 	c.shMany = host.AddShader(spv + "\\RtLampTraceMany.spv");
 	c.shRefl = host.AddShader(spv + "\\ReflectionsRT.spv");
-	if (!registerMore(host, spv, compute, includes)) { say("RESULT: FAIL (shared images)\n"); return 1; }
+	if (!registerMore(host, spv, compute, includes) || !registerSameFrame(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }
+	if (!registerSigma(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }
+	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
 	for (auto& s : host.shaders) if (GetFileAttributesA(s.c_str()) == INVALID_FILE_ATTRIBUTES) { say("RESULT: FAIL (no %s)\n", s.c_str()); return 1; }
 	if (!host.Start(helperExe.c_str())) { host.Stop(); say("RESULT: FAIL (helper did not get ready)\n"); return 1; }
 	// clear the atlas once (an empty slot reads alpha 0) and the history pair
@@ -1223,10 +1245,18 @@ int main(int argc, char** argv) {
 		{ "pathtex", "path tracer: albedo atlas, 64 lamps in the lamp image, PTLightGrid (RtPathTrace / Grid)", [&] { return scenePathTextures(c); } },
 		{ "falloff", "path tracer lamp falloff: the game's vs physical (PTLampFalloff 1), against the formulas", [&] { return sceneFalloff(c); } },
 		{ "restirlamps", "ManyLights one ray a pixel, reuse + history (RtLampTraceRestir)", [&] { return sceneRestirLamps(c); } },
+		{ "restirdi", "path tracer ReSTIR DI for the lamps (PTRestirDI): exact shadowed lamp sum, shuffled lamp list, slide, broken-remap control", [&] { return sceneRestirDI(c); } },
+		{ "specfurnace", "path tracer specular energy: a white metal box under a uniform sky (VNDF + multiple-scattering compensation)", [&] { return sceneSpecularFurnace(c); } },
+		{ "cache", "path tracer radiance cache (PTRadianceCache): 2 bounces + the cache vs 32 bounces, the light halved", [&] { return sceneRadianceCache(c); } },
 		{ "restirgi", "ReSTIR GI on the path tracer (RtPathTraceGI + RtRestirGI)", [&] { return sceneRestirGI(c); } },
 		{ "denoise", "the game's RtDenoise passes (fork, D3D9 side)", [&] { return sceneDenoise(c); } },
+		{ "sigmalamps", "RT shadow denoiser, lamps of physical size vs the exact soft shadow, still + moving (RtLampTraceSigma + RtShadowDenoise)", [&] { return sceneSigmaLamps(c); } },
+		{ "sigmasun", "RT shadow denoiser on the sun (10 deg disc + the real 0.53 deg) vs the exact soft shadow, still + moving (RtSunShadow + RtShadowDenoise)", [&] { return sceneSigmaSun(c); } },
+		{ "refldenoise", "RT reflection denoiser (FFX port / ours) vs the old Temporal + Blur and the exact glossy reflection, still + slide + turn (RtReflDenoise*)", [&] { return sceneReflDenoise(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
+		{ "movingrest", "ManyLights histories under a walking person: MovingCasterHistory 0 vs 2 (RtLampTraceMany + RtLampTraceRestir)", [&] { return sceneMovingRest(c); } },
+		{ "sameframe", "SameFrame lamp shadows: camera rays + trace in one exchange, a walking caster, the hidden first-person body (RtLampPrimary + RtLampTrace + PointShadowTraced)", [&] { return sceneSameFrame(c); } },
 	};
 	int failed = 0, ran = 0;
 	std::string summary;

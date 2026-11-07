@@ -11,7 +11,8 @@
 #include "Reflections.glsl"
 #include "ReflectionsRT.glsl"
 
-layout(location = 1) out vec4 o_spread;   // 2026-10-29: R16F, the hit's distance share (0 contact .. 1 far / unknown) for the blur passes
+layout(location = 1) out vec4 o_spread;   // 2026-10-29: x the hit's distance share (0 contact .. 1 far / unknown) for the blur passes;
+                                          // 2026-11-07 (G16R16F) y the hit distance for the RT reflection denoiser (0 unknown, Distance: nothing hit)
 
 // 2026-10-31: one RT hit's colour as seen along the reflection (the screen at the hit when it is visible there, else the cube toward
 // it when it is out of view, else the estimate), and which source it came from (x screen, y cube share; the rest the estimate).
@@ -188,6 +189,12 @@ void main() {
         confidence += skyShare;
     }
     colour = sum / max(confidence, 1.0e-4);
+    // UNOFFICIAL 2026-11-07 the RT reflection denoiser's hit distance (o_spread.y): the march's where it answered most, else the ray's,
+    // Distance where the ray met nothing, 0 where nothing is known (the fallbacks alone)
+    if (RtDenoiserOn) {
+        float marchHit = texelFetch(sampler2D(t_rtMarchHit, POINT_S), texel, 0).x;
+        o_spread.y = march.a >= 0.5 && marchHit > 0.0 ? marchHit : rtT > 0.0 ? rtT : rtT == 0.0 ? RtDistance : marchHit;
+    }
     // RT diagnostics (the effect's DebugView is 6 then, so the composite shows these as they are):
     // 1 where each share came from: green the screen march, cyan RT on screen, blue RT through the cube, magenta RT estimate,
     //   grey the old fallbacks (cube, grid, sky), black nothing;

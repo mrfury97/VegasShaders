@@ -1,0 +1,36 @@
+#version 460
+// UNOFFICIAL 2026-11-07 PTRadianceCache's resolve pass (core\RtPathTrace.cpp, after the path tracer's pass; RT-PATH-TRACING.md section 48):
+// one thread a cache entry (RtPathTrace.comp CacheKey / CacheAdd has the layout). A cell written this frame folds its sum into its resolved
+// light (a running mean at most PTCacheMaxSamples samples and PTCacheMaxFrames frames deep, so it follows light that changes) and clears the sum; a cell nobody wrote
+// for PTCacheMaxAge frames is freed.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtPathTraceCache.spv RtPathTraceCache.comp
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 params;        // x entries, y the cache's first word / 4096, z PTCacheMaxSamples, w PTCacheMaxAge (frames)
+	vec4 params2;       // x PTCacheMaxFrames
+} p;
+layout(set = 0, binding = 20, std430) buffer Scratch { uint words[]; } scratch;
+
+void main() {
+	const uint i = gl_GlobalInvocationID.x;
+	if (i >= uint(p.params.x + 0.5)) return;
+	const uint e = uint(p.params.y + 0.5) * 4096u + i * 16u;
+	if (scratch.words[e] == 0u) return;
+	const uint count = scratch.words[e + 4u];
+	if (count == 0u) {
+		const uint age = scratch.words[e + 5u] + 1u;
+		if (float(age) > p.params.w) for (uint k = 0u; k < 16u; k++) scratch.words[e + k] = 0u;
+		else scratch.words[e + 5u] = age;
+		return;
+	}
+	const vec3 sum = vec3(scratch.words[e + 1u], scratch.words[e + 2u], scratch.words[e + 3u]) * (1.0 / 256.0);
+	// the history's weight: at most PTCacheMaxSamples samples, and at most PTCacheMaxFrames frames of this frame's count (the cache feeds
+	// itself, each frame one more round of bounces: a sample cap alone left it 7-17 % behind a change of light in the host scene `cache`)
+	const float n = min(uintBitsToFloat(scratch.words[e + 6u]), min(p.params.z, float(count) * max(p.params2.x - 1.0, 0.0)));
+	const vec3 old = vec3(uintBitsToFloat(scratch.words[e + 8u]), uintBitsToFloat(scratch.words[e + 9u]), uintBitsToFloat(scratch.words[e + 10u]));
+	const vec3 mean = (old * n + sum) / (n + float(count));
+	scratch.words[e + 8u] = floatBitsToUint(mean.x); scratch.words[e + 9u] = floatBitsToUint(mean.y); scratch.words[e + 10u] = floatBitsToUint(mean.z);
+	scratch.words[e + 6u] = floatBitsToUint(n + float(count));
+	scratch.words[e + 1u] = 0u; scratch.words[e + 2u] = 0u; scratch.words[e + 3u] = 0u; scratch.words[e + 4u] = 0u;
+	scratch.words[e + 5u] = 0u;
+}

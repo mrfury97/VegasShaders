@@ -228,6 +228,10 @@ namespace ManyLamps {
 	// PTGameLamps 4): world position, reach (Spec.r), colour as in the table (linear when linear lighting is compiled in); TableFrame says when
 	struct ActiveLamp { float pos[3], reach, colour[3]; };
 	inline std::vector<ActiveLamp> ActiveLamps;
+	// UNOFFICIAL 2026-11-07 every lamp in the table that is not hidden (app-culled), also those the game left out of THIS view's pass (a lamp
+	// behind the camera still lights what the camera sees through a bounce, and its own light reaches into the view): the path tracer's
+	// PTAllLamps (RtPathTrace.cpp)
+	inline std::vector<ActiveLamp> AllLamps;
 	inline unsigned StatTableMissing = 0, StatTableLamps = 0;
 	// UNOFFICIAL 2026-10-31 LampTableStandalone / TableLamps (F10 line, BeginFrame)
 	inline double StatBuildMs = 0;
@@ -408,6 +412,7 @@ namespace ManyLamps {
 		static std::vector<const ShadowSceneLight*> order;	// UNOFFICIAL 2026-10-31 TableLamps: lamp n of the table
 		order.clear();
 		ActiveLamps.clear();
+		AllLamps.clear();
 		const bool linear = LinearCompiled && LinearPreDecode::Gamma > 1.0f;
 		const float gamma = LinearPreDecode::Gamma;
 		int n = 0;
@@ -429,6 +434,7 @@ namespace ManyLamps {
 			order.push_back(light);
 			// as GetNumberOfActiveNonShadowLights: not switched off for the view (+0x110), not culled, not flagged (+0xEC)
 			const UInt8* raw8 = (const UInt8*)light;
+			if (!(((const UInt8*)source)[0x30] & 1)) AllLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });	// (2026-11-07) not hidden
 			if (*(const UInt16*)(raw8 + 0x110) != 0xFF && !(((const UInt8*)source)[0x30] & 1) && !raw8[0xEC]) {
 				active.push_back(light);
 				ActiveLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });

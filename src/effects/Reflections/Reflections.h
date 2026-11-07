@@ -49,6 +49,7 @@ public:
 		bool	RtEnabled;
 		float	RtMaxRoughness;		// rougher surfaces keep the old fallbacks (cube, grid, sky)
 		float	RtDistance;			// ray length, game units
+		bool	RtRaysOnly;		// 2026-11-07: RT on = the rays alone (RT DebugView 3's behaviour, the user's pick): no screen-march answers
 		int		RtDebugView;		// 1 sources, 2 hit distance, 3 RT without the screen march, 4 hit instance
 		bool	RtAlphaSolid;		// UNOFFICIAL 2026-11-06 diagnostic: alpha-tested hits taken as solid (is the alpha test what the rays miss?)
 		float	RtScreenTolerance;	// a hit counts as the screen's pixel when their depths differ by less than this share
@@ -74,6 +75,16 @@ public:
 		float	RtWeaponRoughness;	// 2026-10-30: the weapon's roughness where no material data says (MaterialAware / MaterialBuffer)
 		float	RtWeaponMetal;		// 2026-10-30: the weapon's metal guessed from its colour (grey = metal) x this, without material data
 		bool	RtHitTextures;		// 2026-10-29: with the core's [Main.Main.RayTracing] HitTextures, hits take the texture's colour (else the draw's average)
+		// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h, docs/next/RT-REFLECTION-DENOISER.md): in place of Temporal +
+		// Blur X / Y on frames the RT trace runs (native frames, not under DLSS RR); false: the old path exactly as before
+		bool	RtDenoiser;
+		int		RtDenoiserCore;		// 0 ours (ReBLUR-style), 1 AMD FidelityFX Reflections (ported; A/B)
+		float	RtDenoiserHistory;	// frames of history at most (rough surfaces)
+		float	RtDenoiserMirrorHistory;	// frames of history at the mirror limit (growing to History by roughness 0.25)
+		float	RtDenoiserBlur;		// ours: the blur's widest reach (grid pixels)
+		float	RtDenoiserAntiLag;	// ours: history further than this many sigmas from this frame's neighbourhood is cut
+		float	RtDenoiserClip;		// FFX: its temporal stability (history clip weight)
+		int		RtDenoiserDebugView;	// ours: 1 raw, 2 accumulated (no blur), 3 history length, 4 blur radius, 5 hit-point share, 6 hit distance
 	};
 	SettingsStruct	Settings;
 
@@ -169,7 +180,8 @@ public:	// (the RT core user in Reflections.cpp reads the images)
 		IDirect3DTexture9* Ray = nullptr;	IDirect3DSurface9* RaySurface = nullptr;
 		IDirect3DTexture9* Hit = nullptr;	IDirect3DSurface9* HitSurface = nullptr;	// written by the helper (shared back by the RT core)
 		IDirect3DTexture9* Shade = nullptr;	IDirect3DSurface9* ShadeSurface = nullptr;	// the same: the hit's albedo and sun visibility
-		IDirect3DTexture9* Spread = nullptr;	IDirect3DSurface9* SpreadSurface = nullptr;	// Resolve: the hit-distance share for the blur (R16F)
+		IDirect3DTexture9* Spread = nullptr;	IDirect3DSurface9* SpreadSurface = nullptr;	// Resolve: x the hit-distance share for the blur, y (2026-11-07) the hit distance (G16R16F)
+		IDirect3DTexture9* MarchHit = nullptr;	IDirect3DSurface9* MarchHitSurface = nullptr;	// UNOFFICIAL 2026-11-07 RayGen: the march's hit distance (R16F)
 	};
 	RtImagesStruct		Rt;
 	void				RtRegister();		// its RT core user (ShaderManager, once, before the core's first frame)
@@ -195,6 +207,9 @@ private:
 	D3DXMATRIX			rtWaterView, rtWaterInvView, rtWaterProj;	// that frame's camera
 	float				rtWaterScaleX = 1.0f, rtWaterScaleY = 1.0f;	// UNOFFICIAL 2026-11-03 that frame's RenderScale rect (1: native)
 	bool				rtResolved = false;	// Resolve drew this frame (the blur passes read Rt.Spread)
+	bool				rtDenoiseFrame = false;	// UNOFFICIAL 2026-11-07: this frame's RT trace feeds the RT reflection denoiser (RayGen / Resolve: rt5.x)
+	bool				RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture9* signal, const D3DXMATRIX* reproject);	// false: not run (the old path then)
+	void				RtDenoiseIdle();
 	bool				RtWanted() const;	// RT on, nothing failed, the RT core up (its helper alive, RT on that GPU)
 	bool				RtImages();			// makes Rt on first use
 	float				RtSunAmount() const;	// the sun's share for the hits (0 at night and indoors)

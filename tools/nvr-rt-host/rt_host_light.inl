@@ -30,7 +30,7 @@ static bool sceneFalloff(Ctx& c) {
 	for (int mode = 0; mode < 2; mode++) {
 		// the lamp as RtPathTrace.cpp hands it over: physical = reach x 2, colour x PTLampGain (1 here)
 		const float reach = mode ? 2.0f * gameReach : gameReach;
-		std::vector<float> image(size_t(kLightTexels) * (1 + kGridRows) * 2, 0.0f);
+		std::vector<float> image(size_t(kLightTexels) * (2 + kGridRows) * 2, 0.0f);
 		const V3 q = lampAt - cam.eye;
 		const float v[8] = { q.x, q.y, q.z, reach, bright, bright, bright, 0.0f };
 		std::memcpy(image.data(), v, sizeof(v));

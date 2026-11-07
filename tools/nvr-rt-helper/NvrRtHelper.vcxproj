@@ -64,6 +64,7 @@
     <ClInclude Include="NvrRtProtocol.h" />
     <ClInclude Include="NvrRtCapture.h" />
     <ClInclude Include="NvrRtReplay.inl" />
+    <ClInclude Include="NvrRtShadowDenoise.inl" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
 </Project>

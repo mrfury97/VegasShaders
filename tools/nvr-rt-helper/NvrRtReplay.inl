@@ -432,7 +432,8 @@
 		if (!CreateBuffer(h.vk, sizeof(VkAccelerationStructureInstanceKHR) * NVR_RT_MAX_INSTANCES, VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR, true, s.instances) ||
 			!CreateBuffer(h.vk, (VkDeviceSize)NVR_RT_PASS_CONSTANTS * NVR_RT_MAX_PASSES, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, true, s.constants) ||
 			!CreateBuffer(h.vk, sizeof(NvrRtInstanceRecord) * NVR_RT_MAX_INSTANCES, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, true, s.records) ||
-			!CreateTlas(h) || !EnsureScratch(h, h.tlasScratch) || !CreatePipelineLayout(h))
+			!CreateTlas(h) || !EnsureScratch(h, h.tlasScratch) || !CreatePipelineLayout(h) ||
+			!CreateBuffer(h.vk, 256ull << 20, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, false, h.scratchStore))	// (2026-11-07, protocol 6)
 			return 3;
 		VkCommandBuffer cmd = s.cmd;
 
@@ -669,9 +670,10 @@
 			asWrite.pAccelerationStructures = &h.tlas;
 			VkDescriptorBufferInfo ubo = { s.constants.buffer, (VkDeviceSize)p * NVR_RT_PASS_CONSTANTS, NVR_RT_PASS_CONSTANTS };
 			VkDescriptorImageInfo imageInfos[NVR_RT_PASS_IMAGES_MAX] = {};
-			VkWriteDescriptorSet writes[2 + NVR_RT_PASS_IMAGES_MAX + 2] = {};
+			VkWriteDescriptorSet writes[2 + NVR_RT_PASS_IMAGES_MAX + 3] = {};
 			VkDescriptorBufferInfo recordInfo = { s.records.buffer, 0, VK_WHOLE_SIZE };
 			VkDescriptorBufferInfo dataInfo = { h.geometryData.buffer, 0, VK_WHOLE_SIZE };
+			VkDescriptorBufferInfo scratchInfo = { h.scratchStore.buffer, 0, VK_WHOLE_SIZE };	// (2026-11-07, protocol 6; a capture holds no scratch: zero)
 			writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, &asWrite, s.sets[p], 0, 0, 1, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR };
 			writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], 1, 0, 1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, nullptr, &ubo };
 			for (uint32_t i = 0; i < pass.imageCount; i++) {
@@ -680,7 +682,8 @@
 			}
 			writes[2 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_RECORDS, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &recordInfo };
 			writes[3 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_GEOMETRY, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &dataInfo };
-			vkUpdateDescriptorSets(h.vk.device, 4 + pass.imageCount, writes, 0, nullptr);
+			writes[4 + pass.imageCount] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr, s.sets[p], NVR_RT_BINDING_SCRATCH, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &scratchInfo };
+			vkUpdateDescriptorSets(h.vk.device, 5 + pass.imageCount, writes, 0, nullptr);
 		}
 
 		// 7. the runs: images reset to the captured contents, the scene built, the passes, each timed
@@ -703,6 +706,7 @@
 				copy.imageExtent = { im.desc.width, im.desc.height, 1 };
 				vkCmdCopyBufferToImage(cmd, imageUpload.buffer, im.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
 			}
+			vkCmdFillBuffer(cmd, h.scratchStore.buffer, 0, VK_WHOLE_SIZE, 0u);	// (2026-11-07) every run from an empty scratch store: runs stay alike
 			FullBarrier(cmd);
 			if (h.queries) { vkCmdResetQueryPool(cmd, h.queries, 0, stampsPerRun); vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, 0); }
 			{
