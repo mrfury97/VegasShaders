@@ -945,7 +945,7 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
 // scale, jitter and half texel are folded in by the DLL); where that frame did not see this point (off screen, another depth there)
 // no contact (1). Compiled in only when SUN_CONTACT_FORWARD (ShaderRecord::BuildDefines: Bend && InLighting && ForwardShadows) AND the
 // including shader opts in (SHADOW_SUN_CONTACT_IN); not in the interior records; not with the sun cross-fade except in the land shaders
-// (the cross-fade owns c146-c166). Registers: s10 (s3 with LiveCube) / c228-c231 / c232 (+ b13 per draw; c148-c152 until 2026-11-08: Wetness.hlsl holds them); the land includers define SHADOW_SUN_CONTACT_LAND: s13 / c183-c187.
+// (the cross-fade owns c146-c166). Registers: s10 (s3 with LiveCube) / c160-c163 / c164 (+ b13 per draw; c148-c152 until 2026-11-08: Wetness.hlsl holds them); the land includers define SHADOW_SUN_CONTACT_LAND: s13 / c183-c187.
 // ---------------------------------------------------------------------------
 #ifndef SHADOW_SUN_CONTACT_IN
     #define SHADOW_SUN_CONTACT_IN 0
@@ -974,8 +974,8 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
     #else
         #define SUN_CONTACT_SAMPLER_REG s10
     #endif
-    #define SUN_CONTACT_MATRIX_REG c228	// (2026-11-08: was c148-c152, which 1.0.5's Wetness.hlsl holds, c146-c158)
-    #define SUN_CONTACT_DATA_REG c232
+    #define SUN_CONTACT_MATRIX_REG c160	// (2026-11-08: was c148-c152, which 1.0.5's Wetness.hlsl holds (c146-c159); c160-c166 is the sun cross-fade's, which Bend never compiles with in objects)
+    #define SUN_CONTACT_DATA_REG c164
 #endif
 row_major float4x4 TESR_ContactReproject : register(SUN_CONTACT_MATRIX_REG); // camera-relative world -> last frame's clip (w = view depth)
 float4 TESR_ContactForwardData : register(SUN_CONTACT_DATA_REG); // x 1 = use it (2 / 3: BendDebug 1 / 2), y depth match tolerance (fraction of depth), z start distance (view units; at least 64, the view model), w 1 / fade-in length
