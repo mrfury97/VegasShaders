@@ -72,7 +72,9 @@ void main() {
     float lastT = 0.0;
     float lastZ = position.z;
     float hitT = -1.0;
-    bool searching = !weapon;
+    // (2026-11-07 perf-reflfix) RaysOnly (RT DebugView 3): Resolve drops the march's answer on every pixel, so it is not marched at all
+    // (the same picture; the march's steps were the pass's whole cost). Mirrors and every other reflecting pixel take the rays alone.
+    bool searching = !weapon && !(RtOn && abs(RtDebugView - 3.0) < 0.5);
     for (float i = 1.0; i <= Steps && searching; i += 1.0) {
         float s = (i - 1.0 + jitter) / Steps;
         float t = RayLength * s * s + 2.0;

@@ -1,0 +1,146 @@
+#version 460
+// UNOFFICIAL 2026-11-07 (ptaaa-emissive; docs/next/RT-PATH-TRACING.md section "ptaaa-emissive") PTEmissive's light list: a pass before the
+// path tracer (core\RtPathTrace.cpp), one workgroup of 64 an emissive instance. The game's side (src/core/RtEmissiveRow.h has the layout)
+// gives each glowing instance a number e (the record's bits 8-15 = e + 1) and its entry in the lamp image's row 50 (transform, triangles,
+// geometry id, its index in the frame record). Here:
+//   1. its record: the lowest record at or below the game's index whose bits 8-15 are e + 1 (the helper only drops instances whose geometry
+//      is not built; records past this frame's count are stale and always higher) and whose geometry id matches;
+//   2. every triangle's power: its area (camera-relative, through the transform) x the luminance of its mean glow (16 stratified points,
+//      each a filtered read of the real glow map at a quarter of the triangle's size, or the glow atlas' texel: rtHitGlow, as the trace
+//      reads it). A triangle under 1e-4 of mean glow gets 0: never sampled as a light (a bounce ray that meets it counts it in full);
+//   3. the running sum of the powers in the triangles' order (the CDF the trace picks a triangle by: binary search), the instance's total,
+//      its bound sphere from the vertices themselves (the trace weighs instances by it).
+// Into the scratch store from word params.y x 4096 (RtEmissiveRow.h: kMax blocks of 32 words, then the list). PTGlow is left out (it
+// scales every instance alike).
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtEmissiveBuild.spv RtEmissiveBuild.comp
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 1, std140) uniform Pass {   // core\RtPathTrace.cpp EmissiveConstants
+	vec4 params;        // x emissive instances, y the scratch word the list starts at / 4096, zw unused
+} p;
+layout(set = 0, binding = 2, rg32f) uniform readonly image2D lampImage;     // (pass image 0) RtPathTrace's lamp image: row 50
+layout(set = 0, binding = 3, rgba8) uniform readonly image2D glowAtlas;     // (pass image 1) the glow atlas (GlowTextures)
+layout(set = 0, binding = 20, std430) buffer Scratch { uint words[]; } scratch;
+
+#define RT_GLOW_ATLAS glowAtlas
+#include "RtHit.glsl"
+
+// (ptaaa-hangfix) triangle prim of record g lies inside the geometry data (its three indices, their positions and texcoords): the
+// emissive list's triangle counts come from the game's side, the arena is not checked by the hardware (no robustBufferAccess). An
+// instance with any triangle outside is not listed (the trace then never reads its triangles: it checks only prim < triangles)
+bool RtTriangleInArena(uint g, uint prim) {
+	const uint len = uint(words.length()), io = records[g].indexOffset, vo = records[g].vertexOffset;
+	if (io >= len || prim >= (len - io) / 3u || vo >= len) return false;
+	const uvec3 i = rtHitTriangle(g, prim);
+	const uint m = max(i.x, max(i.y, i.z));
+	if (m >= (len - vo) / 3u) return false;
+	if (rtHitHasTexcoords(g)) { const uint uo = floatBitsToUint(records[g].albedo.w); if (uo >= len || m >= (len - uo) / 2u) return false; }
+	return true;
+}
+const int kEmissiveRow = 50;      // RtEmissiveRow.h kRow
+const uint kBlockWords = 32u, kMax = 128u, kTrianglesMax = 65536u;   // RtEmissiveRow.h
+
+vec2 Entry(int e, int texel) { return imageLoad(lampImage, ivec2(8 * e + texel, kEmissiveRow)).rg; }
+
+shared uint sFound, sOutside;
+shared float sScan[64];
+shared vec3 sLo[64], sHi[64];
+
+void main() {
+	const int e = int(gl_WorkGroupID.x), t = int(gl_LocalInvocationID.x);
+	const int count = p.params.x > 0.0 ? min(int(min(p.params.x, float(kMax)) + 0.5), int(kMax)) : 0;   // (ptaaa-hangfix: NaN-safe)
+	if (e >= count) return;   // (whole workgroups)
+	// (ptaaa-hangfix) the blocks and the list must lie inside the scratch store (no robustBufferAccess in the helper: a write past it can
+	// fault the GPU): else nothing is written (the trace checks the same and samples no emissive light). Uniform: whole workgroups return.
+	const uint total = uint(scratch.words.length());
+	if (!(p.params.y >= 0.0) || p.params.y > float(total / 4096u)) return;
+	const uint base0 = uint(p.params.y + 0.5) * 4096u;
+	if (base0 + kMax * kBlockWords + kTrianglesMax > total) return;
+	const uint block = base0 + uint(e) * kBlockWords, list = base0 + kMax * kBlockWords;
+	const vec4 r0 = vec4(Entry(e, 0), Entry(e, 1)), r1 = vec4(Entry(e, 2), Entry(e, 3)), r2 = vec4(Entry(e, 4), Entry(e, 5));
+	const vec2 e6 = Entry(e, 6), e7 = Entry(e, 7);
+	// (ptaaa-hangfix) counts clamped before the float -> uint conversions (a huge or NaN float has no defined uint): the same where the row
+	// is sane (triangles <= kTrianglesMax, records <= 32767)
+	const uint tris = uint(clamp(e6.x, 0.0, float(kTrianglesMax + 1u)) + 0.5), geometryId = uint(e6.y + 0.5), last = uint(clamp(e7.y, 0.0, 32767.0) + 0.5);
+	uint first = 0u;   // this instance's place in the list: the triangles of the ones before it
+	for (int k = 0; k < e; k++) first += uint(clamp(Entry(k, 6).x, 0.0, float(kTrianglesMax + 1u)) + 0.5);
+
+	// 1. the record
+	if (t == 0) { sFound = 0xFFFFFFFFu; sOutside = 0u; }
+	barrier();
+	const uint recordCount = uint(records.length());   // (ptaaa-hangfix: never past the records buffer)
+	for (uint g = uint(t); g <= last && g < recordCount; g += 64u) {
+		const uint f = records[g].flags;
+		if ((f & 0x24u) == 0x04u && ((f >> 8) & 0xFFu) == uint(e + 1)) atomicMin(sFound, g);   // (glow, not alpha-tested)
+	}
+	barrier();
+	const uint g = sFound;
+	const bool ok = g != 0xFFFFFFFFu && (records[g].geometryId & 0x00FFFFFFu) == geometryId &&	// (2026-11-07 perf-reflfix: bit 31 = the smooth normals)
+		 records[g].vertexOffset != 0xFFFFFFFFu && tris > 0u &&
+		tris <= kTrianglesMax && first <= kTrianglesMax - tris;   // (ptaaa-hangfix: no uint wrap; was first + tris <= 65536)
+
+	// 2. + 3. the triangles' power, running sum, bound
+	float carry = 0.0;
+	vec3 lo = vec3(1.0e30), hi = vec3(-1.0e30);
+	for (uint c0 = 0u; c0 < (ok ? tris : 0u); c0 += 64u) {
+		const uint prim = c0 + uint(t);
+		float power = 0.0;
+		const bool inside = prim < tris && RtTriangleInArena(g, prim);   // (ptaaa-hangfix)
+		if (prim < tris && !inside) atomicOr(sOutside, 1u);
+		if (inside) {
+			const uvec3 i = rtHitTriangle(g, prim);
+			const vec3 o0 = rtHitObjectPosition(g, i.x), o1 = rtHitObjectPosition(g, i.y), o2 = rtHitObjectPosition(g, i.z);
+			const vec3 a = vec3(dot(r0.xyz, o0) + r0.w, dot(r1.xyz, o0) + r1.w, dot(r2.xyz, o0) + r2.w);
+			const vec3 b = vec3(dot(r0.xyz, o1) + r0.w, dot(r1.xyz, o1) + r1.w, dot(r2.xyz, o1) + r2.w);
+			const vec3 c = vec3(dot(r0.xyz, o2) + r0.w, dot(r1.xyz, o2) + r1.w, dot(r2.xyz, o2) + r2.w);
+			lo = min(lo, min(a, min(b, c))); hi = max(hi, max(a, max(b, c)));
+			const float area = 0.5 * length(cross(b - a, c - a));
+			if (area > 1.0e-6) {
+#ifndef RT_NO_REAL_TEXTURES
+				rtConeWidth = 0.25 * sqrt(2.0 * area);   // (each read a filtered quarter of the triangle; no direction: one isotropic mip)
+				rtConeDir = vec3(0.0);
+#endif
+				vec3 sum = vec3(0.0);
+				for (int k = 0; k < 16; k++) {   // 4 x 4 stratified points, uniform over the triangle
+					const float u = (float(k & 3) + 0.5) * 0.25, w = (float(k >> 2) + 0.5) * 0.25, su = sqrt(u);
+					sum += rtHitGlow(g, prim, vec2(su * (1.0 - w), su * w));
+				}
+				const float glow = dot(max(sum, vec3(0.0)) / 16.0, vec3(0.2126, 0.7152, 0.0722));
+				power = glow >= 1.0e-4 ? glow * area : 0.0;
+				if (!(power < 3.0e38)) power = 0.0;
+			}
+		}
+		sScan[t] = power;
+		barrier();
+		for (int off = 1; off < 64; off <<= 1) {   // inclusive scan (Hillis-Steele)
+			const float v = t >= off ? sScan[t - off] : 0.0;
+			barrier();
+			sScan[t] += v;
+			barrier();
+		}
+		if (prim < tris) scratch.words[list + first + prim] = floatBitsToUint(carry + sScan[t]);
+		carry += sScan[63];
+		barrier();
+	}
+	sLo[t] = lo; sHi[t] = hi;
+	barrier();
+	for (int off = 32; off > 0; off >>= 1) {
+		if (t < off) { sLo[t] = min(sLo[t], sLo[t + off]); sHi[t] = max(sHi[t], sHi[t + off]); }
+		barrier();
+	}
+	if (t == 0) {
+		const bool usable = ok && carry > 0.0 && all(lessThanEqual(sLo[0], sHi[0])) && sOutside == 0u;   // (ptaaa-hangfix: + every triangle in the data)
+		const vec3 centre = 0.5 * (sLo[0] + sHi[0]);
+		const float radius = 0.5 * length(sHi[0] - sLo[0]) * 1.001 + 0.5;   // (float slack: every point of every triangle inside)
+		scratch.words[block] = usable ? g + 1u : 0u;
+		scratch.words[block + 1u] = floatBitsToUint(usable ? carry : 0.0);
+		scratch.words[block + 2u] = floatBitsToUint(centre.x); scratch.words[block + 3u] = floatBitsToUint(centre.y);
+		scratch.words[block + 4u] = floatBitsToUint(centre.z); scratch.words[block + 5u] = floatBitsToUint(radius);
+		scratch.words[block + 6u] = usable ? tris : 0u;
+		scratch.words[block + 7u] = first;
+		const vec4 rows[3] = vec4[3](r0, r1, r2);
+		for (int r = 0; r < 3; r++) for (int k = 0; k < 4; k++) scratch.words[block + 8u + uint(r * 4 + k)] = floatBitsToUint(rows[r][k]);
+	}
+}

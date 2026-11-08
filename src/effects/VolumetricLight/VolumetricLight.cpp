@@ -3,6 +3,7 @@
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (only while Diagnostics::VLCapturing)
+#include "../../core/RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility
 
 static void ReadLook(const char* section, VolumetricLightEffect::LookStruct& look) {
 	look.Strength = std::clamp(TheSettingManager->GetSettingF(section, "Strength"), 0.0f, 10.0f);
@@ -35,6 +36,12 @@ void VolumetricLightEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_VolumetricLightReproject", (D3DXVECTOR4*)&Constants.Reproject);
 	TheShaderManager->RegisterConstant("TESR_VolumetricLightGridLayout", &Constants.GridLayout);
 	TheShaderManager->RegisterConstant("TESR_VolumetricLightGridData", &Constants.GridData);
+	TheShaderManager->RegisterConstant("TESR_VolumetricLightRt", &Constants.Rt);	// UNOFFICIAL 2026-11-07 (ptaaa-fog)
+}
+
+float VolumetricLightEffect::GridDistance() const {	// UNOFFICIAL 2026-11-07 (ptaaa-fog): as UpdateConstants' Data.w
+	const float day = std::clamp(TheShaderManager->GameState.isDayTime, 0.0f, 1.0f);
+	return std::lerp(Settings.Night.MaxDistance, Settings.Day.MaxDistance, day);
 }
 
 void VolumetricLightEffect::RegisterTextures() {
@@ -51,6 +58,9 @@ void VolumetricLightEffect::RegisterTextures() {
 	TheTextureManager->InitTexture("TESR_VolumetricLightGrid", &Textures.GridTexture, &Textures.GridSurface, gw * 8, gh * 8, D3DFMT_A16B16G16R16F);
 	TheTextureManager->InitTexture("TESR_VolumetricLightGridTemp", &Textures.GridTempTexture, &Textures.GridTempSurface, gw * 8, gh * 8, D3DFMT_A16B16G16R16F);
 	Constants.GridLayout = D3DXVECTOR4((float)gw, (float)gh, 1.0f / (gw * 8), 1.0f / (gh * 8));
+	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the traced sun visibility per cell, the same layout (core/RtFogVisibility.h; 1.8 MB at 1440p). Made
+	// whatever the settings (the RT core copies into it only while it traces; TESR_VolumetricLightRt.x 0 = never read)
+	TheTextureManager->InitTexture("TESR_RtFogVisibility", &Textures.RtVisibilityTexture, &Textures.RtVisibilitySurface, gw * 8, gh * 8, D3DFMT_R16F);
 }
 
 // UNOFFICIAL 2026-10-18: one line on what the march's history did since the last report (only when it drew; the froxel grid has none).
@@ -106,6 +116,9 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	// UNOFFICIAL 2026-11-01 the report burst's VL stages (core/Diagnostics.cpp): while a burst captures, this frame's values and each
 	// stage's output (shrunk on the GPU into the burst frame's slot). Outside a burst this is false and nothing of it runs.
 	const bool report = Diagnostics::VLCapturing;
+	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the traced sun visibility in the air (core/RtFogVisibility.h), when the RT core traced it this frame
+	// (x 0: the cascades, as before). Both paths read it: the grid's cells and the march's samples.
+	Constants.Rt = RtFogVisibility::Constant(Constants.Data.w);
 	if (CompositeTechnique() == 8) {
 		if (report) {	// (the grid has no march stages: only that it ran)
 			Diagnostics::VLValues values;
@@ -257,7 +270,8 @@ namespace {
 		"TESR_VolumetricLightGridLayout", "TESR_VolumetricLightGridData", "TESR_FogData", "TESR_SunAmount", "TESR_GameTime",
 		"TESR_VolumetricFogDensity", "TESR_VolumetricFogShape", "TESR_VolumetricFogWind", "TESR_VolumetricFogScatter",
 		"TESR_VolumetricFogWeather", "TESR_VolumetricFogNight", "TESR_VolumetricFogNightScatter", "TESR_CameraPosition",
-		"TESR_GameMultisample" };	// (UNOFFICIAL 2026-11-05: the game's MSAA and the composites' sky shares, Compute/MsaaSkyEdge.glsl)
+		"TESR_GameMultisample",	// (UNOFFICIAL 2026-11-05: the game's MSAA and the composites' sky shares, Compute/MsaaSkyEdge.glsl)
+		"TESR_VolumetricLightRt" };	// (UNOFFICIAL 2026-11-07 ptaaa-fog: RT fog visibility, VL_RT)
 	struct ExtConstants {
 		D3DXMATRIX	Matrices[_countof(ExtMatrixNames)];
 		D3DXVECTOR4	Vectors[_countof(ExtVectorNames)];
@@ -294,11 +308,12 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 	UINT count = 0;
 	switch (techniqueIndex) {
 	case 0: textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = Textures.BlurTexture; textures[3] = skyCoverage; count = 4; break;
-	case 1: textures[0] = depth; textures[1] = atlas; count = 2; break;
+	// (UNOFFICIAL 2026-11-07 ptaaa-fog) March and GridLight also read the traced visibility (binding 2; only while TESR_VolumetricLightRt.x > 0)
+	case 1: textures[0] = depth; textures[1] = atlas; textures[2] = Textures.RtVisibilityTexture; count = 3; break;
 	case 2: textures[0] = Textures.TempTexture; count = 1; break;
 	case 3: textures[0] = Textures.MarchTexture; textures[1] = Textures.HistoryTexture; count = 2; break;
 	case 4: textures[0] = Textures.MarchTexture; count = 1; break;
-	case 5: textures[0] = atlas; textures[1] = fogNoise; count = 2; break;	// the noise is bound whether or not the fog volume reads it
+	case 5: textures[0] = atlas; textures[1] = fogNoise; textures[2] = Textures.RtVisibilityTexture; count = 3; break;	// the noise is bound whether or not the fog volume reads it
 	case 6: textures[0] = Textures.GridTexture; count = 1; break;
 	case 7: textures[0] = Textures.GridTempTexture; count = 1; break;
 	case 8: textures[0] = TheTextureManager->RenderedTexture; textures[1] = depth; textures[2] = Textures.GridTexture; textures[3] = skyCoverage; count = 4; break;

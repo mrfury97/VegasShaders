@@ -1,0 +1,277 @@
+// UNOFFICIAL 2026-11-07 (protocol 8, rtgap-tessblas) NvrRtHelper's displacement kernel (embedded in the helper as RtDisplace.h; rebuild that
+// after a change:
+//   glslangValidator -V --target-env vulkan1.2 --vn kRtDisplaceSpv -o RtDisplace.h RtDisplace.comp
+// NvrRtDisplace.inl runs it; docs/next/RT-DETAIL-GAPS.md 1c has the design.
+//
+// The game's tessellation (fork 1.7-displace) moves the land and the parallax objects near the camera along their normal by their height
+// maps (src/hlsl/NewVegas/Compute/Tess/TerrainDisplace.tese, ObjectDisplace.tese). Here a copy of such a geometry is split, every source
+// triangle into N x N (the same N for the whole copy), and every new point moved by the same formula from the same textures (the game's
+// own, real textures: set 0 here = the helper's real-texture set), so the RT scene holds the bumps the raster draws. Four modes, one job
+// (Job below) a dispatch, one thread per source triangle (MEASURE, NORMALS, INDICES) or per new point (DISPLACE):
+//   MEASURE   the longest source edge (object units) and the longest edge in uv, atomicMax into result[job] / result[job + 1] (float bits)
+//   NORMALS   smooth vertex normals when the game's are not sent: each triangle's unit normal (land: turned up) added in 1/65536 into the
+//             copy's accumulator (integer atomics: the same sum whatever the order)
+//   INDICES   the copy's triangle list (degenerate source triangles stay degenerate: nothing to hit, as the tessellation drops them)
+//   DISPLACE  the copy's points: position, texcoord
+// Crack-free: a point on a shared edge is computed from the edge's two corners alone with the same integer barycentrics in both triangles
+// (precise, so the sums are the same bit for bit), and everything it reads there (uv, normal, the per-corner weights, the land's height
+// detail level, rounded to 1/256 as the TES) depends only on those corners. Objects are pinned to 0 on every source edge (EdgeFade) as
+// the game's are.
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 1) uniform sampler texSampler;           // the real textures' sampler (linear, mips, repeat)
+layout(set = 0, binding = 2) uniform texture2D textures[];          // NVR_RT_BINDING_TEXTURES (ids 1 ..)
+
+struct Job {
+	uvec4 a;     // mode, source triangles, N, kind (0 land, 1 object)
+	uvec4 b;     // words: source positions, source triangle list, source texcoords, normal accumulator (3 per source vertex)
+	uvec4 c;     // words: copy positions, copy triangle list, copy texcoords; the game's normals (DATA words, ~0: none)
+	uvec4 d;     // words: weights A (DATA: 3V xyz then 2V zw), weights B (3V xyz) (~0: none); layer count; height bits
+	uvec4 tex;   // texture ids: x = layer 0 | 1 << 16, y = 2 | 3, z = 4 | 5, w = 6
+	vec4 row0, row1, row2;   // object -> scene (camera relative), rows
+	vec4 p0;     // Strength, Center, Contrast, LodBias
+	vec4 p1;     // FadeStart, FadeEnd, BumpSize (land) | EdgeFade (object), BorderGrid (land)
+	vec4 p2;     // the camera's forward (scene) xyz, the object's scale
+	vec4 p3;     // the eye in object space xyz, the copy's point spacing (object units: longest source edge / N)
+	uvec4 e;     // source vertex count, 0, 0, 0
+};
+
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words { uint w[]; };
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Jobs { Job j[]; };
+layout(push_constant) uniform Push {
+	uvec2 data;     // the geometry data (binding 11 of the passes)
+	uvec2 jobs;     // this slot's jobs
+	uvec2 result;   // this slot's measurements (2 uints a job)
+	uint job;
+	uint threads;
+} pc;
+
+#define MODE_MEASURE  0u
+#define MODE_NORMALS  1u
+#define MODE_INDICES  2u
+#define MODE_DISPLACE 3u
+#define NONE 0xFFFFFFFFu
+
+vec3 load3(Words d, uint at) { return vec3(uintBitsToFloat(d.w[at]), uintBitsToFloat(d.w[at + 1u]), uintBitsToFloat(d.w[at + 2u])); }
+vec2 load2(Words d, uint at) { return vec2(uintBitsToFloat(d.w[at]), uintBitsToFloat(d.w[at + 1u])); }
+
+uint texId(Job jb, uint layer) {
+	const uint word = layer == 0u ? jb.tex.x : layer == 1u ? jb.tex.x >> 16 : layer == 2u ? jb.tex.y : layer == 3u ? jb.tex.y >> 16 :
+		layer == 4u ? jb.tex.z : layer == 5u ? jb.tex.z >> 16 : jb.tex.w;
+	return word & 0xFFFFu;
+}
+
+float fadeAt(Job jb, float dist) {
+	return 1.0 - smoothstep(jb.p1.x, max(jb.p1.y, jb.p1.x + 1.0), dist);
+}
+
+// A point on the copy: (a, b) of the source triangle's N x N grid, row b holds a = 0 .. N - b
+uint rowStart(uint b, uint n) { return b * (n + 1u) - (b * (b - 1u)) / 2u; }
+
+// The height of one texture at uv, between two detail levels (as the TES's HEIGHT_AT), from the channel the kind uses
+float heightAt(uint id, vec2 uv, float lod, bool red) {
+	const vec4 lo = textureLod(sampler2D(textures[nonuniformEXT(id)], texSampler), uv, floor(lod));
+	const vec4 hi = textureLod(sampler2D(textures[nonuniformEXT(id)], texSampler), uv, floor(lod) + 1.0);
+	return red ? mix(lo.r, hi.r, fract(lod)) : mix(lo.a, hi.a, fract(lod));
+}
+
+float meanOf(uint id, bool red) {
+	const int levels = textureQueryLevels(sampler2D(textures[nonuniformEXT(id)], texSampler));
+	if (levels <= 1) return 0.5;
+	const vec4 m = texelFetch(sampler2D(textures[nonuniformEXT(id)], texSampler), ivec2(0), levels - 1);
+	return red ? m.r : m.a;
+}
+
+void main() {
+	const uint g = gl_GlobalInvocationID.x;
+	if (g >= pc.threads) return;
+	Jobs jobs = Jobs(pc.jobs);
+	const Job jb = jobs.j[pc.job];
+	Words d = Words(pc.data);
+	const uint mode = jb.a.x, n = max(jb.a.z, 1u);
+	const bool land = jb.a.w == 0u;
+	const uint points = (n + 1u) * (n + 2u) / 2u;
+
+	const uint t = mode == MODE_DISPLACE ? g / points : g;
+	if (t >= jb.a.y) return;
+	const uint i0 = d.w[jb.b.y + 3u * t], i1 = d.w[jb.b.y + 3u * t + 1u], i2 = d.w[jb.b.y + 3u * t + 2u];
+	const uint vcount = jb.e.x;
+	const bool bad = i0 >= vcount || i1 >= vcount || i2 >= vcount;
+	const vec3 p0 = bad ? vec3(0.0) : load3(d, jb.b.x + 3u * i0), p1 = bad ? vec3(0.0) : load3(d, jb.b.x + 3u * i1),
+		p2 = bad ? vec3(0.0) : load3(d, jb.b.x + 3u * i2);
+	const vec3 faceRaw = cross(p1 - p0, p2 - p0);
+	const bool degenerate = bad || i0 == i1 || i1 == i2 || i2 == i0 || dot(faceRaw, faceRaw) < 1e-12;
+
+	if (mode == MODE_MEASURE) {
+		if (degenerate) return;
+		const vec2 u0 = load2(d, jb.b.z + 2u * i0), u1 = load2(d, jb.b.z + 2u * i1), u2 = load2(d, jb.b.z + 2u * i2);
+		const float len = max(max(distance(p0, p1), distance(p1, p2)), distance(p2, p0));
+		const float uvLen = max(max(distance(u0, u1), distance(u1, u2)), distance(u2, u0));
+		Words r = Words(pc.result);
+		atomicMax(r.w[2u * pc.job], floatBitsToUint(len));
+		atomicMax(r.w[2u * pc.job + 1u], floatBitsToUint(uvLen));
+		return;
+	}
+	if (mode == MODE_NORMALS) {
+		if (degenerate) return;
+		vec3 f = normalize(faceRaw);
+		if (land && f.z < 0.0) f = -f;   // the land is a height field: its normals point up whatever the strips' winding
+		const ivec3 q = ivec3(round(f * 65536.0));
+		for (uint k = 0u; k < 3u; k++) {
+			const uint v = k == 0u ? i0 : k == 1u ? i1 : i2;
+			atomicAdd(d.w[jb.b.w + 3u * v], uint(q.x));
+			atomicAdd(d.w[jb.b.w + 3u * v + 1u], uint(q.y));
+			atomicAdd(d.w[jb.b.w + 3u * v + 2u], uint(q.z));
+		}
+		return;
+	}
+	if (mode == MODE_INDICES) {
+		const uint base = t * points, out0 = jb.c.y + 3u * t * n * n;
+		uint s = 0u;
+		for (uint b = 0u; b < n; b++) {
+			for (uint a = 0u; a + b < n; a++) {   // upward: (a, b) (a + 1, b) (a, b + 1)
+				const uint o = out0 + 3u * s++;
+				d.w[o] = degenerate ? base : base + rowStart(b, n) + a;
+				d.w[o + 1u] = degenerate ? base : base + rowStart(b, n) + a + 1u;
+				d.w[o + 2u] = degenerate ? base : base + rowStart(b + 1u, n) + a;
+			}
+			for (uint a = 0u; a + b + 1u < n; a++) {   // downward: (a + 1, b) (a + 1, b + 1) (a, b + 1)
+				const uint o = out0 + 3u * s++;
+				d.w[o] = degenerate ? base : base + rowStart(b, n) + a + 1u;
+				d.w[o + 1u] = degenerate ? base : base + rowStart(b + 1u, n) + a + 1u;
+				d.w[o + 2u] = degenerate ? base : base + rowStart(b + 1u, n) + a;
+			}
+		}
+		return;
+	}
+
+	// ---- DISPLACE: point k of triangle t
+	const uint k = g - t * points;
+	uint row = 0u;
+	while (row < n && rowStart(row + 1u, n) <= k) row++;
+	const uint col = k - rowStart(row, n);
+	// integer barycentrics: corner 1 a / N, corner 2 b / N, corner 0 the rest
+	const float w1 = float(col) / float(n), w2 = float(row) / float(n), w0 = float(n - col - row) / float(n);
+	const uint outIndex = t * points + k;
+	const vec2 u0 = load2(d, jb.b.z + 2u * i0), u1 = load2(d, jb.b.z + 2u * i1), u2 = load2(d, jb.b.z + 2u * i2);
+	precise vec3 p = p0 * w0 + p1 * w1 + p2 * w2;
+	precise vec2 uv = u0 * w0 + u1 * w1 + u2 * w2;
+
+	if (!degenerate && jb.p0.x != 0.0) {
+		// the normal: the game's (DATA) or the smooth one, per corner, interpolated and normalized (as the TES)
+		vec3 n0, n1, n2;
+		if (jb.c.w != NONE) {
+			n0 = load3(d, jb.c.w + 3u * i0); n1 = load3(d, jb.c.w + 3u * i1); n2 = load3(d, jb.c.w + 3u * i2);
+		} else {
+			n0 = vec3(ivec3(d.w[jb.b.w + 3u * i0], d.w[jb.b.w + 3u * i0 + 1u], d.w[jb.b.w + 3u * i0 + 2u]));
+			n1 = vec3(ivec3(d.w[jb.b.w + 3u * i1], d.w[jb.b.w + 3u * i1 + 1u], d.w[jb.b.w + 3u * i1 + 2u]));
+			n2 = vec3(ivec3(d.w[jb.b.w + 3u * i2], d.w[jb.b.w + 3u * i2 + 1u], d.w[jb.b.w + 3u * i2 + 2u]));
+		}
+		const vec3 fallback = normalize(faceRaw) * ((land && faceRaw.z < 0.0) ? -1.0 : 1.0);
+		n0 = dot(n0, n0) > 1e-12 ? normalize(n0) : fallback;
+		n1 = dot(n1, n1) > 1e-12 ? normalize(n1) : fallback;
+		n2 = dot(n2, n2) > 1e-12 ? normalize(n2) : fallback;
+		precise vec3 nrm = n0 * w0 + n1 * w1 + n2 * w2;
+		nrm = dot(nrm, nrm) > 1e-12 ? normalize(nrm) : vec3(0.0, 0.0, 1.0);
+
+		const float strength = jb.p0.x, center = jb.p0.y, contrast = jb.p0.z, lodBias = jb.p0.w;
+		float disp = 0.0;
+		if (land) {
+			// TerrainDisplace.tesc: per corner the distance fade (from the eye, object space) and none on a quadrant border; interpolated
+			const vec3 eye = jb.p3.xyz;
+			const float f0 = fadeAt(jb, distance(p0, eye)), f1 = fadeAt(jb, distance(p1, eye)), f2 = fadeAt(jb, distance(p2, eye));
+			float r0 = f0, r1 = f1, r2 = f2;
+			const float grid = jb.p1.w;
+			if (grid > 0.0) {
+				vec2 m;
+				m = abs(fract(p0.xy / grid + 0.5) - 0.5) * grid; if (min(m.x, m.y) < 0.5) r0 = 0.0;
+				m = abs(fract(p1.xy / grid + 0.5) - 0.5) * grid; if (min(m.x, m.y) < 0.5) r1 = 0.0;
+				m = abs(fract(p2.xy / grid + 0.5) - 0.5) * grid; if (min(m.x, m.y) < 0.5) r2 = 0.0;
+			}
+			const float weight = r0 * w0 + r1 * w1 + r2 * w2;
+			const float fadeZ = f0 * w0 + f1 * w1 + f2 * w2;
+			// the height's detail level: the copy's point spacing, never finer than BumpSize, through this triangle's uv-per-unit map (land
+			// uv is a plane over x / y: the same for every triangle of a quadrant), rounded to 1/256 of a level as the TES
+			const vec2 e1 = p1.xy - p0.xy, e2 = p2.xy - p0.xy;
+			const float det2 = e1.x * e2.y - e1.y * e2.x;
+			float uvPerUnit = 0.0;
+			if (abs(det2) > 1e-3) {
+				const mat2 J = mat2(u1 - u0, u2 - u0) * inverse(mat2(e1, e2));
+				uvPerUnit = sqrt(abs(determinant(J)));
+			}
+			float lodUv = -30.0;
+			if (uvPerUnit > 0.0) {
+				lodUv = floor(log2(max(jb.p3.w, 1e-3) * uvPerUnit) * 256.0 + 0.5) / 256.0;
+				if (jb.p1.z > 0.0) lodUv = max(lodUv, floor(log2(jb.p1.z * uvPerUnit) * 256.0 + 0.5) / 256.0);
+			}
+			float h = 0.5;
+			if (weight > 0.0) {
+				// the layer weights (COLOR0 / COLOR1 of the land's vertex shader = its TEXCOORD1 / 2), interpolated
+				float lw[7] = float[7](1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+				if (jb.d.x != NONE) {
+					const uint vc = jb.e.x;
+					const vec3 a = load3(d, jb.d.x + 3u * i0) * w0 + load3(d, jb.d.x + 3u * i1) * w1 + load3(d, jb.d.x + 3u * i2) * w2;
+					const float a3 = uintBitsToFloat(d.w[jb.d.x + 3u * vc + 2u * i0 + 1u]) * w0 + uintBitsToFloat(d.w[jb.d.x + 3u * vc + 2u * i1 + 1u]) * w1 +
+						uintBitsToFloat(d.w[jb.d.x + 3u * vc + 2u * i2 + 1u]) * w2;
+					lw[0] = a.x; lw[1] = a.y; lw[2] = a.z; lw[3] = a3;
+					if (jb.d.y != NONE) {
+						const vec3 b = load3(d, jb.d.y + 3u * i0) * w0 + load3(d, jb.d.y + 3u * i1) * w1 + load3(d, jb.d.y + 3u * i2) * w2;
+						lw[4] = b.x; lw[5] = b.y; lw[6] = b.z;
+					}
+				}
+				float hsum = 0.0, wsum = 0.0;
+				const uint layers = clamp(jb.d.z, 1u, 7u);
+				for (uint l = 0u; l < layers; l++) {
+					if (!(lw[l] > 0.0005)) continue;
+					float r = 0.0;
+					const uint id = texId(jb, l);
+					if (((jb.d.w >> l) & 1u) != 0u && id != 0u) {
+						const vec2 size = vec2(textureSize(sampler2D(textures[nonuniformEXT(id)], texSampler), 0));
+						const float lod = max(lodUv + log2(max(size.x, 1.0)) + lodBias, 0.0);
+						r = heightAt(id, uv, lod, false) - meanOf(id, false);
+					}
+					hsum += lw[l] * r;
+					wsum += lw[l];
+				}
+				const float x = 2.0 * contrast * (wsum > 0.0 ? hsum / wsum : 0.0);
+				h = 0.5 + 0.5 * x * inversesqrt(1.0 + x * x);
+			}
+			disp = strength * (weight * (h - 0.5) + fadeZ * (0.5 - center));
+		} else {
+			// ObjectDisplace.tesc / .tese: the fade by each corner's view depth, interpolated; pinned to 0 on the source edges over EdgeFade
+			// generated steps (every edge has N here)
+			const vec3 fwd = jb.p2.xyz;
+			const vec3 s0 = vec3(dot(jb.row0.xyz, p0) + jb.row0.w, dot(jb.row1.xyz, p0) + jb.row1.w, dot(jb.row2.xyz, p0) + jb.row2.w);
+			const vec3 s1 = vec3(dot(jb.row0.xyz, p1) + jb.row0.w, dot(jb.row1.xyz, p1) + jb.row1.w, dot(jb.row2.xyz, p1) + jb.row2.w);
+			const vec3 s2 = vec3(dot(jb.row0.xyz, p2) + jb.row0.w, dot(jb.row1.xyz, p2) + jb.row1.w, dot(jb.row2.xyz, p2) + jb.row2.w);
+			const float fade = fadeAt(jb, dot(fwd, s0)) * w0 + fadeAt(jb, dot(fwd, s1)) * w1 + fadeAt(jb, dot(fwd, s2)) * w2;
+			float pin = 1.0;
+			const float edgeFade = jb.p1.z;
+			if (edgeFade > 0.0) {
+				pin = min(min(clamp(w0 * float(n) / edgeFade, 0.0, 1.0), clamp(w1 * float(n) / edgeFade, 0.0, 1.0)), clamp(w2 * float(n) / edgeFade, 0.0, 1.0));
+				pin = pin * pin * (3.0 - 2.0 * pin);
+			}
+			const float weight = fade * pin;
+			const uint id = texId(jb, 0u);
+			const float scale = jb.p2.w;
+			if (weight > 0.0 && id != 0u && scale > 1e-6) {
+				const float uvStep = max(max(distance(u0, u1), distance(u1, u2)), distance(u2, u0)) / float(n);
+				const vec2 size = vec2(textureSize(sampler2D(textures[nonuniformEXT(id)], texSampler), 0));
+				const int levels = textureQueryLevels(sampler2D(textures[nonuniformEXT(id)], texSampler));
+				const float lod = clamp(log2(max(uvStep, 1e-8)) + log2(max(size.x, 1.0)) + lodBias, 0.0, float(max(levels - 1, 0)));
+				const float x = 2.0 * contrast * (heightAt(id, uv, lod, true) - meanOf(id, true));
+				const float h = 0.5 + 0.5 * x * inversesqrt(1.0 + x * x);
+				disp = strength * weight * (h - center) / scale;
+			}
+		}
+		p = p + nrm * disp;
+	}
+	const uint ov = jb.c.x + 3u * outIndex;
+	d.w[ov] = floatBitsToUint(p.x); d.w[ov + 1u] = floatBitsToUint(p.y); d.w[ov + 2u] = floatBitsToUint(p.z);
+	const uint ou = jb.c.z + 2u * outIndex;
+	d.w[ou] = floatBitsToUint(uv.x); d.w[ou + 1u] = floatBitsToUint(uv.y);
+}

@@ -17,3 +17,8 @@ What it is now:
 
 Settings: `[Shaders.Flashlight.Main]` Dimmer, Distance, AttachToWeapon; `[Shaders.Flashlight.Deferred]` the light pass's options;
 `[Shaders.Flashlight.Status]` Enabled.
+
+## Path tracing (2026-11-07)
+Under PTRealtime / PTReplace the path tracer lights the picture itself; the flashlight is passed to it as lamp 0 with its cone
+(core/RtPathTrace.cpp Lamps, Compute/Rt/RtPathTrace.comp LampSpot; docs/next/RT-PATH-TRACING.md section 53). Before, it showed only on
+the few pixels where the path-traced picture falls back to the game's frame.

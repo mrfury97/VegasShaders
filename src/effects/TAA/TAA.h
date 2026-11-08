@@ -139,8 +139,9 @@ public:
 
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction ([Shaders.TAA.DLSS] RayReconstruction, off by default; effects/TAAFSR.cpp,
 	// docs/next/FORK2-DLSS-RR.md): NVIDIA's DLSS-D through the DLSS helper at the RR point of ShaderManager::RenderEffectsPreTonemapping
-	// (after the god rays, before exposure and bloom), native resolution only. In such a frame it takes DLSS SR's place (Render skips
-	// its resolve) and the RT effects hand it their raw signals from the next frame on (Upscaler::RayReconstructionWantsRaw).
+	// (after the god rays, before exposure and bloom). In such a frame it takes DLSS SR's place (Render skips its resolve) and the RT effects
+	// hand it their raw signals from the next frame on (Upscaler::RayReconstructionWantsRaw). (2026-11-07 perf-rr) Also at RenderScale < 1
+	// (RenderScale v2 rect frames): RR denoises the render rect and upscales it to the screen in one step, in place of the SR upscale.
 	struct RRSettingsStruct {
 		int		Albedo = 0;			// RRAlbedo: 0 flat grey 0.5, 1 the picture's own chroma at a fixed luminance, 2 TESR_AlbedoBuffer where written (2026-10-31 AlbedoBuffer)
 		float	Roughness = 0.6f;	// RRRoughness [0-1]: where no TESR_MaterialBuffer roughness exists
@@ -148,6 +149,7 @@ public:
 	};
 	RRSettingsStruct	RRSettings;
 	bool				rrAlbedoMissingLogged = false;	// UNOFFICIAL 2026-10-31 AlbedoBuffer: RRAlbedo 2 without the buffer, said once
+	float				rrPtGuideMode = 0.0f;	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) the guides from the path tracer: 0 none, 1 diffuse, 2 + specular (each change logged)
 	// True when this frame's RR point will try: RR wanted and ready, and the frame checks known at the start of the pre-tonemap chain pass
 	// (the frame chain by its setting: it begins later). Asked once a frame there, before the RT point (ShaderManager.cpp), and handed to
 	// the upscaler (Upscaler::RayReconstructionPlan) for the RT denoisers' WantsRaw; the RR point runs only in a frame this said yes to.
@@ -216,6 +218,10 @@ private:
 	D3DXVECTOR4	rrPrevCameraPosition = D3DXVECTOR4(0, 0, 0, 0);
 	LARGE_INTEGER	rrLastTime = {};
 	int			rrLastWidth = 0, rrLastHeight = 0;
+	UINT		rrLastRenderWidth = 0, rrLastRenderHeight = 0;	// UNOFFICIAL 2026-11-07 (perf-rr) the last RR frame's render size (a change resets RR)
+	std::string	rrPlanLogged;			// (perf-rr) the last RR plan line logged (sizes, jitter, subrect; logged again when it changes)
+	UInt32		rrPlanLogs = 0;
+	void		RRLogPlan(bool rect, bool ready);	// (perf-rr) the plan of this frame's RR, helper or not (a log dry run on cards without RR)
 	FSRTexture	rrColor, rrDiffuse, rrSpecular, rrNormals, rrRoughness;	// DlssRRGuides' outputs (screen size, made on RR's first frame)
 	int			rrWidth = 0, rrHeight = 0;
 	ID3D9NvrExtPipeline*	rrGuides = nullptr;
@@ -289,6 +295,9 @@ private:
 	// the viewmodel depth; jittered = false reads it at its own pixels (the weapon is not jittered).
 	bool	UpscaleComposite(IDirect3DDevice9* Device, IDirect3DTexture9* fsrOutput, IDirect3DTexture9* depthSource = nullptr, bool colour = true, bool jittered = true);
 	void	UpscaleFinish(bool ok, bool v2);	// after the upscale (or its failure): state off, counted, logged
+	// UNOFFICIAL 2026-11-07 (perf-rr): a rect frame's end after DLSS RR denoised and upscaled it at the RR point (TAAFSR.cpp): the rect
+	// ends, the depths go full size, TESR_DepthBuffer / normals redrawn; UpscaleAfterEffects then finds nothing pending (no second upscale).
+	void	UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3DSurface9* ChainTarget);
 
 	bool	WillResolveThisFrame();
 

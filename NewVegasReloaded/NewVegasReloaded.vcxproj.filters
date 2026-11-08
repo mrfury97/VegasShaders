@@ -166,6 +166,9 @@
     <ClInclude Include="..\src\effects\Bodycam\Bodycam.h">
       <Filter>Effects</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\effects\Dream\Dream.h">
+      <Filter>Effects</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\effects\Reflections\Reflections.h">
       <Filter>Effects</Filter>
     </ClInclude>
@@ -529,6 +532,9 @@
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\Bodycam\Bodycam.cpp">
+      <Filter>Effects</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\effects\Dream\Dream.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\Reflections\Reflections.cpp">

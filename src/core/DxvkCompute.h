@@ -141,6 +141,15 @@ public:
 	// player on tessellated land): while the land's bumps are on, where the screen-space contact shadows should start and be full
 	// (view depth; ShadowsExterior.cpp takes the farther of this and NearFade). False: the bumps are off, or the option is.
 	static bool					DisplaceContactFade(float& Start, float& End);
+	// UNOFFICIAL 2026-11-07 (rtgap-tess, docs/next/RT-DETAIL-GAPS.md 1a) the RT passes' start slack: the depth buffer has the bumps, the RT
+	// scene is flat, so a ray rebuilt from the depth can start under the RT surface. Out: [0] the largest active Strength (land or objects,
+	// game units), [1] FadeStart, [2] FadeEnd of the families on (the bumps fade out between them, by view depth); false and zeros while no
+	// bumps are drawn, or [Main.Main.RayTracing] TessStartSlack is off (the A/B). Plain values for RtTessContact.h.
+	static bool					DisplaceRtSlack(float Out[3]);
+	// UNOFFICIAL 2026-11-07 (rtgap-tessblas) the RT scene's displaced copies (RtCore::Displace): the land's / the parallax objects'
+	// tessellation is registered and switched on (as last sent: [Shaders.Terrain.Displacement] / [Shaders.POM.Displacement] Enabled)
+	static bool					DisplaceLandActive();
+	static bool					DisplaceObjectsActive();
 
 	// Marks every compute path off for the session (logged once with the reason).
 	static void					Fail(const char* Reason);

@@ -249,7 +249,8 @@ float4 NVR_TerrainLampRT : register(c172);                  // x 1 = on, y depth
 float4 NVR_TerrainLampPack : register(c173);                // (2026-11-03 rtext) x the packing unit U (1024; 4096 ManyLights), y 1 = ManyLights:
                                                             // entry 2 is R, the traced share of every lamp not among the 2 exact ones;
                                                             // z (2026-11-05) 1 = debug (ExteriorDebug 3): the lamps' light red where traced
-                                                            // blocked, green where lit
+                                                            // blocked, green where lit; w (2026-11-07) 1 / the result's width (the
+                                                            // edge search's texel; 0 = none)
 sampler2D NVR_TerrainLampVis : register(s15);               // the traced result (point sampled, set by the DLL)
 
 // The pixel's three traced entries: their visibility and their lamps' positions (once a pixel; the slot table read in a loop, the
@@ -265,7 +266,23 @@ void TerrainLampEntries(float3 worldPos, out float3 vis, out float3 p0, out floa
     const float U = NVR_TerrainLampPack.x > 0.5f ? NVR_TerrainLampPack.x : 1024.0f;   // an entry: visibility x U / 16 + slot
     float code = floor(traced.y / U);
     float err = abs(exp2(code * NVR_TerrainLampRT.z) - clip.w) / clip.w;
-    [branch] if (!(err <= NVR_TerrainLampRT.y)) return;
+    // (2026-11-07) where the land meets an object's silhouette its own traced texel may be the object's: the four neighbours one texel
+    // away, the first with this point's depth (PointShadowForward.hlsl does the same); none: not traced here (lit)
+    [branch] if (!(err <= NVR_TerrainLampRT.y)) {
+        float tx = NVR_TerrainLampPack.w;
+        bool found = false;
+        [branch] if (tx > 0.0f) {
+            float ty = tx * length(float3(NVR_TerrainLampReproject[0][1], NVR_TerrainLampReproject[1][1], NVR_TerrainLampReproject[2][1])) /
+                max(length(float3(NVR_TerrainLampReproject[0][0], NVR_TerrainLampReproject[1][0], NVR_TerrainLampReproject[2][0])), 1.0e-6f);
+            [loop] for (float i = 0.0f; i < 3.5f; i += 1.0f) {
+                float2 o = i < 0.5f ? float2(tx, 0.0f) : i < 1.5f ? float2(-tx, 0.0f) : i < 2.5f ? float2(0.0f, ty) : float2(0.0f, -ty);
+                float2 t2 = tex2Dlod(NVR_TerrainLampVis, float4(uv + o, 0.0f, 0.0f)).xy;
+                float c2 = floor(t2.y / U);
+                [branch] if (abs(exp2(c2 * NVR_TerrainLampRT.z) - clip.w) <= NVR_TerrainLampRT.y * clip.w) { traced = t2; code = c2; found = true; break; }
+            }
+        }
+        [branch] if (!found) return;
+    }
     float hi = floor(traced.x / U);
     float3 e = float3(traced.x - U * hi, hi, traced.y - U * code);
     float3 v = floor(e / (U / 16.0f));

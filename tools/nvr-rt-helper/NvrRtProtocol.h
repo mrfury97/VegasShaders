@@ -23,11 +23,12 @@
 #pragma once
 
 #include <stdint.h>
+#include <stddef.h>   // offsetof (protocol 9's layout check)
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 6u            // 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
+#define NVR_RT_PROTOCOL_VERSION 9u            // 9 (2026-11-07, ptaaa-omm): opacity micromaps (NvrRtShared::opacityMicromaps, NVR -> helper, was pad4; the helper's omm* counters after it: NvrRtOmm.inl); 8 (2026-11-07, one bump for two teams): rtgap-tessblas: displaced geometry (NVR_RT_OP_DISPLACE_PARAMS / _SOURCE / _DATA, instance flag bits 8-31: NvrRtDisplace below); rtgap-textures: real textures block-compressed on the GPU route (NvrRtShared::textureImage = up to 4 transfer images, a byte each, picked by the op's VkFormat; NVR_RT_TEX_SWIZZLE_GR in NvrRtTextureOp::levels); 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
-#define NVR_RT_MAX_IMAGES       48u           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
+#define NVR_RT_MAX_IMAGES       64u           // (protocol 7: 64, was 48: 46 in use with every RT effect, the path tracer was left out)           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
 #define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
 #define NVR_RT_MAX_OPS          2048u         // geometry operations per frame
 #define NVR_RT_MAX_INSTANCES    32768u        // scene instances per frame
@@ -48,6 +49,28 @@
 // ReSTIR DI reservoirs and radiance cache, RtPathTrace.comp). NvrRtShared::scratchMB megabytes (at least 1). Who uses which words is the
 // passes' business (today only RtPathTrace.comp: docs/next/RT-PATH-TRACING.md section 47 has the layout).
 #define NVR_RT_BINDING_SCRATCH  20u
+// UNOFFICIAL 2026-11-07 (protocol 7) real textures: the game's own textures (full size, every mip, BC-compressed as the game keeps them)
+// in the helper, sampled with filtering and a mip by the ray's footprint, instead of the atlases' 64-256 texel copies (blocky up close,
+// speckled far away). Descriptor SET 1, persistent (one per command slot): binding 0 a std430 buffer of uvec4 per atlas slot (x = the
+// diffuse texture's index, y = the normal map's, z = the glow map's; 0 = none: the shaders keep the atlas), binding 1 a sampler (linear,
+// mips, repeat, anisotropic), binding 2 texture2D[NVR_RT_MAX_TEXTURES] (partially bound). src/hlsl/NewVegas/Compute/Rt/RtTextures.glsl.
+// The bytes travel in a second shared block "<base>-tex" of NvrRtShared::textureStagingMB, a region per frame ring slot (frame % RING):
+// NVR writes a frame's texture ops' bytes there before latestFrame; the helper copies them out before consumedFrame (as the frame record).
+#define NVR_RT_TEXTURE_SET          1u
+#define NVR_RT_BINDING_TEX_TABLE    0u
+#define NVR_RT_BINDING_TEX_SAMPLER  1u
+#define NVR_RT_BINDING_TEXTURES     2u
+#define NVR_RT_MAX_TEXTURES         4096u     // indices 1 .. 4095 (0 = none)
+#define NVR_RT_TEX_TABLE_SLOTS      1024u     // = NVR_RT_ALPHA_ATLAS_SLOTS squared
+#define NVR_RT_EVENT_TEX_SUFFIX     L"-tex"
+// (protocol 8) NvrRtTextureOp::levels: the low byte is the level count; NVR_RT_TEX_SWIZZLE_GR = the helper's view of the texture is
+// (G, R, 1, 1) (the game's ATI2 normal maps as BC5: DXVK samples ATI2 through that swizzle, so the RT copy reads what the game reads)
+#define NVR_RT_TEX_LEVELS_MASK      0xFFu
+#define NVR_RT_TEX_SWIZZLE_GR       0x100u
+// (protocol 8) NvrRtShared::textureImage: up to NVR_RT_TEX_TRANSFERS transfer images, byte i = shared image index + 1 (0 = none); a GPU
+// route op (bytes 0) reads the one whose VkFormat equals its own (RGBA8 = the fork's decoding blit; BC1 / BC3 / BC5 = the game's blocks
+// copied as they are, fork 1.8-rt-bc). Byte 0 is the RGBA8 one, as protocol 7's single value.
+#define NVR_RT_TEX_TRANSFERS        4u
 
 // NvrRtInstanceRecord::flags (NVR sets them; bits 8.. are free for the effects)
 #define NVR_RT_RECORD_LAND          0x01u
@@ -55,10 +78,25 @@
 #define NVR_RT_RECORD_GLOW          0x04u     // the draw has a glow / emissive map
 #define NVR_RT_RECORD_METAL         0x08u
 #define NVR_RT_RECORD_ALBEDO_KNOWN  0x10u     // albedo is the diffuse texture's average (else a neutral grey)
+// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") the record's MATERIAL KIND for the path tracer, two bits that
+// were defined but never set (WATER 0x02 = the low bit, METAL 0x08 = the high bit): 0 plain, 1 glass (a thin dielectric pane: Fresnel
+// reflection + tinted transmission; the instance is non-opaque with mask NVR_RT_MASK_ALPHA and every shader but the path tracer passes it,
+// RtAlpha.glsl), 2 foliage (thin: light through the leaf), 3 skin (softer, warmer diffuse, light through ears / fingers). Only
+// RtPathTrace.comp reads them; a value in the records only: the protocol's layout is unchanged.
+#define NVR_RT_RECORD_KIND_LO       0x02u
+#define NVR_RT_RECORD_KIND_HI       0x08u
+#define NVR_RT_KIND_PLAIN           0u
+#define NVR_RT_KIND_GLASS           1u
+#define NVR_RT_KIND_FOLIAGE         2u
+#define NVR_RT_KIND_SKIN            3u
+inline uint32_t NvrRtKindBits(uint32_t kind) { return ((kind & 1u) ? NVR_RT_RECORD_KIND_LO : 0u) | ((kind & 2u) ? NVR_RT_RECORD_KIND_HI : 0u); }
+inline uint32_t NvrRtKindOf(uint32_t flags) { return ((flags >> 1) & 1u) | ((flags >> 2) & 2u); }
 // UNOFFICIAL 2026-10-29 alpha-tested casters ([Main.Main.RayTracing] AlphaTested): the geometry is non-opaque (cull mask bit
 // NVR_RT_MASK_ALPHA), its texcoords follow the triangle list in binding 11 at the word offset floatBitsToUint(albedo.w), its
 // diffuse alpha is the alpha atlas' slot (flags >> 16) (RtCore::AlphaAtlasImage(): R16F 2048x2048, 64x64 texels a slot, 32 a row), and
 // a candidate hit counts where alpha >= ((flags >> 8) & 0xFF) / 255. src/hlsl/NewVegas/Compute/Rt/RtAlpha.glsl does it.
+// UNOFFICIAL 2026-11-07 (ptaaa-emissive; no version change: the helper never reads them) on a record that is NOT alpha-tested, bits 8-15
+// are the path tracer's emissive number + 1 (PTEmissive, src/core/RtEmissiveRow.h; 0 = none; only with NVR_RT_RECORD_GLOW)
 #define NVR_RT_RECORD_ALPHA_TESTED  0x20u
 // UNOFFICIAL 2026-10-29 hit textures ([Main.Main.RayTracing] HitTextures): the geometry's texcoords are in binding 11 at
 // floatBitsToUint(albedo.w) (as alpha-tested ones) and its diffuse colour is the albedo atlas' slot (flags >> 16) (RGBA8, the same
@@ -66,11 +104,19 @@
 #define NVR_RT_RECORD_TEXTURED      0x40u
 // UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the draw's normal map (tangent space,
 // as stored) is in the normal atlas at the same slot (RGBA8; a slot filled before the map was known reads 0: no map). RtHit.glsl rtHitNormalMapped.
+// (2026-11-07) also with [Main.Main.RayTracing] RealNormalMaps (RealTextures, no atlas): the map is the slot's real normal texture
+// (SLOT_TEXTURES id .y, protocol 7 unchanged); id 0 and no atlas = flat.
 #define NVR_RT_RECORD_NORMAL        0x80u
 // UNOFFICIAL 2026-11-03 the material rule (VegasShaders.materials.txt, the object shaders' table) in bits 26..31 of a textured /
 // alpha-tested record: bits 26-28 roughness (0 unknown, k = 1..7: k / 7), bits 29-31 metal (0 unknown, k = 1..7: (k - 1) / 6)
 #define NVR_RT_RECORD_ROUGH_SHIFT   26u
 #define NVR_RT_RECORD_METAL_SHIFT   29u
+// UNOFFICIAL 2026-11-07 (perf-reflfix) smooth vertex normals: the HELPER sets this bit in a record's geometryId (NVR's ids are 24 bits)
+// when the geometry's packed vertex normals are ready, one word a vertex just BEFORE its positions in binding 11: at
+// vertexOffset - (indexOffset - vertexOffset) / 3 (the positions are 3 words a vertex and the triangle list follows them), octahedral
+// 16 + 16 bit in object space, 0 = none (tools/nvr-rt-helper/RtNormals.comp makes them; RtHit.glsl rtHitSmoothNormal reads them).
+// A shader comparing geometryId masks it (RtEmissiveBuild.comp). No layout change (protocol 9): an older shader ignores the bit.
+#define NVR_RT_RECORD_GEO_NORMALS   0x80000000u
 #define NVR_RT_MASK_ACTOR           0x20u     // UNOFFICIAL 2026-10-29: skinned actors ([Main.Main.RayTracing] Actors), posed every frame
 #define NVR_RT_MASK_ALPHA           0x10u     // the instance mask of alpha-tested geometry (rays that cannot test alpha leave it out)
 #define NVR_RT_MASK_PLAYER          0x40u     // UNOFFICIAL 2026-10-30: the player's own rigid parts with Actors on (the third-person body's
@@ -82,6 +128,10 @@
 // (RtLampPrimary.comp, SameFrame lamp shadows)
 #define NVR_RT_CUSTOM_LAND          0x1u
 #define NVR_RT_CUSTOM_HIDDEN        0x2u
+// (2026-11-07, rtgap-decals) bit 2 = decal ([Main.Main.RayTracing] Decals: posters, cracks, blood; always alpha-tested, mask 0x10, lifted
+// 0.5 unit off what they lie on): shadow, AO and visibility rays pass them (RtAlpha.glsl rtAlphaPassShadow), every other ray sees them.
+// A value in the instances only: the protocol's layout is unchanged (an older helper passes the custom index through as it is).
+#define NVR_RT_CUSTOM_DECAL         0x4u
 #define NVR_RT_ALPHA_SLOT_SIZE      64u
 #define NVR_RT_ALPHA_ATLAS_SLOTS    32u       // a row (and rows): 2048 x 2048 texels, 1024 slots
 
@@ -99,6 +149,17 @@ enum NvrRtState : uint32_t {
 enum NvrRtOp : uint32_t {
 	NVR_RT_OP_BUILD   = 1,           // geometry `id` from the arena: 3 x vertexCount floats at arenaTexel, then 3 x triangleCount uints
 	NVR_RT_OP_RELEASE = 2,           // geometry `id` is gone (the helper frees it once no frame in flight uses it)
+	// (protocol 7) real textures, in NvrRtGeometryOp's fields: NvrRtTextureOp below
+	NVR_RT_OP_TEXTURE = 3,           // texture `id` (1 .. NVR_RT_MAX_TEXTURES - 1): its mips from the frame's staging region (replaces an older one)
+	NVR_RT_OP_TEXTURE_RELEASE = 4,   // texture `id` is gone (freed once no frame in flight uses it; no slot may name it any more)
+	NVR_RT_OP_SLOT_TEXTURES = 5,     // atlas slot `id`: its diffuse / normal / glow textures (0 = none: the atlas)
+	// (protocol 8) displaced geometry (NvrRtDisplace* below; docs/next/RT-DETAIL-GAPS.md 1c)
+	NVR_RT_OP_DISPLACE_PARAMS = 6,   // NvrRtDisplaceParamsOp: one block of the displacement's settings (kept by the helper until sent again)
+	NVR_RT_OP_DISPLACE_SOURCE = 7,   // NvrRtDisplaceSourceOp: how geometry `id` is displaced (its height textures, layer weights, normals)
+	NVR_RT_OP_DATA = 8,              // vertex attributes only, as NvrRtGeometryOp: the 3 x vertexCount floats at arenaTexel (+ with
+	                                 // NVR_RT_OP_FLAG_TEXCOORDS the 2 x vertexCount after the triangle list, which is skipped) kept under
+	                                 // `id` (no structure built); NVR_RT_OP_RELEASE frees it. NVR stages some other element of the vertex
+	                                 // (the land's layer weights, the normals) as the "position" to send it.
 };
 
 // What the fork's ID3D9NvrExtSharedImage::GetInfo reported, plus the NT handle duplicated into the helper's process.
@@ -140,12 +201,83 @@ struct NvrRtGeometryOp {             // 32 bytes
 	uint32_t	pad[2];
 };
 
+// (protocol 7) NVR_RT_OP_TEXTURE / _SLOT_TEXTURES: the same 32 bytes as NvrRtGeometryOp, named
+struct NvrRtTextureOp {              // 32 bytes
+	uint32_t	op;                  // NVR_RT_OP_TEXTURE: id = texture; NVR_RT_OP_SLOT_TEXTURES: id = atlas slot
+	uint32_t	id;
+	uint32_t	width;               // TEXTURE: the first (biggest) level sent; SLOT_TEXTURES: the diffuse texture
+	uint32_t	height;              //                                           SLOT_TEXTURES: the normal map
+	uint32_t	offset;              // TEXTURE: byte offset in this frame's staging region; SLOT_TEXTURES: the glow map
+	uint32_t	vkFormat;            // TEXTURE: VK_FORMAT_BC1_RGBA_UNORM_BLOCK / BC2 / BC3 / BC5 / B8G8R8A8_UNORM / R8G8B8A8_UNORM
+	uint32_t	bytes;               // TEXTURE: all its levels, packed (rows of blocks, no padding), biggest first; 0 = on the GPU: the levels
+	                                 // are in the transfer image of the op's format (NvrRtShared::textureImage's bytes, protocol 8), level 0
+	                                 // at offset (x = low 16 bits, y = high), level l >= 1 at (x + width, y + the heights of levels 1 .. l-1)
+	                                 // (the game's textures are in D3D9's default pool: no CPU copy; the fork's CopyToShared copies each
+	                                 // level there: BC blocks as they are, other formats decoded to RGBA8; BC offsets / sizes whole blocks)
+	uint32_t	levels;              // low byte: levels (NVR_RT_TEX_LEVELS_MASK); NVR_RT_TEX_SWIZZLE_GR (protocol 8)
+};
+
+// ---- (protocol 8, 2026-11-07, rtgap-tessblas) displaced geometry: the land's and the parallax objects' tessellation bumps in the RT scene
+// ([Shaders.Terrain.Displacement] / [Shaders.POM.Displacement] with [Main.Main.RayTracing] Displacement; docs/next/RT-DETAIL-GAPS.md 1c,
+// tools/nvr-rt-helper/NvrRtDisplace.inl). An instance with NVR_RT_INSTANCE_DISPLACE in NvrRtInstance::flags is traced through a copy of
+// its geometry the helper splits (every triangle into N x N) and moves along the normal by the same height maps and formula as the game's
+// tessellation (Compute/Tess/TerrainDisplace.tese, ObjectDisplace.tese), with the instance's own distance fade: one copy per instance
+// (NVR_RT_INSTANCE_KEY: a stable 22-bit key, the geometry's address hashed), redone as the camera moves. The copy's triangles, texcoords
+// and positions are what the record's vertexOffset / indexOffset / texcoord offset point at. Without a copy yet: the flat geometry.
+#define NVR_RT_INSTANCE_DISPLACE    0x100u    // NvrRtInstance::flags bit 8 (bits 0-7 stay VkGeometryInstanceFlags)
+#define NVR_RT_INSTANCE_KEY_SHIFT   10u       // bits 10-31: the instance's key
+inline uint32_t NvrRtInstanceKey(uint32_t flags) { return flags >> NVR_RT_INSTANCE_KEY_SHIFT; }
+
+// NVR_RT_OP_DISPLACE_PARAMS: id = the block; v[] its values. Kept by the helper until the block comes again (NVR sends all five every
+// frame it gathers the scene while either kind is on, and the reach blocks with enable 0 once when both go off).
+enum NvrRtDisplaceBlock : uint32_t {
+	NVR_RT_DISPLACE_LAND_SHAPE = 0,   // Strength, Center, Contrast, BumpSize, LodBias, BorderGrid      ([Shaders.Terrain.Displacement])
+	NVR_RT_DISPLACE_LAND_REACH = 1,   // FadeStart, FadeEnd, spacing, max split, refresh distance, enable (1 / 0)
+	NVR_RT_DISPLACE_OBJ_SHAPE  = 2,   // Strength, Center, Contrast, EdgeFade, LodBias, 0               ([Shaders.POM.Displacement])
+	NVR_RT_DISPLACE_OBJ_REACH  = 3,   // FadeStart, FadeEnd, spacing, max split, refresh distance, enable
+	NVR_RT_DISPLACE_CAMERA     = 4,   // the camera's forward (scene space) xyz, triangles a frame (budget), triangles a copy (cap), 0
+	NVR_RT_DISPLACE_BLOCKS     = 5,
+};
+struct NvrRtDisplaceParamsOp {       // 32 bytes, in NvrRtFrame::ops
+	uint32_t	op;                  // NVR_RT_OP_DISPLACE_PARAMS
+	uint32_t	id;                  // NvrRtDisplaceBlock
+	float		v[6];
+};
+// NVR_RT_OP_DISPLACE_SOURCE: geometry `id` (a BUILD with texcoords) is displaced like this. weightsA / weightsB / normals: NVR_RT_OP_DATA
+// ids (0 = none): A = the land's layer weights 0-2 as xyz (+ texcoords = weights 2-3: .y is layer 3), B = layers 4-6 as xyz; normals = the
+// object-space vertex normals as xyz (none: the helper makes smooth ones from the triangles). packed: 96 bits, little endian over
+// packed[0..2]: bits 12 i .. 12 i + 11 the texture id of layer i (0-6; real textures, NVR_RT_OP_TEXTURE), 84-86 the layer count (1-7),
+// 87-93 the layers that have a height (bit per layer: the land shader's LandHeight > 0), 94 the kind (0 land: height in alpha, 1 a
+// parallax object: height in red, layer 0 only).
+struct NvrRtDisplaceSourceOp {       // 32 bytes
+	uint32_t	op;                  // NVR_RT_OP_DISPLACE_SOURCE
+	uint32_t	id;
+	uint32_t	weightsA, weightsB, normals;
+	uint32_t	packed[3];
+};
+inline void NvrRtDisplacePack(uint32_t packed[3], const uint32_t textures[7], uint32_t layers, uint32_t heightBits, uint32_t kind) {
+	packed[0] = packed[1] = packed[2] = 0;
+	auto put = [&](uint32_t bit, uint32_t width, uint32_t value) {
+		for (uint32_t b = 0; b < width; b++) if ((value >> b) & 1u) packed[(bit + b) >> 5] |= 1u << ((bit + b) & 31u);
+	};
+	for (uint32_t i = 0; i < 7; i++) put(12 * i, 12, textures[i] & 0xFFFu);
+	put(84, 3, layers & 7u); put(87, 7, heightBits & 0x7Fu); put(94, 1, kind & 1u);
+}
+inline uint32_t NvrRtDisplaceField(const uint32_t packed[3], uint32_t bit, uint32_t width) {
+	uint32_t v = 0;
+	for (uint32_t b = 0; b < width; b++) if ((packed[(bit + b) >> 5] >> ((bit + b) & 31u)) & 1u) v |= 1u << b;
+	return v;
+}
+#define NVR_RT_DISPLACE_KIND_LAND   0u
+#define NVR_RT_DISPLACE_KIND_OBJECT 1u
+
 struct NvrRtInstance {               // 64 bytes
 	float		transform[3][4];     // object -> scene (camera-relative world space): row-major 3x4, as VkTransformMatrixKHR
 	uint32_t	geometryId;          // a built geometry (0 or unknown: skipped)
 	uint32_t	customIndex;         // low 24 bits: rayQueryGetIntersectionInstanceCustomIndexEXT
 	uint32_t	mask;                // low 8 bits: ANDed with the ray's cull mask
-	uint32_t	flags;               // VkGeometryInstanceFlagBitsKHR (1 = cull disable, 2 = flip facing, 4 = force opaque)
+	uint32_t	flags;               // VkGeometryInstanceFlagBitsKHR (1 = cull disable, 2 = flip facing, 4 = force opaque) in bits 0-7;
+	                                 // (protocol 8) NVR_RT_INSTANCE_DISPLACE, NVR_RT_INSTANCE_KEY
 };
 
 // One per instance, in the instance list's order (the helper keeps the pairs together when it skips an instance). In the shader:
@@ -207,7 +339,7 @@ struct NvrRtShared {
 	uint8_t		deviceUuid[16];
 	uint8_t		driverUuid[16];
 	uint32_t	imageCount;
-	uint32_t	pad0;
+	uint32_t	textureStagingMB;    // (protocol 7, was pad0) the "<base>-tex" block's size (0: no real textures), a quarter a frame ring slot
 	NvrRtImageDesc images[NVR_RT_MAX_IMAGES];
 	uint64_t	semInputsReady;      // HANDLE values valid in the helper's process (timeline semaphores, OPAQUE_WIN32)
 	uint64_t	semOutputReady;
@@ -216,7 +348,8 @@ struct NvrRtShared {
 
 	// ---- written by NVR any time (shaderCount last, with a release barrier); paths are full, ANSI
 	volatile uint32_t	shaderCount;
-	uint32_t			pad2;
+	uint32_t			textureImage;        // (protocol 7, was pad2) the real textures' transfer images: byte i = image index + 1 (0 = none), the
+	                                         // helper takes the one whose format is the op's (protocol 8; protocol 7: one RGBA8 image + 1)
 	char				shaderPaths[NVR_RT_MAX_SHADERS][260];
 
 	// ---- per frame, written by NVR (latestFrame last, with a release barrier)
@@ -247,15 +380,46 @@ struct NvrRtShared {
 
 	// ---- written by NVR
 	volatile uint32_t	quit;                // 1: exit
-	uint32_t			pad4;
+	volatile uint32_t	opacityMicromaps;    // (protocol 9, was pad4; any time) NVR_RT_OMM_* below: [Main.Main.RayTracing] OpacityMicromaps and
+	                                         // the alpha atlas' image index (0 = no micromaps: what an older NVR leaves there)
+
+	// ---- (protocol 9) written by the helper: opacity micromaps (tools/nvr-rt-helper/NvrRtOmm.inl), for NVR's log and the RT test host
+	volatile uint32_t	ommState;            // NVR_RT_OMM_STATE_*
+	volatile uint32_t	ommVariants;         // alpha-tested geometries with a micromap structure ready (traced through it when eligible)
+	volatile uint64_t	ommBuilt;            // micromaps built (self-test: state sets made and checked) since start
+	volatile uint64_t	ommMicro;            // their micro-triangles
+	volatile uint64_t	ommOpaque;           // of which known opaque (resolved in hardware, no shader call)
+	volatile uint64_t	ommChecked;          // validation samples that fell on a known-opaque micro-triangle (each tested with rtAlphaPass)
+	volatile uint64_t	ommViolations;       // of which rtAlphaPass said "not solid" (any: micromaps off for the session)
+	volatile uint32_t	ommInstances;        // instances of the last scene traced through a micromap structure
+	volatile uint32_t	ommFlags;            // NVR_RT_OMM_FLAG_*
 };
+
+// (protocol 9) NvrRtShared::opacityMicromaps (NVR -> helper)
+#define NVR_RT_OMM_ATLAS_MASK       0xFFu         // the alpha atlas' image index + 1 (0: none: nothing is built)
+#define NVR_RT_OMM_ON               0x80000000u   // [Main.Main.RayTracing] OpacityMicromaps (used only where the GPU has VK_EXT_opacity_micromap)
+#define NVR_RT_OMM_SELF_TEST        0x40000000u   // the RT test host: build and check the states on any GPU (no micromaps without the extension)
+#define NVR_RT_OMM_BREAK_TEST       0x20000000u   // the RT test host's negative control: every micro-triangle marked opaque (the checks must catch it)
+// NvrRtShared::ommState (helper -> NVR)
+#define NVR_RT_OMM_STATE_OFF        0u            // not asked for, or no alpha atlas
+#define NVR_RT_OMM_STATE_NO_EXT     1u            // asked for, the GPU has no VK_EXT_opacity_micromap: the shaders' alpha test as before
+#define NVR_RT_OMM_STATE_ON         2u            // micromaps built and used
+#define NVR_RT_OMM_STATE_DISABLED   3u            // a check failed (the hardware self-test or a state set): off for the session, logged
+#define NVR_RT_OMM_STATE_SELF_TEST  4u            // NVR_RT_OMM_SELF_TEST without the extension: states built and checked, nothing traced
+// NvrRtShared::ommFlags
+#define NVR_RT_OMM_FLAG_EXTENSION   0x1u          // the device has VK_EXT_opacity_micromap (feature micromap) and it is enabled
+#define NVR_RT_OMM_FLAG_HW_TESTED   0x2u          // the startup hardware self-test passed (the micro-triangle order is the one written here)
+#define NVR_RT_OMM_FLAG_FINEST_MIP  0x4u          // the last frame's passes all test alpha at the finest mip (class A: RtAlpha.glsl's lod 0)
 
 #ifdef __cplusplus
 static_assert(sizeof(NvrRtImageDesc) == 56, "NvrRtImageDesc layout");
 static_assert(sizeof(NvrRtGeometryOp) == 32, "NvrRtGeometryOp layout");
+static_assert(sizeof(NvrRtTextureOp) == 32, "NvrRtTextureOp layout");
+static_assert(sizeof(NvrRtDisplaceParamsOp) == 32 && sizeof(NvrRtDisplaceSourceOp) == 32, "displacement ops layout");
 static_assert(sizeof(NvrRtInstance) == 64, "NvrRtInstance layout");
 static_assert(sizeof(NvrRtPass) == 580, "NvrRtPass layout");	// (protocol 5: + extraImages2)
 static_assert(sizeof(NvrRtInstanceRecord) == 32, "NvrRtInstanceRecord layout");
 static_assert(sizeof(NvrRtFrame) % 8 == 0, "NvrRtFrame layout");
 static_assert(sizeof(NvrRtShared) % 8 == 0, "NvrRtShared layout");
+static_assert(offsetof(NvrRtShared, ommBuilt) % 8 == 0, "NvrRtShared layout (protocol 9: the same offsets in the 32-bit game and the 64-bit helper)");
 #endif

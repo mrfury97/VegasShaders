@@ -852,6 +852,19 @@ namespace PointShadowForward {
 			TheRenderManager->device->SetPixelShaderConstantF(174, &constants[0][0], 16);
 			memcpy(Uploaded, constants, sizeof(constants));
 		}
+		// UNOFFICIAL 2026-11-07 the first-person model (arms, gun, Pip-Boy) is never in the traced scene: its lookups never match. Where a
+		// traced lamp has no map to fall back to (outdoors: no cube maps; ManyLights' lamps without one, + 256) it was lit fully however
+		// blocked; it takes the lamp as the eye sees it instead (RtLampEye.comp; the shaders read slot -2 - v). Indoors a lamp with a
+		// cube map keeps it (the map's answer at the model's own points is the better one).
+		if (firstPerson && wanted && RtLampShadows::CompiledIn && pass && pass->lights) {
+			const int firstLight = FirstShaderLight(pass);
+			const int lightCount = (std::min)((int)pass->numLights - firstLight, 6);
+			for (int k = 0; k < lightCount; k++) {
+				if (!(tracedSlots[k] >= 0.0f) || !(ExteriorActive || tracedSlots[k] > 255.5f)) continue;
+				float v = 1.0f;
+				if (RtLampShadows::EyeVisibility(pass->lights[firstLight + k], v)) tracedSlots[k] = -2.0f - (std::min)((std::max)(v, 0.0f), 1.0f);
+			}
+		}
 		RtLampShadows::SetForPass(tracedSlots, force);	// c206-c209, c215-c217 (nothing without POINT_SHADOW_RT)
 		if (GpuTimer::Enabled && !force) { StatDraws++; if (matched) { StatMatchedDraws++; StatMatchedLights += matched; } }
 	}
@@ -880,7 +893,9 @@ namespace PointShadowForward {
 			debugFrame = TheFrameRateManager->FrameNumber;
 			landDebug = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "ExteriorDebug") == 3 ? 1.0f : 0.0f;
 		}
-		const float packing[4] = { 1.0f / RtLampShadows::PackingInverse(), RtLampShadows::TracedMany ? 1.0f : 0.0f, landDebug, 0.0f };
+		// w (2026-11-07): 1 / the result's width, the land lookup's edge search (TerrainTemplate.hlsl TerrainLampEntries)
+		const float packing[4] = { 1.0f / RtLampShadows::PackingInverse(), RtLampShadows::TracedMany ? 1.0f : 0.0f, landDebug,
+			RtLampShadows::TextureWidth > 2 ? 1.0f / (float)RtLampShadows::TextureWidth : 0.0f };
 		TheRenderManager->device->SetPixelShaderConstantF(173, packing, 1);
 		IDirect3DBaseTexture9* traced = RtLampShadows::Stage15Texture();
 		Bind(15, traced, true, true);

@@ -130,6 +130,7 @@ void ShaderManager::Initialize() {
 	EnrollEffect<LocalExposureEffect>(sm, sm->Effects.LocalExposure);	// 2026-11-04
 	EnrollEffect<SkyDitherEffect>(sm, sm->Effects.SkyDither);
 	EnrollEffect<BodycamEffect>(sm, sm->Effects.Bodycam);
+	EnrollEffect<DreamEffect>(sm, sm->Effects.Dream);
 	EnrollEffect<ReflectionsEffect>(sm, sm->Effects.Reflections);
 	EnrollEffect<WetnessReflectionsEffect>(sm, sm->Effects.WetnessReflections);	// UNOFFICIAL 2026-11-04 Wetness Effects
 	EnrollEffect<HudRaindropsEffect>(sm, sm->Effects.HudRaindrops);

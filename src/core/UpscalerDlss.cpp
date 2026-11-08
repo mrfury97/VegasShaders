@@ -534,6 +534,13 @@ namespace {
 	}
 
 	bool DlssUpscaler::Start(const Upscaler::Inputs& In) {
+		// UNOFFICIAL 2026-11-07 (perf-ptcost; the 11-07 tester log: 4.3-5.3 s on the render thread between "Registering Texture TESR_DlssOutput"
+		// and "... given to the helper" at every helper start) the stage for the STALL lines, and each step's time in the "given" line
+		SessionLog::StageScope stage("DLSS helper: start (images, the helper process, handles)");
+		LARGE_INTEGER stepFreq, stepT[6] = {};
+		QueryPerformanceFrequency(&stepFreq);
+		QueryPerformanceCounter(&stepT[0]);
+		auto stepMs = [&](int a, int b) { return stepT[a].QuadPart && stepT[b].QuadPart ? (double)(stepT[b].QuadPart - stepT[a].QuadPart) * 1000.0 / (double)stepFreq.QuadPart : -1.0; };
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (!ext || !DxvkCompute::Available()) return TurnOff("no Vegas Shaders DXVK");
 		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtShare), (void**)&share)) || !share) {
@@ -603,8 +610,10 @@ namespace {
 				return TurnOff(why);
 			}
 		}
+		QueryPerformanceCounter(&stepT[1]);	// (perf-ptcost) the shared images, the mask, the fences
 		TheTextureManager->InitTexture("TESR_DlssOutput", &output.Texture, &output.Surface, In.DisplayWidth, In.DisplayHeight, D3DFMT_A16B16G16R16F);
 		if (!output.Surface) return TurnOff("its output texture could not be made");
+		QueryPerformanceCounter(&stepT[2]);	// the output texture
 		inputWidth = In.InputWidth; inputHeight = In.InputHeight; displayWidth = In.DisplayWidth; displayHeight = In.DisplayHeight;
 
 		// The shared-memory block and the two events, then the helper.
@@ -643,12 +652,14 @@ namespace {
 		else if (helperFailTest == 3) cmdLine += L" --fail-test hang";
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi = {};
+		QueryPerformanceCounter(&stepT[3]);	// the shared-memory block
 		if (!CreateProcessW(exe.c_str(), &cmdLine[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW | ABOVE_NORMAL_PRIORITY_CLASS, nullptr, helperDir.c_str(), &si, &pi)) {
 			sprintf_s(why, "NvrDlssHelper.exe could not be started (CreateProcess: Win32 error %lu)", GetLastError());
 			return TurnOff(why);
 		}
 		CloseHandle(pi.hThread);
 		process = pi.hProcess;
+		QueryPerformanceCounter(&stepT[4]);	// CreateProcess
 
 		// The NT handles (each a duplicate the fork makes of the one it exported), duplicated into the helper, which closes them
 		// after importing. Every failure says which step and its code.
@@ -718,8 +729,10 @@ namespace {
 		handle = nullptr;
 		hr = outputReady->CreateHandle(&handle);
 		if (!give("'output ready' semaphore", hr, handle, shared->semOutputReady)) return TurnOff(why);
-		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: %u images%s and 2 semaphores given to the helper (process %lu).", imageCount,
-			maskReady ? " + the bias current colour mask" : "", GetProcessId(process));
+		QueryPerformanceCounter(&stepT[5]);	// the handles made and given
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper: %u images%s and 2 semaphores given to the helper (process %lu); the render thread spent %.1f ms: "
+			"images + mask + fences %.1f, output texture %.1f, shared block %.1f, CreateProcess %.1f, handles %.1f.", imageCount,
+			maskReady ? " + the bias current colour mask" : "", GetProcessId(process), stepMs(0, 5), stepMs(0, 1), stepMs(1, 2), stepMs(2, 3), stepMs(3, 4), stepMs(4, 5));
 		MemoryBarrier();
 		shared->setupDone = 1;
 		SetEvent(frameEvent);
@@ -755,6 +768,7 @@ namespace {
 	// Ends the helper and releases everything. Waits recorded on the GPU are released first (the helper finishes them, or the
 	// semaphore is signalled from the CPU), so the game's GPU queue never waits for a frame that will not come.
 	void DlssUpscaler::Stop(const char* why) {
+		SessionLog::StageScope stage("DLSS helper: stop (waits: its watchdog 3 s, submitted frames 1 s, the process 3 s at most)");	// (2026-11-07 perf-ptcost: STALL lines)
 		if (why && state != Idle && state != Off) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS helper stopped: %s.", why);
 		if (watchdog) {
 			InterlockedExchange(&watchStop, 1);

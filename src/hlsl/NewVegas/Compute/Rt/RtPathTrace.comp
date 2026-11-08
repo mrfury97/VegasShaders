@@ -9,8 +9,10 @@
 //   - a ray that leaves the scene takes the sky's light: outdoors a gradient from the game's horizon to its sky colour (x PTSky), below
 //     the horizon the horizon colour x 0.3; indoors PTAmbient x the game's ambient (default 0: interiors are lit by their lamps only).
 // Units are the game's: a surface facing the sun gets albedo x the sun colour (no 1/pi), a sky of colour L all round gives albedo x L,
-// so the result compares with the raster frame before its tonemap. No normal maps, specular, actors' skin, grass, particles or glass:
-// what the RT scene holds (FORK-RT-CORE.md), lit by what this pass knows.
+// so the result compares with the raster frame before its tonemap. (2026-11-07 ptaaa-materials: glass panes, light through leaves and grass,
+// skin's scattering and cloth sheen, RT-PATH-TRACING.md section "ptaaa-materials"; still no particles.) What the RT scene holds
+// (FORK-RT-CORE.md), lit by what this pass knows. (Normal maps: at traced hits through RtHit.glsl rtHitNormalMapped, the real maps with
+// RealNormalMaps or the atlas with NormalTextures; specular with PTSpecular.)
 // The running mean is kept in float32 (two RG32F images: fp16 stops moving after a few hundred samples); NVR resets it (p.accum.x = 0)
 // when the camera, the sun or a setting moves, and copies the display image (RGBA16F, linear) back for RtPathTraceShow.frag.
 // Compile: glslangValidator -V --target-env vulkan1.2 -o RtPathTrace.spv RtPathTrace.comp
@@ -21,6 +23,13 @@
 // (2026-11-07) PTRestirDI (flag 262144, not in the GI variant): the lamps at the first hit through ReSTIR DI, reservoirs kept in the
 // helper's scratch store (binding 20, protocol 6) from frame to frame (section 47); PTRadianceCache (flag 524288): a world-space radiance
 // cache in the same store gives the path's last hit the light of all further bounces (section 48; RtPathTraceCache.comp resolves it)
+// (2026-11-07 ptaaa-emissive) PTEmissive (the frame row's texel 22 > 0, not in the GI variant): glowing TRIANGLES as lights, one sample a
+// hit by their power (RtEmissiveBuild.comp's list, src/core/RtEmissiveRow.h), MIS against the bounce rays, in ReSTIR DI with the lamps
+// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit (flag 4194304, with PTDenoise's 512; not in the GI variant): the light written as two signals,
+// diffuse (display) and specular (specOut, + the specular hit distance), each divided by its own albedo, for core\RtDenoise's split
+// (RT-PATH-TRACING.md "ptaaa-denoiser"; the Path() hooks are marked ptaaa-denoiser)
+// (2026-11-07 perf-ptcost, RT-PATH-TRACING.md section 67) the ray budget: ReSTIR DI's same-spot rule, one light sample at bounce hits, one
+// camera query without the hidden body (LoadCostKeys; core\RtPtCost.h), and the RT host's ray count (gRayCount)
 #extension GL_EXT_ray_query : require
 #extension GL_GOOGLE_include_directive : enable
 
@@ -84,17 +93,24 @@ layout(set = 0, binding = 17, rgba16f) uniform writeonly image2D albedoOut;  // 
 layout(set = 0, binding = 18, rg32f) uniform readonly image2D lampImage;     // (pass image 14)
 #ifndef PT_RESTIR_GI
 // UNOFFICIAL 2026-11-07 the helper's scratch store (protocol 6, NVR_RT_BINDING_SCRATCH): zero at the helper's start, kept between frames.
-// Words [0, 8 w h): the ReSTIR DI reservoirs, two sets of w x h (the traced rect's size) x 4 words, this frame writing set FrameParity();
-// a reservoir: [0] lamp + 1 (0: none) | M << 16, [1] W (float bits), [2] the surface's distance from that frame's eye (float bits), [3]
-// its normal (octahedral, 2 x snorm16). From word CacheBase() on: the radiance cache (section 48).
+// Words [0, 12 w h): the ReSTIR DI reservoirs, two sets of w x h (the traced rect's size) x 6 words (since ptaaa-emissive; StoreReservoir
+// has the layout), this frame writing set FrameParity(). From the frame row's cache base on: the radiance cache (section 48), then
+// PTEmissive's blocks + list (LoadScratchLayout checks the regions: ptaaa-hangfix).
 layout(set = 0, binding = 20, std430) buffer Scratch { uint words[]; } scratch;
+// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) PTDenoiseSplit (flag 4194304, with 512): the specular signal apart from the diffuse one (NRD
+// ReLAX's split). display = the diffuse light / the first surface's colour (as before: albedoOut), this image = (the specular light /
+// its specular albedo, the first bounce ray's hit distance when that ray was the specular lobe's: 60000 a miss, 0 unknown); the mean
+// images (unused under PTDenoise) carry the specular albedo the light was divided by: accumA = (r, g), accumB = (b, roughness).
+// (pass image 15; the GI variant has its own image there and no split)
+layout(set = 0, binding = 19, rgba16f) uniform writeonly image2D specOut;
 #endif
 // (2026-11-07) the lamp image's FRAME ROW (row 1 + kGridRows = 49; core\RtPathTrace.cpp FrameRow): per-frame values the full constant
 // block has no room for, two floats a texel: 0-1 last frame's forward (xyz, w 1 = its reservoirs are valid), 2-3 right, 4-5 up (as the
 // pass's: / P00, / P11), 6-7 last frame's eye in this frame's scene space + this frame's reservoir set (0 / 1), 8-9 the camera's world
 // position (the scene's origin in the world: the cache's cells are world cells) + log2 of the cache's entries, 10 PTRestirMaxM,
 // PTRestirDISpatial (neighbours), 11 their radius (pixels), the normal test (cos), 12 the plane test (share of the distance), the
-// cache's first word / 4096
+// cache's first word / 4096; (2026-11-07 ptaaa-emissive) 22 PTEmissive's instances, their scratch words' start / 4096. Row 50 after it:
+// PTEmissive's instances (src/core/RtEmissiveRow.h)
 const int kFrameRow = 49;
 vec2 FrameTexel(int i) { return imageLoad(lampImage, ivec2(i, kFrameRow)).rg; }
 #ifdef PT_RESTIR_GI
@@ -110,8 +126,43 @@ layout(set = 0, binding = 19, rgba16f) uniform writeonly image2D giDirect;   // 
 #define RT_ALBEDO_ATLAS albedoAtlas
 #define RT_GLOW_ATLAS glowAtlas
 #define RT_NORMAL_ATLAS normalAtlas
+// UNOFFICIAL 2026-11-07 (ptaaa-materials) glass panes (record kind 1) are passed by every other shader's alpha test; here a ray meets them
+// when this is true (Path sets it per ray: bounce rays always, the camera's with PTGlass 2). Shadow rays never stop at them (Visible tints).
+bool gGlassSolid = false;
+#define RT_ALPHA_GLASS_SOLID gGlassSolid
 #include "RtAlpha.glsl"
 #include "RtHit.glsl"
+#include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson) rays near the eye pass over the hidden first-person body
+
+// ---- UNOFFICIAL 2026-11-07 (ptaaa-hangfix) GPU hang guards: the merged path tracer lost the AMD iGPU (Windows event 4101, a TDR) now and then.
+// None of these changes a result where the data is sane; each keeps a broken input (a NaN, a bad count, a stale or overlapping scratch
+// header) from running a wave for ever or reading / writing past a buffer (the helper has no robustBufferAccess: on AMD an out-of-range
+// storage buffer access can fault the GPU). RT-PATH-TRACING.md "ptaaa-hangfix".
+//  - every ray query starts through PT_RAY_INIT: a ray whose origin or direction is not finite, whose direction is zero, or whose
+//    [tMin, tMax] is not a finite range from 0 up (undefined behaviour in Vulkan; a NaN ray can keep AMD's traversal looping) becomes an
+//    empty ray (the eye, up, [0, 0]) that meets nothing;
+//  - every rayQueryProceedEXT loop ends after kPtMaxCandidates candidates (rayQueryTerminateEXT: what was confirmed so far stands); a ray
+//    through the densest test scenes meets a few dozen cut-out / glass candidates.
+const uint kPtMaxCandidates = 256u;
+const int kPtMaxLamps = 256, kPtMaxLights = 288;   // the lamp image: RtPathTrace.cpp kLampsMax lamps + kGlowMax glow lights
+const int kPtMaxBounces = 64, kPtMaxPaths = 64;   // (PTBounces / PTSamples go to 16; the RT host's furnaces trace 48 bounces)
+bool PtRayOk(vec3 o, vec3 d, float tMin, float tMax) {
+	// (one sum: a NaN or Inf anywhere in it fails the first test; sane values are far below 1e30)
+	const float s = abs(o.x) + abs(o.y) + abs(o.z) + abs(d.x) + abs(d.y) + abs(d.z) + tMax;
+	return s < 1.0e30 && dot(d, d) > 1.0e-12 && tMax >= tMin && tMin >= 0.0;
+}
+uint gRayCount = 0u;   // (perf-ptcost) this thread's ray queries (the RT host's count mode: LoadCostKeys)
+#ifndef PT_PICK_FLOOR
+#define PT_PICK_FLOOR 0.1   // (perf-ptcost) PTBounceLights 0's floor (Direct); the RT host's ptcost scene: 0.25 +6 % noise, 0.1 +3 %, 0.02 +1 %
+#endif
+#define PT_RAY_INIT(Q, FLAGS, MASK, O, TMIN, D, TMAX) { vec3 o_ = (O), d_ = (D); float t0_ = (TMIN), t1_ = (TMAX); gRayCount++; \
+	if (!PtRayOk(o_, d_, t0_, t1_)) { o_ = vec3(0.0); d_ = vec3(0.0, 0.0, 1.0); t0_ = 0.0; t1_ = 0.0; } \
+	rayQueryInitializeEXT(Q, scene, FLAGS, MASK, o_, t0_, d_, t1_); }
+// at the top of a rayQueryProceedEXT loop's body (N: a uint 0 declared before the loop)
+#define PT_GUARD(Q, N) if (++N > kPtMaxCandidates) { rayQueryTerminateEXT(Q); break; }
+#define PT_PROCEED_OPAQUE(Q) { uint n_ = 0u; while (rayQueryProceedEXT(Q)) { PT_GUARD(Q, n_) } }
+// a count from a constant or the lamp image, NaN-safe, in [0, hi]
+int PtCount(float x, int hi) { return x > 0.0 ? min(int(min(x, float(hi)) + 0.5), hi) : 0; }
 
 bool AlphaTest() { return (uint(p.accum.w) & 1u) != 0u; }
 bool AlbedoAtlas() { return (uint(p.accum.w) & 2u) != 0u; }
@@ -132,10 +183,29 @@ float LampFall(float x) {
 	if ((uint(p.accum.w) & 131072u) != 0u) { const float w = max(1.0 - x * x * x * x, 0.0); return 0.0612 / (4.0 * x * x + 0.04) * w * w; }
 	return (uint(p.accum.w) & 2048u) != 0u ? pow(max(1.0 - x * x, 0.0), 2.2) : (1.0 - x) * (1.0 - x);
 }
-int GlowLightCount() { return LampImage() ? int(p.rect.z + 0.5) : 0; }
+bool gBackSide = false;   // (2026-11-07 ptaaa-materials) Translucent: the light from behind a thin leaf / ear (no glow light sample there)
+int GlowLightCount() { return LampImage() && !gBackSide ? PtCount(p.rect.z, kPtMaxLights - kPtMaxLamps) : 0; }   // (hangfix: capped)
+int LampCount() { return PtCount(p.misc.x, kPtMaxLamps); }   // (hangfix: misc.x, capped at the lamp image's lamps)
 #ifdef PT_LIGHT_GRID
-vec2 GridTexel(int t) { const int width = int(p.grid[2].y + 0.5); return imageLoad(lampImage, ivec2(t % width, 1 + t / width)).rg; }
+vec2 GridTexel(int t) { const int width = max(int(p.grid[2].y + 0.5), 1); return   // (hangfix: no % 0)
+	 imageLoad(lampImage, ivec2(t % width, 1 + t / width)).rg; }
 #endif
+
+// UNOFFICIAL 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1, RT-PATH-TRACING.md section 56) the frame row's texels 16-21
+// (core/RtTessContact.h PackRow; with the lamp image, flag 1024): 16-17 the bumps' slack (Strength, FadeStart, FadeEnd), 18-19 PTContactShadows
+// (pixels, longest, thickness, strength), 20-21 its gate. (1a) a screen surface up to the slack off the traced flat one is the same surface;
+// (1b) the first hit's sun and lamp rays also take the depth buffer's contact march (Direct, RestirLamps).
+#define RT_CONTACT_DEPTH gDepth
+#include "RtContact.glsl"
+vec4 PtSlack() { return LampImage() ? vec4(FrameTexel(16), FrameTexel(17)) : vec4(0.0); }
+bool gContact = false;   // set at the first hit while the screen's surface is known (Path): its point, normal, view depth
+vec3 gContactFrom = vec3(0.0), gContactN = vec3(0.0, 0.0, 1.0);
+float gContactZ = 0.0, gContactNoise = 0.0;
+float PtContact(vec3 toLight, float lightDist) {
+	if (!gContact) return 1.0;
+	return rtContactShadow(gContactFrom, gContactN, toLight, lightDist, gContactZ, p.forward, p.right.xyz, p.up.xyz, vec3(0.0), p.rect.xy, p.size.xy,
+		vec4(FrameTexel(18), FrameTexel(19)), vec4(FrameTexel(20), FrameTexel(21)), gContactNoise);
+}
 
 // PCG (O'Neill 2014) per pixel, frame, path and dimension: no pattern between pixels, independent frames
 uint state;
@@ -143,15 +213,131 @@ uint Pcg() { state = state * 747796405u + 2891336453u; uint w = ((state >> ((sta
 float Rand() { return float(Pcg() >> 8) * (1.0 / 16777216.0); }
 
 // A rayQueryEXT cannot be a parameter: alpha-tested candidates (mask 0x10) are confirmed only where their texture is solid
-#define Proceed(q) while (rayQueryProceedEXT(q)) if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
+// (ptaaa-hangfix) both with the candidate cap (PT_GUARD)
+#define Proceed(q) { uint n_ = 0u; while (rayQueryProceedEXT(q)) { PT_GUARD(q, n_) \
+	if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
 	rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), \
-		rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q)
+		rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q); } }
+// (2026-11-07 rtgap-decals) shadow / visibility rays: decals (NVR_RT_CUSTOM_DECAL) never block them (RtAlpha.glsl rtAlphaPassShadow). (With
+// AlphaTest() off there are no decals in the scene: the core takes them only with its alpha atlas.)
+#define ProceedShadow(q) { uint n_ = 0u; while (rayQueryProceedEXT(q)) { PT_GUARD(q, n_) \
+	if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
+	rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), \
+		uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q); } }
 
+// ---- UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md section "materials") the material models' keys: the lamp image's frame row
+// texels 24-26 (core\RtMaterials.h; with the lamp image, flag 1024): x PTGlass (0 off, 1 the light, 2 the camera too), y PTGlassTint,
+// z PTFoliage, w PTSkin; texel 26 x PTClothSheen. Without the lamp image: all off.
+// (merge 2026-11-07, the size fix) read once per thread (LoadMatKeys at main's start), not at each of ~100 inlined uses
+vec4 gMatKeys = vec4(0.0);
+float gMatSheen = 0.0;
+void LoadMatKeys() {
+	const bool on = (uint(p.accum.w) & 1024u) != 0u;
+	gMatKeys = on ? vec4(FrameTexel(24), FrameTexel(25)) : vec4(0.0);
+	gMatSheen = on ? FrameTexel(26).x : 0.0;
+}
+vec4 MatKeys() { return gMatKeys; }
+float MatSheen() { return gMatSheen; }
+// ---- UNOFFICIAL 2026-11-07 (perf-ptcost, RT-PATH-TRACING.md section "perf-ptcost") the ray budget's keys: the frame row's texels 28-29
+// (core\RtPtCost.h PackRow; with the lamp image, flag 1024; without it all 0). 0 is the cheap path everywhere:
+//   28.x PTRestirDIRays: 0 ReSTIR DI's targets hold visibility as before, but last frame's reservoir at the SAME SPOT (its point within
+//        1.5 pixels: a still camera) needs no rays (its sample was seen there); 1 every ray as before (canonical 1-2, temporal 2, 2 per
+//        spatial neighbour); test values: 2 unshadowed targets + one final ray (RTXDI's final visibility, W 0 when occluded), 3 as 0 +
+//        one shadow ray for the canonical candidates' winner + the neighbours' MIS weights unshadowed (no rays at the neighbours). (With
+//        PTRestirDISpatial 2, the new default: host scene restirdi 2.0 ReSTIR rays a pixel vs 3.3, the same mean and noise.)
+//   28.y PTBounceLights: 0 a bounce hit (and a thin leaf's far side) takes ONE light sample, the sun, the picked lamp or the emissive point,
+//        chosen in proportion to their unshadowed light (one shadow ray); 1 all three, a shadow ray each (before)
+//   29.x 1: no instance of this frame is the hidden first-person body (NVR_RT_CUSTOM_HIDDEN): the camera ray is ONE query over everything
+//        (0x7F), not the world's then the cut-outs' and people's (two)
+//   29.y 1 (the RT host's NVR_RT_HOST_PTCOST count mode only): the display's alpha = 1 + this pixel's ray queries this frame (gRayCount)
+float gRestirRays = 0.0, gBounceLights = 0.0, gOneCameraQuery = 0.0;
+bool gCountRays = false;
+void LoadCostKeys() {
+	if ((uint(p.accum.w) & 1024u) == 0u) return;
+	const vec2 a = FrameTexel(28), b = FrameTexel(29);
+	gRestirRays = a.x; gBounceLights = a.y; gOneCameraQuery = b.x; gCountRays = b.y > 0.5;
+}
+int RestirRaysMode() { return int(clamp(gRestirRays, 0.0, 3.0) + 0.5); }
+float GlassMode() { return MatKeys().x; }
+float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+// GLASS: a thin pane of n = 1.5. Its tint is the hue of the glass texture's average colour (records' albedo), never its darkness (glass
+// textures are drawn see-through: a grey one is not a grey filter), x PTGlassTint
+vec3 GlassTint(vec3 albedo) {
+	const float m = max(max(albedo.r, albedo.g), max(albedo.b, 1.0e-3));
+	return mix(vec3(1.0), clamp(albedo / m, 0.0, 1.0), clamp(MatKeys().y, 0.0, 1.0));
+}
+// unpolarised Fresnel reflectance of one air-glass face at the incidence cosine c (exact, not Schlick: 4 % head on, 100 % grazing)
+float FresnelGlass(float c) {
+	const float eta = 1.5;
+	c = clamp(c, 1.0e-3, 1.0);
+	const float ct = sqrt(max(1.0 - (1.0 - c * c) / (eta * eta), 0.0));
+	const float rs = (c - eta * ct) / (c + eta * ct), rp = (eta * c - ct) / (eta * c + ct);
+	return 0.5 * (rs * rs + rp * rp);
+}
+// The pane as a whole (both faces, the light bouncing between them; a = one pass through it per colour): reflectance R, transmittance T.
+// a = 1: R + T = 1 exactly (host scene `materials`, glass furnace)
+void GlassSlab(float c, vec3 a, out vec3 R, out vec3 T) {
+	const float r = FresnelGlass(c);
+	const vec3 d = max(1.0 - r * r * a * a, vec3(1.0e-6));
+	T = (1.0 - r) * (1.0 - r) * a / d;
+	R = r + (1.0 - r) * (1.0 - r) * r * a * a / d;
+}
+// A shadow ray crossing a pane: its transmittance at the crossing's angle (the triangle's own normal)
+vec3 GlassShadow(uint instance, uint prim, mat3 toScene, vec3 dir) {
+	float c = 1.0;
+	if (records[instance].vertexOffset != 0xFFFFFFFFu) {
+		const vec3 f = toScene * rtHitObjectNormal(instance, prim);
+		if (dot(f, f) > 1.0e-12) c = abs(dot(normalize(f), dir));
+	}
+	vec3 R, T;
+	GlassSlab(c, GlassTint(records[instance].albedo.rgb), R, T);
+	return T;
+}
+
+// (2026-11-07 ptaaa-materials) shadow rays pass glass panes, tinted by them: gShadowTint is the product of the panes' transmittance along
+// the last Visible ray (1 when it met none; Direct multiplies the sun and the lamp by it). A pane's triangle reported twice (the API allows
+// a duplicate any-hit) counts once (the last two crossings are remembered).
+vec3 gShadowTint = vec3(1.0);
 bool Visible(vec3 from, vec3 dir, float tMax) {
-	rayQueryEXT s;
-	rayQueryInitializeEXT(s, scene, gl_RayFlagsTerminateOnFirstHitEXT | (AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT), 0xFFu, from + p.origin.xyz, 0.0, dir, tMax);
-	Proceed(s);
-	return rayQueryGetIntersectionTypeEXT(s, true) != gl_RayQueryCommittedIntersectionTriangleEXT;
+	gShadowTint = vec3(1.0);
+	// (merge 2026-11-07) a near-eye ray (ptaaa-firstperson) returns untinted: glass panes within arm's reach of the eye are rare
+	// (2026-11-07 ptaaa-firstperson) a ray from (the view model, a surface within arm's reach) or toward (the flashlight, the Pip-Boy
+	// light: lamps at the eye; the lamp lies ~16 units past tMax) a point near the eye passes over the hidden first-person body
+	// (RtHidden.glsl). The scene's eye is at 0 here (camera-relative points, p.origin = RtCore::Eye())
+	// (merge 2026-11-07, the ptaaa size fix) ONE query loop for both cases (the path tracer calls Visible from ~9 inlined places: two loops
+	// each with its own alpha test were too much code for the AMD driver's pipeline build). Near the eye: rtBlockedPassHidden's two queries
+	// (kRtAnyHit, mask 0xFF: the opaque 0x8F, then 0x70 every candidate tested, the hidden body passed over), as before; else one query
+	// over everything, glass tinting, cut-outs tested. Same answers as the two functions it replaces.
+	const bool near = rtHiddenPassOver(from, from + dir * (tMax + 16.0), vec3(0.0));
+	if (near && !(tMax > 0.0)) return true;
+	const bool glass = !near && GlassMode() > 0.5;
+	uint seen0 = 0xFFFFFFFFu, seen1 = 0xFFFFFFFFu;
+	for (int k = near ? 0 : 1; k < 2; k++) {   // 0: near the eye, the opaque world first; 1: the candidates' query
+		const uint flags = gl_RayFlagsTerminateOnFirstHitEXT | (k == 0 ? gl_RayFlagsOpaqueEXT : near ? gl_RayFlagsNoOpaqueEXT : AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT);
+		rayQueryEXT s;
+		PT_RAY_INIT(s, flags, k == 0 ? 0x8Fu : near ? 0x70u : 0xFFu, from + p.origin.xyz, 0.0, dir, tMax)   // (hangfix)
+		uint n_ = 0u;
+		while (rayQueryProceedEXT(s)) {
+			PT_GUARD(s, n_)   // (hangfix)
+			if (rayQueryGetIntersectionTypeEXT(s, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+			const uint ci = rayQueryGetIntersectionInstanceCustomIndexEXT(s, false);
+			const uint instance = rayQueryGetIntersectionInstanceIdEXT(s, false), prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(s, false));
+			if (near && (ci & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;   // (the hidden body, near the eye)
+			if (!near && rtIsGlass(instance)) {
+				const uint key = (instance * 2654435761u) ^ (prim * 40503u + 1u);
+				if (glass && key != seen0 && key != seen1) {
+					seen1 = seen0; seen0 = key;
+					gShadowTint *= GlassShadow(instance, prim, mat3(rayQueryGetIntersectionObjectToWorldEXT(s, false)), dir);
+				}
+				continue;
+			}
+			if ((near && !AlphaTest()) || rtAlphaPassShadow(ci, instance, prim, rayQueryGetIntersectionBarycentricsEXT(s, false)))
+				rayQueryConfirmIntersectionEXT(s);
+		}
+		if (rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionTriangleEXT) return false;
+	}
+	return true;
 }
 
 vec3 Basis(vec3 n, out vec3 b) {
@@ -201,9 +387,59 @@ vec3 HitNormal(uint instance, uint prim, mat4x3 toScene, vec3 d) {
 // units fold pi into the light (a Lambert surface facing a light of colour E sends albedo x E), so the direct light uses pi x the BRDF
 // and a path's throughput the physical BRDF x cos / pdf (diffuse alone: x albedo, as before).
 bool Specular() { return (uint(p.accum.w) & 128u) != 0u; }
-struct Surface { vec3 albedo; float rough; float metal; };
+// (2026-11-07 ptaaa-materials) kind: the material model (HitSurface from the record, ScreenHit from the MaterialBuffer's class); for glass
+// the albedo is the pane's tint (GlassTint)
+struct Surface { vec3 albedo; float rough; float metal; uint kind; };
+const uint kKindPlain = 0u, kKindGlass = 1u, kKindFoliage = 2u, kKindSkin = 3u, kKindCloth = 4u;
 
-vec3 FresnelF0(Surface s) { return mix(vec3(0.04), s.albedo, s.metal); }
+// ---- UNOFFICIAL 2026-11-07 (ptaaa-materials) THIN TRANSLUCENT surfaces: leaves and grass (foliage) and skin's thin parts. R is the diffuse
+// colour sent back on the lit side, T the colour sent through to the far side (diffuse again: a thin leaf or ear scatters what it lets
+// through). Foliage: T = PTFoliage x R; skin: T = 0.25 PTSkin x R x flesh red (Skin.hlsl SKIN_TRANSMIT_TINT). Both are scaled per colour
+// so that R + T never exceeds the albedo's share of 1: realistic albedos keep R = albedo (front-lit leaves look as before), an albedo-1
+// card in a white furnace keeps exactly what it receives (host scene `materials`).
+// Light from behind reaches the far side through Translucent (a second light sample from the far side's face); the path goes through
+// with chance Luma(T) / Luma(R + T) (NextDirection). A thick part (a torso, a trunk) stops that light by itself: the far side's sample
+// starts 1 unit inside it and its own back faces block the ray, so only parts thinner than that let light through (ears, fingers, leaves).
+const vec3 kSkinTransmitTint = vec3(1.0, 0.28, 0.12);
+vec3 TransmitShare(Surface s) {
+	if (s.kind == kKindFoliage) return vec3(max(MatKeys().z, 0.0));
+	if (s.kind == kKindSkin) return 0.25 * max(MatKeys().w, 0.0) * kSkinTransmitTint;
+	return vec3(0.0);
+}
+vec3 ReflectColour(Surface s) {
+	const vec3 t = TransmitShare(s);
+	return s.albedo * min(vec3(1.0), 1.0 / max(s.albedo * (1.0 + t), vec3(1.0e-4)));
+}
+vec3 TransmitColour(Surface s) { return TransmitShare(s) * ReflectColour(s); }
+float TransmitChance(Surface s) {
+	if (s.kind != kKindFoliage && s.kind != kKindSkin) return 0.0;
+	const float t = Luma(TransmitColour(s));
+	return t > 0.0 ? t / max(t + Luma(ReflectColour(s)), 1.0e-6) : 0.0;
+}
+// SKIN: the diffuse light under a light at cosine nl wraps past the terminator, per colour (red widest: light scattered under the skin
+// comes out red), normalised (nl + w) / (1 + w)^2: under an even sky never more than Lambert (pi (1 + 2w) / (1 + w)^2 <= pi), head-on 1 / (1 + w)
+// of it, at the terminator w / (1 + w)^2 where Lambert has 0. pi x the BRDF toward the light: that / nl. Light samples only (bounce
+// weights keep Lambert: gBounceEval).
+bool gBounceEval = false;
+vec3 SkinWrap() { return vec3(0.3, 0.12, 0.08) * clamp(MatKeys().w, 0.0, 2.0); }
+vec3 SkinWrapPi(float nl) { const vec3 w = SkinWrap(); nl = max(nl, 1.0e-4); return (nl + w) / ((1.0 + w) * (1.0 + w) * nl); }
+// CLOTH: a sheen lobe (Estevez & Kulla 2017 "Charlie" distribution, Neubelt & Pettineo's visibility) of colour PTClothSheen x sqrt(albedo),
+// roughness = the surface's (at least 0.3); the diffuse under it gives up the sheen's directional albedo (bounded from above by
+// 0.05 + 0.7 exp(-1.9 nv) for roughness 0.3-1, fitted to its numeric integral): energy never grows.
+float SheenD(float nh, float a) { const float inv = 1.0 / a; return (2.0 + inv) * pow(max(1.0 - nh * nh, 0.0), 0.5 * inv) / 6.2831853; }
+float SheenV(float nl, float nv) { return 1.0 / (4.0 * (nl + nv - nl * nv)); }
+float SheenAlbedoBound(float nv) { return 0.05 + 0.7 * exp(-1.9 * clamp(nv, 0.0, 1.0)); }
+
+vec3 FresnelF0(Surface s) { return mix(vec3(s.kind == kKindSkin ? 0.028 : 0.04), s.albedo, s.metal); }   // (skin: Skin.hlsl SKIN_F0)
+// (2026-11-07 ptaaa-denoiser) the specular albedo PTDenoiseSplit divides the specular light by: Karis' fit of the split-sum environment
+// BRDF (as DlssRRGuides.comp / Shaders/Includes/PBR.hlsl EnvBRDFApprox), clamped to 1. Only a demodulation factor (the show pass
+// multiplies the same stored value back), so its accuracy changes how much texture the denoiser sees, never the light.
+vec3 EnvBrdfApprox(vec3 f0, float rough, float nv) {
+	const vec4 r = rough * vec4(-1.0, -0.0275, -0.572, 0.022) + vec4(1.0, 0.0425, 1.04, -0.04);
+	const float a004 = min(r.x * r.x, exp2(-9.28 * nv)) * r.x + r.y;
+	const vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+	return clamp(f0 * ab.x + ab.y, vec3(0.0), vec3(1.0));
+}
 float GgxD(float nh, float a2) { float d = nh * nh * (a2 - 1.0) + 1.0; return a2 / (3.14159265 * d * d); }
 float SmithG1(float x, float a2) { return 2.0 * x / (x + sqrt(a2 + (1.0 - a2) * x * x)); }
 
@@ -220,17 +456,33 @@ float SpecE(float nv, float rough) {
 	const vec2 f = vec2(clamp(nv, 0.0, 1.0) * 31.0, clamp(rough, 0.0, 1.0) * 15.0);
 	const ivec2 i = min(ivec2(f), ivec2(30, 14));
 	const vec2 w = f - vec2(i);
-	const float e00 = EnergyAt(i.y * 32 + i.x), e10 = EnergyAt(i.y * 32 + i.x + 1);
-	const float e01 = EnergyAt((i.y + 1) * 32 + i.x), e11 = EnergyAt((i.y + 1) * 32 + i.x + 1);
+	float e[4];   // (merge 2026-11-07, the size fix: one EnergyAt site) e00, e10, e01, e11
+	for (int c = 0; c < 4; c++) e[c] = EnergyAt((i.y + (c >> 1)) * 32 + i.x + (c & 1));
+	const float e00 = e[0], e10 = e[1], e01 = e[2], e11 = e[3];
 	return max(mix(mix(e00, e10, w.x), mix(e01, e11, w.x), w.y), 0.05);
 }
 
 bool gSpecOnly = false;   // (2026-11-03 rtspec) PTDebugView 8 / 9: BrdfPi without the diffuse part
 
+// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) PTDenoiseSplit (flag 4194304, with PTDenoise's 512): the last BrdfPi's specular part and its
+// whole (pi x the BRDF). What a caller adds right after the call is light x BrdfPi x factors common to both parts, so x SpecShare()
+// (per channel) is exactly its specular part (the split's direct light and the first bounce's share; main() writes the two signals)
+vec3 gBrdfSpec = vec3(0.0), gBrdfAll = vec3(0.0);
+vec3 SpecShare() {
+	return vec3(gBrdfAll.x > 1.0e-12 ? gBrdfSpec.x / gBrdfAll.x : 0.0, gBrdfAll.y > 1.0e-12 ? gBrdfSpec.y / gBrdfAll.y : 0.0,
+		gBrdfAll.z > 1.0e-12 ? gBrdfSpec.z / gBrdfAll.z : 0.0);
+}
+
 // pi x the BRDF toward l (seen from v), both away from the surface
 vec3 BrdfPi(Surface s, vec3 n, vec3 v, vec3 l) {
-	if (!Specular()) return gSpecOnly ? vec3(0.0) : s.albedo;
-	vec3 diffuse = s.albedo * (1.0 - s.metal);
+	gBrdfSpec = vec3(0.0);   // (ptaaa-denoiser; the early returns below are all diffuse)
+	// (2026-11-07 ptaaa-materials) the far side of a thin leaf / ear (DirectSides: its albedo is the transmitted colour T): Lambert
+	if (gBackSide) { gBrdfAll = gSpecOnly ? vec3(0.0) : s.albedo; return gBrdfAll; }
+	if (s.kind == kKindGlass) { gBrdfAll = vec3(0.0); return gBrdfAll; }   // a smooth pane reflects and transmits like a mirror (NextDirection): no light sample meets it
+	const vec3 base = s.kind == kKindFoliage || s.kind == kKindSkin ? ReflectColour(s) : s.albedo;
+	const vec3 shape = s.kind == kKindSkin && !gBounceEval ? SkinWrapPi(dot(n, l)) : vec3(1.0);   // skin's wrap (light samples)
+	if (!Specular()) { gBrdfAll = gSpecOnly ? vec3(0.0) : base * shape; return gBrdfAll; }
+	vec3 diffuse = base * (1.0 - s.metal) * shape;
 	float nl = max(dot(n, l), 1.0e-4), nv = max(dot(n, v), 1.0e-4);
 	vec3 h = normalize(v + l);
 	float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 0.0);
@@ -238,8 +490,22 @@ vec3 BrdfPi(Surface s, vec3 n, vec3 v, vec3 l) {
 	vec3 F = FresnelF0(s) + (1.0 - FresnelF0(s)) * pow(1.0 - vh, 5.0);
 	vec3 spec = F * (GgxD(nh, a2) * SmithG1(nl, a2) * SmithG1(nv, a2) / (4.0 * nl * nv));
 	spec *= 1.0 + FresnelF0(s) * (1.0 / SpecE(nv, s.rough) - 1.0);   // (2026-11-07) the light of multiple scattering
-	return (gSpecOnly ? vec3(0.0) : diffuse * (1.0 - F)) + 3.14159265 * spec;
+	if (s.kind == kKindCloth) {   // (2026-11-07 ptaaa-materials) the sheen lobe on top, the diffuse giving up its share (the split: specular)
+		const vec3 sheen = clamp(MatSheen(), 0.0, 1.0) * sqrt(max(s.albedo, vec3(0.0)));
+		diffuse *= 1.0 - max(max(sheen.r, sheen.g), sheen.b) * SheenAlbedoBound(nv);
+		spec += sheen * (SheenD(nh, clamp(s.rough, 0.3, 1.0)) * SheenV(nl, nv));
+	}
+	gBrdfSpec = 3.14159265 * spec;   // (ptaaa-denoiser)
+	gBrdfAll = (gSpecOnly ? vec3(0.0) : diffuse * (1.0 - F)) + gBrdfSpec;
+	return gBrdfAll;
 }
+
+// (ptaaa-denoiser) PTDenoiseSplit's capture: while gSplitTake (the first hit's Direct only) each light added also adds its specular
+// part to gSplitSpec. A light added without the macro counts as diffuse (the sum stays exact; only the split is coarser).
+bool Split() { return (uint(p.accum.w) & 4194304u) != 0u; }
+bool gSplitTake = false;
+vec3 gSplitSpec = vec3(0.0);
+#define PT_DIRECT_ADD(E, X) { const vec3 add_ = (X); E += add_; if (gSplitTake) gSplitSpec += add_ * SpecShare(); }
 
 // (2026-11-07) a half vector from GGX's VISIBLE normals (Heitz 2018, "Sampling the GGX distribution of visible normals"): every sample faces
 // v, so far fewer go under the surface than with the plain NDF (rough metal at grazing angles was the noisiest), and the path weight
@@ -265,20 +531,65 @@ float SpecularShare(Surface s) { return clamp(0.15 + 0.7 * s.metal + 0.25 * (1.0
 // (2026-11-03 b) the chance density (per solid angle) that NextDirection picks l: what multiple importance sampling weighs the glow
 // light sample against
 float BsdfPdf(vec3 n, vec3 v, Surface s, vec3 l) {
+	if (s.kind == kKindGlass) return 0.0;   // (2026-11-07 ptaaa-materials) mirror-like lobes: no density in any given direction
+	const float q = TransmitChance(s);   // (ptaaa-materials) thin translucent: the far side's cosine lobe with chance q
 	float nl = dot(n, l);
-	if (nl <= 0.0) return 0.0;
-	if (!Specular()) return nl / 3.14159265;
+	if (nl <= 0.0) return q * max(-nl, 0.0) / 3.14159265;
+	if (!Specular()) return (1.0 - q) * nl / 3.14159265;
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a, ps = SpecularShare(s);
 	vec3 h = normalize(v + l);
 	float nh = max(dot(n, h), 0.0), nv = max(dot(n, v), 1.0e-4);
-	return ps * GgxD(nh, a2) * SmithG1(nv, a2) / (4.0 * nv) + (1.0 - ps) * nl / 3.14159265;   // (2026-11-07: the VNDF's density)
+	return (1.0 - q) * (ps * GgxD(nh, a2) * SmithG1(nv, a2) / (4.0 * nv) + (1.0 - ps) * nl / 3.14159265);   // (2026-11-07: the VNDF's density)
+}
+
+// (2026-11-07 ptaaa-denoiser) the chance that direction l came from the specular lobe of NextDirection's mixture (its share of the
+// mixture's density at l): PTDenoiseSplit writes the bounce ray's hit distance as the specular one only above 0.5 (a metal's diffuse
+// lobe sample carries specular light, but its hit is not the reflection's)
+float SpecLobeChance(vec3 n, vec3 v, Surface s, vec3 l) {
+	const float nl = dot(n, l);
+	if (!Specular() || nl <= 0.0) return 0.0;
+	const float a = max(s.rough * s.rough, 0.002), a2 = a * a, ps = SpecularShare(s);
+	const vec3 h = normalize(v + l);
+	const float nh = max(dot(n, h), 0.0), nv = max(dot(n, v), 1.0e-4);
+	const float pS = ps * GgxD(nh, a2) * SmithG1(nv, a2) / (4.0 * nv), pD = (1.0 - ps) * nl / 3.14159265;
+	return pS / max(pS + pD, 1.0e-20);
 }
 
 // The next direction from a hit: the diffuse or the specular lobe (one-sample mixture), the throughput's factor (BRDF x cos / pdf).
 // false: the path ends (the sample went under the surface). (2026-11-03 b) pdf: the direction's chance density (BsdfPdf).
+// (2026-11-07 ptaaa-materials) l may now point to the FAR side (glass let through, a leaf's transmission): Path then starts the next ray
+// from the far side's face.
+bool NextDirectionReflect(vec3 n, vec3 v, Surface s, float q, out vec3 l, out vec3 weight, out float pdf);
 bool NextDirection(vec3 n, vec3 v, Surface s, out vec3 l, out vec3 weight, out float pdf) {
 	pdf = 0.0;
-	if (!Specular()) { l = CosineDirection(n, vec2(Rand(), Rand())); weight = s.albedo; pdf = max(dot(n, l), 0.0) / 3.14159265; return true; }
+	if (s.kind == kKindGlass) {   // the pane: mirror reflection or straight through, chosen in proportion to R and T (each then weighs R / P, T / (1 - P))
+		vec3 R, T;
+		GlassSlab(abs(dot(n, v)), s.albedo, R, T);
+		const float pr = Luma(R) / max(Luma(R) + Luma(T), 1.0e-6);
+		if (Rand() < pr) { l = reflect(-v, n); weight = R / max(pr, 1.0e-6); }
+		else { l = -v; weight = T / max(1.0 - pr, 1.0e-6); }
+		gBrdfSpec = gBrdfAll = vec3(1.0);   // (ptaaa-denoiser's split: both mirror-like lobes count as specular)
+		pdf = 1.0e6;   // (a glow light met along a mirror-like lobe keeps its full weight: no light sample could have found it)
+		return true;
+	}
+	const float q = TransmitChance(s);
+	if (q > 0.0 && Rand() < q) {   // through a thin leaf / ear: the far side's cosine lobe
+		l = CosineDirection(-n, vec2(Rand(), Rand()));
+		pdf = q * max(-dot(n, l), 0.0) / 3.14159265;
+		weight = TransmitColour(s) / q;
+		gBrdfSpec = vec3(0.0); gBrdfAll = vec3(1.0);   // (ptaaa-denoiser's split: diffuse)
+		return true;
+	}
+	gBounceEval = true;
+	const bool going = NextDirectionReflect(n, v, s, q, l, weight, pdf);
+	gBounceEval = false;
+	return going;
+}
+
+// The lit side's lobes (the diffuse and GGX mixture, as before 2026-11-07), taken with chance 1 - q (the weight and pdf include it)
+bool NextDirectionReflect(vec3 n, vec3 v, Surface s, float q, out vec3 l, out vec3 weight, out float pdf) {
+	pdf = 0.0;
+	if (!Specular()) { l = CosineDirection(n, vec2(Rand(), Rand())); weight = BrdfPi(s, n, v, l) / (1.0 - q); pdf = (1.0 - q) * max(dot(n, l), 0.0) / 3.14159265; return true; }
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a;
 	float ps = SpecularShare(s);
 	if (Rand() < ps) {
@@ -304,7 +615,7 @@ bool NextDirection(vec3 n, vec3 v, Surface s, out vec3 l, out vec3 weight, out f
 // so the sum is unbiased, and wherever the sphere aim is poor (a thin neon tube in a big sphere: most aimed rays miss the glow) the
 // bounce ray's share takes over: never much worse than without the light sample.
 vec4 GlowSphere(int k) {
-	int i = int(p.misc.x + 0.5) + k;
+	int i = LampCount() + k;
 	return vec4(imageLoad(lampImage, ivec2(4 * i, 0)).rg, imageLoad(lampImage, ivec2(4 * i + 1, 0)).rg);
 }
 
@@ -316,7 +627,7 @@ float GlowWeight(vec4 sphere, vec3 guess, vec3 hit, vec3 n) {
 	return dot(guess, vec3(0.2126, 0.7152, 0.0722)) * (r * r / max(dist * dist, r * r) * c);
 }
 float GlowWeight(int k, vec3 hit, vec3 n) {
-	int i = int(p.misc.x + 0.5) + k;
+	int i = LampCount() + k;
 	vec3 guess = vec3(imageLoad(lampImage, ivec2(4 * i + 2, 0)).rg, imageLoad(lampImage, ivec2(4 * i + 3, 0)).r);
 	return GlowWeight(GlowSphere(k), guess, hit, n);
 }
@@ -358,8 +669,8 @@ vec3 GlowSample(vec3 lift, vec3 n, vec3 v, Surface s, vec4 sphere, int index, fl
 	float c = dot(n, l);
 	if (c <= 0.0) return vec3(0.0);
 	rayQueryEXT q;
-	rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, lift + p.origin.xyz, 0.0, l, dist + r);
-	Proceed(q);
+	PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, lift + p.origin.xyz, 0.0, l, dist + r)   // (hangfix)
+	ProceedShadow(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return vec3(0.0);
 	uint instance = rayQueryGetIntersectionInstanceIdEXT(q, true);
 	if ((records[instance].flags & RT_HIT_GLOW_FLAG) == 0u) return vec3(0.0);   // something in the way, or a part with no glow map
@@ -371,9 +682,221 @@ vec3 GlowSample(vec3 lift, vec3 n, vec3 v, Surface s, vec4 sphere, int index, fl
 }
 
 float gGlowTotal;   // (2026-11-03 b) the last Direct()'s glow pick total (the bounce ray's MIS weight at the next hit needs it)
+int gBounce = 0;    // (perf-ptcost) the path vertex Direct() lights (0: the first hit), set by Path()
 ivec2 gPixel;   // the pixel this thread traces (ScreenHit)
 
+// UNOFFICIAL 2026-11-07 the flashlight (RtPathTrace.cpp Lamps): always lamp 0 when it is on; its cone in the frame row's texel 15 .x
+// (the lamp image: the lamp texels' spare word carries ReSTIR's number remap) or lampColor[0].w (no lamp image): 1 + (angle x 512 + u)
+// x 512 + v, the cone's half-angle in degrees and its direction octahedral, 9 bits each; 0 = no flashlight. The share of lamp k reaching
+// `toPoint` (lamp -> point, unit): full inside half the cone, nothing outside it, smooth between (as the game's own flashlight pass)
+float LampSpot(int k, vec3 toPoint) {
+	if (k != 0) return 1.0;
+	const float code = LampImage() ? FrameTexel(15).x : p.lampColor[0].w;
+	if (code < 0.5) return 1.0;
+	const uint c = uint(code - 1.0 + 0.5);
+	const vec2 e = vec2(float((c >> 9u) & 511u), float(c & 511u)) / 511.0 * 2.0 - 1.0;
+	vec3 d = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+	if (d.z < 0.0) d.xy = (1.0 - abs(d.yx)) * vec2(d.x >= 0.0 ? 1.0 : -1.0, d.y >= 0.0 ? 1.0 : -1.0);
+	const float angle = radians(float(c >> 18u));
+	return smoothstep(cos(angle), cos(0.5 * angle), dot(normalize(d), toPoint));
+}
+
 #ifndef PT_RESTIR_GI
+// ---- UNOFFICIAL 2026-11-07 (ptaaa-emissive) PTEmissive: glowing TRIANGLES as lights (RT-PATH-TRACING.md section "ptaaa-emissive";
+// src/core/RtEmissiveRow.h has the data, RtEmissiveBuild.comp builds the list each frame before this pass). At a hit ONE emissive sample, as
+// RTXDI samples emissive triangles: an instance in proportion to its total power x the share of its bound sphere above the surface /
+// max(d^2, r^2) (a one-pass reservoir over all of them: the exact chance is known), a triangle in proportion to its power (binary search in
+// the instance's running sums), a uniform point on it; the light there is the glow map's texel (finest mip) x PTGlow, one shadow ray. Its
+// density per solid angle: chance x share / area x d^2 / |cos at the light|. A bounce ray that meets the same triangle evaluates the same
+// density (the record's bits 8-15 name the instance) and the two are weighed by the balance heuristic, so neither counts the light twice;
+// where the path ends at this hit (its last bounce, DebugView 3) the light sample counts in full. At the first hit with PTRestirDI the sample
+// is a candidate of ReSTIR DI next to the lamp loop's (RestirDirect) and a bounce ray from there that meets a listed triangle counts nothing
+// (that light is all ReSTIR's; the radiance cache still gets its balance share). Replaces PTGlowLights' bound spheres (the C++ turns them off).
+const int kEmissiveRow = 50;   // RtEmissiveRow.h kRow (after the frame row)
+// ---- (ptaaa-hangfix) the scratch store's layout as this frame's keys give it, checked once a thread (LoadScratchLayout, main's start): each
+// region (ReSTIR DI's reservoirs, the radiance cache's table, PTEmissive's blocks + list) must lie inside the store and clear of the
+// reservoirs (and the emissive one clear of the cache); a region that does not is off this frame. Same answers wherever the host's layout
+// is right (core\RtPathTrace.cpp CacheBaseWords / EmissiveBaseWords). (tools/nvr-rt-playground sized its reservoirs for the old 4 words a
+// pixel: its cache's first entries lay under the second reservoir set, each pass writing over the other's words.)
+const uint kEmMax = 128u, kEmTriangles = 65536u, kEmWords = 128u * 32u + 65536u;   // RtEmissiveRow.h kMax, kTrianglesMax, kScratchWords
+bool gScratchRestir = false, gScratchCache = false;
+uint gCacheBase = 0u, gCacheMask = 0u, gEmBase = 0u;
+int gEmCount = 0;
+void LoadScratchLayout() {
+	if (!LampImage()) return;
+	const uint total = uint(scratch.words.length());
+	const float pages = float(total / 4096u);   // (bases are in 4096-word pages: compared as floats first, no uint overflow)
+	const uint reservoirs = 12u * uint(max(p.size.x, 0.0)) * uint(max(p.size.y, 0.0));   // two sets of 6 words a pixel (ReservoirWord)
+	const bool restir = (uint(p.accum.w) & 262144u) != 0u;
+	gScratchRestir = reservoirs <= total;
+	const vec2 c9 = FrameTexel(9), c12 = FrameTexel(12);
+	if ((uint(p.accum.w) & 524288u) != 0u && c9.y >= 0.5 && c9.y <= 22.5 && c12.y >= 0.0 && c12.y <= pages) {
+		const uint base = uint(c12.y + 0.5) * 4096u, entries = 1u << uint(c9.y + 0.5);
+		if (base + 16u * entries <= total && (!restir || base >= reservoirs)) { gScratchCache = true; gCacheBase = base; gCacheMask = entries - 1u; }
+	}
+	const vec2 e22 = FrameTexel(22);
+	// (flag 8388608: RtPathTrace.cpp could not add the list's build pass this frame: the blocks are last frame's, never read)
+	if (e22.x >= 0.5 && e22.y >= 0.0 && e22.y <= pages && (uint(p.accum.w) & 8388608u) == 0u) {
+		const uint base = uint(e22.y + 0.5) * 4096u, cacheEnd = gCacheBase + 16u * (gCacheMask + 1u);
+		if (base + kEmWords <= total && (!restir || base >= reservoirs) && (!gScratchCache || base >= cacheEnd || base + kEmWords <= gCacheBase)) {
+			gEmBase = base;
+			gEmCount = PtCount(e22.x, int(kEmMax));
+		}
+	}
+}
+int EmCount() { return gEmCount; }   // (hangfix: was the frame row's texel 22 .x, unchecked)
+uint EmBlock(int e) { return gEmBase + uint(e) * 32u; }
+uint EmList() { return gEmBase + kEmMax * 32u; }
+float EmF(uint w) { return uintBitsToFloat(scratch.words[w]); }
+// (hangfix) a block's triangles and their place in the list: 1 .. kEmTriangles, the whole run inside the list (the trace's binary search
+// and its CDF reads stay in it)
+bool EmListOk(uint b) { const uint tris = scratch.words[b + 6u], first = scratch.words[b + 7u]; return tris >= 1u && tris <= kEmTriangles && first <= kEmTriangles - tris; }
+float gEmTotal = 0.0;   // the last pick's instance weights' sum at its hit (a bounce ray's MIS weight at the next hit needs it)
+bool gEmMis = true;     // (Path) false: the path ends at this hit, so the light sample counts in full
+
+// Instance e's pick weight from a hit (> 0 wherever any of its bound sphere is above the surface: every point it can light is reachable)
+float EmWeight(int e, vec3 hit, vec3 n) {
+	const uint b = EmBlock(e);
+	if (scratch.words[b] == 0u) return 0.0;
+	const vec3 l = vec3(EmF(b + 2u), EmF(b + 3u), EmF(b + 4u)) - p.origin.xyz - hit;
+	const float r = EmF(b + 5u), dist = length(l);
+	const float c = dist > r ? clamp(dot(n, l) / dist + r / dist, 0.0, 1.0) : 1.0;
+	return EmF(b + 1u) * c / max(dist * dist, r * r);
+}
+// Instance e's triangle `prim` in scene space: its record, corners; false: not listed
+bool EmTriangle(int e, uint prim, out uint g, out vec3 a, out vec3 b, out vec3 c) {
+	const uint k = EmBlock(e);
+	g = scratch.words[k];
+	a = b = c = vec3(0.0);
+	if (g == 0u || prim >= scratch.words[k + 6u]) return false;
+	g -= 1u;
+	// (hangfix) a record of this frame's list with its geometry data (the build pass checks both; a stale block must not index past them)
+	// (RtEmissiveBuild.comp lists an instance only when every one of its triangles lies inside the geometry data)
+	if (g >= uint(records.length()) || records[g].vertexOffset == 0xFFFFFFFFu) return false;
+	const vec4 r0 = vec4(EmF(k + 8u), EmF(k + 9u), EmF(k + 10u), EmF(k + 11u));
+	const vec4 r1 = vec4(EmF(k + 12u), EmF(k + 13u), EmF(k + 14u), EmF(k + 15u));
+	const vec4 r2 = vec4(EmF(k + 16u), EmF(k + 17u), EmF(k + 18u), EmF(k + 19u));
+	const uvec3 i = rtHitTriangle(g, prim);
+	const vec3 o0 = rtHitObjectPosition(g, i.x), o1 = rtHitObjectPosition(g, i.y), o2 = rtHitObjectPosition(g, i.z);
+	a = vec3(dot(r0.xyz, o0) + r0.w, dot(r1.xyz, o0) + r1.w, dot(r2.xyz, o0) + r2.w) - p.origin.xyz;
+	b = vec3(dot(r0.xyz, o1) + r0.w, dot(r1.xyz, o1) + r1.w, dot(r2.xyz, o1) + r2.w) - p.origin.xyz;
+	c = vec3(dot(r0.xyz, o2) + r0.w, dot(r1.xyz, o2) + r1.w, dot(r2.xyz, o2) + r2.w) - p.origin.xyz;
+	return true;
+}
+// Triangle prim's share of instance e's power
+float EmShare(int e, uint prim) {
+	const uint k = EmBlock(e);
+	if (!EmListOk(k)) return 0.0;   // (hangfix)
+	const uint at = EmList() + scratch.words[k + 7u] + prim;
+	const float total = EmF(k + 1u);
+	return total > 0.0 && prim < scratch.words[k + 6u] ? max(EmF(at) - (prim > 0u ? EmF(at - 1u) : 0.0), 0.0) / total : 0.0;
+}
+// The emissive instance of a traced hit's record (-1: none listed this frame)
+int EmOf(uint instance) {
+	const uint f = records[instance].flags;
+	if ((f & 0x24u) != 0x04u) return -1;   // (glow, not alpha-tested: bits 8-15 are its alpha reference there)
+	const int e = int((f >> 8) & 0xFFu) - 1;
+	return e >= 0 && e < EmCount() && scratch.words[EmBlock(e)] == instance + 1u ? e : -1;
+}
+// A point of instance e's triangle prim: where (scene space), its triangle's unit normal and area, its record; false: not listed
+bool EmPoint(int e, uint prim, vec2 bary, out vec3 pos, out vec3 ny, out float area, out uint g) {
+	vec3 a, b, c;
+	pos = ny = vec3(0.0); area = 0.0;
+	if (!EmTriangle(e, prim, g, a, b, c)) return false;
+	const vec3 x = cross(b - a, c - a);
+	area = 0.5 * length(x);
+	if (!(area > 0.0)) return false;
+	ny = x / (2.0 * area);
+	pos = a * (1.0 - bary.x - bary.y) + b * bary.x + c * bary.y;
+	return true;
+}
+// Its light: the glow texel there (the finest mip: the exact radiance) x PTGlow
+vec3 EmLe(uint g, uint prim, vec2 bary) {
+#ifndef RT_NO_REAL_TEXTURES
+	const float cw = rtConeWidth; const vec3 cd = rtConeDir;
+	rtConeWidth = 0.0; rtConeDir = vec3(0.0);
+#endif
+	const vec3 le = max(rtHitGlow(g, prim, bary), vec3(0.0)) * p.skyHorizon.w;
+#ifndef RT_NO_REAL_TEXTURES
+	rtConeWidth = cw; rtConeDir = cd;
+#endif
+	return le;
+}
+// One emissive sample from a hit: instance, triangle, point (barycentrics quantized as the reservoirs keep them) and its density per unit
+// area; sets gEmTotal. false: nothing to sample
+bool EmPick(vec3 hit, vec3 n, out int e, out uint prim, out vec2 bary, out float pdfArea) {
+	e = -1; prim = 0u; bary = vec2(0.0); pdfArea = 0.0;
+	const int count = EmCount();
+	float total = 0.0, chosen = 0.0;
+	for (int k = 0; k < count; k++) {
+		const float w = EmWeight(k, hit, n);
+		if (!(w > 0.0)) continue;
+		total += w;
+		if (Rand() * total < w) { e = k; chosen = w; }
+	}
+	gEmTotal = total;
+	if (e < 0) return false;
+	const uint b = EmBlock(e);
+	if (!EmListOk(b)) return false;   // (hangfix: a block whose run leaves the list gives no sample; the build never writes one)
+	const uint list = EmList() + scratch.words[b + 7u], tris = scratch.words[b + 6u];
+	const float u = Rand() * EmF(b + 1u);
+	uint lo = 0u, hi = tris - 1u;
+	// (hangfix) at most 32 halvings (17 cover kEmTriangles): a NaN in the sums only steers the search, never past the run
+	for (int it = 0; it < 32 && lo < hi; it++) { const uint mid = (lo + hi) >> 1; if (EmF(list + mid) > u) hi = mid; else lo = mid + 1u; }
+	prim = lo;
+	const vec2 r = vec2(Rand(), Rand());
+	const float su = sqrt(r.x);
+	bary = unpackUnorm2x16(packUnorm2x16(vec2(su * (1.0 - r.y), su * r.y)));
+	const float share = EmShare(e, prim);
+	uint g; vec3 a, bb, c;
+	if (!(share > 0.0) || !EmTriangle(e, prim, g, a, bb, c)) return false;
+	const float area = 0.5 * length(cross(bb - a, c - a));
+	if (!(area > 0.0)) return false;
+	pdfArea = chosen / total * share / area;
+	return true;
+}
+// The emissive light at a hit by one sample (no ReSTIR; EmPick drew it), MIS-weighted against the bounce ray (gEmMis) or in full, UNSHADOWED:
+// Direct traces its shadow ray (dir, its length tMax) with the other light samples' (perf-ptcost). select: the chance Direct traces this
+// sample (PTBounceLights 0; else 1): the light sample's density is select x pdf in the balance heuristic; Direct divides by select.
+float gEmSelect = 1.0;   // (perf-ptcost) the last Direct's select (the bounce ray's MIS weight at the next hit needs it, with gEmTotal)
+vec3 EmissiveCandidate(vec3 lift, vec3 n, vec3 v, Surface s, int e, uint prim, vec2 bary, float pdfArea, float select, out vec3 dir, out float tMax, out vec3 spec) {
+	dir = vec3(0.0, 0.0, 1.0); tMax = 0.0; spec = vec3(0.0);
+	vec3 pos, ny; float area; uint g;
+	if (!EmPoint(e, prim, bary, pos, ny, area, g)) return vec3(0.0);
+	vec3 l = pos - lift;
+	const float d2 = dot(l, l);
+	if (!(d2 > 1.0e-6)) return vec3(0.0);
+	const float d = sqrt(d2);
+	l /= d;
+	const float cx = dot(n, l), cy = abs(dot(ny, l));
+	if (cx <= 0.0 || cy <= 1.0e-6) return vec3(0.0);
+	const vec3 le = EmLe(g, prim, bary);
+	if (!(dot(le, vec3(1.0)) > 0.0)) return vec3(0.0);
+	dir = l; tMax = max(d * 0.998 - 0.02, 0.0);
+	const float pdf = pdfArea * d2 / cy;
+	const float m = gEmMis ? select * pdf / (select * pdf + BsdfPdf(n, v, s, l)) : 1.0;
+	const vec3 c = le * BrdfPi(s, n, v, l) * (cx * m / (3.14159265 * pdf));
+	spec = SpecShare();
+	return c;
+}
+// The density (per solid angle) with which the previous hit's light sample (EmissiveSample at prevHit / prevN, its weights' sum prevTotal)
+// would have drawn the glowing point a bounce ray from there met (instance, prim) at distance t along dir; 0: it cannot draw it
+float EmPdfAt(uint instance, uint prim, vec3 dir, float t, vec3 prevHit, vec3 prevN, float prevTotal) {
+	if (!(prevTotal > 0.0)) return 0.0;
+	const int e = EmOf(instance);
+	if (e < 0) return 0.0;
+	const float share = EmShare(e, prim);
+	if (!(share > 0.0)) return 0.0;
+	uint g; vec3 a, b, c;
+	if (!EmTriangle(e, prim, g, a, b, c)) return 0.0;
+	const vec3 x = cross(b - a, c - a);
+	const float area = 0.5 * length(x);
+	if (!(area > 0.0)) return 0.0;
+	const float cy = abs(dot(x / (2.0 * area), dir));
+	if (cy <= 1.0e-6) return 0.0;
+	return EmWeight(e, prevHit, prevN) / prevTotal * share / area * t * t / cy;
+}
+
 // ---- UNOFFICIAL 2026-11-07 PTRestirDI: ReSTIR DI for the lamps at the first hit (RT-PATH-TRACING.md section 47; Bitterli et al. 2020,
 // as RTXDI does it). The lamp loop's pick stays the first candidate (resampled importance sampling over EVERY lamp in reach: the source
 // density is its unshadowed diffuse light / the total), resampled to the target p = the luminance of its light through the full BRDF
@@ -383,7 +906,11 @@ ivec2 gPixel;   // the pixel this thread traces (ScreenHit)
 // normal tests), its lamp still in the list (the CPU's remap of lamp numbers) and its count capped at PTRestirMaxM. The chosen lamp gets
 // one shadow ray (none when it is the visible first candidate): occluded, the reservoir is kept with W = 0. 1 / M weights (the classic
 // estimator; section 47 measures it against the exact sum).
-bool RestirDI() { return (uint(p.accum.w) & 262144u) != 0u && LampImage(); }
+// (2026-11-07 ptaaa-emissive) The light samples are lamps OR points on emissive triangles (PTEmissive): one light space, the emissive pick a
+// second canonical candidate (its own domain, so both count with MIS weight 1: wSum = t_lamp / p_lamp + t_em / p_em); an emissive sample's
+// light is per unit area (Le cos cos' / (pi d^2)) and its density per unit area. A reservoir names it by instance (remapped by the CPU as the
+// lamps), triangle and barycentrics, so a reused sample is rebuilt on this frame's triangle (moving glow follows).
+bool RestirDI() { return (uint(p.accum.w) & 262144u) != 0u && LampImage() && gScratchRestir; }   // (hangfix: + the reservoirs fit the store)
 bool gRestirFirst = false;   // Direct() at the path's first hit, the picture views (PTRestirDI)
 int FrameParity() { return int(FrameTexel(7).y + 0.5) & 1; }
 
@@ -396,9 +923,34 @@ bool LampAt(int k, vec3 hit, vec3 n, out vec3 light, out vec3 pos) {
 	vec3 l = pos - hit;
 	const float dist = length(l), reach = b.y;
 	if (dist >= reach || dist < 1.0e-3) return false;
-	light = vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+	light = vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
 	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
 }
+// (ptaaa-emissive) a light sample: lamp >= 0 a lamp; em >= 0 instance em's triangle tri at bary; neither: none
+struct LSample { int lamp; int em; uint tri; vec2 bary; };
+LSample NoSample() { LSample y; y.lamp = -1; y.em = -1; y.tri = 0u; y.bary = vec2(0.0); return y; }
+LSample LampSample(int k) { LSample y = NoSample(); y.lamp = k; return y; }
+bool Valid(LSample y) { return y.lamp >= 0 || y.em >= 0; }
+bool Same(LSample a, LSample b) { return a.lamp == b.lamp && a.em == b.em && (a.em < 0 || (a.tri == b.tri && a.bary == b.bary)); }
+// Sample y's light at a surface point and where it is: a lamp as LampAt; an emissive point Le cos cos' / (pi d^2) (per unit area), seen
+// from the point lifted as the rays leave it (as EmissiveSample and the bounce rays: the same integrand)
+bool LightAt(LSample y, vec3 at, vec3 n, out vec3 light, out vec3 pos) {
+	if (y.lamp >= 0) return LampAt(y.lamp, at, n, light, pos);
+	light = vec3(0.0); pos = vec3(0.0);
+	if (y.em < 0) return false;
+	vec3 ny; float area; uint g;
+	if (!EmPoint(y.em, y.tri, y.bary, pos, ny, area, g)) return false;
+	vec3 l = pos - (at + n * (1.0 + 0.002 * length(at)));
+	const float d2 = dot(l, l);
+	if (!(d2 > 1.0e-6)) return false;
+	l *= inversesqrt(d2);
+	const float cx = dot(n, l), cy = abs(dot(ny, l));
+	if (cx <= 0.0 || cy <= 1.0e-6) return false;
+	light = EmLe(g, y.tri, y.bary) * (cx * cy / (3.14159265 * d2));
+	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
+}
+// The shadow ray's length to a sample's point from `from`: a lamp short of its fixture, an emissive point just short of its surface
+float LightGap(LSample y, float d) { return y.lamp >= 0 ? max(d - 16.0, 0.0) : max(d * 0.998 - 0.02, 0.0); }
 float RestirTarget(vec3 light, vec3 pos, vec3 hit, Surface s, vec3 n, vec3 v) {
 	return dot(light * BrdfPi(s, n, v, normalize(pos - hit)), vec3(0.2126, 0.7152, 0.0722));
 }
@@ -411,54 +963,116 @@ vec3 OctDecode(vec2 e) {
 	if (n.z < 0.0) n.xy = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
 	return normalize(n);
 }
-uint ReservoirWord(int set, ivec2 px) { return 4u * (uint(set) * uint(p.size.x) * uint(p.size.y) + uint(px.y) * uint(p.size.x) + uint(px.x)); }
-void StoreReservoir(int lamp, float M, float W, float dist, vec3 n) {
+// (2026-11-07 ptaaa-emissive) 6 words a reservoir (was 4): [0] the sample's code (0 none, lamp + 1, 0x8000 | emissive instance) | M << 16,
+// [1] W, [2] the surface's distance, [3] its normal (octahedral), [4] the emissive sample's triangle, [5] its barycentrics (2 x unorm16)
+uint ReservoirWord(int set, ivec2 px) { return 6u * (uint(set) * uint(p.size.x) * uint(p.size.y) + uint(px.y) * uint(p.size.x) + uint(px.x)); }
+void StoreReservoir(LSample y, float M, float W, float dist, vec3 n) {
 	const uint at = ReservoirWord(FrameParity(), gPixel);
-	scratch.words[at] = uint(lamp + 1) | (uint(clamp(M, 0.0, 65535.0)) << 16);
+	const uint code = y.lamp >= 0 ? uint(y.lamp + 1) : y.em >= 0 ? 0x8000u | uint(y.em) : 0u;
+	scratch.words[at] = code | (uint(clamp(M, 0.0, 65535.0)) << 16);
 	scratch.words[at + 1u] = floatBitsToUint(W);
 	scratch.words[at + 2u] = floatBitsToUint(dist);
 	scratch.words[at + 3u] = packSnorm2x16(OctEncode(n));
+	scratch.words[at + 4u] = y.tri;
+	scratch.words[at + 5u] = packUnorm2x16(y.bary);
 }
 void ClearReservoir() { scratch.words[ReservoirWord(FrameParity(), gPixel)] = 0u; }
 
-// The lamps' light leaving the first hit toward v (shadowed), by ReSTIR DI. k0: the lamp loop's pick (-1: none), total / w0 its weights.
-// Every target includes VISIBILITY (a lamp is only picked after a shadow ray from here says it is seen), so the chosen lamp needs no
-// final ray. Three steps:
-//   1. the canonical reservoir: the lamp loop's pick (resampled importance sampling, M = 1);
+// The direct light (lamps, PTEmissive's glow) leaving the first hit toward v (shadowed), by ReSTIR DI. k0: the lamp loop's pick (-1: none),
+// total / w0 its weights. Every target includes VISIBILITY (a light is only picked after a shadow ray from here says it is seen), so the
+// chosen sample needs no final ray. Three steps:
+//   1. the canonical reservoir: the lamp loop's pick and (PTEmissive) one emissive pick (resampled importance sampling, M = 1);
 //   2. temporal: last frame's reservoir at the reprojected pixel, merged with 1 / Z (Z = the counts of the two whose surface could have
-//      produced the chosen lamp: it reaches it and is not shadowed there);
+//      produced the chosen sample: it reaches it and is not shadowed there);
 //   3. spatial: PTRestirDISpatial of last frame's neighbours around the reprojected pixel, merged by PAIRWISE MIS (Lin et al. 2022, as
 //      RTXDI does): each neighbour i is weighed against the canonical one only, by the balance heuristic over the unshadowed light x
-//      visibility at both surfaces, so a neighbour whose lamp barely reached it (huge weight W) cannot dominate here.
-// Two shadow rays per neighbour at most (its lamp from here, the canonical lamp from there). Unbiased with these targets.
+//      visibility at both surfaces, so a neighbour whose light barely reached it (huge weight W) cannot dominate here.
+// Two shadow rays per neighbour at most (its sample from here, the canonical sample from there). Unbiased with these targets.
 const int kRestirNeighbours = 8;
-float LampLuma(int k, vec3 at, vec3 n) { vec3 light, pos; return LampAt(k, at, n, light, pos) ? dot(light, vec3(0.2126, 0.7152, 0.0722)) : 0.0; }
-bool LampVisibleFrom(int k, vec3 at, vec3 n) {
+float LightLuma(LSample y, vec3 at, vec3 n) { vec3 light, pos; return LightAt(y, at, n, light, pos) ? dot(light, vec3(0.2126, 0.7152, 0.0722)) : 0.0; }
+// (perf-ptcost) PTRestirDIRays 0 / 2 / 3: the targets are unshadowed, so "visible from" is "within its reach and in front" (no ray)
+bool gRestirVis = true;
+bool LightVisibleFrom(LSample y, vec3 at, vec3 n) {
 	vec3 light, pos;
-	if (!LampAt(k, at, n, light, pos)) return false;
+	if (!LightAt(y, at, n, light, pos)) return false;
+	if (!gRestirVis) return true;
 	const vec3 from = at + n * (1.0 + 0.002 * length(at));
 	const vec3 l = pos - from;
 	const float d = length(l);
-	return Visible(from, l / d, max(d - 16.0, 0.0));
+	return Visible(from, l / d, LightGap(y, d));
 }
-vec3 RestirLamps(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float total, float w0) {
+// Last frame's sample code -> this frame's sample (the CPU's remaps: lamps in their texel 4j + 3 .g, emissive instances in their entry's float
+// 14); none when its light is gone
+LSample OldSample(uint code, uint tri, vec2 bary) {
+	LSample y = NoSample();
+	if (code == 0u) return y;
+	if ((code & 0x8000u) != 0u) {
+		const int j = int(code & 0x7FFFu);
+		if (j >= 128) return y;
+		y.em = int(imageLoad(lampImage, ivec2(8 * j + 7, kEmissiveRow)).r + 0.5) - 1;
+		y.tri = tri; y.bary = bary;
+		if (y.em >= EmCount()) y.em = -1;
+		return y;
+	}
+	if (code > uint(kPtMaxLamps)) return y;   // (hangfix: a code past the lamp image; the CPU's remap never gives one)
+	y.lamp = int(imageLoad(lampImage, ivec2(4 * (int(code) - 1) + 3, 0)).g + 0.5) - 1;   // last frame's number -> this frame's
+	if (y.lamp >= LampCount()) y.lamp = -1;   // (hangfix: within this frame's lamps, as the remap gives them)
+	return y;
+}
+vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float total, float w0) {
 	const float maxM = FrameTexel(10).x;
+	// (perf-ptcost) PTRestirDIRays (LoadCostKeys): 0 / 1 / 3 visibility in the targets (the shadow rays below; 0 and 3 skip the temporal
+	// ones on the same spot, 3 also the neighbours' MIS rays); 2 unshadowed targets + one final ray
+	const int raysMode = RestirRaysMode();
+	gRestirVis = raysMode != 2;
+	// (perf-ptcost, PTRestirDIRays 3) the canonical candidates (the lamp, the emissive point) are streamed by their unshadowed weights and
+	// only the winner gets a shadow ray (one, not one each); occluded, the canonical reservoir holds no sample (M 1). Still a reservoir for
+	// the shadowed target: E[g(y) W] = sum_i w_i V_i g(y_i) / t_i = the integral of g x V (the weights' own normalisation, wSum / t). Host:
+	// the mean right, 0.6-0.7 rays a pixel fewer with emissive lights, but the emissive scene's ReSTIR run 1.4 x noisier (a visible loser is
+	// lost when the winner is shadowed): not in mode 0
+	const bool canonOne = raysMode == 3;
+	const bool canonEach = gRestirVis && !canonOne;   // (mode 1: a ray for each candidate before it enters, as before)
 	// 1. canonical
-	int y = -1;
+	LSample y = NoSample();
 	float yTarget = 0.0;
 	vec3 yLight = vec3(0.0), yPos = vec3(0.0);
-	float W = 0.0, M = 1.0;
+	float W = 0.0, M = 1.0, wSum = 0.0;
 	if (k0 >= 0 && w0 > 0.0 && total > 0.0) {
 		vec3 light, pos;
 		if (LampAt(k0, hit, n, light, pos)) {
 			const float t = RestirTarget(light, pos, hit, s, n, v);
 			const vec3 l = pos - lift;
 			const float dist = length(l);
-			if (t > 0.0 && Visible(lift, l / dist, max(dist - 16.0, 0.0))) {   // (short of its fixture, as Direct)
-				y = k0; yTarget = t; yLight = light; yPos = pos; W = total / w0;   // (RIS weight t x total / w0, over the target t)
+			if (t > 0.0 && (!canonEach || Visible(lift, l / dist, max(dist - 16.0, 0.0)))) {   // (short of its fixture, as Direct)
+				y = LampSample(k0); yTarget = t; yLight = light; yPos = pos; wSum = t * total / w0;   // (RIS weight t x total / w0)
 			}
 		}
 	}
+	gEmTotal = 0.0;
+	if (EmCount() > 0) {   // (ptaaa-emissive) the emissive candidate: its own domain, MIS weight 1 (wSum = t / its density per unit area)
+		LSample c = NoSample();
+		float pdfArea;
+		if (EmPick(hit, n, c.em, c.tri, c.bary, pdfArea)) {
+			vec3 light, pos;
+			if (LightAt(c, hit, n, light, pos)) {
+				const float t = RestirTarget(light, pos, hit, s, n, v);
+				const vec3 l = pos - lift;
+				const float dist = length(l);
+				if (t > 0.0 && (!canonEach || Visible(lift, l / dist, LightGap(c, dist)))) {
+					const float wi = t / pdfArea;
+					wSum += wi;
+					if (Rand() * wSum < wi) { y = c; yTarget = t; yLight = light; yPos = pos; }
+				}
+			}
+		}
+		else c.em = -1;
+	}
+	if (canonOne && Valid(y)) {   // (perf-ptcost) the winner's one shadow ray
+		const vec3 l = yPos - lift;
+		const float dist = length(l);
+		if (!(dist > 1.0e-4) || !Visible(lift, l / dist, LightGap(y, dist))) y = NoSample();
+	}
+	if (Valid(y)) W = wSum / yTarget;
 	const vec2 f1 = FrameTexel(1);
 	if (f1.y > 0.5) {   // last frame's reservoirs are valid
 		const vec3 pf = vec3(FrameTexel(0), f1.x), pr = vec3(FrameTexel(2), FrameTexel(3).x), pu = vec3(FrameTexel(4), FrameTexel(5).x);
@@ -472,7 +1086,7 @@ vec3 RestirLamps(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float t
 			const int count = min(1 + int(sp.y + 0.5), 1 + kRestirNeighbours);
 			const float dist = length(rel);
 			int nb = 0;
-			int nLamp[kRestirNeighbours];
+			LSample nY[kRestirNeighbours];
 			float nW[kRestirNeighbours], nM[kRestirNeighbours];
 			vec3 nPoint[kRestirNeighbours], nN[kRestirNeighbours];
 			for (int i = 0; i < count; i++) {
@@ -483,7 +1097,6 @@ vec3 RestirLamps(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float t
 				const uint w = ReservoirWord(FrameParity() ^ 1, px);
 				const uint head = scratch.words[w];
 				if (head == 0u) continue;   // no surface there last frame
-				const int oldLamp = int(head & 0xFFFFu) - 1;   // (-1: a reservoir that found no lit lamp: its count still counts)
 				const float oldW = uintBitsToFloat(scratch.words[w + 1u]), oldDist = uintBitsToFloat(scratch.words[w + 2u]);
 				const vec3 oldN = OctDecode(unpackSnorm2x16(scratch.words[w + 3u]));
 				// the same surface: its normal within the test, and its point (last frame's centre ray through that pixel) on this hit's plane
@@ -493,83 +1106,107 @@ vec3 RestirLamps(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float t
 				if (abs(dot(oldPoint - here, n)) > sq.x * dist) continue;
 				const float oldM = min(float(head >> 16), maxM);
 				if (!(oldM > 0.0)) continue;
-				int lamp = oldLamp < 0 ? -1 : int(imageLoad(lampImage, ivec2(4 * oldLamp + 3, 0)).g + 0.5) - 1;   // last frame's number -> this frame's
-				if (!(oldW > 0.0) || !(oldW < 3.0e38)) lamp = -1;
+				// (a reservoir that found no lit light: its count still counts)
+				LSample old = OldSample(head & 0xFFFFu, scratch.words[w + 4u], unpackUnorm2x16(scratch.words[w + 5u]));
+				if (!(oldW > 0.0) || !(oldW < 3.0e38)) old = NoSample();
 				const vec3 src = oldPoint - p.origin.xyz;
 				if (i == 0) {
 					// 2. temporal, 1 / Z
-					float wSum = y >= 0 ? yTarget * W : 0.0;   // (the canonical's weight, M = 1)
+					float tSum = Valid(y) ? yTarget * W : 0.0;   // (the canonical's weight, M = 1)
 					vec3 light, pos;
-					if (lamp >= 0 && LampAt(lamp, hit, n, light, pos)) {
+					// (perf-ptcost, PTRestirDIRays 0 / 3) last frame's point within 1.5 pixels of this hit: the same spot. Its sample was seen
+					// there (every target holds visibility), so it is taken as seen here, and y seen here as seen there: no rays (a still
+					// camera: 1 ray a pixel less; host scene restirdi: the error vs the exact sum lower, 0.0097 vs 0.0133, the mean the same)
+					const bool sameSpot = (raysMode == 0 || raysMode == 3) && length(oldPoint - here) < 1.5 * max(dist * 2.0 * length(p.up.xyz) * p.size.w, 0.05);
+					if (Valid(old) && LightAt(old, hit, n, light, pos)) {
 						const float t = RestirTarget(light, pos, hit, s, n, v);
 						const float wi = t * oldW * oldM;
-						if (wi > 0.0 && (lamp == y || LampVisibleFrom(lamp, hit, n))) {
-							wSum += wi;
-							if (Rand() * wSum < wi) { y = lamp; yTarget = t; yLight = light; yPos = pos; }
+						if (wi > 0.0 && (Same(old, y) || sameSpot || LightVisibleFrom(old, hit, n))) {
+							tSum += wi;
+							if (Rand() * tSum < wi) { y = old; yTarget = t; yLight = light; yPos = pos; }
 						}
 					}
-					if (y >= 0) {   // Z: this pixel (y is seen here) + last frame's if it could have produced y
-						const float Z = 1.0 + (lamp == y || LampVisibleFrom(y, src, oldN) ? oldM : 0.0);
-						W = wSum / (Z * yTarget);
+					if (Valid(y)) {   // Z: this pixel (y is seen here) + last frame's if it could have produced y
+						const float Z = 1.0 + (Same(old, y) || (sameSpot ? LightLuma(y, src, oldN) > 0.0 : LightVisibleFrom(y, src, oldN)) ? oldM : 0.0);
+						W = tSum / (Z * yTarget);
 					}
 					M += oldM;
 					continue;
 				}
-				if (nb < kRestirNeighbours) { nLamp[nb] = lamp; nW[nb] = oldW; nM[nb] = oldM; nPoint[nb] = src; nN[nb] = oldN; nb++; }
+				if (nb < kRestirNeighbours) { nY[nb] = old; nW[nb] = oldW; nM[nb] = oldM; nPoint[nb] = src; nN[nb] = oldN; nb++; }
 			}
 			// 3. spatial, pairwise MIS against the canonical (y, W, M)
 			if (nb > 0) {
 				const float k = float(nb), Mc = M;
-				const float qcy = y >= 0 ? LampLuma(y, hit, n) : 0.0;   // the canonical lamp here (seen)
+				const float qcy = Valid(y) ? LightLuma(y, hit, n) : 0.0;   // the canonical sample here (seen)
 				float mc = 0.0, sumM = Mc;
 				float nWeight[kRestirNeighbours];
 				for (int i = 0; i < nb; i++) {
-					// the canonical's share in pair i: does neighbour i's surface see the canonical lamp?
-					if (y >= 0) {
-						const float qiy = nLamp[i] == y || LampVisibleFrom(y, nPoint[i], nN[i]) ? LampLuma(y, nPoint[i], nN[i]) : 0.0;
+					// the canonical's share in pair i: does neighbour i's surface see the canonical sample?
+					if (Valid(y)) {
+						// (perf-ptcost, PTRestirDIRays 3) only an MIS weight: the canonical sample at the neighbour's surface unshadowed (no ray;
+						// host scene restirdi: 1.2 % dark, shadow edges 2.5 % of the pixels off > 15 %: a test value)
+						gRestirVis = raysMode <= 1;
+						const float qiy = Same(nY[i], y) || LightVisibleFrom(y, nPoint[i], nN[i]) ? LightLuma(y, nPoint[i], nN[i]) : 0.0;
+						gRestirVis = raysMode != 2;
 						mc += Mc * qcy / max(Mc * qcy + nM[i] * qiy, 1.0e-30);
 					}
 					sumM += nM[i];
 					nWeight[i] = 0.0;
-					if (nLamp[i] < 0) continue;
+					if (!Valid(nY[i])) continue;
 					vec3 light, pos;
-					if (!LampAt(nLamp[i], hit, n, light, pos)) continue;
+					if (!LightAt(nY[i], hit, n, light, pos)) continue;
 					const float t = RestirTarget(light, pos, hit, s, n, v);
-					if (!(t > 0.0) || !(nLamp[i] == y || LampVisibleFrom(nLamp[i], hit, n))) continue;
-					const float qii = LampLuma(nLamp[i], nPoint[i], nN[i]);   // its own lamp there (seen there: its weight was kept)
+					if (!(t > 0.0) || !(Same(nY[i], y) || LightVisibleFrom(nY[i], hit, n))) continue;
+					const float qii = LightLuma(nY[i], nPoint[i], nN[i]);   // its own sample there (seen there: its weight was kept)
 					const float qci = dot(light, vec3(0.2126, 0.7152, 0.0722));
 					const float mi = nM[i] * qii / max(nM[i] * qii + Mc * qci, 1.0e-30) / k;
 					nWeight[i] = mi * t * nW[i];
 				}
 				mc /= k;
 				// stream: the canonical first, then the neighbours
-				float sum = y >= 0 ? mc * yTarget * W : 0.0;
-				int ny = y;
+				float sum = Valid(y) ? mc * yTarget * W : 0.0;
+				int ny = -1;
 				for (int i = 0; i < nb; i++) {
 					const float wi = nWeight[i];
 					if (!(wi > 0.0)) continue;
 					sum += wi;
-					if (Rand() * sum < wi) ny = i + 1000;
+					if (Rand() * sum < wi) ny = i;
 				}
-				if (ny >= 1000) {
-					const int i = ny - 1000;
+				if (ny >= 0) {
 					vec3 light, pos;
-					LampAt(nLamp[i], hit, n, light, pos);
-					y = nLamp[i]; yTarget = RestirTarget(light, pos, hit, s, n, v); yLight = light; yPos = pos;
+					LightAt(nY[ny], hit, n, light, pos);
+					y = nY[ny]; yTarget = RestirTarget(light, pos, hit, s, n, v); yLight = light; yPos = pos;
 				}
-				W = y >= 0 && yTarget > 0.0 ? sum / yTarget : 0.0;
+				W = Valid(y) && yTarget > 0.0 ? sum / yTarget : 0.0;
 				M = sumM;
 			}
 		}
 	}
 	if (!(W < 3.0e38)) W = 0.0;
+	// (perf-ptcost, PTRestirDIRays 2, a test value) unshadowed targets: ONE shadow ray, for the chosen sample (RTXDI's final visibility); an
+	// occluded sample gives 0 and is stored with W 0 (RTXDI's visibility reuse). Host scene restirdi: 1.5 % dark, the error 1.8 x mode 0's.
+	// (Keeping the occluded sample instead is unbiased but its noise was 5.5 x; dropping the reservoir 36 % too bright: measured, not kept.)
+	vec3 tint = vec3(1.0);
+	float storeW = W;
+	bool seen = true;
+	if (!gRestirVis && Valid(y) && W > 0.0) {
+		const vec3 l = yPos - lift;
+		const float dist = length(l);
+		seen = dist > 1.0e-4 && Visible(lift, l / dist, LightGap(y, dist));
+		tint = gShadowTint;
+		if (!seen) storeW = 0.0;
+	}
+	gRestirVis = true;
 	// the surface as next frame rebuilds it: the distance along this pixel's CENTRE ray (no jitter) to the hit's tangent plane, so the
 	// rebuilt point lies on the surface (the jittered hit's own distance put it up to a pixel's footprint under a slanted floor)
 	const vec2 cuv = (vec2(gPixel) + 0.5) * p.size.zw;
 	const vec3 centre = normalize(p.forward.xyz + p.right.xyz * (2.0 * cuv.x - 1.0) - p.up.xyz * (2.0 * cuv.y - 1.0));
 	const float facing = dot(centre, n);
-	StoreReservoir(y, min(M, maxM), W, abs(facing) > 0.05 ? dot(hit, n) / facing : length(hit), n);   // (from this frame's eye)
-	return y >= 0 && W > 0.0 ? yLight * W * BrdfPi(s, n, v, normalize(yPos - hit)) : vec3(0.0);
+	StoreReservoir(y, min(M, maxM), storeW, abs(facing) > 0.05 ? dot(hit, n) / facing : length(hit), n);   // (from this frame's eye)
+	// (2026-11-07 rtgap-tess 1b) the chosen light's contact march (after the reuse: darkening only, not in the targets)
+	return Valid(y) && W > 0.0 && seen ? yLight * W * BrdfPi(s, n, v, normalize(yPos - hit)) * tint *
+		(gContact ? PtContact(normalize(yPos - gContactFrom), length(yPos - gContactFrom)) : 1.0) : vec3(0.0);
 }
 
 // ---- UNOFFICIAL 2026-11-07 PTRadianceCache (flag 524288, RT-PATH-TRACING.md section 48): a world-space radiance cache in the helper's scratch
@@ -585,7 +1222,7 @@ vec3 RestirLamps(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float t
 //   - RtPathTraceCache.comp (a pass after this one) folds each cell's frame sum into its resolved light (a running mean, at most
 //     PTCacheMaxSamples samples deep: it follows changing light) and frees cells nobody wrote for PTCacheMaxAge frames.
 // A cell with fewer than PTCacheMinSamples samples is a miss (then PTLastSky / PTLastBounce if set).
-bool CacheOn() { return (uint(p.accum.w) & 524288u) != 0u && LampImage(); }
+bool CacheOn() { return (uint(p.accum.w) & 524288u) != 0u && LampImage() && gScratchCache; }   // (hangfix: + its table lies in the store)
 uint Hash32(uint x) { x ^= x >> 16; x *= 0x7feb352du; x ^= x >> 15; x *= 0x846ca68bu; x ^= x >> 16; return x; }
 // The cell of a point (hit: from the camera, scene axes), its table slot and check hash
 void CacheKey(vec3 hit, vec3 n, vec3 offset, out uint slot, out uint check) {
@@ -598,12 +1235,11 @@ void CacheKey(vec3 hit, vec3 n, vec3 offset, out uint slot, out uint check) {
 	const uint axis = a.x >= a.y && a.x >= a.z ? 0u : a.y >= a.z ? 1u : 2u;
 	const uint face = axis * 2u + ((axis == 0u ? n.x : axis == 1u ? n.y : n.z) < 0.0 ? 1u : 0u);
 	const uint h = Hash32(uint(c.x) * 73856093u ^ Hash32(uint(c.y) * 19349663u ^ Hash32(uint(c.z) * 83492791u ^ (uint(level) << 3u | face))));
-	slot = h & ((1u << uint(FrameTexel(9).y + 0.5)) - 1u);
+	slot = h & gCacheMask;   // (hangfix: LoadScratchLayout's checked size; was the frame row's log2, unchecked)
 	check = Hash32(h ^ 0x9E3779B9u) | 1u;
 }
 uint CacheEntry(uint slot, uint i) {
-	const uint mask = (1u << uint(FrameTexel(9).y + 0.5)) - 1u;
-	return uint(FrameTexel(12).y + 0.5) * 4096u + ((slot + i) & mask) * 16u;
+	return gCacheBase + ((slot + i) & gCacheMask) * 16u;   // (hangfix: LoadScratchLayout's checked base and size)
 }
 // The cell's resolved indirect light at a point (jittered inside its cell along the surface); false: no cell / too few samples yet
 bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
@@ -640,14 +1276,21 @@ const int kCacheVerts = 4;   // the vertices a path writes (the first ones)
 
 // The sun, one lamp and (PTGlowLights) one glow light at a hit (next event estimation): the light that leaves it toward v
 vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
+	if (s.kind == kKindGlass) { gGlowTotal = 0.0; return vec3(0.0); }   // (2026-11-07 ptaaa-materials) mirror-like lobes: carried by the path
 	vec3 lift = hit + n * (1.0 + 0.002 * t);
 	vec3 e = vec3(0.0);
+	// (perf-ptcost) the light samples are gathered first as candidates (unshadowed light, its shadow ray's direction and length, the light's
+	// specular share for PTDenoiseSplit), then traced in ONE loop (one Visible call site: the shader inlines every call): 0 the sun, 1 the
+	// picked lamp, 2 the emissive point. The random numbers come in the same order as before.
+	vec3 cE[3], cDir[3], cSpec[3];
+	float cDist[3];
+	for (int k = 0; k < 3; k++) { cE[k] = cDir[k] = cSpec[k] = vec3(0.0); cDist[k] = 0.0; }
 	if (p.sunDir.w > 0.5) {
 		vec3 b, tg = Basis(p.sunDir.xyz, b);
 		float r = sqrt(Rand()) * p.sunColor.w, phi = 6.2831853 * Rand();
 		vec3 l = normalize(p.sunDir.xyz + (tg * cos(phi) + b * sin(phi)) * r);
 		float c = dot(n, l);
-		if (c > 0.0 && Visible(lift, l, 30000.0)) e += p.sunColor.rgb * c * BrdfPi(s, n, v, l);
+		if (c > 0.0) { cE[0] = p.sunColor.rgb * c * BrdfPi(s, n, v, l); cSpec[0] = SpecShare(); cDir[0] = l; cDist[0] = 30000.0; }
 	}
 	// (2026-11-03) ONE lamp of all the frame's lamps (the lamp image, flag 1024: up to 80, 4 RG32F texels each; else the 8 in the
 	// constants), picked in proportion to its unshadowed light here by a one-pass weighted reservoir, and a shadow ray to it.
@@ -656,14 +1299,14 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	// (2026-11-04) PTLightGrid: only the lamps listed in the hit's grid cell (those whose reach meets it, in the same order: every other
 	// lamp has weight 0 here, and a lamp of weight 0 draws no random number, so the pick is the all-lamp loop's, bit for bit); a hit
 	// outside the grid is out of every lamp's reach. Then the glow lights, all of them, after the lamps as before.
-	const int lamps = int(p.misc.x + 0.5), glows = GlowLightCount();
+	const int lamps = LampCount(), glows = GlowLightCount();   // (hangfix: capped)
 	int first = 0, listed = 0;
 	const ivec3 dims = ivec3(int(p.grid[0].w + 0.5), int(p.grid[1].w + 0.5), int(p.grid[2].x + 0.5));
 	const ivec3 cell = ivec3(floor((hit - p.grid[0].xyz) * p.grid[1].xyz));
 	if (all(greaterThanEqual(cell, ivec3(0))) && all(lessThan(cell, dims))) {
 		const vec2 entry = GridTexel((cell.z * dims.y + cell.y) * dims.x + cell.x);
 		first = int(entry.x + 0.5) + 2 * dims.x * dims.y * dims.z;   // (as a float number from the cells' start: entry e at texel e / 2)
-		listed = int(entry.y + 0.5);
+		listed = PtCount(entry.y, kPtMaxLamps);   // (hangfix: a cell lists each lamp once at most)
 	}
 	float total = 0.0, chosenWeight = 0.0, gTotal = 0.0, gChosenWeight = 0.0;
 	vec3 chosenLight = vec3(0.0), chosenPos = vec3(0.0);
@@ -679,7 +1322,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		vec3 l = pos.xyz - hit;
 		float dist = length(l), reach = pos.w;
 		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -695,7 +1338,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		if (Rand() * gTotal < w) { gChosenWeight = w; gChosen = pos; gIndex = g; }
 	}
 #else
-	int lamps = int(p.misc.x + 0.5), lights = lamps + GlowLightCount();
+	int lamps = LampCount(), lights = min(lamps + GlowLightCount(), kPtMaxLights);   // (hangfix: capped at the lamp image's lights)
 	float total = 0.0, chosenWeight = 0.0, gTotal = 0.0, gChosenWeight = 0.0;
 	vec3 chosenLight = vec3(0.0), chosenPos = vec3(0.0);
 	vec4 gChosen = vec4(0.0);
@@ -719,57 +1362,171 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		vec3 l = pos.xyz - hit;
 		float dist = length(l), reach = pos.w;
 		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0));
+		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
 		if (Rand() * total < w) { chosenWeight = w; chosenLight = light; chosenPos = pos.xyz; chosenK = k; }
 	}
 #endif
+	bool restirHere = false;
 #ifndef PT_RESTIR_GI
-	if (gRestirFirst) e += RestirLamps(hit, lift, n, v, s, chosenK, total, chosenWeight);
-	else
+	gEmTotal = 0.0;
+	gEmSelect = 1.0;
+	restirHere = gRestirFirst;
+	if (restirHere) PT_DIRECT_ADD(e, RestirDirect(hit, lift, n, v, s, chosenK, total, chosenWeight))   // (ptaaa-emissive: the lamps + PTEmissive)
 #endif
-	if (total > 0.0 && chosenWeight > 0.0) {
-		vec3 l = chosenPos - lift;
-		float dist = length(l);
-		if (Visible(lift, l / dist, max(dist - 16.0, 0.0)))   // (short of its fixture)
-			e += chosenLight * (total / chosenWeight) * BrdfPi(s, n, v, normalize(chosenPos - hit));
+	if (!restirHere && total > 0.0 && chosenWeight > 0.0) {
+		const vec3 l = chosenPos - lift;
+		const float dist = length(l);
+		cE[1] = chosenLight * (total / chosenWeight) * BrdfPi(s, n, v, normalize(chosenPos - hit)); cSpec[1] = SpecShare();
+		cDir[1] = l / dist; cDist[1] = max(dist - 16.0, 0.0);   // (short of its fixture)
+	}
+	// (2026-11-07 ptaaa-emissive) PTEmissive: one glowing triangle's point (its pick here; its light below, once its chance is known)
+	bool emOk = false;
+#ifndef PT_RESTIR_GI
+	int emE = -1; uint emPrim = 0u; vec2 emBary = vec2(0.0); float emPdfArea = 0.0;
+	if (!restirHere && EmCount() > 0) emOk = EmPick(hit, n, emE, emPrim, emBary, emPdfArea);
+#endif
+	// (perf-ptcost) PTBounceLights 0: at a bounce hit (not the first: the picture's own direct light keeps every sample) ONE of the three
+	// is traced, chosen with chance P_k = 0.75 w_k / sum w + 0.25 / (how many have w > 0) (the floor bounds the noise where a weight
+	// guesses badly) and divided by it: unbiased. w = the unshadowed light's luminance for the sun and the lamp; the emissive weight
+	// must not depend on the point drawn (the bounce ray's MIS weight at the next hit uses P_e x the point's density): gEmTotal, the
+	// instances' power x cos / d^2 summed (EmPick), x PTGlow x 0.5 / pi (a mean cos at the light) x the albedo's luminance
+	// (also the far side of a thin leaf / ear at the first hit, DirectSides: its transmitted light is the smaller share; grass and leaves
+	// under PTRealtime traced the sun, the lamp and the emissive point twice there)
+	const bool pickOne = (gBounce > 0 || gBackSide) && gBounceLights < 0.5 && !restirHere;
+	const float kPickFloor = PT_PICK_FLOOR;
+	float P[3] = { 1.0, 1.0, 1.0 };
+	int chosenC = -1;
+	if (pickOne) {
+		float w[3];
+		w[0] = Luma(cE[0]); w[1] = Luma(cE[1]);
+#ifndef PT_RESTIR_GI
+		w[2] = gEmTotal > 0.0 ? gEmTotal * p.skyHorizon.w * (0.5 / 3.14159265) * max(Luma(s.albedo), 0.05) : 0.0;
+#else
+		w[2] = 0.0;
+#endif
+		float sum = 0.0, count = 0.0;
+		for (int k = 0; k < 3; k++) { if (!(w[k] > 0.0) || !(w[k] < 3.0e38)) w[k] = 0.0; sum += w[k]; count += w[k] > 0.0 ? 1.0 : 0.0; }
+		if (sum > 0.0) {
+			const float u = Rand();
+			float acc = 0.0;
+			for (int k = 0; k < 3; k++) {
+				P[k] = w[k] > 0.0 ? (1.0 - kPickFloor) * w[k] / sum + kPickFloor / count : 0.0;
+				acc += P[k];
+				if (chosenC < 0 && w[k] > 0.0 && u < acc) chosenC = k;
+			}
+			if (chosenC < 0) for (int k = 2; k >= 0; k--) if (chosenC < 0 && w[k] > 0.0) chosenC = k;   // (u at the float edge)
+		}
+#ifndef PT_RESTIR_GI
+		gEmSelect = P[2];
+#endif
+	}
+#ifndef PT_RESTIR_GI
+	if (emOk && (!pickOne || chosenC == 2)) cE[2] = EmissiveCandidate(lift, n, v, s, emE, emPrim, emBary, emPdfArea, pickOne ? P[2] : 1.0, cDir[2], cDist[2], cSpec[2]);
+#endif
+	for (int k = 0; k < 3; k++) {
+		if (pickOne && k != chosenC) continue;
+		if (!(dot(cE[k], vec3(1.0)) > 0.0)) continue;
+		if (!Visible(lift, cDir[k], cDist[k])) continue;
+		// the sun and the lamp: the contact march (2026-11-07 1b) and the panes' tint (ptaaa: through glass); the emissive point: neither
+		vec3 add = cE[k] * (pickOne ? 1.0 / P[k] : 1.0);
+		if (k == 0) add *= PtContact(cDir[0], 30000.0) * gShadowTint;
+		else if (k == 1) add *= (gContact ? PtContact(normalize(chosenPos - gContactFrom), length(chosenPos - gContactFrom)) : 1.0) * gShadowTint;
+		e += add;
+		if (gSplitTake) gSplitSpec += add * cSpec[k];   // (ptaaa-denoiser: as PT_DIRECT_ADD, with that light's own share)
 	}
 	gGlowTotal = gTotal;
-	if (gIndex >= 0 && gChosenWeight > 0.0) e += GlowSample(lift, n, v, s, gChosen, gIndex, gChosenWeight / gTotal);
+	if (gIndex >= 0 && gChosenWeight > 0.0) PT_DIRECT_ADD(e, GlowSample(lift, n, v, s, gChosen, gIndex, gChosenWeight / gTotal))
 	return e;
 }
 
 // A traced hit's material (2026-11-03): the material rule in the record's bits 26-31 (VegasShaders.materials.txt, as the object shaders
 // use it): roughness k / 7, metal (k - 1) / 6; a rough dielectric (0.8, 0) where the rule gives none
-Surface HitSurface(vec3 albedo) { Surface s; s.albedo = albedo; s.rough = 0.8; s.metal = 0.0; return s; }
+Surface HitSurface(vec3 albedo) { Surface s; s.albedo = albedo; s.rough = 0.8; s.metal = 0.0; s.kind = kKindPlain; return s; }
 Surface HitSurface(vec3 albedo, uint instance) {
 	Surface s = HitSurface(albedo);
 	uint f = records[instance].flags;
 	uint r = (f >> 26u) & 7u, m = (f >> 29u) & 7u;
 	if (r != 0u) s.rough = float(r) / 7.0;
 	if (m != 0u) s.metal = float(m - 1u) / 6.0;
+	// (2026-11-07 ptaaa-materials) the record's material kind (NvrRtProtocol.h NVR_RT_RECORD_KIND_*), each with its setting on
+	const uint kind = rtRecordKind(f);
+	const vec4 keys = MatKeys();
+	if (kind == 1u && keys.x > 0.5) { s.kind = kKindGlass; s.albedo = GlassTint(records[instance].albedo.rgb); s.rough = 0.0; s.metal = 0.0; }
+	else if (kind == 2u && keys.z > 0.0) s.kind = kKindFoliage;
+	else if (kind == 3u && keys.w > 0.0) s.kind = kKindSkin;
 	return s;
+}
+
+// (2026-11-07 ptaaa-materials) the light leaving a hit: Direct on its lit side, then for a thin leaf / ear (foliage, skin with its
+// transmission on) the light from BEHIND: the same light sample from the far side's face (its own lift: a thick part's inside blocks it),
+// times the transmitted colour T, Lambert, with no glow light sample, no ReSTIR and no contact march. (merge 2026-11-07: ONE Direct call
+// site in a loop, not a second call: the shader inlines every call, and a second copy of Direct with the emissive sample and ReSTIR made
+// RtPathTrace.spv too big for the AMD driver's pipeline creation.) The results and the random numbers' order are as before.
+vec3 DirectSides(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
+	const bool through = (s.kind == kKindFoliage || s.kind == kKindSkin) && Luma(TransmitColour(s)) > 0.0;
+	const bool contact = gContact;
+#ifndef PT_RESTIR_GI
+	const bool restir = gRestirFirst;
+#endif
+	float glowTotal = 0.0;
+	vec3 e = vec3(0.0);
+	for (int side = 0; side < (through ? 2 : 1); side++) {
+		Surface b = s;
+		if (side == 1) {   // the far side
+			glowTotal = gGlowTotal;   // (the lit side's: the next bounce's glow MIS needs it)
+			b.albedo = TransmitColour(s);
+			gContact = false; gBackSide = true;
+#ifndef PT_RESTIR_GI
+			gRestirFirst = false;
+#endif
+		}
+		e += Direct(hit, side == 1 ? -n : n, t, v, b);
+	}
+	if (through) {
+		gBackSide = false; gContact = contact; gGlowTotal = glowTotal;
+#ifndef PT_RESTIR_GI
+		gRestirFirst = restir;
+#endif
+	}
+	return e;
 }
 
 // (2026-11-02 b) The screen's surface at this pixel (flag 8): x 1 = found (a world draw wrote its colour there), the position (camera
 // relative), its normal and its colour, linear; (2026-11-02 e) its roughness and metal from the MaterialBuffer (flag 256: r = class +
 // 0.49 x metal, b = roughness or -1; class 4 land, 5 plants). Its distance from the eye is compared with the traced first hit.
 bool gScreenDrawnElse = false;   // (2026-11-05) the game drew something at this pixel that NVR's AlbedoBuffer did not capture
+// (2026-11-07 ptaaa-firstperson) the first-person view model (arms, gun, Pip-Boy) in the G-buffer: RtPathTrace.cpp ViewModelPrep marks
+// its pixels in the normals' alpha (the world's 1, people's 2: RtDenoise's mask): 4 + s where the first-person pass captured its colour, normal and material
+// (s = tan(world FOV / 2) / tan(view-model FOV / 2), Reflections' WeaponFovScale), -1 where it did not (the game's own pixel). The depth
+// there is the view model's own (CombineDepth: its view z), drawn from the same eye with its own, narrower FOV and no TAA jitter: its
+// point is the world ray's with the sideways part / s. It is the nearest thing on screen and not in the traced scene: the camera ray is
+// not traced there, the screen's surface is the first hit (its colour, normal, material), lit and bounced from its true point; its rays
+// leave from near the eye, so they pass over the hidden first-person body (RtHidden.glsl).
+bool gViewModel = false;
 bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	hit = n = vec3(0.0);
 	s = HitSurface(vec3(0.0));
 	gScreenDrawnElse = false;
+	gViewModel = false;
 	if (!GBuffer()) return false;
 	float d = imageLoad(gDepth, pixel).r;
 	vec4 a = imageLoad(gAlbedo, pixel);
-	gScreenDrawnElse = d > 0.0 && d < 0.9999 && a.a < 0.5;
-	if (!(d > 0.0 && d < 0.9999) || a.a < 0.5) return false;
+	const vec4 nv = imageLoad(gNormals, pixel);
+	gScreenDrawnElse = d > 0.0 && d < 0.9999 && (a.a < 0.5 || nv.a < -0.5);   // (ptaaa-firstperson) + a view-model pixel without a capture
+	if (!(d > 0.0 && d < 0.9999) || a.a < 0.5 || nv.a < -0.5) return false;
 	vec2 uv = (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy;
-	hit = (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * (d * p.forward.w);
-	vec3 v = imageLoad(gNormals, pixel).rgb * 2.0 - 1.0;
-	n = normalize(normalize(p.right.xyz) * v.x + normalize(p.up.xyz) * v.y + normalize(p.forward.xyz) * v.z);
+	float lateral = 1.0;
+	if (nv.a > 3.5) { gViewModel = true; uv = (vec2(pixel) + 0.5) * p.size.zw; lateral = 1.0 / max(nv.a - 4.0, 0.05); }
+	hit = (p.forward.xyz + (p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * lateral) * (d * p.forward.w);
+	vec3 v = nv.rgb * 2.0 - 1.0;
+	n = normalize(p.right.xyz) * v.x + normalize(p.up.xyz) * v.y + normalize(p.forward.xyz) * v.z;
+	// (ptaaa-hangfix) a G-buffer normal that is zero (0.5 0.5 0.5 stored) or not a number: no screen surface here (normalize gave NaN, every
+	// ray from the pixel started at NaN); the traced hit stands in. A real normal: unchanged
+	if (!(dot(n, n) > 1.0e-8) || !(dot(n, n) < 1.0e30)) { hit = n = vec3(0.0); gViewModel = false; return false; }
+	n = normalize(n);
 	if (dot(n, hit) > 0.0) n = -n;
 	s.albedo = clamp(a.rgb, 0.0, 1.0);
 	if ((uint(p.accum.w) & 256u) != 0u) {
@@ -778,6 +1535,11 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 		if (cls >= 1.0) {
 			s.metal = clamp((m.r - cls) / 0.49, 0.0, 1.0);
 			s.rough = m.b >= 0.0 ? clamp(m.b, 0.05, 1.0) : cls == 4.0 || cls == 5.0 ? 0.95 : 0.7;
+			// (2026-11-07 ptaaa-materials) the class's material model: 3 cloth (ClothWind), 5 plants (PlantPass), 6 skin (SkinFill)
+			const vec4 keys = MatKeys();
+			if (cls == 3.0 && MatSheen() > 0.0) s.kind = kKindCloth;
+			else if (cls == 5.0 && keys.z > 0.0) s.kind = kKindFoliage;
+			else if (cls == 6.0 && keys.w > 0.0) s.kind = kKindSkin;
 		}
 	}
 	return true;
@@ -791,6 +1553,12 @@ vec3 gGIN1 = vec3(0.0, 0.0, 1.0), gGIN2 = vec3(0.0, 0.0, 1.0), gGIDir = vec3(0.0
 #endif
 vec3 gFirstAlbedo;   // (2026-11-03) the path's first surface colour (1: the sky / the frame)
 float gFirstSurface; // 1: the path met a surface first; 0: the sky / the game's frame (exact: the show pass skips the denoiser there)
+// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit: the first surface's roughness, metal and cos(view) (its specular albedo), the path's light
+// after the first hit's own (glow + direct: what came later came through the first bounce), that bounce direction's specular share of
+// the BRDF (per channel) and its ray's hit distance (60000 a miss, 0 no bounce). Set by main() before each Path().
+float gFirstRough = 1.0, gFirstMetal = 0.0, gFirstNV = 1.0;
+vec3 gSplitRad0 = vec3(0.0), gSplitRatio = vec3(0.0);
+float gSplitHitT = 0.0, gSplitSpecLobe = 0.0;   // (+ the chance that the bounce direction was the specular lobe's: SpecLobeChance)
 
 // (2026-11-04 c) PTIndirectClamp: light that reaches the first hit through a bounce (sky, glow, direct light at hits 1+), luminance
 // capped at grid[2].w (0 = none). Biased (darker where real bright indirect light is), the usual firefly cut for a 1-path denoiser.
@@ -799,9 +1567,16 @@ vec3 Indirect(vec3 c) {
 	return cap > 0.0 && l > cap ? c * (cap / l) : c;
 }
 
+// (2026-11-07) a committed hit into the path's locals (traced, qT, qInstance, qPrim, qBary, qToScene): a rayQueryEXT cannot be copied
+#define PT_TAKE_HIT(Q) { traced = rayQueryGetIntersectionTypeEXT(Q, true) == gl_RayQueryCommittedIntersectionTriangleEXT; if (traced) { \
+	qT = rayQueryGetIntersectionTEXT(Q, true); qInstance = rayQueryGetIntersectionInstanceIdEXT(Q, true); \
+	qPrim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(Q, true)); qBary = rayQueryGetIntersectionBarycentricsEXT(Q, true); \
+	qToScene = rayQueryGetIntersectionObjectToWorldEXT(Q, true); } }
+// (NVR_RT_CUSTOM_HIDDEN: RtHidden.glsl)
+
 vec3 Path(vec3 dir) {
 	vec3 pos = vec3(0.0), radiance = vec3(0.0), throughput = vec3(1.0);
-	int bounces = int(p.accum.y + 0.5), view = int(p.misc.w + 0.5);
+	int bounces = PtCount(p.accum.y, kPtMaxBounces), view = int(p.misc.w + 0.5);   // (hangfix: bounces capped)
 	// (2026-11-03 b) PTGlowLights: the previous hit (where this bounce ray left) for the MIS weight of the glow it meets
 	vec3 prevHit = vec3(0.0), prevN = vec3(0.0, 0.0, 1.0);
 	float prevPdf = 0.0, prevGlowTotal = 0.0;
@@ -810,48 +1585,131 @@ vec3 Path(vec3 dir) {
 	const bool cache = CacheOn() && view == 0;
 	vec3 cvHit[kCacheVerts], cvN[kCacheVerts], cvT[kCacheVerts], cvR[kCacheVerts];
 	int cvCount = 0;
+	// (2026-11-07 ptaaa-emissive) PTEmissive: the previous hit's emissive weights' sum (0: it took no emissive sample), whether ReSTIR DI took
+	// its emissive light (then a bounce ray's glow from a listed triangle counts 0 in the picture), and that glow's balance share for the
+	// radiance cache's first vertex (the cache's readers weigh their own light samples by the balance heuristic)
+	float prevEmTotal = 0.0, prevEmSelect = 1.0;   // (perf-ptcost: + the chance its sample was traced, PTBounceLights)
+	bool prevEmRestir = false;
+	vec3 cacheFirstGlow = vec3(0.0);
 #endif
+	float ptFirstT = 0.0, ptPath = 0.0;   // (2026-11-07) real textures' mip: the camera ray's length, the bounces' since
 	for (int bounce = 0; bounce <= bounces; bounce++) {
 		rayQueryEXT q;
+		gGlassSolid = GlassMode() > (bounce > 0 ? 0.5 : 1.5);   // (2026-11-07 ptaaa-materials) bounce rays meet glass panes; the camera's with PTGlass 2
 		// (2026-11-04 b) bounce rays: the alpha test is ~30 % of the pass outdoors (helper replays, section 25): PTBounceAlpha 0 / 2 skip it
 		// (cut-out cards solid / left out), PTBounceDistance cuts them short (a miss then takes the sky outdoors, nothing indoors)
 		// (two calls, not variable flags / mask: one call with them cost the default path 5-8 % in helper replays)
 		const int alphaMode = int(p.rect.w + 0.5);   // PTBounceAlpha: 1 tested as the camera's rays, 0 cut-outs solid, 2 left out, 3 the nearest card's texel
 		const float rayLength = bounce > 0 && p.grid[2].z > 0.0 ? p.grid[2].z : p.misc.z;   // PTBounceDistance (0: misc.z)
-		if (bounce > 0 && alphaMode != 1) {   // opaque: no candidates to confirm; 2 without NVR_RT_MASK_ALPHA (FORK-RT-CORE.md's mask table)
-			rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, alphaMode == 2 ? 0xEFu : 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength);
-			while (rayQueryProceedEXT(q)) {}
+		// (2026-11-07, a tester's video: dotted grey squares round a tree against the sky, smearing as the camera turned) where the
+		// screen has no surface of its own (the sky: the G-buffer's depth at the far plane), the game's frame is the camera ray's answer:
+		// the traced scene holds things the game does not draw there (the tree's leaf cards, whose hashed cut-out test made each a
+		// dotted square; the player's own body in first person), and the screen is the truth for what the camera sees
+		if (bounce == 0 && GBuffer() && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
+			const float d0 = imageLoad(gDepth, gPixel).r;
+			if (!(d0 > 0.0 && d0 < 0.9999)) { radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2)); break; }
+		}
+		bool traced = false;
+		float qT = 0.0;
+		uint qInstance = 0u, qPrim = 0u;
+		vec2 qBary = vec2(0.0);
+		mat4x3 qToScene = mat4x3(1.0);
+		// (2026-11-02 b) the first hit from the screen: its colour (the land's blended layers, decals the atlas lacks) and smooth normal
+		// where the traced hit is the same surface (within 3 % or 8 units); the screen's surface alone where the rays see nothing or
+		// something else (grass, people, things not in the RT scene): it lights and bounces, with no glow of its own.
+		// (2026-11-07 ptaaa-firstperson: read before the camera ray, which the view model's pixels skip)
+		vec3 sHit, sN;
+		Surface sS;
+		bool screen = bounce == 0 && ScreenHit(gPixel, sHit, sN, sS);
+		const bool viewModel = screen && gViewModel;
+		// (2026-11-07 ptaaa-firstperson) a bounce ray that leaves from near the eye (off the view model, or a surface within arm's reach)
+		// passes over the hidden first-person body (RtHidden.glsl): the world without people and cut-outs (opaque), then people, the
+		// player's parts and cut-outs up to that hit, each candidate tested, hidden ones passed over (cut-outs as PTBounceAlpha says:
+		// 0 solid, 2 left out, 1 / 3 their texture)
+		if (bounce > 0 && rtHiddenNear(pos, vec3(0.0))) {
+			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x8Fu, pos + p.origin.xyz, 0.0, dir, rayLength)   // (hangfix: PT_RAY_INIT, the loop caps)
+			PT_PROCEED_OPAQUE(q)
+			PT_TAKE_HIT(q);
+			rayQueryEXT qp;
+			PT_RAY_INIT(qp, gl_RayFlagsNoOpaqueEXT, alphaMode == 2 ? 0x60u : 0x70u, pos + p.origin.xyz, 0.0, dir, traced ? qT : rayLength)
+			uint n_ = 0u;
+			while (rayQueryProceedEXT(qp)) {
+				PT_GUARD(qp, n_)
+				if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+				if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
+				if (alphaMode == 0 || !AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
+				                                                    rayQueryGetIntersectionBarycentricsEXT(qp, false)))
+					rayQueryConfirmIntersectionEXT(qp);
+			}
+			if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
+		}
+		else if (bounce > 0 && alphaMode != 1) {   // opaque: no candidates to confirm; 2 without NVR_RT_MASK_ALPHA (FORK-RT-CORE.md's mask table)
+			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, alphaMode == 2 ? 0xEFu : 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength)   // (hangfix)
+			PT_PROCEED_OPAQUE(q)
 			// 3: the nearest card's texel decides (as the game's alpha test); through a hole the ray goes on with the other cards left out
 			if (alphaMode == 3 && rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT &&
 				!rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, true), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true))) {
 				const float past = rayQueryGetIntersectionTEXT(q, true);
-				rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0xEFu, pos + p.origin.xyz, past, dir, rayLength);
-				while (rayQueryProceedEXT(q)) {}
+				PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0xEFu, pos + p.origin.xyz, past, dir, rayLength)   // (hangfix)
+				PT_PROCEED_OPAQUE(q)
 			}
+			PT_TAKE_HIT(q);
 		}
 		// (2026-11-05 rtfull-gs-body) the camera's rays leave the far LOD out (NVR_RT_MASK_FAR 0x80: FarLandLOD / FarObjectLOD): where the
 		// screen has no world surface of NVR's, the game draws that distant land itself and a camera ray that met its coarse quads showed
 		// them as grey slabs (Goodsprings' hills under PTRealtime once the far ring had loaded); missing it, the ray takes the game's frame.
-		// Bounce and shadow rays keep it. (Three calls with constant masks: a variable mask cost the default path 5-8 %, section 27.)
-		else if (bounce == 0) {
-			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0x7Fu, pos + p.origin.xyz, 1.0, dir, rayLength);
-			Proceed(q);
+		// Bounce and shadow rays keep it. (Constant masks: a variable mask cost the default path 5-8 %, section 27.)
+		// (2026-11-07, a tester's "the player's head projected over the entire sky") the camera's rays also pass over the player's own body
+		// in first person (FirstPersonBody: traced for shadows and reflections, not drawn; instance custom index NVR_RT_CUSTOM_HIDDEN, as
+		// RtLampPrimary.comp). The eye sits inside that body's head, so the one camera ray through everything met the inside of the head
+		// first: where the screen has no surface (the sky) the picture was the head's inside (hair, a hat, an eye) filling the sky, and on
+		// every other pixel the traced hit never matched the screen's, so the first hit lost its real texture, normal map and glow. Two
+		// queries now: the world without cut-outs and people (0x0F: land, objects, lamp glass, lamp models; opaque), then cut-outs, people
+		// and the player's rigid parts (0x70) up to that hit, every candidate tested, the hidden ones passed over; the nearer is the hit.
+		// (2026-11-07 ptaaa-firstperson) the view model's pixels: no camera ray (the screen's surface is the first hit)
+		// (perf-ptcost) only while this frame's scene holds the hidden body; without it the one query below gives the same hit (the people and
+		// the player's parts are opaque unless alpha-tested, and then under 0x10 with the cut-outs)
+		else if (bounce == 0 && !viewModel && !(gOneCameraQuery > 0.5)) {
+			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x0Fu, pos + p.origin.xyz, 1.0, dir, rayLength)   // (hangfix: PT_RAY_INIT, the loop caps)
+			PT_PROCEED_OPAQUE(q)
+			PT_TAKE_HIT(q);
+			rayQueryEXT qp;
+			PT_RAY_INIT(qp, gl_RayFlagsNoOpaqueEXT, 0x70u, pos + p.origin.xyz, 1.0, dir, traced ? qT : rayLength)
+			uint n_ = 0u;
+			while (rayQueryProceedEXT(qp)) {
+				PT_GUARD(qp, n_)
+				if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+				if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
+				if (!AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
+				                                rayQueryGetIntersectionBarycentricsEXT(qp, false)))
+					rayQueryConfirmIntersectionEXT(qp);
+			}
+			if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
 		}
-		else {
-			rayQueryInitializeEXT(q, scene, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength);
+		// bounce rays with PTBounceAlpha 1, and (perf-ptcost) the camera's ray as ONE query over everything but the far LOD (0x7F) when no hidden
+		// body is in this frame's scene (frame row texel 29: RtCore counts them)
+		else if (bounce > 0 || !viewModel) {
+			PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, bounce > 0 ? 0xFFu : 0x7Fu, pos + p.origin.xyz, bounce > 0 ? 0.0 : 1.0, dir, rayLength)   // (hangfix)
 			Proceed(q);
+			PT_TAKE_HIT(q);
 		}
-		bool traced = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
-		// (2026-11-02 b) the first hit from the screen: its colour (the land's blended layers, decals the atlas lacks) and smooth normal
-		// where the traced hit is the same surface (within 3 % or 8 units); the screen's surface alone where the rays see nothing or
-		// something else (grass, people, things not in the RT scene): it lights and bounces, with no glow of its own.
-		vec3 sHit, sN;
-		Surface sS;
-		bool screen = bounce == 0 && ScreenHit(gPixel, sHit, sN, sS);
+		// (2026-11-07 ptaaa-firstperson) the view model is seen along its own ray (its FOV): the view vector toward its true point
+		if (viewModel) dir = normalize(sHit);
 		vec3 hit, n, v = -dir;
 		Surface surf;
 		float t;
-		if (screen && (!traced || abs(rayQueryGetIntersectionTEXT(q, true) - length(sHit)) > max(0.03 * length(sHit), 8.0))) {
+		// (2026-11-07 rtgap-tess, 1a) with the tessellated bumps on, the screen's surface lies up to Strength off the traced (flat) one,
+		// along the ray Strength / cos: within that it is the same surface, and the traced point starts the rays (one in a hollow started
+		// under the flat land and was blocked at once: dark speckles); the screen's colour, normal and material stay
+		float same = max(0.03 * length(sHit), 8.0);
+		if (screen && traced) {
+			const float slack = rtTessSlack(PtSlack(), dot(sHit, p.forward.xyz));
+			if (slack > 0.0) same += slack / max(abs(dot(HitNormal(qInstance, qPrim, qToScene, dir), dir)), 0.35);
+		}
+		// (1b) the first hit's contact march starts on the screen's surface (where the depth buffer has it)
+		gContact = screen && !viewModel;   // (ptaaa-firstperson: the march walks the world's projection; the view model has its own)
+		if (screen) { gContactFrom = sHit; gContactN = sN; gContactZ = dot(sHit, p.forward.xyz); gContactNoise = Rand(); }
+		if (screen && (!traced || abs(qT - length(sHit)) > same)) {
 			hit = sHit; n = sN; surf = sS; t = length(sHit);
 		}
 		else {
@@ -864,24 +1722,40 @@ vec3 Path(vec3 dir) {
 				else if (bounce == 0 && view != 3) radiance = view == 2 || view == 4 || view >= 5 ? vec3(0.0) : Sky(dir);
 				break;
 			}
-			t = rayQueryGetIntersectionTEXT(q, true);
+			t = qT;
 			// (2026-11-03) a camera ray that meets only the far LOD (past SceneRadius: FarLandLOD / FarObjectLOD, coarse, average colours)
 			// where the screen has no world surface of NVR's: the game's own frame shows that distance better
 			// (2026-11-05 rtfull-gs-pt / -pt2) also wherever the game drew something the AlbedoBuffer did not capture (its own distant
 			// terrain and object LOD, grass): the RT scene holds the full mesh there with one 64 px atlas tile (section 5), and Goodsprings'
 			// hill came out as grey slabs under PTRealtime. The game's frame shows what it drew.
-			if (bounce == 0 && !screen && (t > 8192.0 || gScreenDrawnElse) && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5) {
+			// (2026-11-07 ptaaa-materials) except a glass pane the camera meets (PTGlass 2): the game drew its glass there (depth written, no
+			// AlbedoBuffer colour), and the path traces the pane and what lies behind it
+			if (bounce == 0 && !screen && (t > 8192.0 || gScreenDrawnElse) && ScreenFrame() && view != 2 && view != 3 && view != 4 && view < 5 &&
+				!(gGlassSolid && rtIsGlass(qInstance) && GlassMode() > 0.5)) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
 				break;
 			}
-			uint instance = rayQueryGetIntersectionInstanceIdEXT(q, true), prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true));
-			vec2 bary = rayQueryGetIntersectionBarycentricsEXT(q, true);
-			mat4x3 toScene = rayQueryGetIntersectionObjectToWorldEXT(q, true);
+			uint instance = qInstance, prim = qPrim;
+			vec2 bary = qBary;
+			mat4x3 toScene = qToScene;
 			n = HitNormal(instance, prim, toScene, dir);
+			n = rtHitSmoothNormal(instance, prim, bary, n, mat3(toScene), dir);   // (2026-11-07 perf-reflfix) the vertex normals: no facets
 			hit = pos + dir * t;
+#ifndef RT_NO_REAL_TEXTURES
+			// (2026-11-07) the ray's footprint for the real textures' mip: a pixel's width along the camera ray, then the bounces'
+			// lobes (diffuse-wide: half their length), so far and bounced hits read coarse mips (no speckle), near ones the full texture
+			rtConeWidth = bounce == 0 ? t * 2.0 * length(p.up.xyz) * p.size.w : ptFirstT * 2.0 * length(p.up.xyz) * p.size.w + (ptPath + t) * 0.5;
+			// (2026-11-07) anisotropic filtering along the ray's tilt (RtTextures.glsl rtTexSampleHit); flag 2097152 (the RT host's A/B): one mip
+			rtConeDir = (uint(p.accum.w) & 2097152u) != 0u ? vec3(0.0) : dir; rtConeToScene = mat3(toScene);
+#endif
 			surf = HitSurface(clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0), instance);
-			if (screen) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point
-			if (NormalAtlas()) {   // (2026-11-02 d) the normal map bends it (also the screen's smooth normal: that buffer has no maps)
+			if (screen && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
+			// (2026-11-02 d) the normal map bends it (also the screen's smooth normal: that buffer has no maps). (2026-11-07, RT-DETAIL-GAPS
+			// section 2) RealNormalMaps: the real normal map wherever the record has one (flag 0x80), with or without the atlas (flag 64), at
+			// the bounces' hits and a camera ray's traced hit; the screen's own first surface keeps its smooth normal unless NormalTextures
+			// is on (PTDetail already carries the game's normal-mapped shading there: bending it too would count the bumps twice)
+			if (NormalAtlas() || bounce > 0 || !screen) {
+				rtHitNormalAtlasOn = NormalAtlas();
 				vec3 bent = rtHitNormalMapped(instance, prim, bary, n, mat3(toScene));
 				if (dot(bent, v) > 0.0) n = bent;   // (a map that turns it away from the eye: kept as it was)
 			}
@@ -905,10 +1779,25 @@ vec3 Path(vec3 dir) {
 						mis = prevPdf / max(prevPdf + light, 1.0e-8);
 					}
 				}
+#ifndef PT_RESTIR_GI
+				// (2026-11-07 ptaaa-emissive) PTEmissive: the previous hit's emissive sample could have drawn this glowing point too: balance
+				// heuristic against its density there (EmPdfAt), or 0 where ReSTIR DI took the emissive light at the first hit
+				if (bounce > 0 && prevEmTotal > 0.0 && glow != vec3(0.0)) {
+					const float light = EmPdfAt(instance, prim, dir, t, prevHit, prevN, prevEmTotal) * prevEmSelect;
+					if (light > 0.0) {
+						const float balance = prevPdf / max(prevPdf + light, 1.0e-30);
+						if (prevEmRestir) { cacheFirstGlow += Indirect(throughput * glow * (p.skyHorizon.w * balance)); mis = 0.0; }
+						else mis *= balance;
+					}
+				}
+#endif
 				radiance += bounce > 0 ? Indirect(throughput * glow * (p.skyHorizon.w * mis)) : throughput * glow * (p.skyHorizon.w * mis);
 			}
 		}
 		if (bounce == 0) { gFirstAlbedo = surf.albedo; gFirstSurface = 1.0; }
+		if (bounce == 0) { gFirstRough = surf.rough; gFirstMetal = surf.metal; gFirstNV = dot(n, v); gSplitTake = Split() && view == 0; }   // (ptaaa-denoiser)
+		if (bounce == 1) gSplitHitT = t;   // (ptaaa-denoiser) the first bounce ray's hit
+		if (bounce == 0) ptFirstT = t; else ptPath += t;
 #ifdef PT_RESTIR_GI
 		if (bounce == 1 && gGIFirst) { gGIT2 = t; gGIN2 = n; }   // the first bounce's hit (a miss leaves 0: the sky)
 #endif
@@ -931,11 +1820,16 @@ vec3 Path(vec3 dir) {
 #ifndef PT_RESTIR_GI
 		if (cache && bounce == bounces && bounce > 0) { vec3 cl; if (CacheRead(hit, n, cl)) { radiance += Indirect(throughput * cl); cached = true; } }
 #endif
+		bool emRestir = false;
 		if (!arriving && !reflection) {
 #ifndef PT_RESTIR_GI
 			gRestirFirst = bounce == 0 && (view == 0 || view == 3) && RestirDI();   // (2026-11-07) PTRestirDI at the first hit
+			emRestir = gRestirFirst;
+			// (ptaaa-emissive) the emissive light sample is MIS-weighted only where a bounce ray leaves this hit (or the cache stands for it)
+			gEmMis = (bounce < bounces && view != 3 && view != 8) || cached;
 #endif
-			const vec3 lit = Direct(hit, n, t, v, surf);
+			gBounce = bounce;   // (perf-ptcost: PTBounceLights)
+			const vec3 lit = DirectSides(hit, n, t, v, surf);   // (2026-11-07 ptaaa-materials: Direct + the light from behind, one call site)
 #ifndef PT_RESTIR_GI
 			gRestirFirst = false;
 #endif
@@ -947,7 +1841,12 @@ vec3 Path(vec3 dir) {
 			if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 65536u) != 0u && view == 0 && !cached)
 				radiance += Indirect(throughput * surf.albedo * lit * 0.75);
 		}
-		else gGlowTotal = 0.0;
+		else {
+			gGlowTotal = 0.0;
+#ifndef PT_RESTIR_GI
+			gEmTotal = 0.0;
+#endif
+		}
 		gSpecOnly = false;
 		// (2026-11-06, section 39) PTLastSky (flag 32768): the path ends here (PTRealtime traces 1 bounce), so this hit lacks the light of
 		// further bounces; outdoors most of it is the sky's. Add it as if one more diffuse bounce ray (cosine-weighted, unoccluded) left to
@@ -957,6 +1856,7 @@ vec3 Path(vec3 dir) {
 #ifndef PT_RESTIR_GI
 		if (cache && bounce < bounces && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
 #endif
+		if (bounce == 0) { gSplitTake = false; gSplitRad0 = radiance; }   // (ptaaa-denoiser) the first hit's own light ends here
 		if (bounce == bounces || view == 3 || view == 8) break;
 		vec3 l, w;
 		float pdf;
@@ -981,7 +1881,7 @@ vec3 Path(vec3 dir) {
 		// (2026-11-04 d) the first bounce: the glossy lobe with its usual chance (traced on here, its light stays in the rest, not reused),
 		// else a cosine sample for ReSTIR GI (source density (1 - share) x cos / pi; the reuse applies the diffuse part of the BRDF), and
 		// from there the path gathers only what arrives along it
-		else if (bounce == 0 && view == 0) {
+		else if (bounce == 0 && view == 0 && surf.kind != kKindGlass) {   // (2026-11-07 ptaaa: a pane goes on as a pane, below)
 			const float share = Specular() ? SpecularShare(surf) : 0.0;
 			gGISurface = true; gGIT1 = t; gGIN1 = n; gGIShare = share; gGIMetal = Specular() ? surf.metal : 0.0;
 			if (Rand() < share) {
@@ -1017,7 +1917,16 @@ vec3 Path(vec3 dir) {
 			if ((((gPixel.x >> 3) + (gPixel.y >> 3) + int(uint(p.origin.w))) & 1) != 0) break;
 			throughput *= 2.0;
 		}
+		// (ptaaa-denoiser) the bounce goes on: its direction's specular share (NextDirection's BrdfPi was the last; for glass and a leaf's
+		// transmission NextDirection sets it: glass all specular, the leaf all diffuse), a miss unless it hits
+		if (bounce == 0) { gSplitRatio = SpecShare(); gSplitHitT = 60000.0; gSplitSpecLobe = Split() ? SpecLobeChance(n, v, surf, l) : 0.0; }
+		// (2026-11-07 ptaaa-materials) through glass or a leaf: the next ray leaves from the far side's face (and no glow light sample was taken
+		// there: a glow met along it keeps its full weight)
+		if (dot(l, n) < 0.0) { n = -n; gGlowTotal = 0.0; }
 		prevHit = hit; prevN = n; prevPdf = pdf; prevGlowTotal = gGlowTotal;
+#ifndef PT_RESTIR_GI
+		prevEmTotal = gEmTotal; prevEmSelect = gEmSelect; prevEmRestir = emRestir;
+#endif
 		throughput *= w;
 		if (bounce >= 2) {   // Russian roulette: keep the path in proportion to what it still carries
 			float keep = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
@@ -1030,7 +1939,7 @@ vec3 Path(vec3 dir) {
 #ifndef PT_RESTIR_GI
 	// (2026-11-07) PTRadianceCache: each vertex that went on gets what came back through it (its outgoing indirect light)
 	for (int i = 0; i < cvCount; i++) {
-		const vec3 rest = radiance - cvR[i], T = cvT[i];
+		const vec3 rest = radiance - cvR[i] + (i == 0 ? cacheFirstGlow : vec3(0.0)), T = cvT[i];   // (ptaaa-emissive: the first vertex's glow share)
 		CacheAdd(cvHit[i], cvN[i], max(vec3(T.x > 1.0e-4 ? rest.x / T.x : 0.0, T.y > 1.0e-4 ? rest.y / T.y : 0.0, T.z > 1.0e-4 ? rest.z / T.z : 0.0), vec3(0.0)));
 	}
 #endif
@@ -1041,6 +1950,11 @@ void main() {
 	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y)) return;
 	state = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + uint(p.origin.w) * 26699u;
+	LoadMatKeys();   // (2026-11-07 ptaaa-materials) the material models' keys, once
+	LoadCostKeys();  // (perf-ptcost) the ray budget's keys, once
+#ifndef PT_RESTIR_GI
+	LoadScratchLayout();   // (ptaaa-hangfix) the scratch store's regions, checked once
+#endif
 	Pcg();
 #ifdef PT_RESTIR_GI
 	{   // (2026-11-04 d) one path: the first-bounce sample and the rest apart, for RtRestirGI.comp (which demodulates)
@@ -1059,10 +1973,15 @@ void main() {
 		return;
 	}
 #endif
-	const int paths = max(int(p.accum.z + 0.5), 1);
+	const int paths = max(PtCount(p.accum.z, kPtMaxPaths), 1);   // (hangfix: capped)
 	vec3 albedoSum = vec3(0.0);
 	float surfaceSum = 0.0;
 	vec3 sum = vec3(0.0);
+	// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit: each path's light split into diffuse and specular (the sum unchanged); only the picture
+	// (PTDebugView 0) and with the demodulation (512)
+	const bool split = Split() && (uint(p.accum.w) & 512u) != 0u && int(p.misc.w + 0.5) == 0;
+	vec3 specSum = vec3(0.0), specAlbedoSum = vec3(0.0);
+	float roughSum = 0.0, metalSum = 0.0, specHitT = 0.0;
 	for (int s = 0; s < paths; s++) {
 		const vec2 uv = (vec2(pixel) + vec2(Rand(), Rand())) * p.size.zw;
 		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
@@ -1072,13 +1991,35 @@ void main() {
 #endif
 		gFirstAlbedo = vec3(1.0);
 		gFirstSurface = 0.0;
+		gFirstRough = 1.0; gFirstMetal = 0.0; gFirstNV = 1.0;   // (ptaaa-denoiser)
+		gSplitTake = false; gSplitSpec = vec3(0.0); gSplitRad0 = vec3(0.0); gSplitRatio = vec3(0.0); gSplitHitT = 0.0; gSplitSpecLobe = 0.0;
 		vec3 c = Path(dir);
-		if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+		const bool bad = any(isnan(c)) || any(isinf(c));
+		if (bad) c = vec3(0.0);
+		// (ptaaa-denoiser) the specular part: the first hit's direct light through its GGX lobe + what came through the first bounce x that
+		// direction's specular share of the BRDF (exact for either lobe's sample: the one-sample mixture's weight is the whole BRDF's)
+		vec3 spec = vec3(0.0);
+		if (split && !bad && gFirstSurface > 0.0 && Specular()) {
+			spec = gSplitSpec + max(c - gSplitRad0, vec3(0.0)) * gSplitRatio;
+			spec = (any(isnan(spec)) || any(isinf(spec))) ? vec3(0.0) : clamp(spec, vec3(0.0), max(c, vec3(0.0)));
+		}
 		float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-		if (p.misc.y > 0.0 && l > p.misc.y) c *= p.misc.y / l;
+		if (p.misc.y > 0.0 && l > p.misc.y) { c *= p.misc.y / l; spec *= p.misc.y / l; }
 		sum += c;
 		albedoSum += gFirstAlbedo;
 		surfaceSum += gFirstSurface;
+		if (split) {
+			specSum += spec;
+			if (gFirstSurface > 0.0 && Specular()) {
+				const vec3 f0 = mix(vec3(0.04), gFirstAlbedo, clamp(gFirstMetal, 0.0, 1.0));
+				specAlbedoSum += EnvBrdfApprox(f0, clamp(gFirstRough, 0.0, 1.0), clamp(gFirstNV, 0.0, 1.0));
+			}
+			roughSum += gFirstRough;
+			metalSum += gFirstSurface > 0.0 ? clamp(gFirstMetal, 0.0, 1.0) : 0.0;
+			// the specular hit distance only when this bounce ray was (probably) the specular lobe's (the virtual point it gives is the
+			// reflection's); 0 = not known here (the denoiser takes its neighbours')
+			if (s == 0) specHitT = gSplitSpecLobe > 0.5 ? gSplitHitT : 0.0;
+		}
 	}
 	vec3 sample_ = sum / float(paths);
 	if ((uint(p.accum.w) & 512u) != 0u) {   // (2026-11-03) demodulated for the denoiser
@@ -1086,8 +2027,24 @@ void main() {
 		// the raw colour every surface darker than 0.02 in a channel came out darker by colour / 0.02 (rtdenoise-int: PTDenoise 0.87-0.90x
 		// the converged mean overall, dark tiles down to 0.57x)
 		const vec3 albedo = max(albedoSum / float(paths), vec3(0.02));
-		sample_ /= albedo;
 		imageStore(albedoOut, pixel, vec4(albedo, surfaceSum / float(paths)));
+#ifndef PT_RESTIR_GI
+		if (split) {   // (ptaaa-denoiser) the two signals, each divided by its own albedo (fp16-safe), and the specular albedo itself
+			const vec3 specMean = specSum / float(paths);
+			const vec3 specAlbedo = surfaceSum > 0.0 ? max(specAlbedoSum / float(paths), vec3(0.01)) : vec3(0.0);
+			const vec3 diffuse = min(max(sample_ - specMean, vec3(0.0)) / albedo, vec3(60000.0));
+			const vec3 specular = specAlbedo.x > 0.0 ? min(specMean / specAlbedo, vec3(60000.0)) : vec3(0.0);
+			// albedoOut.a: 1 + the metal where every path met a surface (DLSS RR's diffuse albedo = colour x (1 - metal); the show pass and
+			// the guide read a >= 0.5 / clamp it to 1, as the GI variant's)
+			if (surfaceSum >= float(paths)) imageStore(albedoOut, pixel, vec4(albedo, 1.0 + metalSum / float(paths)));
+			imageStore(display, pixel, vec4(diffuse, gCountRays ? 1.0 + float(gRayCount) : 1.0));   // (perf-ptcost: the host's count mode)
+			imageStore(specOut, pixel, vec4(specular, specHitT));
+			imageStore(accumA, pixel, vec4(specAlbedo.rg, 0.0, 0.0));
+			imageStore(accumB, pixel, vec4(specAlbedo.b, roughSum / float(paths), 0.0, 0.0));
+			return;
+		}
+#endif
+		sample_ /= albedo;
 	}
 	const float n = p.accum.x;
 	vec3 mean = sample_;
@@ -1097,5 +2054,5 @@ void main() {
 	}
 	imageStore(accumA, pixel, vec4(mean.rg, 0.0, 0.0));
 	imageStore(accumB, pixel, vec4(mean.b, n + float(paths), 0.0, 0.0));
-	imageStore(display, pixel, vec4(mean, 1.0));
+	imageStore(display, pixel, vec4(mean, gCountRays ? 1.0 + float(gRayCount) : 1.0));   // (perf-ptcost: the host's count mode)
 }

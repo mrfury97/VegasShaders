@@ -204,6 +204,7 @@
     <ClCompile Include="..\src\core\UpscalerFsr31.cpp" />
     <ClCompile Include="..\src\core\RtCore.cpp" />
     <ClCompile Include="..\src\core\RtSunShadows.cpp" />
+    <ClCompile Include="..\src\core\RtFogVisibility.cpp" />
     <ClCompile Include="..\src\core\RtPathTrace.cpp" />
     <ClCompile Include="..\src\core\RtDenoise.cpp" />
     <ClCompile Include="..\src\effects\ShadowsExteriors\ShadowsExterior.cpp" />
@@ -217,6 +218,7 @@
     <ClCompile Include="..\src\effects\TerrainShadows\TerrainShadows.cpp" />
     <ClCompile Include="..\src\effects\SunFar\SunFar.cpp" />
     <ClCompile Include="..\src\effects\Bodycam\Bodycam.cpp" />
+    <ClCompile Include="..\src\effects\Dream\Dream.cpp" />
     <ClCompile Include="..\src\effects\Reflections\Reflections.cpp" />
     <ClCompile Include="..\src\effects\VolumetricClouds\VolumetricClouds.cpp" />
     <ClCompile Include="..\src\effects\BloodFlow\BloodFlow.cpp" />
@@ -299,10 +301,17 @@
     <ClInclude Include="..\src\core\DxvkCompute.h" />
     <ClInclude Include="..\src\core\RtCore.h" />
     <ClInclude Include="..\src\core\RtScenePick.h" />
+    <ClInclude Include="..\src\core\RtTexturePack.h" />
+    <ClInclude Include="..\src\core\RtVideoMemory.h" />
+    <ClInclude Include="..\src\core\RtFaceMorph.h" />
     <ClInclude Include="..\src\core\RtLightGrid.h" />
+    <ClInclude Include="..\src\core\RrRectPlan.h" />
     <ClInclude Include="..\src\core\RtSunShadows.h" />
+    <ClInclude Include="..\src\core\RtFogVisibility.h" />
+    <ClInclude Include="..\src\core\RtFogGrid.h" />
     <ClInclude Include="..\src\core\RtPathTrace.h" />
     <ClInclude Include="..\src\core\RtDenoise.h" />
+    <ClInclude Include="..\src\core\RtHistoryTime.h" />
     <ClInclude Include="..\src\core\HiZ.h" />
     <ClInclude Include="..\src\core\Upscaler.h" />
     <ClInclude Include="..\src\core\PixelInspector.h" />
@@ -382,6 +391,7 @@
     <ClInclude Include="..\src\effects\SunFar\SunFar.h" />
     <ClInclude Include="..\src\effects\Bodycam\Bodycam.h" />
     <ClInclude Include="..\src\effects\Bodycam\BodycamAudio.h" />
+    <ClInclude Include="..\src\effects\Dream\Dream.h" />
     <ClInclude Include="..\src\effects\Reflections\Reflections.h" />
     <ClInclude Include="..\src\effects\VolumetricClouds\VolumetricClouds.h" />
     <ClInclude Include="..\src\effects\BloodFlow\BloodFlow.h" />

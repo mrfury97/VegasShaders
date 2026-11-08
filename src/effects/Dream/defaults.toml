@@ -1,0 +1,24 @@
+[_Shaders.Dream.Main]
+Level = 0.5                            # [0.0-1.0], live: how deep the dream is. Drives every part below; 0 with Breathing off draws nothing at all. The strengths below are 1 = as in DreamSim.
+Breathing = true                       # Live: the level rises and falls slowly by itself around the value above (more the deeper it is).
+BreathingSpeed = 1.0                   # [0.0-5.0], live: how fast it breathes (1 = DreamSim's slow swell of about half a minute).
+Warp = 1.0                             # [0.0-3.0], live: the picture's slow twist round the middle and its fine wobble.
+ColourSplit = 1.0                      # [0.0-3.0], live: red and blue pulled apart sideways.
+HueDrift = 1.0                         # [0.0-3.0], live: every colour slowly turning round the colour wheel and back.
+Saturation = 1.0                       # [0.0-3.0], live: the extra colour the dream adds.
+Tracers = 1.0                          # [0.0-1.5], live: the last frames linger behind anything that moves.
+Tunnel = 1.0                           # [0.0-1.0], live: hold the view still and it starts falling into itself: a swirl, then a hexagonal kaleidoscope zooming in for ever. Move to leave it.
+TunnelDelay = 4.0                      # [0.0-120.0], live: seconds the view must stay still before the tunnel starts (it then takes 20 s to open fully).
+Melt = 1.0                             # [0.0-1.0], live: now and then the whole scene slides into a Julia fractal for a few seconds, then lets go.
+MeltInterval = 7.0                     # [0.0-60.0], live: minutes between melts on average (sooner the deeper the dream). 0 = never.
+Macroblocks = 1.0                      # [0.0-3.0], live: during a glitch burst, blocks of the picture turn flat and posterised (a few flash green).
+Datamosh = 1.0                         # [0.0-3.0], live: during a glitch burst, blocks keep the old picture, smeared sideways.
+GlitchInterval = 85.0                  # [0.0-3600.0], live: seconds between glitch bursts on average (sooner the deeper the dream). 0 = never.
+Vignette = 1.0                         # [0.0-1.5], live: the dark edges round the picture.
+Dither = 1.0                           # [0.0-1.0], live: the coarse 15-bit colour with an ordered dither pattern.
+PixelSize = 0.0                        # [0.0-32.0], live: the size in screen pixels of the glitch blocks' and the dither's pixels. 0 = auto (DreamSim's 240-line picture).
+LowHealth = 0.0                        # [0.0-1.0], live: how much deeper the dream goes when your health is low (from half health down to a tenth). 0 = not at all.
+
+[_Shaders.Dream.Status]
+Enabled = false                        # A "fun" trip look ported from DreamSim: warp, colour drift, tracers, a stare tunnel, fractal melts and glitches.
+

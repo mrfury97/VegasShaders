@@ -7,6 +7,7 @@
 
 #include <cmath>
 #include <cstring>
+#include "RtHistoryTime.h"	// UNOFFICIAL 2026-11-07 (perf-history) TimeScale
 
 namespace RtShadowDenoise {
 
@@ -20,10 +21,10 @@ namespace RtShadowDenoise {
 	static_assert(sizeof(DenoiseConstants) == 19 * 16, "RtShadowDenoise.glsl Pass: 19 vec4s");
 
 	struct Settings {
-		float maxHistory = 32.0f;		// temporal accumulation (frames)
+		float maxHistory = 32.0f;		// temporal accumulation (frames at 60 fps: TimeScale)
 		float maxRadius = 32.0f;		// widest blur (traced pixels)
 		float planeDistance = 0.02f;	// same-surface test: share of the view depth
-		float stabilize = 4.0f;			// the result's own short history (frames, 0 off)
+		float stabilize = 4.0f;			// the result's own short history (frames at 60 fps, 0 off)
 		float minRadius = 0.0f;			// blur at least this (pixels) where a shadow edge is (0: a contact shadow stays as hard as traced)
 		float minRadiusNew = 4.0f;		// + this / history length (a new surface's first frames)
 		float normalPower = 8.0f;		// tap weight: (n . n')^this
@@ -36,6 +37,14 @@ namespace RtShadowDenoise {
 		int core = 0;					// 0 our own (SIGMA-style), 1 AMD FidelityFX Shadows (RtShadowDenoiseFfx.hlsl)
 		int debugView = 0;				// 1 raw, 2 temporal mean, 3 penumbra width, 4 history length, 5 before the stabilization
 	};
+
+	// UNOFFICIAL 2026-11-07 (perf-history, RtHistoryTime.h) the frame counts above are frames at 60 fps: this turns them into the same
+	// seconds at the clock's frame rate (maxHistory, stabilize, blurFrames; minHistory stays 1: a hard edge's one frame). Call before Fill.
+	inline void TimeScale(Settings& s, const RtHistoryTime::Clock& clock) {
+		s.maxHistory = RtHistoryTime::Frames(s.maxHistory, clock);
+		s.stabilize = RtHistoryTime::Frames(s.stabilize, clock);
+		s.blurFrames = RtHistoryTime::Frames(s.blurFrames, clock);
+	}
 
 	// A camera as the trace passes see it: forward (unit), right / P00, up / P11 (scene space = world minus the eye: only directions),
 	// the eye in world units, the depth's jitter (screen uv)

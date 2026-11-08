@@ -30,6 +30,10 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 cloudCentre;   // xy the map's centre (m, on the cloud base), z metres per unit (1 / 70)
 	vec4 cloudLight;    // xyz the light the map was drawn along (z >= 0.25)
 	vec4 camera;        // xyz the camera's world position (units): the scene is camera relative
+	// UNOFFICIAL 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1, RtContact.glsl; core/RtTessContact.h fills them)
+	vec4 slack;         // the tessellated bumps: x Strength, y FadeStart, z FadeEnd (0: none): the ray starts that much more off the surface
+	vec4 contact;       // ContactShadows: x length (pixels of the depth), y longest (units), z thickness, w strength (0 off: Mode 0, or raster ones)
+	vec4 contactGate;   // xy the march fades out between these view depths (the raster contact shadows from there), z thickness per unit
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // TESR_DepthBuffer's red: view z / farZ
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // TESR_NormalsBuffer: view-space normal * 0.5 + 0.5
@@ -39,6 +43,9 @@ layout(set = 0, binding = 6, rgba16f) uniform readonly image2D cloudImage;      
 layout(set = 0, binding = 7, r16f) uniform writeonly image2D hitImage;          // 2026-10-31 Penumbra: the blocker's distance (units), 0 = free / not traced
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
+#include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson)
+#define RT_CONTACT_DEPTH depthImage
+#include "RtContact.glsl"
 
 // UNOFFICIAL 2026-10-30 CloudShadows: the sunlight the clouds let through to a scene-space point (VolumetricClouds.fx.hlsl CloudShadowAt:
 // the map where the light from the point meets the cloud base, bilinear, 1 outside it faded in over its last tenth)
@@ -83,7 +90,7 @@ void main() {
 		rayQueryEXT q;
 		const bool testAlpha = p.alpha.x > 0.5;
 		rayQueryInitializeEXT(q, scene, testAlpha ? 0u : gl_RayFlagsOpaqueEXT, testAlpha ? 0xFFu : 0xEFu, p.origin.xyz, 1.0, direction, 8192.0);
-		while (rayQueryProceedEXT(q))
+		for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 			if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
 				rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 					rayQueryGetIntersectionBarycentricsEXT(q, false)))
@@ -108,7 +115,9 @@ void main() {
 		float facing = dot(normal, p.sun.xyz);
 		if (facing > 0.0) {
 			// Bias: along the normal (grows with distance: depth and normal precision), then a little toward the sun
-			vec3 start = position + normal * (p.bias.x + p.bias.y * viewZ) + p.sun.xyz * p.bias.z;
+			// (2026-11-07 rtgap-tess 1a) + the bumps' Strength while they are drawn: a point in a hollow of the depth buffer lies under the
+			// flat RT surface, and its ray was blocked at once
+			vec3 start = position + normal * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ)) + p.sun.xyz * p.bias.z;
 			rayQueryEXT q;
 			// Soft shadows: one ray a pixel toward a point of the sun's disc, a different one each pixel and frame (the denoiser averages)
 			vec3 toSun = p.sun.xyz;
@@ -123,20 +132,37 @@ void main() {
 			}
 			// Alpha-tested casters (non-opaque, mask 0x10) come as candidates: their diffuse alpha decides (RtAlpha.glsl)
 			const bool testAlpha = p.alpha.x > 0.5;
+			bool hit;
+			float hitT = 0.0;
+			// (2026-11-07 ptaaa-firstperson) a ray from within arm's reach of the eye (the first-person view model's pixels, a counter you
+			// stand at) passes over the hidden first-person body (RtHidden.glsl): the third-person head and arms round the eye shadowed the gun
+			if (rtHiddenNear(start, p.origin.xyz))
+				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, kRtAnyHit, hitT);
+			else {
 			rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 				uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), start, 0.0, toSun, p.bias.w);
-			while (rayQueryProceedEXT(q))
+			// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+			for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 				if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
-					rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+					rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 						rayQueryGetIntersectionBarycentricsEXT(q, false)))
 					rayQueryConfirmIntersectionEXT(q);
-			bool hit = rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+			hit = rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+			if (hit) hitT = rayQueryGetIntersectionTEXT(q, true);
+			}
 			state = hit ? 0.6 : 0.8;
-			if (hit) blocker = max(rayQueryGetIntersectionTEXT(q, true), 1.0);
+			if (hit) blocker = max(hitT, 1.0);
 			if (debug == 1)
-				result = hit ? clamp(rayQueryGetIntersectionTEXT(q, true) / 4096.0, 0.0, 1.0) : 1.0;
+				result = hit ? clamp(hitT / 4096.0, 0.0, 1.0) : 1.0;
 			else
 				result = hit ? 0.0 : 1.0;
+			// (2026-11-07 rtgap-tess 1b) ContactShadows: what the depth buffer has and the RT scene lacks (the bumps, grass, small props)
+			if (!hit && debug == 0 && p.contact.w > 0.0) {
+				const float noise = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
+				const float contact = rtContactShadow(position, normal, toSun, 30000.0, viewZ, p.forward, p.right.xyz, p.up.xyz, p.origin.xyz,
+					p.full.zw, p.full.xy, p.contact, p.contactGate, noise);
+				if (contact < 1.0) { result = contact; blocker = 1.0; }   // (a blocker right at the surface: a sharp edge for the penumbra / denoiser)
+			}
 			// The last FadeLength units of the RT range fade to "free" (the cascades take over there)
 			result = mix(result, 1.0, clamp((viewZ - (p.range.x - p.range.y)) / max(p.range.y, 1.0), 0.0, 1.0));
 		}

@@ -46,13 +46,18 @@ if ($Compile) {
 	# trace shaders (+ the -D variants the scenes use, as tools/nvr-dxvk/compile-compute.sh builds them)
 	$jobs = @(@("RtPathTrace", "RtPathTrace", ""), @("RtPathTraceGrid", "RtPathTrace", "-DPT_LIGHT_GRID"), @("RtPathTraceGI", "RtPathTrace", "-DPT_RESTIR_GI"), @("RtPathTraceCache", "RtPathTraceCache", ""),
 		@("RtRestirGI", "RtRestirGI", ""), @("RtLampTrace", "RtLampTrace", ""), @("RtLampTraceMany", "RtLampTraceMany", ""), @("RtLampTraceRestir", "RtLampTraceRestir", ""),
-		@("ReflectionsRT", "ReflectionsRT", ""), @("RtSunShadow", "RtSunShadow", ""), @("RtAOTrace", "RtAOTrace", ""),
+		@("ReflectionsRT", "ReflectionsRT", ""), @("ReflectionsRTTex", "ReflectionsRTTex", ""), @("RtSunShadow", "RtSunShadow", ""), @("RtAOTrace", "RtAOTrace", ""),
+		# (2026-11-07) the decals scene: reflections with the alpha-tested casters (and decals)
+		@("ReflectionsRTAlpha", "ReflectionsRTAlpha", ""),
 		# (2026-11-07) the RT shadow denoiser's scenes (sigmalamps, sigmasun): the trace variant, the old filter, the module's stages
 		@("RtLampTraceSigma", "RtLampTrace", "-DSIGMA"), @("RtLampFilter", "RtLampFilter", ""), @("RtShadowDenoise", "RtShadowDenoise", ""),
 		@("RtShadowDenoiseTemporalSun", "RtShadowDenoiseTemporal", "-DSUN"), @("RtShadowDenoiseTemporalLamps", "RtShadowDenoiseTemporal", "-DLAMPS"),
 		@("RtShadowDenoiseBlur", "RtShadowDenoiseBlur", ""), @("RtShadowDenoisePostBlur", "RtShadowDenoiseBlur", "-DPOST"),
 		@("RtShadowDenoiseStabilize", "RtShadowDenoiseStabilize", ""), @("RtShadowDenoisePackSun", "RtShadowDenoisePack", "-DSUN"),
-		@("RtShadowDenoisePackLamps", "RtShadowDenoisePack", "-DLAMPS"), @("RtLampPrimary", "RtLampPrimary", ""))
+		@("RtShadowDenoisePackLamps", "RtShadowDenoisePack", "-DLAMPS"), @("RtLampPrimary", "RtLampPrimary", ""),
+		# (2026-11-07 ptaaa-fog) the fogvis scene
+		@("RtFogVisibility", "RtFogVisibility", ""),
+		@("RtEmissiveBuild", "RtEmissiveBuild", ""))
 	foreach ($j in $jobs) {
 		$a = @("-V", "--target-env", "vulkan1.2", "-I$rt", "-o", "$spv\$($j[0]).spv")
 		if ($j[2]) { $a += $j[2] }
@@ -64,7 +69,8 @@ if ($Compile) {
 	$cs = Join-Path $repo "src\hlsl\NewVegas\Compute"
 	# (2026-11-07) + the RT reflection denoiser's passes (refldenoise: core/RtReflDenoise.h)
 	foreach ($name in "RtDenoiseTemporal", "RtDenoiseAtrous", "RtReflDenoiseReproject", "RtReflDenoiseAverage", "RtReflDenoisePrefilter", "RtReflDenoiseTemporal",
-		"RtReflDenoiseOursReproject", "RtReflDenoiseOursBlur", "RtReflDenoiseOursTemporal") {
+		"RtReflDenoiseOursReproject", "RtReflDenoiseOursBlur", "RtReflDenoiseOursTemporal",
+		"RtDenoiseTemporalRgb", "RtDenoiseAtrousRgb", "RtDenoiseTemporalSpec", "RtPathTraceShow", "RtDenoiseFirefly") {	# (2026-11-07 ptaaa-denoiser: + the RGB / specular passes, the show pass)
 		& $glslang.FullName -V --target-env vulkan1.1 "-I$cs" -o "$bin\spv\$name.spv" "$cs\$name.frag" | Out-Null
 		if ($LASTEXITCODE -ne 0) { throw "compile $name failed" }
 	}

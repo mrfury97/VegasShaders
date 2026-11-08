@@ -10,6 +10,6 @@ namespace Branding {
 	constexpr const char* DevToolsTitle = "Dev Tools###DevTools";
 	constexpr const char* AboutTitle = "About Vegas Shaders###About";
 	constexpr const char* InstallCheckTitle = "Install check###InstallCheck";	// 2026-11-03 Help > Install check
-	constexpr const char* Version = "1.0.6-test4";	// keep in step with FILEVERSION / ProductVersion in NewVegasReloaded.rc
+	constexpr const char* Version = "1.0.6-test10";	// keep in step with FILEVERSION / ProductVersion in NewVegasReloaded.rc
 	constexpr const char* VersionLabel = "Vegas Shaders";	// the status bar's version line: "<VersionLabel> <Version>"
 }

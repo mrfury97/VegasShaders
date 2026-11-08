@@ -378,7 +378,8 @@ void AmbientOcclusionEffect::RtTemporalSetup(const D3DSURFACE_DESC& AoDesc) {
 	EffectStatus::History(StatusSlot, Name, continuous ? "kept (RT AO)" : !rectSame && RtHistoryValid ? "reset (RT AO: RenderScale rect changed)" :
 		"reset (RT AO: no history, size, gap, cut or shared rule)");	// UNOFFICIAL 2026-11-01
 	if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, RtLastView, RtLastInvView, RtLastProj, &RtReproject);
-	RtTemporal = D3DXVECTOR4(continuous ? 0.9f : 0.0f, 4.0f,
+	// (2026-11-07 perf-history) 0.9 of last frame kept at 60 fps: the same decay a second at this frame rate (RtHistoryTime.h; 0.73 at 20 fps)
+	RtTemporal = D3DXVECTOR4(continuous ? RtHistoryTime::Keep(0.9f, RtDenoise::HistoryClock()) : 0.0f, 4.0f,
 		(float)(TemporalBackbone::Shared() ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetRtAmbient) : RtFrame % 1024), 0.0f);	// (SharedNoise: shared index, own offset)
 }
 
@@ -787,7 +788,17 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		c.viewToWorld._32 += a * c.viewToWorld._12 + b * c.viewToWorld._22;
 		c.viewToWorld._33 += a * c.viewToWorld._13 + b * c.viewToWorld._23;
 	}
-	c.gi3 = D3DXVECTOR4((float)rt.GIInterleave, (float)rt.AOAlpha, 0.0f, 0.0f);
+	// UNOFFICIAL 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1a) the tessellated bumps' slack: the AO and sky rays start the
+	// Strength further off the surface while the bumps are drawn (a hollow of the depth buffer lies under the flat RT surface). The constants
+	// are full: it rides in viewToWorld's 4th row (the GLSL's 4th column, unused by the view's directions: they have w 0)
+	{
+		float slack[3]; DxvkCompute::DisplaceRtSlack(slack);
+		c.viewToWorld._41 = slack[0]; c.viewToWorld._42 = slack[1]; c.viewToWorld._43 = (std::max)(slack[2], slack[1] + 1.0f);
+	}
+	// (2026-11-07 rtgap-decals) AOAlpha 1 (cut-outs solid, traced opaque) becomes 3 while the core traces decals: solid cut-outs still, but
+	// tested one by one so the decals (NVR_RT_CUSTOM_DECAL) pass instead of occluding as solid quads (RtAOTrace.comp Trace)
+	const int aoAlpha = rt.AOAlpha == 1 && RtCore::DecalsTraced() ? 3 : rt.AOAlpha;
+	c.gi3 = D3DXVECTOR4((float)rt.GIInterleave, (float)aoAlpha, 0.0f, 0.0f);
 	// (2026-10-30) GIReuse: the bounce in its own pass with ReSTIR GI's temporal reuse (RtGITrace: the GI fields, last frame's view and the
 	// camera's move since, the reservoirs swapped every frame); the AO pass then traces no GI rays.
 	static D3DXMATRIX prevViewToWorld;
@@ -904,8 +915,10 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		// giCap back to 1) the cells may lean on 2 frames only, growing back to CacheFrames by one every CacheSpread frames (a cell's turn).
 		cacheReset = !RtCacheValid || RtCacheCellSize != rt.CacheCellSize;
 		const UINT div = cacheReset ? 1u : (UINT)cacheSpread;
-		RtCacheCap = cacheReset || giCap <= 1.0f ? 2.0f : (std::min)(RtCacheCap + 1.0f / (float)div, (float)rt.CacheFrames);
-		cc.cacheC = D3DXVECTOR4((float)cacheRays, cacheReset ? -RtCacheCap : (std::min)(RtCacheCap, (float)rt.CacheFrames),
+		// (2026-11-07 perf-history) CacheFrames is frames at 60 fps: the same seconds at this frame rate (RtHistoryTime.h)
+		const float cacheFrames = RtHistoryTime::Frames((float)rt.CacheFrames, RtDenoise::HistoryClock());
+		RtCacheCap = cacheReset || giCap <= 1.0f ? 2.0f : (std::min)(RtCacheCap + 1.0f / (float)div, cacheFrames);
+		cc.cacheC = D3DXVECTOR4((float)cacheRays, cacheReset ? -RtCacheCap : (std::min)(RtCacheCap, cacheFrames),
 			(float)(TheFrameRateManager->FrameNumber % div), (float)div);
 		cc.cacheD = D3DXVECTOR4((float)((TheFrameRateManager->FrameNumber / div) % 4096u), (float)RtAmbient::CacheLazyPeriod, 2.5f, 0.0f);
 	}

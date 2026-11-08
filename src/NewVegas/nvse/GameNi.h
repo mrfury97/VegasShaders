@@ -500,7 +500,10 @@ public:
 		void**					_vtbl;			// +0x00
 		UInt16*					pBones;			// +0x04
 		float*					Weights;		// +0x08
-		UInt32					pad0C[4];
+		UInt16*					VertexMap;		// +0x0C partition vertex -> the geometry data's vertex (Gamebryo's m_pusVertexMap; null: the same)
+		UInt8*					BonePalette;	// +0x10
+		UInt16*					TriList;		// +0x14
+		UInt16*					StripLengths;	// +0x18
 		UInt16					Vertices;		// +0x1C
 		UInt16					Triangles;		// +0x1E
 		UInt16					Bones;			// +0x20

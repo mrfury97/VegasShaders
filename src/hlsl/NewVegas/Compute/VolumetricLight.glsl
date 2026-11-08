@@ -40,6 +40,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 fogNightScatter;          // TESR_VolumetricFogNightScatter
     vec4 cameraPosition;           // TESR_CameraPosition
     vec4 gameMultisample;          // TESR_GameMultisample (UNOFFICIAL 2026-11-05: the composites' sky shares, MsaaSkyEdge.glsl)
+    vec4 rt;                       // TESR_VolumetricLightRt (UNOFFICIAL 2026-11-07 ptaaa-fog: RT fog visibility, VL_RT below)
 } cb;
 
 layout(push_constant) uniform Push {
@@ -197,5 +198,35 @@ float GridDepth(float s) { s /= 64.0; return MarchDistance * s * s; }
 vec2 GridUV(float z, vec2 local) {
     vec2 tile = vec2(hlslFmod(z, 8.0), floor(z / 8.0));
     return (tile * GridSize + clamp(local, vec2(0.5), GridSize - 0.5)) * GridAtlasTexel;
+}
+#endif
+
+#ifdef VL_RT
+// UNOFFICIAL 2026-11-07 (ptaaa-fog) VolumetricLight.fx.hlsl RtShare, RtFogVisAt, SunVisibility (needs VL_SHADOWS, VL_GRID and t_rtvis:
+// TESR_RtFogVisibility, LINEAR, CLAMP)
+float RtShare(vec3 position) {
+    return cb.rt.x > 0.5 ? saturate((cb.rt.y - length(position)) / max(cb.rt.z, 1.0)) : 0.0;
+}
+
+float RtFogVisAt(vec3 position) {
+    vec3 f = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
+    vec3 r = vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
+    vec3 u = vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
+    float planar = max(dot(position, f), 1.0e-3);
+    vec2 ndc = vec2(dot(position, r) * cb.projectionTransform[0][0], dot(position, u) * cb.projectionTransform[1][1]) / planar;
+    vec2 local = vec2(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y) * GridSize;
+    float s = sqrt(saturate(planar / max(cb.rt.w, 1.0))) * 64.0 - 0.5;
+    float z = clamp(floor(s), 0.0, 63.0);
+    float a = LINEAR_LOD(t_rtvis, GridUV(z, local)).r;
+    float b = LINEAR_LOD(t_rtvis, GridUV(min(z + 1.0, 63.0), local)).r;
+    return mix(a, b, saturate(s - z));
+}
+
+float SunVisibility(vec3 position) {
+    float share = RtShare(position);
+    float visibility = 1.0;
+    if (share > 0.0) visibility = RtFogVisAt(position);
+    if (share < 1.0) visibility = mix(MarchShadow(position), visibility, share);
+    return visibility;
 }
 #endif

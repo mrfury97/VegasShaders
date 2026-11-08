@@ -14,3 +14,4 @@ src/hlsl/NewVegas/Compute/Replace/
 tools/nvr-rt-helper/bin/
 tools/nvr-rt-helper/obj/
 tools/nvr-rt-host/fork-path.txt
+__pycache__/

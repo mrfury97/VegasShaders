@@ -40,6 +40,8 @@ public:
 		D3DXMATRIX	Reproject;	// camera-relative world -> last frame's clip space
 		D3DXVECTOR4	GridLayout;	// xy: froxel grid columns and rows, zw: one atlas texel in UV
 		D3DXVECTOR4	GridData;	// x: fog volume on, y: scale of the lit share in the grid (keeps it in half-float range)
+		D3DXVECTOR4	Rt;			// UNOFFICIAL 2026-11-07 (ptaaa-fog) TESR_VolumetricLightRt (core/RtFogVisibility.h Constant): x 0 the cascades,
+								// 1 the traced visibility on this grid, 2 on another MaxDistance's; y RT range, z fade, w the traced MaxDistance
 	};
 	ConstantsStruct	Constants;
 
@@ -56,6 +58,10 @@ public:
 		IDirect3DSurface9* GridSurface = nullptr;
 		IDirect3DTexture9* GridTempTexture = nullptr;
 		IDirect3DSurface9* GridTempSurface = nullptr;
+		// UNOFFICIAL 2026-11-07 (ptaaa-fog) the traced sun visibility per grid cell (core/RtFogVisibility.h; R16F, the grid's layout),
+		// TESR_RtFogVisibility: the RT core copies it in each frame it traces
+		IDirect3DTexture9* RtVisibilityTexture = nullptr;
+		IDirect3DSurface9* RtVisibilitySurface = nullptr;
 	};
 	TexturesStruct	Textures;
 
@@ -65,6 +71,9 @@ public:
 	void	UpdateSettings();
 	bool	ShouldRender();
 	void	RenderBuffers(IDirect3DDevice9* Device);	// march, history, blur: everything before the composite
+	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the grid's / march's reach this frame (Data.w: the day and night MaxDistance by the time of day), for
+	// the RT fog visibility's trace at the RT point of the frame (before this effect's UpdateConstants may have run)
+	float	GridDistance() const;
 	// UNOFFICIAL 2026-10-27 RenderScale v2: not the grid in a rect frame (its 8 x 8 slice atlas is screen-shaped, so the rect viewport
 	// would cut it); the march runs instead.
 	UINT	CompositeTechnique() const { return Settings.Froxels && Textures.GridSurface && !RenderRect::Active() ? 8 : 0; }

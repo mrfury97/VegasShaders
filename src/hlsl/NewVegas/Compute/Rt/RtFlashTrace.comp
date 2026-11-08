@@ -50,7 +50,7 @@ void main() {
 		float tMin = min(offset / dist, tEnd);
 		rayQueryEXT q;
 		rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, uint(p.params.z), origin, tMin, toLight, tEnd);
-		while (rayQueryProceedEXT(q)) { }
+		for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { }
 		if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) lit = 0.0;
 	}
 	imageStore(resultImage, pixel, vec4(lit));

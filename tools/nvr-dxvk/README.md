@@ -62,6 +62,14 @@ Only d3d9.dll is built and shipped; NVR's own DLL, menu, settings and presets st
                             (it stays in the exec buffer, after the conversions). ID3D9NvrExtRtSeq (QueryInterface)
                             FlushStagedGeometrySeq also writes a sequence texel after the conversions; the helper checks it
                             and builds stale geometry empty (logged once). RT-only forks: 0001-0029 + 0033 + 0034.
+                 0035       (claude/rtgap-textures, 2026-11-07) "1.8-rt-bc": block-compressed shared images
+                            (NVR_EXT_SHARED_BC1 / BC3 / BC5: usage transfer + sampled only, sizes in whole blocks) and a
+                            same-format block copy in CopyToShared / CopyFromShared (offsets on blocks, sizes whole blocks or
+                            to the subresource's edge; another format into a BC image is refused). The RT real textures then
+                            copy the game's DXT1 / DXT5 / ATI2 blocks as they are instead of decoding them to RGBA8
+                            (docs/next/RT-REAL-TEXTURES.md). No new interface: an older fork refuses the new formats and NVR
+                            falls back to RGBA8. Only the d3d9_nvr_ext* files change. Built on r13 (0001-0029 + 0033 + 0034 +
+                            the HDR stack) in WSL ~/fork-rtgap-tex; RT-test forks: + 0035.
                GetInfo reports 1.6. The "1.5-<feature>" parts are separate interfaces found with QueryInterface (or, for sm6,
                by MaxSlots), not by the minor version: NVR checks each one itself and keeps its D3D9 path without it.
 - `debug/`     dxvk.conf templates for debugging (`dxvk.conf.pipelinelog`: the 0017 measurement): `dxvk.conf.markers` (RenderDoc captures with NVR's named groups),

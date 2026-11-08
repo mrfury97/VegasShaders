@@ -16,12 +16,43 @@ layout(location = 1) out vec4 o_spread;   // 2026-10-29: x the hit's distance sh
 
 // 2026-10-31: one RT hit's colour as seen along the reflection (the screen at the hit when it is visible there, else the cube toward
 // it when it is out of view, else the estimate), and which source it came from (x screen, y cube share; the rest the estimate).
-vec3 RtHitColour(vec3 hitW, vec4 hitData, vec4 shade, vec3 worldR, float roughness, out vec2 source) {
-    uint hitFlags = uint(hitData.y + 0.5);
+// 2026-11-07 (perf-reflfix) the screen at the hit only where the screen can show that face: a hit whose (smooth) normal faces away from
+// the camera is the back of what the screen shows there (a mirror sees a sphere's far side; within the depth tolerance near its outline
+// it took the front's colour). And MetalBounce (hit flag 256): the hit is smooth metal; its colour is the tint x what the helper's one
+// mirror ray from it met (bounce): the screen there, else that hit's estimate (normal: facing the bounce ray), or the sky along it.
+bool RtScreenShows(vec3 hitW, vec3 facing, bool facingKnown, out vec2 at) {
     vec3 hitV = WorldToViewDir(hitW);   // camera-relative: a direction transform is the whole move
-    vec2 at = ToScreen(hitV);
+    at = ToScreen(hitV);
     bool inView = hitV.z > nearZ && all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy));   // (2026-11-03: the drawn part)
-    if (inView && abs(readDepthLod(at) - hitV.z) < max(hitV.z * RtTolerance, 8.0) && !IsWeapon(at)) {
+    if (facingKnown && dot(facing, -normalize(hitW)) < -0.15) return false;   // (a normal map may tilt the front a little away)
+    return inView && abs(readDepthLod(at) - hitV.z) < max(hitV.z * RtTolerance, 8.0) && !IsWeapon(at);
+}
+vec3 RtBounceColour(vec3 hitW, vec4 hitData, vec4 shade, vec4 bounce, float roughness, out vec2 source) {
+    uint hitFlags = uint(hitData.y + 0.5);
+    vec3 d2 = OctDecode(hitData.zw);
+    source = vec2(0.0, 0.0);
+    if ((hitFlags & 512u) != 0u || bounce.a <= 0.0) {   // the bounce met nothing within the reach: the sky (or what lies that way)
+        vec3 sky = SkyPanoOn ? PanoAlong(d2) : CubeOn > 0.0 ? EnvAlong(d2, roughness).rgb : SkyAlong(d2);
+        return bounce.rgb * sky;
+    }
+    vec3 p2 = hitW + d2 * bounce.a;
+    vec2 at;
+    if (RtScreenShows(p2, vec3(0.0), false, at)) {
+        source = vec2(1.0, 0.0);
+        return bounce.rgb * linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
+    }
+    int keyLamp = int((hitFlags >> 4u) & 15u) - 1;
+    vec3 shaded = RtShadeHit(p2, -d2, (hitFlags & 2u) != 0u ? shade.rgb : vec3(0.4), shade.a, keyLamp);
+    if ((hitFlags & 8u) != 0u) shaded += shade.rgb * rtc.rt3.w;
+    return bounce.rgb * shaded;
+}
+vec3 RtHitColour(vec3 hitW, vec4 hitData, vec4 shade, vec4 bounce, vec3 worldR, float roughness, out vec2 source) {
+    uint hitFlags = uint(hitData.y + 0.5);
+    if ((hitFlags & 256u) != 0u) return RtBounceColour(hitW, hitData, shade, bounce, roughness, source);
+    vec3 hitV = WorldToViewDir(hitW);
+    vec2 at;
+    bool inView = hitV.z > nearZ && all(greaterThan(ToScreen(hitV), vec2(0.0))) && all(lessThan(ToScreen(hitV), cb.renderScale.xy));
+    if (RtScreenShows(hitW, OctDecode(hitData.zw), (hitFlags & 4u) != 0u, at)) {
         source = vec2(1.0, 0.0);
         return linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
     }
@@ -31,7 +62,7 @@ vec3 RtHitColour(vec3 hitW, vec4 hitData, vec4 shade, vec3 worldR, float roughne
     // 64 px, a little behind in time, so the people, plants and things behind you showed as a smear of what lay that way (or nothing)
     if (rtc.rt4.w > 0.5 && (hitFlags & 2u) != 0u) env.a = 0.0;
     vec3 hitNormal = (hitFlags & 4u) != 0u ? OctDecode(hitData.zw) : -worldR;
-    int keyLamp = int(hitFlags >> 4u) - 1;   // -1: none (outdoors by day shade.a is the sun's)
+    int keyLamp = int((hitFlags >> 4u) & 15u) - 1;   // -1: none (outdoors by day shade.a is the sun's)
     vec3 shaded = RtShadeHit(hitW, hitNormal, shade.rgb, shade.a, keyLamp);
     // 2026-10-29: a glowing draw (the core's record flag: emissive material) gives its own light too (neon, lit glass).
     if ((hitFlags & 8u) != 0u) shaded += shade.rgb * rtc.rt3.w;
@@ -57,6 +88,7 @@ void main() {
     vec4 march = texelFetch(sampler2D(t_rtMarch, POINT_S), texel, 0);
     vec4 hitData = texelFetch(sampler2D(t_rtHit, POINT_S), texel, 0);
     vec4 shade = texelFetch(sampler2D(t_rtShade, POINT_S), texel, 0);
+    vec4 bounce = texelFetch(sampler2D(t_rtBounce, POINT_S), texel, 0);   // (2026-11-07 perf-reflfix: read where hit.y has 256)
     vec3 worldR = OctDecode(texelFetch(sampler2D(t_rtDir, POINT_S), texel, 0).xy);
     bool weaponRay = ray.y > 5.5;   // 2026-10-30 RT weapon reflections: a weapon pixel's own ray (RayGen +6)
     bool borrowed = !weaponRay && ray.y > 3.5;   // a rough pixel whose block's ray this frame was another pixel's (RayGen's budget)
@@ -76,6 +108,7 @@ void main() {
             vec3 cDir = OctDecode(texelFetch(sampler2D(t_rtDir, POINT_S), caster, 0).xy);
             hitData = cHit;
             shade = texelFetch(sampler2D(t_rtShade, POINT_S), caster, 0);
+            bounce = texelFetch(sampler2D(t_rtBounce, POINT_S), caster, 0);
             borrowHitW = cSurface + cDir * cHit.x;
             if (cHit.x > 0.0) hitData.x = max(length(borrowHitW - surfaceW), 1.0e-3);   // our distance to it (for the views / the miss test)
             rayCast = true;
@@ -102,7 +135,7 @@ void main() {
             rtInstance = float(hitFlags & 15u);   // (RT DebugView 4: a colour per flag combination: land, albedo known, normal known)
             vec3 hitW = borrowed ? borrowHitW : surfaceW + worldR * hitData.x;
             vec2 source;
-            vec3 hitColour = RtHitColour(hitW, hitData, shade, worldR, roughness, source);
+            vec3 hitColour = RtHitColour(hitW, hitData, shade, bounce, worldR, roughness, source);
             rtScreenShare = missing * source.x;
             rtCubeShare = missing * (1.0 - source.x) * source.y;
             rtGuessShare = missing - rtScreenShare - rtCubeShare;
@@ -140,7 +173,8 @@ void main() {
                     float w = GgxPdf(N, V, L, a) / max(GgxPdf(nN, -normalize(nSurface), nDir, nA), 1.0e-6);
                     w = min(w, 4.0);   // no single neighbour takes over (fireflies)
                     vec2 nSource;
-                    total += RtHitColour(nHitW, nHit, texelFetch(sampler2D(t_rtShade, POINT_S), nb, 0), L, roughness, nSource) * w;
+                    total += RtHitColour(nHitW, nHit, texelFetch(sampler2D(t_rtShade, POINT_S), nb, 0), texelFetch(sampler2D(t_rtBounce, POINT_S), nb, 0),
+                        L, roughness, nSource) * w;
                     weights += w;
                 }
                 hitColour = total / max(weights, 1.0e-6);

@@ -4,7 +4,8 @@
 #include "../../src/core/RtRestirRow.h"
 
 static const UINT kFrameRowIndex = 1 + kGridRows;   // RtPathTrace.cpp kFrameRow (49): the lamp image's frame row
-static const UINT kLampRows = kFrameRowIndex + 1;
+static const UINT kEmissiveRowIndex = kFrameRowIndex + 1;   // (2026-11-07 ptaaa-emissive) RtEmissiveRow.h kRow (50)
+static const UINT kLampRows = kEmissiveRowIndex + 1;
 
 // ==============================================================================================================================
 // Scene: ReSTIR DI (PTRestirDI, flag 262144) at the first hit, DebugView 3 (the first hit's direct light only), Lambert floor + blocks,
@@ -237,7 +238,7 @@ static bool sceneRadianceCache(Ctx& c) {
 	const Camera cam = Camera::lookDir({ 0, 0, 3000 }, { 0, 0, -1 }, { 0, 1, 0 }, 2.2f, 2.2f);
 	const V3 L = { 0.8f, 0.6f, 0.4f };
 	const int log2Entries = 16;
-	const unsigned base4096 = (8u * S * S + 4095u) / 4096u;   // after the ReSTIR DI reservoirs (RtPathTrace.cpp CacheBaseWords)
+	const unsigned base4096 = (12u * S * S + 4095u) / 4096u;   // after the ReSTIR DI reservoirs (RtPathTrace.cpp CacheBaseWords; 2026-11-07: 6 words a reservoir)
 	RtRestirRow::State state;
 	RtRestirRow::Keys keys;
 	keys.cacheLog2 = float(log2Entries); keys.cacheBase4096 = float(base4096); keys.cacheCell = 8.0f; keys.cacheMaxSamples = std::getenv("NVR_RT_HOST_CACHE_MAX") ? float(std::atof(std::getenv("NVR_RT_HOST_CACHE_MAX"))) : 256.0f; keys.cacheMinSamples = 8.0f;

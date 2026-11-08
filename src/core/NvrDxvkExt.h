@@ -837,6 +837,17 @@ enum NVR_EXT_SHARED_FORMAT {
   NVR_EXT_SHARED_RG32F   = 3,  // VK_FORMAT_R32G32_SFLOAT
   NVR_EXT_SHARED_RGBA8   = 4,  // VK_FORMAT_R8G8B8A8_UNORM
   NVR_EXT_SHARED_R16F    = 5,  // VK_FORMAT_R16_SFLOAT
+  /*
+   * 1.8-rt-bc: block-compressed shared images (the game's DXT1 / DXT5 / ATI2 textures copied as they are, no decode: a quarter
+   * to an eighth of the RGBA8 transfer's memory and copy bandwidth). Width and height must be multiples of 4. Usage TRANSFER_SRC |
+   * TRANSFER_DST | SAMPLED only (a BC image can be neither a storage image nor a colour attachment). CopyToShared / CopyFromShared
+   * between images of the same format: a block copy (offsets multiples of 4; the size multiples of 4 unless it reaches the
+   * source's edge); another format into a BC image fails (no encoder). A d3d9.dll older than 1.8-rt-bc returns D3DERR_INVALIDCALL
+   * for these values: try one and fall back.
+   */
+  NVR_EXT_SHARED_BC1     = 6,  // VK_FORMAT_BC1_RGBA_UNORM_BLOCK (D3DFMT_DXT1)
+  NVR_EXT_SHARED_BC3     = 7,  // VK_FORMAT_BC3_UNORM_BLOCK      (D3DFMT_DXT5)
+  NVR_EXT_SHARED_BC5     = 8,  // VK_FORMAT_BC5_UNORM_BLOCK      (D3DFMT_ATI2: sampled through a (G, R, 1, 1) swizzle, as DXVK's view)
 };
 
 struct NVR_EXT_SHARE_INFO {

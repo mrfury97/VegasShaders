@@ -51,6 +51,11 @@ Skylighting (outdoors, off by default) takes away the sky's share of the light w
 
 Unchanged (all read by AmbientOcclusion.cpp): the Exteriors and Interiors sections (Enabled, Samples, StrengthMultiplier, ClampStrength, Range, AngleBias, LumThreshold, BlurDropThreshold, BlurRadiusMultiplier); Status Enabled; GTAO (Enabled, MaxRadius); FastPaths (Enabled); Skylighting (Enabled, Version, Strength, Distance, ShareApply, OpenThreshold, DepthNormals, AmbientScale, SoftWidth, DebugView, Reflections, MinReflection, LightCap, OpenSides); AOLowRes; Max Quality; NvrDxvkPasses and NvrDxvkVariants; RT (separate, section 9).
 
+(2026-11-07 perf-history, docs/next/RT-PATH-TRACING.md "perf-history") With `[Main.Main.RayTracing] DenoiseTimeBased` (default on) the RT
+estimate's time behaviour is in seconds, as tuned at 60 fps: the RT AO temporal pass keeps 0.9 of last frame at 60 fps and 0.9^(60 dt) at
+other frame rates (0.73 at 20 fps); `[Shaders.AmbientOcclusion.RT] CacheFrames` and `GIMovingHistory` and the RT GI / AO denoisers'
+histories (RtDenoise, 16 frames) are frames at 60 fps, kept as the same seconds. At 60 fps nothing changes.
+
 ## 5. Passes and outputs
 
 ### Techniques
@@ -137,6 +142,17 @@ Target: the sky target, the AO size. G16R16F, or A16B16G16R16F when Reflections 
 - Not rewritten in this pass. The AmbientOcclusionEstimate, Blur, Combine and Sky frag files and their variant lines in Compute/variants.txt are not present, so the Vulkan AO path is not active and the D3D9 passes run. Compute/variants.txt still lists AmbientOcclusionEstimate g0 and g1, which makes a full compile-compute.sh run fail until those frags exist (it stops at the first missing file).
 - AmbientOcclusion.glsl (new): the shared header for all AO passes. Uniform block cb (set 2, binding 0, std140) with the members in the order the C++ fills them (projection, inverse projection, inverse view, ortho transform, aoData, data, gtao, sky, sky2 to sky5, smoothedSunDir, shadowFade, reciprocalResolution, fogData, fogColor, depthConstants, cameraData, aoLayout, skyLayout, rtReproject, rtTemporal). Push block aoPush (24 bytes: axis at 0, gtaoEstimate at 8, linear clamp index at 12, point clamp index at 16, point wrap index at 20). Macros LINEAR_LOD and POINT_LOD, the camera plane macros (nearZ, farZ), AOstrength, startFade and endFade, and the helpers invlerp, SkyFactor and projectedDepthFromLinear. These are the names the kept RT passes use.
 - The four kept RT AO passes (AmbientOcclusionEstimateRT, AmbientOcclusionSkyRT, AmbientOcclusionTemporalRT, RtAOInput) compile against this header.
+- (2026-11-07 rtgap-tess, docs/next/RT-DETAIL-GAPS.md section 1a) RtAOTrace.comp's AO and sky rays start the tessellated bumps' Strength
+  (faded by view depth as the bumps fade) further off the surface while the bumps are drawn (`DxvkCompute::DisplaceRtSlack`,
+  `[Main.Main.RayTracing] TessStartSlack`): a point in a hollow of the depth buffer lay under the flat RT surface (covered sky, rays
+  started inside the floor). The 512-byte block is full: the slack rides in viewToWorld's 4th row (_41 Strength, _42 FadeStart, _43
+  FadeEnd; the view's directions have w 0, so nothing else reads it). The GI bounce pass (RtGITrace) is unchanged. RT host `tessslack`.
+- RT AO / sky / GI (the helper's RtAOTrace.comp, `[Shaders.AmbientOcclusion.RT]`), 2026-11-07 decals (docs/next/RT-DETAIL-GAPS.md 5):
+  the core's decals (`[Main.Main.RayTracing] Decals`, custom index NVR_RT_CUSTOM_DECAL) never occlude: the AO and sky rays (Trace) and
+  the GI hits' shadow rays (Visible) pass them (ProceedShadow); the GI bounce rays see them. AOAlpha 1 (cut-outs solid, traced with the
+  opaque flag, which would make a decal a solid quad) is sent to the shader as 3 while `RtCore::DecalsTraced()`: the cut-outs come as
+  candidates and are confirmed whole, decals passed (ProceedSolid; a little dearer than 1 where many cut-outs are hit). RT host
+  scene `decals` (AOAlpha 2 and 3 against the CPU, the decal card never covers).
 
 ## 8. Look and cost
 
@@ -148,7 +164,7 @@ Cost: estimate at half size (five sample pairs), two blurs of twelve taps, a com
 
 ## 9. Open questions
 
-1. RT ambient occlusion: [Shaders.AmbientOcclusion.RT] is not in the D3D9 effect; the RT passes are the kept Vulkan files. Not specified here. Decide whether the new D3D9 file needs its own RT techniques. At RenderScale < 1 (FSR / DLSS LowResEffects) the RT AO, sky and GI traces cover the frame's top-left rect (RtRecord: the trace grid = RenderRect::Width/Height of the half grid; the GI reuse history restarts on a scale or rect <-> native change), the RT estimate runs inside the rect-aware D3D9 passes and the GI bounce reaches the picture through AmbientLight's D3D9 GI path; details and measurements in docs/next/RT-RENDERSCALE.md (phase 1 AO 2026-11-03, phase 2 GI 2026-11-04).
+1. RT ambient occlusion: [Shaders.AmbientOcclusion.RT] is not in the D3D9 effect; the RT passes are the kept Vulkan files. Not specified here. Decide whether the new D3D9 file needs its own RT techniques. At RenderScale < 1 (FSR / DLSS LowResEffects) the RT AO, sky and GI traces cover the frame's top-left rect (RtRecord: the trace grid = RenderRect::Width/Height of the half grid; the GI reuse history restarts on a scale or rect <-> native change), the RT estimate runs inside the rect-aware D3D9 passes and the GI bounce reaches the picture through AmbientLight's D3D9 GI path; details and measurements in docs/next/RT-RENDERSCALE.md (phase 1 AO 2026-11-03, phase 2 GI 2026-11-04). (2026-11-07) RT GI's bounce hits (Compute/Rt/RtAOTrace.comp Shade, also its RtGITrace / RtRadianceCache variants) are lit with the hit's normal bent by its own normal map (ShadingNormal: the core's [Main.Main.RayTracing] RealNormalMaps, default on with RealTextures; the flat triangle normal stays for the shadow rays' lift); RT host scene `normalmaps`.
 2. Skylighting v1 and v2: both are kept (the C++ selects by Version). v1 darkens the whole pixel. Whether v1 should stay is open.
 3. Vulkan AO passes: not written (section 7). Needed for the Vegas Shaders DXVK path and for the batch compile to succeed again.
 4. The ortho map's height units and the transform's z scale (section 6) need checking against ShadowsExteriors' map.

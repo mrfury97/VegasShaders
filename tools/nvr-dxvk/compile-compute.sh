@@ -43,6 +43,7 @@ RtGITrace RtAOTrace -DRT_GI_PASS
 RtRadianceCache RtAOTrace -DRT_CACHE_PASS
 RtLampTraceSplit RtLampTrace -DSPLIT
 RtLampTraceExterior RtLampTrace -DEXTERIOR
+RtLampTraceSigma RtLampTrace -DSIGMA
 RtPathTraceGrid RtPathTrace -DPT_LIGHT_GRID
 RtPathTraceGI RtPathTrace -DPT_RESTIR_GI
 RT_VARIANTS

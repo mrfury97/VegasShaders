@@ -55,6 +55,10 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 jitter;        // (vec4 15: RtLampShadows.h asserts it) (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray;
 	                    // z (rtalpha) 1 = alpha-tested casters tested (binding 12, the alpha atlas)
 	                    // through uv + this (the rebuilt point stays on the surface; the lookup's Reproject takes the same jitter off)
+	vec4 rectUnused;    // (the C++ rect: ManyLights' variants)
+	vec4 slack;         // (2026-11-07 rtgap-tess; core/RtTessContact.h) the tessellated bumps: x Strength, y FadeStart, z FadeEnd (0: none)
+	vec4 contact;       // (2026-11-07 rtgap-tess 1b, RtContact.glsl) ContactShadows: x length (pixels), y longest (units), z thickness, w strength (0 off)
+	vec4 contactGate;   // xy the march fades out between these view depths (y <= x: no fade), z thickness per unit
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // TESR_DepthBuffer's red: view z / farZ
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // TESR_NormalsBuffer: view-space normal * 0.5 + 0.5
@@ -66,6 +70,9 @@ layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
 layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
+#include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson)
+#define RT_CONTACT_DEPTH depthImage
+#include "RtContact.glsl"
 #ifdef SPLIT
 layout(set = 0, binding = 6, r32f) uniform writeonly image2D vis0Image;
 layout(set = 0, binding = 7, r32f) uniform writeonly image2D vis1Image;
@@ -121,11 +128,16 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	// (2026-11-03 rtalpha) jitter.z 1: alpha-tested casters (foliage cards, fences, chain link, wires: non-opaque, mask 0x10) come as
 	// candidates and their diffuse alpha decides (RtAlpha.glsl, as the sun's rays); 0: they are skipped (mask without 0x10), as before
 	const bool testAlpha = p.jitter.z > 0.5;
+	// (2026-11-07 ptaaa-firstperson) from (the view model, a counter you stand at) or toward (the Pip-Boy light, the flashlight moved
+	// onto the beam) a point within arm's reach of the eye: the hidden first-person body is passed over (RtHidden.glsl)
+	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz))
+		return rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtAnyHit);
 	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q))
+	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
-			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
@@ -140,10 +152,16 @@ float closestBlocker(vec3 origin, vec3 segment, float tMin, float tMax, uint mas
 	rayQueryEXT q;
 	bool oneSided = p.flags.x > 0.5;
 	const bool testAlpha = p.jitter.z > 0.5;
+	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz)) {   // (2026-11-07 ptaaa-firstperson, as blocked())
+		float t;
+		if (!rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtClosest, t)) return -1.0;
+		return t;
+	}
 	rayQueryInitializeEXT(q, scene, testAlpha ? 0u : gl_RayFlagsOpaqueEXT, testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q))
+	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
-			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return -1.0;
@@ -183,8 +201,13 @@ void main() {
 	vec3 n = imageLoad(normalImage, pixel).xyz * 2.0 - 1.0;
 	vec3 normal = normalize(normalize(p.right.xyz) * n.x + normalize(p.up.xyz) * n.y + normalize(p.forward.xyz) * n.z);
 	// the start offset grows with the distance: the position rebuilt from the depth is off by more far away (outdoors: 1000s of units)
-	float offset = p.params.y + p.mask.w * viewZ;
+	// (2026-11-07 rtgap-tess 1a) + the bumps' Strength while they are drawn: a hollow of the depth buffer lies under the flat RT surface
+	float offset = p.params.y + p.mask.w * viewZ + rtTessSlack(p.slack, viewZ);
 	vec3 origin = position + normal * offset;
+	// (1b) ContactShadows: the depth buffer's march toward a lamp from the surface (the steps' offset per pixel and frame)
+	const float contactNoise = fract(hash12(vec2(pixel) + 7.0) + p.params.w);
+#define LAMP_CONTACT(lampPos) rtContactShadow(position, normal, normalize((lampPos) - position), length((lampPos) - position), viewZ, \
+		p.forward, p.right.xyz, p.up.xyz, p.origin.xyz, p.jitter.xy, p.size.xy, p.contact, p.contactGate, contactNoise)
 
 	// The pixel's strongest lamps (unshadowed): intensity x the game's falloff (1 - (d / radius)^2) x N.L, within the shadow's reach
 	int best[3] = int[3](-1, -1, -1);
@@ -252,6 +275,10 @@ void main() {
 						float lampDistance = 1.0 / invLen, blocker = th * lampDistance;
 						signal = vec2(0.0, max(e.y * blocker / max(lampDistance - blocker, 0.02 * lampDistance), 1.0e-3));
 					}
+					else if (p.contact.w > 0.0) {   // (2026-11-07 1b) free: the contact march may still block it (sharp: a blocker at the surface)
+						const float cv = LAMP_CONTACT(vec3(a.xy, b.x));
+						if (cv < 1.0) signal = vec2(cv, 1.0e-3);
+					}
 				}
 			}
 			imageStore(signalImage, pixel + ivec2(0, k * int(p.size.y)), vec4(signal, 0.0, 0.0));
@@ -291,6 +318,7 @@ void main() {
 					lit++;
 			}
 			steps = floor(15.0 * float(lit) / float(rays) + 0.5);
+			if (steps > 0.0 && p.contact.w > 0.0) steps = floor(steps * LAMP_CONTACT(vec3(a.xy, b.x)) + 0.5);   // (2026-11-07 1b)
 		}
 		entry[k] = float(s) + 64.0 * steps;
 #ifdef EXTERIOR

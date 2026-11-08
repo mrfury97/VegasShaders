@@ -52,6 +52,7 @@
 #include "../../core/HdrOutput.h"	// UNOFFICIAL 2026-10-26 HDR output (needs NVR DXVK 1.5-hdr)
 void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-29: from NVSEPlugin_Load (see HdrOutput.h)
 #include "../../core/ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
+#include "../../core/RtHairTint.h"	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene
 #include "../../core/AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts
 #include "../../core/CharacterObjectReach.h"	// UNOFFICIAL 2026-10-23 CharacterObjectReach: head/face/headgear object draws flagged (c204)
 #include "../../core/DustDraw.h"	// 2026-11-04 dust on top surfaces: static world draws flagged (b14)
@@ -651,6 +652,7 @@ using RenderMethod = void(__thiscall*)(Main*, BSRenderedTexture*, int, int);
 RenderMethod Render = reinterpret_cast<RenderMethod>(Hooks::Render);
 void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTexture, int Arg2, int Arg3) {
 	SessionLog::StageScope stage("game frame");	// 2026-11-04: the CRASH lines' stage (SessionLog.h)
+	SessionLog::StallWatch::FrameScope stallFrame;	// UNOFFICIAL 2026-11-07 (perf-ptcost): the STALL watchdog's frame begin / end (SessionLog.h)
 	static CpuTimer gameRenderCpuTimer("Game render (CPU)"), presentCpuTimer("Present (CPU)"), gameUpdateCpuTimer("Game update (CPU)");
 	const double renderStart = CpuTimer::NowMs();
 	if (GpuTimer::Enabled) {
@@ -1787,6 +1789,14 @@ bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal) {
 	return true;
 }
 
+// UNOFFICIAL 2026-11-07 (ptaaa-materials) the material rule's class name for a geometry's diffuse texture ("" when no rule covers it):
+// RtCore's glass panes ("glass") and foliage cards ("plant") for the path tracer
+const char* RtMaterialClassOf(NiGeometry* geometry) {
+	if (!MaterialRulesDraw::Loaded) MaterialRulesDraw::Load();
+	const int index = geometry ? MaterialRulesDraw::RuleFor(geometry, false) : 0;
+	return index ? MaterialRulesDraw::Table.Get(index).Name.c_str() : "";
+}
+
 // UNOFFICIAL 2026-10-14 _rmaos maps ([Shaders.PBR.Rmaos], Object.hlsl RMAOS): before each object, its diffuse texture's
 // <name>_rmaos.dds (beside it, or the same path under textures\pbr\; a diffuse named *_d.dds also tries the name without _d)
 // is bound on texture stage 2, and pixel c220 tells the object shader whether it has one. Loose files only (not BSAs). Each
@@ -2450,6 +2460,7 @@ namespace GrassFirst {
 			for (const OnePassDepth::Record& r : OnePassDepth::Records) {
 				state->SetRenderState(D3DRS_CULLMODE, r.cull, RenderStateArgs);
 				state->SetRenderState(D3DRS_ALPHATESTENABLE, r.alphaTest, RenderStateArgs);
+				ReflMaterial::NeutralScope neutral(r.pass, r.pass ? ((const PointShadowForward::RenderPassView*)r.pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);	// (perf-mirrorfix)
 				RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
 			}
 			((void(__cdecl*)(char, int))0x00B98540)(0, 0);
@@ -2660,6 +2671,7 @@ namespace GrassFirst {
 				// fixes-b #28: alpha-to-coverage (transparency multisampling) needs no restore here: BSBatchRenderer::RenderPassImmediately
 				// 0x00B994F0 itself calls BSRenderState::SetAlphaToCoverageEnable(pass wants it, 0) for every pass when the game's
 				// TMS flag (0x011F9421) is set (Ghidra dump of the exe, psycho-master graphics_fnv_atmosphere_alpha_coverage_state_followup).
+				ReflMaterial::NeutralScope neutral(r.pass, r.pass ? ((const PointShadowForward::RenderPassView*)r.pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);	// (perf-mirrorfix: the grass replay's own alpha)
 				RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
 				NoteRtGrass(r.pass, r.passId);	// UNOFFICIAL 2026-10-30 RT grass (a pass drawn early is noted once: RtCore skips the repeat)
 				if (gpuGrass) {
@@ -2729,6 +2741,8 @@ namespace GrassFirst {
 		if (LinearScene::InSpan) LinearScene::EnsureHooked(TheRenderManager->device);
 		if (CapturedNormals::InSpan) CapturedNormals::EnsureHooked(TheRenderManager->device);
 		if (OnePassDepth::Recording && OnePassDepth::IsOpt(passId)) { DepthFirstPass(pass, passId, a3, a4, a5); return; }	// UNOFFICIAL LampsDepthFirst
+		// UNOFFICIAL 2026-11-07 perf-mirrorfix: every world / first-person pass writes its own alpha (core/ReflMaterial.h; grass comes only through here)
+		ReflMaterial::NeutralScope neutral(pass, pass ? ((const PointShadowForward::RenderPassView*)pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);
 		if (!Recording || !IsGrass(passId)) {
 			RenderPassImmediately(pass, passId, a3, a4, a5);
 			if (IsGrass(passId)) NoteRtGrass(pass, passId);	// UNOFFICIAL 2026-10-30 RT grass (GrassFirst off: the game's own grass call)
@@ -2913,6 +2927,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		}
 	}
 	ReflMaterial::OnShadersBound(TheRenderManager->device);	// UNOFFICIAL 2026-10-21 MaterialAware reflections: alpha writes for a flagged pass
+	RtHairTint::NoteBind(PixelShader ? PixelShader->Name : nullptr);	// UNOFFICIAL 2026-11-07 perf-mirrorfix: a hair shader bound (its tint for the RT scene)
 	if (TheShaderManager->Shaders.Grass) TheShaderManager->Shaders.Grass->SetForDraw(VertexShader, PixelShader);	// UNOFFICIAL 2026-10-17 grass lighting fix
 	TerrainProbe::LastPixel = PixelShader ? PixelShader->Name : nullptr;	// UNOFFICIAL 2026-10-17 terrain study, diagnostic
 	TerrainProbe::LastVertex = VertexShader ? VertexShader->Name : nullptr;
@@ -3364,7 +3379,9 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	PassFamilyView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
 	CasterView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
-	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World && RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
+	ReflMaterial::NeutralBegin(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World,
+		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL 2026-11-07 perf-mirrorfix: every pass's own alpha
+	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
 	const bool countOpt = OnePassDepth::Count && GpuTimer::Enabled && ShaderSplit::CurrentContext == ShaderSplit::World &&
 		OnePassDepth::IsOpt(((const PointShadowForward::RenderPassView*)Pass)->passEnum);	// UNOFFICIAL LampsDepthFirstCount (test aid)
 	if (countOpt) OnePassDepth::Counts::Before(TheRenderManager->device);
@@ -3388,6 +3405,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	ManyLamps::AfterDraw((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsOnePass: the first person's lighting offset
 	LampsInOnePass::GlowAfterDraw(Pass);	// UNOFFICIAL ManyLampsGlow (statistics)
 	ReflMaterial::AfterPass(TheRenderManager->device);
+	ReflMaterial::NeutralEnd(TheRenderManager->device);	// (perf-mirrorfix)
 #if NVR_TEST_TOOLS
 	FoldHighlights::AfterDraw(TheRenderManager->device);	// UNOFFICIAL, diagnostic
 	PassFamilyView::After(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
@@ -3442,7 +3460,9 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	PassFamilyView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
 	CasterView::BeforeDraw(TheRenderManager->device, Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
-	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World && RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
+	ReflMaterial::NeutralBegin(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World,
+		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL 2026-11-07 perf-mirrorfix: every pass's own alpha
+	ReflMaterial::ForPass(Pass, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, RmaosDraw::ThisDraw, TheRenderManager->device);	// UNOFFICIAL MaterialAware reflections
 	const bool countOpt = OnePassDepth::Count && GpuTimer::Enabled && ShaderSplit::CurrentContext == ShaderSplit::World &&
 		OnePassDepth::IsOpt(((const PointShadowForward::RenderPassView*)Pass)->passEnum);	// UNOFFICIAL LampsDepthFirstCount (test aid)
 	if (countOpt) OnePassDepth::Counts::Before(TheRenderManager->device);
@@ -3451,6 +3471,8 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
+	if (ShaderSplit::CurrentContext == ShaderSplit::World)	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene (core/RtHairTint.h)
+		RtHairTint::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, TheRenderManager->device);
 	AlphaHash::AfterPass(TheRenderManager->device);
 	FlashlightLamp::AfterPass();	// UNOFFICIAL 2026-11-04 the flashlight's game lamp back to its own dimmer
 	EnvLightFade::AfterPass();
@@ -3460,6 +3482,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	ManyLamps::AfterDraw((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsOnePass: the first person's lighting offset
 	LampsInOnePass::GlowAfterDraw(Pass);	// UNOFFICIAL ManyLampsGlow (statistics)
 	ReflMaterial::AfterPass(TheRenderManager->device);
+	ReflMaterial::NeutralEnd(TheRenderManager->device);	// (perf-mirrorfix)
 #if NVR_TEST_TOOLS
 	FoldHighlights::AfterDraw(TheRenderManager->device);	// UNOFFICIAL, diagnostic
 	PassFamilyView::After(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL, diagnostic
@@ -3771,7 +3794,14 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 		}
 	}
 	PbrPop::ActorPasses::FirstPersonNow = 1;	// UNOFFICIAL ActorsInOnePass: the first-person model's passes are built in here
+	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) PTViewModel: the model's colour, normals and material into the G-buffer, for the path
+	// tracer to light it (core/CapturedNormals.h BeginViewModelSpan; nothing unless the path tracer asked for it this frame)
+	CapturedNormals::BeginViewModelSpan(TheRenderManager->device);
+	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the arms and gun write their own alpha over the world's materials (core/ReflMaterial.h)
+	ReflMaterial::BeginFirstPerson(TheRenderManager->renderState, TheRenderManager->device, ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0);
 	RenderFirstPerson(This, Renderer, Geo, SkySun, RenderedTexture);
+	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device);
+	CapturedNormals::EndViewModelSpan(TheRenderManager->device, TheFrameRateManager->FrameNumber);
 	PbrPop::ActorPasses::FirstPersonNow = 0;
 	SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-04: the weapon out of the sky share (core/SkyCoverage.h)
 	if (viewModelShadows) {

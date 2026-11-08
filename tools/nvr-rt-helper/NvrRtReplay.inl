@@ -571,6 +571,8 @@
 				else o.accelerationStructureReference = it->second;
 			}
 			memcpy(s.records.mapped, c.records, (size_t)instanceCount * sizeof(NvrRtInstanceRecord));
+			// (2026-11-07 perf-reflfix) the capture holds no smooth normals (the words before the positions are not captured): flat here
+			for (uint32_t i = 0; i < instanceCount; i++) ((NvrRtInstanceRecord*)s.records.mapped)[i].geometryId &= ~NVR_RT_RECORD_GEO_NORMALS;
 		}
 		if (missing) Log("replay: %u instances name a geometry the capture does not hold (masked out)", missing);
 
@@ -732,7 +734,8 @@
 				const NvrRtPass& pass = c.passes[p];
 				if (runsPass[p]) {
 					vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipelines[pass.shader]);
-					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.pipelineLayout, 0, 1, &s.sets[p], 0, nullptr);
+					const VkDescriptorSet bound[2] = { s.sets[p], h.tex.sets[0] };	// (protocol 7) set 1: real textures (none in a replay: the atlases)
+					vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.pipelineLayout, 0, 2, bound, 0, nullptr);
 					vkCmdDispatch(cmd, std::max(1u, pass.groupsX), std::max(1u, pass.groupsY), std::max(1u, pass.groupsZ));
 					FullBarrier(cmd);
 				}

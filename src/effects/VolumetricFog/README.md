@@ -245,6 +245,10 @@ on the sky) by 1 - exp(-6 S), saturation, night tint.
 at the surface (not for the sky) with the include's normal offset and bias (FogSunVisibility: the first cascade holding the point, lit
 past the last one with a 10 % fade); lerp(1, vis, ShadowStrength). 35 % x dayFade of the fog colour counts as direct sun and is shaded;
 the glow (4a SunGlow) is added on top and shaded. inscatter = (shaded colour + sunLight x glow x vis) x albedo.
+(2026-11-07, ptaaa-fog) While the ray tracing core runs for another RT effect, the grid's a channel holds the TRACED sun visibility
+(`[Shaders.VolumetricLight.RT]`, src/effects/VolumetricLight/README.md "RT fog visibility"): with FogVolume + Froxels the fog's sun
+shading inside MaxDistance follows the RT sun shadows' casters with no change here. The surface lookup past the grid (and the ClassicLook /
+no-grid paths) stays the cascades.
 
 **Compose.** skyMask = lerp(1 - sky x WeatherFilterBlend, 1, night x DisableSkyMask); mul = lerp(1, T, skyMask), add = inscatter x (1 -
 T) x skyMask; aerial tint on mul; horizon fog and EdgeAA (one blend k = hf + edge - hf x edge toward the horizon colour); Amount; game

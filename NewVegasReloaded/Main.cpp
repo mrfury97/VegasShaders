@@ -11,6 +11,7 @@ void HdrOutputNoteDesktop();	// in Render.cpp (UNOFFICIAL 2026-10-29)
 #include "../src/core/SessionLog.h"	// UNOFFICIAL 2026-11-01: session header, game events, exit summary
 #include "../src/core/IOWorker2.h"	// UNOFFICIAL 2026-10-20 (EXPERIMENTAL, off by default): a second loading thread for model / texture tasks
 #include "../src/core/DxvkLoader.h"	// UNOFFICIAL 2026-11-04: the DXVK fork's d3d9.dll from a mod manager's mod
+#include "../src/core/RtCore.h"	// UNOFFICIAL 2026-11-07 (rt-shutdown): RtCore::Shutdown at the game's exit
 
 namespace {
 	const UInt32 kPluginVersion = 441;
@@ -159,10 +160,14 @@ extern "C" {
 		case Msg::kMessage_ExitToMainMenu:
 			SessionLog::OnEvent("exit to the main menu");
 			return;
+		// UNOFFICIAL 2026-11-07 (rt-shutdown): the RT helper's shutdown first (RtCore::Shutdown: no GPU wait left for a value it never
+		// signals; ~5 s at most). The window's close (Alt+F4, the X) goes through ImGuiManager's window procedure.
 		case Msg::kMessage_ExitGame:
+			RtCore::Shutdown("the game is exiting (exit to Windows)");
 			SessionLog::OnExit("exit to Windows");
 			return;
 		case Msg::kMessage_ExitGame_Console:
+			RtCore::Shutdown("the game is exiting (qqq)");
 			SessionLog::OnExit("exit with the qqq console command");
 			return;
 		case Msg::kMessage_DeferredInit:

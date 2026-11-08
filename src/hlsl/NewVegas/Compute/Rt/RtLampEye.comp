@@ -1,0 +1,91 @@
+#version 460
+// UNOFFICIAL 2026-11-07 RT lamp shadows: the lamps as the EYE sees them ([Shaders.ShadowsInteriors.RT], core\RtLampShadows.h ReadEye /
+// EyeVisibility; docs\next\FORK-RT-LAMPS.md "The first-person model"). Runs in the 64-bit RT helper after the lamp table is in.
+//
+// The first-person model (the arms, the gun, the Pip-Boy) is drawn but never in the traced scene, so the lamp shaders' lookup never
+// matches on it; outdoors (ExteriorForward: no cube maps) and for ManyLights' lamps without a map of their own, such a lamp then lit the
+// model fully however blocked it was (a tester's red patches on the gun: a red neon lamp inside its sign, everything around it in its
+// traced shadow). Here each lamp of the table is traced from the eye: 8 rays over the lamp's disc (as RtLampTrace.comp: the far and
+// near masks, LampModelDistance, the lamp's stop, alpha-tested casters with jitter.z), people left out (the player's own body may
+// surround the eye: FirstPersonBody), one value a lamp: the share of the rays that reach it (1 for an empty entry). NVR reads the 256
+// values back two frames later and the first-person draws take them for those lamps (PointShadowForward.hlsl: slot -2 - v).
+// Output: binding 6 (pass image 4), R32F, x = the table entry (lamp slot or ManyLights id 0-255), y = 0.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtLampEye.spv RtLampEye.comp
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+
+layout(local_size_x = 64, local_size_y = 1) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {   // RtLampShadows.h PassConstants (the lamp trace's own block, as RtLampTrace.comp)
+	vec4 size;          // x 256 (entries), y 1
+	vec4 forward;
+	vec4 right;
+	vec4 up;
+	vec4 origin;        // xyz the eye in scene space (RtCore::Eye, 0)
+	vec4 params;        // x rays per lamp (1-8), y StartOffset, z LampStop, w noise offset
+	vec4 params2;       // x LampModelDistance (0 = one segment), y far cull mask, z near cull mask, w lamps in the table
+	vec4 flags;
+	vec4 mask;
+	vec4 many;
+	vec4 reproject[4];
+	vec4 many2;
+	vec4 jitter;        // z 1 = alpha-tested casters tested (binding 12)
+	vec4 rect;
+} p;
+// The lamp table, 4 texels a lamp: (x, y), (z, reach), (intensity, the game's radius), (stop, disc radius); reach 0 = no lamp
+layout(set = 0, binding = 5, rg32f) uniform readonly image2D lampTable;
+layout(set = 0, binding = 6, r32f) uniform writeonly image2D eyeImage;
+layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
+
+bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
+	if (!(tMax > tMin)) return false;
+	rayQueryEXT q;
+	const bool testAlpha = p.jitter.z > 0.5;
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
+		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
+	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
+	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+void main() {
+	const int s = int(gl_GlobalInvocationID.x);
+	if (s >= 256) return;
+	float lit = 1.0;
+	vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), e = imageLoad(lampTable, ivec2(4 * s + 3, 0));
+	if (b.y > 0.0) {
+		const vec3 origin = p.origin.xyz;
+		const vec3 toLamp = vec3(a.xy, b.x) - origin;
+		const float dist = length(toLamp);
+		const float stop = max(p.params.z, e.x);
+		const float offset = 4.0;   // off the eye (nothing of the world sits this close to it)
+		if (dist > stop + offset) {
+			const uint people = 0x60u;   // the player's own body and gear may surround the eye; other people's shadows are left out too
+			const uint farMask = uint(p.params2.y) & ~people, nearMask = uint(p.params2.z) & ~people;
+			const vec3 dir = toLamp / dist;
+			const vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
+			const vec3 bt = cross(dir, t);
+			const uint rays = 8u;
+			uint hits = 0u;
+			for (uint i = 0u; i < rays; i++) {
+				const float rr = e.y * sqrt((float(i) + 0.5) / float(rays));
+				const float ang = float(i) * 2.3999632;
+				const vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
+				const float invLen = inversesqrt(dot(segment, segment));
+				const float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
+				const float tMin = min(offset * invLen, tEnd);
+				const float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
+				if (!blocked(origin, segment, tMin, tSplit, farMask) && !blocked(origin, segment, tSplit, tEnd, nearMask)) hits++;
+			}
+			lit = float(hits) / float(rays);
+		}
+	}
+	imageStore(eyeImage, ivec2(s, 0), vec4(lit));
+}

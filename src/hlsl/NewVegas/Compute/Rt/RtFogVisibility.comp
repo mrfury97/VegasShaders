@@ -1,0 +1,145 @@
+#version 460
+// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility ([Shaders.VolumetricLight.RT], core\RtFogVisibility.cpp; docs\next\RT-PATH-TRACING.md
+// "ptaaa-fog"): the sun's visibility in the AIR, per cell of the volumetric light's froxel grid, traced against the helper's scene
+// instead of read from the cascaded shadow maps. The froxel grid (Effects\VolumetricLight.fx.hlsl GridLightPS) is one column per 16 x 16
+// screen pixels, 64 slices deep out to MaxDistance (slice s's near side at MaxDistance (s / 64)^2), its slices in one 2D image as 8 x 8 tiles
+// of columns x rows (slice z in tile (z mod 8, z / 8)). This pass writes the same layout texel for texel: GridLightPS reads the cell's
+// visibility at its own texel (and the march, Froxels off, looks it up by position), so the shafts and the fog's sun shading (FogVolume:
+// the grid's a channel) follow the traced shadows: far geometry the cascades end before, alpha-tested cards, actors, the far LOD (mask 0x80)
+// and the same casters the RT sun shadows and the path tracer see.
+// Runs in the 64-bit helper (NvrRtHelper.exe; the binding layout is the helper's: FORK-RT-CORE.md), one thread per cell.
+//   rays.x rays per cell: points in the cell (a rank-1 lattice across the column, stratified in depth; one ray: the cell's centre), each
+//          one ray toward the sun (TerminateOnFirstHit; alpha-tested casters as candidates, decals never block: rtAlphaPassShadow);
+//          the cell's value = the share of them that reach the sun. A point inside a solid (under the ground, in a wall) meets the back
+//          face at once: shadowed, as the cascades have it.
+//   trace.y 1: the points move every frame (a Cranley-Patterson shift per cell and frame) and rays.y > 0 blends in last frame's value at
+//          the cell's centre, reprojected through last frame's camera (trilinear in the old grid): the cells' values converge to the
+//          fraction of the cell that sees the sun (soft shaft edges, no binary steps) at a few rays a cell and frame. A cell that moved
+//          a whole cell or more in the grid since last frame keeps at most trace.w of it (the resampling blurs, a moving edge lags).
+//   Cells farther than forward.w (the RT range) from the eye: 1 (the game fades to the cascades over the last FadeLength there).
+// Output: R16F visibility 0 .. 1 (binding 2); binding 3 last frame's output (the ping-pong pair; read only when rays.y > 0).
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtFogVisibility.spv RtFogVisibility.comp
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 grid;          // x columns, y rows (the froxel grid's; the image is 8 x 8 tiles of them), z slices (64), w MaxDistance (the last slice's far side, planar depth)
+	vec4 forward;       // xyz camera forward (scene space, unit), w the RT range (distance from the eye; farther cells: 1)
+	vec4 right;         // xyz camera right / projection[0][0]
+	vec4 up;            // xyz camera up / projection[1][1]
+	vec4 origin;        // xyz the eye in scene space (RtCore::Eye(): 0), w the frame (the points' shift)
+	vec4 sun;           // xyz toward the sun (scene space, unit; the moon at night, as the cascades), w 1: it casts shadows this frame
+	vec4 rays;          // x rays per cell (1-8), y last frame's weight (0: no history this frame), z cull mask, w 1: alpha-tested casters tested (binding 4 the atlas)
+	vec4 trace;         // x ray length, y 1: the points move every frame (0: fixed points), z debug (1: no history, the frame's own rays),
+	                    // w the largest history weight of a cell that moved a whole cell since last frame (TemporalMoving)
+	vec4 prevForward;   // last frame's camera: xyz forward (unit), w its MaxDistance
+	vec4 prevRight;     // xyz right * projection[0][0] (onto NDC x), w its columns
+	vec4 prevUp;        // xyz up * projection[1][1] (onto NDC y), w its rows
+	vec4 prevOrigin;    // xyz last frame's eye in this frame's scene space (camera then - camera now), w unused
+} p;
+layout(set = 0, binding = 2, r16f) uniform writeonly image2D visibilityImage;
+layout(set = 0, binding = 3, r16f) uniform readonly image2D historyImage;
+layout(set = 0, binding = 4, r16f) uniform readonly image2D alphaAtlas;      // RtCore::AlphaAtlasImage() (or a stand-in, rays.w 0)
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
+
+// Planar depth of slice coordinate s (0 .. 64; VolumetricLight.fx.hlsl GridDepth)
+float gridDepth(float s, float maxDistance) { s /= 64.0; return maxDistance * s * s; }
+
+// The scene-space direction through screen uv whose point at planar depth d is origin + direction * d (Depth.hlsl toWorld)
+vec3 viewRay(vec2 uv) { return p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0); }
+
+// Sample k of n in the cell, as (column uv offset in cells, depth share of the slice): n = 1 the centre (0.5, 0.5, 0.5)
+vec3 cellPoint(int k, int n, ivec3 cell) {
+	vec3 o = vec3(fract(0.5 + float(k) * 0.7548777), fract(0.5 + float(k) * 0.5698403), (float(k) + 0.5) / float(n));
+	if (p.trace.y > 0.5) {
+		const float h = fract(52.9829189 * fract(0.06711056 * float(cell.x + 13 * cell.z) + 0.00583715 * float(cell.y + 29 * cell.z)));
+		const vec3 j = fract(vec3(h, fract(h * 1.618034), fract(h * 2.236068)) + p.origin.w * vec3(0.7548777, 0.5698403, 0.6180340));
+		o.xy = fract(o.xy + j.xy);
+		o.z = (float(k) + j.z) / float(n);
+	}
+	return o;
+}
+
+// One ray toward the sun from a scene-space point: 1 free, 0 blocked
+float sunRay(vec3 position) {
+	const bool testAlpha = p.rays.w > 0.5;
+	// (ptaaa-hangfix) a ray that is not finite (the constants' sun or range, a NaN point) is not traced: lit, as past the RT range. Sane
+	// rays: unchanged
+	const vec3 a = abs(position) + abs(p.sun.xyz);
+	if (!(a.x < 1.0e30 && a.y < 1.0e30 && a.z < 1.0e30 && dot(p.sun.xyz, p.sun.xyz) > 1.0e-12 && p.trace.x >= 0.0 && p.trace.x < 1.0e30)) return 1.0;
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
+		uint(p.rays.z) & (testAlpha ? 0xFFu : 0xEFu), position, 0.0, p.sun.xyz, p.trace.x);
+	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+	// (ptaaa-hangfix) at most 256 candidates (rayQueryTerminateEXT: a confirmed one still blocks); a sun ray meets a few dozen at most
+	uint candidates = 0u;
+	while (rayQueryProceedEXT(q))
+		if (++candidates > 256u) { rayQueryTerminateEXT(q); break; }
+		else if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
+	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT ? 0.0 : 1.0;
+}
+
+// Last frame's value at a scene-space point (trilinear over its grid); false: the point was outside last frame's grid. moved: how far
+// the point lies from the cell `cell` of last frame's grid, in cells (0 for a still camera)
+bool history(vec3 position, ivec3 cell, out float value, out float moved) {
+	value = 0.0;
+	moved = 0.0;
+	const vec3 q = position - p.prevOrigin.xyz;
+	const float planar = dot(q, p.prevForward.xyz);
+	if (!(planar > 0.01) || planar > p.prevForward.w) return false;
+	const vec2 ndc = vec2(dot(q, p.prevRight.xyz), dot(q, p.prevUp.xyz)) / planar;
+	const vec2 uv = vec2(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y);
+	if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) return false;
+	const ivec2 size = ivec2(p.prevRight.w, p.prevUp.w);
+	const vec3 g = vec3(uv * vec2(size), sqrt(planar / p.prevForward.w) * 64.0) - 0.5;   // texel / slice centres at k + 0.5
+	moved = length(g - vec3(cell));
+	const ivec3 base = ivec3(floor(g));
+	const vec3 f = g - vec3(base);
+	float sum = 0.0;
+	for (int c = 0; c < 8; c++) {
+		const ivec3 o = ivec3(c & 1, (c >> 1) & 1, c >> 2);
+		const ivec3 t = clamp(base + o, ivec3(0), ivec3(size - 1, 63));
+		const float w = (o.x == 1 ? f.x : 1.0 - f.x) * (o.y == 1 ? f.y : 1.0 - f.y) * (o.z == 1 ? f.z : 1.0 - f.z);
+		sum += w * imageLoad(historyImage, ivec2(t.z % 8, t.z / 8) * size + t.xy).r;
+	}
+	value = sum;
+	return true;
+}
+
+void main() {
+	const ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 size = ivec2(p.grid.xy);
+	if (texel.x >= size.x * 8 || texel.y >= size.y * 8)
+		return;
+	const ivec2 tile = texel / size;
+	const ivec3 cell = ivec3(texel - tile * size, tile.y * 8 + tile.x);
+	const float near = gridDepth(float(cell.z), p.grid.w), far = gridDepth(float(cell.z) + 1.0, p.grid.w);
+
+	float result = 1.0;
+	if (p.sun.w > 0.5) {
+		const int n = clamp(int(p.rays.x + 0.5), 1, 8);
+		float lit = 0.0;
+		for (int k = 0; k < n; k++) {
+			const vec3 o = cellPoint(k, n, cell);
+			const vec3 position = p.origin.xyz + viewRay((vec2(cell.xy) + o.xy) / p.grid.xy) * mix(near, far, o.z);
+			lit += length(position - p.origin.xyz) > p.forward.w ? 1.0 : sunRay(position);
+		}
+		result = lit / float(n);
+	}
+	if (p.rays.y > 0.0 && p.trace.z < 0.5) {
+		// the cell's centre in the grid's own coordinates (slice coordinate z + 0.5: a still camera reads its own cell back exactly)
+		// Each reprojection resamples the old grid (trilinear: a little blur) and the moving grid leaves an old value behind a moving edge:
+		// a cell that moved a whole cell or more since last frame keeps at most trace.w (TemporalMoving) of it, a still one rays.y.
+		float last, moved;
+		if (history(p.origin.xyz + viewRay((vec2(cell.xy) + 0.5) / p.grid.xy) * gridDepth(float(cell.z) + 0.5, p.grid.w), cell, last, moved))
+			result = mix(result, last, mix(p.rays.y, min(p.rays.y, p.trace.w), clamp(moved, 0.0, 1.0)));
+	}
+	imageStore(visibilityImage, texel, vec4(result, 0.0, 0.0, 0.0));
+}

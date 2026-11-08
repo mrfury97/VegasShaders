@@ -6,9 +6,12 @@
 
 layout(set = 1, binding = 0) uniform texture2D t_depth;      // TESR_DepthBuffer (POINT, CLAMP)
 layout(set = 1, binding = 1) uniform texture2D t_atlas;      // TESR_ShadowAtlas (LINEAR, CLAMP)
+layout(set = 1, binding = 2) uniform texture2D t_rtvis;      // TESR_RtFogVisibility (LINEAR, CLAMP; UNOFFICIAL 2026-11-07 ptaaa-fog)
 
 #define VL_DEPTH
 #define VL_SHADOWS
+#define VL_GRID
+#define VL_RT
 #include "VolumetricLight.glsl"
 
 // Interleaved gradient noise (Jimenez 2014) in [0, 1).
@@ -33,7 +36,7 @@ void main() {
     for (float i = 0.0; i < Steps; i += 1.0) {
         float t = (i + offset) * dt;
         float transmittance = exp(-sigma * t);
-        lit += MarchShadow(ray * t) * transmittance;
+        lit += SunVisibility(ray * t) * transmittance;   // (UNOFFICIAL 2026-11-07 ptaaa-fog: MarchShadow, or the traced visibility)
         all += transmittance;
     }
     float scattered = sigma * dt;

@@ -21,6 +21,11 @@
 //    CaptureMaterial), and reads it there.
 // Safety net: if a pass drew blended although it got c212.x = 1 (a pass kind not known above), its pass number is put on a list
 // that never gets the flag again, and the log says so once.
+// UNOFFICIAL 2026-11-07 (perf-mirrorfix, core/ReflMaterialRule.h): every OTHER pass that replaces a pixel's colour writes its own alpha
+// too (the game's 0..1: no material), so nothing drawn in front of a mirror keeps the mirror's material (chrome shirts and fence posts at
+// the RT test room's mirror wall); blended first passes of skinned objects (hair) scale it by (1 - their alpha). NeutralBegin / NeutralEnd
+// round every object pass (the two pass hooks AND BSBatchRenderer::RenderPassImmediately, which also draws grass), in the world scene
+// and the first-person scene (BeginFirstPerson / EndFirstPerson: the same separate alpha blend round it).
 // Off (MaterialAware 0 at startup, or the _rmaos maps off): nothing here runs and the shaders are compiled without it.
 #include <d3d9.h>
 #include <unordered_set>
@@ -28,6 +33,7 @@
 #include <string>
 #include <algorithm>
 #include "PassSums.h"
+#include "ReflMaterialRule.h"
 
 namespace ReflMaterial {
 	inline int Startup = -1;					// MaterialAware > 0 and the _rmaos maps on, read once (the shaders are compiled with it)
@@ -56,6 +62,13 @@ namespace ReflMaterial {
 	inline DWORD SavedWrite = 0xF;				// the pass's colour write mask before OnShadersBound added alpha
 	inline bool WriteChanged = false;
 	inline UInt32 DiagBound = 0, DiagChanged = 0, DiagFlagged = 0, DiagMask[16] = {};	// diagnostic counts for the log (per report)
+	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the other passes' own alpha (ReflMaterialRule.h Own / Cover)
+	inline bool FirstPersonLive = false;		// the first-person scene writes alpha (BeginFirstPerson)
+	inline int NeutralDepth = 0;				// NeutralBegin calls open (the dispatcher's round the pass hook's: the outer one decides)
+	inline ReflMaterialRule::Write NeutralWrite = ReflMaterialRule::Keep;
+	inline bool NeutralAlphaAdded = false, NeutralBlendChanged = false;
+	inline DWORD NeutralSavedDestAlpha = D3DBLEND_ONE;
+	inline UInt32 DiagOwn = 0, DiagCover = 0;
 
 	// Whether the object shaders were compiled with it (asked by ShaderRecord::BuildDefines, at the first shader load).
 	// UNOFFICIAL 2026-10-22: only while Reflections itself is on at startup, so MaterialAware can be on by default while the effect
@@ -129,11 +142,8 @@ namespace ReflMaterial {
 
 	// The world scene starts: the blended passes keep off the alpha (through the game's render state cache, so its own later
 	// settings stay right), and c212 is sent again on the first pass (an effect may have used the register since).
-	inline void BeginWorld(NiDX9RenderState* state, IDirect3DDevice9* device, bool live) {
-		Writing = CompiledIn() && live;
-		Current = -1.0f;
-		if (!Writing || !state || !device) return;
-		ReadSettings();
+	// The scene's separate alpha blend (blended passes keep off the alpha), through the game's state cache; and back
+	inline void SetSceneStates(NiDX9RenderState* state, IDirect3DDevice9* device) {
 		device->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &SavedSeparate);
 		device->GetRenderState(D3DRS_SRCBLENDALPHA, &SavedSrcAlpha);
 		device->GetRenderState(D3DRS_DESTBLENDALPHA, &SavedDstAlpha);
@@ -143,27 +153,55 @@ namespace ReflMaterial {
 		state->SetRenderState(D3DRS_BLENDOPALPHA, D3DBLENDOP_ADD, RenderStateArgs);
 		state->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, TRUE, RenderStateArgs);
 		StatesSet = true;
-		Frames++;
 	}
-
-	inline void EndWorld(NiDX9RenderState* state, IDirect3DDevice9* device) {
-		if (device && Current != 0.0f && Current != -1.0f) Send(device, 0.0f);
+	inline void RestoreSceneStates(NiDX9RenderState* state, IDirect3DDevice9* device, const char* scene) {
 		if (StatesSet && state && device) {
 			// Still on? (the game never sets it, as far as known; if it did, the log says so once)
 			DWORD now = FALSE;
 			device->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &now);
 			static bool warned = false;
-			if (!now && !warned) { warned = true; Logger::Log("[WARNING] MaterialAware reflections: separate alpha blending was switched off during the world scene; blended draws after that point change the material buffer"); }
+			if (!now && !warned) { warned = true; Logger::Log("[WARNING] MaterialAware reflections: separate alpha blending was switched off during the %s scene; blended draws after that point change the material buffer", scene); }
 			state->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, SavedSeparate, RenderStateArgs);
 			state->SetRenderState(D3DRS_SRCBLENDALPHA, SavedSrcAlpha, RenderStateArgs);
 			state->SetRenderState(D3DRS_DESTBLENDALPHA, SavedDstAlpha, RenderStateArgs);
 			state->SetRenderState(D3DRS_BLENDOPALPHA, SavedOpAlpha, RenderStateArgs);
 		}
 		StatesSet = false;
+	}
+
+	inline void BeginWorld(NiDX9RenderState* state, IDirect3DDevice9* device, bool live) {
+		Writing = CompiledIn() && live;
+		Current = -1.0f;
+		NeutralDepth = 0;
+		if (!Writing || !state || !device) { Writing = false; return; }
+		ReadSettings();
+		SetSceneStates(state, device);
+		Frames++;
+	}
+
+	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the first-person scene (Render.cpp RenderFirstPersonHook): drawn into the same target before
+	// the effects copy the material out (the arms and gun over a mirror kept its material: a chrome gun). No material passes here; every
+	// pass that replaces the colour writes its own alpha (Own), under the same separate alpha blend as the world scene.
+	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live) {
+		FirstPersonLive = CompiledIn() && live && state && device && !StatesSet;
+		NeutralDepth = 0;
+		if (FirstPersonLive) SetSceneStates(state, device);
+	}
+	inline void EndFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device) {
+		if (FirstPersonLive) RestoreSceneStates(state, device, "first-person");
+		FirstPersonLive = false;
+	}
+
+	inline void EndWorld(NiDX9RenderState* state, IDirect3DDevice9* device) {
+		if (device && Current != 0.0f && Current != -1.0f) Send(device, 0.0f);
+		RestoreSceneStates(state, device, "world");
 		Writing = false;
 		if (Frames >= 1800) {
 			Logger::Log("MaterialAware reflections: %u object passes per frame wrote their material (average of %u frames); %u pass kinds refused",
 				FlaggedPasses / Frames, Frames, (unsigned)Refused.size());
+			Logger::Log("MaterialAware reflections: per frame %u other passes wrote their own alpha (no material), %u blended skinned passes covered it (perf-mirrorfix)",
+				DiagOwn / Frames, DiagCover / Frames);
+			DiagOwn = DiagCover = 0;
 			char masks[160] = ""; size_t used = 0;
 			for (int m = 0; m < 16; m++) if (DiagMask[m]) used += snprintf(masks + used, sizeof(masks) - used, " %X:%u", m, DiagMask[m]);
 			Logger::Log("MaterialAware reflections diagnostic: %u flagged passes drew, %u shader binds inside them, %u got alpha added; write mask at the draw's end (mask:passes)%s",
@@ -177,7 +215,9 @@ namespace ReflMaterial {
 	// SetShaders call inside 151800 flagged passes): the game draws the world with COLORWRITEENABLE 7 (no alpha: run 00:22, the world
 	// target's alpha stayed 0 everywhere), so alpha is added to the mask on the device for this draw only. The game's state cache
 	// never sees it; AfterPass puts the old value back. (Also called from SetShadersHook, in case a pass binds inside.)
+	inline void NeutralRebind(IDirect3DDevice9* device);
 	inline void OnShadersBound(IDirect3DDevice9* device) {
+		NeutralRebind(device);	// (2026-11-07 perf-mirrorfix) a pass that set its own write mask after NeutralBegin
 		if (!LastFlagged || WriteChanged || !device) return;
 		DiagBound++;
 		device->GetRenderState(D3DRS_COLORWRITEENABLE, &SavedWrite);
@@ -187,20 +227,95 @@ namespace ReflMaterial {
 		DiagChanged++;
 	}
 
-	// Before each object pass (Render.cpp RenderPassStandardHook / RenderPassSkinnedHook). world: in the world scene, with an _rmaos map.
-	inline void ForPass(const void* pass, NiGeometry* geometry, bool world, IDirect3DDevice9* device) {
+	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the pass's facts for ReflMaterialRule::Decide (device: read only for what Decide needs then)
+	inline ReflMaterialRule::Pass PassFacts(const void* pass, NiGeometry* geometry, bool world, bool hasMap) {
+		ReflMaterialRule::Pass p;
+		p.live = world ? Writing : FirstPersonLive;
+		p.world = world;
+		p.hasGeometry = pass && geometry;
+		if (!p.live || !p.hasGeometry) return p;
+		p.hasMap = hasMap;
+		const UInt16 e = *(const UInt16*)((const UInt8*)pass + 0x04);
+		p.firstKind = PassSums::KindOf(e) == PassSums::None;
+		p.refused = Refused.count(e) != 0;
+		const NiAlphaProperty* alpha = geometry->propertyState.m_spAlphaProperty;
+		p.blendProperty = alpha && (alpha->flags & NiAlphaProperty::ALPHA_BLEND_MASK);
+		p.testProperty = alpha && (alpha->flags & NiAlphaProperty::TEST_ENABLE_MASK);
+		p.skinned = geometry->skinInstance != nullptr;
+		return p;
+	}
+
+	// Round every object pass of the world / first-person scene (the outermost call decides; nested calls only count): world / firstPerson
+	// = ShaderSplit's context; hasMap: RmaosDraw::ThisDraw where known (the pass hooks), false in the dispatcher (a material pass is then
+	// given alpha writes here, and its c212 flag by ForPass inside: the same result).
+	inline void NeutralBegin(const void* pass, NiGeometry* geometry, bool world, bool firstPerson, bool hasMap, IDirect3DDevice9* device) {
+		if (NeutralDepth++ > 0) return;
+		NeutralWrite = ReflMaterialRule::Keep;
+		NeutralAlphaAdded = NeutralBlendChanged = false;
+		if (!device || !(world || firstPerson) || !(world ? Writing : FirstPersonLive)) return;
+		ReflMaterialRule::Pass p = PassFacts(pass, geometry, world, hasMap);
+		if (!p.live || !p.hasGeometry) return;
+		DWORD separate = FALSE, write = 0;
+		device->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &separate);
+		device->GetRenderState(D3DRS_COLORWRITEENABLE, &write);
+		p.separateAlpha = separate != FALSE;
+		p.colorWrite = write;
+		ReflMaterialRule::Write w = ReflMaterialRule::Decide(p);
+		if (w == ReflMaterialRule::Material) w = ReflMaterialRule::Own;	// (the dispatcher's view of a material pass: ForPass sets its flag)
+		NeutralWrite = w;
+		if (w == ReflMaterialRule::Keep) return;
+		if (w == ReflMaterialRule::Cover) {
+			device->GetRenderState(D3DRS_DESTBLENDALPHA, &NeutralSavedDestAlpha);
+			device->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+			NeutralBlendChanged = true;
+			DiagCover++;
+		}
+		else DiagOwn++;
+		if (!(write & D3DCOLORWRITEENABLE_ALPHA)) {
+			device->SetRenderState(D3DRS_COLORWRITEENABLE, write | D3DCOLORWRITEENABLE_ALPHA);
+			NeutralAlphaAdded = true;
+		}
+	}
+
+	// The game set a write mask inside the pass (through its state cache, after NeutralBegin): alpha again, if it writes colour
+	inline void NeutralRebind(IDirect3DDevice9* device) {
+		if (NeutralDepth <= 0 || NeutralWrite == ReflMaterialRule::Keep || !device) return;
+		DWORD write = 0;
+		device->GetRenderState(D3DRS_COLORWRITEENABLE, &write);
+		if (!(write & 7u) || (write & D3DCOLORWRITEENABLE_ALPHA)) return;
+		device->SetRenderState(D3DRS_COLORWRITEENABLE, write | D3DCOLORWRITEENABLE_ALPHA);
+		NeutralAlphaAdded = true;
+	}
+
+	inline void NeutralEnd(IDirect3DDevice9* device) {
+		if (NeutralDepth <= 0) return;
+		if (--NeutralDepth > 0) return;
+		if (device && NeutralAlphaAdded) {	// the mask the game believes in (its cache never saw the alpha bit)
+			DWORD write = 0;
+			device->GetRenderState(D3DRS_COLORWRITEENABLE, &write);
+			if (write & D3DCOLORWRITEENABLE_ALPHA) device->SetRenderState(D3DRS_COLORWRITEENABLE, write & ~(DWORD)D3DCOLORWRITEENABLE_ALPHA);
+		}
+		if (device && NeutralBlendChanged) device->SetRenderState(D3DRS_DESTBLENDALPHA, NeutralSavedDestAlpha);
+		NeutralWrite = ReflMaterialRule::Keep;
+		NeutralAlphaAdded = NeutralBlendChanged = false;
+	}
+
+	// Scoped NeutralBegin / NeutralEnd (the dispatcher's calls)
+	struct NeutralScope {
+		IDirect3DDevice9* device;
+		NeutralScope(const void* pass, NiGeometry* geometry, bool world, bool firstPerson, IDirect3DDevice9* d) : device(d) {
+			NeutralBegin(pass, geometry, world, firstPerson, false, d);
+		}
+		~NeutralScope() { NeutralEnd(device); }
+	};
+
+	// Before each object pass (Render.cpp RenderPassStandardHook / RenderPassSkinnedHook). world: in the world scene; hasMap: with an
+	// _rmaos map. (2026-11-07 perf-mirrorfix: the decision is ReflMaterialRule::Decide's Material.)
+	inline void ForPass(const void* pass, NiGeometry* geometry, bool world, bool hasMap, IDirect3DDevice9* device) {
 		LastFlagged = false;
 		if (!Writing || !device) return;
-		bool flag = world && pass && geometry;
-		UInt16 e = 0;
-		if (flag) {
-			e = *(const UInt16*)((const UInt8*)pass + 0x04);
-			flag = PassSums::KindOf(e) == PassSums::None && !Refused.count(e);
-		}
-		if (flag) {
-			const NiAlphaProperty* alpha = geometry->propertyState.m_spAlphaProperty;
-			flag = !alpha || !(alpha->flags & (NiAlphaProperty::ALPHA_BLEND_MASK | NiAlphaProperty::TEST_ENABLE_MASK));
-		}
+		UInt16 e = pass ? *(const UInt16*)((const UInt8*)pass + 0x04) : 0;
+		const bool flag = world && ReflMaterialRule::Decide(PassFacts(pass, geometry, true, hasMap)) == ReflMaterialRule::Material;
 		Send(device, flag ? 1.0f : 0.0f);
 		if (flag) { FlaggedPasses++; LastFlagged = true; LastFlaggedPass = e; OnShadersBound(device); }
 	}

@@ -168,7 +168,8 @@ row_major float4x4 NVR_RtLampReproject : register(c206); // camera-relative posi
 float4 NVR_PointShadowRT      : register(c215); // x: 0 = the cube maps (as without RT), 1 = the traced result, 2 = the compare view
                                                 // (both; see PointShadowFactor); y: depth tolerance (share of the view depth); z:
                                                 // log2(farZ) / 4095 (the depth code's unit); w: 1 = the darker of traced and cube map
-                                                // (the RT scene has no people yet: their shadows come from the cube maps)
+                                                // (the RT scene has no people yet: their shadows come from the cube maps); (2026-11-07)
+                                                // + 1 / the traced result's width (its fraction: the edge search's texel, 0 = no search)
 float4 NVR_PointShadowRTSlot[2] : register(c216); // the draw's lights 0-3 and 4-5: their cube slot (0-62) when the lamp is in the trace's table, -1 = cube map; [1].z DebugView 3's slot
                                                 // [1].w (2026-10-31): 1 / the result's packing unit, 1024 or 4096 (ManyLights: lamp ids 0-254 in the
                                                 // slots, + 256 for a lamp with no shadow map of its own)
@@ -418,7 +419,27 @@ float PointShadowTraced(float slot, float3 worldPos) {
     float2 scaled = traced * unit;
     float2 high = floor(scaled);                    // entry 1, the depth code
     float depthError = abs(exp2(high.y * NVR_PointShadowRT.z) - clip.w) / clip.w;
-    [branch] if (!(depthError <= NVR_PointShadowRT.y)) return -2.0f - saturate(depthError);  // -2..-3: the depth did not match
+    // (2026-11-07, a tester's red lines along every edge outdoors: ExteriorForward lights a lamp fully where the traced frame has no
+    // answer) a silhouette pixel's own traced texel is often the other side of the edge (the ray through its centre + jitter met the
+    // surface behind or in front): its four neighbours one texel away, the first whose depth is this point's, before giving up
+    [branch] if (!(depthError <= NVR_PointShadowRT.y)) {
+        float tx = frac(NVR_PointShadowRT.w);
+        bool found = false;
+        [branch] if (tx > 0.0f) {
+            // the traced frame's texel height from its width: the projection's y / x scales (the reprojection's columns) = width / height
+            float ty = tx * length(float3(NVR_RtLampReproject[0][1], NVR_RtLampReproject[1][1], NVR_RtLampReproject[2][1])) /
+                max(length(float3(NVR_RtLampReproject[0][0], NVR_RtLampReproject[1][0], NVR_RtLampReproject[2][0])), 1.0e-6f);
+            [loop] for (float i = 0.0f; i < 3.5f; i += 1.0f) {
+                float2 o = i < 0.5f ? float2(tx, 0.0f) : i < 1.5f ? float2(-tx, 0.0f) : i < 2.5f ? float2(0.0f, ty) : float2(0.0f, -ty);
+                float2 t2 = tex2Dlod(NVR_RtLampVis, float4(uv + o, 0.0f, 0.0f)).xy;
+                float2 h2 = floor(t2 * unit);
+                [branch] if (abs(exp2(h2.y * NVR_PointShadowRT.z) - clip.w) <= NVR_PointShadowRT.y * clip.w) {
+                    traced = t2; scaled = t2 * unit; high = h2; found = true; break;
+                }
+            }
+        }
+        [branch] if (!found) return -2.0f - saturate(depthError);  // -2..-3: the depth did not match
+    }
     // 2026-10-29 v4 (RtLampTrace.comp): three entries, slot + U / 16 x visibility (16 steps); the lamp's own slot, or -4: this pixel
     // traced other lamps (they bring it more light), the cube map then. ManyLights (RtLampTraceMany.comp): two entries, the third's
     // place holds R, the traced share of every other lamp at this pixel, which such a lamp takes instead.
@@ -499,6 +520,13 @@ float PointShadowCube(PS_CUBE_T cube, float4 light, float fade, float3 worldPos,
     // map. Where the traced frame did not see this point, the cube map (and in the compare view both agree there: it shows the traced
     // area only).
     float rayLit = -1.0f;
+    // (2026-11-07) the first-person model (arms, gun, Pip-Boy) is never in the traced scene: where its lamp has no map to fall back to
+    // (outdoors, ManyLights' lamps without one) the DLL sends -2 - v, v = how much of the lamp the eye sees (RtLampEye.comp), for the
+    // whole model; before, those lamps lit it fully however blocked they were (a red neon lamp inside its sign: red patches on the gun)
+    [branch] if (rtSlot < -1.5f && NVR_PointShadowRT.x > 0.0f) {
+        rayLit = saturate(-2.0f - rtSlot);
+        return POINT_SHADOW_DONE(1.0f);
+    }
     [branch] if (NVR_PointShadowRT.x > 0.0f && rtSlot >= 0.0f) {
         rayLit = PointShadowTraced(rtSlot, worldPos);
         [branch] if (NVR_PointShadowRT.x < 1.5f && rayLit >= 0.0f && NVR_PointShadowRT.w < 0.5f) return lerp(1.0f, rayLit, NVR_PointShadowParams.x * abs(fade));
@@ -784,8 +812,9 @@ float PointShadow4(float3 worldPos, float3 normal, float att) { return PointShad
 // RT builds: the sixth light has no cube map (NVR_RtLampVis took s15): the traced result where there is one, else lit.
 float PointShadow5(float3 worldPos, float3 normal, float att) {
     float4 light = NVR_PointShadowLight[5];
-    [branch] if (!(light.w > 0.0f) || !(att > 0.0f) || !(NVR_PointShadowRT.x > 0.0f) || NVR_PointShadowRTSlot[1].y < 0.0f) return 1.0f;
+    [branch] if (!(light.w > 0.0f) || !(att > 0.0f) || !(NVR_PointShadowRT.x > 0.0f) || NVR_PointShadowRTSlot[1].y > -1.5f && NVR_PointShadowRTSlot[1].y < 0.0f) return 1.0f;
     [branch] if (!(length(worldPos - light.xyz) * light.w < 1.0f)) return 1.0f;
+    [branch] if (NVR_PointShadowRTSlot[1].y < -1.5f) return lerp(1.0f, saturate(-2.0f - NVR_PointShadowRTSlot[1].y), NVR_PointShadowParams.x * abs(NVR_PointShadowTint[5].w));   // (2026-11-07) the eye's
     float traced = PointShadowTraced(NVR_PointShadowRTSlot[1].y, worldPos);
     return traced < 0.0f ? 1.0f : lerp(1.0f, traced, NVR_PointShadowParams.x * abs(NVR_PointShadowTint[5].w));
 }

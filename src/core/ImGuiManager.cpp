@@ -251,6 +251,12 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 	// A console command posted by Dev Tools runs here, outside any frame (see MenuTools.cpp)
 	if (MenuTools::HandleWindowMessage(msg, lParam)) return 0;
 
+	// UNOFFICIAL 2026-11-07 (rt-shutdown): the window closing (Alt+F4, the X, Windows logging off) may end the game without xNVSE's
+	// ExitGame messages: the RT helper's shutdown first (RtCore::Shutdown; nothing when RT never ran, ~5 s at most). These arrive
+	// through the game's message pump on its main thread, outside a frame. (A WM_CLOSE the game then ignored leaves RT off.)
+	if (msg == WM_CLOSE || msg == WM_DESTROY || (msg == WM_ENDSESSION && wParam))
+		RtCore::Shutdown(msg == WM_CLOSE ? "the game window is closing (WM_CLOSE)" : msg == WM_DESTROY ? "the game window is closing (WM_DESTROY)" : "Windows is ending the session");
+
 	if (msg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE) SetOverlayVisible(false);
 
 	if (gOverlay.open) {
@@ -661,6 +667,11 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.VolumetricClouds.Main",        "HalfResolution",     RestartRule::Changed },
 	{ "Shaders.VolumetricClouds.Main",        "ShadowResolution",   RestartRule::Changed },
 	{ "Shaders.Skin.Main",                    "OverrideVanillaPlusSkin", RestartRule::Changed },	// picks the SKIN shader files at start (with Vanilla Plus Skin installed)
+	// UNOFFICIAL 2026-11-07 (perf-ptcost) the path tracer's images made at the RT helper's start (RtPathTrace.cpp Setup): turned on later they
+	// wait for the next helper start (a game restart, or reloadshaders); RtPathTrace keeps its other features running meanwhile
+	{ "Main.Main.RayTracing",                 "PTRestirGI",         RestartRule::TurnOn },
+	{ "Main.Main.RayTracing",                 "PTDenoiseSplit",     RestartRule::TurnOn },
+	{ "Main.Main.RayTracing",                 "PTCacheEntriesLog2", RestartRule::Changed },
 };
 
 static std::unordered_map<std::string, float> s_startupValues;	// "Section.Key" -> its value when the game started
@@ -1262,7 +1273,8 @@ static const ConflictRule kConflictRules[] = {
 		"Ambient light does ambient occlusion and bounce light itself: the separate Ambient occlusion and Bounce light effects switch off while it runs." },
 	{ "Main.Main.RayTracing", "PTRealtime", "true", nullptr,
 		"Path tracing lights the whole picture itself: Ambient light, ambient occlusion and specular highlights switch off, and the path "
-		"tracer's own settings are overridden. Very heavy: for top graphics cards." },
+		"tracer's own settings are overridden. It also turns on Grass (near you, up to 1000 units, with See-through meshes on) and "
+		"Distant land in the traced scene. Very heavy: for top graphics cards." },
 	{ "Main.Main.RayTracing", "PTReplace", "true", nullptr,
 		"The path-traced picture replaces the game's: Ambient light, ambient occlusion and specular highlights switch off while it runs." },
 	{ "Shaders.ShadowsExteriors.RT", "Mode", "1", nullptr,
@@ -1405,10 +1417,17 @@ static const SimpleRow kSimpleRows[] = {
 		"by Reflections' WetRoughness: if it is rougher than this, puddles get no rays." },
 	{ "Shaders.Reflections.RT", "Weapon", "Weapon reflections", nullptr, "Your gun reflects the world around it: lamps, signs, the sky. Strongest on metal parts." },
 	{ "Shaders.Reflections.RT", "Water", "Ray-traced water reflections", nullptr, "Water reflects the world with rays instead of the old reflection map." },
+	// Light shafts and fog (UNOFFICIAL 2026-11-07 ptaaa-fog)
+	{ "Shaders.VolumetricLight.RT", "Enabled", "Ray-traced light shafts and fog", nullptr, "Sunbeams through windows, trees and buildings, and the fog's sunlight, "
+		"follow the traced shadows instead of the shadow maps. Works while another ray-traced effect is on." },
+	{ "Shaders.VolumetricLight.RT", nullptr, "Shaft quality",
+		"Fast: RaysPerCell=1 | Balanced: RaysPerCell=2 | High: RaysPerCell=4",
+		"Rays per piece of air each frame: more gives cleaner shaft edges sooner after the view moves, at more cost." },
 	// Scene and path tracing
 	{ "Main.Main.RayTracing", "Actors", "People in the traced scene", nullptr, "People and creatures cast traced shadows and show up in traced reflections. Costs some frame rate in crowds." },
 	{ "Main.Main.RayTracing", "AlphaTested", "See-through meshes (fences, leaves, grates)", nullptr, "Fences, leaves and grates cast traced shadows with their holes, not as solid blocks." },
-	{ "Main.Main.RayTracing", "Grass", "Grass", nullptr, "Grass casts traced shadows and shows in reflections. Needs See-through meshes on." },
+	{ "Main.Main.RayTracing", "Grass", "Grass", nullptr, "Grass casts traced shadows and shows in reflections. Needs See-through meshes on. Path tracing turns it on by itself." },
+	{ "Main.Main.RayTracing", "Decals", "Decals and blood", nullptr, "Posters, cracks and blood splats show in traced reflections and bounce light. They cast no shadows. Needs See-through meshes on." },
 	{ "Main.Main.RayTracing", "HitTextures", "Real textures in reflections and bounce light", nullptr, "Reflections and bounce light use the real colours of what they hit instead of flat ones. Uses more video memory." },
 	{ "Main.Main.RayTracing", "FarObjectLOD", "Distant buildings and objects", nullptr, "Distant buildings and objects are in the traced scene, so far shadows and reflections are complete." },
 	{ "Main.Main.RayTracing", "FarLandLOD", "Distant land", nullptr, "Distant hills are in the traced scene, so far shadows and reflections include them." },
@@ -2107,6 +2126,13 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Bodycam.Main", "Bounce", "Camera bob", nullptr, "The picture bobs with each step and leans into turns, like a chest-mounted camera." },
 	{ "Shaders.Bodycam.Main", "MotionBlur", "Motion smear", nullptr, "Smears the picture while you turn." },
 	{ "Shaders.Bodycam.Main", "Mic", "Camera microphone sound", nullptr, "Makes all game sound like a cheap camera microphone. Costs no frame rate." },
+	// Dream (Main): the "fun" trip look (Extras group)
+	{ "Shaders.Dream.Main", "Level", "Dream level", nullptr, "How deep the dream is. Everything below grows with it." },
+	{ "Shaders.Dream.Main", "Breathing", "Breathing", nullptr, "The dream level rises and falls slowly by itself." },
+	{ "Shaders.Dream.Main", "Tracers", "Tracers", nullptr, "Anything that moves leaves trails behind it." },
+	{ "Shaders.Dream.Main", "Tunnel", "Stare tunnel", nullptr, "Hold the view still for a few seconds and it starts falling into itself. Move to leave it." },
+	{ "Shaders.Dream.Main", "Melt", "Fractal melts", nullptr, "Now and then the whole scene slides into a fractal for a few seconds." },
+	{ "Shaders.Dream.Main", "LowHealth", "Deeper when hurt", nullptr, "Low health pushes the dream deeper." },
 	// Bodycam (Night)
 	{ "Shaders.Bodycam.Night", "Fisheye", "Lens distortion", nullptr, "How much the wide lens bends straight lines outwards at the edges." },
 	{ "Shaders.Bodycam.Night", "Vignette", "Dark corners", nullptr, "Darkens the corners of the picture." },
@@ -3581,11 +3607,11 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::None, false, "Less work redrawing the lamp shadows indoors.", nullptr },
 
 	// Main.Main.RayTracing
-	{ "Main.Main.RayTracing", "People", "Actors, ActorUpdateInterval, ActorRadius, ActorStillSkip, ActorStillThreshold, ActorRebuildInterval",
+	{ "Main.Main.RayTracing", "People", "Actors, ActorUpdateInterval, ActorRadius, ActorStillSkip, ActorStillThreshold, ActorRebuildInterval, FaceMorphs, FaceMorphRadius",
 		FogType::None, true, "NPCs, creatures and your own body in the ray traced scene, and how often they are updated.", nullptr },
 	{ "Main.Main.RayTracing", "Plants and grass", "LeafCards, LeafCardsOpaque, PlantSway, Grass, GrassRadius, GrassMaxTufts",
 		FogType::None, false, "Tree leaves, bushes and the grass near you in the ray traced scene.", nullptr },
-	{ "Main.Main.RayTracing", "Textures and see-through meshes", "AlphaTested, HitTextures, GlowTextures",
+	{ "Main.Main.RayTracing", "Textures and see-through meshes", "AlphaTested, HitTextures, GlowTextures, Decals",
 		FogType::None, false, "Fences and foliage cards with their holes, and each mesh's texture and glow where a ray hits it.", nullptr },
 	{ "Main.Main.RayTracing", "Far distance", "FarObjectLOD, FarLandLOD, FarRadius",
 		FogType::None, false, "Distant objects and terrain in the ray traced scene (for RT reflections).", nullptr },
@@ -3975,6 +4001,11 @@ static bool IsMovedShaderEntry(const std::string& name) {
 static std::string MenuEntryLabel(const std::string& name) {
 	if (name == "TAA") return "TAA / FSR / DLSS##TAA";
 	if (name == "SunFar") return "SunFar (mountain and flat-cloud shadow pass)##SunFar";
+	// UNOFFICIAL 2026-11-07 (user: "why is the exterior setting underneath interior"): the two shadow effects are named after the game's
+	// old split, but ShadowsInteriors is the LAMPS' shadows (indoors and, with its RT section, street lamps outdoors at night) and
+	// ShadowsExteriors the sun's; the sections keep their names in the settings files
+	if (name == "ShadowsInteriors") return "Lamp shadows (ShadowsInteriors)##ShadowsInteriors";
+	if (name == "ShadowsExteriors") return "Sun shadows (ShadowsExteriors)##ShadowsExteriors";
 	return name;
 }
 // The same for a page in the sidebar (by its full path; the section keeps its name in the settings files).
@@ -3999,6 +4030,9 @@ static const RtSection kRtSections[] = {
 	{ "Shaders.AmbientOcclusion.RT", "Ambient occlusion and bounce light",
 		"Traced occlusion in place of the screen estimate, and with GI one bounce of light (more with RadianceCache)." },
 	{ "Shaders.Reflections.RT", "Reflections", "Rays for what the screen-space reflections miss: things off screen or hidden. Needs Reflections on." },
+	// UNOFFICIAL 2026-11-07 (ptaaa-fog)
+	{ "Shaders.VolumetricLight.RT", "Light shafts and fog", "The sun's shadow in the air (the light shafts and the fog's sunlight) traced with the same scene as the other "
+		"ray-traced effects. It uses ray tracing only while another ray-traced effect is on." },
 	{ "Main.Main.RayTracing", "Scene and path tracing", "What goes into the traced scene (people, plants, see-through meshes, far distance), and the path tracer." },
 };
 
@@ -4681,6 +4715,8 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Camera and colour", "Tonemapping, Exposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF" },
 	{ "Anti-aliasing and sharpening", "TAA, SMAA, Sharpening, DitherBuster, SkyDither" },
 	{ "Particles and gun effects", "Particles, GPUParticles", "Main.GunFX.Main", "Gun effects (smoke, barrel glow)##GunFX" },
+	// "fun" looks that are no part of a normal setup, at the bottom where they stay out of the way (off by default)
+	{ "Extras", "Dream" },
 	{ "Developer", "Debug" },
 };
 

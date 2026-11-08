@@ -1,0 +1,224 @@
+// UNOFFICIAL 2026-11-07 (ptaaa-omm, protocol 9) NvrRtHelper's opacity micromap kernel (embedded in the helper as RtOmm.h; rebuild that after a
+// change here OR in src/hlsl/NewVegas/Compute/Rt/RtAlpha.glsl / RtTextures.glsl, whose rtAlphaPass the CHECK mode calls):
+//   glslangValidator -V --target-env vulkan1.2 -I../../src/hlsl/NewVegas/Compute/Rt --vn kRtOmmSpv -o RtOmm.h RtOmm.comp
+// NvrRtOmm.inl runs it; docs/next/RT-PATH-TRACING.md (section "ptaaa-omm") has the design.
+//
+// An alpha-tested geometry (one atlas slot, one alpha reference: the key of a micromap) gets one 4-state opacity micromap: every triangle
+// split into 4^level micro-triangles, each either OPAQUE (1: the hardware commits it, no shader call) or UNKNOWN (3: the candidate goes to
+// the trace shader's rtAlphaPass as before). Never TRANSPARENT (0): the spec ignores such a candidate before the ray's opaque flag is looked
+// at, and the RT passes trace cut-outs with gl_RayFlagsOpaqueEXT on purpose (RtAOTrace AOAlpha 1, RtPathTrace PTBounceAlpha 0 / 3, AlphaTest
+// off: solid cards), which would then see holes. A micro-triangle is OPAQUE only when every texel the shader's alpha test can read anywhere
+// on it passes the test with every dither (RtAlpha.glsl): the atlas texel by texel (imageLoad), or the slot's real texture, bilinear, at
+// lod 0 (class A: frames whose passes never set rtConeWidth) or at every mip (class B). Thresholds: NvrRtOmmMath.h OmmThresholds.
+// Three modes, one Job a dispatch:
+//   INIT   a thread a triangle: its VkMicromapTriangleEXT (data offset, level, 4-state) and its micromap index (= the triangle)
+//   BUILD  a thread a micro-triangle (2 x 4^level a triangle, half of them fall outside): OPAQUE where the texels allow (the states start
+//          at 3 = all bits set; OPAQUE clears the high bit), counted
+//   CHECK  a thread a random point on the geometry (a quarter on the micro-triangles' edges): where the states say OPAQUE, the shader's own
+//          rtAlphaPass (records copies = other dithers; class B also at random ray cones = other mips) must say solid. Counted, the first
+//          failure kept. Any failure turns the micromaps off for the session (NvrRtOmm.inl).
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_GOOGLE_include_directive : enable
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 2, r16f) uniform readonly image2D ommAtlas;   // the alpha atlas (NvrRtShared::opacityMicromaps' image)
+#define RT_ALPHA_ATLAS ommAtlas
+#include "RtAlpha.glsl"   // records (binding 10: this module's record copies), words (binding 11: the geometry data), set 1: real textures
+
+struct Job {
+	uvec4 geo;     // triangles, level, vertexOffset, indexOffset (words)
+	uvec4 tex;     // uvOffset (words), atlas slot, real texture id (0: the atlas), class (0: lod 0 only, 1: every mip)
+	vec4  thr;     // dithered threshold, plain threshold, filter slack, 0
+	uvec4 data;    // the states' address (uvec2), the triangle array's (uvec2)
+	uvec4 index;   // the index buffer's address (uvec2), first record, records
+	uvec4 check;   // samples, seed, 0, 0
+};
+layout(buffer_reference, std430, buffer_reference_align = 16) readonly buffer Jobs { Job j[]; };
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words { uint w[]; };
+layout(push_constant) uniform Push {
+	uvec2 jobs;       // this slot's jobs
+	uvec2 counters;   // this slot's counters: 8 a job (opaque micro-triangles, samples on opaque, violations, samples, first failure x4)
+	uint mode;
+	uint job;
+	uint threads;
+	uint flags;       // 1: the host's negative control (every micro-triangle OPAQUE)
+} pc;
+
+#define MODE_INIT  0u
+#define MODE_BUILD 1u
+#define MODE_CHECK 2u
+
+// The Vulkan spec's reference code (appendix VK_EXT_opacity_micromap): barycentrics -> micro-triangle index along the space-filling curve
+uint ommIndex(float u, float v, uint level) {
+	u = clamp(u, 0.0, 1.0);
+	v = clamp(v, 0.0, 1.0);
+	const float fu = u * float(1u << level);
+	const float fv = v * float(1u << level);
+	uint iu = uint(fu);
+	uint iv = uint(fv);
+	const float uf = fu - float(iu);
+	const float vf = fv - float(iv);
+	if (iu >= (1u << level)) iu = (1u << level) - 1u;
+	if (iv >= (1u << level)) iv = (1u << level) - 1u;
+	const uint iuv = iu + iv;
+	if (iuv >= (1u << level)) iu -= iuv - (1u << level) + 1u;
+	uint iw = ~(iu + iv);
+	if (uf + vf >= 1.0 && iuv < (1u << level) - 1u) --iw;
+	uint b0 = ~(iu ^ iw);
+	b0 &= ((1u << level) - 1u);
+	const uint t = (iu ^ iv) & b0;
+	uint f = t;
+	f ^= f >> 1u;
+	f ^= f >> 2u;
+	f ^= f >> 4u;
+	f ^= f >> 8u;
+	uint b1 = ((f ^ iu) & ~b0) | t;
+	b0 = (b0 | (b0 << 8u)) & 0x00ff00ffu;
+	b0 = (b0 | (b0 << 4u)) & 0x0f0f0f0fu;
+	b0 = (b0 | (b0 << 2u)) & 0x33333333u;
+	b0 = (b0 | (b0 << 1u)) & 0x55555555u;
+	b1 = (b1 | (b1 << 8u)) & 0x00ff00ffu;
+	b1 = (b1 | (b1 << 4u)) & 0x0f0f0f0fu;
+	b1 = (b1 | (b1 << 2u)) & 0x33333333u;
+	b1 = (b1 | (b1 << 1u)) & 0x55555555u;
+	return b0 | (b1 << 1u);
+}
+
+uint bytesPerTriangle(uint level) { return level == 0u ? 1u : 1u << (2u * (level - 1u)); }
+
+uint pcg(inout uint s) { s = s * 747796405u + 2891336453u; uint w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u; return (w >> 22u) ^ w; }
+float rnd(inout uint s) { return float(pcg(s) >> 8) * (1.0 / 16777216.0); }
+
+int wrapi(int x, int n) { const int m = x % n; return m < 0 ? m + n : m; }
+
+// Whether every texel rtAlphaPass can read for a point of the micro-triangle (barycentric corners c0 c1 c2) passes for every dither
+bool solidEverywhere(Job jb, uint tri, vec2 c0, vec2 c1, vec2 c2) {
+	const uint io = jb.geo.w + 3u * tri;
+	const uvec3 i = uvec3(words[io], words[io + 1u], words[io + 2u]);
+	const vec2 u0 = rtTexcoord(jb.tex.x, i.x), u1 = rtTexcoord(jb.tex.x, i.y), u2 = rtTexcoord(jb.tex.x, i.z);
+	const vec2 p0 = u0 * (1.0 - c0.x - c0.y) + u1 * c0.x + u2 * c0.y;
+	const vec2 p1 = u0 * (1.0 - c1.x - c1.y) + u1 * c1.x + u2 * c1.y;
+	const vec2 p2 = u0 * (1.0 - c2.x - c2.y) + u1 * c2.x + u2 * c2.y;
+	// the micro-triangle's texcoord box, padded for the rounding of the hit's barycentrics (a point the hardware puts in this micro-triangle
+	// may lie a rounding step outside it) and of the shader's interpolation
+	const vec2 span = abs(u1 - u0) + abs(u2 - u0) + abs(u2 - u1);
+	const vec2 mag = max(abs(u0), max(abs(u1), abs(u2)));
+	const vec2 pad = span * 1.0e-5 + (mag + 1.0) * 4.0e-6;
+	const vec2 lo = min(p0, min(p1, p2)) - pad, hi = max(p0, max(p1, p2)) + pad;
+	if (any(isnan(lo)) || any(isnan(hi)) || any(isinf(lo)) || any(isinf(hi)) || any(greaterThan(hi - lo, vec2(1.0e6)))) return false;
+	const uint id = jb.tex.z;
+	if (id == 0u) {
+		// the atlas: imageLoad of the texel clamp(ivec2(fract(uv) * S), 0, S - 1) in the slot (RtAlpha.glsl), the hashed test
+		const int S = imageSize(ommAtlas).x / int(RT_ALPHA_SLOTS_A_ROW);
+		const ivec2 origin = ivec2(int(jb.tex.y % RT_ALPHA_SLOTS_A_ROW), int(jb.tex.y / RT_ALPHA_SLOTS_A_ROW)) * S;
+		ivec2 a = ivec2(floor(lo * float(S))), b = ivec2(floor(hi * float(S)));
+		if (b.x - a.x + 1 >= S) { a.x = 0; b.x = S - 1; }
+		if (b.y - a.y + 1 >= S) { a.y = 0; b.y = S - 1; }
+		if ((b.x - a.x + 1) * (b.y - a.y + 1) > 4096) return false;
+		for (int y = a.y; y <= b.y; y++)
+			for (int x = a.x; x <= b.x; x++)
+				if (!(imageLoad(ommAtlas, origin + ivec2(wrapi(x, S), wrapi(y, S))).r > jb.thr.x)) return false;
+		return true;
+	}
+	// the real texture, filtered (bilinear, repeat): lod 0 only (class A: the plain test) or every mip (class B: trilinear between any two,
+	// the hashed test); the footprint of each level is the box's texels and their bilinear neighbours, + 1/64 texel for the sampler's
+	// fixed-point coordinates. A uniform footprint filters to its value exactly; a mixed one within its range, less the slack.
+	const float thr = jb.tex.w == 0u ? jb.thr.y : jb.thr.x;
+	const int levels = jb.tex.w == 0u ? 1 : textureQueryLevels(sampler2D(rtTextures[nonuniformEXT(id)], rtTexSampler));
+	float lowest = 2.0, highest = -1.0;
+	for (int m = 0; m < levels; m++) {
+		const ivec2 size = textureSize(sampler2D(rtTextures[nonuniformEXT(id)], rtTexSampler), m);
+		const vec2 fs = vec2(size);
+		ivec2 a = ivec2(floor(lo * fs - 0.5 - 1.0 / 64.0)), b = ivec2(floor(hi * fs - 0.5 + 1.0 / 64.0)) + 1;
+		if (b.x - a.x + 1 >= size.x) { a.x = 0; b.x = size.x - 1; }
+		if (b.y - a.y + 1 >= size.y) { a.y = 0; b.y = size.y - 1; }
+		if ((b.x - a.x + 1) * (b.y - a.y + 1) > 4096) return false;
+		for (int y = a.y; y <= b.y; y++)
+			for (int x = a.x; x <= b.x; x++) {
+				const float v = texelFetch(sampler2D(rtTextures[nonuniformEXT(id)], rtTexSampler), ivec2(wrapi(x, size.x), wrapi(y, size.y)), m).a;
+				if (!(v > thr)) return false;   // (also NaN)
+				lowest = min(lowest, v);
+				highest = max(highest, v);
+			}
+	}
+	return lowest - (lowest == highest ? 0.0 : jb.thr.z) > thr;
+}
+
+void main() {
+	const uint gid = gl_GlobalInvocationID.x;
+	if (gid >= pc.threads) return;
+	const Job jb = Jobs(pc.jobs).j[pc.job];
+	Words counters = Words(pc.counters);
+	const uint cb = pc.job * 8u;
+	const uint level = jb.geo.y, n = 1u << level, cells = n * n;
+	if (pc.mode == MODE_INIT) {
+		if (gid >= jb.geo.x) return;
+		Words tris = Words(jb.data.zw);
+		tris.w[2u * gid] = gid * bytesPerTriangle(level);       // VkMicromapTriangleEXT: dataOffset (bytes)
+		tris.w[2u * gid + 1u] = level | (2u << 16);              // subdivisionLevel (16 bits), format VK_OPACITY_MICROMAP_FORMAT_4_STATE_EXT
+		Words(jb.index.xy).w[gid] = gid;                         // the BLAS's micromap index of triangle gid
+		return;
+	}
+	if (pc.mode == MODE_BUILD) {
+		const uint tri = gid / (2u * cells);
+		if (tri >= jb.geo.x) return;
+		const uint k = gid % (2u * cells), cell = k >> 1, iu = cell % n, iv = cell / n;
+		const bool flipped = (k & 1u) != 0u;
+		if (flipped ? iu + iv + 2u > n : iu + iv + 1u > n) return;
+		const float inv = 1.0 / float(n);
+		const vec2 c0 = flipped ? vec2(iu + 1u, iv) * inv : vec2(iu, iv) * inv;
+		const vec2 c1 = flipped ? vec2(iu, iv + 1u) * inv : vec2(iu + 1u, iv) * inv;
+		const vec2 c2 = flipped ? vec2(iu + 1u, iv + 1u) * inv : vec2(iu, iv + 1u) * inv;
+		const vec2 centre = flipped ? (vec2(iu, iv) + 2.0 / 3.0) * inv : (vec2(iu, iv) + 1.0 / 3.0) * inv;
+		const uint index = ommIndex(centre.x, centre.y, level);
+		if ((pc.flags & 1u) != 0u || solidEverywhere(jb, tri, c0, c1, c2)) {
+			const uint bit = tri * bytesPerTriangle(level) * 8u + 2u * index + 1u;   // the high bit: 3 (unknown) -> 1 (opaque)
+			atomicAnd(Words(jb.data.xy).w[bit >> 5], ~(1u << (bit & 31u)));
+			atomicAdd(counters.w[cb + 0u], 1u);
+		}
+		return;
+	}
+	if (pc.mode == MODE_CHECK) {
+		if (gid >= jb.check.x) return;
+		uint s = gid * 9781u + jb.check.y * 6271u + 17u;
+		pcg(s);
+		const uint tri = pcg(s) % max(jb.geo.x, 1u);
+		vec2 b = vec2(rnd(s), rnd(s));
+		if (b.x + b.y > 1.0) b = 1.0 - b;
+		// a quarter each on the lines u = i / n, v = j / n, u + v = k / n (the micro-triangles' edges), a rounding step either side
+		const float nf = float(n), jitter = (rnd(s) - 0.5) * 4.0e-6 / nf;
+		const uint kind = gid & 3u;
+		if (kind == 1u) b.x = round(b.x * nf) / nf + jitter;
+		else if (kind == 2u) b.y = round(b.y * nf) / nf + jitter;
+		else if (kind == 3u) { const float d = (round((b.x + b.y) * nf) / nf - (b.x + b.y)) * 0.5 + jitter; b += vec2(d); }
+		b = clamp(b, vec2(0.0), vec2(1.0));
+		if (b.x + b.y > 1.0) b *= 1.0 / (b.x + b.y);
+		const uint index = ommIndex(b.x, b.y, level);
+		const uint bit = tri * bytesPerTriangle(level) * 8u + 2u * index;
+		const uint state = (Words(jb.data.xy).w[bit >> 5] >> (bit & 31u)) & 3u;
+		atomicAdd(counters.w[cb + 3u], 1u);
+		if (state != 1u) return;
+		atomicAdd(counters.w[cb + 1u], 1u);
+		bool bad = false;
+		for (uint r = 0u; r < jb.index.w && !bad; r++) {
+			rtConeWidth = 0.0;
+			bad = !rtAlphaPass(jb.index.z + r, tri, b);
+			for (uint c = 0u; c < 2u && jb.tex.w != 0u && !bad; c++) {
+				rtConeWidth = exp2(mix(-16.0, 20.0, rnd(s)));   // class B: any footprint, so any mip
+				bad = !rtAlphaPass(jb.index.z + r, tri, b);
+			}
+		}
+		rtConeWidth = 0.0;
+		if (bad) {
+			atomicAdd(counters.w[cb + 2u], 1u);
+			if (atomicCompSwap(counters.w[cb + 4u], 0u, tri + 1u) == 0u) {
+				counters.w[cb + 5u] = index;
+				counters.w[cb + 6u] = floatBitsToUint(b.x);
+				counters.w[cb + 7u] = floatBitsToUint(b.y);
+			}
+		}
+	}
+}

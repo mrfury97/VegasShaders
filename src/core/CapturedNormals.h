@@ -50,6 +50,20 @@ namespace CapturedNormals {
 
 	inline void NoteWriter(IDirect3DPixelShader9* handle) { if (handle) Writers.insert(handle); }
 
+	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson; docs/next/RT-PATH-TRACING.md "ptaaa-firstperson") the first-person view model's G-buffer for
+	// the path tracer (RtPathTrace.cpp PTViewModel): the same span round the game's first-person render (Render.cpp RenderFirstPersonHook,
+	// BeginViewModelSpan / EndViewModelSpan), without the clears: the arms, gun and Pip-Boy write their smooth normal + distance, colour and
+	// material over the world's where they are drawn (the readers' distance test keeps the depth-rebuilt normal there for every other
+	// effect, as before: the view model's distance is its own FOV's). The hands' bare skin (the skin template: no albedo / material output
+	// of its own) gets its colour through VmSkin (BeforeDraw) and VmSkinFill, its material through SkinFill. Only while the path tracer asks
+	// (VmWanted, set by RtPathTrace each frame), after a world span that captured, with no MSAA, into a target of the G-buffer's size.
+	inline bool VmWanted = false, VmSpan = false, VmSkinDrawn = false, VmSkinFillFailed = false, VmRefusedLogged = false;
+	inline UInt32 VmFrame = 0xFFFFFFFFu;	// the frame (TheFrameRateManager->FrameNumber, from Render.cpp) whose view model was captured
+	inline UInt32 VmWritesBefore = 0, VmCaptures = 0, VmSkinDraws = 0;
+	inline float VmContrastSaved = 0.0f;
+	inline IDirect3DTexture9* VmSkinTex = nullptr;  inline IDirect3DSurface9* VmSkinSurface = nullptr;
+	inline IDirect3DPixelShader9* VmSkinFillPS = nullptr;
+
 	// UNOFFICIAL 2026-10-29 MaterialBuffer ([Main.Main.Quality] MaterialBuffer, restart, with CapturedNormals; CAPTURED_NORMALS_ON 2; ROOT-ASSUMPTIONS-
 	// PLAN B2, format sent to the RT sessions): the same span, a second fp16 target on stage 2 (TESR_MaterialBuffer), written by the
 	// Object / Parallax / Terrain templates' spare COLOR2 (Includes/CapturedNormals.hlsl CapturedMaterialOut): r the material class, g the
@@ -771,11 +785,29 @@ namespace CapturedNormals {
 			SetMask(d, D3DRS_COLORWRITEENABLE3, 0xF);
 			Writes++;
 			Drawn = true;
-			FlashlightLamp::NoteWrite();	// UNOFFICIAL 2026-11-04: the light pass lights this object (core/FlashlightLamp.h)
+			// UNOFFICIAL 2026-11-04: the light pass lights this object (core/FlashlightLamp.h). (2026-11-07 ptaaa-firstperson) not the view
+			// model's draws (VmSpan): the deferred flashlight ran before them, so marking them "lit already" would take the light off the gun
+			if (!VmSpan) FlashlightLamp::NoteWrite();
 		}
 		else if (Bound) {
 			SetMask(d, D3DRS_COLORWRITEENABLE3, 0);
 			Masked++;
+		}
+		// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) the first-person span (BeginViewModelSpan): the skin template's draws (normal writers that
+		// write no albedo or material: the hands' bare skin) give their own albedo output (COLOR2: saturate(base colour) in the stored curve,
+		// which in the world list goes to the skin blur's target; the blur never binds in first person) to VmSkin; every other draw finds
+		// stage 2 free of it again, so the material buffer below binds itself there as always
+		if (VmSpan && VmSkinSurface) {
+			IDirect3DSurface9* rt2 = TargetNow(d, 2);
+			if (write && !LastAlbedoWriter && !LastMaterialWriter) {
+				if (rt2 != VmSkinSurface && (!rt2 || rt2 == MaterialDrawSurface())) {
+					D3DVIEWPORT9 vp; d->GetViewport(&vp); d->SetRenderTarget(2, VmSkinSurface); d->SetViewport(&vp);
+					MaterialBound = false;
+					rt2 = VmSkinSurface;
+				}
+				if (rt2 == VmSkinSurface) { SetMask(d, D3DRS_COLORWRITEENABLE2, 0xF); VmSkinDrawn = true; VmSkinDraws++; }
+			}
+			else if (rt2 == VmSkinSurface) { D3DVIEWPORT9 vp; d->GetViewport(&vp); d->SetRenderTarget(2, nullptr); d->SetViewport(&vp); }
 		}
 		// UNOFFICIAL 2026-10-29 MaterialBuffer: stage 2 when it is free (or ours), for the material writers' opaque draws; masked otherwise
 		if (MaterialTexture && MaterialCompiled) {
@@ -1108,5 +1140,92 @@ namespace CapturedNormals {
 		}
 		CheckThisFrame = false;
 		Data.x = Drawn && !Failed ? 1.0f : 0.0f;
+	}
+
+	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) the hands' bare skin colour (VmSkin: the skin template's COLOR2, the stored curve) into the
+	// AlbedoBuffer where the captured normals mark skin (a >= 1.5) and VmSkin was written this span (cleared to 0: any colour or luma there;
+	// a pure-black texel in the dark is the one miss and keeps the world's colour), decoded as SkinAlbedoFill decodes the skin blur's
+	inline void VmSkinFill(IDirect3DDevice9* d) {
+		if (VmSkinFillFailed || !AlbedoSurface || !Texture || !VmSkinTex) return;
+		if (!VmSkinFillPS) {
+			static const char* kPS =
+				"sampler2D N : register(s0); sampler2D S : register(s1); float4 G : register(c0);"
+				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
+				"  float a = tex2D(N, uv).a; clip(a - 1.5);"
+				"  float4 s = tex2D(S, uv); clip(dot(s, 1.0) - 0.002);"
+				"  float3 c = max(s.rgb, 0.0); c = G.x > 1.0 ? pow(c, G.x) : c;"
+				"  return float4(c, 1.0); }";
+			VmSkinFillPS = FullScreenShader(d, kPS, "AlbedoBuffer view-model skin fill", VmSkinFillFailed);
+			if (!VmSkinFillPS) return;
+		}
+		float saved[4] = {};
+		d->GetPixelShaderConstantF(0, saved, 1);
+		const float g[4] = { PassSums::Gamma, 0.0f, 0.0f, 0.0f };
+		d->SetPixelShaderConstantF(0, g, 1);
+		FullScreenPass(d, AlbedoSurface, VmSkinFillPS, Texture, false, D3DBLEND_ONE, D3DBLEND_ZERO, VmSkinTex);
+		d->SetPixelShaderConstantF(0, saved, 1);
+	}
+
+	// Render.cpp RenderFirstPersonHook, right round the game's first-person render
+	inline void BeginViewModelSpan(IDirect3DDevice9* d) {
+		if (!VmWanted || !Live || InSpan || Failed || Data.x <= 0.0f || AlbedoData.x <= 0.0f || !Texture || !AlbedoSurface || MsaaSurface || AlbedoMsaa) return;
+		IDirect3DSurface9* rt0 = nullptr;
+		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return;
+		D3DSURFACE_DESC t = {};
+		rt0->GetDesc(&t);
+		if (t.Width != Made.Width || t.Height != Made.Height || t.MultiSampleType != D3DMULTISAMPLE_NONE) {
+			if (!VmRefusedLogged) { VmRefusedLogged = true; Logger::Log("UNOFFICIAL RT path trace: the first-person model draws into a %ux%u target (msaa %u), the G-buffer is %ux%u: its colour and normals are not captured, it keeps the game's own pixels (logged once)", t.Width, t.Height, (unsigned)t.MultiSampleType, Made.Width, Made.Height); }
+			rt0->Release();
+			return;
+		}
+		if (VmSkinTex) {	// (the screen's size changed)
+			D3DSURFACE_DESC s = {};
+			if (FAILED(VmSkinTex->GetLevelDesc(0, &s)) || s.Width != t.Width || s.Height != t.Height) { VmSkinSurface->Release(); VmSkinSurface = nullptr; VmSkinTex->Release(); VmSkinTex = nullptr; }
+		}
+		if (!VmSkinTex && (FAILED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &VmSkinTex, NULL)) || !VmSkinTex ||
+			FAILED(VmSkinTex->GetSurfaceLevel(0, &VmSkinSurface)))) {
+			if (VmSkinTex) { VmSkinTex->Release(); VmSkinTex = nullptr; }
+			VmSkinSurface = nullptr;	// (the hands then keep the world's colour under them: VmSkinFill needs it; the gun is still captured)
+		}
+		if (VmSkinSurface) d->ColorFill(VmSkinSurface, NULL, D3DCOLOR_ARGB(0, 0, 0, 0));
+		EnsureHooked(d);
+		if (LeanWanted && DxvkCompute::Available()) { HookTracking(d); Resync(d); }
+		else if (BodyLean()) Resync(d);
+		else Tracked = false;
+		SpanTarget = rt0;	// (holds the reference until EndViewModelSpan)
+		VmContrastSaved = ContrastStrength;
+		ContrastStrength = 0.0f;	// (ShadowContrast was applied after the world's list: the first person's lamp passes add nothing to it)
+		InSpan = true;
+		VmSpan = true;
+		Bound = false;
+		LastPS = nullptr;
+		VmSkinDrawn = false;
+		VmWritesBefore = Writes;
+		SharedDrawState::Valid = Lean();
+	}
+
+	inline void EndViewModelSpan(IDirect3DDevice9* d, UInt32 frame) {
+		if (!VmSpan) return;
+		IDirect3DSurface9* rt3 = nullptr;
+		if (SUCCEEDED(d->GetRenderTarget(3, &rt3)) && rt3) rt3->Release();
+		if ((rt3 && rt3 == DrawSurface()) || MaterialBound || AlbedoBound) Unbind(d);
+		IDirect3DSurface9* rt2 = nullptr;
+		if (SUCCEEDED(d->GetRenderTarget(2, &rt2)) && rt2) rt2->Release();
+		if (rt2 && rt2 == VmSkinSurface) { D3DVIEWPORT9 vp; d->GetViewport(&vp); d->SetRenderTarget(2, nullptr); d->SetViewport(&vp); }
+		d->SetRenderState(D3DRS_COLORWRITEENABLE2, 0xF);
+		InSpan = false;
+		VmSpan = false;
+		Tracked = false;
+		SharedDrawState::Valid = false;
+		ContrastStrength = VmContrastSaved;
+		ContrastDrawn = false;
+		if (Writes != VmWritesBefore && !Failed) {
+			if (MaterialTexture && MaterialCompiled) SkinFill(d);	// the hands' material (class 6) from their captured normals' alpha (the world's again: the same values)
+			if (VmSkinDrawn) VmSkinFill(d);
+			VmFrame = frame;
+			if (VmCaptures++ % 3600 == 0)
+				Logger::Log("UNOFFICIAL RT path trace: the first-person model's colour, normals and material captured for the path tracer (%u draws this frame, %u bare-skin draws so far)", Writes - VmWritesBefore, VmSkinDraws);
+		}
+		if (SpanTarget) { SpanTarget->Release(); SpanTarget = nullptr; }
 	}
 }

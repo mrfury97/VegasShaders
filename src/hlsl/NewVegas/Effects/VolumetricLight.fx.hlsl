@@ -45,6 +45,8 @@ sampler2D TESR_VolumetricLightGrid : register(s7) = sampler_state { ADDRESSU = C
 sampler2D TESR_VolumetricLightGridTemp : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 float4 TESR_VolumetricLightGridLayout; // xy: grid columns and rows (one per 16 x 16 screen pixels), zw: one atlas texel in UV
 float4 TESR_VolumetricLightGridData;   // x: fog volume on ([Shaders.VolumetricFog.Main] FogVolume), y: scale of the lit share (r)
+float4 TESR_VolumetricLightRt;         // UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility: x 0 the cascades, 1 traced on this grid, 2 traced on
+                                       // another MaxDistance's grid; y the RT range, z its fade length, w the traced MaxDistance (see SunVisibility)
 // The fog volume's density and patches, as VolumetricFog.fx.hlsl ModernFogTerms works them out (same constants).
 float4 TESR_FogData;                   // w: fog power
 float4 TESR_SunAmount;                 // x: day
@@ -80,6 +82,9 @@ VSOUT FrameVS(VSIN IN) { VSOUT OUT = (VSOUT)0.0f; OUT.vertPos = IN.vertPos; OUT.
 #include "Includes/Depth.hlsl"
 #define MSAA_SKY_EDGE_REG s9   // after TESR_VolumetricLightGridTemp (s8)
 #include "Includes/MsaaSkyEdge.hlsl"	// UNOFFICIAL 2026-11-04 the game's MSAA: sky edges (TESR_SkyCoverage, the last TESR_ sampler)
+// UNOFFICIAL 2026-11-07 (ptaaa-fog) the traced sun visibility per grid cell (core/RtFogVisibility.h), the grid's layout. After TESR_SkyCoverage
+// (s9): the effect binds TESR_ samplers by their place. Linear: the march's reads between columns; the grid reads texel centres.
+sampler2D TESR_RtFogVisibility : register(s10) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 #include "Includes/Shadows.hlsl"
 #include "Includes/SunCascades.hlsl"
 #include "Includes/FrameNoise.hlsl"	// UNOFFICIAL 2026-11-01 the shared noise code (the same pattern as before)
@@ -127,6 +132,8 @@ float MarchShadow(float3 position) {
 	return ChebyshevUpperBound(moments.xz, warped, depthScale * depthScale, bleed);
 }
 
+float SunVisibility(float3 position);	// UNOFFICIAL 2026-11-07 (ptaaa-fog): MarchShadow, or the traced visibility (below the grid's code)
+
 // ---- 1: March, half resolution ----
 float4 MarchPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float2 uv = (vpos + 0.5) * LowTexel;                                  // this block's centre on screen
@@ -143,7 +150,7 @@ float4 MarchPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	[loop] for (float i = 0.0; i < Steps; i += 1.0) {
 		float t = (i + offset) * dt;
 		float transmittance = exp(-sigma * t);
-		lit += MarchShadow(ray * t) * transmittance;
+		lit += SunVisibility(ray * t) * transmittance;
 		all += transmittance;
 	}
 	float scattered = sigma * dt;                   // the share each sample scatters towards the eye
@@ -313,6 +320,41 @@ float2 GridUV(float z, float2 local) {
 	return (tile * GridSize + clamp(local, 0.5, GridSize - 0.5)) * GridAtlasTexel;
 }
 
+// ---- UNOFFICIAL 2026-11-07 (ptaaa-fog): RT fog visibility ([Shaders.VolumetricLight.RT], core/RtFogVisibility.h) ----
+// While the ray tracing core runs for another RT effect, the sun's visibility in each grid cell is traced against the RT scene (the casters
+// the RT sun shadows and the path tracer see: far geometry past the cascades, alpha-tested cards, actors, the far LOD; Compute/Rt/
+// RtFogVisibility.comp: a few rays a cell, a temporal history) and copied into TESR_RtFogVisibility in the grid's layout. Inside the RT range
+// it replaces the cascade reads below (GridLight: the cell's own texel; the march: by position), the cascades fade back in over the last
+// FadeLength (by distance from the eye). TESR_VolumetricLightRt.x 0 (not traced this frame): MarchShadow alone, as before.
+float RtShare(float3 position) {
+	return TESR_VolumetricLightRt.x > 0.5 ? saturate((TESR_VolumetricLightRt.y - length(position)) / max(TESR_VolumetricLightRt.z, 1.0)) : 0.0;
+}
+
+// The traced visibility at a camera-relative position: the grid column it projects to (bilinear between columns), between its two nearest
+// slices (the cells' values stand for their centres: slice coordinate z + 0.5). The grid it was traced on reaches TESR_VolumetricLightRt.w.
+float RtFogVisAt(float3 position) {
+	float3 f = float3(TESR_ViewTransform[0][2], TESR_ViewTransform[1][2], TESR_ViewTransform[2][2]);
+	float3 r = float3(TESR_ViewTransform[0][0], TESR_ViewTransform[1][0], TESR_ViewTransform[2][0]);
+	float3 u = float3(TESR_ViewTransform[0][1], TESR_ViewTransform[1][1], TESR_ViewTransform[2][1]);
+	float planar = max(dot(position, f), 1.0e-3);
+	float2 ndc = float2(dot(position, r) * TESR_ProjectionTransform[0][0], dot(position, u) * TESR_ProjectionTransform[1][1]) / planar;
+	float2 local = float2(ndc.x * 0.5 + 0.5, 0.5 - 0.5 * ndc.y) * GridSize;   // the screen's, not a RenderScale rect's: the grid covers the screen
+	float s = sqrt(saturate(planar / max(TESR_VolumetricLightRt.w, 1.0))) * 64.0 - 0.5;
+	float z = clamp(floor(s), 0.0, 63.0);
+	float a = tex2Dlod(TESR_RtFogVisibility, float4(GridUV(z, local), 0, 0)).r;
+	float b = tex2Dlod(TESR_RtFogVisibility, float4(GridUV(min(z + 1.0, 63.0), local), 0, 0)).r;
+	return lerp(a, b, saturate(s - z));
+}
+
+// The sun's visibility at a camera-relative position: traced inside the RT range, the cascades past it (blended over the fade)
+float SunVisibility(float3 position) {
+	float share = RtShare(position);
+	float visibility = 1.0;
+	[branch] if (share > 0.0) visibility = RtFogVisAt(position);
+	[branch] if (share < 1.0) visibility = lerp(MarchShadow(position), visibility, share);
+	return visibility;
+}
+
 // The fog's density by height at a camera-relative height (relative to the camera's: only ratios of it are used), as
 // VolumetricFog.fx.hlsl getHeightFog's falloff with its night and weather scaling, and HeightInfluence.
 float FogHeightWeight(float height, float nightFactor) {
@@ -344,7 +386,17 @@ float4 GridLightPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	// of its 16 x 16 pixels: thin shadows (poles, wires) between the column centres are not missed outright.
 	float3 positionA = toWorld((cell + 0.25) / GridSize) * lerp(near, far, 0.25);
 	float3 positionB = toWorld((cell + 0.75) / GridSize) * lerp(near, far, 0.75);
-	float shadowA = MarchShadow(positionA), shadowB = MarchShadow(positionB);
+	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the traced visibility of the whole cell inside the RT range (its own texel when traced on this
+	// grid, else by position), the two cascade reads only where the cascades fade back in
+	float3 centre = toWorld((cell + 0.5) / GridSize) * GridDepth(z + 0.5);
+	float rtShare = RtShare(centre);
+	float traced = 1.0;
+	[branch] if (rtShare > 0.0) traced = TESR_VolumetricLightRt.x < 1.5 ? tex2Dlod(TESR_RtFogVisibility, float4((vpos + 0.5) * GridAtlasTexel, 0, 0)).r : RtFogVisAt(centre);
+	float shadowA = traced, shadowB = traced;
+	[branch] if (rtShare < 1.0) {
+		shadowA = lerp(MarchShadow(positionA), traced, rtShare);
+		shadowB = lerp(MarchShadow(positionB), traced, rtShare);
+	}
 	float sigma = Density * length(toWorld((cell + 0.5) / GridSize));
 	float4 cellValue = float4(0.5 * (shadowA + shadowB) * (exp(-sigma * near) - exp(-sigma * far)) * TESR_VolumetricLightGridData.y, 0.0, 0.0, 0.0);
 	[branch] if (TESR_VolumetricLightGridData.x > 0.5) {

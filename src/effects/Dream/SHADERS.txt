@@ -1,0 +1,3 @@
+# The shader files the Dream effect loads (they stay where the game loads them from: src/hlsl/NewVegas mirrors
+# Data\Shaders\VegasShaders). Keep it up to date by hand.
+src/hlsl/NewVegas/Effects/Dream.fx.hlsl

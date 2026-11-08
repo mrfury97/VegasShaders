@@ -19,6 +19,8 @@ layout(set = 1, binding = 20) uniform texture2D t_rtHit;      // the helper: x h
                                                               // y flags (1 land, 2 albedo known, 4 normal known, 8 glow map), zw the hit's normal (octahedral)
 layout(set = 1, binding = 22) uniform texture2D t_rtMarchHit;  // 2026-11-07 RayGen out 3 (R16F): the march's hit distance (0: none)
 layout(set = 1, binding = 21) uniform texture2D t_rtShade;    // the helper: rgb the hit draw's albedo (linear), a sun visible at the hit (0..1)
+layout(set = 1, binding = 26) uniform texture2D t_rtBounce;   // 2026-11-07 (perf-reflfix) MetalBounce, where t_rtHit.y has 256: rgb the metal's
+                                                              // Fresnel tint at the first hit, a the bounce's hit distance from it (0: none)
 
 layout(set = 2, binding = 1, std140) uniform RtConstants {
     vec4 rt;    // x 1 = on, y MaxRoughness, z Distance (game units), w DebugView

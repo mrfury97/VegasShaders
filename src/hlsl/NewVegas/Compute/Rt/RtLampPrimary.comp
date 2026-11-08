@@ -50,7 +50,7 @@ Primary closest(vec3 origin, vec3 dir, uint mask, bool alpha, bool people) {
 	if (mask == 0u) return r;
 	rayQueryEXT q;
 	rayQueryInitializeEXT(q, scene, people ? gl_RayFlagsNoOpaqueEXT : alpha ? gl_RayFlagsNoneEXT : gl_RayFlagsOpaqueEXT, mask, origin, 0.5, dir, 1e7);
-	while (rayQueryProceedEXT(q)) {
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {
 		if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
 		if (people && (rayQueryGetIntersectionInstanceCustomIndexEXT(q, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
 		if (!alpha || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),

@@ -19,6 +19,10 @@
 //  o_roughness: linear (perceptual) roughness, the one GGX squares: TESR_MaterialBuffer.b where this frame's material buffer holds one
 //               (a material class in r, b >= 0; options.z 1), else RRRoughness (view.w); 1 on the sky.
 // The first-person weapon is taken as rendered (its pixels are put back unchanged after RR: DlssRRComposite).
+// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) options.w 1 / 2: the path tracer's picture is the scene (PTRealtime) and RR denoises its raw paths:
+// the guides are what the path tracer divided its light by (core\RtPathTrace.h RrGuides), where its first surface is: the diffuse albedo
+// = t_ptAlbedo.rgb x (1 - metal) (a = 1 + metal); with 2 (PTDenoiseSplit) also the specular albedo (t_ptSpecRG.rg, t_ptSpecB.r) and the
+// roughness (t_ptSpecB.g) instead of the G-buffer's guesses. The sky / the game's frame pixels (a < 0.5) keep the guides above.
 #extension GL_GOOGLE_include_directive : require
 #include "Common.glsl"
 
@@ -34,13 +38,17 @@ layout(set = 1, binding = 6, rgba16f) writeonly uniform image2D o_specular;
 layout(set = 1, binding = 7, rgba16f) writeonly uniform image2D o_normals;
 layout(set = 1, binding = 8, r16f) writeonly uniform image2D o_roughness;
 layout(set = 1, binding = 9) uniform texture2D t_albedo;      // TESR_AlbedoBuffer (rgb linear base colour, a 1 written; a placeholder while options.x is below 2)
+layout(set = 1, binding = 10) uniform texture2D t_ptAlbedo;   // (2026-11-07 ptaaa-denoiser) the path tracer's first-surface colour (placeholders while options.w is 0)
+layout(set = 1, binding = 11) uniform texture2D t_ptSpecRG;   // its specular albedo r, g
+layout(set = 1, binding = 12) uniform texture2D t_ptSpecB;    // b, roughness
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 right;                 // xyz: the camera's right axis in world space (TESR_ViewTransform's first column)
     vec4 up;                    // xyz: its up axis (second column)
     vec4 forward;               // xyz: its forward axis (third column)
     vec4 view;                  // x: 1 / projection _11, y: 1 / _22 (the view ray per NDC unit), z: Linearization, w: RRRoughness
-    vec4 options;               // x: RRAlbedo (0 grey, 1 the picture's chroma, 2 t_albedo where written, else the chroma), y: 1 = normals in view space, z: 1 = t_material holds this frame's
+    vec4 options;               // x: RRAlbedo (0 grey, 1 the picture's chroma, 2 t_albedo where written, else the chroma), y: 1 = normals in view space, z: 1 = t_material holds this frame's,
+                                // w: (2026-11-07) 1 the path tracer's diffuse albedo, 2 + its specular albedo and roughness
     vec4 size;                  // xy: the screen size in pixels
 } cb;
 
@@ -108,6 +116,20 @@ void main() {
 
     // (saturate: the fit reaches about 1.04 at a grazing view on a mirror; a reflectance is at most 1)
     vec3 specular = saturate(EnvBRDFApprox(f0, roughness, saturate(dot(n, toCamera))));
+
+    // (2026-11-07 ptaaa-denoiser) the path tracer's own albedos where its first surface is
+    if (cb.options.w > 0.5 && !sky) {
+        const vec4 pa = texelFetch(sampler2D(t_ptAlbedo, POINT_S), pixel, 0);
+        if (pa.a >= 0.5) {
+            diffuse = saturate(pa.rgb) * (1.0 - saturate(pa.a - 1.0));
+            if (cb.options.w > 1.5) {
+                const vec2 rg = texelFetch(sampler2D(t_ptSpecRG, POINT_S), pixel, 0).rg;
+                const vec2 br = texelFetch(sampler2D(t_ptSpecB, POINT_S), pixel, 0).rg;
+                specular = saturate(vec3(rg, br.x));
+                roughness = saturate(br.y);
+            }
+        }
+    }
 
     vec3 normal = cb.options.y > 0.5 ? n : n.x * cb.right.xyz + n.y * cb.up.xyz + n.z * cb.forward.xyz;
 

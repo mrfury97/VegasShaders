@@ -1,0 +1,113 @@
+From e1d71e1656cfaa56ac93d1abb8a27605783fd1f2 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 15:51:16 -0500
+Subject: [PATCH] NVR extension 1.8-rt-bc: block-compressed shared images (BC1
+ / BC3 / BC5: transfer + sampled usage only, whole blocks) and a same-format
+ block copy in CopyToShared / CopyFromShared, so the RT helper gets the game
+ textures BC blocks as they are
+
+---
+ src/d3d9/d3d9_nvr_ext.cpp   | 43 +++++++++++++++++++++++++++++++++++++
+ src/d3d9/d3d9_nvr_ext_api.h | 11 ++++++++++
+ 2 files changed, 54 insertions(+)
+
+diff --git a/src/d3d9/d3d9_nvr_ext.cpp b/src/d3d9/d3d9_nvr_ext.cpp
+index 3ac922d..438cced 100644
+--- a/src/d3d9/d3d9_nvr_ext.cpp
++++ b/src/d3d9/d3d9_nvr_ext.cpp
+@@ -2101,6 +2101,9 @@ namespace dxvk {
+       case NVR_EXT_SHARED_RG32F:   return VK_FORMAT_R32G32_SFLOAT;
+       case NVR_EXT_SHARED_RGBA8:   return VK_FORMAT_R8G8B8A8_UNORM;
+       case NVR_EXT_SHARED_R16F:    return VK_FORMAT_R16_SFLOAT;
++      case NVR_EXT_SHARED_BC1:     return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;   // 1.8-rt-bc
++      case NVR_EXT_SHARED_BC3:     return VK_FORMAT_BC3_UNORM_BLOCK;
++      case NVR_EXT_SHARED_BC5:     return VK_FORMAT_BC5_UNORM_BLOCK;
+       default:                     return VK_FORMAT_UNDEFINED;
+     }
+   }
+@@ -2244,6 +2247,12 @@ namespace dxvk {
+     if (unlikely(format == VK_FORMAT_UNDEFINED))
+       return D3DERR_INVALIDCALL;
+ 
++    // 1.8-rt-bc: a block-compressed image is a whole number of blocks
++    const bool blockCompressed = lookupFormatInfo(format)->flags.test(DxvkFormatFlag::BlockCompressed);
++
++    if (unlikely(blockCompressed && ((pDesc->Width & 3u) || (pDesc->Height & 3u))))
++      return D3DERR_INVALIDCALL;
++
+     D3D9DeviceLock lock = m_device->LockDevice();
+ 
+     Rc<DxvkDevice> device = m_device->GetDXVKDevice();
+@@ -2284,6 +2293,19 @@ namespace dxvk {
+     info.sharing.type  = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_WIN32_BIT;
+     info.debugName     = pDesc->pDebugName ? pDesc->pDebugName : "NVR shared image";
+ 
++    // 1.8-rt-bc: a BC image can only be copied and sampled (no storage image, no colour attachment)
++    if (blockCompressed) {
++      info.usage       = VK_IMAGE_USAGE_TRANSFER_SRC_BIT
++                       | VK_IMAGE_USAGE_TRANSFER_DST_BIT
++                       | VK_IMAGE_USAGE_SAMPLED_BIT;
++      info.stages      = VK_PIPELINE_STAGE_TRANSFER_BIT
++                       | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT
++                       | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
++      info.access      = VK_ACCESS_TRANSFER_READ_BIT
++                       | VK_ACCESS_TRANSFER_WRITE_BIT
++                       | VK_ACCESS_SHADER_READ_BIT;
++    }
++
+     // Exportable at that size with that usage? (DxvkImage would otherwise quietly make an unshared image.)
+     DxvkFormatQuery query = { };
+     query.format     = format;
+@@ -2437,6 +2459,27 @@ namespace dxvk {
+     if (unlikely(DstX + width > dstExtent.width || DstY + height > dstExtent.height))
+       return D3DERR_INVALIDCALL;
+ 
++    // 1.8-rt-bc: block-compressed images. Same format: a block copy, offsets on block boundaries and the size whole blocks unless it
++    // reaches the subresource's edge (vkCmdCopyImage's rule). Into a BC image from another format: no encoder, refused. From a BC
++    // image into an uncompressed one: the blit below decodes (as before 1.8-rt-bc).
++    const DxvkFormatInfo* dstInfo = lookupFormatInfo(DstImage->info().format);
++    const DxvkFormatInfo* srcInfo = lookupFormatInfo(SrcImage->info().format);
++
++    if (dstInfo->flags.test(DxvkFormatFlag::BlockCompressed)) {
++      if (unlikely(DstImage->info().format != SrcImage->info().format))
++        return D3DERR_INVALIDCALL;
++
++      auto whole = [] (UINT offset, UINT size, UINT edge, UINT block) {
++        return (offset % block) == 0u && ((size % block) == 0u || offset + size == edge);
++      };
++
++      if (unlikely(!whole(UINT(rect.left), width,  srcExtent.width,  srcInfo->blockSize.width)
++                || !whole(UINT(rect.top),  height, srcExtent.height, srcInfo->blockSize.height)
++                || !whole(DstX,            width,  dstExtent.width,  dstInfo->blockSize.width)
++                || !whole(DstY,            height, dstExtent.height, dstInfo->blockSize.height)))
++        return D3DERR_INVALIDCALL;
++    }
++
+     VkImageSubresourceLayers dstLayers = { VK_IMAGE_ASPECT_COLOR_BIT, DstMip, DstLayer, 1u };
+     VkImageSubresourceLayers srcLayers = { VK_IMAGE_ASPECT_COLOR_BIT, SrcMip, SrcLayer, 1u };
+ 
+diff --git a/src/d3d9/d3d9_nvr_ext_api.h b/src/d3d9/d3d9_nvr_ext_api.h
+index 24e595d..3e73606 100644
+--- a/src/d3d9/d3d9_nvr_ext_api.h
++++ b/src/d3d9/d3d9_nvr_ext_api.h
+@@ -836,6 +836,17 @@ enum NVR_EXT_SHARED_FORMAT {
+   NVR_EXT_SHARED_RG32F   = 3,  // VK_FORMAT_R32G32_SFLOAT
+   NVR_EXT_SHARED_RGBA8   = 4,  // VK_FORMAT_R8G8B8A8_UNORM
+   NVR_EXT_SHARED_R16F    = 5,  // VK_FORMAT_R16_SFLOAT
++  /*
++   * 1.8-rt-bc: block-compressed shared images (the game's DXT1 / DXT5 / ATI2 textures copied as they are, no decode: a quarter
++   * to an eighth of the RGBA8 transfer's memory and copy bandwidth). Width and height must be multiples of 4. Usage TRANSFER_SRC |
++   * TRANSFER_DST | SAMPLED only (a BC image can be neither a storage image nor a colour attachment). CopyToShared / CopyFromShared
++   * between images of the same format: a block copy (offsets multiples of 4; the size multiples of 4 unless it reaches the
++   * source's edge); another format into a BC image fails (no encoder). A d3d9.dll older than 1.8-rt-bc returns D3DERR_INVALIDCALL
++   * for these values: try one and fall back.
++   */
++  NVR_EXT_SHARED_BC1     = 6,  // VK_FORMAT_BC1_RGBA_UNORM_BLOCK (D3DFMT_DXT1)
++  NVR_EXT_SHARED_BC3     = 7,  // VK_FORMAT_BC3_UNORM_BLOCK      (D3DFMT_DXT5)
++  NVR_EXT_SHARED_BC5     = 8,  // VK_FORMAT_BC5_UNORM_BLOCK      (D3DFMT_ATI2: sampled through a (G, R, 1, 1) swizzle, as DXVK's view)
+ };
+ 
+ struct NVR_EXT_SHARE_INFO {
+-- 
+2.43.0
+

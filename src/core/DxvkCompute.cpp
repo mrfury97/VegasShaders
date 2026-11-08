@@ -3,6 +3,7 @@
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 (DisplaceObjectsLayout)
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
+#include "RtCore.h"	// UNOFFICIAL 2026-11-07 (DisplaceRtSlack: the RT scene's displaced copies)
 
 ID3D9NvrExt*	DxvkCompute::Ext = nullptr;
 NVR_EXT_INFO	DxvkCompute::ExtInfo = {};
@@ -782,6 +783,30 @@ bool DxvkCompute::DisplaceContactFade(float& Start, float& End) {
 	return true;
 }
 
+// UNOFFICIAL 2026-11-07 (rtgap-tess) the bumps the RT scene lacks: the largest Strength on and the widest fade (docs/next/RT-DETAIL-GAPS.md 1a)
+bool DxvkCompute::DisplaceRtSlack(float Out[3]) {
+	Out[0] = Out[1] = Out[2] = 0.0f;
+	if (!DisplaceInterface || !DisplaceSettingOr("TessStartSlack", true, "Main.Main.RayTracing")) return false;
+	bool any = false;
+	// (2026-11-07 merge of rtgap-tess + rtgap-tessblas) a family whose bumps the RT scene carries as displaced copies (RtCore::Displace)
+	// needs no Strength-sized start: the depth's point lies on the traced bumps (0.23 units mean). A small 2 units stays for the copies'
+	// split error and the frames a new copy waits for its build budget (traced flat until then).
+	bool copiedLand = false, copiedObjects = false;
+	RtCore::DisplacedCopies(copiedLand, copiedObjects);
+	auto take = [&](const NVR_EXT_TESS_STATE& s, bool copied) {
+		if (!s.Enable || !(s.EvalParams[0] > 0.0f)) return;
+		const float strength = copied ? (std::min)(s.EvalParams[0], 2.0f) : s.EvalParams[0];
+		Out[1] = any ? (std::min)(Out[1], s.ControlParams[3]) : s.ControlParams[3];
+		Out[2] = (std::max)(Out[2], s.ControlParams[4]);
+		Out[0] = (std::max)(Out[0], strength);
+		any = true;
+	};
+	if (DisplaceRegistered[0] && DisplaceRegistered[1]) take(DisplaceBase, copiedLand);
+	if (DisplaceObjRegistered[0] && DisplaceObjRegistered[1]) take(DisplaceObj, copiedObjects);
+	if (!any) Out[0] = Out[1] = Out[2] = 0.0f;
+	return any;
+}
+
 // IgnoreMipBias: TAA / FSR / DLSS put a texture mip bias on every sampler while the world draws (TAAEffect::SetMipBias: MipBias, and
 // log2 of RenderScale), and the tessellation's height lookups (explicit detail level) take the sampler's bias too: sharper bumps with
 // jitter on or a lower RenderScale (tester: "turning off jitter seems to shrink tessellation"). Added back here, so the lookups stay
@@ -889,6 +914,15 @@ static void DisplaceObjectSettings() {
 		+ 0.99f * std::clamp(DisplaceFloatOr("Center", 0.5f, s), 0.0f, 1.0f);
 	state.EvalParams[2] = std::clamp(DisplaceFloatOr("LodBias", 0.0f, s), -2.0f, 4.0f) + 4.0f + DisplaceMipCompensation();	// (IgnoreMipBias, the land's setting)
 	state.EvalParams[3] = std::clamp(DisplaceFloatOr("EdgeFade", 1.5f, s), 0.0f, 8.0f);
+}
+
+// UNOFFICIAL 2026-11-07 (rtgap-tessblas) RtCore::Displace: whether the game draws the bumps (so the RT scene should have them too)
+bool DxvkCompute::DisplaceLandActive() {
+	return DisplaceInterface && DisplaceRegistered[0] && DisplaceRegistered[1] && DisplaceBase.Enable;
+}
+
+bool DxvkCompute::DisplaceObjectsActive() {
+	return DisplaceInterface && DisplaceObjRegistered[0] && DisplaceObjRegistered[1] && DisplaceObj.Enable;
 }
 
 void DxvkCompute::DisplaceTick() {

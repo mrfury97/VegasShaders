@@ -38,6 +38,7 @@
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the history watch (HistoryProbe)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask
+#include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) the render size's maths, shared with RR's plan
 
 D3DXVECTOR4 TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 
@@ -287,16 +288,16 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	// half / quarter / eighth buffers then drew a part half a texel off the frame's (753 for 752.5), an offset growing across the
 	// picture, and AmbientLight's depth-aware upsampling tipped over to the wrong texels past a line (the split). A multiple of 8 keeps
 	// every one of them whole (at most 0.3 % off the chosen scale). The native size (scale 1) stays exact.
-	auto snap = [](UINT full, float s) { const UINT r = (UINT)floorf((float)full * s / 8.0f + 0.5f) * 8u; return s >= 1.0f ? full : (std::clamp)(r, 16u, full); };
-	const UINT renderWidth = snap(width, scale);
-	const UINT renderHeight = snap(height, scale);
+	// (2026-11-07 perf-rr: the same maths, now core/RrRectPlan.h's, so tests/rr_rect_plan.cpp checks the sizes RR is given)
+	const UINT renderWidth = RrRect::SnapRenderSize(width, scale);
+	const UINT renderHeight = RrRect::SnapRenderSize(height, scale);
 
 	Up.Width = width;
 	Up.Height = height;
 	Up.RenderWidth = renderWidth;
 	Up.RenderHeight = renderHeight;
 	// ffxFsr2GetJitterPhaseCount: 8 x (display / render)^2 steps.
-	Up.JitterPhases = (float)(std::max)(8, (int)(8.0f * powf((float)width / (float)renderWidth, 2.0f)));
+	Up.JitterPhases = RrRect::JitterPhases(width, renderWidth);
 	Up.Target = target;
 	Up.DepthStencil = depth;
 	Up.TargetFormat = targetDesc.Format;
@@ -698,6 +699,49 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 			Up.Width, Up.Height, Upscaler::Choose(FSRSettings.Upscaler)->Name());
 	}
 	UpscaleFinish(ok, true);
+}
+
+// UNOFFICIAL 2026-11-07 (perf-rr) DLSS Ray Reconstruction at RenderScale < 1: the RR point (TAAFSR.cpp RayReconstruct) denoised AND upscaled
+// this rect frame's picture into the frame chain (the whole screen now). What UpscaleAfterEffects does after its colour upscale is done here,
+// right after RR, so the chain's last steps (luma, exposure, bloom, lens, the pre-tonemap LUT) run at full size on the full picture and the
+// image-space hook's UpscaleAfterEffects finds nothing pending (no second upscale): the rect ends (RenderRect::End, buffers registered for
+// after the upscale stretched), the world's and the weapon's depths are upsampled into the depth-stencil and resolved, TESR_DepthBuffer and
+// TESR_NormalsBuffer redrawn at full size. DLSS SR's history goes stale (it did not see this frame); its jitter index steps on, as UpscaleRun's.
+void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3DSurface9* ChainTarget) {
+	if (!Up.Deferred) return;
+	Up.Deferred = false;
+	DroppedInARow = 0;	// (this frame's upscale ran: RR's)
+	RenderRect::End();
+	RenderRect::RescaleRegistered(Device);
+	{
+		static GpuTimer timer("  RR: RenderScale depths to full size");
+		GpuProfileScope gpu(timer, Device);
+		if (Up.DepthStencil && Up.CompositePS && Up.CompositeStates) {
+			IDirect3DSurface9* oldDepth = nullptr;
+			if (FAILED(Device->GetDepthStencilSurface(&oldDepth))) oldDepth = nullptr;
+			// the world's depth (TESR_DepthBufferWorld, the rect, jittered) upsampled into the depth-stencil (no colour: RR wrote the picture)
+			// as UpscaleRun's composite writes it, then resolved; then the weapon's (unjittered pixels), as UpscaleAfterEffects
+			if (UpscaleComposite(Device, nullptr, nullptr, false, true)) {
+				Device->SetDepthStencilSurface(Up.DepthStencil);
+				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
+				if (UpscaleComposite(Device, nullptr, TheTextureManager->DepthTextureViewModel, false, false)) {
+					Device->SetDepthStencilSurface(Up.DepthStencil);
+					TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
+				}
+			}
+			Device->SetDepthStencilSurface(oldDepth);
+			if (oldDepth) oldDepth->Release();
+		}
+	}
+	RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	// As after UpscaleRun: the frame counts as upscaled after the effects (TAA's resolve skips it; CapturedNormals does not merge into the
+	// normals redrawn from an upsampled depth; SmoothEffects skips it).
+	Up.Upscaled = true;
+	Up.AfterEffects = true;
+	Up.HistoryValid = false;	// DLSS SR / FSR's RenderScale history did not see this frame
+	Up.JitterIndex = (Up.JitterIndex + 1) % (std::max)(1, (int)Up.JitterPhases);
+	TheShaderManager->RenderDepthAndNormals(ChainTarget ? ChainTarget : Up.Target);
+	UpscaleFinish(true, true);
 }
 
 void TAAEffect::UpscaleFinish(bool ok, bool v2) {

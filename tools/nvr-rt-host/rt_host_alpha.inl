@@ -25,7 +25,27 @@ static AlphaFn chainLinkMip(int res) {
 	return [table, res](int x, int y) { return (*table)[std::min(std::max(y, 0), res - 1) * res + std::min(std::max(x, 0), res - 1)]; };
 }
 
-static bool sceneChainLink(Ctx& c) {
+// (2026-11-07, protocol 7) the real texture: the full 512 x 512 pattern as BGRA8 (alpha = the pattern), every mip (box filtered), packed
+static std::vector<uint8_t> chainLinkTexture(uint32_t& levels) {
+	std::vector<uint8_t> out;
+	std::vector<float> a(kChainRes * kChainRes);
+	for (int y = 0; y < kChainRes; y++) for (int x = 0; x < kChainRes; x++) a[y * kChainRes + x] = chainLinkFull(x, y);
+	int r = kChainRes;
+	levels = 0;
+	while (true) {
+		for (int i = 0; i < r * r; i++) { const uint8_t v = uint8_t(a[i] * 255.0f + 0.5f); out.push_back(200); out.push_back(180); out.push_back(160); out.push_back(v); }
+		levels++;
+		if (r == 1) break;
+		const int n = r / 2;
+		std::vector<float> b(n * n);
+		for (int y = 0; y < n; y++) for (int x = 0; x < n; x++)
+			b[y * n + x] = 0.25f * (a[(2 * y) * r + 2 * x] + a[(2 * y) * r + 2 * x + 1] + a[(2 * y + 1) * r + 2 * x] + a[(2 * y + 1) * r + 2 * x + 1]);
+		a.swap(b); r = n;
+	}
+	return out;
+}
+
+static bool sceneChainLink(Ctx& c, bool real = false) {
 	Host& h = *c.host;
 	const int slot = 40, tiles = 3;
 	World w;
@@ -39,6 +59,13 @@ static bool sceneChainLink(Ctx& c) {
 	// the GPU's atlas slot: the 64-texel mip (as RtAlphaToAtlas fills it); the CPU world: the full texture
 	const AlphaFn mip = chainLinkMip(kAlphaSlot);
 	if (!uploadSlot(h, c.alphaAtlas, slot, mip, kAlphaSlot)) return false;
+	const uint32_t realId = 7;
+	if (real) {	// (2026-11-07, protocol 7) the full texture over the real-textures path, the slot pointed at it (the atlas stays as the fallback)
+		uint32_t levels = 0;
+		const std::vector<uint8_t> tex = chainLinkTexture(levels);
+		if (!h.StageTexture(realId, 44 /* VK_FORMAT_B8G8R8A8_UNORM */, kChainRes, kChainRes, levels, tex)) return false;
+		h.SlotTextures(slot, realId, 0, 0);
+	}
 	World exact = w; exact.slots[slot] = [](int x, int y) { return chainLinkFull(x, y); }; exact.slotRes[slot] = kChainRes;
 	w.slots[slot] = mip; w.slotRes[slot] = kAlphaSlot;
 	std::vector<uint32_t> ids;
@@ -83,10 +110,14 @@ static bool sceneChainLink(Ctx& c) {
 	int recall = 0, exactShadow = 0;
 	for (UINT i = 0; i < S * S; i++) if (gpu[i] >= 0 && cpu[i] < 0.5f) { exactShadow++; recall += gpu[i] < 0.5f; }
 	const float recallShare = exactShadow ? float(recall) / exactShadow : 0;
-	const bool ok = both > 1000 && tiles8 > 50 && cShare > 0.01f && std::fabs(gShare - cShare) < 0.3f * cShare && rmse < 0.08f;
-	say("  chain-link (512 texels, 4-texel wires, 3 x 3 tiles; GPU slot = its %d-texel mip): %d floor pixels, agree %.1f %%, shadowed %.3f (exact %.3f), "
-		"exact shadow found %.1f %%, 8x8 tile RMSE %.3f over %d tiles%s\n", kAlphaSlot, both, both ? 100.0f * agree / both : 0.0f, gShare, cShare, 100.0f * recallShare, rmse, tiles8,
-		ok ? "" : "  <- the atlas loses the pattern");
+	// real texture (protocol 7): the full pattern itself, read filtered (bilinear, as the game's own alpha test reads it), against the exact
+	// answer's nearest texel: they differ only where filtering rounds the diagonal wires' texel steps (measured 2026-11-07: 99.5 % of the
+	// pixels agree, 94.3 % of the exact shadow found, tiles 0.020; the 64-texel atlas: 98.4 %, 80.8 %, 0.035). Pass: 99 %, 90 %, 0.025.
+	const bool ok = real ? both > 1000 && tiles8 > 50 && agree > 0.99f * both && recallShare > 0.9f && std::fabs(gShare - cShare) < 0.1f * cShare && rmse < 0.025f
+		: both > 1000 && tiles8 > 50 && cShare > 0.01f && std::fabs(gShare - cShare) < 0.3f * cShare && rmse < 0.08f;
+	say("  chain-link (512 texels, 4-texel wires, 3 x 3 tiles; GPU = %s): %d floor pixels, agree %.1f %%, shadowed %.3f (exact %.3f), "
+		"exact shadow found %.1f %%, 8x8 tile RMSE %.3f over %d tiles%s\n", real ? "the REAL 512 texture, protocol 7" : "its 64-texel atlas mip", both, both ? 100.0f * agree / both : 0.0f, gShare, cShare, 100.0f * recallShare, rmse, tiles8,
+		ok ? "" : real ? "  <- the real texture does not reach the rays" : "  <- the atlas loses the pattern");
 	if (!ok) { dumpPfm("chainlink_gpu", gpu, S, S, 1, 0); dumpPfm("chainlink_exact", cpu, S, S, 1, 0); }
 	releaseWorld(h, ids);
 	return ok;

@@ -94,6 +94,23 @@ namespace SessionLog {
 	};
 	// NVSEPlugin_Load, after OnPluginLoad: the CRASH lines from here on (the filter set before ours, a crash logger's, still runs)
 	void ArmCrashReport();
+
+	// UNOFFICIAL 2026-11-07 (perf-ptcost; the 11-07 tester log: game freezes of 9-55 s with no line saying why) the STALL watchdog. A thread
+	// wakes 5 times a second; when the render thread has not begun or ended a game frame (RenderHook) for over 1 s, in game, not on a loading
+	// screen, with the game window in front and not minimised, it writes STALL lines at 1, 4, 16 and 64 s, and "STALL over" when frames come
+	// again: where the render thread is (inside the frame or outside it: the game's update, Present, a pause), its stage stack (the StageScope
+	// names: "game frame > effects > <chain step> > ..."), what it runs (its instruction pointer's module + offset and the return addresses
+	// on its stack: d3d9.dll = the D3D9 runtime / DXVK, ntdll / KERNELBASE = a Windows wait or I/O, FalloutNV.exe = the game's code), the
+	// CPU it used meanwhile (near 0 = it waits; near 100 % = it computes), page faults (a paging stall), the 32-bit address space (used,
+	// largest free block) and system memory, and the extra state registered with SetExtra (RtCore: the RT helper's frames). The thread is
+	// suspended only for GetThreadContext and a copy of its stack (nothing that takes a lock). At most 40 stalls a session.
+	namespace StallWatch {
+		void RenderBegin();		// NewVegas/Hooks/Render.cpp RenderHook (FrameScope)
+		void RenderEnd();
+		struct FrameScope { FrameScope() { RenderBegin(); } ~FrameScope() { RenderEnd(); } FrameScope(const FrameScope&) = delete; FrameScope& operator=(const FrameScope&) = delete; };
+		void SetExtra(void (*text)(char* out, unsigned size));	// called on the watchdog thread: read only what is safe to read from there
+		void Stop();			// at exit (SessionLog::OnExit)
+	}
 	// xNVSE PostLoad and once in game: a crash handler set after ours goes under ours (when: for the log line)
 	void ReassertCrashReport(const char* when);
 	// A C++ exception's type as the compiler names it (".?AVtype_error@toml@@"), or "?"; safe on a broken record

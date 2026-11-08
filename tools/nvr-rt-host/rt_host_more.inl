@@ -26,7 +26,8 @@ static bool registerMore(Host& h, const std::string& spv, const std::string& com
 	gM.aoGi = h.AddImage("ao gi", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.aoLight = h.AddImage("ao frame light", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.albedoAtlas = h.AddImage("albedo atlas", 2048, 2048, NVR_EXT_SHARED_RGBA8);
-	gM.ptLamps = h.AddImage("pt lamps", kLightTexels, 2 + kGridRows, NVR_EXT_SHARED_RG32F);   // (2026-11-07: + the frame row)
+	gM.ptLamps = h.AddImage("pt lamps", kLightTexels, 3 + kGridRows, NVR_EXT_SHARED_RG32F);   // (2026-11-07: + the frame row, + the emissive row)
+	gPtCostImage = gM.ptLamps;   // (2026-11-07 perf-ptcost) NVR_RT_HOST_PTCOST patches its frame row
 	gM.ptAlbedoOut = h.AddImage("pt first albedo", S, S, NVR_EXT_SHARED_RGBA16F);
 	gM.giResult = h.AddImage("pt gi result", S, S, NVR_EXT_SHARED_RGBA16F);
 	for (int i = 0; i < 2; i++) {
@@ -58,6 +59,7 @@ static float fract(float x) { return x - std::floor(x); }
 struct SunConstants {         // RtSunShadows.cpp PassConstants
 	float size[4], forward[4], right[4], up[4], origin[4], sun[4], bias[4], range[4], alpha[4], full[4];
 	float cloud[4], cloudCentre[4], cloudLight[4], camera[4];
+	float slack[4], contact[4], contactGate[4];   // (2026-11-07 rtgap-tess) RtTessContact.h
 };
 
 static bool sceneSun(Ctx& c) {
@@ -342,7 +344,7 @@ static bool scenePathTextures(Ctx& c) {
 	std::vector<V3> lampPos; std::vector<float> reach;
 	for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) { lampPos.push_back({ -1400 + x * 400.0f, -1400 + y * 400.0f, 150.0f + 10.0f * ((x + y) % 3) }); reach.push_back(520.0f + 15.0f * ((x * 3 + y) % 5)); }
 	const int lamps = int(lampPos.size());
-	std::vector<float> image(size_t(kLightTexels) * (2 + kGridRows) * 2, 0.0f);
+	std::vector<float> image(size_t(kLightTexels) * (3 + kGridRows) * 2, 0.0f);
 	std::vector<float> scene(size_t(lamps) * 8);
 	for (int i = 0; i < lamps; i++) {
 		const V3 q = lampPos[i] - cam.eye;
@@ -952,10 +954,15 @@ static bool sceneLampLookup(Ctx& c) {
 			}
 			if (pass == 1 && !many) break;
 			if (!fillTex(pos, posB, 4) || !fillTex(slots, slotB, 1)) return false;
+			// (2026-11-07) twice: as before (c215.w 0: no edge search), then with the edge search (c215.w = 1 / the result's width, as
+			// RtLampShadows sets it): silhouette pixels whose own texel holds the other side of the edge take a neighbour with their depth.
+			// It must answer more pixels, leave fewer "another depth" ones, and never answer wrong.
+			int edgesWithout = -1;
+			for (int search = 0; search < 2; search++) {
 			// the lookup's constants, as PointShadowForward::Bind sets them (RT_ONLY: the reprojection at c200)
 			const V3 pe = camA.eye - camB.eye, ax = camA.r * camA.p00, ay = camA.u * camA.p11, aw = camA.f;
 			const float reproject[16] = { ax.x, ay.x, 0, aw.x, ax.y, ay.y, 0, aw.y, ax.z, ay.z, 0, aw.z, -dot(ax, pe), -dot(ay, pe), 0, -dot(aw, pe) };
-			const float rt[4] = { 1.0f, 0.02f, std::log2(camA.farZ) / 4095.0f, 0.0f };
+			const float rt[4] = { 1.0f, 0.02f, std::log2(camA.farZ) / 4095.0f, search ? 1.0f / S : 0.0f };
 			const float slotsC[8] = { -1, -1, -1, -1, -1, -1, -1, many ? 1.0f / 4096.0f : 1.0f / 1024.0f };
 			const float size[4] = { float(S), float(S), 1.0f / S, 1.0f / S };
 			h.dev->SetVertexShader(vsObj); h.dev->SetPixelShader(psObj);
@@ -982,7 +989,7 @@ static bool sceneLampLookup(Ctx& c) {
 			std::vector<float> got;
 			if (!readTex(h, out, got, 1)) return false;
 			// the CPU: where does B's point land in A, and what did A's trace hold for that lamp there
-			int answered = 0, checked = 0, bad = 0, notTraced = 0, off = 0, shown = 0, restAnswers = 0;
+			int answered = 0, checked = 0, bad = 0, notTraced = 0, off = 0, shown = 0, restAnswers = 0, edges = 0;
 			for (UINT p = 0; p < S * S; p++) {
 				const Want& wt = want[p];
 				if (!wt.valid || !wt.stable) continue;
@@ -1006,14 +1013,18 @@ static bool sceneLampLookup(Ctx& c) {
 					if (e.stable) for (int a = 0; a < (many ? 2 : 3); a++) if (e.slot[a] == wt.lamp) ok1 = false;
 				} else if (g <= -2.0f && g >= -3.0f) {
 					ok1 = true;   // another depth there in A (an edge the B point is hidden behind in A): allowed, counted below
+					edges++;
 				} else ok1 = false;
 				if (!ok1) { bad++; if (shown++ < 5) say("    %s pixel %u: lookup %.4f for lamp %d, expected lit %.0f (in A at %.3f %.3f)\n", many ? "ManyLights" : "48 lamps", p, g, wt.lamp, wt.lit, ua, va); }
 			}
-			const bool pass1 = bad == 0 && (pass == 1 ? restAnswers > checked / 2 : answered > checked / 2);
-			say("  lamp lookup (PointShadowTraced, %s, %s): %d pixels of B checked, %d answered from A's trace, %d not traced there, %d off A's screen, %d wrong -> %s\n",
-				many ? "ManyLights" : "RtLampTrace 48 lamps", pass == 0 ? "each pixel's strongest lamp" : "a lamp outside the top two (R)", checked, answered, notTraced, off, bad,
-				pass1 ? "ok" : "BAD");
+			const bool fewerEdges = !search || edgesWithout < 0 || edges <= edgesWithout;
+			const bool pass1 = bad == 0 && fewerEdges && (pass == 1 ? restAnswers > checked / 2 : answered > checked / 2);
+			say("  lamp lookup (PointShadowTraced, %s, %s, %s): %d pixels of B checked, %d answered from A's trace, %d not traced there, %d off A's screen, %d another depth, %d wrong -> %s\n",
+				many ? "ManyLights" : "RtLampTrace 48 lamps", pass == 0 ? "each pixel's strongest lamp" : "a lamp outside the top two (R)",
+				search ? "edge search on" : "no edge search", checked, answered, notTraced, off, edges, bad, pass1 ? "ok" : "BAD");
 			if (!pass1) { ok = false; dumpPfm(many ? "lookup_many" : "lookup_lamps", got, S, S, 1); }
+			if (!search) edgesWithout = edges;
+			}
 		}
 		releaseWorld(h, ids);
 	}
@@ -1048,7 +1059,18 @@ static bool sceneScenePick(Ctx&) {
 	{ RtScenePick::Geometry t = g; t.speedTreeLeaf = true; t.land = true; t.lightingProperty = false; expectFate("leaf as land", t, on, NotLighting, false); }
 	{ RtScenePick::Geometry t = g; t.hasShaderProperty = false; expectFate("no shader property", t, on, NotLighting, false); }
 	{ RtScenePick::Geometry t = g; t.lightingProperty = false; expectFate("not lighting", t, on, NotLighting, false); }
-	{ RtScenePick::Geometry t = g; t.decalOrRefraction = true; expectFate("decal", t, on, DecalOrRefraction, false); }
+	// (2026-11-07 rtgap-decals) refraction stays out; decals go in alpha-tested with Decals + AlphaTested on, whatever their alpha property
+	{ RtScenePick::Geometry t = g; t.refraction = true; expectFate("refraction", t, on, DecalOrRefraction, false); }
+	{ Switches d = on; d.decals = true;
+	  { RtScenePick::Geometry t = g; t.refraction = true; t.decal = true; expectFate("refraction + decal", t, d, DecalOrRefraction, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; expectFate("decal, Decals off", t, on, DecalOrRefraction, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; Switches o = off; o.decals = true; expectFate("decal, AlphaTested off", t, o, DecalOrRefraction, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; expectFate("decal (no alpha property)", t, d, Taken, true); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.hasAlphaProperty = true; t.alphaFlags = kAlphaBlend; expectFate("decal, blended only", t, d, Taken, true); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest; expectFate("decal, alpha-tested", t, d, Taken, true); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.lightingProperty = false; expectFate("decal, not lighting", t, d, NotLighting, false); }
+	  { RtScenePick::Geometry t = g; t.decal = true; t.skinned = true; expectFate("decal, skinned", t, d, Skinned, false); }
+	  { RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaBlend; expectFate("blended glass, Decals on", t, d, BlendedOnly, false); } }
 	{ RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaBlend; expectFate("blended glass", t, on, BlendedOnly, false); }
 	{ RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest; expectFate("cut-out, AlphaTested on", t, on, Taken, true); }
 	{ RtScenePick::Geometry t = g; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest | kAlphaBlend; expectFate("cut-out + blend", t, on, Taken, true); }
@@ -1068,6 +1090,33 @@ static bool sceneScenePick(Ctx&) {
 	  expectU("compact alpha op", OpFlags(r), NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA | NVR_RT_OP_FLAG_COMPACT); }
 	{ Record r; r.albedoKnown = true; r.glowMap = true; r.land = true; expectU("plain record", RecordFlags(r), NVR_RT_RECORD_LAND | NVR_RT_RECORD_ALBEDO_KNOWN | NVR_RT_RECORD_GLOW);
 	  r.materialRule = true; r.rough = 1; r.metal = 1; r.normalMap = true; expectU("rule + normal ignored without texcoords", RecordFlags(r), NVR_RT_RECORD_LAND | NVR_RT_RECORD_ALBEDO_KNOWN | NVR_RT_RECORD_GLOW); }
+	// (2026-11-07 rtgap-decals) a decal's record, mask, custom index, alpha reference, normal and lift
+	{ Record r; r.decal = true; r.alphaTested = true; r.slot = 7; r.alphaRef = 128; r.hookMask = 0x0C;
+	  expectU("decal mask (alpha, over the hook)", InstanceMask(r), NVR_RT_MASK_ALPHA);
+	  expectU("decal custom index", CustomIndex(r), NVR_RT_CUSTOM_DECAL);
+	  expectU("decal record (alpha-tested, ref 128, slot 7)", RecordFlags(r), NVR_RT_RECORD_ALPHA_TESTED | (128u << 8) | (7u << 16));
+	  expectU("decal op", OpFlags(r), NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA);
+	  Record l; l.land = true; l.hidden = true; expectU("land + hidden custom index", CustomIndex(l), NVR_RT_CUSTOM_LAND | NVR_RT_CUSTOM_HIDDEN);
+	  expectU("custom index bits distinct", NVR_RT_CUSTOM_DECAL & (NVR_RT_CUSTOM_LAND | NVR_RT_CUSTOM_HIDDEN), 0u);
+	  expectU("decal ref: alpha test", DecalAlphaRef(true, kAlphaTest | kAlphaBlend, 0x1A0), 0xA0);
+	  expectU("decal ref: blended only", DecalAlphaRef(true, kAlphaBlend, 77), 128);
+	  expectU("decal ref: alpha property, neither bit", DecalAlphaRef(true, 0x00EC, 77), 0);
+	  expectU("decal ref: no alpha property", DecalAlphaRef(false, 0, 77), 0); }
+	{ const float up[12] = { 0, 0, 1, 0, 0.2f, 0.98f, 0, -0.2f, 0.98f, 0, 0, 1 };
+	  float n[3] = {};
+	  cases++; if (!AverageNormal(up, 4, n) || std::fabs(n[2] - 1.0f) > 1e-3f || std::fabs(n[0]) > 1e-6f || std::fabs(n[1]) > 1e-6f) { bad++; say("    average normal: %f %f %f\n", n[0], n[1], n[2]); }
+	  const float cancel[6] = { 0, 0, 1, 0, 0, -1 };
+	  cases++; if (AverageNormal(cancel, 2, n)) { bad++; say("    average normal of a cancelling pair: should be none\n"); }
+	  cases++; if (AverageNormal(nullptr, 0, n)) { bad++; say("    average normal of nothing: should be none\n"); }
+	  // a decal model lying in its own xy plane (normal +z), turned 90 degrees about x (+z -> -y) and scaled 3, at (10, 20, 30): lifted 0.5
+	  // along -y exactly (the scale does not lengthen the lift)
+	  float t[3][4] = { { 3, 0, 0, 10 }, { 0, 0, -3, 20 }, { 0, 3, 0, 30 } };
+	  const float mz[3] = { 0, 0, 1 };
+	  cases++;
+	  if (!DecalLift(t, mz, kDecalLift) || std::fabs(t[0][3] - 10.0f) > 1e-5f || std::fabs(t[1][3] - 19.5f) > 1e-5f || std::fabs(t[2][3] - 30.0f) > 1e-5f ||
+	      t[0][0] != 3 || t[1][2] != -3 || t[2][1] != 3) { bad++; say("    decal lift: translation %f %f %f\n", t[0][3], t[1][3], t[2][3]); }
+	  float z[3][4] = {}; const float zn[3] = { 0, 0, 1 };
+	  cases++; if (DecalLift(z, zn, kDecalLift)) { bad++; say("    decal lift with a zero transform: should refuse\n"); } }
 	// every slot x refs x rules: each field reads back as the shaders read it, nothing spills
 	int packBad = 0, packed = 0;
 	for (int slot = 0; slot < 1024; slot++) for (int kind = 0; kind < 2; kind++) for (int ref = 0; ref < 256; ref += kind ? 255 : 51) for (int rule = 0; rule < 9; rule++) {

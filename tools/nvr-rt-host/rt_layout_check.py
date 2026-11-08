@@ -26,11 +26,18 @@ PAIRS = [
     (("src/core/RtLampShadows.h", "PrimaryConstants"), [RT + "RtLampPrimary.comp"]),   # 2026-11-07 SameFrame
     (("src/core/RtPathTrace.cpp", "PassConstants"), [RT + "RtPathTrace.comp"]),
     (("src/core/RtPathTrace.cpp", "RestirConstants"), [RT + "RtRestirGI.comp"]),
+    (("src/core/RtPathTrace.cpp", "EmissiveConstants"), [RT + "RtEmissiveBuild.comp"]),   # 2026-11-07 ptaaa-emissive
     (("src/core/RtSunShadows.cpp", "PassConstants"), [RT + "RtSunShadow.comp"]),
+    (("src/core/RtFogGrid.h", "PassConstants"), [RT + "RtFogVisibility.comp"]),   # 2026-11-07 ptaaa-fog (the game and the host fill it)
     (("src/effects/Reflections/Reflections.cpp", "RtPassConstants"), [RT + "ReflectionsRTBody.glsl"]),
     # (2026-11-07) the game's own fork passes: RT reflections' RayGen / Resolve block, and the RT reflection denoiser's push block
     (("src/effects/Reflections/Reflections.cpp", "ReflRtUniforms"), ["src/hlsl/NewVegas/Compute/ReflectionsRT.glsl"]),
     (("src/core/RtReflDenoise.h", "Push"), ["src/hlsl/NewVegas/Compute/RtReflDenoise.glsl"]),
+    # (2026-11-07 ptaaa-denoiser) the shared RT denoiser's push blocks (RtDenoise.cpp; the path tracer's denoiser)
+    (("src/core/RtDenoise.cpp", "TemporalPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseTemporal.frag", "src/hlsl/NewVegas/Compute/RtDenoiseTemporalRgb.frag"]),
+    (("src/core/RtDenoise.cpp", "SpecPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseTemporalSpec.frag"]),
+    (("src/core/RtDenoise.cpp", "AtrousPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseAtrous.frag", "src/hlsl/NewVegas/Compute/RtDenoiseAtrousRgb.frag"]),
+    (("src/core/RtDenoise.cpp", "FireflyPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseFirefly.frag"]),
 ]
 # the host's mirrors -> the game's structs
 MIRRORS = [
@@ -38,6 +45,17 @@ MIRRORS = [
     (("tools/nvr-rt-host/rt_host_sameframe.inl", "PrimaryConstantsHost"), ("src/core/RtLampShadows.h", "PrimaryConstants")),
     (("tools/nvr-rt-host/rt_host.cpp", "PathConstants"), ("src/core/RtPathTrace.cpp", "PassConstants")),
     (("tools/nvr-rt-host/rt_host.cpp", "ReflConstants"), ("src/effects/Reflections/Reflections.cpp", "RtPassConstants")),
+    (("tools/nvr-rt-host/rt_host_more.inl", "SunConstants"), ("src/core/RtSunShadows.cpp", "PassConstants")),   # 2026-11-07 rtgap-tess
+    (("tools/nvr-rt-host/rt_host_ptsplit.inl", "DnTemporalPush"), ("src/core/RtDenoise.cpp", "TemporalPush")),   # 2026-11-07 ptaaa-denoiser
+    (("tools/nvr-rt-host/rt_host_ptsplit.inl", "DnSpecPush"), ("src/core/RtDenoise.cpp", "SpecPush")),
+    (("tools/nvr-rt-host/rt_host_ptsplit.inl", "DnAtrousPush"), ("src/core/RtDenoise.cpp", "AtrousPush")),
+    # (2026-11-07 ptaaa-playground) the RT playground's copies (tools/nvr-rt-playground/playground.cpp)
+    (("tools/nvr-rt-playground/playground.cpp", "PathConstants"), ("src/core/RtPathTrace.cpp", "PassConstants")),
+    (("tools/nvr-rt-playground/playground.cpp", "SunConstants"), ("src/core/RtSunShadows.cpp", "PassConstants")),
+    (("tools/nvr-rt-playground/playground.cpp", "TemporalPush"), ("src/core/RtDenoise.cpp", "TemporalPush")),
+    (("tools/nvr-rt-playground/playground.cpp", "SpecPush"), ("src/core/RtDenoise.cpp", "SpecPush")),
+    (("tools/nvr-rt-playground/playground.cpp", "AtrousPush"), ("src/core/RtDenoise.cpp", "AtrousPush")),
+    (("tools/nvr-rt-playground/playground.cpp", "FireflyPush"), ("src/core/RtDenoise.cpp", "FireflyPush")),
 ]
 
 
@@ -70,8 +88,14 @@ def cpp_layout(path, name):
         decl = decl.strip()
         if not decl:
             continue
-        t = re.match(r"(float|D3DXVECTOR4|uint32_t)\s+(.*)$", decl, re.S)
-        if t and t.group(1) == "uint32_t":   # (2026-11-07) 4-byte scalars (a push block's sampler indices)
+        t = re.match(r"(float|D3DXVECTOR4|uint32_t|UInt32)\s+(.*)$", decl, re.S)
+        if t and t.group(1) in ("uint32_t", "UInt32"):   # (2026-11-07) 4-byte scalars (a push block's sampler indices)
+            for d in t.group(2).split(","):
+                members.append((d.strip(), offset, 4))
+                offset += 4
+            continue
+        # (2026-11-07 ptaaa-denoiser) scalar floats (push blocks: std430, no padding before them)
+        if t and t.group(1) == "float" and all(re.match(r"^\w+$", d.strip()) for d in t.group(2).split(",")):
             for d in t.group(2).split(","):
                 members.append((d.strip(), offset, 4))
                 offset += 4
@@ -112,6 +136,17 @@ def glsl_layout(path):
     for decl in body_after(text, blocks[0].start()).split(";"):
         decl = decl.strip()
         if not decl:
+            continue
+        ua = re.match(r"uint\s+(\w+)\s*\[\s*(\d+)\s*\]$", decl)   # (2026-11-07 ptaaa-denoiser) uint pad[3]
+        if ua:
+            members.append((ua.group(1), offset, 4 * int(ua.group(2))))
+            offset += 4 * int(ua.group(2))
+            continue
+        fs = re.match(r"float\s+([\w\s,]+)$", decl)   # (2026-11-07 ptaaa-denoiser) scalar floats in push blocks
+        if fs:
+            for n in fs.group(1).split(","):
+                members.append((n.strip(), offset, 4))
+                offset += 4
             continue
         u = re.match(r"uint\s+([\w\s,]+)$", decl)
         if u:

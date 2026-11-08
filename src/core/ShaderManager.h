@@ -199,6 +199,7 @@ public:
 	void					PostStep_Cinema(ChainContext& ctx);
 	void					PostStep_ImageAdjust(ChainContext& ctx);
 	void					PostStep_Bodycam(ChainContext& ctx);
+	void					PostStep_Dream(ChainContext& ctx);
 	void					PostStep_SkyDither(ChainContext& ctx);
 	void					PostStep_SunDepthFitView(ChainContext& ctx);
 	void					PostStep_RtSunDebug(ChainContext& ctx);
@@ -255,6 +256,7 @@ public:
 		WetnessReflectionsEffect*	WetnessReflections;	// UNOFFICIAL 2026-11-04 Wetness Effects: screen-space reflections on what is wet
 		HudRaindropsEffect*		HudRaindrops;	// UNOFFICIAL 2026-11-04 Wetness Effects: rain drops on the first-person arms and weapon (and AllObjects)
 		BodycamEffect*			Bodycam;			// UNOFFICIAL, testbed: police body-camera look
+		DreamEffect*			Dream;				// "fun" trip look (from the author's DreamSim), off by default
 		SkyDitherEffect*		SkyDither;			// UNOFFICIAL: breaks up the sky's banding before the 8-bit screen
 		VolumetricCloudsEffect*	VolumetricClouds;	// UNOFFICIAL: 3D clouds in place of the game's cloud layers
 		BloodFlowEffect*		BloodFlow;	// UNOFFICIAL: blood that runs and dries, pools under bodies

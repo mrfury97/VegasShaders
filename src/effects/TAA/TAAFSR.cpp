@@ -28,6 +28,8 @@
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion: FSR's motion vectors for what moved itself
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (no RR in rect frames)
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) RR's guides from the path tracer
+#include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) RR at RenderScale < 1: sizes, jitter, the composite's rect mapping
 
 namespace {
 	// Constants of FSRPrep.comp (std140).
@@ -51,7 +53,8 @@ namespace {
 	const NVR_EXT_BINDING_DESC CompositeBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), IMG(4), POINTS };
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction: DlssRRGuides.comp (colour, normals, depth, material; the five guides; the constants)
 	// and DlssRRComposite.frag (RR's output, the frame before RR, the weapon's depth). Same conventions as above.
-	const NVR_EXT_BINDING_DESC RRGuidesBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), UAV(4), UAV(5), UAV(6), UAV(7), UAV(8), CB(2, 0), POINTS, IMG(9) };	// IMG(9): UNOFFICIAL 2026-10-31 TESR_AlbedoBuffer (RRAlbedo 2)
+	const NVR_EXT_BINDING_DESC RRGuidesBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), UAV(4), UAV(5), UAV(6), UAV(7), UAV(8), CB(2, 0), POINTS, IMG(9),
+		IMG(10), IMG(11), IMG(12) };	// IMG(9): UNOFFICIAL 2026-10-31 TESR_AlbedoBuffer (RRAlbedo 2); IMG(10-12): 2026-11-07 (ptaaa-denoiser) the path tracer's albedos
 	const NVR_EXT_BINDING_DESC RRCompositeBindings[] = { IMG(0), IMG(1), IMG(2), POINTS };
 #undef IMG
 #undef UAV
@@ -306,11 +309,20 @@ bool TAAEffect::RRFrameChecks(bool frameStart) {
 	};
 	if (rrFailed) return false;	// (logged when it happened)
 	if (!FSRSettings.Enabled || FSRSettings.Upscaler != 1) return no(1, "DLSS is not the upscaler: no Ray Reconstruction");
-	if (FSRSettings.RenderScale < 0.999f)
-		return no(2, "DLSS Ray Reconstruction runs at RenderScale 1 only for now (the RT effects do not run in rect frames); DLSS SR upscales this session's frames");
+	// (2026-11-07 perf-rr) RenderScale < 1: RR runs in RenderScale v2's rect frames (the effects drawn small, the upscale after them): it
+	// denoises the render rect and upscales it to the screen in one step, in place of DLSS SR's upscale. Was: RenderScale 1 only (reason 2).
+	// A frame upscaled BEFORE the effects (v1: [Shaders.TAA.FSR] EffectsAfterUpscale, or v2 off for the session after frames dropped) has
+	// had DLSS SR already: RR would run on an upscaled picture, so it goes without RR (DLSS SR's frame, as before).
+	if (Up.Upscaled)
+		return no(2, "this RenderScale frame was upscaled before the effects (v1: [Shaders.TAA.FSR] EffectsAfterUpscale on, or RenderScale v2 off for the session): no Ray Reconstruction (DLSS SR upscaled it)");
 	if (!Enabled || !Effect || !ShouldRender()) return no(4, "TAA is off ([Shaders.TAA.Status] Enabled): DLSS and its Ray Reconstruction need it");
-	if (RenderRect::Active() || Up.Deferred || Up.Upscaled) return no(8, "a RenderScale frame: no Ray Reconstruction in it");
-	if (!DxvkCompute::PassesOn() || DxvkCompute::KeptOnD3D9(Name))
+	const bool rect = RenderRect::Active();
+	if (rect != Up.Deferred) return no(8, "a RenderScale frame whose rect is not the effects' (RenderRect and the deferred upscale disagree): no Ray Reconstruction in it");
+	// Every RR pass goes through the extension itself (RRDispatch, ExtDrawTo), drawing / writing what it is given: in a rect frame the
+	// render rect (one thread per render pixel) and the whole screen (the composite). DxvkCompute::PassesOn is false in rect frames (the
+	// whole-target passes of the effects), so it is not asked there: the setting and the fork are.
+	const bool passesOn = rect ? (TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available()) : DxvkCompute::PassesOn();
+	if (!passesOn || DxvkCompute::KeptOnD3D9(Name))
 		return no(16, "the Vegas Shaders DXVK fork's Vulkan passes are off ([Main.Main.Performance] NvrDxvkPasses, or TAA in NvrDxvkKeepD3D9): no Ray Reconstruction");
 	if (!TheSettingManager->SettingsMain.Main.RenderPreTonemapping)
 		return no(32, "[Main.Main.Main] RenderPreTonemapping is off (the effects run after the tonemap): no Ray Reconstruction");
@@ -320,9 +332,33 @@ bool TAAEffect::RRFrameChecks(bool frameStart) {
 	const bool chainOn = frameStart ? !TheSettingManager->SettingsMain.Main.DisableFrameChain : TheShaderManager->Chain.IsActive();
 	if (!chainOn) return no(128, "the frame chain is off ([Main.Main.Performance] FrameChain): no Ray Reconstruction");
 	if (fsrFailed) return no(256, "TAA's FSR / DLSS path is off for this session (see above): no Ray Reconstruction");
-	if (!Upscaler::RayReconstructionReady())
+	const bool ready = Upscaler::RayReconstructionReady();
+	if (frameStart) RRLogPlan(rect, ready);	// (perf-rr) the planned sizes, also where the helper cannot run RR (a log dry run)
+	if (!ready)
 		return no(512, "the DLSS helper cannot evaluate Ray Reconstruction (yet: starting, or no RR on this card / no nvngx_dlssd.dll: the DLSS lines say why); DLSS SR meanwhile");
 	return true;
+}
+
+// UNOFFICIAL 2026-11-07 (perf-rr) one line with this frame's RR plan (core/RrRectPlan.h: what RayReconstruct sends), logged whenever it changes
+// (at most 24 a session): the sizes, the jitter steps, the motion scale, the dispatch, the helper's subrect and whether the helper can run RR.
+// On a card without RR (or before the helper is up) this is the dry run: the frame goes to DLSS SR, the line says what RR would have got.
+void TAAEffect::RRLogPlan(bool rect, bool ready) {
+	const UINT screenW = TheRenderManager->width, screenH = TheRenderManager->height;
+	const RrRect::Plan plan = RrRect::Make(rect, screenW, screenH, Up.RenderWidth, Up.RenderHeight, Up.Jittered, Up.JitterX, Up.JitterY, Up.JitterPhases,
+		frameJittered, frameJitterX, frameJitterY, (float)JitterSequenceLength);
+	const char* problem = RrRect::Problem(plan);
+	char line[640];
+	sprintf_s(line, "UNOFFICIAL DLSS RR plan: %s, render %ux%u -> output %ux%u (%.0f%% of the pixels; RenderScale %.2f), inputs %ux%u (the render rect at 0, 0 = "
+		"the helper's subrect), jitter %s over %.0f steps, motion x %.0f / %.0f (render pixels), guides + prep %ux%u groups, composite %s; the helper %s%s%s",
+		rect ? "RenderScale rect frame (RR denoises AND upscales; DLSS SR's upscale step is skipped in its frames)" : "native frame (RR denoises; no upscale)",
+		plan.renderW, plan.renderH, plan.displayW, plan.displayH, 100.0 * plan.renderW * plan.renderH / ((double)plan.displayW * plan.displayH), FSRSettings.RenderScale,
+		plan.inputW, plan.inputH, rect ? "RenderScale's (Halton, render pixels)" : "TAA's (Halton)", plan.jitterPhases, plan.mvScaleX, plan.mvScaleY, plan.groupsX, plan.groupsY,
+		rect ? "reads the rect at pixel x scale" : "pixel for pixel", ready ? "runs RR" : "cannot run RR here (dry run: DLSS SR takes these frames)",
+		problem ? "; PROBLEM: " : "", problem ? problem : "");
+	if (rrPlanLogged == line || rrPlanLogs >= 24) return;
+	rrPlanLogged = line;
+	rrPlanLogs++;
+	Logger::Log("%s", line);
 }
 
 bool TAAEffect::RayReconstructionPlanned() {
@@ -380,7 +416,8 @@ bool TAAEffect::RRPipelines() {
 		rrGuides = DxvkCompute::CreatePipeline("DlssRRGuides", RRGuidesBindings, _countof(RRGuidesBindings), 4, true);
 		if (!rrGuides) return fail("its compute pipeline could not be made (Compute\\DlssRRGuides.spv refused)");
 		rrComposite.Tried = true;
-		rrComposite.Pipeline = DxvkCompute::CreateGraphicsPipeline("DlssRRComposite", RRCompositeBindings, _countof(RRCompositeBindings), 16, true, 1, NVR_EXT_BLEND_NONE, false);
+		// (2026-11-07 perf-rr: push block 32 bytes, + the rect mapping)
+		rrComposite.Pipeline = DxvkCompute::CreateGraphicsPipeline("DlssRRComposite", RRCompositeBindings, _countof(RRCompositeBindings), 32, true, 1, NVR_EXT_BLEND_NONE, false);
 		if (!rrComposite.Pipeline) return fail("its composite pass could not be made (Compute\\DlssRRComposite.spv)");
 	}
 	return rrGuides && rrComposite.Pipeline;
@@ -447,6 +484,22 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	if (!projection || !view || !cameraData || !color || !depth || !normals || !viewModel || !point) return fail("an input is missing");
 
 	const int width = rrWidth, height = rrHeight;
+	// UNOFFICIAL 2026-11-07 (perf-rr) a RenderScale v2 rect frame: everything before this point drew the top-left render rect of the screen-size
+	// targets; FSRPrep and DlssRRGuides run one thread per render pixel (they read and write that rect: texelFetch at the pixel, the view ray's
+	// uv over the render size), DLSS-D gets render size -> screen size on RenderScale's jitter, and the composite fills the whole screen. A
+	// native frame: render = screen, TAA's jitter, as before. (core/RrRectPlan.h; RRFrameChecks made sure rect == Up.Deferred.)
+	const bool rect = RenderRect::Active() && Up.Deferred;
+	const RrRect::Plan plan = RrRect::Make(rect, (unsigned)width, (unsigned)height, Up.RenderWidth, Up.RenderHeight, Up.Jittered, Up.JitterX, Up.JitterY,
+		Up.JitterPhases, frameJittered, frameJitterX, frameJitterY, (float)JitterSequenceLength);
+	if (const char* problem = RrRect::Problem(plan)) {
+		rrHistoryValid = false;
+		static bool logged = false;
+		if (!logged) Logger::Log("UNOFFICIAL DLSS RR: a frame left to DLSS SR: %s (render %ux%u, inputs %ux%u, output %ux%u; logged once)", problem, plan.renderW, plan.renderH,
+			plan.inputW, plan.inputH, plan.displayW, plan.displayH);
+		logged = true;
+		return false;
+	}
+	const UINT rw = plan.renderW, rh = plan.renderH;
 	const D3DXMATRIX& proj = *(const D3DXMATRIX*)projection;	// TheRenderManager->projMatrix: unjittered here (the image-space hook rebuilt the camera)
 	const D3DXMATRIX& viewMatrix = *(const D3DXMATRIX*)view;	// TheRenderManager->viewMatrix
 	const float nearZ = cameraData->x, farZ = cameraData->y;
@@ -478,7 +531,9 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	QueryPerformanceFrequency(&frequency);
 	const float deltaTime = rrLastTime.QuadPart ? (float)(now.QuadPart - rrLastTime.QuadPart) / (float)frequency.QuadPart : 0.0f;
 	rrLastTime = now;
-	const bool reset = !rrHistoryValid || TheShaderManager->GameState.isCameraCut || width != rrLastWidth || height != rrLastHeight || deltaTime > 0.5f;
+	// (perf-rr: + the render size, which changes with RenderScale and between rect and native frames)
+	const bool reset = !rrHistoryValid || TheShaderManager->GameState.isCameraCut || width != rrLastWidth || height != rrLastHeight || rw != rrLastRenderWidth ||
+		rh != rrLastRenderHeight || deltaTime > 0.5f;
 	if (reset) SessionLog::HistoryReset("DLSS Ray Reconstruction", !rrHistoryValid ? "no history" : TheShaderManager->GameState.isCameraCut ? "camera cut" :
 		deltaTime > 0.5f ? "frame gap over 0.5 s" : "size");	// UNOFFICIAL 2026-11-01
 	if (reset) {
@@ -500,7 +555,8 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	const D3DXVECTOR4 delta = TheRenderManager->CameraPosition - rrPrevCameraPosition;
 	const bool objectMotion = ObjectMotion::Ready();	// cameraDelta.w = FSRPrep.comp's switch for t_objmotion
 	prep.cameraDelta = D3DXVECTOR4(delta.x, delta.y, delta.z, objectMotion ? 1.0f : 0.0f);
-	prep.size = D3DXVECTOR4((float)width, (float)height, reset ? 1.0f : 0.0f, FSRSettings.WeaponReactive);
+	// (perf-rr) the render size: in a rect frame the rect of the screen-size depth / weapon depth, motion in uv of the render picture
+	prep.size = D3DXVECTOR4((float)rw, (float)rh, reset ? 1.0f : 0.0f, FSRSettings.WeaponReactive);
 	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(rrPrepUniforms, &prep, sizeof(prep));
 	if (!prepBuffer) return fail("its constant buffers could not be written");
 	{
@@ -508,7 +564,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 			Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, prepBuffer), Sampler(0, point), Image(4, objectMotion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth) };
 		static GpuTimer prepTimer("  RR prep (FSRPrep)");
 		GpuProfileScope gpuPrep(prepTimer, Device);
-		if (!RRDispatch(fsrPrep, b, _countof(b), (width + 7) / 8, (height + 7) / 8)) return fail("FSRPrep failed to dispatch");
+		if (!RRDispatch(fsrPrep, b, _countof(b), plan.groupsX, plan.groupsY)) return fail("FSRPrep failed to dispatch");
 	}
 
 	// 2. The linear picture and the guides.
@@ -517,30 +573,49 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	guides.up = D3DXVECTOR4(viewMatrix._12, viewMatrix._22, viewMatrix._32, 0.0f);
 	guides.forward = D3DXVECTOR4(viewMatrix._13, viewMatrix._23, viewMatrix._33, 0.0f);
 	guides.view = D3DXVECTOR4(1.0f / proj._11, 1.0f / proj._22, linearization, RRSettings.Roughness);
-	guides.options = D3DXVECTOR4(albedoOn ? 2.0f : RRSettings.Albedo >= 1 ? 1.0f : 0.0f, RRSettings.Normals == 1 ? 1.0f : 0.0f, materialOn ? 1.0f : 0.0f, 0.0f);	// x 2: the albedo buffer (2026-10-31)
-	guides.size = D3DXVECTOR4((float)width, (float)height, 0.0f, 0.0f);
+	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) the path traced picture is the scene (PTRealtime): RR's albedos and roughness are the path
+	// tracer's own (what it divided its light by), w 1 diffuse only, 2 + specular and roughness (PTDenoiseSplit)
+	IDirect3DTexture9 *ptAlbedo = nullptr, *ptSpecRG = nullptr, *ptSpecB = nullptr;
+	const bool ptGuides = RtPathTrace::RrGuides(&ptAlbedo, &ptSpecRG, &ptSpecB);
+	const float ptMode = ptGuides ? (ptSpecRG && ptSpecB ? 2.0f : 1.0f) : 0.0f;
+	static UInt32 ptGuideLogs = 0;
+	if (ptMode != rrPtGuideMode) {
+		rrPtGuideMode = ptMode;
+		if (++ptGuideLogs <= 40) Logger::Log("UNOFFICIAL DLSS RR: the guides' albedo %s", ptMode > 1.5f ? "and roughness are the path tracer's (diffuse + specular, PTDenoiseSplit)" :
+			ptMode > 0.5f ? "is the path tracer's diffuse one (the specular albedo and roughness: the G-buffer's)" : "and roughness are the G-buffer's (no path traced picture)");
+	}
+	guides.options = D3DXVECTOR4(albedoOn ? 2.0f : RRSettings.Albedo >= 1 ? 1.0f : 0.0f, RRSettings.Normals == 1 ? 1.0f : 0.0f, materialOn ? 1.0f : 0.0f, ptMode);	// x 2: the albedo buffer (2026-10-31)
+	guides.size = D3DXVECTOR4((float)rw, (float)rh, 0.0f, 0.0f);	// (perf-rr) the render size: one thread per render pixel, the rect of every image
 	ID3D9NvrExtBuffer* guidesBuffer = ExtUniforms(rrGuidesUniforms, &guides, sizeof(guides));
 	if (!guidesBuffer) return fail("its constant buffers could not be written");
 	{
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, color), Image(1, normals), Image(2, depth), Image(3, materialOn ? (IUnknown*)material : (IUnknown*)depth),
 			Image(4, rrColor.Texture, true), Image(5, rrDiffuse.Texture, true), Image(6, rrSpecular.Texture, true), Image(7, rrNormals.Texture, true),
 			Image(8, rrRoughness.Texture, true), Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, guidesBuffer), Sampler(0, point),
-			Image(9, albedoOn ? (IUnknown*)albedo : (IUnknown*)depth) };	// UNOFFICIAL 2026-10-31 AlbedoBuffer (a placeholder the shader never reads below RRAlbedo 2)
+			Image(9, albedoOn ? (IUnknown*)albedo : (IUnknown*)depth),	// UNOFFICIAL 2026-10-31 AlbedoBuffer (a placeholder the shader never reads below RRAlbedo 2)
+			Image(10, ptAlbedo ? (IUnknown*)ptAlbedo : (IUnknown*)depth), Image(11, ptSpecRG ? (IUnknown*)ptSpecRG : (IUnknown*)depth),	// (2026-11-07 ptaaa-denoiser)
+			Image(12, ptSpecB ? (IUnknown*)ptSpecB : (IUnknown*)depth) };
 		static GpuTimer guidesTimer("  RR guides");
 		GpuProfileScope gpuGuides(guidesTimer, Device);
-		if (!RRDispatch(rrGuides, b, _countof(b), (width + 7) / 8, (height + 7) / 8)) return fail("DlssRRGuides failed to dispatch");
+		if (!RRDispatch(rrGuides, b, _countof(b), plan.groupsX, plan.groupsY)) return fail("DlssRRGuides failed to dispatch");
 	}
 
-	// 3. DLSS-D at render size = display size, on TAA's 8-step jitter (FSRDraw's sign convention: BeginJitter moved the picture left/down).
+	// 3. DLSS-D. Native: render size = display size, on TAA's 8-step jitter (FSRDraw's sign convention: BeginJitter moved the picture left/down).
+	// (perf-rr) Rect frame: the render rect (the helper copies it at 0, 0 and gives DLSS-D that subrect, as for DLSS SR) -> the screen, on
+	// RenderScale's jitter (Up: Halton over Up.JitterPhases steps in render pixels, the same sign); the motion scale is the render size (Exchange).
 	Upscaler::RrInputs in;
 	in.Color = rrColor.Texture;
 	in.Depth = fsrDepth.Texture;
 	in.Motion = fsrMotion.Texture;
-	in.RenderWidth = in.InputWidth = in.DisplayWidth = (UINT)width;
-	in.RenderHeight = in.InputHeight = in.DisplayHeight = (UINT)height;
-	in.JitterX = frameJittered ? -frameJitterX : 0.0f;
-	in.JitterY = frameJittered ? frameJitterY : 0.0f;
-	in.JitterPhases = (float)JitterSequenceLength;
+	in.RenderWidth = plan.renderW;
+	in.RenderHeight = plan.renderH;
+	in.InputWidth = plan.inputW;
+	in.InputHeight = plan.inputH;
+	in.DisplayWidth = plan.displayW;
+	in.DisplayHeight = plan.displayH;
+	in.JitterX = plan.jitterX;
+	in.JitterY = plan.jitterY;
+	in.JitterPhases = plan.jitterPhases;
 	in.NearZ = nearZ;
 	in.FarZ = farZ;
 	in.TanHalfFovX = 1.0f / proj._11;
@@ -575,7 +650,11 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		IDirect3DSurface9* target = chain.Output();
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, output), Image(1, color), Image(2, viewModel), Sampler(0, point) };
 		// (review 2026-10-30) rawFrame: the RT effects handed RR raw signals this frame, the weapon's too: it takes RR's output then.
-		struct { UInt32 pointIndex; float invLinearization; UInt32 rawFrame, pad; } push = { 0, 1.0f / linearization, Upscaler::RayReconstructionWantsRaw() ? 1u : 0u, 0 };
+		// (2026-11-07 perf-rr) rect: the frame before RR (its alpha, the weapon test and colour) is the render rect: read at the screen pixel's
+		// centre x scale (DlssRRComposite.frag; core/RrRectPlan.h RectPoint / NearestRectPixel); RR's output is the whole screen either way.
+		struct { UInt32 pointIndex; float invLinearization; UInt32 rawFrame, rect; float scaleX, scaleY, renderW, renderH; } push = { 0, 1.0f / linearization,
+			Upscaler::RayReconstructionWantsRaw() ? 1u : 0u, rect ? 1u : 0u, plan.scaleX, plan.scaleY, (float)plan.renderW, (float)plan.renderH };
+		static_assert(sizeof(push) == 32, "DlssRRComposite.frag's push block");
 		static GpuTimer compositeTimer("  RR composite");
 		GpuProfileScope gpuComposite(compositeTimer, Device);
 		if (!ExtDrawTo(rrComposite.Pipeline, &target, 1, b, _countof(b), &push, sizeof(push))) return fail("the composite pass failed");
@@ -583,16 +662,47 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	chain.Commit();
 	Upscaler::RayReconstructionDelivered();	// (review 2026-10-30) only now: next frame's WantsRaw goes by a delivered RR frame
 	rrIdleFrames = 0;
+	// (perf-rr) the rect frame is upscaled now: its end here (the rect off for the chain's last steps, depths full size), and nothing pends
+	// for the image-space hook's UpscaleAfterEffects (no DLSS SR upscale after this)
+	if (rect) UpscaleAfterRayReconstruction(Device, RenderTarget);
 
 	rrPrevView = TheRenderManager->viewMatrix;
 	rrPrevProjection = D3DXVECTOR4(TheRenderManager->projMatrix._11, TheRenderManager->projMatrix._22, 0.0f, 0.0f);
 	rrPrevCameraPosition = TheRenderManager->CameraPosition;
 	rrLastWidth = width;
 	rrLastHeight = height;
+	rrLastRenderWidth = rw;
+	rrLastRenderHeight = rh;
 	rrHistoryValid = true;
 	rrRanThisFrame = true;
-	if (++rrFrames == 1)
-		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction runs after the god rays, before exposure and bloom, %ix%i native (albedo %s, normals in %s space, roughness %s).", width, height,
-			albedoOn ? "the albedo buffer where written, else the picture's chroma" : RRSettings.Albedo >= 1 ? "the picture's chroma" : "flat grey", RRSettings.Normals == 1 ? "view" : "world", materialOn ? "from the material buffer" : "constant");
+	// UNOFFICIAL 2026-11-01 (Diagnostics.h part 5) the history watch's state, as the other resolve paths keep it
+	Diag.path = rect ? "DLSS Ray Reconstruction at RenderScale (denoise + upscale in one step, after the god rays)" : "DLSS Ray Reconstruction at native resolution";
+	Diag.upscaler.clear();
+	Diag.reset = reset;
+	Diag.sinceReset = reset ? 0 : Diag.sinceReset + 1;
+	Diag.jitter = rect ? Up.JitterIndex : jitterIndex;
+	Diag.jitterX = in.JitterX;
+	Diag.jitterY = in.JitterY;
+	Diag.deltaMs = deltaTime * 1000.0f;
+	Diag.inW = rw; Diag.inH = rh; Diag.outW = (unsigned)width; Diag.outH = (unsigned)height;
+	Diag.hdr = true;
+	Diag.output = output;
+	Diag.frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+	static int loggedMode = -1;
+	static UINT loggedW = 0, loggedH = 0;
+	if (++rrFrames == 1 || loggedMode != (int)rect || loggedW != rw || loggedH != rh) {
+		if (rrFrames == 1)
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS Ray Reconstruction runs after the god rays, before exposure and bloom (albedo %s, normals in %s space, roughness %s).",
+				albedoOn ? "the albedo buffer where written, else the picture's chroma" : RRSettings.Albedo >= 1 ? "the picture's chroma" : "flat grey", RRSettings.Normals == 1 ? "view" : "world",
+				materialOn ? "from the material buffer" : "constant");
+		static UInt32 modeLogs = 0;
+		if (++modeLogs <= 24) {
+			if (rect) Logger::Log("UNOFFICIAL DLSS RR: denoises AND upscales at RenderScale %.2f: %ux%u -> %ux%u in one step (jitter %.0f steps, RenderScale's); DLSS SR's upscale step is "
+				"skipped in these frames, the effects after RR (exposure, bloom, lens) run at %ux%u (frame %u).", FSRSettings.RenderScale, rw, rh, (unsigned)width, (unsigned)height, plan.jitterPhases,
+				(unsigned)width, (unsigned)height, Diag.frame);
+			else Logger::Log("UNOFFICIAL DLSS RR: denoises at native resolution %ux%u (jitter %.0f steps, TAA's) (frame %u).", rw, rh, plan.jitterPhases, Diag.frame);
+		}
+		loggedMode = (int)rect; loggedW = rw; loggedH = rh;
+	}
 	return true;
 }

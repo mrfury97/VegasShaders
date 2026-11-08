@@ -78,6 +78,15 @@ Every key read by this pass or by its producer that changes what this pass draws
   Since 2026-11-07 `ShadowDenoiser` (bool, default true, live) denoises that term in the RT helper (one ray over the sun's disc, SunAngle 0 =
   the real 0.53 degrees; a penumbra-sized blur: sharp at contact, softer away) and `Denoise` / `Penumbra` stand aside while it runs; its
   `Denoiser*` keys tune it. docs/next/RT-DENOISER.md. Still not read by this pass.
+  Since 2026-11-07 (perf-history, docs/next/RT-PATH-TRACING.md "perf-history") `DenoiserHistory` and `DenoiserStabilize` are frames AT 60
+  FPS: with `[Main.Main.RayTracing] DenoiseTimeBased` (default on) the helper gets the same seconds at the game's frame rate
+  (RtShadowDenoise::TimeScale; 32 -> ~11 frames at 20 fps). At 60 fps nothing changes.
+  Since 2026-11-07 (rtgap-tess, docs/next/RT-DETAIL-GAPS.md section 1) `ContactShadows` (0-1, default 1, live) and `ContactLength`
+  (pixels, default 24): a screen-space contact march in the traced sun term for what the depth buffer has and the RT scene lacks
+  (tessellated bumps, grass, small props). Mode 1 only; where this pass's own contact shadows (`[_Shaders.ShadowsExteriors.ScreenSpace]`)
+  draw, the traced march fades out over their fade-in band (TESR_ShadowScreenSpaceFade, NearFade pushed to the bumps' FadeEnd by
+  `DisplaceContactFade`), so a pixel never gets both. With the bumps on, the traced rays also start the bumps' Strength further off
+  the surface (`[Main.Main.RayTracing] TessStartSlack`). Not read by this pass.
 - `[_Shaders.ShadowsExteriors.Ortho]` and `[_Shaders.ShadowsExteriors.TerrainShadows]`: producer settings only.
 - `[_Shaders.ShadowsExteriors.SunSmoothing]`: producer settings only (quantised sun direction and cross-fade).
 - Interior settings under `[_Shaders.ShadowsInteriors.*]` do not affect this pass.

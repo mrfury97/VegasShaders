@@ -14,6 +14,7 @@
 #include "../../core/RtCore.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections
 #include "../../core/RtReflDenoise.h"	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
+#include "../../core/RtDenoise.h"	// UNOFFICIAL 2026-11-07 (perf-history) HistoryClock
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT resolve unblurred, no history)
 
 void ReflectionsEffect::UpdateSettings() {
@@ -68,6 +69,8 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtDistance = std::clamp(TheSettingManager->GetSettingF(rt, "Distance"), 200.0f, 30000.0f);
 	Settings.RtDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DebugView"), 0, 7);	// 7 (2026-11-05) the reflected direction
 	Settings.RtRaysOnly = TheSettingManager->GetSettingI(rt, "RaysOnly") != 0;	// 2026-11-07
+	Settings.RtMetalBounce = std::clamp(TheSettingManager->GetSettingF(rt, "MetalBounce"), 0.0f, 1.0f);	// 2026-11-07 perf-reflfix (missing key: 0, off)
+	if (!(Settings.RtMetalBounce == Settings.RtMetalBounce)) Settings.RtMetalBounce = 0.0f;
 	Settings.RtScreenTolerance = std::clamp(TheSettingManager->GetSettingF(rt, "ScreenTolerance"), 0.002f, 0.2f);
 	Settings.RtEstimate = std::clamp(TheSettingManager->GetSettingF(rt, "EstimateBrightness"), 0.0f, 4.0f);
 	Settings.RtSunShadows = TheSettingManager->GetSettingI(rt, "SunShadows") != 0;
@@ -109,6 +112,7 @@ void ReflectionsEffect::UpdateSettings() {
 namespace {
 	ReflectionsEffect* RtEffect = nullptr;
 	int RtImageDir = -1, RtImageRay = -1, RtImageHit = -1, RtImageShade = -1, RtShader = -1;
+	int RtImageBounce = -1;	// UNOFFICIAL 2026-11-07 (perf-reflfix) MetalBounce: the metal's tint + the bounce's distance (RGBA16F), the pass's last image
 	int RtShaderAlpha = -1;	// UNOFFICIAL 2026-10-29: Compute\Rt\ReflectionsRTAlpha.spv (with the core's alpha-tested casters)
 	int RtShaderTex = -1, RtShaderAlphaTex = -1;	// UNOFFICIAL 2026-10-29: the same with hit textures (ReflectionsRTTex / ReflectionsRTAlphaTex)
 	int RtShaderTexGlow = -1, RtShaderAlphaTexGlow = -1;	// UNOFFICIAL 2026-10-30: and the glow maps (ReflectionsRTTexGlow / ReflectionsRTAlphaTexGlow)
@@ -166,13 +170,14 @@ namespace {
 		RtImageRay = RtCore::AddImage("NVR RT reflections ray", RtWidth(), RtHeight(), NVR_EXT_SHARED_RG32F);
 		RtImageHit = RtCore::AddImage("NVR RT reflections hit", RtWidth(), RtHeight(), NVR_EXT_SHARED_RGBA16F);
 		RtImageShade = RtCore::AddImage("NVR RT reflections shade", RtWidth(), RtHeight(), NVR_EXT_SHARED_RGBA16F);
+		RtImageBounce = RtCore::AddImage("NVR RT reflections bounce", RtWidth(), RtHeight(), NVR_EXT_SHARED_RGBA16F);	// (2026-11-07 perf-reflfix)
 	}
 	// Recorded at the late exchange (RtCoreClient::Exchange from RtTrace), after RayGen drew Rt.Dir and Rt.Ray.
 	void RtUserRecord(IDirect3DDevice9* Device) {
 		RtRecorded = false;
-		if (!RtEffect || RtImageDir < 0 || RtImageRay < 0 || RtImageHit < 0 || RtImageShade < 0 || RtShader < 0) return;
+		if (!RtEffect || RtImageDir < 0 || RtImageRay < 0 || RtImageHit < 0 || RtImageShade < 0 || RtImageBounce < 0 || RtShader < 0) return;
 		const ReflectionsEffect::RtImagesStruct& rt = RtEffect->Rt;
-		if (!rt.Dir || !rt.Ray || !rt.HitSurface || !rt.ShadeSurface) return;
+		if (!rt.Dir || !rt.Ray || !rt.HitSurface || !rt.ShadeSurface || !rt.BounceSurface) return;
 		if (!RtCore::CopyIn(RtImageDir, rt.Dir) || !RtCore::CopyIn(RtImageRay, rt.Ray)) return;
 		// With the core's alpha-tested casters in the scene, the pass that tests them (their alpha atlas as a fifth image).
 		const int atlas = RtCore::AlphaTested() ? RtCore::AlphaAtlasImage() : -1;
@@ -184,15 +189,16 @@ namespace {
 		// With the core's glow maps too ([Main.Main.RayTracing] GlowTextures): glowing draws glow only where their glow map is lit.
 		const int glowAtlas = tex ? RtCore::GlowAtlasImage() : -1;
 		const bool glow = glowAtlas >= 0 && (alpha ? RtShaderAlphaTexGlow : RtShaderTexGlow) >= 0;
-		int images[7] = { RtImageDir, RtImageRay, RtImageHit, RtImageShade, atlas, albedo, glowAtlas };
+		int images[8] = { RtImageDir, RtImageRay, RtImageHit, RtImageShade, atlas, albedo, glowAtlas, RtImageBounce };
 		int count = 4;
 		if (alpha) images[count++] = atlas;
 		if (tex) images[count++] = albedo;
 		if (glow) images[count++] = glowAtlas;
+		images[count++] = RtImageBounce;	// (2026-11-07 perf-reflfix) always last: ReflectionsRTBody.glsl RT_BOUNCE_BINDING
 		const int shader = alpha ? (glow ? RtShaderAlphaTexGlow : tex ? RtShaderAlphaTex : RtShaderAlpha) : (glow ? RtShaderTexGlow : tex ? RtShaderTex : RtShader);
 		const UINT gridW = RtTraceWidth ? RtTraceWidth : RtWidth(), gridH = RtTraceHeight ? RtTraceHeight : RtHeight();	// (2026-11-03: the rect in rect frames)
 		if (!RtCore::AddPass(shader, images, count, 0xC, &RtPending, sizeof(RtPending), (gridW + 7) / 8, (gridH + 7) / 8)) return;
-		RtRecorded = RtCore::CopyOut(RtImageHit, rt.HitSurface) && RtCore::CopyOut(RtImageShade, rt.ShadeSurface);
+		RtRecorded = RtCore::CopyOut(RtImageHit, rt.HitSurface) && RtCore::CopyOut(RtImageShade, rt.ShadeSurface) && RtCore::CopyOut(RtImageBounce, rt.BounceSurface);
 	}
 	const RtCore::User RtUser = { "RT reflections", RtUserWants, RtUserSetup, RtUserRecord, 1 };	// Point 1: only through RtCore::Exchange (RtTrace)
 }
@@ -233,13 +239,14 @@ float ReflectionsEffect::RtSunAmount() const {
 
 // The four half-resolution RT images, made the first time RT runs (no memory spent when it never does). Any failure: RT off for the session.
 bool ReflectionsEffect::RtImages() {
-	if (Rt.MarchHit) return true;
+	if (Rt.Bounce) return true;	// (the last one made)
 	IDirect3DDevice9* device = TheRenderManager->device;
-	struct { IDirect3DTexture9** texture; IDirect3DSurface9** surface; D3DFORMAT format; } images[7] = {
+	struct { IDirect3DTexture9** texture; IDirect3DSurface9** surface; D3DFORMAT format; } images[8] = {
 		{ &Rt.March, &Rt.MarchSurface, D3DFMT_A16B16G16R16F }, { &Rt.Dir, &Rt.DirSurface, D3DFMT_G32R32F },
 		{ &Rt.Ray, &Rt.RaySurface, D3DFMT_G32R32F }, { &Rt.Hit, &Rt.HitSurface, D3DFMT_A16B16G16R16F },
 		{ &Rt.Shade, &Rt.ShadeSurface, D3DFMT_A16B16G16R16F }, { &Rt.Spread, &Rt.SpreadSurface, D3DFMT_G16R16F },	// (2026-11-07: + y the hit distance)
-		{ &Rt.MarchHit, &Rt.MarchHitSurface, D3DFMT_R16F } };	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
+		{ &Rt.MarchHit, &Rt.MarchHitSurface, D3DFMT_R16F },	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
+		{ &Rt.Bounce, &Rt.BounceSurface, D3DFMT_A16B16G16R16F } };	// UNOFFICIAL 2026-11-07 (perf-reflfix) MetalBounce
 	for (auto& i : images)
 		if (FAILED(device->CreateTexture(RtWidth(), RtHeight(), 1, D3DUSAGE_RENDERTARGET, i.format, D3DPOOL_DEFAULT, i.texture, NULL)) ||
 			FAILED((*i.texture)->GetSurfaceLevel(0, i.surface))) {
@@ -278,8 +285,10 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		const D3DXVECTOR4& sun = TheShaderManager->ShaderConst.SunDir;
 		// (2026-10-31: with the core's FarObjectLOD the rays reach the far ring's edge: the skyline past SceneRadius)
+		// (2026-11-07, RT-DETAIL-GAPS.md 7: PTRealtime turns the core's FarLandLOD on by itself, RtCore.cpp Gather)
 		const float reach = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarObjectLOD") != 0 ||
-			TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0 ?
+			TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0 ||
+			TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTRealtime") != 0 ?
 			(std::max)(Settings.RtDistance, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FarRadius")) : Settings.RtDistance;
 		// UNOFFICIAL 2026-11-03 RenderScale < 1: in a rect frame the helper traces the top-left rect of the half-size images (RenderRect::
 		// Width / Height of them, the part the D3D9 passes' ApplyViewport draws); RayGen wrote "no ray" past it.
@@ -288,7 +297,7 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		RtPending.size = D3DXVECTOR4((float)RtTraceWidth, (float)RtTraceHeight, reach, (Settings.RtSunShadows ? 1.0f : 0.0f) + (Settings.RtAlphaSolid ? 2.0f : 0.0f));	// w: + 2 AlphaSolid
 		RtPending.forward = D3DXVECTOR4(view._13, view._23, view._33, 0.0f);
 		RtPending.right = D3DXVECTOR4(view._11 / proj._11, view._21 / proj._11, view._31 / proj._11, 1.0f / WeaponFovScale());	// w: the weapon's
-		RtPending.up = D3DXVECTOR4(view._12 / proj._22, view._22 / proj._22, view._32 / proj._22, 0.0f);
+		RtPending.up = D3DXVECTOR4(view._12 / proj._22, view._22 / proj._22, view._32 / proj._22, Settings.RtMetalBounce);	// w (2026-11-07 perf-reflfix): MetalBounce
 		const D3DXVECTOR3 eye = RtCore::Eye();	// the eye in scene space (2026-10-29 rt-sun-core 4ba2abfd: CameraLocation reads ~0 in game)
 		RtPending.origin = D3DXVECTOR4(eye.x, eye.y, eye.z, Settings.RtDebugView == 5 ? 1.0f : 0.0f);	// w: the alignment check
 		D3DXVECTOR3 toSun(sun.x, sun.y, sun.z);
@@ -869,6 +878,7 @@ namespace {
 	// buffer slot 2: slot 1 is the Hi-Z storage buffer, and a uniform and a storage buffer on one slot number are one resource) + RayGen's
 	// three outputs and the helper's hits (set 1, bindings 17-20, image slots 16-19).
 	const UINT RtUniformSlot = 2;
+	const UINT RtBounceSlot = 25;	// UNOFFICIAL 2026-11-07 (perf-reflfix) Rt.Bounce (set 1, binding 26; slots 22-24 are taken)
 	const NVR_EXT_BINDING_DESC ReflRtUniformBinding = { 2, 1, NVR_EXT_BIND_UNIFORM_BUFFER, RtUniformSlot, NVR_EXT_VIEW_2D, FALSE, 0 };
 	struct ReflRtUniforms { D3DXVECTOR4 rt, rt2, sunDir, sunColor, rt3, rt4, lamps[24], rt5; };	// ReflectionsRT.glsl RtConstants (std140; rt5 2026-11-07)
 	ReflRtUniforms RtUploaded;
@@ -945,10 +955,13 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		else if (rtPass) {
 			// UNOFFICIAL 2026-10-28: the same bindings + RtConstants + RayGen's outputs and the helper's hits (both passes declare all).
 			static const char* const rtNames[2] = { "ReflectionsRayGen", "ReflectionsRTResolve" };
-			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 7];
+			// (2026-11-07 perf-reflfix: + t_rtBounce, set 1 binding 26, image slot 25: bindings 23-25 / slots 22-24 are the glass mask, the
+			// material buffer and the cloud probe)
+			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 8];
 			memcpy(bindings, ReflBindings, sizeof(ReflBindings));
 			bindings[_countof(ReflBindings)] = ReflRtUniformBinding;
 			for (UINT i = 0; i < 6; i++) bindings[_countof(ReflBindings) + 1 + i] = { 1, 17 + i, NVR_EXT_BIND_SAMPLED_IMAGE, ReflTextureCount + i, NVR_EXT_VIEW_2D, FALSE, 0 };
+			bindings[_countof(ReflBindings) + 7] = { 1, 26, NVR_EXT_BIND_SAMPLED_IMAGE, RtBounceSlot, NVR_EXT_VIEW_2D, FALSE, 0 };
 			if (DxvkCompute::HasSpirv(rtNames[techniqueIndex - 8]))
 				pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(rtNames[techniqueIndex - 8], bindings, _countof(bindings), sizeof(ReflPush), true,
 					techniqueIndex == 8 ? 4 : 2, NVR_EXT_BLEND_NONE, false);	// (2026-11-07: RayGen + Rt.MarchHit)	// a refusal must not turn the other Vulkan passes off (Resolve: + Rt.Spread)
@@ -1087,7 +1100,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		ReflUploaded = uniforms;
 	}
 
-	NVR_EXT_RESOURCE_BINDING resources[_countof(ReflBindings) + 7] = {};
+	NVR_EXT_RESOURCE_BINDING resources[_countof(ReflBindings) + 8] = {};	// (2026-11-07 perf-reflfix: + Rt.Bounce)
 	for (UINT i = 0; i < ReflTextureCount; i++) {
 		resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = textures[i];
 	}
@@ -1131,10 +1144,10 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		}
 		resources[resourceCount].Slot = RtUniformSlot; resources[resourceCount].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[resourceCount].pResource = rtBuffer;
 		resourceCount++;
-		IDirect3DBaseTexture9* rtImages[6] = { Rt.March, Rt.Dir, Rt.Ray, Rt.Hit, Rt.Shade, Rt.MarchHit };
-		for (UINT i = 0; i < 6; i++) {
+		IDirect3DBaseTexture9* rtImages[7] = { Rt.March, Rt.Dir, Rt.Ray, Rt.Hit, Rt.Shade, Rt.MarchHit, Rt.Bounce };	// (2026-11-07 perf-reflfix: + Bounce)
+		for (UINT i = 0; i < 7; i++) {
 			if (!rtImages[i]) return false;
-			resources[resourceCount].Slot = ReflTextureCount + i; resources[resourceCount].Type = NVR_EXT_BIND_SAMPLED_IMAGE;
+			resources[resourceCount].Slot = i == 6 ? RtBounceSlot : ReflTextureCount + i; resources[resourceCount].Type = NVR_EXT_BIND_SAMPLED_IMAGE;
 			resources[resourceCount].pResource = techniqueIndex == 8 ? depth : rtImages[i];
 			resourceCount++;
 		}
@@ -1217,8 +1230,10 @@ bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture
 	f.historyUsable = reproject != nullptr;
 	RtReflDenoise::Settings s;
 	s.Core = Settings.RtDenoiserCore;
-	s.MaxSamples = Settings.RtDenoiserHistory;
-	s.MirrorHistory = Settings.RtDenoiserMirrorHistory;
+	// (2026-11-07 perf-history) DenoiserHistory / DenoiserMirrorHistory are frames at 60 fps: the same seconds at this frame rate
+	const RtHistoryTime::Clock historyClock = RtDenoise::HistoryClock();
+	s.MaxSamples = RtHistoryTime::Frames(Settings.RtDenoiserHistory, historyClock);
+	s.MirrorHistory = RtHistoryTime::Frames(Settings.RtDenoiserMirrorHistory, historyClock);
 	s.BlurRadius = Settings.RtDenoiserBlur;
 	s.AntiLag = Settings.RtDenoiserAntiLag;
 	s.ClipWeight = Settings.RtDenoiserClip;

@@ -50,6 +50,7 @@ public:
 		float	RtMaxRoughness;		// rougher surfaces keep the old fallbacks (cube, grid, sky)
 		float	RtDistance;			// ray length, game units
 		bool	RtRaysOnly;		// 2026-11-07: RT on = the rays alone (RT DebugView 3's behaviour, the user's pick): no screen-march answers
+		float	RtMetalBounce;	// 2026-11-07 (perf-reflfix): smooth metal hit by a ray reflects (one more ray) up to this roughness; 0 off
 		int		RtDebugView;		// 1 sources, 2 hit distance, 3 RT without the screen march, 4 hit instance
 		bool	RtAlphaSolid;		// UNOFFICIAL 2026-11-06 diagnostic: alpha-tested hits taken as solid (is the alpha test what the rays miss?)
 		float	RtScreenTolerance;	// a hit counts as the screen's pixel when their depths differ by less than this share
@@ -182,6 +183,7 @@ public:	// (the RT core user in Reflections.cpp reads the images)
 		IDirect3DTexture9* Shade = nullptr;	IDirect3DSurface9* ShadeSurface = nullptr;	// the same: the hit's albedo and sun visibility
 		IDirect3DTexture9* Spread = nullptr;	IDirect3DSurface9* SpreadSurface = nullptr;	// Resolve: x the hit-distance share for the blur, y (2026-11-07) the hit distance (G16R16F)
 		IDirect3DTexture9* MarchHit = nullptr;	IDirect3DSurface9* MarchHitSurface = nullptr;	// UNOFFICIAL 2026-11-07 RayGen: the march's hit distance (R16F)
+		IDirect3DTexture9* Bounce = nullptr;	IDirect3DSurface9* BounceSurface = nullptr;	// UNOFFICIAL 2026-11-07 (perf-reflfix) the helper: MetalBounce's tint + distance
 	};
 	RtImagesStruct		Rt;
 	void				RtRegister();		// its RT core user (ShaderManager, once, before the core's first frame)

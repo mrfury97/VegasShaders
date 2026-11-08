@@ -13,4 +13,9 @@ namespace RtPathTrace {
 	void	Replace(IDirect3DDevice9* Device);
 	bool	Replacing();	// (2026-11-03) the traced picture replaces the scene this frame: AO / AmbientLight / Specular stay out (no light twice)	// (2026-11-03) PTReplace: the traced picture into the scene right after RtCore::Frame
 	std::string	StatusText();				// the REPORT block's line: on / why not, samples so far
+	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) DLSS Ray Reconstruction's guides from the path tracer (TAAFSR.cpp RayReconstruct): true when
+	// this frame's traced picture is in the scene at the screen's size (PTReplace + PTDenoise, native). Albedo: rgb the first surface's
+	// colour the diffuse light was divided by, a 0 = no surface (sky / the game's frame), 1 + metal (PTDenoiseSplit) or 1; SpecularRG /
+	// SpecularBRough (G32R32F; nullptr without PTDenoiseSplit): the specular albedo the specular light was divided by, + the roughness.
+	bool	RrGuides(IDirect3DTexture9** Albedo, IDirect3DTexture9** SpecularRG, IDirect3DTexture9** SpecularBRough);
 }

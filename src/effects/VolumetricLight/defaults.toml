@@ -17,6 +17,16 @@ Density = 0.02                         # [0.0-2.0] By night: how thick the air i
 MaxDistance = 5000.0                   # [500-15000] By night: how far from the eye the shafts are worked out (game units).
 Anisotropy = 0.5                       # [0.0-0.9] By night: forward scattering, how much the light gathers round the moon.
 
+[_Shaders.VolumetricLight.RT]
+Enabled = true                         # UNOFFICIAL (2026-11-07), uses ray tracing while it runs for another RT effect (the DXVK fork, a GPU with ray tracing and NvrRtHelper.exe, and one of RT sun shadows, RT reflections, RT lamp shadows, RT ambient occlusion or the path tracer / PTRealtime on): the sun's shadow in the AIR (the shafts, and the fog's sunlight with FogVolume and Froxels) is traced against the same scene as the RT sun shadows and the path tracer instead of read from the sun's shadow maps, so shafts through windows, under trees and round buildings match the traced shadows: far buildings and hills past the shadow maps, cut-out cards (leaves, fences) and people cast them too. It never starts ray tracing by itself: without it (or off) the shadow maps, as before. Live.
+RaysPerCell = 2                        # [1-8] UNOFFICIAL (2026-11-07): rays toward the sun per cell of the shafts' grid (one cell per 16 x 16 pixels, 64 slices deep) and frame: 2 is about 1.8 million short rays a frame at 1440p. Each frame takes new points in each cell and the history averages them. Live.
+Temporal = 0.9                         # [0.0-0.97] UNOFFICIAL (2026-11-07): how much of last frame's value each cell keeps while the camera is still (the cells settle to the share of them in sunlight: soft shaft edges, no flicker). 0: each frame's rays alone (grainy). Live. At 60 fps (perf-history 2026-11-07): at other frame rates the same fade a second ([Main.Main.RayTracing] DenoiseTimeBased).
+TemporalMoving = 0.7                   # [0.0-0.97] UNOFFICIAL (2026-11-07): the same while the camera moves (for a cell that moved a whole cell since last frame): less, so the shafts do not smear behind a turn. Live. At 60 fps (perf-history 2026-11-07): at other frame rates the same fade a second ([Main.Main.RayTracing] DenoiseTimeBased).
+Range = 8000.0                         # UNOFFICIAL (2026-11-07): how far from the eye (units) the air is traced, at most [Main.Main.RayTracing] SceneRadius (the RT scene ends there); past it the shadow maps, blended in over FadeLength. Live.
+FadeLength = 1000.0                    # UNOFFICIAL (2026-11-07): the last stretch of Range (units) over which the shadow maps take over. Live.
+RayLength = 20000.0                    # UNOFFICIAL (2026-11-07): how far (units) each ray looks for a caster toward the sun. Live.
+DebugView = 0                          # [0-1] UNOFFICIAL, TEST (2026-11-07): 1 = traced but not used (the shadow maps, as before: an A/B with the same cost). Live.
+
 [_Shaders.VolumetricLight.Status]
 Enabled = true                         # Volumetric light: sun shafts through the air, shaded by the sun's shadow maps. Outdoors only, needs exterior shadows on. Written for this build (idea from Physically-Based-Reloaded).
 

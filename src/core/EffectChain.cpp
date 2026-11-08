@@ -133,17 +133,19 @@
 //                             when: always called
 //  21  Bodycam                Body camera look
 //                             when: always called
-//  22  SkyDither              Sky dither
-//                             when: !cinemaDither
-//  23  SunDepthFitView        FitToDepthDebug view
-//                             when: SunDepthFit::DebugView > 0
-//  24  RtSunDebug             RT sun shadows DebugView 4
-//                             when: always called (nothing otherwise)
-//  25  Debug                  Debug effect + the clipping view
+//  22  Dream                  Dream (a "fun" trip look, off by default)
 //                             when: always called
-//  26  CoverMapDebug          Cover map debug view
+//  23  SkyDither              Sky dither
+//                             when: !cinemaDither
+//  24  SunDepthFitView        FitToDepthDebug view
+//                             when: SunDepthFit::DebugView > 0
+//  25  RtSunDebug             RT sun shadows DebugView 4
+//                             when: always called (nothing otherwise)
+//  26  Debug                  Debug effect + the clipping view
+//                             when: always called
+//  27  CoverMapDebug          Cover map debug view
 //                             when: TheCoverMap
-//  27  FlickerWatch           FlickerWatch frame check (or its flags cleared)
+//  28  FlickerWatch           FlickerWatch frame check (or its flags cleared)
 //                             when: FlickerWatch on outdoors
 
 #include "OrthoProbe.h"	// UNOFFICIAL 2026-10-17 test tools (AfterCombine)
@@ -166,6 +168,7 @@
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
+#include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
 #include "EffectChain.h"
@@ -308,7 +311,7 @@ void ShaderManager::PreStep_RtCore(ChainContext& ctx) {
 	// fork, a GPU with ray tracing and the helper are there).
 	{
 		static bool rtRegistered = false;
-		if (!rtRegistered) { RtSunShadows::Register(); Effects.Reflections->RtRegister(); RtLampShadows::Register(); AmbientOcclusionEffect::RtRegister(); RtPathTrace::Register(); rtRegistered = true; }	// UNOFFICIAL 2026-10-28 RT sun + RT reflections + RT lamp shadows + RT AO/sky
+		if (!rtRegistered) { RtSunShadows::Register(); Effects.Reflections->RtRegister(); RtLampShadows::Register(); AmbientOcclusionEffect::RtRegister(); RtPathTrace::Register(); RtFogVisibility::Register(); rtRegistered = true; }	// UNOFFICIAL 2026-10-28 RT sun + RT reflections + RT lamp shadows + RT AO/sky (+ 2026-11-07 ptaaa-fog: RT fog visibility, last: it rides along)
 		RtCore::Frame(Device);
 		RtPathTrace::Replace(Device);	// UNOFFICIAL 2026-11-03 [Main.Main.RayTracing] PTReplace: the path traced picture into the scene (off)
 		RtLampShadows::Denoise(Device);	// UNOFFICIAL 2026-10-29: the traced lamp shadows through the shared denoiser (Denoise, off)
@@ -1241,7 +1244,7 @@ void ShaderManager::PostStep_FusedPassPlan(ChainContext& ctx) {
 	const bool colorLUT = renders(Effects.Coloring) && !Effects.LUT->Settings.PreTonemapping && renders(Effects.LUT) &&
 		Effects.Coloring->Effect->GetTechniqueByName("ColoringLUT");
 	const bool cinemaDither = renders(Effects.Cinema) && renders(Effects.SkyDither) && !renders(Effects.ImageAdjust) &&
-		!renders(Effects.Bodycam) && Effects.Cinema->Effect->GetTechniqueByName("CinemaSkyDither");
+		!renders(Effects.Bodycam) && !renders(Effects.Dream) && Effects.Cinema->Effect->GetTechniqueByName("CinemaSkyDither");
 	ctx.colorLUT = colorLUT;
 	ctx.cinemaDither = cinemaDither;
 }
@@ -1256,7 +1259,7 @@ void ShaderManager::PostStep_FinalEffect(ChainContext& ctx) {
 		EffectRecord* const order[] = {
 			Effects.Rain, Effects.Snow, Effects.BloomLegacy, Effects.HeatHaze, Effects.VolumetricSmoke, Effects.BarrelHaze, Effects.Coloring, Effects.LUT, Effects.DepthOfField,
 			Effects.MotionBlur, Effects.BloodLens, Effects.WaterLens, Effects.LowHF, Effects.DitherBuster,
-			Effects.SMAA, Effects.FXAA, Effects.Sharpening, Effects.Cinema, Effects.ImageAdjust, Effects.Bodycam, Effects.SkyDither, Effects.Debug,
+			Effects.SMAA, Effects.FXAA, Effects.Sharpening, Effects.Cinema, Effects.ImageAdjust, Effects.Bodycam, Effects.Dream, Effects.SkyDither, Effects.Debug,
 			TheCoverMap };	// UNOFFICIAL 2026-10-27: the cover map's debug view (PersistentDebugView), last
 		EffectRecord* last = nullptr;
 		for (EffectRecord* effect : order)
@@ -1461,6 +1464,19 @@ void ShaderManager::PostStep_Bodycam(ChainContext& ctx) {
 	}
 }
 
+void ShaderManager::PostStep_Dream(ChainContext& ctx) {
+	static GpuTimer dreamTimer("Dream");
+	IDirect3DDevice9* Device = ctx.Device;
+	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
+	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
+	{
+		// The "fun" trip look (src/effects/Dream, off by default), on the finished picture after the body camera (the sky dither still
+		// comes after it). Its own Render runs one or two passes (Dream.cpp).
+		GpuProfileScope gpu(dreamTimer, Device);
+		{ Effects.Dream->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Dream); }
+	}
+}
+
 void ShaderManager::PostStep_SkyDither(ChainContext& ctx) {
 	static GpuTimer skyDitherTimer("Sky dither");
 	IDirect3DDevice9* Device = ctx.Device;
@@ -1587,6 +1603,7 @@ static const EffectChain::Step PostTonemapSteps[] = {
 	{ "Cinema", EffectChain::PostTonemap, &ShaderManager::PostStep_Cinema },
 	{ "ImageAdjust", EffectChain::PostTonemap, &ShaderManager::PostStep_ImageAdjust },
 	{ "Bodycam", EffectChain::PostTonemap, &ShaderManager::PostStep_Bodycam },
+	{ "Dream", EffectChain::PostTonemap, &ShaderManager::PostStep_Dream },
 	{ "SkyDither", EffectChain::PostTonemap, &ShaderManager::PostStep_SkyDither },
 	{ "SunDepthFitView", EffectChain::PostTonemap, &ShaderManager::PostStep_SunDepthFitView },
 	{ "RtSunDebug", EffectChain::PostTonemap, &ShaderManager::PostStep_RtSunDebug },
@@ -1598,6 +1615,8 @@ static const EffectChain::Step PostTonemapSteps[] = {
 void EffectChain::Run(ShaderManager* manager, Stage stage, ChainContext& ctx) {
 	const Step* steps = stage == PreTonemap ? PreTonemapSteps : PostTonemapSteps;
 	const size_t count = stage == PreTonemap ? _countof(PreTonemapSteps) : _countof(PostTonemapSteps);
-	for (size_t i = 0; i < count && !ctx.stop; i++)
+	for (size_t i = 0; i < count && !ctx.stop; i++) {
+		SessionLog::StageScope stage(steps[i].name);	// UNOFFICIAL 2026-11-07 (perf-ptcost): the step's name for the CRASH and STALL lines
 		(manager->*steps[i].function)(ctx);
+	}
 }

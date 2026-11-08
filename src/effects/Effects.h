@@ -44,6 +44,7 @@
 #include "LocalExposure/LocalExposure.h"	// 2026-11-04 local exposure (read by the tone mapper)
 #include "SkyDither/SkyDither.h"
 #include "Bodycam/Bodycam.h"
+#include "Dream/Dream.h"	// "fun" trip look, off by default (from the author's DreamSim)
 #include "Reflections/Reflections.h"
 #include "VolumetricClouds/VolumetricClouds.h"
 #include "BloodFlow/BloodFlow.h"

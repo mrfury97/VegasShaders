@@ -121,9 +121,13 @@ void LoadPrev(ivec2 pixel, out Sample s, out float W, out float M) {
 	if (any(isnan(s.L)) || isnan(W) || isinf(W)) { W = 0.0; M = 0.0; }
 }
 
-#define Proceed(q) while (rayQueryProceedEXT(q)) if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
+#define Proceed(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
 	rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), \
 		rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q)
+// (2026-11-07 rtgap-decals) the reuse's visibility ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+#define ProceedShadow(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
+	rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), \
+		uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q)
 
 bool Visible(vec3 from, vec3 to) {
 	const vec3 d = to - from;
@@ -132,7 +136,7 @@ bool Visible(vec3 from, vec3 to) {
 	rayQueryEXT q;
 	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT), 0xFFu, from + p.origin.xyz,
 		0.0, d / len, max(len - 2.0, 0.0));
-	Proceed(q);
+	ProceedShadow(q);
 	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT;
 }
 

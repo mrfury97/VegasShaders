@@ -40,6 +40,7 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	                    // trace's rect of them; the history is used only at the same scale, so that rect is size.xy). Native: = size.xy
 	                    // (2026-11-07) z MovingCasterHistory: frames of history kept where people cast the shadow (0 = no limit), w the
 	                    // people's cull mask (0x60: actors 0x20, the player's parts 0x40; 0 = never tested)
+	vec4 slack;         // (2026-11-07 rtgap-tess; core/RtTessContact.h) the tessellated bumps: x Strength, y FadeStart, z FadeEnd (0: none)
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;
@@ -51,6 +52,9 @@ layout(set = 0, binding = 7, rgba16f) uniform writeonly image2D historyOut;
 layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
+#include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson)
+#define RT_CONTACT_DEPTH depthImage
+#include "RtContact.glsl"
 
 const int MaxLamps = 255;
 shared vec4 lampA[MaxLamps];    // x y z (scene space), reach
@@ -78,11 +82,16 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	// (2026-11-03 rtalpha) jitter.z 1: alpha-tested casters (foliage cards, fences, chain link, wires: non-opaque, mask 0x10) come as
 	// candidates and their diffuse alpha decides (RtAlpha.glsl, as the sun's rays); 0: they are skipped (mask without 0x10), as before
 	const bool testAlpha = p.jitter.z > 0.5;
+	// (2026-11-07 ptaaa-firstperson) from (the view model, a counter you stand at) or toward (the Pip-Boy light, the flashlight moved
+	// onto the beam) a point within arm's reach of the eye: the hidden first-person body is passed over (RtHidden.glsl)
+	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz))
+		return rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtAnyHit);
 	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q))
+	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
-			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
@@ -97,7 +106,7 @@ bool blockedByPeople(vec3 origin, vec3 segment, float tMin, float tMax) {
 	if (people == 0u || !(tMax > tMin)) return false;
 	rayQueryEXT q;
 	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, people, origin, tMin, segment, tMax);
-	while (rayQueryProceedEXT(q)) {}
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
 	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
 }
 
@@ -160,7 +169,7 @@ void main() {
 		position = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * viewZ;
 		vec3 n = imageLoad(normalImage, pixel).xyz * 2.0 - 1.0;
 		normal = normalize(normalize(p.right.xyz) * n.x + normalize(p.up.xyz) * n.y + normalize(p.forward.xyz) * n.z);
-		offset = p.params.y + p.mask.w * viewZ;
+		offset = p.params.y + p.mask.w * viewZ + rtTessSlack(p.slack, viewZ);   // (2026-11-07 rtgap-tess 1a: + the bumps' Strength)
 		origin = position + normal * offset;
 	}
 

@@ -7,6 +7,7 @@
 #include "DxvkCompute.h"
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1: the trace over the frame's top-left rect (docs/next/RT-RENDERSCALE.md)
 #include "GpuProfiler.h"
+#include "RtTessContact.h"	// UNOFFICIAL 2026-11-07 (rtgap-tess) the bumps' slack + ContactShadows (docs/next/RT-DETAIL-GAPS.md section 1)
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
 
 namespace {
@@ -31,6 +32,8 @@ namespace {
 		int		shadowDenoiser = 0;		// 2026-11-07: 1 = the helper's RT shadow denoiser (RtShadowDenoise.spv) instead of RtDenoise + Penumbra
 		int		denoiserDebugView = 0;
 		float	denoiserHistory = 32.0f, denoiserMaxRadius = 32.0f, denoiserStabilize = 4.0f;
+		float	contact = 1.0f;			// 2026-11-07 (rtgap-tess) ContactShadows: the depth buffer's contact march (strength, 0 off; Mode 1 only)
+		float	contactLength = 24.0f;	// ContactLength (pixels)
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
 	} S;
 
@@ -38,6 +41,7 @@ namespace {
 	struct PassConstants {
 		float size[4], forward[4], right[4], up[4], origin[4], sun[4], bias[4], range[4], alpha[4], full[4];
 		float cloud[4], cloudCentre[4], cloudLight[4], camera[4];	// 2026-10-30 CloudShadows (cloud.x 0: none); camera: its world position
+		float slack[4], contact[4], contactGate[4];	// 2026-11-07 (rtgap-tess) RtTessContact.h / RtContact.glsl
 	};
 
 	int			imageDepth = -1, imageNormals = -1, imageVisibility = -1, shader = -1, hitDebugShader = -1;
@@ -90,6 +94,8 @@ namespace {
 		S.startBias = TheSettingManager->GetSettingF(kSection, "StartBias");
 		S.rayLength = (std::max)(100.0f, TheSettingManager->GetSettingF(kSection, "RayLength"));
 		S.debugView = TheSettingManager->GetSettingI(kSection, "DebugView");
+		S.contact = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "ContactShadows"), 0.0f), 1.0f);	// 2026-11-07 (a missing key: 0, off)
+		S.contactLength = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "ContactLength"), 0.0f), 128.0f);
 		S.sunAngle = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "SunAngle"), 0.0f), 10.0f);
 		S.denoise = TheSettingManager->GetSettingI(kSection, "Denoise") != 0;
 		S.halfResolution = TheSettingManager->GetSettingI(kSection, "HalfResolution") != 0;
@@ -211,6 +217,24 @@ namespace {
 		c.alpha[1] = (float)(frames & 1023);								// the jitter's frame
 		c.alpha[2] = tanf(0.5f * S.sunAngle * 0.0174532925f);				// the sun cone's half-angle tangent (0: hard)
 		c.alpha[3] = (wantHit && hitSurface) || helperDenoise ? 1.0f : 0.0f;	// 2026-10-31 Penumbra / 2026-11-07 ShadowDenoiser: the blocker distances (binding 7)
+		// 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1) (1a) the bumps' slack: rays start the Strength further off the surface
+		// while the tessellated bumps are drawn. (1b) ContactShadows: in Mode 1 only (Mode 0 keeps the cascades, which hold the bumps' own
+		// shadows with CastShadows, and the raster contact shadows: a march here would darken twice); where the raster contact shadows run
+		// ([Shaders.ShadowsExteriors.ScreenSpace]: in the shadow buffer in both modes) the march fades out as they fade in
+		// (TESR_ShadowScreenSpaceFade: NearFade, pushed out to the bumps' FadeEnd by DisplaceContactFade), so the two never darken the same
+		// pixel twice and no ring shows where one hands over to the other; raster ones with no fade at all: no march.
+		{
+			float v[3]; DxvkCompute::DisplaceRtSlack(v);
+			RtTessContact::Slack slack; slack.strength = v[0]; slack.fadeStart = v[1]; slack.fadeEnd = v[2];
+			RtTessContact::SlackVec(slack, c.slack);
+			RtTessContact::Contact contact = RtTessContact::Make(S.mode == 1 ? S.contact : 0.0f, S.contactLength);
+			if (contact.strength > 0.0f && shadows->Constants.ScreenSpaceData.x > 0.0f) {
+				const D3DXVECTOR4* fade = Constant("TESR_ShadowScreenSpaceFade");
+				if (fade && fade->y > 0.0f) RtTessContact::GateBy(contact, fade->x, fade->y);
+				else contact.strength = 0.0f;
+			}
+			RtTessContact::ContactVecs(contact, c.contact, c.contactGate);
+		}
 		c.range[0] = S.range; c.range[1] = 0.15f * S.range; c.range[2] = 255.0f; c.range[3] = S.debugView == 3 ? 1.0f : S.debugView == 5 ? 2.0f : S.debugView == 6 ? 3.0f :
 			S.debugView == 9 ? 5.0f : S.debugView == 10 ? 6.0f : 0.0f;	// 9, 10 (2026-10-30): CloudShadows checks
 
@@ -275,6 +299,7 @@ namespace {
 				ds.maxHistory = S.denoiserHistory; ds.maxRadius = S.denoiserMaxRadius / (float)scale; ds.stabilize = S.denoiserStabilize;
 				ds.debugView = S.denoiserDebugView;
 				ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
+				RtShadowDenoise::TimeScale(ds, RtDenoise::HistoryClock());	// UNOFFICIAL 2026-11-07 (perf-history) frames at 60 fps -> the same seconds
 				RtShadowDenoise::DenoiseConstants d;
 				RtShadowDenoise::Fill(d, now, before, tw, th, rw, rh, 0, 1, frames, ds, moved, c.alpha[2]);
 				d.layerReset[0][0] = before.valid ? 0.0f : 1.0f;

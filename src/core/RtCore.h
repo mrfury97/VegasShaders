@@ -82,10 +82,18 @@ public:
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).
 	static D3DXVECTOR3	Eye();
 	static bool			Running();							// the helper is ready (users trace from the frame after it got ready)
+	// UNOFFICIAL 2026-11-07 (ptaaa-fog) another user than Name (not left out) wants to trace this frame. A user that only rides along with
+	// the RT effects the player switched on (RT fog visibility: on by default) asks this in its Wants, with Running(), so it never starts the
+	// helper or keeps it tracing by itself.
+	static bool			OthersWant(const char* Name);
 	static bool			LeftOut(const char* Name);			// (2026-11-05) this user's images did not fit at the helper start: it does not trace
 	// UNOFFICIAL 2026-11-02 (bench warm slot, shot command reloadshaders): stop a running helper; it starts again on the next frame an RT
 	// effect wants it, so it loads every Compute\Rt\*.spv again (and settings read at its start: HitTextures ...). Users' Setup runs again.
 	static void			Restart(const char* Why);
+	// UNOFFICIAL 2026-11-07 (rt-shutdown) the game is exiting (xNVSE ExitGame / ExitGame_Console, the window closing): the helper finishes
+	// every recorded frame, DXVK's queue is drained, the helper exits (Core::Stop's order; ~5 s at most); RT stays off from then on.
+	// Render (main) thread only, outside a frame's recording; any number of calls.
+	static void			Shutdown(const char* Why);
 	static const char*	StatusText();
 	static const NvrRtShared* Helper();						// the helper's counters (null when not running)
 	static UInt32		Instances();						// this frame's
@@ -97,6 +105,12 @@ public:
 	// mask). A pass that tests them adds AlphaAtlasImage() to its images and includes Compute\Rt\RtAlpha.glsl (FORK-RT-CORE.md).
 	static bool			AlphaTested();
 	static int			AlphaAtlasImage();					// the alpha atlas' image index (-1: none)
+	// UNOFFICIAL 2026-11-07 (rtgap-decals) decals ([Main.Main.RayTracing] Decals, live, with AlphaTested): true while the scene may hold them
+	// (alpha-tested, mask 0x10, custom index NVR_RT_CUSTOM_DECAL). A pass whose rays treat the cut-outs as solid (gl_RayFlagsOpaqueEXT over
+	// mask 0x10) would see them as solid quads: such a pass must test candidates instead (RtAlpha.glsl rtIsDecal; RT AO's AOAlpha 3).
+	static bool			DecalsTraced();
+	// UNOFFICIAL 2026-11-07 the RT scene carries displaced copies of the land / parallax objects (Displacement; RT-DETAIL-GAPS.md 1c)
+	static void			DisplacedCopies(bool& Land, bool& Objects);
 	// UNOFFICIAL 2026-10-29 hit textures ([Main.Main.RayTracing] HitTextures): the albedo atlas' image index (RGBA8; -1: none). A pass
 	// that shades its hits adds it to its images and uses Compute\Rt\RtHit.glsl (rtHitAlbedo: the texture's colour, else the average).
 	static int			AlbedoAtlasImage();
@@ -105,20 +119,31 @@ public:
 	static int			GlowAtlasImage();
 	// UNOFFICIAL 2026-11-02 normal textures ([Main.Main.RayTracing] NormalTextures, with HitTextures): the normal atlas' image index
 	// (RGBA8, the same slots; record flag NVR_RT_RECORD_NORMAL; RtHit.glsl rtHitNormalMapped with RT_NORMAL_ATLAS). -1: none.
+	// (2026-11-07) [Main.Main.RayTracing] RealNormalMaps (default on with RealTextures) needs no image: the real normal maps go with the
+	// real textures (set 1) and set the record flag too; rtHitNormalMapped reads them in every pass that includes RtHit.glsl.
 	static int			NormalAtlasImage();
 	// UNOFFICIAL 2026-10-29 (rt-lamp-shadows): true while the scene holds the posed skinned actors ([Main.Main.RayTracing] Actors +
 	// fork patch 0033; instance mask NVR_RT_MASK_ACTOR = 0x20), so a pass can stop taking people's shadows from elsewhere
 	static bool			Actors();
 	// UNOFFICIAL 2026-10-30 (rt-ao-sky, GlowDirect): this frame's instances with a glow map (NVR_RT_RECORD_GLOW) as sphere lights: the
 	// world bound's centre in scene space (camera relative, as the instances), its radius and the draw's average colour (the record's).
-	struct GlowLight { float center[3]; float radius; float rgb[3]; };
+	// (2026-11-07 ptaaa-emissive) + its index in the frame record, its geometry id and triangle count (0: unknown) for PTEmissive
+	struct GlowLight { float center[3]; float radius; float rgb[3]; UInt32 record; UInt32 geometryId; UInt32 triangles; };
 	static const std::vector<GlowLight>& GlowLights();
+	// UNOFFICIAL 2026-11-07 (ptaaa-emissive, src/core/RtEmissiveRow.h) PTEmissive, during a user's Record: the transform of the frame record's
+	// instance `Record` (false: not recording, not a glow record, alpha-tested (its bits 8-15 are taken) or traced through a displaced copy);
+	// MarkEmissive sets its record's bits 8-15 to Number (the emissive instance's number + 1) for this exchange
+	static bool			EmissiveTransform(UInt32 Record, float Transform[3][4]);
+	static bool			MarkEmissive(UInt32 Record, UInt32 Number);
 	// UNOFFICIAL 2026-10-30 grass ([Main.Main.RayTracing] Grass, needs AlphaTested; GrassRadius, GrassMaxTufts live): the grass is not in
 	// the cells' scene graph (the game places its tufts per draw from TallGrassShader's instance table), so each grass pass, right after
 	// it is drawn (Render.cpp GrassFirst), hands its tufts here: the model's first tuft is built once (alpha-tested, its card texture in
 	// the alpha atlas) and every tuft within GrassRadius of the camera this frame is an instance of it (the tuft's world position and
 	// size step; no sway). GrassWanted: worth reading the pass's tufts (the helper runs, Grass and AlphaTested on).
 	static bool			GrassWanted();
+	// UNOFFICIAL 2026-11-07 (perf-ptcost) how many instances of the exchange being recorded are the hidden first-person body
+	// (NVR_RT_CUSTOM_HIDDEN): 0 lets the path tracer's camera ray be one query (RtPtCost.h). Valid inside a user's Record.
+	static UInt32		HiddenInstances();
 	static void			NoteGrass(NiGeometry* Geometry, IDirect3DBaseTexture9* Texture, const float* Instances, UINT Count, UINT VertsPerTuft,
 							const float* ScaleMask, UInt32 AlphaRef);
 };

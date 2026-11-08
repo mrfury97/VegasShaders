@@ -850,6 +850,7 @@ void SessionLog::OnEvent(const char* what) {
 void SessionLog::OnExit(const char* how) {
 	if (Ended) return;
 	Ended = true;
+	SessionLog::StallWatch::Stop();	// (2026-11-07 perf-ptcost: the exit's own long frames are no stall)
 	FlushChanges(true);
 	Logger::Log("SESSION END (%s): up %s, %s in game, %u loading screens, %u setting changes (last: %s), last cell %s, weather %s, address space peak %.0f MB, worst frame %.1f ms",
 		how, Uptime(Seconds() - StartSeconds).c_str(), Uptime(InGameSeconds).c_str(), LoadingScreens, ChangesTotal, LastChange.c_str(), LastCell.c_str(),
@@ -871,6 +872,17 @@ void SessionLog::OnFrame() {
 			Logger::Log("SESSION CrashTest %d: crashing the game on purpose now", crash);
 			if (crash == 2) throw std::runtime_error("CrashTest");
 			*(volatile int*)nullptr = 0;
+		}
+		// UNOFFICIAL 2026-11-07 (perf-ptcost) [Main.Develop.Main] StallTest: a freeze on purpose (once per value), to check the STALL lines
+		{
+			static int lastStallTest = 0;
+			const int stall = (std::min)((std::max)(TheSettingManager->GetSettingI("Main.Develop.Main", "StallTest"), 0), 120);
+			if (stall > 0 && stall != lastStallTest) {
+				Logger::Log("SESSION StallTest %d: the render thread sleeps %d s on purpose now (the STALL lines should follow)", stall, stall);
+				SessionLog::StageScope stage("StallTest");
+				Sleep((DWORD)stall * 1000u);
+			}
+			lastStallTest = stall;
 		}
 		FlushChanges(false);
 		PeakAddressMB = (std::max)(PeakAddressMB, AddressSpaceMB());
@@ -936,4 +948,268 @@ void SessionLog::OnFrame() {
 		if (frameMs > WorstEver && now - StartSeconds > 1.0) WorstEver = frameMs;
 	}
 	if (now - WindowStart >= 60.0) Heartbeat(now);
+}
+
+// ---- UNOFFICIAL 2026-11-07 (perf-ptcost) the STALL watchdog (SessionLog.h StallWatch) ---------------------------------------------------
+namespace {
+	volatile LONG64 StallProgressQpc = 0;	// the last RenderBegin / RenderEnd (QPC)
+	volatile LONG StallFrames = 0, StallInRender = 0, StallArmed = 0, StallLoading = 0;
+	volatile LONG StallStop = 0;
+	HANDLE StallThread = nullptr, StallRenderThread = nullptr;
+	DWORD StallRenderThreadId = 0;
+	UINT_PTR StallStackBase = 0;
+	const char* const* StallStageStack = nullptr;	// the render thread's SessionLog::Stages (thread_local: its addresses, read from here)
+	const unsigned* StallStageDepth = nullptr;
+	void (*StallExtra)(char*, unsigned) = nullptr;
+	LONG64 StallQpcFrequency = 0;
+
+	double StallNowMs(LONG64 qpc) { return StallQpcFrequency ? (double)qpc * 1000.0 / (double)StallQpcFrequency : 0.0; }
+
+	// The render thread's instruction pointer and the return addresses on its stack (a scan, as the CRASH lines'), suspended only while
+	// GetThreadContext runs and its stack is copied (no lock, no allocation in between)
+	unsigned StallSample(UINT_PTR& eip, UINT_PTR* out, unsigned max) {
+		static UINT_PTR copy[4096];	// 16 KB of stack (the watchdog thread is the only user)
+		eip = 0;
+		if (!StallRenderThread || SuspendThread(StallRenderThread) == (DWORD)-1) return 0;
+		CONTEXT ctx = {};
+		ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+		size_t words = 0;
+		if (GetThreadContext(StallRenderThread, &ctx)) {
+			eip = ctx.Eip;
+			const UINT_PTR start = ctx.Esp;
+			if (start && StallStackBase > start) {
+				words = (std::min)((size_t)((StallStackBase - start) / sizeof(UINT_PTR)), sizeof(copy) / sizeof(copy[0]));
+				__try { memcpy(copy, (const void*)start, words * sizeof(UINT_PTR)); }
+				__except (EXCEPTION_EXECUTE_HANDLER) { words = 0; }
+			}
+		}
+		ResumeThread(StallRenderThread);
+		unsigned found = 0;
+		for (size_t i = 0; i < words && found < max; i++)
+			if (LooksLikeReturn(copy[i]) && (!found || out[found - 1] != copy[i])) out[found++] = copy[i];
+		return found;
+	}
+
+	// "module+offset" WITHOUT the loader lock (GetModuleHandleEx / GetModuleFileName take it, and a frozen render thread may be holding it:
+	// a LoadLibrary in a driver): the image's base from VirtualQuery, its name from its own export directory (the exe has none: its base is
+	// known), else "module@base"
+	HMODULE StallExeBase = nullptr;
+	void StallModuleText(UINT_PTR address, char* out, size_t size) {
+		MEMORY_BASIC_INFORMATION info;
+		if (address < 0x10000 || !VirtualQuery((const void*)address, &info, sizeof(info)) || info.Type != MEM_IMAGE || !info.AllocationBase) {
+			sprintf_s(out, size, "%08lX (in no module)", (unsigned long)address);
+			return;
+		}
+		const UINT_PTR base = (UINT_PTR)info.AllocationBase;
+		char name[64] = "";
+		if ((HMODULE)base == StallExeBase) strcpy_s(name, "FalloutNV.exe");
+		else {
+			__try {
+				const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)base;
+				const IMAGE_NT_HEADERS32* nt = (const IMAGE_NT_HEADERS32*)(base + dos->e_lfanew);
+				const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+				if (dos->e_magic == IMAGE_DOS_SIGNATURE && nt->Signature == IMAGE_NT_SIGNATURE && dir.VirtualAddress && dir.Size) {
+					const IMAGE_EXPORT_DIRECTORY* exp = (const IMAGE_EXPORT_DIRECTORY*)(base + dir.VirtualAddress);
+					if (exp->Name) strncpy_s(name, (const char*)(base + exp->Name), _TRUNCATE);
+				}
+			}
+			__except (EXCEPTION_EXECUTE_HANDLER) { name[0] = 0; }
+		}
+		if (name[0]) sprintf_s(out, size, "%s+%lX", name, (unsigned long)(address - base));
+		else sprintf_s(out, size, "module@%08lX+%lX", (unsigned long)base, (unsigned long)(address - base));
+	}
+
+	const char* StallKind(UINT_PTR address) {	// what kind of code the address is in, from its module's name
+		char text[MAX_PATH + 32];
+		StallModuleText(address, text, sizeof(text));
+		_strlwr_s(text);
+		if (strstr(text, "d3d9.dll") || strstr(text, "dxvk")) return "the D3D9 runtime (d3d9.dll: DXVK / Vegas Shaders DXVK)";
+		if (strstr(text, "ntdll") || strstr(text, "kernelbase") || strstr(text, "kernel32") || strstr(text, "win32u") || strstr(text, "user32"))
+			return "Windows (a wait, I/O or a system call)";
+		if (strstr(text, "vegasshaders") || strstr(text, "newvegasreloaded")) return "Vegas Shaders";
+		if (strstr(text, "falloutnv")) return "the game's own code";
+		if (strstr(text, "nvoglv") || strstr(text, "nvd3d") || strstr(text, "amdvlk") || strstr(text, "atio") || strstr(text, "igvk") || strstr(text, "vulkan"))
+			return "the graphics driver";
+		if (strstr(text, "in no module")) return "no module (generated code?)";
+		return "another module (a plugin or a library)";
+	}
+
+	struct StallState {
+		bool on = false;
+		LONG frame = 0;
+		bool inRender = false;
+		LONG64 startQpc = 0;
+		double nextReportMs = 1000.0;
+		ULONGLONG cpuStart = 0;	// the render thread's CPU time (100 ns) when the stall began
+		DWORD faultsStart = 0;
+		unsigned samples = 0;
+		struct Spot { UINT_PTR eip; unsigned count; } spots[8] = {};
+	};
+
+	ULONGLONG StallThreadCpu() {
+		FILETIME c, e, k, u;
+		if (!StallRenderThread || !GetThreadTimes(StallRenderThread, &c, &e, &k, &u)) return 0;
+		return (((ULONGLONG)k.dwHighDateTime << 32) | k.dwLowDateTime) + (((ULONGLONG)u.dwHighDateTime << 32) | u.dwLowDateTime);
+	}
+	DWORD StallPageFaults(SIZE_T* commitMB = nullptr) {
+		struct Counters { DWORD cb, faults; SIZE_T peakWs, ws, qpp, qp, qnpp, qnp, pagefile, peakPagefile; } m = {};	// PROCESS_MEMORY_COUNTERS
+		m.cb = sizeof(m);
+		typedef BOOL (WINAPI* Fn)(HANDLE, void*, DWORD);
+		static Fn fn = (Fn)GetProcAddress(GetModuleHandleA("kernel32.dll"), "K32GetProcessMemoryInfo");
+		if (!fn || !fn(GetCurrentProcess(), &m, sizeof(m))) return 0;
+		if (commitMB) *commitMB = m.pagefile >> 20;
+		return m.faults;
+	}
+	void StallMemoryText(char* out, size_t size) {	// the address space: used, the largest free block; the system's memory
+		SIZE_T largest = 0, freeTotal = 0;
+		MEMORY_BASIC_INFORMATION info;
+		for (UINT_PTR a = 0x10000; a < 0xFFFF0000u; ) {
+			if (!VirtualQuery((const void*)a, &info, sizeof(info))) break;
+			if (info.State == MEM_FREE) { freeTotal += info.RegionSize; largest = (std::max)(largest, info.RegionSize); }
+			const UINT_PTR next = (UINT_PTR)info.BaseAddress + info.RegionSize;
+			if (next <= a) break;
+			a = next;
+		}
+		MEMORYSTATUSEX m = { sizeof(m) };
+		GlobalMemoryStatusEx(&m);
+		SIZE_T commitMB = 0;
+		const DWORD faults = StallPageFaults(&commitMB);
+		sprintf_s(out, size, "address space %.0f of %.0f MB used, largest free block %.0f MB (free %.0f MB in all); committed %u MB; system RAM free %.1f of %.1f GB, "
+			"commit free %.1f GB; page faults so far %lu", (m.ullTotalVirtual - m.ullAvailVirtual) / 1048576.0, m.ullTotalVirtual / 1048576.0, largest / 1048576.0,
+			freeTotal / 1048576.0, (unsigned)commitMB, m.ullAvailPhys / 1073741824.0, m.ullTotalPhys / 1073741824.0, m.ullAvailPageFile / 1073741824.0, (unsigned long)faults);
+	}
+	void StallStagesText(char* out, size_t size) {
+		out[0] = 0;
+		if (!StallStageStack || !StallStageDepth) { strcpy_s(out, size, "(unknown)"); return; }
+		__try {
+			const unsigned depth = (std::min)(*StallStageDepth, 8u);
+			for (unsigned i = 0; i < depth; i++) {
+				const char* s = StallStageStack[i];
+				if (i) strcat_s(out, size, " > ");
+				strncat_s(out, size, s ? s : "?", _TRUNCATE);
+			}
+			if (!depth) strcpy_s(out, size, "(none: outside every marked stage)");
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(out, size, "(unreadable)"); }
+	}
+	void StallExtraText(char* out, unsigned size) {
+		out[0] = 0;
+		if (!StallExtra) return;
+		__try { StallExtra(out, size); }
+		__except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(out, size, "(unreadable)"); }
+	}
+
+	void StallReport(StallState& s, double ms, bool final) {
+		char stages[400], memory[400], extra[600], where[MAX_PATH + 32], stack[1600] = "";
+		StallStagesText(stages, sizeof(stages));
+		StallMemoryText(memory, sizeof(memory));
+		StallExtraText(extra, sizeof(extra));
+		const ULONGLONG cpu = StallThreadCpu();
+		const double cpuMs = cpu > s.cpuStart ? (cpu - s.cpuStart) / 10000.0 : 0.0;
+		const DWORD faults = StallPageFaults();
+		if (final) {
+			// the most sampled instruction pointer of the stall
+			unsigned best = 0;
+			for (unsigned i = 1; i < 8; i++) if (s.spots[i].count > s.spots[best].count) best = i;
+			if (s.spots[best].count) StallModuleText(s.spots[best].eip, where, sizeof(where)); else strcpy_s(where, "(no sample)");
+			Logger::Log("STALL over after %.1f s (frame %ld, %s): the render thread used %.0f ms of CPU in it (%.0f %%), %lu page faults; most of %u samples at %s "
+				"(%s, %u times) | %s", ms / 1000.0, (long)s.frame, s.inRender ? "inside the game frame" : "between game frames", cpuMs, ms > 0 ? 100.0 * cpuMs / ms : 0.0,
+				(unsigned long)(faults - s.faultsStart), s.samples, where, s.spots[best].count ? StallKind(s.spots[best].eip) : "-", s.spots[best].count, memory);
+			return;
+		}
+		UINT_PTR eip = 0, returns[14];
+		const unsigned count = StallSample(eip, returns, 14);
+		StallModuleText(eip, where, sizeof(where));
+		for (unsigned i = 0; i < count; i++) {
+			char entry[MAX_PATH + 32];
+			StallModuleText(returns[i], entry, sizeof(entry));
+			if (i) strcat_s(stack, ", ");
+			strncat_s(stack, entry, _TRUNCATE);
+		}
+		Logger::Log("STALL: the render thread has not finished a game frame for %.1f s (frame %ld, %s; stages: %s) | now in %s: %s | callers (a stack scan, newest first): "
+			"%s | CPU used in the stall %.0f ms (%.0f %%: %s), page faults %lu | %s%s%s", ms / 1000.0, (long)s.frame,
+			s.inRender ? "inside the game frame (RenderHook)" : "BETWEEN game frames: the game's update, Present, or a pause", stages, where, eip ? StallKind(eip) : "?",
+			count ? stack : "(none found)", cpuMs, ms > 0 ? 100.0 * cpuMs / ms : 0.0, ms > 0 && cpuMs < 0.2 * ms ? "it waits" : "it computes", (unsigned long)(faults - s.faultsStart),
+			memory, extra[0] ? " | " : "", extra);
+	}
+
+	DWORD WINAPI StallMain(void*) {
+		StallState s;
+		unsigned stalls = 0;
+		while (!InterlockedCompareExchange(&StallStop, 0, 0)) {
+			Sleep(200);
+			if (!InterlockedCompareExchange(&StallArmed, 0, 0)) continue;
+			LARGE_INTEGER now; QueryPerformanceCounter(&now);
+			const LONG64 last = InterlockedCompareExchange64(&StallProgressQpc, 0, 0);
+			const double ms = StallNowMs(now.QuadPart - last);
+			const LONG frame = InterlockedCompareExchange(&StallFrames, 0, 0);
+			if (s.on && frame != s.frame) {	// frames again
+				StallReport(s, StallNowMs(last - s.startQpc), true);
+				s = StallState();
+				continue;
+			}
+			if (s.on) {
+				if (s.samples < 1000) {	// where it is, 5 times a second (the "over" line's most common spot)
+					UINT_PTR eip = 0, none[1];
+					StallSample(eip, none, 0);
+					s.samples++;
+					unsigned i = 0;
+					for (; i < 8 && s.spots[i].count && s.spots[i].eip != eip; i++) {}
+					if (i < 8) { s.spots[i].eip = eip; s.spots[i].count++; }
+				}
+				if (ms >= s.nextReportMs) { StallReport(s, ms, false); s.nextReportMs *= 4.0; }
+				continue;
+			}
+			if (ms < 1000.0 || last == 0) continue;
+			// not a stall: a loading screen, the game minimised or behind another window (the game pauses its loop there)
+			if (InterlockedCompareExchange(&StallLoading, 0, 0)) continue;
+			if (GameWindow && (IsIconic(GameWindow) || GetForegroundWindow() != GameWindow)) continue;
+			if (stalls >= 40) continue;
+			stalls++;
+			s.on = true; s.frame = frame; s.inRender = InterlockedCompareExchange(&StallInRender, 0, 0) != 0; s.startQpc = last;
+			s.cpuStart = StallThreadCpu(); s.faultsStart = StallPageFaults();
+			StallReport(s, ms, false);
+			s.nextReportMs = 4000.0;
+		}
+		return 0;
+	}
+}
+
+void SessionLog::StallWatch::RenderBegin() {
+	LARGE_INTEGER now; QueryPerformanceCounter(&now);
+	if (!StallRenderThread) {
+		LARGE_INTEGER f; QueryPerformanceFrequency(&f); StallQpcFrequency = f.QuadPart;
+		StallRenderThreadId = GetCurrentThreadId();
+		StallExeBase = GetModuleHandleA(nullptr);
+		StallRenderThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, StallRenderThreadId);
+		StallStackBase = (UINT_PTR)((const NT_TIB*)NtCurrentTeb())->StackBase;
+		StallStageStack = SessionLog::Stages::Stack;
+		StallStageDepth = &SessionLog::Stages::Depth;
+		StallThread = CreateThread(nullptr, 64 * 1024, StallMain, nullptr, 0, nullptr);
+		if (StallThread) SetThreadPriority(StallThread, THREAD_PRIORITY_ABOVE_NORMAL);
+		Logger::Log("SESSION STALL watchdog %s (render thread %lu): a game frame that does not end within 1 s gets STALL lines (where the render thread is)",
+			StallThread && StallRenderThread ? "on" : "could not start", (unsigned long)StallRenderThreadId);
+	}
+	if (GetCurrentThreadId() != StallRenderThreadId) return;
+	InterlockedExchange64(&StallProgressQpc, now.QuadPart);
+	InterlockedExchange(&StallInRender, 1);
+	InterlockedIncrement(&StallFrames);
+	// in game (a cell) and not on a loading screen: the main thread's view, kept for the watchdog
+	InterlockedExchange(&StallArmed, Player && Player->parentCell ? 1 : 0);
+	InterlockedExchange(&StallLoading, (InterfaceManager && InterfaceManager->IsActive(Menu::kMenuType_Loading)) || LoadingStart >= 0.0 ? 1 : 0);
+}
+
+void SessionLog::StallWatch::RenderEnd() {
+	if (GetCurrentThreadId() != StallRenderThreadId) return;
+	LARGE_INTEGER now; QueryPerformanceCounter(&now);
+	InterlockedExchange64(&StallProgressQpc, now.QuadPart);
+	InterlockedExchange(&StallInRender, 0);
+}
+
+void SessionLog::StallWatch::SetExtra(void (*text)(char* out, unsigned size)) { StallExtra = text; }
+
+void SessionLog::StallWatch::Stop() {
+	InterlockedExchange(&StallArmed, 0);
+	InterlockedExchange(&StallStop, 1);
+	if (StallThread) { WaitForSingleObject(StallThread, 1000); CloseHandle(StallThread); StallThread = nullptr; }
 }

@@ -1,0 +1,74 @@
+// UNOFFICIAL 2026-11-07 (perf-reflfix) NvrRtHelper's smooth vertex normals (embedded in the helper as RtNormals.h; rebuild that after a change:
+//   glslangValidator -V --target-env vulkan1.2 --vn kRtNormalsSpv -o RtNormals.h RtNormals.comp
+// The RT scene held positions (+ texcoords) only, so every traced hit was shaded with its flat triangle normal: a sphere in a mirror came
+// out faceted (a tester's RTX shots, the RT test room, test 9). Per geometry the helper keeps one word a vertex just BEFORE its positions in
+// the geometry data (binding 11; NvrRtProtocol.h NVR_RT_RECORD_GEO_NORMALS), the vertex's normal in object space, octahedral 16 + 16 bit
+// (0 = none), made here from the geometry's own positions and triangle list:
+//   ACCUMULATE  one thread a triangle: its unit face normal times the corner's angle (Thuermer-Wuethrich) added into a 3-word fixed-point
+//               accumulator per vertex (1 / 16384; integer atomics: the sums are the same bit for bit whatever the order);
+//   PACK        one thread a vertex: the sum normalized and packed (a vertex no triangle touches: 0).
+// The game's meshes split their vertices where the art wants a hard edge (each copy has its own normal), so averaging over the triangles
+// that share a vertex INDEX keeps the authored hard edges and smooths the rest: a crease-free reconstruction of the vertex normals. Where
+// a mesh is split only for its texcoords the two copies get slightly different sums (a faint seam at worst, not a facet). Static geometry
+// runs once at its build; skinned (dynamic) geometry after every refit, from its posed positions.
+#version 460
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 64) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer Words { uint w[]; };
+layout(push_constant) uniform Push {
+	uvec2 data;        // the geometry data buffer's address (binding 11's)
+	uint vertexOffset; // words: float3 positions
+	uint indexOffset;  // words: uint triangle list
+	uint normalOffset; // words: the packed normals (one a vertex)
+	uint accOffset;    // words: the accumulator (3 a vertex, cleared before ACCUMULATE)
+	uint vertices;
+	uint triangles;
+	uint mode;         // 0 ACCUMULATE, 1 PACK
+} pc;
+
+const float kScale = 16384.0;
+
+vec3 load3(Words d, uint o) { return vec3(uintBitsToFloat(d.w[o]), uintBitsToFloat(d.w[o + 1u]), uintBitsToFloat(d.w[o + 2u])); }
+
+float cornerAngle(vec3 a, vec3 b) {   // the angle between two edges leaving a corner (0 for a zero-length edge)
+	const float la = dot(a, a), lb = dot(b, b);
+	if (la < 1e-20 || lb < 1e-20) return 0.0;
+	return acos(clamp(dot(a, b) * inversesqrt(la * lb), -1.0, 1.0));
+}
+
+uint octPack(vec3 n) {
+	n /= abs(n.x) + abs(n.y) + abs(n.z);
+	vec2 e = n.xy;
+	if (n.z < 0.0) e = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+	const uvec2 q = uvec2(round(clamp(e * 0.5 + 0.5, 0.0, 1.0) * 65535.0));
+	const uint w = q.x | (q.y << 16);
+	return w == 0u ? 1u : w;   // (0 means "none": the one direction that packs to 0 moves by one step)
+}
+
+void main() {
+	const uint i = gl_GlobalInvocationID.x;
+	Words d = Words(pc.data);
+	if (pc.mode == 0u) {
+		if (i >= pc.triangles) return;
+		const uint i0 = d.w[pc.indexOffset + 3u * i], i1 = d.w[pc.indexOffset + 3u * i + 1u], i2 = d.w[pc.indexOffset + 3u * i + 2u];
+		if (i0 >= pc.vertices || i1 >= pc.vertices || i2 >= pc.vertices || i0 == i1 || i1 == i2 || i2 == i0) return;
+		const vec3 p0 = load3(d, pc.vertexOffset + 3u * i0), p1 = load3(d, pc.vertexOffset + 3u * i1), p2 = load3(d, pc.vertexOffset + 3u * i2);
+		const vec3 face = cross(p1 - p0, p2 - p0);
+		if (!(dot(face, face) > 1e-20)) return;
+		const vec3 f = normalize(face);
+		const float a0 = cornerAngle(p1 - p0, p2 - p0), a1 = cornerAngle(p2 - p1, p0 - p1), a2 = 3.14159265 - a0 - a1;
+		for (uint k = 0u; k < 3u; k++) {
+			const uint v = k == 0u ? i0 : k == 1u ? i1 : i2;
+			const float a = k == 0u ? a0 : k == 1u ? a1 : max(a2, 0.0);
+			const ivec3 q = ivec3(round(f * (a * kScale)));
+			atomicAdd(d.w[pc.accOffset + 3u * v], uint(q.x));
+			atomicAdd(d.w[pc.accOffset + 3u * v + 1u], uint(q.y));
+			atomicAdd(d.w[pc.accOffset + 3u * v + 2u], uint(q.z));
+		}
+		return;
+	}
+	if (i >= pc.vertices) return;
+	const vec3 s = vec3(ivec3(int(d.w[pc.accOffset + 3u * i]), int(d.w[pc.accOffset + 3u * i + 1u]), int(d.w[pc.accOffset + 3u * i + 2u])));
+	d.w[pc.normalOffset + i] = dot(s, s) > 0.5 ? octPack(normalize(s)) : 0u;
+}

@@ -139,16 +139,11 @@ void TAAEffect::UpdateSettings() {
 	// is a real value (a mirror), so only a key that is there at all replaces its default.
 	{
 		Upscaler::RrOptions rr;
-		// (review 2026-10-30: only at RenderScale 1, the one size RR runs at for now; below it the helper would make RR's guide images and
-		// set RR up for nothing. Crossing RenderScale 1 with RR on restarts the helper, with or without them.)
+		// (2026-11-07 perf-rr) at every RenderScale: below 1 RR denoises AND upscales the small frame in one step (TAAFSR.cpp RayReconstruct,
+		// a RenderScale v2 rect frame), in place of DLSS SR's upscale. Was: RenderScale 1 only (review 2026-10-30). The helper's sizes are the
+		// same either way (inputs and output at the screen's size, the render rect inside), so crossing RenderScale 1 restarts nothing.
 		const bool rrKey = dlss && TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RayReconstruction") != 0;
-		rr.Wanted = rrKey && FSRSettings.RenderScale >= 0.999f;
-		static bool rrScaleLogged = false;
-		if (rrKey && !rr.Wanted && !rrScaleLogged) {
-			rrScaleLogged = true;
-			Logger::Log("UNOFFICIAL DLSS RR: RayReconstruction is on, but DLSS Ray Reconstruction runs at RenderScale 1 only for now (the RT effects "
-				"do not run in rect frames); at RenderScale %.2f DLSS SR upscales as before (logged once).", FSRSettings.RenderScale);
-		}
+		rr.Wanted = rrKey;
 		rr.KeepDenoisers = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRKeepDenoisers") != 0;
 		rr.Preset = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "Preset"), 0, 3);
 		rr.RrPreset = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRPreset"), 0, 2);
@@ -487,7 +482,11 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 		D3DXVECTOR2(frameJitterX / (float)TheRenderManager->width, -frameJitterY / (float)TheRenderManager->height) : D3DXVECTOR2(0.0f, 0.0f);
 	Up.AfterEffects = false;
 	if (Up.Upscaled && !afterUpscale) {
-		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, "RenderScale: the world was upscaled before the effects");	// UNOFFICIAL 2026-11-01
+		// (2026-11-07 perf-rr) a rect frame DLSS RR denoised and upscaled at the RR point (TAAFSR.cpp, UpscaleAfterRayReconstruction) is one of
+		// these too: RenderScale's jitter index stepped on there; its flag is spent here (a frame without the RR point must not find it set)
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, rrRanThisFrame ? "DLSS Ray Reconstruction denoised and upscaled this RenderScale frame" :
+			"RenderScale: the world was upscaled before the effects");	// UNOFFICIAL 2026-11-01
+		rrRanThisFrame = false;
 		Up.Upscaled = false;
 		historyValid = false;
 		lastPathFSR = false;
