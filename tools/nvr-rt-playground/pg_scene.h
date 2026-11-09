@@ -155,7 +155,7 @@ struct Object {
 		// the game packs a material rule only on textured draws (RtScenePick); the playground's plain objects carry one too (the shader's
 		// HitSurface reads bits 26-31 whatever the rest says)
 		if (slot < 0 && (rough >= 0.0f || metal >= 0.0f)) {
-			if (rough >= 0.0f) { int k = int(rough * 7.0f + 0.5f); k = k < 1 ? 1 : k > 7 ? 7 : k; f |= uint32_t(k) << NVR_RT_RECORD_ROUGH_SHIFT; }
+			if (rough >= 0.0f) f |= NvrRtRoughCode(rough) << NVR_RT_RECORD_ROUGH_SHIFT;	// (2026-11-07 perf-reflfix2)
 			if (metal >= 0.0f) { int k = int(metal * 6.0f + 0.5f) + 1; k = k > 7 ? 7 : k; f |= uint32_t(k) << NVR_RT_RECORD_METAL_SHIFT; }
 		}
 		return f;

@@ -18,7 +18,9 @@ static bool registerHair(Host& h, const std::string& spv) {
 	return gShReflAlphaTex >= 0;
 }
 
-static bool hairRun(Ctx& c, bool textured, bool oldPacking, int& bad, int& wallThroughGaps, int& cardHits, int& sunThroughGaps, int& stoppedAtGaps) {
+// face (with oldPacking: an opaque textured card): (2026-11-07 perf-mirrorfix2) the card is a FaceGen face's skin: record kind skin and the
+// face's colour gain in bits 8-15 (RtScenePick::FaceGenGain / SkinGainCode, neutral maps: 2^2.2); its colour = the texel x the gain
+static bool hairRun(Ctx& c, bool textured, bool oldPacking, int& bad, int& wallThroughGaps, int& cardHits, int& sunThroughGaps, int& stoppedAtGaps, bool face = false) {
 	Host& h = *c.host;
 	World w;
 	w.meshes.resize(3);
@@ -41,6 +43,21 @@ static bool hairRun(Ctx& c, bool textured, bool oldPacking, int& bad, int& wallT
 	card.alphaRef = RtScenePick::ActorAlphaRef(hairFlags, 0);
 	card.tinted = !oldPacking;
 	card.albedo = oldPacking ? V3(greyLinear, greyLinear, greyLinear) : tintLinear;
+	// (perf-mirrorfix2) the face: grey 0.25 base (a dark head texture), FaceGen maps at their neutral 0.5 (stored): the game's face is x 2
+	const float faceBaseLinear = RtScenePick::SrgbDecode(64.0f / 255.0f), fgNeutral = RtScenePick::SrgbDecode(0.5f);
+	const float faceBase[3] = { faceBaseLinear, faceBaseLinear, faceBaseLinear }, fg[3] = { fgNeutral, fgNeutral, fgNeutral };
+	const float faceGain = RtScenePick::FaceGenGain(faceBase, fg, fg);
+	const uint32_t faceCode = RtScenePick::SkinGainCode(faceGain);
+	if (face) {
+		const float wantGain = RtScenePick::SrgbDecode(2.0f * 64.0f / 255.0f) / faceBaseLinear;
+		if (std::fabs(faceGain - wantGain) > 0.02f * wantGain || std::fabs(RtScenePick::FaceGenGain(nullptr, fg, fg) - 4.5947934f) > 1e-4f) {
+			bad++; say("    FaceGenGain %.3f (expected %.3f: the base x 2 in the stored curve)\n", faceGain, wantGain); }
+		card.skin = true; card.skinGain = faceCode;
+		card.albedo = V3(std::min(1.0f, greyLinear * faceGain), std::min(1.0f, greyLinear * faceGain), std::min(1.0f, greyLinear * faceGain));
+		const uint32_t f = card.recordFlags();
+		if (NvrRtKindOf(f) != NVR_RT_KIND_SKIN || ((f >> 8) & 0xFFu) != faceCode || !(f & NVR_RT_RECORD_TEXTURED) || (f & (NVR_RT_RECORD_ALPHA_TESTED | NVR_RT_RECORD_GLOW))) {
+			bad++; say("    the face card's record %08X (expected skin, gain code %u, textured)\n", f, faceCode); }
+	}
 	if (!oldPacking && (!card.alphaTested || card.alphaRef != 128u || !RtScenePick::IsTinted(card.recordFlags()) || card.mask() != NVR_RT_MASK_ACTOR)) {
 		bad++; say("    the hair card's packing: alpha-tested %d, reference %u, flags %08X, mask %02X (expected a tinted cut-out, 128, mask 0x20)\n",
 			int(card.alphaTested), card.alphaRef, card.recordFlags(), card.mask());
@@ -130,6 +147,7 @@ static bool hairRun(Ctx& c, bool textured, bool oldPacking, int& bad, int& wallT
 		const Object& o = cpu.objects[ref.object];
 		V3 want = o.albedo;
 		if (ref.object == 2 && textured) want = oldPacking ? V3(greyLinear, greyLinear, greyLinear) : V3(greyLinear * tintLinear.x, greyLinear * tintLinear.y, greyLinear * tintLinear.z) * RtScenePick::kTintScale;
+		if (ref.object == 2 && textured && face) { const float g = std::min(1.0f, greyLinear * float(faceCode) / RtScenePick::kSkinGainUnit); want = V3(g, g, g); }
 		const V3 n = octDecode(H[2], H[3]);
 		auto closeTo = [](float a, float b) { return std::fabs(a - b) <= 4e-3f + 0.01f * std::fabs(b); };
 		const bool ok = std::fabs(H[0] - ref.t) <= 0.002f * ref.t + 1.0f && (int(H[1]) & 6) == 6 && dot(n, ref.n) > 0.995f &&
@@ -139,7 +157,7 @@ static bool hairRun(Ctx& c, bool textured, bool oldPacking, int& bad, int& wallT
 	}
 	say("  %s, %s: %d reflection rays checked, %d mismatches; %d met the card, %d met the wall through its gaps, %d wall hits sunlit through "
 		"its gaps%s\n", textured ? "ReflectionsRTAlphaTex (atlas colour x tint)" : "ReflectionsRTAlpha (the record's tint)",
-		oldPacking ? "the OLD packing (opaque, control)" : "the card a tinted cut-out", checked, wrong, cardHits, wallThroughGaps, sunThroughGaps,
+		face ? "the card a FaceGen face (opaque skin x its gain)" : oldPacking ? "the OLD packing (opaque, control)" : "the card a tinted cut-out", checked, wrong, cardHits, wallThroughGaps, sunThroughGaps,
 		oldPacking ? "" : "");
 	if (oldPacking) say("    control: %d rays stopped at the card where its gaps are (the solid card)\n", stoppedAtGaps);
 	bad += wrong;
@@ -169,7 +187,7 @@ static bool sceneHairMirror(Ctx& c) {
 		if (ActorRecordFlags(a) & (NVR_RT_RECORD_TEXTURED | NVR_RT_RECORD_ALPHA_TESTED)) { bad++; say("    ActorRecordFlags (no texcoords) wrong\n"); }
 		if (ActorOpFlags(true, true) != (NVR_RT_OP_FLAG_DYNAMIC | NVR_RT_OP_FLAG_TEXCOORDS | NVR_RT_OP_FLAG_ALPHA) || ActorOpFlags(false, true) != NVR_RT_OP_FLAG_DYNAMIC ||
 			ActorOpFlags(true, false) != (NVR_RT_OP_FLAG_DYNAMIC | NVR_RT_OP_FLAG_TEXCOORDS)) { bad++; say("    ActorOpFlags wrong\n"); }
-		// no static record is ever both (RtScenePick::RecordFlags): only actors' hair is tinted
+		// a static record is both only when tinted (2026-11-08 perf-reflfix4: the rigid hair; scene hairtint): not a plain cut-out
 		Record r; r.alphaTested = true; r.textured = true; r.slot = 3;
 		if (IsTinted(RecordFlags(r))) { bad++; say("    a static record came out tinted\n"); }
 	}
@@ -182,6 +200,11 @@ static bool sceneHairMirror(Ctx& c) {
 	if (through < 200 || cards < 200) { bad++; say("    textured: %d through the gaps, %d on the card\n", through, cards); }
 	if (!hairRun(c, true, true, bad, through, cards, sunGaps, stopped)) return false;
 	if (stopped < 200) { bad++; say("    control: only %d rays stopped at the old solid card's gaps: the test has no teeth\n", stopped); }
+	// (perf-mirrorfix2) a FaceGen face card: its colour = the texel x its gain (the averages-only variant: the record's albedo = average x gain)
+	say("  FaceGen face card (opaque skin, gain in bits 8-15):\n");
+	if (!hairRun(c, true, true, bad, through, cards, sunGaps, stopped, true)) return false;
+	if (cards < 200) { bad++; say("    only %d rays met the face card\n", cards); }
+	if (!hairRun(c, false, true, bad, through, cards, sunGaps, stopped, true)) return false;
 	say("  hairmirror: %s\n", bad ? "FAILED" : "the hair card is cut out in reflections and in the sun's shadow, tinted (record + texture x tint); the old packing stops the rays (control)");
 	return bad == 0;
 }

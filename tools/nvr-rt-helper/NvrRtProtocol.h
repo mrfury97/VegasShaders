@@ -109,8 +109,19 @@ inline uint32_t NvrRtKindOf(uint32_t flags) { return ((flags >> 1) & 1u) | ((fla
 #define NVR_RT_RECORD_NORMAL        0x80u
 // UNOFFICIAL 2026-11-03 the material rule (VegasShaders.materials.txt, the object shaders' table) in bits 26..31 of a textured /
 // alpha-tested record: bits 26-28 roughness (0 unknown, k = 1..7: k / 7), bits 29-31 metal (0 unknown, k = 1..7: (k - 1) / 6)
+// (2026-11-07 perf-reflfix2) roughness k = 1..7 now means (k / 7)^2: 0.02, 0.08, 0.18, 0.33, 0.51, 0.73, 1 (more steps where reflections
+// are sharp: chrome 0.125 was 0.14, now 0.08; glass 0.06 0.08; a mirror 0.02 exists). Same bits, no protocol change: the readers are the
+// trace shaders shipped with the DLL (RtPathTrace.comp HitSurface, ReflectionsRTBody.glsl MetalBounce); NvrRtRoughCode / NvrRtRoughOf.
 #define NVR_RT_RECORD_ROUGH_SHIFT   26u
 #define NVR_RT_RECORD_METAL_SHIFT   29u
+inline uint32_t NvrRtRoughCode(float rough) {   // 1..7 (rough >= 0), the nearest step in sqrt space
+	const float s = rough > 0.0f ? (rough < 1.0f ? rough : 1.0f) : 0.0f;
+	float q = 0.0f;   // sqrt(s) by Newton (no <math.h> here)
+	if (s > 0.0f) { q = s > 0.25f ? s : 0.5f; for (int i = 0; i < 8; i++) q = 0.5f * (q + s / q); }
+	int k = (int)(q * 7.0f + 0.5f);
+	return (uint32_t)(k < 1 ? 1 : k > 7 ? 7 : k);
+}
+inline float NvrRtRoughOf(uint32_t k) { return (float)(k * k) / 49.0f; }
 // UNOFFICIAL 2026-11-07 (perf-reflfix) smooth vertex normals: the HELPER sets this bit in a record's geometryId (NVR's ids are 24 bits)
 // when the geometry's packed vertex normals are ready, one word a vertex just BEFORE its positions in binding 11: at
 // vertexOffset - (indexOffset - vertexOffset) / 3 (the positions are 3 words a vertex and the triangle list follows them), octahedral

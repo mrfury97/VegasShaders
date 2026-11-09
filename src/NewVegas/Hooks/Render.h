@@ -86,6 +86,7 @@ bool __fastcall NiDX9Renderer__Do_EndFrame(NiDX9Renderer* Renderer, void*);
 
 void AttachGrassFirstRenderPassHook();	// UNOFFICIAL 2026-10-17 GrassFirst ([Shaders.Grass.Main] DrawFirst), inside the Detours transaction
 void InstallGrassFirstHooks();			// after it
+void InstallMaterialDrawHooks();		// UNOFFICIAL 2026-11-07 perf-mirrorfix2: MaterialAware's alpha + the RT hair tint at every object draw (after the cloth hooks)
 void InstallSoftParticleHook();			// UNOFFICIAL 2026-11-05 soft particles: BSShaderNoLighting::SetupGeometryConstants
 
 // Detector window (the scene graph browser) helpers.

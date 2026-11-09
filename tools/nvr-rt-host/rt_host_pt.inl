@@ -375,7 +375,7 @@ static bool sceneSpecularFurnace(Ctx& c) {
 		for (int ch = 0; ch < 3; ch++) worst = std::max(worst, float(std::fabs(sum[ch] / n / (&L.x)[ch] - 1.0)));
 		const float limit = k7 >= 6 ? 0.03f : 0.02f;   // (6/7: a bounce weighs 0 .. 2.1, the product over many bounces is heavy-tailed)
 		const bool pass = nan == 0 && worst < limit;
-		say("  white metal box, roughness %d/7, 16 frames x 16 paths: mean / L = %.4f %.4f %.4f (worst %.2f %%, limit %.0f %%), NaN %d -> %s\n", k7,
+		say("  white metal box, roughness %d/7 (code %u = %.3f since perf-reflfix2), 16 frames x 16 paths: mean / L = %.4f %.4f %.4f (worst %.2f %%, limit %.0f %%), NaN %d -> %s\n", k7, NvrRtRoughCode(k7 / 7.0f), NvrRtRoughOf(NvrRtRoughCode(k7 / 7.0f)),
 			sum[0] / n / L.x, sum[1] / n / L.y,
 			sum[2] / n / L.z, worst * 100, limit * 100, nan, pass ? "ok" : "BAD");
 		ok = ok && pass;

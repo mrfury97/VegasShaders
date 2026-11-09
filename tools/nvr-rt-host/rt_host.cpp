@@ -39,6 +39,9 @@
 #include "RtFogGrid.h"       // (2026-11-07 ptaaa-fog) RT fog visibility: the trace pass's constants + history rules (src/core), run by the fogvis scene
 #include "RtViewModel.h"     // (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (src/core), run by the vmprep scene
 #include "RtPtCost.h"        // (2026-11-07 perf-ptcost) the path tracer's ray budget keys (src/core): the NVR_RT_HOST_PTCOST knob
+#include "RtFlashlightCode.h" // (2026-11-07 perf-reflfix2) the path tracer's flashlight code (src/core), run by the ptflashlight scene
+#include "RtHairTint.h"      // (2026-11-08 perf-reflfix3) the hair's tint for the RT scene (src/core), run by the hairtint scene
+#include "../../src/effects/Reflections/RtReflLamps.h"   // (2026-11-07 perf-reflfix2) RT reflections' lamps as the game lights them (reflorbs)
 #include <d3dcompiler.h>
 
 // (2026-11-07 perf-ptcost) NVR_RT_HOST_PTCOST="r,b,c": every upload of the path tracer's lamp image (gPtCostImage, rt_host_more.inl) gets
@@ -148,11 +151,14 @@ struct Object {               // one instance of one mesh
 	uint32_t emissive = 0;    // (2026-11-07 ptaaa-emissive) PTEmissive's number + 1 in the record's bits 8-15 (RtScenePick::WithEmissive)
 	bool actor = false;       // (2026-11-07 perf-mirrorfix) a skinned actor's partition: mask 0x20, RtScenePick::ActorRecordFlags (alphaTested: a cut-out)
 	bool tinted = false;      // ... with the hair's tint (albedo = the tint's linear colour)
+	bool skin = false;        // (perf-mirrorfix2) ... skin (record kind 3)
+	uint32_t skinGain = 0;    // ... a FaceGen face's gain code (RtScenePick::SkinGainCode)
 	uint32_t recordFlags() const {
 		if (actor) {
 			RtScenePick::ActorPart a;
 			a.albedoKnown = albedoKnown; a.textured = (alphaTested || textured) && alphaSlot >= 0; a.slot = alphaSlot; a.normalMap = normalMap;
 			a.alphaTested = alphaTested; a.alphaRef = alphaRef; a.tinted = tinted && alphaTested;
+			a.skin = skin; a.skinGain = skinGain;
 			return RtScenePick::ActorRecordFlags(a);
 		}
 		return RtScenePick::WithEmissive(RtScenePick::RecordFlags(record()), emissive);
@@ -164,6 +170,7 @@ struct Object {               // one instance of one mesh
 		r.hookMask = hookMask; r.hidden = hidden; r.decal = decal;
 		r.normalMap = normalMap;
 		r.kind = kind;
+		r.tinted = tinted && alphaTested;	// (2026-11-08 perf-reflfix4) the rigid hair: a TINTED static record
 		return r;
 	}
 	uint32_t mask() const { return actor ? NVR_RT_MASK_ACTOR : RtScenePick::InstanceMask(record()); }
@@ -730,7 +737,7 @@ struct PathConstants {        // RtPathTrace.cpp PassConstants
 };
 static_assert(sizeof(PathConstants) == 512, "RtPathTrace's block is full");
 struct ReflConstants {        // Reflections.cpp RtPassConstants
-	float size[4], forward[4], right[4], up[4], origin[4], sun[4], layout[4], lamps[24][4];
+	float size[4], forward[4], right[4], up[4], origin[4], sun[4], layout[4], lamps[24][4], frame[4];   // (frame: 2026-11-07 perf-reflfix2)
 };
 
 static const UINT S = 128;   // the scenes' screen
@@ -1343,7 +1350,12 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_shutdown.inl"	// (2026-11-07 rt-shutdown) the helper's + the game's shutdown: quit with frames pending, the game killed mid-flight
 #include "rt_host_historytime.inl"	// (2026-11-07 perf-history) the denoisers' history in seconds, not frames (RtHistoryTime.h)
 #include "rt_host_reflfix.inl"	// (2026-11-07 perf-reflfix) smooth vertex normals at traced hits + MetalBounce (a chrome sphere in a mirror)
+#include "rt_host_reflfix2.inl"	// (2026-11-07 perf-reflfix2) RT reflections' lamps vs the game's, MetalBounce's GGX lobe, the path tracer's flashlight
+#include "rt_host_reflfix3.inl"	// (2026-11-08 perf-reflfix3) a lamp by a ceiling, the flashlight at its origin, the gold's shimmer, the player's hair tint
+#include "rt_host_reflfix4.inl"	// (2026-11-08 perf-reflfix4) the gold smooth in a mirror / chrome (5 x 5 tent), the mirror's silver F0, the hair's tint from its property
+#include "rt_host_mirroraa.inl"	// (2026-11-08 perf-reflfix4) blocky mirrors: MirrorJitter vs 4x rays vs the old centred ray
 #include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
+#include "rt_host_flashhead.inl"	// (2026-11-07 perf-flashlight) a lamp in the hidden first-person head under SameFrame lamp shadows (RtLampPrimary + RtLampTrace / Sigma + RtLampEye)
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1409,11 +1421,15 @@ int main(int argc, char** argv) {
 	if (!registerNormals(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }
 	if (!registerOmm(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }   // (2026-11-07 ptaaa-omm)
 	if (!registerReflFix(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 perf-reflfix)
+	if (!registerReflFix2(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-07 perf-reflfix2)
+	if (!registerReflFix3(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-08 perf-reflfix3)
+	if (!registerReflFix4(host, spv)) { say("RESULT: FAIL (shaders)\n"); return 1; }	// (2026-11-08 perf-reflfix4)
 	if (!registerPtSplit(host)) { say("RESULT: FAIL (shared images)\n"); return 1; }	// (2026-11-07 ptaaa-denoiser)
 	gCacheShader = host.AddShader(spv + "\\RtPathTraceCache.spv");   // (2026-11-07) PTRadianceCache's resolve pass
 	gEmissiveShader = host.AddShader(spv + "\\RtEmissiveBuild.spv");   // (2026-11-07 ptaaa-emissive) PTEmissive's light list
 	if (!registerTextureRoutes(host)) { say("RESULT: FAIL (texture transfer images)\n"); return 1; }   // (2026-11-07, protocol 8)
 	if (!registerFog(host, spv)) { say("RESULT: FAIL (fog visibility images)\n"); return 1; }   // (2026-11-07 ptaaa-fog)
+	if (!registerFlashHead(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }   // (2026-11-07 perf-flashlight)
 	for (auto& s : host.shaders) if (GetFileAttributesA(s.c_str()) == INVALID_FILE_ATTRIBUTES) { say("RESULT: FAIL (no %s)\n", s.c_str()); return 1; }
 	if (!host.Start(helperExe.c_str())) { host.Stop(); say("RESULT: FAIL (helper did not get ready)\n"); return 1; }
 	// (2026-11-07 ptaaa-omm, protocol 9) [Main.Main.RayTracing] OpacityMicromaps on, as the game sends it (a GPU without the extension: no-op)
@@ -1435,6 +1451,17 @@ int main(int argc, char** argv) {
 		{ "manylamps", "48 lamps, slots past 32 (RtLampTrace)", [&] { return sceneManyLamps(c); } },
 		{ "mirror", "mirror floor + blocks (ReflectionsRT)", [&] { return sceneMirror(c); } },
 		{ "reflfix", "a sphere in a mirror (perf-reflfix): smooth vertex normals at RT reflection + path tracer hits vs the exact sphere (before: the triangle's), MetalBounce: a chrome sphere reflects the boxes beside it (one mirror ray) vs the CPU (ReflectionsRT, RtPathTrace, RtNormals)", [&] { return sceneReflFix(c); } },
+		{ "reflorbs", "RT reflections' lamp estimate vs the game's own lamp light (perf-reflfix2: the RT test room's mirror orbs): RtLampLight.glsl on the GPU + RtReflLamps::Pack vs the game's maths (dimmer clamp, LOD, LightScale, falloff / LampFalloff's shape); the helper's key-lamp pick (RtLampLightCheck, ReflectionsRT)", [&] { return sceneReflOrbs(c); } },
+		{ "reflbounce", "MetalBounce's direction from the metal's GGX lobe (perf-reflfix2: gold as sharp as chrome in a mirror) vs the CPU's VNDF lobe; the exact mirror without a denoiser; the roughness code (k / 7)^2 (ReflectionsRT)", [&] { return sceneReflBounce(c); } },
+		{ "ptflashlight", "the path tracer's flashlight (lamp 0, its cone in the frame row's texel 15) in a dark room: the first hit's direct light inside / outside the cone vs the CPU in every variant (no lamp image, lamp image, PTLightGrid, PTRestirDI, PTRestirGI's tracer; the ray budget's defaults) + the picture (RtPathTrace*)", [&] { return scenePtFlashlight(c); } },
+		{ "reflnear", "RT reflections near a light (perf-reflfix3): a lamp 4 units under a ceiling vs the game's per-pixel lamp light (bounded); the flashlight's light at hits round its own origin (none within 24 units: the orb round the reflected head) (RtLampLightCheck)", [&] { return sceneReflNear(c); } },
+		{ "reflshimmer", "the gold sphere in a mirror (perf-reflfix3): test 11's per-frame bounce sample vs the fixed 9-point lobe + Resolve's average (perf-reflfix4: the 5 x 5 tent) (emulated on the helper's images): shimmer of a still view, error vs the 256-ray truth (ReflectionsRT)", [&] { return sceneReflShimmer(c); } },
+		{ "hairtint", "the hair's tint as the game gives it (perf-reflfix4): the shader property's +0x84 (RtHairTint::For), a noted draw and the player's TESNPC colour (R in the low byte) as fallbacks; the rigid hair's TINTED static record (CPU)", [&] { return sceneHairTint4(c); } },
+		{ "reflsmooth", "the gold seen in a mirror (shot B) and in a chrome sphere (shot A) (perf-reflfix4): Resolve's average emulated on the helper's images, test 12's 3 x 3 box vs the 5 x 5 tent: blocks (Laplacian), error vs the 64-ray stratified truth, shimmer; pictures out\\reflsmooth_*.pfm (ReflectionsRT)", [&] { return sceneReflSmooth(c); } },
+		{ "hairglow", "the RIGID hair (a static alpha-tested tinted card) in a mirror on the game's variant ReflectionsRTAlphaTexGlow (perf-reflfix4, the lead's run: the reflected hair still white): with the GLOW flag its slot-2 hair layer map replaced the tinted colour (test 12, bb2dc764); without it the texture x the tint", [&] { return sceneHairGlow(c); } },
+		{ "mirroraa", "blocky mirrors (perf-reflfix4): a mirror's outlines and hard shadow edges vs a 4-ray-a-pixel reference, still / camera pan / moving box: the old centred ray, A one ray an output pixel, B MirrorJitter (8 points + the denoiser's virtual history); the helper honours the code; the trace pass's cost (ReflectionsRT)", [&] { return sceneMirrorAA(c); } },
+		{ "mirrorf0", "MetalBounce's F0 (perf-reflfix4, ReflMetalF0.glsl): a mirror-smooth metal with a near-black texture reflects in neutral silver, the rough gold in its own colour (ReflectionsRT)", [&] { return sceneMirrorF0(c); } },
+		{ "mirrorlamp", "MirrorLampHighlight (perf-reflfix3, the lamp dots on mirrors / chrome): the composite's ReflLampHighlightScale + ring + mix on a synthetic lit mirror (point-lamp spots, a sun glint, stripes) and the gold's soft highlight (ReflHighlightCheck)", [&] { return sceneMirrorLamp(c); } },
 		{ "cameramove", "camera move with history (RtLampTraceMany)", [&] { return sceneCameraMove(c); } },
 		{ "sun", "sun shadows, half resolution, Penumbra blockers (RtSunShadow)", [&] { return sceneSun(c); } },
 		{ "ao", "AO + sky visibility (RtAOTrace)", [&] { return sceneAO(c); } },
@@ -1485,6 +1512,7 @@ int main(int argc, char** argv) {
 		{ "ptviewmodel", "the first-person view model lit by the path tracer (PTViewModel: its G-buffer, its own FOV, the hidden body round the eye passed over; not-captured pixels keep the game's) (RtPathTrace)", [&] { return scenePtViewModel(c); } },
 		{ "vmprep", "PTViewModel's prep pass (src/core/RtViewModel.h, ps_3_0 on the fork's D3D9 device): the view model's code (4 + s / -1), its captured view-space normal, people 2, the world 1, vs the CPU", [&] { return sceneVmPrep(c); } },
 		{ "hiddennear","rays that start or end within reach of the eye pass over the hidden first-person body (a lamp in the head, a counter under the third-person gun); beyond reach its shadow stays (RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneHiddenNear(c); } },
+		{ "flashhead", "a lamp inside the hidden first-person head (the Pip-Boy light as a game lamp) under SameFrame lamp shadows: camera rays, the lamp trace, the denoiser's signal and the eye pass match the absent body bit for bit; a visible head blocks it (RtLampPrimary + RtLampTrace + RtLampTraceSigma + RtLampEye)", [&] { return sceneFlashHead(c); } },
 		{ "shutdown", "the RT helper's shutdown on second hosts: quit with 4 frames pending, then the game killed mid-flight (a frame whose inputs never come + 2 never run): every published frame's output ready signalled, the GPU idle, the helper exits by itself (NvrRtHelper ShutdownDrain + RtCore Core::Stop's order)", [&] { return sceneShutdown(); } },
 		{ "omm", "opacity micromaps (ptaaa-omm): the curve + thresholds vs brute force; the helper's state builder checked with rtAlphaPass on the GPU (atlas, real texture lod 0 / every mip, tiled grid, decal left out)", [&] { return sceneOmm(c); } },
 		// (2026-11-07 ptaaa-omm) LAST: it switches the micromaps off for the rest of the helper's session

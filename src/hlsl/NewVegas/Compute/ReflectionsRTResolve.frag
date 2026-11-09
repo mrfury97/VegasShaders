@@ -95,6 +95,8 @@ void main() {
     bool rayCast = ray.y > 1.5;
     float roughness = ray.y - (weaponRay ? 6.0 : borrowed ? 4.0 : rayCast ? 2.0 : 0.0);
     vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);   // RayGen's pixel centre in the block
+    // (2026-11-08 perf-reflfix4) MirrorJitter: a mirror pixel's own ray left from this frame's point of the texel (RtMirrorJitter.glsl)
+    if (!weaponRay && !borrowed && rayCast) pixelUV += RtMirrorJitter(rtc.rt5.w, roughness) * LowTexel;
     vec3 surfaceW = ViewToWorldDir(SurfacePosition(pixelUV, ray.x));    // camera-relative (2026-10-30: the weapon's own FOV)
     vec3 borrowHitW = vec3(0.0);
     if (borrowed) {
@@ -136,6 +138,46 @@ void main() {
             vec3 hitW = borrowed ? borrowHitW : surfaceW + worldR * hitData.x;
             vec2 source;
             vec3 hitColour = RtHitColour(hitW, hitData, shade, bounce, worldR, roughness, source);
+            // 2026-11-08 (perf-reflfix3, test 11: the gold sphere shimmered in the mirror) rough metal's bounce: the helper's sample is one of
+            // 9 fixed points of the metal's lobe by the pixel's place in a 3 x 3 block (ReflectionsRTBody.glsl BounceDirection); the 8
+            // neighbours on the same metal (a bounce of the same class, the surface at the same depth, the first hits within 10 % of the distance + 16 units of each other) are its other
+            // 8: their mean is the lobe's 9-ray answer, the same every frame. Chrome (class 0) keeps its one exact mirror ray.
+            // 2026-11-08 (perf-reflfix4, test 12: the gold in the mirror BLOCKY, staircase blocks of ~3 half-resolution texels, 1/200 of the
+            // screen at the tester's DLSS render scale; the gold in the chrome sphere blotchy) the 3 x 3 BOX made those blocks: each of the
+            // 9 lobe directions lies once in any 3 x 3 window, so as the window slides a direction's sample stays put for 3 texels and then
+            // jumps 3: every direction's picture was a nearest-neighbour copy on a 3-texel lattice. Now a 5 x 5 TENT, weights
+            // (3 - |dx|)(3 - |dy|): for each direction its lattice samples' weights add up to the same 9 wherever the window stands (a
+            // bilinear rebuild of each direction's picture), so their mean is smooth, and still the same every frame (no test-11 shimmer).
+            // The first-hit test widened to 25 % of the distance + 32 units: the hits two texels apart on a sphere seen in a curved metal lie
+            // further apart (another thing met first is still told apart by the bounce class, the surface depth and the hit flags).
+            const uint bounceClass = (hitFlags & 256u) != 0u ? (hitFlags & 1u) | ((hitFlags >> 1u) & 2u) : 0u;
+            if (bounceClass > 0u && !borrowed && !weaponRay) {
+                vec3 total = hitColour * 9.0;
+                float count = 9.0;
+                const ivec2 rayTexels = textureSize(sampler2D(t_rtRay, POINT_S), 0);
+                for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
+                    if (dx == 0 && dy == 0) continue;
+                    const float w = float((3 - abs(dx)) * (3 - abs(dy)));
+                    const ivec2 nb = texel + ivec2(dx, dy);
+                    if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, rayTexels))) continue;   // (off the image: texelFetch is undefined there)
+                    const vec2 nRay = texelFetch(sampler2D(t_rtRay, POINT_S), nb, 0).xy;
+                    if (nRay.x <= 0.0 || nRay.y < 1.5 || nRay.y > 3.5) continue;          // (no own ray there: a borrower, a weapon pixel, nothing)
+                    if (abs(nRay.x - ray.x) > ray.x * 0.05 + 4.0) continue;              // another surface
+                    const vec4 nHit = texelFetch(sampler2D(t_rtHit, POINT_S), nb, 0);
+                    const uint nFlags = uint(nHit.y + 0.5);
+                    if (nHit.x <= 0.0 || (nFlags & 256u) == 0u || ((nFlags & 1u) | ((nFlags >> 1u) & 2u)) != bounceClass) continue;
+                    const vec2 nUV = (vec2(nb) + 0.5) * LowTexel - 0.5 * (LowTexel - cb.reciprocalResolution.xy) + RtMirrorJitter(rtc.rt5.w, nRay.y - 2.0) * LowTexel;
+                    const vec3 nSurface = ViewToWorldDir(SurfacePosition(nUV, nRay.x));
+                    const vec3 nDir = OctDecode(texelFetch(sampler2D(t_rtDir, POINT_S), nb, 0).xy);
+                    const vec3 nHitW = nSurface + nDir * nHit.x;
+                    if (length(nHitW - hitW) > hitData.x * 0.25 + 32.0) continue;   // another thing met first (the metal's hit points lie together)
+                    vec2 nSource;
+                    total += RtHitColour(nHitW, nHit, texelFetch(sampler2D(t_rtShade, POINT_S), nb, 0),
+                        texelFetch(sampler2D(t_rtBounce, POINT_S), nb, 0), nDir, roughness, nSource) * w;
+                    count += w;
+                }
+                hitColour = total / count;
+            }
             rtScreenShare = missing * source.x;
             rtCubeShare = missing * (1.0 - source.x) * source.y;
             rtGuessShare = missing - rtScreenShare - rtCubeShare;

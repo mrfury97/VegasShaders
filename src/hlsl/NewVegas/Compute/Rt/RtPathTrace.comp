@@ -1443,13 +1443,13 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 }
 
 // A traced hit's material (2026-11-03): the material rule in the record's bits 26-31 (VegasShaders.materials.txt, as the object shaders
-// use it): roughness k / 7, metal (k - 1) / 6; a rough dielectric (0.8, 0) where the rule gives none
+// use it): roughness (k / 7)^2 (2026-11-07 perf-reflfix2; was k / 7), metal (k - 1) / 6; a rough dielectric (0.8, 0) where the rule gives none
 Surface HitSurface(vec3 albedo) { Surface s; s.albedo = albedo; s.rough = 0.8; s.metal = 0.0; s.kind = kKindPlain; return s; }
 Surface HitSurface(vec3 albedo, uint instance) {
 	Surface s = HitSurface(albedo);
 	uint f = records[instance].flags;
 	uint r = (f >> 26u) & 7u, m = (f >> 29u) & 7u;
-	if (r != 0u) s.rough = float(r) / 7.0;
+	if (r != 0u) s.rough = float(r * r) / 49.0;   // (2026-11-07 perf-reflfix2) (k / 7)^2: finer near 0 (was k / 7; NvrRtProtocol.h)
 	if (m != 0u) s.metal = float(m - 1u) / 6.0;
 	// (2026-11-07 ptaaa-materials) the record's material kind (NvrRtProtocol.h NVR_RT_RECORD_KIND_*), each with its setting on
 	const uint kind = rtRecordKind(f);

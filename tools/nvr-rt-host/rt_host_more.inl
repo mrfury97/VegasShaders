@@ -1126,7 +1126,7 @@ static bool sceneScenePick(Ctx&) {
 		if (rule == 8) r.rough = -1.0f;
 		const uint32_t f = RecordFlags(r);
 		packed++;
-		const uint32_t rk = r.rough >= 0 ? uint32_t(std::min(std::max(int(r.rough * 7 + 0.5f), 1), 7)) : 0u;
+		const uint32_t rk = r.rough >= 0 ? uint32_t(std::min(std::max(int(std::sqrt(r.rough) * 7 + 0.5f), 1), 7)) : 0u;   // (2026-11-07 perf-reflfix2: (k / 7)^2)
 		const uint32_t mk = r.metal >= 0 ? uint32_t(std::min(int(r.metal * 6 + 0.5f) + 1, 7)) : 0u;
 		const bool good = ((f >> 16) & 0x3FFu) == uint32_t(slot) &&                                   // RtAlpha.glsl / RtHit.glsl
 			((f & NVR_RT_RECORD_ALPHA_TESTED) != 0) == (kind == 1) && ((f & NVR_RT_RECORD_TEXTURED) != 0) == (kind == 0) &&

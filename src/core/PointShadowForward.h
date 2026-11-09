@@ -3,6 +3,7 @@
 #include "PointShadowSchedule.h"
 #include "LampFixtures.h"
 #include "RtLampShadows.h"	// UNOFFICIAL 2026-10-28
+#include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-07 (perf-flashlight) the flashlight's game lamp stays out of ManyLights' table (NoteManyLamp)
 #include "ShadowPool.h"	// UNOFFICIAL 2026-10-29 ShadowPool (ShadowPoolMax)
 #include "ShadowHold.h"	// UNOFFICIAL 2026-10-30 ShadowHold (FadeIn across live / pool)
 #include <unordered_set>	// UNOFFICIAL 2026-10-30 TerrainRecords
@@ -716,6 +717,13 @@ namespace PointShadowForward {
 		if (!RtLampShadows::Noting(light)) return;
 		const NiPointLight* source = light->sourceLight;
 		if (!source || !(source->Spec.r > 0.0f)) return;
+		// UNOFFICIAL 2026-11-07 (perf-flashlight; docs/next/RT-PATH-TRACING.md "Team perf-flashlight") not the flashlight's game lamp (the
+		// Pip-Boy light the Flashlight effect moves onto the beam, core/FlashlightLamp.h), as every other NVR lamp list leaves it out: the
+		// light pass is the flashlight on what the G-buffer holds (with its own shadow map), and its dimmer here is the DRAW's (0 for those
+		// objects, the cone for the rest), so the table took whichever the frame's first draw had (0.001 or full) and the pixels' traced
+		// lamps changed with it, frame to frame; outdoors (ExteriorForward, which RT testers turn on, + ExteriorManyLights, on by default)
+		// every frame with the flashlight on; indoors with ManyLights. Without it the lamp's light on the few draws that get it stays unshadowed, as indoors without ManyLights.
+		if (FlashlightLamp::Is(source)) return;
 		const ShadowsExteriorEffect::InteriorsStruct& interiors = TheShaderManager->Effects.ShadowsExteriors->Settings.Interiors;
 		const NiPoint3& p = source->m_worldTransform.pos;
 		float stop = 0.0f;

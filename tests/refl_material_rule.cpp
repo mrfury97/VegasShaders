@@ -89,6 +89,35 @@ int main() {
 	// 12. MSAA edge: half shirt, half mirror averaged: below 2, no material
 	CHECK(!IsMaterial(0.5f * mirror + 0.5f * 1.0f), "an MSAA edge between the shirt and the mirror resolves to no material");
 
+	// --- perf-mirrorfix2 (test 10): the rule at draw time, from the device's state (DecideDraw) -----------------------------------------
+	auto draw = [](bool blend, uint32_t src, bool skinned) { Draw d; d.live = true; d.colorWrite = 7; d.blend = blend; d.srcBlend = src; d.skinned = skinned; return d; };
+	const uint32_t kOne = 2, kDestColor = 9, kSrcAlpha = kBlendSrcAlpha;
+	// her head in front of the mirror, drawn by the sorted blended list (never through the pass hooks): before, nothing touched the alpha
+	float px = mirror;
+	px = After(DecideDraw(draw(false, kOne, true)), px, 1.0f, mirror, false);	// the face's first (opaque) skin pass
+	CHECK(DecideDraw(draw(false, kOne, true)) == Own && !IsMaterial(px), "draw: the face's opaque skin pass writes its own alpha (%.3f)", px);
+	px = After(DecideDraw(draw(true, kOne, true)), px, 1.0f, mirror, true);		// its additive light passes
+	px = After(DecideDraw(draw(true, kDestColor, true)), px, 1.0f, mirror, true);	// the FaceGen colour multiply (DESTCOLOR)
+	CHECK(DecideDraw(draw(true, kOne, true)) == Keep && DecideDraw(draw(true, kDestColor, true)) == Keep && !IsMaterial(px),
+		"draw: the face's additive light and FaceGen multiply passes keep its own alpha: no material on the face");
+	// an actor drawn blended over (its fade property: SRCALPHA / INVSRCALPHA) at full opacity
+	CHECK(DecideDraw(draw(true, kSrcAlpha, true)) == Cover && !IsMaterial(After(Cover, mirror, 1.0f, mirror, true)), "draw: a skinned SRCALPHA draw covers the mirror");
+	// hair in the blended list
+	CHECK(!IsMaterial(After(DecideDraw(draw(true, kSrcAlpha, true)), mirror, 0.9f, mirror, true)), "draw: hair (skinned, SRCALPHA) over the mirror: no material");
+	CHECK(IsMaterial(After(Keep, mirror, 0.9f, mirror, true)), "control: a draw nobody handled (the blended list before) kept the mirror");
+	// glass, decals: static SRCALPHA keeps; a static opaque draw writes
+	CHECK(DecideDraw(draw(true, kSrcAlpha, false)) == Keep, "draw: static glass / decal (SRCALPHA) keeps the material under it");
+	CHECK(DecideDraw(draw(false, kOne, false)) == Own, "draw: a static opaque draw writes its own alpha");
+	// alpha already on (a material pass, or a pass hook's Own): left alone
+	Draw mat = draw(false, kOne, false); mat.colorWrite = 15;
+	CHECK(DecideDraw(mat) == Material, "draw: alpha writes already on: left as they are");
+	Draw depthOnly = draw(false, kOne, true); depthOnly.colorWrite = 0;
+	CHECK(DecideDraw(depthOnly) == Keep, "draw: no colour writes: Keep");
+	Draw noSep = draw(true, kSrcAlpha, true); noSep.separateAlpha = false;
+	CHECK(DecideDraw(noSep) == Keep, "draw: separate alpha blending off: Keep");
+	Draw dead = draw(false, kOne, true); dead.live = false;
+	CHECK(DecideDraw(dead) == Keep, "draw: MaterialAware off / not the world or first-person scene: Keep");
+
 	std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
 	return failures;
 }

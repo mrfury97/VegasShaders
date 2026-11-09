@@ -15,6 +15,8 @@ public:
 		float	InteriorFloors;	// indoors: how much floors reflect
 		float	Roughness;		// dry surfaces (0 mirror .. 1 matte)
 		bool	MirrorSmoothOnly;	// 2026-11-06: Mirror only on surfaces whose own roughness is under 0.05 (the test room's mirror panels)
+		bool	KeepFlashlight;		// 2026-11-07 (perf-reflfix2): the Vulkan composite keeps the flashlight's highlight under the reflection
+		float	MirrorLampHighlight;	// 2026-11-08 (perf-reflfix3): the point lamps' highlight left on mirror / chrome pixels the reflection covers (0..1)
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	MaxDistance;	// ray length, game units
@@ -59,6 +61,7 @@ public:
 		bool	RtSplitTest;		// test only: RayGen + Resolve without rays (no helper needed): must be the normal trace's picture
 		bool	RtVndf;				// 2026-10-29: glossy rays from the GGX distribution of visible normals (Heitz 2018)
 		bool	RtHitLamps;			// 2026-10-29: the 12 nearest scene lamps light the hits the screen cannot show (one shadow ray to the key lamp)
+		bool	RtHitFlashlight;	// 2026-11-07 (perf-reflfix2): the flashlight lights them too (lamp 0, its cone; no shadow ray)
 		float	RtRoughReach;		// 2026-10-29: a ray's reach at roughness 1, as a share of Distance (0 = full reach)
 		float	RtRoughShare;		// 2026-10-29: above this roughness, 1 ray per 2x2 pixels a frame (0 = every pixel)
 		float	RtContactSharpness;	// 2026-10-29: the blur radius share at contact (1 = off: the blur as before)
@@ -82,6 +85,8 @@ public:
 		int		RtDenoiserCore;		// 0 ours (ReBLUR-style), 1 AMD FidelityFX Reflections (ported; A/B)
 		float	RtDenoiserHistory;	// frames of history at most (rough surfaces)
 		float	RtDenoiserMirrorHistory;	// frames of history at the mirror limit (growing to History by roughness 0.25)
+		int		RtMirrorJitter;			// UNOFFICIAL 2026-11-08 (perf-reflfix4) 0 off, 1 with the denoiser, 2 also under DLSS RR
+		float	RtMirrorJitterHistory;	// ... frames of history on jittered mirror pixels
 		float	RtDenoiserBlur;		// ours: the blur's widest reach (grid pixels)
 		float	RtDenoiserAntiLag;	// ours: history further than this many sigmas from this frame's neighbourhood is cut
 		float	RtDenoiserClip;		// FFX: its temporal stability (history clip weight)
@@ -211,6 +216,7 @@ private:
 	float				rtWaterScaleX = 1.0f, rtWaterScaleY = 1.0f;	// UNOFFICIAL 2026-11-03 that frame's RenderScale rect (1: native)
 	bool				rtResolved = false;	// Resolve drew this frame (the blur passes read Rt.Spread)
 	bool				rtDenoiseFrame = false;	// UNOFFICIAL 2026-11-07: this frame's RT trace feeds the RT reflection denoiser (RayGen / Resolve: rt5.x)
+	float				mirrorJitterCode = 0.0f;	// UNOFFICIAL 2026-11-08 (perf-reflfix4) this frame's MirrorJitter code (0 off): RtMirrorJitter.glsl
 	bool				RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture9* signal, const D3DXMATRIX* reproject);	// false: not run (the old path then)
 	void				RtDenoiseIdle();
 	bool				RtWanted() const;	// RT on, nothing failed, the RT core up (its helper alive, RT on that GPU)

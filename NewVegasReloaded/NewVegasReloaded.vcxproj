@@ -313,6 +313,8 @@
     <ClInclude Include="..\src\core\RtPathTrace.h" />
     <ClInclude Include="..\src\core\RtDenoise.h" />
     <ClInclude Include="..\src\core\RtHistoryTime.h" />
+    <ClInclude Include="..\src\core\RtFlashlightCode.h" />
+    <ClInclude Include="..\src\effects\Reflections\RtReflLamps.h" />
     <ClInclude Include="..\src\core\HiZ.h" />
     <ClInclude Include="..\src\core\Upscaler.h" />
     <ClInclude Include="..\src\core\PixelInspector.h" />

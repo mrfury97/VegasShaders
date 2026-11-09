@@ -7,6 +7,7 @@
 #include "RtMaterials.h"	// (2026-11-07 ptaaa-materials) glass, foliage, skin, cloth keys in the frame row (shared with tools/nvr-rt-host)
 #include "RtEmissiveRow.h"	// (2026-11-07 ptaaa-emissive) PTEmissive's emissive row + remap (shared with tools/nvr-rt-host)
 #include "RtPtCost.h"	// (2026-11-07 perf-ptcost) the ray budget keys in the frame row (shared with tools/nvr-rt-host)
+#include "RtFlashlightCode.h"	// (2026-11-07 perf-reflfix2) the flashlight's cone code (shared with tools/nvr-rt-host)
 #include "RtPathTrace.h"
 #include "RtCore.h"
 #include "DxvkCompute.h"
@@ -392,16 +393,9 @@ namespace {
 			}
 			const float len = D3DXVec3Length(&axis);
 			if (reach > 10.0f && len > 1.0e-3f && (colour.x + colour.y + colour.z) > 0.0f) {
-				const float dx = axis.x / len, dy = axis.y / len, dz = axis.z / len;
-				const float n1 = fabsf(dx) + fabsf(dy) + fabsf(dz);
-				float ox = dx / n1, oy = dy / n1;
-				if (dz < 0.0f) { const float tx = (1.0f - fabsf(oy)) * (ox >= 0.0f ? 1.0f : -1.0f), ty = (1.0f - fabsf(ox)) * (oy >= 0.0f ? 1.0f : -1.0f); ox = tx; oy = ty; }
-				const UInt32 qu = (UInt32)(std::min)((std::max)((ox * 0.5f + 0.5f) * 511.0f + 0.5f, 0.0f), 511.0f);
-				const UInt32 qv = (UInt32)(std::min)((std::max)((oy * 0.5f + 0.5f) * 511.0f + 0.5f, 0.0f), 511.0f);
-				const float degrees = D3DXToDegree(acosf((std::min)((std::max)(cosOuter, -1.0f), 1.0f)));
-				const UInt32 angle = (UInt32)(std::min)((std::max)(degrees + 0.5f, 1.0f), 63.0f);
+				// (2026-11-07 perf-reflfix2) the code in RtFlashlightCode.h (the RT test host's ptflashlight scene checks the same function)
 				flash.pos = D3DXVECTOR4(pos.x, pos.y, pos.z, reach);
-				flash.colour = D3DXVECTOR4(colour.x, colour.y, colour.z, (float)(1u + (angle * 512u + qu) * 512u + qv));
+				flash.colour = D3DXVECTOR4(colour.x, colour.y, colour.z, RtFlashlightCode::Encode(axis.x, axis.y, axis.z, cosOuter));
 				flash.distance = -1.0f;	// at the eye: always the first lamp
 				haveFlash = true;
 			}

@@ -145,6 +145,9 @@ void AttachHooks() {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-07 perf-mirrorfix2 (Render.cpp MaterialDraw): on top of the cloth / Pip-Boy fit hooks above, calling on them
+	InstallMaterialDrawHooks();
+
 	// --- engine patches ---
 	Patch({
 		{ Branch::Call, 0xBE0B73, (UInt32)&NiD3DVertexShaderEx::Free },	// NVR's shader records are freed with the game's shaders

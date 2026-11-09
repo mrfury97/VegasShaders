@@ -60,6 +60,12 @@ layout(set = 2, binding = 0, std140) uniform Constants {
                                 // y tan(world FOV / 2) / tan(1st-person FOV / 2), z the strength, w the roughness without material data
     vec4 renderScale;           // UNOFFICIAL 2026-11-03 TESR_RenderScale (Includes/RenderRect.hlsl): xy this frame's RenderScale rect, zw 1 / xy;
                                 // (1, 1, 1, 1) in a native frame. Only the RT passes (RayGen, Resolve, SkyPano) run in rect frames.
+    vec4 flashPos;              // UNOFFICIAL 2026-11-07 (perf-reflfix2) KeepFlashlight: the flashlight (FlashlightDeferred::LightParams) for the
+    vec4 flashDir;              // composite: pos xyz camera-relative, w its reach (0: off this frame); dir xyz its axis, w cos of the cone's
+    vec4 flashColor;            // edge; color rgb its light (the composite's linear space), w cos of the full-strength edge; look x Falloff
+    vec4 flashLook;             // ([Shaders.Flashlight.Deferred]), y the cap on its highlight (linear)
+    vec4 mirrorLamp;            // UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl): x 1 - MirrorLampHighlight (0: off),
+    vec4 sunDirection;          // y the ring's radius (full-resolution pixels), z 1 = the sun is up (its glint kept); sunDirection xyz toward the sun (world)
     vec4 puddle;                // 2026-11-08 Puddles (src/effects/Puddles): TESR_PuddleData: x water level, y Coverage, z 1 / Size,
                                 // w Quality (0: off, or ReflectionPuddles off)
     vec4 puddle2;               // x slope start, y slope full, z the water's roughness, w edge softness

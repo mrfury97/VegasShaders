@@ -57,7 +57,9 @@ if ($Compile) {
 		@("RtShadowDenoisePackLamps", "RtShadowDenoisePack", "-DLAMPS"), @("RtLampPrimary", "RtLampPrimary", ""),
 		# (2026-11-07 ptaaa-fog) the fogvis scene
 		@("RtFogVisibility", "RtFogVisibility", ""),
-		@("RtEmissiveBuild", "RtEmissiveBuild", ""))
+		@("RtEmissiveBuild", "RtEmissiveBuild", ""),
+		# (2026-11-07 perf-reflfix2) the reflorbs scene's check pass
+		@("RtLampLightCheck", "RtLampLightCheck", ""))
 	foreach ($j in $jobs) {
 		$a = @("-V", "--target-env", "vulkan1.2", "-I$rt", "-o", "$spv\$($j[0]).spv")
 		if ($j[2]) { $a += $j[2] }

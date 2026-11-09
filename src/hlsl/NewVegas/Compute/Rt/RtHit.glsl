@@ -91,13 +91,17 @@ vec2 rtHitTexcoord(uint instance, uint primitive, vec2 bary) {
 vec3 rtHitMap(uint instance, uint primitive, vec2 bary, bool glow) {
 	const bool hasUv = rtHitHasTexcoords(instance);
 	const vec2 uv = hasUv ? rtHitTexcoord(instance, primitive, bary) : vec2(0.0);   // (once for every read below)
-	const vec3 tint = (records[instance].flags & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS ? records[instance].albedo.rgb * 4.5947934 : vec3(1.0);
+	// (2026-11-07 perf-mirrorfix2) a FaceGen face (record kind skin 0x0A, no glow 0x04, not alpha-tested 0x20, bits 8-15 non-zero): the
+	// face pass's colour gain over its base texture (RtScenePick.h FaceGenGain, k / 32), else the faces were their bare base texture: dark
+	const uint hitFlags = records[instance].flags;
+	const vec3 tint = (hitFlags & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS ? records[instance].albedo.rgb * 4.5947934 :
+		(hitFlags & 0x2Eu) == 0x0Au && ((hitFlags >> 8u) & 0xFFu) != 0u ? vec3(float((hitFlags >> 8u) & 0xFFu) * (1.0 / 32.0)) : vec3(1.0);
 	for (int pass = glow ? 0 : 1; pass < 2; pass++) {	// 0 the glow map, 1 the diffuse
 #ifndef RT_NO_REAL_TEXTURES
 		if (hasUv) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
 			const uvec3 ids = rtSlotTextures(records[instance].flags);
 			const uint id = pass == 0 ? ids.z : ids.x;
-			if (id != 0u) return rtTexToLinear(rtTexSampleHit(id, uv, instance, primitive).rgb) * (pass == 1 ? tint : vec3(1.0));
+			if (id != 0u) return min(rtTexToLinear(rtTexSampleHit(id, uv, instance, primitive).rgb) * (pass == 1 ? tint : vec3(1.0)), vec3(1.0));	// (perf-mirrorfix2: an albedo, at most 1)
 		}
 #endif
 		if (hasUv) {
@@ -119,7 +123,7 @@ vec3 rtHitMap(uint instance, uint primitive, vec2 bary, bool glow) {
 #endif
 			}
 			// as the map stores it (sRGB-encoded)
-			if (c.r >= 0.0) return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045))) * (pass == 1 ? tint : vec3(1.0));
+			if (c.r >= 0.0) return min(mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045))) * (pass == 1 ? tint : vec3(1.0)), vec3(1.0));
 		}
 	}
 	return records[instance].albedo.rgb;

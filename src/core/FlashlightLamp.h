@@ -9,8 +9,9 @@
 //  - 0 for the passes of an object the G-buffer holds (it wrote it this frame or the last, NoteWrite from CapturedNormals::BeforeDraw):
 //    the light pass lights that already, with its shadow; except its env-map passes (0x244-0x24B), which the light pass does not touch;
 //  - else its own times the cone at the object's bound (the share of the bound inside the beam), so an object outside the beam gets none.
-// VegasShaders' own light lists (ShaderManager::GetNearbyLights, ManyLamps' table, the RT reflections' lamps) leave it out (Is): the light
-// pass and the grass's own beam are the flashlight there.
+// VegasShaders' own light lists (ShaderManager::GetNearbyLights, ManyLamps' table, the RT reflections' lamps, and since 2026-11-07
+// perf-flashlight the RT lamp shadows' ManyLights / ExteriorManyLights table, PointShadowForward::NoteManyLamp) leave it out (Is): the light
+// pass and the grass's own beam are the flashlight there. So no RT lamp-shadow pass ever traces it (only the path tracer, as its lamp 0).
 #include <unordered_set>
 #include <unordered_map>
 #include <string>

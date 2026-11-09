@@ -1,0 +1,33 @@
+#version 460
+// UNOFFICIAL 2026-11-07 (perf-reflfix2) a TEST pass of the RT test host (tools/nvr-rt-host rt_host_reflfix2.inl, scene reflorbs), not used
+// by the game: RtLampLight.glsl (RT reflections' lamp light, as Resolve's RtShadeHit and the helper's key-lamp pick evaluate it) at a grid
+// of points on a plane, the sum over Pass size.z lamps, into image 0. Compile: tools/nvr-dxvk/compile-compute.sh (Vulkan 1.2).
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "RtLampLight.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;   // (the helper's layout; unused)
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 size;      // xy the grid, z the lamp count, w the flashlight's lamp index + 1 (0: none)
+	vec4 origin;    // xyz the plane's corner (scene space), w the flashlight's cone (RtFlashlightCode.h)
+	vec4 axisU;     // xyz the plane's u edge
+	vec4 axisV;     // xyz the plane's v edge
+	vec4 normal;    // xyz the points' normal
+	vec4 lamps[24]; // as ReflectionsRT.glsl RtConstants / ReflectionsRTBody.glsl Pass
+} p;
+layout(set = 0, binding = 2, rgba16f) uniform writeonly image2D outImage;
+
+void main() {
+	const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+	if (px.x >= int(p.size.x) || px.y >= int(p.size.y)) return;
+	const vec3 at = p.origin.xyz + p.axisU.xyz * ((float(px.x) + 0.5) / p.size.x) + p.axisV.xyz * ((float(px.y) + 0.5) / p.size.y);
+	const vec3 n = normalize(p.normal.xyz);
+	vec3 light = vec3(0.0);
+	const int count = min(int(p.size.z + 0.5), 12);
+	const int flash = int(p.size.w + 0.5) - 1;   // (as ReflectionsRT.glsl RtShadeHit)
+	for (int i = 0; i < count; i++)
+		light += i == flash ? RtSpotLight(p.lamps[2 * i], p.lamps[2 * i + 1], p.origin.w, at, n) : RtLampLight(p.lamps[2 * i], p.lamps[2 * i + 1], at, n);
+	imageStore(outImage, px, vec4(light, 1.0));
+}

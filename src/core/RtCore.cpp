@@ -283,9 +283,19 @@ namespace {
 
 	// UNOFFICIAL 2026-10-30 the glow / emissive flag (NVR_RT_RECORD_GLOW; rt-reflections' GlowBrightness reads it): the draw's shader has
 	// a glow map (BSShaderPPLightingProperty texture slot 2: neon, lit signs and windows, lamp globes).
+	// (2026-11-08 perf-reflfix4, the lead's in-game run: the reflected hair still white with the tint in its record) texture slot 2 is the
+	// game's "glow/skin sst/hair layer texture" (decomp bsshaderpplightingproperty.cpp): on hair it is the hair LAYER map (the vanilla hair
+	// NIFs: <name>_hl.dds; SM3002 / SM3003 LayerMap at s5), on FaceGen skin the skin map (_sk.dds, ApplyFaceGenTextures). Taken as a glow
+	// map, the hair's record got the GLOW flag: the glow variants (ReflectionsRT*Glow, the path tracer's emissive lights) REPLACED the hair's
+	// tinted colour with the grey-white layer map and added it as light. Not a glow map on a Hair- or FaceGen-flagged property, nor on the
+	// skin shader (index 0xE).
+	bool SlotTwoIsLayer(BSShaderProperty* shaderProperty) {
+		return (shaderProperty->ulFlags[0] & (BSShaderProperty::Hair | BSShaderProperty::FaceGen)) != 0 || shaderProperty->uiShaderIndex == 0xE;
+	}
 	bool HasGlowMap(BSShaderProperty* shaderProperty) {
 		const UInt32 type = static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType;
 		if (!shaderProperty->IsLightingProperty() && type != NiShadeProperty::kProp_PPLighting && type != NiShadeProperty::kProp_Lighting30) return false;
+		if (SlotTwoIsLayer(shaderProperty)) return false;
 		NiSourceTexture** glow = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[2];
 		return glow && *glow && (*glow)->rendererData && (*glow)->rendererData->dTexture;
 	}
@@ -347,6 +357,12 @@ namespace {
 		UInt32		actorUpdates[4] = {};				// since the last line: posed, still (not posed), between poses (ActorUpdateInterval), rebuilds
 		UInt32		actorPartitions = 0;				// skinned partitions staged (exchanges 1-60)
 		UInt32		actorAlphaParts = 0, actorTintedParts = 0;	// (2026-11-07 perf-mirrorfix) poses built alpha-tested, of them tinted (hair)
+		UInt32		faceGains[2] = { 0, 0 };				// (perf-mirrorfix2) FaceGen face records: [0] gain from the maps, [1] the x 2 fallback
+		int			faceGainLogs = 0;
+		UInt32		hairParts[2][4] = {};				// (2026-11-08 perf-reflfix4) hair parts met (a part a frame): [rigid, skinned][RtHairTint::Source]
+		const void*	hairTold[8] = {};					// ... the first 8 logged (HairTintOf)
+		int			hairLogs = 0;
+		int			HairTintOf(NiGeometry* geo, BSShaderProperty* shaderProperty, bool skinned, bool alphaPart, float rgb[3]);
 		UInt32		partitionFate[5] = {};
 		UInt32		skinTex[6] = {};	// hit textures on actors: not PPLighting, no diffuse, texcoords elsewhere, no slot, staged without texcoords, textured				// skipped: no buffer data, too many bones, not described, streams / half positions, palette
 		std::vector<ID3D9NvrExtSharedImage*> images;	// [0] = the arena
@@ -359,6 +375,8 @@ namespace {
 		HANDLE		mapping = nullptr, frameEvent = nullptr, statusEvent = nullptr, process = nullptr, watchdog = nullptr;
 		NvrRtShared* shared = nullptr;
 		ULONGLONG	startTick = 0;
+		UInt32		startNotes = 0;						// (2026-11-08 perf-reflfix4) "still getting ready" lines written (one every 30 s)
+		static constexpr ULONGLONG kHelperReadyMs = 300000;	// (2026-11-08 perf-reflfix4) how long the helper may take to get ready (was 60 s)
 		UInt64		frame = 0;
 		volatile LONG64	lastRecorded = 0;
 		volatile LONG	watchStop = 0;
@@ -1255,6 +1273,7 @@ namespace {
 		watchdog = CreateThread(nullptr, 64 * 1024, WatchdogMain, this, 0, nullptr);
 		if (!watchdog) { TurnOff("its watchdog thread could not be started"); return false; }
 		startTick = GetTickCount64();
+		startNotes = 0;
 		state = Starting;
 		lastSerial = 0;
 		geometries.clear();
@@ -1400,7 +1419,18 @@ namespace {
 			else if (InterlockedCompareExchange(&tripped, 0, 0)) TurnOff(tripReason);
 			// (2026-11-03: 15 -> 60 s: the helper compiles every registered trace shader before it says ready, ~1 s each on the iGPU; with
 			// 12 it was ready at 15.4 s and the core had turned itself off (warm slot, Lucky 38). The game never waits for it meanwhile.)
-			else if (GetTickCount64() - startTick > 60000) TurnOff("the helper did not get ready within 60 seconds");
+			// (2026-11-08 perf-reflfix4, the lead's bench run of test 12 on the iGPU: ~22 trace shaders now, RtAOTrace alone 29 s; ready
+			// after 55.7 s, and the run before had lost RT for the whole session at 60 s) 60 -> 300 s, and a line every 30 s while it waits
+			else {
+				const ULONGLONG waited = GetTickCount64() - startTick;
+				if (waited > kHelperReadyMs) TurnOff("the helper did not get ready within 300 seconds (it compiles its trace shaders first)");
+				else if (waited / 30000 > startNotes) {
+					startNotes = (UInt32)(waited / 30000);
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper still getting ready after %llu s (it compiles its %u trace shaders before the first "
+						"frame; a first launch on a slow GPU takes a minute or more; the game runs without RT meanwhile; up to %u s) (perf-reflfix4)",
+						(unsigned long long)(waited / 1000), (unsigned)shared->shaderCount, (unsigned)(kHelperReadyMs / 1000));
+				}
+			}
 			return;
 		}
 		if (state == Running) {
@@ -1520,6 +1550,43 @@ namespace {
 		return true;
 	}
 
+	// UNOFFICIAL 2026-11-08 (perf-reflfix4, test 12: the reflected hair white in first person) a part's hair tint: what the game puts in the
+	// hair shader's c2 is the part's own shader property at +0x84 (RtHairTint.h: Lighting30Shader's constant 2 for the hair pass, written
+	// by ApplyFaceGenTextures from TESNPC::iHairColor when the head is built), for the player and NPCs, first and third person, drawn or not.
+	// rgb: the tint (0..1, the stored curve); the answer RtHairTint::Source (None: not hair, or no colour known). skinned: which path met it
+	// (the vanilla hair, beards and brows are rigid: AddGeometry). alphaPart: it goes in as a cut-out (a TINTED record needs that). The first
+	// 8 hair parts met are logged with everything read, so a tester's log settles it.
+	int Core::HairTintOf(NiGeometry* geo, BSShaderProperty* shaderProperty, bool skinned, bool alphaPart, float rgb[3]) {
+		if (!geo || !shaderProperty) return RtHairTint::None;
+		const bool hairFlag = (shaderProperty->ulFlags[0] & BSShaderProperty::Hair) != 0;
+		const bool named = RtHairTint::HairName(geo->m_pcName);
+		if (!hairFlag && !named) return RtHairTint::None;
+		const UInt32 shaderType = static_cast<NiShadeProperty*>((NiProperty*)shaderProperty)->m_eShaderType;
+		const float* at84 = RtHairTint::TintClass(shaderType) ? (const float*)((const UInt8*)shaderProperty + RtHairTint::kPropertyTintOffset) : nullptr;
+		const bool playerHair = walkingPlayer && Player && Player->baseForm && Player->baseForm->formType == TESForm::kFormType_NPC;
+		const UInt32 packed = playerHair ? *(const UInt32*)((const UInt8*)Player->baseForm + 0x1D8) : 0u;	// TESNPC::iHairColor (decomp: offsetof asserts)
+		const int how = alphaPart ? RtHairTint::For(geo, at84, true, playerHair, packed, rgb) : RtHairTint::None;
+		hairParts[skinned ? 1 : 0][how]++;
+		bool told = false;
+		for (int k = 0; k < hairLogs && !told; k++) told = hairTold[k] == geo;
+		if (!told && hairLogs < 8) {
+			hairTold[hairLogs++] = geo;
+			float noted[3] = { -1.0f, -1.0f, -1.0f };
+			const bool hasNote = RtHairTint::Lookup(geo, noted);
+			const NiAlphaProperty* ap = (const NiAlphaProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Alpha);
+			Logger::Log("RT CORE hair (perf-reflfix4): '%s' %s, %s (alpha %04X); its shader property vtable %08X type %u index %u flags %08X: Hair flag %d, "
+				"FaceGen hair name %d, the player's %d (TESNPC colour %08X); at +0x84 %s%.3f %.3f %.3f %.3f; a draw's c2 %s%.3f %.3f %.3f; tint from %s = "
+				"%.3f %.3f %.3f -> record albedo (linear) %.4f %.4f %.4f; hair-shader draws seen so far: %u still, %u skinned",
+				geo->m_pcName ? geo->m_pcName : "", skinned ? "skinned (AddSkinned)" : "rigid (AddGeometry)", alphaPart ? "a cut-out" : "NOT a cut-out (no TINTED record)",
+				ap ? (unsigned)ap->flags : 0u, *(const UInt32*)shaderProperty, shaderType, shaderProperty->uiShaderIndex, shaderProperty->ulFlags[0], hairFlag ? 1 : 0,
+				named ? 1 : 0, playerHair ? 1 : 0, packed, at84 ? "" : "(not read: not shader type 8 / 12) ", at84 ? at84[0] : 0.0f, at84 ? at84[1] : 0.0f,
+				at84 ? at84[2] : 0.0f, at84 ? at84[3] : 0.0f, hasNote ? "" : "(none) ", noted[0], noted[1], noted[2], RtHairTint::SourceName(how),
+				how ? rgb[0] : 0.0f, how ? rgb[1] : 0.0f, how ? rgb[2] : 0.0f, how ? RtScenePick::TintLinear(rgb[0]) : 0.0f, how ? RtScenePick::TintLinear(rgb[1]) : 0.0f,
+				how ? RtScenePick::TintLinear(rgb[2]) : 0.0f, RtHairTint::HairDraws[0], RtHairTint::HairDraws[1]);
+		}
+		return how;
+	}
+
 	// UNOFFICIAL 2026-10-29 skinned actors ([Main.Main.RayTracing] Actors; fork patch 0033 ID3D9NvrExtRtSkin): every partition of a
 	// skinned geometry, posed every frame by the fork (palette = bone world x SkinToBone, Gamebryo's skinning, scene-relative), built
 	// fast in the helper, placed with the identity. Mask NVR_RT_MASK_ACTOR.
@@ -1565,7 +1632,33 @@ namespace {
 		const bool alphaPart = hitTextures && ppLighting && RtScenePick::ActorAlphaTested(alpha != nullptr, alpha ? alpha->flags : 0, skinKind, alphaOn);
 		const UInt32 actorAlphaRef = alphaPart ? RtScenePick::ActorAlphaRef(alpha->flags, alpha->alphaTestRef) : 0u;
 		float hairTint[3] = { 1.0f, 1.0f, 1.0f };
-		const bool tinted = alphaPart && RtHairTint::Find(geo, hairTint);
+		// (2026-11-08 perf-reflfix4) the tint the game gives the hair shader (the part's own shader property, +0x84), else a noted draw, else
+		// the player's TESNPC colour (HairTintOf, RtHairTint.h). The vanilla hair, beards and brows are rigid (AddGeometry); a mod's skinned
+		// hair comes through here.
+		const bool tinted = HairTintOf(geo, shaderProperty, true, alphaPart, hairTint) != RtHairTint::None;
+		// (2026-11-07 perf-mirrorfix2) a FaceGen face: the game's face colour is 2((2(fg0 - 0.5) + base) 2 fg1), not the base texture (the
+		// face dark in mirrors): its gain from the three textures' averages (RtScenePick::FaceGenGain; 2^2.2 where the maps cannot be read)
+		float faceGain = 0.0f;
+		if (ppLighting && skinKind && hitTextures && (shaderProperty->ulFlags[0] & BSShaderProperty::FaceGen)) {
+			BSShaderPPLightingProperty* pp = (BSShaderPPLightingProperty*)shaderProperty;
+			auto averageOf = [&](int set, int index) -> const Albedo* {
+				NiSourceTexture** t = pp->ppTextures[set];
+				NiTexture* texture = t ? t[index] : nullptr;
+				if (!texture || !texture->rendererData || !texture->rendererData->dTexture) return nullptr;
+				const Albedo& a = AlbedoOfTexture(texture->rendererData->dTexture);
+				return a.known ? &a : nullptr;
+			};
+			const Albedo* base = averageOf(0, 0);
+			const Albedo* fg0 = pp->ppTextures[0] && pp->ppTextures[0][0] ? averageOf(0, 1) : nullptr;
+			const Albedo* fg1 = pp->ppTextures[1] && pp->ppTextures[1][0] ? averageOf(1, 1) : nullptr;
+			faceGain = RtScenePick::FaceGenGain(base ? base->rgb : nullptr, fg0 ? fg0->rgb : nullptr, fg1 ? fg1->rgb : nullptr);
+			faceGains[base && fg0 && fg1 ? 0 : 1]++;
+			if (faceGainLogs < 8) {
+				faceGainLogs++;
+				Logger::Log("RT CORE face colour (perf-mirrorfix2): FaceGen head '%s': gain %.2f (linear; %s)", geo->m_pcName ? geo->m_pcName : "",
+					faceGain, base && fg0 && fg1 ? "from its base texture and FaceGen maps" : "a FaceGen map could not be read: x 2 in the stored curve");
+			}
+		}
 		const float cx = TheRenderManager->CameraPosition.x, cy = TheRenderManager->CameraPosition.y, cz = TheRenderManager->CameraPosition.z;
 		static std::vector<NVR_EXT_RT_RANGE> ranges;
 		static std::vector<float> palette;
@@ -1746,6 +1839,10 @@ namespace {
 				for (int k = 0; k < 3; k++) extra.albedo[k] = RtScenePick::TintLinear(hairTint[k]);
 			}
 			else { extra.albedo[0] = albedo.rgb[0]; extra.albedo[1] = albedo.rgb[1]; extra.albedo[2] = albedo.rgb[2]; }
+			// (perf-mirrorfix2) a FaceGen face: its gain on the texture (RtHit.glsl), and on the average (the colour without the texture)
+			actorPart.skinGain = actorPart.textured && !actorPart.alphaTested ? RtScenePick::SkinGainCode(faceGain) : 0u;
+			if (faceGain > 0.0f && !actorPart.tinted)
+				for (int k = 0; k < 3; k++) extra.albedo[k] = (std::min)(1.0f, extra.albedo[k] * faceGain);
 			extra.albedo[3] = 1.0f;
 			extra.flags = RtScenePick::ActorRecordFlags(actorPart);
 			if (skinKind) skinParts++;
@@ -2577,7 +2674,28 @@ namespace {
 		// bushes: thin, light goes through them; trunks are not cut out and stay plain)
 		if (glass) { pr.kind = NVR_RT_KIND_GLASS; glassTaken++; }
 		else if (alphaTested && !pick.decal && !land && !strcmp(RtMaterialClassOf(geo), "plant")) { pr.kind = NVR_RT_KIND_FOLIAGE; foliageCards++; }
+		// (2026-11-08 perf-reflfix4, test 12: the reflected hair still white) the hair, beards and brows are RIGID shapes (the vanilla hair
+		// NIFs hold no skin instance; the tester's log: 'FaceGenHairNoHat' taken here): their tint, as the game gives the hair shader, goes in
+		// a TINTED record (RtScenePick::RecordFlags: alpha-tested + the textured bit; its albedo the tint's linear colour, RtHit.glsl)
+		if (!land && !walkingFar && !pick.decal && !glass) {
+			float hairTint[3];
+			if (HairTintOf(geo, shaderProperty, false, alphaTested && alphaSlot >= 0, hairTint) != RtHairTint::None) {
+				pr.tinted = true;
+				for (int k = 0; k < 3; k++) extra.albedo[k] = RtScenePick::TintLinear(hairTint[k]);
+			}
+		}
 		extra.flags = RtScenePick::RecordFlags(pr);
+		if (pr.tinted) {	// (2026-11-08 perf-reflfix4) the hair's record as sent: TINTED (0x60 both), no GLOW (0x04: its slot 2 is the layer map)
+			static int toldRecord = 0;
+			if (toldRecord < 4) {
+				toldRecord++;
+				NiSourceTexture** layer = ((BSShaderPPLightingProperty*)shaderProperty)->ppTextures[2];
+				Logger::Log("RT CORE hair record (perf-reflfix4): '%s' flags %08X: tinted %d, glow %d, alpha ref %u, slot %u, albedo %.4f %.4f %.4f; its slot-2 "
+					"texture '%s' (%s)", geo->m_pcName ? geo->m_pcName : "", extra.flags, RtScenePick::IsTinted(extra.flags) ? 1 : 0,
+					(extra.flags & NVR_RT_RECORD_GLOW) ? 1 : 0, (extra.flags >> 8) & 0xFFu, (extra.flags >> 16) & 0x3FFu, extra.albedo[0], extra.albedo[1], extra.albedo[2],
+					layer && *layer && (*layer)->ddsPath1 ? (*layer)->ddsPath1 : "(none)", SlotTwoIsLayer(shaderProperty) ? "the hair layer map: not a glow map" : "a glow map");
+			}
+		}
 		LogAlphaTaken(geo, alphaTested ? alphaSlot : -1, alphaTested ? pr.alphaRef : 999u, alphaTested && alpha && (alpha->flags & NiAlphaProperty::AlphaFlags::ALPHA_BLEND_MASK) != 0);
 		LogBigTaken(geo);
 		if ((extra.flags & NVR_RT_RECORD_GLOW) && geo->m_kWorldBound && glows.size() < 4096) {	// (2026-10-30) GlowLights()
@@ -2895,7 +3013,7 @@ namespace {
 	void Core::Gather() {
 		sceneFrame++;
 		RtHairTint::Frame = sceneFrame;	// (2026-11-07 perf-mirrorfix) the hair draws note their tint while actors with textures are traced
-		RtHairTint::Wanted = actorsOn && rtSkin && hitTextures;
+		RtHairTint::Wanted = alphaOn || (actorsOn && rtSkin && hitTextures);	// (2026-11-08 perf-reflfix4) the rigid hair: an alpha-tested caster
 		// A cell change (a door, a jump, a load): every actor partition goes at once (its buffers and bones may be unloaded and the
 		// addresses reused by new ones); the actors still there are posed again from scratch this frame
 		static const void* lastCell = nullptr;
@@ -3307,7 +3425,21 @@ namespace {
 					c.skinTex[0], c.skinTex[1], c.skinTex[2], c.skinTex[3], c.skinTex[4], c.skinTex[5]);
 			if (n == 60 && c.actorsOn)	// (2026-11-07 perf-mirrorfix)
 				Logger::Log("RT CORE: actors: %u poses built as cut-outs (alpha-tested hair, brows, eye cards, fringes: AlphaTested %s), %u of them with "
-					"the hair's tint (%u tints noted from the hair draws)", c.actorAlphaParts, c.alphaOn ? "on" : "off", c.actorTintedParts, (unsigned)RtHairTint::Tints.size());
+					"the hair's tint (%u tints noted from the hair draws, %u hair draws seen at draw time); FaceGen face records: %u with the gain from "
+					"their maps, %u with the x 2 fallback (perf-mirrorfix2)", c.actorAlphaParts, c.alphaOn ? "on" : "off", c.actorTintedParts,
+					(unsigned)RtHairTint::Tints.size(), RtHairTint::DrawNotes, c.faceGains[0], c.faceGains[1]);
+			if ((n == 60 || n == 600 || n == 6000) && RtHairTint::Wanted) {	// (2026-11-08 perf-reflfix4) where the hair's tint came from
+				char shaders[128] = "";
+				for (int k = 0; k < RtHairTint::SkinnedShaderCount; k++) {
+					strcat_s(shaders, k ? ", " : ""); strcat_s(shaders, RtHairTint::SkinnedShaders[k]);
+				}
+				const UInt32 (&hp)[2][4] = c.hairParts;
+				Logger::Log("RT CORE hair (perf-reflfix4, exchanges 1-%u): hair-shader draws of the world seen at draw time: %u still objects (rigid), %u skinned "
+					"partitions (%u tints noted); pixel shaders of the world's skinned partitions: %s; hair parts in the traced scene (a part a frame): rigid "
+					"%u (tint from the shader property %u, a draw %u, the player's colour %u, none %u), skinned %u (%u, %u, %u, %u)", (unsigned)n, RtHairTint::HairDraws[0],
+					RtHairTint::HairDraws[1], (unsigned)RtHairTint::Tints.size(), shaders[0] ? shaders : "(none seen)", hp[0][0] + hp[0][1] + hp[0][2] + hp[0][3],
+					hp[0][1], hp[0][2], hp[0][3], hp[0][0], hp[1][0] + hp[1][1] + hp[1][2] + hp[1][3], hp[1][1], hp[1][2], hp[1][3], hp[1][0]);
+			}
 			if (n == 60) {
 				const UInt32* a = c.alphaFate;
 				Logger::Log("RT CORE: alpha-tested meshes met (exchanges 1-60): taken %u, atlas %u slots; left out: blended only %u, AlphaTested off %u, "

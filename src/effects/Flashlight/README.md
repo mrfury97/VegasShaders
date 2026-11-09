@@ -18,6 +18,16 @@ What it is now:
 Settings: `[Shaders.Flashlight.Main]` Dimmer, Distance, AttachToWeapon; `[Shaders.Flashlight.Deferred]` the light pass's options;
 `[Shaders.Flashlight.Status]` Enabled.
 
+## Ray tracing without the path tracer (2026-11-07, perf-flashlight)
+No RT lamp-shadow pass traces the flashlight: its game lamp is left out of every NVR lamp list (GetNearbyLights, so no cube slot and no
+place in the RT lamp table; ManyLamps' table; the RT reflections' hit lamps; and since perf-flashlight ManyLights' / ExteriorManyLights'
+table, PointShadowForward::NoteManyLamp), and the light pass's shadow is its own spot map, which leaves the player out. So
+FirstPersonBody, SameFrame and the RT shadow denoiser change nothing on the beam (host scene `flashhead`: a lamp in the hidden head is
+traced as if the body were absent anyway). What RT does change: RT reflections replace the Fresnel share of a shiny surface's lit colour,
+the beam's light included, with a reflection whose off-screen hits are lit without the flashlight (mirrors, chrome, gold: the spot fades
+there). Checks: DebugView 1 / 2 here, `[Shaders.Reflections.RT] Enabled = false` for the reflections. docs/next/RT-PATH-TRACING.md
+"Team perf-flashlight".
+
 ## Path tracing (2026-11-07)
 Under PTRealtime / PTReplace the path tracer lights the picture itself; the flashlight is passed to it as lamp 0 with its cone
 (core/RtPathTrace.cpp Lamps, Compute/Rt/RtPathTrace.comp LampSpot; docs/next/RT-PATH-TRACING.md section 53). Before, it showed only on

@@ -44,6 +44,32 @@ namespace ReflMaterialRule {
 		return Keep;
 	}
 
+	// UNOFFICIAL 2026-11-07 (perf-mirrorfix2, test 10: her head and hair in front of the mirror still took its material) the same rule at
+	// DRAW time, from the device's own state as the draw goes out (Render.cpp MaterialDraw: the skinned partitions' draw calls and the
+	// renderer's still-object draws, whatever list draws them: the sorted blended list, which holds actors with a blend property and hair,
+	// never comes through the pass hooks, and those hooks are only in with some settings on):
+	//   alpha already written (a material pass, or a pass hook's Own / Cover): Material (left as it is);
+	//   no colour writes: Keep;  not blended: Own;
+	//   blended "over" (SRCBLEND = SRCALPHA) by a skinned geometry with the scene's separate alpha blend on: Cover;
+	//   any other blend (additive lamp passes ONE / ONE, the FaceGen face's multiply DESTCOLOR, glass and decals): Keep (a re-draw of the
+	//   same surface, or something see-through).
+	constexpr uint32_t kBlendSrcAlpha = 5u;	// D3DBLEND_SRCALPHA
+	struct Draw {
+		bool		live = false;			// the world / first-person scene writes materials now
+		uint32_t	colorWrite = 7;			// COLORWRITEENABLE
+		bool		blend = false;			// ALPHABLENDENABLE
+		bool		separateAlpha = true;	// SEPARATEALPHABLENDENABLE
+		uint32_t	srcBlend = 2;			// SRCBLEND (D3DBLEND)
+		bool		skinned = false;
+	};
+	inline Write DecideDraw(const Draw& d) {
+		if (!d.live || !(d.colorWrite & 7u)) return Keep;
+		if (d.colorWrite & 8u) return Material;
+		if (!d.blend) return Own;
+		if (d.skinned && d.separateAlpha && d.srcBlend == kBlendSrcAlpha) return Cover;
+		return Keep;
+	}
+
 	// The scene's alpha after the pass drew over a pixel (its depth and alpha tests passed). dst: the alpha before; src: the shader's alpha
 	// output; encoded: what a material pass writes; blendOn: the device blends this draw (the scene's separate alpha blend then applies).
 	inline float After(Write w, float dst, float src, float encoded, bool blendOn) {

@@ -1,0 +1,41 @@
+#version 460
+// UNOFFICIAL 2026-11-08 (perf-reflfix3) a TEST pass of the RT test host (tools/nvr-rt-host rt_host_reflfix3.inl, scene mirrorlamp), not used by
+// the game: ReflectionsComposite.frag's MirrorLampHighlight on a synthetic lit picture: ../ReflLampHighlight.glsl ReflLampHighlightScale (the
+// function the composite calls) with the composite's ring (8 taps at the radius, the same surface), then the composite's mix with a flat
+// reflection. Image 0: the lit colour (rgb linear, a = keep: the sun's glint there); image 1: the result. Two regions (x < half: left).
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : require
+#include "../ReflLampHighlight.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;   // (the helper's layout; unused)
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 size;      // xy the picture, z strength (1 - MirrorLampHighlight), w the ring's radius (pixels)
+	vec4 left;      // x roughness, y the reflection's share, z the reflection's colour (grey, linear)
+	vec4 right;     // the same for x >= size.x / 2
+} p;
+layout(set = 0, binding = 2, rgba16f) uniform readonly image2D litImage;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D outImage;
+
+void main() {
+	const ivec2 px = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 dims = ivec2(p.size.xy + 0.5);
+	if (px.x >= dims.x || px.y >= dims.y) return;
+	const vec4 lit = imageLoad(litImage, px);
+	const bool isLeft = px.x < dims.x / 2;
+	const vec4 region = isLeft ? p.left : p.right;
+	vec3 top = vec3(0.0);
+	int valid = 0;
+	for (int k = 0; k < 8; k++) {
+		const float a = 0.7853982 * float(k);
+		const ivec2 at = px + ivec2(round(vec2(cos(a), sin(a)) * p.size.w));
+		if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, dims)) || ((at.x < dims.x / 2) != isLeft)) continue;   // (another surface)
+		ReflHighlightRingAdd(ReflHighlightLuma(imageLoad(litImage, at).rgb), top);
+		valid++;
+	}
+	const float ringMax = top.z;
+	const vec3 share = vec3(region.y);
+	const vec3 lin = ReflLampHighlightScale(lit.rgb, ringMax, valid, share, region.x, p.size.z, lit.a);
+	imageStore(outImage, px, vec4(mix(lin, vec3(region.z), share), 1.0));
+}

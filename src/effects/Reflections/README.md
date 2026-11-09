@@ -55,6 +55,11 @@ and depth-first replays, and the first-person scene):
 Log (every 1800 frames): `MaterialAware reflections: per frame N other passes wrote their own alpha (no material), M blended skinned
 passes covered it`. Correct: `DebugView 7` (the material buffer) shows the mirror panels only, with every person / post / gun in front
 of them black (no material); wrong: a person's outline filled with the mirror's colour in DebugView 7.
+(2026-11-07 perf-mirrorfix2, test 10: her head and hair still took the mirror) the same rule also runs at DRAW time from the device's
+state (Render.cpp MaterialDraw round the skinned partition and still-object draws: the sorted blended list, which holds actors with a
+blend property and hair, never came through the pass hooks; ReflMaterialRule::DecideDraw). The log lists each distinct kind of draw
+once a session (`MaterialAware reflections draw (session list N)`): a `KEEPS the alpha under it` line for an opaque or skinned draw is
+the one to look at if something still shows the mirror. RT-PATH-TRACING.md section 68.
 Known gap: the path tracer's G-buffer (CapturedNormals MaterialBuffer / AlbedoBuffer) keeps the same leak for draws that write no
 G-buffer (the game's own shaders, hair, blended draws): docs/next/RT-PATH-TRACING.md section 67.
 
@@ -102,3 +107,70 @@ the gold one banded orange, neither reflecting anything. docs/next/RT-PATH-TRACI
   Bumpy floors reflect as if flat until the material pass also writes the mapped normal (CapturedNormals target 3 or the material
   buffer's free g / a, DEFERRED-RENDERING-PLAN.md); then RayGen can lerp toward it by (1 - roughness) for mirrors.
 - RT test host scene `reflfix` (`tools/nvr-rt-host/run.ps1 -Scene reflfix`).
+
+## Lamps as the game lights them, glossy metal bounces, the flashlight (2026-11-07, perf-reflfix2)
+Tester (RTX 4090, test 10, the RT test room) and the flashlight team. docs/next/RT-PATH-TRACING.md "Team perf-reflfix2" has the numbers.
+- **Lamps at hits the screen cannot show** (Resolve `RtShadeHit`, the helper's key-lamp pick): `RtGatherLamps` packs each lamp through
+  `RtReflLamps.h` as the game lights it: diffuse x Dimmer at most 1 without HDR x the LOD dimmer x LightingScale, decoded on the CPU
+  (linear), the game's falloff `(1 - (d/r)^2)^2.2` or LampFalloff's shape; `Rt/RtLampLight.glsl` evaluates it in both passes. Before:
+  the dimmer unclamped and decoded with the colour (the room's lamps have fade 1.8-2: 4.4-8.9x the game's light): white discs on the
+  ceiling near each lamp in the mirror ("orbs"), discs on the chrome and gold spheres.
+- **MetalBounce's direction**: a GGX sample of the metal's roughness about its normal (visible normals), a new one each frame while the
+  RT reflection denoiser (or DLSS RR) averages the frames (Pass `frame.y`); without one the exact mirror direction. Gold (0.33) is now
+  as blurred in the mirror as seen directly; chrome (0.08) stays sharp. The RT records' roughness code is `(k / 7)^2` (finer near 0).
+- **HitFlashlight** (`[Shaders.Reflections.RT]`, default true, live): the flashlight (FlashlightDeferred::LightParams) is lamp 0 of the
+  hits' lamps, with its cone and its pass's falloff, never the key lamp (no shadow ray). Its beam's spot shows in mirrors and on metal.
+- **KeepFlashlight** (`[Shaders.Reflections.Main]`, default true, live; the Vulkan composite only): the composite adds back the share of
+  the flashlight's GGX highlight that mixing the reflection over the lit colour took away (no reflection ray sees the light itself).
+  Lamps' highlights are not kept (the composite has no lamp list).
+- What correct looks like: in the RT test room's mirror the ceiling over a lamp as bright as on screen, no white dots; gold in the mirror
+  blurred like gold seen directly (a little grain that settles in a few frames with the denoiser on), chrome sharp; the flashlight's spot
+  on the walls seen in the mirror, and its small highlight on a mirror / chrome / gold surface it shines on. Wrong: a speckled gold
+  sphere (the denoiser off: the bounce then stays sharp, report it), the beam's spot on screen but not in the mirror (HitFlashlight off,
+  or HitLamps off).
+- RT test host scenes `reflorbs`, `reflbounce` (`tools/nvr-rt-host/run.ps1 -Scene reflorbs`).
+
+## Steady gold in mirrors, the flashlight near the player, undrawn hair (2026-11-08, perf-reflfix3)
+docs/next/RT-PATH-TRACING.md "Team perf-reflfix3" has the numbers.
+- **MetalBounce on rough metal** (roughness 0.1 and up: gold, brass): the bounce's GGX sample is fixed per pixel (one of 9 lobe points by
+  its place in a 3 x 3 block) and Resolve averages each bouncing pixel with its neighbours on the same metal: the lobe's 9-ray mean, the
+  same every frame (test 11 drew a new sample each frame and a mirror keeps no history: the gold shimmered). Chrome keeps one exact ray.
+- **HitFlashlight**: no light within 24 units of the flashlight, full from 48 (the reflected head was a white orb). KeepFlashlight's glint
+  is capped at 2 linear (was 8).
+- **Hair**: RT hair keeps its tint while the game is not drawing it (first person: the player's hair from the player's hair colour).
+  (perf-reflfix4: this never ran for the hair, which is rigid; see below.)
+- What correct looks like: the gold in the mirror smooth and still (a fine blur of the room, no sparkle); no orb round the reflected head
+  (the flashlight's spot on the walls stays); the player's hair its own colour in chrome and mirrors in first person. Small bright dots at
+  the lamps in mirrors and chrome are the surface's own highlight of each lamp (as on the gold on screen), not a fault.
+- **MirrorLampHighlight** (`[Shaders.Reflections.Main]`, default 0, live; the Vulkan composite): the point lamps' own highlight on mirror-smooth / chrome surfaces the reflection covers (the blooming dots) is taken out before the mix (above 1.0 linear and above its 12-pixel surroundings); the sun's and the flashlight's glints stay, the gold's soft highlights (roughness 0.15 and up) are not touched. 1 = as before. Host scene `mirrorlamp`.
+
+## Silver mirrors, smooth gold, hair in its colour (2026-11-08, perf-reflfix4)
+docs/next/RT-PATH-TRACING.md "Team perf-reflfix4" has the facts (each checked against the game's code / files) and the numbers.
+- **Metal's F0 (MaterialAware)**: the composite took a metal's reflection colour from the hue of its own lit colour; on a mirror (a
+  near-black diffuse) that hue is the lamps', and the whole reflected room went orange under warm lamps. Now (`Compute/ReflMetalF0.glsl`,
+  the D3D9 composite's `ReflMetalF0`, MetalBounce's F0 in the RT pass) a metal up to roughness 0.06 reflects in neutral silver (0.95),
+  blending into its colour from 0.06 to 0.15; rough coloured metal (gold 0.2-0.5) keeps its colour.
+- **Rough metal's bounce average** (Resolve): a 5 x 5 tent (weights (3 - |dx|)(3 - |dy|)) in place of test 12's 3 x 3 box, which made 3-texel
+  blocks and staircase edges in the gold (each of the 9 lobe directions held on a 3-texel lattice); first hits within 25 % + 32 units.
+  Still steady (the fixed 9-point lobe). Host scene `reflsmooth` (pictures in out\reflsmooth_*.pfm), `mirrorf0`.
+- **Hair** (core/RtHairTint.h, RtCore HairTintOf): the vanilla hair, beards and brows are rigid shapes (no skin instance), so the tint
+  look-ups on the skinned path never met them. The tint is now read from the hair's own shader property (+0x84: what the game's hair
+  shader is given as HairTint, written from the NPC's hair colour when the head is built), for the player and NPCs, first and third
+  person; the rigid hair goes in as a TINTED record like the actors'. Log: `RT CORE hair (perf-reflfix4): ...` per hair part (first 8)
+  and a summary at exchanges 60 / 600 / 6000. The hair's texture slot 2 is its layer map (_hl.dds), not a glow map: taken as one, the glow
+  variants replaced the tinted colour with it (white hair). `RT CORE hair record (perf-reflfix4)` shows the flags as sent (tinted 1, glow
+  0); `UNOFFICIAL RT reflections (perf-reflfix4): trace variant ...` the variant. Host scene `hairglow`.
+- **Blocky mirrors: MirrorJitter** (`[Shaders.Reflections.RT] MirrorJitter`, default 1, + `MirrorJitterHistory` 8): a mirror pixel's ray
+  leaves from one of 8 points of its half-resolution texel frame by frame (Compute/RtMirrorJitter.glsl: RayGen, the helper, Resolve) and the
+  RT reflection denoiser keeps a short history on mirrors (virtual reprojection, anti-lag, a 1.25-sigma variance clip): outlines and hard
+  shadow edges smooth instead of stepping every 2 output pixels. Only where the denoiser runs (native resolution; 2 = also under DLSS
+  RR); rect frames keep the fixed centre ray. Log `UNOFFICIAL RT reflections MirrorJitter (perf-reflfix4): ...`. Host scene `mirroraa`.
+  What wrong looks like: a soft trail behind a fast-moving person in a mirror (lower MirrorJitterHistory), shimmer on mirror edges
+  (MirrorJitter 0 to compare).
+- **Shader files check**: `UNOFFICIAL Reflections shader files (perf-reflfix4: ...)` once at start: each of the changed .spv (and the
+  D3D9 Reflections.fx.hlsl) "this build's" or "OLD (copy the new one)".
+- What correct looks like: the mirror's reflection the room's own colours under any lamp (white walls stay white under the warm lamps);
+  the gold in the mirror and in the chrome sphere smooth (no blocks, no staircase on the red sphere's reflection) and still; the player's
+  and NPCs' hair in the colour the game draws it. Wrong: the room orange in the mirror again (an old ReflectionsComposite.spv: the log
+  line says so); blocks in the gold (an old ReflectionsRTResolve.spv); white hair with `tint from none` in the hair lines (the property
+  held no written colour: the line shows what it held).

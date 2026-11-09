@@ -33,9 +33,15 @@ layout(set = 2, binding = 1, std140) uniform RtConstants {
                     // 2026-10-31: y 1 = RayReuse (rough pixels reuse their neighbours' hits), z its lowest roughness;
                     // 2026-11-05: w 1 = ShadeOffscreen (a hit out of view shaded from itself, not the cube)
     vec4 lamps[24]; // 2026-10-29: the 12 nearest scene lamps: [2i] xyz camera-relative position, w reach; [2i + 1] rgb colour x dimmer (gamma)
-    vec4 rt5;       // 2026-11-07: x 1 = the RT reflection denoiser runs this frame (core/RtReflDenoise.h): RayGen's second noise number
+                    // (2026-11-07 perf-reflfix2: [2i + 1] rgb the game's colour, LINEAR, w its falloff: Rt/RtLampLight.glsl)
+    vec4 rt5;      // 2026-11-07: x 1 = the RT reflection denoiser runs this frame (core/RtReflDenoise.h): RayGen's second noise number
                     // decorrelated, RayGen writes the march's hit distance, Resolve the hit distance (Spread .y)
+                    // (2026-11-07 perf-reflfix2) y the flashlight's lamp index + 1 (0: none), z its cone (src/core/RtFlashlightCode.h)
+                    // (2026-11-08 perf-reflfix4) w MirrorJitter's code (RtMirrorJitter.glsl; 0 off)
 } rtc;
+
+#include "Rt/RtLampLight.glsl"   // (2026-11-07 perf-reflfix2) a lamp's light as the game's shaders give it
+#include "RtMirrorJitter.glsl"   // (2026-11-08 perf-reflfix4) MirrorJitter: rt5.w the code
 
 #define RtOn (rtc.rt.x > 0.5)
 #define RtDenoiserOn (rtc.rt5.x > 0.5)
@@ -64,7 +70,7 @@ float RtFade(float roughness) { return 1.0 - smoothstep(0.75 * RtMaxRoughness, R
 // average diffuse colour (protocol v2 records; 0.4 grey when unknown) on the hit triangle's own normal (facing the ray when unknown),
 // lit by the surroundings cube's blurriest mip round that normal (the light the place has) and, outdoors by day, the sun as far as
 // the helper's shadow ray from the hit saw it. No texture detail and no lamps of their own (tiers 5-6).
-// 2026-10-29: plus the 12 nearest scene lamps (the game's own colour, dimmer and reach; a squared-quadratic falloff), the hit's key
+// 2026-10-29: plus the 12 nearest scene lamps (the game's own colour, dimmer and reach; 2026-11-07: as the game lights them), the hit's key
 // lamp (keyLamp >= 0, indoors / at night) through the helper's shadow ray (visible = shade.a then).
 vec3 RtShadeHit(vec3 hitW, vec3 normal, vec3 albedo, float visible, int keyLamp) {
     vec3 light = CubeOn > 0.0 ? EnvAlong(normal, 1.0).rgb : SkyAlong(vec3(0.0, 0.0, 1.0)) * 0.5;
@@ -77,11 +83,17 @@ vec3 RtShadeHit(vec3 hitW, vec3 normal, vec3 albedo, float visible, int keyLamp)
     float sunAmount = rtc.rt2.z;
     if (sunAmount > 0.0) light += linearize(rtc.sunColor.rgb) * saturate(dot(normal, normalize(rtc.sunDir.xyz))) * sunAmount * visible;
     int count = int(rtc.rt2.w + 0.5);
+    // (2026-11-07 perf-reflfix2) each lamp as the game's shaders light it (Rt/RtLampLight.glsl): its colour with the dimmer at most 1 (no
+    // HDR), the LOD dimmer and the light scale, decoded on the CPU; the game's falloff (or LampFalloff's shape). Before: the dimmer
+    // unclamped and decoded with the colour (the RT test room's lamps, dimmer 1.8-2: 4.5x the game's light), no light scale, (1 - (d/r)^2)^2:
+    // the ceiling over a lamp, out of view, came out several times brighter in a mirror than on screen and the firefly cap made it a white
+    // disc (the tester's "orbs"; chrome / gold spheres showed them as discs too).
+    // (2026-11-07 perf-reflfix2) the flashlight (rt5.y its index + 1, rt5.z its cone: RtFlashlightCode.h) lights the hits in its beam (it
+    // was left out: its spot faded on mirrors and metal), never the key lamp (no shadow ray: the player's own body stands at the light)
+    const int flash = int(rtc.rt5.y + 0.5) - 1;
     for (int i = 0; i < count; i++) {
-        vec3 toLamp = rtc.lamps[2 * i].xyz - hitW;
-        float d = length(toLamp), reach = rtc.lamps[2 * i].w;
-        float fall = saturate(1.0 - (d * d) / (reach * reach));
-        vec3 c = linearize(rtc.lamps[2 * i + 1].rgb) * fall * fall * saturate(dot(normal, toLamp / max(d, 1.0e-3)));
+        vec3 c = i == flash ? RtSpotLight(rtc.lamps[2 * i], rtc.lamps[2 * i + 1], rtc.rt5.z, hitW, normal) :
+            RtLampLight(rtc.lamps[2 * i], rtc.lamps[2 * i + 1], hitW, normal);
         light += i == keyLamp ? c * visible : c;
     }
     return albedo * light * rtc.rt2.y;

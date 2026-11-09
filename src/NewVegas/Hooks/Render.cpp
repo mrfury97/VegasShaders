@@ -3614,7 +3614,80 @@ namespace SandstormGlass {
 }
 
 void (__thiscall* RenderBlended)(void*, UInt32) = (void (__thiscall*)(void*, UInt32))Hooks::RenderBlended;
+// UNOFFICIAL 2026-11-07 perf-mirrorfix2 (test 10: her head, hair and shoulder in front of the mirror still took its material; the RT
+// hair stayed white): round every game draw of an object, whatever list draws it, from the device's own state as the draw goes out:
+// the material alpha (core/ReflMaterial.h DrawBegin / DrawEnd, ReflMaterialRule::DecideDraw) and the hair's tint for the RT scene
+// (core/RtHairTint.h NoteHairDraw). The sorted blended list (actors with a blend property, hair) never comes through the pass hooks,
+// and those are only redirected with some settings on. Hooked: the skinned partitions' two draw calls in
+// BSBatchRenderer::RenderPassImmediately_Skinned (00B992E3 / 00B99339) and the renderer's still-object draws (vtable 010EE670 /
+// 010EE674), each calling on whatever was there (the cloth / Pip-Boy fit hooks keep working).
+namespace MaterialDraw {
+	typedef void(__fastcall* PartitionFn)(void*, void*, NiGeometryBufferData*, NiSkinPartition::Partition*, void*);
+	typedef void(__fastcall* StillFn)(void*, void*, NiGeometry*);
+	static PartitionFn PartitionNext[2] = { nullptr, nullptr };
+	static StillFn StillNext[2] = { nullptr, nullptr };
+
+	struct Current { bool world, firstPerson; const PointShadowForward::RenderPassView* pass; const char* pixelShader; };
+	static inline Current Now() {
+		Current c = { ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, nullptr, nullptr };
+		if (!c.world && !c.firstPerson) return c;
+		c.pass = *(const PointShadowForward::RenderPassView* const*)0x011F91E0;	// BSShaderManager::pCurrentRenderPass
+		const NiD3DPass* d3dPass = *(NiD3DPass* const*)0x0126F74C;					// NiD3DShader::m_pCurrentPass
+		const NiD3DPixelShaderEx* ps = d3dPass ? static_cast<const NiD3DPixelShaderEx*>(d3dPass->PixelShader) : nullptr;
+		c.pixelShader = ps ? ps->Name : nullptr;
+		return c;
+	}
+
+	template <int Site> static void __fastcall PartitionHook(void* renderer, void* edx, NiGeometryBufferData* buffer, NiSkinPartition::Partition* partition, void* unused) {
+		IDirect3DDevice9* device = TheRenderManager ? TheRenderManager->device : nullptr;
+		const Current c = Now();
+		ReflMaterial::DrawState s;
+		ReflMaterial::DrawBegin(device, true, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
+		PartitionNext[Site](renderer, edx, buffer, partition, unused);
+		ReflMaterial::DrawEnd(device, s);
+		if (c.world && c.pass) RtHairTint::NoteHairDraw(c.pass->geometry, c.pixelShader, device);
+	}
+
+	template <int Slot> static void __fastcall StillHook(void* renderer, void* edx, NiGeometry* geometry) {
+		IDirect3DDevice9* device = TheRenderManager ? TheRenderManager->device : nullptr;
+		const Current c = Now();
+		ReflMaterial::DrawState s;
+		ReflMaterial::DrawBegin(device, false, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
+		StillNext[Slot](renderer, edx, geometry);
+		ReflMaterial::DrawEnd(device, s);
+		// (2026-11-08 perf-reflfix4) the rigid hair, beards and brows draw HERE (the vanilla hair NIFs hold no skin instance): its c2, noted as
+		// a fallback and a cross-check of the property's tint (RtHairTint.h; RtCore reads the property itself)
+		if (c.world) RtHairTint::NoteHairDraw(geometry, c.pixelShader, device, false);
+	}
+}
+
+// After the cloth / Pip-Boy fit hooks (Hooks.cpp): ours on top, calling on theirs
+void InstallMaterialDrawHooks() {
+	const bool rtActors = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Actors") != 0;
+	if (!ReflMaterial::CompiledIn() && !rtActors) return;
+	static const UInt32 kSites[2] = { 0x00B992E3, 0x00B99339 };
+	const bool callsThere = *(const UInt8*)kSites[0] == 0xE8 && *(const UInt8*)kSites[1] == 0xE8;
+	if (callsThere) {
+		for (int i = 0; i < 2; i++) MaterialDraw::PartitionNext[i] = (MaterialDraw::PartitionFn)(kSites[i] + 5 + *(const SInt32*)(kSites[i] + 1));
+		WriteRelCall(kSites[0], (UInt32)&MaterialDraw::PartitionHook<0>);
+		WriteRelCall(kSites[1], (UInt32)&MaterialDraw::PartitionHook<1>);
+	}
+	const UInt32 shape = *(const UInt32*)0x010EE670, strips = *(const UInt32*)0x010EE674;
+	const bool stillThere = shape && strips;
+	if (stillThere) {
+		MaterialDraw::StillNext[0] = (MaterialDraw::StillFn)shape;
+		MaterialDraw::StillNext[1] = (MaterialDraw::StillFn)strips;
+		SafeWrite32(0x010EE670, (UInt32)&MaterialDraw::StillHook<0>);
+		SafeWrite32(0x010EE674, (UInt32)&MaterialDraw::StillHook<1>);
+	}
+	Logger::Log("UNOFFICIAL MaterialAware / RT hair tint draw hooks (perf-mirrorfix2): skinned partition draws %s (calling %08X %08X), still-object draws %s (calling %08X %08X)",
+		callsThere ? "hooked" : "NOT hooked (not the game's calls)", callsThere ? (UInt32)MaterialDraw::PartitionNext[0] : 0u, callsThere ? (UInt32)MaterialDraw::PartitionNext[1] : 0u,
+		stillThere ? "hooked" : "NOT hooked", shape, strips);
+}
+
 void __fastcall RenderBlendedHook(void* This, UInt32 edx, UInt32 Arg) {
+	// UNOFFICIAL 2026-11-07 perf-mirrorfix2: the sorted blended list's draws, named in MaterialAware's session list
+	struct BlendedListScope { BlendedListScope() { ReflMaterial::InBlendedList = true; } ~BlendedListScope() { ReflMaterial::InBlendedList = false; } } blendedList;
 	using namespace SandstormGlass;
 	bool hide = false, glass = false;
 	if (InWorldScene && (WorldDepth || GlassDepth)) {

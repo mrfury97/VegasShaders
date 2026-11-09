@@ -236,6 +236,13 @@ float3 EnvironmentFresnelF0(float roughness, float NdotV, float3 F0) {
 	float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
 	return F0 * ab.x + ab.y;
 }
+
+// UNOFFICIAL 2026-11-08 (perf-reflfix4, test 12: the mirror reflected the room orange under warm lamps) metal's F0: a mirror-smooth metal
+// in neutral silver, not its lit colour's hue (that is the lamps'), blending into the hue from roughness 0.06 to 0.15 (rough gold keeps its
+// colour). The Vulkan composite's ReflMetalF0 (Compute/ReflMetalF0.glsl), the same numbers.
+float3 ReflMetalF0(float3 colour, float roughness) {
+	return lerp(float3(0.95, 0.95, 0.95), saturate(colour), smoothstep(0.06, 0.15, roughness));
+}
 #endif
 
 // The sky along a world direction: the weather's horizon and zenith colours (as Specular reads it). Below the horizon,
@@ -635,7 +642,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	// rest at F0 0.04 as before (with no metal this is EnvironmentFresnel exactly).
 	float3 litColour = linearize(color.rgb);
 	float3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
-	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), lerp(0.04, tint, SurfaceMetal))) * saturate(reflection.a);
+	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), lerp(0.04, ReflMetalF0(tint, roughness), SurfaceMetal))) * saturate(reflection.a);	// (2026-11-08 perf-reflfix4)
 #else
 	float share = saturate(amount * EnvironmentFresnel(roughness, saturate(dot(-V, N)))) * saturate(reflection.a);
 #endif

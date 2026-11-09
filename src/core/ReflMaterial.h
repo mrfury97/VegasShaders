@@ -69,6 +69,7 @@ namespace ReflMaterial {
 	inline bool NeutralAlphaAdded = false, NeutralBlendChanged = false;
 	inline DWORD NeutralSavedDestAlpha = D3DBLEND_ONE;
 	inline UInt32 DiagOwn = 0, DiagCover = 0;
+	inline UInt32 DiagDrawOwn = 0, DiagDrawCover = 0, DiagDrawKeep = 0;	// (perf-mirrorfix2) DrawBegin's decisions
 
 	// Whether the object shaders were compiled with it (asked by ShaderRecord::BuildDefines, at the first shader load).
 	// UNOFFICIAL 2026-10-22: only while Reflections itself is on at startup, so MaterialAware can be on by default while the effect
@@ -201,7 +202,10 @@ namespace ReflMaterial {
 				FlaggedPasses / Frames, Frames, (unsigned)Refused.size());
 			Logger::Log("MaterialAware reflections: per frame %u other passes wrote their own alpha (no material), %u blended skinned passes covered it (perf-mirrorfix)",
 				DiagOwn / Frames, DiagCover / Frames);
+			Logger::Log("MaterialAware reflections: per frame at draw time %u draws wrote their own alpha, %u covered by their alpha, %u kept the alpha under them (perf-mirrorfix2)",
+				DiagDrawOwn / Frames, DiagDrawCover / Frames, DiagDrawKeep / Frames);
 			DiagOwn = DiagCover = 0;
+			DiagDrawOwn = DiagDrawCover = DiagDrawKeep = 0;
 			char masks[160] = ""; size_t used = 0;
 			for (int m = 0; m < 16; m++) if (DiagMask[m]) used += snprintf(masks + used, sizeof(masks) - used, " %X:%u", m, DiagMask[m]);
 			Logger::Log("MaterialAware reflections diagnostic: %u flagged passes drew, %u shader binds inside them, %u got alpha added; write mask at the draw's end (mask:passes)%s",
@@ -298,6 +302,68 @@ namespace ReflMaterial {
 		if (device && NeutralBlendChanged) device->SetRenderState(D3DRS_DESTBLENDALPHA, NeutralSavedDestAlpha);
 		NeutralWrite = ReflMaterialRule::Keep;
 		NeutralAlphaAdded = NeutralBlendChanged = false;
+	}
+
+	// --- UNOFFICIAL 2026-11-07 (perf-mirrorfix2) the same at DRAW time (ReflMaterialRule::DecideDraw), round every game draw of an object:
+	// Render.cpp MaterialDraw wraps the skinned partitions' two draw calls and the renderer's still-object draws. Test 10 showed her head,
+	// hair and shoulder in front of the mirror still taking its material: actors with a blend property and hair are drawn by the sorted
+	// blended list, which never comes through the pass hooks (and the pass hooks are only redirected with some settings on).
+	inline bool InBlendedList = false;			// RenderBlendedHook: the sorted blended list is drawing
+	inline std::unordered_set<UInt64> DiagDrawSeen;	// the once-per-session list (distinct pass / shader / state)
+	struct DrawState { bool alphaAdded = false, blendChanged = false; DWORD savedDest = D3DBLEND_ONE; };
+
+	// world / firstPerson: ShaderSplit's context; passEnum / pixelShader: the game's current pass (for the session list only)
+	inline ReflMaterialRule::Write DrawBegin(IDirect3DDevice9* device, bool skinned, bool world, bool firstPerson, UInt16 passEnum,
+		const char* pixelShader, DrawState& s) {
+		s = DrawState();
+		ReflMaterialRule::Draw d;
+		d.live = device && ((world && Writing) || (firstPerson && FirstPersonLive));
+		if (!d.live) return ReflMaterialRule::Keep;
+		DWORD write = 0, blend = FALSE, separate = FALSE, src = D3DBLEND_ONE, dst = D3DBLEND_ZERO;
+		device->GetRenderState(D3DRS_COLORWRITEENABLE, &write);
+		d.colorWrite = write;
+		if ((write & 7u) && !(write & D3DCOLORWRITEENABLE_ALPHA)) {
+			device->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+			if (blend) { device->GetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, &separate); device->GetRenderState(D3DRS_SRCBLEND, &src); }
+		}
+		d.blend = blend != FALSE; d.separateAlpha = separate != FALSE; d.srcBlend = src; d.skinned = skinned;
+		const ReflMaterialRule::Write w = ReflMaterialRule::DecideDraw(d);
+		if (w == ReflMaterialRule::Own || w == ReflMaterialRule::Cover) {
+			if (w == ReflMaterialRule::Cover) {
+				device->GetRenderState(D3DRS_DESTBLENDALPHA, &s.savedDest);
+				device->SetRenderState(D3DRS_DESTBLENDALPHA, D3DBLEND_INVSRCALPHA);
+				s.blendChanged = true;
+				DiagDrawCover++;
+			}
+			else DiagDrawOwn++;
+			device->SetRenderState(D3DRS_COLORWRITEENABLE, write | D3DCOLORWRITEENABLE_ALPHA);
+			s.alphaAdded = true;
+		}
+		else if (w == ReflMaterialRule::Keep && (write & 7u)) DiagDrawKeep++;
+		// The once-per-session list (the lead's ask, test 10): every distinct kind of draw that writes colour, for skinned geometry and for
+		// whatever leaves the alpha under it (Keep: a material there would stay), with what was done; at most 64 lines a session
+		if ((write & 7u) && (skinned || w == ReflMaterialRule::Keep) && DiagDrawSeen.size() < 64) {
+			if (blend) device->GetRenderState(D3DRS_DESTBLEND, &dst);
+			const UInt64 key = ((UInt64)passEnum << 48) ^ ((UInt64)(uintptr_t)pixelShader << 8) ^ ((UInt64)w << 4) ^ ((UInt64)src << 20) ^ ((UInt64)dst << 26) ^
+				((UInt64)blend << 1) ^ (skinned ? 1u : 0u) ^ (InBlendedList ? 4u : 0u) ^ (firstPerson ? 8u : 0u);
+			if (DiagDrawSeen.insert(key).second) {
+				static const char* const kNames[] = { "KEEPS the alpha under it", "material pass", "writes its own alpha", "covers by its alpha" };
+				Logger::Log("MaterialAware reflections draw (session list %u): %s pass %03X (%s), PS %s, %s, blend %s%u->%u, %s%s",
+					(unsigned)DiagDrawSeen.size(), skinned ? "skinned" : "still", (unsigned)passEnum, Pointers::Functions::GetPassDescription(passEnum),
+					pixelShader ? pixelShader : "?", InBlendedList ? "sorted blended list" : "main lists", blend ? "on " : "off ", (unsigned)src, (unsigned)dst,
+					kNames[(int)w], firstPerson ? " (first person)" : "");
+			}
+		}
+		return w;
+	}
+	inline void DrawEnd(IDirect3DDevice9* device, const DrawState& s) {
+		if (!device) return;
+		if (s.alphaAdded) {
+			DWORD write = 0;
+			device->GetRenderState(D3DRS_COLORWRITEENABLE, &write);
+			device->SetRenderState(D3DRS_COLORWRITEENABLE, write & ~(DWORD)D3DCOLORWRITEENABLE_ALPHA);
+		}
+		if (s.blendChanged) device->SetRenderState(D3DRS_DESTBLENDALPHA, s.savedDest);
 	}
 
 	// Scoped NeutralBegin / NeutralEnd (the dispatcher's calls)

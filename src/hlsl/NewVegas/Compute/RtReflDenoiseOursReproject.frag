@@ -104,6 +104,10 @@ void main() {
         }
     m1 /= c; m2 /= c;
     vec4 sigma = sqrt(max(m2 - m1 * m1, vec4(0.0)));
+    // UNOFFICIAL 2026-11-08 (perf-reflfix4) MirrorJitter: a mirror pixel's history (only reached with MirrorJitter: MirrorRoughness 0) is
+    // clipped into this frame's 3 x 3 neighbourhood, mean +- 1.25 sigma (TAA's variance clip): the jittered samples' area average stays,
+    // what moved is cut at once (the RT test host's mirroraa scene: motion's extra error 0.0024 -> 0.0019, the stair-steps gone)
+    if (s.roughness < 0.03) history = clamp(history, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
     float stray = luma(abs(history - m1).rgb), allowed = pc.params3.x * luma(sigma.rgb) + 0.05 * luma(m1.rgb) + 0.01;
     if (stray > allowed) n = max(1.0, n * allowed / stray);
     float a = 1.0 / n;
