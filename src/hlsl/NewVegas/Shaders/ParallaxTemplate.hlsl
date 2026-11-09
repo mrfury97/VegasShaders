@@ -201,9 +201,16 @@
 #endif
 // UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl; as ObjectTemplate.hlsl): the sunlit passes of the material get the water
 // layer. c146-c157 (the sun cross-fade's), the cover map on s12 (free outdoors).
-#if defined(PS) && defined(WETNESS_EFFECTS) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS) && \
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY)) && \
     !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(PAR_LAMP_FIRST)
     #define PARALLAX_WETNESS
+    #if defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY
+        // 2026-11-09 the outdoor RT lamp-shadow record (INTERIOR_SHADOWS + POINT_SHADOW_RT_ONLY, ShaderManager ExteriorForward) gets the water
+        // layer too; PointShadowForward writes c174-c189 raw on every draw there (NVR_PointShadowLight + params), so the puddles' two take
+        // c160 / c161 (in none of those records' tables: Bend's c160-c164 is not compiled into them; no raw write)
+        #define PR_DATA c160
+        #define PR_LOOK c161
+    #endif
     #define WETNESS_ORTHO_REG s12
     #include "includes/Wetness.hlsl"
 #endif
@@ -746,6 +753,9 @@ PS_OUTPUT main(PS_INPUT pin)
             wet.roughness = 1.0f;
             wet.normal = sunShadowNormal;
             [branch] if (shadowWorldPosValid > 0.0f) wet = GetWetness(pin.shadowWorldPos.xyz, sunShadowNormal, sunShadowNormal);
+            #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
+                nmap.xyz = normalize(lerp(nmap.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
+            #endif
             const float3 wetDry = max(LinColor(wetDryTexture), 1.0f / 256.0f);
             #ifdef ONLY_LIGHT
                 albedoPx.rgb *= WetAlbedo(wetDry, wet.darkening, 1.0f) / wetDry;
@@ -871,6 +881,9 @@ PS_OUTPUT main(PS_INPUT pin)
         po.color.a = albedoPx.a;
     #else
         po.color.a = ReflMaterialAlpha(texAlpha * AmbientColor.a);	// UNOFFICIAL MaterialAware reflections (Object.hlsl)
+    #endif
+    #if defined(PARALLAX_WETNESS) && defined(PUDDLES_COMPILED)
+        [branch] if (PuddleDebugColor.x >= 0.0f) po.color.rgb = PuddleDebugColor;	// 2026-11-08 [Shaders.Puddles.Debug] DebugView
     #endif
     po.color.rgb = LinearSceneOut(po.color.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
 #if CAPTURED_NORMALS_ON

@@ -33,6 +33,7 @@ float3 LinEncode(float3 c) { return TESR_LinearLighting.x > 1.0f ? pow(max(c, 0.
 #define SKYLIGHTING_MODE 0
 #include "../Shaders/Includes/SkyAmbient.hlsl"
 #define WETNESS_ORTHO_REG s3
+#define PUDDLES_RUNTIME	// 2026-11-08 Puddles: the same puddle field as the surface shaders (live: TESR_PuddleData.w 0 = off)
 #include "../Shaders/Includes/Wetness.hlsl"
 
 struct VSOUT

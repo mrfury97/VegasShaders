@@ -1,0 +1,9 @@
+# The shader files the Puddles effect is in (they stay where the game loads them from: src/hlsl/NewVegas mirrors
+# Data\Shaders\VegasShaders). No pass of its own: the puddle model is compiled into the surface shaders (WETNESS_EFFECTS 2) and the
+# reflection passes. Keep it up to date by hand.
+src/hlsl/NewVegas/Shaders/Includes/Wetness.hlsl
+src/hlsl/NewVegas/Shaders/ObjectTemplate.hlsl
+src/hlsl/NewVegas/Shaders/ParallaxTemplate.hlsl
+src/hlsl/NewVegas/Shaders/TerrainTemplate.hlsl
+src/hlsl/NewVegas/Effects/WetnessReflections.fx.hlsl
+src/hlsl/NewVegas/Compute/Reflections.glsl

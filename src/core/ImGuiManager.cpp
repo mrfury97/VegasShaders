@@ -662,6 +662,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.PBR.Main",                     "VanillaBridgeDielectricMax", RestartRule::Changed },	// VANILLA_BRIDGE_DIELECTRIC_MAX (2026-11-06)
 	{ "Shaders.HandBlood.Status",             "Enabled",            RestartRule::Changed },
 	{ "Shaders.Cloth.Main",                   "Enabled",            RestartRule::TurnOn },
+	{ "Shaders.Puddles.Status",               "Enabled",            RestartRule::Changed },	// WETNESS_EFFECTS 2 (2026-11-08)
 	{ "Shaders.WetnessEffects.HudRaindrops",  "Enabled",            RestartRule::TurnOn },	// HUD_RAIN_ON: on at start
 	{ "Shaders.VolumetricClouds.Main",        "Resolution",         RestartRule::Changed },	// textures made at start
 	{ "Shaders.VolumetricClouds.Main",        "HalfResolution",     RestartRule::Changed },

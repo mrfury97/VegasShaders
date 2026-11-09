@@ -279,6 +279,7 @@ public:
 		ParticleShaders*		Particles; // UNOFFICIAL, optional, off by default
 		TerrainShaders*			Terrain;
 		WetnessEffectsShaders*	Wetness;	// UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl)
+		PuddlesShaders*			Puddles;	// 2026-11-08 Puddles (effects/Puddles, Includes/Wetness.hlsl PUDDLES_COMPILED)
 	};
 
 	// What UpdateConstants worked out about the game this frame.

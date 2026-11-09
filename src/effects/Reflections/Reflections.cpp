@@ -462,7 +462,10 @@ void ReflectionsEffect::UpdateConstants() {
 	Constants.Data.x = (exterior ? Settings.GroundSheen : Settings.InteriorFloors) * reflectivity;
 	Constants.Data.y = exterior ? wet * Settings.RainWetness : 0.0f;
 	// UNOFFICIAL 2026-10-19: the rain wets only open ground (the ortho map's roof test, as Wet World): kept up while it rains here.
-	Constants.Data4.y = Constants.Data.y > 0.0f ? 1.0f : 0.0f;
+	// 2026-11-08 Puddles: and while standing water is left (the passes mirror it after the rain, Reflections.glsl PuddleStanding).
+	PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles;
+	PuddlesActive = exterior && puddles && puddles->ReflectionsWanted();
+	Constants.Data4.y = Constants.Data.y > 0.0f || PuddlesActive ? 1.0f : 0.0f;
 	if (Constants.Data4.y > 0.0f) TheShaderManager->orthoRequired = true;
 	Constants.Data.z = Settings.Roughness;
 	Constants.Data.w = Settings.WetRoughness;
@@ -515,7 +518,7 @@ void ReflectionsEffect::BindMaterial() {
 bool ReflectionsEffect::ShouldRender() {
 	if (cubeOnly || materialOnly) return true;	// RenderCubeOnly's / CaptureMaterial's own passes
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
-	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f);
+	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f);
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
 	// the weapon rays can run (RtTrace's weaponFrame: the helper up, not a rect frame). Weapon 0 or RT off: as before.
@@ -833,6 +836,7 @@ namespace {
 		D3DXVECTOR4	material2;	// UNOFFICIAL 2026-10-30 x 1: TESR_MaterialBuffer's roughness for the floor guess
 		D3DXVECTOR4	weapon;		// UNOFFICIAL 2026-10-30 x on, y WeaponFovScale, z strength, w roughness without material data
 		D3DXVECTOR4	renderScale;	// UNOFFICIAL 2026-11-03 TESR_RenderScale: xy the rect frame's scale, zw 1 / xy; 1 in a native frame
+		D3DXVECTOR4	puddle, puddle2;	// 2026-11-08 Puddles (PuddlesShaders::ReflectionData): the standing water's field (Reflections.glsl PuddleStanding)
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1093,6 +1097,8 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// keep to its top-left part, as the .fx's techniques do with TESR_RenderScale.
 	uniforms.renderScale = RenderRect::Active() ? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY) :
 		D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	// 2026-11-08 Puddles: the puddles' field, so the SSR and RT reflections mirror them (zero: off).
+	if (PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles) puddles->ReflectionData(uniforms.puddle, uniforms.puddle2);
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));

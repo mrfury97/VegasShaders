@@ -401,7 +401,10 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	if (ForwardCloudShadows::CompiledIn()) AppendDefine("FORWARD_CLOUD_SHADOWS", "1");
 	// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status] Enabled at startup; Includes/Wetness.hlsl): the water layer in the
 	// object, parallax and land pixel shaders. Defined only when on, and last, as above.
-	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) AppendDefine("WETNESS_EFFECTS", "1");
+	// 2026-11-08 Puddles ([Shaders.Puddles.Status] Enabled at startup, effects/Puddles): WETNESS_EFFECTS 2 compiles the puddle model in
+	// (Includes/Wetness.hlsl PUDDLES_COMPILED), without a define of its own (the list is near its cap).
+	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled"))
+		AppendDefine("WETNESS_EFFECTS", TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") ? "2" : "1");
 	// UNOFFICIAL 2026-10-24 SmoothObjectNormals ([Shaders.PBR.Main], restart): the object and skin shaders' shadow lookups and sky ambient take
 	// the vertex normal instead of the per-triangle one (Includes/Shadow.hlsl ShadowFacingNormal). 0: the shaders exactly as before.
 	AppendDefine("OBJECT_SMOOTH_NORMALS", TheSettingManager->GetSettingI("Shaders.PBR.Main", "SmoothObjectNormals") ? "1" : "0");

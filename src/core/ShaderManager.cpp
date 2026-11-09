@@ -154,6 +154,7 @@ void ShaderManager::Initialize() {
 	EnrollCollection<ParticleShaders>(sm, sm->Shaders.Particles);
 	EnrollCollection<TerrainShaders>(sm, sm->Shaders.Terrain);
 	EnrollCollection<WetnessEffectsShaders>(sm, sm->Shaders.Wetness);	// UNOFFICIAL 2026-11-04 Wetness Effects
+	EnrollCollection<PuddlesShaders>(sm, sm->Shaders.Puddles);	// 2026-11-08 Puddles
 	LoadEarlyShaders(sm);	// UNOFFICIAL 2026-10-27: shaders the game made while the sets above did not exist yet
 
 	// setup map of constant names: the bindings are inserted in this order, the terrain erosion's own after the first block
@@ -926,9 +927,31 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		const bool skin = tmpl.Name && strstr(tmpl.Name, "SkinTemplate") == tmpl.Name;
 		ShaderRecordPixel* record = nullptr;
 		int exteriorLevel = 0;
+		// UNOFFICIAL 2026-11-09: the skin's many-lamp variants with 3+ lamps (SKIN2010 POINTS 4, SKIN2011 POINTS 3) never fit with every
+		// lamp shadowed outdoors (X4505, 32 temps, at both compile flags; offline template_compile with the user's toml). A failed compile
+		// is not cached, so trying them cost ~13 s at EVERY start (two shaders x the flow-control retry). They start at the 2-lamp level,
+		// which is what they always ended up with.
+		// (MANY only: SKIN2009, DIFFUSE with 3 lamps, fits with every lamp)
+		if (skin) {
+			bool many = false; int points = 0;
+			for (const D3DXMACRO& d : tmpl.Defines) {
+				if (d.Name && !strcmp(d.Name, "MANY")) many = true;
+				if (d.Name && !strcmp(d.Name, "POINTS") && d.Definition) points = atoi(d.Definition);
+			}
+			if (many && points >= 3) exteriorLevel = 1;
+		}
 		for (; exteriorLevel < (skin ? 3 : 1) && !record; exteriorLevel++)
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, customExterior ? "Exteriors\\" : NULL, tmpl,
 				exteriorCache[exteriorLevel], exteriorLamps[exteriorLevel]);
+		// 2026-11-09 Puddles / Wetness Effects: the outdoor record carries the water layer too (ObjectTemplate / ParallaxTemplate with
+		// POINT_SHADOW_RT_ONLY). Where that does not fit (SLS2027 in game: X4505, though it fits offline), it is made again without the water
+		// layer (WETNESS_OFF) rather than losing the lamp shadows: no wetness on that shader near lamps, the shadows kept.
+		if (!record && !skin && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+			static D3DXMACRO exteriorLampsDry[4] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
+			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, customExterior ? "Exteriors\\" : NULL, tmpl, "ExteriorLampsDry\\", exteriorLampsDry);
+			if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s's outdoor lamp-shadow record did not fit with the water layer: made without it "
+				"(the lamp shadows kept; no Wetness Effects / Puddles on it near lamps).", pixel->Name);
+		}
 		if (record && exteriorLevel > 1)
 			Logger::Log("UNOFFICIAL RT lamp shadows: %s's outdoor lamp-shadow record shadows only the first %d lamp(s) of a draw (the full one did not fit).",
 				pixel->Name, exteriorLevel == 2 ? 2 : 1);
@@ -953,6 +976,13 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		else if (lamps) {
 			static D3DXMACRO terrainLamps[2] = { { "TERRAIN_LAMP_RT", "1" }, { NULL, NULL } };
 			ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLamps\\", terrainLamps);
+			// 2026-11-09 Puddles: the land's lamp record carries the water layer on its own registers (TerrainTemplate WETNESS_ALT_REGS); if that
+			// does not fit, the record is made again without it rather than losing the lamp shadows (as the objects' above).
+			if (!record && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+				static D3DXMACRO terrainLampsDry[3] = { { "TERRAIN_LAMP_RT", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
+				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLampsDry\\", terrainLampsDry);
+				if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s (land)'s outdoor lamp-shadow record did not fit with the water layer: made without it.", pixel->Name);
+			}
 			if (record) {
 				PointShadowForward::ExteriorRecords[pixel] = record;
 				PointShadowForward::TerrainRecords.insert(pixel);

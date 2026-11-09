@@ -109,7 +109,9 @@ void WetnessEffectsShaders::UpdateConstants() {
 
 	// No shore wetness (removed): the game lists water planes only some of the time, and its heights are no
 	// guide to where the water is, so the ground near it went wet and dark, on and off with the view.
-	bool active = on && (Wetness > 0.0f || PuddleWetness > 0.0f || Raining > 0.0f);
+	// 2026-11-08 Puddles: standing water (or its debug view) keeps the layer on after the rain (effects/Puddles; last frame's level).
+	PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles;
+	bool active = on && (Wetness > 0.0f || PuddleWetness > 0.0f || Raining > 0.0f || (puddles && puddles->Active()));
 
 	Constants.Data = D3DXVECTOR4(Wetness, PuddleWetness, Raining, (float)RainTime);
 	Constants.Params = D3DXVECTOR4(Settings.MaxRainWetness, Settings.MaxPuddleWetness, Settings.MinRainWetness, Settings.PuddleRadius);

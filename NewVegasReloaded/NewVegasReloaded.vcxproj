@@ -233,6 +233,7 @@
     <ClCompile Include="..\src\effects\SunShadows\SunShadows.cpp" />
     <ClCompile Include="..\src\effects\Terrain\Terrain.cpp" />
     <ClCompile Include="..\src\effects\WetnessEffects\WetnessEffects.cpp" />
+    <ClCompile Include="..\src\effects\Puddles\Puddles.cpp" />
     <ClCompile Include="..\src\effects\WetnessEffects\HudRaindrops.cpp" />
     <ClCompile Include="..\src\effects\WetnessEffects\WetnessReflections.cpp" />
     <ClCompile Include="..\src\effects\Tonemapping\Tonemapping.cpp" />
@@ -408,6 +409,7 @@
     <ClInclude Include="..\src\effects\SunShadows\SunShadows.h" />
     <ClInclude Include="..\src\effects\Terrain\Terrain.h" />
     <ClInclude Include="..\src\effects\WetnessEffects\WetnessEffects.h" />
+    <ClInclude Include="..\src\effects\Puddles\Puddles.h" />
     <ClInclude Include="..\src\effects\WetnessEffects\HudRaindrops.h" />
     <ClInclude Include="..\src\effects\WetnessEffects\WetnessReflections.h" />
     <ClInclude Include="..\src\effects\Tonemapping\Tonemapping.h" />

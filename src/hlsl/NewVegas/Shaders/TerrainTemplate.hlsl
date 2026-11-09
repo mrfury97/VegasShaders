@@ -309,11 +309,14 @@ float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3
 
 // UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl, from Physically-Based-Reloaded; in place of WetWorld's screen pass): the
 // land darkens, gains the water film and puddles, and the rain ripples on it. Its constants (c146-c157) are the RT lamp slots' above and
-// the sun cross-fade's, so not with either. The rain cover map on s13, free below seven texture layers (the seventh layer's normal map
+// the sun cross-fade's: not with the cross-fade; with the lamp slots (TERRAIN_LAMP_RT) they move (2026-11-09, WETNESS_ALT_REGS). The rain cover map on s13, free below seven texture layers (the seventh layer's normal map
 // there): seven-layer land goes without the cover test (open everywhere). The layers' height maps shape the wetness and the puddles
 // (WETNESS_HEIGHT, c158: [Shaders.WetnessEffects.Main] HeightAwareness, CreviceFill, NormalAwareness), as in Physically-Based-Reloaded.
-#if defined(PS) && defined(WETNESS_EFFECTS) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS))
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE
     #define TERRAIN_WETNESS
+    #if TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS)
+        #define WETNESS_ALT_REGS    // 2026-11-09: the lamp slots hold c146-c173 here; the water layer takes c2, c4-c17, c98-c99 (Wetness.hlsl)
+    #endif
     #if TEX_COUNT < 7
         #define WETNESS_ORTHO_REG s13
     #endif
@@ -632,6 +635,9 @@ PS_OUTPUT main(PS_INPUT pin) {
         }
         surfaceHeight = heightWeight > 0.0f ? surfaceHeight / heightWeight : 0.5f;
         Wetness wet = GetWetness(camPos, geoN, wetWorldNormal, surfaceHeight);
+        #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
+            combinedNormal = normalize(lerp(combinedNormal, float3(0.0f, 0.0f, 1.0f), wet.flatten));
+        #endif
         baseColor = WetAlbedo(baseColor, wet.darkening, 1.0f);
     #endif
     float3 litCol = getSunLighting(sunTS, LinColor(SunColor.rgb), toEye, combinedNormal, LinColor(AmbientColor.rgb), baseColor, glossV, specPow, 1.0, sunMul, geoN);
@@ -712,6 +718,9 @@ PS_OUTPUT main(PS_INPUT pin) {
 #endif
     #ifdef TERRAIN_WETNESS
         [branch] if (WETNESS_DEBUG_COVER) outCol = WetnessCoverDebug(camPos, geoN);	// [Shaders.WetnessEffects.Debug] ShowCover
+        #ifdef PUDDLES_COMPILED
+            [branch] if (PuddleDebugColor.x >= 0.0f) outCol = PuddleDebugColor;	// 2026-11-08 [Shaders.Puddles.Debug] DebugView
+        #endif
     #endif
     po.finalCol.rgb = outCol;
     po.finalCol.rgb = LinearSceneOut(po.finalCol.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)

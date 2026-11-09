@@ -389,9 +389,16 @@
 // passes that light the material's own albedo with the sun get the water layer; lamp-only, highlight-only and lamp-first passes do not,
 // nor the interior records (no rain indoors). Its constants are the sun cross-fade's (c146-c159), so not with SUN_CROSSFADE; s12 is free
 // in every outdoor variant, for the rain cover map.
-#if defined(PS) && defined(WETNESS_EFFECTS) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS) && \
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY)) && \
     !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(OBJ_LAMP_FIRST)
     #define OBJECT_WETNESS
+    #if defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY
+        // 2026-11-09 the outdoor RT lamp-shadow record (INTERIOR_SHADOWS + POINT_SHADOW_RT_ONLY, ShaderManager ExteriorForward) gets the water
+        // layer too; PointShadowForward writes c174-c189 raw on every draw there (NVR_PointShadowLight + params), so the puddles' two take
+        // c160 / c161 (in none of those records' tables: Bend's c160-c164 is not compiled into them; no raw write)
+        #define PR_DATA c160
+        #define PR_LOOK c161
+    #endif
     #define WETNESS_ORTHO_REG s12
     #include "includes/Wetness.hlsl"
     // The wet albedo (linear). In a light-only pass the albedo is 1 here and the texture pass multiplies the real one (dryTexture, stored)
@@ -1576,6 +1583,9 @@ PS_OUTPUT main(PS_INPUT IN) {
             wet.roughness = 1.0f;
             wet.normal = faceNormal;
             [branch] if (skyValid > 0.0f) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal);
+            #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
+                normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
+            #endif
         #endif
         [branch] if (getMetalStrength() > 0.0f) {
             // Faded out with distance (getMetalFade); at full without the position (a vanilla vertex shader ran).
@@ -1665,6 +1675,9 @@ PS_OUTPUT main(PS_INPUT IN) {
             wet.roughness = 1.0f;
             wet.normal = faceNormal;
             [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w)) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal);
+            #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
+                normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
+            #endif
             surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f);
         #endif
         FOLD_DECL lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
@@ -1910,6 +1923,9 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;	// SmoothObjectNormals off: no vertex normal here
     #endif
 #endif
+    #if defined(OBJECT_WETNESS) && defined(PUDDLES_COMPILED)
+        [branch] if (PuddleDebugColor.x >= 0.0f) pout.color.rgb = PuddleDebugColor;	// 2026-11-08 [Shaders.Puddles.Debug] DebugView
+    #endif
     pout.color.rgb = LinearSceneOut(pout.color.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
 
     return pout;
@@ -2170,6 +2186,9 @@ PS_OUTPUT main(PS_INPUT IN) {
         wet.roughness = 1.0f;
         wet.normal = sunFaceN;
         [branch] if (SHADOW_WP_VALID(IN)) wet = GetWetness(sunWP, sunFaceN, sunFaceN);
+        #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
+            normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
+        #endif
         #ifdef METAL
             baseColor.rgb = ObjectWetAlbedo(baseColor.rgb, 1.0f, wet, 1.0f - saturate(sqrt(metallic)));
         #else
@@ -2298,6 +2317,9 @@ PS_OUTPUT main(PS_INPUT IN) {
             const float skew = max(max(abs(dot(tT, tB)) / max(lT * lB, 1.0e-6f), abs(dot(tT, tN)) / max(lT * lN, 1.0e-6f)), abs(dot(tB, tN)) / max(lB * lN, 1.0e-6f));
             pout.color.rgb = saturate(float3(skew, abs(lT / lN - 1.0f), abs(lB / lN - 1.0f)) * 4.0f);
         }
+    #endif
+    #if defined(OBJECT_WETNESS) && defined(PUDDLES_COMPILED)
+        [branch] if (PuddleDebugColor.x >= 0.0f) pout.color.rgb = PuddleDebugColor;	// 2026-11-08 [Shaders.Puddles.Debug] DebugView
     #endif
     pout.color.rgb = LinearSceneOut(pout.color.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
 

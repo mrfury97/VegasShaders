@@ -60,6 +60,9 @@ layout(set = 2, binding = 0, std140) uniform Constants {
                                 // y tan(world FOV / 2) / tan(1st-person FOV / 2), z the strength, w the roughness without material data
     vec4 renderScale;           // UNOFFICIAL 2026-11-03 TESR_RenderScale (Includes/RenderRect.hlsl): xy this frame's RenderScale rect, zw 1 / xy;
                                 // (1, 1, 1, 1) in a native frame. Only the RT passes (RayGen, Resolve, SkyPano) run in rect frames.
+    vec4 puddle;                // 2026-11-08 Puddles (src/effects/Puddles): TESR_PuddleData: x water level, y Coverage, z 1 / Size,
+                                // w Quality (0: off, or ReflectionPuddles off)
+    vec4 puddle2;               // x slope start, y slope full, z the water's roughness, w edge softness
 } cb;
 
 layout(push_constant) uniform Push {
@@ -177,6 +180,37 @@ float OpenAbove(vec2 uv, float depth) {
     return top > p.z - max(RoofMargin * perUnit, 0.0001) ? 1.0 : 0.0;
 }
 
+// 2026-11-08 Puddles (src/effects/Puddles/README.md): the standing water the surface shaders draw (Shaders/Includes/Wetness.hlsl
+// PuddleField), line for line, so the SSR and RT reflections mirror the same puddles at the water's roughness. Without the land's height
+// term (no height map here) and the ortho map's soft edge (OpenAbove's hard test is applied by the caller). 0-1.
+vec3 WetHash33(vec3 p3) {
+    p3 = fract(p3 * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yxx) * p3.zyx);
+}
+float PuddleHash(vec2 p) { return WetHash33(vec3(p, 7.13)).x; }
+float PuddleValueNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = PuddleHash(i), b = PuddleHash(i + vec2(1.0, 0.0));
+    float c = PuddleHash(i + vec2(0.0, 1.0)), d = PuddleHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+#define PuddlesOn (cb.puddle.w > 0.5 && cb.puddle.x > 0.001)
+float PuddleStanding(vec2 uv, float depth, float worldUp) {
+    if (!PuddlesOn || depth > 10240.0) return 0.0;
+    vec3 worldPos = cb.cameraPosition.xyz + toWorld(uv) * depth;
+    vec2 p = worldPos.xy * cb.puddle.z;
+    float n = PuddleValueNoise(p) * 0.62 + PuddleValueNoise(p * 2.31 + 17.7) * 0.38;
+    if (cb.puddle.w > 2.5) n = n * 0.85 + PuddleValueNoise(p * 5.7 + 41.3) * 0.15;
+    n = smoothstep(0.2, 0.8, n);
+    float t = 1.0 - cb.puddle.x * cb.puddle.y;
+    float shore = saturate((n - t) / max(cb.puddle2.w, 1.0e-3));
+    float nearFactor = 1.0 - smoothstep(0.0, 10240.0, depth);
+    return shore * shore * (3.0 - 2.0 * shore) * smoothstep(cb.puddle2.x, cb.puddle2.y, worldUp) * nearFactor;
+}
+
 // UNOFFICIAL 2026-10-30 a reflecting pixel's view-space position: ViewPosition, except on the first-person weapon, which the game draws
 // with its own (narrower) field of view from the same eye: the same depth, the sideways offsets shrunk by the two FOVs' ratio.
 vec3 SurfacePosition(vec2 uv, float depth) {
@@ -229,9 +263,12 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     float maxRough = cb.material.y;
     float dry = cb.material.z * (1.0 - smoothstep(0.6 * maxRough, maxRough, material.r));
     float wetness = Wetness * floorShare;
-    if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);   // the rain wets open ground only
+    float standing = floorShare > 0.0 ? PuddleStanding(uv, depth, ViewToWorldDir(ViewNormal(uv)).z) : 0.0;   // 2026-11-08 Puddles
+    if ((wetness > 0.0 || standing > 0.0) && RoofMaskOn > 0.5) { float open = OpenAbove(uv, depth); wetness *= open; standing *= open; }   // the rain wets open ground only
+    wetness = max(wetness, standing);
     float amount = dry + wetness;
     roughness = mix(roughness, WetRoughness, wetness / max(amount, 1.0e-4));
+    roughness = mix(roughness, cb.puddle2.z, standing);
     SurfaceMetal = material.g;
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * fade;
@@ -288,7 +325,9 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     float worldZ = cb.cameraPosition.z + toWorld(uv).z * depth;
     if (abs(worldZ - cb.waterSettings.x) < max(2.0, depth * 0.002)) return WaterReflectivity(depth, roughness);   // water reflects on its own (RT water: rays)
     float wetness = Wetness;
-    if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);   // the rain wets open ground only
+    float standing = PuddleStanding(uv, depth, worldNormal.z);   // 2026-11-08 Puddles: the standing water mirrors after the rain too
+    if ((wetness > 0.0 || standing > 0.0) && RoofMaskOn > 0.5) { float open = OpenAbove(uv, depth); wetness *= open; standing *= open; }   // the rain wets open ground only
+    wetness = max(wetness, standing);
     float amount = DryReflect + wetness;
     // UNOFFICIAL 2026-10-30 MaterialBufferRoughness: where the game's shader wrote the roughness it lit the surface with (TESR_MaterialBuffer:
     // r class > 0, b roughness, -1 none), the dry surface takes it instead of the one DryRoughness (polished floors sharp, carpets blurred).
@@ -300,6 +339,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
         if (written.r > 0.5 && written.b >= 0.0) dryRoughness = saturate(written.b);
     }
     roughness = mix(dryRoughness, WetRoughness, wetness / max(amount, 1.0e-4));
+    roughness = mix(roughness, cb.puddle2.z, standing);
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }

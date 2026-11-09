@@ -1,0 +1,26 @@
+[_Shaders.Puddles.Status]
+Enabled = false                     # Puddles (2026-11-08, restart; needs [Shaders.WetnessEffects.Status] Enabled): rain puddles that fill where water would gather (low spots, the land's crevices, flat open ground), grow while it rains and shrink back from their edges after it stops, over game hours. Inside a puddle a flat, mirror-like water layer with rain ripples; a soaked ring round it; water running down walls in the rain. Mirrored by the reflections too (SSR, and RT with the Vulkan reflection passes).
+
+[_Shaders.Puddles.Main]
+Quality = 2                         # [0-3] 0 off (Wetness Effects' own puddles), 1 low (puddles, water layer), 2 medium (+ the land's crevices fill first, soaked rings, wall streaks, ripples on the land), 3 high (+ ripples on objects, finer puddle edges).
+Coverage = 0.25                     # [0.0-1.0] Share of flat open ground under water when the puddles are full.
+Size = 420.0                        # [32-8192] Size of the puddle pattern, in game units.
+FillHours = 0.5                     # [0.01-48] Game hours of steady rain to fill the puddles (heavier rain fills faster).
+DryHours = 3.0                      # [0.01-96] Game hours for full puddles to dry in sunshine. They shrink from the edges in.
+NightDrying = 0.35                  # [0.0-1.0] How fast puddles dry at night or under cloud, as a share of the sunny speed.
+Roughness = 0.03                    # [0.01-0.5] Roughness of the water's surface: low is a sharp mirror.
+Darkening = 0.6                     # [0.0-2.0] How much deeper water darkens the ground under it.
+EdgeSoftness = 0.05                 # [0.005-0.5] How soft a puddle's shore is.
+SlopeStart = 0.92                   # [0.5-0.999] How flat ground must be for a puddle to start (the up component of its normal).
+SlopeFull = 0.97                    # [0.5-1.0] How flat ground must be for a full puddle.
+Cavity = 0.6                        # [0.0-2.0] The land only: how strongly the textures' crevices draw the water in (they fill first).
+WetRing = 0.12                      # [0.0-0.5] Width of the soaked, darker ring round each puddle.
+Ripples = 1.0                       # [0.0-2.0] Strength of the rain ripples on the puddles.
+Streaks = 1.0                       # [0.0-2.0] Strength of the water running down walls in the rain. 0 off.
+StreakWidth = 6.0                   # [1-64] Width of a streak lane, in game units.
+StreakSpeed = 1.0                   # [0.0-8.0] How fast the water runs down the walls.
+ReflectionPuddles = true            # The reflection passes ([Shaders.Reflections], Vulkan: screen-space and ray-traced) mirror the puddles too, also after the rain.
+
+[_Shaders.Puddles.Debug]
+LevelOverride = -1.0                # [-1.0-1.0] Force the puddles' water level (for testing in dry weather). -1 off.
+DebugView = 0                       # [0-3] 1 where it is wet (red puddles, green soaked rings, blue wall streaks), 2 the ripples, 3 the levels (red rain wetness, green the puddles' water level, blue rain falling). 0 off.
