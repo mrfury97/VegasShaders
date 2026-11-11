@@ -440,7 +440,7 @@ namespace {
 	int RtImageIn = -1, RtImageOut = -1, RtImageGI = -1, RtImageAlphaStandIn = -1, RtImageLight = -1, RtImageAlbedoStandIn = -1, RtShader = -1;
 	int RtGIShader = -1, RtImageReservoir[2][2] = { { -1, -1 }, { -1, -1 } };	// (2026-10-30) GIReuse: RtGITrace and its two reservoir pairs (A, B)
 	bool RtGIHistory = false;
-	int RtCacheShader = -1, RtImageCache = -1;	// (2026-10-31) RadianceCache: RtRadianceCache and its 256 x 256 image (4 texels a cell)
+	int RtCacheShader = -1, RtImageCache = -1;	// (2026-10-31) RadianceCache: RtRadianceCache and its image (2026-11-12 sungi p3: 512 x 512, 8 texels a cell, 2 levels)
 	bool RtCacheValid = false;	// the cache image holds this session's cells (else the next cache pass starts every cell over)
 	float RtCacheCellSize = 0.0f, RtCacheCap = 0.0f;
 	int RtImageGIOut = -1, RtImageGlowList = -1;	// (2026-10-30) the reuse passes' bounce light out (estimate + GlowDirect) and the glow lights
@@ -453,6 +453,11 @@ namespace {
 	int RtImageLamps = -1, RtLampCount = 0;
 	IDirect3DTexture9* RtLampTexture = nullptr;	// (GILampImageMax x 4) x 1, G32R32F, dynamic
 	float RtLampData[GILampImageMax][8] = {};
+	// UNOFFICIAL 2026-11-12 (sungi p3, F6) SkyMissSH: the sky's radiance harmonics for the traces' ray misses, row 1 of the lamp image (the lamp
+	// rows are row 0; the passes' constants are full): 9 coefficients x rgb as 27 floats in 14 RG32F texels (RtAOTrace.comp SkyRadianceSH)
+	float RtSkyData[16][2] = {};
+	bool RtSkyDataOn = false;	// RtFillLamps writes row 1 and fills the image even with no lamps
+	int RtCacheFlags = 0;	// the cache's last flags (1 CacheVisibility, 2 CacheCascades 2): a change starts every cell over
 	bool RtGITraced = false;	// (rt-ao-gi) this frame's trace had GI rays
 	UInt32 RtTracedFrame = 0xFFFFFFFF;
 	UInt32 RtReduced(UInt32 size) { return MaxQuality::Reduced(size, 2); }
@@ -482,8 +487,11 @@ namespace {
 		RtGIHistory = false;
 		RtImageGIOut = RtCore::AddImage("NVR RT gi out", w, h, NVR_EXT_SHARED_RGBA16F);
 		RtImageGlowList = RtCore::AddImage("NVR RT glow lights", GlowLightsMax, 3, NVR_EXT_SHARED_RGBA16F);
-		RtImageCache = RtCore::AddImage("NVR RT radiance cache", 256, 256, NVR_EXT_SHARED_RGBA16F);	// (2026-10-31) RadianceCache
-		RtImageLamps = RtCore::AddImage("NVR RT gi lamps", 4 * GILampImageMax, 1, NVR_EXT_SHARED_RG32F);	// (2026-11-03 rtgi-lamps)
+		// (2026-10-31) RadianceCache. UNOFFICIAL 2026-11-12 (sungi p3): 512 x 512 (was 256 x 256): 8 texels a cell (the SH, the header and the
+		// visibility moments) and two levels of 256 rows (the fine grid, the coarse cascade); still ONE shared image (RtAOTrace.comp CacheTexel)
+		RtImageCache = RtCore::AddImage("NVR RT radiance cache", 512, 512, NVR_EXT_SHARED_RGBA16F);
+		// (2026-11-03 rtgi-lamps) UNOFFICIAL 2026-11-12 (sungi p3): 2 rows (the image is rounded up to 256 rows anyway): row 1 = the sky SH
+		RtImageLamps = RtCore::AddImage("NVR RT gi lamps", 4 * GILampImageMax, 2, NVR_EXT_SHARED_RG32F);
 		RtCacheValid = false;
 	}
 
@@ -593,13 +601,15 @@ namespace {
 	}
 	// (2026-11-03 rtgi-lamps) RtLampData into RtLampTexture and the helper's lamp image; false: not this frame (the constants' lamps then)
 	bool RtFillLamps(IDirect3DDevice9* Device) {
-		if (RtImageLamps < 0 || RtLampCount <= 0) return false;
-		if (!RtLampTexture && FAILED(Device->CreateTexture(4 * GILampImageMax, 1, 1, D3DUSAGE_DYNAMIC, D3DFMT_G32R32F, D3DPOOL_DEFAULT, &RtLampTexture, nullptr)))
+		if (RtImageLamps < 0 || (RtLampCount <= 0 && !RtSkyDataOn)) return false;
+		// (2026-11-12 sungi p3: 2 rows, the second the sky SH)
+		if (!RtLampTexture && FAILED(Device->CreateTexture(4 * GILampImageMax, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_G32R32F, D3DPOOL_DEFAULT, &RtLampTexture, nullptr)))
 			return false;
 		D3DLOCKED_RECT r = {};
 		if (FAILED(RtLampTexture->LockRect(0, &r, nullptr, D3DLOCK_DISCARD))) return false;
 		memset(r.pBits, 0, sizeof(RtLampData));
-		memcpy(r.pBits, RtLampData, sizeof(float) * 8 * RtLampCount);
+		memcpy(r.pBits, RtLampData, sizeof(float) * 8 * (std::max)(RtLampCount, 0));
+		if (RtSkyDataOn) memcpy((char*)r.pBits + r.Pitch, RtSkyData, sizeof(RtSkyData));
 		RtLampTexture->UnlockRect(0);
 		return RtCore::CopyIn(RtImageLamps, RtLampTexture);
 	}
@@ -855,6 +865,26 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 				RtDenoise::GIMotion(Device, rtLightSurface, traceW, traceH, RtRectScaleX(), RtRectScaleY())) c.gi2.y = -c.gi2.y;	// (2026-11-04: the rect grid)
 		}
 	}
+	// UNOFFICIAL 2026-11-12 (sungi p3, F6) SkyMissSH: where ray misses bring sky light (gi.y > 1: GISky or AmbientReplace), the sky's own radiance
+	// in the ray's direction. The forward shaders' sky harmonics (TESR_SkyIrradianceObjects: band l stored at A_l / pi of its projection, A0 = pi,
+	// A1 = 2 pi / 3, A2 = pi / 4, i.e. 1, 2/3, 1/4 of the radiance's) un-convolved to radiance by 1, 1.5, 4 (SkyAmbient.hlsl SkyAmbientSharp),
+	// x the GI's ambient scale (GIAmbientUnits: LinearScales.y). They go in row 1 of the lamp image (RtSkyData), gi.y + 10 tells the shaders.
+	const float giYBase = c.gi.y;
+	const bool skySh = gi && rt.SkyMissSH && c.gi.y > 1.0f && RtImageLamps >= 0 && TheShaderManager->Shaders.Sky;
+	if (skySh) {
+		PBRShaders* pbrSky = TheShaderManager->Shaders.PBR;
+		const float scale = rt.GIGameLamps && rt.GIAmbientUnits && pbrSky ? pbrSky->Constants.LinearScales.y : 1.0f;
+		const D3DXVECTOR4* sh = TheShaderManager->Shaders.Sky->Constants.IrradianceObjects;
+		float flat[28] = {};
+		for (int k = 0; k < 9; k++) {
+			const float band = k == 0 ? 1.0f : k < 4 ? 1.5f : 4.0f;
+			flat[3 * k] = sh[k].x * band * scale;
+			flat[3 * k + 1] = sh[k].y * band * scale;
+			flat[3 * k + 2] = sh[k].z * band * scale;
+		}
+		memcpy(RtSkyData, flat, sizeof(flat));
+	}
+	RtSkyDataOn = skySh;
 	const int alphaAtlas = RtCore::AlphaAtlasImage() >= 0 ? RtCore::AlphaAtlasImage() : RtImageAlphaStandIn;
 	if (alphaAtlas < 0) return;
 	const int albedoAtlas = RtCore::AlbedoAtlasImage() >= 0 ? RtCore::AlbedoAtlasImage() : RtImageAlbedoStandIn;
@@ -917,12 +947,20 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// (the same flag as DebugView 7), in every GI path (the AO pass's own bounce too: it reads lamp slot 7 the same way)
 	const bool offscreenView = (rt.DebugView == 7 && (giPass || merged)) || (gi && !rt.GIScreenLight);
 	const int cacheRays = exterior ? rt.CacheRaysExterior : rt.CacheRays, cacheSpread = exterior ? rt.CacheSpreadExterior : rt.CacheSpread;
-	RtAmbient::CacheConstants cc = {};
+	RtAmbient::CacheConstants cc = {}, cc2 = {};
+	// the second level needs passes: the fine update, the coarse update, the AO / merged pass and the GI pass (of 8 a frame, the RT sun's among them)
+	const bool cascade2 = cacheOn && rt.CacheCascades >= 2;
+	// UNOFFICIAL 2026-11-12 (sungi p3 review) the layout flag follows the SETTING only; a frame short of pass slots just skips the coarse level's
+	// update (its cells keep their light). Before, the flag itself followed PassesLeft(), and every flip started every cell over (GI pumping).
+	const bool coarseUpdate = cascade2 && RtCore::PassesLeft() >= 4;
+	const int cacheFlags = cacheOn ? (rt.CacheVisibility ? 1 : 0) | (cascade2 ? 2 : 0) : 0;
 	if (cacheOn || offscreenView) {
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		const double size = rt.CacheCellSize;
 		const double cell[3] = { floor(camera.x / size), floor(camera.y / size), floor(camera.z / size) };
-		cc.cacheA = D3DXVECTOR4((float)(camera.x - cell[0] * size), (float)(camera.y - cell[1] * size), (float)(camera.z - cell[2] * size), (float)size);
+		// UNOFFICIAL 2026-11-12 (sungi p3) the cell size carries the v2 flags: size + 1024 x (1 CacheVisibility, 2 CacheCascades 2), only with the
+		// cache on (RtAOTrace.comp CacheFlags / CacheSize). The coarse level's origin is derived from this cell in the shader (cell / 4).
+		cc.cacheA = D3DXVECTOR4((float)(camera.x - cell[0] * size), (float)(camera.y - cell[1] * size), (float)(camera.z - cell[2] * size), (float)size + 1024.0f * (float)cacheFlags);
 		cc.cacheB = D3DXVECTOR4((float)cell[0], (float)cell[1], (float)cell[2], cacheOn ? rt.CacheStrength : 0.0f);
 		c.gi.z = (std::min)(c.gi.z, (float)(RtAmbient::GILampsMax - 1));
 		c.lampPos[RtAmbient::GILampsMax - 1] = cc.cacheA;
@@ -1013,7 +1051,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		cc.gi2 = c.gi2;
 		// A new image or cell size: every cell traced and started over this frame. When the light changes (the reuse's history cut,
 		// giCap back to 1) the cells may lean on 2 frames only, growing back to CacheFrames by one every CacheSpread frames (a cell's turn).
-		cacheReset = !RtCacheValid || RtCacheCellSize != rt.CacheCellSize;
+		cacheReset = !RtCacheValid || RtCacheCellSize != rt.CacheCellSize || RtCacheFlags != cacheFlags;	// (2026-11-12 sungi p3: the layout's flags too: the moments / the coarse level are not in the old cells)
 		const UINT div = cacheReset ? 1u : (UINT)cacheSpread;
 		// (2026-11-07 perf-history) CacheFrames is frames at 60 fps: the same seconds at this frame rate (RtHistoryTime.h)
 		const float cacheFrames = RtHistoryTime::Frames((float)rt.CacheFrames, RtDenoise::HistoryClock());
@@ -1021,6 +1059,14 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		cc.cacheC = D3DXVECTOR4((float)cacheRays, cacheReset ? -RtCacheCap : (std::min)(RtCacheCap, cacheFrames),
 			(float)(TheFrameRateManager->FrameNumber % div), (float)div);
 		cc.cacheD = D3DXVECTOR4((float)((TheFrameRateManager->FrameNumber / div) % 4096u), (float)RtAmbient::CacheLazyPeriod, 2.5f, 0.0f);
+		// UNOFFICIAL 2026-11-12 (sungi p3, F18) the coarse level's update: the same pass again with the level in cacheD.w, 1 in 2 x the spread's cells a
+		// frame (the grid is 4 x as large and changes 4 x as slowly; the cost stays that of the fine level's half); all cells in one frame on a reset
+		cc2 = cc;
+		const UINT div2 = cacheReset ? 1u : (std::min)(div * 2u, 64u);
+		cc2.cacheC.z = (float)(TheFrameRateManager->FrameNumber % div2);
+		cc2.cacheC.w = (float)div2;
+		cc2.cacheD.x = (float)((TheFrameRateManager->FrameNumber / div2) % 4096u);
+		cc2.cacheD.w = 1.0f;
 	}
 	// UNOFFICIAL 2026-11-03 (rtgi-lamps) more lamps than the constants carry (8, or 7 with lamp slot 7 the cache's / GIScreenLight's): all
 	// of them through the lamp image, every GI pass (gi.z = -count; the reuse's light keys above stay the nearest ones'). Few lamps
@@ -1032,37 +1078,62 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		static bool lampsLogged = false;
 		if (!lampsLogged) { lampsLogged = true; Logger::Log("UNOFFICIAL RT AO: GI lights its bounce hits from all %d lamps (lamp image; the constants hold %d).", RtLampCount, RtAmbient::GILampsMax); }
 	}
+	// UNOFFICIAL 2026-11-12 (sungi p3, F6) SkyMissSH: the lamp image carries the sky harmonics (row 1) even with few lamps: it is filled and bound
+	// for the passes then (the lamps in the constants stay as they are: gi.z >= 0). gi.y + 10 = directional sky misses (RtAOTrace.comp SkyMiss),
+	// in every pass that has GI rays (the AO pass of a split GI has none: its gi.y is 0) and in the cache passes (their gi.y was zeroed with it).
+	bool lampsBound = lampImage;
+	if (skySh && !lampImage) lampsBound = RtFillLamps(Device);
+	const bool skyShNow = skySh && lampsBound;
+	if (skyShNow) {
+		if (c.gi.y > 0.5f) c.gi.y += 10.0f;
+		if (g.gi.y > 0.5f) g.gi.y += 10.0f;
+		cc.gi.y = cc2.gi.y = giYBase + 10.0f;
+	}
 	const int cur = giParity & 1, prev = cur ^ 1;
 	// (2026-10-30) the glow atlas as image 11 (binding 15): the merged pass's last; the plain AO pass binds 6-10 too then (not used there:
 	// the reservoirs and the GI out, unwritten without gi3.z), so the atlas lands at its binding
 	const bool glowAtlas = gi && c.sunColor.w > 0.5f;
 	// (2026-11-03 rtgi-lamps) + the lamp image as image 12 (binding 16); image 11 (binding 15, rgba8) then the albedo atlas when no glow atlas
-	const bool aoLamps = lampImage;	// (its fillers checked with it)
+	const bool aoLamps = lampsBound;	// (its fillers checked with it) (2026-11-12 sungi p3: also with the sky harmonics in the lamp image)
 	const int images[13] = { RtImageIn, RtImageOut, cacheNow && mergedNow ? RtImageCache : RtImageGI, alphaAtlas, RtImageLight, albedoAtlas,
 		RtImageReservoir[prev][0], RtImageReservoir[prev][1], RtImageReservoir[cur][0], RtImageReservoir[cur][1],
 		RtImageGIOut, glowAtlas ? RtCore::GlowAtlasImage() : aoLamps ? albedoAtlas : RtImageGIOut, RtImageLamps };
 	const UINT aoImages = aoLamps ? 13u : mergedNow ? (glowAtlas ? 12u : 11u) : (glowAtlas && RtImageGIOut >= 0 && RtImageReservoir[1][1] >= 0 ? 12u : 6u);
 	const int giImages[13] = { RtImageIn, RtImageReservoir[prev][0], RtImageReservoir[prev][1], alphaAtlas, RtImageLight, albedoAtlas,
 		RtImageReservoir[cur][0], RtImageReservoir[cur][1], RtImageGIOut, RtImageGlowList,
-		glowAtlas ? RtCore::GlowAtlasImage() : lampImage ? albedoAtlas : RtImageGlowList,
+		glowAtlas ? RtCore::GlowAtlasImage() : lampsBound ? albedoAtlas : RtImageGlowList,
 		RtImageCache >= 0 ? RtImageCache : RtImageGIOut, RtImageLamps };	// (2026-10-31: the radiance cache as image 11, binding 15, with RadianceCache;
 																			// 2026-11-03 rtgi-lamps: the lamp image as 12, binding 16)
 	// (2026-10-31) the cache pass: the cache at binding 2, the atlases at theirs (5, 7, 15); the bindings between are fillers (unused)
 	const int cacheImages[13] = { RtImageCache, RtImageCache, RtImageCache, alphaAtlas, RtImageCache, albedoAtlas, RtImageCache, RtImageCache,
-		RtImageCache, RtImageCache, RtImageCache, glowAtlas ? RtCore::GlowAtlasImage() : lampImage ? albedoAtlas : RtImageCache, RtImageLamps };
+		RtImageCache, RtImageCache, RtImageCache, glowAtlas ? RtCore::GlowAtlasImage() : lampsBound ? albedoAtlas : RtImageCache, RtImageLamps };
 	const UINT cacheGroups = RtAmbient::CacheCells / (cacheNow ? (UINT)cc.cacheC.w : 1u) / 64u;
+	const UINT cacheGroups2 = RtAmbient::CacheCells / (cacheNow ? (std::max)((UINT)cc2.cacheC.w, 1u) : 1u) / 64u;	// (2026-11-12 sungi p3: the coarse level)
 	const bool glowOk = (giPass || mergedNow) && RtImageGIOut >= 0 && RtImageGlowList >= 0 && RtFillGlowLights(Device, rt.GlowDirect);
 	if ((giPass || mergedNow) && !glowOk) { RtGIHistory = false; return; }
 	if (!RtCore::CopyIn(RtImageIn, rtInputTexture) || (gi && !RtCore::CopyIn(RtImageLight, rtLightTexture)) ||
 		(glowOk && !RtCore::CopyIn(RtImageGlowList, RtGlowTexture)) ||
-		(cacheNow && !RtCore::AddPass(RtCacheShader, cacheImages, lampImage ? 13 : glowAtlas ? 12 : 6, 0x1, &cc, sizeof(cc), cacheGroups, 1)) ||
+		(cacheNow && !RtCore::AddPass(RtCacheShader, cacheImages, lampsBound ? 13 : glowAtlas ? 12 : 6, 0x1, &cc, sizeof(cc), cacheGroups, 1)) ||
+		// UNOFFICIAL 2026-11-12 (sungi p3, F18) the coarse cascade's update (cc2: level 1, 1 in 2 x the spread's cells a frame)
+		(cacheNow && coarseUpdate && !RtCore::AddPass(RtCacheShader, cacheImages, lampsBound ? 13 : glowAtlas ? 12 : 6, 0x1, &cc2, sizeof(cc2), cacheGroups2, 1)) ||
 		!RtCore::AddPass(RtShader, images, aoImages, mergedNow ? (cacheNow ? 0x702 : 0x706) : 0x6, &c, sizeof(c), ((rt.Interleave >= 2 ? (traceW + 1) / 2 : traceW) + 7) / 8,
 			((rt.Interleave >= 4 ? (traceH + 1) / 2 : traceH) + 7) / 8) ||	// (Interleave: only the traced texels' threads; 2026-11-03: over the rect)
-		(giPass && !RtCore::AddPass(RtGIShader, giImages, lampImage ? 13 : cacheNow ? 12 : glowAtlas ? 11 : 10, 0x1C0, &g, sizeof(g), (traceW + 7) / 8, (traceH + 7) / 8)) ||	// (2026-11-04: the rect)
+		(giPass && !RtCore::AddPass(RtGIShader, giImages, lampsBound ? 13 : cacheNow ? 12 : glowAtlas ? 11 : 10, 0x1C0, &g, sizeof(g), (traceW + 7) / 8, (traceH + 7) / 8)) ||	// (2026-11-04: the rect)
 		!RtCore::CopyOut(RtImageOut, rtRawSurface) ||
 		(gi && !RtCore::CopyOut(giPass || mergedNow ? RtImageGIOut : RtImageGI, rtGISurface))) { RtGIHistory = false; RtCacheValid = false; return; }
 	RtCacheValid = cacheNow;	// (a frame without the cache pass: the next one starts the cells over)
 	RtCacheCellSize = rt.CacheCellSize;
+	RtCacheFlags = cacheFlags;
+	{	// UNOFFICIAL 2026-11-12 (sungi p3) what is active, once per change
+		static int loggedV2 = -1;
+		const int key = (cacheNow ? 1 : 0) | (cacheNow && (cacheFlags & 1) ? 2 : 0) | (cacheNow && (cacheFlags & 2) ? 4 : 0) | (skyShNow ? 8 : 0);
+		if (key != loggedV2 && (key != 0 || loggedV2 > 0)) {
+			Logger::Log("UNOFFICIAL RT AO: sun-GI cache v2: CacheVisibility %s (Chebyshev weights from the cells' distance moments), CacheCascades %d (%s), SkyMissSH %s (ray misses bring the sky's harmonics in their direction; lamp image row 1).",
+				cacheNow && (cacheFlags & 1) ? "on" : "off", cacheNow && (cacheFlags & 2) ? 2 : 1,
+				cacheNow && (cacheFlags & 2) ? "the fine grid + a 4 x coarser one, updated 1 in 2 x the spread's cells" : "the single fine grid, as before", skyShNow ? "on" : "off");
+		}
+		loggedV2 = key;
+	}
 	if (cacheNow) {
 		static bool cacheLogged = false;
 		if (!cacheLogged || cacheReset) {

@@ -82,6 +82,17 @@ namespace RtAmbient {
 		int		CacheSpread = 8;
 		int		CacheRaysExterior = 4;
 		int		CacheSpreadExterior = 8;
+		// UNOFFICIAL 2026-11-12 (sungi p3, SunGI-study STUDY.md F6 / F8 / F18) radiance cache v2, each behind its own key; missing key = the default.
+		// CacheVisibility (default true; only while RadianceCache runs): every cell also keeps its rays' mean distance and mean squared distance
+		// toward 6 axis bins and a lookup weighs each of the 8 cells by DDGI's Chebyshev visibility (no light through walls thinner than a cell).
+		// CacheCascades (1-2, default 2; 1 = exactly the old single level): a second grid, the same 32 x 32 x 16 at 4 x CacheCellSize, in the same
+		// image, updated by its own pass 1 in 2 x its spread cells a frame; lookups use the fine grid inside it (a fade over its outer 2 cells)
+		// and the coarse one beyond, so bounce hits far from the camera still find light. SkyMissSH (default true; only where misses bring sky
+		// light: GISky > 0 or AmbientReplace): a ray that finds nothing brings the sky's radiance in ITS direction (TESR_SkyIrradianceObjects'
+		// harmonics, un-convolved, x the ambient scale), in the GI passes and in the cache's rays, fading out below the horizon.
+		bool	CacheVisibility = true;
+		int		CacheCascades = 2;
+		bool	SkyMissSH = true;
 		// UNOFFICIAL 2026-10-31 (rt-ao-sky, docs/next/RT-DENOISE-BACKBONE.md "RT GI") with [Main.Main.RayTracing] DenoiseBackbone: the GI
 		// denoiser's history on pixels that move themselves (B1's object motion > 0.25 units a frame: a walking person) at most this many
 		// frames (their bounce light changes as they move; 16 frames there trail behind them); 0 = no cap
@@ -127,6 +138,10 @@ namespace RtAmbient {
 			Current.GIAmbientUnits = !TheSettingManager->Config.FillNode(&node, s, "GIAmbientUnits") || node.BoolValue;	// UNOFFICIAL 2026-11-11 (sungi, F9)
 			Current.SkySoftEdges = !TheSettingManager->Config.FillNode(&node, s, "SkySoftEdges") || node.BoolValue;
 			Current.RtFarFade = !TheSettingManager->Config.FillNode(&node, s, "RtFarFade") || node.BoolValue;
+			// UNOFFICIAL 2026-11-12 (sungi p3): a missing key = the default (visibility on, 2 cascades, directional sky on)
+			Current.CacheVisibility = !TheSettingManager->Config.FillNode(&node, s, "CacheVisibility") || node.BoolValue;
+			Current.CacheCascades = TheSettingManager->Config.FillNode(&node, s, "CacheCascades") ? std::clamp((int)node.IntValue, 1, 2) : 2;
+			Current.SkyMissSH = !TheSettingManager->Config.FillNode(&node, s, "SkyMissSH") || node.BoolValue;
 		}
 		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 8);
 		Current.GI = TheSettingManager->GetSettingI(s, "GI") != 0;
@@ -238,13 +253,13 @@ namespace RtAmbient {
 		D3DXVECTOR4	lampPos[GILampsMax];
 		D3DXVECTOR4	lampColor[GILampsMax];
 		D3DXVECTOR4	gi2;
-		D3DXVECTOR4	cacheA;			// xyz the camera's world position minus its cell's corner, w the cell size
+		D3DXVECTOR4	cacheA;			// xyz the camera's world position minus its cell's corner, w the cell size + 1024 x flags (2026-11-12 sungi p3: 1 CacheVisibility, 2 CacheCascades 2)
 		D3DXVECTOR4	cacheB;			// xyz the camera's cell (world cell coordinates), w CacheStrength
 		D3DXVECTOR4	cacheC;			// x CacheRays, y the frames of history at most (negative: all cells start over), z this frame's turn, w 1 in this many cells a frame
-		D3DXVECTOR4	cacheD;			// (2026-10-31 b) x the visit (frame / cacheC.w, mod 4096), y lazy cells' period, z "far" in cells
+		D3DXVECTOR4	cacheD;			// (2026-10-31 b) x the visit (frame / cacheC.w, mod 4096), y lazy cells' period, z "far" in cells; w (2026-11-12 sungi p3) the level: 0 fine, 1 coarse
 	};
 	static_assert(sizeof(CacheConstants) <= 512, "RtCore: 512 bytes of constants a pass");
-	inline constexpr UINT CacheCells = 32 * 32 * 16, CacheLazyPeriod = 8;	// RtAOTrace.comp CacheGrid; the image: 256 x 256 (4 texels a cell)
+	inline constexpr UINT CacheCells = 32 * 32 * 16, CacheLazyPeriod = 8;	// RtAOTrace.comp CacheGrid; the image: 512 x 512 since 2026-11-12 (8 texels a cell, 2 levels of 256 rows; RtAOTrace.comp CacheTexel)
 
 	// The RT core (RtCore.h) runs: the helper is ready on a GPU with ray tracing. Off = NVR's own passes.
 	inline bool CoreReady() { return RtCore::Running(); }
