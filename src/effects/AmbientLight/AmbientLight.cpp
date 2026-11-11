@@ -18,6 +18,12 @@ void AmbientLightEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_AmbientLightData2", &Constants.Data2);
 }
 
+// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace (STUDY phase 2): outdoors the game's ambient is taken out of the pixel and the RT GI (with the sky light of its
+// ray misses) puts it back. Render also requires the RT GI to be on (the screen-space GI has no sky light).
+bool AmbientLightEffect::AmbientReplaceActive() const {
+	return ambientReplace > 0.0f && TheShaderManager->GameState.isExterior;
+}
+
 void AmbientLightEffect::UpdateSettings() {
 	Constants.Data.x = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "Radius"), 10.0f, 1000.0f);
 	Constants.Data.y = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "OcclusionStrength"), 0.0f, 4.0f);
@@ -43,6 +49,9 @@ void AmbientLightEffect::UpdateSettings() {
 		SettingManager::Configuration::ConfigNode node;
 		exteriorBalance = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "ExteriorBalance") || node.BoolValue;
 		giSingleHistory = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GISingleHistory") || node.BoolValue;
+		// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace / AmbientFloor (missing key, an older toml: 0 / 0.15)
+		ambientReplace = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientReplace") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;
+		ambientFloor = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientFloor") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.15f;
 	}
 	interiorBounceShare = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "InteriorBounceShare"), 0.0f, 4.0f);
 	noEdgeOutline = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "NoEdgeOutline") != 0;	// UNOFFICIAL 2026-10-21 (aloutline)
@@ -1148,12 +1157,15 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		// lit shaders put on the ambient (LIN_SCALE_AMBIENT) when the real albedo is known (AlbedoBuffer on), else 1 (SurfaceColour's guess
 		// divides the lit colour by the unscaled ambient, so the unscaled share matches it).
 		float exteriorShare = 0.0f;
-		if (exteriorBalance && !interiorMode && TheShaderManager->GameState.isExterior) {
+		const bool replace = AmbientReplaceActive() && rtGI != nullptr && !interiorMode;	// UNOFFICIAL 2026-11-11 (sungi p2): needs the RT GI (it carries the sky light)
+		if ((exteriorBalance || replace) && !interiorMode && TheShaderManager->GameState.isExterior) {
 			const PBRShaders* pbr = TheShaderManager->Shaders.PBR;
 			const bool realAlbedo = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
 			exteriorShare = realAlbedo && pbr && pbr->Constants.LinearScales.y > 0.0f ? (std::min)(pbr->Constants.LinearScales.y, 4.0f) : 1.0f;
 		}
-		D3DXVECTOR4 data(interiorMode ? 1.0f : 0.0f, balanceValid ? 1.0f : 0.0f, interiorBounceShare, interiorMode ? 0.9f : exteriorShare);
+		// UNOFFICIAL 2026-11-11 (sungi p2): outdoors .y = AmbientReplace and .z = AmbientFloor (the interior balance's meanings are not read outdoors); 0 = off
+		D3DXVECTOR4 data(interiorMode ? 1.0f : 0.0f, interiorMode ? (balanceValid ? 1.0f : 0.0f) : (replace ? ambientReplace : 0.0f),
+			interiorMode ? interiorBounceShare : ambientFloor, interiorMode ? 0.9f : exteriorShare);
 		Effect->SetVector(h, &data);
 	}
 	// UNOFFICIAL 2026-10-21 (alrocks): the normal smoothing's reach and the horizon bias (radians) for Prepare and Estimate.

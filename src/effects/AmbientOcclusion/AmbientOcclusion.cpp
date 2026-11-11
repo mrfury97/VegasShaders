@@ -837,7 +837,10 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 			RtAmbient::InteriorNow = !TheShaderManager->GameState.isExterior;
 			RtAmbient::UpdateSettings();
 		}
-		const float giSky = !TheShaderManager->GameState.isExterior ? 0.0f : rt.GISkyNight < 0.0f ? rt.GISky : std::lerp(rt.GISkyNight, rt.GISky, TheShaderManager->GameState.transitionCurve);	// GISkyNight (2026-11-10): the night's own value
+		// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace (AmbientLight Apply removes the game's ambient share): the sky light must come from the GI, so a ray miss
+		// brings the full scene ambient (weight 1, already x LinearScales.y by GIAmbientUnits); GISky is ignored then.
+		const bool replaceSky = al && al->AmbientReplaceActive();
+		const float giSky = replaceSky ? 1.0f : !TheShaderManager->GameState.isExterior ? 0.0f : rt.GISkyNight < 0.0f ? rt.GISky : std::lerp(rt.GISkyNight, rt.GISky, TheShaderManager->GameState.transitionCurve);	// GISkyNight (2026-11-10): the night's own value
 		c.gi = D3DXVECTOR4(rt.GIDistance, 1.0f + giSky, (float)RtGILamps(c), rt.GIAmbient);
 		c.gi2 = D3DXVECTOR4(rt.GIOffscreen, 0.05f, rt.GIClamp, (float)rt.Interleave);
 		// (GI v2) The game's lit frame, as it is now (the RT core's point: the world is drawn, NVR's effects are not yet), down to the

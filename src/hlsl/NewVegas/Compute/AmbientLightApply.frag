@@ -178,6 +178,13 @@ vec4 Apply(vec2 uv, bool sky) {
     else {
         // UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (AmbientLight.fx.hlsl Apply; alInterior.w > 0 outdoors = the ambient scale)
         vec3 lit = cb.alInterior.w > 0.0 ? lin - (1.0 - ao) * min(lin, albedo * cb.alScene.rgb * cb.alInterior.w) : lin * ao;
+        // UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace (cb.alInterior.y = r, .z = AmbientFloor outdoors; r 0 = the line above, unchanged): remove r of the game's
+        // ambient share A (before occlusion), keep k = 1 - r + r*floor of it occluded as today: lit = lin - A + k*A*ao. The RT GI adds the sky back.
+        if (cb.alInterior.y > 0.0 && cb.alInterior.w > 0.0) {
+            vec3 share = min(lin, albedo * cb.alScene.rgb * cb.alInterior.w);
+            float keepShare = 1.0 - cb.alInterior.y * (1.0 - cb.alInterior.z);
+            lit = lin - share + keepShare * share * ao;
+        }
         if (sky) lit = SkyTake(lit, skyFactor.x, skyFactor.y, cb.aoSky5.x, cb.aoSky5.w);
         lin = lit + gridBounce * albedo;
     }

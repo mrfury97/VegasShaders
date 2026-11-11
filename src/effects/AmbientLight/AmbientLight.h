@@ -37,6 +37,9 @@ public:
 	bool				historyValid = false;
 	bool				exteriorBalance = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] ExteriorBalance (Apply)
 	bool				giSingleHistory = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] GISingleHistory (GI accumulate)
+	float				ambientReplace = 0.0f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientReplace (0-1; 0 = off)
+	float				ambientFloor = 0.15f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientFloor (0-1)
+	bool				AmbientReplaceActive() const;	// UNOFFICIAL 2026-11-11 (sungi p2) outdoors and AmbientReplace > 0 (AmbientOcclusion forces the sky-miss weight)
 	bool				temporal = true;
 	D3DXMATRIX			lastView, lastInvView, lastProj;
 	double				lastTime = 0.0;
