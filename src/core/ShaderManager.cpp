@@ -948,13 +948,26 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			}
 			if (many && points >= 3) exteriorLevel = 1;
 		}
+		// 2026-11-11 Puddles: a record that did not fit with the water layer is never cached, so trying it again cost ~11 s at EVERY start
+		// (SLS2027, the flow-control retry). Its dry copy in Cache\ExteriorLampsDry, newer than any fitted copy in Cache\ExteriorLamps, says it did not
+		// fit last time: straight to the dry one. (Delete Cache\ExteriorLampsDry to try the water layer again after a template change.)
+		const bool wetAll = !skin && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
+		if (wetAll) {
+			const std::string cache = std::string(ShadersPath) + "Cache\\";
+			// (2026-11-11 second try: a fitted copy from before the water layer existed stays in Cache\ExteriorLamps, so "no fitted copy" never
+			// held; a dry copy NEWER than the fitted one says the last try failed.)
+			WIN32_FILE_ATTRIBUTE_DATA dry = {}, wet = {};
+			const bool hasDry = GetFileAttributesExA((cache + "ExteriorLampsDry\\" + pixel->Name).c_str(), GetFileExInfoStandard, &dry) != 0;
+			const bool hasWet = GetFileAttributesExA((cache + "ExteriorLamps\\" + pixel->Name).c_str(), GetFileExInfoStandard, &wet) != 0;
+			if (hasDry && (!hasWet || CompareFileTime(&dry.ftLastWriteTime, &wet.ftLastWriteTime) > 0)) exteriorLevel = 1;	// the loop below is skipped
+		}
 		for (; exteriorLevel < (skin ? 3 : 1) && !record; exteriorLevel++)
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, customExterior ? "Exteriors\\" : NULL, tmpl,
 				exteriorCache[exteriorLevel], exteriorLamps[exteriorLevel]);
 		// 2026-11-09 Puddles / Wetness Effects: the outdoor record carries the water layer too (ObjectTemplate / ParallaxTemplate with
 		// POINT_SHADOW_RT_ONLY). Where that does not fit (SLS2027 in game: X4505, though it fits offline), it is made again without the water
 		// layer (WETNESS_OFF) rather than losing the lamp shadows: no wetness on that shader near lamps, the shadows kept.
-		if (!record && !skin && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+		if (!record && wetAll) {
 			static D3DXMACRO exteriorLampsDry[4] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, customExterior ? "Exteriors\\" : NULL, tmpl, "ExteriorLampsDry\\", exteriorLampsDry);
 			if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s's outdoor lamp-shadow record did not fit with the water layer: made without it "
