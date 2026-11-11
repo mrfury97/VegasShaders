@@ -58,6 +58,10 @@ namespace RtDenoise {
 		IDirect3DBaseTexture9* Roughness = nullptr;	// (Specular) .g = roughness (required)
 		float	MirrorHistory = 12.0f;	// (Specular) the history a mirror keeps (frames); MaxHistory from roughness 0.4 up
 		bool	Virtual = true;			// (Specular) the hit-distance (virtual) reprojection; false = the surface's only (the A/B)
+		bool	MirrorSurface = false;	// UNOFFICIAL 2026-11-09 (pt-mirrors, Specular) PTDenoiseMirrorSurface: pixels the path tracer marks (Noisy .a
+										// < 0: a smooth metal whose reflected thing stands in for it, its colour divided out) keep the reflected
+										// surface's full history (the virtual point of a curved mirror too) and are smoothed in reflection space;
+										// false = as before (mirrors: MirrorHistory frames, no spatial pass)
 		float	MeanVariance = 0.0f;	// (RGB mode) the a-trous brightness test with the variance of the accumulated mean of up to this many
 										// frames (per-path variance / min(history, this); 0 / 1 = one path's, as before): converged fine shadows (a
 										// chain-link wire's) stay edges instead of noise to smooth away. PTDenoiseMeanVariance (2)

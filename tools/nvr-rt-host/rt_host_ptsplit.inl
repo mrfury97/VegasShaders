@@ -274,7 +274,7 @@ static bool scenePtSplit(Ctx& c) {
 static bool scenePtSpecMove(Ctx& c) {
 	Host& h = *c.host;
 	FragPass fp;
-	if (!loadFragN(h, "RtDenoiseTemporalSpec", 9, 216, 4, fp, 192)) return false;
+	if (!loadFragN(h, "RtDenoiseTemporalSpec", 10, 216, 4, fp, 192)) return false;
 	const float wallY = 1400.0f, wallTop = 1600.0f;
 	auto reflection = [&](const Camera& cam, UINT i, UINT j, float& value, float& hit, float& viewZ) -> bool {
 		const V3 ray = cam.ray((i + 0.5f) / S, (j + 0.5f) / S);   // a point at view z s: eye + ray s
@@ -299,7 +299,9 @@ static bool scenePtSpecMove(Ctx& c) {
 	auto gauss = [&]() { auto u = [&]() { rng = rng * 747796405u + 2891336453u; uint32_t x = ((rng >> ((rng >> 28u) + 4u)) ^ rng) * 277803737u; return (float(((x >> 22u) ^ x) >> 8) + 0.5f) / 16777216.0f; };
 		return std::sqrt(-2.0f * std::log(u())) * std::cos(6.2831853f * u()); };
 	struct Result { double err = 0, rmse = 0; int n = 0; double still = 0; };
-	auto run = [&](bool virtualOn, float antiLag, bool noise, Result& res) -> bool {
+	// (2026-11-09 pt-mirrors) mirror: PTDenoiseMirrorSurface (the hit distance marked negative, spec.z 1: the full history where the virtual
+	// one holds; the normals image a constant stand-in: a flat mirror, curvature 0)
+	auto run = [&](bool virtualOn, float antiLag, bool noise, Result& res, bool mirror = false) -> bool {
 		std::vector<float> a(size_t(S) * S * 4, 0.0f), b(size_t(S) * S * 4, 0.0f), cc(size_t(S) * S * 4, 0.0f);
 		rng = 12345;
 		Camera prev = Camera::lookDir({ 0, -600, 500 }, normalize({ 0, 1, -0.75f }), { 0, 0, 1 }, 1.3f, 1.3f);
@@ -313,15 +315,15 @@ static bool scenePtSpecMove(Ctx& c) {
 				const size_t p = size_t(j) * S + i;
 				exact[p] = v;
 				const float n = noise ? std::max(1.0f + 0.35f * gauss(), 0.0f) : 1.0f;
-				sig[p * 4] = sig[p * 4 + 1] = sig[p * 4 + 2] = v * n; sig[p * 4 + 3] = t;
+				sig[p * 4] = sig[p * 4 + 1] = sig[p * 4 + 2] = v * n; sig[p * 4 + 3] = mirror ? -t : t;
 				dz[p] = z / cam.farZ;
 			}
 			if (!fillTex(noisy, sig, 4) || !fillTex(depth, dz, 1) || !fillTex(hA, a, 4) || !fillTex(hB, b, 4) || !fillTex(hC, cc, 4)) return false;
 			DnSpecPush t;
 			dnCamera(t, cam, prev, S, S, 32.0f, f == 0);
-			put4(t.spec, 12.0f, virtualOn ? 1.0f : 0.0f, 0, 0);
+			put4(t.spec, 12.0f, virtualOn ? 1.0f : 0.0f, mirror ? 1.0f : 0.0f, 0);
 			t.antiLag = antiLag;
-			IUnknown* images[9] = { noisy.t, hA.t, depth.t, hB.t, depth.t, depth.t, captured.t, rough.t, hC.t };
+			IUnknown* images[10] = { noisy.t, hA.t, depth.t, hB.t, depth.t, depth.t, captured.t, rough.t, hC.t, rough.t };   // (pt-mirrors: [9] the normals, read only with spec.z)
 			IDirect3DSurface9* targets[4] = { oA.s, oB.s, oC.s, oD.s };
 			if (!drawN(h, fp, targets, 4, images, &t)) return false;
 			if (!readTex(h, oA, a, 4) || !readTex(h, oB, b, 4) || !readTex(h, oC, cc, 4)) return false;
@@ -340,16 +342,23 @@ static bool scenePtSpecMove(Ctx& c) {
 		}
 		return true;
 	};
-	Result sv0, vv0, sv3, vv3, sn, vn;
+	Result sv0, vv0, sv3, vv3, sn, vn, mv3, mn;
 	if (!run(false, 0.0f, false, sv0) || !run(true, 0.0f, false, vv0) || !run(false, 3.0f, false, sv3) || !run(true, 3.0f, false, vv3) ||
-		!run(false, 3.0f, true, sn) || !run(true, 3.0f, true, vn)) return false;
+		!run(false, 3.0f, true, sn) || !run(true, 3.0f, true, vn) || !run(true, 3.0f, false, mv3, true) || !run(true, 3.0f, true, mn, true)) return false;
 	say("  mirror reflection, camera sliding 12 units a frame (clean signal), mean |error| over the last 8 moving frames (%d pixels):\n", vv0.n);
 	say("    AntiLag 0: surface-only reprojection %.4f, hit-distance (virtual) %.4f (x %.2f); still before the slide %.5f / %.5f\n",
 		sv0.err, vv0.err, vv0.err / std::max(sv0.err, 1e-9), sv0.still, vv0.still);
 	say("    AntiLag 3 (the default): surface-only %.4f, virtual %.4f (x %.2f)\n", sv3.err, vv3.err, vv3.err / std::max(sv3.err, 1e-9));
 	say("    noisy (x (1 + 0.35 n)), AntiLag 3: RMSE surface-only %.4f, virtual %.4f (x %.2f)\n", sn.rmse, vn.rmse, vn.rmse / std::max(sn.rmse, 1e-9));
-	const bool pass = vv0.err < 0.6 * sv0.err && vv3.err < 0.6 * sv3.err && vn.rmse < sn.rmse && vv0.still < 0.002 && sv0.still < 0.002;
-	say("    (virtual < 0.6 x surface-only at AntiLag 0 and 3, below it noisy; still < 0.002) -> %s\n", pass ? "ok" : "BAD");
+	// (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the full history while the reflection stands still on screen (the still camera: less
+	// noise), MirrorHistory as it slides 2+ pixels a frame (this slide: no worse than the virtual path)
+	say("    PTDenoiseMirrorSurface (marked): still camera, noisy mean |error| %.4f (x %.2f of virtual's %.4f); sliding: clean %.4f (x %.2f of"
+		" virtual), noisy RMSE %.4f (x %.2f of virtual); clean still %.5f\n", mn.still, mn.still / std::max(vn.still, 1e-9), vn.still,
+		mv3.err, mv3.err / std::max(vv3.err, 1e-9), mn.rmse, mn.rmse / std::max(vn.rmse, 1e-9), mv3.still);
+	const bool mirrorOk = mn.still < 1.0 * vn.still && mn.rmse < 1.05 * vn.rmse && mv3.err < 1.1 * vv3.err + 0.002 && mv3.still < 0.002;
+	const bool pass = vv0.err < 0.6 * sv0.err && vv3.err < 0.6 * sv3.err && vn.rmse < sn.rmse && vv0.still < 0.002 && sv0.still < 0.002 && mirrorOk;
+	say("    (virtual < 0.6 x surface-only at AntiLag 0 and 3, below it noisy; still < 0.002; mirror surface (this scene runs the temporal pass only: the gain is the a-trous pass' and the lobe's): still noisy <= virtual,"
+		" sliding noisy < 1.05 x and clean < 1.1 x virtual + 0.002) -> %s\n", pass ? "ok" : "BAD");
 	freeTex({ &noisy, &depth, &rough, &captured, &hA, &hB, &hC, &oA, &oB, &oC, &oD });
 	return pass;
 }
@@ -446,7 +455,7 @@ struct DnChain {
 		};
 		for (Tex* t : { &oA, &out }) if (!makeTex(h, w, hh, F, true, *t)) return false;
 		for (Tex* t : { &oB, &oC, &oD, &tA, &tB, &cA[0], &cA[1], &cB[0], &cB[1], &scratch, &hA, &hB, &hC }) if (!target(*t)) return false;
-		return loadFragN(h, "RtDenoiseTemporalRgb", 7, 200, 3, temporalRgb, 176) && loadFragN(h, "RtDenoiseTemporalSpec", 9, 216, 4, temporalSpec, 192) && loadFragN(h, "RtDenoiseFirefly", 3, 32, 2, firefly) &&
+		return loadFragN(h, "RtDenoiseTemporalRgb", 7, 200, 3, temporalRgb, 176) && loadFragN(h, "RtDenoiseTemporalSpec", 10, 216, 4, temporalSpec, 192) && loadFragN(h, "RtDenoiseFirefly", 3, 32, 2, firefly) &&
 			loadFragN(h, "RtDenoiseAtrousRgb", 5, 48, 2, atrous);
 	}
 	void free() { freeTex({ &hA, &hB, &hC, &oA, &oB, &oC, &oD, &tA, &tB, &cA[0], &cA[1], &cB[0], &cB[1], &scratch, &out }); }
@@ -470,7 +479,7 @@ struct DnChain {
 		} else {
 			IDirect3DSurface9* t4[4] = { firstA, firstB, oC.s, oD.s };
 			DnSpecPush t; dnCamera(t, cam, cam, w, hh, 32.0f, reset); t.antiLag = gAntiLag; put4(t.spec, 12.0f, 1.0f, 0, 0); t.fireflyK = antiFirefly;
-			IUnknown* images[9] = { noisy, hA.t, depth, hB.t, standIn, standIn, standIn, rough, hC.t };
+			IUnknown* images[10] = { noisy, hA.t, depth, hB.t, standIn, standIn, standIn, rough, hC.t, normals };   // (2026-11-09 pt-mirrors: + the normals)
 			if (!drawN(h, temporalSpec, t4, 4, images, &t)) return false;
 		}
 		if (ff) {

@@ -28,6 +28,7 @@ public:
 		float	WeaponTAA;
 		float	Sharpness;		// sharpening of the TAA output (never of the history), 0 off
 		float	MipBias;		// texture mip LOD bias while the jittered world draws, 0 off
+		bool	BackboneReset;	// UNOFFICIAL 2026-11-09: drop the history whenever TemporalBackbone::HistoryValid() is false
 	};
 	TAASettingsStruct	Settings;
 

@@ -15,12 +15,14 @@ public:
 		D3DXVECTOR4		Data;		// x: strength (0 = as the game draws them), y: 1 (the game's own brightness), z: sun share, w: 1 outdoors (sun)
 		D3DXVECTOR4		Ambient;	// rgb: ambient light (the sky's outdoors, the cell's indoors)
 		D3DXVECTOR4		Soft;		// UNOFFICIAL 2026-11-04 soft particles: x: soft scale (0: off for this draw), yz: 1 / resolution
+		D3DXVECTOR4		Phase;		// UNOFFICIAL 2026-11-09 sun phase: xyz toward the sun (world), w: Henyey-Greenstein g (0 = the flat SunShare)
 	};
 	ParticleStruct	Constants;
 
 	struct ParticleSettings {
 		float	Strength;
 		float	SunShare;
+		float	SunPhase;		// Henyey-Greenstein anisotropy of the sun on particles (0 = the old flat share)
 		float	SoftScale;		// particle systems (their own size)
 		float	MeshSoftScale;	// NoLighting meshes (their bound radius): glows, lamp cards, the dust storm walls
 	};

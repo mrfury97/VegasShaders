@@ -38,3 +38,9 @@ the `TEXCONV` variable, or on PATH). The output is the same on every run.
 - `Effects/SMAA_AreaTex.dds`, `Effects/SMAA_SearchTex.dds`: the SMAA project's lookup tables (MIT), kept exact.
 - Our own: `Effects/BloodDrops`, `BloodRuns`, `BloodSpatterSmall`, `CloudDetail`, `CloudShape`, `CloudWeather`,
   `NoiseVolume`, `Snownoise256`; `Precipitations/splash`, `splash_n`, `water-streaks_n`; `Water/water_d`.
+
+## Contributed (origin confirmed 2026-11-09: made by the contributor for this project; may ship, credit him)
+
+| File | Format | What it is | Read by |
+|---|---|---|---|
+| `Precipitations/fx_weather_snow01.dds` | 512 DXT5, 10 mips | 4x4 sheet of snowflake pictures (alpha = shape). Sent by macintroll with his world-space snow on 2026-11-09. The file name looks like a stock game asset: confirm with him where it comes from before any release carries it | Snow (`[Shaders.Snow.Main] WorldSpace`) |

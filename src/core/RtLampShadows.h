@@ -25,6 +25,7 @@
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
+#include "ObjectMotion.h"	// UNOFFICIAL 2026-11-09 (sweep) Ready(): the motion buffer is THIS frame's
 #include "RtTessContact.h"	// UNOFFICIAL 2026-11-07 (rtgap-tess) the bumps' slack + ContactShadows (docs/next/RT-DETAIL-GAPS.md section 1)
 
 namespace RtLampShadows {
@@ -197,8 +198,15 @@ namespace RtLampShadows {
 	inline IDirect3DTexture9* EyeTexture = nullptr;
 	inline IDirect3DSurface9* EyeSurface = nullptr;
 	inline IDirect3DSurface9* EyeSys[3] = {};
-	struct EyeSnapshot { UInt32 frame = 0; bool pending = false; int count = 0; int slot[ManyIds] = {}; const void* light[ManyIds] = {}; };
+	struct EyeSnapshot { UInt32 frame = 0; UInt32 issued = 0; bool pending = false; int count = 0; int slot[ManyIds] = {}; const void* light[ManyIds] = {}; };
 	inline EyeSnapshot EyeRing[3];
+	// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md R2) the lamp slots of the eye pass whose answer EyeSurface holds NOW.
+	// RtCore::CopyOut only queues its copy (the core carries it out after the helper's frame), so a readback issued while recording
+	// fetches the PREVIOUS eye pass's answer. It was stamped with this frame's slots: a lamp that changed slot got another lamp's
+	// visibility, and the first readback read a surface nothing had written. The readback now takes the slots (and frame) of the pass
+	// it really holds; frame: that pass's (the answer's age), issued: when the readback was asked for (the two-frame wait).
+	inline EyeSnapshot EyeHeld;
+	inline bool EyeHeldValid = false;
 	inline UInt32 EyeRecorded = 0, EyeVisFrame = 0, EyeReads = 0;
 	inline std::unordered_map<const void*, float> EyeVis;
 	inline bool EyeWanted() { return Player && Player->IsFirstPerson(); }
@@ -207,7 +215,7 @@ namespace RtLampShadows {
 		const UInt32 now = TheFrameRateManager->FrameNumber;
 		for (int i = 0; i < 3; i++) {
 			EyeSnapshot& s = EyeRing[i];
-			if (!s.pending || now - s.frame < 2 || !EyeSys[i]) continue;
+			if (!s.pending || now - s.issued < 2 || !EyeSys[i]) continue;
 			s.pending = false;
 			D3DLOCKED_RECT lock;
 			if (FAILED(EyeSys[i]->LockRect(&lock, nullptr, D3DLOCK_READONLY))) continue;
@@ -846,12 +854,17 @@ namespace RtLampShadows {
 				PassConstants e = c;	// the trace's own masks, stop, LampModelDistance, alpha test and eye (origin)
 				e.size[0] = 256.0f; e.size[1] = 1.0f;
 				const int eyeImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageEye, imageDepth, imageDepth, imageDepth, AlphaImage() };
-				if (RtCore::AddPass(eyeShader, eyeImages, 9, 0x10, &e, sizeof(e), 4, 1) && RtCore::CopyOut(imageEye, EyeSurface, 256, 1) &&
-					SUCCEEDED(Device->GetRenderTargetData(EyeSurface, EyeSys[ring]))) {
-					snap.frame = TheFrameRateManager->FrameNumber; snap.pending = true; snap.count = 0;
-					for (int i = 0; i < LampCount && snap.count < ManyIds; i++)
-						if (Lamps[i].light && Lamps[i].slot >= 0 && Lamps[i].slot < 256) { snap.slot[snap.count] = Lamps[i].slot; snap.light[snap.count] = Lamps[i].light; snap.count++; }
-					EyeRecorded++;
+				if (RtCore::AddPass(eyeShader, eyeImages, 9, 0x10, &e, sizeof(e), 4, 1) && RtCore::CopyOut(imageEye, EyeSurface, 256, 1)) {
+					// (2026-11-09 rt-review R2) what EyeSurface holds now is the last eye pass's answer (this frame's copy is only queued)
+					if (EyeHeldValid && SUCCEEDED(Device->GetRenderTargetData(EyeSurface, EyeSys[ring]))) {
+						snap = EyeHeld;
+						snap.issued = TheFrameRateManager->FrameNumber; snap.pending = true;
+						EyeRecorded++;
+					}
+					EyeHeld.frame = TheFrameRateManager->FrameNumber; EyeHeld.pending = false; EyeHeld.count = 0;
+					for (int i = 0; i < LampCount && EyeHeld.count < ManyIds; i++)
+						if (Lamps[i].light && Lamps[i].slot >= 0 && Lamps[i].slot < 256) { EyeHeld.slot[EyeHeld.count] = Lamps[i].slot; EyeHeld.light[EyeHeld.count] = Lamps[i].light; EyeHeld.count++; }
+					EyeHeldValid = true;
 				}
 			}
 		}
@@ -912,9 +925,13 @@ namespace RtLampShadows {
 				// ObjectMotion's world move a pixel (B1), when it was made this frame; else the camera's reprojection alone
 				IDirect3DBaseTexture9* motion = Texture("TESR_ObjectMotionBuffer");
 				const D3DXVECTOR4* motionData = Constant("TESR_ObjectMotionData");
-				const bool moved = motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageMotion, motion);
+				// (2026-11-09 sweep: Ready(), not Data.x alone: with SameFrame the trace runs before the world draws and the buffer still holds LAST frame's moves)
+				const bool moved = motion && motionData && ObjectMotion::Ready() && RtCore::CopyIn(imageMotion, motion);
 				c.many2[3] = moved ? 1.0f : 0.0f;
 				if (moved) MotionFrames++;
+				// UNOFFICIAL 2026-11-09 (rt-review R1) ManyLightsSampleFix: the one-ray variant's disc point, its two numbers stepped apart
+				// (RtLampTraceRestir.comp; many.x was unused there, ManyLightsRays is the other variant's)
+				c.many[0] = TheSettingManager->GetSettingI(kSection, "ManyLightsSampleFix") != 0 ? 1.0f : 0.0f;
 				const int images[10] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity],
 					imageHistoryIds[HistoryParity], imageHistoryIds[1 - HistoryParity], moved ? imageMotion : imageNormals, AlphaImage() };	// [9]: binding 13 (rtalpha)
 				if (!RtCore::AddPass(restirShader, images, 10, 0xA4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
@@ -1012,7 +1029,7 @@ namespace RtLampShadows {
 			lastW = tw; lastH = th; lastFrame = frameNow;
 			IDirect3DBaseTexture9* motion = Texture("TESR_ObjectMotionBuffer");
 			const D3DXVECTOR4* motionData = Constant("TESR_ObjectMotionData");
-			const bool moved = imageMotion >= 0 && motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageMotion, motion);
+			const bool moved = imageMotion >= 0 && motion && motionData && ObjectMotion::Ready() && RtCore::CopyIn(imageMotion, motion);	// (2026-11-09 sweep: this frame's only)
 			RtShadowDenoise::Settings ds;
 			ds.maxHistory = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserHistory"), 1.0f), 64.0f);
 			ds.maxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);

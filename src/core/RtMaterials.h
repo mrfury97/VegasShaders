@@ -4,7 +4,8 @@
 // tools/nvr-rt-host (scene `materials`), which packs its rows with it.
 //   texel 24  PTGlass (0 off, 1 glass for the light: shadow and bounce rays, 2 the camera's rays too), PTGlassTint (0-1)
 //   texel 25  PTFoliage (thin leaves' transmission, 0 off), PTSkin (skin's scattering, 0 off)
-//   texel 26  PTClothSheen (0 off), unused
+//   texel 26  PTClothSheen (0 off), (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the roughness under which a smooth metal's reflected
+//             thing stands in for it in the specular denoiser (0 off; only with PTDenoiseSplit's own denoiser: the caller sets it)
 // The kinds themselves ride in the instance records (NvrRtProtocol.h NVR_RT_RECORD_KIND_*) and, at the first hit, in the MaterialBuffer's
 // class (3 cloth, 5 plants, 6 skin).
 
@@ -16,11 +17,12 @@ namespace RtMaterials {
 		float foliage = 0.4f;		// PTFoliage: the share of a leaf's diffuse light that goes through it
 		float skin = 1.0f;			// PTSkin: skin's wrap (soft terminator, red widest) and its light through thin parts (x 0.25)
 		float sheen = 0.5f;			// PTClothSheen
+		float mirrorSurface = 0.0f;	// (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface's roughness (0 off; RtPathTrace.cpp sets it per frame)
 	};
 	inline void PackRow(float* row, const Keys& k) {
 		row[2 * kTexel + 0] = k.glass;   row[2 * kTexel + 1] = k.glassTint;
 		row[2 * kTexel + 2] = k.foliage; row[2 * kTexel + 3] = k.skin;
-		row[2 * kTexel + 4] = k.sheen;   row[2 * kTexel + 5] = 0.0f;
+		row[2 * kTexel + 4] = k.sheen;   row[2 * kTexel + 5] = k.mirrorSurface;
 	}
 	inline bool Any(const Keys& k) { return k.glass > 0.0f || k.foliage > 0.0f || k.skin > 0.0f || k.sheen > 0.0f; }
 }

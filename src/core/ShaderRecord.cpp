@@ -210,6 +210,9 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// only when on at startup, so that off the object and parallax shaders are exactly what they were.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Dust", "Enabled")) AppendDefine("DUST_ON", "1");
 	if (TheSettingManager->GetSettingI("Shaders.PBR.MicroShadow", "Enabled")) AppendDefine("MICRO_SHADOW_ON", "1");
+	// UNOFFICIAL 2026-11-09 FromGameData (Includes/Object.hlsl NVR_EnvData, Render.cpp RmaosDraw; needs RMAOS_ON): metal from the game's env-map
+	// flag, strength and mask. Defined only when on at startup, so that off the define list and the shaders are exactly as before.
+	if (TheSettingManager->GetSettingI("Shaders.PBR.EnvMaps", "FromGameData")) AppendDefine("ENV_FROM_DATA_ON", "1");
 	// UNOFFICIAL 2026-11-05 VanillaBridge (Includes/Object.hlsl, ObjectTemplate / ParallaxTemplate): the object highlights take the authored
 	// Blinn-Phong highlight's width and strength. Defined only when on, so that off the define list and the shaders are exactly as before.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Main", "VanillaBridge")) {

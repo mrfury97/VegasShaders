@@ -27,8 +27,10 @@ PS_OUTPUT main(PS_INPUT IN) {
     [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w))
         decal.rgb *= ParticleLight(IN.vertexLight.rgb, IN.shadowWorldPos.xyz);
 
-    // As the game's: colour times the fade, alpha times the fade twice.
-    float fade = IN.uv.z;
-    OUT.color_0 = float4(decal.rgb * fade, decal.a * fade * fade);
+    // UNOFFICIAL 2026-11-09 (from the Physically-Based-Reloaded fork, commit 9d8158e2): the fade clamped to 0..1 and applied once to colour
+    // and alpha, as Blood Decal Flashing Fix (Nexus 87830) does to the game's shader; this file overrides that mod's, so the fix lives
+    // here. The game's own: colour times the fade, alpha times it twice, unclamped (blood on bodies flashed).
+    float fade = saturate(IN.uv.z);
+    OUT.color_0 = decal * fade;
     return OUT;
 }

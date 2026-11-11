@@ -847,6 +847,7 @@ void ShaderManager::PreStep_AmbientLight(ChainContext& ctx) {
 		Effects.AmbientLight->foldShadow = shadowIntoAmbientLight;
 		Effects.AmbientLight->shadowApplied = false;
 		{ Effects.AmbientLight->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.AmbientLight); }
+		if (PixelInspector::Active && AO) AO->RtInspect();	// UNOFFICIAL 2026-11-09 (diagnostic): the RT AO / GI buffers this frame's AmbientLight read
 		Effects.AmbientLight->foldShadow = false;
 		if (Effects.AmbientLight->shadowApplied) FlickerWatch::Flags |= FlickerWatch::kALApplied;
 		if (shadowIntoAmbientLight && !Effects.AmbientLight->shadowApplied) {
@@ -1293,7 +1294,7 @@ void ShaderManager::PostStep_WeatherAndLegacyBloom(ChainContext& ctx) {
 	{
 		GpuProfileScope gpu(weatherTimer, Device);
 		{ Effects.Rain->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Rain); }
-		{ Effects.Snow->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Snow); }
+		{ Effects.Snow->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, Effects.Snow->Technique(), false, SourceSurface); PixelInspector::AfterFrame(Effects.Snow); }
 		// UNOFFICIAL 2026-10-26: GPU-simulated rain / snow drops (off by default; needs NVR DXVK 1.5-particles, nothing without it)
 		{
 			static GpuTimer gpuParticlesTimer("GPU particles (sim + draw)");

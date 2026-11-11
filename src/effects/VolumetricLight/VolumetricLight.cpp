@@ -22,6 +22,8 @@ void VolumetricLightEffect::UpdateSettings() {
 	ReadLook("Shaders.VolumetricLight.Night", Settings.Night);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 4, 48);
 	Settings.Temporal = std::clamp(TheSettingManager->GetSettingF(section, "Temporal"), 0.0f, 0.97f);
+	// UNOFFICIAL 2026-11-09 TemporalJitterFix (core/TemporalBackbone.h ShiftReprojection; missing key: on)
+	{ SettingManager::Configuration::ConfigNode node; Settings.JitterFix = !TheSettingManager->Config.FillNode(&node, section, "TemporalJitterFix") || node.BoolValue; }
 	Settings.BlurRadius = std::clamp(TheSettingManager->GetSettingF(section, "BlurRadius"), 0.0f, 8.0f);
 	Settings.RainStrength = std::clamp(TheSettingManager->GetSettingF(section, "RainStrength"), 0.0f, 1.0f);
 	Settings.Froxels = TheSettingManager->GetSettingI(section, "Froxels") != 0;
@@ -196,6 +198,9 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 			toLastView.m[3][j] = (float)(move[0] * lastView.m[0][j] + move[1] * lastView.m[1][j] + move[2] * lastView.m[2][j]);
 		toLastView.m[3][3] = 1.0f;
 		D3DXMatrixMultiply(&Constants.Reproject, &toLastView, &lastProj);
+		// UNOFFICIAL 2026-11-09 TemporalJitterFix: the march was drawn from this frame's jittered depth, the history from last frame's
+		// (the temporal pass, D3D9 and Compute/VolumetricLightTemporal.frag, reads the history where the jitter's change puts it)
+		if (Settings.JitterFix) TemporalBackbone::ShiftReprojection(Constants.Reproject, TemporalBackbone::DepthJitter() - lastJitter);
 	}
 	Constants.Data3.x = usable ? Settings.Temporal : 0.0f;
 	// UNOFFICIAL 2026-11-01 SharedNoise: with Temporal the shared index (own offset); without, the march's noise moves only while TAA /
@@ -255,6 +260,7 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastView = view;
 	lastInvView = invView;
 	lastProj = TheRenderManager->projMatrix;
+	lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 }
 
 // UNOFFICIAL 2026-10-25 (NVR DXVK): see VolumetricLight.h. The constants are read from the same registered memory the D3D9 path

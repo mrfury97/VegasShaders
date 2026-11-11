@@ -2,6 +2,7 @@
 #include "../../core/PointShadowForward.h"
 #include "../../core/ClothWind.h"	// UNOFFICIAL 2026-10-19 cloth round 5: the partition draw hook
 #include "../../core/ParticleSize.h"	// UNOFFICIAL 2026-11-04 soft particles
+#include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds, GrassTiming key)
 
 namespace {
 	// One Detours redirection: the game function pointer variable and the function that replaces it.
@@ -79,6 +80,7 @@ void AttachHooks() {
 	});
 	if (settings->FlyCam.Enabled) Redirect({ NVR_REDIRECT(UpdateFlyCam) });
 	DetourTransactionCommit();
+	GrassTiming::Install();	// UNOFFICIAL 2026-11-09, test builds only, off unless [Main.Main.Performance] GrassTiming > 0 (own Detours transaction)
 
 	// --- the game's own shaders: per-draw constant updates ---
 	kSkyShaderConstantsDetour.ReplaceVirtualFunc(0x10AFE94, SkyShader__UpdateConstants);

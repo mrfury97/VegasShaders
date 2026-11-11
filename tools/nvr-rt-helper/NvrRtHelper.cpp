@@ -63,6 +63,16 @@ namespace {
 	HANDLE				g_statusEvent = nullptr;
 	bool				g_console = false;
 	std::wstring		g_exeDir;
+	// UNOFFICIAL 2026-11-09 (players: "shader compiling takes up to 5 minutes" since 1.0.6; docs/next/RT-PT-REVIEW-2026-11-09.md 9.2) the trace
+	// pipelines' cache on disk. Every pipeline was built from its SPIR-V at every start (44 .spv now, 22 in 1.0.5; 55 s measured on an
+	// integrated GPU, and the game waits up to 300 s for "ready"): ray tracing was simply absent for that long after every launch. The
+	// driver's compiled pipelines are now kept in NvrRtPipelines.cache next to the helper (written after the first "ready" and whenever a
+	// pipeline is built later) and handed back at the next start; the driver checks them against the GPU and its own version (the header is
+	// checked here too), so another card or a driver update just rebuilds once. A file named NvrRtPipelines.off next to the helper: no
+	// cache, exactly as before. VK_NULL_HANDLE (no cache) is what every pipeline was made with until now.
+	VkPipelineCache		g_pipelineCache = VK_NULL_HANDLE;
+	size_t				g_pipelineCacheSaved = 0;	// the size last written (0: nothing yet)
+	bool				g_pipelineCacheLive = false;	// after the first save: a pipeline built later is saved at once
 
 	void Log(const char* format, ...) {
 		char line[1024];
@@ -883,6 +893,52 @@ namespace {
 		return true;
 	}
 
+	// (2026-11-09) the pipeline cache: made from the file when its header is this GPU's and driver's (else empty); see g_pipelineCache
+	void PipelineCacheOpen(const VulkanDevice& vk) {
+		const std::wstring off = g_exeDir + L"\\NvrRtPipelines.off";
+		if (GetFileAttributesW(off.c_str()) != INVALID_FILE_ATTRIBUTES) { Log("pipeline cache: off (NvrRtPipelines.off exists): every pipeline is built from its SPIR-V"); return; }
+		std::vector<uint8_t> data;
+		FILE* f = nullptr;
+		if (_wfopen_s(&f, (g_exeDir + L"\\NvrRtPipelines.cache").c_str(), L"rb") == 0 && f) {
+			fseek(f, 0, SEEK_END); const long n = ftell(f); fseek(f, 0, SEEK_SET);
+			if (n > 32 && n < (64 << 20)) { data.resize((size_t)n); if (fread(data.data(), 1, data.size(), f) != data.size()) data.clear(); }
+			fclose(f);
+		}
+		bool usable = false;
+		if (data.size() > 32) {	// VkPipelineCacheHeaderVersionOne: size, version, vendor, device, the driver's cache UUID
+			uint32_t head[4]; memcpy(head, data.data(), 16);
+			usable = head[0] == 32u && head[1] == (uint32_t)VK_PIPELINE_CACHE_HEADER_VERSION_ONE && head[2] == vk.properties.vendorID &&
+				head[3] == vk.properties.deviceID && memcmp(data.data() + 16, vk.properties.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+		}
+		VkPipelineCacheCreateInfo info = { VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO };
+		if (usable) { info.initialDataSize = data.size(); info.pInitialData = data.data(); }
+		if (vkCreatePipelineCache(vk.device, &info, nullptr, &g_pipelineCache) != VK_SUCCESS) {
+			g_pipelineCache = VK_NULL_HANDLE;
+			if (usable) { info.initialDataSize = 0; info.pInitialData = nullptr; if (vkCreatePipelineCache(vk.device, &info, nullptr, &g_pipelineCache) != VK_SUCCESS) g_pipelineCache = VK_NULL_HANDLE; usable = false; }
+		}
+		g_pipelineCacheSaved = usable ? data.size() : 0;
+		Log("pipeline cache: %s", !g_pipelineCache ? "could not be made: every pipeline is built from its SPIR-V" : usable ? "loaded from NvrRtPipelines.cache" :
+			data.empty() ? "empty (no file yet): this start builds every pipeline and saves them" : "the file is another GPU's or driver's: this start builds every pipeline and saves them");
+		if (usable) Log("pipeline cache: %u KB read", (unsigned)(data.size() >> 10));
+	}
+
+	// Written to a temporary file and moved over the old one (a helper stopped mid-write leaves the old file whole). when: for the log.
+	void PipelineCacheSave(VkDevice device, const char* when) {
+		if (!g_pipelineCache) return;
+		size_t size = 0;
+		if (vkGetPipelineCacheData(device, g_pipelineCache, &size, nullptr) != VK_SUCCESS || size <= 32 || size == g_pipelineCacheSaved) { g_pipelineCacheLive = true; return; }
+		std::vector<uint8_t> data(size);
+		if (vkGetPipelineCacheData(device, g_pipelineCache, &size, data.data()) != VK_SUCCESS) { g_pipelineCacheLive = true; return; }
+		const std::wstring path = g_exeDir + L"\\NvrRtPipelines.cache", temp = path + L".tmp";
+		FILE* f = nullptr;
+		bool ok = _wfopen_s(&f, temp.c_str(), L"wb") == 0 && f;
+		if (ok) { ok = fwrite(data.data(), 1, size, f) == size; fclose(f); }
+		ok = ok && MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING) != 0;
+		if (ok) g_pipelineCacheSaved = size;
+		g_pipelineCacheLive = true;
+		Log("pipeline cache: %s (%u KB, %s)", ok ? "saved" : "could NOT be written next to the helper (the next start builds the pipelines again)", (unsigned)(size >> 10), when);
+	}
+
 	// The pipeline of shader `index` (loaded from NVR's path on first use; a failure is logged once and skips its passes).
 	VkPipeline Pipeline(Helper& h, uint32_t index) {
 		if (index >= NVR_RT_MAX_SHADERS || index >= g_shared->shaderCount) return VK_NULL_HANDLE;
@@ -918,7 +974,7 @@ namespace {
 			info.stage.module = module;
 			info.stage.pName = "main";
 			info.layout = h.pipelineLayout;
-			r = vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline);
+			r = vkCreateComputePipelines(h.vk.device, g_pipelineCache, 1, &info, nullptr, &pipeline);
 			vkDestroyShaderModule(h.vk.device, module, nullptr);
 		}
 		if (r != VK_SUCCESS) {
@@ -927,6 +983,7 @@ namespace {
 			return VK_NULL_HANDLE;
 		}
 		Log("trace shader %u loaded: %s", index, path);
+		if (g_pipelineCacheLive) PipelineCacheSave(h.vk.device, "a shader registered after the start");
 		h.pipelines[index] = pipeline;
 		return pipeline;
 	}
@@ -2086,6 +2143,7 @@ namespace {
 		Helper& h = *hp;
 		auto fail = [&](const char* why) { if (why) Status("%s", why); SetState(NVR_RT_STATE_FAILED); return 3; };
 		if (!CreateVulkanDevice(h.vk, shared->deviceLuid, shared->deviceLuidValid != 0, shared->deviceUuid)) return fail(nullptr);
+		PipelineCacheOpen(h.vk);	// (2026-11-09) before any pipeline is made
 		if (memcmp(h.vk.ids.driverUUID, shared->driverUuid, VK_UUID_SIZE))
 			return fail("the helper's Vulkan driver is not the game's (driver UUIDs differ): images cannot be shared");
 		h.imageCount = std::min<uint32_t>(shared->imageCount, NVR_RT_MAX_IMAGES);
@@ -2134,7 +2192,7 @@ namespace {
 					info.stage.module = module;
 					info.stage.pName = "main";
 					info.layout = h.guardLayout;
-					if (vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &info, nullptr, &h.guardPipeline) != VK_SUCCESS) h.guardPipeline = VK_NULL_HANDLE;
+					if (vkCreateComputePipelines(h.vk.device, g_pipelineCache, 1, &info, nullptr, &h.guardPipeline) != VK_SUCCESS) h.guardPipeline = VK_NULL_HANDLE;
 					vkDestroyShaderModule(h.vk.device, module, nullptr);
 				}
 				if (!CreateBuffer(h.vk, kCmdRing * 8, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, h.guardResult))
@@ -2154,7 +2212,7 @@ namespace {
 					info.stage.module = normalsModule;
 					info.stage.pName = "main";
 					info.layout = h.normalsLayout;
-					if (vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &info, nullptr, &h.normalsPipeline) != VK_SUCCESS) h.normalsPipeline = VK_NULL_HANDLE;
+					if (vkCreateComputePipelines(h.vk.device, g_pipelineCache, 1, &info, nullptr, &h.normalsPipeline) != VK_SUCCESS) h.normalsPipeline = VK_NULL_HANDLE;
 					vkDestroyShaderModule(h.vk.device, normalsModule, nullptr);
 				}
 				Log("smooth normals: %s", h.normalsPipeline ? "on (a packed normal a vertex before its positions, RtNormals.comp)" : "OFF (pipeline failed: flat triangle normals)");
@@ -2234,6 +2292,7 @@ namespace {
 		Status("ready: ray tracing on %s, the game's GPU (found by %s; %u shared images, arena %ux%u; opacity micromaps: %s)", h.vk.properties.deviceName, h.vk.matchedBy,
 			h.imageCount, arena.width, arena.height, !h.vk.omm ? "no (no VK_EXT_opacity_micromap)" : Omm::g_omm.hwOk ? "yes (self-test passed)" : "no (self-test failed)");
 		SetState(NVR_RT_STATE_READY);
+		PipelineCacheSave(h.vk.device, "after the start's pipelines");	// (2026-11-09; the game may stop the helper without a word later)
 
 		// (2026-11-07 rt-shutdown) every way out of this loop goes through ShutdownDrain (above): the frames published but not run get their
 		// outputReady signal, the GPU goes idle, then the process exits. quit and the game's death are checked between frames too.

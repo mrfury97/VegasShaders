@@ -28,7 +28,7 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 params2;       // x LampModelDistance, y far cull mask, z near cull mask, w lamps in the table (ids 0 .. w-1)
 	vec4 flags;         // x OneSided (diagnostic)
 	vec4 mask;          // z RankBy, w StartOffsetPerUnit
-	vec4 many;          // x unused, y history frames (1-31), z spatial radius (0-2), w 1 = the history is valid
+	vec4 many;          // x 1 = ManyLightsSampleFix (2026-11-09; was unused), y history frames (1-31), z spatial radius (0-2), w 1 = the history is valid
 	vec4 reproject[4];  // rows: scene-space point -> the previous trace's clip space (x, y, -, w = view z), PointShadowForward's matrix
 	vec4 many2;         // x frame number (random seed), y history depth tolerance (relative), w 1 = the motion image is this frame's
 	vec4 jitter;        // (2026-11-03) xy the depth's jitter (TAA / FSR / DLSS, screen uv): the depth pixel lies on the unjittered ray
@@ -203,9 +203,21 @@ void main() {
 	int target = !valid || best0 < 0 ? -1 : job == 0 ? best0 : job == 1 ? best1 : chosen;
 	float v = 1.0;
 	if (target >= 0) {
+		// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md R1) ManyLightsSampleFix (many.x 1): the point on the lamp's
+		// disc. The radius number and the angle number both moved by params.w a frame, so their difference never changed at a pixel: over
+		// the history a pixel's points lay on ONE spiral arm of the disc, another arm per pixel, a stipple in the penumbra that no number
+		// of frames averages out. Now each moves by its own step (R2's pair, from the frame number in whole-number arithmetic: a float
+		// frame x 0.75 has no fraction left after a few hours) while the pattern turns (params.w not 0); a held pattern stays held.
+		// many.x 0: the old pair, bit for bit.
 		float u = fract(hash12(vec2(pixel) + 17.0) + p.params.w);
+		float turn = fract(hash12(vec2(pixel)) + p.params.w);
+		if (p.many.x > 0.5 && p.params.w != 0.0) {
+			const uint f = uint(p.many2.x);
+			u = fract(hash12(vec2(pixel) + 17.0) + float(f * 3242174889u) * (1.0 / 4294967296.0));     // 0.7548777 a frame
+			turn = fract(hash12(vec2(pixel)) + float(f * 2447445414u) * (1.0 / 4294967296.0));        // 0.5698403 a frame
+		}
 		float rr = lampB[target].w * sqrt(job == 2 ? random01() : u);
-		float ang = 6.2831853 * (job == 2 ? random01() : fract(hash12(vec2(pixel)) + p.params.w));
+		float ang = 6.2831853 * (job == 2 ? random01() : turn);
 		v = reaches(origin, offset, target, rr, ang) ? 1.0 : 0.0;
 	}
 

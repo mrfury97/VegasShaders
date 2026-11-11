@@ -13,14 +13,34 @@ powershell -ExecutionPolicy Bypass -File tools\nvr-rt-playground\run.ps1 -NoBuil
 powershell -ExecutionPolicy Bypass -File tools\nvr-rt-playground\run.ps1 -NoBuild -Demo 20 -Size 320x180 -FixedStep 0.5 -Set "F2=0,F4=0" -Tag _off
 ```
 
-`-Demo N` plays the scripted 70 s (8 segments: the room, the window + fence, raw, path tracer off, the mirror, the reference, night,
-glass + leaf + skin) in N seconds. With `-FixedStep S` the script advances S seconds a frame instead, so A/B runs see exactly the same
+`-Demo N` plays the scripted 100 s (10 segments: the room, the window + fence, raw, path tracer off, the mirror, the reference, night,
+glass + leaf + skin, and the matched references of 05 and 08, below) in N seconds. With `-FixedStep S` the script advances S seconds a frame instead, so A/B runs see exactly the same
 frames (the camera, the lamps, the random seeds); the run still stops at N seconds of wall clock. It saves one screenshot a segment (the HUD is the caption) and logs each segment's fps, frame ms and helper GPU ms to
 `out\playground.log`. Its exit code is 0 only without helper errors. `-Set <key>=<value>` holds a toggle through it, by its key
 (`R=0`, `B=1`, `Z=1`, `G=1`, `F2=0`, `F5=1`); `-Tag` suffixes the screenshot names and shows on the HUD. Each screenshot's line in the log
 (and `out\fireflies.csv`) carries a count of bright outliers on the window-size frame (a sparkle detector; at a small `-Size` the frame
 is scaled up and a sparkle becomes a block, so count at the internal size instead: the method is in docs/next/RT-PATH-TRACING.md).
 `--max-frames N` stops after N frames.
+
+**Films (2026-11-09).** `-Frames <file>` appends every frame's finished picture (window size, RGB, 3 bytes a pixel) to one raw file;
+`-FramesRange a,b` keeps only the demo's script seconds [a, b) (segment 05 = 30,40: 300 frames at `-FixedStep 0.0333`, ~0.8 GB at
+1280x720). With `-FixedStep 0.0333` played at 30 a second the film shows what a card that runs the path tracer in real time would show
+(noise crawl and ghosting only show in motion): `ffmpeg -f rawvideo -pix_fmt rgb24 -s 1280x720 -r 30 -i <file> -c:v libx264 -crf 18
+-pix_fmt yuv420p out.mp4`, then delete the raw file.
+
+**Object motion (2026-11-09).** The playground draws the game's object motion buffer for the things it animates (MotionPass: each moved
+object drawn again with this frame's and last frame's transform; rgb = the world move since last frame, a = 1, where the depth matches),
+binds it as the game does (`t_motion`, backbone.x 1, MovingHistory 8) for both denoisers. Key 5 / `-Set 5=0`: without it (before).
+
+**Scoring against a reference (2026-11-09).** The script now runs 100 s: segments 09 and 10 are the many-sample references (~450
+samples) of 05 (the mirror + spheres) and 08 (glass + leaf + skin) at the SAME camera and the SAME moment as those screenshots (the lamps
+and the cube frozen there; `UsePose`). `py -3.11 -I tools\nvr-rt-playground\score_mirror.py _tagA _tagB` scores each run's 05 and 08
+against them over fixed regions (the wall mirror, the chrome and gold spheres, the floor; the glass pane, the leaf, the sun patch): the
+mean absolute error, a high-frequency noise measure, its ratio to the reference's, and the brightness bias. Judge the denoiser at
+`-FixedStep 0.0333` (30 frames a second of motion; 0.2 starves every history), the same step for every A/B; at 320x180 the 100 s take
+about 7 minutes. At each screenshot the log also gets two `probe` lines (left / right half): the specular denoiser's history length,
+the virtual reprojection's share and how many smooth pixels are marked mirror surface (segment 05: the chrome sphere is on the left,
+the wall mirror on the right).
 
 `build.ps1` fills `tools\nvr-rt-playground\bin\` with everything the program needs: `NvrRtPlayground.exe`, `NvrRtHelper.exe`,
 `d3d9.dll` (the fork), `shaders\Rt\*.spv`, `shaders\Compute\*.spv` and `run-playground.cmd`. That folder runs on its own:
@@ -68,6 +88,8 @@ so while it waits.
 | F2 | PTEmissive (glowing triangles as lights: `RtEmissiveBuild` + the emissive row) |
 | F3 | PTDenoiseSplit (diffuse and specular denoised apart: `RtDenoiseTemporalSpec`) |
 | F4 | PTDenoiseAntiFirefly (`RtDenoiseFirefly`, PTDenoiseFireflyK 2) |
+| F11 | PTDenoiseMirrorSurface 0.1 / off (2026-11-09: mirrors and chrome denoised as the thing they reflect; off = as before; `-Set F11=0`) |
+| 5 | object motion on / off (2026-11-09: the game's TESR_ObjectMotionBuffer for the things that move here, the cube and the lamp globes; the denoisers subtract it and cap moving pixels at 8 frames, as PTDenoiseObjectMotion; off = no object motion, as before; `-Set 5=0`) |
 | F5 | PTGlass 0 / 1 (the light) / 2 (the camera's rays too) |
 | F6, F7 | PTFoliage 0 / 0.4; PTSkin 0 / 1 (+ PTClothSheen 0.5) |
 | F8 | PTContactShadows |
@@ -107,7 +129,10 @@ passes `traceUsAvg`), the GPU, the mode, and every toggle.
    - diffuse: `RtDenoiseTemporalRgb` (3 targets: the history A / B and the clamped firefly excess), `RtDenoiseFirefly` (the excess
      spread back, PTDenoiseAntiFirefly), then `RtDenoiseAtrousRgb` x2 with steps 1 and 2;
    - specular (PTDenoiseSplit): `RtDenoiseTemporalSpec` (4 targets, the hit-distance / virtual reprojection, MirrorHistory 12), then the
-     same firefly and a-trous passes in specular mode.
+     same firefly and a-trous passes in specular mode. With PTDenoiseMirrorSurface (F11, on by default since 2026-11-09) the trace marks
+     smooth pure metals (negative hit distance, the reflected colour divided out); the temporal pass gets the normals as a 10th image
+     (a curved mirror's virtual point) and keeps the full history there, the a-trous passes smooth them (bit 4, the raw specular image
+     in the guide albedo's slot). docs/next/PT-MIRRORS-2026-11-09.md.
 
    The settings are PTDenoiseHistory 32, PTDenoiseSigma 1, AntiLag 3, Guide 0.35, HistoryFix 3, MeanVariance 2 and FireflyK 2. The
    push blocks are the game's; `rt_layout_check.py` checks the playground's copies against them.

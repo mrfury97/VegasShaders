@@ -231,12 +231,23 @@ float Rand() { return float(Pcg() >> 8) * (1.0 / 16777216.0); }
 // (merge 2026-11-07, the size fix) read once per thread (LoadMatKeys at main's start), not at each of ~100 inlined uses
 vec4 gMatKeys = vec4(0.0);
 float gMatSheen = 0.0;
+float gMirrorSurface = 0.0;   // (2026-11-09 pt-mirrors) frame row texel 26.y (RtMaterials.h mirrorSurface)
 void LoadMatKeys() {
 	const bool on = (uint(p.accum.w) & 1024u) != 0u;
 	gMatKeys = on ? vec4(FrameTexel(24), FrameTexel(25)) : vec4(0.0);
 	gMatSheen = on ? FrameTexel(26).x : 0.0;
+	gMirrorSurface = on ? FrameTexel(26).y : 0.0;   // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the roughness under which it applies (0 off)
 }
 vec4 MatKeys() { return gMatKeys; }
+// ---- UNOFFICIAL 2026-11-09 PTBounceRoughen (the frame row's texel 27.x; core\RtPathTrace.cpp): path regularisation. A path that has
+// left a matte (or rough) surface and then meets a smooth one finds a lamp or a glow through a needle-thin lobe: rare and hundreds of
+// times brighter than its neighbours, one white pixel for a frame (a tester's screenshot: dots over the floor round a chrome and a gold
+// ball; gone with PTSpecular off). No denoiser removes those reliably, and DLSS Ray Reconstruction is handed them raw. With the key on,
+// a surface met AFTER a bounce is at least (the roughest bounce so far x the key) rough: the light a matte floor gets by way of a chrome
+// ball is spread over a wider lobe (the same energy, far less variance; such "caustic" light comes out softer), while what the CAMERA
+// sees in a mirror, and a mirror seen in a mirror, stay as sharp as before (their paths' bounces so far were smooth). 0 = off.
+float gBounceRoughen = 0.0;
+void LoadBounceRoughen() { gBounceRoughen = LampImage() ? clamp(FrameTexel(27).x, 0.0, 1.0) : 0.0; }
 float MatSheen() { return gMatSheen; }
 // ---- UNOFFICIAL 2026-11-07 (perf-ptcost, RT-PATH-TRACING.md section "perf-ptcost") the ray budget's keys: the frame row's texels 28-29
 // (core\RtPtCost.h PackRow; with the lamp image, flag 1024; without it all 0). 0 is the cheap path everywhere:
@@ -526,7 +537,14 @@ vec3 SampleVndf(vec3 n, vec3 v, float a, vec2 u) {
 }
 
 // The specular lobe's share of the one-sample mixture NextDirection uses
-float SpecularShare(Surface s) { return clamp(0.15 + 0.7 * s.metal + 0.25 * (1.0 - s.rough), 0.1, 0.9); }
+// (2026-11-09 pt-mirrors) with PTDenoiseMirrorSurface on (gMirrorSurface > 0): a pure metal (metal >= 0.99: its diffuse part
+// (1 - metal) x albedo is nil) always takes its specular lobe. At the 0.9 cap one bounce ray in ten went down the diffuse lobe, where a
+// mirror's BRDF is ~0: a black sample one frame in ten on every mirror and chrome pixel (the dark grain), the other nine x 1.11.
+// Unbiased either way (the mixture's density changes with it: BsdfPdf, SpecLobeChance); only the noise goes.
+float SpecularShare(Surface s) {
+	if (gMirrorSurface > 0.0 && s.metal >= 0.99) return 1.0;
+	return clamp(0.15 + 0.7 * s.metal + 0.25 * (1.0 - s.rough), 0.1, 0.9);
+}
 
 // (2026-11-03 b) the chance density (per solid angle) that NextDirection picks l: what multiple importance sampling weighs the glow
 // light sample against
@@ -1559,6 +1577,11 @@ float gFirstSurface; // 1: the path met a surface first; 0: the sky / the game's
 float gFirstRough = 1.0, gFirstMetal = 0.0, gFirstNV = 1.0;
 vec3 gSplitRad0 = vec3(0.0), gSplitRatio = vec3(0.0);
 float gSplitHitT = 0.0, gSplitSpecLobe = 0.0;   // (+ the chance that the bounce direction was the specular lobe's: SpecLobeChance)
+// UNOFFICIAL 2026-11-09 (pt-mirrors) PTDenoiseMirrorSurface: the colour of what the first bounce ray met (1: a miss, the sky). On a smooth
+// metal (a mirror, chrome) whose bounce was the specular lobe, the reflected thing stands in for the surface: main() divides the specular
+// light by it too (it rides in the specular albedo, so the show pass multiplies it back) and marks the hit distance negative, and the
+// denoiser treats the reflection like a diffuse surface seen through the mirror (RtDenoiseTemporalSpec / RtDenoiseAtrousRgb).
+vec3 gReflAlbedo = vec3(1.0);
 
 // (2026-11-04 c) PTIndirectClamp: light that reaches the first hit through a bounce (sky, glow, direct light at hits 1+), luminance
 // capped at grid[2].w (0 = none). Biased (darker where real bright indirect light is), the usual firefly cut for a 1-path denoiser.
@@ -1580,6 +1603,7 @@ vec3 Path(vec3 dir) {
 	// (2026-11-03 b) PTGlowLights: the previous hit (where this bounce ray left) for the MIS weight of the glow it meets
 	vec3 prevHit = vec3(0.0), prevN = vec3(0.0, 0.0, 1.0);
 	float prevPdf = 0.0, prevGlowTotal = 0.0;
+	float pathRough = 0.0;   // (2026-11-09 PTBounceRoughen) the roughest bounce so far (a matte bounce: 1)
 #ifndef PT_RESTIR_GI
 	// (2026-11-07) PTRadianceCache: the vertices that go on (where, the throughput that reached them, the light gathered up to their own)
 	const bool cache = CacheOn() && view == 0;
@@ -1794,9 +1818,11 @@ vec3 Path(vec3 dir) {
 				radiance += bounce > 0 ? Indirect(throughput * glow * (p.skyHorizon.w * mis)) : throughput * glow * (p.skyHorizon.w * mis);
 			}
 		}
+		// (2026-11-09 PTBounceRoughen) a surface met after a bounce: at least the roughest bounce so far x the key
+		if (bounce > 0 && gBounceRoughen > 0.0) surf.rough = max(surf.rough, pathRough * gBounceRoughen);
 		if (bounce == 0) { gFirstAlbedo = surf.albedo; gFirstSurface = 1.0; }
 		if (bounce == 0) { gFirstRough = surf.rough; gFirstMetal = surf.metal; gFirstNV = dot(n, v); gSplitTake = Split() && view == 0; }   // (ptaaa-denoiser)
-		if (bounce == 1) gSplitHitT = t;   // (ptaaa-denoiser) the first bounce ray's hit
+		if (bounce == 1) { gSplitHitT = t; gReflAlbedo = surf.albedo; }   // (ptaaa-denoiser) the first bounce ray's hit (pt-mirrors: + its colour)
 		if (bounce == 0) ptFirstT = t; else ptPath += t;
 #ifdef PT_RESTIR_GI
 		if (bounce == 1 && gGIFirst) { gGIT2 = t; gGIN2 = n; }   // the first bounce's hit (a miss leaves 0: the sky)
@@ -1920,6 +1946,9 @@ vec3 Path(vec3 dir) {
 		// (ptaaa-denoiser) the bounce goes on: its direction's specular share (NextDirection's BrdfPi was the last; for glass and a leaf's
 		// transmission NextDirection sets it: glass all specular, the leaf all diffuse), a miss unless it hits
 		if (bounce == 0) { gSplitRatio = SpecShare(); gSplitHitT = 60000.0; gSplitSpecLobe = Split() ? SpecLobeChance(n, v, surf, l) : 0.0; }
+		// (2026-11-09 PTBounceRoughen) how rough this bounce was: the surface's roughness by the chance its direction was the glossy lobe's,
+		// 1 (matte) by the rest
+		if (gBounceRoughen > 0.0) pathRough = max(pathRough, mix(1.0, surf.rough, clamp(SpecLobeChance(n, v, surf, l), 0.0, 1.0)));
 		// (2026-11-07 ptaaa-materials) through glass or a leaf: the next ray leaves from the far side's face (and no glow light sample was taken
 		// there: a glow met along it keeps its full weight)
 		if (dot(l, n) < 0.0) { n = -n; gGlowTotal = 0.0; }
@@ -1951,6 +1980,7 @@ void main() {
 	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y)) return;
 	state = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + uint(p.origin.w) * 26699u;
 	LoadMatKeys();   // (2026-11-07 ptaaa-materials) the material models' keys, once
+	LoadBounceRoughen();   // (2026-11-09 PTBounceRoughen)
 	LoadCostKeys();  // (perf-ptcost) the ray budget's keys, once
 #ifndef PT_RESTIR_GI
 	LoadScratchLayout();   // (ptaaa-hangfix) the scratch store's regions, checked once
@@ -1982,6 +2012,7 @@ void main() {
 	const bool split = Split() && (uint(p.accum.w) & 512u) != 0u && int(p.misc.w + 0.5) == 0;
 	vec3 specSum = vec3(0.0), specAlbedoSum = vec3(0.0);
 	float roughSum = 0.0, metalSum = 0.0, specHitT = 0.0;
+	bool specMirror = false;   // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the first path's reflected thing stands in for the surface
 	for (int s = 0; s < paths; s++) {
 		const vec2 uv = (vec2(pixel) + vec2(Rand(), Rand())) * p.size.zw;
 		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
@@ -1993,6 +2024,7 @@ void main() {
 		gFirstSurface = 0.0;
 		gFirstRough = 1.0; gFirstMetal = 0.0; gFirstNV = 1.0;   // (ptaaa-denoiser)
 		gSplitTake = false; gSplitSpec = vec3(0.0); gSplitRad0 = vec3(0.0); gSplitRatio = vec3(0.0); gSplitHitT = 0.0; gSplitSpecLobe = 0.0;
+		gReflAlbedo = vec3(1.0);   // (pt-mirrors)
 		vec3 c = Path(dir);
 		const bool bad = any(isnan(c)) || any(isinf(c));
 		if (bad) c = vec3(0.0);
@@ -2012,7 +2044,17 @@ void main() {
 			specSum += spec;
 			if (gFirstSurface > 0.0 && Specular()) {
 				const vec3 f0 = mix(vec3(0.04), gFirstAlbedo, clamp(gFirstMetal, 0.0, 1.0));
-				specAlbedoSum += EnvBrdfApprox(f0, clamp(gFirstRough, 0.0, 1.0), clamp(gFirstNV, 0.0, 1.0));
+				vec3 specAlbedoPath = EnvBrdfApprox(f0, clamp(gFirstRough, 0.0, 1.0), clamp(gFirstNV, 0.0, 1.0));
+				// (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: a smooth metal whose bounce took the specular lobe: the reflected thing's colour
+				// joins the specular albedo (divided out here, multiplied back by the show pass with this frame's), so the denoiser smooths only
+				// the reflected light, as it smooths a diffuse surface's, and the reflected textures stay sharp. Pure metals only (metal >= 0.99,
+				// which then always take the specular lobe: SpecularShare): a smooth dielectric takes the diffuse lobe on most frames, where the
+				// reflected thing is unknown (its signal would switch between the two scales). The mark is the surface's alone, so a pixel never
+				// drops out of it for a frame (a sample under the horizon: its light 0, its hit unknown: -0.5 below).
+				const bool mirror = gMirrorSurface > 0.0 && gFirstRough < gMirrorSurface && gFirstMetal >= 0.99;
+				if (mirror && gSplitSpecLobe > 0.5) specAlbedoPath *= max(gReflAlbedo, vec3(0.02));
+				specAlbedoSum += specAlbedoPath;
+				if (s == 0) specMirror = mirror;
 			}
 			roughSum += gFirstRough;
 			metalSum += gFirstSurface > 0.0 ? clamp(gFirstMetal, 0.0, 1.0) : 0.0;
@@ -2038,7 +2080,9 @@ void main() {
 			// the guide read a >= 0.5 / clamp it to 1, as the GI variant's)
 			if (surfaceSum >= float(paths)) imageStore(albedoOut, pixel, vec4(albedo, 1.0 + metalSum / float(paths)));
 			imageStore(display, pixel, vec4(diffuse, gCountRays ? 1.0 + float(gRayCount) : 1.0));   // (perf-ptcost: the host's count mode)
-			imageStore(specOut, pixel, vec4(specular, specHitT));
+			// (2026-11-09 pt-mirrors) a negative hit distance marks the mirror pixels whose reflected thing stands in (PTDenoiseMirrorSurface);
+			// -0.5: marked, its hit not known this frame (the denoisers read |hit| < 1 as unknown)
+			imageStore(specOut, pixel, vec4(specular, specMirror ? (specHitT >= 1.0 ? -specHitT : -0.5) : specHitT));
 			imageStore(accumA, pixel, vec4(specAlbedo.rg, 0.0, 0.0));
 			imageStore(accumB, pixel, vec4(specAlbedo.b, roughSum / float(paths), 0.0, 0.0));
 			return;

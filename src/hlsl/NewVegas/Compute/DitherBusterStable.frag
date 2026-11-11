@@ -26,7 +26,8 @@ float ditherGradientNoise(vec2 p) { return fract(52.9829189 * fract(dot(p, vec2(
 
 float tonemapDitherAt(vec2 pixel) {
     vec2 p = pixel + pc.toneMappingClip.z * vec2(5.588238, 3.235);
-    return (ditherGradientNoise(p) + ditherGradientNoise(p + vec2(47.0, 17.0)) - 1.0) * pc.toneMappingClip.y;
+    // UNOFFICIAL 2026-11-09 (review 6.6.1): the second read is taken at the pixel's SWAPPED coordinates. At a constant offset it was fract(first + 0.427 or 0.444) for every pixel (the noise is linear in the pixel), so the 'triangular' sum was one number counted twice: uneven grain. Every copy of this noise changes together (SkyDither, the tonemap, Cinema, and the SMAA / DitherBuster passes that take it off again).
+    return (ditherGradientNoise(p) + ditherGradientNoise(p.yx + vec2(47.0, 17.0)) - 1.0) * pc.toneMappingClip.y;
 }
 
 float lumaWithoutDither(float l, vec2 pixel) {

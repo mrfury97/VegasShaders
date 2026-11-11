@@ -21,7 +21,7 @@ DryColorR = 0.24                       # [0.0-1.0] Dried blood colour, sRGB: a d
 DryColorG = 0.085
 DryColorB = 0.065
 MatchGameColor = true                  # Fresh blood takes each game splat's own colour (the colour its decal is drawn with, times MatchShade), so streams and pools match your blood textures. false: FreshColor below. Dried blood keeps the same darkening and browning as DryColor over FreshColor.
-MatchShade = 0.12                      # [0.02-0.5] The blood splatter texture's own grey (sRGB) that the game multiplies by the decal colour. 0.12 suits a dark splatter texture (measured on a popular 2048 blood replacer); raise it for a lighter one.
+MatchShade = 0.12                      # [0.01-1] The blood splatter texture's own grey (sRGB) that the game multiplies by the decal colour. 0.12 suits a dark splatter texture (measured on a popular 2048 blood replacer); raise it for a lighter one.
 MatchBrightness = 1.0                  # [0.3-3.0] Brightens (above 1) or darkens the matched colour, if the streams still look lighter or darker than the game's splats in the same light.
 MatchFloor = 0.2                       # [0-0.6] UNOFFICIAL (2026-10-27): the darkest a matched blood colour may be (sRGB, its strongest channel); a darker one is lifted to it, its hue kept. A dark splatter texture times the decal colour can come out near black (0.08 with a popular 2048 replacer), and then the wet sheen on top reads grey instead of red. 0: off.
 Sheen = 0.45                           # [0-2] UNOFFICIAL (2026-10-27): how strongly wet blood mirrors the sky or the room at low angles, x what it was (1 = as before 2026-10-27, which made pools look grey and almost reflective). Also capped: never more than a quarter of the sky.

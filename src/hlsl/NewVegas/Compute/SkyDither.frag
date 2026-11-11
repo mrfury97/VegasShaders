@@ -23,7 +23,8 @@ void main() {
     vec4 color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv);
     if (pc.skyDitherData.y > 0.0 && texture(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv).x < 0.996) { o_color = color; return; }
     vec2 pixel = floor(gl_FragCoord.xy) + pc.skyDitherData.z * vec2(5.588238, 3.235);
-    float noise = GradientNoise(pixel) + GradientNoise(pixel + vec2(47.0, 17.0)) - 1.0;
+    // UNOFFICIAL 2026-11-09 (review 6.6.1): the second read is taken at the pixel's SWAPPED coordinates. At a constant offset it was fract(first + 0.427 or 0.444) for every pixel (the noise is linear in the pixel), so the 'triangular' sum was one number counted twice: uneven grain. Every copy of this noise changes together (SkyDither, the tonemap, Cinema, and the SMAA / DitherBuster passes that take it off again).
+    float noise = GradientNoise(pixel) + GradientNoise(pixel.yx + vec2(47.0, 17.0)) - 1.0;
     color.rgb += noise * pc.skyDitherData.x;
     o_color = color;
 }

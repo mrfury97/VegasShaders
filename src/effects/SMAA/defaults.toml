@@ -1,5 +1,5 @@
 [_Shaders.SMAA.Main]
-EdgeDetection = 3                      # What counts as an edge. 0 luma, 1 colour, 2 depth, 3 luma and depth together. Luma and colour see shading and material edges; depth sees geometry and the alpha test edges they miss. 3 takes both and is the default - the gain over luma alone is small but real.
+EdgeDetection = 3                      # [0-3] What counts as an edge. 0 luma, 1 colour, 2 depth, 3 luma and depth together. Luma and colour see shading and material edges; depth sees geometry and the alpha test edges they miss. 3 takes both and is the default - the gain over luma alone is small but real.
 Threshold = 0.05                       # [0.005-0.5] Luma/colour contrast a pixel pair must differ by to count as an edge. Lower finds more edges and antialiases more of the image; too low starts smoothing texture detail.
 DepthThreshold = 0.005                 # [0.0001-0.5] Depth edge sensitivity, as a fraction of the depth at that pixel rather than an absolute distance, so it behaves the same near and far. Affects EdgeDetection 2 and 3 only.
 MaxSearchSteps = 32                    # [4-112] How far along an edge the search may travel looking for its end. Longer edges need more steps to be smoothed properly - shallow near horizontal ones most of all - and the cost is only paid where edges actually run that far.

@@ -20,6 +20,8 @@ void BounceLightEffect::UpdateSettings() {
 	multiBounce = std::clamp(TheSettingManager->GetSettingF("Shaders.BounceLight.Main", "MultiBounce"), 0.0f, 2.0f);
 	temporal = TheSettingManager->GetSettingI("Shaders.BounceLight.Main", "Temporal") != 0;
 	halfSamples = TheSettingManager->GetSettingI("Shaders.BounceLight.Main", "HalfSamples") != 0;
+	// UNOFFICIAL 2026-11-09 TemporalJitterFix (core/TemporalBackbone.h ShiftReprojection; missing key: on)
+	{ SettingManager::Configuration::ConfigNode node; jitterFix = !TheSettingManager->Config.FillNode(&node, "Shaders.BounceLight.Main", "TemporalJitterFix") || node.BoolValue; }
 	// UNOFFICIAL NeonSpill (0 or missing: off; reach and light level missing: their defaults).
 	// NeonSpillOn: the spill's own switch, so it can be turned off and on without losing its strength. Off, the bounce light runs
 	// exactly as with NeonSpill 0 (the plain bounce, no pyramid, no spill buffers drawn).
@@ -611,6 +613,9 @@ void BounceLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 			ambient = Player->parentCell->lighting->ambient.toD3DXVECTOR4();
 		ambientData = D3DXVECTOR4(0.25f * BounceLinear(ambient.x), 0.25f * BounceLinear(ambient.y), 0.25f * BounceLinear(ambient.z), offScreenLight);
 		if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, lastView, lastInvView, lastProj, &reproject);
+		// UNOFFICIAL 2026-11-09 TemporalJitterFix: the gather was drawn from this frame's jittered depth, the history from last frame's
+		// (LastFrame() in BounceLight.fx.hlsl and Compute/BounceLight.glsl read the history where the jitter's change puts it)
+		if (continuous && jitterFix) TemporalBackbone::ShiftReprojection(reproject, TemporalBackbone::DepthJitter() - lastJitter);
 		Effect->SetVector(temporalHandle, &temporalData);
 		Effect->SetVector(ambientHandle, &ambientData);
 		Effect->SetMatrix(reprojectHandle, &reproject);
@@ -729,6 +734,7 @@ void BounceLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		lastView = TheRenderManager->viewMatrix;
 		lastInvView = TheRenderManager->InvViewMatrix;
 		lastProj = TheRenderManager->projMatrix;
+		lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 		lastValid = true;
 		lastQuarter = quarter;
 		lastTime = now;

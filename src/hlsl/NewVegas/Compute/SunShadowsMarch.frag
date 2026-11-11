@@ -15,6 +15,7 @@ void main() {
     vec4 color = sampleShadow(uv);
     if (cb.screenSpaceData.x == 0.0) { o_color = vec4(1.0, color.g, 0.0, 1.0); return; }
     vec3 pos = reconstructPosition(uv);
+    float pixelZ = pos.z;   // (2026-11-09 review 7.2.3: the fades go by the pixel's depth, not the marched ray's end)
     bool isFar = pos.z > SSS_MAXDEPTH;
     float NdotL = dot(GetNormal(uv), normalize(cb.viewSpaceLightDir.xyz));
     float facing = saturate(NdotL * 8.0);
@@ -42,8 +43,8 @@ void main() {
             pos = pos2;
             total += 1.0 / step1 + 1.0 / step2;
         }
-        occlusion = pows(occlusion / total, 0.3) * facing * ContactNearFade(pos.z);   // (NearFade, 2026-10-27)
-        color.r = mix(1.0 - occlusion, 1.0, hlslSmoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, pos.z));
+        occlusion = pows(occlusion / total, 0.3) * facing * ContactNearFade(pixelZ);   // (NearFade, 2026-10-27)
+        color.r = mix(1.0 - occlusion, 1.0, hlslSmoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, pixelZ));
         result = color;
     }
     o_color = result;

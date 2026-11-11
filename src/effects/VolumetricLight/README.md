@@ -9,6 +9,13 @@ With `Froxels` on (the default) and the volumetric fog running, the fog applies 
 march, 8 CompositeGrid) draw only when the fog did not (`EffectChain.cpp` PreStep_VolumetricLight, `gridApplied`). A fix to how the light
 is put on the picture has to go into both.
 
+## TAA jitter and the history (2026-11-09, roadmap track 1 step 2)
+
+`[Shaders.VolumetricLight.Main] TemporalJitterFix` (on; only the half-resolution march's Temporal pass, so only with `Froxels` off): the
+march is drawn from this frame's jittered depth and the history from last frame's, so the history is read where the jitter's change puts
+it (as AmbientLight's TemporalJitterFix). C++ only: `TemporalBackbone::ShiftReprojection` shifts `TESR_VolumetricLightReproject`, which
+the .fx and `Compute/VolumetricLightTemporal.frag` both read; `lastJitter` is kept with `lastView`. Off: as before; 0 without TAA's Jitter.
+
 ## The game's MSAA and see-through cutouts
 
 Each pixel's air is read at the one depth the effects get (`TESR_DepthBuffer`). With the game's MSAA and transparency multisampling, a

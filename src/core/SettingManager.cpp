@@ -56,7 +56,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 77;  // (77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 78;  // (78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -637,6 +637,28 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 			(*saved)["FirstPersonBody"] = true;
 			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.FirstPersonBody false -> true";
 		}
+	}
+	// 78 (2026-11-09, user: "make any obvious default RT settings default by default so this doesn't happen again"; a tester's "deep fried" picture): the
+	// menu's Save writes every setting, and RT defaults replaced since 1.0.5 had no migration, so a saved config (the tester's: version 75) still held
+	// Actors / AlphaTested / HitTextures / GlowTextures false (the RT scene without people, cut-outs, the real hit textures and the glow maps: the bounce
+	// took each mesh's average colour), GIOffscreen 0.1 (1 since 1.0.4: 0.1 made most of the bounce 10 times too dark), ActorUpdateInterval 2 /
+	// ActorRebuildInterval 0 (1 / 8 since test 4) and AmbientLight AlbedoBuffer false (the bounce took a colour guessed from the lit picture: a
+	// room's tint applied twice). A saved old default goes to the new one once; anything else the player chose stays.
+	if (version < 78) {
+		auto toTrue = [&](const char* section, const char* key) {
+			tomlValue* saved = UserSection(section);
+			if (!saved || !saved->contains(key) || !saved->at(key).is_boolean() || saved->at(key).as_boolean()) return;
+			(*saved)[key] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + section + "." + key + " false -> true";
+		};
+		toTrue("Main.Main.RayTracing", "Actors");
+		toTrue("Main.Main.RayTracing", "AlphaTested");
+		toTrue("Main.Main.RayTracing", "HitTextures");
+		toTrue("Main.Main.RayTracing", "GlowTextures");
+		replace("Main.Main.RayTracing", "ActorUpdateInterval", 2, 1, true);
+		replace("Main.Main.RayTracing", "ActorRebuildInterval", 0, 8, true);
+		replace("Shaders.AmbientOcclusion.RT", "GIOffscreen", 0.1, 1.0, false);
+		toTrue("Shaders.AmbientLight.Main", "AlbedoBuffer");
 	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "

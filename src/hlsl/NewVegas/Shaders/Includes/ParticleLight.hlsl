@@ -41,7 +41,26 @@ float3 ParticleVertexLight(float3 cameraRelativePos) {
 #else
 
 float4 TESR_ParticleData : register(c168); // as above
-float4 TESR_SunColor : register(c170);     // rgb: the weather's sun (directional) colour
+// UNOFFICIAL 2026-11-09 (roadmap track 3 bench): TESR_SunColor was pinned to c170, which HudRaindrops::SetDrawConstants writes on every
+// geometry pass (zero when dry) after the shader's constants are uploaded: the sun term read black on every particle and blood decal.
+// c192-c193: only bound by name elsewhere (ObjectDust, Skin), never written per draw.
+float4 TESR_SunColor : register(c192);     // rgb: the weather's sun (directional) colour
+#ifdef PARTICLE_SUN_PHASE
+float4 TESR_ParticlePhase : register(c193); // (not c171: BarrelHeat writes c171-c173 per draw) xyz: toward the sun (world), w: Henyey-Greenstein anisotropy g (0 = the flat SunShare)
+
+// UNOFFICIAL 2026-11-09 (roadmap track 3 step 2): how much of the sun a thin particle sends toward the camera, by the angle between
+// the sun's light and the view ray. Henyey-Greenstein divided by its isotropic value 1 / (4 pi), so its average over all view
+// directions is 1 and the average brightness stays the flat SunShare's: g > 0 glows with the sun behind the smoke and darkens it
+// seen from the sun's side. g = 0 skips it (exactly the old flat share).
+float ParticleSunPhase(float3 cameraRelativePos) {
+    const float g = TESR_ParticlePhase.w;
+    [branch] if (g == 0.0f) return 1.0f;
+    // cos of the scattering angle: the sun's light travels along -L, leaves toward the camera along -viewRay
+    const float cosTheta = dot(TESR_ParticlePhase.xyz, normalize(cameraRelativePos));
+    const float denom = 1.0f + g * g - 2.0f * g * cosTheta;
+    return (1.0f - g * g) / (denom * sqrt(denom));
+}
+#endif
 
 // The multiplier for the colour: the vertex light plus the sun through its shadow, times the brightness, blended in by
 // the strength (0 = 1, the game's unlit look).
@@ -50,7 +69,11 @@ float3 ParticleLight(float3 vertexLight, float3 cameraRelativePos) {
     float3 light = vertexLight;
     [branch] if (TESR_ParticleData.w > 0.0f) {
         // Facing the camera; only the shadow bias uses it.
+#ifdef PARTICLE_SUN_PHASE
+        light += TESR_SunColor.rgb * GetSunShadow(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z * ParticleSunPhase(cameraRelativePos);
+#else
         light += TESR_SunColor.rgb * GetSunShadow(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z;
+#endif
     }
     return lerp(1.0f, light * TESR_ParticleData.y, TESR_ParticleData.x);
 }

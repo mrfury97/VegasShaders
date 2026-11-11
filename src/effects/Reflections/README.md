@@ -37,6 +37,11 @@ in docs/next/FORK-RT-REFLECTIONS.md).
 - (2026-11-07) Decals (`[Main.Main.RayTracing] Decals`, with AlphaTested: the ReflectionsRTAlpha* variants): the reflection rays see
   posters, cracks and blood (lifted 0.5 unit off their surface); the sun / key-lamp shadow ray at a hit passes them
   (ReflectionsRTBody.glsl RtProceedShadow). RT host scene `decals`.
+- (2026-11-09, roadmap track 1 step 2) `[Shaders.Reflections.Main] TemporalJitterFix` (on): the old chain's Temporal pass reads the
+  history where the change of TAA / FSR / DLSS's jitter since last frame puts it (as AmbientLight's). Done in C++ only:
+  `TemporalBackbone::ShiftReprojection` shifts `TESR_ReflectionsReproject` (the matrix the .fx and `Compute/ReflectionsTemporal.frag` both
+  read), `lastJitter` is kept with `lastView`. The RT denoiser's own reprojection is not shifted (not measured). Off: as before. Without
+  TAA's Jitter the shift is 0. Wrong would look like the reflection drifting by a pixel each frame on a still camera with TAA on.
 
 ## MaterialAware: what owns the scene's alpha (2026-11-07, perf-mirrorfix)
 The per-pixel material (MaterialAware, core/ReflMaterial.h) lives in the world target's alpha: 2 + 0.25 x metal + 0.24 x roughness,

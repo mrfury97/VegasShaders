@@ -52,6 +52,7 @@ static_assert(sizeof(BSShaderProperty) == 0x60, "BSShaderProperty");
 static_assert(offsetof(BSShaderProperty, ulFlags) == 0x20, "BSShaderProperty::ulFlags");
 static_assert(offsetof(BSShaderProperty, fAlpha) == 0x28, "BSShaderProperty::fAlpha");
 static_assert(offsetof(BSShaderProperty, fFadeAlpha) == 0x2C, "BSShaderProperty::fFadeAlpha");
+static_assert(offsetof(BSShaderProperty, fEnvMapScale) == 0x30, "BSShaderProperty::fEnvMapScale");
 static_assert(offsetof(BSShaderProperty, pRenderPassArray) == 0x3C, "BSShaderProperty::pRenderPassArray");
 static_assert(offsetof(BSShaderProperty, uiShaderIndex) == 0x58, "BSShaderProperty::uiShaderIndex");
 static_assert(offsetof(BSShaderProperty, fDepthBias) == 0x5C, "BSShaderProperty::fDepthBias");

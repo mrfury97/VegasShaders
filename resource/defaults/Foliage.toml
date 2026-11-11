@@ -1,5 +1,5 @@
 [_Shaders.Foliage.Main]
-Translucency = 0.0                   # UNOFFICIAL: grass and tree leaves glow softly when the sun is behind them (light passing through). 0 = off (the default): this page does nothing until you raise it. Try 0.5 and look toward the sun. In the menu: under Plants.
+Translucency = 0.0                   # [0-1] UNOFFICIAL: grass and tree leaves glow softly when the sun is behind them (light passing through). 0 = off (the default): this page does nothing until you raise it. Try 0.5 and look toward the sun. In the menu: under Plants.
 Power = 4.0                          # [0.5-16] how tightly the glow gathers around the sun: higher = only when looking almost straight into it.
 SunGate = 4.0                        # [0-20] fades the glow out as the sun nears the horizon; it is off at night.
 

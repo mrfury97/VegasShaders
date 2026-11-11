@@ -51,6 +51,10 @@ namespace {
 		int		bounceAlpha = 1;		// PTBounceAlpha (2026-11-04 b): bounce rays' alpha test: 1 as the camera's, 0 cut-outs solid, 2 cut-outs left out, 3 the nearest card's texel
 		float	bounceDistance = 0.0f;	// PTBounceDistance (2026-11-04 b): bounce rays' length (0 = 60000, as the camera's)
 		float	indirectClamp = 0.0f;	// PTIndirectClamp (2026-11-04 c): light through a bounce, luminance cap (0 = none)
+		// UNOFFICIAL 2026-11-09 the real-time path tracer's firefly guards (a tester on DLSS Ray Reconstruction: single white pixels over matte
+		// surfaces round shiny ones; RR gets the raw paths and the path tracer's own anti-firefly pass steps aside there):
+		float	realtimeClamp = 0.0f;	// PTRealtimeClamp: PTIndirectClamp's value under PTRealtime while that key is 0 (0 = none there too)
+		float	bounceRoughen = 0.0f;	// PTBounceRoughen: path regularisation (RtPathTrace.comp gBounceRoughen); -1 = 0.35 under PTRealtime, else 0
 		int		lastSky = 0;			// (2026-11-06) PTLastSky: the last hit's sky light (flag 32768)
 		int		lastBounce = 0;		// (2026-11-06 b) PTLastBounce: the last hit's further bounces, estimated from its own direct light (flag 65536)
 		int		lampFalloff = 0;	// (2026-11-06 c) PTLampFalloff: 0 the game's (1 - (d/r)^2)^2.2, 1 physical (windowed inverse square, reach x 2; flag 131072)
@@ -74,11 +78,14 @@ namespace {
 		int		denoiseMovingHistory = 8;
 		float	denoiseMirrorHistory = 12.0f;
 		bool	denoiseVirtual = true;
+		float	denoiseMirrorSurface = 0.1f;	// UNOFFICIAL 2026-11-09 (pt-mirrors) PTDenoiseMirrorSurface: smooth metals under this roughness are denoised as the
+												// thing they reflect (RtPathTrace.comp gReflAlbedo, RtDenoise Settings.MirrorSurface); 0 = as before
 		int		denoiseUnderRr = 0;
 		float	denoiseHistoryFix = 3.0f;	// (ptaaa-denoiser) PTDenoiseHistoryFix: RtDenoise Settings.HistoryFix (newly seen pixels: no speckles)
 		float	denoiseMeanVariance = 2.0f;	// (ptaaa-denoiser) PTDenoiseMeanVariance: RtDenoise Settings.MeanVariance (fine shadows kept)
 		int		denoiseAntiFirefly = -1;	// (ptaaa-denoiser) PTDenoiseAntiFirefly: -1 auto (on under PTRealtime), 0 off, 1 on
 		float	denoiseFireflyK = 2.0f;	// PTDenoiseFireflyK (test key): its k
+		int		denoiseFireflySpread = 4;	// PTDenoiseFireflySpread (2026-11-09): the most of a clamped firefly that is spread on, x what the pixel supports (0: all of it)
 		float	detail = 1.0f;			// (2026-11-07) PTDetail: the game's fine shading on the traced light (0 off, 1 all)
 		float	contact = 1.0f;			// (2026-11-07 rtgap-tess) PTContactShadows: the depth buffer's contact march at the first hit (strength, 0 off)
 		float	contactLength = 24.0f;	// PTContactLength: its length on screen (pixels)
@@ -134,7 +141,9 @@ namespace {
 	int			shaderGI = -1, shaderReuse = -1, imageGIResult = -1, imageResA[2] = { -1, -1 }, imageResB[2] = { -1, -1 }, imageResC[2] = { -1, -1 }, imageSurf[2] = { -1, -1 };
 	UInt32		giFrame = 0;		// ping-pong: this frame writes set giFrame & 1
 	bool		giHistory = false;	// last frame ran the reuse at this size (its reservoirs are valid)
-	float		giPrevCamera[4][4] = {};	// last frame's forward, right, up (as the pass's), eye
+	float		giPrevCamera[4][4] = {};	// last frame's forward, right, up (as the pass's), and the camera's WORLD position (2026-11-09: was the
+										// scene-space eye, RtCore::Eye() = 0 every frame, so the reuse never saw the camera move)
+	UINT		giPrevSize[2] = {};		// (2026-11-09 rt-review P6) the rect the reservoirs were written at
 	struct RestirConstants { float size[4], forward[4], right[4], up[4], origin[4], rect[4], prevForward[4], prevRight[4], prevUp[4], prevEye[4], params[4]; };
 	int			imageDepth = -1, imageNormals = -1, imageAlbedo = -1, imagePano = -1, imageFrame = -1, imageMaterial = -1, imageAlbedoOut = -1, imageLamps = -1;
 	// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit: the specular signal's image (pass image 15) and the game-side copies: the specular light
@@ -231,6 +240,8 @@ namespace {
 		S.bounceAlpha = i("PTBounceAlpha", 0, 3);
 		S.bounceDistance = f("PTBounceDistance", 0.0f, 60000.0f);
 		S.indirectClamp = f("PTIndirectClamp", 0.0f, 1000.0f);
+		S.realtimeClamp = f("PTRealtimeClamp", 0.0f, 1000.0f);	// UNOFFICIAL 2026-11-09 (a missing key: 0, off)
+		S.bounceRoughen = f("PTBounceRoughen", -1.0f, 1.0f);		// UNOFFICIAL 2026-11-09 (-1 = on under PTRealtime; a missing key reads 0: off)
 		S.denoiseIterations = i("PTDenoiseIterations", 0, 5);
 		S.denoiseHistory = f("PTDenoiseHistory", 1.0f, 256.0f);
 		S.denoiseClamp = f("PTDenoiseClamp", 0.0f, 8.0f);
@@ -243,11 +254,13 @@ namespace {
 		S.denoiseMovingHistory = i("PTDenoiseMovingHistory", 0, 256);
 		S.denoiseMirrorHistory = f("PTDenoiseMirrorHistory", 1.0f, 256.0f);
 		S.denoiseVirtual = TheSettingManager->GetSettingI(kSection, "PTDenoiseVirtual") != 0;
+		S.denoiseMirrorSurface = f("PTDenoiseMirrorSurface", 0.0f, 1.0f);	// UNOFFICIAL 2026-11-09 (pt-mirrors; a missing key: 0, off)
 		S.denoiseUnderRr = i("PTDenoiseUnderRr", 0, 1);
 		S.denoiseHistoryFix = f("PTDenoiseHistoryFix", 0.0f, 16.0f);
 		S.denoiseMeanVariance = f("PTDenoiseMeanVariance", 0.0f, 64.0f);
 		S.denoiseAntiFirefly = i("PTDenoiseAntiFirefly", -1, 1);
 		S.denoiseFireflyK = f("PTDenoiseFireflyK", 0.0f, 64.0f);
+		S.denoiseFireflySpread = (int)f("PTDenoiseFireflySpread", 0.0f, 64.0f);	// UNOFFICIAL 2026-11-09 (RtDenoiseTemporalRgb / Spec .frag FireflyExcess)
 		S.detail = f("PTDetail", 0.0f, 1.0f);
 		S.detailRadius = f("PTDetailRadius", 1.0f, 16.0f);
 		S.viewModel = TheSettingManager->GetSettingI(kSection, "PTViewModel") != 0;	// (2026-11-07 ptaaa-firstperson; a missing key: 0, off)
@@ -317,7 +330,12 @@ namespace {
 			if (S.radianceCache < 0) S.radianceCache = 1;	// (2026-11-07, section 48) PTRadianceCache
 			if (S.emissive < 0) S.emissive = 1;	// (2026-11-07 ptaaa-emissive) PTEmissive
 			if (S.denoiseAntiFirefly < 0) S.denoiseAntiFirefly = 1;	// (2026-11-07 ptaaa-denoiser) PTDenoiseAntiFirefly
+			// UNOFFICIAL 2026-11-09 the firefly guards in the trace itself (they reach DLSS Ray Reconstruction too): the bounce light's cap
+			// unless PTIndirectClamp sets one, and path regularisation unless PTBounceRoughen is set
+			if (S.indirectClamp <= 0.0f) S.indirectClamp = S.realtimeClamp;
+			if (S.bounceRoughen < 0.0f) S.bounceRoughen = 0.35f;
 		}
+		if (S.bounceRoughen < 0.0f) S.bounceRoughen = 0.0f;
 		if (S.emissive < 0) S.emissive = 0;
 		if (S.radianceCache < 0) S.radianceCache = 0;
 		if (S.denoiseAntiFirefly < 0) S.denoiseAntiFirefly = 0;
@@ -886,7 +904,13 @@ namespace {
 					float* row = (float*)((char*)r.pBits + (size_t)r.Pitch * kFrameRow);
 					row[30] = lampCount > 0 ? lampData[0].colour[3] : 0.0f; row[31] = 0.0f;
 					RtTessContact::PackRow(row, slack, contact);	// (2026-11-07 rtgap-tess) texels 16-21
-					RtMaterials::PackRow(row, S.materials);	// (2026-11-07 ptaaa-materials) texels 24-26
+					{	// (2026-11-07 ptaaa-materials) texels 24-26; (2026-11-09 pt-mirrors) + PTDenoiseMirrorSurface, only while the split specular
+						// light goes through the path tracer's own denoiser (not to DLSS RR, whose specular albedo must stay the BRDF's)
+						RtMaterials::Keys keys = S.materials;
+						keys.mirrorSurface = (flags & 4194304u) && S.denoise && !rrDenoising ? S.denoiseMirrorSurface : 0.0f;
+						RtMaterials::PackRow(row, keys);
+					}
+					row[54] = S.bounceRoughen; row[55] = 0.0f;	// UNOFFICIAL 2026-11-09 PTBounceRoughen: texel 27 (RtPathTrace.comp LoadBounceRoughen)
 					{	// (2026-11-07 perf-ptcost) texels 28-29: the ray budget keys + whether this frame's scene holds the hidden first-person body
 						RtPtCost::Keys cost;
 						cost.restirRays = (float)S.restirDIRays; cost.bounceLights = (float)S.bounceLights;
@@ -945,15 +969,25 @@ namespace {
 			memcpy(r.size, c.size, 16); memcpy(r.forward, c.forward, 16); r.forward[3] = 0.0f; memcpy(r.right, c.right, 16); memcpy(r.up, c.up, 16);
 			memcpy(r.origin, c.origin, 16);
 			r.rect[0] = c.rect[0]; r.rect[1] = c.rect[1];
+			// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md P1, P6) the reservoirs of another rect (a RenderScale
+			// change, rect <-> native) hold other texels: no history that frame, as ReSTIR DI's row does it (RtRestirRow.h)
+			if (giPrevSize[0] != tw || giPrevSize[1] != th) giHistory = false;
 			r.rect[2] = (float)((flags & 1u ? 1u : 0u) | (giHistory ? 2u : 0u) | 4u);
 			memcpy(r.prevForward, giPrevCamera[0], 16); memcpy(r.prevRight, giPrevCamera[1], 16); memcpy(r.prevUp, giPrevCamera[2], 16);
-			for (int k = 0; k < 3; k++) r.prevEye[k] = giPrevCamera[3][k] - c.origin[k];
+			// (P1) last frame's eye in THIS frame's scene space, minus this frame's eye. The scene is camera-relative, so that is the camera's
+			// world move back. It was giPrevCamera[3] - c.origin with both the scene-space eye (0 - 0): the reuse reprojected the view's
+			// turn only, and every kept sample slid along with the camera while walking.
+			const D3DXVECTOR4& giCamera = TheRenderManager->CameraPosition;
+			const float giWorld[3] = { giCamera.x, giCamera.y, giCamera.z };
+			for (int k = 0; k < 3; k++) r.prevEye[k] = giHistory ? giPrevCamera[3][k] - giWorld[k] : 0.0f;
 			r.prevEye[3] = S.restirMaxM;
 			r.params[0] = S.restirSpatial; r.params[1] = S.restirRadius; r.params[2] = S.restirDepth; r.params[3] = S.restirNormal;
 			const int reuseImages[14] = { imageA, imageB, imageDisplay, imageGIResult, imageAlbedoOut, images[3], imageResA[prev], imageResB[prev], imageResC[prev],
 				imageResA[cur], imageResB[cur], imageResC[cur], imageSurf[prev], imageSurf[cur] };
 			if (!RtCore::AddPass(shaderReuse, reuseImages, 14, (1u << 3) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 13), &r, sizeof(r), (tw + 7) / 8, (th + 7) / 8)) { giHistory = false; return; }
-			memcpy(giPrevCamera[0], c.forward, 16); memcpy(giPrevCamera[1], c.right, 16); memcpy(giPrevCamera[2], c.up, 16); memcpy(giPrevCamera[3], c.origin, 16);
+			memcpy(giPrevCamera[0], c.forward, 16); memcpy(giPrevCamera[1], c.right, 16); memcpy(giPrevCamera[2], c.up, 16);
+			giPrevCamera[3][0] = giWorld[0]; giPrevCamera[3][1] = giWorld[1]; giPrevCamera[3][2] = giWorld[2]; giPrevCamera[3][3] = 0.0f;
+			giPrevSize[0] = tw; giPrevSize[1] = th;
 			giFrame++;
 			giHistory = true;
 			if (!RtCore::CopyOut(imageGIResult, displaySurface, tw, th)) return;
@@ -1131,7 +1165,8 @@ namespace {
 			settings.MovingHistory = S.denoiseObjectMotion ? S.denoiseMovingHistory : 0;
 			settings.HistoryFix = S.denoiseHistoryFix;	// (2026-11-07 ptaaa-denoiser) the lead's RT playground: speckle trails behind a moving lamp / object
 			settings.MeanVariance = S.denoiseMeanVariance;	// (2026-11-07 ptaaa-denoiser) the playground's chain-link wire shadow
-			settings.AntiFirefly = S.denoiseAntiFirefly > 0 ? S.denoiseFireflyK : 0.0f;	// (2026-11-07 ptaaa-denoiser) the playground's fireflies
+			settings.AntiFirefly = S.denoiseAntiFirefly > 0 ? S.denoiseFireflyK + (S.denoiseFireflyK > 0.0f ? 128.0f * (float)S.denoiseFireflySpread : 0.0f) : 0.0f;	// (2026-11-09: + 128 x PTDenoiseFireflySpread, the shaders' packing)
+			//	// (2026-11-07 ptaaa-denoiser) the playground's fireflies
 			settings.MaxHistory = S.denoiseHistory;
 			settings.PeopleHistory = S.denoisePeopleHistory;
 			settings.AntiLag = S.denoiseAntiLag;	// (2026-11-07) testers: "a lot of ghosting"
@@ -1154,6 +1189,7 @@ namespace {
 				spec.Roughness = specAlbedoB;
 				spec.MirrorHistory = S.denoiseMirrorHistory;
 				spec.Virtual = S.denoiseVirtual;
+				spec.MirrorSurface = S.denoiseMirrorSurface > 0.0f;	// (2026-11-09 pt-mirrors; the trace marks the pixels, RtPathTrace.comp)
 				if (RtDenoise::Run(specDenoiser, Device, specTexture, specDenoisedSurface, spec)) specShown = specDenoised;
 			}
 		}

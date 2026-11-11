@@ -4,6 +4,7 @@
 // helper by core/RtAmbient.h. uv is the target's texel centre. effects/AmbientOcclusion.cpp RtRaw.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : enable
 #include "AmbientOcclusion.glsl"
 
 layout(set = 1, binding = 0) uniform texture2D t_depth;      // TESR_DepthBuffer (LINEAR, CLAMP)
@@ -35,7 +36,31 @@ void main() {
     if (s.x > 1.0 || s.y > 1.0) { o_color = vec4(0.0); return; }
     vec3 P = reconstructPosition(uv, s);
     if (!(P.z < endFade) || P.z <= 0.0) { o_color = vec4(0.0); return; }
-    vec3 N = POINT_LOD(t_normals, uv).xyz * 2.0 - 1.0;
+    // UNOFFICIAL 2026-11-09 NormalGuard (cb.skyLayout.w 1, [Shaders.AmbientOcclusion.RT]; docs/next/RT-PT-REVIEW-2026-11-09.md 1.2 and 11).
+    // PROVEN on a tester's RTX 5090 (NVIDIA 621.1, DXVK "Binding model: Descriptor heap"): the point-sampled read below returned a blank
+    // texel there on every pixel, while the buffer itself held real normals. A blank texel decodes to (-1, -1, -1): every AO / GI ray
+    // started from one bogus normal, and the face-forward flip below turned it over on one side of the view plane X + Y + Z = 0: a
+    // screen-fixed 45-degree triangle in the bounce light, plus trails (the reuse's normal test passed everywhere).
+    // On: the normals are fetched by texel, with no sampler (the same texel a point sampler picks); and a texel that is still not a
+    // unit normal (an undrawn or cleared buffer) takes the surface's own normal, rebuilt from the depth here and at its neighbours.
+    // Off: the point-sampled read as before, whatever it returns.
+    vec3 N;
+    if (cb.skyLayout.w > 0.5) {
+        const ivec2 size = textureSize(t_normals, 0);
+        N = texelFetch(t_normals, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).xyz * 2.0 - 1.0;
+        const float nn = dot(N, N);
+        if (!(nn > 0.5625 && nn < 1.5625)) {
+            const vec2 px = cb.aoLayout.zw;   // one target texel in uv
+            const vec3 Px = reconstructPosition(uv + vec2(px.x, 0.0), (uv + vec2(px.x, 0.0)) / cb.rtRect.xy);
+            const vec3 Py = reconstructPosition(uv + vec2(0.0, px.y), (uv + vec2(0.0, px.y)) / cb.rtRect.xy);
+            const vec3 Qx = reconstructPosition(uv - vec2(px.x, 0.0), (uv - vec2(px.x, 0.0)) / cb.rtRect.xy);
+            const vec3 Qy = reconstructPosition(uv - vec2(0.0, px.y), (uv - vec2(0.0, px.y)) / cb.rtRect.xy);
+            // the nearer neighbour on each axis (the one on this surface at a depth edge)
+            const vec3 dx = abs(Px.z - P.z) < abs(Qx.z - P.z) ? Px - P : P - Qx;
+            const vec3 dy = abs(Py.z - P.z) < abs(Qy.z - P.z) ? Py - P : P - Qy;
+            N = normalize(cross(dy, dx) + vec3(0.0, 0.0, -1.0e-20));
+        }
+    } else N = POINT_LOD(t_normals, uv).xyz * 2.0 - 1.0;
     N = dot(N, -P) < 0.0 ? -N : N;
     vec3 n = normalize((cb.invViewTransform * vec4(N, 0.0)).xyz);
     o_color = vec4(P.z, Pack2(OctEncode(n)), 0.0, 0.0);

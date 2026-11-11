@@ -127,7 +127,8 @@ float4 CinemaDither(VSOUT IN, float2 vpos : VPOS) : COLOR0
 	float4 color = Cinema(IN);
 	[branch] if (TESR_SkyDitherData.y > 0.0 && tex2D(TESR_DepthBuffer, IN.UVCoord).x < 0.996) return color;
 	float2 pixel = vpos + TESR_SkyDitherData.z * float2(5.588238, 3.235);
-	float noise = GradientNoise(pixel) + GradientNoise(pixel + float2(47.0, 17.0)) - 1.0;
+	// UNOFFICIAL 2026-11-09 (review 6.6.1): the second read is taken at the pixel's SWAPPED coordinates. At a constant offset it was fract(first + 0.427 or 0.444) for every pixel (the noise is linear in the pixel), so the 'triangular' sum was one number counted twice: uneven grain. Every copy of this noise changes together (SkyDither, the tonemap, Cinema, and the SMAA / DitherBuster passes that take it off again).
+	float noise = GradientNoise(pixel) + GradientNoise(pixel.yx + float2(47.0, 17.0)) - 1.0;
 	color.rgb += noise * TESR_SkyDitherData.x;
 	return color;
 }

@@ -83,7 +83,7 @@ namespace RtDenoise {
 			std::vector<char> spirv;
 			ID3D9NvrExt* ext = DxvkCompute::Extension();
 			if (!ext || !DxvkCompute::LoadSpirv(name, spirv)) return nullptr;
-			NVR_EXT_BINDING_DESC bindings[10] = {};	// images + the sampler
+			NVR_EXT_BINDING_DESC bindings[11] = {};	// images + the sampler (2026-11-09 pt-mirrors: up to 10 images, RtDenoiseTemporalSpec)
 			for (UINT i = 0; i < images; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
 			bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, samplerAt != 0xFFFFFFFFu ? samplerAt : pushSize - 16 };	// samplerIndex: the last 16 bytes
 			NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
@@ -107,7 +107,7 @@ namespace RtDenoise {
 
 		bool Draw(ID3D9NvrExtPipeline* pipeline, IDirect3DSurface9* target, IUnknown* const* images, UINT count, const void* push, UINT pushSize,
 			IDirect3DSurface9* target2 = nullptr, IDirect3DSurface9* target3 = nullptr, IDirect3DSurface9* target4 = nullptr) {
-			NVR_EXT_RESOURCE_BINDING bindings[10] = {};	// images + the sampler
+			NVR_EXT_RESOURCE_BINDING bindings[11] = {};	// images + the sampler (pt-mirrors: up to 10 images)
 			for (UINT i = 0; i < count; i++) { bindings[i].Slot = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].pResource = images[i]; }
 			bindings[count].Slot = 0; bindings[count].Type = NVR_EXT_BIND_SAMPLER; bindings[count].pResource = DxvkCompute::PointClamp();
 			NVR_EXT_DRAW_DESC draw = {};
@@ -142,7 +142,7 @@ namespace RtDenoise {
 			float forward[4], right[4], up[4], move[4], params[4];
 			float backbone[4];
 			float rect[4];
-			float spec[4];		// x MirrorHistory, y 1: the virtual reprojection
+			float spec[4];		// x MirrorHistory, y 1: the virtual reprojection, z 1: MirrorSurface (2026-11-09 pt-mirrors)
 			UInt32 samplerIndex;
 			float clampK;
 			float peopleCap;
@@ -321,7 +321,8 @@ namespace RtDenoise {
 			atrousRgb = Make("RtDenoiseAtrousRgb", 5, 48, 2);	// (2026-11-07: + the guide frame and albedo)
 		}
 		// (2026-11-07 ptaaa-denoiser) the specular temporal pass, made on its first use (a missing .spv only turns the specular mode off)
-		if (S.Specular && !specTried) { specTried = true; temporalSpec = Make("RtDenoiseTemporalSpec", 9, sizeof(SpecPush), 4, 0xFu, offsetof(SpecPush, samplerIndex)); }
+		// (2026-11-09 pt-mirrors: + the normals, image 9: a curved mirror's curvature)
+		if (S.Specular && !specTried) { specTried = true; temporalSpec = Make("RtDenoiseTemporalSpec", 10, sizeof(SpecPush), 4, 0xFu, offsetof(SpecPush, samplerIndex)); }
 		const bool rgb = S.Channels == 3;
 		if (rgb && (!temporalRgb || !atrousRgb)) return false;
 		const bool spec = rgb && S.Specular;	// (2026-11-07 ptaaa-denoiser)
@@ -358,8 +359,10 @@ namespace RtDenoise {
 		// (2026-11-03) RenderScale < 1: the signal is in the top-left RenderRect part; a scale change (or a rect <-> native frame) restarts
 		const float scaleX = RenderRect::On ? RenderRect::ScaleX : 1.0f, scaleY = RenderRect::On ? RenderRect::ScaleY : 1.0f;
 		const bool rescaled = scaleX != d->lastScale[0] || scaleY != d->lastScale[1];
-		const bool cut = !d->hasHistory || S.Reset || D3DXVec3Length(&move) > 512.0f || rescaled;	// a jump: a camera cut, a load, a teleport, a new RenderScale
-		if (cut) SessionLog::HistoryReset("RT denoiser", !d->hasHistory ? "no history" : S.Reset ? "reset asked (cut / mode / size)" : "camera moved over 512 units");	// UNOFFICIAL 2026-11-01
+		// (2026-11-09 sweep: + the game's camera cut, as the backbone and GIMotion below test it: a door into a room under 512 units away kept the old room's history)
+		const bool cameraCut = TheShaderManager->GameState.isCameraCut;
+		const bool cut = !d->hasHistory || S.Reset || cameraCut || D3DXVec3Length(&move) > 512.0f || rescaled;	// a jump: a camera cut, a load, a teleport, a new RenderScale
+		if (cut) SessionLog::HistoryReset("RT denoiser", !d->hasHistory ? "no history" : S.Reset ? "reset asked (cut / mode / size)" : cameraCut ? "camera cut" : "camera moved over 512 units");	// UNOFFICIAL 2026-11-01
 
 		TemporalPush t = {};
 		t.rect[0] = scaleX; t.rect[1] = scaleY; t.rect[2] = rescaled ? scaleX : d->lastScale[0]; t.rect[3] = rescaled ? scaleY : d->lastScale[1];
@@ -438,10 +441,11 @@ namespace RtDenoise {
 				SpecPush ts = {};
 				memcpy(&ts, &t, offsetof(TemporalPush, samplerIndex));	// prevViewProj .. rect
 				ts.spec[0] = RtHistoryTime::Frames((std::max)(S.MirrorHistory, 1.0f), clock); ts.spec[1] = S.Virtual ? 1.0f : 0.0f;
+				ts.spec[2] = S.MirrorSurface ? 1.0f : 0.0f;	// (2026-11-09 pt-mirrors)
 				ts.clampK = t.clampK; ts.peopleCap = t.peopleCap; ts.antiLag = t.antiLag; ts.fireflyK = t.fireflyK; ts.fastFrames = t.fastFrames;
-				IUnknown* specImages[9] = { temporalImages[0], temporalImages[1], temporalImages[2], temporalImages[3], temporalImages[4], temporalImages[5],
-					temporalImages[6], S.Roughness, d->historyC[last] };
-				ok = nowA && nowB && nowC && excess && Draw(temporalSpec, nowA, specImages, 9, &ts, sizeof(ts), nowB, nowC, excess);
+				IUnknown* specImages[10] = { temporalImages[0], temporalImages[1], temporalImages[2], temporalImages[3], temporalImages[4], temporalImages[5],
+					temporalImages[6], S.Roughness, d->historyC[last], normals };
+				ok = nowA && nowB && nowC && excess && Draw(temporalSpec, nowA, specImages, 10, &ts, sizeof(ts), nowB, nowC, excess);
 				if (nowC) nowC->Release();
 			}
 			if (nowA) nowA->Release();
@@ -469,9 +473,11 @@ namespace RtDenoise {
 				const bool guide = rgb && !spec && S.Guide && S.GuideAlbedo && S.GuideSigma > 0.0f;
 				a.guideSigma = guide ? S.GuideSigma : 0.0f;
 				a.specular = (spec ? 1u : 0u) | (rgb && S.AntiFirefly > 0.0f && fireflyPipe ? 2u : 0u);	// (2026-11-07 ptaaa-denoiser) bit 0 specular mode (the roughness in the guide frame's slot), bit 1 the symmetric test (AntiFirefly)
+				const bool mirrorSurface = spec && S.MirrorSurface;	// (2026-11-09 pt-mirrors) bit 2: the marked mirrors smoothed (the raw image's hit distance in the guide albedo's slot)
+				if (mirrorSurface) a.specular |= 4u;
 				a.historyFix = RtHistoryTime::Frames((std::max)(S.HistoryFix, 0.0f), clock);	// (2026-11-07 ptaaa-denoiser; perf-history: frames at 60 fps)
 				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,
-					guide ? (IUnknown*)S.GuideAlbedo : (IUnknown*)sourceA };
+					guide ? (IUnknown*)S.GuideAlbedo : mirrorSurface ? (IUnknown*)Noisy : (IUnknown*)sourceA };
 				ok = Draw(atrousRgb, lastPass ? Output : targetA, images, 5, &a, sizeof(a), lastPass ? scratch : targetB);
 				if (targetA) targetA->Release();
 				if (targetB) targetB->Release();

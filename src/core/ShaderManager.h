@@ -290,6 +290,7 @@ public:
 		bool					isExterior, isUnderwater, isDialog, isCellChanged;
 		bool					isCameraCut;	// UNOFFICIAL 2026-10-27: the cell changed by a jump (a door, fast travel), not by walking over a border
 		bool					VATSIsOn, PipBoyIsOn, OverlayIsOn;
+		bool					FaceMenuIsOn;	// UNOFFICIAL 2026-11-09: the character creation / face menu is open (it draws its own 3D head; GameShadersInMenus)
 		bool					isRainy, isSnow, isCloudy;
 	};
 

@@ -2,6 +2,14 @@
 Flakes = 0.5
 Speed = 1.4                         # Speed multiplier for snow falling
 ForceSnow = false                   # UNOFFICIAL (2026-10-19): the mod's snow acts as if it is snowing outdoors in any weather (falling snow, snow cover building up), to try the snow effects without a snow weather mod. Snow and Snow accumulation must be on
+WorldSpace = false                  # UNOFFICIAL (2026-11-09, macintroll's world-space snow) false = the snow as before (flake layers that follow the camera). true = his new snow: each flake has a place in the world, so the snow stays put when you turn and you walk through it; flakes are small pictures from a flake sheet, drift with the cloud wind, stop under roofs, and are lit by the sun and sky colour. Needs Textures\Precipitations\fx_weather_snow01.dds (without it no flakes show). Costs more than the old snow (see docs/next/SNOW-WORLDSPACE-2026-11-09.md). With the DXVK fork it runs as a D3D9 pass (no Vulkan version yet). Live.
+WorldFlakeSize = 1.8                # [0.5-3] (WorldSpace) Half the width of a flake in game units (70 = 1 m); each flake varies from 0.65 to 1.35 times this, and 2.9 is the largest a flake is drawn. Live.
+WorldDensity = 1.0                  # [0-1] (WorldSpace) How many of the possible flake places are filled at full snowfall. Lower = thinner snow, same cost. Live.
+WorldDistance = 1200                # [200-1300] (WorldSpace) How far from the camera flakes are drawn, in game units (they fade out over the last fifth). Shorter is cheaper. Live.
+WorldOpacity = 0.8                  # [0-1] (WorldSpace) How solid each flake is. Live.
+WorldSurfaceMarks = true            # (WorldSpace) Short-lived flake marks on upward-facing surfaces open to the sky within about 14 m (1000 units): where flakes land. One extra screen pass; needs the Normals effect (without it only the falling flakes are drawn). Not on your first-person weapon or under water. Live.
+WorldCloudWind = 0.7                # [0-2] (WorldSpace) How strongly the snow drifts sideways with the volumetric clouds' wind (their direction and speed). 0 = straight down with a small wobble. Changing it re-places the flakes once. Without the volumetric clouds there is no drift. Live.
+WorldPlantWind = 0.0                # [0-3] (WorldSpace) How much the flakes sway with the plant wind's gusts (the wind that moves grass and leaves); 0 = off, each flake wobbles on its own. 1.5 was the contributor's test value. Live.
 
 [_Shaders.Snow.Status]
 Enabled = false                     # Snow precipitation shader.

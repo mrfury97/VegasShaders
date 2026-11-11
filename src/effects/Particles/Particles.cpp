@@ -6,14 +6,17 @@ void ParticleShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ParticleData", &Constants.Data);
 	TheShaderManager->RegisterConstant("TESR_ParticleAmbient", &Constants.Ambient);
 	TheShaderManager->RegisterConstant("TESR_ParticleSoft", &Constants.Soft);
+	TheShaderManager->RegisterConstant("TESR_ParticlePhase", &Constants.Phase);
 	Constants.Data = D3DXVECTOR4(0.0f, 1.0f, 0.0f, 0.0f);
 	Constants.Ambient = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	Constants.Soft = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	Constants.Phase = D3DXVECTOR4(0.0f, 0.0f, 1.0f, 0.0f);
 }
 
 void ParticleShaders::UpdateSettings() {
 	Settings.Strength = std::clamp(TheSettingManager->GetSettingF("Shaders.Particles.Main", "Strength"), 0.0f, 1.0f);
 	Settings.SunShare = max(TheSettingManager->GetSettingF("Shaders.Particles.Main", "SunShare"), 0.0f);
+	Settings.SunPhase = std::clamp(TheSettingManager->GetSettingF("Shaders.Particles.Main", "SunPhase"), -0.9f, 0.9f);
 	Settings.SoftScale = max(TheSettingManager->GetSettingF("Shaders.Particles.Main", "SoftScale"), 0.0f);
 	Settings.MeshSoftScale = max(TheSettingManager->GetSettingF("Shaders.Particles.Main", "MeshSoftScale"), 0.0f);
 }
@@ -28,6 +31,9 @@ void ParticleShaders::UpdateConstants() {
 	Constants.Ambient = D3DXVECTOR4(ambient.x, ambient.y, ambient.z, 1.0f);
 	// y 1: the game's own light on them, no brightness of NVR's (UNOFFICIAL 2026-11-05, user: "get rid of the brightness setting")
 	Constants.Data = D3DXVECTOR4(Settings.Strength, 1.0f, Settings.SunShare, exterior ? 1.0f : 0.0f);
+	// UNOFFICIAL 2026-11-09 sun phase (roadmap track 3 step 2): the direction the sun's (by night the moon's) light comes from
+	const D3DXVECTOR4& sunDir = TheShaderManager->ShaderConst.SunDir;
+	Constants.Phase = D3DXVECTOR4(sunDir.x, sunDir.y, sunDir.z, Settings.SunPhase);
 }
 
 void ParticleShaders::BeginWorldScene() {

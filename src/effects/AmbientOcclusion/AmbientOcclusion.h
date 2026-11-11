@@ -54,6 +54,9 @@ public:
 	static std::string RtStatusText();	// UNOFFICIAL 2026-11-01: the RT AO's state as of this frame, for the REPORT block
 	static IDirect3DSurface9* RtRawSurface();	// UNOFFICIAL 2026-11-01: the last trace's output (x = AO visibility; null before the first), for the REPORT block
 	void RtRecord(IDirect3DDevice9* Device);
+	// UNOFFICIAL 2026-11-09 (diagnostic): the RT AO / GI buffers as PixelInspector stages (what the rays start from, what the helper
+	// returned, what the denoisers made of it), so one capture says at which stage a wrong picture begins. EffectChain, after AmbientLight.
+	void RtInspect();
 	IDirect3DTexture9* RtRaw();
 	IDirect3DTexture9* RtGI();	// (rt-ao-gi) this frame's traced bounce light, or null
 	IDirect3DTexture9* RtDenoised(IDirect3DDevice9* Device);

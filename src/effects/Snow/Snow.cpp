@@ -25,11 +25,38 @@ void SnowEffect::UpdateConstants() {
 void SnowEffect::UpdateSettings() {
 	const char* section = "Shaders.Snow.Main";
 	Constants.Data.z = TheSettingManager->GetSettingF(section, "Speed");
+
+	// UNOFFICIAL 2026-11-09 WorldSpace (macintroll's world-space snow; Snow.fx.hlsl techniques 1 and 2). All live.
+	// The limits are the shader's: the flake radius is capped at 4.5 % of the 64-unit cell (2.88) after its 0.65-1.35 spread, and the
+	// ray walks at most 40 cells, which covers (40 - 3) * 64 / 1.733 = 1366 units.
+	WorldSpace = TheSettingManager->GetSettingI(section, "WorldSpace") != 0;
+	WorldSurfaceMarks = TheSettingManager->GetSettingI(section, "WorldSurfaceMarks") != 0;
+	Constants.WorldData.x = std::clamp(TheSettingManager->GetSettingF(section, "WorldFlakeSize"), 0.5f, 3.0f);
+	Constants.WorldData.y = std::clamp(TheSettingManager->GetSettingF(section, "WorldDensity"), 0.0f, 1.0f);
+	Constants.WorldData.z = std::clamp(TheSettingManager->GetSettingF(section, "WorldDistance"), 200.0f, 1300.0f);
+	Constants.WorldData.w = std::clamp(TheSettingManager->GetSettingF(section, "WorldOpacity"), 0.0f, 1.0f);
+	const float cloudWind = std::clamp(TheSettingManager->GetSettingF(section, "WorldCloudWind"), 0.0f, 2.0f);
+	Constants.WorldWind.x = cloudWind;
+	// The flake grid repeats every this many cells, so that one whole wrap of the clouds' offset (900000 units) moves the snow by
+	// a whole number of repeats (his WS_CloudRepeatCells, here because the strength is no longer a compile-time constant).
+	Constants.WorldWind.y = (std::max)(1.0f, floorf(8192.0f * cloudWind + 0.5f));
+	Constants.WorldWind.z = std::clamp(TheSettingManager->GetSettingF(section, "WorldPlantWind"), 0.0f, 3.0f);
+	Constants.WorldWind.w = 0.0f;
+}
+
+UINT SnowEffect::Technique() {
+	if (!WorldSpace || !Effect) return 0;
+	// The marks read the Normals effect's buffer: without it, the flakes alone.
+	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
+	const UINT wanted = WorldSurfaceMarks && normals && normals->Enabled && normals->Effect ? 2 : 1;
+	return Effect->GetTechnique(wanted) ? wanted : 0;	// (an older Snow.fx.hlsl in the game folder: the old snow)
 }
 
 void SnowEffect::RegisterConstants() {
 	ShaderManager* sm = TheShaderManager;
 	sm->RegisterConstant("TESR_SnowData", &Constants.Data);
+	sm->RegisterConstant("TESR_SnowWorldData", &Constants.WorldData);	// UNOFFICIAL 2026-11-09 WorldSpace
+	sm->RegisterConstant("TESR_SnowWorldWind", &Constants.WorldWind);
 }
 
 bool SnowEffect::ShouldRender() {
@@ -49,6 +76,8 @@ static const D3DXVECTOR4* RegisteredConstant(const char* name) {
 // Push block (196 bytes, padded to 208 like the shader's block): the registers of the two matrices the shader reads (the
 // shadow matrix's four, the view matrix's first three: toWorld reads no more), then the float4s, then the sampler index.
 bool SnowEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	// UNOFFICIAL 2026-11-09: only technique 0 has a Vulkan twin. WorldSpace (techniques 1 and 2) has none yet, so on the DXVK fork
+	// it falls back to the D3D9 effect here (false = Render draws the technique as D3D9 passes).
 	if (techniqueIndex != 0) return false;
 	const D3DXVECTOR4* shadowToLight = RegisteredConstant("TESR_ShadowCameraToLightTransformOrtho");
 	const D3DXVECTOR4* view = RegisteredConstant("TESR_ViewTransform");

@@ -27,7 +27,7 @@ void AmbientLightEffect::UpdateSettings() {
 	Constants.Data2.z = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "BlurRadius"), 0.5f, 4.0f);
 	Constants.Data2.w = (float)std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "DebugView"), 0, 13);	// 13: ComputeGI's light (2026-10-27)
 	temporal = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "Temporal") != 0;
-	gridBounce = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridBounce"), 0.0f, 10.0f);
+	gridBounce = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridBounce"), 0.0f, 40.0f);	// UNOFFICIAL 2026-11-09: 40 (was 10): the sun's bounce outdoors; the menu clamps to the same [0-40]
 	gridCell = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridCellSize"), 50.0f, 800.0f);
 	gridSteps = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "GridSteps"), 1, 16);
 	gridSpread = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridSpread"), 0.0f, 0.6f);
@@ -57,7 +57,7 @@ void AmbientLightEffect::UpdateSettings() {
 	hizLogQ = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "HiZ"), 0, 6);	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 	// UNOFFICIAL 2026-10-27 (NVR DXVK, deep/fork2-ssgi) ComputeGI (AmbientLight.h).
 	computeGI = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGI") != 0;
-	giStrength = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIStrength"), 0.0f, 4.0f);
+	giStrength = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIStrength"), 0.0f, 20.0f);	// UNOFFICIAL 2026-11-09: 20 (was 4), as RT GIStrength
 	giThickness = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIThickness"), 5.0f, 500.0f);
 	giQuality = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGIQuality"), 0, 2);
 	giThinOcclusion = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGIThinOcclusion") != 0;
@@ -96,7 +96,24 @@ void AmbientLightEffect::EnsureBuffers() {
 	const int height = lowScale ? (int)TheRenderManager->height : MaxQuality::Reduced(TheRenderManager->height, 2);
 	if (lowScale) Logger::Log("UNOFFICIAL AmbientLight: LowScaleFullRes: buffers made at %d x %d (RenderScale 0.5 or less with LowResEffects: one texel a rendered pixel); "
 		"restart after changing RenderScale", width, height);
-	TheTextureManager->InitTexture("NVR_AmbientLightPrep", &prepTexture, &prepSurface, width, height, D3DFMT_A32B32G32R32F);
+	// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md section 6) SlimPrep ([Shaders.AmbientLight.Main], read here: restart):
+	// the prep holds two numbers a texel (x the view depth, y the packed normal; z and w have been 0 since the screen bounce went, 10-14) in a
+	// four-number format, 16 bytes a texel. It is the most-read texture of the effect: Estimate takes 17 texels of it a pixel, each smoothing
+	// pass 7. With two numbers a texel (G32R32F, 8 bytes, the same precision) those reads move half the memory: the part that costs on the
+	// older cards (players' profiles: Estimate 0.8-1.7 ms and prepare + smooth 0.5 ms on a GTX 1070 / 680, 0.1-0.3 ms on RTX cards). Not
+	// with AmbientLightSmoothCompute (off by default: it copies a four-number buffer into the prep). false = the old format.
+	bool slimPrep = false;
+	{
+		SettingManager::Configuration::ConfigNode node;
+		slimPrep = (!TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SlimPrep") || node.BoolValue) &&
+			!TheSettingManager->SettingsMain.Main.AmbientLightSmoothCompute;
+	}
+	TheTextureManager->InitTexture("NVR_AmbientLightPrep", &prepTexture, &prepSurface, width, height, slimPrep ? D3DFMT_G32R32F : D3DFMT_A32B32G32R32F);
+	if (slimPrep && !prepTexture) {	// (a card without that target format: the old one)
+		slimPrep = false;
+		TheTextureManager->InitTexture("NVR_AmbientLightPrep", &prepTexture, &prepSurface, width, height, D3DFMT_A32B32G32R32F);
+	}
+	Logger::Log("UNOFFICIAL AmbientLight: prep %d x %d, %s", width, height, slimPrep ? "two numbers a texel (SlimPrep, 8 bytes)" : "four numbers a texel (16 bytes)");
 	TheTextureManager->InitTexture("NVR_AmbientLight0", &bufferTexture[0], &bufferSurface[0], width, height, D3DFMT_A16B16G16R16F);
 	TheTextureManager->InitTexture("NVR_AmbientLight1", &bufferTexture[1], &bufferSurface[1], width, height, D3DFMT_A16B16G16R16F);
 	TheTextureManager->InitTexture("NVR_AmbientLightHistory0", &historyTexture[0], &historySurface[0], width, height, D3DFMT_A16B16G16R16F);
@@ -1127,7 +1144,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		Effect->SetVector(h, &edges);
 	}
 	if (D3DXHANDLE h = ParameterHandle(paramReach, "NVR_ALReach")) {	// UNOFFICIAL 2026-11-01 MinReach (AmbientLight.fx.hlsl Estimate)
-		D3DXVECTOR4 reach(minReach ? 1.0f : 0.0f, minReachTexels, 0.0f, 0.0f);
+		D3DXVECTOR4 reach(minReach ? 1.0f : 0.0f, minReachTexels, 0.0f, RtAmbient::Current.RtFarFade ? 1.0f : 0.0f);	// w: (alsky) RtFarFade
 		Effect->SetVector(h, &reach);
 	}
 	D3DXHANDLE flagsHandle = ParameterHandle(paramFlags, "NVR_ALFlags");
@@ -1143,7 +1160,10 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// UNOFFICIAL 2026-10-19 SunFar: the land's and the clouds' shadow factor on stage 13 for the folded sun-shadow apply (Apply pass).
 	IDirect3DTexture9* sunFar = shadow && TheShaderManager->Effects.SunFar ? TheShaderManager->Effects.SunFar->FactorTexture() : nullptr;
 	if (D3DXHANDLE h = ParameterHandle(paramSunFarFlags, "NVR_SunFarFlags")) {
-		D3DXVECTOR4 sunFarFlags(sunFar ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+		// yz: UNOFFICIAL 2026-11-08 (alsky) MinReach for the Vulkan Estimate (AmbientLightEstimate.frag; NVR_ALReach's x and y, which the
+		// D3D9 Estimate reads). The Vulkan constants block has no field for NVR_ALReach and nothing reads this vector past x.
+		// w: (alsky) RtFarFade for AmbientLightEstimateRT.frag
+		D3DXVECTOR4 sunFarFlags(sunFar ? 1.0f : 0.0f, minReach ? 1.0f : 0.0f, minReachTexels, RtAmbient::Current.RtFarFade ? 1.0f : 0.0f);
 		Effect->SetVector(h, &sunFarFlags);
 	}
 	else sunFar = nullptr;

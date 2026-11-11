@@ -109,7 +109,7 @@ vec4 SmoothX(int x, int y) {
         }
         normal = normalize(sum);
     }
-    return vec4(normal, viewZ);
+    return vec4(normal, min(viewZ, 64000.0));   // (2026-11-09 rt-review: finite in the half floats, as the passes)
 }
 
 vec4 ReadX(uint row, uint column) {
@@ -141,7 +141,7 @@ void main() {
         vec2 uv = vec2(float(x) * pc.invWidth + pc.uvOffsetX, float(y) * pc.invHeight + pc.uvOffsetY);
         vec4 c = ReadX(uint(y - regionTop), column);
         vec3 normal = c.xyz;
-        float viewZ = c.w;
+        float viewZ = c.w >= 64000.0 ? 1.0e6 : c.w;
         if (viewZ < pc.drawDistance && pc.reach > 0.5) {
             vec3 origin = PositionFromViewZ(uv, viewZ);
             float spacing = pc.reach / 3.0;
@@ -154,7 +154,7 @@ void main() {
                 tapUV = clamp(tapUV, 0.0, 1.0);
                 vec4 t = ReadX(uint(PointTexel(tapUV.y, pc.height) - regionTop), column);
                 vec3 tapNormal = t.xyz;
-                float tapZ = t.w;
+                float tapZ = t.w >= 64000.0 ? 1.0e6 : t.w;
                 sum += tapNormal * TapWeight(tapUV, tapZ, tapNormal, origin, normal, viewZ, dist, onScreen);
             }
             normal = normalize(sum);

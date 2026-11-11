@@ -96,7 +96,7 @@ namespace ShadowDenoise {
 			info.stage.module = module;
 			info.stage.pName = "main";
 			info.layout = h.pipelineLayout;
-			if (vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipeline) != VK_SUCCESS) pipeline = VK_NULL_HANDLE;
+			if (vkCreateComputePipelines(h.vk.device, g_pipelineCache, 1, &info, nullptr, &pipeline) != VK_SUCCESS) pipeline = VK_NULL_HANDLE;
 			vkDestroyShaderModule(h.vk.device, module, nullptr);
 		}
 		if (!pipeline) Status("RT shadow denoiser: %s did not make a pipeline", path.c_str());

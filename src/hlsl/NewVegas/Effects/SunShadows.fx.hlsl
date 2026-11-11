@@ -308,6 +308,7 @@ float4 ScreenSpaceShadow(VSOUT IN) : COLOR0
 	if (!TESR_ShadowScreenSpaceData.x) return float4(1.0, col.g, 0, 1); // skip is screenspace shadows are disabled
 
 	float3 sp = reconstructPosition(uv);// + expand(rnd3);
+	float pixelZ = sp.z;	// UNOFFICIAL 2026-11-09 (review 7.2.3): the fades go by the PIXEL's depth. The march moves sp 10 random-length steps toward the sun, so the NearFade and far-fade borders slid with the view's angle to the sun and had a grainy edge
 
 	if (sp.z > SSS_MAXDEPTH) return float4(1.0, col.g, 0, 1); // early out for pixels further away than the max render distance
 
@@ -358,11 +359,11 @@ float4 ScreenSpaceShadow(VSOUT IN) : COLOR0
 		wTot += 1/step1 + 1/step2; // weight samples inversely with distance
 	}
 
-    occl = pows(occl / wTot, 0.3) * facing * ContactNearFade(sp.z); // get an average shading based on wTot weights (NearFade: UNOFFICIAL 2026-10-27)
+    occl = pows(occl / wTot, 0.3) * facing * ContactNearFade(pixelZ); // get an average shading based on wTot weights (NearFade: UNOFFICIAL 2026-10-27)
 	
 
     // save result of SSS in red channel, and fade contribution with distance
-    col.r = lerp(1.0f - occl, 1.0, smoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, sp.z));
+    col.r = lerp(1.0f - occl, 1.0, smoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, pixelZ));
     return col;
 }
 
@@ -380,6 +381,7 @@ float4 ScreenSpaceShadowFast(VSOUT IN) : COLOR0
 	float4 col = tex2D(TESR_PointShadowBuffer, IN.UVCoord);
 	if (!TESR_ShadowScreenSpaceData.x) return float4(1.0, col.g, 0, 1);
 	float3 sp = reconstructPosition(uv);
+	float pixelZ = sp.z;	// UNOFFICIAL 2026-11-09 (review 7.2.3): the fades go by the PIXEL's depth. The march moves sp 10 random-length steps toward the sun, so the NearFade and far-fade borders slid with the view's angle to the sun and had a grainy edge
 	bool far = sp.z > SSS_MAXDEPTH;
 	float nDotL = dot(GetNormal(uv), normalize(TESR_ViewSpaceLightDir.xyz));
 	float facing = saturate(nDotL * 8.0f);
@@ -410,8 +412,8 @@ float4 ScreenSpaceShadowFast(VSOUT IN) : COLOR0
 			sp = pos2;
 			wTot += 1/step1 + 1/step2;
 		}
-		occl = pows(occl / wTot, 0.3) * facing * ContactNearFade(sp.z);	// (NearFade)
-		col.r = lerp(1.0f - occl, 1.0, smoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, sp.z));
+		occl = pows(occl / wTot, 0.3) * facing * ContactNearFade(pixelZ);	// (NearFade)
+		col.r = lerp(1.0f - occl, 1.0, smoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, pixelZ));
 		result = col;
 	}
 	return result;
@@ -486,6 +488,7 @@ float4 SharpContactShadow(VSOUT IN) : COLOR0
 	float4 col = tex2D(TESR_PointShadowBuffer, uv);
 	if (!TESR_ShadowScreenSpaceData.x) return float4(1.0, col.g, 0, 1);
 	float3 sp = reconstructPosition(uv);
+	float pixelZ = sp.z;	// UNOFFICIAL 2026-11-09 (review 7.2.3): the fades go by the PIXEL's depth. The march moves sp 10 random-length steps toward the sun, so the NearFade and far-fade borders slid with the view's angle to the sun and had a grainy edge
 	if (sp.z > SSS_MAXDEPTH) return float4(1.0, col.g, 0, 1);
 	float3 light = normalize(TESR_ViewSpaceLightDir.xyz);
 	float facing = saturate(dot(GetNormal(uv), light) * 8.0f);
@@ -509,8 +512,8 @@ float4 SharpContactShadow(VSOUT IN) : COLOR0
 		occl += (delta > bias && delta < ContactThickness(stepUV, front, bias)) * w;	// (thickness: BackDepth)
 		wTot += w;
 	}
-	occl = pows(occl / wTot, 0.3) * facing * ContactNearFade(sp.z);	// (NearFade)
-	return float4(lerp(1.0f - occl, 1.0f, smoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, sp.z)), col.g, 0, 1);
+	occl = pows(occl / wTot, 0.3) * facing * ContactNearFade(pixelZ);	// (NearFade)
+	return float4(lerp(1.0f - occl, 1.0f, smoothstep(SSS_MAXDEPTH * 0.8, SSS_MAXDEPTH, pixelZ)), col.g, 0, 1);
 }
 
 // The four neighbours averaged in with the centre where they lie at the same dpt (only the stair edges change), then the

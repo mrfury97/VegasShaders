@@ -113,6 +113,14 @@ vec4 Estimate(vec2 uv) {
             float s = (float(k) + fract(noise.y + float(k) * 0.618034)) / float(AL_STEPS);
             s *= s;
             vec2 offset = omega * screenRadius * max(s, 2.0 * cb.alLayout.z);
+            // UNOFFICIAL 2026-11-08 (alsky) MinReach, as the D3D9 Estimate's since 2026-11-01 (NVR_ALReach x / y, here cb.sunFarFlags.y / z;
+            // tester at native 4K on these passes: AmbientLight darkened the far ground with a hard line): the max above compares a share of
+            // the radius with a texel size, so far away the nearest reads fell on the pixel's own texel, a read at distance 0 that counts as
+            // a 90-degree horizon, and the ground darkened itself from that distance on. On: every read at least MinReachTexels texels out.
+            if (cb.sunFarFlags.y > 0.5) {
+                vec2 reach = screenRadius * s;
+                offset = omega * reach * max(1.0, cb.sunFarFlags.z * cb.alLayout.z / max(reach.x, 1.0e-6));
+            }
             [[unroll]] for (int side = 0; side < 2; side++) {
                 vec2 sampleUV = uv + (side == 0 ? offset : -offset);
                 float onScreen = step(0.0, sampleUV.x) * step(sampleUV.x, 1.0) * step(0.0, sampleUV.y) * step(sampleUV.y, 1.0);

@@ -30,7 +30,8 @@ float FrameNoiseIGNShared(float2 pixel)
 float FrameNoiseDither(float2 pixel, float index)
 {
     const float2 p = pixel + index * float2(5.588238, 3.235);
-    return FrameNoiseIGN0(p) + FrameNoiseIGN0(p + float2(47.0, 17.0)) - 1.0;
+    // UNOFFICIAL 2026-11-09 (review 6.6.1): the second read is taken at the pixel's SWAPPED coordinates. At a constant offset it was fract(first + 0.427 or 0.444) for every pixel (the noise is linear in the pixel), so the 'triangular' sum was one number counted twice: uneven grain. Every copy of this noise changes together (SkyDither, the tonemap, Cinema, and the SMAA / DitherBuster passes that take it off again).
+    return FrameNoiseIGN0(p) + FrameNoiseIGN0(p.yx + float2(47.0, 17.0)) - 1.0;
 }
 
 // The R2 sequence (Roberts 2018) at an index, shifted by a per-effect slot (TemporalBackbone::R2 in C++ gives the same points).

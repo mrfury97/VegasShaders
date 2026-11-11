@@ -13,6 +13,7 @@
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (the D3D9 effect's material copy)
 #include "../../core/RtCore.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections
+#include "../../core/WeaponMask.h"	// UNOFFICIAL 2026-11-09 the weapon's own pixels of the first-person model (RT weapon reflections, not the hands)
 #include "../../core/RtReflDenoise.h"	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
 #include "../../core/RtDenoise.h"	// UNOFFICIAL 2026-11-07 (perf-history) HistoryClock
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT resolve unblurred, no history)
@@ -45,13 +46,15 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
 	Settings.Thickness = std::clamp(TheSettingManager->GetSettingF(section, "Thickness"), 0.1f, 10.0f);
 	Settings.Temporal = std::clamp(TheSettingManager->GetSettingF(section, "Temporal"), 0.0f, 0.95f);
+	// UNOFFICIAL 2026-11-09 TemporalJitterFix (core/TemporalBackbone.h ShiftReprojection; missing key: on)
+	{ SettingManager::Configuration::ConfigNode node; Settings.JitterFix = !TheSettingManager->Config.FillNode(&node, section, "TemporalJitterFix") || node.BoolValue; }
 	Settings.BlurRadius = std::clamp(TheSettingManager->GetSettingF(section, "BlurRadius"), 0.0f, 8.0f);
 	Settings.DrawDistance = std::clamp(TheSettingManager->GetSettingF(section, "DrawDistance"), 500.0f, 50000.0f);
 	Settings.SkyFallback = TheSettingManager->GetSettingI(section, "SkyFallback") != 0;
 	Settings.CubeMap = TheSettingManager->GetSettingI(section, "CubeMap") != 0;
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);
-	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 10);	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
+	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 11);	// 11: UNOFFICIAL 2026-11-09 the weapon mask (ReflectionsComposite.frag)	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
 	Settings.GridFallback = TheSettingManager->GetSettingI(section, "GridFallback") != 0;
 	Settings.GridBrightness = std::clamp(TheSettingManager->GetSettingF(section, "GridBrightness"), 0.0f, 4.0f);
 	// UNOFFICIAL 2026-10-20 MaterialAware (core/ReflMaterial.h): needs the shaders compiled with it (on at startup, with the _rmaos maps).
@@ -108,6 +111,9 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtWaterRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WaterRoughness"), 0.0f, 0.5f);
 	Settings.RtWeaponRoughness = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponRoughness"), 0.02f, 1.0f);
 	Settings.RtWeaponMetal = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponMetal"), 0.0f, 1.0f);
+	// UNOFFICIAL 2026-11-09 WeaponHands (a key missing from an older settings file reads 0: the weapon's own pixels only)
+	Settings.RtWeaponHands = TheSettingManager->GetSettingI(rt, "WeaponHands") != 0;
+	WeaponMask::Wanted = TheSettingManager->GetSettingI(rt, "Enabled") != 0 && Settings.RtWeapon > 0.0f && !Settings.RtWeaponHands;
 	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (docs/next/RT-REFLECTION-DENOISER.md)
 	Settings.RtDenoiser = TheSettingManager->GetSettingI(rt, "Denoiser") != 0;
 	Settings.RtDenoiserCore = std::clamp(TheSettingManager->GetSettingI(rt, "DenoiserCore"), 0, 1);
@@ -302,13 +308,14 @@ static UInt32 ReflFileHash(const char* path, bool& found) {
 static void LogReflShaderFiles() {
 	struct Want { const char* name; UInt32 hash; };
 	static const Want wants[] = {	// (perf-reflfix4: tools\nvr-dxvk\compile-compute.sh output, committed)
-		{ "ReflectionsComposite", 0x7814C70Fu }, { "ReflectionsRTResolve", 0xE62AE144u }, { "ReflectionsRayGen", 0xC023A81Eu },	// (+ MirrorJitter: RayGen, the denoiser's reproject)
+		// (2026-11-09 WeaponMask: these four are the rebuilt ones that matter: t_weaponMask in Reflections.glsl, WeaponAt / ViewModelAt, DebugView 11; the rest of the twelve rebuilt shaders only gained the unused binding)
+		{ "ReflectionsComposite", 0x243490C0u }, { "ReflectionsRTResolve", 0x77301D9Eu }, { "ReflectionsRayGen", 0x6E28901Du }, { "ReflectionsTemporal", 0x7069F19Bu },	// (+ MirrorJitter: RayGen, the denoiser's reproject)
 		{ "RtReflDenoiseOursReproject", 0x78BCC94Du }, { "Rt\\ReflectionsRT", 0x3641D1CCu },
 		{ "Rt\\ReflectionsRTAlpha", 0x05B1BA2Cu }, { "Rt\\ReflectionsRTTex", 0x2D3057FCu }, { "Rt\\ReflectionsRTTexGlow", 0x336E2B80u },
 		{ "Rt\\ReflectionsRTAlphaTex", 0x4C556DF2u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x61957805u },
 	};
 	char line[1024];
-	int n = sprintf_s(line, "UNOFFICIAL Reflections shader files (perf-reflfix4: silver mirror F0, rough metal's 5 x 5 tent, MirrorJitter):");
+	int n = sprintf_s(line, "UNOFFICIAL Reflections shader files (perf-reflfix4: silver mirror F0, rough metal's 5 x 5 tent, MirrorJitter; 2026-11-09: weapon mask):");
 	int stale = 0;
 	for (const Want& w : wants) {
 		char path[MAX_PATH];
@@ -733,7 +740,12 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 			toLastView.m[3][j] = (float)(move[0] * lastView.m[0][j] + move[1] * lastView.m[1][j] + move[2] * lastView.m[2][j]);
 		toLastView.m[3][3] = 1.0f;
 		D3DXMatrixMultiply(&reprojectNow, &toLastView, &lastProj);
-		if (usable) Constants.Reproject = reprojectNow;
+		if (usable) {
+			Constants.Reproject = reprojectNow;
+			// UNOFFICIAL 2026-11-09 TemporalJitterFix: the Temporal pass (D3D9 and Compute/ReflectionsTemporal.frag) reads the history where
+			// the TAA jitter's change since last frame puts it (the RT denoiser's own reprojection, reprojectNow, is left as it was)
+			if (Settings.JitterFix) TemporalBackbone::ShiftReprojection(Constants.Reproject, TemporalBackbone::DepthJitter() - lastJitter);
+		}
 	}
 	Constants.Data3.x = usable ? Settings.Temporal : 0.0f;
 	// UNOFFICIAL 2026-11-01 SharedNoise: with Temporal the shared index (own offset); without (and under DLSS RR, a temporal resolve) the
@@ -816,6 +828,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastView = view;
 	lastInvView = invView;
 	lastProj = TheRenderManager->projMatrix;
+	lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 }
 
 // UNOFFICIAL 2026-10-31 RT water reflections ([Shaders.Reflections.RT] Water, docs/next/FORK-RT-REFLECTIONS.md "Water"): the water
@@ -1014,6 +1027,7 @@ namespace {
 		{ 1, 23, NVR_EXT_BIND_SAMPLED_IMAGE, 22, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-29 TESR_GlassMask (index 20: after the samplers)
 		{ 1, 24, NVR_EXT_BIND_SAMPLED_IMAGE, 23, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-30 TESR_MaterialBuffer (index 21)
 		{ 1, 25, NVR_EXT_BIND_SAMPLED_IMAGE, 24, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-30 TESR_CloudSkyProbe (index 22)
+		{ 1, 27, NVR_EXT_BIND_SAMPLED_IMAGE, 26, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (index 23; binding 26 / slot 25 are the RT passes' Rt.Bounce)
 	};
 	const UINT ReflTextureCount = 16;
 	// UNOFFICIAL 2026-10-26 (deep/fork-hiz): ReflectionsTraceHiZ.frag = the same bindings + the Hi-Z pyramid buffer on set 1, binding 16 (buffer slot 1).
@@ -1239,7 +1253,10 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	if (panoReady && techniqueIndex != 10) { skySlot = pano[panoIndex]; uniforms.material2.y = 2.0f; }
 	// UNOFFICIAL 2026-10-30 RT weapon reflections: only in a frame the RT trace runs (RayGen, Resolve, temporal, blur, composite agree).
 	const bool weaponOn = weaponFrame && RtWanted();
-	uniforms.weapon = D3DXVECTOR4(weaponOn ? 1.0f : 0.0f, WeaponFovScale(), Settings.RtWeapon * (TheShaderManager->GameState.isExterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior),
+	// UNOFFICIAL 2026-11-09 WeaponMask (core/WeaponMask.h): x 2 = this frame's first-person pass left the weapon's own pixels in TESR_WeaponMask, so the
+	// hands and arms do not reflect (Reflections.glsl WeaponAt); 1 = the whole first-person model (WeaponHands on, or no mask this frame)
+	IDirect3DTexture9* weaponMask = weaponOn && WeaponMask::Wanted && WeaponMask::ReadyThisFrame() ? WeaponMask::Texture : nullptr;
+	uniforms.weapon = D3DXVECTOR4(weaponOn ? (weaponMask ? 2.0f : 1.0f) : 0.0f, WeaponFovScale(), Settings.RtWeapon * (TheShaderManager->GameState.isExterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior),
 		Settings.RtWeaponRoughness);
 	// UNOFFICIAL 2026-11-03 RT reflections at RenderScale < 1: in a rect frame the passes drawn here (RayGen, Resolve, the panorama)
 	// keep to its top-left part, as the .fx's techniques do with TESR_RenderScale.
@@ -1290,6 +1307,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	resources[20].Slot = 22; resources[20].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[20].pResource = glass ? (IUnknown*)glass : (IUnknown*)depth;
 	resources[21].Slot = 23; resources[21].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[21].pResource = matbuf ? (IUnknown*)matbuf : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30
 	resources[22].Slot = 24; resources[22].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[22].pResource = skySlot ? (IUnknown*)skySlot : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30 (2026-10-31: or the panorama)
+	resources[23].Slot = 26; resources[23].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[23].pResource = weaponMask ? (IUnknown*)weaponMask : (IUnknown*)depth;	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (or the depth: never read while weapon.x is not 2)
 	UINT resourceCount = _countof(ReflBindings);
 	if (hiz) {
 		resources[resourceCount].Slot = 1; resources[resourceCount].Type = NVR_EXT_BIND_STORAGE_BUFFER; resources[resourceCount].pResource = hiz;

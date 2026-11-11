@@ -6,6 +6,7 @@
 // back (D3D9 cannot pair this ps_3_0 shader with a vs_2_0 one), so they are untouched.
 
 #include "includes/Shadow.hlsl"
+#define PARTICLE_SUN_PHASE   // UNOFFICIAL 2026-11-09: the sun phase (smoke, dust; not the blood decals on characters)
 #include "includes/ParticleLight.hlsl"
 
 float4 MaterialColor : register(c0);

@@ -98,8 +98,18 @@ namespace {
 		return nullptr;
 	}
 
+	// UNOFFICIAL 2026-11-09 NVR_RTAOInput's y (RtAOInput.frag: Pack2(OctEncode(world normal)), 12 bits each) back to the normal.
+	void RtInputNormal(float packed, float n[3]) {
+		const float hi = floorf(packed / 4096.0f), lo = packed - hi * 4096.0f;
+		const float ex = hi / 4095.0f * 2.0f - 1.0f, ey = lo / 4095.0f * 2.0f - 1.0f;
+		n[0] = ex; n[1] = ey; n[2] = 1.0f - fabsf(ex) - fabsf(ey);
+		if (n[2] < 0.0f) { const float x = n[0], y = n[1]; n[0] = (1.0f - fabsf(y)) * (x >= 0.0f ? 1.0f : -1.0f); n[1] = (1.0f - fabsf(x)) * (y >= 0.0f ? 1.0f : -1.0f); }
+		const float len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+		if (len > 0.0f) { n[0] /= len; n[1] /= len; n[2] /= len; }
+	}
+
 	const char* KindName(Kind kind) {
-		switch (kind) { case Depth: return "depth"; case Normal: return "normal"; case Buffer: return "buffer"; default: return "colour"; }
+		switch (kind) { case Depth: return "depth"; case Normal: return "normal"; case Buffer: return "buffer"; case RtInput: return "rt input"; default: return "colour"; }
 	}
 
 	// One line of a stage's values (the log and the window's tooltip).
@@ -112,6 +122,11 @@ namespace {
 		if (n < 0 || n >= (int)size) return;
 		if (meta.stages[i].kind == Depth) _snprintf_s(out + n, size - n, _TRUNCATE, " | %.1f units from the camera (x farZ %.0f)", c[0] * meta.farZ, meta.farZ);
 		else if (meta.stages[i].kind == Normal) _snprintf_s(out + n, size - n, _TRUNCATE, " | view normal (%.3f, %.3f, %.3f)", c[0] * 2.0f - 1.0f, c[1] * 2.0f - 1.0f, c[2] * 2.0f - 1.0f);
+		else if (meta.stages[i].kind == RtInput) {
+			float w[3]; RtInputNormal(c[1], w);
+			if (c[0] > 0.0f) _snprintf_s(out + n, size - n, _TRUNCATE, " | rays start %.1f units away, world normal (%.3f, %.3f, %.3f) (z up)", c[0], w[0], w[1], w[2]);
+			else _snprintf_s(out + n, size - n, _TRUNCATE, " | no rays at this texel (x 0: sky, past the far end or outside the rect)");
+		}
 	}
 
 	void LogLatest(const char* why) {
@@ -268,6 +283,24 @@ void EndFrame() {
 	PixelX = TheSettingManager->GetSettingI(Section, "X");
 	PixelY = TheSettingManager->GetSettingI(Section, "Y");
 	LogEvery = TheSettingManager->GetSettingI(Section, "LogEvery");
+	// UNOFFICIAL 2026-11-09 (diagnostic, the RT GI "wedge": a screen-fixed 45-degree triangle in the lower left corner, edge x = y - 1036.6
+	// at 3840 wide): LogEvery = -N is the WEDGE PROBE. X and Y are ignored; the pixel steps every N frames through 18 points, three rows
+	// (y = 0.65, 0.79, 0.93 of the height), in each row the edge's x - 400, - 120, - 30 (inside the wedge) and + 30, + 120, + 400 (outside),
+	// scaled by width / 3840. Every new pixel's first result is logged (the "new pixel" lines), so standing still for 30 s gives several
+	// rounds with nobody touching the menu. tools: share\inspect-rt\wedge_report.py reads them.
+	if (LogEvery < 0) {
+		static const float kRows[3] = { 0.65f, 0.79f, 0.93f };
+		static const int kOffsets[6] = { -400, -120, -30, 30, 120, 400 };
+		const float scale = (float)TheRenderManager->width / 3840.0f;
+		const UINT step = (FrameNumber / (UINT)(-LogEvery)) % 18u;
+		const int y = (int)(kRows[step / 6u] * (float)TheRenderManager->height);
+		PixelY = y;
+		PixelX = (int)((float)y - 1036.6f * scale + (float)kOffsets[step % 6u] * scale);
+		if (PixelX < 0) PixelX = 0;
+		LogEvery = 0;
+		static bool logged = false;
+		if (!logged && Enabled) { logged = true; Logger::Log("PIXEL INSPECTOR wedge probe on: 18 points, a new one every %d frames (edge x = y - %.1f)", -TheSettingManager->GetSettingI(Section, "LogEvery"), 1036.6f * scale); }
+	}
 	const bool inside = PixelX >= 0 && PixelY >= 0 && PixelX < (int)TheRenderManager->width && PixelY < (int)TheRenderManager->height;
 	const bool wasActive = Active;
 	Active = Enabled && inside && Setup();

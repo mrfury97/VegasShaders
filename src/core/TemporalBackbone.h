@@ -93,4 +93,25 @@ namespace TemporalBackbone {
 	inline bool HistoryValid() { return Valid; }
 	// HistoryValid without the render-size part (an effect whose history does not depend on the render size: the clouds).
 	inline bool CameraContinuous() { return CameraOk; }
+
+	// UNOFFICIAL 2026-11-09 TemporalJitterFix for the reprojecting effects (roadmap track 1 step 2; AmbientLight's own since 2026-11-01):
+	// TAA / FSR / DLSS draw the world shifted by a fraction of a pixel that changes every frame, and an effect drawn from that depth holds
+	// each surface where its frame's shift put it. A reprojection that ignores the shift reads the history off by the shift's change
+	// (up to a rendered pixel, three screen pixels at RenderScale 0.33): moving, the history smeared into streaks. DepthJitter is this
+	// frame's shift in screen uv (TAAEffect::DepthJitterUV; 0 when nothing is jittered); an effect keeps last frame's next to its last
+	// camera and shifts its reprojection by now - last, which reads the history at last.xy + (now - last), as AmbientLight's Accumulate.
+	inline D3DXVECTOR2 DepthJitter() {
+		TAAEffect* taa = TheShaderManager->Effects.TAA;
+		return taa ? taa->DepthJitterUV() : D3DXVECTOR2(0.0f, 0.0f);
+	}
+	// reproject: a point (row vector) -> last frame's clip space, read as uv = (clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5). Shifted
+	// so that uv moves by delta (screen uv): clip.x += 2 dx w, clip.y -= 2 dy w (a column operation, so the D3D9 effect and the GLSL twin,
+	// which read the same matrix, both get it).
+	inline void ShiftReprojection(D3DXMATRIX& reproject, const D3DXVECTOR2& delta) {
+		if (delta.x == 0.0f && delta.y == 0.0f) return;
+		for (int i = 0; i < 4; i++) {
+			reproject.m[i][0] += 2.0f * delta.x * reproject.m[i][3];
+			reproject.m[i][1] -= 2.0f * delta.y * reproject.m[i][3];
+		}
+	}
 }

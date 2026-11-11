@@ -1,0 +1,25 @@
+# The shader files the Particles collection loads (game-shader replacements; they stay where the game loads them from:
+# src/hlsl/NewVegas mirrors Data\Shaders\VegasShaders). Keep it up to date by hand.
+src/hlsl/NewVegas/Shaders/NOLIGHT000.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT001.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT002.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT003.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT004.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT005.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT006.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT007.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT016.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT017.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT018.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHT019.vso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHTMAT.pso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHTTEX.pso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHTTEXVC.pso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHTTEXVCPMA.pso.hlsl
+src/hlsl/NewVegas/Shaders/NOLIGHTVCONLY.pso.hlsl
+src/hlsl/NewVegas/Shaders/GDECAL.pso.hlsl
+src/hlsl/NewVegas/Shaders/GDECAL.vso.hlsl
+src/hlsl/NewVegas/Shaders/GDECALS.vso.hlsl
+src/hlsl/NewVegas/Shaders/Includes/NoLighting.hlsl
+src/hlsl/NewVegas/Shaders/Includes/ParticleLight.hlsl
+src/hlsl/NewVegas/Shaders/Includes/SoftParticle.hlsl

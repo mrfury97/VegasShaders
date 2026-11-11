@@ -25,6 +25,7 @@ public:
 		LookStruct	Night;
 		int		Steps;			// shadow samples per march
 		float	Temporal;		// share of last frame's result kept (0: no history)
+		bool	JitterFix;		// UNOFFICIAL 2026-11-09 TemporalJitterFix: the history read where the TAA jitter's change puts it
 		float	BlurRadius;		// denoise blur, half-resolution texels each way
 		float	RainStrength;	// share of the strength in rain
 		bool	Froxels;		// UNOFFICIAL 2026-10-14: the froxel grid instead of the march (see the .fx)
@@ -93,6 +94,7 @@ private:
 	IDirect3DBaseTexture9*	fogNoise = nullptr;	// Textures\Effects\NoiseVolume.dds, loaded on the grid's first frame (stage 9 while the cells are lit)
 	bool		fogNoiseLoaded = false;
 	D3DXMATRIX	lastView, lastInvView, lastProj;
+	D3DXVECTOR2	lastJitter = D3DXVECTOR2(0.0f, 0.0f);	// UNOFFICIAL 2026-11-09 TemporalJitterFix: the depth jitter of the frame lastView is
 	UINT		lastRenderedFrame = 0;	// TheFrameRateManager->FrameNumber of the last frame this effect drew (UNOFFICIAL 2026-10-18: it counted
 										// UpdateConstants calls, two a frame, so last frame's history was never accepted)
 	bool		haveHistory = false;

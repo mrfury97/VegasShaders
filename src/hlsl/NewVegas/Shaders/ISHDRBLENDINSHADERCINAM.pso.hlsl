@@ -140,7 +140,8 @@ VtxVaryings main(VtxAttrs pa) {
     [branch] if (TESR_ToneMappingClip.y > 0.0f) {
         const float2 pt = pa.f_pos + TESR_ToneMappingClip.z * float2(5.588238f, 3.235f);
         const float nn = frac(52.9829189f * frac(dot(pt, float2(0.06711056f, 0.00583715f)))) +
-            frac(52.9829189f * frac(dot(pt + float2(47.0f, 17.0f), float2(0.06711056f, 0.00583715f)))) - 1.0f;
+            // UNOFFICIAL 2026-11-09 (review 6.6.1): the second read is taken at the pixel's SWAPPED coordinates. At a constant offset it was fract(first + 0.427 or 0.444) for every pixel (the noise is linear in the pixel), so the 'triangular' sum was one number counted twice: uneven grain. Every copy of this noise changes together (SkyDither, the tonemap, Cinema, and the SMAA / DitherBuster passes that take it off again).
+            frac(52.9829189f * frac(dot(pt.yx + float2(47.0f, 17.0f), float2(0.06711056f, 0.00583715f)))) - 1.0f;
         final_c.rgb += nn * TESR_ToneMappingClip.y * saturate(final_c.rgb * 128.0f);
     }
 

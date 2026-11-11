@@ -32,6 +32,19 @@ layout(push_constant) uniform Push {
     float fastFrames;    // (2026-11-07 perf-history) AntiLag: the fast history in frames (RtHistoryTime.h: 4 at 60 fps, the same seconds at
                          // other frame rates, at least 2); 0: 4 (the value it had when hard-coded)
 } pc;
+// UNOFFICIAL 2026-11-09 (pt playground review) FireflySpread rides in fireflyK: k + 128 x cap (cap a whole number, 0 = no cap, as before).
+// The clamped excess of one firefly is spread over 5 x 5 pixels (RtDenoiseFirefly.frag); a path hundreds of times its neighbours'
+// brightness still left a white 5 x 5 square that the history then carried for seconds (the playground's denoised frames: dozens of
+// white squares on walls and floor). With a cap the excess handed on is at most cap x what the pixel's neighbours / own past support;
+// the rest is dropped (the usual, slightly biased cut).
+#define NVR_FIREFLY_CAP floor(pc.fireflyK * (1.0 / 128.0))
+#define NVR_FIREFLY_K (pc.fireflyK - 128.0 * NVR_FIREFLY_CAP)
+vec3 FireflyExcess(vec3 excess, vec3 kept) {
+    const float cap = NVR_FIREFLY_CAP;
+    if (!(cap > 0.0)) return excess;
+    const float le = dot(max(excess, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), limit = cap * max(dot(kept, vec3(0.2126, 0.7152, 0.0722)), 1.0e-4);
+    return le > limit ? excess * (limit / le) : excess;
+}
 
 // (2026-11-07 ptaaa-denoiser) AntiFirefly (Settings.AntiFirefly, PTDenoiseAntiFirefly), NRD-style: a new sample brighter than both its
 // 3 x 3 neighbours (the brightest, the centre left out) and k x its own recent past (the mean of its last ~4 RAW samples, kept in B.a while
@@ -88,13 +101,13 @@ void main() {
     const float l = luma(value);
     const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
     // (ptaaa-denoiser) AntiFirefly: the neighbours' support (a newly seen pixel has only that); c the sample used, its excess to o_d
-    const float spatialLimit = pc.fireflyK > 0.0 ? FireflyLimit(uv) : 1.0e30;
+    const float spatialLimit = NVR_FIREFLY_K > 0.0 ? FireflyLimit(uv) : 1.0e30;
     vec3 c = l > spatialLimit ? value * (spatialLimit / l) : value;
     float excessWeight = 1.0, fastWeight = 1.0;
     vec4 a = vec4(c, 1.0);
     // b: z / w (2026-11-07) the FAST history (AntiLag): its luminance mean and second moment over the last kFast frames; with AntiFirefly
     // (ptaaa-denoiser) z the mean of the clamped samples, w the mean of the raw ones (the firefly limit's own support)
-    vec4 b = vec4(luma(c) * luma(c), viewZ, pc.fireflyK > 0.0 ? luma(c) : l, pc.fireflyK > 0.0 ? l : l * l);
+    vec4 b = vec4(luma(c) * luma(c), viewZ, NVR_FIREFLY_K > 0.0 ? luma(c) : l, NVR_FIREFLY_K > 0.0 ? l : l * l);
     // (2026-10-31, rt-ao-sky) at half size (backbone.w 1) the mask over this pixel's 2 x 2 full-size pixels (uv sits on their corner):
     // a thin newly seen edge is not missed by the one tap a point sample takes
     const bool fresh = pc.backbone.y > 0.5 && (pc.backbone.w > 0.5
@@ -147,14 +160,14 @@ void main() {
                     // The old 3 x 3 clamp of the raw sample darkened the picture 5 %.)
                     const float kFast = pc.fastFrames > 0.0 ? pc.fastFrames : 4.0;   // (perf-history: was 4.0)
                     // (ptaaa-denoiser) AntiFirefly with a history: the limit is also k x this pixel's recent raw mean
-                    if (pc.fireflyK > 0.0) {
-                        const float limit = max(spatialLimit, pc.fireflyK * hb.a);
+                    if (NVR_FIREFLY_K > 0.0) {
+                        const float limit = max(spatialLimit, NVR_FIREFLY_K * hb.a);
                         c = l > limit ? value * (limit / l) : value;
                     }
                     const float fastLen = min(ha.a, kFast - 1.0) + 1.0;
                     fastWeight = 1.0 / fastLen;
-                    const float fastL = mix(hb.b, pc.fireflyK > 0.0 ? luma(c) : l, 1.0 / fastLen);
-                    const float fastL2 = mix(hb.a, pc.fireflyK > 0.0 ? l : l * l, 1.0 / fastLen);   // (AntiFirefly: the raw mean)
+                    const float fastL = mix(hb.b, NVR_FIREFLY_K > 0.0 ? luma(c) : l, 1.0 / fastLen);
+                    const float fastL2 = mix(hb.a, NVR_FIREFLY_K > 0.0 ? l : l * l, 1.0 / fastLen);   // (AntiFirefly: the raw mean)
                     b.b = fastL; b.a = fastL2;
                     if (pc.antiLag > 0.0) {
                         const float hl = luma(ha.rgb);
@@ -177,5 +190,6 @@ void main() {
     }
     o_a = a;
     o_b = b;
-    o_d = vec4((value - c) * excessWeight, luma(value - c) * fastWeight);
+    const vec3 excess = FireflyExcess(value - c, c);   // (2026-11-09: FireflySpread's cap)
+    o_d = vec4(excess * excessWeight, luma(excess) * fastWeight);
 }

@@ -23,6 +23,7 @@ public:
 		int		Steps;
 		float	Thickness;		// how thick things count as, for a ray passing behind them
 		float	Temporal;		// share of last frame's result kept (0: no history)
+		bool	JitterFix;		// UNOFFICIAL 2026-11-09 TemporalJitterFix: the history read where the TAA jitter's change puts it
 		float	BlurRadius;		// half-resolution texels each way
 		float	DrawDistance;	// surfaces farther than this do not reflect
 		bool	SkyFallback;	// outdoors: rays that find nothing take the sky
@@ -78,6 +79,7 @@ public:
 		float	RtWaterRoughness;	// 2026-10-31: the water's roughness for its rays
 		float	RtWeaponRoughness;	// 2026-10-30: the weapon's roughness where no material data says (MaterialAware / MaterialBuffer)
 		float	RtWeaponMetal;		// 2026-10-30: the weapon's metal guessed from its colour (grey = metal) x this, without material data
+		bool	RtWeaponHands;		// 2026-11-09: the hands and arms of the first-person model reflect like the weapon too (off: the weapon's own pixels only, core/WeaponMask.h)
 		bool	RtHitTextures;		// 2026-10-29: with the core's [Main.Main.RayTracing] HitTextures, hits take the texture's colour (else the draw's average)
 		// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h, docs/next/RT-REFLECTION-DENOISER.md): in place of Temporal +
 		// Blur X / Y on frames the RT trace runs (native frames, not under DLSS RR); false: the old path exactly as before
@@ -227,6 +229,7 @@ private:
 	D3DXVECTOR4			extSky = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// NVR_ReflectionsSky as RenderBuffers set it
 	IDirect3DTexture9*	extSkyTexture = nullptr;	// the sky visibility it bound on stage 14 (null: none)
 	D3DXMATRIX	lastView, lastInvView, lastProj;
+	D3DXVECTOR2	lastJitter = D3DXVECTOR2(0.0f, 0.0f);	// UNOFFICIAL 2026-11-09 TemporalJitterFix: the depth jitter of the frame lastView is
 	UINT		lastRenderedFrame = 0;	// TheFrameRateManager->FrameNumber of the last frame this effect drew (UNOFFICIAL 2026-10-18: it counted
 										// UpdateConstants calls, two a frame, so last frame's history and cube were never kept)
 	bool		haveHistory = false;

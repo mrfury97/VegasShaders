@@ -1,12 +1,12 @@
 [_Shaders.Skin.Main]
 SpecularStrength = 1.0              # (2026-10-25) Skin highlight strength: two layers, a tight oily sheen and a broad pore haze, at real skin's reflectance (not the plastic-like shine of the object shaders). 1 reads a half-grey specular mask as full skin; 0 none; 2 double.
 Roughness = 0.45                    # (2026-10-25) Skin roughness, 0.1-1: lower is oilier (tighter, brighter highlights), higher is matte.
-VanillaMatchedHighlights = 0.0      # (2026-11-05, PB NVR's skin lighting) 1 makes skin highlights as strong as vanilla's own (its Blinn-Phong pass peaked at the specular mask), keeping the physically based shape; 0 the physically based strength. Matters most with a high Roughness.
+VanillaMatchedHighlights = 0.0      # [0-1] (2026-11-05, PB NVR's skin lighting) 1 makes skin highlights as strong as vanilla's own (its Blinn-Phong pass peaked at the specular mask), keeping the physically based shape; 0 the physically based strength. Matters most with a high Roughness.
 Scattering = 1.0                    # (2026-10-25) How far light spreads under the skin, worked out per pixel from the surface's curvature: light wraps past the shadow line (red furthest) and small features soften (nose, ears, lips, fingers). 1 = twice real skin's measured spread (the true width barely shows on a head at game distances); 0 = plain shading; up to 4. Where the screen-space blur runs ([Shaders.Skin.Scattering]) the blur takes over.
 Translucency = 0.5                  # (2026-10-25) Red light glowing through thin parts (ears, nostrils, fingers) against the light. 0 off, 2 strong.
 ShadowScatter = 1.0                 # (2026-10-25) Light carried under the skin across shadow edges: the soft edge of sun and lamp shadows warms (red reaches furthest into the shadow), and the scattered light passes the skin's own shadow line just past it. 0 off, 2 strong.
-SkyReflection = 1.0                 # (2026-10-25) The sky reflected off skin at glancing angles, through the same two highlight layers. Outdoors only. 0 off, 2 strong.
-RainWetness = 0.5                   # (2026-10-25) How wet and glossy skin gets in the rain. 0 dry, 1 fully wet.
+SkyReflection = 1.0                 # [0-2] (2026-10-25) The sky reflected off skin at glancing angles, through the same two highlight layers. Outdoors only. 0 off, 2 strong.
+RainWetness = 0.5                   # [0-1] (2026-10-25) How wet and glossy skin gets in the rain. 0 dry, 1 fully wet.
 MuteGameHighlights = true           # (2026-10-25) The skin shader draws its own highlights, so the game's extra face highlight passes (drawn with the object shaders' plastic-like shine) are switched off. false keeps them as well: shinier faces, as the older skin shaders had them.
 OverrideVanillaPlusSkin = true      # (2026-10-25) With the Vanilla Plus Skin mod installed: true = this build's skin shader is used anyway; false = VPS's own lighting, with the mod's sun shadows added, which also needs the optional Vanilla Plus Skin compatibility files (SkinVPSTemplate.hlsl, Includes\\SkinVPS.hlsl, a separate download since 2026-11-02; without them this build's skin shader is used). Needs a restart.
 

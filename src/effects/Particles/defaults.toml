@@ -1,6 +1,7 @@
 [_Shaders.Particles.Main]
-Strength = 1.0                       # UNOFFICIAL, optional: how much blood, smoke, dust and debris particles follow the lighting (0 = as the game draws them, unlit; 1 = fully lit).
+Strength = 1.0                       # [0-1] UNOFFICIAL, optional: how much blood, smoke, dust and debris particles follow the lighting (0 = as the game draws them, unlit; 1 = fully lit).
 SunShare = 0.6                       # How much of the sun a particle catches outdoors (they are thin and see the sun from all sides). Shaded particles get only the ambient and lamps.
+SunPhase = 0.3                       # [-0.9-0.9] UNOFFICIAL 2026-11-09: how the sun on particles depends on where you look from (Henyey-Greenstein anisotropy). Above 0, smoke and dust glow toward the sun when it is behind them and read darker from the sun's side; the average over all directions stays SunShare's. 0 = the old even share (exactly the old shader path).
 SoftScale = 0.25                     # UNOFFICIAL 2026-11-04 soft particles (after Vanilla Plus Particles): smoke, dust, blood and spark particle systems fade where they meet the ground, walls and objects behind them, over their own size times this, instead of cutting a hard line. 0 = off. Needs Enabled below on at startup.
 MeshSoftScale = 0.25                 # The same for unlit effect meshes (glows, lamp cards, muzzle and impact flashes, the dust storm walls), over the mesh's bounding radius times this. Big meshes such as the dust storm fade over a long way: lower this if they look too faint near the ground. 0 = off.
 

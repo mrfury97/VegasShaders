@@ -342,7 +342,45 @@
         #endif
     #endif
 #endif
+// UNOFFICIAL 2026-11-09 FromGameData (Includes/Object.hlsl): the 4+ lamp SPECULAR interior lamp-shadow records (SLS2034-2036 with
+// INTERIOR_SHADOWS) are at the 32-temp limit; reading the "_m" mask took SLS2034 / SLS2036 past it (X4505), so they never read it.
+#if defined(PS) && defined(INTERIOR_SHADOWS) && defined(SPECULAR) && defined(LIGHTS)
+    #if INTERIOR_SHADOWS && LIGHTS > 3
+        #define ENV_NO_MASK
+    #endif
+#endif
 #include "includes/Object.hlsl"
+// UNOFFICIAL 2026-11-09 the eye variant (open report "eyes of default races black"; [Shaders.PBR.Main] GameShaderEyes, EyeShaderOld; the
+// records are made by Render.cpp GameEyes::RecordFor, from this file with NVR_EYE and no sun / lamp shadow code, and put on the device
+// for the draws of geometry flagged Eye_Environment_Mapping only). The game draws an eyeball's lit passes with specular forced off
+// (so no metal guess reaches them: METAL is compiled only into SPECULAR variants), then adds its own eye env pass (0x24B, SLS2052 +
+// SLS2059, additive) on top: that highlight is kept as it is. Here the lit passes become: the ambient as for any object, plus the sun's
+// and the lamps' light as a WRAPPED diffuse on the eyeball's own surface (the vertex normal: tangent space (0, 0, 1)), with no shadows.
+// The normal map is not used: eye mods differ in what they put there (and some have none), and an eyeball has no bumps worth lighting.
+// Nothing here assumes a UV layout. The output goes through LinearSceneOut as every lit shader's does, so no frame conversion is needed.
+#if defined(PS) && defined(NVR_EYE)
+    #undef METAL
+    // Wrapped Lambert: the light reaches round the ball by EYE_WRAP of its quarter turn, as light scattering through the white would.
+    #define EYE_WRAP 0.5f
+    #define EYE_DEBUG 0	// (warm-slot diagnosis, 2026-11-09: 1 the light colour alone, 2 the wrap alone, 3 the plain N.L, 4 the albedo, 5 albedo x light x wrap)
+    float3 EyeLight(float3 toLight, float3 radiance, float3 baseColor) {
+        const float wrapped = saturate((normalize(toLight).z + EYE_WRAP) / (1.0f + EYE_WRAP));
+        #if EYE_DEBUG == 1
+            return radiance;
+        #elif EYE_DEBUG == 2
+            return wrapped.xxx;
+        #elif EYE_DEBUG == 3
+            return saturate(normalize(toLight).z).xxx;
+        #elif EYE_DEBUG == 4
+            return baseColor;
+        #elif EYE_DEBUG == 5
+            return baseColor * radiance * wrapped;
+        #endif
+        return lerp(luma(baseColor), baseColor, TESR_PBRExtraData.x) * radiance * LIN_SCALE_LIGHT * wrapped;
+    }
+    #define getSunLighting(toSun, radiance, toEye, N, baseColor, r) EyeLight((toSun), (radiance), (baseColor))
+    #define getPointLightLightingAtt(toLight, falloff, radiance, toEye, N, baseColor, r) (LampAtt(falloff) * EyeLight((toLight), (radiance), (baseColor)))
+#endif
 // UNOFFICIAL: the camera matrices Shadow.hlsl rebuilds world positions with move out of c100-c107 in skinned vertex
 // shaders: the game's bone upload reaches past Bones[54] (c97) and overwrote them, so actors sampled the sun shadow
 // at the wrong place. c240-c247 is beyond any bone write.
@@ -1444,6 +1482,9 @@ PS_OUTPUT main(PS_INPUT IN) {
         #endif
         #endif
         sunAndProj *= sunVis;
+    #endif
+    #ifdef NVR_EYE
+        sunAndProj = 1.0f;	// UNOFFICIAL 2026-11-09 the eye variant (see its block above): no sun or canopy shadow on the eyeball
     #endif
 
     #if INTERIOR_SHADOWS

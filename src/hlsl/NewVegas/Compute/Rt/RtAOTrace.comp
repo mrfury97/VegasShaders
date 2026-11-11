@@ -516,6 +516,34 @@ vec2 OctEncode(vec3 n) {
 }
 float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
+// UNOFFICIAL 2026-11-09 (rtgi-lock; docs/next/HANDOFF-RTGI-WEDGE-2026-11-08.md) the sample numbers of the AO and GI rays. The old pair,
+// fract(vec2(Ign(texel + a), Ign(texel + b)) + frame x vec2(0.618034, 0.754878)), was LOCKED: Ign's inner phase for b differs from a's by a
+// constant (the offset difference x (0.0671 + 0.0058)), so fract(52.98 x phase) differs by a constant too: u.y - u.x was ONE value per frame
+// for every texel (float32 replica: 100 % of 1920 x 1080 texels within 0.03 of it), moving 0.1368 of a turn a frame. Every texel's ray
+// came from one spiral of directions that turned 0.1368 of a turn a frame, so the bounce light pulsed with a period of 1 / 0.1368 = 7.3
+// frames (a tester's footage: the ground +-10 % at 8 Hz; a lobe in direction space is hit by 0 to 8 % of the rays a frame, mean 2 %), and
+// where the normals' tangent frame differs (cross(n, up) turns the azimuth when n.z falls under 0.999) the pulse runs half a period
+// apart: a screen-fixed step along that border, ghosting when turning. Now the first number is the gradient noise as before and the
+// second an integer hash of the texel (independent of it), both stepped in time by R2's pair (a good 2D sequence at each texel).
+// decorrelate false (SampleLockFix off): the old pair, bit for bit, for the A/B.
+float HashTexel(ivec2 texel, uint salt) {
+    uint v = uint(texel.x) + 65536u * uint(texel.y) + salt * 0x9E3779B9u;   // (2026-11-09 rt-review R8: was 2048u, so on a trace grid wider than 2048 texel (x, y) had (x - 2048, y + 1)'s numbers)
+    v = v * 747796405u + 2891336453u;
+    v = ((v >> ((v >> 28u) + 4u)) ^ v) * 277803737u;
+    v = (v >> 22u) ^ v;
+    return float(v >> 8u) * (1.0 / 16777216.0);
+}
+vec2 SampleU(ivec2 texel, float frame, float offsetA, float offsetB, vec2 add, bool decorrelate) {
+    if (!decorrelate)
+        return fract(vec2(Ign(vec2(texel) + offsetA), Ign(vec2(texel) + offsetB)) + frame * vec2(0.618034, 0.754878) + add);
+    return fract(vec2(Ign(vec2(texel) + offsetA), HashTexel(texel, uint(offsetB))) + frame * vec2(0.7548777, 0.5698403) + add);
+}
+// (2026-11-09 rtgi-lock, second step) one number for each decision around the ray (the reservoir's acceptance tests, the spatial spin, the glow light pick, the bounce's light pick):
+// an integer hash of the texel with its own salt, and its own irrational step per frame. The old ones were gradient noise stepped by 0.618 / 0.7548777 / 0.56984: the acceptance
+// number kept a fixed relation to the ray's own numbers (replica: 100 % of the texels the same fract(r - u), r - u.y static, r - u.x drifting at the pulse's 0.1368 a frame), so a
+// texel only ever accepted candidates from one window of directions: a bias that differs where the tangent frames differ, and a second pulse. SampleLockFix off: the old numbers.
+float Decide(ivec2 texel, uint salt, float frame, float step_) { return fract(HashTexel(texel, salt) + frame * step_); }
+
 // (2026-10-30) GlowDirect: the glow-mapped instances (neon, lit signs, lamp globes, screens) light the texel directly, as sphere lights
 // (glowList, filled by NVR from RtCore::GlowLights(): row 0 the centre in scene space + the bound's radius, row 1 the colour; texel
 // (0, 2) x the count, y the strength). One light picked per texel in proportion to what it would give unshadowed (its colour x
@@ -526,7 +554,7 @@ float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 // the emitting radius (the bound's, at most 32 units; meshes over 256 left out) and the colour already gated by its brightness (as
 // GlowGI: its strongest channel from 0.35 to 0.8), so only small bright emitters count.
 #ifdef RT_GI_PASS
-vec3 GlowDirect(ivec2 texel, vec3 p, vec3 n, float bias) {
+vec3 GlowDirect(ivec2 texel, vec3 p, vec3 n, float bias, bool decorrelate) {
     vec4 head = imageLoad(glowList, ivec2(0, 2));
     int count = min(int(head.x + 0.5), 32);
     if (count <= 0 || !(head.y > 0.0)) return vec3(0.0);
@@ -540,7 +568,7 @@ vec3 GlowDirect(ivec2 texel, vec3 p, vec3 n, float bias) {
     }
     if (!(total > 0.0)) return vec3(0.0);
     float frame = cb.origin.w;
-    float pick = fract(Ign(vec2(texel) + 307.0) + frame * 0.618034) * total;
+    float pick = (decorrelate ? Decide(texel, 307u, frame, 0.2360680) : fract(Ign(vec2(texel) + 307.0) + frame * 0.618034)) * total;
     for (int k = 0; k < count; k++) {
         vec4 s = imageLoad(glowList, ivec2(k, 0));
         vec3 col = imageLoad(glowList, ivec2(k, 1)).rgb;
@@ -552,7 +580,8 @@ vec3 GlowDirect(ivec2 texel, vec3 p, vec3 n, float bias) {
         if (pick >= w && k < count - 1) { pick -= w; continue; }
         if (!(w > 0.0)) return vec3(0.0);
         // a point on the sphere's inner half (soft shadows), the ray stopping at its surface
-        vec2 u = fract(vec2(Ign(vec2(texel) + 331.0), Ign(vec2(texel) + 359.0)) + frame * vec2(0.754878, 0.569840));
+        vec2 u = decorrelate ? fract(vec2(Ign(vec2(texel) + 331.0), HashTexel(texel, 359u)) + frame * vec2(0.7548777, 0.5698403))   // (2026-11-09 rtgi-lock)
+                             : fract(vec2(Ign(vec2(texel) + 331.0), Ign(vec2(texel) + 359.0)) + frame * vec2(0.754878, 0.569840));
         vec3 target = s.xyz + CosineDirection(-l / max(dist, 1.0e-2), u) * (0.5 * s.w);
         vec3 toT = target - start;
         float t = length(toT);
@@ -572,30 +601,60 @@ ivec2 GIMotion(ivec2 texel) {
     return e >= 1 && e <= 1023 ? ivec2((e & 31) - 16, (e >> 5) - 16) : ivec2(0);
 }
 
-void ReuseGI(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool giTile, vec3 v, float reuse) {
+// UNOFFICIAL 2026-11-08 (rtgi-ghost; tester: dark streaks fanning out across the sand behind a running player, "crazy ghosting when
+// looking around", GIReuse 32) GIReuseSpread: how much of its M a reservoir copied from last frame keeps. Last frame's texel is copied
+// onto every texel that reprojects into it; where the surface is now seen larger (the camera came closer, or it moved toward the
+// screen's edge) that is several texels, each then holding the same sample at full M: a new candidate rarely displaces it (1 in M), so
+// the copies stay and are copied again next frame - streaks along the screen's motion that last GIReuse frames. Each copy keeps the
+// share of the old texel's surface it covers: the area a texel sees is ~ z^3 / |n . P| (P the camera-relative point, z its view depth:
+// the texel's solid angle ~ (z / |P|)^3, over the surface's cosine), so share = (this frame's area / last frame's), at most 1.
+float ReuseSpread(vec3 p, vec3 prevPoint, vec3 n, float viewZ, float prevZ) {
+    float now = viewZ * viewZ * viewZ / max(abs(dot(n, p)), 0.5);
+    float then = prevZ * prevZ * prevZ / max(abs(dot(n, prevPoint)), 0.5);
+    return then > 0.0 ? clamp(now / then, 0.0, 1.0) : 1.0;
+}
+
+void ReuseGI(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool giTile, vec3 v, float reuse, vec3 prevPoint) {
     // Last frame's reservoir of this surface. (2026-10-30, v2) Outside the frame's tiles a texel without its own history (a
     // disocclusion, a screen edge) borrows a neighbour's last frame (2 texels round the reprojected point, depth within 15 %) instead
     // of tracing: v1 traced there, and one such texel made its whole wave pay for the bounce (rt-gi-10/11: GIInterleave 4 cost ~12-14
     // ms where a quarter of the full rate's 26 is 6.5). Nothing usable: empty (M 0) until its tile's turn.
-    float cap = mod(reuse, 64.0), historyM = 0.0;
-    int spatial = clamp(int(min(reuse / 64.0, 16.0)), 0, 16);   // (ptaaa-hangfix: capped; GISpatial is 0-4)
+    // (2026-11-08 rtgi-ghost) reuse = the M cap + 64 x GISpatial + 4096 x flags: 1 GIReuseSpread (above), 2 GIReuseShuffle (below)
+    int reuseCode = int(reuse + 0.5);
+    int reuseFlags = reuseCode / 4096;
+    const bool decorrelate = (reuseFlags & 4) != 0;   // (2026-11-09 rtgi-lock: SampleLockFix)
+    float reuseRest = float(reuseCode - reuseFlags * 4096);
+    float cap = mod(reuseRest, 64.0), historyM = 0.0;
+    int spatial = clamp(int(min(reuseRest / 64.0, 16.0)), 0, 16);   // (ptaaa-hangfix: capped; GISpatial is 0-4)
+    float spread = (reuseFlags & 1) != 0 && v.z > 1.0 ? ReuseSpread(p, prevPoint, n, viewZ, v.z) : 1.0;
     vec4 history = vec4(0.0);
     ivec2 qt = ivec2(-1);
     if (cap > 0.5) {
         if (v.z > 1.0) {
             vec2 q = vec2(0.5 + 0.5 * v.x / (v.z * cb.projection.x), 0.5 - 0.5 * v.y / (v.z * cb.projection.y));
             qt = ivec2(floor(q * cb.projection.zw)) + GIMotion(texel);
+            // (2026-11-08 rtgi-ghost) GIReuseShuffle (RTXDI's permutation sampling): first the texel of the reprojected one's 2 x 2 block
+            // that this frame's mask picks (an XOR inside blocks whose corner moves each frame, the same for every texel: a one-to-one
+            // shuffle, so it copies nothing twice), then the plain one if that surface does not match. Copies one frame lands side by
+            // side then come from different texels the next: no long runs of one sample along the motion, the denoiser gets noise
+            // instead of streaks.
+            int shuffle = (reuseFlags & 2) != 0 ? int(fract(cb.origin.w * 0.618034 + 0.25) * 16.0) : 0;
+            ivec2 shift = ivec2(shuffle & 1, (shuffle >> 1) & 1), mask = ivec2((shuffle >> 2) & 1, (shuffle >> 3) & 1);
+            ivec2 shuffled = ((qt + shift) ^ mask) - shift;
             const ivec2 around[5] = ivec2[5](ivec2(0, 0), ivec2(2, 0), ivec2(-2, 0), ivec2(0, 2), ivec2(0, -2));
+            int first = any(notEqual(shuffled, qt)) ? -1 : 0;
             int tries = giTile ? 1 : 5;
-            for (int k = 0; k < tries && historyM < 0.5; k++) {
-                ivec2 at = qt + around[k];
+            bool found = false;   // (2026-11-08: was historyM < 0.5, which a spread M under 0.5 would no longer stop)
+            for (int k = first; k < tries && !found; k++) {
+                ivec2 at = k < 0 ? shuffled : qt + around[k];
                 if (any(lessThan(at, ivec2(0))) || any(greaterThanEqual(at, ivec2(cb.projection.zw)))) continue;
                 vec4 b = imageLoad(prevB, at);
-                float tolerance = k == 0 ? 0.05 : 0.15;
+                float tolerance = k <= 0 ? 0.05 : 0.15;
                 if (b.x > 0.5 && abs(b.y - v.z) < tolerance * v.z + 2.0 && dot(OctDecode(b.zw), n) > 0.9) {
                     history = imageLoad(prevA, at);
-                    historyM = min(b.x, cap);
-                    if (!(history.a >= 0.0) || any(isnan(history.rgb)) || any(isinf(history.rgb))) { history = vec4(0.0); historyM = 0.0; }
+                    historyM = min(b.x, cap) * spread;
+                    found = true;
+                    if (!(history.a >= 0.0) || any(isnan(history.rgb)) || any(isinf(history.rgb))) { history = vec4(0.0); historyM = 0.0; found = false; }
                 }
             }
         }
@@ -609,7 +668,7 @@ void ReuseGI(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool giTile, 
     // floor or a wall, can leak a little across contact shadows (that is what the depth / normal tests and the short radius limit).
     if (spatial > 0 && qt.x >= 0 && v.z > 1.0) {
         float frame = cb.origin.w;
-        float spin = 6.2831853 * fract(Ign(vec2(texel) + 211.0) + frame * 0.618034);
+        float spin = 6.2831853 * (decorrelate ? Decide(texel, 211u, frame, 0.1415927) : fract(Ign(vec2(texel) + 211.0) + frame * 0.618034));
         for (int k = 0; k < spatial; k++) {
             float a = spin + float(k) * 2.3999632;  // the golden angle
             float r = 3.0 + 9.0 * fract(0.5 + float(k) * 0.618034 + frame * 0.381966);
@@ -620,36 +679,55 @@ void ReuseGI(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool giTile, 
             vec4 h = imageLoad(prevA, at);
             if (!(h.a > 0.0) || any(isnan(h.rgb)) || any(isinf(h.rgb))) continue;
             vec3 l = h.rgb / h.a;
-            float mk = min(b.x, max(cap * 0.5, 1.0));
+            float mk = min(b.x, max(cap * 0.5, 1.0)) * spread;   // (2026-11-08 rtgi-ghost: GIReuseSpread too)
             float w = Luma(l) * h.a * mk;
             weightSum += w;
             m += mk;
-            if (fract(Ign(vec2(texel) + 257.0 + 31.0 * float(k)) + frame * 0.7548777) * weightSum < w) chosen = l;
+            if ((decorrelate ? Decide(texel, 257u + 31u * uint(k), frame, 0.4142136) : fract(Ign(vec2(texel) + 257.0 + 31.0 * float(k)) + frame * 0.7548777)) * weightSum < w) chosen = l;
         }
     }
 
     // The first frame of a reservoir (cap 0: no history at all) traces everywhere.
     if (giTile || cap < 0.5) {
         float frame = cb.origin.w;
-        vec2 u = fract(vec2(Ign(vec2(texel) + 41.0), Ign(vec2(texel) + 73.0)) + frame * vec2(0.618034, 0.754878) + vec2(0.381966, 0.5));
-        vec3 light = Bounce(p + n * bias, CosineDirection(n, u), 0.05 * bias, fract(Ign(vec2(texel) + 97.0) + frame * 0.569840)).rgb;
+        vec2 u = SampleU(texel, frame, 41.0, 73.0, vec2(0.381966, 0.5), decorrelate);   // (2026-11-09 rtgi-lock; was the locked pair)
+        vec3 light = Bounce(p + n * bias, CosineDirection(n, u), 0.05 * bias, decorrelate ? Decide(texel, 97u, frame, 0.5497005) : fract(Ign(vec2(texel) + 97.0) + frame * 0.569840)).rgb;
         float w = Luma(light);
         weightSum += w;
         m += 1.0;
-        if (fract(Ign(vec2(texel) + 131.0) + frame * 0.7548777) * weightSum < w) chosen = light;
+        if ((decorrelate ? Decide(texel, 131u, frame, 0.3247180) : fract(Ign(vec2(texel) + 131.0) + frame * 0.7548777)) * weightSum < w) chosen = light;
     }
     float target = Luma(chosen);
     float W = m > 0.0 && target > 0.0 ? weightSum / (m * target) : 0.0;
     imageStore(curA, texel, vec4(chosen * W, W));
     imageStore(curB, texel, vec4(m, viewZ, OctEncode(n)));
 #ifdef RT_GI_PASS
-    imageStore(giOut, texel, vec4(chosen * W + GlowDirect(texel, p, n, bias), 1.0));
+    imageStore(giOut, texel, vec4(chosen * W + GlowDirect(texel, p, n, bias, (reuseFlags & 4) != 0), 1.0));
 #else
     imageStore(giOut, texel, vec4(chosen * W, 1.0));
 #endif
 }
 
 #ifndef RT_GI_PASS
+// UNOFFICIAL 2026-11-08 (alsky; tester: Skylighting with RT AO draws hard straight lines on roads and paths, RT AO itself looks right) how
+// much one sky ray is blocked, 0 open .. 1 blocked. flags (sky.y / 1000, core/RtAmbient.h): 0 as before, any hit within the reach blocks
+// it in full. 1 SkyInsideFix: the closest hit; a back face within insideReach of the start means the ray began under the traced surface
+// (a road or path mesh drawn just below the land, the depth a little off far away): it carries on from just past that face, once. The AO
+// rays already count such a ray open (their 'inside'); the sky rays took the face for cover, so whole roads lost their sky light with the
+// road's own hard edges. 2 SkySoftEdges: a hit counts in full to half the reach and nothing at its end, as the AO rays: no hard edge at
+// SkyDistance from walls, cliffs and banks.
+float SkyBlocked(vec3 start, vec3 d, float reach, int alpha, int flags, float insideReach) {
+    if (flags == 0) return Trace(start, d, 0.0, reach, true, alpha).x >= 0.0 ? 1.0 : 0.0;
+    vec2 hit = Trace(start, d, 0.0, reach, false, alpha);
+    if ((flags & 1) != 0 && hit.x >= 0.0 && hit.y > 0.5 && hit.x < insideReach) {
+        float skip = hit.x + 1.0;
+        hit = Trace(start + d * skip, d, 0.0, max(reach - skip, 1.0), false, alpha);
+        if (hit.x >= 0.0) hit.x += skip;
+    }
+    if (hit.x < 0.0) return 0.0;
+    return (flags & 2) != 0 ? 1.0 - smoothstep(0.5 * reach, reach, hit.x) : 1.0;
+}
+
 void main() {
     // (2026-10-29) Interleave: only every 2nd (checkerboard) or every 4th (one texel of each 2 x 2, in turn) texel is traced a frame;
     // the others keep the result they last had (the shared images persist) and AmbientLight's history blends them. The dispatch is
@@ -688,7 +766,7 @@ void main() {
     int rays = min(int(min(cb.ao.y, 64.0) + 0.5), 64);   // (ptaaa-hangfix: capped)
     if (rays > 0) {
         float frame = cb.ao.z > 0.5 ? cb.origin.w : 0.0;
-        vec2 noise = fract(vec2(Ign(vec2(texel)), Ign(vec2(texel) + 17.0)) + frame * vec2(0.618034, 0.754878));
+        vec2 noise = SampleU(texel, frame, 0.0, 17.0, vec2(0.0), cb.ao.z > 1.5);   // (2026-11-09 rtgi-lock; ao.z 2 = SampleLockFix)
         vec3 start = p + n * (bias + slack);
         float reach = cb.ao.x, occlusion = 0.0, inside = 0.0, meanHit = 0.0;
         for (int i = 0; i < rays; i++) {
@@ -707,13 +785,18 @@ void main() {
     // weighed by its cosine to n; open if nothing within the distance. Turned by a 4 x 4 per-texel interleave that never changes with
     // the frame: nothing flickers when standing still.
     float skyVisibility = 1.0, covered = 0.0;
-    int skyRays = int(cb.sky.y + 0.5);
+    // (2026-11-08 alsky) sky.y = the rays (0, 8 or 16) + 1000 x SkyBlocked's flags
+    int skyCode = int(cb.sky.y + 0.5);
+    int skyRays = skyCode % 1000;
+    int skyFlags = skyCode / 1000;
     if (skyRays > 0) {
         vec3 start = p + n * (bias + max(8.0, slack));   // (2026-11-07: at least the bumps' slack)
         float reach = cb.sky.x;
+        // (alsky) a back face this close to the start is the surface the ray began under (the AO rays' 4 x bias, from the lifted start)
+        float insideReach = max(48.0, 4.0 * (bias + max(8.0, slack)));
         vec2 cell = vec2(texel & 3);
         float turn = (cell.x * 4.0 + cell.y) * (3.14159265 / 4.0 / 16.0);
-        covered = Trace(start, vec3(0.0, 0.0, 1.0), 0.0, reach, true, int(cb.gi3.y + 0.5)).x >= 0.0 ? 1.0 : 0.0;
+        covered = SkyBlocked(start, vec3(0.0, 0.0, 1.0), reach, int(cb.gi3.y + 0.5), skyFlags, insideReach);
         float total = 0.034 * clamp(n.z, 0.0, 1.0);
         float open = total * (1.0 - covered);
         int rings = skyRays > 8 ? 2 : 1;
@@ -727,7 +810,7 @@ void main() {
                 float w = ringWeight * clamp(dot(d, n), 0.0, 1.0);
                 if (w <= 0.0) continue;
                 total += w;
-                if (Trace(start, d, 0.0, reach, true, 2).x < 0.0) open += w;
+                open += w * (1.0 - SkyBlocked(start, d, reach, 2, skyFlags, insideReach));   // (flags 0: open += w on a miss, as before)
             }
         }
         skyVisibility = total > 1.0e-5 ? open / total : 1.0;
@@ -747,19 +830,27 @@ void main() {
         vec3 a = p + vec3(cb.reuse.zw, cb.gi3.w);
         vec3 r0 = cb.prevRot.xyz, r1 = vec3(cb.prevRot.w, cb.reuse.xy), r2 = cross(r0, r1) * cb.sky.w;
         vec3 v = cb.sky.z > 0.5 ? vec3(dot(r0, a), dot(r1, a), dot(r2, a)) : vec3(0.0);
-        ReuseGI(texel, p, n, viewZ, bias, true, v, cb.sky.z);
+        ReuseGI(texel, p, n, viewZ, bias, true, v, cb.sky.z, a);
     }
     else if (cb.gi.y > 0.5 && !giTile) {
         // (no GI ray this frame here: the image keeps its last value)
     }
     else if (cb.gi.y > 0.5) {
         float frame = cb.ao.z > 0.5 ? cb.origin.w : 0.0;
-        vec2 u = fract(vec2(Ign(vec2(texel) + 41.0), Ign(vec2(texel) + 73.0)) + frame * vec2(0.618034, 0.754878) + vec2(0.381966, 0.5));
-        gi = Bounce(p + n * bias, CosineDirection(n, u), 0.05 * bias, fract(Ign(vec2(texel) + 97.0) + frame * 0.569840));
+        vec2 u = SampleU(texel, frame, 41.0, 73.0, vec2(0.381966, 0.5), cb.ao.z > 1.5);   // (2026-11-09 rtgi-lock; was the locked pair)
+        gi = Bounce(p + n * bias, CosineDirection(n, u), 0.05 * bias, cb.ao.z > 1.5 ? Decide(texel, 97u, frame, 0.5497005) : fract(Ign(vec2(texel) + 97.0) + frame * 0.569840));
     }
     if ((cb.gi.y < 0.5 || giTile) && cb.gi3.z < 0.5) imageStore(giImage, texel, gi);
     if (cb.ao.w > 3.5 && cb.ao.w < 4.5) aoVisibility = clamp(viewZ / 2000.0, 0.0, 1.0);
-    if (cb.ao.w > 4.5) aoVisibility = n.z * 0.5 + 0.5;
+    if (cb.ao.w > 4.5 && cb.ao.w < 5.5) aoVisibility = n.z * 0.5 + 0.5;
+    // UNOFFICIAL 2026-11-09 (rtgi-lock) DebugView 8: the tangent frame the AO and GI rays' directions are built in (CosineDirection): white = the flat branch
+    // (n.z >= 0.999: the azimuth is measured from +Y), grey 0.15 .. 0.85 = the tilted branch, the shade = the angle of its tangent cross(n, up). Two screen
+    // regions of another shade are two tangent frames: where the GI's sample pattern runs half a turn out of step
+    if (cb.ao.w > 7.5) {
+        const bool tilted = abs(n.z) < 0.999;
+        const vec3 tangent = normalize(tilted ? cross(n, vec3(0.0, 0.0, 1.0)) : cross(n, vec3(1.0, 0.0, 0.0)));
+        aoVisibility = tilted ? 0.15 + 0.7 * (atan(tangent.y, tangent.x) * 0.15915494 + 0.5) : 1.0;
+    }
     imageStore(outputImage, texel, vec4(aoVisibility, skyVisibility, covered, debugValue));
 }
 #else
@@ -798,7 +889,7 @@ void main() {
 
     // Last frame's reservoir: the point in last frame's view (its rotation and the camera's move), then the shared reuse step.
     vec3 v = cb.reuse.w > 0.5 ? transpose(mat3(cb.prevViewToWorld)) * (p + cb.reuse.xyz) : vec3(0.0);
-    ReuseGI(texel, p, n, viewZ, bias, giTile, v, cb.reuse.w);
+    ReuseGI(texel, p, n, viewZ, bias, giTile, v, cb.reuse.w, p + cb.reuse.xyz);
 }
 #endif
 #else

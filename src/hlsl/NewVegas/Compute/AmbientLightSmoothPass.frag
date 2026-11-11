@@ -13,7 +13,9 @@ void main() {
     vec2 uv = frameUV();
     bool alongY = (pc.variant & 1u) != 0u;
     float viewZ; vec3 normal;
-    if (alongY) { vec4 c = pointLod(t_source, uv); normal = c.xyz; viewZ = c.w; }
+    // (2026-11-09 rt-review) the 16-bit float buffer cannot hold the sky's / the weapon's depth (it came back infinite): X stores at most
+    // 64000, Y reads 64000 or more as 1.0e6 (AmbientLight.fx.hlsl SmoothNormal)
+    if (alongY) { vec4 c = pointLod(t_source, uv); normal = c.xyz; viewZ = c.w >= 64000.0 ? 1.0e6 : c.w; }
     else { vec4 c = pointLod(t_source, uv); viewZ = c.x; normal = OctDecode(Unpack2(c.y)); }
     if (viewZ < DrawDistance && cb.alEdges.x > 0.5) {
         vec3 origin = PositionFromViewZ(uv, viewZ);
@@ -30,7 +32,7 @@ void main() {
             float onScreen = step(0.0, tapUV.x) * step(tapUV.x, 1.0) * step(0.0, tapUV.y) * step(tapUV.y, 1.0);
             tapUV = clamp(tapUV, 0.0, 1.0);
             float tapZ; vec3 tapNormal;
-            if (alongY) { vec4 t = pointLod(t_source, tapUV); tapNormal = t.xyz; tapZ = t.w; }
+            if (alongY) { vec4 t = pointLod(t_source, tapUV); tapNormal = t.xyz; tapZ = t.w >= 64000.0 ? 1.0e6 : t.w; }
             else { vec4 t = pointLod(t_source, tapUV); tapZ = t.x; tapNormal = OctDecode(Unpack2(t.y)); }
             float tolerance = max(viewZ * 0.001 * dist, 0.5);
             float plane = abs(dot(PositionFromViewZ(tapUV, tapZ) - origin, normal));
@@ -39,5 +41,5 @@ void main() {
         }
         normal = normalize(sum);
     }
-    o_color = alongY ? vec4(viewZ, Pack2(OctEncode(normal)), 0.0, 0.0) : vec4(normal, viewZ);
+    o_color = alongY ? vec4(viewZ, Pack2(OctEncode(normal)), 0.0, 0.0) : vec4(normal, min(viewZ, 64000.0));
 }

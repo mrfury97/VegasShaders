@@ -18,6 +18,11 @@ layout(set = 1, binding = 4) uniform texture2D t_guideAlbedo;
 // is the roughness image (.g). A reflection on a smooth surface is sharp: the taps around a pixel weigh smoothstep(0.05, 0.4, roughness)
 // (a mirror is left as the temporal pass made it), only taps of a like roughness count and the normal test is 8x stricter on smooth ones
 // (NRD ReLAX's specular lobe weights, simplified)
+// UNOFFICIAL 2026-11-09 (pt-mirrors) specular bit 2 (PTDenoiseMirrorSurface): t_guideAlbedo is the path tracer's raw specular image, whose
+// alpha is the reflected hit distance, NEGATIVE where the reflected thing stands in for a smooth metal (RtPathTrace.comp gReflAlbedo: the
+// reflected colour already divided out). Such a pixel is no longer left alone: its reflection is smoothed like a diffuse surface, over the
+// marked taps of the same mirror (depth, the 8x stricter normal test: a curved mirror's taps see other directions) whose reflected hit lies
+// at a like distance (the edges of the reflected things), with the usual brightness test. Bit 2 off: as before.
 
 layout(push_constant) uniform Push {
     vec4 params;   // x step, y depth sigma, z normal power, w value sigma
@@ -68,7 +73,10 @@ void main() {
     const float r0 = spec ? textureLod(sampler2D(t_guideFrame, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).g : 1.0;
     const float spread = spec ? smoothstep(0.05, 0.4, r0) : 1.0;
     const float normalPower = spec ? pc.params.z * mix(8.0, 1.0, spread) : pc.params.z;
-    if (spec && spread <= 0.0) { o_a = ca; o_b = cb; return; }   // (ptaaa-denoiser) a mirror: left as the temporal pass made it (no taps read)
+    // (pt-mirrors) bit 2: a marked mirror pixel (its raw hit distance < 0) is smoothed in reflection space (above)
+    const float h0 = spec && (pc.specular & 4u) != 0u ? textureLod(sampler2D(t_guideAlbedo, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a : 0.0;
+    const bool mirror = h0 < 0.0;
+    if (spec && spread <= 0.0 && !mirror) { o_a = ca; o_b = cb; return; }   // (ptaaa-denoiser) a mirror: left as the temporal pass made it (no taps read)
     // (ptaaa-denoiser) the history fix: 1 at one frame of history, 0 from historyFix + 1 frames on
     const float fresh = pc.historyFix > 0.0 ? clamp((pc.historyFix + 1.0 - ca.a) / pc.historyFix, 0.0, 1.0) : 0.0;
 
@@ -87,7 +95,13 @@ void main() {
             w *= pow(max(dot(n, tn), 0.0), normalPower);
             if (spec && (x != 0 || y != 0)) {
                 const float rt = textureLod(sampler2D(t_guideFrame, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).g;
-                w *= spread * exp(-abs(rt - r0) / (0.05 + 0.25 * r0));
+                w *= (mirror ? 1.0 : spread) * exp(-abs(rt - r0) / (0.05 + 0.25 * r0));
+                if (mirror) {   // (pt-mirrors) only marked taps, their reflected hit at a like distance
+                    const float ht = textureLod(sampler2D(t_guideAlbedo, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).a;
+                    // (a hit not known on either side, -0.5: no hit test; one known, one not: no tap)
+                    w = !(ht < 0.0) ? 0.0 : (ht > -0.9 || h0 > -0.9) ? (ht > -0.9 && h0 > -0.9 ? w : 0.0)
+                        : w * exp(-abs(ht - h0) / (0.03 * -h0 * pc.params.x * length(vec2(x, y)) + 2.0));
+                }
             }
             float sigmaT = valueSigma;
             if (symmetric) {

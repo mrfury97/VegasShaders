@@ -10,6 +10,7 @@
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (the Vulkan passes' motion input)
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the history watch (HistoryProbe)
 #include "../../core/SessionLog.h"
+#include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-09 BackboneReset (the shared history rule)
 
 void TAAEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_TAAData", &Constants.Data);
@@ -61,6 +62,9 @@ void TAAEffect::UpdateSettings() {
 	// 0 is off for both, which is also what a missing key reads as.
 	Settings.Sharpness = std::clamp(TheSettingManager->GetSettingF("Shaders.TAA.Main", "Sharpness"), 0.0f, 1.0f);
 	Settings.MipBias = std::clamp(TheSettingManager->GetSettingF("Shaders.TAA.Main", "MipBias"), -1.5f, 0.0f);
+
+	// UNOFFICIAL 2026-11-09: the history follows TemporalBackbone::HistoryValid (default on; a missing key reads as on).
+	{ SettingManager::Configuration::ConfigNode node; Settings.BackboneReset = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.Main", "BackboneReset") || node.BoolValue; }
 
 	// UNOFFICIAL 2026-10-26 (NVR DXVK): FSR 2 as the resolve. All three read as 0 (off) when missing.
 	// UNOFFICIAL 2026-10-27 (user: "give dlss its own tab like fsr does ... toggling one disables the other"): [Shaders.TAA.DLSS]
@@ -524,6 +528,14 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 
 	// A new cell means a loading screen or a teleport: last frame's history shows another place.
 	if (TheShaderManager->GameState.isCameraCut) { if (historyValid) SessionLog::HistoryReset("TAA", "camera cut"); historyValid = false; }
+	// UNOFFICIAL 2026-11-09 ([Shaders.TAA.Main] BackboneReset, roadmap track 1 step 1): and whenever the shared history rule says last
+	// frame is not worth reprojecting (TemporalBackbone::HistoryValid: a jump above 512 units inside one cell -- VATS, the kill camera, a
+	// teleport --, a frame gap or a hitch above 0.5 s, another render size / RenderScale / upscaler), as every other temporal effect does.
+	// Off (or SharedNoise off): only the cell-change cut above, as before.
+	if (Settings.BackboneReset && TemporalBackbone::Shared() && !TemporalBackbone::HistoryValid()) {
+		if (historyValid) SessionLog::HistoryReset("TAA", "the shared history rule (jump, gap or size change)");
+		historyValid = false;
+	}
 
 	// With no usable history, make last frame's camera this frame's. The reprojection becomes the
 	// identity, and the shader ignores the history anyway because Data.z is 0.

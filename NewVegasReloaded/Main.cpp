@@ -258,6 +258,10 @@ extern "C" {
 		TheSettingManager->LoadSettings();
 		LoadStep = "logging the changed settings";
 		SessionLog::OnSettingsLoaded();	// UNOFFICIAL 2026-11-01: every setting that is not its default
+		if (!nvse->IsEditor) {	// UNOFFICIAL 2026-11-09 (DxvkLoader.h): before the game makes its Direct3D; a missing key reads as on
+			SettingManager::Configuration::ConfigNode node;
+			DxvkLoader::DescriptorHeapOff(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkDescriptorHeapOff") || node.BoolValue);
+		}
 		LoadStep = "reading the presets";
 		PresetManager::Initialize();
 		LoadStep = "installing the hooks";

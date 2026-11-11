@@ -790,6 +790,7 @@ public:
 		kMenuType_Surgery = 0x41E, kMenuType_Hacking = 0x41F,
 		kMenuType_VATS = 0x420, kMenuType_Computers = 0x421, kMenuType_SlotMachine = 0x438,
 		kMenuType_Blackjack = 0x439, kMenuType_Roulette = 0x43A, kMenuType_Caravan = 0x43B,
+		kMenuType_RaceSex = 0x40C, kMenuType_CharGen = 0x418,	// (2026-11-09: xNVSE's ids; the menus that draw the player's head themselves)
 	};
 
 	NVR_VSLOT(0);
@@ -987,7 +988,10 @@ namespace Pointers {	// raw game globals and functions
 
 // Bit numbers for BSShaderProperty::GetFlag (0..31 in ulFlags[0], 32..63 in ulFlags[1]).
 enum BSShaderPropertyFlag {
+	BSSP_ENVIRONMENT_MAPPING = 7, BSSP_FACEGEN = 10, BSSP_HAIR = 18,	// (10 / 18, 2026-11-09: FaceGen heads and hair, as the NIF format names the flag bits)
+	// BSSP_ENVIRONMENT_MAPPING:	// the env pass (0x248-0x24B); its cube is texture slot 4, its mask (the "_m" texture) slot 5
 	BSSP_REFRACTION = 15, BSSP_FIRE_REFRACTION = 16, BSSP_EYE_ENVIRONMENT_MAPPING = 17,
+	BSSP_WINDOW_ENVIRONMENT_MAPPING = 21,
 	BSSP_DECAL = 26, BSSP_DYNAMIC_DECAL = 27,
 };
 
@@ -1005,7 +1009,8 @@ public:
 	UInt32		ulFlags[2];			// +0x20 BSShaderFlags, BSShaderFlags2
 	float		fAlpha;				// +0x28
 	float		fFadeAlpha;			// +0x2C
-	UInt32		pad30[3];
+	float		fEnvMapScale;		// +0x30 the env-map strength (the env passes' c27.z; decomp m_fAmbientReflectionScale, ApplyFogAndAlpha 0xB795B0)
+	UInt32		pad34[2];
 	UInt32		pRenderPassArray;	// +0x3C
 	UInt32		pad40[6];
 	UInt32		uiShaderIndex;		// +0x58 the shader definition (1 shadow light, 0xF parallax, 0x1D lighting30, ...)

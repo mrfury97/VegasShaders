@@ -84,6 +84,8 @@ public:
 	// What the last frame's low-resolution passes left for this one: their camera (to find last frame's bounce at the same
 	// spot), and whether their final result (low buffer 0) and their gather (history buffer historyIndex) can be used.
 	D3DXMATRIX			lastView, lastInvView, lastProj;
+	D3DXVECTOR2			lastJitter = D3DXVECTOR2(0.0f, 0.0f);	// UNOFFICIAL 2026-11-09 TemporalJitterFix: the depth jitter of the frame lastView is
+	bool				jitterFix = true;	// UNOFFICIAL 2026-11-09 TemporalJitterFix ([Shaders.BounceLight.Main])
 	bool				lastValid = false;
 	bool				lastQuarter = false;
 	bool				historyValid = false;

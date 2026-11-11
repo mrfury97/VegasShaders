@@ -57,6 +57,11 @@ void main() {
             }
         }
         vec2 rt = weight > 0.0 ? sum / weight : texelFetch(t_rt, centre, 0).yz;   // x sky visibility, y covered (a share now)
+        // UNOFFICIAL 2026-11-08 (alsky) SkySoftEdges (cb.sky5.z, [Shaders.AmbientOcclusion.RT]): open sky over the last quarter before
+        // endFade, where this pass, the trace's input and the composites stop. The ortho version is open there already (its map ends
+        // long before); the traced one is not, so its factor stopped with a hard line at 8000 units. 0: as before.
+        float farOpen = cb.sky5.z > 0.5 ? smoothstep(0.75 * endFade, endFade, depth) : 0.0;
+        rt = mix(rt, vec2(1.0, 0.0), farOpen);
         float visibility = saturate(rt.x * cb.sky3.y);
         result = SkyFactor(visibility, n, sunMask, rt.y);
         skyVisibility = visibility;

@@ -17,7 +17,7 @@
 class EffectRecord;
 
 namespace PixelInspector {
-	enum Kind { Color = 0, Depth = 1, Normal = 2, Buffer = 3 };
+	enum Kind { Color = 0, Depth = 1, Normal = 2, Buffer = 3, RtInput = 4 };	// RtInput (2026-11-09): NVR_RTAOInput (x view distance, y the packed world normal)
 
 	extern bool Active;	// this frame records stages (set once a frame by EndFrame)
 

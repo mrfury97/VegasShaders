@@ -3209,6 +3209,19 @@ bool RtCore::AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteM
 	NvrRtFrame* f = TheCore.record;
 	if (!TheCore.recording || !f || f->passCount >= NVR_RT_MAX_PASSES || Shader < 0 || ImageCount > NVR_RT_PASS_IMAGES_MAX || ConstantsSize > NVR_RT_PASS_CONSTANTS)
 		return false;
+	// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md R3) a shader the helper could not load or build (its
+	// shaderFailures bit: a missing .spv, a driver that refuses the pipeline). The helper skips such a pass without a word to the game,
+	// which went on to copy out and use an image nothing had written (all shadow, or last frame's). Refused here instead, so the effect
+	// takes the path it takes for any failed AddPass (its own passes); logged once per shader.
+	if (TheCore.shared && Shader < (int)NVR_RT_MAX_SHADERS && (TheCore.shared->shaderFailures & (1u << Shader))) {
+		static uint32_t logged = 0;
+		if (!(logged & (1u << Shader))) {
+			logged |= 1u << Shader;
+			Logger::Log("[WARNING] UNOFFICIAL Vegas Shaders DXVK: RT helper could not load the trace shader %s (Compute\\Rt\\%s.spv; the helper's log says why): its passes are not run, the effect that asked falls back.",
+				Shader < (int)TheCore.shaders.size() ? TheCore.shaders[Shader].c_str() : "?", Shader < (int)TheCore.shaders.size() ? TheCore.shaders[Shader].c_str() : "?");
+		}
+		return false;
+	}
 	NvrRtPass& p = f->passes[f->passCount];
 	memset(&p, 0, offsetof(NvrRtPass, constants));
 	p.shader = (uint32_t)Shader;

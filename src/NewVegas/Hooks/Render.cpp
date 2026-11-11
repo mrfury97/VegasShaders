@@ -17,6 +17,7 @@
 #include "../../core/ShaderWarmUp.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections (RenderBlendedHook)
 #include "../../core/ShaderWarmUp2.h"
+#include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds)
 #include "../../core/IOWorker2.h"	// UNOFFICIAL 2026-10-20: second loading thread (its once-a-minute log line)
 #include "../../core/CpuSplit.h"	// UNOFFICIAL 2026-10-21: game update split (F10 profiling only)
 #include "../../core/ConstantFilter.h"
@@ -62,6 +63,7 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/LandLamps.h"	// UNOFFICIAL 2026-10-30 LandAllLamps: the land lit by all of its own lamps (plan C)
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04 SkyCoverage: the game's MSAA, exact sky shares
+#include "../../core/WeaponMask.h"	// UNOFFICIAL 2026-11-09 WeaponMask: the weapon's own pixels of the first-person model (RT weapon reflections, not the hands)
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow in the surface shaders
 #include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (LOD only, per draw)
 
@@ -670,6 +672,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	NvrDepthWarningTick();	// UNOFFICIAL 2026-10-27: stock DXVK on NVIDIA gives NVR no depth: said once on screen (RenderManager.cpp)
 #if NVR_TEST_TOOLS
 	ShaderWarmUp2::FrameTick(SettingShots::Running ? (int)SettingShots::Index : -1);	// UNOFFICIAL ShaderWarmUp2: frame times + new setups (shot index: picture frames)
+	GrassTiming::OnFrame(SettingShots::Running ? (int)SettingShots::Index : -1);	// UNOFFICIAL 2026-11-09: the game's grass CPU time (GrassTiming key)
 #else
 	ShaderWarmUp2::FrameTick(-1);	// UNOFFICIAL ShaderWarmUp2: frame times + new setups
 #endif
@@ -1821,6 +1824,17 @@ namespace RmaosDraw {
 	static float FadeSeconds = 0.0f;
 	static double FrameNowMs = 0.0;
 	static int Loaded = 0;
+	// UNOFFICIAL 2026-11-09 FromGameData ([Shaders.PBR.EnvMaps] FromGameData, restart to compile it in, then live; Includes/Object.hlsl
+	// NVR_EnvData): per object, pixel c94 = { 1 on, the env-map strength (0: no Environment_Mapping flag, or an eye / window), 1 = its "_m"
+	// mask (texture slot 5) is bound on s2, the NoMask share }. Eyes have their own variant and windows are glass: neither is made metal.
+	namespace EnvData {
+		static bool Checked = false, Compiled = false, Live = false;
+		static float NoMask = 1.0f;
+		static float Amount = 0.5f;	// UNOFFICIAL 2026-11-09 FromGameDataAmount: the flag's strength x this (the game's env pass ADDS a reflection, it does not turn the surface into metal)
+		static bool Dirty = false;	// c94 holds an object's value: AfterObject puts "no flag" back, so a draw that never comes through ForObject inherits nothing
+		static unsigned long long Flagged = 0, Masked = 0, Bodies = 0;
+		static std::unordered_set<std::string> Seen;	// (log) each flagged or left-out geometry once, at most 60 a session
+	}
 
 	static void Worker() {
 		for (;;) {
@@ -1878,6 +1892,15 @@ namespace RmaosDraw {
 	// objects are seen changing their look when theirs comes in. 0 = two a frame, as before.
 	static void Upload() {
 		Current[0] = -1.0f;
+		if (EnvData::Compiled) {
+			EnvData::Live = TheSettingManager->GetSettingI("Shaders.PBR.EnvMaps", "FromGameData") != 0;
+			EnvData::NoMask = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.EnvMaps", "FromGameDataNoMask"), 0.0f, 1.0f);
+			{	// (a missing key: 0.5)
+				SettingManager::Configuration::ConfigNode node;
+				EnvData::Amount = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.EnvMaps", "FromGameDataAmount") ?
+					std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.EnvMaps", "FromGameDataAmount"), 0.0f, 1.0f) : 0.5f;
+			}
+		}
 #if NVR_TEST_TOOLS
 		ReloadTest();
 #endif
@@ -1963,6 +1986,9 @@ namespace RmaosDraw {
 		if (!Checked) {
 			Checked = true;
 			Compiled = TheSettingManager->GetSettingI("Shaders.PBR.Rmaos", "Enabled") != 0;	// as ShaderRecord compiled it
+			EnvData::Compiled = Compiled && TheSettingManager->GetSettingI("Shaders.PBR.EnvMaps", "FromGameData") != 0;	// (ShaderRecord BuildDefines)
+			EnvData::Live = EnvData::Compiled;
+			if (EnvData::Compiled) Logger::Log("UNOFFICIAL FromGameData: metal from the game's env-map data (flag, strength, _m mask) compiled into the object shaders");
 		}
 		if (!Compiled) return;
 		PBRShaders* pbr = TheShaderManager->Shaders.PBR;
@@ -2001,7 +2027,56 @@ namespace RmaosDraw {
 			map->ReflGeneration = ReflMaterial::OverrideGeneration;
 		}
 		ReflMaterial::DrawRough = on ? map->ReflRough : -1.0f;
-		Send(values, on ? map->Texture : nullptr);
+		// UNOFFICIAL 2026-11-09 FromGameData: the object's env-map data (c94) and, where it has a mask and no _rmaos map, the mask on s2
+		IDirect3DBaseTexture9* envMask = nullptr;
+		if (EnvData::Compiled) {
+			float env[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+			if (EnvData::Live) {
+				env[0] = 1.0f;
+				env[3] = EnvData::NoMask;
+				if ((vtable == 0x10AE0D0 || vtable == 0x10B9910) && !(property->ulFlags[0] & BSShaderProperty::Landscape)) {
+					const UInt32 flags = property->ulFlags[0];
+					// UNOFFICIAL 2026-11-09 (a tester's path-traced character: head and hair came out as polished gold with FromGameData on):
+					// hair and FaceGen heads are never made metal by the flag (hair meshes carry it for a faint sheen; with no mask the
+					// whole surface took the flag's full strength), and the flag's strength is scaled (FromGameDataAmount)
+					const bool body = (flags & ((1u << BSSP_FACEGEN) | (1u << BSSP_HAIR))) != 0;
+					const bool flagged = (flags & (1u << BSSP_ENVIRONMENT_MAPPING)) && !body &&
+						!(flags & ((1u << BSSP_EYE_ENVIRONMENT_MAPPING) | (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING)));
+					if (body && (flags & (1u << BSSP_ENVIRONMENT_MAPPING))) {
+						EnvData::Bodies++;
+						const std::string name = geometry && geometry->m_pcName ? geometry->m_pcName : "?";
+						if (EnvData::Seen.size() < 60 && EnvData::Seen.insert("b:" + name).second)
+							Logger::Log("UNOFFICIAL FromGameData: '%s' carries the env-map flag but is %s: left out (flags %08X, strength %.2f)", name.c_str(),
+								(flags & (1u << BSSP_HAIR)) ? "hair" : "a FaceGen head", flags, property->fEnvMapScale);
+					}
+					if (flagged) {
+						env[1] = std::clamp(property->fEnvMapScale, 0.0f, 4.0f) * EnvData::Amount;
+						NiSourceTexture** mask = ((BSShaderPPLightingProperty*)property)->ppTextures[5];
+						if (!on && mask && *mask && (*mask)->rendererData) envMask = (*mask)->rendererData->dTexture;
+						env[2] = envMask ? 1.0f : 0.0f;
+						EnvData::Flagged++;
+						if (envMask) EnvData::Masked++;
+						if (EnvData::Seen.size() < 60 && EnvData::Seen.insert(std::string(geometry && geometry->m_pcName ? geometry->m_pcName : "?")).second)
+							Logger::Log("UNOFFICIAL FromGameData: env-mapped object %llu '%s': strength %.2f, %s (%llu with a mask so far)", EnvData::Flagged,
+								geometry && geometry->m_pcName ? geometry->m_pcName : "?", env[1], envMask ? "its _m mask" : on ? "its _rmaos map decides" : "no mask",
+								EnvData::Masked);
+					}
+				}
+			}
+			// every draw: the land shaders' bind and the effects drawn between scenes write c94 too, so a cached value could be stale
+			TheRenderManager->device->SetPixelShaderConstantF(94, env, 1);
+			EnvData::Dirty = env[1] > 0.0f;
+		}
+		Send(values, on ? map->Texture : (IDirect3DTexture9*)envMask);
+	}
+
+	// UNOFFICIAL 2026-11-09 FromGameData: after the object's draw. A draw that does not come through ForObject (the game's sorted blended
+	// list, another plugin's draws) read whatever the last object left in c94: one object's metal on the next. Put "on, no flag" back.
+	static void AfterObject() {
+		if (!EnvData::Compiled || !EnvData::Dirty) return;
+		const float env[4] = { EnvData::Live ? 1.0f : 0.0f, 0.0f, 0.0f, EnvData::NoMask };
+		TheRenderManager->device->SetPixelShaderConstantF(94, env, 1);
+		EnvData::Dirty = false;
 	}
 
 	int LoadedCount() { return Loaded; }
@@ -2854,29 +2929,180 @@ namespace GameEyes {
 		}
 	}
 
+	static bool Eye = false;		// this draw: an eye record is on the device
+	static bool EyeAtBind = false;	// (EYE PROBE) the record went on at a bind inside the draw
+	static bool EyeWanted = false;	// this draw is an eye's, with the variant on (OnBind tries again when the game binds inside it)
+	// UNOFFICIAL 2026-11-09 EyeProbe (open report "eyes of default races black"): every eye-flagged draw, whatever the switches, logged once
+	// per distinct pass + shader pair (at most 40 lines a session) AFTER it drew, so the line shows what the draw really used: the pass,
+	// the bound pair and whether NVR's or the game's handles were on the device, the blend state, LinearScene's state, the texture set.
+	static const PointShadowForward::RenderPassView* ProbePass = nullptr;
+	static void ProbeLog() {
+		const PointShadowForward::RenderPassView* pass = ProbePass;
+		ProbePass = nullptr;
+		static std::unordered_set<std::string> seen;
+		if (!pass || !pass->geometry || seen.size() >= 40) return;
+		IDirect3DDevice9* device = TheRenderManager->device;
+		NiD3DPass* bound = *(NiD3DPass**)0x0126F74C;
+		NiD3DPixelShaderEx* ps = bound ? (NiD3DPixelShaderEx*)bound->PixelShader : nullptr;
+		NiD3DVertexShaderEx* vs = bound ? (NiD3DVertexShaderEx*)bound->VertexShader : nullptr;
+		char key[160];
+		sprintf_s(key, "%X %s %s %d %.40s %u", (unsigned)pass->passEnum, vs && vs->Name ? vs->Name : "?", ps && ps->Name ? ps->Name : "?", (int)ShaderSplit::CurrentContext,
+			pass->geometry->m_pcName ? pass->geometry->m_pcName : "?", (unsigned)pass->numLights);
+		if (!seen.insert(key).second) return;
+		IDirect3DPixelShader9* onPS = nullptr; IDirect3DVertexShader9* onVS = nullptr;
+		device->GetPixelShader(&onPS); device->GetVertexShader(&onVS);
+		auto who = [](const void* on, const void* nvr, const void* game) { return !on ? "none" : on == nvr && on != game ? "NVR" : on == game ? "game" : "other"; };
+		const char* psWho = ps ? who(onPS, ps->ShaderHandle, ps->ShaderHandleBackup) : "?";
+		const char* vsWho = vs ? who(onVS, vs->ShaderHandle, vs->ShaderHandleBackup) : "?";
+		if (onPS) onPS->Release();
+		if (onVS) onVS->Release();
+		DWORD blend = 0, src = 0, dst = 0, test = 0, zwrite = 0, mask = 0;
+		device->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend); device->GetRenderState(D3DRS_SRCBLEND, &src); device->GetRenderState(D3DRS_DESTBLEND, &dst);
+		device->GetRenderState(D3DRS_ALPHATESTENABLE, &test); device->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite); device->GetRenderState(D3DRS_COLORWRITEENABLE, &mask);
+		NiGeometry* geometry = (NiGeometry*)pass->geometry;
+		BSShaderProperty* prop = (BSShaderProperty*)geometry->GetProperty(NiProperty::kType_Shade);
+		std::string textures;
+		if (prop && prop->IsLightingProperty()) {
+			BSShaderPPLightingProperty* lighting = (BSShaderPPLightingProperty*)prop;
+			for (int i = 0; i < 6; i++) {
+				const NiSourceTexture* t = lighting->ppTextures[i] ? lighting->ppTextures[i][0] : nullptr;
+				textures += " [" + std::to_string(i) + "] " + (t && t->ddsPath1 ? t->ddsPath1 : "-");
+			}
+		}
+		const char* passName = Pointers::Functions::GetPassDescription(pass->passEnum);
+		Logger::Log("EYE PROBE: pass 0x%X (%s) context %d '%s'%s: eye variant %s; %s %s + %s %s; blend %lu src %lu dst %lu, alpha test %lu, z write %lu, write mask %lX; lamps %u; "
+			"LinearScene live %d linear-now %d; flags %08X %08X; shader index 0x%X; textures%s", (unsigned)pass->passEnum, passName ? passName : "?",
+			(int)ShaderSplit::CurrentContext, geometry->m_pcName ? geometry->m_pcName : "?", geometry->skinInstance ? " (skinned)" : "",
+			Eye ? (EyeAtBind ? "on (at the bind inside the draw)" : "on (before the draw)") : EyeWanted ? "WANTED, not applied" : "off",
+			vs && vs->Name ? vs->Name : "?", vsWho, ps && ps->Name ? ps->Name : "?", psWho, blend, src, dst, test, zwrite, mask, (unsigned)pass->numLights,
+			LinearScene::Live ? 1 : 0, LinearScene::Linear ? 1 : 0, prop ? prop->ulFlags[0] : 0, prop ? prop->ulFlags[1] : 0, prop ? prop->uiShaderIndex : 0,
+			textures.c_str());
+	}
+
+	// UNOFFICIAL 2026-11-09 the eye variant (ObjectTemplate.hlsl NVR_EYE): a record of the bound pixel shader made from the same source with
+	// NVR_EYE and no shadow code, made the first time an eye draws with that shader (cached on disk under Shaders\...\Eyes\ like any record;
+	// in practice one or two shaders, SLS2031 above all). Only ObjectTemplate shaders have one; nullptr = none (another template, or it did
+	// not compile: those eyes keep the old way, logged once).
+	static std::unordered_map<const void*, ShaderRecordPixel*> EyeRecords;
+	static NiD3DPixelShaderEx* EyePS = nullptr;
+	static unsigned long long EyeDrawCount = 0;
+
+	static ShaderRecordPixel* RecordFor(NiD3DPixelShaderEx* ps) {
+		auto known = EyeRecords.find(ps);
+		if (known != EyeRecords.end()) return known->second;
+		ShaderRecordPixel* record = nullptr;
+		ShaderCollection* family = ps->Name ? TheShaderManager->GetShaderCollection(ps->Name) : nullptr;
+		if (family) {
+			ShaderTemplate tmpl = family->GetTemplate(ps->Name);
+			if (tmpl.Name && !strcmp(tmpl.Name, "ObjectTemplate")) {
+				static D3DXMACRO eye[] = { { "NVR_EYE", "1" }, { "FORWARD_SHADOWS", "0" }, { "INTERIOR_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" },
+					{ "CONTACT_HARDENING", "0" }, { NULL, NULL } };
+				const double start = CpuTimer::NowMs();
+				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(ps->Name, NULL, tmpl, "Eyes\\", eye);
+				// its SetCT runs inside the draw, after the game bound the pass's textures: it must not empty the stages (a pixel record's
+				// SetCT clears all 16 at a normal bind). The second eye drawn had no colour texture, so came out black (warm slot, 11-09).
+				if (record) record->ClearSamplers = false;
+				Logger::Log("UNOFFICIAL eye variant: %s %s (%.0f ms)", ps->Name, record ? "has its eye record (eyes: ambient + wrapped diffuse, no shadows, no metal)" :
+					"did not load an eye record: its eyes keep the old way", CpuTimer::NowMs() - start);
+			}
+		}
+		EyeRecords[ps] = record;
+		return record;
+	}
+
+	// The eye record of the bound pixel shader on the device, its constants set (its own table; pinned registers are the same as the
+	// shader's own record's). false: not an NVR-replaced shader, or no record.
+	static bool ApplyEye(NiD3DPixelShaderEx* ps) {
+		if (!ps || !ps->ShaderHandleBackup || ps->ShaderHandle == ps->ShaderHandleBackup) return false;
+		ShaderRecordPixel* record = RecordFor(ps);
+		if (!record || !record->ShaderHandle) return false;
+		record->SetCT();
+		TheRenderManager->device->SetPixelShader(record->ShaderHandle);
+		EyePS = ps;
+		Eye = true;
+		return true;
+	}
+
 	static void Before(const PointShadowForward::RenderPassView* pass) {
 		Active = false;
+		Eye = false;
+		EyeWanted = false;
+		EyeAtBind = false;
+		ProbePass = nullptr;
+		if (!pass || !pass->geometry) return;
+		const BSShaderProperty* prop = static_cast<const BSShaderProperty*>(((NiGeometry*)pass->geometry)->GetProperty(NiProperty::kType_Shade));
+		const bool eye = prop && prop->GetFlag(BSSP_EYE_ENVIRONMENT_MAPPING);
+		if (eye) ProbePass = pass;
+		// UNOFFICIAL 2026-11-09 EnvProbe: env-mapped objects (BSS1 Environment_Mapping 0x80), each texture set once (at most 60 a session):
+		// the flag words, the cube and mask slots, the property's floats past the textures (to find the env-map scale)
+		if (prop && (prop->ulFlags[0] & 0x80) && const_cast<BSShaderProperty*>(prop)->IsLightingProperty()) {
+			static std::unordered_set<const void*> seenSets;
+			const BSShaderPPLightingProperty* lighting = (const BSShaderPPLightingProperty*)prop;
+			const NiSourceTexture* d = lighting->ppTextures[0] ? lighting->ppTextures[0][0] : nullptr;
+			if (d && seenSets.size() < 60 && seenSets.insert(d).second) {
+				const NiSourceTexture* cube = lighting->ppTextures[4] ? lighting->ppTextures[4][0] : nullptr;
+				const NiSourceTexture* m = lighting->ppTextures[5] ? lighting->ppTextures[5][0] : nullptr;
+				const float* f = (const float*)((const char*)prop + 0xC4);
+				Logger::Log("ENV PROBE: pass 0x%X '%s' flags %08X %08X (eye %d, window %d) [0] %s [4] %s [5] %s; +C4..: %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g %g",
+					(unsigned)pass->passEnum, pass->geometry->m_pcName ? pass->geometry->m_pcName : "?", prop->ulFlags[0], prop->ulFlags[1], eye ? 1 : 0,
+					(prop->ulFlags[0] & 0x200000) ? 1 : 0, d->ddsPath1 ? d->ddsPath1 : "-", cube && cube->ddsPath1 ? cube->ddsPath1 : "-", m && m->ddsPath1 ? m->ddsPath1 : "-",
+					f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[8], f[9], f[10], f[11], f[12], f[13], f[14], f[15]);
+			}
+		}
+		if (!GameShaderEyes || !eye) return;
+		NiD3DPass* bound = *(NiD3DPass**)0x0126F74C;
+		// UNOFFICIAL 2026-11-09: the eye variant (EyeShaderOld false, the default). Where it has no record: the old way below.
+		if (!EyeShaderOld) {
+			EyeWanted = true;
+			if (bound && ApplyEye((NiD3DPixelShaderEx*)bound->PixelShader)) {
+				if (++EyeDrawCount == 1) Logger::Log("UNOFFICIAL eye variant: the first eye drawn with it ('%s', %s)",
+					pass->geometry->m_pcName ? pass->geometry->m_pcName : "?", EyePS->Name ? EyePS->Name : "?");
+				return;
+			}
+		}
 		// UNOFFICIAL 2026-10-28: with LinearScene on, the eyes keep NVR's shader (a game shader there would turn the whole frame back to the
 		// stored curve and forth again for every eye).
-		if (!GameShaderEyes || LinearScene::Live || !pass || !pass->geometry) return;
-		const BSShaderProperty* prop = static_cast<const BSShaderProperty*>(((NiGeometry*)pass->geometry)->GetProperty(NiProperty::kType_Shade));
-		if (!prop || !prop->GetFlag(BSSP_EYE_ENVIRONMENT_MAPPING)) return;
+		if (LinearScene::Live) return;
 		Active = true;
-		NiD3DPass* bound = *(NiD3DPass**)0x0126F74C;
 		if (bound) Apply((NiD3DPixelShaderEx*)bound->PixelShader, (NiD3DVertexShaderEx*)bound->VertexShader);
 	}
 
-	static void OnBind(NiD3DPixelShaderEx* ps, NiD3DVertexShaderEx* vs) { if (Active) Apply(ps, vs); }
+	static void OnBind(NiD3DPixelShaderEx* ps, NiD3DVertexShaderEx* vs) {
+		if (EyeWanted && ApplyEye(ps)) { EyeAtBind = true; return; }
+		if (Active) Apply(ps, vs);
+	}
 
 	static void After() {
+		if (ProbePass) ProbeLog();
+		IDirect3DDevice9* device = TheRenderManager->device;
+		if (Eye) {
+			// NVR's own handle back, and its record's constants (the eye record's table set them last)
+			if (EyePS) {
+				device->SetPixelShader(EyePS->ShaderHandle);
+				for (int v = ShaderRecordType::Default; v <= ShaderRecordType::Interior; v++) {
+					ShaderRecordPixel* own = (ShaderRecordPixel*)EyePS->ShaderProg[v];
+					if (own && own->ShaderHandle == EyePS->ShaderHandle) {	// (constants only: the stages hold the game's textures for the next draws)
+						const bool clear = own->ClearSamplers;
+						own->ClearSamplers = false;
+						own->SetCT();
+						own->ClearSamplers = clear;
+						break;
+					}
+				}
+			}
+			Eye = false; EyePS = nullptr;
+		}
+		EyeWanted = false;
 		if (!Active) return;
 		Active = false;
-		IDirect3DDevice9* device = TheRenderManager->device;
 		if (PS) device->SetPixelShader(PS->ShaderHandle);
 		if (VS) device->SetVertexShader(VS->ShaderHandle);
 		PS = nullptr; VS = nullptr;
 	}
 }
+
+// (ShaderManager::ReloadShaders, the warm slot's reloadshaders) the eye records are made again from the .hlsl on their next use
+void GameEyesForgetRecords() { GameEyes::EyeRecords.clear(); }
 
 void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	BarrelHeat::Clear();
@@ -2956,6 +3182,24 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 			announced = true;
 			Logger::Log("UNOFFICIAL skin outside the world scene (%s + %s, e.g. the character creation menu): drawn with the game's own skin shaders",
 				VertexShader && VertexShader->Name ? VertexShader->Name : "?", PixelShader->Name);
+		}
+	}
+	// UNOFFICIAL 2026-11-09 [Shaders.PBR.Main] GameShadersInMenus (open report: "PBR Shader makes CharGen menu dark and eyes of default races black"):
+	// the rule above covers SKIN* only, so the menu's hair, eyes, teeth and clothes still drew with the mod's object shaders, which take the
+	// WORLD's data: the sun shadow at a position rebuilt with the world camera, the frame's lamp table (built from the world scene's lights:
+	// the menu's own lights are not in it, ManyLamps skips them), ambient and light scales made for a frame the tone chain finishes. While
+	// the character creation / face menu is open, everything it draws outside the world scene takes the game's own shaders, as a pair
+	// (as GameShadersInReflections above). Other 'Outside' pictures (a scope lens) keep the mod's.
+	if (GameShadersInMenus && ShaderSplit::CurrentContext == ShaderSplit::Outside && TheShaderManager->GameState.FaceMenuIsOn) {
+		const bool nvrPixel = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
+		const bool nvrVertex = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
+		if (nvrPixel) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
+		if (nvrVertex) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
+		static bool announcedMenu = false;
+		if ((nvrPixel || nvrVertex) && !announcedMenu) {
+			announcedMenu = true;
+			Logger::Log("UNOFFICIAL GameShadersInMenus: the character creation menu's 3D view is drawn with the game's own shaders (first: %s + %s)",
+				VertexShader && VertexShader->Name ? VertexShader->Name : "?", PixelShader && PixelShader->Name ? PixelShader->Name : "?");
 		}
 	}
 	// UNOFFICIAL 2026-10-27 [Shaders.PBR.Main] GameShaderEyes (user: "pbr seems to apply to eyeballs and can darken them in some areas. it
@@ -3250,6 +3494,9 @@ static bool PlantPass(NiGeometry* geometry) {
 	const NiSourceTexture* diffuse = textures ? *textures : nullptr;
 	if (!diffuse) return false;
 	auto plant = PlantWind::ByTexture.find(diffuse);
+	// UNOFFICIAL 2026-11-09 (sweep): the verdict is kept by the texture's address; a texture freed on a cell change and another made at the
+	// same address took the old one's (a wall written as a plant). The stored path is compared, as PlantWind's own readers do.
+	if (plant != PlantWind::ByTexture.end() && diffuse->ddsPath1 && plant->second.first != diffuse->ddsPath1) { PlantWind::ByTexture.erase(plant); plant = PlantWind::ByTexture.end(); }
 	if (plant == PlantWind::ByTexture.end()) {
 		if (!diffuse->ddsPath1) return false;
 		if (PlantWind::ByTexture.size() >= 4096) PlantWind::ByTexture.clear();
@@ -3395,6 +3642,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	DisplaceHeight::Geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-11-01 SameHeight
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	AlphaHash::AfterPass(TheRenderManager->device);
 	FlashlightLamp::AfterPass();	// UNOFFICIAL 2026-11-04 the flashlight's game lamp back to its own dimmer
 	EnvLightFade::AfterPass();
@@ -3471,6 +3719,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
+	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	if (ShaderSplit::CurrentContext == ShaderSplit::World)	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene (core/RtHairTint.h)
 		RtHairTint::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, TheRenderManager->device);
 	AlphaHash::AfterPass(TheRenderManager->device);
@@ -3643,7 +3892,10 @@ namespace MaterialDraw {
 		const Current c = Now();
 		ReflMaterial::DrawState s;
 		ReflMaterial::DrawBegin(device, true, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
+		WeaponMask::DrawState weaponTag;	// UNOFFICIAL 2026-11-09 (core/WeaponMask.h): a first-person draw tags the stencil (a skinned one: the arms, never the gun)
+		if (c.firstPerson) WeaponMask::DrawBegin(device, c.pass ? c.pass->geometry : nullptr, weaponTag);
 		PartitionNext[Site](renderer, edx, buffer, partition, unused);
+		WeaponMask::DrawEnd(device, weaponTag);
 		ReflMaterial::DrawEnd(device, s);
 		if (c.world && c.pass) RtHairTint::NoteHairDraw(c.pass->geometry, c.pixelShader, device);
 	}
@@ -3653,7 +3905,10 @@ namespace MaterialDraw {
 		const Current c = Now();
 		ReflMaterial::DrawState s;
 		ReflMaterial::DrawBegin(device, false, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
+		WeaponMask::DrawState weaponTag;	// UNOFFICIAL 2026-11-09 (core/WeaponMask.h): a first-person draw tags the stencil (the gun's: 1, the rest: 0)
+		if (c.firstPerson) WeaponMask::DrawBegin(device, geometry, weaponTag);
 		StillNext[Slot](renderer, edx, geometry);
+		WeaponMask::DrawEnd(device, weaponTag);
 		ReflMaterial::DrawEnd(device, s);
 		// (2026-11-08 perf-reflfix4) the rigid hair, beards and brows draw HERE (the vanilla hair NIFs hold no skin instance): its c2, noted as
 		// a fallback and a cross-check of the property's tint (RtHairTint.h; RtCore reads the property itself)
@@ -3664,7 +3919,9 @@ namespace MaterialDraw {
 // After the cloth / Pip-Boy fit hooks (Hooks.cpp): ours on top, calling on theirs
 void InstallMaterialDrawHooks() {
 	const bool rtActors = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Actors") != 0;
-	if (!ReflMaterial::CompiledIn() && !rtActors) return;
+	// UNOFFICIAL 2026-11-09 WeaponMask: the RT weapon reflections tag the weapon's draws through these hooks too
+	const bool rtWeapon = TheSettingManager->GetSettingI("Shaders.Reflections.RT", "Enabled") != 0 && TheSettingManager->GetSettingF("Shaders.Reflections.RT", "Weapon") > 0.0f;
+	if (!ReflMaterial::CompiledIn() && !rtActors && !rtWeapon) return;
 	static const UInt32 kSites[2] = { 0x00B992E3, 0x00B99339 };
 	const bool callsThere = *(const UInt8*)kSites[0] == 0xE8 && *(const UInt8*)kSites[1] == 0xE8;
 	if (callsThere) {
@@ -3680,6 +3937,7 @@ void InstallMaterialDrawHooks() {
 		SafeWrite32(0x010EE670, (UInt32)&MaterialDraw::StillHook<0>);
 		SafeWrite32(0x010EE674, (UInt32)&MaterialDraw::StillHook<1>);
 	}
+	WeaponMask::HooksOn = callsThere && stillThere;	// UNOFFICIAL 2026-11-09: both draw paths reach the first-person tags (else no mask: the old whole-model weapon)
 	Logger::Log("UNOFFICIAL MaterialAware / RT hair tint draw hooks (perf-mirrorfix2): skinned partition draws %s (calling %08X %08X), still-object draws %s (calling %08X %08X)",
 		callsThere ? "hooked" : "NOT hooked (not the game's calls)", callsThere ? (UInt32)MaterialDraw::PartitionNext[0] : 0u, callsThere ? (UInt32)MaterialDraw::PartitionNext[1] : 0u,
 		stillThere ? "hooked" : "NOT hooked", shape, strips);
@@ -3867,6 +4125,9 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 		}
 	}
 	PbrPop::ActorPasses::FirstPersonNow = 1;	// UNOFFICIAL ActorsInOnePass: the first-person model's passes are built in here
+	// UNOFFICIAL 2026-11-09 WeaponMask (core/WeaponMask.h): the weapon's draws tag the stencil from here to the end of the pass (MaterialDraw hooks),
+	// for the RT weapon reflections to leave the hands and arms out. Nothing unless [Shaders.Reflections.RT] Weapon is on and WeaponHands off.
+	WeaponMask::Begin(TheRenderManager->device);
 	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) PTViewModel: the model's colour, normals and material into the G-buffer, for the path
 	// tracer to light it (core/CapturedNormals.h BeginViewModelSpan; nothing unless the path tracer asked for it this frame)
 	CapturedNormals::BeginViewModelSpan(TheRenderManager->device);
@@ -3876,6 +4137,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device);
 	CapturedNormals::EndViewModelSpan(TheRenderManager->device, TheFrameRateManager->FrameNumber);
 	PbrPop::ActorPasses::FirstPersonNow = 0;
+	WeaponMask::End(TheRenderManager->device, TheFrameRateManager->FrameNumber);	// UNOFFICIAL 2026-11-09: the stencil's tags into TESR_WeaponMask (core/WeaponMask.h)
 	SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-04: the weapon out of the sky share (core/SkyCoverage.h)
 	if (viewModelShadows) {
 		// The map holds the viewmodel now, not what the world's draws read: nothing later this frame reads it (w 0).

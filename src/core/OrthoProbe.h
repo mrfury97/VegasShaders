@@ -6,12 +6,14 @@
 // (alpha test included, as there) plus the caster's number, so the map itself is the real one. Written next to the evidence:
 // ortho.f32 (the map, row-major floats), ids.f32 (caster number per texel; 1 = nothing drawn), depth.f32 (NVR's TESR_DepthBuffer as it
 // is when the shadow maps are drawn: the previous frame), meta.txt (matrices, camera, sizes) and casters.txt (one line per caster).
+// (2026-11-09: written into the game folder's VegasShaders-Logs\OrthoDump\<value>_<tick>\, not into an absolute path of the author's PC.)
 #include "TestTools.h"
 #if NVR_TEST_TOOLS
 #include <string>
 #include <vector>
 #include <unordered_map>
 #include <cstdio>
+#include "Paths.h"	// VS_LOGS_FOLDER
 
 namespace OrthoProbe {
 	struct Entry { NiGeometry* geo; const void* pass; };
@@ -125,7 +127,11 @@ namespace OrthoProbe {
 
 	inline void Dump(IDirect3DDevice9* device, IDirect3DSurface9* orthoSurface, const D3DXMATRIX& orthoMatrix, int value) {
 		char dir[MAX_PATH];
-		snprintf(dir, sizeof(dir), "C:\\Users\\foot\\Documents\\Codex\\2026-10-03\\this\\work\\bench\\deep-roadmap\\evidence\\orthomap\\dump\\%d_%lu", value, GetTickCount());
+		// 2026-11-09: the folder was the author's own evidence folder (an absolute path of one PC, built into every release DLL); it is the game folder's
+		// VegasShaders-Logs\OrthoDump now, like the other test tools' files.
+		CreateDirectoryA(".\\" VS_LOGS_FOLDER, NULL);
+		CreateDirectoryA(".\\" VS_LOGS_FOLDER "\\OrthoDump", NULL);
+		snprintf(dir, sizeof(dir), ".\\" VS_LOGS_FOLDER "\\OrthoDump\\%d_%lu", value, GetTickCount());
 		CreateDirectoryA(dir, NULL);
 		std::string base(dir); base += "\\";
 		std::vector<float> data; UINT w = 0, h = 0; D3DFORMAT format = D3DFMT_UNKNOWN;

@@ -5,7 +5,7 @@ optional per-texture material maps. Settings: `[Shaders.PBR.*]` (`defaults.toml`
 (the lighting maths), `Shaders/Includes/Object.hlsl` (material inputs), `Shaders/ObjectTemplate.hlsl` / `ParallaxTemplate.hlsl`
 (the object shaders that use them).
 
-This doc is still partial: it covers the vanilla bridge and the material maps. The rest of the effect is described in the settings'
+This doc is still partial: it covers the vanilla bridge, the material maps, which data decides metal, and the eyes. The rest of the effect is described in the settings'
 own descriptions.
 
 ## Which data decides a highlight
@@ -113,3 +113,44 @@ scene's alpha (`core/ReflMaterial.h`).
 
 How to check it: an object with a hand-made map whose alpha is dark should show weaker sun and lamp highlights on its non-metal
 parts than before; with Vegas Shaders' generated maps nothing changes.
+
+## Which data decides metal (mirror-like surfaces)
+
+| Mode | A pixel's metal share | Code |
+|---|---|---|
+| default (`[Shaders.PBR.EnvMaps] FromGameData` false) | an `_rmaos` map's G with `MetalFromMap`; else a material class's; else the guess from grey colour and the normal map's alpha, times `[Shaders.PBR.Metal]` World / FirstPerson | `getMetalStrength`, `getDerivedMetallic` |
+| `FromGameData` true (restart; then live) | the game's env-map data: Environment_Mapping flag + its `_m` mask (texture slot 5) = env-map scale x mask; flag, no mask = scale x (`FromGameDataNoMask`: 1 the whole surface, 0 the normal map's alpha, the game's own rule); no flag = 0, whatever the colour; an `_rmaos` map's G over all of it; times World / FirstPerson. Material classes' metal is not used | `NVR_EnvData` (c94), `Render.cpp` RmaosDraw |
+
+Facts the design rests on (decomp of 1.4.0.525, 2026-11-09): the flag is BSShaderProperty flags word 0 bit 7; the strength is the
+property's float at +0x30 (`fEnvMapScale`, the env pass's c27.z); the env cube is texture slot 4 and the mask slot 5; the game's env
+pass (0x248-0x24B, `EnvTemplate.hlsl`) reads the mask on s3 when slot 5 holds a texture, else the normal map's alpha.
+The mask is bound on s2, the `_rmaos` stage (a draw with a map never needs it), and carried in `RmaosValue.g` (no temp register of its
+own). Constant c94: ps_3_0 has only c0-c223, and every other register is taken in some object-shader variant (register-table audit
+of every ObjectTemplate pixel shader); c94 is otherwise only the land shaders' (`TESR_TerrainParallaxIso`), so it is written before
+every object draw, never cached. Limits: the 4+ lamp SPECULAR interior lamp-shadow records (SLS2034-2036 with `INTERIOR_SHADOWS`)
+are at the 32-temp limit and never read the mask (`ENV_NO_MASK`: the no-mask rule there); the 6-lamp OPT shader SLS2035 has the game
+data INSTEAD of the guess while compiled in (it is at the slot count a driver refused), so its objects have no metal while the live
+switch is off. Eyes (their own variant) and windows (Window_Environment_Mapping, glass) are never made metal. Not done: the SSR
+MaterialAware buffer and the RT materials still know only `_rmaos` maps; the env pass's `WithMetal` is per pass, not per pixel.
+
+What correct looks like (`[Shaders.PBR.Metal] DebugView 1`): with `FromGameData` on, orange only on env-mapped meshes (guns, chrome
+fittings, polished stone with a mask), following the mask's pattern; grey concrete and cloth no longer orange.
+
+## Eyes (`[Shaders.PBR.Main] GameShaderEyes`, `EyeShaderOld`)
+
+The game draws an eyeball (BSShaderProperty flag 17, Eye_Environment_Mapping) with its ordinary lit passes, specular forced off
+(so the metal guess, compiled only into SPECULAR variants, never reaches it), then its own eye env pass (0x24B: SLS2052.vso +
+SLS2059.pso, additive ONE/ONE, the fixed eyereflection.dds cube; a skinned eye takes the generic 0x249 env pass instead). In game the
+lit pair is SLS2022.vso + SLS2031.pso (logs 2026-10-28). Under LinearScene (default on) the old exemption (the game's own shaders) was
+off, so the eyes took the mod's object shader: sun shadow from the head and lids, the normal map's bumps, lit as a small ball.
+`GameShaderEyes` on with `EyeShaderOld` false (default, live): every lit pass of an eye draws with an eye record of its pixel shader
+(`ObjectTemplate.hlsl` `NVR_EYE`, made on first use by `Render.cpp` GameEyes::RecordFor, cached under `Shaders\...\Eyes\`): the ambient
+as for any object plus the sun's and the lamps' light as a wrapped diffuse (wrap 0.5) on the eyeball's own surface (tangent-space
+(0,0,1): no normal map, no UV assumption), no shadows, no metal, output through `LinearSceneOut` (no frame conversion). The game's
+eye env pass is kept as it is. `EyeShaderOld` true: as before (the game's shaders with LinearScene off, the mod's ordinary shader
+with it on). `GameShaderEyes` false: the mod's ordinary shader. The log line `EYE PROBE` names each distinct eye draw (pass, pair,
+NVR or game handle, blend state, textures) once.
+Trap met while building it: a pixel record's `SetCT` empties all 16 texture stages (it expects to run at a bind, before the game binds
+the pass's textures). The eye record's `SetCT` runs inside the draw, so eye records have `ClearSamplers` off and the restore after the
+draw uploads constants only; otherwise the second eye drawn (both share `eyeblue.dds`, so the game does not bind it again) is black.
+Bench pictures and the full write-up: `docs/next/EYES-ENVFLAG-2026-11-09.md`.

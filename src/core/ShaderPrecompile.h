@@ -129,6 +129,42 @@ namespace ShaderPrecompile {
 		// UNOFFICIAL 2026-10-21 LampFalloff: as ShaderManager::LoadShader's interior records (PBRShaders::LampFalloffInteriorDefine).
 		if (const char* lampFalloff = PBRShaders::LampFalloffInteriorDefine()) interior[4] = { "LAMP_FALLOFF_ON", lampFalloff };
 		const bool interiorShadows = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
+		// UNOFFICIAL 2026-11-09 (players: shader compiling takes up to 5 minutes since 1.0.6) the OUTDOOR lamp-shadow records (ShaderManager::LoadShader,
+		// RT lamp shadows + ExteriorForward: one more record per lit pixel shader, Cache\ExteriorLamps\) were never queued here, so ~87 of the
+		// biggest shaders compiled one after another on the main thread: about 130 of the 190 s of a full compile in the 11-08 log (59 s
+		// without them). 1.0.6's RT presets switch them on. Queued now with the same source folder, cache folder and defines as that load's
+		// first level (the skin shaders' smaller fall-back levels still compile there if the full one does not fit).
+		const bool exteriorLampRecords = interiorShadows && TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "Enabled") != 0 &&
+			TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "ExteriorForward") != 0;
+		static D3DXMACRO exteriorLamps[] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { NULL, NULL } };
+		// (the skin shaders' two smaller levels as well: SKIN2010 / SKIN2011 end on Fit2, 5 s each on the main thread in the bench run)
+		static D3DXMACRO exteriorFit1[] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { "SKIN_PT_LAMPS", "2" }, { NULL, NULL } };
+		static D3DXMACRO exteriorFit2[] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { "SKIN_PT_LAMPS", "1" }, { NULL, NULL } };
+		auto addExteriorLamps = [&](const char* name, const ShaderTemplate& tmpl) {
+			const bool skin = tmpl.Name && strstr(tmpl.Name, "SkinTemplate") == tmpl.Name;
+			static const char* const folders[3] = { "ExteriorLamps\\", "ExteriorLamps\\Fit1\\", "ExteriorLamps\\Fit2\\" };	// (2026-11-11 mrfury97: a single backslash before Fit1 / Fit2 was C4129, "\F" = "F": the Fit levels compiled into ExteriorLampsFit1\, a folder the load never reads)
+			const D3DXMACRO* const sets[3] = { exteriorLamps, exteriorFit1, exteriorFit2 };
+			// (2026-11-11 mrfury97: the skin's MANY variants with 3+ lamps start at Fit1, as ShaderManager::LoadShader does: the all-lamp level never fits)
+			int first = 0;
+			if (skin) { bool many = false; int points = 0;
+				for (const D3DXMACRO& d : tmpl.Defines) { if (d.Name && !strcmp(d.Name, "MANY")) many = true; if (d.Name && !strcmp(d.Name, "POINTS") && d.Definition) points = atoi(d.Definition); }
+				if (many && points >= 3) first = 1; }
+			for (int level = first; level < (skin ? 3 : 1); level++) {
+				const size_t before = Jobs.size();
+				Add(name, "Exteriors\\", folders[level], tmpl, sets[level]);	// (the game's outdoor version of the shader, where the mod has one)
+				if (Jobs.size() == before) Add(name, NULL, folders[level], tmpl, sets[level]);
+			}
+		};
+		// The land's outdoor records (TerrainTemplate with lamps, TERRAIN_LAMP_RT; not with Terrain Blending: ShaderManager::LoadShader): 21 more.
+		const bool terrainLampRecords = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "Enabled") != 0 &&
+			TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.RT", "ExteriorForward") != 0 && !TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled");
+		static D3DXMACRO terrainLamps[] = { { "TERRAIN_LAMP_RT", "1" }, { NULL, NULL } };
+		auto addTerrainLamps = [&](const char* name, const ShaderTemplate& tmpl) {
+			if (!terrainLampRecords || !tmpl.Name || strcmp(tmpl.Name, "TerrainTemplate")) return;
+			bool lamps = false;
+			for (const D3DXMACRO& d : tmpl.Defines) if (d.Name && !strcmp(d.Name, "NUM_PT_LIGHTS")) lamps = true;
+			if (lamps) Add(name, NULL, "ExteriorLamps\\", tmpl, terrainLamps);
+		};
 		std::unordered_set<std::string> templated;
 		for (const auto& [CollectionName, Pointer] : TheShaderManager->ShaderNames) {
 			ShaderCollection* Collection = Pointer ? *Pointer : nullptr;
@@ -137,8 +173,12 @@ namespace ShaderPrecompile {
 				const std::string name(Name);
 				templated.insert(name);
 				Add(name.c_str(), NULL, NULL, Template, NULL);
+				if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
 				if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
+				{
 					Add(name.c_str(), NULL, "Interiors\\", Template, interior);
+					if (exteriorLampRecords) addExteriorLamps(name.c_str(), Template);
+				}
 			}
 		}
 		// The hand-written ones (no template): every Name.hlsl the game's shader names map to a collection.
@@ -151,7 +191,10 @@ namespace ShaderPrecompile {
 				if (templated.count(name) || !TheShaderManager->GetShaderCollection(name.c_str())) continue;
 				Add(name.c_str(), NULL, NULL, ShaderTemplate{}, NULL);
 				if (interiorShadows && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), ShaderTemplate{}))
+				{
 					Add(name.c_str(), NULL, "Interiors\\", ShaderTemplate{}, interior);
+					if (exteriorLampRecords) addExteriorLamps(name.c_str(), ShaderTemplate{});
+				}
 			} while (FindNextFileA(h, &find));
 			FindClose(h);
 		}

@@ -116,6 +116,29 @@ float4 TESR_MaterialTint  : register(c199); // rgb: the class's DebugView colour
 float4 NVR_Rmaos : register(c220); // x: 1 = this draw has an _rmaos map on s2, y: occlusion strength, z: DebugView (1 roughness, 2 metal, 3 occlusion, 4 which objects have one), w: 1 = metal from the map (MetalFromMap)
 sampler2D NVR_RmaosMap : register(s2);
 static float4 RmaosValue = float4(1.0f, 0.0f, 1.0f, 1.0f);
+// UNOFFICIAL 2026-11-09 FromGameData ([Shaders.PBR.EnvMaps] FromGameData, restart: ENV_FROM_DATA_ON; per draw NVR_EnvData, Render.cpp
+// RmaosDraw). A tester: reflections on characters and buildings should follow the game's own env-map data, not the mod's metal guess from
+// grey colour and gloss. The game marks the surfaces it gives a mirror shine (BSShaderProperty flag Environment_Mapping) with a strength
+// (the env-map scale) and, where the artist made one, a mask (texture slot 5, the "_m" texture; its env pass reads it on s3). On, that
+// data decides how much of a pixel is metal (mirror-like): flag + mask = strength x the mask per pixel; flag, no mask = strength x
+// (NoMask: 1 the whole surface, 0 the normal map's alpha, as the game's own env pass does without a mask); no flag = no metal at all,
+// whatever the colour; an _rmaos map still decides (its green, as MetalFromMap). The mask is bound on s2 (the _rmaos map's stage: a draw
+// with a map never needs the mask). Eyes and windows keep their own rules (the eye variant; glass). Off (x 0): the metal guess as before.
+#if defined(ENV_FROM_DATA_ON) && ENV_FROM_DATA_ON
+#define ENV_FROM_DATA
+float4 NVR_EnvData : register(c94);	// x 1 = on for this draw, y the env-map strength (0 = no flag), z 1 = the _m mask on s2, w NoMask share. c94: the only kind of hole
+// left below c224 (ps_3_0's limit; an audit of every object-shader variant's register table, 2026-11-09): only the land shaders use it
+// (TESR_TerrainParallaxIso, uploaded when a land shader binds), so RmaosDraw writes it before every object draw, never cached.
+// The mask is kept in RmaosValue.g (only bound on a draw without a map, so that never holds the map then): no temp register of its own
+// (the interior lamp-shadow records of SLS2026/2027/2034/2036 are at the 32-temp limit; a separate value took them past it).
+// ENV_NO_MASK (ObjectTemplate.hlsl: the 4+ lamp SPECULAR interior records, SLS2034-2036): even that read takes them past the limit, so
+// there a flagged surface always takes the no-mask rule (NoMask), mask or not.
+#ifdef ENV_NO_MASK
+    #define ENV_HAS_MASK false
+#else
+    #define ENV_HAS_MASK (NVR_EnvData.z > 0.5f)
+#endif
+#endif
 // UNOFFICIAL 2026-10-18 FadeIn (pbrpop, [Shaders.PBR.Rmaos] FadeIn): x below 1 = the map arrived a moment ago: its values blend in
 // from what the object had without it (x = the map's share), so a map that arrives while the object is in view does not pop. x = 1:
 // exactly the map, as before; 0: no map.
@@ -162,6 +185,11 @@ void RmaosRead(float2 uv) {
             MicroShadowAO = saturate(1.0f - (1.0f - RmaosValue.b) * TESR_MicroShadow.x * (RMAOS_FADING ? NVR_Rmaos.x : 1.0f));
         #endif
     }
+    #ifdef ENV_FROM_DATA
+        #ifndef ENV_NO_MASK
+        [branch] if (NVR_EnvData.z > 0.5f) RmaosValue.g = tex2Dgrad(NVR_RmaosMap, uv, dx, dy).r;	// UNOFFICIAL 2026-11-09 FromGameData: the _m mask (no map then)
+        #endif
+    #endif
 }
 
 // The ambient light's share the map's occlusion leaves (1 without a map).
@@ -425,6 +453,11 @@ float getMetalStrength() {
     #ifdef RMAOS
         if (RMAOS_ACTIVE) return 1.0f;	// the map says where the metal is
     #endif
+    #if defined(ENV_FROM_DATA) && defined(NVR_SLOT_TIGHT)
+        return NVR_EnvData.y * TESR_PBRMetal.x;	// UNOFFICIAL 2026-11-09 FromGameData (slot-tight SLS2035: the game's data only, see getDerivedMetallic)
+    #elif defined(ENV_FROM_DATA)
+        if (NVR_EnvData.x > 0.5f) return NVR_EnvData.y * TESR_PBRMetal.x;	// UNOFFICIAL 2026-11-09 FromGameData: no env-map flag, no metal
+    #endif
     #ifdef MATERIAL_RULES
         if (TESR_MaterialRule.x > 0.0f) return TESR_MaterialRule.y;
     #endif
@@ -448,6 +481,19 @@ float getDerivedMetallic(float specMask, float3 albedo) {
         // UNOFFICIAL 2026-10-28 MetalFromMap (c220 w): only then the map's metal. a tester: "metal in pbr doesn't seem to do anything anymore" --
         // NVR's generated maps carry the metal guess baked at World 0.5, so on every object with a map the Metal sliders did nothing.
         [branch] if (RMAOS_ACTIVE && NVR_Rmaos.w > 0.5f) return RMAOS_FADING ? lerp(getDerivedMetallicGuess(specMask, greyness), RmaosValue.g, NVR_Rmaos.x) : RmaosValue.g;
+    #endif
+    #if defined(ENV_FROM_DATA) && defined(NVR_SLOT_TIGHT)
+        // the 6-lamp OPT shader (SLS2035) sits at the slot count a driver refused (+7 slots, 2026-10-21): there the game's data REPLACES the
+        // guess while FromGameData is compiled in (the live switch off = no metal on its objects; restart for the guess there)
+        const float envMetal = saturate(NVR_EnvData.y * (ENV_HAS_MASK ? RmaosValue.g : lerp(specMask, 1.0f, NVR_EnvData.w))) * TESR_PBRMetal.x;
+        return RMAOS_ACTIVE ? (RMAOS_FADING ? lerp(envMetal, RmaosValue.g, NVR_Rmaos.x) : RmaosValue.g) : envMetal;
+    #endif
+    #ifdef ENV_FROM_DATA
+        // UNOFFICIAL 2026-11-09 FromGameData (see NVR_EnvData): the game's env-map data, the colour not looked at; a map's metal over it
+        [branch] if (NVR_EnvData.x > 0.5f) {
+            const float envMetal = saturate(NVR_EnvData.y * (ENV_HAS_MASK ? RmaosValue.g : lerp(specMask, 1.0f, NVR_EnvData.w))) * TESR_PBRMetal.x;
+            return RMAOS_ACTIVE ? (RMAOS_FADING ? lerp(envMetal, RmaosValue.g, NVR_Rmaos.x) : RmaosValue.g) : envMetal;
+        }
     #endif
     return getDerivedMetallicGuess(specMask, greyness);
 }

@@ -103,7 +103,7 @@ namespace Displace {
 		pi.stage.module = module;
 		pi.stage.pName = "main";
 		pi.layout = m.layout;
-		const VkResult r = vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &pi, nullptr, &m.pipeline);
+		const VkResult r = vkCreateComputePipelines(h.vk.device, g_pipelineCache, 1, &pi, nullptr, &m.pipeline);
 		vkDestroyShaderModule(h.vk.device, module, nullptr);
 		if (r != VK_SUCCESS) { Log("displacement: OFF (pipeline: %s)", VkResultName(r)); m.pipeline = VK_NULL_HANDLE; return false; }
 		for (uint32_t i = 0; i < kCmdRing; i++) {

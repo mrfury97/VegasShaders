@@ -25,7 +25,7 @@ void main() {
     if (amount <= 0.0) { o_color = vec4(0.0); o_dir = vec4(0.0); o_ray = vec4(0.0); return; }
     // UNOFFICIAL 2026-11-08 (perf-reflfix4) MirrorJitter: a mirror pixel's ray leaves from this frame's point of the texel (RtMirrorJitter.glsl;
     // the helper and Resolve move the same point), where that point is the same reflecting surface (else the centre, as before)
-    if (RtOn && rtc.rt5.w > 0.5 && !WeaponAt(pixelUV)) {
+    if (RtOn && rtc.rt5.w > 0.5 && !ViewModelAt(pixelUV)) {   // (2026-11-09: ViewModelAt, any first-person pixel: its depth is not the world's)
         const vec2 j = RtMirrorJitter(rtc.rt5.w, roughness);
         if (j != vec2(0.0)) {
             const vec2 at = pixelUV + j * LowTexel;
@@ -33,7 +33,7 @@ void main() {
             const vec3 jN = ViewNormal(at);
             float jRough;
             const float jAmount = Reflectivity(at, jDepth, jN, jRough);
-            if (jAmount > 0.0 && jRough < RtMirrorJitterRoughness && abs(jDepth - depth) < depth * 0.05 + 4.0 && !WeaponAt(at)) {
+            if (jAmount > 0.0 && jRough < RtMirrorJitterRoughness && abs(jDepth - depth) < depth * 0.05 + 4.0 && !ViewModelAt(at)) {
                 pixelUV = at; depth = jDepth; N = jN; amount = jAmount; roughness = jRough;
             }
             else {   // the centre's surface globals back; marked not a jittered mirror pixel (0.03: the helper and Resolve then use the centre)

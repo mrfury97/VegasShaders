@@ -19,6 +19,7 @@
 #include <d3dcompiler.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdarg>
 #include <cstdio>
@@ -108,11 +109,15 @@ struct Settings {
 	int cache = 1;         // Y: PTRadianceCache (PTRealtime's auto)
 	int lampFalloff = 0;   // F: PTLampFalloff (0 the game's, 1 physical)
 	int contact = 1;       // PTContactShadows 1 (the default; no key)
-	int indirectClamp = 0; // Z: PTIndirectClamp 0 (the default) / 4 (the game's firefly cut for light through a bounce)
+	int indirectClamp = 1; // Z: the bounce light's cap: 0 none / 4 (2026-11-09: PTRealtimeClamp's default under PTRealtime; was 0)
+	int bounceRoughen = 1; // F10: PTBounceRoughen 0 off / 0.35 (2026-11-09: the default under PTRealtime; frame row texel 27)
 	// (2026-11-07, the merged ptaaa branches; the game's defaults under PTRealtime)
 	int emissive = 1;      // F2: PTEmissive (glowing triangles as lights: RtEmissiveBuild + the emissive row)
 	int denoiseSplit = 1;  // F3: PTDenoiseSplit (diffuse + specular denoised apart, RtDenoiseTemporalSpec)
 	int antiFirefly = 1;   // F4: PTDenoiseAntiFirefly (RtDenoiseFirefly, PTDenoiseFireflyK 2)
+	int objectMotion = 1;  // 5: the object motion (2026-11-09: TESR_ObjectMotionBuffer's stand-in, PTDenoiseObjectMotion + MovingHistory 8, as the game) / off (before)
+	int mirrorSurface = 1; // F11: PTDenoiseMirrorSurface 0.1 (2026-11-09 pt-mirrors: a smooth metal denoised as the thing it reflects) / off (as before)
+	int fireflySpread = 1; // F9: PTDenoiseFireflySpread 0 no cap (as before 2026-11-09) / 1 = 4 (the default) / 2 = 1
 	int glass = 2;         // F5: PTGlass 0 off / 1 the light / 2 the camera's rays too
 	int foliage = 1;       // F6: PTFoliage 0 / 0.4
 	int skin = 1;          // F7: PTSkin 0 / 1 (+ PTClothSheen 0.5 with it)
@@ -123,7 +128,7 @@ struct Settings {
 	int hud = 1;           // F1
 	float exposure = 1.0f; // + / -
 	float ptGlow = 4.0f;   // PTGlow (the playground's default: the panel is its only traced glow)
-	float ptSky = 1.0f;    // PTSky
+	float ptSky = 0.25f;   // PTSky (2026-11-09: the game's default since 1.0.6, pt-look; was 1.0 here: the sky's light flattened sunlit faces)
 	float denoiseHistory = 32, denoiseSigma = 1.0f, denoiseAntiLag = 3.0f, denoiseGuide = 0.35f, detailRadius = 4.0f;
 	int denoiseIterations = 2;
 	float denoiseHistoryFix = 3.0f, denoiseMeanVariance = 2.0f, fireflyK = 2.0f, mirrorHistory = 12.0f;   // PTDenoiseHistoryFix / MeanVariance / FireflyK / MirrorHistory
@@ -158,6 +163,28 @@ VO main(VI i) {
 	o.uv = i.uv; o.rel = rel;
 	return o;
 })";
+// (2026-11-09 pt-mirrors, the owner's request) the object motion pass (core\ObjectMotion.h, TESR_ObjectMotionBuffer): each vertex placed
+// with this frame's transform (c0-c2) and last frame's (c8-c10); out: how far that surface point moved in the world since last frame
+static const char* kVsMotion = R"(
+float4 c_row0 : register(c0); float4 c_row1 : register(c1); float4 c_row2 : register(c2);
+float4 c_eye : register(c3); float4 c_R : register(c4); float4 c_U : register(c5); float4 c_F : register(c6); float4 c_z : register(c7);
+float4 c_prev0 : register(c8); float4 c_prev1 : register(c9); float4 c_prev2 : register(c10);
+struct VI { float3 p : POSITION; float3 n : NORMAL; float2 uv : TEXCOORD0; };
+struct VO { float4 h : POSITION; float3 move : TEXCOORD0; };
+VO main(VI i) {
+	VO o;
+	float4 p = float4(i.p, 1);
+	float3 world = float3(dot(c_row0, p), dot(c_row1, p), dot(c_row2, p));
+	float3 rel = world - c_eye.xyz;
+	float vz = dot(rel, c_F.xyz);
+	o.h = float4(dot(rel, c_R.xyz) * c_R.w, dot(rel, c_U.xyz) * c_U.w, vz * c_z.x + c_z.y, vz);
+	o.h.xy += c_z.zw * vz;
+	o.move = world - float3(dot(c_prev0, p), dot(c_prev1, p), dot(c_prev2, p));
+	return o;
+})";
+static const char* kPsMotion = R"(
+float4 main(float3 move : TEXCOORD0) : COLOR0 { return float4(move, 1); }
+)";
 static const char* kPsGBuffer = R"(
 sampler2D s_diffuse : register(s0); sampler2D s_glow : register(s1);
 float4 c_albedo : register(c0);   // rgb linear, w 1: x the diffuse texture (sRGB)
@@ -332,6 +359,11 @@ struct App {
 	bool prevCamValid = false;
 	double simTime = 0;
 	double demoTime = -1.0;   // the demo's script clock (>= 0 in --demo)
+	// (2026-11-09 pt-mirrors) the demo's matched references: the camera and the script clock of each segment's screenshot, so a later
+	// reference segment renders the SAME view with the animation frozen at that moment (freezeSim >= 0: the animation's clock)
+	struct ShotPose { bool valid = false; V3 eye; float yaw = 0, pitch = 0; double time = 0; };
+	std::vector<ShotPose> shotPoses;
+	double freezeSim = -1.0;
 	std::string hudTag;       // --tag, shown on the HUD (A/B frames carry their label)
 	int hudBottom = 0;        // the HUD panel's height on the composite (the firefly count skips it)
 	std::vector<RasterMesh> meshes;
@@ -354,6 +386,10 @@ struct App {
 	IDirect3DVertexDeclaration9* declFull = nullptr;
 	IDirect3DVertexBuffer9* fullQuad = nullptr;
 	IDirect3DVertexShader9* vsGeo = nullptr; IDirect3DVertexShader9* vsFull = nullptr;
+	IDirect3DVertexShader9* vsMotion = nullptr; IDirect3DPixelShader9* psMotion = nullptr;   // (2026-11-09) the object motion pass
+	RtTex motion;                                   // (2026-11-09) TESR_ObjectMotionBuffer's stand-in: rgb world move since last frame, a 1
+	std::vector<std::array<float, 12>> prevTransform;   // each object's transform last frame (the motion pass)
+	bool motionThisFrame = false;
 	IDirect3DPixelShader9* psGBuffer = nullptr; IDirect3DPixelShader9* psDepth = nullptr; IDirect3DPixelShader9* psDeferred = nullptr; IDirect3DPixelShader9* psTonemap = nullptr;
 	IDirect3DPixelShader9* psGlass = nullptr;
 	IDirect3DTexture9* fontTex = nullptr;
@@ -558,12 +594,13 @@ struct App {
 			float* q; fullQuad->Lock(0, 0, (void**)&q, 0);
 			const float v[12] = { -1, -1, -1, 1, 1, 1, -1, -1, 1, 1, 1, -1 }; std::memcpy(q, v, sizeof(v)); fullQuad->Unlock();
 		}
+		if (!MakeVs(kVsMotion, &vsMotion) || !MakePs(kPsMotion, &psMotion) || !MakeTex(motion, W, H, D3DFMT_A16B16G16R16F)) return false;   // (2026-11-09)
 		if (!MakeVs(kVsGeo, &vsGeo) || !MakeVs(kVsFull, &vsFull) || !MakePs(kPsGBuffer, &psGBuffer) || !MakePs(kPsDepth, &psDepth) ||
 			!MakePs(kPsDeferred, &psDeferred) || !MakePs(kPsTonemap, &psTonemap) || !MakePs(kPsGlass, &psGlass) || !MakeFont()) return false;
 		// the fork's passes, as RtDenoise.cpp Make (images, push size, targets, the sampler index's byte) and RtPathTrace.cpp ShowPipeline
 		{ NVR_EXT_SAMPLER_DESC sd = { NVR_EXT_FILTER_NEAREST, NVR_EXT_ADDRESS_CLAMP }; PG_CHECK(host.ext->CreateSampler(&sd, &pointClamp), "CreateSampler"); }
 		if (!MakeFrag("RtDenoiseTemporalRgb", 7, sizeof(TemporalPush), 3, offsetof(TemporalPush, samplerIndex), temporalRgb) ||
-			!MakeFrag("RtDenoiseTemporalSpec", 9, sizeof(SpecPush), 4, offsetof(SpecPush, samplerIndex), temporalSpec) ||
+			!MakeFrag("RtDenoiseTemporalSpec", 10, sizeof(SpecPush), 4, offsetof(SpecPush, samplerIndex), temporalSpec) ||
 			!MakeFrag("RtDenoiseFirefly", 3, sizeof(FireflyPush), 2, sizeof(FireflyPush) - 16, firefly) ||
 			!MakeFrag("RtDenoiseAtrousRgb", 5, sizeof(AtrousPush), 2, sizeof(AtrousPush) - 16, atrousRgb) ||
 			!MakeFrag("RtPathTraceShow", 10, 48, 1, 4, show)) return false;
@@ -641,6 +678,7 @@ struct App {
 			for (int i = 0; i < 2; i++) { Rel(dn->hist[i]); Rel(dn->histB[i]); Rel(dn->histC[i]); Rel(dn->chain[i]); Rel(dn->chainB[i]); }
 		}
 		Rel(ds); Rel(lampTexture); Rel(backbuffer); Rel(shotSys); Rel(declGeo); Rel(declFull); Rel(fullQuad); Rel(vsGeo); Rel(vsFull);
+		Rel(vsMotion); Rel(psMotion); Rel(motion);
 		Rel(psGBuffer); Rel(psDepth); Rel(psDeferred); Rel(psTonemap); Rel(psGlass); Rel(fontTex);
 		for (FragPass* p : { &temporalRgb, &temporalSpec, &firefly, &atrousRgb, &show }) Rel(p->pipe);
 		Rel(pointClamp);
@@ -658,6 +696,9 @@ struct App {
 		return clean;
 	}
 
+	void UsePose(size_t step) {   // (pt-mirrors) a reference segment: the camera and the frozen clock of that step's screenshot
+		if (step < shotPoses.size() && shotPoses[step].valid) { cam.eye = shotPoses[step].eye; cam.yaw = shotPoses[step].yaw; cam.pitch = shotPoses[step].pitch; freezeSim = shotPoses[step].time; }
+	}
 	void ApplyView(int i) {
 		if (i < 0 || i >= int(scene.views.size())) return;
 		cam.eye = scene.views[i].eye; cam.yaw = scene.views[i].yaw; cam.pitch = scene.views[i].pitch;
@@ -686,9 +727,10 @@ struct App {
 			{ 'K', "K", "lamps", &set.lamps, 2 }, { 'L', "L", "lamp moves", &set.lampAnim, 2 }, { 'J', "J", "cube spins", &set.spin, 2 },
 			{ 'G', "G", "PTGlowLights", &set.glowLights, 2 }, { 'H', "H", "PTDetail", &set.detail, 2 }, { 'X', "X", "PTSpecular", &set.specular, 2 },
 			{ 'R', "R", "PTRestirDI", &set.restirDI, 2 }, { 'Y', "Y", "PTRadianceCache", &set.cache, 2 }, { 'F', "F", "PTLampFalloff", &set.lampFalloff, 2 },
-			{ 'Z', "Z", "PTIndirectClamp 4", &set.indirectClamp, 2 },
+			{ 'Z', "Z", "PTRealtimeClamp 4", &set.indirectClamp, 2 }, { VK_F10, "F10", "PTBounceRoughen", &set.bounceRoughen, 2 },
 			{ VK_F2, "F2", "PTEmissive", &set.emissive, 2 }, { VK_F3, "F3", "PTDenoiseSplit", &set.denoiseSplit, 2 },
-			{ VK_F4, "F4", "PTDenoiseAntiFirefly", &set.antiFirefly, 2 }, { VK_F5, "F5", "PTGlass", &set.glass, 3 },
+			{ VK_F4, "F4", "PTDenoiseAntiFirefly", &set.antiFirefly, 2 }, { VK_F9, "F9", "FireflySpread 0/4/1", &set.fireflySpread, 3 },
+			{ VK_F11, "F11", "PTDenoiseMirrorSurface", &set.mirrorSurface, 2 }, { '5', "5", "object motion", &set.objectMotion, 2 }, { VK_F5, "F5", "PTGlass", &set.glass, 3 },
 			{ VK_F6, "F6", "PTFoliage", &set.foliage, 2 }, { VK_F7, "F7", "PTSkin", &set.skin, 2 }, { VK_F8, "F8", "PTContactShadows", &set.contact, 2 },
 			{ 'O', "O", "PTSplit", &set.split, 2 }, { 'I', "I", "RT sun (PT off)", &set.rtSun, 2 }, { 'T', "T", "tonemap", &set.tonemap, 2 },
 			{ 'V', "V", "PTDebugView", &set.debugView, int(sizeof(kDebugViews) / sizeof(kDebugViews[0])) }, { VK_F1, "F1", "HUD", &set.hud, 3 },
@@ -820,6 +862,49 @@ struct App {
 		d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
 		d->SetDepthStencilSurface(nullptr);
 	}
+	// (2026-11-09, the owner's request) the object motion, as the game makes TESR_ObjectMotionBuffer (core\ObjectMotion.h): only the objects
+	// whose transform changed since last frame are drawn again, each vertex placed twice (this frame's transform, last frame's), into an fp16
+	// target: rgb = the world move since last frame (game units, world axes), a = 1, kept where the depth matches the G-buffer's (the surface
+	// the screen shows there); every other pixel 0 = moved with the world. The denoisers subtract it before reprojecting (backbone.x 1) and
+	// cap moving pixels at PTDenoiseMovingHistory (8), as RtPathTrace.cpp Show sets them with PTDenoiseObjectMotion. Key 5: off = as before.
+	void MotionPass() {
+		IDirect3DDevice9* d = host.dev;
+		d->ColorFill(motion.s, nullptr, 0);
+		motionThisFrame = false;
+		const bool had = prevTransform.size() == scene.objects.size();
+		if (!had) prevTransform.assign(scene.objects.size(), {});
+		std::vector<size_t> moved;
+		for (size_t i = 0; i < scene.objects.size(); i++) {
+			const Object& o = scene.objects[i];
+			float t[3][4]; o.transform(t);
+			std::array<float, 12> now; std::memcpy(now.data(), t, sizeof(t));
+			if (had && set.objectMotion && o.raster && o.visible && !o.glass() && now != prevTransform[i]) moved.push_back(i);
+			else prevTransform[i] = now;
+		}
+		if (!set.objectMotion) return;
+		motionThisFrame = true;   // (the buffer holds this frame's, also when nothing moved: all 0)
+		if (moved.empty()) return;
+		d->SetDepthStencilSurface(ds);
+		d->SetRenderTarget(0, motion.s); for (int i = 1; i < 4; i++) d->SetRenderTarget(i, nullptr);
+		d->SetVertexDeclaration(declGeo); d->SetVertexShader(vsMotion); d->SetPixelShader(psMotion);
+		SetCameraVs();
+		d->SetRenderState(D3DRS_ZENABLE, TRUE); d->SetRenderState(D3DRS_ZWRITEENABLE, FALSE); d->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+		d->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE); d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+		const float bias = -1.0e-5f; d->SetRenderState(D3DRS_DEPTHBIAS, *(const DWORD*)&bias);   // (the G-buffer's placement: a hair nearer)
+		for (size_t i : moved) {
+			const Object& o = scene.objects[i];
+			const RasterMesh& m = meshes[o.mesh];
+			float t[3][4]; o.transform(t);
+			d->SetVertexShaderConstantF(0, &t[0][0], 3);
+			d->SetVertexShaderConstantF(8, prevTransform[i].data(), 3);
+			d->SetStreamSource(0, m.vb, 0, 32); d->SetIndices(m.ib);
+			d->DrawIndexedPrimitive(D3DPT_TRIANGLELIST, 0, 0, m.vertices, 0, m.triangles);
+			std::memcpy(prevTransform[i].data(), t, sizeof(t));
+		}
+		const float zero = 0.0f; d->SetRenderState(D3DRS_DEPTHBIAS, *(const DWORD*)&zero);
+		d->SetRenderState(D3DRS_ZWRITEENABLE, TRUE);
+		d->SetDepthStencilSurface(nullptr);
+	}
 	// the raster objects (glass only, or everything but glass) with the G-buffer pass' constants
 	void DrawObjects(bool glassOnly) {
 		IDirect3DDevice9* d = host.dev;
@@ -934,7 +1019,9 @@ struct App {
 		const bool restir = realtime && set.restirDI;
 		const bool cache = realtime && set.cache;
 		const bool emissiveOn = realtime && set.emissive;   // PTEmissive -1: on under PTRealtime only
-		const RtMaterials::Keys materials = set.Materials();
+		RtMaterials::Keys materials = set.Materials();
+		// (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface rides in texel 26.y while the split specular light goes through the denoiser
+		materials.mirrorSurface = denoise && set.denoiseSplit && set.mirrorSurface ? 0.1f : 0.0f;
 		// the inputs: the G-buffer and the frame (flags 8, 256, 32), as RtCore::CopyIn
 		uint32_t flags = 1u | 2u | 4u;   // the alpha test, the albedo atlas (the real textures), the glow textures
 		if (host.CopyIn(imDepth, gDepth.t) && host.CopyIn(imNormals, gNormals.t) && host.CopyIn(imAlbedo, gAlbedo.t)) flags |= 8u;
@@ -1023,6 +1110,7 @@ struct App {
 			row[30] = 0.0f; row[31] = 0.0f;   // texel 15: the flashlight's cone (none)
 			RtTessContact::PackRow(row, RtTessContact::Slack(), RtTessContact::Make((flags & 8u) ? float(set.contact) : 0.0f, 24.0f));   // texels 16-21
 			RtMaterials::PackRow(row, materials);   // texels 24-26
+			row[54] = set.bounceRoughen ? 0.35f : 0.0f; row[55] = 0.0f;   // texel 27: PTBounceRoughen (2026-11-09)
 			float* emRow = (float*)((char*)r.pBits + size_t(r.Pitch) * kEmissiveRow);
 			if (emissiveWanted) {
 				std::vector<RtEmissiveRow::Source> sources;
@@ -1092,7 +1180,7 @@ struct App {
 	// 4. RtDenoise::Run, RGB mode, with the path tracer's settings (RtPathTrace.cpp Show under PTRealtime): PTDenoiseHistory 32, 2 a-trous
 	// passes, PTDenoiseSigma 1, AntiLag 3, Guide 0.35 (diffuse only), HistoryFix 3, MeanVariance 2, AntiFirefly (PTDenoiseFireflyK 2);
 	// spec: the specular mode (RtDenoiseTemporalSpec: the roughness = the specular albedo's b / roughness image, history C, MirrorHistory 12,
-	// the virtual reprojection). No object motion, no DenoiseBackbone, no people (stand-ins as RtDenoise.cpp passes them).
+	// the virtual reprojection). (2026-11-09) the object motion (MotionPass, key 5) as PTDenoiseObjectMotion; no DenoiseBackbone, no people (stand-ins as RtDenoise.cpp passes them).
 	bool RunDenoiser(Denoiser& dn, IUnknown* noisy, IDirect3DSurface9* output, bool spec) {
 		const V3 move = cam.eye - prevEye;
 		const bool cut = !histValid || !dn.valid || length(move) > 512.0f;
@@ -1104,20 +1192,25 @@ struct App {
 		put4(t.params, set.denoiseHistory, 0.03f, 1.0f / W, 1.0f / H);
 		put4(t.rect, 1, 1, 1, 1);
 		const bool ff = set.antiFirefly && firefly.pipe;
-		t.clampK = 0.0f; t.peopleCap = 0.0f; t.antiLag = set.denoiseAntiLag; t.fireflyK = ff ? set.fireflyK : 0.0f;
+		t.clampK = 0.0f; t.peopleCap = 0.0f; t.antiLag = set.denoiseAntiLag; t.fireflyK = ff ? set.fireflyK + 128.0f * (set.fireflySpread == 1 ? 4.0f : set.fireflySpread == 2 ? 1.0f : 0.0f) : 0.0f;	// (2026-11-09: + 128 x FireflySpread)
 		const uint32_t last = dn.frame & 1, now = (dn.frame + 1) & 1;
 		// AntiFirefly: the temporal pass writes A / B into chain[0] / chainB[0] and the clamped excess into scratchB, RtDenoiseFirefly spreads
 		// the excess into the history; off: A / B straight into the history
 		IDirect3DSurface9* nowA = ff ? dn.chain[0].s : dn.hist[now].s;
 		IDirect3DSurface9* nowB = ff ? dn.chainB[0].s : dn.histB[now].s;
-		IUnknown* temporalImages[7] = { noisy, dn.hist[last].t, gDepth.t, dn.histB[last].t, gDepth.t, gDepth.t, gDepth.t };
+		// (2026-11-09) the object motion as RtDenoise::Run binds it (Settings.ObjectMotion + MovingHistory 8: PTDenoiseObjectMotion), key 5
+		const bool om = set.objectMotion && motionThisFrame;
+		t.backbone[0] = om ? 1.0f : 0.0f; t.backbone[2] = om ? 8.0f : 0.0f;
+		IUnknown* motionImage = om ? (IUnknown*)motion.t : (IUnknown*)gDepth.t;
+		IUnknown* temporalImages[7] = { noisy, dn.hist[last].t, gDepth.t, dn.histB[last].t, motionImage, gDepth.t, gDepth.t };
 		if (!spec) { if (!DrawFrag(temporalRgb, nowA, nowB, temporalImages, &t, dn.scratchB.s)) return false; }
 		else {
 			SpecPush ts = {};
 			std::memcpy(&ts, &t, offsetof(TemporalPush, samplerIndex));
 			ts.spec[0] = set.mirrorHistory; ts.spec[1] = 1.0f;   // PTDenoiseMirrorHistory, PTDenoiseVirtual
+			ts.spec[2] = set.mirrorSurface ? 1.0f : 0.0f;        // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface
 			ts.clampK = t.clampK; ts.peopleCap = t.peopleCap; ts.antiLag = t.antiLag; ts.fireflyK = t.fireflyK;
-			IUnknown* specImages[9] = { noisy, dn.hist[last].t, gDepth.t, dn.histB[last].t, gDepth.t, gDepth.t, gDepth.t, specAlbedoB.t, dn.histC[last].t };
+			IUnknown* specImages[10] = { noisy, dn.hist[last].t, gDepth.t, dn.histB[last].t, motionImage, gDepth.t, gDepth.t, specAlbedoB.t, dn.histC[last].t, gNormals.t };
 			if (!DrawFrag(temporalSpec, nowA, nowB, specImages, &ts, dn.histC[now].s, dn.scratchB.s)) return false;
 		}
 		if (ff) {
@@ -1130,7 +1223,8 @@ struct App {
 		put4(a.size, 1.0f / W, 1.0f / H, set.denoiseMeanVariance > 1.0f ? set.denoiseMeanVariance : 0.0f, 0.0f);
 		const bool guide = !spec && set.denoiseGuide > 0.0f;
 		a.guideSigma = guide ? set.denoiseGuide : 0.0f;
-		a.specular = (spec ? 1u : 0u) | (ff ? 2u : 0u);
+		const bool mirror = spec && set.mirrorSurface;   // (2026-11-09 pt-mirrors) bit 2 + the raw image's hit distance in the guide albedo's slot
+		a.specular = (spec ? 1u : 0u) | (ff ? 2u : 0u) | (mirror ? 4u : 0u);
 		a.historyFix = set.denoiseHistoryFix;
 		RtTex* srcA = &dn.hist[now]; RtTex* srcB = &dn.histB[now];
 		const int iterations = std::max(0, std::min(set.denoiseIterations, 5));
@@ -1138,7 +1232,7 @@ struct App {
 			const bool lastPass = i == std::max(iterations, 1) - 1;
 			a.params[0] = iterations ? float(1 << i) : 0.0f;
 			IUnknown* images[5] = { srcA->t, gNormals.t, srcB->t, spec ? (IUnknown*)specAlbedoB.t : guide ? (IUnknown*)frame.t : (IUnknown*)srcA->t,
-				guide ? (IUnknown*)albedoOut.t : (IUnknown*)srcA->t };
+				guide ? (IUnknown*)albedoOut.t : mirror ? noisy : (IUnknown*)srcA->t };
 			if (!DrawFrag(atrousRgb, lastPass ? output : dn.chain[i & 1].s, lastPass ? dn.scratchB.s : dn.chainB[i & 1].s, images, &a)) return false;
 			srcA = &dn.chain[i & 1]; srcB = &dn.chainB[i & 1];
 		}
@@ -1243,6 +1337,68 @@ struct App {
 		d->SetTexture(0, nullptr);
 	}
 
+	// (2026-11-09 pt-mirrors) the specular denoiser's state on smooth pixels (roughness < 0.1) at a screenshot: the history length the
+	// temporal pass kept (A.a), the virtual reprojection's share (C.z) and the hit distance, left and right half apart (segment 05: the
+	// chrome sphere is on the left, the wall mirror on the right). One log line a half.
+	static float Half(uint16_t h) {
+		const uint32_t sgn = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u;
+		float v = e == 0 ? m * (1.0f / 16777216.0f) : e == 31 ? 65504.0f : std::ldexp(1.0f + m / 1024.0f, int(e) - 15);
+		return sgn ? -v : v;
+	}
+	bool ReadBack(RtTex& t, D3DFORMAT f, std::vector<float>& out, int comps) {
+		IDirect3DSurface9* sys = nullptr;
+		if (!t.s || FAILED(host.dev->CreateOffscreenPlainSurface(W, H, f, D3DPOOL_SYSTEMMEM, &sys, nullptr))) return false;
+		bool ok = SUCCEEDED(host.dev->GetRenderTargetData(t.s, sys));
+		D3DLOCKED_RECT lr;
+		if (ok && SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+			out.assign(size_t(W) * H * comps, 0.0f);
+			for (UINT y = 0; y < H; y++) for (UINT x = 0; x < W; x++) for (int c = 0; c < comps; c++) {
+				const char* row = (const char*)lr.pBits + y * lr.Pitch;
+				out[(size_t(y) * W + x) * comps + c] = f == D3DFMT_A16B16G16R16F ? Half(((const uint16_t*)row)[x * 4 + c]) : ((const float*)row)[x * comps + c];
+			}
+			sys->UnlockRect();
+		}
+		else ok = false;
+		sys->Release();
+		return ok;
+	}
+	void ProbeSpecular(const std::string& name) {
+		if (!specularDn.valid || !splitThisFrame || set.ptMode != 0) return;
+		const uint32_t now = specularDn.frame & 1;
+		std::vector<float> a, c, rough, raw;
+		if (!ReadBack(specularDn.hist[now], D3DFMT_A16B16G16R16F, a, 4) || !ReadBack(specularDn.histC[now], D3DFMT_A16B16G16R16F, c, 4) ||
+			!ReadBack(specAlbedoB, D3DFMT_G32R32F, rough, 2) || !ReadBack(specTex, D3DFMT_A16B16G16R16F, raw, 4)) return;
+		for (int half = 0; half < 2; half++) {
+			double n = 0, len = 0, vs = 0, hit = 0, marked = 0; int full = 0, under8 = 0;
+			for (UINT y = H / 6; y < H; y++) for (UINT x = half ? W / 2 : 0; x < (half ? W : W / 2); x++) {
+				const size_t i = size_t(y) * W + x;
+				if (!(rough[i * 2 + 1] < 0.1f) || !(raw[i * 4 + 3] != 0.0f)) continue;   // smooth, its ray the specular lobe's (< 0: marked, PTDenoiseMirrorSurface)
+				n++; len += a[i * 4 + 3]; vs += c[i * 4 + 2]; hit += std::fabs(raw[i * 4 + 3]); marked += raw[i * 4 + 3] < 0.0f ? 1 : 0;
+				if (a[i * 4 + 3] >= set.denoiseHistory - 0.5f) full++;
+				if (a[i * 4 + 3] < 8.0f) under8++;
+			}
+			if (n > 0) pgLog("  probe %s %s half: %.0f smooth pixels, specular history %.1f frames avg (%.0f %% under 8, %.0f %% at the full %g), virtual share %.2f, hit %.0f, %.0f %% marked mirror surface\n",
+				name.c_str(), half ? "right" : "left", n, len / n, 100.0 * under8 / n, 100.0 * full / n, set.denoiseHistory, vs / n, hit / n, 100.0 * marked / n);
+		}
+	}
+	// UNOFFICIAL 2026-11-09 --frames <file>: every frame's finished picture (window size, RGB, 3 bytes a pixel, top row first) appended to
+	// one raw file, for a film at a fixed rate (ffmpeg -f rawvideo): with --fixed-step 0.0333 the film plays what 30 frames a second look
+	// like on a card that runs the path tracer in real time, however slowly this PC renders it.
+	FILE* frameDump = nullptr;
+	double framesFrom = -1.0e30, framesTo = 1.0e30;   // (2026-11-09 pt-mirrors) --frames-range a,b: only the demo's script seconds [a, b) (one segment's film)
+	unsigned framesDumped = 0;
+	void DumpFrame() {
+		if (!frameDump || FAILED(host.dev->GetRenderTargetData(composite.s, shotSys))) return;
+		D3DLOCKED_RECT lr;
+		if (FAILED(shotSys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) return;
+		std::vector<uint8_t> rgb(size_t(winW) * winH * 3);
+		for (UINT y = 0; y < winH; y++) for (UINT x = 0; x < winW; x++) {
+			const uint8_t* p = (const uint8_t*)lr.pBits + y * lr.Pitch + x * 4;
+			uint8_t* q = &rgb[(size_t(y) * winW + x) * 3]; q[0] = p[2]; q[1] = p[1]; q[2] = p[0];
+		}
+		shotSys->UnlockRect();
+		if (std::fwrite(rgb.data(), 1, rgb.size(), frameDump) == rgb.size()) framesDumped++;
+	}
 	bool SaveShot(const std::string& name) {
 		CreateDirectoryA(outDir.c_str(), nullptr);
 		if (FAILED(host.dev->GetRenderTargetData(composite.s, shotSys))) return false;
@@ -1286,7 +1442,7 @@ struct App {
 	bool Frame(double dt) {
 		frameNumber++;
 		cam.update(float(W) / float(H));
-		if (demoTime >= 0.0) simTime = demoTime * 0.5;   // (the demo: the animation follows the script's clock, so A/B runs see the same frames)
+		if (demoTime >= 0.0) simTime = (freezeSim >= 0.0 ? freezeSim : demoTime) * 0.5;   // (the demo: the animation follows the script's clock, so A/B runs see the same frames)
 		else if (set.lampAnim || set.spin) simTime += dt;
 		Animate(simTime);
 		std::vector<PgInstance> inst = Instances();
@@ -1294,6 +1450,7 @@ struct App {
 		IDirect3DDevice9* d = host.dev;
 		d->BeginScene();
 		RasterGBuffer();
+		MotionPass();   // (2026-11-09) TESR_ObjectMotionBuffer's stand-in (key 5)
 		bool denoisedOk = false, specOk = false;
 		if (set.pt) {
 			Deferred(false);                                  // the game's frame (before the trace: flag 32, PTDetail, the guide)
@@ -1343,8 +1500,10 @@ struct App {
 			char name[128]; snprintf(name, sizeof(name), "%s_%03d", wantShot.c_str(), ++shotCount);
 			if (wantShot != "shot") snprintf(name, sizeof(name), "%s", wantShot.c_str());
 			SaveShot(name);
+			ProbeSpecular(name);   // (2026-11-09 pt-mirrors)
 			wantShot.clear();
 		}
+		if (demoTime < 0.0 || (demoTime >= framesFrom && demoTime < framesTo)) DumpFrame();	// (--frames; pt-mirrors: --frames-range, script seconds)
 		d->StretchRect(composite.s, nullptr, backbuffer, nullptr, D3DTEXF_POINT);
 		if (FAILED(d->Present(nullptr, nullptr, nullptr, nullptr))) { pgLog("  error: Present\n"); return false; }
 		return true;
@@ -1367,6 +1526,10 @@ static std::vector<DemoStep> DemoScript() {
 		{ 50, 60, "07_night_lamps_glow", [=](App& a, double) { view(a, 0); a.set = Settings(); a.set.sun = 0; a.set.glowLights = 1; a.set.exposure = 1.6f; }, 59.5 },
 		// (2026-11-07) the merged materials: the glass pane in the window, the back-lit leaf card, the skin head, in the sun
 		{ 60, 70, "08_glass_leaf_skin", [=](App& a, double) { view(a, 1); a.cam.eye = a.cam.eye + V3(150, -40, -40); a.cam.yaw = 0.15f; a.set = Settings(); }, 69.5 },
+		// (2026-11-09 pt-mirrors) the many-sample references of 05 and 08 at THEIR screenshot's camera and moment (the lamps and the cube
+		// frozen there): the denoised shots are scored against these (tools/nvr-rt-playground/score_mirror.py)
+		{ 70, 85, "09_reference_of_05", [=](App& a, double) { a.UsePose(4); a.set = Settings(); a.set.ptMode = 1; }, 84.5 },
+		{ 85, 100, "10_reference_of_08", [=](App& a, double) { a.UsePose(7); a.set = Settings(); a.set.ptMode = 1; }, 99.5 },
 	};
 }
 
@@ -1401,7 +1564,9 @@ int main(int argc, char** argv) {
 		else if (a == "--set") { const std::string kv = next(); const size_t eq = kv.find('='); if (eq != std::string::npos) sets.push_back({ kv.substr(0, eq), std::atoi(kv.c_str() + eq + 1) }); }
 		else if (a == "--tag") tag = next();
 		else if (a == "--fixed-step") fixedStep = std::atof(next().c_str());
+		else if (a == "--frames-range") { double f0 = 0, f1 = 0; if (sscanf_s(next().c_str(), "%lf,%lf", &f0, &f1) == 2) { app.framesFrom = f0; app.framesTo = f1; } }
 		else if (a == "--max-frames") maxFrames = std::atoi(next().c_str());
+		else if (a == "--frames") { const std::string file = next(); fopen_s(&app.frameDump, file.c_str(), "wb"); if (!app.frameDump) pgLog("  error: --frames cannot write %s\n", file.c_str()); }
 		else if (a == "--size" || a == "--window") {
 			UINT w = 0, h = 0; if (sscanf_s(next().c_str(), "%ux%u", &w, &h) != 2 || w < 64 || h < 64) { std::printf("bad %s\n", a.c_str()); return 2; }
 			if (a == "--size") { app.W = w; app.H = h; } else { app.winW = w; app.winH = h; }
@@ -1430,7 +1595,7 @@ int main(int argc, char** argv) {
 	std::vector<Seg> segs(script.size());
 	bool ok = true;
 	double titleAt = 0;
-	// the demo's timeline is 60 s; --demo N runs it in N seconds (each segment scaled)
+	// the demo's timeline is 100 s (2026-11-09: + the matched references 09, 10); --demo N runs it in N seconds (each segment scaled)
 	const double scriptLength = script.back().to;
 	const double timeScale = app.demoSeconds > 0 ? app.demoSeconds / scriptLength : 1.0;
 	uint64_t demoFrames = 0;
@@ -1456,10 +1621,16 @@ int main(int argc, char** argv) {
 			if (fixedStep > 0 && t > app.demoSeconds) { pgLog("stopped at the --demo limit of %.0f s (wall clock)\n", app.demoSeconds); break; }
 			const DemoStep& s = script[step];
 			const bool held = app.set.hud;   // (the HUD stays as the person set it: on)
+			app.freezeSim = -1.0;   // (pt-mirrors: only a reference segment's apply freezes it)
 			s.apply(app, (st - s.from) / (s.to - s.from));
 			app.set.hud = held;
 			applySets();
-			if (!shotTaken && st >= s.shotAt) { app.wantShot = std::string(s.label) + tag; shotTaken = true; }
+			if (!shotTaken && st >= s.shotAt) {
+				app.wantShot = std::string(s.label) + tag; shotTaken = true;
+				if (app.shotPoses.size() < script.size()) app.shotPoses.resize(script.size());
+				App::ShotPose& pose = app.shotPoses[step];   // (pt-mirrors) for the matched reference segments
+				pose.valid = true; pose.eye = app.cam.eye; pose.yaw = app.cam.yaw; pose.pitch = app.cam.pitch; pose.time = app.freezeSim >= 0.0 ? app.freezeSim : st;
+			}
 			if (st > s.from + 2.0) { segs[step].frames++; segs[step].seconds += frameDt; segs[step].gpuSum += app.host.shared->gpuTimeUsAvg / 1000.0; segs[step].traceSum += app.host.shared->traceUsAvg / 1000.0; }
 		}
 		else app.Input(float(dt));

@@ -89,4 +89,48 @@ namespace DxvkLoader {
 		GetEnvironmentVariableA("DXVK_CONFIG_FILE", loadedConfig, MAX_PATH);
 		Logger::Log("DxvkLoader: %s loaded (%d of 2 entry points redirected; dxvk.conf %s)", dll.c_str(), redirected, loadedConfig[0] ? loadedConfig : "none");
 	}
+
+	// UNOFFICIAL 2026-11-09 DxvkDescriptorHeapOff ([Main.Main.Misc], default on; docs/next/RT-PT-REVIEW-2026-11-09.md section 11): DXVK 3.0
+	// binds textures and samplers through VK_EXT_descriptor_heap wherever the driver is known good (NVIDIA from 595.84, AMD's and
+	// Mesa's drivers that have it). Vegas Shaders' DXVK extension was written and tested without it, and in that mode a pass's
+	// second sampler read blank on a tester's RTX 5090 (the ray tracing input pass: one bogus normal for every ray, a screen-fixed
+	// triangle in the bounce light); 34 of the mod's Vulkan shaders read through a second sampler. Until the extension is right
+	// there, DXVK is told not to use it: "dxvk.enableDescriptorHeap = False" is added to the DXVK_CONFIG environment variable of
+	// this process (what DXVK reads after its dxvk.conf), unless the player's dxvk.conf or DXVK_CONFIG already sets that key
+	// either way. Called at plugin load after the settings are read, before the game makes its Direct3D. No file is changed.
+	inline bool ConfigSetsKey(const std::string& text, const char* key) {
+		size_t at = 0;
+		while ((at = text.find(key, at)) != std::string::npos) {
+			size_t line = text.find_last_of("\n;", at);	// (';' separates DXVK_CONFIG's entries)
+			line = line == std::string::npos ? 0 : line + 1;
+			size_t first = text.find_first_not_of(" \t\r", line);
+			if (first == at) return true;	// the key starts its line or entry: not a comment
+			at += strlen(key);
+		}
+		return false;
+	}
+	inline void DescriptorHeapOff(bool wanted) {
+		static const char* kKey = "dxvk.enableDescriptorHeap";
+		if (!wanted) { Logger::Log("DxvkLoader: DxvkDescriptorHeapOff is off: DXVK chooses its binding model itself"); return; }
+		char file[MAX_PATH] = {};
+		if (!GetEnvironmentVariableA("DXVK_CONFIG_FILE", file, MAX_PATH)) strcpy_s(file, "dxvk.conf");
+		std::string conf;
+		if (FILE* f = nullptr; !fopen_s(&f, file, "rb") && f) {
+			char buffer[4096]; size_t n;
+			while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) conf.append(buffer, n);
+			fclose(f);
+		}
+		char line[2048] = {};
+		const DWORD have = GetEnvironmentVariableA("DXVK_CONFIG", line, sizeof(line));
+		if (have >= sizeof(line)) { Logger::Log("DxvkLoader: DXVK_CONFIG is too long to add to: left as it is"); return; }
+		if (ConfigSetsKey(conf, kKey) || ConfigSetsKey(line, kKey)) {
+			Logger::Log("DxvkLoader: %s is set in %s: left as the player set it", kKey, ConfigSetsKey(conf, kKey) ? file : "DXVK_CONFIG");
+			return;
+		}
+		std::string value = line;
+		if (!value.empty()) value += ";";
+		value += std::string(kKey) + " = False";
+		SetEnvironmentVariableA("DXVK_CONFIG", value.c_str());
+		Logger::Log("DxvkLoader: DXVK told not to use its descriptor-heap binding model (DXVK_CONFIG \"%s\"; [Main.Main.Misc] DxvkDescriptorHeapOff)", value.c_str());
+	}
 }

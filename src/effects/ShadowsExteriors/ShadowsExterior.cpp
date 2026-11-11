@@ -47,7 +47,11 @@ void ShadowsExteriorEffect::UpdateConstants() {
 		if (TheShaderManager->GameState.isDayTime < 0.5f) {
 			// at night the moon phase sets the strength: the phase runs 0..8 over the moon's cycle
 			const UInt8 phaseLength = Tes->sky->firstClimate->phaseLength & 0x3F;
-			float moonPhase = (fmod(daysPassed, 8 * Tes->sky->firstClimate->phaseLength & 0x3F)) / phaseLength;
+			// UNOFFICIAL 2026-11-09 (review): was fmod(daysPassed, 8 * raw & 0x3F) = (8 * raw) & 0x3F: for a climate with a phase of 8 days or
+			// more the cycle length wrapped (8 days: fmod by 0 = not a number, into the night shadows' strength), and a phase length of 0
+			// divided by 0. Now 8 x the masked length, at least 1 day. Phases under 8 days (the game's own climates): the same numbers.
+			const float phaseDays = (float)(phaseLength ? phaseLength : 1);
+			float moonPhase = fmodf(daysPassed, 8.0f * phaseDays) / phaseDays;
 			const float moonPhaseDays = moonPhase;	// UNOFFICIAL 2026-10-16: for the NIGHT STATE line below
 
 			const float piValue = 3.1416f;	// a cosine curve over the phase fades the moon light's shadows
@@ -1085,6 +1089,13 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 		TheShaderManager->Effects.Snow->ClearSampler("TESR_OrthoMapBuffer", 19);
 		TheShaderManager->Effects.SnowAccumulation->ClearSampler("TESR_OrthoMapBuffer", 19);
 		TheShaderManager->Effects.WetWorld->ClearSampler("TESR_OrthoMapBuffer", 19);
+
+		// UNOFFICIAL 2026-11-09 (crash log 2026-11-08 14:07, Ortho.Resolution 2 -> 3, access violation on the dxvk-cs thread 12 s later):
+		// the game's own shaders (SLS*, PAR*, SKIN* ...) sample the ortho map too, and each holds its own cached pointer to the texture
+		// just released above (ShaderRecord::SetCT re-resolves only a null one). Only the four effects above were cleared, so the first
+		// ortho resize of a run left every game shader binding a freed texture: DXVK's SetTexture touched freed memory, fine until the
+		// memory was reused, then a wild pointer on the command-stream thread. The atlas path above has always done this.
+		TheShaderManager->ClearShaderSamplers("TESR_OrthoMapBuffer", 19);
 	}
 
 	// Start the shadow manager's frame counter again, and refresh every cascade next frame: the staggered schedule would

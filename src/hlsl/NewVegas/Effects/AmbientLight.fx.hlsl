@@ -216,7 +216,12 @@ float4 Prepare(VSOUT IN) : COLOR0 {
 float4 SmoothNormal(VSOUT IN, uniform bool alongY) : COLOR0 {
 	float2 uv = IN.UVCoord;
 	float viewZ; float3 normal;
-	if (alongY) { float4 c = tex2Dlod(NVR_ALBuffer, float4(uv, 0.0f, 0.0f)); normal = c.xyz; viewZ = c.w; }
+	// UNOFFICIAL 2026-11-09 (rt-review; docs/next/RT-PT-REVIEW-2026-11-09.md section 6) pass X's target is a 16-bit float buffer (largest value 65504):
+	// the sky's depth (the far plane, ~350000) and the weapon's 1.0e6 came back from it as INFINITE, and pass Y's taps on them worked out
+	// inf - inf = not a number in the plane test. What a GPU does with that in saturate / max differs by vendor and by D3D9 / Vulkan: on some the
+	// normals within the reach of a skyline or of the weapon's outline turned to garbage, new garbage every frame (flicker along skylines
+	// for some players only). Pass X now stores at most 64000 and pass Y reads 64000 or more back as the 1.0e6 'nothing here' it stood for.
+	if (alongY) { float4 c = tex2Dlod(NVR_ALBuffer, float4(uv, 0.0f, 0.0f)); normal = c.xyz; viewZ = c.w >= 64000.0f ? 1.0e6f : c.w; }
 	else { float4 c = tex2Dlod(NVR_ALPrep, float4(uv, 0.0f, 0.0f)); viewZ = c.x; normal = OctDecode(Unpack2(c.y)); }
 	[branch] if (viewZ < DrawDistance && NVR_ALEdges.x > 0.5f) {
 		float3 origin = PositionFromViewZ(uv, viewZ);
@@ -236,7 +241,7 @@ float4 SmoothNormal(VSOUT IN, uniform bool alongY) : COLOR0 {
 			float onScreen = step(0.0f, tapUV.x) * step(tapUV.x, TESR_RenderScale.x) * step(0.0f, tapUV.y) * step(tapUV.y, TESR_RenderScale.y);
 			tapUV = clamp(tapUV, 0.0f, TESR_RenderScale.xy);
 			float tapZ; float3 tapNormal;
-			if (alongY) { float4 t = tex2Dlod(NVR_ALBuffer, float4(tapUV, 0.0f, 0.0f)); tapNormal = t.xyz; tapZ = t.w; }
+			if (alongY) { float4 t = tex2Dlod(NVR_ALBuffer, float4(tapUV, 0.0f, 0.0f)); tapNormal = t.xyz; tapZ = t.w >= 64000.0f ? 1.0e6f : t.w; }
 			else { float4 t = tex2Dlod(NVR_ALPrep, float4(tapUV, 0.0f, 0.0f)); tapZ = t.x; tapNormal = OctDecode(Unpack2(t.y)); }
 			float tolerance = max(viewZ * 0.001f * dist, 0.5f);	// a 30-degree bend at this distance stays within it; a rock's thickness does not
 			float plane = abs(dot(PositionFromViewZ(tapUV, tapZ) - origin, normal));
@@ -245,7 +250,7 @@ float4 SmoothNormal(VSOUT IN, uniform bool alongY) : COLOR0 {
 		}
 		normal = normalize(sum);
 	}
-	return alongY ? float4(viewZ, Pack2(OctEncode(normal)), 0.0f, 0.0f) : float4(normal, viewZ);
+	return alongY ? float4(viewZ, Pack2(OctEncode(normal)), 0.0f, 0.0f) : float4(normal, min(viewZ, 64000.0f));
 }
 
 // GTAO's cosine-weighted visible arc of one slice between its two horizons (cosines), each kept within the hemisphere round the
@@ -358,7 +363,9 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 	// Bounce: the average over the reads, x BounceScale so a pixel enclosed by surfaces showing light L receives about L.
 	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.x, see the samplers): the traced bounce light instead, x the fade, as
 	// AmbientLightEstimateRT.frag writes it (point read: each texel's own ray; the blurs and Accumulate average them).
-	[branch] if (NVR_ALGI.x > 0.5f) bounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * fade;
+	// (UNOFFICIAL 2026-11-08 alsky RtFarFade, NVR_ALReach.w: the trace stops at endFade, so the bounce fades out before it, not at DrawDistance)
+	[branch] if (NVR_ALGI.x > 0.5f) bounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * fade *
+		(NVR_ALReach.w > 0.5f ? 1.0f - smoothstep(0.75f * endFade, (float)endFade, origin.z) : 1.0f);
 	else bounce *= BounceScale * fade / (SLICES * STEPS * 2);
 	return float4(bounce, saturate(visibility));
 }

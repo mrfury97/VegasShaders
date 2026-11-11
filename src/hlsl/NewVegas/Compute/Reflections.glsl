@@ -28,6 +28,8 @@ layout(set = 1, binding = 15) uniform texture2D t_material;    // NVR_Reflection
 layout(set = 1, binding = 23) uniform texture2D t_glass;       // UNOFFICIAL 2026-10-29 TESR_GlassMask (core/GlassMask.h; a placeholder when off)
 layout(set = 1, binding = 24) uniform texture2D t_matbuf;      // UNOFFICIAL 2026-10-30 TESR_MaterialBuffer (core/CapturedNormals.h; a placeholder when off)
 layout(set = 1, binding = 25) uniform texture2D t_cloudSky;    // UNOFFICIAL 2026-10-30 TESR_CloudSkyProbe (VolumetricClouds RenderSkyProbe; a placeholder when off)
+// (binding 26: the RT passes' Rt.Bounce, declared by them)
+layout(set = 1, binding = 27) uniform texture2D t_weaponMask;  // UNOFFICIAL 2026-11-09 TESR_WeaponMask (core/WeaponMask.h): red 1 on the first-person weapon's own pixels; a placeholder unless weapon.x is 2
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;   // TESR_ProjectionTransform
@@ -167,7 +169,15 @@ bool IsWeapon(vec2 uv) {
 
 // UNOFFICIAL 2026-10-30 RT weapon reflections: the first-person weapon's pixels reflect too (only while RT traces this frame).
 #define WeaponOn (cb.weapon.x > 0.5)
-bool WeaponAt(vec2 uv) { return WeaponOn && IsWeapon(uv); }
+// UNOFFICIAL 2026-11-09 WeaponMask: weapon.x 2 = TESR_WeaponMask holds the weapon's own pixels (core/WeaponMask.h).
+#define WeaponMasked (cb.weapon.x > 1.5)
+// Any pixel of the first-person model while the weapon rays run: its depth is in the first-person FOV (SurfacePosition), it moves with the camera.
+bool ViewModelAt(vec2 uv) { return WeaponOn && IsWeapon(uv); }
+// The pixels that reflect as the weapon: the whole first-person model (hands, arms and gun: as before), or with the mask the weapon's own only.
+bool WeaponAt(vec2 uv) {
+    if (!ViewModelAt(uv)) return false;
+    return !WeaponMasked || textureLod(sampler2D(t_weaponMask, POINT_S), uv, 0.0).r > 0.5;
+}
 
 vec3 ViewNormal(vec2 uv) { return normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0); }
 
@@ -221,7 +231,7 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
 // with its own (narrower) field of view from the same eye: the same depth, the sideways offsets shrunk by the two FOVs' ratio.
 vec3 SurfacePosition(vec2 uv, float depth) {
     vec3 p = ViewPosition(uv, depth);
-    if (WeaponAt(uv)) p.xy /= cb.weapon.y;
+    if (ViewModelAt(uv)) p.xy /= cb.weapon.y;   // (2026-11-09: every pixel of the first-person model, the hands too: they are drawn with the same FOV)
     return p;
 }
 
@@ -297,7 +307,8 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
         // and metal from MaterialAware where its texture has a map, else the roughness the game lit it with (TESR_MaterialBuffer), else
         // the Weapon roughness; the strength x (1 - roughness) on the last two (a matte stock reflects little). The composite's Fresnel
         // (metal tinted by the weapon's own colour) lays it over the weapon's own reflection.
-        if (!WeaponOn) return 0.0;
+        // (2026-11-09 WeaponMask: with the mask, only the weapon's own pixels; the hands, gloves and arms of the first-person model do not reflect)
+        if (!WeaponAt(uv)) return 0.0;
         if (MaterialOn) {
             vec4 material = MaterialAt(uv);
             if (material.b > 0.5) { roughness = max(material.r, 0.02); SurfaceMetal = material.g; return cb.weapon.z; }

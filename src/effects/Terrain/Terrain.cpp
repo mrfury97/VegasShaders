@@ -3,6 +3,7 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-27 (NVR DXVK 1.7-displace): DisplaceTick
 #include "../../core/DisplaceShadows.h"	// UNOFFICIAL 2026-10-27 displacement shadows: the land's draws taken, the depth copy's camera
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04
+#include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-09 the dither follows the shared temporal resolve
 
 // Set by SettingManager::Configuration::UpdateOldDefaults (settings version 65) when a saved config already had ParallaxLite
 // on, from builds that forced its distance cap every frame; UpdateSettings then writes the suggested distance once.
@@ -251,8 +252,15 @@ void TerrainShaders::UpdateConstants() {
 	// without TAA a moving dither would crawl, so it stands still.
 	BlendingConstants.Extra.x = 1.0f / (float)TheRenderManager->width;
 	BlendingConstants.Extra.y = 1.0f / (float)TheRenderManager->height;
-	TAAEffect* taa = TheShaderManager->Effects.TAA;
-	BlendingConstants.Extra.z = taa && taa->Enabled && taa->Effect ? fmodf(BlendingConstants.Extra.z + 1.0f, 64.0f) : 0.0f;
+	// UNOFFICIAL 2026-11-09 (roadmap track 1 step 4): with [Main.Main.Quality] SharedNoise (on) the dither follows the shared backbone like
+	// every other history-less noise (TemporalBackbone::NoiseIndex: the shared frame index while TAA / FSR / DLSS really resolves this frame,
+	// else 0). It moved whenever TAA was switched on, also in frames TAA did not resolve (menus, the overlay, effects off), where it
+	// crawled, and it stepped once per UpdateConstants call (two a frame). SharedNoise off: as before.
+	if (TemporalBackbone::Shared()) BlendingConstants.Extra.z = (float)(TemporalBackbone::NoiseIndex() % 64);
+	else {
+		TAAEffect* taa = TheShaderManager->Effects.TAA;
+		BlendingConstants.Extra.z = taa && taa->Enabled && taa->Effect ? fmodf(BlendingConstants.Extra.z + 1.0f, 64.0f) : 0.0f;
+	}
 
 	// One value blended over day / night (the interior operand is 0: the land has no Interiors group and returns early
 	// indoors), then dry to wet by rainFactor.

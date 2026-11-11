@@ -890,7 +890,7 @@ namespace SettingShots {
 			if (!Running) return;
 		}
 		if (!MainLoopSeen) RunCommands();	// (an xNVSE without the main-loop message: here, as before)
-		if (Moves && Player) Cell = Player->parentCell;
+		if ((Moves || WalkRate != 0.0f) && Player) Cell = Player->parentCell;	// 2026-11-09 grass-cache: an outdoor 'walk' crosses cells
 		if (!Player || Player->parentCell != Cell) { Stop("the player changed place"); return; }
 		if (TheRenderManager->device->TestCooperativeLevel() != D3D_OK) { Reader.Release(); ReleaseWorld(); Stop("the device was lost"); return; }
 		Frame++;

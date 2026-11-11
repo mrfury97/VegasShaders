@@ -231,7 +231,7 @@ namespace Omm {
 		pi.stage.module = module;
 		pi.stage.pName = "main";
 		pi.layout = m.pipelineLayout;
-		const VkResult r = vkCreateComputePipelines(h.vk.device, VK_NULL_HANDLE, 1, &pi, nullptr, &m.pipeline);
+		const VkResult r = vkCreateComputePipelines(h.vk.device, g_pipelineCache, 1, &pi, nullptr, &m.pipeline);
 		vkDestroyShaderModule(h.vk.device, module, nullptr);
 		if (r != VK_SUCCESS) { Log("opacity micromaps: OFF (pipeline: %s)", VkResultName(r)); m.pipeline = VK_NULL_HANDLE; return false; }
 		VkDescriptorPoolSize sizes[2] = { { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kCmdRing }, { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 2 * kCmdRing } };

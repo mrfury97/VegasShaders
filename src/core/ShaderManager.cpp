@@ -418,7 +418,12 @@ void ShaderManager::UpdateConstants() {
 	MarkShadersVanilla = TheSettingManager->GetSettingI("Shaders.PBR.Main", "MarkShadersVanilla");
 	MarkShadersVsFrom = TheSettingManager->GetSettingI("Shaders.PBR.Main", "MarkShadersVsFrom");
 	MarkShadersVsTo = TheSettingManager->GetSettingI("Shaders.PBR.Main", "MarkShadersVsTo");
+	{	// UNOFFICIAL 2026-11-09 (Render.cpp SetShadersHook): on unless the toml says false (a saved config from before the key: on)
+		SettingManager::Configuration::ConfigNode node;
+		GameShadersInMenus = !TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "GameShadersInMenus") || node.BoolValue;
+	}
 	GameShaderEyes = TheSettingManager->GetSettingI("Shaders.PBR.Main", "GameShaderEyes") != 0;	// UNOFFICIAL 2026-10-27 (Render.cpp SetShadersHook)
+	EyeShaderOld = TheSettingManager->GetSettingI("Shaders.PBR.Main", "EyeShaderOld") != 0;	// UNOFFICIAL 2026-11-09 (Render.cpp GameEyes)
 	NvrMsaaWarningTick();
 	// MarkShadersVanilla 2 (test only, once): the game's lamp falloff textures (BSShaderManager::spAttenuationXY 0x011F9534 / Z 0x011F9538)
 	// saved next to the log as PNG, to compare their shape with the shaders' 1 - (d / r)^2.
@@ -452,6 +457,7 @@ void ShaderManager::UpdateConstants() {
 	auto* const ui = InterfaceManager;
 	GameState.PipBoyIsOn = ui->IsPipBoyOpen();
 	GameState.VATSIsOn = ui->IsActive(Menu::kMenuType_VATS);
+	GameState.FaceMenuIsOn = ui->IsActive(Menu::kMenuType_RaceSex) || ui->IsActive(Menu::kMenuType_CharGen);	// UNOFFICIAL 2026-11-09 (GameShadersInMenus)
 
 	// A game menu counts as open when it is active and, if the live menu API is there, paused.
 	const bool hasLiveMenus = TheGameMenuManager->IsLiveMenu != nullptr;
@@ -787,8 +793,10 @@ template <typename ShaderEx> static bool HasAnyRecord(ShaderEx* shader) {
 * changed, the cache answers the rest), the same way it was loaded at start (LoadShader: templates, interior records). Called at the
 * frame's end (NiDX9Renderer__Do_EndFrame), never during a draw. A shader that no longer compiles keeps no record: the game's own draws.
 */
+void GameEyesForgetRecords();	// Render.cpp (UNOFFICIAL 2026-11-09 the eye variant)
 void ShaderManager::ReloadShaders() {
 	auto timer = TimeLogger();
+	GameEyesForgetRecords();
 	unsigned vs = 0, ps = 0;
 	for (const auto& Named : ShaderNames) {
 		ShaderCollection* collection = Named.second ? *Named.second : nullptr;

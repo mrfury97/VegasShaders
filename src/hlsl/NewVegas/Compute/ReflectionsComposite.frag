@@ -84,6 +84,19 @@ void main() {
         o_color = m.b > 0.5 ? vec4(m.r, m.g, 0.6 * (1.0 - m.r), 1.0) : vec4(color.rgb * 0.15, color.a);
         return;
     }
+    // UNOFFICIAL 2026-11-09 DebugView 11 (diagnostic, core/WeaponMask.h): the first-person model, the rest of the picture dimmed. With this frame's mask in use
+    // (weapon.x 2): red the weapon's own pixels (the weapon reflection covers them), blue the hands, arms and Pip-Boy, green anywhere else the mask is set
+    // (nowhere, if it is right). Yellow: no mask, the whole model counts as the weapon (WeaponHands on, or the mask could not be made). Magenta: no RT weapon
+    // rays this frame (Weapon 0, RT off, a rect frame): the model does not reflect.
+    if (abs(DebugView - 11.0) < 0.5) {
+        const bool model = IsWeapon(uv);
+        const vec4 dim = vec4(color.rgb * 0.25, color.a);
+        if (!WeaponOn) { o_color = model ? vec4(1.0, 0.0, 1.0, 1.0) : dim; return; }
+        if (!WeaponMasked) { o_color = model ? vec4(1.0, 1.0, 0.0, 1.0) : dim; return; }
+        const bool set = textureLod(sampler2D(t_weaponMask, POINT_S), uv, 0.0).r > 0.5;
+        o_color = model ? (set ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 1.0, 1.0)) : (set ? vec4(0.0, 1.0, 0.0, 1.0) : dim);
+        return;
+    }
     vec3 N = ViewNormal(uv);
     float roughness;
     float amount = Reflectivity(uv, depth, N, roughness);

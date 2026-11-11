@@ -4,10 +4,11 @@ Radius = 150.0                      # How far the bounce reaches, in world units
 DrawDistance = 6000.0               # Distance from the camera where the effect has faded out.
 BlurRadius = 1.5                    # Smoothing of the bounce's grain, in pixels (x6 each way).
 QuarterResolution = true            # Works the bounce out on a quarter of the pixels instead of half (about 1.2 instead of 1.9 ms at 1440p on a GTX 1070, no visible difference). Off = half resolution.
-OffScreenLight = 1.0                # UNOFFICIAL: light for bounce samples that land off the screen (or behind your weapon), guessed from the ambient light and what is seen nearby, so the bounce no longer fades out toward the screen edges. 0 = off (they add nothing, as before).
-MultiBounce = 1.0                   # UNOFFICIAL: more than one bounce: the bounce light each surface shows is passed on again the next frame (1 = all of it, up to 2). Subtle, mostly in corners. 0 = one bounce, as before.
+OffScreenLight = 1.0                # [0-4] UNOFFICIAL: light for bounce samples that land off the screen (or behind your weapon), guessed from the ambient light and what is seen nearby, so the bounce no longer fades out toward the screen edges. 0 = off (they add nothing, as before).
+MultiBounce = 1.0                   # [0-2] UNOFFICIAL: more than one bounce: the bounce light each surface shows is passed on again the next frame (1 = all of it, up to 2). Subtle, mostly in corners. 0 = one bounce, as before.
 Temporal = true                     # UNOFFICIAL: reuses last frame's bounce (moved with the view, dropped where something moved in front): less grain, steadier, light from things just turned away from fades out instead of vanishing. Off = as before.
 HalfSamples = false                 # UNOFFICIAL: with Temporal, half the samples each frame: about 0.03 ms cheaper at 1440p, a little more shimmer while turning.
+TemporalJitterFix = true            # UNOFFICIAL (2026-11-09), BUG FIX, applies immediately, with Temporal: TAA / FSR / DLSS draw every frame shifted by a fraction of a pixel, and last frame's bounce was read back without that shift's change, so while you moved it smeared a little (as AmbientLight's TemporalJitterFix). On: it is read where the shift puts it. Off: as before. Does nothing without TAA's Jitter.
 HardEdges = true                   # UNOFFICIAL: the bounce light never crosses the edge of a thing in front of a lit wall (pillars, posts and palms took the wall's light: a blurry glow drawn over them). Off: the softer blend from before. Applies to the Plus and Temporal modes.
 
 [_Shaders.BounceLight.Status]

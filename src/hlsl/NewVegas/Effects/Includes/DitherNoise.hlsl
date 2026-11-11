@@ -16,7 +16,8 @@ float DitherGradientNoise(float2 p)
 float TonemapDitherAt(float2 pixel)
 {
     const float2 p = pixel + TESR_ToneMappingClip.z * float2(5.588238, 3.235);
-    return (DitherGradientNoise(p) + DitherGradientNoise(p + float2(47.0, 17.0)) - 1.0) * TESR_ToneMappingClip.y;
+    // UNOFFICIAL 2026-11-09 (review 6.6.1): the second read is taken at the pixel's SWAPPED coordinates. At a constant offset it was fract(first + 0.427 or 0.444) for every pixel (the noise is linear in the pixel), so the 'triangular' sum was one number counted twice: uneven grain. Every copy of this noise changes together (SkyDither, the tonemap, Cinema, and the SMAA / DitherBuster passes that take it off again).
+    return (DitherGradientNoise(p) + DitherGradientNoise(p.yx + float2(47.0, 17.0)) - 1.0) * TESR_ToneMappingClip.y;
 }
 
 // A luma read with the tonemap's noise subtracted (the tonemap added n * saturate(rgb * 128) to every channel: the same n, so to luma too).

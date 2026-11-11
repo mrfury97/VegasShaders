@@ -9,7 +9,7 @@
 #   -FixedStep  the demo's script seconds a frame (e.g. 0.2): every run sees the same frames (A/B comparisons); 0 = real time
 #   -Set      toggles held through the demo, by their key: -Set R=0,B=1 (PTRestirDI off, 1 bounce); -Tag: a suffix for its screenshots
 param([string]$Size = "640x360", [string]$Window = "1280x720", [string]$Device = "", [double]$Demo = 0, [string]$Fork = "",
-	[switch]$Compile, [switch]$NoBuild, [switch]$SkipHelper, [string[]]$Set = @(), [string]$Tag = "", [double]$FixedStep = 0)
+	[switch]$Compile, [switch]$NoBuild, [switch]$SkipHelper, [string[]]$Set = @(), [string]$Tag = "", [double]$FixedStep = 0, [string]$Frames = "", [string]$FramesRange = "")
 $ErrorActionPreference = "Continue"
 $here = $PSScriptRoot
 $bin = Join-Path $here "bin"
@@ -30,5 +30,7 @@ if ($Demo -gt 0) { $a += @("--demo", "$Demo") }
 foreach ($s in $Set) { foreach ($one in $s.Split(",")) { if ($one) { $a += @("--set", $one.Trim()) } } }
 if ($Tag) { $a += @("--tag", $Tag) }
 if ($FixedStep -gt 0) { $a += @("--fixed-step", "$FixedStep") }
+if ($FramesRange) { $a += @("--frames-range", $FramesRange) }   # (2026-11-09) only the demo's script seconds a,b (e.g. 30,40: segment 05)
+if ($Frames) { $a += @("--frames", $Frames) }   # (2026-11-09) every frame's picture, raw RGB at the window size, for a film (see the README)
 & "$bin\NvrRtPlayground.exe" @a
 exit $LASTEXITCODE

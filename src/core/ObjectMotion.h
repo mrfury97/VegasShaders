@@ -45,6 +45,11 @@ namespace ObjectMotion {
 		NiTransform cur = {}, prev = {};
 		D3DXVECTOR3 camCur = {}, camPrev = {};		// the camera position the bones were made relative to
 		std::vector<float> bones, prevBones;		// 12 floats a bone (3 rows of a 3x4), camera relative
+		// UNOFFICIAL 2026-11-09 ObjectMotionIdentity (roadmap track 1 step 3): what the geometry at this address was made of when it was
+		// last noted. The map is keyed by the raw NiGeometry*: a geometry freed and a new one made at the same address (a cell unloading,
+		// a corpse swapped, a weapon model changed) would have taken the old one's transform or bones as its "last frame" and drawn a
+		// false move. A note whose mesh data, skin or parent node differ from the entry's is a new thing: no last frame (as on its first).
+		const void* data = nullptr; const void* skin = nullptr; const void* parent = nullptr;
 	};
 	inline std::unordered_map<NiGeometry*, Entry> Map;
 	inline std::vector<NiGeometry*> Moving;
@@ -62,11 +67,22 @@ namespace ObjectMotion {
 	// where the upscale runs after this buffer is made). On: a geometry whose move is the camera's move counts as still (2026-11-01: for a large
 	// one, its position alone: the dome also turns, NoteRigid).
 	inline bool SkipCameraFollow = false;	// read in BeginFrame
+	inline bool IdentityCheck = true;		// UNOFFICIAL 2026-11-09 [Main.Main.Quality] ObjectMotionIdentity (missing key: on), read in BeginFrame
+	inline UInt32 Reused = 0;				// notes whose address held another geometry (the identity check said new)
+	// True when the entry was made for another geometry at the same address; takes this one's identity either way.
+	inline bool Reidentify(Entry& e, NiGeometry* geo) {
+		const void* data = geo->geomData; const void* skin = geo->skinInstance; const void* parent = geo->m_parent;
+		const bool other = e.seen != 0 && (e.data != data || e.skin != skin || e.parent != parent);
+		e.data = data; e.skin = skin; e.parent = parent;
+		if (other && IdentityCheck) { Reused++; return true; }
+		return false;
+	}
 
 	// Render.cpp, once a frame, before the world draws.
 	inline void BeginFrame() {
 		Live = !Failed && Wanted();
 		SkipCameraFollow = TheSettingManager->GetSettingI("Main.Main.Quality", "ObjectMotionSkipCameraFollow") != 0;
+		{ SettingManager::Configuration::ConfigNode node; IdentityCheck = !TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "ObjectMotionIdentity") || node.BoolValue; }
 		if (!Live) {
 			if (!Map.empty()) { Map.clear(); Moving.clear(); }
 			Data.x = 0.0f;
@@ -104,7 +120,8 @@ namespace ObjectMotion {
 		const UInt32 frame = NoteFrame;
 		Entry& e = Map[geo];
 		if (e.seen == frame) return;
-		e.hasPrev = e.seen == frame - 1 && !e.skinned;
+		const bool reused = Reidentify(e, geo);	// UNOFFICIAL 2026-11-09 ObjectMotionIdentity
+		e.hasPrev = e.seen == frame - 1 && !e.skinned && !reused;
 		e.skinned = false;
 		e.prev = e.cur;
 		e.camPrev = e.camCur;
@@ -163,7 +180,8 @@ namespace ObjectMotion {
 		const UInt32 frame = NoteFrame;
 		Entry& e = Map[geo];
 		if (e.seen == frame) return;
-		e.hasPrev = e.seen == frame - 1 && e.skinned && e.bones.size() == skin->Bones * 12u;
+		const bool reused = Reidentify(e, geo);	// UNOFFICIAL 2026-11-09 ObjectMotionIdentity
+		e.hasPrev = e.seen == frame - 1 && e.skinned && e.bones.size() == skin->Bones * 12u && !reused;
 		e.skinned = true;
 		e.prevBones.swap(e.bones);
 		e.camPrev = e.camCur;
@@ -436,9 +454,10 @@ namespace ObjectMotion {
 					CheckCopy->UnlockRect();
 				}
 			}
-			Logger::Log("ObjectMotion: per frame %.1f geometries noted, %.1f moved ones drawn (%.1f skinned), %.1f left out as following the camera; this frame %d of 5184 sampled pixels carry a move (largest %.2f units)",
-				Noted / (double)Frames, DrawnGeometries / (double)Frames, DrawnSkinned / (double)Frames, CameraFollowers / (double)Frames, moving, largest);
-			Frames = DrawnGeometries = DrawnSkinned = Noted = CameraFollowers = 0;
+			Logger::Log("ObjectMotion: per frame %.1f geometries noted, %.1f moved ones drawn (%.1f skinned), %.1f left out as following the camera; this frame %d of 5184 sampled pixels carry a move (largest %.2f units); %u notes found another geometry at a known address (identity check %s)",
+				Noted / (double)Frames, DrawnGeometries / (double)Frames, DrawnSkinned / (double)Frames, CameraFollowers / (double)Frames, moving, largest,
+				Reused, IdentityCheck ? "on" : "off");
+			Frames = DrawnGeometries = DrawnSkinned = Noted = CameraFollowers = Reused = 0;
 			// UNOFFICIAL 2026-10-30 (blur ring hunt): what moved this frame, against the camera's own move.
 			for (size_t k = 0; k < Moving.size() && k < 8; k++) {
 				auto found = Map.find(Moving[k]);

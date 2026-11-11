@@ -27,7 +27,7 @@ void main() {
     float w = max(clip.w, 0.001);
     vec2 last = vec2(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5);
     // UNOFFICIAL 2026-10-30 RT weapon reflections: the weapon moves with the camera: its history is where it is on the screen.
-    if (WeaponAt(uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy))) last = uv;
+    if (ViewModelAt(uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy))) last = uv;   // (2026-11-09: ViewModelAt: the hands move with the camera too)
     float inside = float(all(greaterThan(last, vec2(0.0))) && all(lessThan(last, vec2(1.0))) && current.a + high.a > 0.0);
     vec4 history = textureLod(sampler2D(t_history, POINT_S), last, 0.0);
     if (any(isnan(history)) || any(isinf(history))) history = current;   // (2026-10-30: a bad texel never survives)
