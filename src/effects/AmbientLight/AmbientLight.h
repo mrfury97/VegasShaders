@@ -35,6 +35,8 @@ public:
 	IDirect3DSurface9*	occlusionHistorySurface[2] = {};
 	int					historyIndex = 0;		// the one holding last frame's
 	bool				historyValid = false;
+	bool				exteriorBalance = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] ExteriorBalance (Apply)
+	bool				giSingleHistory = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] GISingleHistory (GI accumulate)
 	bool				temporal = true;
 	D3DXMATRIX			lastView, lastInvView, lastProj;
 	double				lastTime = 0.0;

@@ -501,6 +501,17 @@ namespace {
 			looseTextures.erase(looseTextures.begin(), looseTextures.begin() + (std::min)(count, looseTextures.size()));
 		}
 		void ClearTextureQueues() { DropSlots(slotQueue.size()); DropLoose(looseTextures.size()); }
+		// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): texIds / texKeyOf / alphaSlots are keyed by the texture's address and outlive the
+		// game's texture: a new texture allocated at a freed one's address inherited its RT id / atlas slot (wrong colour, wrong alpha at
+		// hits). Now one COM reference is held per texture with a live texKeyOf id (taken when the id is assigned, given back when the id is
+		// released or at the full clears); alphaSlots keys are not pinned (see AlphaSlotOf; alphaHeld stays empty). The VRAM tradeoff: a texture the
+		// game dropped stays alive until its id is released (RealTextureBudgetMB LRU, kTexIdle exchanges unused).
+		std::vector<IDirect3DBaseTexture9*> alphaHeld;
+		void ReleaseTexRefs() {
+			for (IDirect3DBaseTexture9*& x : texKeyOf) if (x) { x->Release(); x = nullptr; }
+			for (IDirect3DBaseTexture9* x : alphaHeld) if (x) x->Release();
+			alphaHeld.clear();
+		}
 		// per atlas slot: the ids its SLOT_TEXTURES op named; state 0 none, 1 queued, 2 sent, 3 short (a texture refused by the budget or
 		// released): queued again when the slot is next used from retryAt on
 		struct SlotReal { UInt32 ids[3] = {}; UInt8 state = 0; UInt64 retryAt = 0; };
@@ -794,6 +805,9 @@ namespace {
 			target->Release();
 		}
 		if (target2) target2->Release();
+		// UNOFFICIAL 2026-11-11 (sungi): alphaSlots keys are NOT pinned (an atlas slot is never freed: pinning would keep up to 1024
+		// diffuse + 1024 glow textures alive for the session, GBs of VRAM after a long walk). The remaining ABA risk there is a wrong
+		// alpha / albedo atlas slot for a texture reallocated at a freed one's address (no crash); see SunGI-study F2.
 		alphaSlots.emplace(key, slot);
 		return slot;
 	}
@@ -853,7 +867,12 @@ namespace {
 			p.levels | (p.swapRG ? NVR_RT_TEX_SWIZZLE_GR : 0u) };
 		memcpy(&f.ops[f.opCount++], &op, sizeof(op));
 		texRes.Add(id, p.bytes, n);
-		if (id < texKeyOf.size()) texKeyOf[id] = base;
+		// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): one reference while the id lives (given back in ReleaseTexture / ReleaseTexRefs)
+		if (id < texKeyOf.size()) {
+			base->AddRef();
+			if (texKeyOf[id]) texKeyOf[id]->Release();	// (not expected: the id was freed before; keeps the count balanced)
+			texKeyOf[id] = base;
+		}
 		texSent++;
 		texRouteSent[p.route]++;
 		return (int)id;
@@ -869,6 +888,8 @@ namespace {
 		if (id < texKeyOf.size()) {
 			auto it = texIds.find(texKeyOf[id]);
 			if (it != texIds.end() && it->second.id == id) texIds.erase(it);
+			// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): the key is erased first (the Release may free the texture and its address)
+			if (texKeyOf[id]) texKeyOf[id]->Release();
 			texKeyOf[id] = nullptr;
 		}
 		for (SlotReal& s : slotReal)
@@ -1088,6 +1109,7 @@ namespace {
 		normalSlots = 0;
 		atlasUsed = 0;
 		glowSlots = 0;
+		ReleaseTexRefs();	// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): the references of the keys cleared here and below
 		alphaSlots.clear();
 		// (2026-11-07, protocol 7) real textures: read at each helper start (restart), with the atlases they follow
 		realTextures = (alphaOn || hitTextures) && TheSettingManager->GetSettingI("Main.Main.RayTracing", "RealTextures") != 0;
@@ -1457,6 +1479,7 @@ namespace {
 		FreeLeafCards(true);
 		FreeFaces(true);
 		pendingReleases.clear();
+		ReleaseTexRefs();	// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): Stop may run at shutdown; releasing a held reference is valid there
 		alphaSlots.clear();
 		if (alphaUpload) { alphaUpload->Release(); alphaUpload = nullptr; }
 		if (alphaDetailUpload) { alphaDetailUpload->Release(); alphaDetailUpload = nullptr; }

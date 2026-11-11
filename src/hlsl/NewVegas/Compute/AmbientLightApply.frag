@@ -176,7 +176,8 @@ vec4 Apply(vec2 uv, bool sky) {
     if (DebugView > 0.5) return delinearize(vec4(DebugView < 1.5 ? vec3(ao) : gridBounce * albedo, 1.0));
     if (cb.alInterior.x > 0.5) lin = lin - (1.0 - ao) * min(lin, albedo * cb.alScene.rgb) + gridBounce * albedo;
     else {
-        vec3 lit = lin * ao;
+        // UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (AmbientLight.fx.hlsl Apply; alInterior.w > 0 outdoors = the ambient scale)
+        vec3 lit = cb.alInterior.w > 0.0 ? lin - (1.0 - ao) * min(lin, albedo * cb.alScene.rgb * cb.alInterior.w) : lin * ao;
         if (sky) lit = SkyTake(lit, skyFactor.x, skyFactor.y, cb.aoSky5.x, cb.aoSky5.w);
         lin = lit + gridBounce * albedo;
     }

@@ -11,6 +11,7 @@
 #include "../../core/MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT estimate's blurs and history are skipped)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 AlbedoBuffer (TESR_AlbedoBuffer: the bounce's surface colour)
+#include "../PBR/PBR.h"	// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (LinearScales.y: the lit shaders' ambient scale)
 
 void AmbientLightEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_AmbientLightData", &Constants.Data);
@@ -38,6 +39,11 @@ void AmbientLightEffect::UpdateSettings() {
 	gridLamps = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridLamps"), 0.0f, 40.0f);	// (lightgrid2)
 	gridFine = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "GridFine") != 0;	// (lightgrid2)
 	interiorBalance = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "InteriorBalance") != 0;
+	{	// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance / GISingleHistory (missing key, an older toml: on)
+		SettingManager::Configuration::ConfigNode node;
+		exteriorBalance = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "ExteriorBalance") || node.BoolValue;
+		giSingleHistory = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GISingleHistory") || node.BoolValue;
+	}
 	interiorBounceShare = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "InteriorBounceShare"), 0.0f, 4.0f);
 	noEdgeOutline = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "NoEdgeOutline") != 0;	// UNOFFICIAL 2026-10-21 (aloutline)
 	{	// UNOFFICIAL 2026-11-01 EdgeReject (missing key, an older toml: on)
@@ -1098,7 +1104,9 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	D3DXHANDLE giHandle = ParameterHandle(paramGI, "NVR_ALGI");
 	if (giD3D9Texture && !giHandle) giD3D9Texture = nullptr;	// an older AmbientLight.fx.hlsl: nothing to switch
 	if (giHandle) {
-		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f, 0.0f);	// z: set for Apply (below)
+		// w: UNOFFICIAL 2026-11-11 (sungi) GISingleHistory: the RT denoiser's GI (it keeps its own history): Accumulate keeps no bounce history
+		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f,
+			giD3D9Texture && giSingleHistory && giD3D9Texture != rtGI ? 1.0f : 0.0f);	// z: set for Apply (below)
 		Effect->SetVector(giHandle, &giFlags);
 	}
 	Effect->SetTechnique(technique);
@@ -1135,7 +1143,17 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	if (!balanceRuns || TheShaderManager->GameState.isCellChanged) balanceValid = false;
 	const int balanceRead = balanceIndex, balanceWrite = balanceIndex ^ 1;
 	if (D3DXHANDLE h = ParameterHandle(paramInterior, "NVR_ALInterior")) {
-		D3DXVECTOR4 data(interiorMode ? 1.0f : 0.0f, balanceValid ? 1.0f : 0.0f, interiorBounceShare, 0.9f);
+		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (STUDY F4): outdoors .x is 0 and .y / .z / .w are not read (the balance passes run
+		// only indoors), so .w carries the exterior mode: > 0 = the occlusion darkens only the ambient share, and the value is the scale the
+		// lit shaders put on the ambient (LIN_SCALE_AMBIENT) when the real albedo is known (AlbedoBuffer on), else 1 (SurfaceColour's guess
+		// divides the lit colour by the unscaled ambient, so the unscaled share matches it).
+		float exteriorShare = 0.0f;
+		if (exteriorBalance && !interiorMode && TheShaderManager->GameState.isExterior) {
+			const PBRShaders* pbr = TheShaderManager->Shaders.PBR;
+			const bool realAlbedo = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
+			exteriorShare = realAlbedo && pbr && pbr->Constants.LinearScales.y > 0.0f ? (std::min)(pbr->Constants.LinearScales.y, 4.0f) : 1.0f;
+		}
+		D3DXVECTOR4 data(interiorMode ? 1.0f : 0.0f, balanceValid ? 1.0f : 0.0f, interiorBounceShare, interiorMode ? 0.9f : exteriorShare);
 		Effect->SetVector(h, &data);
 	}
 	// UNOFFICIAL 2026-10-21 (alrocks): the normal smoothing's reach and the horizon bias (radians) for Prepare and Estimate.
@@ -1183,6 +1201,16 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	lastRect = RenderRect::Active();
 	// UNOFFICIAL 2026-11-01 SharedNoise: and the shared history rule (core/TemporalBackbone.h)
 	const bool sharedNoise = TemporalBackbone::Shared();
+	// UNOFFICIAL 2026-11-11 (sungi) Q8b (STUDY F16): the bounce and occlusion histories restart when the player goes between interior and
+	// exterior or to another worldspace (a cell border walked over keeps them; isCellChanged would also fire there)
+	{
+		static bool placeKnown = false, lastExterior = false;
+		static const void* lastWorld = nullptr;
+		const bool exteriorNow = TheShaderManager->GameState.isExterior;
+		const void* worldNow = exteriorNow && Player ? (const void*)Player->GetWorldSpace() : nullptr;
+		if (placeKnown && (exteriorNow != lastExterior || worldNow != lastWorld)) historyValid = false;
+		placeKnown = true; lastExterior = exteriorNow; lastWorld = worldNow;
+	}
 	const bool continuous = historyValid && rectSame && now - lastTime >= 0.0 && now - lastTime < 0.5 && !TheShaderManager->GameState.isCameraCut &&
 		(!sharedNoise || TemporalBackbone::HistoryValid());
 	FlickerWatch::Flags |= FlickerWatch::kALRendered | (continuous ? FlickerWatch::kALHistory : 0u);	// UNOFFICIAL 2026-10-23 test only
@@ -1217,6 +1245,9 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// RR denoises the frame (Upscaler::RayReconstructionWantsRaw): no blur X / Y (Accumulate and Apply read buffer 0, the estimate as it
 	// is) and Accumulate keeps no history (share 0: it passes the estimate through into the targets Apply reads). Set by the RT estimate.
 	bool rrRaw = false;
+	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (STUDY F7): set when this frame's RT GI came through the RT denoiser (its own 16-frame
+	// history): the GI accumulate then keeps no bounce history of its own (the occlusion's stays).
+	bool giDenoised = false;
 	// UNOFFICIAL 2026-11-03 (RT AO at RenderScale < 1; docs/next/RT-RENDERSCALE.md, phase 1) the RT estimate below as one helper: the Vulkan
 	// passes' Estimate (ExtOn) and, in rect frames, the one Vulkan pass inside the rect-aware D3D9 passes (ExtOnRect). True: drawn.
 	auto estimateRT = [&](IDirect3DSurface9* const* targets) -> bool {
@@ -1236,6 +1267,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			IDirect3DBaseTexture9* rtTextures[] = { prepTexture, rtVis ? rtVis : rtRaw, rtGIUsed ? (IDirect3DBaseTexture9*)rtGIUsed : (IDirect3DBaseTexture9*)rtRaw };
 			drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reduced);
 			if (drawn && rtGI) giDrawn = true;	// ComputeGI's accumulate and apply take the bounce light from here
+			giDenoised = drawn && rtGIClean && giSingleHistory;	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory
 			// UNOFFICIAL 2026-10-30 DLSS RR (rrRaw above): Accumulate's history share 0 from here on (Estimate has read
 			// NVR_ALTemporal already; the passes after it read only .x's share from it, and .y / .z stay)
 			if (drawn && Upscaler::RayReconstructionWantsRaw()) {
@@ -1351,7 +1383,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				else if (p == 4) {
 					if (giDrawn && giTest != 1) {	// (ComputeGI) the bounce light kept from frame to frame too, in the bounce history
 						IDirect3DBaseTexture9* giTextures[] = { bufferTexture[blurred], prepTexture, occlusionHistory[readIndex], historyTexture[readIndex] };
-						drawn = ExtDraw(ExtGIAccumulate, targets, 2, giTextures, 0, reduced);
+						drawn = ExtDraw(ExtGIAccumulate, targets, 2, giTextures, giDenoised ? 1u : 0u, reduced);	// UNOFFICIAL 2026-11-11 (sungi) variant bit 0: GISingleHistory
 					}
 					if (!drawn) giDrawn = false;	// (ComputeGI) no accumulated light: the plain apply
 					// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer when this frame's is made (variant bit 2), else a stand-in nothing reads

@@ -172,3 +172,8 @@ Cost: estimate at half size (five sample pairs), two blurs of twelve taps, a com
 6. The sun mask is read in its R channel only.
 7. bNVAOLoaded is declared in the C++ and never set; the check never blocks.
 8. The blur step cap (8 pixels) and the constant of the blur radius are chosen here; tune in game if the blur looks too strong or too weak near the camera.
+
+### Sun-GI study fixes (2026-11-11, sungi; not built or tested yet)
+- RtCore: the real-texture ids (texKeyOf) and the alpha atlas keys (alphaSlots) hold a COM reference on their textures, so a new texture at a freed one's address no longer inherits its RT id / atlas slot (F2). Costs: a dropped texture lives until its id is LRU-released; atlas keys are bounded by the atlas capacity.
+- `[Shaders.AmbientOcclusion.RT] GIAmbientUnits` (default true, missing = true): the GI hits' ambient is scaled by TESR_LinearScales.y (the PBR AmbientScale, as the lit shaders do), like the sun by .x, under GIGameLamps (F9).
+- The GI reservoirs and both RT denoisers (AO, GI) start over on the frame the player's place changes (interior/exterior or worldspace) or the sun direction jumps more than 2 degrees (F16).

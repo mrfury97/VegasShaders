@@ -467,7 +467,8 @@ AccumulateOut Accumulate(VSOUT IN) {
 			tex2Dlod(NVR_ALHistory, float4((base + 1.5f) * NVR_ALLayout.zw, 0.0f, 0.0f)).rgb * weight.w) / max(found, 1.0e-4f);
 		float3 marginC = (highC - lowC) * 0.25f;
 		bounceHistory = clamp(bounceHistory, lowC - marginC, highC + marginC);
-		OUT.bounce = float4(lerp(current.rgb, bounceHistory, keep), viewZ);
+		// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (NVR_ALGI.w, STUDY F7): the RT denoiser's GI has its own history; keep 0 here
+		OUT.bounce = float4(lerp(current.rgb, bounceHistory, NVR_ALGI.w > 0.5f ? 0.0f : keep), viewZ);
 	}
 	return OUT;
 }
@@ -1052,7 +1053,9 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	// UNOFFICIAL 2026-10-18 (ambfix2): indoors the occlusion takes only from the ambient share (see above StatsSample).
 	[branch] if (NVR_ALInterior.x > 0.5f) lin = lin - (1.0f - ao) * min(lin, albedo * NVR_ALScene.rgb) + gridBounce * albedo;
 	else {
-		float3 lit = lin * ao;
+		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (NVR_ALInterior.w > 0 outdoors = the ambient scale): the occlusion darkens only the
+		// ambient share of the pixel (as indoors), not the direct sun: lit = lin * ao took the sun's light out of every crease.
+		float3 lit = NVR_ALInterior.w > 0.0f ? lin - (1.0f - ao) * min(lin, albedo * NVR_ALScene.rgb * NVR_ALInterior.w) : lin * ao;
 		if (sky) lit = SkyTake(lit, skyFactor.x, skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w);	// (UNOFFICIAL 2026-10-20 skyamb)
 		lin = lit + gridBounce * albedo;	// (the screen bounce removed 2026-10-14: the light grid is the bounce)
 	}

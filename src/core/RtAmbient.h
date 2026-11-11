@@ -31,6 +31,9 @@ namespace RtAmbient {
 		// ray that meets a back face just after its start began under the traced surface and carries on past it (as the AO rays' 'inside').
 		// SkySoftEdges: cover near the end of a sky ray counts less (the AO rays' falloff) and the traced factor opens up toward endFade.
 		bool	SkyInsideFix = true;
+		// UNOFFICIAL 2026-11-11 (sungi, F9) BUG FIX, on by default (a missing key, an older toml: on): the GI hits' ambient x the game's
+		// ambient scale (LIN_SCALE_AMBIENT, TESR_LinearScales.y), as the sun already is by LinearScales.x, under GIGameLamps; AmbientOcclusion.cpp
+		bool	GIAmbientUnits = true;
 		bool	SkySoftEdges = true;
 		// UNOFFICIAL 2026-11-08 (alsky; tester: RT GI strength + AmbientLight DrawDistance 12000 drew a hard line across the ground) BUG FIX,
 		// on by default: AmbientLight's traced occlusion and RT GI bounce fade out before endFade (where the trace stops) instead of at
@@ -121,6 +124,7 @@ namespace RtAmbient {
 		{	// UNOFFICIAL 2026-11-08 (alsky): on unless the toml says false
 			SettingManager::Configuration::ConfigNode node;
 			Current.SkyInsideFix = !TheSettingManager->Config.FillNode(&node, s, "SkyInsideFix") || node.BoolValue;
+			Current.GIAmbientUnits = !TheSettingManager->Config.FillNode(&node, s, "GIAmbientUnits") || node.BoolValue;	// UNOFFICIAL 2026-11-11 (sungi, F9)
 			Current.SkySoftEdges = !TheSettingManager->Config.FillNode(&node, s, "SkySoftEdges") || node.BoolValue;
 			Current.RtFarFade = !TheSettingManager->Config.FillNode(&node, s, "RtFarFade") || node.BoolValue;
 		}

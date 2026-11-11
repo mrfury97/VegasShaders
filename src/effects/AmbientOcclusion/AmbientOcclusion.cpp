@@ -58,6 +58,35 @@ static UInt32 RtFrame = 0;
 // another scale (or rect vs native) holds other texels and starts again (AmbientLight's rectSame rule). The shaders' cb.rtRect.zw.
 static float RtHistoryScale[2] = { 1.0f, 1.0f };
 static float RtRectScaleX() { return RenderRect::On ? RenderRect::ScaleX : 1.0f; }
+// UNOFFICIAL 2026-11-11 (sungi, F16) true on the one frame the player's place changes between interior and exterior or to another worldspace
+// (the parent cell's), or the sun's direction jumps more than 2 degrees in a frame (a time skip, a weather-start snap; ShadowsExteriors
+// SmoothedSunDir moves in small steps otherwise). The RT GI reservoirs and both RT denoisers (AO, GI) start over on it: the frame of a door
+// or a load must not blend the other space's light in. Once a frame (frame-number guard), so every caller sees the same answer.
+static bool RtPlaceRestart() {
+	static UInt32 frame = 0xFFFFFFFF;
+	static bool result = false, known = false, lastExterior = false, haveSun = false;
+	static const void* lastWorld = nullptr;
+	static D3DXVECTOR3 lastSun(0.0f, 0.0f, 1.0f);
+	const UInt32 now = TheFrameRateManager->FrameNumber;
+	if (frame == now) return result;
+	frame = now;
+	const bool exterior = TheShaderManager->GameState.isExterior;
+	const void* world = Player ? (const void*)Player->GetWorldSpace() : nullptr;
+	bool restart = known && (exterior != lastExterior || world != lastWorld);
+	known = true; lastExterior = exterior; lastWorld = world;
+	ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+	if (shadows && exterior) {
+		D3DXVECTOR3 sun(shadows->Constants.SmoothedSunDir.x, shadows->Constants.SmoothedSunDir.y, shadows->Constants.SmoothedSunDir.z);
+		const float len = D3DXVec3Length(&sun);
+		if (len > 0.0f) {
+			sun /= len;
+			if (haveSun && D3DXVec3Dot(&sun, &lastSun) < cosf(D3DXToRadian(2.0f))) restart = true;
+			lastSun = sun; haveSun = true;
+		}
+	} else haveSun = false;
+	if (restart) Logger::Log("UNOFFICIAL RT AO: GI reservoirs and RT denoisers start over (place or sun direction changed).");
+	return result = restart;
+}
 static float RtRectScaleY() { return RenderRect::On ? RenderRect::ScaleY : 1.0f; }
 
 static float LinearLuma(const D3DXVECTOR4& c) {
@@ -373,7 +402,7 @@ bool AmbientOcclusionEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSur
 void AmbientOcclusionEffect::RtTemporalSetup(const D3DSURFACE_DESC& AoDesc) {
 	const double now = TheFrameRateManager->Time;
 	const bool rectSame = RtHistoryScale[0] == RtRectScaleX() && RtHistoryScale[1] == RtRectScaleY() && !RenderRect::ScaleChanged();	// (2026-11-03)
-	const bool continuous = RtHistoryValid && rtHistoryWidth == AoDesc.Width && rtHistoryHeight == AoDesc.Height && now - RtLastTime >= 0.0 &&
+	const bool continuous = !RtPlaceRestart() && RtHistoryValid && rtHistoryWidth == AoDesc.Width && rtHistoryHeight == AoDesc.Height && now - RtLastTime >= 0.0 &&
 		now - RtLastTime < 0.5 && !TheShaderManager->GameState.isCameraCut && rectSame &&
 		(!TemporalBackbone::Shared() || TemporalBackbone::HistoryValid());	// UNOFFICIAL 2026-11-01 SharedNoise: and the shared history rule
 	D3DXMatrixIdentity(&RtReproject);
@@ -624,6 +653,7 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoised(IDirect3DDevice9* Device) 
 	static GpuTimer timer("  AO RT denoise");
 	GpuProfileScope gpu(timer, Device);
 	RtDenoise::Settings s;	// the defaults: 16 frames of history, 3 a-trous passes
+	s.Reset = RtPlaceRestart();	// UNOFFICIAL 2026-11-11 (sungi, F16)
 	s.Downscale = 2;
 	s.Kernel = RtAmbient::Current.DenoiseKernel;	// (2026-10-30) 3 by default: ~2.5x cheaper (rt-sun 1f5d987e)
 	result = RtDenoise::Run(denoiser, Device, raw, rtDenoisedSurface, s);
@@ -648,6 +678,7 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 	static GpuTimer timer("  GI RT denoise (half, rgb)");
 	GpuProfileScope gpu(timer, Device);
 	RtDenoise::Settings s;
+	s.Reset = RtPlaceRestart();	// UNOFFICIAL 2026-11-11 (sungi, F16)
 	s.Channels = 3;
 	s.Downscale = 2;
 	s.MovingHistory = RtAmbient::Current.GIMovingHistory;	// (2026-10-31, rt-ao-sky) with DenoiseBackbone only
@@ -768,6 +799,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// puts the bounce into rgb the same way. The reuse's reservoirs hold one frame's rect layout: a history made at another RenderRect scale
 	// (or rect vs native) holds other texels and starts again (as the AO's RtHistoryScale).
 	const bool gi = rt.GI && al && al->ShouldRender();
+	if (gi && RtGIHistory && RtPlaceRestart()) RtGIHistory = false;	// UNOFFICIAL 2026-11-11 (sungi, F16): reuse.w 0 = no history (a new place / a sun jump)
 	{
 		static float giHistoryScale[2] = { 1.0f, 1.0f };
 		if (giHistoryScale[0] != RtRectScaleX() || giHistoryScale[1] != RtRectScaleY() || RenderRect::ScaleChanged()) {
@@ -791,7 +823,11 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		PBRShaders* pbr = TheShaderManager->Shaders.PBR;
 		const float lightScale = rt.GIGameLamps && pbr ? pbr->Constants.LinearScales.x : 1.0f;
 		c.sunColor = D3DXVECTOR4(lin(sunColor.x) * lightScale, lin(sunColor.y) * lightScale, lin(sunColor.z) * lightScale, 0.0f);
-		c.ambient = D3DXVECTOR4(lin(ambient.x), lin(ambient.y), lin(ambient.z), rt.GlowGI);	// (w: GlowGI, 2026-10-30)
+		// UNOFFICIAL 2026-11-11 (sungi, F9) GIAmbientUnits: the ambient x the game's ambient scale (LIN_SCALE_AMBIENT = TESR_LinearScales.y: the
+		// PBR AmbientScale, weather-blended and gamma-decoded), as the lit shaders scale it and as the sun is scaled above by .x; unscaled, the
+		// sky / ambient share at a bounce hit was off by that factor. Same condition as the sun's scale (GIGameLamps and the PBR shaders).
+		const float ambientScale = rt.GIGameLamps && rt.GIAmbientUnits && pbr ? pbr->Constants.LinearScales.y : 1.0f;
+		c.ambient = D3DXVECTOR4(lin(ambient.x) * ambientScale, lin(ambient.y) * ambientScale, lin(ambient.z) * ambientScale, rt.GlowGI);	// (w: GlowGI, 2026-10-30)
 		// (2026-10-30) sunColor.w 1: the core's glow atlas is bound ([Main.Main.RayTracing] GlowTextures): GlowGI takes the glow map's colour
 		// at the hit (RtHit.glsl rtHitGlow) instead of the whole mesh's
 		c.sunColor.w = RtCore::GlowAtlasImage() >= 0 && rt.GlowGI > 0.0f ? 1.0f : 0.0f;
