@@ -102,7 +102,8 @@ bool EffectRecord::LoadEffect() {
 		logMessages(messages, sourcePath.c_str());
 	}
 	else {
-		const bool stale = !EffectCompiler47::CacheFresh(preprocessedPath.c_str(), source);	// UNOFFICIAL 2026-10-29 (was CheckPreprocessResult)
+		bool stale = !EffectCompiler47::CacheFresh(preprocessedPath.c_str(), source);	// UNOFFICIAL 2026-10-29 (was CheckPreprocessResult)
+		if ((stale || !FileExists(compiledPath.c_str())) && SeedFromShipped(preprocessedPath.c_str(), compiledPath.c_str(), EffectCompiler47::CacheText(source))) stale = false;	// UNOFFICIAL 2026-11-10 shipped cache
 		const bool hasBinary = FileExists(compiledPath.c_str());
 
 		// Cached binary: load it as it is.

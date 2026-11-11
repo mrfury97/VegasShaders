@@ -703,7 +703,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 					normalGuard ? "the rays' normals fetched by texel, no sampler; a texel that is not a unit normal takes the normal rebuilt from depth" : "the point-sampled read, traced as it reads");
 			}
 		}
-		if (!ExtConstants(extRtUniforms, layout, D3DXVECTOR4(0.0f, 0.0f, 0.0f, normalGuard ? 1.0f : 0.0f)) || !Resources(resources, count, inputs, 2, extRtUniforms.Buffer) ||
+		if (!ExtConstants(extRtUniforms, layout, D3DXVECTOR4(RtAmbient::Current.LegacyTilt, 0.0f, 0.0f, normalGuard ? 1.0f : 0.0f))	/* x: 2026-11-10 LegacyTilt */ || !Resources(resources, count, inputs, 2, extRtUniforms.Buffer) ||
 			!ExtDrawTo(extInputRT.Pipeline, &rtInputSurface, 1, resources, count, &push, sizeof(push))) {
 			ExtFailed = wasFailed;
 			failed = true;
@@ -795,7 +795,14 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		// (2026-10-30) sunColor.w 1: the core's glow atlas is bound ([Main.Main.RayTracing] GlowTextures): GlowGI takes the glow map's colour
 		// at the hit (RtHit.glsl rtHitGlow) instead of the whole mesh's
 		c.sunColor.w = RtCore::GlowAtlasImage() >= 0 && rt.GlowGI > 0.0f ? 1.0f : 0.0f;
-		c.gi = D3DXVECTOR4(rt.GIDistance, 1.0f, (float)RtGILamps(c), rt.GIAmbient);
+		// UNOFFICIAL 2026-11-10 (gisky) GISky rides on gi.y (1 = GI rays; the shader only tests it against 0.5): 1 + GISky, outdoors only (a miss
+		// indoors is a gap in the walls or the ray's end, not the sky). RtAOTrace.comp SkyMiss.
+		if (RtAmbient::InteriorNow != !TheShaderManager->GameState.isExterior) {	// UNOFFICIAL 2026-11-10: the <Key>Interior values, on going in or out (the frame of the change still traces with the old ones)
+			RtAmbient::InteriorNow = !TheShaderManager->GameState.isExterior;
+			RtAmbient::UpdateSettings();
+		}
+		const float giSky = !TheShaderManager->GameState.isExterior ? 0.0f : rt.GISkyNight < 0.0f ? rt.GISky : std::lerp(rt.GISkyNight, rt.GISky, TheShaderManager->GameState.transitionCurve);	// GISkyNight (2026-11-10): the night's own value
+		c.gi = D3DXVECTOR4(rt.GIDistance, 1.0f + giSky, (float)RtGILamps(c), rt.GIAmbient);
 		c.gi2 = D3DXVECTOR4(rt.GIOffscreen, 0.05f, rt.GIClamp, (float)rt.Interleave);
 		// (GI v2) The game's lit frame, as it is now (the RT core's point: the world is drawn, NVR's effects are not yet), down to the
 		// trace grid: on-screen bounce hits take their light from it (RtAOTrace.comp ScreenLight).

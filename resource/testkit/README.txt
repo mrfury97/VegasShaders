@@ -17,7 +17,7 @@ the spheres, the panels and the glass).
 - Camera marks: player.moveto VSRTRoomCam01 (the whole room), Cam02 (the window wall), Cam03 (the mirror and spheres), Cam04 (the
   glowing panel), Cam05 (the open part and the sky). coc VSRTRoom works too.
 - VegasShaders\Presets\VSRTRoom.ini: the room's settings (RT lamp shadows, RT reflections, Mirror 1 on the mirror panels only
-  (MirrorSmoothOnly), roughness overrides for the mirror, spheres and glass; the path tracer PTRealtime stays off: turn it on in the
+  (MirrorSmoothOnly), roughness overrides for the mirror, spheres and glass; the path tracer is left as you have it: turn PTRealtime on in the
   Ray tracing page to compare). With the Preset Manager on it applies by itself in the cell; otherwise apply it from the preset
   browser, then restart the game once (the RT switches need a restart).
 - Our own files for it (made by tools\testkit\build_rtroom.py, no vanilla file copied):

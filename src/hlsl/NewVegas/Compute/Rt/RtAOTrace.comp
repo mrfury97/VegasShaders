@@ -462,8 +462,18 @@ vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 ng, vec3 n, float
 
 // One bounce (rt-ao-gi): a cosine-weighted ray from the pixel; at its closest hit the light that surface sends back toward the pixel:
 // the game's lit frame where the screen saw it (ScreenLight, GI v2), else Shade. Misses return 0: what the sky gives is the game's own
-// ambient already.
+// ambient already (unless GISky, below).
 #ifndef RT_CACHE_PASS
+// UNOFFICIAL 2026-11-10 (gisky; tester: AL occlusion and GIStrength change plants and objects, never the terrain) [Shaders.AmbientOcclusion.RT]
+// GISky (gi.y - 1, outdoors only; 0 = off, exactly as before): a ray that finds nothing brings back the ambient (sky) light, full above the
+// horizon and none below it (a smooth band of +-0.25 in d.z), capped as a hit's sample. Open upward ground sent nearly every ray to the
+// sky, so its bounce was ~0 and GIStrength had nothing to scale (log 2026-11-10 00:58:31: soil 0.0007 against a wall's 0.05). It adds
+// to the game's own ambient (a second copy of the sky's light), hence off by default.
+vec3 SkyMiss(vec3 d) {
+    float s = cb.gi.y - 1.0;
+    if (s <= 0.0) return vec3(0.0);
+    return Clamped(cb.ambient.rgb * (s * clamp(0.5 + 2.0 * d.z, 0.0, 1.0)));
+}
 // (2026-11-07 ptaaa-firstperson) a committed hit into Bounce's locals (a rayQueryEXT cannot be copied)
 #define AO_TAKE_HIT(Q) { found = rayQueryGetIntersectionTypeEXT(Q, true) == gl_RayQueryCommittedIntersectionTriangleEXT; if (found) { \
     t = rayQueryGetIntersectionTEXT(Q, true); instance = rayQueryGetIntersectionInstanceIdEXT(Q, true); \
@@ -496,7 +506,7 @@ vec4 Bounce(vec3 start, vec3 d, float tMin, float xi) {
         Proceed(q);
         AO_TAKE_HIT(q);
     }
-    if (!found) return vec4(0.0, 0.0, 0.0, 1.0);
+    if (!found) return vec4(SkyMiss(d), 1.0);   // (2026-11-10 gisky: was 0)
     vec3 n = HitNormal(instance, prim, toWorld, d);
     vec3 hit = start + d * t;
     vec4 seen = ScreenLight(hit);

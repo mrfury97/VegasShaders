@@ -51,6 +51,10 @@ void AmbientLightEffect::UpdateSettings() {
 		minReachTexels = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "MinReachTexels") ? (std::max)(0.0f, (std::min)(node.FloatValue, 8.0f)) : 0.75f;
 	}
 	albedoBuffer = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
+	{	// UNOFFICIAL 2026-11-10 AlbedoFallbackCap (AmbientLight.fx.hlsl FallbackCap; missing key, an older toml: 0.12)
+		SettingManager::Configuration::ConfigNode node;
+		albedoFallbackCap = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AlbedoFallbackCap") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.12f;
+	}
 	normalSmoothing = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "NormalSmoothing"), 0, 64);	// UNOFFICIAL 2026-10-21 (alrocks)
 	normalSmoothingWorld = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "NormalSmoothingWorld"), 0.0f, 64.0f);	// UNOFFICIAL 2026-10-24 (charfacets)
 	horizonBias = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "HorizonBias"), 0.0f, 45.0f);
@@ -1076,7 +1080,10 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// accumulate (temporal) and apply (x the surface colour x GIStrength). ComputeGI itself, when on, keeps its screen search instead.
 	AmbientOcclusionEffect* rtAO = TheShaderManager->Effects.AmbientOcclusion;
 	IDirect3DTexture9* rtGI = !giOn && rtAO && RtAmbient::Ready() ? rtAO->RtGI() : nullptr;
-	Constants.Data.z = giOn ? giStrength : rtGI ? RtAmbient::Current.GIStrength : 0.0f;
+	// UNOFFICIAL 2026-11-10 GIStrengthNight: outdoors the RT bounce strength blends to the night's own value (below 0: none set)
+	const RtAmbient::Settings& rtS = RtAmbient::Current;
+	const float rtGIStrength = TheShaderManager->GameState.isExterior && rtS.GIStrengthNight >= 0.0f ? std::lerp(rtS.GIStrengthNight, rtS.GIStrength, TheShaderManager->GameState.transitionCurve) : rtS.GIStrength;
+	Constants.Data.z = giOn ? giStrength : rtGI ? rtGIStrength : 0.0f;
 	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (AmbientLight.fx.hlsl NVR_ALGI; docs/next/RT-PATH-TRACING.md section 16): with
 	// [Main.Main.Performance] NvrDxvkAmbientLight off (its default since 2026-11-01) every pass below is D3D9, and the RT bounce light
 	// used to reach the picture only through the Vulkan twins (RT estimate, GI accumulate, GI apply), so RT GI changed nothing. Now the
@@ -1144,7 +1151,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		Effect->SetVector(h, &edges);
 	}
 	if (D3DXHANDLE h = ParameterHandle(paramReach, "NVR_ALReach")) {	// UNOFFICIAL 2026-11-01 MinReach (AmbientLight.fx.hlsl Estimate)
-		D3DXVECTOR4 reach(minReach ? 1.0f : 0.0f, minReachTexels, 0.0f, RtAmbient::Current.RtFarFade ? 1.0f : 0.0f);	// w: (alsky) RtFarFade
+		D3DXVECTOR4 reach(minReach ? 1.0f : 0.0f, minReachTexels, albedoFallbackCap, RtAmbient::Current.RtFarFade ? 1.0f : 0.0f);	// z: 2026-11-10 AlbedoFallbackCap; w: (alsky) RtFarFade
 		Effect->SetVector(h, &reach);
 	}
 	D3DXHANDLE flagsHandle = ParameterHandle(paramFlags, "NVR_ALFlags");
@@ -1152,7 +1159,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the templates' own base colour for the bounce (NVR_ALAlbedo on s12 in the Apply and balance passes) when
 	// it holds this frame's; those two passes then run as D3D9 passes (their Vulkan twins have no albedo input yet; logged once).
 	const bool albedoOn = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
-	if (albedoOn && !albedoLogged) { albedoLogged = true; Logger::Log("UNOFFICIAL AmbientLight: AlbedoBuffer on: the bounce takes the surfaces' own colour from TESR_AlbedoBuffer where written; the balance and Apply passes run as D3D9 passes"); }
+	if (albedoOn && !albedoLogged) { albedoLogged = true; Logger::Log("UNOFFICIAL AmbientLight: AlbedoBuffer on: the bounce takes the surfaces' own colour from TESR_AlbedoBuffer where written (elsewhere, grass for one, the guessed colour capped at %.2f: AlbedoFallbackCap); the balance and Apply passes run as D3D9 passes", albedoFallbackCap > 0.0f ? albedoFallbackCap : 0.6f); }
 	if (flagsHandle) {
 		D3DXVECTOR4 flags(shadow ? 1.0f : 0.0f, noEdgeOutline ? 1.0f : 0.0f, albedoOn ? 1.0f : 0.0f, edgeReject ? 1.0f : 0.0f);
 		Effect->SetVector(flagsHandle, &flags);

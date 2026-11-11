@@ -130,6 +130,8 @@ layout(set = 0, binding = 19, rgba16f) uniform writeonly image2D giDirect;   // 
 // when this is true (Path sets it per ray: bounce rays always, the camera's with PTGlass 2). Shadow rays never stop at them (Visible tints).
 bool gGlassSolid = false;
 #define RT_ALPHA_GLASS_SOLID gGlassSolid
+float gHairKind = 0.0;   // (2026-11-10) frame row texel 30.x bit 2 (BlendedHair): hair's own highlight, and its alpha as a blend's coverage
+#define RT_ALPHA_BLEND_TINTED (gHairKind > 0.5)   // (hair is blended by the game: its alpha blocks that share of the rays, RtAlpha.glsl; off with BlendedHair false: the plain cut as before)
 #include "RtAlpha.glsl"
 #include "RtHit.glsl"
 #include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson) rays near the eye pass over the hidden first-person body
@@ -214,10 +216,15 @@ float Rand() { return float(Pcg() >> 8) * (1.0 / 16777216.0); }
 
 // A rayQueryEXT cannot be a parameter: alpha-tested candidates (mask 0x10) are confirmed only where their texture is solid
 // (ptaaa-hangfix) both with the candidate cap (PT_GUARD)
+// (2026-11-11 hair-through) the nearest hair card (a tinted record, flags 0x60) the current ray's alpha test let it pass, as a distance
+// along the ray; 1e30 = none. Reset before each ray of the path, read for the camera's ray only (the first-hit choice in Trace).
+float gHairSkipT = 1.0e30;
+#define PT_NOTE_HAIR_SKIP(q) { if ((records[rayQueryGetIntersectionInstanceIdEXT(q, false)].flags & 0x60u) == 0x60u) \
+	gHairSkipT = min(gHairSkipT, rayQueryGetIntersectionTEXT(q, false)); }
 #define Proceed(q) { uint n_ = 0u; while (rayQueryProceedEXT(q)) { PT_GUARD(q, n_) \
-	if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
-	rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), \
-		rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q); } }
+	if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT) { \
+	if (rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), \
+		rayQueryGetIntersectionBarycentricsEXT(q, false))) rayQueryConfirmIntersectionEXT(q); else PT_NOTE_HAIR_SKIP(q) } } }
 // (2026-11-07 rtgap-decals) shadow / visibility rays: decals (NVR_RT_CUSTOM_DECAL) never block them (RtAlpha.glsl rtAlphaPassShadow). (With
 // AlphaTest() off there are no decals in the scene: the core takes them only with its alpha atlas.)
 #define ProceedShadow(q) { uint n_ = 0u; while (rayQueryProceedEXT(q)) { PT_GUARD(q, n_) \
@@ -246,8 +253,15 @@ vec4 MatKeys() { return gMatKeys; }
 // a surface met AFTER a bounce is at least (the roughest bounce so far x the key) rough: the light a matte floor gets by way of a chrome
 // ball is spread over a wider lobe (the same energy, far less variance; such "caustic" light comes out softer), while what the CAMERA
 // sees in a mirror, and a mirror seen in a mirror, stay as sharp as before (their paths' bounces so far were smooth). 0 = off.
-float gBounceRoughen = 0.0;
-void LoadBounceRoughen() { gBounceRoughen = LampImage() ? clamp(FrameTexel(27).x, 0.0, 1.0) : 0.0; }
+// UNOFFICIAL 2026-11-10 PTCacheShort (frame row texel 27.y; 0 = off): the radiance cache as a SHORTCUT (as NVIDIA's SHaRC uses its cache), not
+// only as the last hit's top-up. Measured (tools/nvr-rt-playground, the room, 320 x 180 on the iGPU): PTRealtime's trace 63 ms, of which the
+// cache 25 ms, while the cache never made a path shorter. With the key at N, one path in N is traced in full as before (those keep the cache
+// fed at every depth); the others END at their first bounce hit when the cache has a settled cell there: that hit's own direct light is
+// traced as before, and everything further comes from the cell (the same value a full path's last hit takes). A hit without a settled
+// cell goes on in full. Cost: the light of the second bounce on is as coarse as the cache's cells (PTCacheCell) everywhere, not only at
+// the path's end.
+float gBounceRoughen = 0.0, gCacheShort = 0.0;
+void LoadBounceRoughen() { const vec2 k = LampImage() ? FrameTexel(27) : vec2(0.0); gBounceRoughen = clamp(k.x, 0.0, 1.0); gCacheShort = clamp(k.y, 0.0, 64.0); }
 float MatSheen() { return gMatSheen; }
 // ---- UNOFFICIAL 2026-11-07 (perf-ptcost, RT-PATH-TRACING.md section "perf-ptcost") the ray budget's keys: the frame row's texels 28-29
 // (core\RtPtCost.h PackRow; with the lamp image, flag 1024; without it all 0). 0 is the cheap path everywhere:
@@ -263,11 +277,46 @@ float MatSheen() { return gMatSheen; }
 //   29.y 1 (the RT host's NVR_RT_HOST_PTCOST count mode only): the display's alpha = 1 + this pixel's ray queries this frame (gRayCount)
 float gRestirRays = 0.0, gBounceLights = 0.0, gOneCameraQuery = 0.0;
 bool gCountRays = false;
+// UNOFFICIAL 2026-11-10 (the frame row's texel 30; measured on an NVIDIA L4 by replaying a captured Lucky 38 frame, tools/nvr-rt-helper
+// rt_capcheck + the cloud jobs: of the pass's 4.96 ms the first surface is 0.34, its direct light 0.73, the three bounces 1.44 + 1.52 +
+// 0.93; with the lamp list off the whole pass is 2.11):
+//   30.x unused (TRIED and removed the same day: picking the bounce hits' lamp from 1 / 2 / 4 lamps of the cell's list instead of all of
+//        them: 4.95-4.99 ms against 4.96, no gain; the lamps' cost is their shadow rays, not the list)
+//   30.y PTRouletteFrom 1: Russian roulette from the first bounce on (0: from the third, as before). A path is kept in proportion to
+//        what it still carries, at least 1 in 4 here (its light x at most 4: under PTRealtimeClamp), so most second and third bounces off
+//        this game's dark surfaces are never traced.
+//   30.x BlendedHair (2026-11-10): 1 = a camera ray that meets HAIR (a tinted cut-out record) nearer than the screen's surface keeps the
+//        traced hair as its first surface. The game's blend-only hair writes no depth, colour or normal into the G-buffer: the screen
+//        held the scalp (or the wall behind) there, so the hair came out in the skin's colour, or not at all.
+//   23.x early kick (2026-11-10, env NVR_RT_EARLY_PT; RtPathTrace.cpp SubmitBeforeWorld): 1 = this frame was recorded before the world
+//        was drawn (no G-buffer: a traced first surface); the camera rays go through the pixel centre + the depth's jitter (p.rect.xy),
+//        as ScreenHit places the screen's surface, so the traced first surface lies on the pixel the game rasterises (the denoiser's and
+//        the upscaler's depth / normals / motion). 0: the random point in the pixel, as before.
+float gRouletteFrom = 0.0, gHairFirst = 0.0;
+bool gCameraJitter = false;
+// (2026-11-11 PTDenoiseCeiling, frame row texel 23.y; a tester's video: an object the flashlight lit from close by went BLACK under path
+// tracing) the light handed to the denoiser is divided by the surface's colour (down to 0.02) and was capped only at 60000, the largest
+// half float. The denoiser keeps the SQUARE of its brightness in a half float too (the second moment, RtDenoiseTemporalRgb.frag): above
+// about 256 that square is infinite, the variance not a number, and the pixel black. A strong light close up (the flashlight on a
+// sphere at arm's length) passes 256 easily. Capped at the ceiling (200: its square 40000 fits), far above anything the picture can show
+// as other than white. 0 in the row = the old 60000.
+float gDenoiseCeil = 60000.0;
 void LoadCostKeys() {
+#ifdef PT_TEST_RR
+	gRouletteFrom = float(PT_TEST_RR);   // (replay experiments: the key compiled in)
+#endif
 	if ((uint(p.accum.w) & 1024u) == 0u) return;
+#ifndef PT_TEST_RR
+	gRouletteFrom = FrameTexel(30).y;
+#endif
+	{ const float hairBits = FrameTexel(30).x; gHairKind = hairBits >= 1.5 ? 1.0 : 0.0; gHairFirst = hairBits - 2.0 * gHairKind; }   // (1: first surface, 2: hair's own highlight)
 	const vec2 a = FrameTexel(28), b = FrameTexel(29);
 	gRestirRays = a.x; gBounceLights = a.y; gOneCameraQuery = b.x; gCountRays = b.y > 0.5;
+	gCameraJitter = FrameTexel(23).x > 0.5;   // (2026-11-10 early kick)
+	{ const float ceil_ = FrameTexel(23).y; gDenoiseCeil = ceil_ > 0.0 ? min(ceil_, 60000.0) : 60000.0; }   // (2026-11-11 PTDenoiseCeiling)
 }
+// The camera ray's point in the pixel (screen uv): the random sub-pixel point (rnd) as before, or with texel 23.x the jittered centre
+vec2 CameraUV(ivec2 pixel, vec2 rnd) { return gCameraJitter ? (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy : (vec2(pixel) + rnd) * p.size.zw; }
 int RestirRaysMode() { return int(clamp(gRestirRays, 0.0, 3.0) + 0.5); }
 float GlassMode() { return MatKeys().x; }
 float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -401,7 +450,7 @@ bool Specular() { return (uint(p.accum.w) & 128u) != 0u; }
 // (2026-11-07 ptaaa-materials) kind: the material model (HitSurface from the record, ScreenHit from the MaterialBuffer's class); for glass
 // the albedo is the pane's tint (GlassTint)
 struct Surface { vec3 albedo; float rough; float metal; uint kind; };
-const uint kKindPlain = 0u, kKindGlass = 1u, kKindFoliage = 2u, kKindSkin = 3u, kKindCloth = 4u;
+const uint kKindPlain = 0u, kKindGlass = 1u, kKindFoliage = 2u, kKindSkin = 3u, kKindCloth = 4u, kKindHair = 5u;   // (hair: 2026-11-10, a traced TINTED record with texel 30.x's bit 2)
 
 // ---- UNOFFICIAL 2026-11-07 (ptaaa-materials) THIN TRANSLUCENT surfaces: leaves and grass (foliage) and skin's thin parts. R is the diffuse
 // colour sent back on the lit side, T the colour sent through to the far side (diffuse again: a thin leaf or ear scatters what it lets
@@ -441,7 +490,13 @@ float SheenD(float nh, float a) { const float inv = 1.0 / a; return (2.0 + inv) 
 float SheenV(float nl, float nv) { return 1.0 / (4.0 * (nl + nv - nl * nv)); }
 float SheenAlbedoBound(float nv) { return 0.05 + 0.7 * exp(-1.9 * clamp(nv, 0.0, 1.0)); }
 
-vec3 FresnelF0(Surface s) { return mix(vec3(s.kind == kKindSkin ? 0.028 : 0.04), s.albedo, s.metal); }   // (skin: Skin.hlsl SKIN_F0)
+// (2026-11-10 hair; measured on an RTX-class card: traced hair of albedo ~0.02 came out pale grey, and dark brown as in the game with
+// PTSpecular off: the plain dielectric's white 4 % highlight is as strong as that hair's whole diffuse light) hair's highlight takes
+// the hair's own colour, between 0.4 % and 4 %: a dark head keeps a dark, coloured sheen, a blond one nearly the plain highlight.
+vec3 FresnelF0(Surface s) {
+	if (s.kind == kKindHair) return clamp(s.albedo, vec3(0.004), vec3(0.04));
+	return mix(vec3(s.kind == kKindSkin ? 0.028 : 0.04), s.albedo, s.metal);
+}   // (skin: Skin.hlsl SKIN_F0)
 // (2026-11-07 ptaaa-denoiser) the specular albedo PTDenoiseSplit divides the specular light by: Karis' fit of the split-sum environment
 // BRDF (as DlssRRGuides.comp / Shaders/Includes/PBR.hlsl EnvBRDFApprox), clamped to 1. Only a demodulation factor (the show pass
 // multiplies the same stored value back), so its accuracy changes how much texture the denoiser sees, never the light.
@@ -718,6 +773,17 @@ float LampSpot(int k, vec3 toPoint) {
 	const float angle = radians(float(c >> 18u));
 	return smoothstep(cos(angle), cos(0.5 * angle), dot(normalize(d), toPoint));
 }
+// UNOFFICIAL 2026-11-11 the flashlight's NearFade and HotspotLimit ([Shaders.Flashlight.Main] / .Interiors, the old flashlight's keys), frame
+// row texel 31 (x NearFade in units, y HotspotLimit; 0 off; RtPathTrace.cpp writes them only while lamp 0 is the flashlight): lamp 0's
+// light at `dist` from it, as FlashlightDeferred.hlsl shapes it. The knee here acts on the light arriving (before the surface's colour), the
+// raster pass's on the light it adds. Both 0 (or no lamp image: no row) = the light unchanged.
+vec3 FlashShape(int k, float dist, vec3 light) {
+	if (k != 0 || !LampImage()) return light;
+	const vec2 t = FrameTexel(31);
+	if (t.x > 0.0) light *= smoothstep(0.0, t.x, dist);
+	if (t.y > 0.0) { const float limit = 1.0 / t.y; light *= limit / max(limit, dot(light, vec3(0.2126, 0.7152, 0.0722))); }
+	return light;
+}
 
 #ifndef PT_RESTIR_GI
 // ---- UNOFFICIAL 2026-11-07 (ptaaa-emissive) PTEmissive: glowing TRIANGLES as lights (RT-PATH-TRACING.md section "ptaaa-emissive";
@@ -941,7 +1007,7 @@ bool LampAt(int k, vec3 hit, vec3 n, out vec3 light, out vec3 pos) {
 	vec3 l = pos - hit;
 	const float dist = length(l), reach = b.y;
 	if (dist >= reach || dist < 1.0e-3) return false;
-	light = vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
+	light = FlashShape(k, dist, vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist)));   // (2026-11-11 FlashShape)
 	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
 }
 // (ptaaa-emissive) a light sample: lamp >= 0 a lamp; em >= 0 instance em's triangle tri at bary; neither: none
@@ -1340,7 +1406,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		vec3 l = pos.xyz - hit;
 		float dist = length(l), reach = pos.w;
 		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
+		vec3 light = FlashShape(k, dist, colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist)));   // (2026-11-11 FlashShape)
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -1380,7 +1446,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		vec3 l = pos.xyz - hit;
 		float dist = length(l), reach = pos.w;
 		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist));
+		vec3 light = FlashShape(k, dist, colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist)));   // (2026-11-11 FlashShape)
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -1472,6 +1538,7 @@ Surface HitSurface(vec3 albedo, uint instance) {
 	// (2026-11-07 ptaaa-materials) the record's material kind (NvrRtProtocol.h NVR_RT_RECORD_KIND_*), each with its setting on
 	const uint kind = rtRecordKind(f);
 	const vec4 keys = MatKeys();
+	if (gHairKind > 0.5 && (f & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS) { s.kind = kKindHair; s.rough = max(s.rough, 0.8); s.metal = 0.0; }
 	if (kind == 1u && keys.x > 0.5) { s.kind = kKindGlass; s.albedo = GlassTint(records[instance].albedo.rgb); s.rough = 0.0; s.metal = 0.0; }
 	else if (kind == 2u && keys.z > 0.0) s.kind = kKindFoliage;
 	else if (kind == 3u && keys.w > 0.0) s.kind = kKindSkin;
@@ -1615,7 +1682,10 @@ vec3 Path(vec3 dir) {
 	float prevEmTotal = 0.0, prevEmSelect = 1.0;   // (perf-ptcost: + the chance its sample was traced, PTBounceLights)
 	bool prevEmRestir = false;
 	vec3 cacheFirstGlow = vec3(0.0);
+	// (2026-11-10 PTCacheShort) this path may end at its first bounce hit, in the cache (one path in gCacheShort is traced in full)
+	const bool cacheShort = cache && gCacheShort > 0.5 && bounces > 1 && Rand() * gCacheShort >= 1.0;
 #endif
+	bool cacheEnd = false;
 	float ptFirstT = 0.0, ptPath = 0.0;   // (2026-11-07) real textures' mip: the camera ray's length, the bounces' since
 	for (int bounce = 0; bounce <= bounces; bounce++) {
 		rayQueryEXT q;
@@ -1634,6 +1704,7 @@ vec3 Path(vec3 dir) {
 			if (!(d0 > 0.0 && d0 < 0.9999)) { radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2)); break; }
 		}
 		bool traced = false;
+		gHairSkipT = 1.0e30;   // (hair-through)
 		float qT = 0.0;
 		uint qInstance = 0u, qPrim = 0u;
 		vec2 qBary = vec2(0.0);
@@ -1707,6 +1778,7 @@ vec3 Path(vec3 dir) {
 				if (!AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
 				                                rayQueryGetIntersectionBarycentricsEXT(qp, false)))
 					rayQueryConfirmIntersectionEXT(qp);
+				else PT_NOTE_HAIR_SKIP(qp)   // (hair-through)
 			}
 			if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
 		}
@@ -1733,7 +1805,19 @@ vec3 Path(vec3 dir) {
 		// (1b) the first hit's contact march starts on the screen's surface (where the depth buffer has it)
 		gContact = screen && !viewModel;   // (ptaaa-firstperson: the march walks the world's projection; the view model has its own)
 		if (screen) { gContactFrom = sHit; gContactN = sN; gContactZ = dot(sHit, p.forward.xyz); gContactNoise = Rand(); }
-		if (screen && (!traced || abs(qT - length(sHit)) > same)) {
+		// (2026-11-10 BlendedHair, texel 30.x) traced hair in front of the screen's surface: the hair is the first surface
+		const bool hairFront = bounce == 0 && screen && traced && !viewModel && gHairFirst > 0.5 && qT < length(sHit) + same &&   // (not a margin IN FRONT: short hair and beards lie on the skin, under 0.1 unit off it; the nearest traced hit being hair is the test)
+			(records[qInstance].flags & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS;
+		// (2026-11-11 hair-through; a tester on an RTX 4090: "hair is taking on the material of objects it's overlapping, much like it did
+		// in front of a mirror") hair's alpha is a blend's coverage (BlendedHair), so a share of the camera's rays passes THROUGH a hair
+		// card and meets what is behind it. The depth buffer there still holds the HAIR, while the colour and material buffers hold what
+		// was drawn before it (hair is blended: it writes neither). The traced hit, far behind the screen's depth, counted as "not the
+		// screen's surface", and the screen's won: a surface at the hair's place with the wall's, the ceiling's or the mirror's colour and
+		// material, lit there. Such a ray now keeps its traced hit, with that hit's own colour and material: what really is behind the hair.
+		const bool hairThrough = bounce == 0 && screen && traced && !viewModel && !hairFront && gHairKind > 0.5 &&
+			gHairSkipT < length(sHit) + same && qT > length(sHit) + same;
+		if (hairFront || hairThrough) gContact = false;
+		if (screen && !hairFront && !hairThrough && (!traced || abs(qT - length(sHit)) > same)) {
 			hit = sHit; n = sN; surf = sS; t = length(sHit);
 		}
 		else {
@@ -1773,7 +1857,7 @@ vec3 Path(vec3 dir) {
 			rtConeDir = (uint(p.accum.w) & 2097152u) != 0u ? vec3(0.0) : dir; rtConeToScene = mat3(toScene);
 #endif
 			surf = HitSurface(clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0), instance);
-			if (screen && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
+			if (screen && !hairFront && !hairThrough && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
 			// (2026-11-02 d) the normal map bends it (also the screen's smooth normal: that buffer has no maps). (2026-11-07, RT-DETAIL-GAPS
 			// section 2) RealNormalMaps: the real normal map wherever the record has one (flag 0x80), with or without the atlas (flag 64), at
 			// the bounces' hits and a camera ray's traced hit; the screen's own first surface keeps its smooth normal unless NormalTextures
@@ -1844,7 +1928,7 @@ vec3 Path(vec3 dir) {
 		gSpecOnly = view == 8 && bounce == 0;
 		bool cached = false;   // (2026-11-07) PTRadianceCache: the last hit's further bounces came from the cache
 #ifndef PT_RESTIR_GI
-		if (cache && bounce == bounces && bounce > 0) { vec3 cl; if (CacheRead(hit, n, cl)) { radiance += Indirect(throughput * cl); cached = true; } }
+		if (cache && bounce > 0 && (bounce == bounces || cacheShort)) { vec3 cl; if (CacheRead(hit, n, cl)) { radiance += Indirect(throughput * cl); cached = true; cacheEnd = bounce < bounces; } }
 #endif
 		bool emRestir = false;
 		if (!arriving && !reflection) {
@@ -1880,10 +1964,10 @@ vec3 Path(vec3 dir) {
 		if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 32768u) != 0u && view == 0 && p.skyZenith.w > 0.5 && !cached)
 			radiance += Indirect(throughput * surf.albedo * Sky(CosineDirection(n, vec2(Rand(), Rand()))));
 #ifndef PT_RESTIR_GI
-		if (cache && bounce < bounces && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
+		if (cache && bounce < bounces && !cacheEnd && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
 #endif
 		if (bounce == 0) { gSplitTake = false; gSplitRad0 = radiance; }   // (ptaaa-denoiser) the first hit's own light ends here
-		if (bounce == bounces || view == 3 || view == 8) break;
+		if (bounce == bounces || cacheEnd || view == 3 || view == 8) break;
 		vec3 l, w;
 		float pdf;
 		if (arriving) { l = CosineDirection(n, vec2(Rand(), Rand())); w = vec3(1.0); pdf = max(dot(n, l), 0.0) / 3.14159265; }
@@ -1957,8 +2041,9 @@ vec3 Path(vec3 dir) {
 		prevEmTotal = gEmTotal; prevEmSelect = gEmSelect; prevEmRestir = emRestir;
 #endif
 		throughput *= w;
-		if (bounce >= 2) {   // Russian roulette: keep the path in proportion to what it still carries
-			float keep = clamp(max(throughput.r, max(throughput.g, throughput.b)), 0.05, 0.95);
+		if (bounce >= (gRouletteFrom > 0.5 ? 1 : 2)) {   // Russian roulette: keep the path in proportion to what it still carries
+			// (2026-11-10 PTRouletteFrom: already before the SECOND bounce ray, there kept at least 1 time in 4; the first bounce ray is always traced)
+			float keep = clamp(max(throughput.r, max(throughput.g, throughput.b)), bounce < 2 ? 0.25 : 0.05, 0.95);
 			if (Rand() >= keep) break;
 			throughput /= keep;
 		}
@@ -1988,7 +2073,7 @@ void main() {
 	Pcg();
 #ifdef PT_RESTIR_GI
 	{   // (2026-11-04 d) one path: the first-bounce sample and the rest apart, for RtRestirGI.comp (which demodulates)
-		const vec2 uv = (vec2(pixel) + vec2(Rand(), Rand())) * p.size.zw;
+		const vec2 uv = CameraUV(pixel, vec2(Rand(), Rand()));   // (2026-11-10 early kick: texel 23.x)
 		gPixel = pixel;
 		gFirstAlbedo = vec3(1.0);
 		gFirstSurface = 0.0;
@@ -2014,7 +2099,7 @@ void main() {
 	float roughSum = 0.0, metalSum = 0.0, specHitT = 0.0;
 	bool specMirror = false;   // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the first path's reflected thing stands in for the surface
 	for (int s = 0; s < paths; s++) {
-		const vec2 uv = (vec2(pixel) + vec2(Rand(), Rand())) * p.size.zw;
+		const vec2 uv = CameraUV(pixel, vec2(Rand(), Rand()));   // (2026-11-10 early kick: texel 23.x; the random numbers drawn either way)
 		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
 		gPixel = pixel;
 #ifndef PT_RESTIR_GI
@@ -2074,8 +2159,8 @@ void main() {
 		if (split) {   // (ptaaa-denoiser) the two signals, each divided by its own albedo (fp16-safe), and the specular albedo itself
 			const vec3 specMean = specSum / float(paths);
 			const vec3 specAlbedo = surfaceSum > 0.0 ? max(specAlbedoSum / float(paths), vec3(0.01)) : vec3(0.0);
-			const vec3 diffuse = min(max(sample_ - specMean, vec3(0.0)) / albedo, vec3(60000.0));
-			const vec3 specular = specAlbedo.x > 0.0 ? min(specMean / specAlbedo, vec3(60000.0)) : vec3(0.0);
+			const vec3 diffuse = min(max(sample_ - specMean, vec3(0.0)) / albedo, vec3(gDenoiseCeil));
+			const vec3 specular = specAlbedo.x > 0.0 ? min(specMean / specAlbedo, vec3(gDenoiseCeil)) : vec3(0.0);
 			// albedoOut.a: 1 + the metal where every path met a surface (DLSS RR's diffuse albedo = colour x (1 - metal); the show pass and
 			// the guide read a >= 0.5 / clamp it to 1, as the GI variant's)
 			if (surfaceSum >= float(paths)) imageStore(albedoOut, pixel, vec4(albedo, 1.0 + metalSum / float(paths)));
@@ -2088,7 +2173,7 @@ void main() {
 			return;
 		}
 #endif
-		sample_ /= albedo;
+		sample_ = min(sample_ / albedo, vec3(gDenoiseCeil));   // (2026-11-11 PTDenoiseCeiling: was uncapped here)
 	}
 	const float n = p.accum.x;
 	vec3 mean = sample_;

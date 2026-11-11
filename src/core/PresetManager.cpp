@@ -1,4 +1,5 @@
 #include "PresetManager.h"
+#include "StalePresetValues.h"	// UNOFFICIAL 2026-11-10
 #include <algorithm>
 #include <cstdio>
 #include <filesystem>
@@ -390,6 +391,7 @@ namespace {
 			const char* section = dotted.c_str();
 			for (const auto& [key, value] : values) {
 				if (value.Type != ValueKind::String) {
+					if (StalePresetValues::Blocked(section, key.c_str(), value.FloatValue, "a preset")) continue;	// UNOFFICIAL 2026-11-10
 					if (TheSettingManager->GetSettingF(section, key.c_str()) != value.FloatValue) {
 						TheSettingManager->SetSettingF(section, key.c_str(), value.FloatValue);
 						++changed;

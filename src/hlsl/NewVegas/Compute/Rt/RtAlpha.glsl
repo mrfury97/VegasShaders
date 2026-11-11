@@ -73,7 +73,14 @@ bool rtAlphaPass(uint instance, uint primitive, vec2 bary) {
 			const float lod = rtTexLod(id, instance, primitive);
 			alpha = rtTexSample(id, uv, lod).a;
 			// at the full texture's own detail (the finest mips) the game's plain test is exact: no dither (that is for averaged alpha)
+#ifdef RT_ALPHA_BLEND_TINTED   // (an expression, as RT_ALPHA_GLASS_SOLID: true = hair's alpha is dithered at the finest mip too)
+			// (2026-11-10, the path tracer) hair (a TINTED record: alpha-tested + textured, 0x60) is BLENDED by the game, not cut: a beard texel
+			// at alpha 0.3 covers 30 % there. The hard cut at the reference left beards (47 % of their texels under 128) and eyebrows (70 %)
+			// thin or gone for every camera ray; the dithered test below lets a texel block its alpha's share of the rays.
+			if (lod < 0.5 && !((RT_ALPHA_BLEND_TINTED) && (flags & 0x60u) == 0x60u)) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
+#else
 			if (lod < 0.5) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
+#endif
 		}
 	}
 #endif

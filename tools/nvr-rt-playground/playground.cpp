@@ -111,6 +111,7 @@ struct Settings {
 	int contact = 1;       // PTContactShadows 1 (the default; no key)
 	int indirectClamp = 1; // Z: the bounce light's cap: 0 none / 4 (2026-11-09: PTRealtimeClamp's default under PTRealtime; was 0)
 	int bounceRoughen = 1; // F10: PTBounceRoughen 0 off / 0.35 (2026-11-09: the default under PTRealtime; frame row texel 27)
+	int cacheShort = 0;    // 6: PTCacheShort 0 off / 8 / 4 (2026-11-10: paths end at their first bounce hit in the radiance cache; texel 27.y)
 	// (2026-11-07, the merged ptaaa branches; the game's defaults under PTRealtime)
 	int emissive = 1;      // F2: PTEmissive (glowing triangles as lights: RtEmissiveBuild + the emissive row)
 	int denoiseSplit = 1;  // F3: PTDenoiseSplit (diffuse + specular denoised apart, RtDenoiseTemporalSpec)
@@ -603,7 +604,7 @@ struct App {
 			!MakeFrag("RtDenoiseTemporalSpec", 10, sizeof(SpecPush), 4, offsetof(SpecPush, samplerIndex), temporalSpec) ||
 			!MakeFrag("RtDenoiseFirefly", 3, sizeof(FireflyPush), 2, sizeof(FireflyPush) - 16, firefly) ||
 			!MakeFrag("RtDenoiseAtrousRgb", 5, sizeof(AtrousPush), 2, sizeof(AtrousPush) - 16, atrousRgb) ||
-			!MakeFrag("RtPathTraceShow", 10, 48, 1, 4, show)) return false;
+			!MakeFrag("RtPathTraceShow", 10, 52, 1, 4, show)) return false;
 
 		// the meshes: raster buffers + staged into the RT scene (one BUILD each), the real textures, the atlases; one exchange
 		for (size_t m = 0; m < scene.meshes.size(); m++) {
@@ -727,7 +728,7 @@ struct App {
 			{ 'K', "K", "lamps", &set.lamps, 2 }, { 'L', "L", "lamp moves", &set.lampAnim, 2 }, { 'J', "J", "cube spins", &set.spin, 2 },
 			{ 'G', "G", "PTGlowLights", &set.glowLights, 2 }, { 'H', "H", "PTDetail", &set.detail, 2 }, { 'X', "X", "PTSpecular", &set.specular, 2 },
 			{ 'R', "R", "PTRestirDI", &set.restirDI, 2 }, { 'Y', "Y", "PTRadianceCache", &set.cache, 2 }, { 'F', "F", "PTLampFalloff", &set.lampFalloff, 2 },
-			{ 'Z', "Z", "PTRealtimeClamp 4", &set.indirectClamp, 2 }, { VK_F10, "F10", "PTBounceRoughen", &set.bounceRoughen, 2 },
+			{ 'Z', "Z", "PTRealtimeClamp 4", &set.indirectClamp, 2 }, { VK_F10, "F10", "PTBounceRoughen", &set.bounceRoughen, 2 }, { '6', "6", "PTCacheShort 0/8/4", &set.cacheShort, 3 },
 			{ VK_F2, "F2", "PTEmissive", &set.emissive, 2 }, { VK_F3, "F3", "PTDenoiseSplit", &set.denoiseSplit, 2 },
 			{ VK_F4, "F4", "PTDenoiseAntiFirefly", &set.antiFirefly, 2 }, { VK_F9, "F9", "FireflySpread 0/4/1", &set.fireflySpread, 3 },
 			{ VK_F11, "F11", "PTDenoiseMirrorSurface", &set.mirrorSurface, 2 }, { '5', "5", "object motion", &set.objectMotion, 2 }, { VK_F5, "F5", "PTGlass", &set.glass, 3 },
@@ -1110,7 +1111,7 @@ struct App {
 			row[30] = 0.0f; row[31] = 0.0f;   // texel 15: the flashlight's cone (none)
 			RtTessContact::PackRow(row, RtTessContact::Slack(), RtTessContact::Make((flags & 8u) ? float(set.contact) : 0.0f, 24.0f));   // texels 16-21
 			RtMaterials::PackRow(row, materials);   // texels 24-26
-			row[54] = set.bounceRoughen ? 0.35f : 0.0f; row[55] = 0.0f;   // texel 27: PTBounceRoughen (2026-11-09)
+			row[54] = set.bounceRoughen ? 0.35f : 0.0f; row[55] = set.cacheShort == 1 ? 8.0f : set.cacheShort == 2 ? 4.0f : 0.0f; row[60] = 0.0f; row[61] = 0.0f;   // (texel 30: PTRouletteFrom off here)   // texel 27: PTBounceRoughen (2026-11-09), PTCacheShort (2026-11-10)
 			float* emRow = (float*)((char*)r.pBits + size_t(r.Pitch) * kEmissiveRow);
 			if (emissiveWanted) {
 				std::vector<RtEmissiveRow::Source> sources;
@@ -1249,10 +1250,10 @@ struct App {
 		const int view = kDebugViews[set.debugView];
 		IDirect3DTexture9* shown = denoisedOk ? denoised.t : display.t;
 		IDirect3DTexture9* specShown = specDenoisedOk ? specDenoised.t : specTex.t;
-		struct { float exposure; uint32_t samplerIndex; float split, gamma; uint32_t modulate; float uvx, uvy; uint32_t keep; float detail, radius, texel[2]; } push =
+		struct { float exposure; uint32_t samplerIndex; float split, gamma; uint32_t modulate; float uvx, uvy; uint32_t keep; float detail, radius, texel[2], detailEdge; } push =
 			{ 1.0f, 0, set.split ? 0.5f : 0.0f, view == 1 || view == 2 || view == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | 2u | (splitShow ? 4u : 0u), 1.0f, 1.0f, 0u,
-			  set.detail && modulate && view == 0 ? 1.0f : 0.0f, set.detailRadius, { 1.0f / W, 1.0f / H } };
-		static_assert(sizeof(push) == 48, "RtPathTraceShow's push block");
+			  set.detail && modulate && view == 0 ? 1.0f : 0.0f, set.detailRadius, { 1.0f / W, 1.0f / H }, 2.0f };   // (the last: 2026-11-10 PTDetailEdge, the game's default)
+		static_assert(sizeof(push) == 52, "RtPathTraceShow's push block");
 		IUnknown* images[10] = { shown, modulate ? (IUnknown*)albedoOut.t : (IUnknown*)shown, display.t, display.t, frame.t, gDepth.t,
 			splitShow ? (IUnknown*)specShown : display.t, splitShow ? (IUnknown*)specTex.t : display.t, splitShow ? (IUnknown*)specAlbedoA.t : display.t,
 			splitShow ? (IUnknown*)specAlbedoB.t : display.t };

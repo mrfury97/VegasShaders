@@ -41,7 +41,7 @@ static bool scenePtDetail(Ctx& c) {
 	// ---- (1) the show pass
 	{
 		FragPass show;
-		if (!loadFragRaw(h, "RtPathTraceShow", 10, 48, 1, show)) return false;	// (2026-11-07 ptaaa-denoiser: + the specular images 6-9, stand-ins here)
+		if (!loadFragRaw(h, "RtPathTraceShow", 10, 52, 1, show)) return false;	// (2026-11-07 ptaaa-denoiser: + the specular images 6-9, stand-ins here)
 		Tex traced, albedo, raw, viewModel, frame, depth, out;
 		if (!makeTex(h, S, S, D3DFMT_A16B16G16R16F, false, traced) || !makeTex(h, S, S, D3DFMT_A16B16G16R16F, false, albedo) ||
 			!makeTex(h, S, S, D3DFMT_A16B16G16R16F, false, raw) || !makeTex(h, S, S, D3DFMT_R32F, false, viewModel) ||
@@ -57,9 +57,9 @@ static bool scenePtDetail(Ctx& c) {
 			if (i >= 96) dz[p] = 0.6f;   // another surface from column 96: the taps across it are left out
 		}
 		if (!fillTex(traced, t, 4) || !fillTex(albedo, a, 4) || !fillTex(raw, r, 4) || !fillTex(viewModel, vm, 1) || !fillTex(frame, fr, 4) || !fillTex(depth, dz, 1)) return false;
-		struct { float exposure; uint32_t samplerIndex; float split, gamma; uint32_t modulate; float uvx, uvy; uint32_t keep; float detail, radius, texel[2]; } push =
-			{ 1.0f, 0, 0.0f, 1.0f / 2.2f, 1u | 2u, 1.0f, 1.0f, 0u, 1.0f, 4.0f, { 1.0f / S, 1.0f / S } };
-		static_assert(sizeof(push) == 48, "RtPathTraceShow's push block");
+		struct { float exposure; uint32_t samplerIndex; float split, gamma; uint32_t modulate; float uvx, uvy; uint32_t keep; float detail, radius, texel[2]; float detailEdge; } push =
+			{ 1.0f, 0, 0.0f, 1.0f / 2.2f, 1u | 2u, 1.0f, 1.0f, 0u, 1.0f, 4.0f, { 1.0f / S, 1.0f / S }, 0.0f };	// (2026-11-10: + PTDetailEdge, 0 = off here)
+		static_assert(sizeof(push) == 52, "RtPathTraceShow's push block");
 		IUnknown* imgs[10] = { traced.t, albedo.t, raw.t, viewModel.t, frame.t, depth.t, traced.t, traced.t, traced.t, traced.t };
 		for (int on = 1; on >= 0; on--) {
 			push.detail = on ? 1.0f : 0.0f;

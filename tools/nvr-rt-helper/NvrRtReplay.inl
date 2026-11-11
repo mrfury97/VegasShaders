@@ -381,6 +381,14 @@
 		std::wstring capturePath, outDir, shaderDir;
 		std::vector<std::pair<std::string, std::wstring>> overrides;
 		uint32_t runs = 5;
+		// UNOFFICIAL 2026-11-10 (rt-capcheck: a captured game frame as a test scene, docs/next/RT-CAPCHECK.md) patches to a pass's constants,
+		// by the pass's shader name and the float's index in its block: --set <name>:<i>=<value>; --bits <name>:<i>=<clear>,<set> (the float
+		// holds whole-number flags); --seed <name>:<i> (run r adds r to it: another random sequence each run). --mean: the runs follow one
+		// another as frames do (the images and the scratch store are NOT reset after the first run, so histories, reservoirs and caches
+		// live on) and every written image's mean over the runs is saved as mean_img<i> (a converged picture from a one-path-a-pixel pass).
+		struct ConstPatch { std::string name; uint32_t index = 0; int kind = 0; float value = 0.0f; uint32_t clear = 0, set = 0; };	// kind 0 set, 1 bits, 2 seed
+		std::vector<ConstPatch> patches;
+		bool meanMode = false;
 		bool dumpInputs = false;
 		for (int i = 1; i < argc; i++) {
 			if (!wcscmp(argv[i], L"--replay") && i + 1 < argc) capturePath = argv[++i];
@@ -388,6 +396,19 @@
 			else if (!wcscmp(argv[i], L"--runs") && i + 1 < argc) runs = std::max(1u, (uint32_t)_wtoi(argv[++i]));
 			else if (!wcscmp(argv[i], L"--shaders") && i + 1 < argc) shaderDir = argv[++i];
 			else if (!wcscmp(argv[i], L"--inputs")) dumpInputs = true;
+			else if (!wcscmp(argv[i], L"--mean")) meanMode = true;
+			else if ((!wcscmp(argv[i], L"--set") || !wcscmp(argv[i], L"--bits") || !wcscmp(argv[i], L"--seed")) && i + 1 < argc) {
+				ConstPatch cp;
+				cp.kind = !wcscmp(argv[i], L"--set") ? 0 : !wcscmp(argv[i], L"--bits") ? 1 : 2;
+				const std::string a = Narrow(argv[++i]);
+				const size_t colon = a.find(':'), eq = a.find('=');
+				if (colon == std::string::npos || (cp.kind != 2 && eq == std::string::npos)) { printf("--set <name>:<i>=<value>, --bits <name>:<i>=<clear>,<set>, --seed <name>:<i>\n"); return 1; }
+				cp.name = a.substr(0, colon);
+				cp.index = (uint32_t)atoi(a.c_str() + colon + 1);
+				if (cp.kind == 0) cp.value = (float)atof(a.c_str() + eq + 1);
+				if (cp.kind == 1) { cp.clear = (uint32_t)strtoul(a.c_str() + eq + 1, nullptr, 0); const size_t comma = a.find(',', eq); if (comma != std::string::npos) cp.set = (uint32_t)strtoul(a.c_str() + comma + 1, nullptr, 0); }
+				patches.push_back(cp);
+			}
 			else if (!wcscmp(argv[i], L"--shader") && i + 1 < argc) {
 				const std::wstring a = argv[++i];
 				const size_t eq = a.find(L'=');
@@ -566,7 +587,10 @@
 				o.mask = in.mask & 0xFF;
 				o.instanceShaderBindingTableRecordOffset = 0;
 				o.flags = in.flags & 0xFF;
-				auto it = addresses.find(in.geometryId);
+				// (2026-11-10 FIX) the captured id is the bound record's, which since 2026-11-07 (perf-reflfix) carries NVR_RT_RECORD_GEO_NORMALS in its
+				// high bit when the geometry has smooth normals: every such instance was "not in the capture" and masked out, so replays of
+				// captures made since then traced an EMPTY scene (times far too low, no shadows, no bounce) without a word past this log line
+				auto it = addresses.find(in.geometryId & ~NVR_RT_RECORD_GEO_NORMALS);
 				if (it == addresses.end()) { missing++; o.mask = 0; o.accelerationStructureReference = addresses.empty() ? 0 : addresses.begin()->second; }
 				else o.accelerationStructureReference = it->second;
 			}
@@ -574,7 +598,7 @@
 			// (2026-11-07 perf-reflfix) the capture holds no smooth normals (the words before the positions are not captured): flat here
 			for (uint32_t i = 0; i < instanceCount; i++) ((NvrRtInstanceRecord*)s.records.mapped)[i].geometryId &= ~NVR_RT_RECORD_GEO_NORMALS;
 		}
-		if (missing) Log("replay: %u instances name a geometry the capture does not hold (masked out)", missing);
+		if (missing) Log("replay: WARNING %u of %u instances name a geometry the capture does not hold (masked out: the rays pass through them)", missing, instanceCount);
 
 		// 4. the images the passes bind, with their contents before the passes
 		std::vector<uint32_t> bound(c.images.size(), 0);
@@ -667,6 +691,17 @@
 			if (!imagesOk) { Log("pass %u: an image is missing: skipped", p); continue; }
 			runsPass[p] = true;
 			memcpy((uint8_t*)s.constants.mapped + (size_t)p * NVR_RT_PASS_CONSTANTS, pass.constants, std::min<uint32_t>(pass.constantsSize, NVR_RT_PASS_CONSTANTS));
+			{	// (2026-11-10) --set / --bits on this pass's constants (--seed: per run, below)
+				float* block = (float*)((uint8_t*)s.constants.mapped + (size_t)p * NVR_RT_PASS_CONSTANTS);
+				const std::string passName = pass.shader < c.shaderPaths.size() ? ShaderName(c.shaderPaths[pass.shader]) : "";
+				for (const ConstPatch& cp : patches) {
+					if (_stricmp(cp.name.c_str(), passName.c_str()) || cp.index >= NVR_RT_PASS_CONSTANTS / 4) continue;
+					const float before = block[cp.index];
+					if (cp.kind == 0) block[cp.index] = cp.value;
+					else if (cp.kind == 1) block[cp.index] = (float)(((uint32_t)(before + 0.5f) & ~cp.clear) | cp.set);
+					if (cp.kind != 2) Log("replay: pass %u %s constant %u: %g -> %g", p, passName.c_str(), cp.index, before, block[cp.index]);
+				}
+			}
 			VkWriteDescriptorSetAccelerationStructureKHR asWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
 			asWrite.accelerationStructureCount = 1;
 			asWrite.pAccelerationStructures = &h.tlas;
@@ -697,10 +732,24 @@
 		std::vector<std::vector<double>> passTimes(passCount);
 		std::vector<double> sceneTimes, wallTimes;
 		const double tRuns0 = Seconds();
+		std::vector<std::vector<double>> meanSums(c.images.size());	// (2026-11-10 --mean) per written image, the runs' sum
+		std::vector<uint32_t> meanChannels(c.images.size(), 0);
 		for (uint32_t run = 0; run < runs; run++) {
 			const double w0 = Seconds();
+			for (uint32_t p = 0; p < passCount; p++) {	// (2026-11-10 --seed) this run's random sequence
+				const NvrRtPass& pass = c.passes[p];
+				if (!runsPass[p]) continue;
+				const std::string passName = pass.shader < c.shaderPaths.size() ? ShaderName(c.shaderPaths[pass.shader]) : "";
+				for (const ConstPatch& cp : patches)
+					if (cp.kind == 2 && !_stricmp(cp.name.c_str(), passName.c_str()) && cp.index < NVR_RT_PASS_CONSTANTS / 4) {
+						float captured;
+						memcpy(&captured, pass.constants + (size_t)cp.index * 4, 4);
+						((float*)((uint8_t*)s.constants.mapped + (size_t)p * NVR_RT_PASS_CONSTANTS))[cp.index] = captured + (float)run;
+					}
+			}
 			if (!ReplayBegin(cmd)) return 3;
 			for (ReplayImage& im : c.images) {
+				if (meanMode && run > 0) break;	// (--mean) the runs follow one another: what a pass wrote stays
 				if (!im.image.image || !im.before) continue;
 				VkBufferImageCopy copy = {};
 				copy.bufferOffset = im.staging;
@@ -708,7 +757,7 @@
 				copy.imageExtent = { im.desc.width, im.desc.height, 1 };
 				vkCmdCopyBufferToImage(cmd, imageUpload.buffer, im.image.image, VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
 			}
-			vkCmdFillBuffer(cmd, h.scratchStore.buffer, 0, VK_WHOLE_SIZE, 0u);	// (2026-11-07) every run from an empty scratch store: runs stay alike
+			if (!meanMode || run == 0) vkCmdFillBuffer(cmd, h.scratchStore.buffer, 0, VK_WHOLE_SIZE, 0u);	// (2026-11-07) every run from an empty scratch store: runs stay alike
 			FullBarrier(cmd);
 			if (h.queries) { vkCmdResetQueryPool(cmd, h.queries, 0, stampsPerRun); vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, 0); }
 			{
@@ -718,7 +767,7 @@
 				g.geometry.instances.data.deviceAddress = s.instances.address;
 				VkAccelerationStructureBuildGeometryInfoKHR b = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_BUILD_GEOMETRY_INFO_KHR };
 				b.type = VK_ACCELERATION_STRUCTURE_TYPE_TOP_LEVEL_KHR;
-				b.flags = VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+				b.flags = TlasBuildFlags();	// (2026-11-10: NVR_RT_TLAS_FAST_TRACE, see NvrRtHelper.cpp)
 				b.mode = VK_BUILD_ACCELERATION_STRUCTURE_MODE_BUILD_KHR;
 				b.dstAccelerationStructure = h.tlas;
 				b.geometryCount = 1;
@@ -741,7 +790,7 @@
 				}
 				if (h.queries) vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, 2 + p);
 			}
-			if (run + 1 == runs) {	// the written images out (after the last run)
+			if (run + 1 == runs || meanMode) {	// the written images out (after the last run; --mean: after every run)
 				for (ReplayImage& im : c.images) {
 					if (!im.image.image || !im.written || !im.desc.texelBytes) continue;
 					VkBufferImageCopy copy = {};
@@ -756,6 +805,16 @@
 				vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
 			}
 			if (!ReplaySubmit(h, cmd)) return 3;
+			if (meanMode)
+				for (size_t i = 0; i < c.images.size(); i++) {
+					ReplayImage& im = c.images[i];
+					if (!im.image.image || !im.written || !im.desc.texelBytes) continue;
+					uint32_t ch = 0;
+					const std::vector<float> v = ToFloats(im.desc, (const uint8_t*)imageReadback.mapped + im.readback, ch);
+					if (!ch) continue;
+					if (meanSums[i].empty()) { meanSums[i].assign(v.size(), 0.0); meanChannels[i] = ch; }
+					for (size_t k = 0; k < v.size(); k++) if (v[k] == v[k] && v[k] < 3e38f && v[k] > -3e38f) meanSums[i][k] += v[k];
+				}
 			wallTimes.push_back((Seconds() - w0) * 1000.0);
 			if (h.queries) {
 				std::vector<uint64_t> stamps(stampsPerRun);
@@ -823,6 +882,20 @@
 			wchar_t base[64];
 			swprintf_s(base, L"\\img%02u", i);
 			SaveImage(outDir + base, im.desc, replayed, note);
+			if (meanMode && !meanSums[i].empty()) {	// (2026-11-10 --mean) mean_img<i>.f32 + .png (gamma 2.2, scaled by 1 / max when over 1)
+				const uint32_t ch = meanChannels[i];
+				std::vector<float> m(meanSums[i].size());
+				float maxV = 0.0f;
+				for (size_t k = 0; k < m.size(); k++) { m[k] = (float)(meanSums[i][k] / runs); if (k % ch < 3) maxV = std::max(maxV, m[k]); }
+				wchar_t meanBase[64];
+				swprintf_s(meanBase, L"\\mean_img%02u", (uint32_t)i);
+				WriteF32(outDir + meanBase + L".f32", im.desc.width, im.desc.height, ch, m);
+				const float scale = maxV > 1.0f ? 1.0f / maxV : 1.0f;
+				const size_t n = (size_t)im.desc.width * im.desc.height;
+				std::vector<uint8_t> rgb(n * 3);
+				for (size_t t = 0; t < n; t++) for (uint32_t k = 0; k < 3; k++) { float x = ch == 1 ? m[t] : k < ch ? m[t * ch + k] : 0.0f; x = powf(std::min(std::max(x * scale, 0.0f), 1.0f), 1.0f / 2.2f); rgb[t * 3 + k] = (uint8_t)(x * 255.0f + 0.5f); }
+				WritePng(outDir + meanBase + L".png", im.desc.width, im.desc.height, rgb);
+			}
 			if (im.after) {
 				swprintf_s(base, L"\\game_img%02u", i);
 				SaveImage(outDir + base, im.desc, im.after, gameNote);

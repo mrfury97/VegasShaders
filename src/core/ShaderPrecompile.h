@@ -55,7 +55,8 @@ namespace ShaderPrecompile {
 		}
 		if (errors) { errors->Release(); errors = nullptr; }
 		job->Preprocessed_ok = true;
-		const bool fresh = ShaderProgram::CheckPreprocessResult(job->Preprocessed.c_str(), job->SourceBuffer);
+		bool fresh = ShaderProgram::CheckPreprocessResult(job->Preprocessed.c_str(), job->SourceBuffer);
+		if (!fresh) fresh = ShaderProgram::SeedFromShipped(job->Preprocessed.c_str(), job->Compiled.c_str(), ShaderProgram::PortableSource(job->SourceBuffer));	// UNOFFICIAL 2026-11-10 shipped cache
 		if (fresh) {
 			FILE* f = nullptr;
 			if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {

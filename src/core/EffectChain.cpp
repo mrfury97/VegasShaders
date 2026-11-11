@@ -312,6 +312,10 @@ void ShaderManager::PreStep_RtCore(ChainContext& ctx) {
 	{
 		static bool rtRegistered = false;
 		if (!rtRegistered) { RtSunShadows::Register(); Effects.Reflections->RtRegister(); RtLampShadows::Register(); AmbientOcclusionEffect::RtRegister(); RtPathTrace::Register(); RtFogVisibility::Register(); rtRegistered = true; }	// UNOFFICIAL 2026-10-28 RT sun + RT reflections + RT lamp shadows + RT AO/sky (+ 2026-11-07 ptaaa-fog: RT fog visibility, last: it rides along)
+		// UNOFFICIAL 2026-11-10 (PT early kick, env NVR_RT_EARLY_PT; a no-op without it) the path tracer's early frame collected. Before
+		// Frame, not between Frame and Replace: Frame's exchange collects anything still open first (RtCore's safety net), which would
+		// leave this call nothing to do.
+		RtPathTrace::CollectBeforeShow(Device);
 		RtCore::Frame(Device);
 		RtPathTrace::Replace(Device);	// UNOFFICIAL 2026-11-03 [Main.Main.RayTracing] PTReplace: the path traced picture into the scene (off)
 		RtLampShadows::Denoise(Device);	// UNOFFICIAL 2026-10-29: the traced lamp shadows through the shared denoiser (Denoise, off)

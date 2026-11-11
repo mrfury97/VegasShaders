@@ -42,6 +42,9 @@ namespace FlashlightDeferred {
 	// The light as the pass and the grass take it (camera-relative to TheRenderManager->CameraPosition): [0] xyz the light, w its reach;
 	// [1] xyz the beam's axis, w cos of the cone's outer edge; [2] rgb the colour (linear, its hue at Intensity), w cos of the full-strength
 	// edge (half the angle). False while the light is off or cannot draw (2026-11-04: the grass, which the G-buffer does not hold).
+	// UNOFFICIAL 2026-11-11 the Flashlight's Angle, Offset, Distance, colour (UseOwnColour) and the Interiors look are already in the NiSpotLight
+	// and Settings (FlashlightEffect::UpdateConstants / ApplyLook), so every reader of this gets them; NearFade / HotspotLimit are not in
+	// here (the pass's c10.w / c8.x, the path tracer's frame row texel 31).
 	inline bool LightParams(D3DXVECTOR4 out[3]) {
 		const FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
 		if (!Usable() || !f->spotLightActive || !f->SpotLight) return false;
@@ -179,9 +182,10 @@ namespace FlashlightDeferred {
 			{ params[0].x, params[0].y, params[0].z, params[0].w },
 			{ params[1].x, params[1].y, params[1].z, params[1].w },
 			{ params[2].x, params[2].y, params[2].z, params[2].w },
-			{ 0.0f, 0.0f, gamma, 1.0f / gamma },
+			// (UNOFFICIAL 2026-11-11 xy, were 0: HotspotLimit and SoftEdges, the old flashlight's keys; 0 = today's light)
+			{ f->Settings.HotspotLimit, f->Settings.softEdges ? 1.0f : 0.0f, gamma, 1.0f / gamma },
 			{ shadowed ? 1.0f : 0.0f, mapDesc.Width ? 1.0f / (float)mapDesc.Width : 0.0f, f->Deferred.ShadowBias, SoftnessTexels(mapDesc.Width) },
-			{ f->Deferred.Cookie, (float)debugView, f->Deferred.Falloff, 0.0f } };
+			{ f->Deferred.Cookie, (float)debugView, f->Deferred.Falloff, f->Settings.NearFade } };	// (w: UNOFFICIAL 2026-11-11 NearFade, was 0)
 		d->SetPixelShaderConstantF(0, own[0], 11);
 		d->SetPixelShaderConstantF(11, (const float*)&TheShaderManager->SpotLightWorldToLightMatrix[0], 4);	// row_major in the pass
 

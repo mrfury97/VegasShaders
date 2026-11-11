@@ -828,21 +828,29 @@ float3 GridBounce(float3 cameraRelative, float3 normal) {
 // by a tinted ambient came out as bright pastel copies of that tint (measured in game, Gomorrah at GridBounce 2: the picture's
 // median brightness x 2.2-3.2 and its local contrast x 0.74 (Lab); with this x 1.2-1.4 and x 1.06).
 static const float MaxReflectance = 0.6f;	// the old stand-in's level; 92 % of Gomorrah's pixels come out below it
-float3 SurfaceColour(float3 lin) {
+float3 SurfaceColourCap(float3 lin, float cap) {
 	float3 ambient = max(NVR_ALScene.rgb, 0.25f * luma(NVR_ALScene.rgb) + 1.0e-4f);
 	float3 raw = max(lin, 0.0f) / ambient;
 	float level = luma(raw);
 	float3 hue = raw / max(level, 1.0e-4f);
-	float trust = saturate(MaxReflectance / max(level, 1.0e-4f));
-	return min(level, MaxReflectance) * min(lerp(1.0f, hue, trust), 3.0f);
+	float trust = saturate(cap / max(level, 1.0e-4f));
+	return min(level, cap) * min(lerp(1.0f, hue, trust), 3.0f);
 }
+float3 SurfaceColour(float3 lin) { return SurfaceColourCap(lin, MaxReflectance); }
+// UNOFFICIAL 2026-11-10 AlbedoFallbackCap (NVR_ALReach.z; testers: "RT GI / ambient light only affect the grass now", "interiors still
+// discoloured with AlbedoBuffer on"): with the albedo buffer live, a pixel no template wrote (grass, and whatever else draws with a shader
+// that is not ours: 80 % of one tester's 4K outdoor frame) still took the guess above, capped at 0.6, next to written surfaces whose real
+// base colour is 0.05-0.15: the bounce was 5-10 times stronger there, in the light's own tint. The guess for those pixels is now capped at
+// the level real surfaces have (the cap also fades the guessed hue: a lit pixel's hue is the lamp's as much as the surface's). 0 = the old
+// 0.6. Without the buffer (AlbedoBuffer off) nothing changes.
+float FallbackCap() { return NVR_ALFlags.z > 0.5f && NVR_ALReach.z > 0.0f ? NVR_ALReach.z : MaxReflectance; }
 // UNOFFICIAL 2026-10-31 AlbedoBuffer: the surface's real linear base colour where the templates wrote it (NVR_ALAlbedo, a 1), SurfaceColour's guess
 // elsewhere. Branch-free on purpose: Apply already uses every one of ps_3_0's 16 boolean registers for its constant branches (one more [branch]
 // on NVR_ALFlags.z failed the whole effect with X4550 in the first bench run), so the read is unconditional (s12 is bound or black) and a lerp picks.
 float3 SurfaceAlbedo(float2 uv, float3 lin) {
 	float4 a = tex2Dlod(NVR_ALAlbedo, float4(uv, 0.0f, 0.0f));
 	float take = step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a);
-	return lerp(SurfaceColour(lin), max(a.rgb, 0.0f), take);
+	return lerp(SurfaceColourCap(lin, FallbackCap()), max(a.rgb, 0.0f), take);
 }
 
 // UNOFFICIAL 2026-10-18 (ambfix2, user: "indoors it's too powerful ... it diverges from the original mood of each vanilla room"):
@@ -1068,7 +1076,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		float3 localLin = localSum / localWeight;
 		float shade = luma(linearize(color.rgb)) / max(luma(c0), 1.0e-4f);	// the sun shadow on this pixel
 		float detail = clamp(luma(c0) / max(luma(localLin), 1.0e-4f), 0.0f, 2.0f);
-		float3 guess = SurfaceColour(localLin * shade) * detail;
+		float3 guess = SurfaceColourCap(localLin * shade, FallbackCap()) * detail;	// (2026-11-10 AlbedoFallbackCap)
 		float4 a = tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord, 0.0f, 0.0f));
 		lin += giLight * lerp(guess, max(a.rgb, 0.0f), step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a));
 	}

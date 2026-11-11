@@ -76,6 +76,7 @@ public:
 	bool				fullResBuffers = false;		// UNOFFICIAL 2026-11-01 LowScaleFullRes: the buffers were made at the full screen size
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer ([Shaders.AmbientLight.Main] AlbedoBuffer, live): the bounce's surface colour from TESR_AlbedoBuffer where written
 	bool				albedoBuffer = false;
+	float				albedoFallbackCap = 0.12f;	// UNOFFICIAL 2026-11-10 AlbedoFallbackCap: the guessed colour's cap where the albedo buffer has no texel (0 = the old 0.6)
 	bool				albedoLogged = false;
 	bool				giD3D9Logged = false;	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes: logged once
 	// UNOFFICIAL 2026-10-21 (alrocks; the occlusion cut off hard along low-poly rocks' triangle edges): NormalSmoothing (half-resolution

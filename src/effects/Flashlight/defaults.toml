@@ -2,17 +2,38 @@
 Dimmer = 4.0                           # [0-50] How bright the flashlight is at the centre of its beam, in the lamps' units (1 is about a bright lamp up close). Its colour is your Pip-Boy's HUD colour (the game's display settings).
 Distance = 1000                        # How far the beam reaches, in game units (it fades out well before this: see Deferred's Falloff).
 AttachToWeapon = true                  # The flashlight rides the weapon instead of the camera (in third person: the head). It rides the weapon while aiming either way.
+UseOwnColour = false                   # UNOFFICIAL (2026-11-11): the beam takes ColorR/G/B below instead of your Pip-Boy's HUD colour (their hue: how bright it is stays Dimmer's). false = the Pip-Boy colour, as before.
+ColorR = 2.0                           # [0-10] UNOFFICIAL (2026-11-11): red of the beam's own colour (only with UseOwnColour; 2, 2, 1 the old flashlight's warm white).
+ColorG = 2.0                           # [0-10] UNOFFICIAL (2026-11-11): green of the beam's own colour (only with UseOwnColour).
+ColorB = 1.0                           # [0-10] UNOFFICIAL (2026-11-11): blue of the beam's own colour (only with UseOwnColour).
+Angle = 30.0                           # [5-63] UNOFFICIAL (2026-11-11): the beam's cone, the angle in degrees from its centre to its outer edge (half the full cone; full brightness inside half of it). Its shadow map and lens pattern follow it, and so does the path tracer. 30 = the beam as before.
+OffsetX = 0.0                          # UNOFFICIAL (2026-11-11): moves the light along the beam, in game units, from where it sits (the weapon, the head in third person, or the camera). 0 = where it was.
+OffsetY = 0.0                          # UNOFFICIAL (2026-11-11): moves the light along the second axis of what it rides (the weapon, head or camera), in game units. 0 = where it was.
+OffsetZ = 0.0                          # UNOFFICIAL (2026-11-11): moves the light along the third axis of what it rides (the weapon, head or camera), in game units. 0 = where it was.
+NearFade = 0.0                         # [0-1000] UNOFFICIAL (2026-11-11): fades the light out on surfaces closer to it than this many units, so point blank walls do not clip to white (the path tracer too). 0 off, as before.
+HotspotLimit = 0.0                     # [0-10] UNOFFICIAL (2026-11-11): rolls off the brightest part of the lit pool without dimming the falloff round it; higher rolls off sooner (the path tracer too). 0 off, as before.
+SoftEdges = false                      # UNOFFICIAL (2026-11-11): wrap lighting instead of the clamped diffuse, less speckle where normals scatter, a flatter beam. The light pass only (the path tracer shades physically). false = as before.
 
 [_Shaders.Flashlight.Deferred]
-Shadows = true                         # Everything in front of the flashlight casts a shadow in its beam (a shadow map drawn from the light every frame while it is on).
+Shadows = true                         # Everything in front of the flashlight casts a shadow in its beam (a shadow map drawn from the light every frame while it is on). (The old RenderShadows key.)
 ShadowSoftness = 5.0                   # [0-16] How soft the shadow edges are: the PCF blur's radius in texels of a 512 map (the same width whatever ShadowMapSize is). 16 bilinear PCF samples.
 ShadowBias = 0.004                     # [0-0.1] How far a surface may be behind its shadow map depth and still count as lit, as a share of the beam's reach. Raise it if surfaces shadow themselves in stripes; lower it if shadows lift off their casters.
 ShadowMapSize = 2048                   # NEEDS A RESTART. [512, 1024, 2048, 4096] The flashlight's own shadow map resolution (it used the lamp shadows' ShadowCubeMapSize before). Higher: sharper shadow shapes, more video memory (2048: 16 MB).
-Cookie = 0.0                           # [0-1] The flashlight lens pattern (Effects\Flashlight.png) over the beam. 0 a clean beam.
+Cookie = 0.0                           # [0-1] The flashlight lens pattern (Effects\Flashlight.png) over the beam. 0 a clean beam. (The old CookieStrength key; it follows Angle.)
 Falloff = 4.0                          # [0-32] How fast the beam fades with distance: a windowed inverse square, bright close up, about a quarter as bright halfway to the reach (Distance) at 4, nothing at the reach. Higher: a shorter beam. 0: the lamps' falloff (still three quarters as bright halfway out).
 GameLight = true                       # The flashlight is also a real game light (the Pip-Boy light, moved onto the beam), so everything a lamp lights reacts to it as to a lamp at night: leaves, your first-person view, see-through things and the env-map shine of glossy assets. What the light pass already lights gets none of it (no double light); the rest gets it as far as the object is in the beam.
 DebugView = 0                          # DIAGNOSTIC: 1 the flashlight's light alone, 2 its shadow, 3 the normals it lights by. 0 off.
 TestForceOn = false                    # TEST, for automatic tests: the flashlight on as if the Pip-Boy light were (and the game's Pip-Boy light switched on). Leave off.
+
+[_Shaders.Flashlight.Interiors]
+ColorR = -1.0                          # [-1-10] UNOFFICIAL (2026-11-11): the flashlight indoors (Main is everywhere else). Red of its own colour (only with Main's UseOwnColour). -1 = the same as Main.
+ColorG = -1.0                          # [-1-10] UNOFFICIAL (2026-11-11): green of its own colour indoors (only with UseOwnColour). -1 = the same as Main.
+ColorB = -1.0                          # [-1-10] UNOFFICIAL (2026-11-11): blue of its own colour indoors (only with UseOwnColour). -1 = the same as Main.
+Dimmer = -1.0                          # [-1-50] UNOFFICIAL (2026-11-11): how bright the beam is indoors. -1 = the same as Main.
+Angle = -1.0                           # [-1-63] UNOFFICIAL (2026-11-11): the beam's cone indoors, degrees from its centre to its edge (5 at least). -1 = the same as Main.
+Distance = -1.0                        # [-1-...] UNOFFICIAL (2026-11-11): how far the beam reaches indoors, game units (10 at least). -1 = the same as Main.
+NearFade = -1.0                        # [-1-1000] UNOFFICIAL (2026-11-11): Main's NearFade indoors (0 off). -1 = the same as Main.
+HotspotLimit = -1.0                    # [-1-10] UNOFFICIAL (2026-11-11): Main's HotspotLimit indoors (0 off). -1 = the same as Main.
 
 [_Shaders.Flashlight.Status]
 Enabled = true                         # The flashlight (the Pip-Boy light's key): a real spot light, coloured by your Pip-Boy's HUD colour, that lights the world's surfaces with their own colour, roughness and metal, casts shadows, lights the grass, and is the game's lamp for what that light cannot reach. Needs [Main.Main.Quality] CapturedNormals, MaterialBuffer and AlbedoBuffer (restart) for the surfaces.

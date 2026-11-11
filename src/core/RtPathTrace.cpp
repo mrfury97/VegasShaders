@@ -9,6 +9,7 @@
 #include "RtPtCost.h"	// (2026-11-07 perf-ptcost) the ray budget keys in the frame row (shared with tools/nvr-rt-host)
 #include "RtFlashlightCode.h"	// (2026-11-07 perf-reflfix2) the flashlight's cone code (shared with tools/nvr-rt-host)
 #include "RtPathTrace.h"
+#include "SettingShots.h"	// UNOFFICIAL 2026-11-11 InternalTools: a test run's shot list may set the internal keys
 #include "RtCore.h"
 #include "DxvkCompute.h"
 #include "GpuProfiler.h"
@@ -18,6 +19,7 @@
 #include "FlashlightDeferred.h"	// (2026-11-07) the flashlight as its own pass draws it (LightParams)
 #include "RenderRect.h"	// (2026-11-03) RenderScale < 1: the trace over the frame's top-left rect (docs/next/RT-RENDERSCALE.md)
 #include "RtViewModel.h"	// (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (shared with tools/nvr-rt-host)
+#include "RtBlendedLayer.h"	// UNOFFICIAL 2026-11-10 PTBlendedLayer
 #include "CapturedNormals.h"	// (2026-11-07 ptaaa-firstperson) PTViewModel: the first-person model's G-buffer (VmWanted / VmFrame)
 #include "Upscaler.h"	// (2026-11-07 ptaaa-denoiser) DLSS RR denoises the raw path traced picture (RayReconstructionWantsRaw)
 #include <algorithm>
@@ -55,6 +57,26 @@ namespace {
 		// surfaces round shiny ones; RR gets the raw paths and the path tracer's own anti-firefly pass steps aside there):
 		float	realtimeClamp = 0.0f;	// PTRealtimeClamp: PTIndirectClamp's value under PTRealtime while that key is 0 (0 = none there too)
 		float	bounceRoughen = 0.0f;	// PTBounceRoughen: path regularisation (RtPathTrace.comp gBounceRoughen); -1 = 0.35 under PTRealtime, else 0
+		// UNOFFICIAL 2026-11-10 PTCacheShort (RtPathTrace.comp gCacheShort; frame row texel 27.y): with PTRadianceCache, one path in N is traced in
+		// full, the others end at their first bounce hit in the cache. 0 = off (every path in full).
+		float	cacheShort = 0.0f;
+		// UNOFFICIAL 2026-11-10 PTRouletteFrom (RtPathTrace.comp gRouletteFrom; frame row texel 30.y): 1 = Russian roulette already before the
+		// second bounce ray. Measured by replaying a captured Lucky 38 frame: the pass -12 % on an NVIDIA L4 (4.96 -> 4.37 ms), -18 % on the
+		// iGPU; the converged picture the same (mean x1.0000, 32-pixel tiles within 0.4 %); one frame's noise +12 % (relative MSE 0.46 -> 0.51).
+		int		rouletteFrom = 0;
+		float	denoiseCeiling = 200.0f;	// UNOFFICIAL 2026-11-11 PTDenoiseCeiling (frame row texel 23.y; RtPathTrace.comp gDenoiseCeil)
+		float	restirDILampMatch = 0.0f;
+		bool	blendedLayer = false;	// UNOFFICIAL 2026-11-10 PTBlendedLayer (core/RtBlendedLayer.h)
+		bool	hairFirst = true;	// UNOFFICIAL 2026-11-10 [Main.Main.RayTracing] BlendedHair, the path tracer's half: frame row texel 30.x
+		// UNOFFICIAL 2026-11-10 PTRealtimeLevel (a tester's RTX 4090: 23 fps in a small room, the trace 45 of the frame's 59 ms; the same card's
+		// 1.0.6 log: the plain 4-bounce reference trace 14 ms, PTRealtime 40). What PTRealtime trades for speed, each step measured in
+		// tools/nvr-rt-playground (the room, 320 x 180, this PC's iGPU; the trace 65.6 ms at level 0):
+		//   0 as before (3 bounces, every extra);
+		//   1 two bounces + PTCacheShort 8 (most paths end at their first bounce hit in the radiance cache): 48.4 ms, -26 %;
+		//   2 one bounce (its hit's further light from the radiance cache) and no PTEmissive (glowing triangles light through the bounce
+		//     rays only: noisier next to neon, the same brightness): 27.4 ms, -58 %; the picture 3 % darker in that room.
+		// A key the player set themselves stays (PTBounces off its default 4, PTEmissive off -1, PTCacheShort off 0).
+		int		realtimeLevel = 0;
 		int		lastSky = 0;			// (2026-11-06) PTLastSky: the last hit's sky light (flag 32768)
 		int		lastBounce = 0;		// (2026-11-06 b) PTLastBounce: the last hit's further bounces, estimated from its own direct light (flag 65536)
 		int		lampFalloff = 0;	// (2026-11-06 c) PTLampFalloff: 0 the game's (1 - (d/r)^2)^2.2, 1 physical (windowed inverse square, reach x 2; flag 131072)
@@ -89,6 +111,7 @@ namespace {
 		float	detail = 1.0f;			// (2026-11-07) PTDetail: the game's fine shading on the traced light (0 off, 1 all)
 		float	contact = 1.0f;			// (2026-11-07 rtgap-tess) PTContactShadows: the depth buffer's contact march at the first hit (strength, 0 off)
 		float	contactLength = 24.0f;	// PTContactLength: its length on screen (pixels)
+		float	detailEdge = 2.0f;		// (2026-11-10) PTDetailEdge: the detail fades where the game's shading steps by this factor (0 off)
 		float	detailRadius = 4.0f;	// (2026-11-07) PTDetailRadius: its local average's reach (pixels)	// (2026-11-07) PTDenoisePeopleHistory: people's pixels keep at most this many frames (0 off)
 		bool	viewModel = true;		// (2026-11-07 ptaaa-firstperson) PTViewModel: the first-person model lit by the path tracer (its G-buffer captured)
 		bool	restirGI = false;		// PTRestirGI (2026-11-04 d): ReSTIR GI on the first bounce (with PTDenoise; RtPathTraceGI.spv + RtRestirGI.spv)
@@ -218,7 +241,8 @@ namespace {
 	void ReadSettings() {
 		auto f = [](const char* k, float lo, float hi) { return (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, k), lo), hi); };
 		auto i = [](const char* k, int lo, int hi) { return (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, k), lo), hi); };
-		S.enabled = TheSettingManager->GetSettingI(kSection, "ReferencePT") != 0;
+		const bool tools = RtPathTrace::InternalTools();	// UNOFFICIAL 2026-11-11: ReferencePT / PTReplace / PTDenoise are internal tools
+		S.enabled = tools && TheSettingManager->GetSettingI(kSection, "ReferencePT") != 0;
 		S.bounces = i("PTBounces", 1, 16);
 		S.samples = i("PTSamples", 1, 16);
 		S.maxSamples = i("PTMaxSamples", 1, 1 << 20);
@@ -231,8 +255,17 @@ namespace {
 		S.debugView = i("PTDebugView", 0, 10);	// (2026-11-07: 10 the radiance cache at the first hit)
 		S.primary = TheSettingManager->GetSettingI(kSection, "PTPrimary") != 0;
 		S.specular = TheSettingManager->GetSettingI(kSection, "PTSpecular") != 0;
-		S.denoise = TheSettingManager->GetSettingI(kSection, "PTDenoise") != 0;
-		S.replace = TheSettingManager->GetSettingI(kSection, "PTReplace") != 0;
+		S.denoise = tools && TheSettingManager->GetSettingI(kSection, "PTDenoise") != 0;
+		S.replace = tools && TheSettingManager->GetSettingI(kSection, "PTReplace") != 0;
+		if (!tools) {
+			static bool told = false;
+			if (!told && (TheSettingManager->GetSettingI(kSection, "ReferencePT") != 0 || TheSettingManager->GetSettingI(kSection, "PTDenoise") != 0 ||
+				TheSettingManager->GetSettingI(kSection, "PTReplace") != 0)) {
+				told = true;
+				Logger::Log("UNOFFICIAL RT path trace: ReferencePT / PTReplace / PTDenoise are set in the settings file but are internal comparison tools: "
+					"ignored. PTRealtime is the path tracing switch (it turns all three on by itself).");
+			}
+		}
 		S.glowLights = TheSettingManager->GetSettingI(kSection, "PTGlowLights") != 0;
 		S.glowFromFrame = TheSettingManager->GetSettingI(kSection, "PTGlowFromFrame") != 0;
 		S.lightGrid = TheSettingManager->GetSettingI(kSection, "PTLightGrid") != 0;
@@ -242,6 +275,10 @@ namespace {
 		S.indirectClamp = f("PTIndirectClamp", 0.0f, 1000.0f);
 		S.realtimeClamp = f("PTRealtimeClamp", 0.0f, 1000.0f);	// UNOFFICIAL 2026-11-09 (a missing key: 0, off)
 		S.bounceRoughen = f("PTBounceRoughen", -1.0f, 1.0f);		// UNOFFICIAL 2026-11-09 (-1 = on under PTRealtime; a missing key reads 0: off)
+		S.cacheShort = f("PTCacheShort", 0.0f, 64.0f);	// UNOFFICIAL 2026-11-10 (a missing key: 0, off)
+		S.realtimeLevel = i("PTRealtimeLevel", 0, 2);	// UNOFFICIAL 2026-11-10 (a missing key: 0, as before)
+		{ SettingManager::Configuration::ConfigNode hn; S.hairFirst = !TheSettingManager->Config.FillNode(&hn, kSection, "BlendedHair") || hn.BoolValue; }	// UNOFFICIAL 2026-11-10 (a missing key: on)
+		S.rouletteFrom = i("PTRouletteFrom", 0, 1);	// UNOFFICIAL 2026-11-10 (a missing key: 0, as before)
 		S.denoiseIterations = i("PTDenoiseIterations", 0, 5);
 		S.denoiseHistory = f("PTDenoiseHistory", 1.0f, 256.0f);
 		S.denoiseClamp = f("PTDenoiseClamp", 0.0f, 8.0f);
@@ -263,6 +300,10 @@ namespace {
 		S.denoiseFireflySpread = (int)f("PTDenoiseFireflySpread", 0.0f, 64.0f);	// UNOFFICIAL 2026-11-09 (RtDenoiseTemporalRgb / Spec .frag FireflyExcess)
 		S.detail = f("PTDetail", 0.0f, 1.0f);
 		S.detailRadius = f("PTDetailRadius", 1.0f, 16.0f);
+		{	// UNOFFICIAL 2026-11-10 PTDetailEdge (a missing key, an older toml: 2)
+			SettingManager::Configuration::ConfigNode node;
+			S.detailEdge = TheSettingManager->Config.FillNode(&node, kSection, "PTDetailEdge") ? std::clamp(node.FloatValue, 0.0f, 16.0f) : 2.0f;
+		}
 		S.viewModel = TheSettingManager->GetSettingI(kSection, "PTViewModel") != 0;	// (2026-11-07 ptaaa-firstperson; a missing key: 0, off)
 		S.contact = f("PTContactShadows", 0.0f, 1.0f);	// (2026-11-07 rtgap-tess; a missing key: 0, off)
 		S.contactLength = f("PTContactLength", 0.0f, 128.0f);
@@ -295,6 +336,9 @@ namespace {
 		S.restirDIMaxM = f("PTRestirDIMaxM", 1.0f, 255.0f);
 		S.restirDINormal = f("PTRestirDINormal", -1.0f, 1.0f);
 		S.restirDIPlane = f("PTRestirDIPlane", 0.001f, 1.0f);
+		S.blendedLayer = i("PTBlendedLayer", 0, 1) != 0;	// UNOFFICIAL 2026-11-10 (a missing key: 0, off)
+		{ SettingManager::Configuration::ConfigNode cn; S.denoiseCeiling = TheSettingManager->Config.FillNode(&cn, kSection, "PTDenoiseCeiling") ? (std::min)((std::max)(cn.FloatValue, 0.0f), 60000.0f) : 200.0f; }	// UNOFFICIAL 2026-11-11 (a missing key: the documented 200; 0 = the old 60000)
+		{ SettingManager::Configuration::ConfigNode ln; S.restirDILampMatch = TheSettingManager->Config.FillNode(&ln, kSection, "PTRestirDILampMatch") ? (std::min)((std::max)(ln.FloatValue, 0.0f), 256.0f) : 32.0f; }	// UNOFFICIAL 2026-11-10 (BUG FIX: a missing key reads the documented 32; 0 = the old exact match)
 		S.restirDIRays = i("PTRestirDIRays", 0, 3);	// (2026-11-07 perf-ptcost)
 		S.bounceLights = i("PTBounceLights", 0, 1);
 		// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") the material models (a missing key: 0, off)
@@ -320,7 +364,10 @@ namespace {
 			// 4 (was 1: outdoors the ground 1.2 % dark, indoors 2.5 %, patched by PTLastSky / PTLastBounce estimates); PTBounceHalf no longer on
 			// by itself (its 8 x 8 tile checkerboard showed as a TILE GRID while the camera turned: the denoiser's history lags the half-rate
 			// tiles); set PTBounceHalf 1 to get it back
-			if (S.bounces == 4) S.bounces = 3;
+			if (S.bounces == 4) S.bounces = S.realtimeLevel >= 2 ? 1 : S.realtimeLevel == 1 ? 2 : 3;	// (2026-11-10 PTRealtimeLevel)
+			if (S.realtimeLevel == 1 && S.cacheShort <= 0.0f) S.cacheShort = 8.0f;
+			if (S.realtimeLevel >= 1) S.rouletteFrom = 1;
+			if (S.realtimeLevel >= 2 && S.emissive < 0) S.emissive = 0;
 			if (S.bounceHalf < 0) S.bounceHalf = 0;
 			// PTLastSky / PTLastBounce estimate the light of the bounces a 1-bounce path leaves out: on by themselves only at 1 bounce
 			if (S.lastSky < 0) S.lastSky = S.bounces == 1 ? 1 : 0;	// (2026-11-06, section 39) PTLastSky: the last hit's sky light
@@ -507,13 +554,23 @@ namespace {
 		const double camWorld[3] = { cam.x, cam.y, cam.z };
 		const float eyeScene[3] = { eye.x, eye.y, eye.z };
 		RtRestirRow::Keys keys;
-		keys.maxM = S.restirDIMaxM; keys.spatial = (float)S.restirDISpatial; keys.radius = S.restirDIRadius; keys.normal = S.restirDINormal; keys.plane = S.restirDIPlane;
+		keys.maxM = S.restirDIMaxM; keys.spatial = (float)S.restirDISpatial; keys.radius = S.restirDIRadius; keys.normal = S.restirDINormal; keys.plane = S.restirDIPlane; keys.lampMatch = S.restirDILampMatch;
 		if (cacheLog2Setup > 0) {	// (2026-11-07) PTRadianceCache
 			keys.cacheLog2 = (float)cacheLog2Setup;
 			keys.cacheBase4096 = (float)(CacheBaseWords(TheRenderManager->width, TheRenderManager->height) / 4096ull);
 			keys.cacheCell = S.cacheCell; keys.cacheMaxSamples = S.cacheMaxSamples; keys.cacheMinSamples = S.cacheMinSamples;
 		}
+		const int lampsBefore = restirState.lamps;
 		RtRestirRow::Build(restirState, row, lamps, lampData[0].pos, lampCount, (int)(sizeof(LampData) / sizeof(float)), camWorld, eyeScene, c.forward, c.right, c.up, tw, th, keys);
+		{	// UNOFFICIAL 2026-11-10, measurement: how the lamps kept their ReSTIR history over the last 300 frames (a lamp unmatched every frame = its light all but lost)
+			static int frames = 0, sumUnmatched = 0, sumLoose = 0, sumLamps = 0, maxUnmatched = 0;
+			sumUnmatched += restirState.unmatched; sumLoose += restirState.loose; sumLamps += lampsBefore; maxUnmatched = (std::max)(maxUnmatched, restirState.unmatched);
+			if (++frames >= 300) {
+				Logger::Log("UNOFFICIAL RT path trace lamp history: %.1f lamps a frame, of last frame's %.2f a frame found no match (most in one frame %d), %.2f matched only by the loose rule (PTRestirDILampMatch %.0f units); ReSTIR DI %s",
+					sumLamps / 300.0f, sumUnmatched / 300.0f, maxUnmatched, sumLoose / 300.0f, S.restirDILampMatch, S.restirDI > 0 ? "on" : "off");
+				frames = sumUnmatched = sumLoose = sumLamps = maxUnmatched = 0;
+			}
+		}
 	}
 
 	struct GridInfo { int cells = 0, entries = 0; float cell[3] = {}; int dims[3] = {}; };
@@ -731,7 +788,14 @@ namespace {
 		return moved;
 	}
 
+	// UNOFFICIAL 2026-11-10 early kick (RtPathTrace.h SubmitBeforeWorld): Record runs inside RtCore::SubmitEarly at the world's start
+	// (earlyRecording), when nothing of this frame's world is drawn: no G-buffer, no frame copy. earlyFrame: the frame whose trace went
+	// early; RtCore::Frame's exchange after the world must not record it again (its copies out would follow a second, other trace).
+	bool		earlyRecording = false;
+	UInt32		earlyFrame = ~0u;
+
 	void Record(IDirect3DDevice9* Device) {
+		if (!earlyRecording && earlyFrame == TheFrameRateManager->FrameNumber) return;	// (2026-11-10 early kick: recorded at the world's start)
 		vmThisFrame = false;	// (2026-11-07 ptaaa-firstperson) set below when this frame's trace lights the view model
 		if (imageA < 0 || imageB < 0 || imageDisplay < 0 || shader < 0) return;
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
@@ -781,6 +845,9 @@ namespace {
 		UInt32 flags = (RtCore::AlphaTested() && alphaAtlas >= 0 ? 1u : 0u) | (albedoAtlas >= 0 ? 2u : 0u) | (glowAtlas >= 0 && albedoAtlas >= 0 ? 4u : 0u);
 		// (2026-11-02 b) PTPrimary: the screen's depth, normals and albedo (CapturedNormals' AlbedoBuffer: linear base colour, the land's
 		// blended layers) for the first hit, when this frame's albedo capture ran
+		// UNOFFICIAL 2026-11-10 early kick: recorded before the world is drawn, the G-buffer (and the view model's, the frame copy) would be
+		// last frame's at this frame's camera: traced first surface instead, as PTPrimary false (the player's setting stays as it is)
+		const bool primary = S.primary && !earlyRecording;
 		const D3DXVECTOR4* albedoData = constant("TESR_AlbedoBufferData");
 		IDirect3DBaseTexture9* gDepth = texture("TESR_DepthBuffer");
 		IDirect3DBaseTexture9* gNormals = texture("TESR_NormalsBuffer");
@@ -791,15 +858,16 @@ namespace {
 		// (with PTDenoise only: the reference's running mean would smear a model that sways while the camera is still)
 		const bool fullRect = tw == w && th == h;
 		vmThisFrame = false;
-		if (S.primary && S.viewModel && S.denoise && fullRect && gNormals && CapturedNormals::VmFrame == TheFrameRateManager->FrameNumber && albedoData && albedoData->x > 0.5f)
+		if (primary && S.viewModel && S.denoise && fullRect && gNormals && CapturedNormals::VmFrame == TheFrameRateManager->FrameNumber && albedoData && albedoData->x > 0.5f)
 			vmThisFrame = ViewModelPrep(Device, gNormals, w, h);
 		IDirect3DBaseTexture9* normalsIn = vmThisFrame ? (IDirect3DBaseTexture9*)vmNormals : gNormals;
-		if (S.primary && imageDepth >= 0 && imageNormals >= 0 && imageAlbedo >= 0 && c.forward[3] > 0.0f && albedoData && albedoData->x > 0.5f &&
+		if (primary && imageDepth >= 0 && imageNormals >= 0 && imageAlbedo >= 0 && c.forward[3] > 0.0f && albedoData && albedoData->x > 0.5f &&
 			gDepth && normalsIn && gAlbedo && RtCore::CopyIn(imageDepth, gDepth) && RtCore::CopyIn(imageNormals, normalsIn) && RtCore::CopyIn(imageAlbedo, gAlbedo))
 			flags |= 8u;
 		else vmThisFrame = false;
 		// the next frame's first-person render captures the model while the path tracer can light it (the screen's G-buffer, the full rect)
-		CapturedNormals::VmWanted = S.viewModel && S.primary && S.denoise && fullRect;
+		// (2026-11-10 early kick: recorded at the world's start this is THIS frame's first-person render, and the trace does not use it)
+		CapturedNormals::VmWanted = S.viewModel && primary && S.denoise && fullRect;
 		// (2026-11-02 e) the screen's roughness / metal (CapturedNormals' MaterialBuffer) with the first hit's G-buffer
 		const D3DXVECTOR4* materialData = constant("TESR_MaterialBufferData");
 		IDirect3DBaseTexture9* gMaterial = texture("TESR_MaterialBuffer");
@@ -837,7 +905,7 @@ namespace {
 			flags |= 16u;
 		// (2026-11-02 c) the frame as drawn so far (the world, the sky; NVR's effects not yet): camera rays that leave the RT scene show it
 		IDirect3DSurface9* frame = nullptr;
-		if (S.primary && imageFrame >= 0 && SUCCEEDED(Device->GetRenderTarget(0, &frame)) && frame) {
+		if (primary && imageFrame >= 0 && SUCCEEDED(Device->GetRenderTarget(0, &frame)) && frame) {
 			if (RtCore::CopyIn(imageFrame, frame)) flags |= 32u;
 			frame->Release();
 		}
@@ -875,7 +943,11 @@ namespace {
 		const bool tess = slack.strength > 0.0f || contact.strength > 0.0f;
 		const bool materials = RtMaterials::Any(S.materials);	// (2026-11-07 ptaaa-materials) their keys ride in the frame row (texels 24-26)
 		emissiveCount = 0;
-		if (imageLamps >= 0 && (lampCount > 8 || glowCount > 0 || restir || cache || energy || tess || materials || emissiveWanted)) {
+		// (2026-11-10 early kick: + earlyRecording, its camera jitter flag rides in the frame row's texel 23)
+		// The lamp image is filled from the CPU lists: at the world's start the game's lamp table (ManyLamps) is last frame's, built at its
+		// first world draw (the flashlight, the shadow / tracked lamp lists as ShaderManager left them); the glow lights and PTEmissive's
+		// records are the scene RtCore gathered for this exchange.
+		if (imageLamps >= 0 && (lampCount > 8 || glowCount > 0 || restir || cache || energy || tess || materials || emissiveWanted || earlyRecording)) {
 			if (!lampTexture) TheRenderManager->device->CreateTexture(kLightTexels, kLampRows, 1, D3DUSAGE_DYNAMIC, D3DFMT_G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr);
 			D3DLOCKED_RECT r = {};
 			if (lampTexture && SUCCEEDED(lampTexture->LockRect(0, &r, nullptr, D3DLOCK_DISCARD))) {
@@ -903,6 +975,19 @@ namespace {
 				{	// (2026-11-07) the flashlight's cone (lamp 0) in the frame row's texel 15 (RtPathTrace.comp LampSpot; RtRestirRow fills 0-14)
 					float* row = (float*)((char*)r.pBits + (size_t)r.Pitch * kFrameRow);
 					row[30] = lampCount > 0 ? lampData[0].colour[3] : 0.0f; row[31] = 0.0f;
+					// UNOFFICIAL 2026-11-10 early kick, texel 23.x (RtPathTrace.comp gCameraJitter): 1 = the camera rays at the pixel centre + the
+					// depth's jitter (c.rect.xy), as ScreenHit places the screen's first surface: the traced first surface then lies on the pixel
+					// the game rasterises, which the denoiser's and the upscaler's depth / normals / motion describe. Written every frame (the
+					// lock discards: an unwritten texel holds anything).
+					row[46] = earlyRecording ? 1.0f : 0.0f; row[47] = S.denoiseCeiling;	// (23.y: 2026-11-11 PTDenoiseCeiling)
+					// UNOFFICIAL 2026-11-11 texel 31 (RtPathTrace.comp FlashShape): the flashlight's NearFade (x) and HotspotLimit (y) as its light pass
+					// takes them (FlashlightEffect::ApplyLook: Main or Interiors), only while lamp 0 is the flashlight (texel 15 holds its cone code);
+					// 0 = off, as every other frame (the lock discards: written every frame)
+					{
+						const FlashlightEffect* fe = TheShaderManager->Effects.Flashlight;
+						const bool flashLamp = fe && row[30] > 0.5f;
+						row[62] = flashLamp ? fe->Settings.NearFade : 0.0f; row[63] = flashLamp ? fe->Settings.HotspotLimit : 0.0f;
+					}
 					RtTessContact::PackRow(row, slack, contact);	// (2026-11-07 rtgap-tess) texels 16-21
 					{	// (2026-11-07 ptaaa-materials) texels 24-26; (2026-11-09 pt-mirrors) + PTDenoiseMirrorSurface, only while the split specular
 						// light goes through the path tracer's own denoiser (not to DLSS RR, whose specular albedo must stay the BRDF's)
@@ -910,7 +995,7 @@ namespace {
 						keys.mirrorSurface = (flags & 4194304u) && S.denoise && !rrDenoising ? S.denoiseMirrorSurface : 0.0f;
 						RtMaterials::PackRow(row, keys);
 					}
-					row[54] = S.bounceRoughen; row[55] = 0.0f;	// UNOFFICIAL 2026-11-09 PTBounceRoughen: texel 27 (RtPathTrace.comp LoadBounceRoughen)
+					row[54] = S.bounceRoughen; row[55] = S.cacheShort; row[60] = (S.hairFirst && !S.blendedLayer ? 1.0f : 0.0f) + (S.hairFirst ? 2.0f : 0.0f);	/* (not with PTBlendedLayer: the game's own hair comes over) */ row[61] = (float)S.rouletteFrom;	/* texel 30.y: 2026-11-10 PTRouletteFrom */	// UNOFFICIAL 2026-11-09 PTBounceRoughen: texel 27 (RtPathTrace.comp LoadBounceRoughen); y: 2026-11-10 PTCacheShort
 					{	// (2026-11-07 perf-ptcost) texels 28-29: the ray budget keys + whether this frame's scene holds the hidden first-person body
 						RtPtCost::Keys cost;
 						cost.restirRays = (float)S.restirDIRays; cost.bounceLights = (float)S.bounceLights;
@@ -973,6 +1058,7 @@ namespace {
 			// change, rect <-> native) hold other texels: no history that frame, as ReSTIR DI's row does it (RtRestirRow.h)
 			if (giPrevSize[0] != tw || giPrevSize[1] != th) giHistory = false;
 			r.rect[2] = (float)((flags & 1u ? 1u : 0u) | (giHistory ? 2u : 0u) | 4u);
+			r.rect[3] = S.denoiseCeiling;	// UNOFFICIAL 2026-11-11 PTDenoiseCeiling (was unused; 0 = no ceiling)
 			memcpy(r.prevForward, giPrevCamera[0], 16); memcpy(r.prevRight, giPrevCamera[1], 16); memcpy(r.prevUp, giPrevCamera[2], 16);
 			// (P1) last frame's eye in THIS frame's scene space, minus this frame's eye. The scene is camera-relative, so that is the camera's
 			// world move back. It was giPrevCamera[3] - c.origin with both the scene-space eye (0 - 0): the reuse reprojected the view's
@@ -1054,6 +1140,9 @@ namespace {
 			Logger::Log("UNOFFICIAL RT path trace: %u samples a pixel (camera still; %u restarts so far).", samples, resets);
 	}
 
+	// the core user (Register); (2026-11-10 early kick) one object, so SubmitBeforeWorld hands RtCore::SubmitEarly the same user
+	RtCore::User ptUser = { kUserName, Wants, Setup, Record, 0, 1 };	// Order 1: set up last (the first left out when the images do not fit)
+
 	ID3D9NvrExtPipeline* ShowPipeline() {
 		if (showTried) return showPipeline;
 		showTried = true;
@@ -1078,7 +1167,7 @@ namespace {
 		desc.FragmentSpirvSize = (UINT)spirv.size();
 		desc.BindingCount = 11;
 		desc.pBindings = bindings;
-		desc.PushConstantSize = 48;
+		desc.PushConstantSize = 52;	// RtPathTraceShow.frag's Push block (2026-11-10: + detailEdge; at 48 the draw with the 52-byte block was dropped: the game's own picture stayed)
 		desc.UsesSamplerHeap = TRUE;
 		desc.SamplerHeapSet = 0;
 		desc.SamplerHeapBinding = 0;
@@ -1097,13 +1186,21 @@ namespace {
 
 	// The traced picture (denoised with PTDenoise) into Target: over the finished frame (hdr false: clamped, gamma, PTExposure) or into
 	// the HDR scene (hdr true, PTReplace: the stored curve x^(1/2.2), not clamped above 1)
+	bool showDrew = false;	// (2026-11-10) Show reached its draw this call (Replace: the blended layer goes onto a traced picture only)
 	void Show(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, bool hdr) {
+		showDrew = false;
 		if (!S.enabled || !haveImage || !displayTexture || !RenderTarget || !RtCore::Running()) return;
 		IDirect3DTexture9* shown = displayTexture;
 		IDirect3DTexture9* specShown = nullptr;	// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit: the specular light shown (denoised, or raw)
 		// (2026-11-07) PTDetail / PTDenoiseGuide: the game's own lit frame, copied before the traced picture replaces it (the scene as stored)
 		IDirect3DTexture9* gameFrame = nullptr;
-		if (hdr && (S.detail > 0.0f || S.denoiseGuide > 0.0f)) {
+		const bool layerCopies = hdr && S.blendedLayer && ReactiveMask::Opaque && ReactiveMask::CopiesFrame == ReactiveMask::FrameNumber();
+		if (layerCopies) {	// (2026-11-10 PTBlendedLayer) the game's frame WITHOUT its blended layer, if it is the scene's size
+			D3DSURFACE_DESC rd = {};
+			RenderTarget->GetDesc(&rd);
+			if (rd.Width == ReactiveMask::Width && rd.Height == ReactiveMask::Height) gameFrame = ReactiveMask::Opaque;
+		}
+		if (!gameFrame && hdr && (S.detail > 0.0f || S.denoiseGuide > 0.0f)) {
 			D3DSURFACE_DESC rd = {};
 			RenderTarget->GetDesc(&rd);
 			static IDirect3DTexture9* copy = nullptr;
@@ -1210,8 +1307,9 @@ namespace {
 		// light (PTDenoise), also when the denoiser did not run (it failed, or DLSS RR takes the raw paths): it showed the light / colour then
 		const bool modulate = S.denoise && (shown == denoisedTexture || shown == displayTexture) && albedoThisFrame && albedoTexture;
 		const bool splitShow = modulate && specShown && splitThisFrame;	// (ptaaa-denoiser) + the specular light x its albedo
-		struct { float exposure; UInt32 samplerIndex; float split, gamma; UInt32 modulate, pad[3]; float detail, detailRadius, texel[2]; } push = { S.exposure, 0, S.split,
-			S.debugView == 1 || S.debugView == 2 || S.debugView == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | (hdr ? 2u : 0u) | (splitShow ? 4u : 0u), { 0, 0, 0 }, 0.0f, 4.0f, { 0.0f, 0.0f } };
+		struct { float exposure; UInt32 samplerIndex; float split, gamma; UInt32 modulate, pad[3]; float detail, detailRadius, texel[2], detailEdge; } push = { S.exposure, 0, S.split,
+			S.debugView == 1 || S.debugView == 2 || S.debugView == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | (hdr ? 2u : 0u) | (splitShow ? 4u : 0u), { 0, 0, 0 }, 0.0f, 4.0f, { 0.0f, 0.0f }, S.detailEdge };	// (the last: 2026-11-10 PTDetailEdge)
+		static_assert(sizeof(push) == 52, "RtPathTraceShow's push block: keep desc.PushConstantSize (the pipeline, above) the same");
 		IDirect3DBaseTexture9* depthBuffer = nullptr;
 		{ auto found = TheTextureManager->TextureNames.find("TESR_DepthBuffer"); if (found != TheTextureManager->TextureNames.end() && found->second) depthBuffer = *found->second; }
 		if (gameFrame && depthBuffer && S.detail > 0.0f && S.debugView == 0) {	// (2026-11-07) PTDetail
@@ -1252,13 +1350,18 @@ namespace {
 		draw.pBindings = bindings;
 		draw.pPushData = &push;
 		draw.PushDataSize = sizeof(push);
-		DxvkCompute::Extension()->Draw(&draw);
+		showDrew = SUCCEEDED(DxvkCompute::Extension()->Draw(&draw));
 		Device->SetRenderTarget(0, current);
 		if (current) current->Release();
 	}
 }
 
 namespace RtPathTrace {
+	bool InternalTools() {
+		return SettingShots::Running || SettingShots::Pending || TheSettingManager->GetSettingI("Main.Menu.Developer", "InternalTools") != 0;
+	}
+	bool ReferenceOn() { return InternalTools() && TheSettingManager->GetSettingI(kSection, "ReferencePT") != 0; }
+
 	void Register() {
 		shader = RtCore::AddShader("RtPathTrace");
 		shaderGrid = RtCore::AddShader("RtPathTraceGrid");	// (2026-11-04) PTLightGrid
@@ -1266,7 +1369,37 @@ namespace RtPathTrace {
 		shaderEmissive = RtCore::AddShader("RtEmissiveBuild");	// (2026-11-07 ptaaa-emissive) PTEmissive's light list
 		shaderGI = RtCore::AddShader("RtPathTraceGI");		// (2026-11-04 d) PTRestirGI
 		shaderReuse = RtCore::AddShader("RtRestirGI");
-		RtCore::AddUser({ kUserName, Wants, Setup, Record, 0, 1 });	// Order 1: set up last (the first left out when the images do not fit)
+		RtCore::AddUser(ptUser);	// (ptUser: Order 1, set up last)
+	}
+
+	// UNOFFICIAL 2026-11-10 early kick (RtPathTrace.h; docs/next/PT-EARLY-KICK-PLAN-2026-11-10.md). It submits only where the PT's Record
+	// would trace this frame at RtCore::Frame anyway: live path tracing (ReferencePT or PTRealtime, PTReplace + PTDenoise), not left out,
+	// the helper running, its images and shader made, and the pre-tonemap chain (where Frame and Replace run) will run this frame.
+	void SubmitBeforeWorld(IDirect3DDevice9* Device) {
+		if (!RtCore::EarlyPtWanted() || !RtCore::Running()) return;
+		const UInt32 frame = TheFrameRateManager->FrameNumber;
+		if (earlyFrame == frame) return;	// once a frame
+		if (!Wants() || !S.replace || !S.denoise) return;	// (Wants reads the settings: PTRealtime's overrides, LeftOut)
+		if (imageA < 0 || imageB < 0 || imageDisplay < 0 || shader < 0) return;	// (Record's own first test)
+		// ShaderManager::RenderEffectsPreTonemapping's early returns: without the chain nothing would collect the frame or show it
+		if (!TheSettingManager->SettingsMain.Main.RenderEffects || !Player || !Player->parentCell || TheShaderManager->GameState.OverlayIsOn) return;
+		earlyRecording = true;
+		const bool submitted = RtCore::SubmitEarly(Device, &ptUser);
+		earlyRecording = false;
+		if (!submitted) return;	// refused (grass outdoors, the helper not ready ...): Record runs at RtCore::Frame as before
+		earlyFrame = frame;
+		static bool told = false;
+		if (!told) {
+			told = true;
+			Logger::Log("UNOFFICIAL RT path trace: early kick on (NVR_RT_EARLY_PT): traced first surface, submitted at world start");
+		}
+	}
+
+	// Right before Replace: the early frame's results in (RtCore waits for the helper and runs the copies Record noted). Everything Show,
+	// Replace, RrGuides and RtBlendedLayer read from the trace (haveImage, albedoThisFrame, splitThisFrame, tracedScale, vmThisFrame) was
+	// set by Record when it noted the copies, as in a normal exchange; only the copies themselves wait for this.
+	void CollectBeforeShow(IDirect3DDevice9* Device) {
+		if (RtCore::EarlyPending()) RtCore::CollectEarly(Device);
 	}
 
 	void RenderDebug(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget) {
@@ -1277,11 +1410,22 @@ namespace RtPathTrace {
 	// (2026-11-03) PTReplace: the traced picture into the game's scene right after the RT core's point (HDR, the stored curve), so
 	// NVR's and the game's later passes (tonemap, bloom, grading) treat it as the frame
 	void Replace(IDirect3DDevice9* Device) {
+		ReactiveMask::WantCopies = S.enabled && S.replace && S.denoise && S.blendedLayer;	// (2026-11-10 PTBlendedLayer) for the next frame's world
 		if (!S.enabled || !S.replace) return;
 		IDirect3DSurface9* scene = nullptr;
 		if (FAILED(Device->GetRenderTarget(0, &scene)) || !scene) return;
 		Show(Device, scene, true);
 		scene->Release();
+		// UNOFFICIAL 2026-11-10 PTBlendedLayer: what the game drew after its opaque list, onto the traced picture (core/RtBlendedLayer.h)
+		if (showDrew && S.blendedLayer && S.denoise && haveImage && albedoThisFrame && albedoTexture && RtCore::Running() && S.debugView == 0) {
+			IDirect3DTexture9* viewModel = TheTextureManager->DepthTextureViewModel;
+			RtBlendedLayer::Apply(Device, albedoTexture, viewModel, viewModel ? (TheRenderManager->DepthConstants.z == 0.0f ? 1 : 2) : 0);
+			static int frames = 0;
+			if (++frames >= 600) {
+				Logger::Log("UNOFFICIAL RT path trace: PTBlendedLayer applied in %u of the last %d frames (%u without this frame's copies)", RtBlendedLayer::AppliedFrames, frames, RtBlendedLayer::SkippedFrames);
+				frames = 0; RtBlendedLayer::AppliedFrames = RtBlendedLayer::SkippedFrames = 0;
+			}
+		}
 	}
 
 	bool Replacing() { return S.enabled && S.replace && haveImage && RtCore::Running(); }

@@ -51,6 +51,7 @@ namespace RtRestirRow {
 		float maxM = 20.0f, spatial = 2.0f, radius = 16.0f, normal = 0.9f, plane = 0.05f;	// (2026-11-07 perf-ptcost: spatial 2, was 4; RT-PATH-TRACING.md "perf-ptcost")
 		float cacheLog2 = 0.0f, cacheBase4096 = 0.0f, cacheCell = 0.0f, cacheMaxSamples = 0.0f, cacheMinSamples = 0.0f;
 		float frame = 0.0f;
+		float lampMatch = 0.0f;	// (2026-11-10 PTRestirDILampMatch) > 0: a lamp that moved or changed reach (fire, flicker) still matches, see Build
 	};
 
 	struct State {
@@ -61,6 +62,7 @@ namespace RtRestirRow {
 		int			parity = 0;
 		int			lamps = 0;
 		float		lampWorld[kMaxLamps][4] = {};
+		int			unmatched = 0, loose = 0;	// (2026-11-10, measurement) last Build: last-frame lamps with no match; matched only by the loose pass
 	};
 
 	// Fills `row` (kRowFloats, zeroed here) and the remap in `lampRow`, then makes this frame "last frame". lamps: lampCount entries of `stride`
@@ -68,6 +70,7 @@ namespace RtRestirRow {
 	inline void Build(State& r, float* row, float* lampRow, const float* lamps, int lampCount, int stride, const double cam[3], const float eye[3],
 		const float forward[3], const float right[3], const float up[3], unsigned tw, unsigned th, const Keys& keys) {
 		std::memset(row, 0, sizeof(float) * kRowFloatsAll);
+		r.unmatched = r.loose = 0;	// (measurement: nothing matched this call unless the block below runs)
 		std::memcpy(row + 2 * kEnergyTexel, kGgxEnergy, sizeof(kGgxEnergy));
 		if (lampCount > kMaxLamps) lampCount = kMaxLamps;
 		auto world = [&](int k, int a) { return (float)((double)lamps[k * stride + a] + cam[a] - eye[a]); };
@@ -86,6 +89,29 @@ namespace RtRestirRow {
 						std::fabs(world(k, 2) - r.lampWorld[j][2]) < 1.0f && std::fabs(lamps[k * stride + 3] - r.lampWorld[j][3]) < 1.0f) found = k + 1;
 				lampRow[8 * j + 7] = (float)found;
 			}
+			// UNOFFICIAL 2026-11-10 PTRestirDILampMatch (BUG FIX): the game's flickering lights (fire) move and change reach every frame, so the
+			// 1-unit rule above called them "gone" each frame: their samples were dropped from last frame's reservoirs, while the shader's 1 / Z
+			// still counted that history as able to produce them (the lamp is in this frame's list): the lamp's light came out divided by up to
+			// 1 + PTRestirDIMaxM (a fire barrel lit nothing under PTRealtime). Second pass: a last-frame lamp still unmatched takes the NEAREST
+			// this-frame lamp that no last-frame lamp matched, within lampMatch units and a reach within 2 x. Exact matches are never changed.
+			r.loose = 0;
+			if (keys.lampMatch > 0.0f) {
+				bool taken[kMaxLamps] = {};
+				for (int j = 0; j < r.lamps; j++) { const int f = (int)lampRow[8 * j + 7]; if (f > 0) taken[f - 1] = true; }
+				for (int j = 0; j < r.lamps; j++) {
+					if (lampRow[8 * j + 7] > 0.0f) continue;
+					int best = -1; float bestD = keys.lampMatch * keys.lampMatch;
+					for (int k = 0; k < lampCount; k++) {
+						if (taken[k]) continue;
+						const float dx = world(k, 0) - r.lampWorld[j][0], dy = world(k, 1) - r.lampWorld[j][1], dz = world(k, 2) - r.lampWorld[j][2];
+						const float d = dx * dx + dy * dy + dz * dz, reach = lamps[k * stride + 3], old = r.lampWorld[j][3];
+						if (d < bestD && reach < 2.0f * old && old < 2.0f * reach) { best = k; bestD = d; }
+					}
+					if (best >= 0) { lampRow[8 * j + 7] = (float)(best + 1); taken[best] = true; r.loose++; }
+				}
+			}
+			r.unmatched = 0;
+			for (int j = 0; j < r.lamps; j++) if (lampRow[8 * j + 7] <= 0.0f) r.unmatched++;
 		}
 		r.parity ^= 1;
 		row[15] = (float)r.parity;

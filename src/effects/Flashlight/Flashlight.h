@@ -20,17 +20,27 @@ public:
 		float		Dimmer;			// how bright the beam is at its centre, in the lamps' units (linear light)
 		float		Distance;		// its reach
 		bool		attachToWeapon;	// on the weapon instead of the camera (it rides the weapon while aiming either way)
-		NiColor		Color;			// the Pip-Boy's HUD colour this frame (SystemColorManager "Pipboy")
-		float		ConeAngle;		// the cone's outer half-angle, degrees (fixed)
-		NiPoint3	Offset;			// from the weapon or camera, in its frame (fixed)
+		NiColor		Color;			// the Pip-Boy's HUD colour this frame (SystemColorManager "Pipboy"), or ColorR/G/B with UseOwnColour
+		float		ConeAngle;		// the cone's outer half-angle, degrees (Angle; 30 = the fixed value of 2026-11-04)
+		NiPoint3	Offset;			// from the weapon or camera, in its frame (OffsetX = along the beam, Y / Z the node's other two axes)
+		// UNOFFICIAL 2026-11-11 the old flashlight's look keys back on this one (each a no-op at its default)
+		bool		useOwnColour;	// ColorR/G/B instead of the Pip-Boy colour (its hue: brightness stays Dimmer's)
+		float		NearFade;		// > 0: the light fades out on surfaces nearer the light than this (units)
+		float		HotspotLimit;	// > 0: a soft roll-off of the added light above 1 / HotspotLimit (luma)
+		bool		softEdges;		// wrap lighting instead of the clamped N.L (the raster pass only)
 	};
 	FlashlightSettingsStruct	Settings = {};
+	// UNOFFICIAL 2026-11-11 the look outdoors ([0], Main) and indoors ([1], Main with Interiors' values >= 0 over it); ApplyLook picks one
+	// each frame into Settings (as the old flashlight did, by TheShaderManager->GameState.isExterior).
+	struct LookStruct { NiColor Color; float Dimmer, Distance, ConeAngle, NearFade, HotspotLimit; };
+	LookStruct	Looks[2] = {};
+	void	ApplyLook(bool exterior);
 	// [Shaders.Flashlight.Deferred] (core/FlashlightDeferred.h): how the light pass draws it.
 	struct DeferredSettingsStruct {
-		bool	Shadows;		// the light's shadow map
+		bool	Shadows;		// the light's shadow map (the old Main RenderShadows' successor)
 		float	ShadowSoftness;	// PCF radius, in texels of a 512 map (FlashlightDeferred::SoftnessTexels)
 		float	ShadowBias;		// share of the reach
-		float	Cookie;			// the cookie texture's strength (0 none)
+		float	Cookie;			// the cookie texture's strength (0 none; the old Main CookieStrength's successor)
 		float	Falloff;		// > 0 a windowed inverse square, (1 - d^2/r^2)^2 / (1 + F d^2/r^2); 0 the lamps' 1 - d^2/r^2
 		bool	GameLight;		// the Pip-Boy light as the beam's real game lamp for what the light pass cannot see (core/FlashlightLamp.h)
 		int		DebugView;		// 1 the light alone, 2 the shadow, 3 the normal

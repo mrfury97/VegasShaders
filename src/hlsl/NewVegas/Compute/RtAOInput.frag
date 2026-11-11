@@ -62,6 +62,13 @@ void main() {
         }
     } else N = POINT_LOD(t_normals, uv).xyz * 2.0 - 1.0;
     N = dot(N, -P) < 0.0 ? -N : N;
+    // UNOFFICIAL 2026-11-10 LegacyTilt (cb.skyLayout.x, 0-1, [Shaders.AmbientOcclusion.RT]; 0 = off): a tester preferred the much darker
+    // AO / sky light / bounce the blank-normals bug above gave, without its wedge and trails. What the bug did over most of the screen: every
+    // ray started from the view-space direction (-1, -1, -1) (left, down, toward the camera) instead of the surface's normal, so on open
+    // ground most rays went into the ground or along it. This bends the real normal toward that direction by the amount set. No flip (the
+    // wedge was the flip), and below 1 the normals still differ from surface to surface, so the reuse's normal test keeps working (at 1 it
+    // passes everywhere again: the trails can come back).
+    if (cb.skyLayout.x > 0.0) N = normalize(mix(N, vec3(-0.57735), clamp(cb.skyLayout.x, 0.0, 1.0)) + vec3(0.0, 0.0, -1.0e-6));
     vec3 n = normalize((cb.invViewTransform * vec4(N, 0.0)).xyz);
     o_color = vec4(P.z, Pack2(OctEncode(n)), 0.0, 0.0);
 }

@@ -77,6 +77,18 @@ public:
 	// the world's own draws, which have not run yet; the user then traces at Frame as before. True: the user's outputs are recorded
 	// (ready for the world's draws).
 	static bool			ExchangeEarly(IDirect3DDevice9* Device, const User& user);
+	// UNOFFICIAL 2026-11-10 (PT early kick, bench only; docs/next/PT-EARLY-KICK-PLAN-2026-11-10.md) split exchange for one user: SubmitEarly at
+	// the world's start (after RtLampShadows::TraceBeforeWorld) gathers the scene (or reuses this frame's), runs the user's Record and signals
+	// the helper without waiting; CollectEarly waits for that frame and runs its CopyOuts. One frame in flight: any later exchange, Frame and
+	// SubmitEarly collect an open one first; a helper stop drops it. Outdoors with Grass on it does not refuse (unlike ExchangeEarly): that
+	// frame's scene has no grass. The user's Record sees last frame's lamp list and must take no G-buffer input.
+	static bool			EarlyPtWanted();									// env NVR_RT_EARLY_PT set (read once)
+	static bool			SubmitEarly(IDirect3DDevice9* Device, const User* user);	// true: signalled for this user alone and pending
+	static bool			EarlyPending();									// a Submit is open
+	static void			CollectEarly(IDirect3DDevice9* Device);			// waits for the pending frame + its copies; no-op when nothing is pending
+	// this user's Record went with this game frame's SubmitEarly (true from the submit to the frame's end, also after the collect):
+	// RtCore::Frame does not record it again
+	static bool			SubmittedEarlyThisFrame(const User* user);
 	// The eye in scene space. The scene is world minus TheRenderManager->CameraPosition, the NiCamera's world translation (the eye), so
 	// this is (0, 0, 0). Use it for every ray origin from the camera: Pointers::Generic::CameraLocation is NOT the eye (it read ~0
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).

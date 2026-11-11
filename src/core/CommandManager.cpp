@@ -2,6 +2,7 @@
 // registration order (= opcode order) and the results are public: other mods call them.
 
 #include "Branding.h"
+#include "StalePresetValues.h"	// UNOFFICIAL 2026-11-10
 
 namespace {
 
@@ -310,6 +311,7 @@ void CommandManager::PluginCommands::GetSetting(double* out, const char* section
 
 void CommandManager::PluginCommands::SetSetting(double* out, const char* section, const char* key, float value) {
 
+	if (StalePresetValues::Blocked(section, key, value, "a script (NVRSetSetting)")) { *out = 1; return; }	// UNOFFICIAL 2026-11-10
 	TheSettingManager->SetSettingF(section, key, value);
 	*out = 1;
 

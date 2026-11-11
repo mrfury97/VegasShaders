@@ -168,9 +168,9 @@ namespace {
 
 	std::string CountsText() {
 		char text[400];
-		sprintf_s(text, "shader cache: %ld hits, %ld compiled, %ld precompiled, %ld compile failures, %ld PREFER_FLOW_CONTROL retries",
+		sprintf_s(text, "shader cache: %ld hits, %ld compiled, %ld precompiled, %ld compile failures, %ld PREFER_FLOW_CONTROL retries, %ld filled from the release's cache",
 			ShaderCounts[EffectStatus::CacheHit], ShaderCounts[EffectStatus::Compiled], ShaderCounts[EffectStatus::Precompiled],
-			ShaderCounts[EffectStatus::CompileFailed], ShaderCounts[EffectStatus::FlowControlRetry]);
+			ShaderCounts[EffectStatus::CompileFailed], ShaderCounts[EffectStatus::FlowControlRetry], ShaderProgram::ShippedSeeds());	// (the last: 2026-11-10)
 		std::string out = text;
 		std::lock_guard<std::mutex> guard(FailLock);
 		if (Failures.empty()) out += " | D3D / Vegas Shaders DXVK call failures: none";

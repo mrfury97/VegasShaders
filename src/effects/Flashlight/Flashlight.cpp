@@ -6,14 +6,46 @@
 // Settings readers for this file: the section and key exactly as the settings file names them.
 static int FlashSettingI(const char* section, const char* key) { return TheSettingManager->GetSettingI(section, key); }
 static float FlashSettingF(const char* section, const char* key) { return TheSettingManager->GetSettingF(section, key); }
+// UNOFFICIAL 2026-11-11 a key's value, or `fallback` when the settings do not have it (an older saved file): the keys brought back below must
+// be no-ops when missing too, and a missing key reads 0 through FlashSettingF (Angle 0, Interiors 0 = "replace Main with 0").
+static float FlashSettingOr(const char* section, const char* key, float fallback) {
+	SettingManager::Configuration::ConfigNode node;
+	return TheSettingManager->Config.FillNode(&node, section, key) ? node.FloatValue : fallback;
+}
 
 void FlashlightEffect::UpdateSettings() {
 	const char* const mainSection = "Shaders.Flashlight.Main";
-	Settings.Dimmer = (std::min)((std::max)(FlashSettingF(mainSection, "Dimmer"), 0.0f), 50.0f);
-	Settings.Distance = (std::max)(FlashSettingF(mainSection, "Distance"), 10.0f);
 	Settings.attachToWeapon = FlashSettingI(mainSection, "AttachToWeapon") != 0;
-	Settings.ConeAngle = 30.0f;	// (2026-11-04: fixed, as the default always was; the full-strength edge is half of it)
-	Settings.Offset = NiPoint3(0.0f, 0.0f, 0.0f);
+	// UNOFFICIAL 2026-11-11 (players asked for the old flashlight's settings back): its look keys on this light, each a no-op at its default.
+	// Angle: the cone's outer HALF-angle in degrees, as OuterSpotAngle, the old Angle and the 2026-11-04 fixed 30 (default 30: today's beam);
+	// the full-strength edge is half of it, the shadow map's FOV twice it (ShadowManager::RenderShadowSpotlight, so the map and the cookie
+	// follow), at most 63 because the path tracer packs it in whole degrees below 64 (RtFlashlightCode.h). Offset: in the frame of the node
+	// the light rides (weapon, head or camera: weaponRot below, as the old one), X along the beam.
+	Settings.useOwnColour = FlashSettingI(mainSection, "UseOwnColour") != 0;
+	Settings.softEdges = FlashSettingI(mainSection, "SoftEdges") != 0;
+	Settings.Offset = NiPoint3(FlashSettingOr(mainSection, "OffsetX", 0.0f), FlashSettingOr(mainSection, "OffsetY", 0.0f), FlashSettingOr(mainSection, "OffsetZ", 0.0f));
+	LookStruct& outdoors = Looks[0];
+	auto colour = [&](const char* key, float fallback) { return (std::min)((std::max)(FlashSettingOr(mainSection, key, fallback), 0.0f), 10.0f); };
+	outdoors.Color = NiColor(colour("ColorR", 2.0f), colour("ColorG", 2.0f), colour("ColorB", 1.0f));
+	outdoors.Dimmer = (std::min)((std::max)(FlashSettingF(mainSection, "Dimmer"), 0.0f), 50.0f);
+	outdoors.Distance = (std::max)(FlashSettingF(mainSection, "Distance"), 10.0f);
+	outdoors.ConeAngle = (std::min)((std::max)(FlashSettingOr(mainSection, "Angle", 30.0f), 5.0f), 63.0f);
+	outdoors.NearFade = (std::min)((std::max)(FlashSettingOr(mainSection, "NearFade", 0.0f), 0.0f), 1000.0f);
+	outdoors.HotspotLimit = (std::min)((std::max)(FlashSettingOr(mainSection, "HotspotLimit", 0.0f), 0.0f), 10.0f);
+	// Interiors: a value of 0 or more replaces Main's indoors; below 0 (default -1) or missing: Main's (as RtAmbient's <Key>Interior)
+	const char* const interiorSection = "Shaders.Flashlight.Interiors";
+	auto indoors = [&](const char* key, float main, float lo, float hi) {
+		const float v = FlashSettingOr(interiorSection, key, -1.0f);
+		return v >= 0.0f ? (std::min)((std::max)(v, lo), hi) : main;
+	};
+	LookStruct& inside = Looks[1];
+	inside.Color = NiColor(indoors("ColorR", outdoors.Color.r, 0.0f, 10.0f), indoors("ColorG", outdoors.Color.g, 0.0f, 10.0f), indoors("ColorB", outdoors.Color.b, 0.0f, 10.0f));
+	inside.Dimmer = indoors("Dimmer", outdoors.Dimmer, 0.0f, 50.0f);
+	inside.Distance = indoors("Distance", outdoors.Distance, 10.0f, 1.0e6f);
+	inside.ConeAngle = indoors("Angle", outdoors.ConeAngle, 5.0f, 63.0f);
+	inside.NearFade = indoors("NearFade", outdoors.NearFade, 0.0f, 1000.0f);
+	inside.HotspotLimit = indoors("HotspotLimit", outdoors.HotspotLimit, 0.0f, 10.0f);
+	ApplyLook(TheShaderManager->GameState.isExterior);
 
 	const char* const deferredSection = "Shaders.Flashlight.Deferred";
 	Deferred.Shadows = FlashSettingI(deferredSection, "Shadows") != 0;
@@ -54,9 +86,21 @@ static NiColor PipboyColor() {
 	return NiColor(((packed >> 24) & 0xFF) / 255.0f, ((packed >> 16) & 0xFF) / 255.0f, ((packed >> 8) & 0xFF) / 255.0f);
 }
 
+// UNOFFICIAL 2026-11-11 the outdoor or indoor look into Settings (everything that reads the light reads it from there: the light below,
+// FlashlightDeferred::LightParams for the light pass, the grass, RT reflections and the path tracer, FlashlightLamp).
+void FlashlightEffect::ApplyLook(bool exterior) {
+	const LookStruct& look = Looks[exterior ? 0 : 1];
+	Settings.Dimmer = look.Dimmer;
+	Settings.Distance = look.Distance;
+	Settings.ConeAngle = look.ConeAngle;
+	Settings.NearFade = look.NearFade;
+	Settings.HotspotLimit = look.HotspotLimit;
+}
+
 void FlashlightEffect::UpdateConstants() {
 	if (SpotLight == nullptr) return;
-	Settings.Color = PipboyColor();
+	ApplyLook(TheShaderManager->GameState.isExterior);	// (UNOFFICIAL 2026-11-11: per frame, so a door switches it)
+	Settings.Color = Settings.useOwnColour ? Looks[TheShaderManager->GameState.isExterior ? 0 : 1].Color : PipboyColor();
 
 	// Whether the game has the flashlight on: the test JIP uses (functions_jip/jip_fn_ui.h), with TestForceOn for the auto tests.
 	uint8_t* const magicBase = ThisStdCall<uint8_t*>(0x93CCD0, NULL);

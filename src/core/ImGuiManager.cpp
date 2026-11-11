@@ -9,6 +9,7 @@
 #include "MenuSkin.h"
 #include "MenuTools.h"
 #include "MenuWidgets.h"
+#include "MenuLayout.h"	// 2026-11-10: the effects list's folders, the player's own arrangement
 #include "Branding.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
 #include "InstallCheck.h"	// 2026-11-03: the install self-check (main-menu notice, Help > Install check, Copy bug report)
@@ -577,6 +578,9 @@ static bool ShouldHideSection(const std::string& name) {
 // Keys never drawn as rows: the old text menu's colours (TextColor*, TextShadow*), the LUT names (the LUT page has pickers for
 // them), the New-in-patch and developer lists, and the sidebar width (set by dragging the sidebar's edge).
 static bool ShouldHideKey(const char* key) {
+	// 2026-11-11: the path tracer's three internal comparison keys, and the key that shows them (RtPathTrace.h InternalTools)
+	if (!strcmp(key, "InternalTools")) return true;
+	if ((!strcmp(key, "ReferencePT") || !strcmp(key, "PTReplace") || !strcmp(key, "PTDenoise")) && !RtPathTrace::InternalTools()) return true;
 	if (!strncmp(key, "TextColor", 9) || !strncmp(key, "TextShadow", 10)) return true;
 	static const std::unordered_set<std::string> kRowless = {
 		"DayLUT", "NightLUT", "InteriorLUT",
@@ -1410,6 +1414,17 @@ static const SimpleRow kSimpleRows[] = {
 		"(expensive)." },
 	{ "Shaders.AmbientOcclusion.RT", "GIStrength", "Bounce light strength", nullptr, "How much bounced light is added. Higher looks more vivid, less realistic." },
 	{ "Shaders.AmbientOcclusion.RT", "GIAmbient", "Bounce light from the sky (shows on cloudy days)", nullptr, "Lets sky light bounce too, so bounce light still shows on cloudy days and in shade." },
+	{ "Shaders.AmbientOcclusion.RT", "GIStrengthNight", "Bounce light strength at night", nullptr, "Outdoors at night, this replaces Bounce light strength. It blends in over dusk and dawn. -1 uses the daytime value." },
+	{ "Shaders.AmbientOcclusion.RT", "GISkyNight", "Bounce light on open ground at night", nullptr, "Outdoors at night, this replaces Bounce light on open ground. It blends in over dusk and dawn. -1 uses the daytime value." },
+	{ "Shaders.AmbientOcclusion.RT", "GIStrengthInterior", "Bounce light strength indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "GIAmbientInterior", "Bounce light from the sky indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "GIClampInterior", "Brightest single bounce indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "GIDistanceInterior", "Bounce light reach indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "GlowGIInterior", "Light from glowing surfaces indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "GlowDirectInterior", "Direct light from glowing objects indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "LegacyTiltInterior", "Darker shading (the old look) indoors", nullptr, "Indoors, this replaces the setting of the same name without Interior. -1 uses that setting indoors too." },
+	{ "Shaders.AmbientOcclusion.RT", "GISky", "Bounce light on open ground", nullptr, "Rays that reach the open sky bring sky light back, so open ground and roofs get bounce light and Bounce light strength changes them. Small values: 0.1 is plenty." },
+	{ "Shaders.AmbientOcclusion.RT", "LegacyTilt", "Darker ground shading (the old look)", nullptr, "Brings back the darker shading on the ground from older versions, without the dark triangle. 0.5 is a clear darkening; 1 is the old look exactly." },
 	// Reflections
 	{ "Shaders.Reflections.RT", "Enabled", "Ray-traced reflections", nullptr, "Rays fill in what normal reflections miss: things off screen or hidden behind something. Needs Reflections on." },
 	{ "Shaders.Reflections.RT", nullptr, "Surfaces that get rays",
@@ -3539,7 +3554,7 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.AmbientOcclusion.RT", "Sky visibility", "Sky, SkyRays, SkyDistance",
 		FogType::None, false, "How much of the sky each spot sees, from rays instead of a top-down map.", nullptr },
 	{ "Shaders.AmbientOcclusion.RT", "Bounce light",
-		"GI, GIDistance, GIStrength, GIOffscreen, GIScreenLight, GIGameLamps, GIClamp, GIAmbient, GISpatial, GIReuse, GIInterleave, GIMovingHistory, GlowGI, GlowDirect",
+		"GI, GIDistance, GIStrength, GIOffscreen, GIScreenLight, GIGameLamps, GIClamp, GIAmbient, GISky, GIStrengthNight, GISkyNight, LegacyTilt, GIStrengthInterior, GIAmbientInterior, GIClampInterior, GIDistanceInterior, GlowGIInterior, GlowDirectInterior, LegacyTiltInterior, GISpatial, GIReuse, GIInterleave, GIMovingHistory, GlowGI, GlowDirect",
 		FogType::None, true, "One bounce of light from walls and floors, and glowing signs and windows lighting what is near them.", nullptr },
 	{ "Shaders.AmbientOcclusion.RT", "Light that bounces more than once",
 		"RadianceCache, CacheStrength, CacheCellSize, CacheRays, CacheFrames, CacheExteriors, CacheSpread, CacheRaysExterior, CacheSpreadExterior",
@@ -3600,7 +3615,7 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.AmbientLight.Main", "Edges and outlines", "NoEdgeOutline, EdgeReject, LowScaleFullRes, TemporalJitterFix, MinReach, NormalSmoothing, NormalSmoothingWorld, HorizonBias",
 		FogType::None, true, "Fixes for thin light outlines round things and dark facets on low-poly surfaces.", nullptr },
 	{ "Shaders.AmbientLight.Main", "Light grid bounce",
-		"GridBounce, GridCellSize, GridSteps, GridSpread, GridScreenStrength, GridBlocking, GridWallMemory, GridLamps, GridFine, GridColour, AlbedoBuffer",
+		"GridBounce, GridCellSize, GridSteps, GridSpread, GridScreenStrength, GridBlocking, GridWallMemory, GridLamps, GridFine, GridColour, AlbedoBuffer, AlbedoFallbackCap",
 		FogType::None, false, "Bounce light from a 3D grid of light round you, from the sun by day and the lamps indoors and at night.", nullptr },
 	{ "Shaders.AmbientLight.Main", "Screen bounce light",
 		"ComputeGI, ComputeGIStrength, ComputeGIThickness, ComputeGIThinOcclusion, ComputeGIQuality, ComputeGITest",
@@ -3897,8 +3912,8 @@ struct PageEntry {
 // Draws every setting of the page: the ungrouped ones first, then each menu group under its own header.
 // The group, hidden and test facts of each setting are computed once per frame, not in every pass over the list.
 // The simple view of a page (kSimpleRows): its rows in the table's order, and how many more Advanced shows.
-// 2026-11-08 (visual pages): true while a visual page draws only some of a section's keys: groups with none of them are left out,
-// the fog-type switches are not drawn (the page's own fog choice is) and the simple view's multi-key choices are left to the
+// True while a folder shown again on the Ray tracing page draws only some of a section's keys: groups with none of them are left out,
+// the fog-type switches are not drawn and the simple view's multi-key choices are left to the
 // section's own page.
 static bool s_keySubset = false;
 
@@ -4195,7 +4210,7 @@ static RtStatusLine RtPathTraceLine() {
 	const char* s = "Main.Main.RayTracing";
 	const std::string detail = RtPathTrace::StatusText();
 	const bool realtime = RtOn(s, "PTRealtime");
-	if (!realtime && !RtOn(s, "ReferencePT")) return { RtState::Off, "off", detail };
+	if (!realtime && !RtPathTrace::ReferenceOn()) return { RtState::Off, "off", detail };	// (2026-11-11: ReferencePT only as honoured)
 	if (!RtCore::Running()) return { RtState::Blocked, "on, but the ray tracing core is not running (first line)", detail };
 	return { RtState::Running, realtime ? "running: the path-traced game (experimental)" : "running: the reference picture (a comparison, not for play)", detail };
 }
@@ -4299,7 +4314,7 @@ static void DrawRtDebugPicker() {
 		WrappedTooltip("Shows one ray-traced effect's own picture, to see what it does. It stays on until you pick Off (the normal picture).");
 }
 
-static void DrawRtSharedBlocksOnRtPage(const char* rtSection);	// 2026-11-09: below, with the pages by what you see
+static void DrawRtSharedBlocksOnRtPage(const char* rtSection);	// 2026-11-09: below
 
 static void RenderRayTracingPage() {
 	PageTitle("Ray tracing", "Every ray-traced effect in one place. Needs the DXVK fork, NvrRtHelper.exe and a GPU with ray tracing.");
@@ -4424,424 +4439,42 @@ static bool RenderSimpleEffectPage() {
 	return true;
 }
 
-// ---- Pages by what you see (experiment) ------------------------------------------------------------------------------------
-// 2026-11-08 (a community proposal, tried as the user wanted it: subfolders under each visual page instead of hidden settings).
-// A layer above the effect list: one page per thing you see (Shadows, Lighting, Reflections, ...), gathering the settings of every
-// effect that touches it. Where options COMPETE (only one runs: the sun's shadow maps or ray tracing, ComputeGI or the RT bounce
-// light) a choice at the top picks one and writes the same keys the effects' own pages do. Each option has its own folder; a folder
-// for an option that is not picked shows collapsed with the reason, and its settings stay editable (they are kept for when it is
-// picked again). Effects that STACK (contact shadows on any shadow type) are plain folders, always shown. Only the menu changes:
-// every row is the effect's own setting, drawn as its own page draws it, so the toml is unchanged and the effect pages stay as
-// they are.
-
-static const char* const kVisualPrefix = "@Visual.";
-
-static void SetEffectOn(const char* name, bool on) {
-	if (TheSettingManager->GetMenuShaderEnabled(name) != on) TheShaderManager->SwitchShaderStatus(name);
-}
-
-struct VisualOption {
-	const char* Label;
-	const char* Tip;		// what picking it means, under the choice while it is picked
-	bool (*Active)();		// the first option whose Active() is true is the one shown as picked; none: "Custom"
-	void (*Select)();		// writes the keys (LoadSettings follows)
-};
-struct VisualChoice {
-	const char* Id;
-	const char* Label;
-	const char* Tip;
-	std::vector<VisualOption> Options;
-	void (*Status)();		// a live line under the choice, or nullptr
-};
+// ---- Folders of settings shown again on the Ray tracing page -----------------------------------------------------------------
+// (2026-11-10: these were the folders of the "pages by what you see", an experiment of 2026-11-08 that put a second map of the same
+// settings above the effects list. The pages are gone: the effects list is the one map, and the player arranges its folders, see "The
+// effects list's folders" below. What stays is the part the Ray tracing page uses: the raster settings a ray-traced effect shares.)
 
 // Keys: nullptr = every key of the section; "-a, b" = every key but these; "@group:<Header>" = that kMenuGroups group's keys;
 // otherwise the keys listed. Section "@effect": Keys is an effect's name, drawn as its on/off switch.
 struct VisualItem { const char* Section; const char* Keys; const char* Title; };
-
-struct VisualFolder {
-	const char* Title;
-	const char* Note;
-	const VisualChoice* Choice;	// nullptr: stacks with everything (always in use)
-	unsigned Mask;			// bit i: in use while option i of Choice is picked
-	std::vector<VisualItem> Items;
-	void (*Status)();
-};
-
-struct VisualPart {
-	const char* Heading;		// a heading line, or
-	const VisualChoice* Choice;	// a choice row, or
-	const VisualFolder* Folder;	// a folder
-};
-struct VisualPage { const char* Id; const char* Title; const char* Intro; std::vector<VisualPart> Parts; };
-
-static VisualPart VHeading(const char* text) { return { text, nullptr, nullptr }; }
-static VisualPart VChoice(const VisualChoice& c) { return { nullptr, &c, nullptr }; }
-static VisualPart VFolder(const VisualFolder& f) { return { nullptr, nullptr, &f }; }
-
-static void VisualWarn(const char* text) { ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.2f, 1.0f), "%s", text); }
-static bool PathTracingOn() { return SettingOn("Main.Main.RayTracing", "PTRealtime") || SettingOn("Main.Main.RayTracing", "PTReplace"); }
-
-// -- Shadows
-static const VisualChoice kSunShadowChoice = { "sun", "Sun shadows",
-	"Which draws the sun's shadows outdoors. The same switches as the Sun shadows (ShadowsExteriors) entry and the Ray tracing page.", {
-	{ "Off", "No sun shadows from Vegas Shaders (the Sun shadows effect is off).",
-		[]() { return !EffectOn("ShadowsExteriors") || !SettingOn("Shaders.ShadowsExteriors.Main", "Enabled"); },
-		[]() { SetEffectOn("ShadowsExteriors", false); } },
-	{ "Shadow maps", "The sun's shadow maps (cascades): every graphics card.",
-		[]() { return !SettingOn("Shaders.ShadowsExteriors.RT", "Enabled"); },
-		[]() { SetEffectOn("ShadowsExteriors", true); TheSettingManager->SetSetting("Shaders.ShadowsExteriors.Main", "Enabled", true);
-			TheSettingManager->SetSetting("Shaders.ShadowsExteriors.RT", "Enabled", false); } },
-	{ "Ray traced", "Traced sun shadows, on top of the shadow maps (combine) or in their place near you (replace: the RT folder's Mode). "
-		"Needs the DXVK fork, NvrRtHelper.exe and a graphics card with ray tracing. The shadow maps keep drawing beyond the traced range.",
-		[]() { return true; },
-		[]() { SetEffectOn("ShadowsExteriors", true); TheSettingManager->SetSetting("Shaders.ShadowsExteriors.Main", "Enabled", true);
-			TheSettingManager->SetSetting("Shaders.ShadowsExteriors.RT", "Enabled", true); } },
-	}, []() { if (SettingOn("Shaders.ShadowsExteriors.RT", "Enabled")) DrawRtStatusLine("Ray tracing", RtSunLine()); } };
+struct VisualFolder { const char* Title; const char* Note; std::vector<VisualItem> Items; };
 
 static const VisualFolder kSunMapsFolder = { "Shadow maps", "Distance, sharpness and what casts. Used by both: ray tracing combines with the maps or "
-	"replaces them only near you.", &kSunShadowChoice, 0b110, {
+	"replaces them only near you.", {
 	{ "Shaders.ShadowsExteriors.Main", nullptr, "General" },
 	{ "Shaders.ShadowsExteriors.ShadowMaps", nullptr, "Shadow maps" },
 	{ "Shaders.ShadowsExteriors.Forms", nullptr, "What casts sun shadows" },
 	{ "Shaders.ShadowsExteriors.SunSmoothing", nullptr, "Sun movement" },
-	{ "Shaders.ShadowsExteriors.Ortho", nullptr, "Top-down map" } }, nullptr };
+	{ "Shaders.ShadowsExteriors.Ortho", nullptr, "Top-down map" } } };
 static const VisualFolder kSunSoftFolder = { "Soft edges (contact hardening)", "Sharp where an object meets the ground and softer the further the "
 	"shadow falls. It softens the shadow maps: with ray tracing on Replace it shows only past the traced range. Switching it on needs a restart.",
-	&kSunShadowChoice, 0b110, {
+	{
 	{ "@effect", "ContactHardening", "Soft edges" },
-	{ "Shaders.ContactHardening.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kSunRtFolder = { "Ray traced", "Soft traced sun shadows, their noise filter and range. The same rows as Ray tracing > Sun shadows.",
-	&kSunShadowChoice, 0b100, { { "Shaders.ShadowsExteriors.RT", nullptr, nullptr } }, []() { DrawRtStatusLine("Status", RtSunLine()); } };
+	{ "Shaders.ContactHardening.Main", nullptr, nullptr } } };
 static const VisualFolder kSunContactFolder = { "Contact shadows (screen space)", "Small sun shadows where things touch, on top of either.",
-	&kSunShadowChoice, 0b110, { { "Shaders.ShadowsExteriors.ScreenSpace", nullptr, nullptr } }, nullptr };
-static const VisualFolder kMountainFolder = { "Mountain shadows", "Hills and mountains shade the land far past the shadow maps. Works with any sun shadow type.",
-	nullptr, 0, { { "Shaders.ShadowsExteriors.TerrainShadows", nullptr, nullptr } }, nullptr };
-
-static const VisualChoice kCloudShadowChoice = { "clouds", "Cloud shadows",
-	"Drifting cloud shadows on the land. The volumetric clouds' own shadows replace the flat ones while they are on, so one runs at a time.", {
-	{ "Off", "No cloud shadows.",
-		[]() { return !EffectOn("CloudShadows") && !CloudsCastShadows(); },
-		[]() { SetEffectOn("CloudShadows", false); TheSettingManager->SetSetting("Shaders.VolumetricClouds.Main", "Shadows", 0.0f); } },
-	{ "Flat (the game's cloud layers)", "The game's own cloud pictures cast moving shadows (cheap).",
-		[]() { return !CloudsCastShadows(); },
-		[]() { SetEffectOn("CloudShadows", true); TheSettingManager->SetSetting("Shaders.VolumetricClouds.Main", "Shadows", 0.0f); } },
-	{ "Volumetric clouds", "The volumetric clouds cast their own shadows (needs the Volumetric clouds effect, which this turns on).",
-		[]() { return true; },
-		[]() {
-			SetEffectOn("VolumetricClouds", true);
-			if (TheSettingManager->GetSettingF("Shaders.VolumetricClouds.Main", "Shadows") <= 0.0f) TheSettingManager->SetSetting("Shaders.VolumetricClouds.Main", "Shadows", 0.6f);
-			SetEffectOn("CloudShadows", false);
-		} },
-	}, nullptr };
-static const VisualFolder kFlatCloudFolder = { "Flat cloud shadows", nullptr, &kCloudShadowChoice, 0b010,
-	{ { "Shaders.CloudShadows.Main", "-Enabled", nullptr } }, nullptr };
-static const VisualFolder kVolCloudShadowFolder = { "Volumetric cloud shadows", "How dark, how far round you and how soft. The clouds themselves are on the "
-	"Fog and atmosphere page.", &kCloudShadowChoice, 0b100, { { "Shaders.VolumetricClouds.Main", "@group:Cloud shadows", nullptr } }, nullptr };
-
-static const VisualChoice kLampShadowChoice = { "lamps", "Lamp shadows",
-	"Shadows from lamps: indoors, and street lamps outdoors at night. The same switches as the Lamp shadows (ShadowsInteriors) entry and the Ray tracing page.", {
-	{ "Off", "No lamp shadows from Vegas Shaders (the Lamp shadows effect is off).",
-		[]() { return !EffectOn("ShadowsInteriors"); },
-		[]() { SetEffectOn("ShadowsInteriors", false); } },
-	{ "Shadow maps (cube maps)", "Each shadowed lamp draws a cube of shadow maps: every graphics card.",
-		[]() { return !(SettingOn("Shaders.ShadowsInteriors.RT", "Enabled") && SettingOn("Shaders.ShadowsInteriors.RT", "Live")); },
-		[]() { SetEffectOn("ShadowsInteriors", true);
-			if (SettingOn("Shaders.ShadowsInteriors.RT", "Enabled")) TheSettingManager->SetSetting("Shaders.ShadowsInteriors.RT", "Live", false); } },
-	{ "Ray traced", "Traced lamp shadows in place of the cube maps. Turning ray tracing on the first time needs a restart (Enabled); "
-		"after that this switches back and forth at once (Live).",
-		[]() { return true; },
-		[]() { SetEffectOn("ShadowsInteriors", true); TheSettingManager->SetSetting("Shaders.ShadowsInteriors.RT", "Enabled", true);
-			TheSettingManager->SetSetting("Shaders.ShadowsInteriors.RT", "Live", true); } },
-	}, []() { if (SettingOn("Shaders.ShadowsInteriors.RT", "Enabled") || RtLampShadows::CompiledIn) DrawRtStatusLine("Ray tracing", RtLampLine()); } };
-
+	{ { "Shaders.ShadowsExteriors.ScreenSpace", nullptr, nullptr } } };
 static const VisualFolder kLampCommonFolder = { "Lamps and what casts shadows", "How many lamps cast shadows, how far, and which objects. Used by both.",
-	&kLampShadowChoice, 0b110, { { "Shaders.ShadowsInteriors.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kLampMapsFolder = { "Shadow maps (cube maps)", "Softness, which lamps get shadows, pop-in and the shadow atlas.",
-	&kLampShadowChoice, 0b010, {
-	{ "Shaders.ShadowsInteriors.Forward", nullptr, "Lamp shadows" },
-	{ "Shaders.ShadowsInteriors.Atlas", nullptr, "Shadow atlas (DXVK)" },
-	{ "Shaders.ShadowsInteriors.Deferred", nullptr, "Lamp light pass (DXVK)" } }, nullptr };
-static const VisualFolder kLampRtFolder = { "Ray traced", "Traced lamp shadows: lamp size, noise filter, every lamp on screen, street lamps at night.",
-	&kLampShadowChoice, 0b100, { { "Shaders.ShadowsInteriors.RT", nullptr, nullptr } }, []() { DrawRtStatusLine("Status", RtLampLine()); } };
+	{ { "Shaders.ShadowsInteriors.Main", nullptr, nullptr } } };
 static const VisualFolder kLampCapsuleFolder = { "People's lamp shadows (capsules)", "Soft lamp shadows of people from simple shapes round their bones, "
-	"on top of either.", &kLampShadowChoice, 0b110, { { "Shaders.ShadowsInteriors.Capsules", nullptr, nullptr } }, nullptr };
-
-// -- Lighting
-static const VisualChoice kAmbientChoice = { "ambient", "Ambient light and occlusion",
-	"The soft light from the sky and the room, and the darkening in corners and under things. Ambient light does both in one pass and "
-	"switches the separate Ambient occlusion and Bounce light effects off while it runs.", {
-	{ "Ambient light (all in one)", "Occlusion and bounce light in one pass (the default).",
-		[]() { return EffectOn("AmbientLight"); },
-		[]() { SetEffectOn("AmbientLight", true); } },
-	{ "Separate occlusion and bounce", "The older separate effects: Ambient occlusion, and Bounce light if you turn it on in its folder.",
-		[]() { return EffectOn("AmbientOcclusion") || EffectOn("BounceLight"); },
-		[]() { SetEffectOn("AmbientLight", false); SetEffectOn("AmbientOcclusion", true); } },
-	{ "Off", "No ambient occlusion or bounce light from Vegas Shaders.",
-		[]() { return true; },
-		[]() { SetEffectOn("AmbientLight", false); SetEffectOn("AmbientOcclusion", false); SetEffectOn("BounceLight", false); } },
-	}, []() { if (PathTracingOn()) VisualWarn("Path tracing is on (Ray tracing page): it lights the whole picture itself, and these switch off while it runs."); } };
-
-static const char* const kComputeGIKeys = "ComputeGI, ComputeGIStrength, ComputeGIThickness, ComputeGIThinOcclusion, ComputeGIQuality, ComputeGITest";
-static const VisualChoice kBounceChoice = { "bounce", "Extra bounce light",
-	"Light bounced off walls and floors on top of Ambient light's own. The screen-space one (ComputeGI) replaces the ray-traced one while "
-	"it is on, so one runs at a time. The light grid (its own folder) adds to either.", {
-	{ "None", "Ambient light's own bounce only (and the light grid, if its strength is above 0).",
-		[]() { return !SettingOn("Shaders.AmbientLight.Main", "ComputeGI") && !(SettingOn("Shaders.AmbientOcclusion.RT", "Enabled") && SettingOn("Shaders.AmbientOcclusion.RT", "GI")); },
-		[]() { TheSettingManager->SetSetting("Shaders.AmbientLight.Main", "ComputeGI", false); TheSettingManager->SetSetting("Shaders.AmbientOcclusion.RT", "GI", false); } },
-	{ "Screen-space (ComputeGI)", "Light bounced from what is on screen. Needs the DXVK fork. Experimental.",
-		[]() { return SettingOn("Shaders.AmbientLight.Main", "ComputeGI"); },
-		[]() { TheSettingManager->SetSetting("Shaders.AmbientLight.Main", "ComputeGI", true); TheSettingManager->SetSetting("Shaders.AmbientOcclusion.RT", "GI", false); } },
-	{ "Ray traced", "One bounce of traced light (more with the radiance cache). Needs ray tracing; also turns the ray-traced occlusion on.",
-		[]() { return true; },
-		[]() { TheSettingManager->SetSetting("Shaders.AmbientLight.Main", "ComputeGI", false); TheSettingManager->SetSetting("Shaders.AmbientOcclusion.RT", "Enabled", true);
-			TheSettingManager->SetSetting("Shaders.AmbientOcclusion.RT", "GI", true); } },
-	}, []() {
-		if (!EffectOn("AmbientLight")) VisualWarn("Only with Ambient light (all in one) picked above: it adds this light.");
-		else if (SettingOn("Shaders.AmbientOcclusion.RT", "GI")) DrawRtStatusLine("Ray tracing", RtGILine());
-	} };
-
+	"on top of either.", { { "Shaders.ShadowsInteriors.Capsules", nullptr, nullptr } } };
 static const VisualFolder kAmbientLightFolder = { "Ambient light", "Reach, strength and the outline fixes of the all-in-one pass.",
-	&kAmbientChoice, 0b001, { { "@effect", "AmbientLight", "Ambient light" },
+	{ { "@effect", "AmbientLight", "Ambient light" },
 	{ "Shaders.AmbientLight.Main", "-GridBounce, GridCellSize, GridSteps, GridSpread, GridScreenStrength, GridBlocking, GridWallMemory, GridLamps, GridFine, GridColour, "
-		"AlbedoBuffer, ComputeGI, ComputeGIStrength, ComputeGIThickness, ComputeGIThinOcclusion, ComputeGIQuality, ComputeGITest", nullptr } }, nullptr };
+		"AlbedoBuffer, AlbedoFallbackCap, ComputeGI, ComputeGIStrength, ComputeGIThickness, ComputeGIThinOcclusion, ComputeGIQuality, ComputeGITest", nullptr } } };
 static const VisualFolder kGridFolder = { "Light grid bounce", "Sun and lamp light spread through a 3D grid round you (GridBounce above 0 turns it on). "
-	"Adds to any extra bounce light.", &kAmbientChoice, 0b001, { { "Shaders.AmbientLight.Main", "@group:Light grid bounce", nullptr } }, nullptr };
-static const VisualFolder kSeparateAOFolder = { "Separate ambient occlusion", nullptr, &kAmbientChoice, 0b010, {
-	{ "@effect", "AmbientOcclusion", "Ambient occlusion" },
-	{ "Shaders.AmbientOcclusion.Exteriors", nullptr, "Outdoors" },
-	{ "Shaders.AmbientOcclusion.Interiors", nullptr, "Indoors" },
-	{ "Shaders.AmbientOcclusion.GTAO", nullptr, "GTAO" },
-	{ "Shaders.AmbientOcclusion.FastPaths", nullptr, "Speed" } }, nullptr };
-static const VisualFolder kSeparateBounceFolder = { "Separate bounce light", nullptr, &kAmbientChoice, 0b010, {
-	{ "@effect", "BounceLight", "Bounce light" }, { "Shaders.BounceLight.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kComputeGIFolder = { "Screen-space bounce (ComputeGI)", nullptr, &kBounceChoice, 0b010,
-	{ { "Shaders.AmbientLight.Main", kComputeGIKeys, nullptr } }, nullptr };
-static const VisualFolder kRtBounceFolder = { "Ray-traced bounce light", "Strength, reach, glowing signs lighting their surroundings, and light that bounces more than once.",
-	&kBounceChoice, 0b100, {
-	{ "Shaders.AmbientOcclusion.RT", "@group:Bounce light", "One bounce" },
-	{ "Shaders.AmbientOcclusion.RT", "@group:Light that bounces more than once", "More than one bounce (radiance cache)" } },
-	[]() { DrawRtStatusLine("Status", RtGILine()); } };
-static const VisualFolder kRtOcclusionFolder = { "Ray-traced occlusion", "Traced occlusion in place of the screen estimate; Ambient light and Ambient "
-	"occlusion both use it. Works with either ambient choice.", nullptr, 0, {
-	{ "Shaders.AmbientOcclusion.RT", "Enabled, RayCount, Distance, Denoise, Interleave, AOAlpha, DenoiseKernel, DebugView", nullptr },
-	{ "Shaders.AmbientOcclusion.RT", "@group:Sky visibility", "Sky visibility" } },
-	[]() { DrawRtStatusLine("Status", RtAOLine()); } };
-static const VisualFolder kSkyLightFolder = { "Sky light", "How much the sky's colour lights things from above and around.", nullptr, 0, {
-	{ "Shaders.AmbientOcclusion.Skylighting", nullptr, "Sky light (occlusion)" },
-	{ "Shaders.PBR.Main", "@group:Sky light", "Sky light (materials)" } }, nullptr };
-static const VisualFolder kMaterialsFolder = { "Materials and highlights", "How surfaces take the light: roughness, metal, highlights, lamp falloff.",
-	nullptr, 0, {
-	{ "@effect", "PBR", "Materials (PBR)" },
-	{ "Shaders.PBR.Main", "-SkylightingScale, SkylightingMode, SkylightingDirectionality, SkylightingSaturation", "General" },
-	{ "Shaders.PBR.Rain", nullptr, "In the rain" }, { "Shaders.PBR.Night", nullptr, "At night" }, { "Shaders.PBR.NightRain", nullptr, "At night in the rain" },
-	{ "Shaders.PBR.Interiors", nullptr, "Indoors" }, { "Shaders.PBR.Linear", nullptr, "Linear lighting" }, { "Shaders.PBR.LampFalloff", nullptr, "Lamp falloff" },
-	{ "Shaders.PBR.MicroShadow", nullptr, "Micro shadows" }, { "Shaders.PBR.Rmaos", nullptr, "Material maps" }, { "Shaders.PBR.MaterialRules", nullptr, "Material rules" },
-	{ "Shaders.PBR.Dust", nullptr, "Dust" } }, nullptr };
-static const VisualFolder kSpecularFolder = { "Specular highlights", nullptr, nullptr, 0, {
-	{ "@effect", "Specular", "Specular" }, { "Shaders.Specular.Exterior", nullptr, "Outdoors" }, { "Shaders.Specular.Rain", nullptr, "In the rain" } }, nullptr };
-static const VisualFolder kFlashlightFolder = { "Flashlight", nullptr, nullptr, 0, {
-	{ "@effect", "Flashlight", "Flashlight" }, { "Shaders.Flashlight.Main", nullptr, "General" }, { "Shaders.Flashlight.Deferred", nullptr, "Light pass" } }, nullptr };
-
-// -- Reflections
-static const VisualChoice kReflectionChoice = { "refl", "Reflections",
-	"The screen-space reflections, and rays for what they miss (things off screen or hidden). The rays only fill in the screen-space ones.", {
-	{ "Off", "No reflections from Vegas Shaders (water keeps the game's own).",
-		[]() { return !EffectOn("Reflections"); },
-		[]() { SetEffectOn("Reflections", false); } },
-	{ "Screen-space", "Reflections of what is on screen, with the sky or a live cube where the screen has nothing.",
-		[]() { return !SettingOn("Shaders.Reflections.RT", "Enabled"); },
-		[]() { SetEffectOn("Reflections", true); TheSettingManager->SetSetting("Shaders.Reflections.RT", "Enabled", false); } },
-	{ "Screen-space + ray traced", "Rays fill in what the screen misses. Needs ray tracing.",
-		[]() { return true; },
-		[]() { SetEffectOn("Reflections", true); TheSettingManager->SetSetting("Shaders.Reflections.RT", "Enabled", true); } },
-	}, []() { if (SettingOn("Shaders.Reflections.RT", "Enabled")) DrawRtStatusLine("Ray tracing", RtReflectionsLine()); } };
+	"Adds to any extra bounce light.", { { "Shaders.AmbientLight.Main", "@group:Light grid bounce", nullptr } } };
 static const VisualFolder kSsrFolder = { "Screen-space reflections", "Reach, steadiness, what shows where rays find nothing, and per-material reflections. "
-	"Used by both.", &kReflectionChoice, 0b110, { { "Shaders.Reflections.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kRtReflFolder = { "Ray traced", "Off-screen lighting, glossy surfaces, the weapon and water.", &kReflectionChoice, 0b100,
-	{ { "Shaders.Reflections.RT", nullptr, nullptr } }, []() { DrawRtStatusLine("Status", RtReflectionsLine()); } };
-static const VisualFolder kWetReflFolder = { "Wet surfaces", "How wet ground and surfaces reflect in the rain.", nullptr, 0,
-	{ { "Shaders.WetnessEffects.Reflections", nullptr, nullptr } }, nullptr };
-static const VisualFolder kMetalFolder = { "Metal and environment maps", nullptr, nullptr, 0, {
-	{ "Shaders.PBR.Metal", nullptr, "Metal" }, { "Shaders.PBR.EnvMaps", nullptr, "Environment maps" } }, nullptr };
-static const VisualFolder kWaterReflFolder = { "Water reflections", "The game's water reflection map.", nullptr, 0,
-	{ { "Main.Main.Water", nullptr, nullptr } }, nullptr };
-
-// -- Fog and atmosphere
-static const VisualChoice kFogChoice = { "fog", "Fog type",
-	"One fog type draws at a time. The same switches as the Volumetric fog entry's fog groups.", {
-	{ "Off", "No fog from Vegas Shaders (the game's own fog stays).",
-		[]() { return ActiveFog() == FogType::None; }, []() { SetEffectOn("VolumetricFog", false); } },
-	{ "Current fog", "This build's fog: drifting patches in the air, darker where the sun's shadow falls.",
-		[]() { return ActiveFog() == FogType::Current; }, []() { SetFogType(FogType::Current, true); } },
-	{ "Classic fog (the original look)", "The fog as the original mod drew it. Uses most of the current fog's settings.",
-		[]() { return ActiveFog() == FogType::Classic; }, []() { SetFogType(FogType::Classic, true); } },
-	{ "Legacy fog (for older presets)", "The fog from before the fog rewrite, for presets made for it.",
-		[]() { return ActiveFog() == FogType::Legacy; }, []() { SetFogType(FogType::Legacy, true); } },
-	}, nullptr };
-static const VisualFolder kFogSharedFolder = { "Shared by every fog type", "Strength, colour and the distant haze.", &kFogChoice, 0b1110, {
-	{ kFogMain, "@group:Shared by every fog type", "Outdoors" },
-	{ "Shaders.VolumetricFog.Night", nullptr, "At night" },
-	{ "Shaders.VolumetricFog.Interiors", "@group:Shared by every fog type", "Indoors" } }, nullptr };
-static const VisualFolder kFogCurrentFolder = { "Current fog", "The classic fog uses these too, except FogVolume, SunGlow, GameFogFloor, WeatherFogColor "
-	"and the height layer.", &kFogChoice, 0b0110, {
-	{ kFogMain, "@group:Current fog", "Outdoors" },
-	{ "Shaders.VolumetricFog.Interiors", "@group:Current fog", "Indoors" } }, nullptr };
-static const VisualFolder kFogClassicFolder = { "Classic fog", "ClassicLook 1 = half resolution (faster), 2 = full resolution as the original did.",
-	&kFogChoice, 0b0100, { { kFogMain, "@group:Classic fog (the original look)", nullptr } }, nullptr };
-static const VisualFolder kFogLegacyFolder = { "Legacy fog", nullptr, &kFogChoice, 0b1000, {
-	{ kFogMain, "@group:Legacy fog (for older presets)", "Outdoors" },
-	{ "Shaders.VolumetricFog.Interiors", "@group:Legacy fog (for older presets)", "Indoors" } }, nullptr };
-static const VisualFolder kLampHazeFolder = { "Lamp haze", "The room's lamps glow in the indoor fog's air. Needs the current fog.", &kFogChoice, 0b0010,
-	{ { "Shaders.VolumetricFog.Interiors", "@group:Lamp haze", nullptr } }, nullptr };
-static const VisualFolder kSkyFolder = { "Sky", nullptr, nullptr, 0, {
-	{ "@effect", "Sky", "Sky" }, { "Shaders.Sky.Main", nullptr, "General" }, { "Shaders.Sky.Physical", nullptr, "Physical sky" }, { "Shaders.Sky.Clouds", nullptr, "Game clouds" } }, nullptr };
-static const VisualFolder kCloudsFolder = { "Volumetric clouds", "Their shadows are on the Shadows page.", nullptr, 0, {
-	{ "@effect", "VolumetricClouds", "Volumetric clouds" },
-	{ "Shaders.VolumetricClouds.Main", "-Shadows, ShadowRange, ShadowResolution, ShadowPrefilter, ShadowSoftness, PhysicalShadows, ShadowDebug", nullptr } }, nullptr };
-static const VisualFolder kShaftsFolder = { "Light shafts", nullptr, nullptr, 0, {
-	{ "@effect", "VolumetricLight", "Volumetric light" }, { "Shaders.VolumetricLight.Main", nullptr, "General" }, { "Shaders.VolumetricLight.Night", nullptr, "At night" },
-	{ "Shaders.VolumetricLight.RT", nullptr, "Ray traced" } }, nullptr };
-static const VisualFolder kGodRaysFolder = { "God rays", nullptr, nullptr, 0, {
-	{ "@effect", "GodRays", "God rays" }, { "Shaders.GodRays.Main", nullptr, "General" }, { "Shaders.GodRays.Coloring", nullptr, "Colour" } }, nullptr };
-static const VisualFolder kMotesFolder = { "Dust motes", nullptr, nullptr, 0, {
-	{ "@effect", "DustMotes", "Dust motes" }, { "Shaders.DustMotes.Main", nullptr, nullptr } }, nullptr };
-
-// -- Colour and tone
-static const char* const kAdaptKeys = "-Mode, AdaptExposure, AdaptWhiteBalance, AdaptWeatherLight";
-static const VisualChoice kExposureChoice = { "exposure", "Exposure",
-	"How the picture's brightness adapts as you move between light and dark. The classic exposure and eye adaptation are one or the other (Exposure Mode).", {
-	{ "Off", "No automatic exposure from Vegas Shaders.",
-		[]() { return !EffectOn("Exposure"); }, []() { SetEffectOn("Exposure", false); } },
-	{ "Classic", "Brightens dark scenes and darkens bright ones toward a target (Mode 0).",
-		[]() { return TheSettingManager->GetSettingI("Shaders.Exposure.Main", "Mode") != 1; },
-		[]() { SetEffectOn("Exposure", true); TheSettingManager->SetSetting("Shaders.Exposure.Main", "Mode", 0); } },
-	{ "Eye adaptation", "Auto-exposure and white balance as the eye adapts (Mode 1). Made to go with the Perceptual tone mapper.",
-		[]() { return true; },
-		[]() { SetEffectOn("Exposure", true); TheSettingManager->SetSetting("Shaders.Exposure.Main", "Mode", 1); } },
-	}, nullptr };
-static const VisualFolder kClassicExposureFolder = { "Classic exposure", nullptr, &kExposureChoice, 0b010, {
-	{ "Shaders.Exposure.Main", kAdaptKeys, "Outdoors" }, { "Shaders.Exposure.Night", kAdaptKeys, "At night" },
-	{ "Shaders.Exposure.Interiors", kAdaptKeys, "Indoors" } }, nullptr };
-static const VisualFolder kEyeAdaptFolder = { "Eye adaptation", nullptr, &kExposureChoice, 0b100, {
-	{ "Shaders.Exposure.Main", "@group:Eye adaptation", "Outdoors" }, { "Shaders.Exposure.Night", "@group:Eye adaptation", "At night" },
-	{ "Shaders.Exposure.Interiors", "@group:Eye adaptation", "Indoors" } }, nullptr };
-static const VisualFolder kLocalExposureFolder = { "Local exposure", "Dark corners and bright skies each kept readable. Works with either exposure.",
-	nullptr, 0, { { "@effect", "LocalExposure", "Local exposure" }, { "Shaders.LocalExposure.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kToneFolder = { "Tone mapping", nullptr, nullptr, 0, {
-	{ "@effect", "Tonemapping", "Tone mapping" }, { "Shaders.Tonemapping.Main", nullptr, "Outdoors" }, { "Shaders.Tonemapping.Night", nullptr, "At night" },
-	{ "Shaders.Tonemapping.Interiors", nullptr, "Indoors" } }, nullptr };
-static const VisualFolder kHdrFolder = { "HDR output", nullptr, nullptr, 0, { { "@effect", "HDR", "HDR" }, { "Shaders.HDR.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kBloomFolder = { "Bloom", nullptr, nullptr, 0, {
-	{ "@effect", "Bloom", "Bloom" }, { "Shaders.Bloom.Main", nullptr, "Outdoors" }, { "Shaders.Bloom.Night", nullptr, "At night" }, { "Shaders.Bloom.Interiors", nullptr, "Indoors" },
-	{ "@effect", "BloomLegacy", "Bloom (legacy)" }, { "Shaders.BloomLegacy.Exteriors", nullptr, "Legacy: outdoors" }, { "Shaders.BloomLegacy.Interiors", nullptr, "Legacy: indoors" } }, nullptr };
-static const VisualFolder kLensFolder = { "Lens", nullptr, nullptr, 0, {
-	{ "@effect", "Lens", "Lens" }, { "Shaders.Lens.Main", nullptr, "Outdoors" }, { "Shaders.Lens.Night", nullptr, "At night" }, { "Shaders.Lens.Interiors", nullptr, "Indoors" } }, nullptr };
-static const VisualFolder kGradingFolder = { "Colour grading", "The LUT files themselves are picked on the LUT page.", nullptr, 0, {
-	{ "@effect", "LUT", "LUT" }, { "Shaders.LUT.Main", nullptr, "LUT" },
-	{ "@effect", "Coloring", "Colouring" }, { "Shaders.Coloring.Default", nullptr, "Colouring" },
-	{ "@effect", "ImageAdjust", "Image adjust" }, { "Shaders.ImageAdjust.Main", nullptr, "Image adjust: outdoors" },
-	{ "Shaders.ImageAdjust.Night", nullptr, "Image adjust: at night" }, { "Shaders.ImageAdjust.Interiors", nullptr, "Image adjust: indoors" } }, nullptr };
-static const VisualFolder kCinemaFolder = { "Cinema", nullptr, nullptr, 0, { { "@effect", "Cinema", "Cinema" }, { "Shaders.Cinema.Main", nullptr, nullptr } }, nullptr };
-
-// -- Sharpness and anti-aliasing
-static void PickUpscaler(const char* on, const char* off) {	// the same RenderScale hand-over as SwitchOffOtherUpscaler
-	if (on && off && TheSettingManager->GetSettingI(off, "Enabled")) {
-		const float scale = TheSettingManager->GetSettingF(off, "RenderScale");
-		if (scale > 0.0f) TheSettingManager->SetSetting(on, "RenderScale", scale);
-	}
-	if (off) TheSettingManager->SetSetting(off, "Enabled", false);
-	if (on) TheSettingManager->SetSetting(on, "Enabled", true);
-}
-static const VisualChoice kTemporalChoice = { "temporal", "Temporal anti-aliasing",
-	"Blends each frame with the last for smooth edges. FSR and DLSS replace TAA's blending and can upscale (RenderScale below 1); one at a time.", {
-	{ "Off", "No temporal anti-aliasing.", []() { return !EffectOn("TAA"); }, []() { SetEffectOn("TAA", false); } },
-	{ "TAA", "Vegas Shaders' own TAA.",
-		[]() { return !SettingOn("Shaders.TAA.FSR", "Enabled") && !SettingOn("Shaders.TAA.DLSS", "Enabled"); },
-		[]() { SetEffectOn("TAA", true); PickUpscaler(nullptr, "Shaders.TAA.FSR"); PickUpscaler(nullptr, "Shaders.TAA.DLSS"); } },
-	{ "AMD FSR", "Needs the DXVK fork. Any graphics card.",
-		[]() { return SettingOn("Shaders.TAA.FSR", "Enabled"); },
-		[]() { SetEffectOn("TAA", true); PickUpscaler("Shaders.TAA.FSR", "Shaders.TAA.DLSS"); } },
-	{ "NVIDIA DLSS", "Needs the DXVK fork and an NVIDIA RTX card.",
-		[]() { return SettingOn("Shaders.TAA.DLSS", "Enabled"); },
-		[]() { SetEffectOn("TAA", true); PickUpscaler("Shaders.TAA.DLSS", "Shaders.TAA.FSR"); } },
-	}, nullptr };
-static const VisualChoice kEdgeChoice = { "edges", "Edge smoothing",
-	"Smoothing of edges after the picture is drawn. Both at once cost more and soften the picture, so one at a time.", {
-	{ "Off", "None.", []() { return !EffectOn("SMAA") && !SettingOn("Main.Main.ReducedQuality", "FXAA"); },
-		[]() { SetEffectOn("SMAA", false); TheSettingManager->SetSetting("Main.Main.ReducedQuality", "FXAA", false); } },
-	{ "SMAA", "Sharper edges, about 1 ms at 1440p.", []() { return EffectOn("SMAA") && !SettingOn("Main.Main.ReducedQuality", "FXAA"); },
-		[]() { SetEffectOn("SMAA", true); TheSettingManager->SetSetting("Main.Main.ReducedQuality", "FXAA", false); } },
-	{ "FXAA", "Cheaper (about 0.15 ms at 1440p), a little softer. No settings.", []() { return !EffectOn("SMAA") && SettingOn("Main.Main.ReducedQuality", "FXAA"); },
-		[]() { SetEffectOn("SMAA", false); TheSettingManager->SetSetting("Main.Main.ReducedQuality", "FXAA", true); } },
-	}, nullptr };
-static const VisualFolder kTaaFolder = { "TAA", "TAA's own blending and sharpening. FSR and DLSS replace its blending (its Sharpness is not used with FSR); "
-	"Jitter and the mip bias still matter there.", &kTemporalChoice, 0b1110, { { "Shaders.TAA.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kFsrFolder = { "AMD FSR", nullptr, &kTemporalChoice, 0b0100, { { "Shaders.TAA.FSR", "-Enabled", nullptr } }, nullptr };
-static const VisualFolder kDlssFolder = { "NVIDIA DLSS", nullptr, &kTemporalChoice, 0b1000, { { "Shaders.TAA.DLSS", "-Enabled", nullptr } }, nullptr };
-static const VisualFolder kCutoutsFolder = { "Smooth cutouts", "Fences and leaves with smooth edges, with any temporal choice.", &kTemporalChoice, 0b1110,
-	{ { "Shaders.TAA.Cutouts", nullptr, nullptr } }, nullptr };
-static const VisualFolder kSmaaFolder = { "SMAA", nullptr, &kEdgeChoice, 0b010, { { "Shaders.SMAA.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kSharpenFolder = { "Sharpening", nullptr, nullptr, 0, {
-	{ "@effect", "Sharpening", "Sharpening" }, { "Shaders.Sharpening.Main", nullptr, "Outdoors" }, { "Shaders.Sharpening.Interiors", nullptr, "Indoors" } }, nullptr };
-static const VisualFolder kBandingFolder = { "Banding and dither", nullptr, nullptr, 0, {
-	{ "@effect", "DitherBuster", "Dither buster" }, { "Shaders.DitherBuster.Main", nullptr, "Dither buster" },
-	{ "@effect", "SkyDither", "Sky dither" }, { "Shaders.SkyDither.Main", nullptr, "Sky dither" } }, nullptr };
-
-// -- Weather and water
-static const VisualFolder kRainFolder = { "Rain", nullptr, nullptr, 0, {
-	{ "@effect", "Precipitations", "Rain" }, { "Shaders.Precipitations.Main", nullptr, "Rain" },
-	{ "@effect", "WetnessEffects", "Wetness" }, { "Shaders.WetnessEffects.Main", nullptr, "Wetness" }, { "Shaders.WetnessEffects.Raindrops", nullptr, "Raindrops" },
-	{ "Shaders.WetnessEffects.HudRaindrops", nullptr, "Raindrops on the screen" } }, nullptr };
-static const VisualFolder kWetWorldFolder = { "Wet ground", nullptr, nullptr, 0, { { "@effect", "WetWorld", "Wet world" }, { "Shaders.WetWorld.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kSnowFolder = { "Snow", nullptr, nullptr, 0, {
-	{ "@effect", "Snow", "Snow" }, { "Shaders.Snow.Main", nullptr, "Snow" },
-	{ "@effect", "SnowAccumulation", "Snow on the ground" }, { "Shaders.SnowAccumulation.Main", nullptr, "Snow on the ground" } }, nullptr };
-static const VisualFolder kSandstormFolder = { "Sandstorm", nullptr, nullptr, 0, { { "@effect", "Sandstorm", "Sandstorm" }, { "Shaders.Sandstorm.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kHeatHazeFolder = { "Heat haze", nullptr, nullptr, 0, { { "@effect", "HeatHaze", "Heat haze" }, { "Shaders.HeatHaze.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kWeatherModeFolder = { "Weather control", nullptr, nullptr, 0, {
-	{ "Main.WeatherMode.General", nullptr, "General" }, { "Main.WeatherMode.Main", nullptr, nullptr } }, nullptr };
-static const VisualFolder kWaterFolder = { "Water", nullptr, nullptr, 0, {
-	{ "@effect", "Water", "Water" }, { "Shaders.Water.Default", nullptr, "Outdoors" }, { "Shaders.Water.Interiors", nullptr, "Indoors" }, { "Shaders.Water.Placed", nullptr, "Placed water" },
-	{ "@effect", "WaterLens", "Water on the lens" }, { "Shaders.WaterLens.Main", nullptr, "Water on the lens" }, { "@effect", "Underwater", "Underwater" } }, nullptr };
-
-static const std::vector<VisualPage> kVisualPages = {
-	{ "@Visual.Shadows", "Shadows", "Every shadow in the game: the sun's, the lamps', the clouds' and the mountains'. A choice picks which kind runs; "
-		"each kind has its own folder.", {
-		VHeading("Sun"), VChoice(kSunShadowChoice), VFolder(kSunMapsFolder), VFolder(kSunSoftFolder), VFolder(kSunRtFolder), VFolder(kSunContactFolder),
-		VFolder(kMountainFolder),
-		VHeading("Clouds"), VChoice(kCloudShadowChoice), VFolder(kFlatCloudFolder), VFolder(kVolCloudShadowFolder),
-		VHeading("Lamps"), VChoice(kLampShadowChoice), VFolder(kLampCommonFolder), VFolder(kLampMapsFolder), VFolder(kLampRtFolder), VFolder(kLampCapsuleFolder) } },
-	{ "@Visual.Lighting", "Lighting", "The soft light from the sky and the room, light bounced off walls, and how materials take the light.", {
-		VHeading("Ambient light"), VChoice(kAmbientChoice), VFolder(kAmbientLightFolder), VFolder(kGridFolder), VFolder(kSeparateAOFolder), VFolder(kSeparateBounceFolder),
-		VFolder(kRtOcclusionFolder),
-		VHeading("Bounce light"), VChoice(kBounceChoice), VFolder(kComputeGIFolder), VFolder(kRtBounceFolder),
-		VHeading("Surfaces and lights"), VFolder(kSkyLightFolder), VFolder(kMaterialsFolder), VFolder(kSpecularFolder), VFolder(kFlashlightFolder) } },
-	{ "@Visual.Reflections", "Reflections", "Reflections on floors, metal, glass, wet ground and water.", {
-		VChoice(kReflectionChoice), VFolder(kSsrFolder), VFolder(kRtReflFolder),
-		VHeading("On every choice"), VFolder(kWetReflFolder), VFolder(kMetalFolder), VFolder(kWaterReflFolder) } },
-	{ "@Visual.Fog", "Fog and atmosphere", "Fog, sky, clouds, light shafts and what floats in the air.", {
-		VHeading("Fog"), VChoice(kFogChoice), VFolder(kFogSharedFolder), VFolder(kFogCurrentFolder), VFolder(kFogClassicFolder), VFolder(kFogLegacyFolder),
-		VFolder(kLampHazeFolder),
-		VHeading("Sky and air"), VFolder(kSkyFolder), VFolder(kCloudsFolder), VFolder(kShaftsFolder), VFolder(kGodRaysFolder), VFolder(kMotesFolder) } },
-	{ "@Visual.Colour", "Colour and tone", "Brightness, contrast, colour and glow: what the camera does to the picture.", {
-		VChoice(kExposureChoice), VFolder(kClassicExposureFolder), VFolder(kEyeAdaptFolder),
-		VHeading("On every choice"), VFolder(kLocalExposureFolder), VFolder(kToneFolder), VFolder(kHdrFolder), VFolder(kBloomFolder), VFolder(kLensFolder),
-		VFolder(kGradingFolder), VFolder(kCinemaFolder) } },
-	{ "@Visual.Sharpness", "Sharpness and anti-aliasing", "Smooth edges, upscaling and sharpening.", {
-		VChoice(kTemporalChoice), VFolder(kTaaFolder), VFolder(kFsrFolder), VFolder(kDlssFolder), VFolder(kCutoutsFolder),
-		VChoice(kEdgeChoice), VFolder(kSmaaFolder),
-		VHeading("On every choice"), VFolder(kSharpenFolder), VFolder(kBandingFolder) } },
-	{ "@Visual.Weather", "Weather and water", "Rain, wet ground, snow, sandstorms, heat haze and water.", {
-		VFolder(kRainFolder), VFolder(kWetWorldFolder), VFolder(kSnowFolder), VFolder(kSandstormFolder), VFolder(kHeatHazeFolder),
-		VFolder(kWeatherModeFolder), VFolder(kWaterFolder) } },
-};
-
-static bool IsVisualPage(const std::string& page) { return page.compare(0, strlen(kVisualPrefix), kVisualPrefix) == 0; }
-
-static int ActiveOption(const VisualChoice& c) {
-	for (size_t i = 0; i < c.Options.size(); i++) if (c.Options[i].Active()) return (int)i;
-	return -1;
-}
+	"Used by both.", { { "Shaders.Reflections.Main", nullptr, nullptr } } };
 
 static bool VisualKeyWanted(const char* keys, const char* section, const char* key) {
 	if (!keys) return true;
@@ -4913,38 +4546,34 @@ static void DrawVisualItem(const VisualItem& item, bool titled) {
 // 2026-11-09 (user: "make the settings for RT effects that live under raster menus also have duplicate copies under each RT effect so
 // users do not have to swap between menus to configure them"): a ray-traced effect runs together with its raster twin and reads some of
 // the twin's settings (the sun's shadow maps and smoothing, the lamps' reach and capsules, the screen-space reflections, Ambient light and
-// the light grid with the surface colour it multiplies the bounce by). Each folder above that is marked "used by both" shows again under
-// the RT effect, folded, as the very same rows (the same keys: a change here is a change there, and the toml is the same). They sit under
-// the effect's section on the Ray tracing page and inside its "Ray traced" folder on the pages by what you see.
+// the light grid with the surface colour it multiplies the bounce by). Each folder above shows under the RT effect's section on the Ray
+// tracing page, folded, as the very same rows (the same keys: a change here is a change on the effect's own page, and the toml is the same).
 struct RtSharedBlock {
 	const char* Rt;				// the RT effect's section
-	const char* Folder;			// its folder's title on a page by what you see, or nullptr (not shown there: it already holds them)
-	bool OnRtPage;				// shown under the effect on the Ray tracing page
-	const VisualFolder* Source;	// the raster folder whose rows are shown again (one list: edit the folder, the copy follows)
+	const VisualFolder* Source;	// the raster folder whose rows are shown again
 };
 static const VisualFolder kShaftsSharedFolder = { "Light shafts", "The shafts' own strength and look; the traced shadow only changes what blocks the sun.",
-	nullptr, 0, { { "Shaders.VolumetricLight.Main", nullptr, "General" }, { "Shaders.VolumetricLight.Night", nullptr, "At night" } }, nullptr };
+	{ { "Shaders.VolumetricLight.Main", nullptr, "General" }, { "Shaders.VolumetricLight.Night", nullptr, "At night" } } };
 static const RtSharedBlock kRtSharedBlocks[] = {
-	{ "Shaders.ShadowsExteriors.RT", "Ray traced", true, &kSunMapsFolder },
-	{ "Shaders.ShadowsExteriors.RT", "Ray traced", true, &kSunSoftFolder },
-	{ "Shaders.ShadowsExteriors.RT", "Ray traced", true, &kSunContactFolder },
-	{ "Shaders.ShadowsInteriors.RT", "Ray traced", true, &kLampCommonFolder },
-	{ "Shaders.ShadowsInteriors.RT", "Ray traced", true, &kLampCapsuleFolder },
-	{ "Shaders.AmbientOcclusion.RT", "Ray-traced bounce light", true, &kAmbientLightFolder },
-	{ "Shaders.AmbientOcclusion.RT", "Ray-traced bounce light", true, &kGridFolder },
-	{ "Shaders.AmbientOcclusion.RT", "Ray-traced occlusion", false, &kAmbientLightFolder },	// (one copy on the Ray tracing page: it shows both)
-	{ "Shaders.Reflections.RT", "Ray traced", true, &kSsrFolder },
-	{ "Shaders.VolumetricLight.RT", nullptr, true, &kShaftsSharedFolder },	// (the Fog page's Light shafts folder already holds RT and raster)
+	{ "Shaders.ShadowsExteriors.RT", &kSunMapsFolder },
+	{ "Shaders.ShadowsExteriors.RT", &kSunSoftFolder },
+	{ "Shaders.ShadowsExteriors.RT", &kSunContactFolder },
+	{ "Shaders.ShadowsInteriors.RT", &kLampCommonFolder },
+	{ "Shaders.ShadowsInteriors.RT", &kLampCapsuleFolder },
+	{ "Shaders.AmbientOcclusion.RT", &kAmbientLightFolder },
+	{ "Shaders.AmbientOcclusion.RT", &kGridFolder },
+	{ "Shaders.Reflections.RT", &kSsrFolder },
+	{ "Shaders.VolumetricLight.RT", &kShaftsSharedFolder },
 };
 
-static void DrawRtSharedBlock(const RtSharedBlock& b, const char* where) {
+static void DrawRtSharedBlock(const RtSharedBlock& b) {
 	const VisualFolder& f = *b.Source;
-	const std::string header = std::string("Also used here: ") + f.Title + "###rtshared/" + where + "/" + b.Rt + "/" + f.Title;
+	const std::string header = std::string("Also used here: ") + f.Title + "###rtshared/page/" + b.Rt + "/" + f.Title;
 	if (!MenuWidgets::SubHeader(header.c_str(), false)) return;
 	ImGui::PushID(f.Title);
 	ImGui::Indent(ImGui::GetFontSize() * 0.75f);
 	ImGui::PushTextWrapPos(0.0f);
-	ImGui::TextDisabled("The same rows as the \"%s\" folder: a change here is a change there.", f.Title);
+	ImGui::TextDisabled("The same rows as on the effect's own page: a change here is a change there.");
 	if (f.Note) ImGui::TextDisabled("%s", f.Note);
 	ImGui::PopTextWrapPos();
 	int sections = 0;
@@ -4952,132 +4581,12 @@ static void DrawRtSharedBlock(const RtSharedBlock& b, const char* where) {
 	for (const VisualItem& item : f.Items) DrawVisualItem(item, sections > 1);
 	ImGui::Unindent(ImGui::GetFontSize() * 0.75f);
 	ImGui::PopID();
-}
-
-// Inside a "Ray traced" folder of a page by what you see: the blocks of the RT section its own rows belong to.
-static void DrawRtSharedBlocksInFolder(const VisualFolder& f) {
-	for (const RtSharedBlock& b : kRtSharedBlocks) {
-		if (!b.Folder || strcmp(b.Folder, f.Title)) continue;
-		bool ownsRt = false;
-		for (const VisualItem& item : f.Items) if (!strcmp(item.Section, b.Rt)) { ownsRt = true; break; }
-		if (ownsRt) DrawRtSharedBlock(b, "folder");
-	}
 }
 
 // Under an RT effect's section on the Ray tracing page.
 static void DrawRtSharedBlocksOnRtPage(const char* rtSection) {
 	for (const RtSharedBlock& b : kRtSharedBlocks)
-		if (b.OnRtPage && !strcmp(b.Rt, rtSection)) DrawRtSharedBlock(b, "page");
-}
-
-static void DrawVisualChoice(const VisualChoice& c) {
-	const int active = ActiveOption(c);
-	ImGui::PushID(c.Id);
-	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
-	MenuWidgets::RowBegin(c.Label, MenuWidgets::ResetSlotWidth());
-	ImGui::SetNextItemWidth(-FLT_MIN);
-	if (ImGui::BeginCombo("##choice", active >= 0 ? c.Options[active].Label : "Custom (set by hand in the folders below)")) {
-		for (size_t i = 0; i < c.Options.size(); i++) {
-			if (ImGui::Selectable(c.Options[i].Label, (int)i == active) && (int)i != active) {
-				c.Options[i].Select();
-				TheSettingManager->LoadSettings();
-			}
-			if (ImGui::IsItemHovered() && c.Options[i].Tip) WrappedTooltip(c.Options[i].Tip);
-		}
-		ImGui::EndCombo();
-	}
-	if ((ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered()) && c.Tip) WrappedTooltip(c.Tip);
-	ImGui::PushTextWrapPos(0.0f);
-	if (active >= 0 && c.Options[active].Tip) ImGui::TextDisabled("%s", c.Options[active].Tip);
-	if (c.Status) c.Status();
-	ImGui::PopTextWrapPos();
-	ImGui::PopID();
-}
-
-static std::unordered_map<std::string, int> s_visualFolderSeen;	// folder -> the choice's option when it was last drawn (to fold on a change)
-
-static void DrawVisualFolder(const VisualFolder& f, const char* pageId) {
-	const int active = f.Choice ? ActiveOption(*f.Choice) : -1;
-	const bool inUse = !f.Choice || active < 0 || ((f.Mask >> active) & 1u);	// "Custom": the menu cannot tell, so shown as in use
-	const std::string key = std::string(pageId) + "/" + f.Title;
-	std::string reason;
-	if (!inUse) reason = std::string("Not in use: ") + f.Choice->Options[active].Label + " is selected above";
-
-	// Opens the first time while its option is picked; when the choice changes, the folders it uses open and the others fold
-	const auto seen = s_visualFolderSeen.find(key);
-	if (seen == s_visualFolderSeen.end()) ImGui::SetNextItemOpen(f.Choice && inUse, ImGuiCond_Always);
-	else if (f.Choice && seen->second != active) ImGui::SetNextItemOpen(inUse, ImGuiCond_Always);
-	s_visualFolderSeen[key] = active;
-
-	const std::string header = std::string(f.Title) + (reason.empty() ? std::string() : "   (" + reason + ")") + "###vf" + key;
-	if (!inUse) ImGui::PushStyleColor(ImGuiCol_Text, MenuWidgets::MutedText(0.55f));
-	const bool open = MenuWidgets::SubHeader(header.c_str(), false);
-	if (!inUse) ImGui::PopStyleColor();
-	if (!open) return;
-
-	ImGui::PushID(key.c_str());
-	ImGui::Indent(ImGui::GetFontSize() * 0.75f);
-	ImGui::PushTextWrapPos(0.0f);
-	if (!inUse) {
-		std::string uses;
-		for (size_t i = 0; i < f.Choice->Options.size(); i++)
-			if ((f.Mask >> i) & 1u) uses += (uses.empty() ? "" : " or ") + std::string(f.Choice->Options[i].Label);
-		VisualWarn((reason + ". These settings are kept and apply again with " + uses + " picked.").c_str());
-	}
-	if (f.Note) ImGui::TextDisabled("%s", f.Note);
-	if (f.Status && inUse) f.Status();
-	ImGui::PopTextWrapPos();
-	int sections = 0;
-	for (const VisualItem& item : f.Items) if (strcmp(item.Section, "@effect")) sections++;
-	for (const VisualItem& item : f.Items) DrawVisualItem(item, sections > 1);
-	DrawRtSharedBlocksInFolder(f);	// 2026-11-09: an RT folder shows the raster settings it shares, folded
-	ImGui::Unindent(ImGui::GetFontSize() * 0.75f);
-	ImGui::PopID();
-}
-
-static void RenderVisualPage(const VisualPage& page) {
-	PageTitle(page.Title, page.Intro);
-	for (const VisualPart& part : page.Parts) {
-		if (part.Heading) {
-			ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
-			ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
-			MenuWidgets::Title(part.Heading, 1.1f);
-			ImGui::PopStyleColor();
-			ImGui::Separator();
-		}
-		else if (part.Choice) DrawVisualChoice(*part.Choice);
-		else if (part.Folder) DrawVisualFolder(*part.Folder, page.Id);
-	}
-	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 2.0f));
-	ImGui::PushTextWrapPos(0.0f);
-	ImGui::TextDisabled("Every row here is the effect's own setting: a change shows on the effect's page too (Shaders list), and the "
-		"settings file is the same.");
-	ImGui::PopTextWrapPos();
-}
-
-static bool RenderVisualPageIfShown() {
-	if (!IsVisualPage(gMenu.page)) return false;
-	for (const VisualPage& page : kVisualPages)
-		if (gMenu.page == page.Id) {
-			RenderVisualPage(page);
-			return true;
-		}
-	ImGui::TextDisabled("Select a page from the left panel.");
-	return true;
-}
-
-// The sidebar's "By what you see" group, above the effects.
-static void DrawVisualPagesGroup() {
-	if (!MenuWidgets::GroupLabel("By what you see", gMenu.revealPage && IsVisualPage(gMenu.page))) return;
-	for (const VisualPage& page : kVisualPages) {
-		const bool shown = gMenu.page == page.Id;
-		ImGui::PushID(page.Id);
-		ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
-		if (ImGui::Selectable(page.Title, shown)) gMenu.page = page.Id;
-		ImGui::PopStyleColor();
-		if (ImGui::IsItemHovered()) WrappedTooltip(page.Intro);
-		ImGui::PopID();
-	}
+		if (!strcmp(b.Rt, rtSection)) DrawRtSharedBlock(b);
 }
 
 // ---- What is hiding effects right now ---------------------------------------------------------------------------------------
@@ -5183,7 +4692,7 @@ static const HidingNote kHidingNotes[] = {
 		"a lake shows only the sky where it should mirror the far shore.", "Put the distance in",
 		"Main.Main.RayTracing/FarObjectLOD=true Main.Main.RayTracing/FarLandLOD=true" },
 	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && RtCore::LeftOut("RT reference path tracer") &&
-			(SettingOn("Main.Main.RayTracing", "ReferencePT") || SettingOn("Main.Main.RayTracing", "PTRealtime")); },
+			(RtPathTrace::ReferenceOn() || SettingOn("Main.Main.RayTracing", "PTRealtime")); },
 		"Path tracing is on but it was left out at start: the other ray-traced effects took all the shared images it needs. Turn one "
 		"of them off (or PTRestirGI) and restart the game.", nullptr, nullptr },
 	{ []() { return TheSettingManager->SettingsMain.Main.RenderEffects && AnyRtOn() && !RtCore::Running(); },
@@ -5265,7 +4774,6 @@ static void RenderContent() {
 	if (SearchActive()) return RenderSearchResults();
 	if (gMenu.page == kNewTabId) return RenderNewInPatch();
 	if (gMenu.page == kRtTabId) return RenderRayTracingPage();
-	if (RenderVisualPageIfShown()) return;	// 2026-11-08 experiment: the pages by what you see
 	if (gMenu.page.empty()) {
 		ImGui::TextDisabled("Select a section from the left panel.");
 		return;
@@ -5291,11 +4799,21 @@ static void RenderContent() {
 
 static void RenderSectionNode(const std::string& path, const std::string& name, bool parentIsShaders);
 
+// 2026-11-10 (the effects list's folders): the row that was right-clicked this frame, a page's path or a folder's name. The menu that
+// rearranges the list opens from them once the sidebar is drawn (LayoutMenu).
+static std::string s_ctxPath, s_ctxFolder;
+static void LayoutRowDragDrop(const std::string& path);	// (below, with the folders: a row can be dragged, and dropped on)
+static void NoteRowRightClick(const std::string& path) {
+	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) s_ctxPath = path;
+	LayoutRowDragDrop(path);
+}
+
 // A page row: muted unless it is the page shown.
 static void DrawLeafSection(const std::string& path, const std::string& name) {
 	const bool shown = gMenu.page == path;
 	ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
 	if (ImGui::Selectable(MenuSectionLabel(path, name).c_str(), shown)) gMenu.page = path;
+	NoteRowRightClick(path);
 	if (shown && gMenu.revealPage) ImGui::SetScrollHereY(0.5f);	// test shots: the page's row in view
 	ImGui::PopStyleColor();
 }
@@ -5307,6 +4825,7 @@ static bool FoldingRow(const std::string& path) {
 	const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_AllowOverlap | ImGuiTreeNodeFlags_FramePadding;
 	ImGui::PushStyleColor(ImGuiCol_Text, MenuWidgets::MutedText(0.5f));	// the arrow
 	const bool open = ImGui::TreeNodeEx("##node", flags);
+	NoteRowRightClick(path);
 	ImGui::PopStyleColor();
 	ImGui::SameLine();
 	return open;
@@ -5422,6 +4941,8 @@ static void RenderSectionNode(const std::string& path, const std::string& name, 
 // "in the list with the rest of the effects"; docs/next/SETTINGS-GAME-MENU-PLAN.md): the Shaders list as folding groups of effects of a
 // kind, as a game's graphics menu groups them. Only the sidebar changes: each effect keeps its row, switch and pages. An effect no
 // group names goes under "Other", so a new one never goes missing. Ray tracing is a row of its own here (the page above).
+// 2026-11-10: these are the BUILT-IN folders. The player can make, rename, reorder and delete folders and move effects between them
+// (MenuLayout.h; right-click a row); with no arrangement of their own the list is exactly this table.
 struct EffectGroup { const char* Name; const char* Entries; const char* Page = nullptr; const char* PageLabel = nullptr; };	// Page: a settings page that is no effect entry
 static const EffectGroup kEffectGroups[] = {
 	{ "Lighting", "AmbientLight, AmbientOcclusion, BounceLight, Specular, PBR, Reflections, Flashlight" },
@@ -5439,49 +4960,166 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Developer", "Debug" },
 };
 
-static bool InAnyEffectGroup(const std::string& name) {
-	for (const EffectGroup& g : kEffectGroups) if (g.Entries && KeyInList(g.Entries, name.c_str())) return true;
-	return false;
+// ---- The effects list's folders (2026-11-10) ----------------------------------------------------------------------------------
+// User: "our folder system with the shaders is the default, but our users can make, rearrange, or delete folders if they want and their
+// arrangement is saved". The folders above are the start; MenuLayout holds the list as it is now (the player's file, or the table).
+// An entry is an effect's name or one of two fixed pages: the Ray tracing pages (one entry, drawn as their rows) and Gun effects.
+// Right-click a folder or an effect's row: move to a folder, up / down, new folder, rename, delete, back to the built-in folders.
+// Drag (user: "drag the folders and effects into each other for ease of access"): an effect onto a folder puts it in that folder, an
+// effect onto an effect puts it at that place, a folder onto a folder moves it to that place. A drop only notes what to do: the list
+// is changed once the sidebar is drawn (LayoutMenu), never while its rows are being walked.
+static const char* const kLayoutRt = "@RayTracing";
+static const char* const kLayoutGun = "@GunFX";
+static bool s_layoutDirty = true;		// entries may be missing from the folders (first use, or after an edit)
+static size_t s_layoutChildren = 0;		// how many effects the list had when the folders were last checked
+static std::string s_layoutEntry, s_layoutFolder;	// what the open right-click menu is about (one of them)
+static char s_layoutNewName[48] = "", s_layoutRename[48] = "";
+static std::string s_dropEntry, s_dropFolder;	// what was dropped this frame (an entry, or a folder) ...
+static std::string s_dropOnEntry, s_dropOnFolder;	// ... and on what
+
+static const EffectGroup* GunPageGroup() {
+	for (const EffectGroup& g : kEffectGroups) if (g.Page) return &g;
+	return nullptr;
 }
 
-// One group's folding row: its name and how many of its effects are on; open while a test shot shows one of its pages.
-static bool DrawEffectGroupRow(const char* name, const std::vector<std::string>& entries) {
+// The built-in folder of an entry ("Other" for an effect no group names, so a new one never goes missing).
+static const char* DefaultFolderOf(const std::string& entry) {
+	for (const EffectGroup& g : kEffectGroups) {
+		if (!g.Entries) { if (entry == kLayoutRt) return g.Name; }
+		else if (KeyInList(g.Entries, entry.c_str())) return g.Name;
+		if (g.Page && entry == kLayoutGun) return g.Name;
+	}
+	return "Other";
+}
+
+static void LayoutDefaults() {
+	std::vector<MenuLayout::Folder>& folders = MenuLayout::S.folders;
+	folders.clear();
+	for (const EffectGroup& g : kEffectGroups) {
+		MenuLayout::Folder f;
+		f.name = g.Name;
+		if (!g.Entries) f.entries.push_back(kLayoutRt);
+		else for (const char* p = g.Entries; *p; ) {	// in the group's own order
+			while (*p == ' ' || *p == ',') p++;
+			const char* end = p;
+			while (*end && *end != ',') end++;
+			if (end > p) f.entries.push_back(std::string(p, end));
+			p = end;
+		}
+		if (g.Page) f.entries.push_back(kLayoutGun);
+		folders.push_back(f);
+	}
+}
+
+// Puts an entry no folder holds into its built-in folder, or into "Other" when that folder is gone.
+static bool LayoutPlace(const std::string& entry) {
+	if (MenuLayout::FolderOf(entry)) return false;
+	MenuLayout::Folder* f = MenuLayout::Find(DefaultFolderOf(entry));
+	if (!f) f = MenuLayout::Find("Other");
+	if (!f) {
+		MenuLayout::S.folders.push_back({ "Other", {} });
+		f = &MenuLayout::S.folders.back();
+	}
+	f->entries.push_back(entry);
+	return true;
+}
+
+// Reads the player's file the first time (none: the built-in folders), and keeps every effect of the list in some folder.
+static void LayoutEnsure(const StringList& children) {
+	MenuLayout::State& layout = MenuLayout::S;
+	if (!layout.loaded) {
+		layout.loaded = true;
+		layout.path = Paths::ModuleDir() + "VegasShaders.menu.toml";
+		if (MenuLayout::Load())
+			Logger::Log("UNOFFICIAL Vegas Shaders menu: the effects list uses your own folders (%d, from %s)", (int)layout.folders.size(), layout.path.c_str());
+		else LayoutDefaults();
+		s_layoutDirty = true;
+	}
+	if (!s_layoutDirty && s_layoutChildren == children.size()) return;
+	s_layoutDirty = false;
+	s_layoutChildren = children.size();
+	bool placed = false;
+	for (const std::string& child : children)
+		if (!IsMovedShaderEntry(child)) placed = LayoutPlace(child) || placed;
+	placed = LayoutPlace(kLayoutRt) || placed;
+	placed = LayoutPlace(kLayoutGun) || placed;
+	if (placed && layout.custom) MenuLayout::Save();
+}
+
+// After any change the player makes: it is their own arrangement from now on, written at once.
+static void LayoutEdited() {
+	MenuLayout::S.custom = true;
+	if (!MenuLayout::Save()) Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders menu: cannot write %s (the folders stay as arranged until the game closes)", MenuLayout::S.path.c_str());
+	s_layoutDirty = true;
+}
+
+// Deleting a folder: its effects go back to their built-in folders (or "Other" when that is the folder deleted, or gone).
+static void LayoutDeleteFolder(const std::string& name) {
+	std::vector<MenuLayout::Folder>& folders = MenuLayout::S.folders;
+	for (size_t i = 0; i < folders.size(); i++) {
+		if (folders[i].name != name) continue;
+		const std::vector<std::string> entries = folders[i].entries;
+		folders.erase(folders.begin() + i);
+		for (const std::string& e : entries) LayoutPlace(e);
+		return;
+	}
+}
+
+static void RtSwitchCount(int& on, int& switches) {
+	static const char* const kOnKeys[][2] = { { "Shaders.ShadowsExteriors.RT", "Enabled" }, { "Shaders.ShadowsInteriors.RT", "Enabled" },
+		{ "Shaders.AmbientOcclusion.RT", "Enabled" }, { "Shaders.Reflections.RT", "Enabled" }, { "Main.Main.RayTracing", "PTRealtime" } };
+	for (const auto& k : kOnKeys) if (RtOn(k[0], k[1]) || (!strcmp(k[1], "PTRealtime") && RtPathTrace::ReferenceOn())) on++;
+	switches += (int)_countof(kOnKeys);
+}
+
+// One folder's row: its name and how many of its effects are on; open while a test shot shows one of its pages.
+static bool DrawEffectGroupRow(const MenuLayout::Folder& folder, const std::vector<std::string>& effects, bool rayTracing) {
 	int on = 0, switches = 0;
 	bool reveal = false;
-	for (const std::string& e : entries) {
+	for (const std::string& e : effects) {
 		if (TheSettingManager->GetMenuShaderSwitch(e.c_str()) != SettingManager::MenuSwitch::None) {
 			switches++;
 			if (TheSettingManager->GetMenuShaderEnabled(e.c_str())) on++;
 		}
 		reveal = reveal || (gMenu.revealPage && LeadsToSelected("Shaders." + e));
 	}
+	if (rayTracing) {
+		RtSwitchCount(on, switches);
+		reveal = reveal || (gMenu.revealPage && (gMenu.page == kRtTabId || IsRtSection(gMenu.page)));
+	}
 	if (reveal) ImGui::SetNextItemOpen(true);
 	const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
-	const bool open = ImGui::TreeNodeEx((std::string(name) + "###effectgroup" + name).c_str(), flags);
+	const bool open = ImGui::TreeNodeEx((folder.name + "###effectgroup" + folder.name).c_str(), flags);
+	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) s_ctxFolder = folder.name;
+	if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
+		ImGui::SetDragDropPayload("VSFOLDER", folder.name.c_str(), folder.name.size() + 1);
+		ImGui::Text("Folder: %s", folder.name.c_str());
+		ImGui::EndDragDropSource();
+	}
+	if (ImGui::BeginDragDropTarget()) {
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("VSENTRY")) { s_dropEntry = (const char*)p->Data; s_dropOnFolder = folder.name; }
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("VSFOLDER")) { s_dropFolder = (const char*)p->Data; s_dropOnFolder = folder.name; }
+		ImGui::EndDragDropTarget();
+	}
 	if (switches) {
 		ImGui::SameLine();
 		ImGui::TextDisabled("%d of %d on", on, switches);
 	}
+	else if (folder.entries.empty()) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("empty");
+	}
 	return open;
 }
 
-// The Ray tracing group (2026-11-05, user: "its own little drop down like the others"): the overview page (status, one switch, debug
-// views) and the five RT sections' own pages, which have no effect entry of their own in the list. "n of 5 on" as the other groups.
-static void DrawRayTracingGroup() {
-	static const char* const kOnKeys[][2] = { { "Shaders.ShadowsExteriors.RT", "Enabled" }, { "Shaders.ShadowsInteriors.RT", "Enabled" },
-		{ "Shaders.AmbientOcclusion.RT", "Enabled" }, { "Shaders.Reflections.RT", "Enabled" }, { "Main.Main.RayTracing", "PTRealtime" } };
-	int on = 0;
-	for (const auto& k : kOnKeys) if (RtOn(k[0], k[1]) || (!strcmp(k[1], "PTRealtime") && RtOn(k[0], "ReferencePT"))) on++;
-	if (gMenu.revealPage && (gMenu.page == kRtTabId || IsRtSection(gMenu.page))) ImGui::SetNextItemOpen(true);
-	const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
-	const bool open = ImGui::TreeNodeEx("Ray tracing###effectgroupRT", flags);
-	ImGui::SameLine();
-	ImGui::TextDisabled("%d of %d on", on, (int)_countof(kOnKeys));
-	if (!open) return;
+// The Ray tracing pages (2026-11-05): the overview (status, one switch, debug views) and the five RT sections' own pages, which have no
+// effect entry of their own in the list. One entry of the folders: they move together.
+static void DrawRayTracingRows() {
 	const bool shown = gMenu.page == kRtTabId;
 	ImGui::PushID(kRtTabId);
 	ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
-	if (ImGui::Selectable("Overview (status, one switch, debug views)", shown)) gMenu.page = kRtTabId;
+	if (ImGui::Selectable("Ray tracing: overview (status, one switch, debug views)", shown)) gMenu.page = kRtTabId;
+	NoteRowRightClick(kRtTabId);
 	ImGui::PopStyleColor();
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Every ray-traced effect in one place: what runs, what stops it, one switch for all and the debug views.");
 	ImGui::PopID();
@@ -5490,43 +5128,167 @@ static void DrawRayTracingGroup() {
 		DrawLeafSection(section.Section, std::string(section.Title) + "##" + section.Section);
 		ImGui::PopID();
 	}
-	ImGui::TreePop();
 }
 
 static void DrawEffectGroups(const StringList& children) {
+	LayoutEnsure(children);
 	auto shown = [](const std::string& child) { return !IsMovedShaderEntry(child) && !HiddenFromSidebar("Shaders." + child, child); };
-	std::vector<std::string> other;
-	for (const std::string& child : children)
-		if (shown(child) && !InAnyEffectGroup(child)) other.push_back(child);
-	auto drawGroup = [&](const char* name, const std::vector<std::string>& entries, const EffectGroup* group) {
-		if (entries.empty() && !(group && group->Page)) return;
-		if (DrawEffectGroupRow(name, entries)) {
-			for (const std::string& e : entries) RenderSectionNode("Shaders." + e, e, true);
-			if (group && group->Page) {
-				ImGui::PushID(group->Page);
-				DrawLeafSection(group->Page, group->PageLabel);
+	const EffectGroup* gun = GunPageGroup();
+	for (const MenuLayout::Folder& folder : MenuLayout::S.folders) {
+		std::vector<std::string> effects;	// the folder's effects this install has and shows
+		bool rayTracing = false, pages = false;
+		for (const std::string& e : folder.entries) {
+			if (e == kLayoutRt) rayTracing = pages = true;
+			else if (e == kLayoutGun) pages = pages || gun;
+			else if (std::find(children.begin(), children.end(), e) != children.end() && shown(e)) effects.push_back(e);
+		}
+		if (!folder.entries.empty() && effects.empty() && !pages) continue;	// (only hidden effects, as Developer > Debug; an EMPTY folder shows: something can be moved in)
+		if (!DrawEffectGroupRow(folder, effects, rayTracing)) continue;
+		for (const std::string& e : folder.entries) {
+			if (e == kLayoutRt) DrawRayTracingRows();
+			else if (e == kLayoutGun) {
+				if (!gun) continue;
+				ImGui::PushID(gun->Page);
+				DrawLeafSection(gun->Page, gun->PageLabel);
 				ImGui::PopID();
 			}
-			ImGui::TreePop();
+			else if (std::find(effects.begin(), effects.end(), e) != effects.end()) RenderSectionNode("Shaders." + e, e, true);
 		}
-	};
-	for (const EffectGroup& g : kEffectGroups) {
-		if (!g.Entries) {
-			DrawRayTracingGroup();
-			continue;
-		}
-		std::vector<std::string> entries;	// in the group's own order
-		for (const char* p = g.Entries; *p; ) {
-			while (*p == ' ' || *p == ',') p++;
-			const char* end = p;
-			while (*end && *end != ',') end++;
-			const std::string name(p, end);
-			if (!name.empty() && std::find(children.begin(), children.end(), name) != children.end() && shown(name)) entries.push_back(name);
-			p = end;
-		}
-		drawGroup(g.Name, entries, &g);
+		ImGui::TreePop();
 	}
-	drawGroup("Other", other, nullptr);
+	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	ImGui::PushTextWrapPos(0.0f);
+	ImGui::TextDisabled("Drag a folder or an effect to move it. Right-click one for more (new folder, rename, delete, reset).");
+	ImGui::PopTextWrapPos();
+}
+
+// The folders' entry a right-clicked row belongs to ("" = none: a page outside the effects list).
+static std::string LayoutEntryOfPath(const std::string& path) {
+	if (path == kRtTabId || IsRtSection(path)) return kLayoutRt;
+	const EffectGroup* gun = GunPageGroup();
+	if (gun && path == gun->Page) return kLayoutGun;
+	if (path.compare(0, 8, "Shaders.") != 0) return std::string();
+	const std::string effect = path.substr(8, path.find('.', 8) == std::string::npos ? std::string::npos : path.find('.', 8) - 8);
+	return MenuLayout::FolderOf(effect) ? effect : std::string();	// (an effect nested under another's entry is not in the folders)
+}
+
+static std::string LayoutEntryLabel(const std::string& entry) {
+	if (entry == kLayoutRt) return "Ray tracing pages";
+	if (entry == kLayoutGun) return "Gun effects";
+	return ShownText(MenuEntryLabel(entry));
+}
+
+// A row of the list as something to drag and to drop on (called for the row just drawn). An effect's own row, the Gun effects page and
+// the Ray tracing overview can be dragged; any row of an effect (its pages too) takes a drop for that effect's place.
+static void LayoutRowDragDrop(const std::string& path) {
+	if (!MenuLayout::S.loaded) return;
+	if (!ImGui::IsItemActive() && !(ImGui::IsDragDropActive() && ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem))) return;
+	const std::string entry = LayoutEntryOfPath(path);
+	if (entry.empty()) return;
+	const EffectGroup* gun = GunPageGroup();
+	const bool own = path == "Shaders." + entry || path == kRtTabId || (gun && path == gun->Page);
+	if (own && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
+		ImGui::SetDragDropPayload("VSENTRY", entry.c_str(), entry.size() + 1);
+		ImGui::TextUnformatted(LayoutEntryLabel(entry).c_str());
+		ImGui::EndDragDropSource();
+	}
+	if (ImGui::BeginDragDropTarget()) {
+		if (const ImGuiPayload* p = ImGui::AcceptDragDropPayload("VSENTRY")) { s_dropEntry = (const char*)p->Data; s_dropOnEntry = entry; }
+		ImGui::EndDragDropTarget();
+	}
+}
+
+// The right-click menu, and what was dropped this frame. Called once the sidebar is drawn, at the same place of the ID stack every frame.
+static void LayoutMenu() {
+	if (!s_dropEntry.empty() || !s_dropFolder.empty()) {
+		bool moved = false;
+		if (!s_dropFolder.empty()) moved = MenuLayout::DropFolderOn(s_dropFolder, s_dropOnFolder);
+		else if (!s_dropOnEntry.empty()) moved = MenuLayout::DropEntryOn(s_dropEntry, s_dropOnEntry);
+		else if (!s_dropOnFolder.empty()) {
+			const MenuLayout::Folder* in = MenuLayout::FolderOf(s_dropEntry);
+			moved = in && in->name != s_dropOnFolder && MenuLayout::MoveEntry(s_dropEntry, s_dropOnFolder);
+		}
+		s_dropEntry.clear(); s_dropFolder.clear(); s_dropOnEntry.clear(); s_dropOnFolder.clear();
+		if (moved) LayoutEdited();
+	}
+	if (!s_ctxPath.empty() || !s_ctxFolder.empty()) {
+		s_layoutEntry = s_ctxFolder.empty() ? LayoutEntryOfPath(s_ctxPath) : std::string();
+		s_layoutFolder = s_ctxFolder;
+		s_ctxPath.clear();
+		s_ctxFolder.clear();
+		if (MenuLayout::S.loaded && (!s_layoutEntry.empty() || !s_layoutFolder.empty())) {
+			s_layoutNewName[0] = 0;
+			strncpy_s(s_layoutRename, s_layoutFolder.c_str(), _TRUNCATE);
+			ImGui::OpenPopup("##effectsLayout");
+		}
+	}
+	if (!ImGui::BeginPopup("##effectsLayout")) return;
+	bool edited = false;
+	if (!s_layoutEntry.empty()) {
+		const MenuLayout::Folder* in = MenuLayout::FolderOf(s_layoutEntry);
+		ImGui::TextDisabled("%s", LayoutEntryLabel(s_layoutEntry).c_str());
+		ImGui::Separator();
+		if (ImGui::BeginMenu("Move to folder")) {
+			for (size_t i = 0; i < MenuLayout::S.folders.size(); i++) {
+				const std::string name = MenuLayout::S.folders[i].name;	// (a copy: the move below changes the list)
+				if (ImGui::MenuItem((name + "##to" + std::to_string(i)).c_str(), nullptr, false, !in || in->name != name)) {
+					edited = MenuLayout::MoveEntry(s_layoutEntry, name);
+					break;
+				}
+			}
+			ImGui::EndMenu();
+		}
+		if (ImGui::MenuItem("Move up")) edited = MenuLayout::ShiftEntry(s_layoutEntry, -1) || edited;
+		if (ImGui::MenuItem("Move down")) edited = MenuLayout::ShiftEntry(s_layoutEntry, +1) || edited;
+	}
+	else {
+		ImGui::TextDisabled("Folder: %s", s_layoutFolder.c_str());
+		ImGui::Separator();
+		if (ImGui::MenuItem("Move up")) edited = MenuLayout::ShiftFolder(s_layoutFolder, -1) || edited;
+		if (ImGui::MenuItem("Move down")) edited = MenuLayout::ShiftFolder(s_layoutFolder, +1) || edited;
+		if (ImGui::BeginMenu("Rename")) {
+			ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+			ImGui::InputText("##rename", s_layoutRename, sizeof(s_layoutRename));
+			ImGui::SameLine();
+			if (ImGui::Button("Rename")) {
+				if (MenuLayout::RenameFolder(s_layoutFolder, s_layoutRename)) { edited = true; ImGui::CloseCurrentPopup(); }
+			}
+			ImGui::TextDisabled("A name no other folder has.");
+			ImGui::EndMenu();
+		}
+		if (ImGui::BeginMenu("Delete folder")) {
+			ImGui::TextDisabled("Its effects go back to their built-in folders (or \"Other\"). No setting changes.");
+			if (ImGui::MenuItem("Delete")) { LayoutDeleteFolder(s_layoutFolder); edited = true; }
+			ImGui::EndMenu();
+		}
+	}
+	ImGui::Separator();
+	if (ImGui::BeginMenu(s_layoutEntry.empty() ? "New folder" : "New folder with this in it")) {
+		ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+		ImGui::InputText("##newfolder", s_layoutNewName, sizeof(s_layoutNewName));
+		ImGui::SameLine();
+		if (ImGui::Button("Create")) {
+			if (MenuLayout::AddFolder(s_layoutNewName)) {
+				if (!s_layoutEntry.empty()) MenuLayout::MoveEntry(s_layoutEntry, MenuLayout::Clean(s_layoutNewName));
+				edited = true;
+				ImGui::CloseCurrentPopup();
+			}
+		}
+		ImGui::TextDisabled("A name no other folder has.");
+		ImGui::EndMenu();
+	}
+	if (ImGui::BeginMenu("Reset to the built-in folders", MenuLayout::S.custom)) {
+		ImGui::TextDisabled("Removes your folders and their order (VegasShaders.menu.toml). No setting changes.");
+		if (ImGui::MenuItem("Reset")) {
+			MenuLayout::RemoveFile();
+			MenuLayout::S.custom = false;
+			LayoutDefaults();
+			s_layoutDirty = true;
+		}
+		ImGui::EndMenu();
+	}
+	ImGui::EndPopup();
+	if (edited) LayoutEdited();
 }
 
 // "New in this patch (N)" at the top of the sidebar, in the heading colour; the page shown while nothing else is picked.
@@ -5553,7 +5315,6 @@ static void RenderSidebar() {
 
 	// The skin's IndentSpacing is 0 (the pages indent their own groups): the sidebar's folds get a small step per level
 	ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, ImGui::GetFontSize());
-	DrawVisualPagesGroup();	// 2026-11-08 experiment: Shadows, Lighting, ... above the effect list, which stays as it was
 	StringList roots;
 	TheSettingManager->FillMenuSections(&roots, nullptr);
 	for (const std::string& root : roots) {
@@ -5566,6 +5327,7 @@ static void RenderSidebar() {
 		ImGui::PopID();
 	}
 	ImGui::PopStyleVar();
+	LayoutMenu();	// 2026-11-10: the right-click menu that rearranges the effects list
 }
 
 // ---- Drawn without the menu ----------------------------------------------------------------------------------------------

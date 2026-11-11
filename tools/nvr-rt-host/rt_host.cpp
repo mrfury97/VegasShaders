@@ -373,6 +373,11 @@ struct Host {
 		shared->shaderCount = uint32_t(shaders.size());
 		wchar_t exe[MAX_PATH]; MultiByteToWideChar(CP_ACP, 0, helperExe, -1, exe, MAX_PATH);
 		std::wstring cmd = L"\"" + std::wstring(exe) + L"\" --shm " + baseName + helperArgs;
+		if (const wchar_t* w = _wgetenv(L"NVR_RT_HELPER_WAIT")) cmd += std::wstring(L" --wait ") + w;
+		if (const wchar_t* w = _wgetenv(L"NVR_RT_HELPER_PRIORITY")) cmd += std::wstring(L" --gpu-priority ") + w;
+		if (_wgetenv(L"NVR_RT_HELPER_MEASURE")) cmd += L" --measure";
+		if (const wchar_t* w = _wgetenv(L"NVR_RT_HELPER_SIGNAL")) cmd += std::wstring(L" --signal ") + w;
+		if (_wgetenv(L"NVR_RT_HELPER_TIMER")) cmd += L" --timer-1ms";	// (2026-11-10) the helper's wait mode for the whole run: cpu / gpu
 		STARTUPINFOW su = { sizeof(su) };
 		if (!CreateProcessW(exe, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &su, &helper)) {
 			say("  error: could not start %s (%lu)\n", helperExe, GetLastError()); return false;
@@ -1340,6 +1345,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_decals.inl"	// (2026-11-07 rtgap-decals) decals: shadow / AO rays pass them, reflections and camera rays see them
 #include "rt_host_hair.inl"	// (2026-11-07 perf-mirrorfix) an actor's alpha-tested hair card in a mirror: cut out, tinted
 #include "rt_host_normals.inl"	// (2026-11-07) RealNormalMaps: the real normal maps at traced hits (PT, RT reflections, RT GI)
+#include "rt_host_gisky.inl"	// (2026-11-10) GISky: RT GI rays that miss bring back the sky light
 #include "rt_host_tessblas.inl"	// (2026-11-07, rtgap-tessblas, protocol 8) displaced geometry in the RT scene vs the CPU's truth
 #include "rt_host_textures.inl"	// (2026-11-07, protocol 8) real textures' routes: BC blocks, the GPU route through the fork, auto caps, release
 #include "rt_host_fog.inl"	// (2026-11-07 ptaaa-fog) RT fog visibility: the froxel grid's traced sun visibility vs the CPU's rays
@@ -1496,6 +1502,7 @@ int main(int argc, char** argv) {
 		{ "movingrest", "ManyLights histories under a walking person: MovingCasterHistory 0 vs 2 (RtLampTraceMany + RtLampTraceRestir)", [&] { return sceneMovingRest(c); } },
 		{ "ptaniso", "anisotropic filtering at ray-traced hits: a floor of real textures at a glancing angle, ray cones vs one mip (RtPathTrace + RtTextures)", [&] { return scenePtAniso(c); } },
 		{ "ptdetail", "the path-traced picture keeps the game's fine shading (PTDetail) and the a-trous stops at its edges (PTDenoiseGuide)", [&] { return scenePtDetail(c); } },
+		{ "gisky", "RT GI GISky: bounce rays that miss bring back the ambient (sky) light x GISky, none below the horizon, capped by GIClamp; GISky 0 = exactly 0 as before (RtAOTrace)", [&] { return sceneGISky(c); } },
 		{ "normalmaps", "real normal maps at traced hits (RealNormalMaps): path tracer camera + bounce hits, RT GI's bounce, RT reflections' hit normal vs the CPU's bend; off / no map = flat", [&] { return sceneNormalMaps(c); } },
 		{ "pthidden", "path tracer camera rays vs the hidden first-person body round the eye (the head over the sky; RtPathTrace)", [&] { return scenePtHidden(c); } },
 		{ "tessslack", "tessellated bumps vs the flat RT floor: rays start under it (speckles) without the slack, none with it (RtPathTrace, RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneTessSlack(c); } },

@@ -54,7 +54,9 @@ namespace EffectPrecompile {
 			return;	// LoadEffect preprocesses it again and reports the error
 		}
 		if (errors) { errors->Release(); errors = nullptr; }
-		if (!EffectCompiler47::CacheFresh(job->Preprocessed.c_str(), source) || !ShaderProgram::FileExists(job->Compiled.c_str())) {
+		bool fresh = EffectCompiler47::CacheFresh(job->Preprocessed.c_str(), source) && ShaderProgram::FileExists(job->Compiled.c_str());
+		if (!fresh) fresh = ShaderProgram::SeedFromShipped(job->Preprocessed.c_str(), job->Compiled.c_str(), EffectCompiler47::CacheText(source));	// UNOFFICIAL 2026-11-10 shipped cache
+		if (!fresh) {
 			ID3DXEffectCompiler* compiler = nullptr;
 			ID3DXBuffer* binary = nullptr;
 			// UNOFFICIAL 2026-10-29 NewEffectCompiler: d3dcompiler_47 first (seconds instead of minutes on the big effects)

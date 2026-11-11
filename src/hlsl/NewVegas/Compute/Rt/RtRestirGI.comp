@@ -29,7 +29,7 @@ layout(set = 0, binding = 1, std140) uniform Pass {   // core\RtPathTrace.cpp Re
 	vec4 right;         // right / P00
 	vec4 up;            // up / P11
 	vec4 origin;        // xyz the eye in scene space (RtCore::Eye), w the frame's random seed
-	vec4 rect;          // xy the depth's jitter (screen uv), z flags (1 alpha test, 2 last frame's reservoirs valid, 4 demodulate), w unused
+	vec4 rect;          // xy the depth's jitter (screen uv), z flags (1 alpha test, 2 last frame's reservoirs valid, 4 demodulate), w (2026-11-11) PTDenoiseCeiling (0 none)
 	vec4 prevForward;   // last frame's camera, as above
 	vec4 prevRight;
 	vec4 prevUp;
@@ -62,6 +62,10 @@ bool AlphaTest() { return (uint(p.rect.z + 0.5) & 1u) != 0u; }
 bool History() { return (uint(p.rect.z + 0.5) & 2u) != 0u; }
 bool Demodulate() { return (uint(p.rect.z + 0.5) & 4u) != 0u; }
 
+// (2026-11-11 PTDenoiseCeiling, rect.w; RtPathTrace.comp gDenoiseCeil has the why) the demodulated light for the denoiser is capped so its
+// square still fits a half float: above about 256 the denoiser's second moment is infinite and the pixel black (a tester's video: an
+// object lit by the flashlight from close by). Only the demodulated picture; 0 = no ceiling.
+vec3 Ceil(vec3 c) { return p.rect.w > 0.0 && (uint(p.rect.z + 0.5) & 4u) != 0u ? min(c, vec3(p.rect.w)) : c; }
 const float kSky = 100000.0;   // a sky sample's point: this far along its direction
 
 struct Sample { vec3 x2; vec3 n2; vec3 L; };
@@ -150,7 +154,7 @@ void main() {
 	const vec4 albedo = imageLoad(albedoIn, pixel);
 	const float t1 = lt.a;
 	if (!(t1 > 0.0)) {   // no first surface (the sky, the game's frame): the path as it was, no reservoir
-		imageStore(result, pixel, vec4(rest / (Demodulate() ? max(albedo.rgb, vec3(0.02)) : vec3(1.0)), 1.0));
+		imageStore(result, pixel, vec4(Ceil(rest / (Demodulate() ? max(albedo.rgb, vec3(0.02)) : vec3(1.0))), 1.0));
 		imageStore(curA, pixel, vec4(0.0));
 		imageStore(curB, pixel, vec4(0.0));
 		imageStore(curC, pixel, vec4(0.0));
@@ -228,7 +232,7 @@ void main() {
 	const float metal = clamp(albedo.a - 1.0, 0.0, 1.0);
 	const vec3 diffuse = share > 0.0 ? colour * ((1.0 - metal) * (vec3(1.0) - mix(vec3(0.04), colour, metal))) : colour;   // (no glossy lobe: PTSpecular 0, Lambert)
 	const vec3 indirect = diffuse * (c / 3.14159265) * sel.L * W;
-	imageStore(result, pixel, vec4((rest + indirect) / (Demodulate() ? colour : vec3(1.0)), 1.0));
+	imageStore(result, pixel, vec4(Ceil((rest + indirect) / (Demodulate() ? colour : vec3(1.0))), 1.0));
 
 	imageStore(curA, pixel, vec4(sel.x2.xy, 0.0, 0.0));
 	imageStore(curB, pixel, vec4(sel.x2.z, rgiPackNormalM(sel.n2, M), 0.0, 0.0));

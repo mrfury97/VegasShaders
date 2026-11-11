@@ -5,6 +5,7 @@
 #include "DisplaceHeight.h"	// UNOFFICIAL 2026-11-01 SameHeight
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-24 (NVR DXVK phase 2)
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
+#include <atomic>
 #include "ShaderWarmUp.h"
 #include "PointShadowForward.h"
 #include "ManyLamps.h"	// UNOFFICIAL 2026-10-27 ManyLampsOnePass
@@ -108,6 +109,38 @@ bool ShaderProgram::CheckPreprocessResult(const char* CachedPath, ID3DXBuffer* S
 	if (!File.is_open()) return false;
 	const std::string Cached((std::istreambuf_iterator<char>(File)), std::istreambuf_iterator<char>());
 	return !Cached.empty() && Cached == PortableSource(Source);
+}
+
+// UNOFFICIAL 2026-11-10 shipped shader cache (players: "shader compiling takes 5 minutes"). Releases 1.0.2-1.0.7 shipped no cache, so the
+// first start after every update compiled every shader (about 30 s on 12 threads, minutes on 4), and so did every start after a setting that
+// changes the shaders was flipped and flipped back (one cache file per shader name). A release can now carry a second, read-only cache made
+// with its default settings next to the live one: <Shaders or Effects>\CacheShipped\, the same layout as ...\Cache\. When the live entry
+// is stale or missing and the shipped one was made from exactly this preprocessed source (the same text compare as the live cache: nothing
+// is trusted by name or date), its two files are copied over the live entry and it loads as a cache hit. A separate folder because a mod
+// manager's overwrite layer (MO2) keeps the player's old live cache on top of anything a release puts in ...\Cache\. No such folder (or
+// renamed): nothing changes. Called from the compile worker threads too: each shader has its own files.
+static std::atomic<long> gShippedSeeds{ 0 };
+long ShaderProgram::ShippedSeeds() { return gShippedSeeds.load(); }
+bool ShaderProgram::SeedFromShipped(const char* PreprocessedPath, const char* CompiledPath, const std::string& Text) {
+	auto shipped = [](const char* path) {
+		std::string s = path;
+		const size_t at = s.rfind("\\Cache\\");	// the last one (no cache sub-folder is called Cache; the game path above may hold one)
+		if (at == std::string::npos) return std::string();
+		s.replace(at, 7, "\\CacheShipped\\");
+		return s;
+	};
+	const std::string pre = shipped(PreprocessedPath), bin = shipped(CompiledPath);
+	if (pre.empty() || bin.empty() || Text.empty()) return false;
+	std::ifstream file(pre, std::ios::in | std::ios::binary);
+	if (!file.is_open()) return false;
+	const std::string cached((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	file.close();
+	if (cached != Text) return false;
+	// the compiled file first: a copy that fails half way leaves the live source text stale, so the shader compiles as before
+	if (!CopyFileA(bin.c_str(), CompiledPath, FALSE) || !CopyFileA(pre.c_str(), PreprocessedPath, FALSE)) return false;
+	SetFileAttributesA(CompiledPath, FILE_ATTRIBUTE_NORMAL); SetFileAttributesA(PreprocessedPath, FILE_ATTRIBUTE_NORMAL);
+	gShippedSeeds++;
+	return true;
 }
 
 // UNOFFICIAL: the preprocessed source as it is cached and compared. D3DX writes the full path of the top file into its
@@ -495,7 +528,8 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 		logCompilerMessages(messages, Name);
 	}
 	else {
-		const bool recompile = precompiled ? false : !CheckPreprocessResult(preprocessedPath.c_str(), source);
+		bool recompile = precompiled ? false : !CheckPreprocessResult(preprocessedPath.c_str(), source);
+		if (recompile && SeedFromShipped(preprocessedPath.c_str(), binaryPath.c_str(), PortableSource(source))) recompile = false;	// UNOFFICIAL 2026-11-10
 
 		if (strstr(Name, ".vso")) profile = "vs_3_0";
 		else if (strstr(Name, ".pso")) profile = "ps_3_0";

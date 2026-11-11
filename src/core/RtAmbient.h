@@ -54,6 +54,8 @@ namespace RtAmbient {
 		int		AOAlpha = 1;			// (2026-10-30) alpha-tested meshes for the AO rays: 0 left out, 1 solid (no test), 2 alpha-tested
 		int		DenoiseKernel = 3;		// (2026-10-30) RtDenoise's a-trous kernel for both denoisers: 3 (9 taps) or 5 (25 taps)
 		int		GIInterleave = 1;		// 1, 2 or 4 (2026-10-29): the GI rays in every / every 2nd / every 4th 8 x 8 tile a frame			// 1, 2 or 4 (2026-10-29): trace every, every 2nd or every 4th texel a frame (cost / 1, 2, 4)
+		float	GIStrengthNight = -1.0f, GISkyNight = -1.0f;	// UNOFFICIAL 2026-11-10 (tester request): outdoors at night, GIStrength / GISky use these instead (blended over dusk and dawn); below 0 = the same as by day
+		float	GISky = 0.0f;			// [0-1] UNOFFICIAL 2026-11-10 (gisky) outdoors, a bounce ray that misses brings back the ambient (sky) light x this; 0 = misses bring nothing (as before)
 		float	GIAmbient = 0.0f;		// [0-1] the ambient's share in what lights a hit (0: sun and lamps only; the game's ambient is already its indirect light)
 		float	GlowGI = 0.0f;			// [0-4] (2026-10-30) glow-mapped surfaces (neon, lit windows, screens) light the bounce: their colour x this; 0 = off
 		float	GlowDirect = 0.0f;		// [0-8] (2026-10-30) glow-mapped instances as sphere lights on the bounce light (one picked per texel, a
@@ -101,8 +103,12 @@ namespace RtAmbient {
 		// UNOFFICIAL 2026-11-09 (rt-review) on by default (a missing key: on); RtAOInput.frag. A normals texel that is not a unit normal (an
 		// undrawn or cleared buffer) gets no rays instead of a made-up normal that flips on the view plane X + Y + Z = 0. Off: as before.
 		bool	NormalGuard = true;
+		// UNOFFICIAL 2026-11-10 LegacyTilt (RtAOInput.frag; 0 = off): the rays' normal bent toward the one direction the blank-normals bug
+		// gave every pixel: its much darker AO / sky light / bounce as a look, without the wedge.
+		float	LegacyTilt = 0.0f;
 	};
 	inline Settings Current;
+	inline bool InteriorNow = false;	// UNOFFICIAL 2026-11-10: set by AmbientOcclusion's RT pass each frame; UpdateSettings applies the <Key>Interior values while true
 
 	inline void UpdateSettings() {
 		const char* s = "Shaders.AmbientOcclusion.RT";
@@ -123,6 +129,7 @@ namespace RtAmbient {
 		Current.GIDistance = std::clamp(TheSettingManager->GetSettingF(s, "GIDistance"), 100.0f, 8000.0f);
 		Current.GIStrength = std::clamp(TheSettingManager->GetSettingF(s, "GIStrength"), 0.0f, 20.0f);	// UNOFFICIAL 2026-11-09: 20 (was 4); the menu clamps to the same [0-20] its description gives
 		Current.GIAmbient = std::clamp(TheSettingManager->GetSettingF(s, "GIAmbient"), 0.0f, 1.0f);
+		Current.GISky = std::clamp(TheSettingManager->GetSettingF(s, "GISky"), 0.0f, 1.0f);	// (0-1: 4 x GIStrength 4 blew the ground out white)	// UNOFFICIAL 2026-11-10 (gisky)
 		Current.GIOffscreen = std::clamp(TheSettingManager->GetSettingF(s, "GIOffscreen"), 0.0f, 1.0f);
 		Current.GIScreenLight = TheSettingManager->GetSettingI(s, "GIScreenLight") != 0;	// UNOFFICIAL 2026-11-03 (rtgi-cal)
 		Current.GIGameLamps = TheSettingManager->GetSettingI(s, "GIGameLamps") != 0;	// UNOFFICIAL 2026-11-03 (rtspec)
@@ -154,6 +161,24 @@ namespace RtAmbient {
 			Current.GIDenoiseAntiLag = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseAntiLag") ? std::clamp(node.FloatValue, 0.0f, 16.0f) : 3.0f;
 			Current.SampleLockFix = !TheSettingManager->Config.FillNode(&node, s, "SampleLockFix") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rtgi-lock)
 			Current.NormalGuard = !TheSettingManager->Config.FillNode(&node, s, "NormalGuard") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rt-review)
+			Current.GIStrengthNight = TheSettingManager->Config.FillNode(&node, s, "GIStrengthNight") ? std::clamp(node.FloatValue, -1.0f, 20.0f) : -1.0f;	// UNOFFICIAL 2026-11-10
+			Current.GISkyNight = TheSettingManager->Config.FillNode(&node, s, "GISkyNight") ? std::clamp(node.FloatValue, -1.0f, 1.0f) : -1.0f;
+			Current.LegacyTilt = TheSettingManager->Config.FillNode(&node, s, "LegacyTilt") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;	// UNOFFICIAL 2026-11-10
+			// UNOFFICIAL 2026-11-10 (tester request: interiors and exteriors balanced apart): indoors, a <Key>Interior value of 0 or more replaces
+			// the key's own (below 0 or a missing key: the same value everywhere, as before). AmbientOcclusion's RT pass calls this when the
+			// player goes in or out (InteriorNow).
+			if (InteriorNow) {
+				auto indoors = [&](const char* key, float& value, float lo, float hi) {
+					if (TheSettingManager->Config.FillNode(&node, s, key) && node.FloatValue >= 0.0f) value = std::clamp(node.FloatValue, lo, hi);
+				};
+				indoors("GIStrengthInterior", Current.GIStrength, 0.0f, 20.0f);
+				indoors("GIAmbientInterior", Current.GIAmbient, 0.0f, 1.0f);
+				indoors("GIClampInterior", Current.GIClamp, 0.05f, 4.0f);
+				indoors("GIDistanceInterior", Current.GIDistance, 100.0f, 8000.0f);
+				indoors("GlowGIInterior", Current.GlowGI, 0.0f, 4.0f);
+				indoors("GlowDirectInterior", Current.GlowDirect, 0.0f, 8.0f);
+				indoors("LegacyTiltInterior", Current.LegacyTilt, 0.0f, 1.0f);
+			}
 		}
 	}
 
@@ -167,7 +192,7 @@ namespace RtAmbient {
 		D3DXVECTOR4	ao;				// x distance, y rays (0 none), z 1 = move the noise each frame
 		D3DXVECTOR4	sky;			// x distance, y rays (0 none)
 		// UNOFFICIAL 2026-10-29 (rt-ao-gi) one-bounce GI (all linear rgb; 0 rays = no GI rays)
-		D3DXVECTOR4	gi;				// x distance, y rays (0 or 1), z the lamps given, w GIAmbient
+		D3DXVECTOR4	gi;				// x distance, y rays (0 or 1 + GISky outdoors: the shader tests > 0.5), z the lamps given, w GIAmbient
 		D3DXVECTOR4	sunDir;			// xyz toward the sun (scene = world axes), w 1 = the sun lights (exteriors, above the horizon)
 		D3DXVECTOR4	sunColor;		// rgb the sun's light on a surface facing it
 		D3DXVECTOR4	ambient;		// rgb the ambient (sky) light, the upper hemisphere's; w GlowGI (2026-10-30)

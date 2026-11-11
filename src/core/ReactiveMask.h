@@ -34,6 +34,10 @@ namespace ReactiveMask {
 	inline UINT Width = 0, Height = 0;
 	inline D3DFORMAT Format = D3DFMT_UNKNOWN;
 	inline UInt32 OpaqueFrame = 0;		// FrameNumber the opaque copy was made in
+	// UNOFFICIAL 2026-11-10 (core/RtBlendedLayer.h): another reader of the two copies. WantCopies: make Opaque and Final also with ReactiveMask 0
+	// (the mask itself is then not drawn); CopiesFrame: the frame both copies were last made in.
+	inline bool WantCopies = false;
+	inline UInt32 CopiesFrame = 0;
 	inline UInt32 ReadyFrame = 0;		// FrameNumber the mask was made in
 	inline bool Failed = false;
 	inline UInt32 StatFrames = 0, StatMade = 0, StatCounted = 0;
@@ -104,7 +108,7 @@ namespace ReactiveMask {
 
 	// GrassFirst::MainListHook, after the game's main list (and LinearScene's re-encode), world context only. True = copied.
 	inline bool NoteOpaque(IDirect3DDevice9* d) {
-		if (Failed || !(Scale() > 0.0f) || OpaqueFrame == FrameNumber()) return false;
+		if (Failed || !(Scale() > 0.0f || WantCopies) || OpaqueFrame == FrameNumber()) return false;
 		D3DSURFACE_DESC t = {};
 		IDirect3DSurface9* rt0 = MainTarget(d, t);
 		if (!rt0) return false;
@@ -117,11 +121,20 @@ namespace ReactiveMask {
 	// RenderWorldSceneGraphHook, after the world scene and its depth resolve (before any NVR effect, the weapon and a v2 upscale).
 	inline void Build(IDirect3DDevice9* d) {
 		const float scale = Scale();
+		if (!Failed && !(scale > 0.0f) && WantCopies && OpaqueFrame == FrameNumber() && CopiesFrame != FrameNumber()) {	// (2026-11-10) the copies alone
+			D3DSURFACE_DESC ct = {};
+			if (IDirect3DSurface9* crt = MainTarget(d, ct)) {
+				if (Ensure(d, ct) && SUCCEEDED(d->StretchRect(crt, NULL, FinalSurface, NULL, D3DTEXF_NONE))) CopiesFrame = FrameNumber();
+				crt->Release();
+			}
+			return;
+		}
 		if (Failed || !(scale > 0.0f) || OpaqueFrame != FrameNumber() || ReadyFrame == FrameNumber()) return;
 		D3DSURFACE_DESC t = {};
 		IDirect3DSurface9* rt0 = MainTarget(d, t);
 		if (!rt0) return;
 		if (!Ensure(d, t) || !Compile(d) || FAILED(d->StretchRect(rt0, NULL, FinalSurface, NULL, D3DTEXF_NONE))) { rt0->Release(); return; }
+		CopiesFrame = FrameNumber();
 		const bool count = GpuTimer::Enabled && (Query || SUCCEEDED(d->CreateQuery(D3DQUERYTYPE_OCCLUSION, &Query)));
 
 		NiDX9RenderState* state = TheRenderManager->renderState;

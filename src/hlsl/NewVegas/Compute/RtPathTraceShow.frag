@@ -33,6 +33,7 @@ layout(push_constant) uniform Push {
     float detail;        // 32: (2026-11-07) PTDetail: how much of the game's own fine shading the traced light takes (0 off, 1 all)
     float detailRadius;  // 36: its local average's reach (pixels)
     vec2 texel;          // 40: 1 / the target's size
+    float detailEdge;    // 48: (2026-11-10) PTDetailEdge: the detail fades out where the game's shading steps by about this factor (0 off)
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -69,17 +70,25 @@ void main() {
         const float z0 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
         if (a0.a >= 0.5 && z0 > 0.0 && z0 < 0.9999) {
             const float s0 = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(a0.rgb), 0.02);
-            float sum = 0.0, n = 0.0;
+            float sum = 0.0, n = 0.0, lo = s0, hi = s0;
             for (int k = 0; k < 4; k++) {
                 const vec2 o = (k == 0 ? vec2(1.0, 0.0) : k == 1 ? vec2(-1.0, 0.0) : k == 2 ? vec2(0.0, 1.0) : vec2(0.0, -1.0)) * pc.detailRadius * pc.texel;
                 const vec2 tt = tuv + o;
                 const vec4 at = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0);
                 const float zt = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).r;
                 if (at.a < 0.5 || abs(zt - z0) > 0.03 * z0) continue;
-                sum += luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(at.rgb), 0.02);
+                const float st = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(at.rgb), 0.02);
+                sum += st; lo = min(lo, st); hi = max(hi, st);
                 n += 1.0;
             }
-            if (n > 0.5 && s0 > 0.0 && sum > 0.0) c *= mix(1.0, clamp(s0 / (sum / n), 0.5, 2.0), clamp(pc.detail, 0.0, 1.0));
+            // (2026-11-10 PTDetailEdge; seen on an RTX-class card in the lamp test room: thin dark and light lines over people's faces and
+            // clothes, gone with PTDetail 0) the game's frame also holds the game's own LAMP AND SUN SHADOWS, and where one of their
+            // edges runs between this pixel and its taps the ratio below is that shadow step, clamped to 0.5 / 2: the old shadow's
+            // outline stamped onto the traced light, which has its own shadows elsewhere. Fine detail (a normal map's bumps, cracks)
+            // differs by tens of percent between the five samples; a shadow edge by a factor of several. Where the samples' largest
+            // over their smallest passes PTDetailEdge the detail fades out (gone at 1.25 x it).
+            const float edge = pc.detailEdge > 0.0 ? 1.0 - smoothstep(0.75 * pc.detailEdge, 1.25 * pc.detailEdge, hi / max(lo, 1.0e-4)) : 1.0;
+            if (n > 0.5 && s0 > 0.0 && sum > 0.0) c *= mix(1.0, clamp(s0 / (sum / n), 0.5, 2.0), clamp(pc.detail, 0.0, 1.0) * edge);
         }
     }
     c = (pc.modulate & 2u) != 0u ? max(c, vec3(0.0)) : clamp(c, 0.0, 1.0);

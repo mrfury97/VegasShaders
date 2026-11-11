@@ -32,9 +32,9 @@ float4 FL_Fwd      : register(c4);	// xyz forward, w 1 = the frame is linear now
 float4 FL_Pos      : register(c5);	// xyz the light, camera-relative, w its reach (game units)
 float4 FL_Dir      : register(c6);	// xyz the beam's axis (unit), w cos of the cone's outer edge
 float4 FL_Color    : register(c7);	// rgb the light (linear, times dimmer and Intensity), w cos of the full-strength edge
-float4 FL_Gamma    : register(c8);	// z the gamma (copy path), w 1 / the gamma
+float4 FL_Gamma    : register(c8);	// z the gamma (copy path), w 1 / the gamma; UNOFFICIAL 2026-11-11 x HotspotLimit (0 off), y 1 = SoftEdges
 float4 FL_Shadow   : register(c9);	// x 1 = the shadow map is there, y its texel size (0-1), z the depth bias (share of the reach), w PCF radius (texels)
-float4 FL_Look     : register(c10);	// x cookie strength (0 none), y DebugView (0 off, 1 the light alone, 2 the shadow, 3 the normal), z Falloff (0: the lamps' 1 - d^2 / r^2)
+float4 FL_Look     : register(c10);	// x cookie strength (0 none), y DebugView (0 off, 1 the light alone, 2 the shadow, 3 the normal), z Falloff (0: the lamps' 1 - d^2 / r^2), w NearFade (units, 0 off; UNOFFICIAL 2026-11-11)
 row_major float4x4 FL_LightViewProj : register(c11);	// c11-c14: camera-relative world -> the shadow map's clip space
 
 sampler2D FL_Frame    : register(s0);	// the frame's copy (only when it is not linear)
@@ -114,7 +114,10 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     const float reachShare2 = dot(toLight, toLight) / (FL_Pos.w * FL_Pos.w);
     const float window = saturate(1.0f - reachShare2);
     const float falloff = FL_Look.z > 0.0f ? window * window / (1.0f + FL_Look.z * reachShare2) : vanillaAtt(toLight, FL_Pos.w);
-    const float att = falloff * cone * cone;
+    // UNOFFICIAL 2026-11-11 NearFade (the old flashlight's formula): ramps the pool down point blank so a wall a foot away does not clip
+    // to white; 0 = 1, today's light
+    const float nearFade = FL_Look.w > 0.0f ? smoothstep(0.0f, FL_Look.w, dist) : 1.0f;
+    const float att = falloff * cone * cone * nearFade;
 
     float2 mapUV;
     const float shadow = FLShadow(position, dist / FL_Pos.w, mapUV);
@@ -125,7 +128,24 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     const float roughness = m.b >= 0.0f ? m.b : 0.7f;
     const float metal = saturate((m.r - floor(m.r)) / 0.49f);
     SetDiffuseEnergyKeep(N, -ray, roughness);
-    float3 light = getPointLightLightingAtt(toLight, att, FL_Color.rgb, -ray, N, tex2Dlod(FL_Albedo, uv4).rgb, roughness, metal) * (shadow * cookie * keep);
+    const float3 albedo = tex2Dlod(FL_Albedo, uv4).rgb;
+    float3 lit = getPointLightLightingAtt(toLight, att, FL_Color.rgb, -ray, N, albedo, roughness, metal);
+    // UNOFFICIAL 2026-11-11 SoftEdges (the old flashlight's wrap: 0.75 x ((N.L + 1) / 2)^2 for the clamped N.L, the same mean light over
+    // all normals, less speckle where the normals scatter): the diffuse's plain Lambert part (PBRDiffuse's: (1 - metal) x colour x N.L x
+    // light) swapped for the wrap; the highlight as it is. Off: nothing changes.
+    [branch] if (FL_Gamma.y > 0.5f) {
+        const float ndl = dot(N, toLight / max(dist, 1.0e-3f));
+        const float wrap = saturate(ndl * 0.5f + 0.5f);
+        const float3 graded = lerp(luma(albedo), albedo, TESR_PBRExtraData.x);
+        lit = max(lit + LampAtt(att) * (1.0f - metal) * graded * FL_Color.rgb * LIN_SCALE_LIGHT * (0.75f * wrap * wrap - saturate(ndl)), 0.0f);
+    }
+    float3 light = lit * (shadow * cookie * keep);
+    // UNOFFICIAL 2026-11-11 HotspotLimit (the old flashlight's Reinhard-style roll-off on the added light only): the pool's centre stops
+    // short of clipping without dimming the falloff round it; 0 off
+    [branch] if (FL_Gamma.x > 0.0f) {
+        const float limit = 1.0f / FL_Gamma.x;
+        light *= limit / max(limit, luma(light));
+    }
 
     [branch] if (FL_Look.y > 0.5f) {	// the debug views, written over the frame (blend off: FlashlightDeferred::Apply)
         const float3 dbg = FL_Look.y < 1.5f ? light : FL_Look.y < 2.5f ? shadow.xxx : N * 0.5f + 0.5f;
