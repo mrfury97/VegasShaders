@@ -66,6 +66,24 @@ void AmbientLightEffect::UpdateSettings() {
 		minReachTexels = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "MinReachTexels") ? (std::max)(0.0f, (std::min)(node.FloatValue, 8.0f)) : 0.75f;
 	}
 	albedoBuffer = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
+	gridBounceKey = gridBounce;
+	{	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI, the one switch (missing key: off): in memory, outdoors only (indoors every key is the user's own).
+		// Forced here: ExteriorBalance on, AmbientReplace (the key if above 0, else 0.8), AlbedoBuffer (this effect's key), the Status switch. The grid
+		// fallback (GridBounce) depends on the RT core and is SunGIFrame's. The strength / quality keys are not touched.
+		SettingManager::Configuration::ConfigNode node;
+		sunGi = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
+		const bool status = TheSettingManager->GetSettingI("Shaders.AmbientLight.Status", "Enabled") != 0;
+		const bool wasForced = sunGiForced;
+		sunGiForced = sunGi && !status;
+		// the runtime Enabled flag follows a live change of the key (load and revert: SettingManager::GetMenuShaderEnabled)
+		if (IsLoaded()) { if (sunGi && !Enabled) Enabled = true; else if (!sunGi && wasForced) Enabled = false; }
+		settingsOutdoors = TheShaderManager->GameState.isExterior;
+		const bool on = sunGi && settingsOutdoors;
+		CapturedNormals::SunGIWantsAlbedo = on;
+		ambientReplaceKey = ambientReplace;
+		ambientReplaceSunGI = ambientReplaceKey > 0.0f ? ambientReplaceKey : 0.8f;
+		if (on) { exteriorBalance = true; albedoBuffer = true; ambientReplace = ambientReplaceSunGI; }
+	}
 	{	// UNOFFICIAL 2026-11-10 AlbedoFallbackCap (AmbientLight.fx.hlsl FallbackCap; missing key, an older toml: 0.12)
 		SettingManager::Configuration::ConfigNode node;
 		albedoFallbackCap = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AlbedoFallbackCap") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.12f;
@@ -184,6 +202,7 @@ void AmbientLightEffect::EnsureGridBuffers() {
 bool AmbientLightEffect::WantsGridSunMap(const D3DXVECTOR3& sunDir) {
 	gridSunFresh = false;
 	gridSunActive = false;
+	SunGIFrame();	// UNOFFICIAL 2026-11-12 (sungi p4): the grid fallback's GridBounce is set before the sun map is asked for
 	if (!Enabled || !Effect || gridBounce <= 0.0f || sunDir.z < 0.03f || TheShaderManager->GameState.isUnderwater) return false;
 	EnsureGridBuffers();
 	if (!gridSunSurface || !gridSunDepth || !gridWaveSurface[0] || !gridWaveSurface[1] || !gridAccumSurface[0] || !gridAccumSurface[1] || !gridGeometrySurface) return false;
@@ -522,8 +541,42 @@ void AmbientLightEffect::RenderGrid(IDirect3DDevice9* Device, bool sun, bool scr
 	}
 }
 
+// UNOFFICIAL 2026-11-12 (sungi p4) SunGI, once a frame (RtWants, WantsGridSunMap, Render): follows the player in and out (RtAmbient::InteriorNow, then every
+// setting re-read: the overrides are outdoors only) and applies what depends on the RT core running. With RT GI: AmbientReplace as forced, GridBounce the
+// user's own (the two bounces must not stack). Without it (native D3D9, stock DXVK, no ray-tracing GPU, NvrDxvkPasses off): no AmbientReplace (it needs the
+// RT GI), ExteriorBalance on, and the light grid supplies the sun bounce: GridBounce = the key if above 0, else 1.0. One log line per change of state.
+void AmbientLightEffect::SunGIFrame() {
+	const bool outdoors = TheShaderManager->GameState.isExterior;
+	if (sunGi && (RtAmbient::InteriorNow == outdoors || settingsOutdoors != outdoors)) {
+		RtAmbient::InteriorNow = !outdoors;
+		UpdateSettings();
+	}
+	const bool on = sunGi && outdoors;
+	const bool rt = RtAmbient::SunGIRtRunning();
+	if (sunGi) {
+		gridBounce = on && !rt ? (gridBounceKey > 0.0f ? gridBounceKey : 1.0f) : gridBounceKey;
+		ambientReplace = on ? (rt ? ambientReplaceSunGI : 0.0f) : ambientReplaceKey;
+	}
+	const int state = !sunGi ? 0 : !outdoors ? 1 : rt ? 2 : 3;
+	if (state == sunGiState) return;
+	sunGiState = state;
+	if (state == 0) Logger::Log("UNOFFICIAL SunGI: off (the settings are the toml's own).");
+	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced ? "; AmbientLight does not render there, its Status is off" : "");
+	else if (state == 2) Logger::Log("UNOFFICIAL SunGI: on, outdoors, ray-traced path running. Forced in memory: RT AO + GI + Sky + RadianceCache + CacheExteriors on, ExteriorBalance on, "
+		"AmbientReplace %.2f, AlbedoBuffer (AmbientLight key) on%s; GridBounce stays %.2f (the RT bounce is the sun bounce); GI denoiser %s.", ambientReplace,
+		sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce, RtAmbient::Current.GIDenoiseSunGI ? "SunGI settings (GIDenoiseSunGI)" : "as before (GIDenoiseSunGI off)");
+	else Logger::Log("UNOFFICIAL SunGI: on, outdoors, FALLBACK: the RT core is not running (native D3D9, stock DXVK, no ray-tracing GPU, or NvrDxvkPasses off). Forced in memory: "
+		"ExteriorBalance on, AlbedoBuffer on%s; no AmbientReplace (it needs the RT GI); the light grid is the sun bounce: GridBounce %.2f.", sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce);
+	static bool albedoNoted = false;
+	if (on && !albedoNoted && !CapturedNormals::AlbedoCompiledIn()) {
+		albedoNoted = true;
+		Logger::Log("UNOFFICIAL SunGI: [Main.Main.Quality] AlbedoBuffer is off (a restart key: the template writes the target only if it is on at start): the bounce uses the guessed surface colour until a restart with it on.");
+	}
+}
+
 bool AmbientLightEffect::ShouldRender() {
 	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
+	if (sunGiForced && !TheShaderManager->GameState.isExterior) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
 
@@ -967,6 +1020,7 @@ bool AmbientLightEffect::GIActive() {
 void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 	IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 	IDirect3DSurface9* SourceBuffer) {
+	SunGIFrame();	// UNOFFICIAL 2026-11-12 (sungi p4)
 	if (!ShouldRender()) { EffectStatus::Note(StatusSlot, Name, EffectStatus::ShouldRenderFalse); renderTime = 0; historyValid = false; return; }
 	EnsureBuffers();
 	// UNOFFICIAL 2026-10-18 (ambfix): the scene's own light (the cell's ambient and directional colours indoors, the sky's ambient and

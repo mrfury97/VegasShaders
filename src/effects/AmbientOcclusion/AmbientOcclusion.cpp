@@ -9,6 +9,7 @@
 #include "../../core/ManyLamps.h"
 #include "../PBR/PBR.h"	// UNOFFICIAL 2026-11-04 (rtgap) the game's light scale	// UNOFFICIAL 2026-11-03 (rtspec) GIGameLamps: the game's lamp table
 #include "../../core/RtCore.h"
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 (sungi p4) the GI denoiser's guide: AlbedoTexture
 #include "../../core/RtDenoise.h"	// (2026-10-29) the shared RT denoiser	// (the RT core: AddUser / CopyIn / AddPass / CopyOut)	// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT temporal pass is skipped)
 #include "../../core/PixelInspector.h"	// UNOFFICIAL 2026-11-09 RtInspect
@@ -465,6 +466,7 @@ namespace {
 
 	bool RtWants() {
 		AmbientOcclusionEffect* ao = TheShaderManager->Effects.AmbientOcclusion;
+		if (AmbientLightEffect* sunGiAl = TheShaderManager->Effects.AmbientLight) sunGiAl->SunGIFrame();	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI follows the player in and out before Current.Enabled is read
 		// (2026-11-03) rect frames too (RenderScale < 1: RtRecord traces the rect; docs/next/RT-RENDERSCALE.md)
 		return RtAmbient::Current.Enabled && RtAmbient::PassesWanted() && ao && ao->Effect;
 	}
@@ -694,6 +696,27 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 	s.MovingHistory = RtAmbient::Current.GIMovingHistory;	// (2026-10-31, rt-ao-sky) with DenoiseBackbone only
 	s.Kernel = RtAmbient::Current.DenoiseKernel;	// (2026-10-30) 3 by default: ~2.5x cheaper (rt-sun 1f5d987e)
 	s.AntiLag = RtAmbient::Current.GIDenoiseAntiLag;	// UNOFFICIAL 2026-11-08 (rtgi-ghost): the path tracer's anti-lag (0 = off, as before)
+	// UNOFFICIAL 2026-11-12 (sungi p4, STUDY F7 / phase 4) SunGI outdoors ([Shaders.AmbientOcclusion.RT] GIDenoiseSunGI, default true; off = the settings above
+	// only): the denoiser is the GI's one history, so (1) HistoryClamp 1.5: the history is clipped to the new frame's 3 x 3 mean +- 1.5 deviations (a moved
+	// light or a turn no longer leaves the old bounce behind); (2) Guide / GuideAlbedo / GuideSigma 0.5 as the path tracer's PTDenoiseGuide: the a-trous passes
+	// stop at the game's own shading edges (the lit frame / the albedo buffer, read by uv, so the half-size signal is fine), when the albedo buffer holds
+	// this frame's and the frame is not a RenderScale rect frame; (3) ObjectMotion where [Main.Main.Quality] ObjectMotion is on (a walking NPC's history follows
+	// him; MovingHistory above then applies); (4) Kernel 5, Iterations 3: outdoor GI is low frequency and the 3 x 3 kernel left the noise. AntiLag and
+	// MovingHistory stay as configured.
+	if (RtAmbient::SunGIOutdoors() && RtAmbient::Current.GIDenoiseSunGI) {
+		s.HistoryClamp = 1.5f;
+		s.Kernel = 5;
+		s.Iterations = 3;
+		s.ObjectMotion = TheSettingManager->GetSettingI("Main.Main.Quality", "ObjectMotion") != 0;
+		IDirect3DTexture9* lit = TheTextureManager->RenderedTexture;
+		if (lit && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture && RtRectScaleX() == 1.0f && RtRectScaleY() == 1.0f) {
+			s.Guide = lit;
+			s.GuideAlbedo = CapturedNormals::AlbedoTexture;
+			s.GuideSigma = 0.5f;
+		}
+		static bool sunGiLogged = false;
+		if (!sunGiLogged) { sunGiLogged = true; Logger::Log("UNOFFICIAL SunGI: the GI denoiser runs with HistoryClamp 1.5, kernel 5 x 3 passes%s%s (GIDenoiseSunGI).", s.Guide ? ", guided by the lit frame + albedo buffer (sigma 0.5)" : ", unguided (no albedo buffer this frame)", s.ObjectMotion ? ", object motion" : ""); }
+	}
 	result = RtDenoise::Run(denoiser, Device, gi, rtDenoisedGISurface, s);
 	static bool logged = false;
 	if (result && !logged) { logged = true; Logger::Log("UNOFFICIAL RT AO: the GI bounce light goes through the shared RT denoiser (RGB, half resolution)."); }

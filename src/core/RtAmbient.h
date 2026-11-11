@@ -120,6 +120,13 @@ namespace RtAmbient {
 		// UNOFFICIAL 2026-11-10 LegacyTilt (RtAOInput.frag; 0 = off): the rays' normal bent toward the one direction the blank-normals bug
 		// gave every pixel: its much darker AO / sky light / bounce as a look, without the wedge.
 		float	LegacyTilt = 0.0f;
+		// UNOFFICIAL 2026-11-12 (sungi p4, SunGI-study STUDY.md F3 / F7) SunGI: [Shaders.AmbientLight.Main] SunGI, the one switch for the exterior sun
+		// bounce (missing key: off). UpdateSettings reads it here (in memory only, never the toml) and, while the player is outdoors (not InteriorNow), forces
+		// Enabled / GI / Sky / RadianceCache / CacheExteriors on: the user's strength / quality keys stay. AmbientLight forces its own side (ExteriorBalance,
+		// AmbientReplace, AlbedoBuffer, the Status switch, the grid fallback; AmbientLight.cpp SunGIFrame). GIDenoiseSunGI (default true; missing key: true):
+		// with SunGI the GI denoiser gets the sun-GI settings (AmbientOcclusion.cpp RtDenoisedGI); false = the old settings, for the A/B.
+		bool	SunGI = false;
+		bool	GIDenoiseSunGI = true;
 	};
 	inline Settings Current;
 	inline bool InteriorNow = false;	// UNOFFICIAL 2026-11-10: set by AmbientOcclusion's RT pass each frame; UpdateSettings applies the <Key>Interior values while true
@@ -199,6 +206,12 @@ namespace RtAmbient {
 				indoors("LegacyTiltInterior", Current.LegacyTilt, 0.0f, 1.0f);
 			}
 		}
+		{	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI: the one switch. Outdoors only: indoors every key is the user's own (SunGI changes no interior).
+			SettingManager::Configuration::ConfigNode node;
+			Current.SunGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
+			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
+			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
+		}
 	}
 
 	inline constexpr int GILampsMax = 8;
@@ -275,6 +288,9 @@ namespace RtAmbient {
 	// frames (phase 2: its consumers are Vulkan passes that are off there). (2026-11-04, phase 2: it is, over the same rect; AmbientLight's
 	// D3D9 GI path applies it there; AmbientOcclusion.cpp RtRecord.)
 	inline bool PassesWanted() { return TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available(); }
+	// UNOFFICIAL 2026-11-12 (sungi p4) the ray-traced path can run at all (the Ready() states 1 and 2 passed): false = SunGI's fallback (the light grid's bounce).
+	inline bool SunGIRtRunning() { return PassesWanted() && CoreReady(); }
+	inline bool SunGIOutdoors() { return Current.SunGI && !InteriorNow; }
 	inline bool Ready() {
 		static int reported = -1;
 		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : !CoreReady() ? 2 : 3;
