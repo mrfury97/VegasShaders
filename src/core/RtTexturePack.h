@@ -54,10 +54,13 @@ namespace RtTexturePack {
 	inline Caps AutoCaps(uint64_t memory) {
 		const uint64_t GB = 1ull << 30;
 		if (!memory) return { 1024u, 1536u, "unknown video memory: the 8 GB tier" };
-		if (memory >= 15 * GB) return { 2048u, 4096u, "16 GB+" };
-		if (memory >= 11 * GB) return { 2048u, 3072u, "12 GB+" };
-		if (memory >= 7 * GB) return { 1024u, 1536u, "8 GB+" };
-		return { 512u, 768u, "under 8 GB" };
+		// UNOFFICIAL 2026-11-13 (rt-tex-release) the budgets halved-ish: the helper's copies share the GPU with the game's own textures (a heavily
+		// modded game: 11.6 of 12.1 GB local in use with 3.7 GB of copies, 1 % lows of 1-9 fps). With the game-dropped sweep the working set is the
+		// loaded cells' textures (Mojave peaked at 1.4 GB), so 2.5 GB at 16 GB+ still holds it; the old values were 4096 / 3072 / 1536 / 768.
+		if (memory >= 15 * GB) return { 2048u, 2560u, "16 GB+" };
+		if (memory >= 11 * GB) return { 2048u, 2048u, "12 GB+" };
+		if (memory >= 7 * GB) return { 1024u, 1024u, "8 GB+" };
+		return { 512u, 512u, "under 8 GB" };
 	}
 
 	// What goes for one texture
