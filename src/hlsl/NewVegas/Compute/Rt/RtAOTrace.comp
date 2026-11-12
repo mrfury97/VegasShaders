@@ -942,7 +942,15 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
             float J = GIJacobian(s, xq, p);
             if (!(J > 0.1 && J < 10.0)) continue;
             float mk = min(b.x, max(cap * 0.5, 1.0)) * spread;
-            float w = GITarget(s, p, n) * W * mk * J;
+            float tg = GITarget(s, p, n);
+            // (2026-11-13 B3b) GISpatialVisibility 2 (reuse flag 64): the visibility ray now, for every neighbour that could give light here: a blocked
+            // sample then has no chance of being chosen (the winner-only test gives 0 for the frame when it is)
+            if (tg > 0.0 && (reuseFlags & 64) != 0) {
+                vec3 d = s.x2 - start;
+                float len = length(d);
+                if (!Visible(start, d / max(len, 1.0e-3), s.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) tg = 0.0;
+            }
+            float w = tg * W * mk * J;
             wSum += w;
             m += mk;
             if (w > 0.0 && Decide(texel, 257u + 31u * uint(k), frame, 0.4142136) * wSum < w) { sel = s; fromNeighbour = true; }
@@ -969,7 +977,7 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
     float W = m > 0.0 && target > 0.0 ? wSum / (m * target) : 0.0;
     vec3 toSample = sel.x2 - start;
     float len = length(toSample);
-    if (fromNeighbour && W > 0.0 && !Visible(start, toSample / max(len, 1.0e-3), sel.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) W = 0.0;
+    if (fromNeighbour && (reuseFlags & 64) == 0 && W > 0.0 && !Visible(start, toSample / max(len, 1.0e-3), sel.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) W = 0.0;
     if (isnan(W) || isinf(W)) W = 0.0;
     vec3 dsel = sel.x2 - p;
     float dl = length(dsel);

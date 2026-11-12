@@ -1052,7 +1052,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		cuts += changed ? 1 : 0;
 		if (++frames >= 600) { Logger::Log("UNOFFICIAL RT AO: GI reuse history cut %d times in the last 600 frames (the lamps or the sun changed by > 10 %%).", cuts); cuts = frames = 0; }
 		// UNOFFICIAL 2026-11-08 (rtgi-ghost) + 4096 x the reuse fixes' flags (RtAOTrace.comp ReuseGI: 1 GIReuseSpread, 2 GIReuseShuffle, 4 SampleLockFix 2026-11-09)
-		const int reuseFlags = (rt.GIReuseSpread ? 1 : 0) | (rt.GIReuseShuffle ? 2 : 0) | (rt.SampleLockFix ? 4 : 0) | (rt.GICandidates >= 2 ? 8 : 0) | (rt.GISamplePoints ? 16 : 0) | (rt.GISamplePoints && rt.GIValidate ? 32 : 0);	// (8: 2026-11-13 rtgi-review B1)
+		const int reuseFlags = (rt.GIReuseSpread ? 1 : 0) | (rt.GIReuseShuffle ? 2 : 0) | (rt.SampleLockFix ? 4 : 0) | (rt.GICandidates >= 2 ? 8 : 0) | (rt.GISamplePoints ? 16 : 0) | (rt.GISamplePoints && rt.GIValidate ? 32 : 0) | (rt.GISamplePoints && rt.GISpatialVisibility >= 2 ? 64 : 0);	// (8: 2026-11-13 rtgi-review B1)
 		{
 			static int loggedFlags = -1;
 			if (reuseFlags != loggedFlags) {

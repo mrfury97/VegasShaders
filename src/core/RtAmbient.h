@@ -135,6 +135,7 @@ namespace RtAmbient {
 		// (default true, with GISamplePoints): 1 texel in 8 a frame re-traces the ray to its kept sample point and drops the history when the geometry changed.
 		bool	GISamplePoints = false;
 		bool	GIValidate = true;
+		int		GISpatialVisibility = 1;	// (B3b) with GISamplePoints: 1 = one visibility ray for a winner taken from a neighbour, 2 = one for every neighbour before it is merged
 		bool	GIDenoiseGuideOnce = true;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) the GI denoiser's guide worked out once a texel (RtDenoise Settings.GuideOnce); false = per tap in every pass, as before
 		bool	GIHitMips = true;	// UNOFFICIAL 2026-11-13 (rtgi-review R19) the bounce hits' textures at the mip of the ray's footprint (0.5 x its length); false = mip 0 as before
 		int		GICandidates = 1;	// UNOFFICIAL 2026-11-13 (rtgi-review B1) [1-2] new bounce candidates a texel and frame (GIReuse > 0; RtAOTrace.comp ReuseGI, reuse flag 8)
@@ -232,6 +233,7 @@ namespace RtAmbient {
 			Current.GIDenoiseGuideOnce = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseGuideOnce") || node.BoolValue;
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;
+			Current.GISpatialVisibility = TheSettingManager->Config.FillNode(&node, s, "GISpatialVisibility") ? std::clamp((int)node.IntValue, 1, 2) : 1;
 			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
 			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
 			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each
