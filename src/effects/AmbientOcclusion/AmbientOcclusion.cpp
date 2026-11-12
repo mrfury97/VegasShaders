@@ -873,7 +873,12 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace (AmbientLight Apply removes the game's ambient share): the sky light must come from the GI, so a ray miss
 		// brings the full scene ambient (weight 1, already x LinearScales.y by GIAmbientUnits); GISky is ignored then.
 		const bool replaceSky = al && al->AmbientReplaceActive();
-		const float giSky = replaceSky ? 1.0f : !TheShaderManager->GameState.isExterior ? 0.0f : rt.GISkyNight < 0.0f ? rt.GISky : std::lerp(rt.GISkyNight, rt.GISky, TheShaderManager->GameState.transitionCurve);	// GISkyNight (2026-11-10): the night's own value
+		// UNOFFICIAL 2026-11-12 (sungi p5, user screenshot: blue grass/ground with SunGI and GIStrength 20) in replace mode the sky light of the misses
+		// REPLACES the game's ambient, so it must come back at x1: AmbientLight multiplies the whole GI by GIStrength (its day/night blend, as
+		// AmbientLight.cpp rtGIStrength), so the misses' weight is 1 / that strength (capped at 3.5: gi.y > 5 is SkyMissSH's flag). GIStrength then
+		// scales only the light bounced off surfaces. Before: the sky came back x GIStrength (x20: the shade turned sky blue).
+		const float giStrengthNow = TheShaderManager->GameState.isExterior && rt.GIStrengthNight >= 0.0f ? std::lerp(rt.GIStrengthNight, rt.GIStrength, TheShaderManager->GameState.transitionCurve) : rt.GIStrength;
+		const float giSky = replaceSky ? std::clamp(1.0f / (std::max)(giStrengthNow, 0.05f), 0.0f, 3.5f) : !TheShaderManager->GameState.isExterior ? 0.0f : rt.GISkyNight < 0.0f ? rt.GISky : std::lerp(rt.GISkyNight, rt.GISky, TheShaderManager->GameState.transitionCurve);	// GISkyNight (2026-11-10): the night's own value
 		c.gi = D3DXVECTOR4(rt.GIDistance, 1.0f + giSky, (float)RtGILamps(c), rt.GIAmbient);
 		c.gi2 = D3DXVECTOR4(rt.GIOffscreen, 0.05f, rt.GIClamp, (float)rt.Interleave);
 		// (GI v2) The game's lit frame, as it is now (the RT core's point: the world is drawn, NVR's effects are not yet), down to the
