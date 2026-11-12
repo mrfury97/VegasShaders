@@ -11,10 +11,17 @@
 #include "../../core/MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT estimate's blurs and history are skipped)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 AlbedoBuffer (TESR_AlbedoBuffer: the bounce's surface colour)
+#include "../PBR/PBR.h"	// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (LinearScales.y: the lit shaders' ambient scale)
 
 void AmbientLightEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_AmbientLightData", &Constants.Data);
 	TheShaderManager->RegisterConstant("TESR_AmbientLightData2", &Constants.Data2);
+}
+
+// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace (STUDY phase 2): outdoors the game's ambient is taken out of the pixel and the RT GI (with the sky light of its
+// ray misses) puts it back. Render also requires the RT GI to be on (the screen-space GI has no sky light).
+bool AmbientLightEffect::AmbientReplaceActive() const {
+	return ambientReplace > 0.0f && TheShaderManager->GameState.isExterior;
 }
 
 void AmbientLightEffect::UpdateSettings() {
@@ -38,6 +45,14 @@ void AmbientLightEffect::UpdateSettings() {
 	gridLamps = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "GridLamps"), 0.0f, 40.0f);	// (lightgrid2)
 	gridFine = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "GridFine") != 0;	// (lightgrid2)
 	interiorBalance = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "InteriorBalance") != 0;
+	{	// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance / GISingleHistory (missing key, an older toml: on)
+		SettingManager::Configuration::ConfigNode node;
+		exteriorBalance = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "ExteriorBalance") || node.BoolValue;
+		giSingleHistory = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GISingleHistory") || node.BoolValue;
+		// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace / AmbientFloor (missing key, an older toml: 0 / 0.15)
+		ambientReplace = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientReplace") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;
+		ambientFloor = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientFloor") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.15f;
+	}
 	interiorBounceShare = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "InteriorBounceShare"), 0.0f, 4.0f);
 	noEdgeOutline = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "NoEdgeOutline") != 0;	// UNOFFICIAL 2026-10-21 (aloutline)
 	{	// UNOFFICIAL 2026-11-01 EdgeReject (missing key, an older toml: on)
@@ -51,6 +66,24 @@ void AmbientLightEffect::UpdateSettings() {
 		minReachTexels = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "MinReachTexels") ? (std::max)(0.0f, (std::min)(node.FloatValue, 8.0f)) : 0.75f;
 	}
 	albedoBuffer = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
+	gridBounceKey = gridBounce;
+	{	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI, the one switch (missing key: off): in memory, outdoors only (indoors every key is the user's own).
+		// Forced here: ExteriorBalance on, AmbientReplace (the key if above 0, else 0.8), AlbedoBuffer (this effect's key), the Status switch. The grid
+		// fallback (GridBounce) depends on the RT core and is SunGIFrame's. The strength / quality keys are not touched.
+		SettingManager::Configuration::ConfigNode node;
+		sunGi = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
+		const bool status = TheSettingManager->GetSettingI("Shaders.AmbientLight.Status", "Enabled") != 0;
+		const bool wasForced = sunGiForced;
+		sunGiForced = sunGi && !status;
+		// the runtime Enabled flag follows a live change of the key (load and revert: SettingManager::GetMenuShaderEnabled)
+		if (IsLoaded()) { if (sunGi && !Enabled) Enabled = true; else if (!sunGi && wasForced) Enabled = false; }
+		settingsOutdoors = TheShaderManager->GameState.isExterior;
+		const bool on = sunGi && settingsOutdoors;
+		CapturedNormals::SunGIWantsAlbedo = on;
+		ambientReplaceKey = ambientReplace;
+		ambientReplaceSunGI = ambientReplaceKey > 0.0f ? ambientReplaceKey : 0.8f;
+		if (on) { exteriorBalance = true; albedoBuffer = true; ambientReplace = ambientReplaceSunGI; }
+	}
 	{	// UNOFFICIAL 2026-11-10 AlbedoFallbackCap (AmbientLight.fx.hlsl FallbackCap; missing key, an older toml: 0.12)
 		SettingManager::Configuration::ConfigNode node;
 		albedoFallbackCap = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AlbedoFallbackCap") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.12f;
@@ -169,6 +202,7 @@ void AmbientLightEffect::EnsureGridBuffers() {
 bool AmbientLightEffect::WantsGridSunMap(const D3DXVECTOR3& sunDir) {
 	gridSunFresh = false;
 	gridSunActive = false;
+	SunGIFrame();	// UNOFFICIAL 2026-11-12 (sungi p4): the grid fallback's GridBounce is set before the sun map is asked for
 	if (!Enabled || !Effect || gridBounce <= 0.0f || sunDir.z < 0.03f || TheShaderManager->GameState.isUnderwater) return false;
 	EnsureGridBuffers();
 	if (!gridSunSurface || !gridSunDepth || !gridWaveSurface[0] || !gridWaveSurface[1] || !gridAccumSurface[0] || !gridAccumSurface[1] || !gridGeometrySurface) return false;
@@ -507,8 +541,42 @@ void AmbientLightEffect::RenderGrid(IDirect3DDevice9* Device, bool sun, bool scr
 	}
 }
 
+// UNOFFICIAL 2026-11-12 (sungi p4) SunGI, once a frame (RtWants, WantsGridSunMap, Render): follows the player in and out (RtAmbient::InteriorNow, then every
+// setting re-read: the overrides are outdoors only) and applies what depends on the RT core running. With RT GI: AmbientReplace as forced, GridBounce the
+// user's own (the two bounces must not stack). Without it (native D3D9, stock DXVK, no ray-tracing GPU, NvrDxvkPasses off): no AmbientReplace (it needs the
+// RT GI), ExteriorBalance on, and the light grid supplies the sun bounce: GridBounce = the key if above 0, else 1.0. One log line per change of state.
+void AmbientLightEffect::SunGIFrame() {
+	const bool outdoors = TheShaderManager->GameState.isExterior;
+	if (sunGi && (RtAmbient::InteriorNow == outdoors || settingsOutdoors != outdoors)) {
+		RtAmbient::InteriorNow = !outdoors;
+		UpdateSettings();
+	}
+	const bool on = sunGi && outdoors;
+	const bool rt = RtAmbient::SunGIRtRunning();
+	if (sunGi) {
+		gridBounce = on && !rt ? (gridBounceKey > 0.0f ? gridBounceKey : 1.0f) : gridBounceKey;
+		ambientReplace = on ? (rt ? ambientReplaceSunGI : 0.0f) : ambientReplaceKey;
+	}
+	const int state = !sunGi ? 0 : !outdoors ? 1 : rt ? 2 : 3;
+	if (state == sunGiState) return;
+	sunGiState = state;
+	if (state == 0) Logger::Log("UNOFFICIAL SunGI: off (the settings are the toml's own).");
+	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced ? "; AmbientLight does not render there, its Status is off" : "");
+	else if (state == 2) Logger::Log("UNOFFICIAL SunGI: on, outdoors, ray-traced path running. Forced in memory: RT AO + GI + Sky + RadianceCache + CacheExteriors on, ExteriorBalance on, "
+		"AmbientReplace %.2f, AlbedoBuffer (AmbientLight key) on%s; GridBounce stays %.2f (the RT bounce is the sun bounce); GI denoiser %s.", ambientReplace,
+		sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce, RtAmbient::Current.GIDenoiseSunGI ? "SunGI settings (GIDenoiseSunGI)" : "as before (GIDenoiseSunGI off)");
+	else Logger::Log("UNOFFICIAL SunGI: on, outdoors, FALLBACK: the RT core is not running (native D3D9, stock DXVK, no ray-tracing GPU, or NvrDxvkPasses off). Forced in memory: "
+		"ExteriorBalance on, AlbedoBuffer on%s; no AmbientReplace (it needs the RT GI); the light grid is the sun bounce: GridBounce %.2f.", sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce);
+	static bool albedoNoted = false;
+	if (on && !albedoNoted && !CapturedNormals::AlbedoCompiledIn()) {
+		albedoNoted = true;
+		Logger::Log("UNOFFICIAL SunGI: [Main.Main.Quality] AlbedoBuffer is off (a restart key: the template writes the target only if it is on at start): the bounce uses the guessed surface colour until a restart with it on.");
+	}
+}
+
 bool AmbientLightEffect::ShouldRender() {
 	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
+	if (sunGiForced && !TheShaderManager->GameState.isExterior) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
 
@@ -952,6 +1020,7 @@ bool AmbientLightEffect::GIActive() {
 void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 	IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 	IDirect3DSurface9* SourceBuffer) {
+	SunGIFrame();	// UNOFFICIAL 2026-11-12 (sungi p4)
 	if (!ShouldRender()) { EffectStatus::Note(StatusSlot, Name, EffectStatus::ShouldRenderFalse); renderTime = 0; historyValid = false; return; }
 	EnsureBuffers();
 	// UNOFFICIAL 2026-10-18 (ambfix): the scene's own light (the cell's ambient and directional colours indoors, the sky's ambient and
@@ -1098,7 +1167,9 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	D3DXHANDLE giHandle = ParameterHandle(paramGI, "NVR_ALGI");
 	if (giD3D9Texture && !giHandle) giD3D9Texture = nullptr;	// an older AmbientLight.fx.hlsl: nothing to switch
 	if (giHandle) {
-		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f, 0.0f);	// z: set for Apply (below)
+		// w: UNOFFICIAL 2026-11-11 (sungi) GISingleHistory: the RT denoiser's GI (it keeps its own history): Accumulate keeps no bounce history
+		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f,
+			giD3D9Texture && giSingleHistory && giD3D9Texture != rtGI ? 1.0f : 0.0f);	// z: set for Apply (below)
 		Effect->SetVector(giHandle, &giFlags);
 	}
 	Effect->SetTechnique(technique);
@@ -1135,7 +1206,20 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	if (!balanceRuns || TheShaderManager->GameState.isCellChanged) balanceValid = false;
 	const int balanceRead = balanceIndex, balanceWrite = balanceIndex ^ 1;
 	if (D3DXHANDLE h = ParameterHandle(paramInterior, "NVR_ALInterior")) {
-		D3DXVECTOR4 data(interiorMode ? 1.0f : 0.0f, balanceValid ? 1.0f : 0.0f, interiorBounceShare, 0.9f);
+		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (STUDY F4): outdoors .x is 0 and .y / .z / .w are not read (the balance passes run
+		// only indoors), so .w carries the exterior mode: > 0 = the occlusion darkens only the ambient share, and the value is the scale the
+		// lit shaders put on the ambient (LIN_SCALE_AMBIENT) when the real albedo is known (AlbedoBuffer on), else 1 (SurfaceColour's guess
+		// divides the lit colour by the unscaled ambient, so the unscaled share matches it).
+		float exteriorShare = 0.0f;
+		const bool replace = AmbientReplaceActive() && rtGI != nullptr && !interiorMode;	// UNOFFICIAL 2026-11-11 (sungi p2): needs the RT GI (it carries the sky light)
+		if ((exteriorBalance || replace) && !interiorMode && TheShaderManager->GameState.isExterior) {
+			const PBRShaders* pbr = TheShaderManager->Shaders.PBR;
+			const bool realAlbedo = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
+			exteriorShare = realAlbedo && pbr && pbr->Constants.LinearScales.y > 0.0f ? (std::min)(pbr->Constants.LinearScales.y, 4.0f) : 1.0f;
+		}
+		// UNOFFICIAL 2026-11-11 (sungi p2): outdoors .y = AmbientReplace and .z = AmbientFloor (the interior balance's meanings are not read outdoors); 0 = off
+		D3DXVECTOR4 data(interiorMode ? 1.0f : 0.0f, interiorMode ? (balanceValid ? 1.0f : 0.0f) : (replace ? ambientReplace : 0.0f),
+			interiorMode ? interiorBounceShare : ambientFloor, interiorMode ? 0.9f : exteriorShare);
 		Effect->SetVector(h, &data);
 	}
 	// UNOFFICIAL 2026-10-21 (alrocks): the normal smoothing's reach and the horizon bias (radians) for Prepare and Estimate.
@@ -1183,6 +1267,16 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	lastRect = RenderRect::Active();
 	// UNOFFICIAL 2026-11-01 SharedNoise: and the shared history rule (core/TemporalBackbone.h)
 	const bool sharedNoise = TemporalBackbone::Shared();
+	// UNOFFICIAL 2026-11-11 (sungi) Q8b (STUDY F16): the bounce and occlusion histories restart when the player goes between interior and
+	// exterior or to another worldspace (a cell border walked over keeps them; isCellChanged would also fire there)
+	{
+		static bool placeKnown = false, lastExterior = false;
+		static const void* lastWorld = nullptr;
+		const bool exteriorNow = TheShaderManager->GameState.isExterior;
+		const void* worldNow = exteriorNow && Player ? (const void*)Player->GetWorldSpace() : nullptr;
+		if (placeKnown && (exteriorNow != lastExterior || worldNow != lastWorld)) historyValid = false;
+		placeKnown = true; lastExterior = exteriorNow; lastWorld = worldNow;
+	}
 	const bool continuous = historyValid && rectSame && now - lastTime >= 0.0 && now - lastTime < 0.5 && !TheShaderManager->GameState.isCameraCut &&
 		(!sharedNoise || TemporalBackbone::HistoryValid());
 	FlickerWatch::Flags |= FlickerWatch::kALRendered | (continuous ? FlickerWatch::kALHistory : 0u);	// UNOFFICIAL 2026-10-23 test only
@@ -1217,6 +1311,9 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// RR denoises the frame (Upscaler::RayReconstructionWantsRaw): no blur X / Y (Accumulate and Apply read buffer 0, the estimate as it
 	// is) and Accumulate keeps no history (share 0: it passes the estimate through into the targets Apply reads). Set by the RT estimate.
 	bool rrRaw = false;
+	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (STUDY F7): set when this frame's RT GI came through the RT denoiser (its own 16-frame
+	// history): the GI accumulate then keeps no bounce history of its own (the occlusion's stays).
+	bool giDenoised = false;
 	// UNOFFICIAL 2026-11-03 (RT AO at RenderScale < 1; docs/next/RT-RENDERSCALE.md, phase 1) the RT estimate below as one helper: the Vulkan
 	// passes' Estimate (ExtOn) and, in rect frames, the one Vulkan pass inside the rect-aware D3D9 passes (ExtOnRect). True: drawn.
 	auto estimateRT = [&](IDirect3DSurface9* const* targets) -> bool {
@@ -1236,6 +1333,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			IDirect3DBaseTexture9* rtTextures[] = { prepTexture, rtVis ? rtVis : rtRaw, rtGIUsed ? (IDirect3DBaseTexture9*)rtGIUsed : (IDirect3DBaseTexture9*)rtRaw };
 			drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reduced);
 			if (drawn && rtGI) giDrawn = true;	// ComputeGI's accumulate and apply take the bounce light from here
+			giDenoised = drawn && rtGIClean && giSingleHistory;	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory
 			// UNOFFICIAL 2026-10-30 DLSS RR (rrRaw above): Accumulate's history share 0 from here on (Estimate has read
 			// NVR_ALTemporal already; the passes after it read only .x's share from it, and .y / .z stay)
 			if (drawn && Upscaler::RayReconstructionWantsRaw()) {
@@ -1351,7 +1449,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				else if (p == 4) {
 					if (giDrawn && giTest != 1) {	// (ComputeGI) the bounce light kept from frame to frame too, in the bounce history
 						IDirect3DBaseTexture9* giTextures[] = { bufferTexture[blurred], prepTexture, occlusionHistory[readIndex], historyTexture[readIndex] };
-						drawn = ExtDraw(ExtGIAccumulate, targets, 2, giTextures, 0, reduced);
+						drawn = ExtDraw(ExtGIAccumulate, targets, 2, giTextures, giDenoised ? 1u : 0u, reduced);	// UNOFFICIAL 2026-11-11 (sungi) variant bit 0: GISingleHistory
 					}
 					if (!drawn) giDrawn = false;	// (ComputeGI) no accumulated light: the plain apply
 					// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer when this frame's is made (variant bit 2), else a stand-in nothing reads

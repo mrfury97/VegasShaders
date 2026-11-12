@@ -1651,6 +1651,13 @@ SettingManager::MenuSwitch SettingManager::GetMenuShaderSwitch(const char* Name)
 bool SettingManager::GetMenuShaderEnabled(const char* name) {
 	// UNOFFICIAL 2026-11-04 HudRaindrops has no section of its own: it is switched under Wetness Effects (HudRaindropsEffect::UpdateSettings).
 	if (!strcmp(name, "HudRaindrops")) return GetSettingI("Shaders.WetnessEffects.HudRaindrops", "Enabled") != 0;
+	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, the one switch for the exterior sun bounce) implies AmbientLight's
+	// Status Enabled: it is on at load and after a revert (the runtime flag; AmbientLight::UpdateSettings follows a live change). The toml is not written;
+	// AmbientLight::ShouldRender keeps it off indoors while only SunGI has it on, so interiors stay as the user set them.
+	if (!strcmp(name, "AmbientLight")) {
+		Configuration::ConfigNode sunGi;
+		if (Config.FillNode(&sunGi, "Shaders.AmbientLight.Main", "SunGI") && sunGi.BoolValue) return true;
+	}
 
 	char section[256];
 

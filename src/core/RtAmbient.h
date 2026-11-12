@@ -31,6 +31,9 @@ namespace RtAmbient {
 		// ray that meets a back face just after its start began under the traced surface and carries on past it (as the AO rays' 'inside').
 		// SkySoftEdges: cover near the end of a sky ray counts less (the AO rays' falloff) and the traced factor opens up toward endFade.
 		bool	SkyInsideFix = true;
+		// UNOFFICIAL 2026-11-11 (sungi, F9) BUG FIX, on by default (a missing key, an older toml: on): the GI hits' ambient x the game's
+		// ambient scale (LIN_SCALE_AMBIENT, TESR_LinearScales.y), as the sun already is by LinearScales.x, under GIGameLamps; AmbientOcclusion.cpp
+		bool	GIAmbientUnits = true;
 		bool	SkySoftEdges = true;
 		// UNOFFICIAL 2026-11-08 (alsky; tester: RT GI strength + AmbientLight DrawDistance 12000 drew a hard line across the ground) BUG FIX,
 		// on by default: AmbientLight's traced occlusion and RT GI bounce fade out before endFade (where the trace stops) instead of at
@@ -79,6 +82,17 @@ namespace RtAmbient {
 		int		CacheSpread = 8;
 		int		CacheRaysExterior = 4;
 		int		CacheSpreadExterior = 8;
+		// UNOFFICIAL 2026-11-12 (sungi p3, SunGI-study STUDY.md F6 / F8 / F18) radiance cache v2, each behind its own key; missing key = the default.
+		// CacheVisibility (default true; only while RadianceCache runs): every cell also keeps its rays' mean distance and mean squared distance
+		// toward 6 axis bins and a lookup weighs each of the 8 cells by DDGI's Chebyshev visibility (no light through walls thinner than a cell).
+		// CacheCascades (1-2, default 2; 1 = exactly the old single level): a second grid, the same 32 x 32 x 16 at 4 x CacheCellSize, in the same
+		// image, updated by its own pass 1 in 2 x its spread cells a frame; lookups use the fine grid inside it (a fade over its outer 2 cells)
+		// and the coarse one beyond, so bounce hits far from the camera still find light. SkyMissSH (default true; only where misses bring sky
+		// light: GISky > 0 or AmbientReplace): a ray that finds nothing brings the sky's radiance in ITS direction (TESR_SkyIrradianceObjects'
+		// harmonics, un-convolved, x the ambient scale), in the GI passes and in the cache's rays, fading out below the horizon.
+		bool	CacheVisibility = true;
+		int		CacheCascades = 2;
+		bool	SkyMissSH = true;
 		// UNOFFICIAL 2026-10-31 (rt-ao-sky, docs/next/RT-DENOISE-BACKBONE.md "RT GI") with [Main.Main.RayTracing] DenoiseBackbone: the GI
 		// denoiser's history on pixels that move themselves (B1's object motion > 0.25 units a frame: a walking person) at most this many
 		// frames (their bounce light changes as they move; 16 frames there trail behind them); 0 = no cap
@@ -106,6 +120,13 @@ namespace RtAmbient {
 		// UNOFFICIAL 2026-11-10 LegacyTilt (RtAOInput.frag; 0 = off): the rays' normal bent toward the one direction the blank-normals bug
 		// gave every pixel: its much darker AO / sky light / bounce as a look, without the wedge.
 		float	LegacyTilt = 0.0f;
+		// UNOFFICIAL 2026-11-12 (sungi p4, SunGI-study STUDY.md F3 / F7) SunGI: [Shaders.AmbientLight.Main] SunGI, the one switch for the exterior sun
+		// bounce (missing key: off). UpdateSettings reads it here (in memory only, never the toml) and, while the player is outdoors (not InteriorNow), forces
+		// Enabled / GI / Sky / RadianceCache / CacheExteriors on: the user's strength / quality keys stay. AmbientLight forces its own side (ExteriorBalance,
+		// AmbientReplace, AlbedoBuffer, the Status switch, the grid fallback; AmbientLight.cpp SunGIFrame). GIDenoiseSunGI (default true; missing key: true):
+		// with SunGI the GI denoiser gets the sun-GI settings (AmbientOcclusion.cpp RtDenoisedGI); false = the old settings, for the A/B.
+		bool	SunGI = false;
+		bool	GIDenoiseSunGI = true;
 	};
 	inline Settings Current;
 	inline bool InteriorNow = false;	// UNOFFICIAL 2026-11-10: set by AmbientOcclusion's RT pass each frame; UpdateSettings applies the <Key>Interior values while true
@@ -121,8 +142,13 @@ namespace RtAmbient {
 		{	// UNOFFICIAL 2026-11-08 (alsky): on unless the toml says false
 			SettingManager::Configuration::ConfigNode node;
 			Current.SkyInsideFix = !TheSettingManager->Config.FillNode(&node, s, "SkyInsideFix") || node.BoolValue;
+			Current.GIAmbientUnits = !TheSettingManager->Config.FillNode(&node, s, "GIAmbientUnits") || node.BoolValue;	// UNOFFICIAL 2026-11-11 (sungi, F9)
 			Current.SkySoftEdges = !TheSettingManager->Config.FillNode(&node, s, "SkySoftEdges") || node.BoolValue;
 			Current.RtFarFade = !TheSettingManager->Config.FillNode(&node, s, "RtFarFade") || node.BoolValue;
+			// UNOFFICIAL 2026-11-12 (sungi p3): a missing key = the default (visibility on, 2 cascades, directional sky on)
+			Current.CacheVisibility = !TheSettingManager->Config.FillNode(&node, s, "CacheVisibility") || node.BoolValue;
+			Current.CacheCascades = TheSettingManager->Config.FillNode(&node, s, "CacheCascades") ? std::clamp((int)node.IntValue, 1, 2) : 2;
+			Current.SkyMissSH = !TheSettingManager->Config.FillNode(&node, s, "SkyMissSH") || node.BoolValue;
 		}
 		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 8);
 		Current.GI = TheSettingManager->GetSettingI(s, "GI") != 0;
@@ -180,6 +206,17 @@ namespace RtAmbient {
 				indoors("LegacyTiltInterior", Current.LegacyTilt, 0.0f, 1.0f);
 			}
 		}
+		{	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI: the one switch. Outdoors only: indoors every key is the user's own (SunGI changes no interior).
+			SettingManager::Configuration::ConfigNode node;
+			Current.SunGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
+			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
+			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
+			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
+			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each
+			// wall got the open sky's light. With SunGI the sky already comes in through the ray misses (and the cache, both visibility-tested), so
+			// GIAmbient is an unshadowed second copy of it that drowns the sun's bounce: 0 outdoors with SunGI (the key stays for the old chain).
+			if (Current.SunGI && !InteriorNow) Current.GIAmbient = 0.0f;
+		}
 	}
 
 	inline constexpr int GILampsMax = 8;
@@ -234,13 +271,13 @@ namespace RtAmbient {
 		D3DXVECTOR4	lampPos[GILampsMax];
 		D3DXVECTOR4	lampColor[GILampsMax];
 		D3DXVECTOR4	gi2;
-		D3DXVECTOR4	cacheA;			// xyz the camera's world position minus its cell's corner, w the cell size
+		D3DXVECTOR4	cacheA;			// xyz the camera's world position minus its cell's corner, w the cell size + 1024 x flags (2026-11-12 sungi p3: 1 CacheVisibility, 2 CacheCascades 2)
 		D3DXVECTOR4	cacheB;			// xyz the camera's cell (world cell coordinates), w CacheStrength
 		D3DXVECTOR4	cacheC;			// x CacheRays, y the frames of history at most (negative: all cells start over), z this frame's turn, w 1 in this many cells a frame
-		D3DXVECTOR4	cacheD;			// (2026-10-31 b) x the visit (frame / cacheC.w, mod 4096), y lazy cells' period, z "far" in cells
+		D3DXVECTOR4	cacheD;			// (2026-10-31 b) x the visit (frame / cacheC.w, mod 4096), y lazy cells' period, z "far" in cells; w (2026-11-12 sungi p3) the level: 0 fine, 1 coarse
 	};
 	static_assert(sizeof(CacheConstants) <= 512, "RtCore: 512 bytes of constants a pass");
-	inline constexpr UINT CacheCells = 32 * 32 * 16, CacheLazyPeriod = 8;	// RtAOTrace.comp CacheGrid; the image: 256 x 256 (4 texels a cell)
+	inline constexpr UINT CacheCells = 32 * 32 * 16, CacheLazyPeriod = 8;	// RtAOTrace.comp CacheGrid; the image: 512 x 512 since 2026-11-12 (8 texels a cell, 2 levels of 256 rows; RtAOTrace.comp CacheTexel)
 
 	// The RT core (RtCore.h) runs: the helper is ready on a GPU with ray tracing. Off = NVR's own passes.
 	inline bool CoreReady() { return RtCore::Running(); }
@@ -256,6 +293,9 @@ namespace RtAmbient {
 	// frames (phase 2: its consumers are Vulkan passes that are off there). (2026-11-04, phase 2: it is, over the same rect; AmbientLight's
 	// D3D9 GI path applies it there; AmbientOcclusion.cpp RtRecord.)
 	inline bool PassesWanted() { return TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available(); }
+	// UNOFFICIAL 2026-11-12 (sungi p4) the ray-traced path can run at all (the Ready() states 1 and 2 passed): false = SunGI's fallback (the light grid's bounce).
+	inline bool SunGIRtRunning() { return PassesWanted() && CoreReady(); }
+	inline bool SunGIOutdoors() { return Current.SunGI && !InteriorNow; }
 	inline bool Ready() {
 		static int reported = -1;
 		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : !CoreReady() ? 2 : 3;

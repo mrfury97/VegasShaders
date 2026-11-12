@@ -60,5 +60,6 @@ void main() {
     float moved = length((last.xy - uv) / cb.alLayout.zw);
     float keep = cb.alTemporal.x / (1.0 + moved / cb.alTemporal.y) * saturate(found * 2.0) * inside;
     o_occlusion = vec4(mix(current.a, occlusionHistory, keep), viewZ, 0.0, 1.0);
-    o_bounce = vec4(mix(current.rgb, bounceHistory, keep), viewZ);
+    // UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (STUDY F7): variant bit 0 = the GI came through the RT denoiser (own history): keep 0
+    o_bounce = vec4(mix(current.rgb, bounceHistory, (pc.variant & 1u) != 0u ? 0.0 : keep), viewZ);
 }

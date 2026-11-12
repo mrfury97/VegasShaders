@@ -320,41 +320,85 @@ vec3 ShadingNormal(uint instance, uint prim, vec2 bary, vec3 n, mat4x3 toScene, 
 float LampFall(float x, bool game) { return game ? pow(max(1.0 - x * x, 0.0), 2.2) : (1.0 - x) * (1.0 - x); }
 const ivec3 CacheGrid = ivec3(32, 32, 16);
 
-// A cell's slot texel (k = 0) and its stamp, for a cell given relative to the camera's cell.
-ivec2 CacheTexel(ivec3 local, out vec3 stamp) {
-    vec3 world = vec3(local) + CACHE_B.xyz;
+// UNOFFICIAL 2026-11-12 (sungi p3) the cache v2 layout. The image is 512 x 512 now (was 256 x 256, 4 texels a cell): 8 texels a cell, and
+// two levels (cascades), level 0 in rows 0-255 and level 1 (the coarse one, 4 x the cell size, the same 32 x 32 x 16 grid) in rows 256-511.
+// Slot index i of a level: texel x (i mod 64) x 8 + k, y i / 64 + 256 x level. k 0-3 as before (SH red / green / blue, header);
+// k 4-7 (2026-11-12, CacheVisibility; written only while it is on): the cell's distance moments toward 6 axis bins, the mean and the mean
+// of the square of the distance the cell's rays travelled (a miss counts as 8; in cell sizes, so the squares fit in half floats), a ray
+// weighed into the 3 bins of its direction by the squares of its components: k 4 mean (+x, -x, +y, -y), k 5 mean square (+x, -x, +y, -y),
+// k 6 (mean +z, mean -z, mean square +z, mean square -z), k 7 reserved. CacheIrradiance weighs a cell by DDGI's Chebyshev visibility.
+// Flags ride in the cell size: CACHE_A.w = size + 1024 x flags (1 CacheVisibility, 2 CacheCascades 2); no flags = exactly the old w.
+int CacheFlags() { return int(floor(CACHE_A.w * (1.0 / 1024.0))); }
+float CacheSize() { return CACHE_A.w - 1024.0 * float(CacheFlags()); }
+// Level 0 is the camera's cell grid. Level 1 (4 x the size): the camera's coarse cell is floor(fine cell / 4) (exact: floor(floor(x / s) / 4)
+// = floor(x / 4 s)), the camera's offset in it the fine offset plus the fine cells it sits in; no extra constants needed.
+void CacheLevel(int level, out float size, out vec3 cell, out vec3 offset) {
+    const float s0 = CacheSize();
+    if (level == 0) { size = s0; cell = CACHE_B.xyz; offset = CACHE_A.xyz; return; }
+    cell = floor(CACHE_B.xyz * 0.25);
+    size = 4.0 * s0;
+    offset = (CACHE_B.xyz - 4.0 * cell) * s0 + CACHE_A.xyz;
+}
+
+// A cell's slot texel (k = 0) and its stamp, for a cell given relative to the level's camera cell.
+ivec2 CacheTexel(ivec3 local, vec3 cameraCell, int level, out vec3 stamp) {
+    vec3 world = vec3(local) + cameraCell;
     stamp = floor(world / vec3(CacheGrid));
     ivec3 slot = ivec3(world - stamp * vec3(CacheGrid));
     int index = slot.x + CacheGrid.x * (slot.y + CacheGrid.y * slot.z);
-    return ivec2((index & 63) * 4, index >> 6);
+    return ivec2((index & 63) * 8, (index >> 6) + level * 256);
+}
+
+// UNOFFICIAL 2026-11-12 (sungi p3, F8) DDGI's visibility weight of a cell for a point: the distance from the cell's centre to the point
+// (in cell sizes) against the cell's mean distance toward that direction (its 3 axis bins, weighed by the direction's squared
+// components) and the variance (mean square - mean^2): not farther than the mean 1, else the Chebyshev bound var / (var + (d - mean)^2),
+// cubed, at least 0.05 (a tie-breaker so a cell is never fully lost). Light cannot come through a wall the cell's rays hit short of the point.
+float CacheVisibility(ivec2 t, vec3 toPoint, float size) {
+    const float dist = length(toPoint);
+    if (!(dist > 1.0e-3)) return 1.0;
+    const vec3 dir = toPoint / dist;
+    const float d = dist / size;
+    const vec4 a = imageLoad(cacheImage, t + ivec2(4, 0)), b = imageLoad(cacheImage, t + ivec2(5, 0)), c = imageLoad(cacheImage, t + ivec2(6, 0));
+    const vec3 w = dir * dir;
+    const float m1 = w.x * (dir.x >= 0.0 ? a.x : a.y) + w.y * (dir.y >= 0.0 ? a.z : a.w) + w.z * (dir.z >= 0.0 ? c.x : c.y);
+    const float m2 = w.x * (dir.x >= 0.0 ? b.x : b.y) + w.y * (dir.y >= 0.0 ? b.z : b.w) + w.z * (dir.z >= 0.0 ? c.z : c.w);
+    if (isnan(m1) || isnan(m2) || d <= m1) return 1.0;
+    const float v = max(m2 - m1 * m1, 0.01), x = d - m1;
+    const float cheb = v / (v + x * x);
+    return max(cheb * cheb * cheb, 0.05);
 }
 
 // The cache's irradiance at p (scene space) toward n: the 8 cells round the point half a cell off the surface, trilinear, each weighed
 // by how much it faces the surface (DDGI's normal weight) and out where its stamp is not the cell's, it has no samples or it sits
 // inside something. 0 where no cell is usable (outside the grid, a fresh area).
-vec3 CacheIrradiance(vec3 p, vec3 n) {
-    float size = CACHE_A.w;
-    if (!(CACHE_STRENGTH > 0.0) || !(size > 0.0)) return vec3(0.0);
-    vec3 g = (p + n * (0.5 * size) + CACHE_A.xyz) / size - 0.5;   // the cell centres at whole numbers (relative to the camera's cell)
+// UNOFFICIAL 2026-11-12 (sungi p3) one level's lookup (level 0 with visibility off and no cascades = the function as it was): the normalised
+// irradiance and the weights' sum. visibility: each cell's weight x CacheVisibility toward the point half a cell off the surface.
+vec3 CacheLookupLevel(int level, vec3 p, vec3 n, bool visibility, out float weights) {
+    float size;
+    vec3 cameraCell, offset;
+    CacheLevel(level, size, cameraCell, offset);
+    vec3 g = (p + n * (0.5 * size) + offset) / size - 0.5;   // the cell centres at whole numbers (relative to the camera's cell)
     vec3 base = floor(g), f = g - base;
     ivec3 half_ = CacheGrid / 2;
     vec3 sum = vec3(0.0);
-    float weights = 0.0;
+    weights = 0.0;
     for (int k = 0; k < 8; k++) {
         ivec3 o = ivec3(k & 1, (k >> 1) & 1, k >> 2);
         ivec3 local = ivec3(base) + o;
         if (any(lessThan(local, -half_)) || any(greaterThanEqual(local, half_))) continue;
         vec3 stamp;
-        ivec2 t = CacheTexel(local, stamp);
+        ivec2 t = CacheTexel(local, cameraCell, level, stamp);
         vec4 head = imageLoad(cacheImage, t + ivec2(3, 0));
         float hw = abs(head.w), m = floor(hw);   // (2026-10-31 b: negative = far from every surface, still valid)
         if (!(m >= 1.0) || any(greaterThan(abs(head.xyz - stamp), vec3(0.25)))) continue;
         float inside = (hw - m) / 0.9;
         vec3 tri = mix(1.0 - f, f, vec3(o));
-        vec3 toCell = (vec3(local) + 0.5) * size - CACHE_A.xyz - p;
+        vec3 centre = (vec3(local) + 0.5) * size - offset;
+        vec3 toCell = centre - p;
         float facing = 0.5 + 0.5 * dot(toCell, n) * inversesqrt(max(dot(toCell, toCell), 1.0e-4));
         float w = tri.x * tri.y * tri.z * (facing * facing + 0.2) * (1.0 - smoothstep(0.15, 0.4, inside));
         if (!(w > 1.0e-5)) continue;
+        if (visibility) w *= CacheVisibility(t, p + n * (0.5 * size) - centre, size);   // (the point the trilinear weights use)
         vec4 r = imageLoad(cacheImage, t), gr = imageLoad(cacheImage, t + ivec2(1, 0)), b = imageLoad(cacheImage, t + ivec2(2, 0));
         vec4 dn = vec4(1.0, 2.0 * n);
         vec3 e = max(vec3(dot(r, dn), dot(gr, dn), dot(b, dn)), vec3(0.0));
@@ -363,6 +407,25 @@ vec3 CacheIrradiance(vec3 p, vec3 n) {
         weights += w;
     }
     return weights > 1.0e-4 ? sum / weights : vec3(0.0);
+}
+
+vec3 CacheIrradiance(vec3 p, vec3 n) {
+    float size = CacheSize();
+    if (!(CACHE_STRENGTH > 0.0) || !(size > 0.0)) return vec3(0.0);
+    const int flags = CacheFlags();
+    float wf;
+    vec3 fine = CacheLookupLevel(0, p, n, (flags & 1) != 0, wf);
+    if ((flags & 2) == 0) return fine;   // CacheCascades 1: the single level, as before
+    // UNOFFICIAL 2026-11-12 (sungi p3, F18) the coarse level (4 x the cell size) beyond the fine grid: the fine level counts in full inside
+    // it, fades out over its outer 2 cells (and where its cells give little weight), the coarse level takes the rest.
+    const vec3 q = (p + n * (0.5 * size) + CACHE_A.xyz) / size;   // in cells from the camera's cell corner; the grid spans +-16, +-16, +-8
+    const float edge = min(min(15.5 - abs(q.x), 15.5 - abs(q.y)), 7.5 - abs(q.z));
+    const float share = wf > 1.0e-4 ? smoothstep(0.0, 2.0, edge) * clamp(wf * 4.0, 0.0, 1.0) : 0.0;
+    if (share > 0.999) return fine;
+    float wc;
+    vec3 coarse = CacheLookupLevel(1, p, n, (flags & 1) != 0, wc);
+    if (!(wc > 1.0e-4)) return share > 0.0 ? fine : vec3(0.0);
+    return mix(coarse, fine, share);
 }
 
 // The light a hit sends back (in the bounce's units: with cosine sampling the pixel's irradiance estimate is pi x the hit's radiance =
@@ -463,17 +526,33 @@ vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 ng, vec3 n, float
 // One bounce (rt-ao-gi): a cosine-weighted ray from the pixel; at its closest hit the light that surface sends back toward the pixel:
 // the game's lit frame where the screen saw it (ScreenLight, GI v2), else Shade. Misses return 0: what the sky gives is the game's own
 // ambient already (unless GISky, below).
-#ifndef RT_CACHE_PASS
+// UNOFFICIAL 2026-11-12 (sungi p3, F6) SkyMissSH: gi.y + 10 = the directional sky is on. The sky's radiance as an order-2 SH, 9 coefficients
+// x rgb, already weighted per band (radiance = the irradiance harmonics x 1, 1.5, 4 and the C++'s linear scale; SkyAmbientSharp's maths), in
+// 14 RG32F texels of the lamp image's row 1 (float f = 3 i + channel at texel f / 2, component f & 1). The basis is the lit shaders' order:
+// 1, y, z, x, xy, yz, 3zz - 1, xz, xx - yy.
+vec3 SkyRadianceSH(vec3 d) {
+    float c[28];
+    for (int k = 0; k < 14; k++) { vec2 v = imageLoad(lampImage, ivec2(k, 1)).rg; c[2 * k] = v.x; c[2 * k + 1] = v.y; }
+    const float basis[9] = float[9](1.0, d.y, d.z, d.x, d.x * d.y, d.y * d.z, 3.0 * d.z * d.z - 1.0, d.x * d.z, d.x * d.x - d.y * d.y);
+    vec3 r = vec3(0.0);
+    for (int i = 0; i < 9; i++) r += vec3(c[3 * i], c[3 * i + 1], c[3 * i + 2]) * basis[i];
+    return max(r, vec3(0.0));
+}
 // UNOFFICIAL 2026-11-10 (gisky; tester: AL occlusion and GIStrength change plants and objects, never the terrain) [Shaders.AmbientOcclusion.RT]
 // GISky (gi.y - 1, outdoors only; 0 = off, exactly as before): a ray that finds nothing brings back the ambient (sky) light, full above the
 // horizon and none below it (a smooth band of +-0.25 in d.z), capped as a hit's sample. Open upward ground sent nearly every ray to the
 // sky, so its bounce was ~0 and GIStrength had nothing to scale (log 2026-11-10 00:58:31: soil 0.0007 against a wall's 0.05). It adds
 // to the game's own ambient (a second copy of the sky's light), hence off by default.
+// (2026-11-12 sungi p3, F6) with SkyMissSH (gi.y > 5) the miss brings the sky's radiance in ITS direction (SkyRadianceSH) instead of the
+// flat ambient, fading to 0 over d.z in [-0.1, 0]; the GI pass, the AO pass's own bounce and the radiance cache pass all use it.
 vec3 SkyMiss(vec3 d) {
-    float s = cb.gi.y - 1.0;
+    const bool directional = cb.gi.y > 5.0;
+    float s = (directional ? cb.gi.y - 10.0 : cb.gi.y) - 1.0;
     if (s <= 0.0) return vec3(0.0);
+    if (directional) return Clamped(SkyRadianceSH(d) * (s * clamp(1.0 + 10.0 * d.z, 0.0, 1.0)));
     return Clamped(cb.ambient.rgb * (s * clamp(0.5 + 2.0 * d.z, 0.0, 1.0)));
 }
+#ifndef RT_CACHE_PASS
 // (2026-11-07 ptaaa-firstperson) a committed hit into Bounce's locals (a rayQueryEXT cannot be copied)
 #define AO_TAKE_HIT(Q) { found = rayQueryGetIntersectionTypeEXT(Q, true) == gl_RayQueryCommittedIntersectionTriangleEXT; if (found) { \
     t = rayQueryGetIntersectionTEXT(Q, true); instance = rayQueryGetIntersectionInstanceIdEXT(Q, true); \
@@ -915,8 +994,14 @@ void main() {
     if (index >= cells) return;
     ivec3 half_ = CacheGrid / 2;
     ivec3 local = ivec3(index % CacheGrid.x, (index / CacheGrid.x) % CacheGrid.y, index / (CacheGrid.x * CacheGrid.y)) - half_;
+    // UNOFFICIAL 2026-11-12 (sungi p3) cacheD.w = the level: 0 the fine grid, 1 the coarse one (CacheCascades 2; its own pass, its own turn)
+    const int level = int(cb.cacheD.w + 0.5);
+    const bool visibility = (CacheFlags() & 1) != 0;
+    float size;
+    vec3 cameraCell, offset;
+    CacheLevel(level, size, cameraCell, offset);
     vec3 stamp;
-    ivec2 t = CacheTexel(local, stamp);
+    ivec2 t = CacheTexel(local, cameraCell, level, stamp);
     vec4 head = imageLoad(cacheImage, t + ivec2(3, 0));
     float hw = abs(head.w), m = floor(hw);
     bool same = cb.cacheC.y > 0.0 && m >= 1.0 && m <= 64.0 && !any(greaterThan(abs(head.xyz - stamp), vec3(0.25)));
@@ -924,8 +1009,19 @@ void main() {
     vec4 oldG = same ? imageLoad(cacheImage, t + ivec2(1, 0)) : vec4(0.0);
     vec4 oldB = same ? imageLoad(cacheImage, t + ivec2(2, 0)) : vec4(0.0);
     float oldInside = same ? (hw - m) / 0.9 : 0.0;
+    // the distance moments' history (a new cell: nothing seen, 8 cell sizes away every way: visible from everywhere)
+    vec4 oldM1 = vec4(8.0), oldM2 = vec4(64.0), oldMz = vec4(8.0, 8.0, 64.0, 64.0);
+    if (same && visibility) {
+        oldM1 = imageLoad(cacheImage, t + ivec2(4, 0));
+        oldM2 = imageLoad(cacheImage, t + ivec2(5, 0));
+        oldMz = imageLoad(cacheImage, t + ivec2(6, 0));
+        if (any(isnan(oldM1)) || any(isnan(oldM2)) || any(isnan(oldMz)) || any(isinf(oldM1)) || any(isinf(oldM2)) || any(isinf(oldMz))) {
+            oldM1 = vec4(8.0); oldM2 = vec4(64.0); oldMz = vec4(8.0, 8.0, 64.0, 64.0);
+        }
+    }
     if (any(isnan(oldR)) || any(isnan(oldG)) || any(isnan(oldB)) || any(isinf(oldR)) || any(isinf(oldG)) || any(isinf(oldB))) {
         same = false; oldR = oldG = oldB = vec4(0.0); oldInside = 0.0;
+        oldM1 = vec4(8.0); oldM2 = vec4(64.0); oldMz = vec4(8.0, 8.0, 64.0, 64.0);
     }
     if (!same) m = 0.0;
     // (2026-10-31 b) Lazy cells: settled (full history), and far from every surface (no lookup reaches them: outdoors, the air above) or
@@ -933,13 +1029,16 @@ void main() {
     if (cb.cacheC.y > 0.0 && same && m >= cb.cacheC.y && (head.w < 0.0 || oldInside > 0.4) &&
         (int(cb.cacheD.x + 0.5) + index) % max(int(cb.cacheD.y + 0.5), 1) != 0) return;
 
-    float size = cb.cacheA.w;
-    vec3 centre = (vec3(local) + 0.5) * size - cb.cacheA.xyz;   // scene space
+    vec3 centre = (vec3(local) + 0.5) * size - offset;   // scene space
     int rays = clamp(int(cb.cacheC.x + 0.5), 1, 32);
     float frame = cb.origin.w;
-    vec2 turn = fract(vec2(Ign(vec2(index & 255, index >> 8) + 13.0), Ign(vec2(index >> 8, index & 255) + 29.0)) + frame * vec2(0.618034, 0.754878));
+    vec2 turn = fract(vec2(Ign(vec2(index & 255, index >> 8) + 13.0 + 41.0 * float(level)), Ign(vec2(index >> 8, index & 255) + 29.0)) + frame * vec2(0.618034, 0.754878));
     vec4 r = vec4(0.0), g = vec4(0.0), b = vec4(0.0);
     float inside = 0.0, nearest = 1.0e30;
+    // UNOFFICIAL 2026-11-12 (sungi p3, F8) per axis bin (+x -x +y -y +z -z): the rays' weights and the weighed distance and its square (cell sizes)
+    float binW[6], binD[6], binD2[6];
+    for (int k = 0; k < 6; k++) { binW[k] = 0.0; binD[k] = 0.0; binD2[k] = 0.0; }
+    const bool skyMisses = cb.gi.y > 5.0;   // SkyMissSH (gi.y + 10): a ray that finds nothing brings the sky's radiance in its direction
     for (int i = 0; i < rays; i++) {
         float z = 1.0 - 2.0 * fract((float(i) + turn.x) / float(rays));
         float phi = 6.2831853 * fract(float(i) * 0.618034 + turn.y);
@@ -948,7 +1047,24 @@ void main() {
         rayQueryEXT q;
         rayQueryInitializeEXT(q, scene, 0u, RT_CULL, centre + cb.origin.xyz, 0.0, d, cb.gi.x);
         Proceed(q);
-        if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) continue;
+        const bool found = rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT;
+        if (visibility) {   // a miss counts as 8 cell sizes
+            const float dn = found ? min(rayQueryGetIntersectionTEXT(q, true) / size, 8.0) : 8.0;
+            const vec3 wd = d * d;
+            const int bx = d.x >= 0.0 ? 0 : 1, by = d.y >= 0.0 ? 2 : 3, bz = d.z >= 0.0 ? 4 : 5;
+            binW[bx] += wd.x; binD[bx] += wd.x * dn; binD2[bx] += wd.x * dn * dn;
+            binW[by] += wd.y; binD[by] += wd.y * dn; binD2[by] += wd.y * dn * dn;
+            binW[bz] += wd.z; binD[bz] += wd.z * dn; binD2[bz] += wd.z * dn * dn;
+        }
+        if (!found) {
+            if (skyMisses) {
+                vec3 sky = SkyMiss(d);
+                r += sky.r * vec4(1.0, d);
+                g += sky.g * vec4(1.0, d);
+                b += sky.b * vec4(1.0, d);
+            }
+            continue;
+        }
         float th = rayQueryGetIntersectionTEXT(q, true);
         nearest = min(nearest, th);
         if (!rayQueryGetIntersectionFrontFaceEXT(q, true)) { inside += 1.0; continue; }
@@ -970,6 +1086,22 @@ void main() {
     imageStore(cacheImage, t + ivec2(1, 0), mix(oldG, g * scale, alpha));
     imageStore(cacheImage, t + ivec2(2, 0), mix(oldB, b * scale, alpha));
     bool far = nearest > cb.cacheD.z * size;   // (from this visit's rays: a near surface they missed makes it lazy for a while, no more)
+    if (visibility) {
+        // UNOFFICIAL 2026-11-12 (sungi p3, F8) the distance moments (layout above CacheTexel): a bin this visit's rays barely touched (weight
+        // under 0.02) keeps its history, and a thin one blends in by its weight (1.5 x, at most 1): few rays leave some bins empty
+        float m1[6], m2[6];
+        const float oldD[6] = float[6](oldM1.x, oldM1.y, oldM1.z, oldM1.w, oldMz.x, oldMz.y);
+        const float oldD2[6] = float[6](oldM2.x, oldM2.y, oldM2.z, oldM2.w, oldMz.z, oldMz.w);
+        for (int k = 0; k < 6; k++) {
+            const float w = binW[k];
+            const float a = w > 0.02 ? alpha * min(1.0, 1.5 * w) : 0.0;
+            m1[k] = mix(oldD[k], w > 0.02 ? binD[k] / w : oldD[k], a);
+            m2[k] = mix(oldD2[k], w > 0.02 ? binD2[k] / w : oldD2[k], a);
+        }
+        imageStore(cacheImage, t + ivec2(4, 0), vec4(m1[0], m1[1], m1[2], m1[3]));
+        imageStore(cacheImage, t + ivec2(5, 0), vec4(m2[0], m2[1], m2[2], m2[3]));
+        imageStore(cacheImage, t + ivec2(6, 0), vec4(m1[4], m1[5], m2[4], m2[5]));
+    }
     imageStore(cacheImage, t + ivec2(3, 0), vec4(stamp, (far ? -1.0 : 1.0) * (m + 0.9 * insideNew)));
 }
 #endif

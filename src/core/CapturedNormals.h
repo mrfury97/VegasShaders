@@ -114,6 +114,7 @@ namespace CapturedNormals {
 	inline IDirect3DPixelShader9* SkinAlbedoFillPS = nullptr;  inline bool SkinAlbedoFillFailed = false, SkinAlbedoLogged = false, AlbedoWantLogged = false;
 	inline void NoteAlbedoWriter(IDirect3DPixelShader9* handle, bool lightOnly) { if (!handle) return; AlbedoWriters.insert(handle); if (lightOnly) AlbedoLightOnlyWriters.insert(handle); }
 	inline void NoteSkinAlbedo(IDirect3DTexture9* tex, IDirect3DSurface9* msaa, IDirect3DSurface9* surface) { SkinAlbedoTex = tex; SkinAlbedoMsaa = msaa; SkinAlbedoSurface = surface; }
+	inline bool SunGIWantsAlbedo = false;	// UNOFFICIAL 2026-11-12 (sungi p4) set by AmbientLight (SunGI on, outdoors): AlbedoBuffer's reader asks for the capture without the AL key
 	inline bool AlbedoCompiledIn() {
 		if (!AlbedoChecked) { AlbedoChecked = true; AlbedoCompiled = MaterialCompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "AlbedoBuffer") != 0; }
 		return AlbedoCompiled;
@@ -123,7 +124,7 @@ namespace CapturedNormals {
 	// the G-buffer would never be made). Logged once.
 	inline bool AlbedoWanted() {
 		const bool rr = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RayReconstruction") != 0 && TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRAlbedo") == 2;
-		const bool al = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0;
+		const bool al = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0 || SunGIWantsAlbedo;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI outdoors asks for it too
 		if (!AlbedoCompiledIn()) {
 			// UNOFFICIAL 2026-10-31 (round 1's AlbedoBuffer-off twin run: the AmbientLight switch went on and off without a word): a reader
 			// switched on without the capture gets its one line, so the silence is explained.
