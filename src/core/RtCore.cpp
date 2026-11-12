@@ -25,7 +25,10 @@ const char* RtMaterialClassOf(NiGeometry* geometry);	// UNOFFICIAL 2026-11-07 pt
 
 // UNOFFICIAL 2026-11-05 (rtrefl-only: the demo room's ceiling met by no reflection ray) the first 64 distinct meshes a cell that the
 // traced scene leaves out, with why.
+static const UInt32 kSceneLogCap = 3000;	// (rt-audit F9) lines a session for each of the three scene loggers below
 static void LogLeftOut(const NiGeometry* geo, const char* why, int shaderType) {
+	static UInt32 sessionLines = 0;	// UNOFFICIAL 2026-11-13 (rt-audit F9): a session cap (re-armed each cell, these wrote 60,000 flushed lines in 35 min outdoors)
+	if (sessionLines >= kSceneLogCap) return;
 	static std::vector<std::string> told;
 	static std::unordered_map<const void*, bool> seen;	// geometries met this cell (cheap: this runs for every left-out mesh every frame)
 	static const void* toldCell = nullptr;
@@ -37,12 +40,14 @@ static void LogLeftOut(const NiGeometry* geo, const char* why, int shaderType) {
 	if (shaderType >= 0) key += std::to_string(shaderType) + ")";
 	if (std::find(told.begin(), told.end(), key) != told.end()) return;
 	told.push_back(key);
-	Logger::Log("RT CORE: left out of the traced scene: %s", key.c_str());
+	sessionLines++, Logger::Log("RT CORE: left out of the traced scene: %s", key.c_str());
 }
 
 // UNOFFICIAL 2026-11-06 (alpha lamp shadows: VS-AlphaLampTest's chain-link fence cast no traced shadow) the first 64 meshes (by name) a
 // cell that the traced scene takes, alpha-tested ones with their atlas slot and alpha reference: with LogLeftOut, which meshes rays can meet.
 static void LogAlphaTaken(const NiGeometry* geo, int slot, unsigned ref, bool blended) {
+	static UInt32 sessionLines = 0;	// UNOFFICIAL 2026-11-13 (rt-audit F9): a session cap (re-armed each cell, these wrote 60,000 flushed lines in 35 min outdoors)
+	if (sessionLines >= kSceneLogCap) return;
 	static std::unordered_map<const void*, bool> seen;		// geometries met this cell (cheap: this runs for every taken mesh every frame)
 	static std::unordered_map<std::string, bool> names;	// (2026-11-06 b) one line a mesh name + slot: a room's 40 copies of one wall filled the cap
 	static const void* toldCell = nullptr;
@@ -55,13 +60,13 @@ static void LogAlphaTaken(const NiGeometry* geo, int slot, unsigned ref, bool bl
 	// with its world bound's centre (camera relative) and radius: which part of a kit piece is the ceiling, and is it taken
 	const NiBound* b = geo ? geo->m_kWorldBound : nullptr;
 	const float cz = b ? b->Center.z - TheRenderManager->CameraPosition.z : 0.0f, r = b ? b->Radius : 0.0f;
-	if (ref > 255u) Logger::Log("RT CORE: in the traced scene: '%s' opaque, bound centre z %+.0f (camera relative), r %.0f", geo && geo->m_pcName ? geo->m_pcName : "", cz, r);
+	if (ref > 255u) sessionLines++, Logger::Log("RT CORE: in the traced scene: '%s' opaque, bound centre z %+.0f (camera relative), r %.0f", geo && geo->m_pcName ? geo->m_pcName : "", cz, r);
 	else {
 		// (2026-11-06 d) the alpha property's test function (flags bits 10-12: 0 ALWAYS, 1 LESS, 2 EQUAL, 3 LEQUAL, 4 GREATER, 5 NOTEQUAL,
 		// 6 GEQUAL, 7 NEVER); the RT test assumes GREATER
 		const NiAlphaProperty* ap = geo ? (const NiAlphaProperty*)const_cast<NiGeometry*>(geo)->GetProperty(NiProperty::PropertyType::kType_Alpha) : nullptr;
 		static const char* const funcs[8] = { "ALWAYS", "LESS", "EQUAL", "LEQUAL", "GREATER", "NOTEQUAL", "GEQUAL", "NEVER" };
-		Logger::Log("RT CORE: alpha-tested in the traced scene: '%s' atlas slot %d, alpha ref %u, test %s (flags %04X)%s, bound centre z %+.0f, r %.0f",
+		sessionLines++, Logger::Log("RT CORE: alpha-tested in the traced scene: '%s' atlas slot %d, alpha ref %u, test %s (flags %04X)%s, bound centre z %+.0f, r %.0f",
 			geo && geo->m_pcName ? geo->m_pcName : "", slot, ref, ap ? funcs[(ap->flags >> 10) & 7] : "?", ap ? (unsigned)ap->flags : 0u, blended ? " (also blended)" : "", cz, r);
 	}
 }
@@ -71,6 +76,8 @@ static void LogAlphaTaken(const NiGeometry* geo, int slot, unsigned ref, bool bl
 // its bound centre (camera relative, x y z) and radius, its world scale and its parents' names (the NIF's nodes), so a mesh far bigger
 // than it should be, or standing where the game draws nothing, can be named.
 static void LogBigTaken(const NiGeometry* geo) {
+	static UInt32 sessionLines = 0;	// UNOFFICIAL 2026-11-13 (rt-audit F9): a session cap (re-armed each cell, these wrote 60,000 flushed lines in 35 min outdoors)
+	if (sessionLines >= kSceneLogCap) return;
 	const NiBound* b = geo ? geo->m_kWorldBound : nullptr;
 	if (!b || b->Radius < 300.0f) return;
 	static std::unordered_map<const void*, bool> seen;
@@ -83,7 +90,7 @@ static void LogBigTaken(const NiGeometry* geo) {
 	std::string parents;
 	const NiNode* p = geo->m_parent;
 	for (int k = 0; p && k < 3; k++, p = p->m_parent) { parents += " < '"; parents += p->m_pcName ? p->m_pcName : ""; parents += "'"; }
-	Logger::Log("RT CORE: big mesh in the traced scene: '%s' bound centre %+.0f %+.0f %+.0f (camera relative), r %.0f, scale %.2f%s",
+	sessionLines++, Logger::Log("RT CORE: big mesh in the traced scene: '%s' bound centre %+.0f %+.0f %+.0f (camera relative), r %.0f, scale %.2f%s",
 		geo->m_pcName ? geo->m_pcName : "", b->Center.x - cam.x, b->Center.y - cam.y, b->Center.z - cam.z, b->Radius, geo->m_worldTransform.scale, parents.c_str());
 }
 
@@ -507,10 +514,32 @@ namespace {
 		// released or at the full clears); alphaSlots keys are not pinned (see AlphaSlotOf; alphaHeld stays empty). The VRAM tradeoff: a texture the
 		// game dropped stays alive until its id is released (RealTextureBudgetMB LRU, kTexIdle exchanges unused).
 		std::vector<IDirect3DBaseTexture9*> alphaHeld;
+		// UNOFFICIAL 2026-11-13 (rt-audit F3/F5, RTAudit\AUDIT.md) atlas slot recycling. The 1024 alpha / albedo atlas slots were never given back and
+		// were keyed by the texture's address: a cell reloaded at new addresses took new slots, and the user's 35-min session filled the atlas at
+		// 09:27 ("1023 slots pointed"); from then on every new alpha-tested mesh was left out of the RT scene ("atlas full", 2,258 lines in 7 min)
+		// and no real texture was sent again. Now each slot holds one COM reference to its diffuse texture (slotTex) and a sweep (SweepSlots,
+		// kSlotSweep slots an exchange) frees a slot whose texture only we still hold (the game dropped it): its alphaSlots key erased (so the
+		// address can never be reused while the key lives: the ABA of SunGI F2 / AUDIT F5), the slot reused from kSlotReuse exchanges on.
+		struct SlotTex { IDirect3DBaseTexture9* diffuse = nullptr; UInt64 key = 0; };
+		std::vector<SlotTex> slotTex;
+		struct FreeSlot { UInt32 slot; UInt64 at; };
+		std::vector<FreeSlot> freeSlots;
+		std::unordered_map<IDirect3DBaseTexture9*, UInt32> slotHolds;	// slots holding a texture (one diffuse can key two slots: with / without a glow map)
+		std::vector<UInt8> slotTableDirty;	// a freed slot's helper table row still names the old ids: the reuse's SLOT_TEXTURES op always goes
+		UInt32		slotSweepAt = 0, slotsFreed = 0, slotsReused = 0;
+		static const UInt32 kSlotSweep = 64;				// slots checked an exchange (the 1024 in 16 exchanges)
+		static const UInt64 kSlotReuse = 64;				// exchanges before a freed slot is drawn into again (frames in flight read it)
+		void		SweepSlots();
 		void ReleaseTexRefs() {
 			for (IDirect3DBaseTexture9*& x : texKeyOf) if (x) { x->Release(); x = nullptr; }
 			for (IDirect3DBaseTexture9* x : alphaHeld) if (x) x->Release();
 			alphaHeld.clear();
+			for (SlotTex& s : slotTex) if (s.diffuse) { s.diffuse->Release(); s.diffuse = nullptr; }	// (rt-audit F3)
+			slotTex.clear();
+			slotHolds.clear();
+			slotTableDirty.clear();
+			freeSlots.clear();
+			slotSweepAt = 0;
 		}
 		// per atlas slot: the ids its SLOT_TEXTURES op named; state 0 none, 1 queued, 2 sent, 3 short (a texture refused by the budget or
 		// released): queued again when the slot is next used from retryAt on
@@ -675,19 +704,22 @@ namespace {
 			return s;
 		}
 		const UInt32 capacity = NVR_RT_ALPHA_ATLAS_SLOTS * NVR_RT_ALPHA_ATLAS_SLOTS;
-		if (atlasImage < 0 || atlasUsed >= capacity) return -1;
+		// (rt-audit F3) a freed slot whose reuse delay has passed comes first; the never-used ones after
+		int reuseAt = -1;
+		for (size_t i = 0; i < freeSlots.size(); i++) if (freeSlots[i].at <= frame) { reuseAt = (int)i; break; }
+		if (atlasImage < 0 || (atlasUsed >= capacity && reuseAt < 0)) return -1;
 		if (atlasThisFrame >= 8) return -2;
 		atlasThisFrame++;
 		const UInt32 S = NVR_RT_ALPHA_SLOT_SIZE;
 		static ID3D9NvrExtPipeline* pipelines[2] = {};	// [0] alpha only (RtAlphaToAtlas), [1] alpha + colour (RtTextureToAtlas)
-		static bool triedPipelines[2] = {};
+		static UInt64 pipelineRetryAt[2] = {};	// UNOFFICIAL 2026-11-13 (rt-audit F12): a failed make is tried again 600 exchanges later (was: once a session)
 		const int which = albedoAtlasImage >= 0 ? 1 : 0;
 		ID3D9NvrExtPipeline*& pipeline = pipelines[which];
 		// (2026-11-06) the alpha-only pass always too: it fills the alpha atlas at AlphaDetail texels (the colour pass stays at 64)
 		for (int want = 0; want <= which; want += which ? 1 : 2) {
 		ID3D9NvrExtPipeline*& made = pipelines[want];
-		if (!triedPipelines[want]) {
-			triedPipelines[want] = true;
+		if (!made && frame >= pipelineRetryAt[want]) {
+			pipelineRetryAt[want] = frame + 600;
 			std::vector<char> spirv;
 			ID3D9NvrExt* ext = DxvkCompute::Extension();
 			if (ext && DxvkCompute::LoadSpirv(want ? "RtTextureToAtlas" : "RtAlphaToAtlas", spirv)) {
@@ -739,7 +771,7 @@ namespace {
 			draw.pPushData = push;
 			draw.PushDataSize = sizeof(push);
 			const RECT all = { 0, 0, (LONG)S, (LONG)S };
-			const UInt32 at = atlasUsed;
+			const UInt32 at = reuseAt >= 0 ? freeSlots[reuseAt].slot : atlasUsed;	// (rt-audit F3)
 			const UInt32 x = (at % NVR_RT_ALPHA_ATLAS_SLOTS) * S, y = (at / NVR_RT_ALPHA_ATLAS_SLOTS) * S;
 			// (2026-11-06) the alpha atlas at AlphaDetail texels a texture: the alpha-only pass into its own target (the 64-texel colour pass
 			// above keeps the albedo / glow / normal atlases; its alpha target is a scratch). Thin cut-outs (chain-link wires) survive at 256.
@@ -796,7 +828,17 @@ namespace {
 						normalTarget->Release();
 					}	// (no map in the slot: it reads 0, the shaders keep the triangle's normal)
 				}
-				if (slot >= 0) { atlasUsed++; if (glow) glowSlots++; }
+				if (slot >= 0) {
+					if (reuseAt >= 0) { freeSlots.erase(freeSlots.begin() + reuseAt); slotsReused++; }	// (rt-audit F3)
+					else atlasUsed++;
+					if (glow) glowSlots++;
+					// (rt-audit F3/F5) the slot holds its diffuse texture until the game drops it (SweepSlots): the key's address stays this texture's
+					if (slotTex.size() < capacity) { slotTex.resize(capacity); slotTableDirty.resize(capacity, 0); }
+					texture->AddRef();
+					slotTex[slot].diffuse = texture;
+					slotTex[slot].key = key;
+					slotHolds[texture]++;
+				}
 				if (slot >= 0 && realTextures && (UInt32)slot < slotReal.size()) {	// (2026-11-07, protocol 7)
 					QueueSlot(slot, texture, normal, glow);
 					slotReal[slot] = SlotReal();
@@ -807,11 +849,49 @@ namespace {
 			target->Release();
 		}
 		if (target2) target2->Release();
-		// UNOFFICIAL 2026-11-11 (sungi): alphaSlots keys are NOT pinned (an atlas slot is never freed: pinning would keep up to 1024
-		// diffuse + 1024 glow textures alive for the session, GBs of VRAM after a long walk). The remaining ABA risk there is a wrong
-		// alpha / albedo atlas slot for a texture reallocated at a freed one's address (no crash); see SunGI-study F2.
+		// UNOFFICIAL 2026-11-11 (sungi) / 2026-11-13 (rt-audit F3): a made slot's key is pinned through slotTex (its diffuse texture held until the
+		// game drops it, then the slot is freed and the key erased: SweepSlots). A -1 (the texture could not be drawn) stays unpinned: those
+		// entries are dropped when the map grows (a new texture at such an address gets its chance again).
+		if (slot < 0 && alphaSlots.size() > 8192)
+			for (auto it = alphaSlots.begin(); it != alphaSlots.end(); ) { if (it->second < 0) it = alphaSlots.erase(it); else ++it; }
 		alphaSlots.emplace(key, slot);
 		return slot;
+	}
+
+	// UNOFFICIAL 2026-11-13 (rt-audit F3, RTAudit\AUDIT.md) kSlotSweep slots an exchange: a slot whose diffuse texture only we still hold (our slot
+	// reference + our real-texture id's reference, texKeyOf) is freed: its key erased, its reference given back (the texture's real id then goes
+	// by the real-texture sweep: only texKeyOf holds it), reusable from kSlotReuse exchanges on. A queued want holds its own reference (QueueSlot),
+	// so a slot waiting to send is never taken for dropped. Textures the game still holds (anything in a loaded cell) are never touched.
+	void Core::SweepSlots() {
+		if (slotTex.empty()) return;
+		const UInt32 total = (UInt32)slotTex.size();
+		for (UInt32 k = 0; k < kSlotSweep && k < total; k++) {
+			if (slotSweepAt >= total) slotSweepAt = 0;
+			const UInt32 s = slotSweepAt++;
+			SlotTex& st = slotTex[s];
+			if (!st.diffuse) continue;
+			auto holds = slotHolds.find(st.diffuse);
+			UInt32 ours = holds != slotHolds.end() ? holds->second : 1u;
+			auto id = texIds.find(st.diffuse);
+			if (id != texIds.end() && id->second.id && id->second.id < texKeyOf.size() && texKeyOf[id->second.id] == st.diffuse) ours++;
+			st.diffuse->AddRef();
+			if (st.diffuse->Release() != ours) continue;
+			alphaSlots.erase(st.key);	// first: the Release below may free the texture and its address
+			if (holds != slotHolds.end() && --holds->second == 0) slotHolds.erase(holds);
+			st.diffuse->Release();
+			st = SlotTex();
+			if (s < slotNormals.size()) slotNormals[s] = nullptr;
+			if (s < slotReal.size()) slotReal[s] = SlotReal();	// (its ids stay with their textures: the real-texture sweep releases them)
+			if (s < slotTableDirty.size()) slotTableDirty[s] = 1;
+			freeSlots.push_back({ s, frame + kSlotReuse });
+			slotsFreed++;
+		}
+		static UInt32 logged = 0;
+		if (slotsFreed >= logged + 100) {
+			logged = slotsFreed;
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT atlas: %u slots freed so far (the game dropped their textures), %u reused, %zu free; %u of %u ever drawn (rt-audit F3)",
+				slotsFreed, slotsReused, freeSlots.size(), atlasUsed, total);
+		}
 	}
 	// (2026-11-07, protocol 7; protocol 8 rtgap-textures) a texture's levels into this exchange's half of its route's transfer image + a
 	// TEXTURE op (bytes 0: on the GPU). Returns its id, 0 = not now (the slot keeps the atlas: not a 2D texture, a format left out, or the
@@ -973,11 +1053,13 @@ namespace {
 			}
 			if (!ready || f.opCount >= NVR_RT_MAX_OPS) break;
 			SlotReal* s = (UInt32)want.slot < slotReal.size() ? &slotReal[want.slot] : nullptr;
-			const bool named = s && (s->ids[0] || s->ids[1] || s->ids[2]);
+			const bool dirty = (UInt32)want.slot < slotTableDirty.size() && slotTableDirty[want.slot];	// (rt-audit F3) a reused slot: its old row goes
+			const bool named = s && (s->ids[0] || s->ids[1] || s->ids[2] || dirty);
 			if (ids[0] || ids[1] || ids[2] || named) {	// (also when it named textures before: the table entry follows)
 				NvrRtTextureOp op = { NVR_RT_OP_SLOT_TEXTURES, (UInt32)want.slot, ids[0], ids[1], ids[2], 0, 0, 0 };
 				memcpy(&f.ops[f.opCount++], &op, sizeof(op));
 				texSlotsSent++;
+				if (dirty) slotTableDirty[want.slot] = 0;
 			}
 			if (s) {
 				for (UInt32 k = 0; k < 3; k++) { s->ids[k] = ids[k]; if (ids[k]) texRes.Use(ids[k], n); }
@@ -1514,6 +1596,7 @@ namespace {
 		if (albedoDetailUpload) { albedoDetailUpload->Release(); albedoDetailUpload = nullptr; }
 		if (albedoDetailScratch) { albedoDetailScratch->Release(); albedoDetailScratch = nullptr; }
 		if (glowUpload) { glowUpload->Release(); glowUpload = nullptr; }
+		if (normalUpload) { normalUpload->Release(); normalUpload = nullptr; }	// UNOFFICIAL 2026-11-13 (rt-audit F11): leaked at every helper restart
 	}
 
 	void Core::Poll() {
@@ -3137,11 +3220,23 @@ namespace {
 		sceneFrame++;
 		RtHairTint::Frame = sceneFrame;	// (2026-11-07 perf-mirrorfix) the hair draws note their tint while actors with textures are traced
 		RtHairTint::Wanted = alphaOn || (actorsOn && rtSkin && hitTextures);	// (2026-11-08 perf-reflfix4) the rigid hair: an alpha-tested caster
+		SweepSlots();	// UNOFFICIAL 2026-11-13 (rt-audit F3) atlas slots whose textures the game dropped
 		// A cell change (a door, a jump, a load): every actor partition goes at once (its buffers and bones may be unloaded and the
 		// addresses reused by new ones); the actors still there are posed again from scratch this frame
 		static const void* lastCell = nullptr;
-		const void* cell = Player ? (const void*)Player->parentCell : nullptr;
-		if (cell != lastCell) {
+		// UNOFFICIAL 2026-11-13 (rt-audit F6) the SPACE, not the exterior cell: outdoors parentCell changes at every cell border, which released and
+		// rebuilt every actor partition (33-230 a frame in the user's log) at each crossing. Indoors the cell, outdoors the worldspace; and a camera
+		// jump past 8192 units in one frame (a save load or fast travel in the same worldspace: every actor made again at new addresses). Actors that
+		// leave the loaded grid age out as any geometry (kReleaseAfterFrames); a partition met again at a dropped one's addresses is rebuilt by the
+		// helper when its counts differ (NvrRtHelper.cpp refit rule) and every ActorRebuildInterval poses anyway.
+		const void* space = Player ? (const void*)Player->GetWorldSpace() : nullptr;
+		const void* cell = space ? space : Player ? (const void*)Player->parentCell : nullptr;
+		static D3DXVECTOR3 lastEye(0.0f, 0.0f, 0.0f);
+		const D3DXVECTOR3 eye(TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
+		const D3DXVECTOR3 eyeMove = eye - lastEye;
+		const bool jumped = D3DXVec3LengthSq(&eyeMove) > 8192.0f * 8192.0f;
+		lastEye = eye;
+		if (cell != lastCell || jumped) {
 			for (auto it = geometries.begin(); it != geometries.end(); ) {
 				if (!it->second.skinned) { ++it; continue; }
 				if (it->second.sent) Release(it->second.id);	// (2026-10-30: queued; a full op list used to drop it and the helper kept it)
