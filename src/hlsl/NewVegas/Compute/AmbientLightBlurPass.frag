@@ -34,7 +34,8 @@ vec4 Blur(vec2 uvIn, vec2 axis) {
             total += w;
         }
     }
-    return vec4(bounce / total.y, visibility / total.x);
+    // UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur (variant bit 1): the RT-denoised bounce passes through (AmbientLight.fx.hlsl Blur)
+    return vec4((pc.variant & 2u) != 0u ? center.rgb : bounce / total.y, visibility / total.x);
 }
 
 void main() { o_color = Blur(frameUV(), (pc.variant & 1u) != 0u ? vec2(0.0, 1.0) : vec2(1.0, 0.0)); }

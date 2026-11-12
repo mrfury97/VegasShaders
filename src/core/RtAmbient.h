@@ -125,6 +125,12 @@ namespace RtAmbient {
 		// Enabled / GI / Sky / RadianceCache / CacheExteriors on: the user's strength / quality keys stay. AmbientLight forces its own side (ExteriorBalance,
 		// AmbientReplace, AlbedoBuffer, the Status switch, the grid fallback; AmbientLight.cpp SunGIFrame). GIDenoiseSunGI (default true; missing key: true):
 		// with SunGI the GI denoiser gets the sun-GI settings (AmbientOcclusion.cpp RtDenoisedGI); false = the old settings, for the A/B.
+		// UNOFFICIAL 2026-11-13 (rtgi-review, RTGIReview/REVIEW.md R2 / R9 / R10 / R4), each on by default (a missing key: the default), read every frame:
+		// GICutByEnergy (AmbientOcclusion.cpp, the GI reuse's light keys), GIDenoiseTune (0-2; RtDenoisedGI, with SunGI outdoors), InputSamePixel (RtAOInput.frag).
+		bool	GICutByEnergy = true;
+		int		GIDenoiseTune = 2;
+		bool	InputSamePixel = true;
+		int		GICandidates = 1;	// UNOFFICIAL 2026-11-13 (rtgi-review B1) [1-2] new bounce candidates a texel and frame (GIReuse > 0; RtAOTrace.comp ReuseGI, reuse flag 8)
 		bool	SunGI = false;
 		bool	GIDenoiseSunGI = true;
 	};
@@ -210,6 +216,11 @@ namespace RtAmbient {
 			SettingManager::Configuration::ConfigNode node;
 			Current.SunGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
 			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
+			// UNOFFICIAL 2026-11-13 (rtgi-review)
+			Current.GICutByEnergy = !TheSettingManager->Config.FillNode(&node, s, "GICutByEnergy") || node.BoolValue;
+			Current.GIDenoiseTune = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseTune") ? std::clamp((int)node.IntValue, 0, 2) : 2;
+			Current.InputSamePixel = !TheSettingManager->Config.FillNode(&node, s, "InputSamePixel") || node.BoolValue;
+			Current.GICandidates = TheSettingManager->Config.FillNode(&node, s, "GICandidates") ? std::clamp((int)node.IntValue, 1, 2) : 1;
 			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
 			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
 			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each
