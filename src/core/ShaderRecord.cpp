@@ -1,4 +1,5 @@
 #include "ShaderRecord.h"	// (also reached through Framework.h; kept for the IDE)
+#include "../effects/Puddles/PuddleMap.h"	// 2026-11-12 Puddles map mode
 #include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker (SetCT joins the sky's projection)
 #include "LinearSceneShaders.h"	// UNOFFICIAL 2026-10-28 LinearScene
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals
@@ -440,7 +441,8 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// 2026-11-08 Puddles ([Shaders.Puddles.Status] Enabled at startup, effects/Puddles): WETNESS_EFFECTS 2 compiles the puddle model in
 	// (Includes/Wetness.hlsl PUDDLES_COMPILED), without a define of its own (the list is near its cap).
 	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled"))
-		AppendDefine("WETNESS_EFFECTS", TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") ? "2" : "1");
+		// 2026-11-12: 3 = puddle map mode (effects/Puddles/PuddleMap.h: the NVR DXVK extension there and [Shaders.Puddles.Main] MapMode on)
+		AppendDefine("WETNESS_EFFECTS", TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") ? (PuddleMap::ModeAtStart() ? "3" : "2") : "1");
 	// UNOFFICIAL 2026-10-24 SmoothObjectNormals ([Shaders.PBR.Main], restart): the object and skin shaders' shadow lookups and sky ambient take
 	// the vertex normal instead of the per-triangle one (Includes/Shadow.hlsl ShadowFacingNormal). 0: the shaders exactly as before.
 	AppendDefine("OBJECT_SMOOTH_NORMALS", TheSettingManager->GetSettingI("Shaders.PBR.Main", "SmoothObjectNormals") ? "1" : "0");
@@ -580,6 +582,13 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			logCompilerMessages(messages, Name);
 			EffectStatus::ShaderLoaded(binary ? EffectStatus::Compiled : EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
 			if (!binary) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
+			// 2026-11-12 (puddle room): the exact source that failed, preprocessed with this record's defines, next to where the binary would
+			// be (<name>.failed.hlsl): tools\landc\landcf.exe compiles it as the game does (the offline template tool's newer compiler fits
+			// shaders the game's D3DX9 one does not, and its define list misses runtime ones).
+			if (!binary && source) {
+				std::ofstream failedFile(binaryPath + ".failed.hlsl", std::ios::out | std::ios::binary);
+				failedFile.write((const char*)source->GetBufferPointer(), source->GetBufferSize());
+			}
 			if (binary) {
 				function = binary->GetBufferPointer();
 				std::ofstream binaryFile(binaryPath, std::ios::out | std::ios::binary);

@@ -216,6 +216,13 @@ float PuddleValueNoise(vec2 p) {
 #define PuddlesOn (cb.puddle.w > 0.5 && cb.puddle.x > 0.001)
 float PuddleStanding(vec2 uv, float depth, float worldUp) {
     if (!PuddlesOn || depth > 10240.0) return 0.0;
+    // 2026-11-12 the surface shaders' own mask (TESR_MaterialBuffer a = 1 + standing water, Includes/CapturedNormals.hlsl; material2.x
+    // bit 2 = bound for this): the water reflects exactly where it is drawn, height pooling, cover and debris included. A pixel no template
+    // wrote (r 0: grass, effects, LOD) falls back to the field below.
+    if (cb.material2.x > 1.5) {
+        vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
+        if (written.r > 0.5) return saturate(written.a - 1.0);
+    }
     vec3 worldPos = cb.cameraPosition.xyz + toWorld(uv) * depth;
     vec2 p = worldPos.xy * cb.puddle.z;
     float n = PuddleValueNoise(p) * 0.62 + PuddleValueNoise(p * 2.31 + 17.7) * 0.38;
@@ -322,7 +329,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
             float saturation = top > 1.0e-4 ? (top - min(lit.r, min(lit.g, lit.b))) / top : 0.0;
             SurfaceMetal = cb.material2.w * (1.0 - smoothstep(0.12, 0.35, saturation));
         }
-        if (cb.material2.x > 0.5) {
+        if (mod(cb.material2.x, 2.0) > 0.5) {
             vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
             if (written.r > 0.5 && written.b >= 0.0) roughness = saturate(written.b);
         }
@@ -351,7 +358,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     float dryRoughness = DryRoughness;
     // UNOFFICIAL 2026-10-31: the copy with MaterialAware on carries it already (b 0.5, core/CapturedNormals.h MergeIntoReflMaterial)
     if (MaterialOn) { vec4 merged = MaterialAt(uv); if (merged.b > 0.25 && merged.b <= 0.75) { dryRoughness = max(merged.r, 0.02); SurfaceMetal = merged.g; } }
-    if (cb.material2.x > 0.5) {
+    if (mod(cb.material2.x, 2.0) > 0.5) {
         vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
         if (written.r > 0.5 && written.b >= 0.0) dryRoughness = saturate(written.b);
     }

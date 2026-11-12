@@ -1231,13 +1231,16 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// this build registers it and it is made; looked up once, by name, so a build without it simply leaves this off.
 	static IDirect3DBaseTexture9** materialBuffer = nullptr;
 	static bool materialLooked = false;
-	if (Settings.MaterialBufferRoughness && !materialLooked) {
+	// 2026-11-12 Puddles: the reflection pass also reads the surfaces' standing-water mask from it (Reflections.glsl PuddleStanding)
+	PuddlesShaders* puddlesMask = TheShaderManager->Shaders.Puddles;
+	const bool puddleMask = puddlesMask && puddlesMask->ReflectionsWanted();
+	if ((Settings.MaterialBufferRoughness || puddleMask) && !materialLooked) {
 		materialLooked = true;
 		std::string name = "TESR_MaterialBuffer";
 		materialBuffer = TheTextureManager->GetTextureSlotByName(name);
 		Logger::Log("UNOFFICIAL Reflections MaterialBufferRoughness: %s", materialBuffer ? "TESR_MaterialBuffer found" : "no TESR_MaterialBuffer in this build: off");
 	}
-	IDirect3DBaseTexture9* matbuf = Settings.MaterialBufferRoughness && materialBuffer ? *materialBuffer : nullptr;
+	IDirect3DBaseTexture9* matbuf = (Settings.MaterialBufferRoughness || puddleMask) && materialBuffer ? *materialBuffer : nullptr;
 	// UNOFFICIAL 2026-10-30 CloudSky: the cloud sky probe (VolumetricClouds RenderSkyProbe), outdoors, while it is fresh.
 	VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds;
 	IDirect3DTexture9* cloudSky = Settings.CloudSky && clouds && clouds->Enabled && clouds->SkyProbeReady() && TheShaderManager->GameState.isExterior ?
@@ -1247,7 +1250,8 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		auto found = TheShaderManager->ConstantsTable.find("TESR_CloudsLayout");
 		if (found != TheShaderManager->ConstantsTable.end() && found->second) cloudBrightness = found->second->w;
 	}
-	uniforms.material2 = D3DXVECTOR4(matbuf ? 1.0f : 0.0f, cloudSky ? 1.0f : 0.0f, cloudBrightness, Settings.RtWeaponMetal);	// w: WeaponMetal (2026-10-30)
+	// x: bit 1 the roughness the shaders lit with (MaterialBufferRoughness), bit 2 the puddle mask (2026-11-12)
+	uniforms.material2 = D3DXVECTOR4((matbuf && Settings.MaterialBufferRoughness ? 1.0f : 0.0f) + (matbuf && puddleMask ? 2.0f : 0.0f), cloudSky ? 1.0f : 0.0f, cloudBrightness, Settings.RtWeaponMetal);	// w: WeaponMetal (2026-10-30)
 	// UNOFFICIAL 2026-10-31 SkyPanorama: the passes after it this frame read the panorama on t_cloudSky (y 2); its own pass reads the probe.
 	IDirect3DBaseTexture9* skySlot = cloudSky;
 	if (panoReady && techniqueIndex != 10) { skySlot = pano[panoIndex]; uniforms.material2.y = 2.0f; }

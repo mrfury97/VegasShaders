@@ -316,9 +316,25 @@ float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3
     #define TERRAIN_WETNESS
     #if TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS)
         #define WETNESS_ALT_REGS    // 2026-11-09: the lamp slots hold c146-c173 here; the water layer takes c2, c4-c17, c98-c99 (Wetness.hlsl)
+        // 2026-11-12 the lamp record is full (32 temps; SLS2094 and 19 more no longer fit with the full puddles): the lean path here
+        // (not in map mode: the puddle map takes the heavy terms)
+        #if WETNESS_EFFECTS < 3
+            #define PUDDLES_LEAN
+        #endif
     #endif
     #if TEX_COUNT < 7
         #define WETNESS_ORTHO_REG s13
+    #elif WETNESS_EFFECTS >= 3 && !TERRAIN_LAMP_RT && !TERRAIN_BLEND_ACTIVE
+        // 2026-11-12 map mode, 7-layer land: the game binds its seventh normal map to s13 itself on every land draw (whatever this shader
+        // declares: measured, the map's alpha read 1 there), so the puddle map goes on s15, free without terrain blending and outside the
+        // lamp-shadow record
+        #define WETNESS_ORTHO_REG s15
+    #elif WETNESS_EFFECTS >= 3
+        // no stage left (blending's depth or the lamp record's result holds s15): the in-shader puddles without the rain cover, as before
+        #define PUDDLES_NOMAP
+        #if TERRAIN_LAMP_RT
+            #define PUDDLES_LEAN
+        #endif
     #endif
     #define WETNESS_RAINDROPS
     #define WETNESS_HEIGHT      // the land's height maps shape the wetness: water gathers in the crevices
@@ -634,11 +650,36 @@ PS_OUTPUT main(PS_INPUT pin) {
             heightWeight += wts[wh];
         }
         surfaceHeight = heightWeight > 0.0f ? surfaceHeight / heightWeight : 0.5f;
+        #ifdef PUDDLES_COMPILED
+        // 2026-11-11 Puddles (user: puddles jumped at the land's quad seams, a wet quad beside a dry one): each layer's height counts
+        // against its OWN average (its last mip), so only its cracks and bumps matter, not how high its height map sits overall; a layer
+        // without one adds nothing. Only while there is water (the field reads the height only then).
+        [branch] if (TESR_PuddleData.x > 0.001f && PUDDLES_ON) {
+            float detail = 0.0f;
+            // 2026-11-12: a layer without a height map gives its colour's brightness detail instead (dark cracks and gaps read as low)
+            [unroll] for (int wa = 0; wa < texLayers; wa++) {
+            #ifdef PUDDLES_LEAN	// (the lamp record: height maps only)
+                if (hStat[wa] > 0.0f) detail += wts[wa] * (tex2Dgrad(BaseMap[wa], offsetUV, odx, ody).a - tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f)).a);
+            #else
+                float4 here = tex2Dgrad(BaseMap[wa], offsetUV, odx, ody);
+                float4 mean = tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f));
+                const float3 lumW = float3(0.3f, 0.59f, 0.11f);
+                detail += wts[wa] * (hStat[wa] > 0.0f ? here.a - mean.a : 0.6f * (dot(here.rgb, lumW) - dot(mean.rgb, lumW)));
+            #endif
+            }
+            surfaceHeight = saturate(0.5f + (heightWeight > 0.0f ? detail / heightWeight : 0.0f));
+        }
+        #endif
         Wetness wet = GetWetness(camPos, geoN, wetWorldNormal, surfaceHeight);
         #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
             combinedNormal = normalize(lerp(combinedNormal, float3(0.0f, 0.0f, 1.0f), wet.flatten));
         #endif
         baseColor = WetAlbedo(baseColor, wet.darkening, 1.0f);
+        #ifdef PUDDLES_COMPILED	// 2026-11-12 floating specks and leaves on standing water
+            // standing water reads darker than the ground round it (WetAlbedo blends only half way: a puddle stayed pale grey)
+            baseColor *= lerp(1.0f, 0.4f, wet.flatten);
+            baseColor = lerp(baseColor, wet.debris.rgb, wet.debris.a);
+        #endif
     #endif
     float3 litCol = getSunLighting(sunTS, LinColor(SunColor.rgb), toEye, combinedNormal, LinColor(AmbientColor.rgb), baseColor, glossV, specPow, 1.0, sunMul, geoN);
     #ifdef TERRAIN_WETNESS	// the water film: the sun's highlight on it and its reflection of the sky, over the land
@@ -648,7 +689,11 @@ PS_OUTPUT main(PS_INPUT pin) {
             litCol += WetSpecular(wet.normal, wetV, TESR_WetnessSun.xyz, wetSun, wet.roughness) * smoothstep(0.0f, 0.2f, wet.gloss);
             float3 wetR = reflect(-wetV, wet.normal);
             float wetHorizon = saturate(1.0f + 1.2f * dot(wetR, geoN));
+            #ifdef PUDDLES_COMPILED	// 2026-11-12 the standing water's murk tints what it reflects (the line below unchanged without puddles: byte identity)
+            litCol += WetSkyReflection(wetR) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * wetHorizon * wetHorizon * PuddleMurkTint(wet.murk);
+            #else
             litCol += WetSkyReflection(wetR) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * wetHorizon * wetHorizon;
+            #endif
         }
     #endif
 
@@ -657,6 +702,17 @@ PS_OUTPUT main(PS_INPUT pin) {
             float3 tlVis, tlP0, tlP1, tlP2, tlOk;
             TerrainLampEntries(camPos, tlVis, tlP0, tlP1, tlP2, tlOk);
             float2 tlDebug = 0.0f;   // (2026-11-05 ExteriorDebug 3) the lamps' attenuation blocked / lit
+        #endif
+        #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && (defined(PUDDLES_LEAN) || TERRAIN_LAMP_RT)
+            // 2026-11-12 Puddles, the lamp record (no room for a second highlight per lamp, also in map mode): the lamps' own specular sees the water film,
+            // its gloss raised by the wetness (PBR: roughness = 1 - gloss; the game's look: a sharper power), so wet ground still shines
+            glossV = max(glossV, wet.gloss * saturate(1.0f - wet.roughness));
+            specPow = lerp(specPow, 200.0f, saturate(wet.gloss));
+        #endif
+        #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && !defined(PUDDLES_LEAN) && !TERRAIN_LAMP_RT
+            const float3 lampFilmTint = smoothstep(0.0f, 0.2f, wet.gloss) * PuddleMurkTint(wet.murk);
+            const float3 lampFilmV = -normalize(camPos);
+            const float lampFilmStretch = lerp(1.0f, 0.3f, wet.gloss);
         #endif
         [loop] for (int k = 0; k < PointLightCount; k++) {
             float3 lampDir = PointLightPosition[k].xyz - pin.localPos.xyz;
@@ -673,6 +729,15 @@ PS_OUTPUT main(PS_INPUT pin) {
                 lampDir = mul(tbnMat, lampDir);
                 // UNOFFICIAL 2026-10-21 (Includes/LampFalloff.hlsl): att as before, the objects' decode (MatchEverywhere) or the shape.
                 litCol += tlShadow * getPointLightLighting(lampDir, LampAttOther(atten), LinColor(PointLightColor[k].rgb), toEye, combinedNormal, baseColor, glossV, specPow);
+                #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && !defined(PUDDLES_LEAN) && !TERRAIN_LAMP_RT
+                    // 2026-11-12 Puddles: the lamp on the water film, stretched toward the eye on wet ground (wet-road streaks); what is the
+                    // same for every lamp is worked out once before the loop (lampFilmTint, lampFilmV)
+                    [branch] if (wet.gloss > 0.05f) {
+                        float3 lampW = normalize(PointLightPosition[k].xyz - pin.localPos.xyz);
+                        litCol += (tlShadow * LampAttOther(atten)) * lampFilmTint
+                                * WetLampFilm(wet.normal, lampFilmV, lampW, LinColor(PointLightColor[k].rgb), wet.roughness, lampFilmStretch);
+                    }
+                #endif
             }
         }
         #if TERRAIN_LAMP_RT
@@ -729,6 +794,10 @@ PS_OUTPUT main(PS_INPUT pin) {
     // replace) it overwrites an object's albedo in the fade strip, as the normal does
     po.capturedPad1 = CapturedAlbedoOut(baseColor);
     po.capturedPad2 = CapturedMaterialOutClass(4.0f, -1.0f);	// UNOFFICIAL 2026-10-29 MaterialBuffer: class 4, land (0 without it)
+    #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON >= 2
+        // 2026-11-12 Puddles: the standing water drawn here, for the SSR/RT reflection pass (Reflections.glsl PuddleStanding: a - 1)
+        po.capturedPad2.a += PuddleStandingOut;
+    #endif
     // UNOFFICIAL 2026-10-28 CapturedNormals: the land's interpolated vertex normal (the land is not rotated: object space is world space;
     // with tessellation the normal its evaluation shader passes on), before the layers' normal maps. Alpha 1 also with terrain blending's
     // Smooth fade (the land drawn blended over objects): the land's normal replaces what is there, with its depth.

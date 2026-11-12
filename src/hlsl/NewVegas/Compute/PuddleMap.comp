@@ -1,0 +1,110 @@
+// 2026-11-12 Puddles, map mode (WETNESS_EFFECTS 3; src/effects/Puddles/README.md "Puddle map"): the large-scale puddle terms, once
+// per texel of a world-space map round the camera instead of in every surface pixel (they cost the ps_3_0 shaders their temps).
+//
+// TESR_PuddleMap, rgba16f, 2048 x 1024: two cascades side by side, each 1024 x 1024, each snapped to its own texel grid around the
+// camera (world-fixed texels: nothing swims as the camera moves). Near: x 0-1023; far: x 1024-2047. Per texel:
+//   r  the puddle field's large-scale part (Wetness.hlsl PuddleField without the surface's own relief): value noise at 1 / Size,
+//      2 octaves (3 at Quality 3), smoothstep(0.2, 0.8)
+//   g  the top surface's height over this spot, camera-relative at the build (zRef): from the ortho map (the rain-cover depth map)
+//      through its inverse transform, one refinement for its slight tilt, averaged over a tent of 3 x 3 ortho texels at a position
+//      jittered by world noise (the old in-shader tent + wander). Nothing there (cleared, outside the ortho map): -60000 (open)
+//   b  the shore / rim wander (value noise at Size / 3.7), 0-1
+//   a  0
+//
+// Build: glslang -V --target-env vulkan1.1 -o PuddleMap.spv PuddleMap.comp
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_ortho;                    // TESR_OrthoMapBuffer (R32F, ortho depth 0-1)
+layout(set = 1, binding = 1, rgba16f) uniform image2D i_map;               // TESR_PuddleMap (read too: the kept cover, below)
+
+layout(push_constant) uniform Push {
+    vec4 cascade[2];     // 0, 16: xy the world position of the cascade's texel (0, 0) corner, z texel size (units), w 1 = the same window as the last build
+    vec4 ortho[3];       // 32: rows 0, 1, 2 of TESR_ShadowCameraToLightTransformOrtho (camera-relative -> ortho clip x, y, z)
+    vec4 inverse[3];     // 80: rows 0, 1, 2 of its inverse (ortho clip x, y, z, 1 -> camera-relative x, y, z)
+    vec4 camera;         // 128: xyz the camera's world position, w the build's zRef (camera-relative z the stored heights are taken from)
+    vec4 params;         // 144: x 1 / Size, y Quality, z ortho texel size (uv), w 1 = the ortho map is valid
+    ivec2 orthoSize;     // 160
+} pc;
+
+vec3 WetHash33(vec3 p3) {
+    p3 = fract(p3 * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yxz + 33.33);
+    return fract((p3.xxy + p3.yxx) * p3.zyx);
+}
+float PuddleHash(vec2 p) { return WetHash33(vec3(p, 7.13)).x; }
+float PuddleValueNoise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = p - i;
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = PuddleHash(i), b = PuddleHash(i + vec2(1.0, 0.0));
+    float c = PuddleHash(i + vec2(0.0, 1.0)), d = PuddleHash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+vec3 OrthoClip(vec3 rel) {   // camera-relative -> ortho clip (orthographic: w 1)
+    vec4 p = vec4(rel, 1.0);
+    return vec3(dot(pc.ortho[0], p), dot(pc.ortho[1], p), dot(pc.ortho[2], p));
+}
+vec3 FromOrtho(vec3 o) {     // ortho clip -> camera-relative
+    vec4 p = vec4(o, 1.0);
+    return vec3(dot(pc.inverse[0], p), dot(pc.inverse[1], p), dot(pc.inverse[2], p));
+}
+float OrthoDepth(vec2 uv) {  // point lookup; > 0.9999: nothing drawn there
+    ivec2 t = clamp(ivec2(uv * vec2(pc.orthoSize)), ivec2(0), pc.orthoSize - 1);
+    return texelFetch(t_ortho, t, 0).r;
+}
+vec2 ToUV(vec3 o) { return vec2(o.x * 0.5 + 0.5, o.y * -0.5 + 0.5); }
+
+// The top surface's camera-relative height over a camera-relative xy (-60000: open sky)
+float TopHeight(vec2 relXY) {
+    vec3 o = OrthoClip(vec3(relXY, pc.camera.w));
+    if (any(greaterThan(abs(o.xy), vec2(1.0)))) return -60000.0;
+    float d = OrthoDepth(ToUV(o));
+    if (d >= 0.9999) return -60000.0;
+    float z = FromOrtho(vec3(o.xy, d)).z;
+    o = OrthoClip(vec3(relXY, z));              // one refinement: the map is tilted a little (0.05) off straight down
+    if (any(greaterThan(abs(o.xy), vec2(1.0)))) return -60000.0;
+    d = OrthoDepth(ToUV(o));
+    if (d >= 0.9999) return -60000.0;
+    return FromOrtho(vec3(o.xy, d)).z;
+}
+
+void main() {
+    ivec2 id = ivec2(gl_GlobalInvocationID.xy);
+    if (id.x >= 2048 || id.y >= 1024) return;
+    int c = id.x >= 1024 ? 1 : 0;
+    vec2 local = vec2(id.x - c * 1024, id.y) + 0.5;
+    vec2 world = pc.cascade[c].xy + local * pc.cascade[c].z;
+
+    vec2 p = world * pc.params.x;
+    float n = PuddleValueNoise(p) * 0.62 + PuddleValueNoise(p * 2.31 + 17.7) * 0.38;
+    if (pc.params.y > 2.5) n = n * 0.85 + PuddleValueNoise(p * 5.7 + 41.3) * 0.15;
+    n = smoothstep(0.2, 0.8, n);
+    float wander = PuddleValueNoise(p * 3.7 + 5.1);
+
+    float top = -60000.0;
+    if (pc.params.w > 0.5) {
+        // the old tent over ~3 ortho texels and the wander of up to 1.6 texels, now in world units (the ortho texel's size)
+        float texelUnits = pc.params.z * 2.0 / max(length(pc.ortho[0].xy), 1e-6);   // ortho uv texel -> world units
+        vec2 jitter = vec2(PuddleValueNoise(world * 0.045), PuddleValueNoise(world.yx * 0.045 + 17.3)) * 2.0 - 1.0;
+        vec2 rel = world - pc.camera.xy + jitter * texelUnits * 1.6;
+        float sum = 0.0, weight = 0.0, seen = 0.0;
+        for (int y = -1; y <= 1; y++)
+            for (int x = -1; x <= 1; x++) {
+                float h = TopHeight(rel + vec2(x, y) * texelUnits);
+                seen += h > -59999.0 ? 1.0 : 0.0;
+                float w = (x == 0 ? 2.0 : 1.0) * (y == 0 ? 2.0 : 1.0);
+                // an open spot counts as far below (the average then leans open there), clamped so one hole does not drown a roof
+                sum += max(h, pc.camera.w - 4000.0) * w;
+                weight += w;
+            }
+        top = sum / weight;
+        // 2026-11-12 (sweep: small pops while panning): the rain map follows the view, so a spot near its edge drops in and out of it as
+        // the camera turns; where the map has nothing for this spot now and the window did not move, the last build's cover stays
+        if (seen < 0.5 && pc.cascade[c].w > 0.5) top = imageLoad(i_map, id).g;
+    }
+    imageStore(i_map, id, vec4(n, top - pc.camera.w, wander, 0.0));
+}

@@ -436,21 +436,49 @@
         // c160 / c161 (in none of those records' tables: Bend's c160-c164 is not compiled into them; no raw write)
         #define PR_DATA c160
         #define PR_LOOK c161
+        // 2026-11-12 these records are full (32 temps): the puddles' lean path here (Wetness.hlsl PUDDLES_LEAN: no shoreline noise, no
+        // texture-detail height); with the full one 20 SLS records no longer fit with the water layer and lost it near lamps. Not in map
+        // mode (WETNESS_EFFECTS 3): the heavy terms come from the puddle map there and the full path fits.
+        #if WETNESS_EFFECTS < 3
+            #define PUDDLES_LEAN
+        #endif
     #endif
     #define WETNESS_ORTHO_REG s12
     #include "includes/Wetness.hlsl"
+    #if defined(PUDDLES_COMPILED) && !defined(PUDDLES_LEAN)	// 2026-11-12 Puddles: the colour texture's detail as the puddles' height (Wetness.hlsl ObjectPuddleHeight)
+        #define OBJ_PUDDLE_HEIGHT(uv, p) , ObjectPuddleHeight(BaseMap, (uv), (p))
+    #else
+        #define OBJ_PUDDLE_HEIGHT(uv, p)
+    #endif
     // The wet albedo (linear). In a light-only pass the albedo is 1 here and the texture pass multiplies the real one (dryTexture, stored)
     // in afterwards, so the light is scaled by how much darker the wet albedo is instead.
     float3 ObjectWetAlbedo(float3 albedo, float3 dryTexture, Wetness wet, float porosity) {
+        #ifdef PUDDLES_COMPILED	// 2026-11-12 standing water darker than the ground round it (WetAlbedo blends only half way)
+            #define PUDDLE_UNDER_MUL * lerp(1.0f, 0.4f, wet.flatten)
+        #else
+            #define PUDDLE_UNDER_MUL
+        #endif
         #ifdef ONLY_LIGHT
             float3 dry = max(LinColor(dryTexture), 1.0f / 256.0f);
-            return albedo * WetAlbedo(dry, wet.darkening, porosity) / dry;
+            return albedo * WetAlbedo(dry, wet.darkening, porosity) / dry PUDDLE_UNDER_MUL;
         #else
-            return WetAlbedo(albedo, wet.darkening, porosity);
+            return WetAlbedo(albedo, wet.darkening, porosity) PUDDLE_UNDER_MUL;
         #endif
     }
     // The water film over the material: the sun's highlight on it (sunRadiance: the sun as getSunLighting takes it, shadowed and scaled)
     // and its reflection of the sky. Undone by the texture a light-only pass's light is later multiplied by.
+    #if defined(PUDDLES_COMPILED) && !defined(PUDDLES_LEAN)
+    // 2026-11-12 Puddles: a lamp's highlight on the wet film, stretched toward the eye (wet-road streaks; Wetness.hlsl WetLampFilm), in
+    // the space the lamp vectors are in (tangent space: N the flattened normal, V the view vector, L the lamp vector). Undone by the
+    // texture a light-only pass's light is later multiplied by, as the sun's film.
+    float3 ObjectLampFilm(Wetness wet, float3 N, float3 V, float3 L, float3 radiance, float3 dryTexture) {
+        float3 film = WetLampFilm(N, V, normalize(L), radiance, wet.roughness, lerp(1.0f, 0.3f, wet.gloss)) * smoothstep(0.0f, 0.2f, wet.gloss);
+        #ifdef ONLY_LIGHT
+            film /= max(LinColor(dryTexture), 1.0f / 256.0f);
+        #endif
+        return film;
+    }
+    #endif
     float3 ObjectWetFilm(Wetness wet, float3 position, float3 geometricNormal, float3 sunRadiance, float3 dryTexture) {
         float3 wetV = -normalize(position);
         float3 film = WetSpecular(wet.normal, wetV, TESR_WetnessSun.xyz, sunRadiance, wet.roughness) * smoothstep(0.0f, 0.2f, wet.gloss);
@@ -1623,7 +1651,7 @@ PS_OUTPUT main(PS_INPUT IN) {
             Wetness wet = (Wetness)0;
             wet.roughness = 1.0f;
             wet.normal = faceNormal;
-            [branch] if (skyValid > 0.0f) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal);
+            [branch] if (skyValid > 0.0f) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal OBJ_PUDDLE_HEIGHT(IN.uv.xy, IN.shadowWorldPos.xyz));
             #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
                 normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
             #endif
@@ -1703,6 +1731,25 @@ PS_OUTPUT main(PS_INPUT IN) {
         #ifdef OBJECT_WETNESS	// the water film: the sun's highlight on it and its reflection, over the material
             [branch] if (wet.gloss > 0.001f)
                 lighting += ObjectWetFilm(wet, IN.shadowWorldPos.xyz, faceNormal, PSLightColor[0].rgb * sunAndProj * LIN_SCALE_LIGHT, wetDryTexture);
+            #if defined(PUDDLES_COMPILED) && !defined(PUDDLES_LEAN) && (defined(OBJ_LAMP2) || defined(OBJ_LAMP3))
+            // 2026-11-12 Puddles: the draw's lamps on the wet film (wet roads and slabs that are objects shine under street lamps)
+            [branch] if (wet.gloss > 0.05f) {
+                const float3 filmV = normalize(IN.viewDir.xyz);
+                #if SHADOW_CONTRAST_ON	// (there the colours are unshadowed and the shadow comes separately)
+                    #define OBJ_FILM_SHADOW2 * scShadow2
+                    #define OBJ_FILM_SHADOW3 * scShadow3
+                #else
+                    #define OBJ_FILM_SHADOW2
+                    #define OBJ_FILM_SHADOW3
+                #endif
+                #ifdef OBJ_LAMP2
+                    lighting += ObjectLampFilm(wet, normal.xyz, filmV, IN.light2Dir.xyz, light2Color * (att2 * LIN_SCALE_LIGHT) OBJ_FILM_SHADOW2, wetDryTexture);
+                #endif
+                #ifdef OBJ_LAMP3
+                    lighting += ObjectLampFilm(wet, normal.xyz, filmV, IN.light3Dir.xyz, light3Color * (att3 * LIN_SCALE_LIGHT) OBJ_FILM_SHADOW3, wetDryTexture);
+                #endif
+            }
+            #endif
         #endif
     #else
     #ifndef OBJ_LAMP_FIRST
@@ -1715,7 +1762,7 @@ PS_OUTPUT main(PS_INPUT IN) {
             Wetness wet = (Wetness)0;
             wet.roughness = 1.0f;
             wet.normal = faceNormal;
-            [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w)) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal);
+            [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w)) wet = GetWetness(IN.shadowWorldPos.xyz, faceNormal, faceNormal OBJ_PUDDLE_HEIGHT(IN.uv.xy, IN.shadowWorldPos.xyz));
             #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
                 normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
             #endif
@@ -1947,6 +1994,9 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedPad2 = CapturedMaterialOutMetal(metallic > 0.0f ? metalRoughness : rough, metallic);
     #else
         pout.capturedPad2 = CapturedMaterialOut(rough);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
+    #endif
+    #if defined(OBJECT_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON >= 2
+        pout.capturedPad2.a += PuddleStandingOut;	// 2026-11-12 Puddles: the standing water drawn here, for the SSR/RT pass (Reflections.glsl)
     #endif
     #if SHADOW_CONTRAST_ON && defined(DIFFUSE)
         // UNOFFICIAL ShadowContrast: an added lamp pass gives the light its shadows took (alpha only: core/CapturedNormals.h masks rgb off)
@@ -2226,7 +2276,7 @@ PS_OUTPUT main(PS_INPUT IN) {
         Wetness wet = (Wetness)0;
         wet.roughness = 1.0f;
         wet.normal = sunFaceN;
-        [branch] if (SHADOW_WP_VALID(IN)) wet = GetWetness(sunWP, sunFaceN, sunFaceN);
+        [branch] if (SHADOW_WP_VALID(IN)) wet = GetWetness(sunWP, sunFaceN, sunFaceN OBJ_PUDDLE_HEIGHT(IN.uv.xy, sunWP));
         #ifdef PUDDLES_COMPILED	// 2026-11-08 Puddles: standing water hides the normal map (the sun, lamps and ambient see a flat surface)
             normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
         #endif
@@ -2314,6 +2364,9 @@ PS_OUTPUT main(PS_INPUT IN) {
         pout.capturedPad2 = CapturedMaterialOutMetal(lightRoughness, metallic);
     #else
         pout.capturedPad2 = CapturedMaterialOut(roughness);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
+    #endif
+    #if defined(OBJECT_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON >= 2
+        pout.capturedPad2.a += PuddleStandingOut;	// 2026-11-12 Puddles: the standing water drawn here, for the SSR/RT pass (Reflections.glsl)
     #endif
     #if LAMPS_DEFERRED && defined(MANY_LAMPS) && MANY_LAMPS_ON >= 2
     {

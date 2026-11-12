@@ -27,6 +27,16 @@
 #ifndef WETNESS_HLSL
 #define WETNESS_HLSL
 
+// 2026-11-12 Puddles map mode (WETNESS_EFFECTS 3; src/effects/Puddles/PuddleMap.h, Compute/PuddleMap.comp): the large-scale terms (the
+// field's noise, the rim wander, the rain cover as the top surface's height) come from TESR_PuddleMap, on the sampler the ortho map
+// used, with its two constants on the ortho matrix's registers. Not for the D3D9 post pass (PUDDLES_RUNTIME).
+// (PUDDLES_NOMAP: one record opts out, ShaderManager's lean retry: the in-shader path for it; SLS2027 with VanillaBridge + MicroShadow)
+#if defined(WETNESS_EFFECTS) && !defined(PUDDLES_RUNTIME) && !defined(PUDDLES_NOMAP)
+    #if WETNESS_EFFECTS >= 3
+        #define PUDDLES_MAP
+    #endif
+#endif
+
 // 2026-11-09 the registers, by name. WETNESS_ALT_REGS: the land's outdoor RT lamp-shadow record (TerrainTemplate.hlsl TERRAIN_LAMP_RT),
 // whose lamp slots hold c146-c173: the water layer and the puddles move to c2, c4-c17, c98-c99 there (in no land table and written raw by
 // nothing in the DLL: check src for SetPixelShaderConstantF before moving any of them). The constants are set by name, so each record may
@@ -44,6 +54,7 @@
     #define WR_CAMERA c9
     #define WR_FLAGS c10
     #define WR_ORTHO c11
+    #define WR_MAP2 c12     // (map mode: TESR_PuddleMapFar, on the ortho matrix's second register)
     #define WR_SUN c15
     #define WR_HEIGHT c16
     #define PR_DATA c17
@@ -75,6 +86,9 @@
     #ifndef WR_ORTHO
         #define WR_ORTHO c153
     #endif
+    #ifndef WR_MAP2
+        #define WR_MAP2 c154
+    #endif
     #ifndef WR_SUN
         #define WR_SUN c157
     #endif
@@ -102,7 +116,12 @@ float4 TESR_WetnessDrops   : register(WR_DROPS);   // x: 1 / grid size, y: 1 / i
 float4 TESR_WetnessRipple  : register(WR_RIPPLE);   // x: ripple strength, y: radius, z: breadth, w: raindrop range
 float4 TESR_WetnessCamera  : register(WR_CAMERA);   // xyz: camera position, w: unused
 float4 TESR_WetnessFlags   : register(WR_FLAGS);   // x: on, z: ripples, w: ortho map texel size (0: no map)
+#ifdef PUDDLES_MAP
+float4 TESR_PuddleMapNear  : register(WR_ORTHO);   // xy near cascade corner (world), z 1 / its extent, w the camera z the heights are relative to
+float4 TESR_PuddleMapFar   : register(WR_MAP2);    // xyz the far cascade's, w 1 = the map holds data
+#else
 row_major float4x4 TESR_ShadowCameraToLightTransformOrtho : register(WR_ORTHO);   // c153-c156
+#endif
 float4 TESR_WetnessSun     : register(WR_SUN);   // xyz: direction to the sun (world), w: ShowCover debug view
 #ifdef WETNESS_HEIGHT
 float4 TESR_WetnessHeight  : register(WR_HEIGHT);   // x: HeightAwareness, y: CreviceFill (the water line at full wetness), z: NormalAwareness
@@ -118,7 +137,27 @@ float4 WetnessMapBound     : register(c159);
 #endif
 
 #ifdef WETNESS_ORTHO_REG
+#ifdef PUDDLES_MAP
+// LINEAR, not POINT ("POINT" is an empty macro in the point-light passes)
+sampler2D TESR_PuddleMap : register(WETNESS_ORTHO_REG) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+// The map at a world xy: r the field's large-scale part, g the top surface's height (relative to TESR_PuddleMapNear.w), b the rim wander.
+// ONE read (2026-11-12: SLS2027 with VanillaBridge + MicroShadow ran out of temps with a near/far blend and two reads a pixel): the near
+// cascade where the point is inside it, else the far one (both hold the same world noise; the cover differs only in its averaging).
+// No map, or past the far cascade: no field, open sky. GetWetness reads it once (WetnessOcclusion) and keeps it in PuddleMapSample.
+static float4 PuddleMapSample = float4(0.0f, -100000.0f, 0.5f, 0.0f);
+float4 PuddleMapRead(float2 world) {
+    const float edge = 0.5f / 1024.0f;
+    float2 un = (world - TESR_PuddleMapNear.xy) * TESR_PuddleMapNear.z;
+    float2 uf = (world - TESR_PuddleMapFar.xy) * TESR_PuddleMapFar.z;
+    bool inNear = all(abs(un - 0.5f) < 0.5f - edge);
+    float2 u = clamp(inNear ? un : uf, edge, 1.0f - edge);
+    float4 m = tex2Dlod(TESR_PuddleMap, float4(u.x * 0.5f + (inNear ? 0.0f : 0.5f), u.y, 0.0f, 0.0f));
+    bool none = TESR_PuddleMapFar.w < 0.5f || any(abs(uf - 0.5f) >= 0.5f - edge);
+    return none ? float4(0.0f, -100000.0f, 0.5f, 0.0f) : m;
+}
+#else
 sampler2D TESR_OrthoMapBuffer : register(WETNESS_ORTHO_REG) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+#endif
 #endif
 
 #define WETNESS_ON (TESR_WetnessFlags.x > 0.5f)
@@ -144,6 +183,7 @@ float4 TESR_PuddleStreak : register(PR_STREAK);   // x streak strength x raining
 #define PUDDLE_QUALITY (TESR_PuddleData.w)
 #define PUDDLE_DEBUG (TESR_PuddleStreak.w)
 #define PUDDLES_NOT_ACTIVE_AND !PUDDLES_ON &&   // (empty without puddles: the land shaders stay byte-identical)
+static float PuddleStandingOut = 0.0f;   // 2026-11-12 the standing water GetWetness found here, for the material buffer (Reflections' mask)
 static float3 PuddleDebugColor = float3(-1.0f, -1.0f, -1.0f);   // >= 0: the debug view's colour for this pixel (the templates output it)
     // Objects get the rain rings too at Quality 3 (the land always has them, WETNESS_RAINDROPS); not the post-pass effect.
     #if !defined(PUDDLES_RUNTIME) && !defined(WETNESS_RAINDROPS)
@@ -200,7 +240,14 @@ float WetSmoothstepDeriv(float x) { return 6.0f * x * (1.0f - x); }
 //   - the lookup nudged by world-space noise of up to a texel, so the line wanders with the ground
 //     instead of following the map's rows and columns, as a real drip line does.
 float WetnessOcclusion(float3 position, float3 normal) {
-#ifdef WETNESS_ORTHO_REG
+#if defined(WETNESS_ORTHO_REG) && defined(PUDDLES_MAP)
+    // map mode: the top surface's height over the look-out point (a steep face looks up from up to 40 units out, as below), against the
+    // point's own height: above it open, below it covered, a 16-unit fade (the map's averaging softens it sideways)
+    float lift = lerp(2.0f, 40.0f, saturate(1.0f - abs(normal.z) * 1.5f));
+    float3 p = TESR_WetnessCamera.xyz + position + normal * lift + float3(0.0f, 0.0f, 2.0f);
+    PuddleMapSample = PuddleMapRead(p.xy);   // (the field and the wander take theirs from here too: one read a pixel)
+    return saturate((p.z - (PuddleMapSample.g + TESR_PuddleMapNear.w)) / 16.0f + 0.5f);
+#elif defined(WETNESS_ORTHO_REG)
     float texel = TESR_WetnessFlags.w;
     [branch] if (texel <= 0.0f || !WETNESS_MAP_READY) return 1.0f;
     // Lifted a little along the normal and up (CS jitters by the normal too), so a surface does not
@@ -208,6 +255,8 @@ float WetnessOcclusion(float3 position, float3 normal) {
 #ifdef PUDDLES_COMPILED
     // 2026-11-09 Puddles: a steep face looks up from up to 40 units out from it, so the roof edge right above a wall is not counted as cover
     // (it was: no wall in a town got streaks); only an overhang deeper than that keeps the wall dry.
+    // 2026-11-11 (user): a wall under an overhang stays dry, so 40 stays: the puddle2 shack walls read covered (DebugView 4; their eave plus
+    // this lookup's own spread, the tent filter and the wander, about +-37 units, reach past it; open at 120) and get no streaks, by choice.
     float lift = PUDDLES_ON ? lerp(2.0f, 40.0f, saturate(1.0f - abs(normal.z) * 1.5f)) : 2.0f;
     #define WET_COVER_LIFT lift
 #else
@@ -249,7 +298,10 @@ float WetnessOcclusion(float3 position, float3 normal) {
 // shader with no sampler for it (seven-texture land).
 #define WETNESS_DEBUG_COVER (TESR_WetnessSun.w > 0.5f)
 float3 WetnessCoverDebug(float3 position, float3 normal) {
-#ifdef WETNESS_ORTHO_REG
+#if defined(WETNESS_ORTHO_REG) && defined(PUDDLES_MAP)
+    if (TESR_PuddleMapFar.w < 0.5f) return float3(0.0f, 0.0f, 1.0f);   // blue: the map holds nothing yet
+    return lerp(float3(1.0f, 0.0f, 0.0f), float3(0.0f, 1.0f, 0.0f), WetnessOcclusion(position, normal));
+#elif defined(WETNESS_ORTHO_REG)
     if (TESR_WetnessFlags.w <= 0.0f) return float3(0.0f, 0.0f, 1.0f);
     if (!WETNESS_MAP_READY) return float3(1.0f, 0.0f, 1.0f);   // magenta: the per-draw binding did not happen
     float4 o = mul(float4(position + normal * 2.0f + float3(0.0f, 0.0f, 2.0f), 1.0f), TESR_ShadowCameraToLightTransformOrtho);
@@ -324,25 +376,40 @@ float PuddleField(float2 worldXY, float height) {
     float n = PuddleValueNoise(p) * 0.62f + PuddleValueNoise(p * 2.31f + 17.7f) * 0.38f;
     [branch] if (PUDDLE_QUALITY > 2.5f) n = n * 0.85f + PuddleValueNoise(p * 5.7f + 41.3f) * 0.15f;
     n = smoothstep(0.2f, 0.8f, n);
-    if (height >= 0.0f && PUDDLE_QUALITY > 1.5f) n += TESR_PuddleShape.z * (0.5f - height) * 0.5f;
+    // 2026-11-12: the height is relative now (each layer against its own average, TerrainTemplate), so it can carry the shape: x1 (was
+    // x0.5 of an absolute height, which shifted whole textures up or down). A flat texture barely moves the field; a bumpy one rules it.
+    // (x1.5 broke big puddles on gravel into islands everywhere in the slot C bench; the deep middle should drown the bumps.)
+    if (height >= 0.0f && PUDDLE_QUALITY > 1.5f) n += TESR_PuddleShape.z * (0.5f - height);
     return n;
 }
 
 // Rain running down a steep face: lanes 1 / TESR_PuddleStreak.y wide across the face, one in three dry, each with drops running down at
-// its own speed (a bright head, a fading tail above it). 0-1.
-float PuddleStreaks(float3 worldPos, float3 n, float t) {
+// its own speed (a bright head, a fading tail above it). 0-1. tilt: how the water's surface leans (world), for the shading: a rivulet
+// bulges across its lane, a drop's tail slopes up from its head, so both catch the sky as moving glints (a flat film on a wall reflects
+// almost nothing, 2026-11-11: streaks on the dark puddle2 shack walls were there in the mask and invisible in the picture).
+float PuddleStreaks(float3 worldPos, float3 n, float t, out float3 tilt) {
     float2 across = float2(-n.y, n.x);
     across /= max(length(across), 1e-4f);
     float u = dot(worldPos.xy, across) * TESR_PuddleStreak.y;
     float lane = floor(u);
     float3 r = WetHash33(float3(lane, 3.1f, 9.7f));
-    float laneMask = saturate(1.0f - abs(frac(u) - 0.5f) * 2.0f * (1.4f + r.y * 1.6f));
+    float side = frac(u) - 0.5f;
+    float sharp = 2.0f * (1.4f + r.y * 1.6f);
+    float m = saturate(1.0f - abs(side) * sharp);
+    float laneMask = m * m * (3.0f - 2.0f * m);   // a rounded rivulet
     float wet = r.x > 0.33f ? 1.0f : 0.0f;
+    // The pattern moves down (the phase grows with z and with time); 2026-11-11 the head is now at the BOTTOM of each period (g = 1 just
+    // above the wrap) and the tail fades above it (it was flow^8: the bright part at the top, trailing its tail).
     float flow = frac(worldPos.z * (0.012f + 0.01f * r.z) + t * TESR_PuddleStreak.z * (0.35f + r.y) + r.x * 13.0f);
-    float drip = flow * flow;
-    drip *= drip;
-    drip *= drip;   // flow^8: a short bright head
-    return laneMask * wet * (0.4f + 0.6f * drip);
+    float g = 1.0f - flow;
+    float g7 = g * g * g;
+    g7 = g7 * g7 * g;
+    float drip = g7 * g;   // g^8: a short bright head
+    float body = wet * (0.6f + 0.4f * drip);   // 2026-11-11: a steadier rivulet body (was 0.4 + 0.6 drip: mostly faint between heads)
+    // the surface's slopes: across the lane d(laneMask)/d(side), up the tail d(drip)/d(-z) (the tail thins upward: the normal leans up)
+    float slopeAcross = (abs(side) * sharp < 1.0f ? 6.0f * m * (1.0f - m) * sharp : 0.0f) * -sign(side);
+    tilt = (float3(across, 0.0f) * slopeAcross * 0.15f + float3(0.0f, 0.0f, 1.0f) * g7 * 0.6f * laneMask) * body;
+    return laneMask * body;
 }
 #endif
 
@@ -354,6 +421,8 @@ struct Wetness {
     float3 normal;      // the film's normal (world): ripples, flattened in puddles
 #ifdef PUDDLES_COMPILED
     float  flatten;     // Puddles: how far standing water hides the material's own normal map (0-1; the templates flatten their normal)
+    float  murk;        // 2026-11-12 Puddles: how deep and muddy the standing water is (0-1): the templates tint its reflection (PuddleMurkTint)
+    float4 debris;      // 2026-11-12 Puddles: a floating speck or leaf (rgb its colour, a its cover), the land template lays it over the albedo
 #endif
 };
 
@@ -368,6 +437,8 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
     w.normal = normal;
 #ifdef PUDDLES_COMPILED
     w.flatten = 0.0f;
+    w.murk = 0.0f;
+    w.debris = 0.0f;
 #endif
     [branch] if (!WETNESS_ON) return w;
 
@@ -397,12 +468,14 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
     // Puddles.
     float puddleWetness = TESR_WetnessData.y * minWetnessAngle;
     float puddle = wetness;
+#ifndef PUDDLES_MAP	// (map mode: the puddles' own field below; Quality 0 there = rain wetness without CS's noise puddles)
     [branch] if (wetness > 0.0f || puddleWetness > 0.0f) {
         float3 coords = (worldPos * 0.5f + 0.5f) * 0.01f / TESR_WetnessParams.w;
         puddle = WetPerlin(coords) * 0.5f + 0.5f;
         puddle = puddle * ((minWetnessAngle / TESR_WetnessParams2.x) * TESR_WetnessParams.y * 0.25f) + 0.5f;
         puddle *= lerp(wetness, puddleWetness, saturate(puddle - 0.25f));
     }
+#endif
 
 #ifdef WETNESS_HEIGHT
     // The height map: water runs off the ridges and gathers in the crevices. A water line rises with
@@ -426,40 +499,87 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
 #ifdef PUDDLES_COMPILED
     // Puddles (Quality > 0): the rain's porous wetness without the CS noise, the soaked ring and the standing water from the field.
     [branch] if (PUDDLES_ON) {
+        // 2026-11-12 rework (the user's reference pictures: wet mud by containers, an overcast yard, a swampy meadow): three zones per pixel,
+        //   damp ground  (the rain): a little darker, glossy (roughness ~0.3), the material's normal map KEPT: wet mud glints on its bumps;
+        //   soaked rim   (around standing water, its width wandering with noise): darker, low roughness (~0.12), normal map kept;
+        //   standing     (where the water level is above the ground): a flat mirror (Roughness), near-black and muddier with depth.
+        // Where water stands comes from the land's own relief first (relative height, TerrainTemplate; else the texture's luminance
+        // detail): crevices, ruts and dips fill, bumps poke out as islands. Flat textures (asphalt, concrete) have little relief, so
+        // the large noise field shapes big irregular puddles there; bumpy ones (mud, dirt, rock) get many small pools: the material
+        // tells itself apart through its own height map, no per-texture data needed.
         float open = saturate(occlusion * 2.0f) * nearFactor;
         float level = TESR_PuddleData.x;
-        float standing = 0.0f, ring = 0.0f, streak = 0.0f;
+        float standing = 0.0f, ring = 0.0f, streak = 0.0f, deep = 0.0f;
+        float3 streakTilt = 0.0f;
         float rain = saturate(rainWetness) * open;
         puddle = rain;
-        w.darkening = rain * rain;
+        w.darkening = rain * rain * 0.7f;
+        float rough = lerp(1.0f, 0.22f, rain);   // damp: glossy, keeps its bumps (0.3 read matte on the slot C mud under overcast)
         [branch] if (level > 0.001f) {
+        #ifdef PUDDLES_MAP
+            // map mode: the field's large-scale part and the rim wander from the map; the surface's own relief added here, per pixel
+            // (the cover's read, at the look-out point: the same spot on flat ground; steep faces get no standing water anyway)
+            float4 mapHere = PuddleMapSample;
+            float field = mapHere.r + (height >= 0.0f && PUDDLE_QUALITY > 1.5f ? TESR_PuddleShape.z * (0.5f - height) : 0.0f);
+        #else
+            float2 p = worldPos.xy * TESR_PuddleData.z;
             float field = PuddleField(worldPos.xy, height);
+        #endif
             float t = 1.0f - level * TESR_PuddleData.y;
-            float soft = max(TESR_PuddleLook.z, 1e-3f);
+        #if defined(PUDDLES_MAP)
+            float wander = mapHere.b;
+        #elif defined(PUDDLES_LEAN)
+            const float wander = 0.5f;   // (the outdoor lamp-shadow object records: no room for the extra noise)
+        #else
+            float wander = PuddleValueNoise(p * 3.7f + 5.1f);                       // 0-1, varies the shoreline softness and the rim width
+        #endif
+            float soft = max(TESR_PuddleLook.z, 1e-3f) * (0.5f + wander);
             float slope = smoothstep(TESR_PuddleShape.x, TESR_PuddleShape.y, vertexNormal.z);
             float shore = saturate((field - t) / soft);
             standing = shore * shore * (3.0f - 2.0f * shore) * slope * open;
-            float deep = saturate((field - t) / (soft * 5.0f));
+            deep = saturate((field - t) / (soft * 5.0f)) * standing;
             [branch] if (PUDDLE_QUALITY > 1.5f) {
-                float ringW = max(TESR_PuddleShape.w, 1e-3f);
+                float ringW = max(TESR_PuddleShape.w, 1e-3f) * (0.35f + 1.3f * wander);
                 ring = saturate((field - t + ringW) / ringW) * smoothstep(TESR_PuddleShape.x - 0.15f, TESR_PuddleShape.x, vertexNormal.z)
                      * open * saturate(level * 4.0f);
+                ring *= ring;
             }
+            // Floating bits on standing water (Quality 2+, the land only: PuddleDebris): sparse specks and leaves, hashed per cell.
+        #if defined(WETNESS_HEIGHT) && !defined(PUDDLES_LEAN)
+            [branch] if (PUDDLE_QUALITY > 1.5f && standing > 0.3f && distance < 1500.0f) {
+                float2 cell = floor(worldPos.xy * 0.16f);
+                float3 hsh = WetHash33(float3(cell, 19.7f));
+                float2 at = (cell + 0.2f + 0.6f * hsh.xy) / 0.16f;
+                float r = lerp(0.6f, 1.8f, hsh.z);
+                float speck = (hsh.x * hsh.y < 0.012f) ? saturate((r - length(worldPos.xy - at)) * 1.5f) : 0.0f;
+                float3 tint = hsh.z > 0.6f ? float3(0.05f, 0.07f, 0.02f) : float3(0.09f, 0.05f, 0.02f);   // dull green specks, brown leaves (linear)
+                w.debris = float4(tint, speck * smoothstep(0.3f, 0.7f, standing) * (1.0f - smoothstep(1000.0f, 1500.0f, distance)));
+                standing *= 1.0f - w.debris.a;
+            }
+        #endif
             w.flatten = standing;
+            w.murk = deep;
             // what the water does to the material under it: the porous darkening, further with depth (absorption)
-            puddle = max(rain, ring * 0.85f);
-            w.darkening = lerp(puddle * puddle, 1.0f + TESR_PuddleLook.y * deep, standing);
+            puddle = max(rain, ring);
+            w.darkening = lerp(max(rain * rain * 0.7f, ring * 0.85f), 1.0f + TESR_PuddleLook.y * deep, standing);
+            rough = lerp(rough, 0.12f, ring);
         }
         // Rain streaks down steep faces open to the sky, while it rains.
         [branch] if (PUDDLE_QUALITY > 1.5f && TESR_PuddleStreak.x > 0.0f && abs(vertexNormal.z) < 0.6f && distance < 3000.0f) {
-            streak = PuddleStreaks(worldPos, vertexNormal, TESR_WetnessData.w) * (1.0f - smoothstep(0.35f, 0.6f, abs(vertexNormal.z)))
-                   * TESR_PuddleStreak.x * saturate(occlusion * 2.0f) * (1.0f - smoothstep(2000.0f, 3000.0f, distance));
-            w.darkening = max(w.darkening, streak * 0.6f);
+            float streakFade = (1.0f - smoothstep(0.35f, 0.6f, abs(vertexNormal.z))) * TESR_PuddleStreak.x * saturate(occlusion * 2.0f)
+                             * (1.0f - smoothstep(2000.0f, 3000.0f, distance));
+            streak = PuddleStreaks(worldPos, vertexNormal, TESR_WetnessData.w, streakTilt) * streakFade;
+            streakTilt *= streakFade;
+            // 2026-11-11 (user: "streaks not working"): a streak is more water on top of the wall's rain wetness, so it adds to it. It was
+            // max(darkening, streak x 0.6) and max(film, streak): a wall's own rain wetness (MinRainWetness 0.65: darkening 0.42, film
+            // 0.65) was as strong as most of a streak, which then hardly showed.
+            w.darkening = lerp(w.darkening, 1.0f, streak * 0.8f);
         }
-        float film = max(max(puddle, standing), streak);
+        float film = max(max(puddle, standing), lerp(puddle, 1.0f, streak));
 
         // The water's surface: the face's own normal under standing water (no bumps), the material's elsewhere; rain rings on top.
         float3 wetN = normalize(lerp(normal, vertexNormal, standing));
+        wetN = normalize(lerp(wetN, vertexNormal, saturate(streak)) + streakTilt);   // 2026-11-11 a streak's water hides the bumps and bulges
         float3 ripple = float3(0.0f, 0.0f, 1.0f);
     #ifdef WETNESS_RAINDROPS
         #ifdef PUDDLE_OBJECT_RIPPLES
@@ -473,13 +593,23 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
         wetN = WetReorient(wetN, normalize(lerp(float3(0.0f, 0.0f, 1.0f), ripple, rippleW)));
 
         w.gloss = saturate(film);
-        w.roughness = lerp(max(saturate(1.0f - film), 0.05f), max(TESR_PuddleLook.x, 0.01f), standing);
+        PuddleStandingOut = standing;
+        rough = lerp(rough, 0.05f, streak);
+        w.roughness = lerp(max(rough, 0.05f), max(TESR_PuddleLook.x, 0.01f), standing);
         w.normal = wetN;
 
         [branch] if (PUDDLE_DEBUG > 0.5f) {
             if (PUDDLE_DEBUG < 1.5f) PuddleDebugColor = float3(standing, ring * (1.0f - standing), streak);
             else if (PUDDLE_DEBUG < 2.5f) PuddleDebugColor = float3(saturate(ripple.xy * 2.0f + 0.5f), standing * 0.5f);
-            else PuddleDebugColor = float3(TESR_WetnessData.x, TESR_PuddleData.x, TESR_WetnessData.z);
+            else if (PUDDLE_DEBUG < 3.5f) PuddleDebugColor = float3(TESR_WetnessData.x, TESR_PuddleData.x, TESR_WetnessData.z);
+            // 2026-11-11 4: the streaks' inputs: red open to the sky, green how steep the face's normal is (1 vertical), blue the raw lanes
+            else if (PUDDLE_DEBUG < 4.5f) PuddleDebugColor = float3(saturate(occlusion * 2.0f), 1.0f - abs(vertexNormal.z), PuddleStreaks(worldPos, vertexNormal, TESR_WetnessData.w, streakTilt));
+        #ifdef PUDDLES_MAP
+            else { float d5 = (TESR_WetnessCamera.z + position.z) - (PuddleMapSample.g + TESR_PuddleMapNear.w);
+                   PuddleDebugColor = float3(PuddleMapSample.r, saturate(0.5f + d5 / 256.0f), TESR_PuddleMapFar.w); }   // 5: red the map's field, green this point against the map's top surface (0.5 = on it, brighter = above), blue the map holds data
+        #else
+            else PuddleDebugColor = 0.0f;
+        #endif
         }
         return w;
     }
@@ -525,6 +655,65 @@ float3 WetSpecular(float3 N, float3 V, float3 L, float3 light, float roughness) 
     float F = 0.02f + 0.98f * pow(1.0f - VdotH, 5.0f);
     return light * (D * vis * F * NdotL);
 }
+
+#ifdef PUDDLES_COMPILED
+// 2026-11-12 Puddles: a lamp's highlight on wet ground stretched toward the viewer, the wet-road streak (Frostbite's wet roads): the half
+// vector's part along the view direction projected onto the surface is shrunk before the GGX lobe is read, so the lobe runs long down
+// that line. stretch 1 = round (WetSpecular), smaller = longer.
+float3 WetSpecularStretched(float3 N, float3 V, float3 L, float3 light, float roughness, float stretch) {
+    float3 along = V - N * dot(V, N);
+    float len = length(along);
+    along = len > 1e-4f ? along / len : float3(0.0f, 0.0f, 0.0f);
+    float3 H = normalize(L + V);
+    H = normalize(H - along * dot(H, along) * (1.0f - stretch));
+    float NdotL = saturate(dot(N, L));
+    float NdotV = saturate(dot(N, V)) + 1e-4f;
+    float NdotH = saturate(dot(N, H));
+    float VdotH = saturate(dot(V, normalize(L + V)));
+    float a = roughness * roughness;
+    float a2 = a * a;
+    float d = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
+    float D = a2 / (3.14159265f * d * d);
+    float k = a * 0.5f;
+    float vis = 0.25f / ((NdotL * (1.0f - k) + k) * (NdotV * (1.0f - k) + k));
+    float F = 0.02f + 0.98f * pow(1.0f - VdotH, 5.0f);
+    return light * (D * vis * F * NdotL);
+}
+
+// 2026-11-12 objects have no height map: their colour texture's brightness detail against its own average (the last mip) stands in, so
+// dark gaps, cracks and seams of a concrete slab or a road piece fill first (the noise-only puddles of before). Read at a mip chosen by
+// distance (no derivatives: the callers are inside branches), only while there is water; -1 = none (the field then ignores it).
+float ObjectPuddleHeight(sampler2D baseMap, float2 uv, float3 position) {
+    float h = -1.0f;
+    [branch] if (TESR_PuddleData.x > 0.001f && PUDDLES_ON && PUDDLE_QUALITY > 1.5f) {
+        const float3 lumW = float3(0.3f, 0.59f, 0.11f);
+        float here = dot(tex2Dlod(baseMap, float4(uv, 0.0f, max(0.0f, log2(length(position) / 256.0f)))).rgb, lumW);
+        float mean = dot(tex2Dlod(baseMap, float4(uv, 0.0f, 14.0f)).rgb, lumW);
+        h = saturate(0.5f + 0.6f * (here - mean));
+    }
+    return h;
+}
+
+// The same stretched highlight, cheap enough for the lamp loops (a normalised Blinn lobe on the stretched half vector, the water's
+// Schlick Fresnel; no visibility term): the land's lamp loop and the objects' lamp passes, where the GGX version above ran the ps_3_0
+// shaders out of temps (the land's RT lamp-shadow record). V: the direction to the eye, worked out once per pixel by the caller.
+float3 WetLampFilm(float3 N, float3 V, float3 L, float3 light, float roughness, float stretch) {
+    float3 along = V - N * dot(V, N);
+    along *= rsqrt(max(dot(along, along), 1e-8f));
+    float3 H = normalize(L + V);
+    float VdotH = saturate(dot(V, H));
+    H = normalize(H - along * (dot(H, along) * (1.0f - stretch)));
+    float r2 = max(roughness * roughness, 0.002f);
+    float power = 2.0f / (r2 * r2) - 2.0f;
+    float spec = pow(saturate(dot(N, H)), power) * ((power + 8.0f) * 0.0397887f);   // (n + 8) / (8 pi)
+    float f = 1.0f - VdotH;
+    float f2 = f * f;
+    return light * (spec * (0.02f + 0.98f * f2 * f2 * f) * saturate(dot(N, L)));
+}
+
+// The standing water's colour over what it reflects: clear at the shore, a muddy brown-grey where it is deep.
+float3 PuddleMurkTint(float murk) { return lerp(float3(1.0f, 1.0f, 1.0f), float3(0.62f, 0.55f, 0.44f), murk); }
+#endif
 
 // The water film's reflection weight (split sum for F0 0.02), times how much film there is.
 float WetReflectance(float NdotV, float roughness, float gloss) {

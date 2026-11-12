@@ -844,6 +844,31 @@ bool ShaderManager::LoadShader(NiD3DVertexShader* Shader) {
 }
 
 
+// 2026-11-12 (Puddles room): a "failed last time" note in the shader cache (a fallback copy newer than the full one) counts only while
+// it is also newer than the sources it was built from (the template and the include named): after a shader change the full version
+// is tried again. (A stale dry copy kept 20 land records dry after their water layer was made to fit.)
+static bool FallbackNewerThanSources(const FILETIME& t, const char* templateName, const char* include) {
+	const std::string dir = std::string(ShadersPath);
+	const std::string sources[2] = { dir + (templateName ? templateName : "") + ".hlsl", dir + include };
+	for (const std::string& src : sources) {
+		WIN32_FILE_ATTRIBUTE_DATA a = {};
+		if (GetFileAttributesExA(src.c_str(), GetFileExInfoStandard, &a) && CompareFileTime(&t, &a.ftLastWriteTime) <= 0) return false;
+	}
+	return true;
+}
+
+// 2026-11-12: a fallback copy used after the fuller version failed is often loaded from the cache unchanged, so its file time stays old
+// (older than an edited source: FallbackNewerThanSources then says "try the full one again" at every start). Stamped now instead.
+static void TouchCacheCopy(const char* sub, const char* name) {
+	const std::string path = std::string(ShadersPath) + "Cache\\" + sub + name;
+	HANDLE f = CreateFileA(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (f == INVALID_HANDLE_VALUE) return;
+	FILETIME now;
+	GetSystemTimeAsFileTime(&now);
+	SetFileTime(f, NULL, NULL, &now);
+	CloseHandle(f);
+}
+
 /*
 * The pixel-shader version of the above, plus the UNOFFICIAL lamp-shadow records (interior forward shadows, RT exterior lamps).
 */
@@ -864,8 +889,31 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 
 	// generic, exterior, interior: each where its file exists
 	static const char* const variantFolders[3] = { NULL, "Exteriors\\", "Interiors\\" };
+	// 2026-11-12 Puddles (combined puddles + sun-GI test): with puddles AND the albedo buffer compiled in, SLS2027's main record ran out of
+	// temp registers in game (it fits offline) and did not load at all: its objects fell back to the game's shader. A main record that
+	// does not load with puddles compiled in is made again with the lean puddle path (PUDDLES_LEAN, Cache\PuddlesLean); its copy, newer than
+	// the full one and than the sources, says the full one failed last time (the failed compile is not cached): straight to it then.
+	static D3DXMACRO puddlesLean[3] = { { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };	// (map mode: the in-shader lean path for this record)
+	const bool puddlesIn = TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
+	bool leanFirst = false;
+	if (puddlesIn) {
+		const std::string cache = std::string(ShadersPath) + "Cache\\";
+		WIN32_FILE_ATTRIBUTE_DATA lean = {}, full = {};
+		const bool hasLean = GetFileAttributesExA((cache + "PuddlesLean\\" + pixel->Name).c_str(), GetFileExInfoStandard, &lean) != 0;
+		const bool hasFull = GetFileAttributesExA((cache + pixel->Name).c_str(), GetFileExInfoStandard, &full) != 0;
+		leanFirst = hasLean && (!hasFull || CompareFileTime(&lean.ftLastWriteTime, &full.ftLastWriteTime) > 0) &&
+			FallbackNewerThanSources(lean.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+	}
 	for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
-		pixel->ShaderProg[variant] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, variantFolders[variant], tmpl);
+		pixel->ShaderProg[variant] = variant == ShaderRecordType::Default && leanFirst ? nullptr :
+			(ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, variantFolders[variant], tmpl);
+	if (!pixel->ShaderProg[ShaderRecordType::Default] && puddlesIn) {
+		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "PuddlesLean\\", puddlesLean);
+		if (pixel->ShaderProg[ShaderRecordType::Default]) {
+			if (!leanFirst) TouchCacheCopy("PuddlesLean\\", pixel->Name);
+			Logger::Log("UNOFFICIAL Puddles: %s's main record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", pixel->Name);
+		}
+	}
 	// UNOFFICIAL interior forward point-light shadows (PointShadowForward.h): the lit pixel shaders get an Interior record
 	// from their own source with INTERIOR_SHADOWS, the sun's code compiled out (it never runs indoors). Only with the
 	// setting on at startup; exteriors keep their records.
@@ -933,6 +981,10 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		static const char* const exteriorCache[3] = { "ExteriorLamps\\", "ExteriorLamps\\Fit1\\", "ExteriorLamps\\Fit2\\" };
 		const bool customExterior = pixel->ShaderProg[ShaderRecordType::Exterior] != nullptr;
 		const bool skin = tmpl.Name && strstr(tmpl.Name, "SkinTemplate") == tmpl.Name;
+		// 2026-11-12 (Puddles room): a "failed last time" note in the cache (a fallback copy newer than the full one) counts only while it is
+		// also newer than the sources it was built from (the template and Includes\Wetness.hlsl / Includes\Skin.hlsl): after a shader
+		// change the full version is tried again (before, a stale dry copy kept 20 records dry after their water layer was made to fit).
+		auto newerThanSources = [&](const FILETIME& t) { return FallbackNewerThanSources(t, tmpl.Name, skin ? "Includes\\Skin.hlsl" : "Includes\\Wetness.hlsl"); };
 		ShaderRecordPixel* record = nullptr;
 		int exteriorLevel = 0;
 		// UNOFFICIAL 2026-11-09: the skin's many-lamp variants with 3+ lamps (SKIN2010 POINTS 4, SKIN2011 POINTS 3) never fit with every
@@ -947,6 +999,18 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 				if (d.Name && !strcmp(d.Name, "POINTS") && d.Definition) points = atoi(d.Definition);
 			}
 			if (many && points >= 3) exteriorLevel = 1;
+			// 2026-11-12 (Puddles room): SKIN2010 / SKIN2011 do not fit at the 2-lamp level either (X4505 in every slot run): they end at the
+			// 1-lamp copy in Cache\ExteriorLamps\Fit2, and the failed 2-lamp try (not cached) cost ~9 s at EVERY start. A next-level copy that
+			// is newer than this level's (or this level has none) says this level failed last time: start at the next one. (Deleting
+			// Cache\ExteriorLamps\Fit2 makes it try again after a template change.)
+			const std::string cache = std::string(ShadersPath) + "Cache\\";
+			while (exteriorLevel < 2) {
+				WIN32_FILE_ATTRIBUTE_DATA here = {}, next = {};
+				const bool hasHere = GetFileAttributesExA((cache + exteriorCache[exteriorLevel] + pixel->Name).c_str(), GetFileExInfoStandard, &here) != 0;
+				const bool hasNext = GetFileAttributesExA((cache + exteriorCache[exteriorLevel + 1] + pixel->Name).c_str(), GetFileExInfoStandard, &next) != 0;
+				if (!hasNext || (hasHere && CompareFileTime(&next.ftLastWriteTime, &here.ftLastWriteTime) <= 0) || !newerThanSources(next.ftLastWriteTime)) break;
+				exteriorLevel++;
+			}
 		}
 		// 2026-11-11 Puddles: a record that did not fit with the water layer is never cached, so trying it again cost ~11 s at EVERY start
 		// (SLS2027, the flow-control retry). Its dry copy in Cache\ExteriorLampsDry, newer than any fitted copy in Cache\ExteriorLamps, says it did not
@@ -959,17 +1023,21 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			WIN32_FILE_ATTRIBUTE_DATA dry = {}, wet = {};
 			const bool hasDry = GetFileAttributesExA((cache + "ExteriorLampsDry\\" + pixel->Name).c_str(), GetFileExInfoStandard, &dry) != 0;
 			const bool hasWet = GetFileAttributesExA((cache + "ExteriorLamps\\" + pixel->Name).c_str(), GetFileExInfoStandard, &wet) != 0;
-			if (hasDry && (!hasWet || CompareFileTime(&dry.ftLastWriteTime, &wet.ftLastWriteTime) > 0)) exteriorLevel = 1;	// the loop below is skipped
+			if (hasDry && (!hasWet || CompareFileTime(&dry.ftLastWriteTime, &wet.ftLastWriteTime) > 0) && newerThanSources(dry.ftLastWriteTime))
+				exteriorLevel = 1;	// the loop below is skipped
 		}
+		const int firstLevel = exteriorLevel;
 		for (; exteriorLevel < (skin ? 3 : 1) && !record; exteriorLevel++)
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, customExterior ? "Exteriors\\" : NULL, tmpl,
 				exteriorCache[exteriorLevel], exteriorLamps[exteriorLevel]);
+		if (record && exteriorLevel - 1 > firstLevel) TouchCacheCopy(exteriorCache[exteriorLevel - 1], pixel->Name);	// a level failed: note it
 		// 2026-11-09 Puddles / Wetness Effects: the outdoor record carries the water layer too (ObjectTemplate / ParallaxTemplate with
 		// POINT_SHADOW_RT_ONLY). Where that does not fit (SLS2027 in game: X4505, though it fits offline), it is made again without the water
 		// layer (WETNESS_OFF) rather than losing the lamp shadows: no wetness on that shader near lamps, the shadows kept.
 		if (!record && wetAll) {
 			static D3DXMACRO exteriorLampsDry[4] = { { "INTERIOR_SHADOWS", "1" }, { "POINT_SHADOW_RT_ONLY", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, customExterior ? "Exteriors\\" : NULL, tmpl, "ExteriorLampsDry\\", exteriorLampsDry);
+			if (record) TouchCacheCopy("ExteriorLampsDry\\", pixel->Name);	// 2026-11-12: the note that the wet one failed (see FallbackNewerThanSources)
 			if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s's outdoor lamp-shadow record did not fit with the water layer: made without it "
 				"(the lamp shadows kept; no Wetness Effects / Puddles on it near lamps).", pixel->Name);
 		}
@@ -996,12 +1064,24 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		}
 		else if (lamps) {
 			static D3DXMACRO terrainLamps[2] = { { "TERRAIN_LAMP_RT", "1" }, { NULL, NULL } };
-			ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLamps\\", terrainLamps);
+			// 2026-11-12: a dry copy newer than the fitted one and than the sources = it did not fit last time (a failed compile is not
+			// cached; each retry cost seconds at every start): straight to the dry one
+			bool skipWet = false;
+			if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+				const std::string cache = std::string(ShadersPath) + "Cache\\";
+				WIN32_FILE_ATTRIBUTE_DATA dry = {}, wet = {};
+				const bool hasDry = GetFileAttributesExA((cache + "ExteriorLampsDry\\" + pixel->Name).c_str(), GetFileExInfoStandard, &dry) != 0;
+				const bool hasWet = GetFileAttributesExA((cache + "ExteriorLamps\\" + pixel->Name).c_str(), GetFileExInfoStandard, &wet) != 0;
+				skipWet = hasDry && (!hasWet || CompareFileTime(&dry.ftLastWriteTime, &wet.ftLastWriteTime) > 0) &&
+					FallbackNewerThanSources(dry.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+			}
+			ShaderRecordPixel* record = skipWet ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLamps\\", terrainLamps);
 			// 2026-11-09 Puddles: the land's lamp record carries the water layer on its own registers (TerrainTemplate WETNESS_ALT_REGS); if that
 			// does not fit, the record is made again without it rather than losing the lamp shadows (as the objects' above).
 			if (!record && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
 				static D3DXMACRO terrainLampsDry[3] = { { "TERRAIN_LAMP_RT", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
 				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLampsDry\\", terrainLampsDry);
+				if (record && !skipWet) TouchCacheCopy("ExteriorLampsDry\\", pixel->Name);	// 2026-11-12: the note that the wet one failed
 				if (record) Logger::Log("UNOFFICIAL RT lamp shadows: %s (land)'s outdoor lamp-shadow record did not fit with the water layer: made without it.", pixel->Name);
 			}
 			if (record) {

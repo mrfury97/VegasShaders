@@ -1,4 +1,5 @@
 #include "ShadowFaceCull.h"
+#include "../effects/Puddles/PuddleMap.h"	// 2026-11-12 Puddles map mode
 #include "PointShadowSchedule.h"
 #include "PointShadowForward.h"
 #include "TestTools.h"	// UNOFFICIAL: NVR_TEST_TOOLS (SkipWhenFadedCheck)
@@ -2945,6 +2946,13 @@ void ShadowManager::RenderShadowMaps() {
 					OrthoProbe::Owners.clear(); OrthoProbe::Drawn.clear();
 				}
 #endif
+				// 2026-11-12 Puddles map mode (effects/Puddles/PuddleMap.h): the puddle map from this frame's ortho map (solid casters only:
+				// the map the rain reads)
+				if (!skyOnly && PuddleMap::MapMode) {
+					PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles;
+					if (puddles) PuddleMap::Build(dev, sm->ShadowCameraToLight, fx->ShadowMapOrthoTexture, fx->Settings.OrthoMap.Resolution,
+						1.0f / puddles->Settings.Size, (float)puddles->Settings.Quality);
+				}
 			}
 			else {
 				D3DXVECTOR3 newCameraTranslation = WorldSceneGraph->camera->m_worldTransform.pos.toD3DXVEC3();

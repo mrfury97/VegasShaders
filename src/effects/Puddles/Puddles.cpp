@@ -1,6 +1,7 @@
 #include <algorithm>
 
 #include "Puddles.h"
+#include "PuddleMap.h"
 
 // 2026-11-08 Puddles: see README.md here.
 
@@ -9,6 +10,7 @@ void PuddlesShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_PuddleLook", &Constants.Look);
 	TheShaderManager->RegisterConstant("TESR_PuddleShape", &Constants.Shape);
 	TheShaderManager->RegisterConstant("TESR_PuddleStreak", &Constants.Streak);
+	PuddleMap::RegisterConstants();	// 2026-11-12 map mode: TESR_PuddleMapNear / Far
 }
 
 void PuddlesShaders::UpdateSettings() {
@@ -33,7 +35,7 @@ void PuddlesShaders::UpdateSettings() {
 	Settings.StreakSpeed = std::clamp(TheSettingManager->GetSettingF(main, "StreakSpeed"), 0.0f, 8.0f);
 	Settings.ReflectionPuddles = TheSettingManager->GetSettingI(main, "ReflectionPuddles") != 0;
 	Settings.LevelOverride = TheSettingManager->GetSettingF(debug, "LevelOverride");
-	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(debug, "DebugView"), 0, 3);
+	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(debug, "DebugView"), 0, 5);
 }
 
 static float Ramp(float x) { return std::clamp(x, 0.0f, 1.0f); }
@@ -91,6 +93,7 @@ void PuddlesShaders::UpdateConstants() {
 	Constants.Data = D3DXVECTOR4(on && exterior ? level : 0.0f, Settings.Coverage, 1.0f / Settings.Size, on ? (float)Settings.Quality : 0.0f);
 	Constants.Look = D3DXVECTOR4(Settings.Roughness, Settings.Darkening, Settings.EdgeSoftness, Settings.Ripples);
 	Constants.Shape = D3DXVECTOR4(Settings.SlopeStart, Settings.SlopeFull, Settings.Cavity, Settings.WetRing);
+	PuddleMap::UpdateConstants();	// 2026-11-12 map mode: the built windows
 	Constants.Streak = D3DXVECTOR4(Settings.Streaks * raining, 1.0f / Settings.StreakWidth, Settings.StreakSpeed, on ? (float)Settings.DebugView : 0.0f);
 }
 

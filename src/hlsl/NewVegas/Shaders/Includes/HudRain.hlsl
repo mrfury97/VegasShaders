@@ -45,7 +45,9 @@ float4 HudRainWorld : register(c170);
 
 // The world's objects are wet only where they are open to the sky: the top-down ortho map, as Wetness Effects reads it (declared
 // there when it is included, else here, on the same registers; not with the sun cross-fade, whose matrices take c146-c166).
-#if defined(WETNESS_HLSL) && defined(WETNESS_ORTHO_REG)
+#if defined(WETNESS_HLSL) && defined(WETNESS_ORTHO_REG) && defined(PUDDLES_MAP)
+	#define HUD_RAIN_COVER 2	// 2026-11-12 Puddles map mode: the puddle map holds the cover (Wetness.hlsl WetnessOcclusion)
+#elif defined(WETNESS_HLSL) && defined(WETNESS_ORTHO_REG)
 	#define HUD_RAIN_COVER 1
 #elif !defined(WETNESS_HLSL) && !(defined(SUN_CROSSFADE) && SUN_CROSSFADE)
 	#define HUD_RAIN_COVER 1
@@ -59,7 +61,9 @@ sampler2D TESR_OrthoMapBuffer : register(s12) = sampler_state { ADDRESSU = CLAMP
 // 1 open to the sky, 0 under something; four taps so a roof's edge is a short fade. position: camera-relative, lifted a little so a
 // surface does not cover itself.
 float HudRainOpenSky(float3 position) {
-#if HUD_RAIN_COVER
+#if HUD_RAIN_COVER == 2
+    return WetnessOcclusion(position + float3(0.0f, 0.0f, 2.0f), float3(0.0f, 0.0f, 1.0f));
+#elif HUD_RAIN_COVER
     float texel = HudRainWorld.z;
     [branch] if (texel <= 0.0f) return 1.0f;
     float4 o = mul(float4(position + float3(0.0f, 0.0f, 4.0f), 1.0f), TESR_ShadowCameraToLightTransformOrtho);

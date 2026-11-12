@@ -1,4 +1,5 @@
 #include "ShadowsExterior.h"
+#include "../Puddles/PuddleMap.h"	// 2026-11-12 Puddles map mode
 #include "../../core/TestTools.h"	// UNOFFICIAL: NVR_TEST_TOOLS (SkipWhenFadedCheck)
 #include "../../core/LampFixtures.h"	// UNOFFICIAL 2026-10-20: LampModelOwnDistance
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
@@ -897,6 +898,7 @@ static void MakeCascadeSurfaces(ShadowsExteriorEffect& fx, ULONG cascadeSize, UL
 void ShadowsExteriorEffect::RegisterTextures() {
 	TerrainShadows.RegisterTextures();	// UNOFFICIAL 2026-10-19
 	BendContact::RegisterTextures();	// UNOFFICIAL 2026-11-06 TESR_ContactForward
+	PuddleMap::RegisterTextures();		// 2026-11-12 Puddles map mode: TESR_PuddleMap (only in map mode)
 	const ULONG cascadeSize = Settings.ShadowMaps.CascadeResolution;
 	const ULONG cubeSize = Settings.Interiors.ShadowCubeMapSize;
 	const ULONG atlasSize = cascadeSize * 2;
