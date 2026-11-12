@@ -713,6 +713,7 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 			s.Guide = lit;
 			s.GuideAlbedo = CapturedNormals::AlbedoTexture;
 			s.GuideSigma = 0.5f;
+			s.GuideOnce = RtAmbient::Current.GIDenoiseGuideOnce;	// UNOFFICIAL 2026-11-13 (rtgi-review B2)
 		}
 		// UNOFFICIAL 2026-11-13 (rtgi-review R9 / R10) GIDenoiseTune (0 off = the settings above; 1; 2 default): 1 = MeanVariance 4 (the a-trous brightness test
 		// with the variance of the accumulated mean: a converged pixel is no longer smoothed as hard as a new one) + HistoryFix 3 (a newly seen pixel is

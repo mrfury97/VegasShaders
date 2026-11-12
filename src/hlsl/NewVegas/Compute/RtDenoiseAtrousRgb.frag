@@ -69,7 +69,11 @@ void main() {
     // reference, the analytic case 1.001 -> 0.912; with this 1.040 / 1.008. The mean of the two variances overshot: 1.056 / 1.019)
     const bool symmetric = (pc.specular & 2u) != 0u;
     const float boost = ca.a < 4.0 ? 0.05 : 0.0, ownVar = variance / meanOf;
-    const float g0 = pc.guideSigma > 0.0 && !spec ? GuideShade(uv) : -1.0;
+    // UNOFFICIAL 2026-11-13 (rtgi-review B2) specular bit 3 (Settings.GuideOnce, in the passes after the first): the guide's value is in B's blue, written
+    // there by the pass before (below): this texel's and each tap's come with the B reads already made, in place of 2 more texture reads and a pow
+    // per tap. The first pass reads the guide's textures as before (B's blue is the temporal pass's fast history then).
+    const bool guideInB = (pc.specular & 8u) != 0u;
+    const float g0 = pc.guideSigma > 0.0 && !spec ? (guideInB ? cb.b : GuideShade(uv)) : -1.0;
     const float r0 = spec ? textureLod(sampler2D(t_guideFrame, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).g : 1.0;
     const float spread = spec ? smoothstep(0.05, 0.4, r0) : 1.0;
     const float normalPower = spec ? pc.params.z * mix(8.0, 1.0, spread) : pc.params.z;
@@ -111,7 +115,7 @@ void main() {
             }
             w *= mix(exp(-abs(luma(ta.rgb) - l) / sigmaT), 1.0, fresh);   // (ptaaa-denoiser: the history fix)
             if (g0 >= 0.0 && (x != 0 || y != 0)) {
-                const float gt = GuideShade(tapUv);
+                const float gt = guideInB ? tb.b : GuideShade(tapUv);
                 if (gt >= 0.0) w *= exp(-abs(gt - g0) / (pc.guideSigma * 0.5 * (gt + g0) + 1.0e-4));
             }
             sum += ta.rgb * w;
@@ -120,5 +124,5 @@ void main() {
         }
     }
     o_a = vec4(weights > 0.0 ? sum / weights : ca.rgb, ca.a);
-    o_b = vec4(weights > 0.0 ? moment / weights : cb.r, z, 0.0, 0.0);
+    o_b = vec4(weights > 0.0 ? moment / weights : cb.r, z, pc.guideSigma > 0.0 && !spec ? g0 : 0.0, 0.0);   // (b: 2026-11-13 B2, the guide for the next pass)
 }

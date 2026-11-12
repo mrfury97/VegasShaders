@@ -130,6 +130,7 @@ namespace RtAmbient {
 		bool	GICutByEnergy = true;
 		int		GIDenoiseTune = 2;
 		bool	InputSamePixel = true;
+		bool	GIDenoiseGuideOnce = true;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) the GI denoiser's guide worked out once a texel (RtDenoise Settings.GuideOnce); false = per tap in every pass, as before
 		bool	GIHitMips = true;	// UNOFFICIAL 2026-11-13 (rtgi-review R19) the bounce hits' textures at the mip of the ray's footprint (0.5 x its length); false = mip 0 as before
 		int		GICandidates = 1;	// UNOFFICIAL 2026-11-13 (rtgi-review B1) [1-2] new bounce candidates a texel and frame (GIReuse > 0; RtAOTrace.comp ReuseGI, reuse flag 8)
 		bool	SunGI = false;
@@ -223,6 +224,7 @@ namespace RtAmbient {
 			Current.InputSamePixel = !TheSettingManager->Config.FillNode(&node, s, "InputSamePixel") || node.BoolValue;
 			Current.GICandidates = TheSettingManager->Config.FillNode(&node, s, "GICandidates") ? std::clamp((int)node.IntValue, 1, 2) : 1;
 			Current.GIHitMips = !TheSettingManager->Config.FillNode(&node, s, "GIHitMips") || node.BoolValue;
+			Current.GIDenoiseGuideOnce = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseGuideOnce") || node.BoolValue;
 			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
 			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
 			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each

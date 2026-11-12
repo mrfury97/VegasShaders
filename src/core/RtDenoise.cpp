@@ -475,6 +475,7 @@ namespace RtDenoise {
 				a.specular = (spec ? 1u : 0u) | (rgb && S.AntiFirefly > 0.0f && fireflyPipe ? 2u : 0u);	// (2026-11-07 ptaaa-denoiser) bit 0 specular mode (the roughness in the guide frame's slot), bit 1 the symmetric test (AntiFirefly)
 				const bool mirrorSurface = spec && S.MirrorSurface;	// (2026-11-09 pt-mirrors) bit 2: the marked mirrors smoothed (the raw image's hit distance in the guide albedo's slot)
 				if (mirrorSurface) a.specular |= 4u;
+				if (guide && S.GuideOnce && i > 0) a.specular |= 8u;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) bit 3: the guide's value is in B's blue (the pass before wrote it)
 				a.historyFix = RtHistoryTime::Frames((std::max)(S.HistoryFix, 0.0f), clock);	// (2026-11-07 ptaaa-denoiser; perf-history: frames at 60 fps)
 				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,
 					guide ? (IUnknown*)S.GuideAlbedo : mirrorSurface ? (IUnknown*)Noisy : (IUnknown*)sourceA };
