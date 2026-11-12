@@ -516,6 +516,8 @@ namespace {
 		// released): queued again when the slot is next used from retryAt on
 		struct SlotReal { UInt32 ids[3] = {}; UInt8 state = 0; UInt64 retryAt = 0; };
 		std::vector<SlotReal> slotReal;
+		static const UInt32 kTexSweep = 256;					// UNOFFICIAL 2026-11-13 (rt-tex-release) ids checked for a game-dropped texture an exchange
+		UInt32		texSweepAt = 1, texDropped = 0;				// the sweep's next id; ids released because the game dropped the texture
 		static const UInt64 kTexIdle = 600;					// exchanges unused before a texture may be released for a new one
 		static const UInt64 kTexReuse = 64;					// exchanges before a released id is given out again (frames in flight)
 		static const UInt64 kTexRetry = 300;				// exchanges before a texture the budget refused is tried again
@@ -911,6 +913,31 @@ namespace {
 
 	// (2026-11-07, protocol 7) the slots made (or short) so far: each one's textures sent (as many as fit this exchange), then its SLOT_TEXTURES op
 	void Core::PumpTextures(NvrRtFrame& f, UInt64 n) {
+		// UNOFFICIAL 2026-11-13 (rt-tex-release; user log 2026-11-13 08:58: alive 1398 -> 3688 MB of 4096 after Mojave -> Cordon -> Mojave, "0 released",
+		// VRAM 95 %, 1 % lows 1-9 fps) the textures the GAME has dropped leave the helper too. Each live id holds one COM reference (texKeyOf, the
+		// ABA guard): it kept the game's own copy alive after the game unloaded it, and below RealTextureBudgetMB nothing was ever released, so both
+		// sides filled VRAM. Now that reference is the sensor: a sweep of kTexSweep ids an exchange (all 4095 in ~16 exchanges) asks each texture's
+		// count (AddRef / Release); 1 = only ours: the game no longer uses it (no cell, no draw holds it), so its id is released now (RELEASE op;
+		// the id is reused only kTexReuse exchanges later, the frames in flight; our Release frees the game's texture, DXVK keeps the image
+		// until the GPU is done with it). Textures the game still holds (everything in view) are never touched: no pops. Pinned (displacement)
+		// ids stay. A queued want holds its own reference (QueueSlot), so a texture waiting to be sent is not taken for dropped.
+		if (realTextures && texKeyOf.size() > 1) {
+			const UInt32 total = (UInt32)texKeyOf.size();
+			for (UInt32 k = 0; k < kTexSweep && f.opCount < NVR_RT_MAX_OPS - 64; k++) {
+				if (texSweepAt == 0 || texSweepAt >= total) texSweepAt = 1;
+				const UInt32 id = texSweepAt++;
+				IDirect3DBaseTexture9* t = texKeyOf[id];
+				if (!t || !texRes.Live(id) || texRes.Pinned(id)) continue;
+				t->AddRef();
+				if (t->Release() == 1) { ReleaseTexture(id, f, n); texDropped++; }
+			}
+			static UInt32 droppedLogged = 0;
+			if (texDropped >= droppedLogged + 100) {
+				droppedLogged = texDropped;
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: %u released so far (%u dropped by the game: unloaded cells); %u alive = %llu MB of %llu",
+					texReleased, texDropped, texRes.count, (unsigned long long)(texRes.alive >> 20), (unsigned long long)(texBudget >> 20));
+			}
+		}
 		if (!realTextures || (slotQueue.empty() && looseTextures.empty())) return;
 		LARGE_INTEGER t0, t1, fq;
 		QueryPerformanceCounter(&t0);
@@ -984,10 +1011,10 @@ namespace {
 		static UInt32 lastLogged = 0;
 		if (texSent + texFailed >= lastLogged + 50 || (lastLogged == 0 && texSent + texFailed > 0)) {
 			lastLogged = texSent + texFailed;
-			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: %u sent (BC1 %u, BC3 %u, BC5 %u, RGBA8 %u), %u alive = %llu MB of %llu, %u released, "
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: %u sent (BC1 %u, BC3 %u, BC5 %u, RGBA8 %u), %u alive = %llu MB of %llu, %u released (%u dropped by the game), "
 				"%u kept the atlas, %u slots pointed, %zu slots waiting, %.1f ms CPU so far", texSent, texRouteSent[RtTexturePack::Bc1], texRouteSent[RtTexturePack::Bc3],
 				texRouteSent[RtTexturePack::Bc5], texRouteSent[RtTexturePack::Rgba8], texRes.count, (unsigned long long)(texRes.alive >> 20),
-				(unsigned long long)(texBudget >> 20), texReleased, texFailed, texSlotsSent, slotQueue.size(), texCpuMs);
+				(unsigned long long)(texBudget >> 20), texReleased, texDropped, texFailed, texSlotsSent, slotQueue.size(), texCpuMs);
 		}
 	}
 	UInt32 (*MaskHook)(NiGeometry*, bool) = nullptr;
