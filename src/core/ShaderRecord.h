@@ -113,8 +113,12 @@ public:
 	~ShaderRecordPixel() override;
 
 	void					SetShaderConstantF(UInt32 FirstRegister, D3DXVECTOR4* Data, UInt32 Count) override;
+	int						PuddleDataRegister();	// 2026-11-12 TESR_PuddleData's register in this record, -1 none (cached)
 
 	IDirect3DPixelShader9*	ShaderHandle;
+	int						PuddleDataReg = -2;		// -2 not looked up yet
+
+	static ShaderRecordPixel* Current;	// 2026-11-12 the record NiD3DPixelShaderEx::SetupShader put on the device last (null: the game's shader)
 };
 
 // Index into NiD3D*ShaderEx::ShaderProg: which variant of a replaced game shader.

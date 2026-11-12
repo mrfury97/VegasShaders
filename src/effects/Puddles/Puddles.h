@@ -36,6 +36,7 @@ public:
 	bool	ReflectionsWanted() const;	// the Vulkan reflection passes should mirror standing water
 	void	ReflectionData(D3DXVECTOR4& puddle, D3DXVECTOR4& puddle2) const;	// Reflections.glsl's cb.puddle / puddle2 (zero: off)
 
+	void	SetDrawConstants(bool firstPerson);	// per geometry pass (Render.cpp): no standing water on the first-person model
 	void	UpdateConstants();
 	void	RegisterConstants();
 	void	UpdateSettings();

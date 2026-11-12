@@ -3269,6 +3269,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	BarrelHeat::SetForDraw(Geometry, VertexShader, PixelShader);
 	HandBlood::SetForDraw();	// UNOFFICIAL: blood on the first-person weapon and gloves
 	if (TheShaderManager->Effects.HudRaindrops) TheShaderManager->Effects.HudRaindrops->SetDrawConstants(ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-11-04: rain drops (Wetness Effects HudRaindrops)
+	if (TheShaderManager->Shaders.Puddles) TheShaderManager->Shaders.Puddles->SetDrawConstants(ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-11-12: no puddles on the first-person model
 	LampScissor::OnBind(PixelShader, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL LampScissor
 	HiddenObjectCulling::OnBind(PixelShader);	// UNOFFICIAL HiddenObjectCulling: only lamp-only passes may be skipped
 	// UNOFFICIAL interior forward point-light shadows: the draw's lamps and their cube maps (PointShadowForward.h).

@@ -1041,6 +1041,7 @@ void __fastcall NiD3DVertexShaderEx::Free(NiD3DVertexShaderEx* Shader) {
 * Hook: picks the shader record whose handle this pass uses, and makes it current.
 */
 void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
+	ShaderRecordPixel::Current = nullptr;	// 2026-11-12 (Puddles first-person fix) set below when one of ours is bound
 	auto useGameShader = [this] { ShaderHandle = (IDirect3DPixelShader9*)ShaderHandleBackup; };
 
 	// UNOFFICIAL 2026-10-17 grass study, diagnostic (only while the F10 GPU profile is on, a few lines a run): the device's
@@ -1100,6 +1101,7 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 		auto found = PointShadowForward::ExteriorRecords.find(this);
 		if (found != PointShadowForward::ExteriorRecords.end()) {
 			ShaderHandle = found->second->ShaderHandle;
+			ShaderRecordPixel::Current = found->second;
 			if (BoundHandle != ShaderHandle) found->second->SetCT();
 			return;
 		}
@@ -1108,12 +1110,14 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 	if (!Player->GetWorldSpace()) {
 		if (ShaderRecordPixel* deferred = DeferredLamps::Choose(this)) {
 			ShaderHandle = deferred->ShaderHandle;
+			ShaderRecordPixel::Current = deferred;
 			if (BoundHandle != ShaderHandle) deferred->SetCT();
 			return;
 		}
 	}
 	if (ShaderRecordPixel* record = PickRecord(this, Player->GetWorldSpace() != nullptr)) {
 		ShaderHandle = record->ShaderHandle;
+		ShaderRecordPixel::Current = record;
 		if (BoundHandle != ShaderHandle) record->SetCT();
 	}
 	else useGameShader();
@@ -1146,6 +1150,17 @@ void __fastcall NiD3DPixelShaderEx::Free(NiD3DPixelShaderEx* Shader) {
 // Vertex records never clear the texture stages in SetCT; pixel records do.
 ShaderRecordVertex::ShaderRecordVertex(const char* RecordName) : ShaderHandle(nullptr) { Name = RecordName; ClearSamplers = false; }
 ShaderRecordPixel::ShaderRecordPixel(const char* RecordName) : ShaderHandle(nullptr) { Name = RecordName; ClearSamplers = true; }
+
+ShaderRecordPixel* ShaderRecordPixel::Current = nullptr;
+
+int ShaderRecordPixel::PuddleDataRegister() {
+	if (PuddleDataReg == -2) {
+		PuddleDataReg = -1;
+		for (UInt32 i = 0; i < FloatShaderValuesCount; i++)
+			if (FloatShaderValues[i].Name && !strcmp(FloatShaderValues[i].Name, "TESR_PuddleData")) { PuddleDataReg = (int)FloatShaderValues[i].RegisterIndex; break; }
+	}
+	return PuddleDataReg;
+}
 
 // UNOFFICIAL 2026-10-13: no handle when the driver refused the shader (LoadShader deletes the record then): releasing
 // nothing crashed the game at startup instead of falling back to the game's own shader.

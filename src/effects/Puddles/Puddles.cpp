@@ -110,3 +110,25 @@ void PuddlesShaders::ReflectionData(D3DXVECTOR4& puddle, D3DXVECTOR4& puddle2) c
 	puddle = Constants.Data;
 	puddle2 = D3DXVECTOR4(Settings.SlopeStart, Settings.SlopeFull, Settings.Roughness, Settings.EdgeSoftness);
 }
+
+// 2026-11-12 (user: walking into and out of puddles put water on the first-person arms) the first-person model's draws read the world's
+// puddle constants, and its positions are posed round the camera, so the field / map gave its upward faces standing water and the soaked
+// rim wherever the player stood near a puddle. For every first-person pass the bound record's TESR_PuddleData goes out with level 0
+// (no standing water, no rim; the rain's dampness and HudRaindrops' drops stay). SetCT uploads only when the pixel shader changes, so
+// the first world pass afterwards puts the real value back on the register last zeroed.
+void PuddlesShaders::SetDrawConstants(bool firstPerson) {
+	static int zeroedReg = -1;
+	ShaderRecordPixel* record = ShaderRecordPixel::Current;
+	const int reg = record ? record->PuddleDataRegister() : -1;
+	if (firstPerson) {
+		if (reg < 0 || Constants.Data.x <= 0.0f) return;
+		D3DXVECTOR4 dry = Constants.Data;
+		dry.x = 0.0f;
+		TheRenderManager->device->SetPixelShaderConstantF(reg, (const float*)&dry, 1);
+		zeroedReg = reg;
+	}
+	else if (zeroedReg >= 0) {
+		if (reg == zeroedReg) TheRenderManager->device->SetPixelShaderConstantF(reg, (const float*)&Constants.Data, 1);
+		zeroedReg = -1;
+	}
+}
