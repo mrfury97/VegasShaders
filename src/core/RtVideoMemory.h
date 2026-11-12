@@ -85,4 +85,37 @@ namespace RtVideoMemory {
 		if (!result) _snprintf_s(text, size, _TRUNCATE, "unknown (the adapter was not found)");
 		return result;
 	}
+
+	// UNOFFICIAL 2026-11-13 (rt-audit F4, RTAudit\AUDIT.md) this PROCESS's local video memory budget (what WDDM lets it keep resident: 12.1 GB
+	// of a 16 GB card in the user's crash log) and its current use, from DXGI 1.4 QueryVideoMemoryInfo on the adapter with this LUID. The
+	// adapter is found once and kept. false: no DXGI 1.4 / no such adapter (the caller keeps its tier budget).
+	inline bool Local(const BYTE luid[8], bool luidValid, unsigned long long& budget, unsigned long long& usage) {
+		static IDXGIAdapter3* cached = nullptr;
+		static bool looked = false;
+		if (!looked) {
+			looked = true;
+			typedef HRESULT(WINAPI* CreateFactory)(REFIID, void**);
+			const HMODULE dxgi = System32("dxgi.dll");
+			const CreateFactory create = dxgi ? (CreateFactory)GetProcAddress(dxgi, "CreateDXGIFactory1") : nullptr;
+			IDXGIFactory1* factory = nullptr;
+			if (luidValid && create && SUCCEEDED(create(__uuidof(IDXGIFactory1), (void**)&factory)) && factory) {
+				LUID want = {};
+				memcpy(&want, luid, sizeof(want));
+				IDXGIAdapter1* adapter = nullptr;
+				for (UINT i = 0; !cached && SUCCEEDED(factory->EnumAdapters1(i, &adapter)); i++) {
+					DXGI_ADAPTER_DESC1 d = {};
+					if (SUCCEEDED(adapter->GetDesc1(&d)) && d.AdapterLuid.LowPart == want.LowPart && d.AdapterLuid.HighPart == want.HighPart)
+						if (FAILED(adapter->QueryInterface(__uuidof(IDXGIAdapter3), (void**)&cached))) cached = nullptr;
+					adapter->Release();
+				}
+				factory->Release();
+			}
+		}
+		if (!cached) return false;
+		DXGI_QUERY_VIDEO_MEMORY_INFO m = {};
+		if (FAILED(cached->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &m)) || !m.Budget) return false;
+		budget = m.Budget;
+		usage = m.CurrentUsage;
+		return true;
+	}
 }

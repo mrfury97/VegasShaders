@@ -478,6 +478,12 @@ namespace {
 		UInt8*		texStaging = nullptr;
 		UInt32		texMaxSize = 1024;						// RealTextureMaxSize (0 = auto by video memory): the biggest level sent (bigger textures start at a smaller mip)
 		UInt64		texBudget = 0;							// RealTextureBudgetMB (0 = auto) in bytes, against texRes.alive (the helper's copies, the route's format)
+		// UNOFFICIAL 2026-11-13 (rt-audit F4) auto budget: its cap at start (min(tier, 20 % of the process's local budget)) and the live watch
+		bool		texAuto = false, texLuidValid = false;
+		BYTE		texLuid[8] = {};
+		UInt64		texBudgetCap = 0;
+		UInt32		vramShrinks = 0;
+		void		VramWatch(NvrRtFrame& f, UInt64 n);
 		// (2026-11-07, protocol 8, rtgap-textures) the routes (RtTexturePack.h): RGBA8 (the fork's decoding blit) and, with fork 1.8-rt-bc,
 		// BC1 / BC3 / BC5 (the game's blocks as they are); a transfer image each (two halves: exchange parity), its own shelf packing
 		uint32_t	texCapBc = 1024, texCapRgba = 1024;		// the biggest level a route sends
@@ -862,6 +868,39 @@ namespace {
 	// reference + our real-texture id's reference, texKeyOf) is freed: its key erased, its reference given back (the texture's real id then goes
 	// by the real-texture sweep: only texKeyOf holds it), reusable from kSlotReuse exchanges on. A queued want holds its own reference (QueueSlot),
 	// so a slot waiting to send is never taken for dropped. Textures the game still holds (anything in a loaded cell) are never touched.
+	// UNOFFICIAL 2026-11-13 (rt-audit F4) every 120 exchanges with an auto budget: this process's local video memory use (the game's DXVK) + the
+	// helper's real textures and structures against 90 % of the process's budget. Over it: the cap drops to what is alive minus the excess
+	// (at least 256 MB) and idle textures (unused kTexIdle exchanges, least recent first) are released now, up to 64 a call; textures in use
+	// stay (new ones then wait: the slots keep the atlas). Under it with 512 MB to spare: the cap climbs back 256 MB a call to its start value.
+	void Core::VramWatch(NvrRtFrame& f, UInt64 n) {
+		if (!texAuto || !realTextures || (n % 120) != 0) return;
+		unsigned long long budget = 0, usage = 0;
+		if (!RtVideoMemory::Local(texLuid, texLuidValid, budget, usage)) return;
+		const UInt64 helper = texRes.alive + (shared ? (UInt64)shared->geometryBytes : 0);
+		const UInt64 total = usage + helper, limit = budget / 10 * 9, floorBytes = 256ull << 20;
+		if (total > limit) {
+			const UInt64 over = total - limit;
+			const UInt64 cap = (std::max)(floorBytes, texRes.alive > over ? texRes.alive - over : 0ull);
+			if (cap < texBudget) {
+				texBudget = cap;
+				if (vramShrinks++ < 20 || (vramShrinks % 100) == 0)
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: video memory at %llu of %llu MB (game %llu + helper %llu): auto budget down to %llu MB (rt-audit F4)",
+						(unsigned long long)(total >> 20), budget >> 20, usage >> 20, (unsigned long long)(helper >> 20), (unsigned long long)(texBudget >> 20));
+			}
+			if (texRes.alive > texBudget) {
+				std::vector<uint32_t> victims;
+				texRes.PickVictims(0, texBudget, n, kTexIdle, victims);	// (false when even all idle ones would not do: then none; try the idle ones anyway)
+				if (victims.empty()) {
+					std::vector<uint32_t> some;
+					if (texRes.alive > 0) texRes.PickVictims(0, texRes.alive - (std::min)(texRes.alive, (UInt64)(64ull << 20)), n, kTexIdle, some);
+					victims.swap(some);
+				}
+				for (size_t k = 0; k < victims.size() && k < 64 && f.opCount < NVR_RT_MAX_OPS - 64; k++) ReleaseTexture(victims[k], f, n);
+			}
+		}
+		else if (total + (512ull << 20) < limit && texBudget < texBudgetCap) texBudget = (std::min)(texBudgetCap, texBudget + (256ull << 20));
+	}
+
 	void Core::SweepSlots() {
 		if (slotTex.empty()) return;
 		const UInt32 total = (UInt32)slotTex.size();
@@ -993,6 +1032,7 @@ namespace {
 
 	// (2026-11-07, protocol 7) the slots made (or short) so far: each one's textures sent (as many as fit this exchange), then its SLOT_TEXTURES op
 	void Core::PumpTextures(NvrRtFrame& f, UInt64 n) {
+		VramWatch(f, n);	// UNOFFICIAL 2026-11-13 (rt-audit F4) the auto budget against the process's video memory
 		// UNOFFICIAL 2026-11-13 (rt-tex-release; user log 2026-11-13 08:58: alive 1398 -> 3688 MB of 4096 after Mojave -> Cordon -> Mojave, "0 released",
 		// VRAM 95 %, 1 % lows 1-9 fps) the textures the GAME has dropped leave the helper too. Each live id holds one COM reference (texKeyOf, the
 		// ABA guard): it kept the game's own copy alive after the game unloaded it, and below RealTextureBudgetMB nothing was ever released, so both
@@ -1242,6 +1282,21 @@ namespace {
 				caps = RtTexturePack::AutoCaps(RtVideoMemory::Dedicated(info.DeviceLUID, info.DeviceLUIDValid != FALSE, info.VendorId, info.DeviceId, memText, sizeof(memText)));
 			texMaxSize = maxSetting > 0 ? RtTexturePack::ExplicitMaxSize(maxSetting) : caps.maxSize;
 			texBudget = (UInt64)(budgetSetting > 0 ? (std::max)(64, budgetSetting) : (int)caps.budgetMB) << 20;
+			// UNOFFICIAL 2026-11-13 (rt-audit F4) auto: also at most 20 % of THIS process's WDDM local budget (the user's 16 GB card gave the game
+			// 12.1 GB; the tier's 4096 MB of copies plus a modded game's own textures went to 95 % and the helper's builds slowed 50-100x), and
+			// watched live (VramWatch): over 90 % of the budget the cap drops to what is alive minus the excess, back up when there is room again
+			texAuto = budgetSetting <= 0;
+			memcpy(texLuid, info.DeviceLUID, 8); texLuidValid = info.DeviceLUIDValid != FALSE;
+			texBudgetCap = texBudget;
+			{
+				unsigned long long vb = 0, vu = 0;
+				if (texAuto && RtVideoMemory::Local(texLuid, texLuidValid, vb, vu)) {
+					texBudgetCap = (std::min)(texBudgetCap, (UInt64)(vb / 5) & ~((1ull << 20) - 1));
+					texBudget = texBudgetCap;
+					Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT real textures: auto budget %llu MB = min(tier, 20 %% of the process's local video memory budget %llu MB; %llu MB in use now) (rt-audit F4)",
+						(unsigned long long)(texBudget >> 20), vb >> 20, vu >> 20);
+				}
+			}
 			// (protocol 8) the BC routes when the fork makes BC shared images (1.8-rt-bc; an older one refuses the format) and
 			// RealTextureCompressed is on (off: everything through RGBA8, the 1.0.6-test7 route, for an A/B)
 			bool bc = false;
