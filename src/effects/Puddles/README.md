@@ -176,3 +176,6 @@ dry lamp record, and 7-layer land had no sampler for the cover map.
 - "Streaks not working": the streak mask was 0 on the shack walls. DebugView 4 (new) showed them steep and with lanes but covered; ExteriorForward off changed nothing; a 120-unit look-out made them open. Kept at 40 (overhangs stay dry).
 - Where streaks ran they hardly showed: max() against the wall's rain wetness (MinRainWetness 0.65: darkening 0.42, film 0.65) hid most of them, and the drop's bright head sat at the top of its tail. Now additive, bulging (glints) and head-down.
 - The user's StreakSpeed 8 (drops at 2-13 m/s, flicker) set to 1.5 with the user's OK.
+
+## 2026-11-12 Who gets standing water
+Only the land, by default (user): `ObjectPuddles = false` sends object draws TESR_PuddleData with level 0 (Puddles::SetDrawConstants, per pass from Render.cpp SetShadersHook; ShaderRecordPixel::IsLand = TerrainTemplate). Skinned meshes (actors) and the first-person model are always dry. Objects keep the rain dampness and wall streaks.
