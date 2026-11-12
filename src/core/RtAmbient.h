@@ -211,6 +211,11 @@ namespace RtAmbient {
 			Current.SunGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
 			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
 			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
+			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
+			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each
+			// wall got the open sky's light. With SunGI the sky already comes in through the ray misses (and the cache, both visibility-tested), so
+			// GIAmbient is an unshadowed second copy of it that drowns the sun's bounce: 0 outdoors with SunGI (the key stays for the old chain).
+			if (Current.SunGI && !InteriorNow) Current.GIAmbient = 0.0f;
 		}
 	}
 
