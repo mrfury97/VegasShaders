@@ -484,7 +484,8 @@ namespace {
 		// (2026-10-30) GIReuse's reservoirs: two pairs, last frame's and this frame's, swapped every frame (RtAOTrace.comp RT_GI_PASS).
 		for (int set = 0; set < 2; set++) {
 			RtImageReservoir[set][0] = RtCore::AddImage(set ? "NVR RT gi reservoir A1" : "NVR RT gi reservoir A0", w, h, NVR_EXT_SHARED_RGBA16F);
-			RtImageReservoir[set][1] = RtCore::AddImage(set ? "NVR RT gi reservoir B1" : "NVR RT gi reservoir B0", w, h, NVR_EXT_SHARED_RGBA16F);
+			// UNOFFICIAL 2026-11-13 (rtgi-review B3) twice as tall: the lower half holds GISamplePoints' sample points (RtAOTrace.comp ReuseGIPoints); no new shared image
+			RtImageReservoir[set][1] = RtCore::AddImage(set ? "NVR RT gi reservoir B1" : "NVR RT gi reservoir B0", w, 2 * h, NVR_EXT_SHARED_RGBA16F);
 		}
 		RtGIHistory = false;
 		RtImageGIOut = RtCore::AddImage("NVR RT gi out", w, h, NVR_EXT_SHARED_RGBA16F);
@@ -839,6 +840,15 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// puts the bounce into rgb the same way. The reuse's reservoirs hold one frame's rect layout: a history made at another RenderRect scale
 	// (or rect vs native) holds other texels and starts again (as the AO's RtHistoryScale).
 	const bool gi = rt.GI && al && al->ShouldRender();
+	{	// UNOFFICIAL 2026-11-13 (rtgi-review B3) GISamplePoints stores its reservoirs another way (A = light, W): a change of mode starts the history over
+		static int lastPoints = -1;
+		if (lastPoints != (RtAmbient::Current.GISamplePoints ? 1 : 0)) {
+			if (lastPoints >= 0) RtGIHistory = false;
+			lastPoints = RtAmbient::Current.GISamplePoints ? 1 : 0;
+			Logger::Log("UNOFFICIAL RT AO: GI reuse: GISamplePoints %s (%s), GIValidate %s.", lastPoints ? "on" : "off",
+				lastPoints ? "the reservoirs keep their sample points: cosine, Jacobian and a visibility ray on spatial reuse" : "the reservoirs keep the light only", RtAmbient::Current.GIValidate ? "on" : "off");
+		}
+	}
 	if (gi && RtGIHistory && RtPlaceRestart()) RtGIHistory = false;	// UNOFFICIAL 2026-11-11 (sungi, F16): reuse.w 0 = no history (a new place / a sun jump)
 	{
 		static float giHistoryScale[2] = { 1.0f, 1.0f };
@@ -1042,7 +1052,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		cuts += changed ? 1 : 0;
 		if (++frames >= 600) { Logger::Log("UNOFFICIAL RT AO: GI reuse history cut %d times in the last 600 frames (the lamps or the sun changed by > 10 %%).", cuts); cuts = frames = 0; }
 		// UNOFFICIAL 2026-11-08 (rtgi-ghost) + 4096 x the reuse fixes' flags (RtAOTrace.comp ReuseGI: 1 GIReuseSpread, 2 GIReuseShuffle, 4 SampleLockFix 2026-11-09)
-		const int reuseFlags = (rt.GIReuseSpread ? 1 : 0) | (rt.GIReuseShuffle ? 2 : 0) | (rt.SampleLockFix ? 4 : 0) | (rt.GICandidates >= 2 ? 8 : 0);	// (8: 2026-11-13 rtgi-review B1)
+		const int reuseFlags = (rt.GIReuseSpread ? 1 : 0) | (rt.GIReuseShuffle ? 2 : 0) | (rt.SampleLockFix ? 4 : 0) | (rt.GICandidates >= 2 ? 8 : 0) | (rt.GISamplePoints ? 16 : 0) | (rt.GISamplePoints && rt.GIValidate ? 32 : 0);	// (8: 2026-11-13 rtgi-review B1)
 		{
 			static int loggedFlags = -1;
 			if (reuseFlags != loggedFlags) {
