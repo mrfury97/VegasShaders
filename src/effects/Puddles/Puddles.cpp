@@ -34,6 +34,7 @@ void PuddlesShaders::UpdateSettings() {
 	Settings.StreakWidth = std::clamp(TheSettingManager->GetSettingF(main, "StreakWidth"), 1.0f, 64.0f);
 	Settings.StreakSpeed = std::clamp(TheSettingManager->GetSettingF(main, "StreakSpeed"), 0.0f, 8.0f);
 	Settings.ReflectionPuddles = TheSettingManager->GetSettingI(main, "ReflectionPuddles") != 0;
+	Settings.ObjectPuddles = TheSettingManager->GetSettingI(main, "ObjectPuddles") != 0;
 	Settings.LevelOverride = TheSettingManager->GetSettingF(debug, "LevelOverride");
 	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(debug, "DebugView"), 0, 5);
 }
@@ -116,11 +117,14 @@ void PuddlesShaders::ReflectionData(D3DXVECTOR4& puddle, D3DXVECTOR4& puddle2) c
 // rim wherever the player stood near a puddle. For every first-person pass the bound record's TESR_PuddleData goes out with level 0
 // (no standing water, no rim; the rain's dampness and HudRaindrops' drops stay). SetCT uploads only when the pixel shader changes, so
 // the first world pass afterwards puts the real value back on the register last zeroed.
-void PuddlesShaders::SetDrawConstants(bool firstPerson) {
+// (2026-11-12, user: in third person the player and NPCs got puddles on them walking through: the same for every skinned mesh, the
+// actors, whose upward faces (shoulders, hoods) took the field's standing water where they stood. Static objects keep it.)
+void PuddlesShaders::SetDrawConstants(bool dry) {
 	static int zeroedReg = -1;
 	ShaderRecordPixel* record = ShaderRecordPixel::Current;
 	const int reg = record ? record->PuddleDataRegister() : -1;
-	if (firstPerson) {
+	if (!Settings.ObjectPuddles && record && !record->IsLand) dry = true;	// (2026-11-12 user: only the land gets puddles; objects keep the rain's dampness and wall streaks)
+	if (dry) {
 		if (reg < 0 || Constants.Data.x <= 0.0f) return;
 		D3DXVECTOR4 dry = Constants.Data;
 		dry.x = 0.0f;

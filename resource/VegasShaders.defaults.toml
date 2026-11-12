@@ -3017,6 +3017,7 @@ Streaks = 1.0                       # [0.0-2.0] Strength of the water running do
 StreakWidth = 6.0                   # [1-64] Width of a streak lane, in game units.
 StreakSpeed = 1.0                   # [0.0-8.0] How fast the water runs down the walls.
 MapMode = true                      # Restart. The large-scale puddle terms (the field, the rim wander, the rain cover) in a world-space map built on the NVR DXVK extension (Compute\PuddleMap), so every surface gets the full puddles (no lean or dry fallbacks; 7-layer land gets its rain cover; its seventh layer's normal map is then flat). Without the extension: the in-shader path.
+ObjectPuddles = false               # Standing water and soaked rims on objects too (road pieces, concrete slabs, rocks). Off: only the land gets puddles; objects keep the rain's dampness and wall streaks. Characters and the first-person model never get them.
 ReflectionPuddles = true            # The reflection passes ([Shaders.Reflections], Vulkan: screen-space and ray-traced) mirror the puddles too, also after the rain.
 
 [_Shaders.Puddles.Debug]

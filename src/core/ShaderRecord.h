@@ -117,6 +117,7 @@ public:
 
 	IDirect3DPixelShader9*	ShaderHandle;
 	int						PuddleDataReg = -2;		// -2 not looked up yet
+	bool					IsLand = false;			// 2026-11-12 compiled from TerrainTemplate (Puddles ObjectPuddles off: only these get standing water)
 
 	static ShaderRecordPixel* Current;	// 2026-11-12 the record NiD3DPixelShaderEx::SetupShader put on the device last (null: the game's shader)
 };

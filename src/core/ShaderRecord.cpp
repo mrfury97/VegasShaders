@@ -645,6 +645,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 					record->CreateCT(source, table);
 					// UNOFFICIAL 2026-10-27 displacement shadows (core/DisplaceShadows.h): the land pixel shaders and their layer counts, so the
 					// land's own draws can be told apart (their per-layer height flags are taken there for the land's shadow draws).
+					if (pixelProfile && Template.Name && !strcmp(Template.Name, "TerrainTemplate")) static_cast<ShaderRecordPixel*>(record)->IsLand = true;	// 2026-11-12 Puddles ObjectPuddles
 					if (pixelProfile && Template.Name && !strcmp(Template.Name, "TerrainTemplate"))
 						DxvkCompute::NoteLandPixelShader(static_cast<ShaderRecordPixel*>(record)->ShaderHandle, Template.Defines);
 					// UNOFFICIAL 2026-10-28 LinearScene (core/LinearScene.h): the pixel shaders that can give linear light (LinearSceneOut).

@@ -15,6 +15,7 @@ public:
 		float	Roughness, Darkening, EdgeSoftness, SlopeStart, SlopeFull, Cavity, WetRing;
 		float	Ripples, Streaks, StreakWidth, StreakSpeed;
 		bool	ReflectionPuddles;
+		bool	ObjectPuddles;	// false: standing water and soaked rims on the land only
 		float	LevelOverride;	// -1 off
 		int		DebugView;		// 0 off, 1 mask, 2 ripples, 3 levels
 	};
@@ -36,7 +37,7 @@ public:
 	bool	ReflectionsWanted() const;	// the Vulkan reflection passes should mirror standing water
 	void	ReflectionData(D3DXVECTOR4& puddle, D3DXVECTOR4& puddle2) const;	// Reflections.glsl's cb.puddle / puddle2 (zero: off)
 
-	void	SetDrawConstants(bool firstPerson);	// per geometry pass (Render.cpp): no standing water on the first-person model
+	void	SetDrawConstants(bool dry);	// per geometry pass (Render.cpp): no standing water on the first-person model or skinned meshes
 	void	UpdateConstants();
 	void	RegisterConstants();
 	void	UpdateSettings();
