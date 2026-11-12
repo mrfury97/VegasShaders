@@ -856,7 +856,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		const D3DXVECTOR4& sunColor = TheShaderManager->ShaderConst.sunColor;
 		const D3DXVECTOR4& ambient = TheShaderManager->ShaderConst.sunAmbient;
 		auto lin = [](float v) { return powf((std::max)(v, 0.0f), 2.2f); };
-		c.sunDir = D3DXVECTOR4(sunDir.x, sunDir.y, sunDir.z, sunUp ? 1.0f : 0.0f);
+		c.sunDir = D3DXVECTOR4(sunDir.x, sunDir.y, sunDir.z, (sunUp ? 1.0f : 0.0f) + (rt.GIHitMips ? 0.25f : 0.0f));	// (w's fraction: 2026-11-13 rtgi-review R19 GIHitMips; the shader's sun test is > 0.5)
 		// UNOFFICIAL 2026-11-04 (rtgap) GIGameLamps: x the game's light scale, as its lit shaders light the sun (LIN_SCALE_LIGHT: 0.49 by day
 		// outdoors, 1 indoors / at night); the bounce hits were lit twice as strongly as the game lights the same surfaces by day
 		PBRShaders* pbr = TheShaderManager->Shaders.PBR;
@@ -1012,7 +1012,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 			light[1] = (std::max)(light[1], luma(c.lampColor[k]));
 		}
 		light[2] = c.gi.z;
-		light[3] = c.sunDir.w > 0.5f ? luma(c.sunColor) : 0.0f;
+		light[3] = c.sunDir.w > 0.5f ? luma(c.sunColor) : 0.0f;	// (w: 0 / 1 + GIHitMips' 0.25)
 		light[4] = c.sunDir.w > 0.5f ? c.sunDir.z * 10.0f : 0.0f;
 		bool changed = false;
 		for (int k = 0; k < GILightKeys; k++)
