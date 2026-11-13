@@ -1278,6 +1278,27 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateSmoothedSunDir() {
 
 	D3DXVECTOR3 sunDir(TheShaderManager->ShaderConst.SunDir);
 
+	// UNOFFICIAL 2026-11-14 (rt-shadows F2) while the forward RT sun runs (RtSunShadows::RealSun) every sun shadow follows the REAL sun,
+	// the one the lit shaders' N.L uses: the 15-degree steps (and their glide) exist to keep shadow-map texels from swimming, which the
+	// traced shadows do not have; quantized, a low sun was traced up to 7.5 degrees off the lit one (long streaks over slopes the
+	// shading called sunlit, the user's "dark spikes down a sunlit slope") and all shadows swept 15 degrees every in-game hour. The
+	// cascades take the same sun (they cover past the RT range and the points the trace did not see), so the two never disagree.
+	// Only a light per-frame ease against jitter; a jump (waiting, sleeping, a load) is taken at once.
+	if (RtSunShadows::RealSun()) {
+		D3DXVECTOR3 eased(Constants.SmoothedSunDir);
+		const float lengthSq = D3DXVec3LengthSq(&eased);
+		if (lengthSq > 0.25f && D3DXVec3Dot(&eased, &sunDir) / sqrtf(lengthSq) > 0.99939f) {	// within 2 degrees
+			D3DXVec3Lerp(&eased, &eased, &sunDir, 0.5f);
+			D3DXVec3Normalize(&eased, &eased);
+		}
+		else eased = sunDir;
+		SunGlideValid = false;
+		SunCrossFading = false;
+		Constants.CrossFade.x = 0.0f;
+		Constants.SmoothedSunDir = D3DXVECTOR4(eased, 0.0f);
+		return eased;
+	}
+
 	if (quantized) {
 		// Snap yaw and pitch to their steps.
 		float yaw = atan2f(sunDir.y, sunDir.x);

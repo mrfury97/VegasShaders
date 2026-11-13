@@ -1682,6 +1682,17 @@ namespace {
 			return;
 		}
 		if (state == Running) {
+			// UNOFFICIAL 2026-11-14 (rt-shadows F9) the helper died while running (a crash or a lost device under GPU pressure: twice on
+			// the bench with another game and a second slot on the GPU, no line in its log): start it again, as a resolution change does,
+			// up to 3 times a session, instead of every RT effect falling back for the rest of the session
+			static int restarts = 0;
+			if (InterlockedCompareExchange(&tripped, 0, 0) && restarts < 3) {
+				restarts++;
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper lost (%s): starting it again (%d of 3 this session)", tripReason, restarts);
+				Stop("the helper is restarted after it was lost");
+				state = Idle;
+				return;
+			}
 			if (InterlockedCompareExchange(&tripped, 0, 0)) TurnOff(tripReason);
 			else if (shared->state == NVR_RT_STATE_FAILED) TurnOff("the helper stopped (its message is above)");
 		}

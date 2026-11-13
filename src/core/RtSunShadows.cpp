@@ -9,6 +9,9 @@
 #include "GpuProfiler.h"
 #include "RtTessContact.h"	// UNOFFICIAL 2026-11-07 (rtgap-tess) the bumps' slack + ContactShadows (docs/next/RT-DETAIL-GAPS.md section 1)
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
+#include "BendContact.h"	// UNOFFICIAL 2026-11-14 (rt-shadows F1) the forward texture the traced visibility rides in
+#include "ForwardCloudShadows.h"	// (rt-shadows) the clouds' shadow already in the lit shaders: not in the trace too
+#include "RtHistoryTime.h"
 
 namespace {
 	const char* const kSection = "Shaders.ShadowsExteriors.RT";
@@ -34,6 +37,7 @@ namespace {
 		float	denoiserHistory = 32.0f, denoiserMaxRadius = 32.0f, denoiserStabilize = 4.0f;
 		float	contact = 1.0f;			// 2026-11-07 (rtgap-tess) ContactShadows: the depth buffer's contact march (strength, 0 off; Mode 1 only)
 		float	contactLength = 24.0f;	// ContactLength (pixels)
+		bool	forward = true;			// 2026-11-14 (rt-shadows F1) Forward: the visibility into the lit shaders' sun term (core/BendContact.h's texture)
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
 	} S;
 
@@ -83,6 +87,18 @@ namespace {
 	ID3D9NvrExtPipeline* combine[3] = {};	// [0] multiply, [1] write red (DebugView 1 / 3), [2] write all (DebugView 4, grey)
 	bool		combineTried[3] = {};
 	bool		tracedForDebug = false;		// this frame's visibility is there for RenderDebug
+	// UNOFFICIAL 2026-11-14 (rt-shadows F1) Forward: RtSunForwardPack.frag into BendContact's texture, and the frame it last did
+	ID3D9NvrExtPipeline* forwardPipeline = nullptr;
+	bool		forwardTried = false;
+	UInt32		forwardPackedFrame = 0xFFFFFFFF;
+	UInt32		forwardPacks = 0;
+	D3DXVECTOR3	lastDenoiseSun(0.0f, 0.0f, 0.0f);	// (rt-shadows) the denoiser's history restarts when the sun jumps (waiting, sleeping)
+
+	// The forward path is in use this frame: on, compiled into the lit shaders at start (BendContact::CompiledIn), no debug view that
+	// shows the visibility itself, outdoors
+	bool ForwardOn() {
+		return S.enabled && S.forward && BendContact::CompiledIn && BendContact::Texture && S.debugView == 0 && TheShaderManager->GameState.isExterior;
+	}
 
 	void ReadSettings() {
 		S.enabled = TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
@@ -108,6 +124,7 @@ namespace {
 		S.denoiserHistory = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserHistory"), 1.0f), 64.0f);
 		S.denoiserMaxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);
 		S.denoiserStabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
+		S.forward = TheSettingManager->GetSettingI(kSection, "Forward") != 0;
 		if ((S.penumbra || S.shadowDenoiser) && S.sunAngle <= 0.0f) S.sunAngle = 0.53f;	// the sun's real angular diameter
 	}
 
@@ -253,6 +270,7 @@ namespace {
 				TheRenderManager->CameraPosition.z / 70.0f);
 		}
 		if (S.cloudShadows && imageCloud >= 0 && clouds && clouds->rtMapValid && clouds->Textures.ShadowTexture && TheShaderManager->GameState.isExterior &&
+			!ForwardCloudShadows::Active &&	// (2026-11-14 rt-shadows) the lit shaders take the clouds' shadow themselves: not twice
 			clouds->shadowMapSize == imageCloudSize && S.debugView != 7 && S.debugView != 8) {
 			const float strength = clouds->ShadowStrengthForSunFar();
 			if (strength > 0.0f && RtCore::CopyIn(imageCloud, clouds->Textures.ShadowTexture)) {
@@ -262,6 +280,9 @@ namespace {
 				cloudsInTrace = true;
 			}
 		}
+		// UNOFFICIAL 2026-11-14 (rt-shadows F4) cloudCentre.w 1: faces turned from the sun are traced too (the forward path: only the sun
+		// term takes the result); the deferred combine darkens whole pixels, so there they keep 1 as before
+		c.cloudCentre[3] = ForwardOn() ? 1.0f : 0.0f;
 		// the camera's world position (the scene is camera relative): the clouds' map is in world metres
 		c.camera[0] = TheRenderManager->CameraPosition.x; c.camera[1] = TheRenderManager->CameraPosition.y; c.camera[2] = TheRenderManager->CameraPosition.z;
 		const int atlas = RtCore::AlphaAtlasImage();
@@ -289,7 +310,12 @@ namespace {
 				static UInt32 lastFrame = 0;
 				const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
 				RtShadowDenoise::View before = denoiseView;
-				before.valid = denoiseView.valid && lastW == tw && lastH == th && frameNow - lastFrame <= 2;
+				// (2026-11-14 rt-shadows) + the sun moved more than a degree since the last frame (waiting, sleeping, a time jump): every
+				// shadow moved, the history is wrong everywhere
+				const D3DXVECTOR3 sunNow(c.sun[0], c.sun[1], c.sun[2]);
+				const bool sunJumped = D3DXVec3Dot(&sunNow, &lastDenoiseSun) < 0.99985f;
+				lastDenoiseSun = sunNow;
+				before.valid = denoiseView.valid && lastW == tw && lastH == th && frameNow - lastFrame <= 2 && !sunJumped;
 				lastW = tw; lastH = th; lastFrame = frameNow;
 				IDirect3DBaseTexture9* motion = Texture("TESR_ObjectMotionBuffer");
 				const D3DXVECTOR4* motionData = Constant("TESR_ObjectMotionData");
@@ -300,6 +326,12 @@ namespace {
 				ds.debugView = S.denoiserDebugView;
 				ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
 				RtShadowDenoise::TimeScale(ds, RtDenoise::HistoryClock());	// UNOFFICIAL 2026-11-07 (perf-history) frames at 60 fps -> the same seconds
+				// UNOFFICIAL 2026-11-14 (rt-shadows F3) hard edges keep a real history too (8 frames at 60 fps; was 1: the one-ray binary
+				// sample went straight out wherever the penumbra was under ~2 pixels: salt noise on lit ground, crawling edges). The
+				// reprojection carries a still shadow with its surface; the anti-lag shortens it where a caster moves. And at least a
+				// 0.75-pixel blur on an edge (a binary edge's stair-steps).
+				ds.minHistory = (std::min)(ds.maxHistory, RtHistoryTime::Frames(8.0f, RtDenoise::HistoryClock()));
+				ds.minRadius = 0.75f / (float)scale;
 				RtShadowDenoise::DenoiseConstants d;
 				RtShadowDenoise::Fill(d, now, before, tw, th, rw, rh, 0, 1, frames, ds, moved, c.alpha[2]);
 				d.layerReset[0][0] = before.valid ? 0.0f : 1.0f;
@@ -431,6 +463,95 @@ namespace {
 		return SUCCEEDED(hr);
 	}
 
+	// UNOFFICIAL 2026-11-14 (rt-shadows F1) RtSunForwardPack.frag: 2 sampled images + the sampler; push 48 bytes (the sampler index at 32);
+	// green and blue written only (Bend's red stays)
+	ID3D9NvrExtPipeline* ForwardPipeline() {
+		if (forwardTried) return forwardPipeline;
+		forwardTried = true;
+		std::vector<char> spirv;
+		ID3D9NvrExt* ext = DxvkCompute::Extension();
+		if (!ext || !DxvkCompute::LoadSpirv("RtSunForwardPack", spirv)) {
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun Forward: Compute\\RtSunForwardPack.spv missing: the old combine is used");
+			return nullptr;
+		}
+		NVR_EXT_BINDING_DESC bindings[3] = {
+			{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
+			{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE, 1, NVR_EXT_VIEW_2D, FALSE, 0 },
+			{ 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 32 },
+		};
+		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
+		desc.pFragmentSpirv = spirv.data();
+		desc.FragmentSpirvSize = (UINT)spirv.size();
+		desc.BindingCount = 3;
+		desc.pBindings = bindings;
+		desc.PushConstantSize = 48;
+		desc.UsesSamplerHeap = TRUE;
+		desc.SamplerHeapSet = 0;
+		desc.SamplerHeapBinding = 0;
+		desc.ColorTargetCount = 1;
+		desc.Blend = NVR_EXT_BLEND_NONE;
+		desc.ColorWriteMask = 0x6u;	// green (view depth) and blue (1 + visibility)
+		desc.pDebugName = "RtSunForwardPack";
+		if (FAILED(ext->CreateGraphicsPipeline(&desc, &forwardPipeline))) {
+			forwardPipeline = nullptr;
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun Forward: the pack pass could not be made (the DXVK log says why): the old combine is used");
+		}
+		return forwardPipeline;
+	}
+
+	// The denoised visibility into BendContact's texture for next frame's lit shaders. False: not drawn (the caller combines as before).
+	bool PackForward(IDirect3DDevice9* Device, IDirect3DTexture9* Signal) {
+		IDirect3DBaseTexture9* depth = Texture("TESR_DepthBuffer");
+		const D3DXVECTOR4* cameraData = Constant("TESR_CameraData");
+		ID3D9NvrExtPipeline* pipeline = ForwardPipeline();
+		ID3D9NvrExtSampler* sampler = S.halfResolution ? DxvkCompute::LinearClamp() : DxvkCompute::PointClamp();
+		if (!pipeline || !depth || !cameraData || !Signal || !sampler || !BendContact::Surface) return false;
+		static GpuTimer timer("  RT sun forward pack");
+		GpuProfileScope gpu(timer, Device);
+		// the lit shaders read the texture on s3 / s10 / s13 / s15 and leave it bound (BendContact::Produce does the same)
+		for (DWORD stage : { 3u, 10u, 12u, 13u, 15u }) {
+			IDirect3DBaseTexture9* bound = nullptr;
+			if (SUCCEEDED(Device->GetTexture(stage, &bound)) && bound) {
+				const bool same = bound == BendContact::Texture;
+				bound->Release();
+				if (same) { Device->SetTexture(stage, nullptr); TheRenderManager->renderState->NoteDeviceTexture(stage, nullptr); }
+			}
+		}
+		IDirect3DSurface9* current = nullptr;
+		Device->GetRenderTarget(0, &current);
+		SunShadowsEffect* sunShadows = TheShaderManager->Effects.SunShadows;
+		const bool park = current == BendContact::Surface && sunShadows && sunShadows->scratchSurface[0];
+		if (park) Device->SetRenderTarget(0, sunShadows->scratchSurface[0]);
+		const UINT fw = TheRenderManager->width, fh = TheRenderManager->height;
+		const UINT rw = RenderRect::Width(fw), rh = RenderRect::Height(fh);
+		struct { float params[4], rect[4]; UInt32 samplerIndex, pad[3]; } push = {};
+		push.params[0] = cameraData->y;
+		push.params[1] = S.range;
+		push.params[2] = textureWidth ? (float)tracedRectW / (float)textureWidth : 1.0f;
+		push.params[3] = textureHeight ? (float)tracedRectH / (float)textureHeight : 1.0f;
+		push.rect[0] = (float)rw / (float)fw; push.rect[1] = (float)rh / (float)fh;
+		push.rect[2] = (std::min)((std::max)(S.strength, 0.0f), 1.0f);
+		NVR_EXT_RESOURCE_BINDING bindings[3] = {};
+		bindings[0].Slot = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].pResource = Signal;
+		bindings[1].Slot = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].pResource = depth;
+		bindings[2].Slot = 0; bindings[2].Type = NVR_EXT_BIND_SAMPLER; bindings[2].pResource = sampler;
+		NVR_EXT_DRAW_DESC draw = {};
+		draw.pPipeline = pipeline;
+		draw.TargetCount = 1;
+		draw.Targets[0].pResource = BendContact::Surface;
+		draw.BindingCount = 3;
+		draw.pBindings = bindings;
+		draw.pPushData = &push;
+		draw.PushDataSize = sizeof(push);
+		const HRESULT hr = DxvkCompute::Extension()->Draw(&draw);
+		if (park) Device->SetRenderTarget(0, current);
+		if (current) current->Release();
+		if (forwardPacks++ % 3600 == 0)
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun Forward: pack %u (%ux%u traced, range %.0f): %s", forwardPacks, tracedRectW, tracedRectH, S.range,
+				SUCCEEDED(hr) ? "the lit shaders take the traced sun next frame" : "Draw FAILED: the old combine");
+		return SUCCEEDED(hr);
+	}
+
 	ID3D9NvrExtPipeline* CombinePipeline(int which) {
 		if (combineTried[which]) return combine[which];
 		combineTried[which] = true;
@@ -504,6 +625,13 @@ namespace RtSunShadows {
 			}
 		}
 		if (!traced || S.debugView == 2 || S.debugView >= 4 || !signalTexture) return;
+		// UNOFFICIAL 2026-11-14 (rt-shadows F1) Forward: the visibility goes into the lit shaders' sun term next frame (BendContact's
+		// texture, Shaders/Includes/Shadow.hlsl), not into the shadow buffer that darkens the whole finished pixel
+		if (ForwardOn() && PackForward(Device, signalTexture)) {
+			forwardPackedFrame = TheFrameRateManager->FrameNumber;
+			if (cloudsInTrace) cloudsAppliedFrame = TheFrameRateManager->FrameNumber + 1;
+			return;
+		}
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		IDirect3DSurface9* target = shadows->Textures.ShadowPassSurface;
 		ID3D9NvrExtPipeline* pipeline = CombinePipeline(S.debugView == 1 || S.debugView == 3 ? 1 : 0);
@@ -573,7 +701,13 @@ namespace RtSunShadows {
 
 	bool CloudsApplied() { return cloudsAppliedFrame == TheFrameRateManager->FrameNumber + 1; }
 
-	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior; }
+	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior && !RealSun(); }
+
+	// UNOFFICIAL 2026-11-14 (rt-shadows F1) this frame was traced and its visibility will be packed for the lit shaders (EffectChain keeps
+	// BendContact's texture for it when Bend's march does not run)
+	bool ForwardWanted() { return tracedThisFrame && ForwardOn(); }
+	// (rt-shadows F2) the forward RT sun is in use: the shadows follow the real sun (ShadowsExterior's SmoothedSunDir unquantized)
+	bool RealSun() { return S.enabled && S.forward && BendContact::CompiledIn && RtCore::Running() && TheShaderManager->GameState.isExterior; }
 
 	// UNOFFICIAL 2026-11-01 (the REPORT block's ray tracing line)
 	std::string StatusText() {
@@ -582,7 +716,7 @@ namespace RtSunShadows {
 		char t[400];
 		sprintf_s(t, "RT sun shadows on, Mode %d (%s)%s | %s | traced %ux%u, frames traced %u, last traced frame f%u%s | Range %.0f, SunAngle %.2f, Denoise %s, HalfResolution %s, "
 			"DebugView %d (1 traced alone, 2 traced not applied, 4 traced visibility as grey: white = the sun reaches the pixel, black = blocked)",
-			S.mode, S.mode == 1 ? "replace: the cascades off inside Range, the traced visibility alone" : "combine: the traced visibility multiplied into the cascades",
+			S.mode, forwardPackedFrame + 1 >= frame && forwardPackedFrame != 0xFFFFFFFF ? "FORWARD: the traced visibility in the lit shaders' sun term, the cascades past it" : S.mode == 1 ? "replace: the cascades off inside Range, the traced visibility alone" : "combine: the traced visibility multiplied into the cascades",
 			Replacing() ? ", replacing now" : "", !RtCore::Running() ? "the RT core is not running: the cascades alone" : !TheShaderManager->GameState.isExterior ? "indoors: not traced" : "the core runs",
 			textureWidth, textureHeight, frames, lastTracedFrame == 0xFFFFFFFF ? 0u : lastTracedFrame, lastTracedFrame == frame ? " (this frame)" : "", S.range, S.sunAngle,
 			S.denoise ? "on" : "off", S.halfResolution ? "on" : "off", S.debugView);

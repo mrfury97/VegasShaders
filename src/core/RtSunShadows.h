@@ -21,4 +21,8 @@ namespace RtSunShadows {
 	// UNOFFICIAL 2026-10-30 [Shaders.ShadowsExteriors.RT] CloudShadows: true when this frame's Apply put a visibility with the volumetric
 	// clouds' shadow in it into the sun shadow buffer: SunFar and the clouds' composite leave the clouds' shadow out this frame
 	bool	CloudsApplied();
+	// UNOFFICIAL 2026-11-14 (rt-shadows F1/F2) [Shaders.ShadowsExteriors.RT] Forward: the denoised visibility into the lit shaders' sun
+	// term (core/BendContact.h's texture, blue; Shaders/Includes/Shadow.hlsl) instead of the whole-pixel combine.
+	bool	ForwardWanted();				// this frame was traced and will be packed (call before Apply)
+	bool	RealSun();						// the forward RT sun is in use: every sun shadow follows the real sun (no 15-degree steps)
 }

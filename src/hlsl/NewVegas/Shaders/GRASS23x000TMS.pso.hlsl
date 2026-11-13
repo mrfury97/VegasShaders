@@ -7,6 +7,10 @@
 // Pip-Boy light on every tuft, and normal maps with the sun's highlight. PBR NVR's c146/c147/c160-c176 are the sun cross-fade's
 // here: c80-c98 instead (nothing else in the grass PS is below c100).
 
+// UNOFFICIAL 2026-11-14 (rt-shadows F1) the forward RT sun (Includes/Shadow.hlsl SunForward): last frame's traced visibility instead of
+// the cascades where it is there; the default registers (s10, c160-c164: free here; not with the sun cross-fade). Not Bend's contact.
+#define SHADOW_SUN_CONTACT_IN 1
+#define SHADOW_SUN_CONTACT_RT_ONLY 1
 #include "includes/Shadow.hlsl"
 #include "includes/PBRScale.hlsl"
 

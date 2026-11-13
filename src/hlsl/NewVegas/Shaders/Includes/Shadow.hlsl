@@ -959,7 +959,11 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
     #define SHADOW_SUN_CONTACT 0
 #endif
 #if SHADOW_SUN_CONTACT
-#if SHADOW_SUN_CONTACT_LAND && defined(SHADOW_SUN_CONTACT_S15)
+#if SHADOW_SUN_CONTACT_LAND && defined(SHADOW_SUN_CONTACT_S12)
+    #define SUN_CONTACT_SAMPLER_REG s12   // (2026-11-14 rt-shadows) the near land, up to 5 layers (TerrainTemplate.hlsl)
+    #define SUN_CONTACT_MATRIX_REG c183
+    #define SUN_CONTACT_DATA_REG c187
+#elif SHADOW_SUN_CONTACT_LAND && defined(SHADOW_SUN_CONTACT_S15)
     #define SUN_CONTACT_SAMPLER_REG s15
     #define SUN_CONTACT_MATRIX_REG c183
     #define SUN_CONTACT_DATA_REG c187
@@ -994,28 +998,37 @@ sampler2D TESR_ContactForward : register(SUN_CONTACT_SAMPLER_REG) = sampler_stat
 #if defined(SHADOW_SUN_CONTACT_PERDRAW)
 bool NVR_ContactDraw : register(b13); // (LodOnly) true = this draw is object LOD (written per draw by BendContact::ForDraw; a bool register: 1.0.5's HUD raindrops took c153)
 #endif
-float SunContactForwardLookup(float3 P);
-float SunContactForward(float3 P) {
-    [branch] if (TESR_ContactForwardData.x < 0.5f) return 1.0f;
-    // LOD only (2026-11-06): the LOD land shaders always; an object draw only when it is object LOD (NVR_ContactDraw, a bool
-    // register: only as a plain if, X4509 otherwise)
-#if defined(SHADOW_SUN_CONTACT_PERDRAW)
-    float v = 1.0f;
-    if (NVR_ContactDraw) v = SunContactForwardLookup(P);
-    return v;
-#else
-    return SunContactForwardLookup(P);
-#endif
-}
-float SunContactForwardLookup(float3 P) {
+// UNOFFICIAL 2026-11-14 (rt-shadows F1) one fetch gives both: x = Bend's contact (1 none; only where the includer takes it: object LOD
+// per draw (NVR_ContactDraw), the LOD land always, never SHADOW_SUN_CONTACT_RT_ONLY), y = the ray traced sun's denoised visibility from
+// last frame (core/RtSunShadows.cpp PackForward: blue = 1 + visibility, 0 none), -1 where there is none (not traced there, past the RT
+// range, the point not seen last frame, nearer than 64 units: the first-person view model). Where y is there, GetSunShadow takes it
+// INSTEAD of the cascades: the traced shadow takes the sun term only, as the cascades do, and never the whole finished pixel.
+float2 SunForwardLookup(float3 P) {
     float4 clip = mul(float4(P, 1.0f), TESR_ContactReproject);
-    [branch] if (clip.w <= TESR_ContactForwardData.z) return 1.0f;   // nearer than the start (the shadow maps' range; the view model)
+    [branch] if (clip.w <= 64.0f) return float2(1.0f, -1.0f);   // the view model (its own projection)
     float2 uv = float2(0.5f, -0.5f) * clip.xy / clip.w + 0.5f;
     const float miss = TESR_ContactForwardData.x > 2.5f ? 0.0f : 1.0f;   // BendDebug 2: misses black
-    [branch] if (any(abs(uv - 0.5f) > 0.5f)) return miss;
-    float2 c = tex2Dlod(TESR_ContactForward, float4(uv, 0.0f, 0.0f)).rg;
-    [branch] if (c.g <= 0.0f || abs(c.g - clip.w) > abs(TESR_ContactForwardData.y) * clip.w) return miss;
-    return TESR_ContactForwardData.x > 2.5f ? 1.0f : lerp(1.0f, c.r, saturate((clip.w - TESR_ContactForwardData.z) * TESR_ContactForwardData.w));
+    [branch] if (any(abs(uv - 0.5f) > 0.5f)) return float2(miss, -1.0f);
+    float3 c = tex2Dlod(TESR_ContactForward, float4(uv, 0.0f, 0.0f)).rgb;
+    [branch] if (c.g <= 0.0f || abs(c.g - clip.w) > abs(TESR_ContactForwardData.y) * clip.w) return float2(miss, -1.0f);
+    // Bend: past its start distance (the cascades' reach), faded in
+    float bend = clip.w <= TESR_ContactForwardData.z || TESR_ContactForwardData.x > 2.5f ? 1.0f :
+                 lerp(1.0f, c.r, saturate((clip.w - TESR_ContactForwardData.z) * TESR_ContactForwardData.w));
+    return float2(bend, c.b > 0.5f ? saturate(c.b - 1.0f) : -1.0f);
+}
+float2 SunForward(float3 P) {
+    [branch] if (TESR_ContactForwardData.x < 0.5f) return float2(1.0f, -1.0f);
+    float2 v = SunForwardLookup(P);
+#if defined(SHADOW_SUN_CONTACT_RT_ONLY) && SHADOW_SUN_CONTACT_RT_ONLY
+    v.x = 1.0f;   // (the near land: Bend is LOD only)
+#elif defined(SHADOW_SUN_CONTACT_PERDRAW)
+    // LOD only (2026-11-06): an object draw takes Bend's contact only when it is object LOD (NVR_ContactDraw, a bool register: only as
+    // a plain if, X4509 otherwise)
+    float bendHere = 1.0f;
+    if (NVR_ContactDraw) bendHere = v.x;
+    v.x = bendHere;
+#endif
+    return v;
 }
 #endif
 
@@ -1040,6 +1053,23 @@ float GetSunShadow(float3 P, float3 Nw) {
     // ShadowMap.pso's channel layout differs per Mode. Fail unshadowed on a mismatch.
     float builtFor = SHADOW_FIXED_MODE;
     if (TESR_ShadowFormatData.x != builtFor) return 1.0f;
+
+#if SHADOW_SUN_CONTACT
+    // UNOFFICIAL 2026-11-14 (rt-shadows F1) last frame's ray traced sun here (reprojected by world position: a still shadow stays on its
+    // surface while the camera moves; only moving casters are a frame late): it replaces the cascades (and the player's map, the
+    // cross-fade) wherever it is; BendDebug 1 / 2 keep their contact-only views.
+    float2 sunForward = SunForward(P);
+    [branch] if (sunForward.y >= 0.0f && TESR_ContactForwardData.x < 1.5f) {
+        float traced = sunForward.y * sunForward.x;
+        traced = lerp(traced, 1.0f, saturate(TESR_ShadowFade.x));
+#if SHADOW_CLOUD_SAMPLE
+        [branch] if (NVR_CloudSun.w > 0.0f) traced *= CloudSunAt(P);
+#elif SHADOW_CLOUD_FROM_VALUE
+        traced *= NvrCloudSun;
+#endif
+        return traced;
+    }
+#endif
 
     // Push the sample along the normal, scaled by how grazing the sun is.
     float nDL = dot(Nw, TESR_SmoothedSunDir.xyz);
@@ -1248,8 +1278,8 @@ float GetSunShadow(float3 P, float3 Nw) {
 #endif
 
 #if SHADOW_SUN_CONTACT
-    // UNOFFICIAL 2026-11-06 forward contact shadows: last frame's sun contact, reprojected (1 where unseen)
-    float sunContact = SunContactForward(P);
+    // UNOFFICIAL 2026-11-06 forward contact shadows: last frame's sun contact, reprojected (1 where unseen; the fetch above)
+    float sunContact = sunForward.x;
     sh = TESR_ContactForwardData.x > 1.5f ? sunContact : sh * sunContact;	// BendDebug 1 / 2: the contact (coverage) alone
 #endif
 

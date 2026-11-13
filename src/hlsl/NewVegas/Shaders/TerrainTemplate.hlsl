@@ -53,6 +53,15 @@
 #ifdef PS
     #define SHADOW_CLOUD_VALUE 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): no sampler is free here, the vertex shader looks the map up
 #endif
+// UNOFFICIAL 2026-11-14 (rt-shadows F1) the forward RT sun (Includes/Shadow.hlsl SunForward): the near land takes last frame's traced
+// visibility instead of the cascades. Up to 5 layers: NormalMap holds s7-s11 then (the compiler gives it only the layers it reads), so
+// s12 is free; c183-c187 as the LOD land's Bend lookup. Not Bend's contact (LOD only): RT_ONLY. 6-7 layers have no sampler left: cascades.
+#if defined(PS) && defined(TEX_COUNT) && TEX_COUNT <= 5
+    #define SHADOW_SUN_CONTACT_IN 1
+    #define SHADOW_SUN_CONTACT_LAND 1
+    #define SHADOW_SUN_CONTACT_S12 1
+    #define SHADOW_SUN_CONTACT_RT_ONLY 1
+#endif
 #include "includes/Shadow.hlsl"	// shared code
 // UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel), compiled in only when on at startup.
 #if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)

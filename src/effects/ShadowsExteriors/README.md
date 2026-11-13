@@ -87,6 +87,15 @@ Every key read by this pass or by its producer that changes what this pass draws
   draw, the traced march fades out over their fade-in band (TESR_ShadowScreenSpaceFade, NearFade pushed to the bumps' FadeEnd by
   `DisplaceContactFade`), so a pixel never gets both. With the bumps on, the traced rays also start the bumps' Strength further off
   the surface (`[Main.Main.RayTracing] TessStartSlack`). Not read by this pass.
+  **Since 2026-11-14 (rt-shadows room, `F:\Claude Brain\RTShadowAudit\AUDIT.md`) `Forward` (bool, default true, restart to turn on):**
+  the denoised traced visibility no longer reaches this pass at all. `core/RtSunShadows.cpp PackForward` (Compute/RtSunForwardPack.frag)
+  writes it into the blue channel of the forward contact texture (`TESR_ContactForward`, core/BendContact.h, rgba16f: r Bend's contact,
+  g view depth, b 1 + visibility, 0 none); next frame `Shaders/Includes/Shadow.hlsl GetSunShadow` looks it up by world position
+  (`SunForward`) and takes it INSTEAD of the cascades wherever it is there, so a traced shadow takes the sun term only. Covered: the
+  object template (static, skinned, LOD), the near land up to 5 layers (s12 / c183-c187), the LOD land, grass (GRASS23x000TMS) and SpeedTree leaves (STLEAF2000/2001 + TMS; s10 / c160-c164); the cascades remain for 6-7
+  layer land, skin/hair shaders (SkinTemplate, SM300x), parallax, points not seen last frame and past Range. While it runs `RtSunShadows::RealSun()` makes
+  `SmoothedSunDir` the real sun (no SunSmoothing steps: the traced and the cascade shadows follow the N.L sun). Off, or no
+  ForwardShadows: the old combine into the red channel below (Mode 0 / 1).
 - `[_Shaders.ShadowsExteriors.Ortho]` and `[_Shaders.ShadowsExteriors.TerrainShadows]`: producer settings only.
 - `[_Shaders.ShadowsExteriors.SunSmoothing]`: producer settings only (quantised sun direction and cross-fade).
 - Interior settings under `[_Shaders.ShadowsInteriors.*]` do not affect this pass.

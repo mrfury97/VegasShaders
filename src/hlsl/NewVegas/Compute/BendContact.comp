@@ -30,7 +30,7 @@ layout(local_size_x = WAVE_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 layout(set = 1, binding = 0) uniform texture2D t_depth;          // CombineDepth: x view depth / far
 layout(set = 1, binding = 1) uniform texture2D t_viewModel;      // the first-person weapon's raw depth (TextureManager DepthTextureViewModel)
-layout(set = 1, binding = 2, rg16f) uniform writeonly image2D i_out;
+layout(set = 1, binding = 2, rgba16f) uniform writeonly image2D i_out;   // (2026-11-14 rt-shadows: rgba16f, b = the RT sun's, written by RtSunForwardPack)
 
 layout(push_constant) uniform Push {
     vec4  lightCoordinate;    // Bend's: xy the sun on the render rect (pixels), z its depth, w +1 / -1 (BuildDispatchList)

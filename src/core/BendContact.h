@@ -28,13 +28,20 @@ namespace BendContact {
 	inline constexpr const char* kSection = "Shaders.ShadowsExteriors.ScreenSpace";
 
 	// The settings that compile the lookups into the lit shaders (ShaderRecord::BuildDefines appends SUN_CONTACT_FORWARD with it)
-	inline bool WantedAtStart() {
-		return TheSettingManager->GetSettingI(kSection, "Bend") != 0 && TheSettingManager->GetSettingI(kSection, "InLighting") != 0 &&
+	// UNOFFICIAL 2026-11-14 (rt-shadows F1) the RT sun's forward path shares this texture, its reprojection and the shaders' lookup:
+	// compiled in also when [Shaders.ShadowsExteriors.RT] Forward is on (the traced visibility rides in its blue channel, RtSunShadows.cpp
+	// PackForward), whether or not Bend itself is on.
+	inline bool RtForwardAtStart() {
+		return TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.RT", "Forward") != 0 &&
 			TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") != 0;
+	}
+	inline bool WantedAtStart() {
+		return (TheSettingManager->GetSettingI(kSection, "Bend") != 0 && TheSettingManager->GetSettingI(kSection, "InLighting") != 0 &&
+			TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") != 0) || RtForwardAtStart();
 	}
 
 	inline bool CompiledIn = false;					// WantedAtStart, read once when the texture is made
-	inline IDirect3DTexture9* Texture = nullptr;	// TESR_ContactForward
+	inline IDirect3DTexture9* Texture = nullptr;	// TESR_ContactForward (rgba16f since 2026-11-14: r Bend's visibility, g view depth, b 1 + the traced sun's visibility (0: none))
 	inline IDirect3DSurface9* Surface = nullptr;
 	inline D3DXMATRIX Reproject;					// TESR_ContactReproject (4 registers, row_major in the shaders)
 	inline D3DXVECTOR4 Data(0.0f, 0.02f, 64.0f, 0.0f);	// TESR_ContactForwardData: x on, y depth tolerance (fraction), z view-model cutoff
@@ -72,7 +79,7 @@ namespace BendContact {
 	inline void RegisterTextures() {
 		CompiledIn = WantedAtStart();
 		if (!CompiledIn || Texture) return;
-		TheTextureManager->InitTexture("TESR_ContactForward", &Texture, &Surface, TheRenderManager->width, TheRenderManager->height, D3DFMT_G16R16F);
+		TheTextureManager->InitTexture("TESR_ContactForward", &Texture, &Surface, TheRenderManager->width, TheRenderManager->height, D3DFMT_A16B16G16R16F);
 		Logger::Log("UNOFFICIAL Bend contact shadows in the lit shaders: %s (%ux%u)", Texture ? "result texture made" : "the result texture was REFUSED: off",
 			(UINT)TheRenderManager->width, (UINT)TheRenderManager->height);
 		if (!Texture) CompiledIn = false;
@@ -144,6 +151,33 @@ namespace BendContact {
 
 	// Nothing is made this frame (Bend did not run, the shadow effect is off, indoors): next frame's shaders take none
 	inline void Invalidate() { Made.valid = false; Data.x = 0.0f; }
+
+	// The camera of this frame as the one the texture is made for (Produce and Hold)
+	inline void MarkMade(UINT w, UINT h) {
+		D3DXVECTOR2 jitter(0.0f, 0.0f);
+		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
+		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
+		Made = { TheRenderManager->viewMatrix, D3DXVECTOR3(camera.x, camera.y, camera.z), TheRenderManager->projMatrix._11, TheRenderManager->projMatrix._22,
+			(float)w / (float)TheRenderManager->width, (float)h / (float)TheRenderManager->height, jitter.x, jitter.y, true };
+		ProducedFrame = TheFrameRateManager->FrameNumber;
+	}
+
+	// UNOFFICIAL 2026-11-14 (rt-shadows F1) a frame where Bend's march does not run but the RT sun packs its visibility here: the texture
+	// cleared to "no contact, no data" (r 1, g 0, b 0) and this frame's camera kept; the pack then writes g and b. False: no texture.
+	inline bool Hold(IDirect3DDevice9* Device) {
+		if (!CompiledIn || !Texture || !Surface) return false;
+		for (DWORD stage : { 3u, 10u, 12u, 13u, 15u }) {
+			IDirect3DBaseTexture9* bound = nullptr;
+			if (SUCCEEDED(Device->GetTexture(stage, &bound)) && bound) {
+				const bool same = bound == Texture;
+				bound->Release();
+				if (same) { Device->SetTexture(stage, nullptr); TheRenderManager->renderState->NoteDeviceTexture(stage, nullptr); }
+			}
+		}
+		Device->ColorFill(Surface, nullptr, D3DCOLOR_ARGB(0, 255, 0, 0));
+		MarkMade(RenderRect::Width(TheRenderManager->width), RenderRect::Height(TheRenderManager->height));
+		return true;
+	}
 
 	// Effect chain step 11, outdoors, in place of the old contact pass: the march into TESR_ContactForward. False: not run
 	// (the old pass then keeps its contact).
@@ -241,18 +275,13 @@ namespace BendContact {
 			}
 		}
 
-		D3DXVECTOR2 jitter(0.0f, 0.0f);
-		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
-		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
-		Made = { TheRenderManager->viewMatrix, D3DXVECTOR3(camera.x, camera.y, camera.z), TheRenderManager->projMatrix._11, TheRenderManager->projMatrix._22,
-			(float)w / (float)TheRenderManager->width, (float)h / (float)TheRenderManager->height, jitter.x, jitter.y, true };
-		ProducedFrame = TheFrameRateManager->FrameNumber;
+		MarkMade(w, h);
 		// BendDebug 3 (diagnostic): the result as it is now, once per switch to 3, with the light it was made for
 		static int lastDebug = 0;
 		const int debug = TheSettingManager->GetSettingI(kSection, "BendDebug");
 		if (debug == 3 && lastDebug != 3) {
 			IDirect3DSurface9* copy = nullptr;
-			if (SUCCEEDED(Device->CreateOffscreenPlainSurface(TheRenderManager->width, TheRenderManager->height, D3DFMT_G16R16F, D3DPOOL_SYSTEMMEM, &copy, nullptr))) {
+			if (SUCCEEDED(Device->CreateOffscreenPlainSurface(TheRenderManager->width, TheRenderManager->height, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &copy, nullptr))) {
 				const HRESULT got = Device->GetRenderTargetData(Surface, copy);
 				HRESULT saved = got;
 				char path[MAX_PATH] = "";

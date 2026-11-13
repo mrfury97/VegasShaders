@@ -481,7 +481,9 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 				// UNOFFICIAL 2026-11-06 forward Bend contact shadows (core/BendContact.h): Bend's march for next frame's lit shaders;
 				// when it ran, the old pass writes "no contact" (its ScreenSpaceData.x test) so nothing is darkened twice.
 				const bool bendRan = fusedForwardContact && sunShadows->Constants.ScreenSpaceData.x != 0.0f && BendContact::Produce(Device);
-				if (!bendRan) BendContact::Invalidate();	// the old pass has the contact this frame: next frame's lit shaders take none
+				// UNOFFICIAL 2026-11-14 (rt-shadows F1): Bend did not march, but the RT sun packs its traced visibility into the same texture
+				// (RtSunShadows::Apply below): the texture is cleared to "no contact" and this frame's camera kept for it
+				if (!bendRan && !(RtSunShadows::ForwardWanted() && BendContact::Hold(Device))) BendContact::Invalidate();	// the old pass has the contact this frame: next frame's lit shaders take none
 				const float screenSpaceWas = sunShadows->Constants.ScreenSpaceData.x;
 				if (bendRan) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
 				RenderEffectToRT(sunShadows->Textures.ShadowPassSurface, Effects.SunShadows, false, sharpContact ? 2 : fusedForwardContact ? 1 : 0);

@@ -111,35 +111,72 @@ void main() {
 		vec3 n = imageLoad(normalImage, source).xyz * 2.0 - 1.0;
 		vec3 right = normalize(p.right.xyz), up = normalize(p.up.xyz), forward = normalize(p.forward.xyz);
 		vec3 normal = normalize(right * n.x + up * n.y + forward * n.z);
-
-		float facing = dot(normal, p.sun.xyz);
-		if (facing > 0.0) {
-			// Bias: along the normal (grows with distance: depth and normal precision), then a little toward the sun
-			// (2026-11-07 rtgap-tess 1a) + the bumps' Strength while they are drawn: a point in a hollow of the depth buffer lies under the
-			// flat RT surface, and its ray was blocked at once
-			vec3 start = position + normal * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ)) + p.sun.xyz * p.bias.z;
+		// UNOFFICIAL 2026-11-14 (rt-shadows F4, the 11-04 fix lost in the 1.0.5 rebase) the GEOMETRIC normal from the depth buffer (the
+		// nearer neighbour on each axis, so a silhouette does not tilt it), turned toward the camera. Every lit pixel is traced now, the
+		// faces turned from the sun too: two-sided foliage, grass and leaf cards seen from their back (their translucency needs the sun's
+		// visibility), and faces whose buffer normal leans away; before, those were never traced and stayed lit inside real shadows. The
+		// ray starts on the SUN's side of the surface (a thin card is crossed, a solid object's back face finds the object itself).
+		vec3 geo = normal;
+		{
+			const ivec2 fullMax = ivec2(p.full.xy) - 1;
+			const vec2 texel = 1.0 / p.full.xy;
+			const ivec2 sr = min(source + ivec2(1, 0), fullMax), sl = max(source - ivec2(1, 0), ivec2(0));
+			const ivec2 sd = min(source + ivec2(0, 1), fullMax), su = max(source - ivec2(0, 1), ivec2(0));
+			const float zr = imageLoad(depthImage, sr).r * p.forward.w, zl = imageLoad(depthImage, sl).r * p.forward.w;
+			const float zd = imageLoad(depthImage, sd).r * p.forward.w, zu = imageLoad(depthImage, su).r * p.forward.w;
+			const vec3 pr = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * (uv.x + texel.x) - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * zr;
+			const vec3 pl = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * (uv.x - texel.x) - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * zl;
+			const vec3 pd = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * (uv.y + texel.y) - 1.0)) * zd;
+			const vec3 pu = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * (uv.y - texel.y) - 1.0)) * zu;
+			const vec3 dx = abs(zr - viewZ) < abs(viewZ - zl) ? pr - position : position - pl;
+			const vec3 dy = abs(zd - viewZ) < abs(viewZ - zu) ? pd - position : position - pu;
+			const vec3 c = cross(dy, dx);
+			if (dot(c, c) > 1.0e-12) geo = normalize(c);
+			if (dot(geo, position - p.origin.xyz) > 0.0) geo = -geo;   // toward the camera
+		}
+		const float facingGeo = dot(geo, p.sun.xyz);
+		const float facingBuf = dot(normal, p.sun.xyz);
+		const float facing = max(facingGeo, facingBuf);
+		// (faces turned from the sun: traced only for the forward path, cloudCentre.w 1; the deferred combine darkens the whole pixel, so
+		// there they keep 1 as before: N.L has no sun on them anyway)
+		if (facing > 0.0 || p.cloudCentre.w > 0.5) {
+			// The sun's side of the surface: the geometric normal, flipped when the sun is behind the face the camera sees
+			const vec3 sunSide = facingGeo >= 0.0 ? geo : -geo;
+			const float slope = min(1.0 / max(abs(facingGeo), 0.05), 4.0);
+			// (rt-shadows F6) the start offsets scale with the slope: along the normal by the pixel's world footprint (a grazing face's
+			// depth steps grow with 1 / cos), toward the sun by 1 / cos (capped at 4x) so a grazing ray clears the surface's own
+			// tolerance; + the bumps' Strength while they are drawn (2026-11-07 rtgap-tess 1a)
+			const float footprint = 2.0 * viewZ * length(p.up.xyz) / max(p.full.y, 1.0);
+			const float normalOffset = p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ) + 0.5 * footprint * slope;
+			vec3 start = position + sunSide * normalOffset + p.sun.xyz * (p.bias.z * slope);
 			rayQueryEXT q;
 			// Soft shadows: one ray a pixel toward a point of the sun's disc, a different one each pixel and frame (the denoiser averages)
 			vec3 toSun = p.sun.xyz;
 			if (p.alpha.z > 0.0) {
 				const vec3 t1 = normalize(abs(toSun.z) < 0.9 ? cross(toSun, vec3(0.0, 0.0, 1.0)) : cross(toSun, vec3(1.0, 0.0, 0.0)));
 				const vec3 t2 = cross(toSun, t1);
-				// interleaved gradient noise + the frame's golden-ratio step: a low-discrepancy disc point
-				const float n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
-				const float n2 = fract(n1 * 1.618034 + 0.7548777 * p.alpha.y + 0.5 * float((pixel.x ^ pixel.y) & 1));
+				// (rt-shadows F5) two INDEPENDENT low-discrepancy numbers per pixel and frame: interleaved gradient noise for the radius and
+				// a second IGN over the transposed, shifted pixel for the angle, each stepped by the R2 sequence's frame increments. (Before,
+				// the angle was a function of the radius: each pixel's samples lay on one curve of the disc.)
+				const float frame = p.alpha.y;
+				const float n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.7548777 * frame);
+				const float n2 = fract(52.9829189 * fract(0.06711056 * float(pixel.y + 37) + 0.00583715 * float(pixel.x + 113)) + 0.5698403 * frame);
 				const float r = sqrt(n1) * p.alpha.z, phi = 6.2831853 * n2;
 				toSun = normalize(toSun + (t1 * cos(phi) + t2 * sin(phi)) * r);
 			}
 			// Alpha-tested casters (non-opaque, mask 0x10) come as candidates: their diffuse alpha decides (RtAlpha.glsl)
 			const bool testAlpha = p.alpha.x > 0.5;
+			// (rt-shadows F7) the NEAREST blocker when its distance is wanted (the denoiser / Penumbra size the penumbra by it); a
+			// first-hit query (cheaper) only for the plain hard visibility
+			const bool nearest = p.alpha.w > 0.5;
 			bool hit;
 			float hitT = 0.0;
 			// (2026-11-07 ptaaa-firstperson) a ray from within arm's reach of the eye (the first-person view model's pixels, a counter you
 			// stand at) passes over the hidden first-person body (RtHidden.glsl): the third-person head and arms round the eye shadowed the gun
 			if (rtHiddenNear(start, p.origin.xyz))
-				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, kRtAnyHit, hitT);
+				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, nearest ? kRtClosest : kRtAnyHit, hitT);
 			else {
-			rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
+			rayQueryInitializeEXT(q, scene, (nearest ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 				uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), start, 0.0, toSun, p.bias.w);
 			// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
 			for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
@@ -157,9 +194,9 @@ void main() {
 			else
 				result = hit ? 0.0 : 1.0;
 			// (2026-11-07 rtgap-tess 1b) ContactShadows: what the depth buffer has and the RT scene lacks (the bumps, grass, small props)
-			if (!hit && debug == 0 && p.contact.w > 0.0) {
+			if (!hit && debug == 0 && p.contact.w > 0.0 && facing > 0.0) {
 				const float noise = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
-				const float contact = rtContactShadow(position, normal, toSun, 30000.0, viewZ, p.forward, p.right.xyz, p.up.xyz, p.origin.xyz,
+				const float contact = rtContactShadow(position, facingBuf > 0.0 ? normal : geo, toSun, 30000.0, viewZ, p.forward, p.right.xyz, p.up.xyz, p.origin.xyz,
 					p.full.zw, p.full.xy, p.contact, p.contactGate, noise);
 				if (contact < 1.0) { result = contact; blocker = 1.0; }   // (a blocker right at the surface: a sharp edge for the penumbra / denoiser)
 			}

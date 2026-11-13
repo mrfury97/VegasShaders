@@ -624,6 +624,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Main.Main.Performance",                "SlimDepthBuffer",    RestartRule::Changed },	// depth texture format (CombineDepth)
 	{ "Shaders.ShadowsExteriors.Main",        "ForwardShadows",     RestartRule::TurnOn },
 	{ "Shaders.ShadowsExteriors.ScreenSpace", "Bend",               RestartRule::TurnOn },	// UNOFFICIAL 2026-11-06 SUN_CONTACT_FORWARD + texture at start
+	{ "Shaders.ShadowsExteriors.RT",          "Forward",            RestartRule::TurnOn },	// UNOFFICIAL 2026-11-14 (rt-shadows) SUN_CONTACT_FORWARD + texture at start
 	{ "Shaders.ShadowsExteriors.ScreenSpace", "InLighting",         RestartRule::TurnOn },
 	{ "Main.Main.Performance",                "NvrDxvkDisplacement", RestartRule::TurnOn },	// land shaders registered as they load ([Shaders.Terrain.Displacement] Enabled is live)
 	{ "Shaders.ShadowsExteriors.SunSmoothing","CrossFade",          RestartRule::Changed },
