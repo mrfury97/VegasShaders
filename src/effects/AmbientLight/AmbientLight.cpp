@@ -1521,7 +1521,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			else if (p == 7) Device->SetTexture(7, historyTexture[writeIndex]);
 			if (applyLike && gridValid) Device->SetTexture(9, gridAccum[gridAccumIndex]);
 			if (applyLike && gridValid && gridColorValid) Device->SetTexture(14, gridAccumColor[gridAccumIndex]);
-			if (applyLike && albedoOn) {	// UNOFFICIAL 2026-10-31 AlbedoBuffer: NVR_ALAlbedo on s12 (the grid passes' NVR_GridSunColor stage, never read here), point sampled
+			if ((applyLike || ((p == 2 || p == 3) && giGrassBlur)) && albedoOn) {	// (2026-11-13 GIGrassBlur: the blur passes read its alpha as the grass mask) UNOFFICIAL 2026-10-31 AlbedoBuffer: NVR_ALAlbedo on s12 (the grid passes' NVR_GridSunColor stage, never read here), point sampled
 				Device->SetTexture(12, CapturedNormals::AlbedoTexture);
 				TheRenderManager->renderState->NoteDeviceTexture(12, CapturedNormals::AlbedoTexture);
 				const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
