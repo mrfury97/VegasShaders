@@ -49,6 +49,7 @@ void AmbientLightEffect::UpdateSettings() {
 		SettingManager::Configuration::ConfigNode node;
 		exteriorBalance = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "ExteriorBalance") || node.BoolValue;
 		giSingleHistory = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GISingleHistory") || node.BoolValue;
+		giDenoisedNoBlur = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GIDenoisedNoBlur") || node.BoolValue;	// UNOFFICIAL 2026-11-13 (rtgi-review R1)
 		// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace / AmbientFloor (missing key, an older toml: 0 / 0.15)
 		ambientReplace = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientReplace") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;
 		ambientFloor = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientFloor") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.15f;
@@ -1169,7 +1170,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	if (giHandle) {
 		// w: UNOFFICIAL 2026-11-11 (sungi) GISingleHistory: the RT denoiser's GI (it keeps its own history): Accumulate keeps no bounce history
 		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f,
-			giD3D9Texture && giSingleHistory && giD3D9Texture != rtGI ? 1.0f : 0.0f);	// z: set for Apply (below)
+			(giD3D9Texture && giSingleHistory && giD3D9Texture != rtGI ? 1.0f : 0.0f) + (giD3D9Texture && giDenoisedNoBlur && giD3D9Texture != rtGI ? 2.0f : 0.0f));	// z: set for Apply (below); w: + 2 = UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur: Blur passes the denoised bounce through
 		Effect->SetVector(giHandle, &giFlags);
 	}
 	Effect->SetTechnique(technique);
@@ -1314,6 +1315,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (STUDY F7): set when this frame's RT GI came through the RT denoiser (its own 16-frame
 	// history): the GI accumulate then keeps no bounce history of its own (the occlusion's stays).
 	bool giDenoised = false;
+	bool giNoBlur = false;	// UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur: the blur passes leave the RT-denoised bounce as it is
 	// UNOFFICIAL 2026-11-03 (RT AO at RenderScale < 1; docs/next/RT-RENDERSCALE.md, phase 1) the RT estimate below as one helper: the Vulkan
 	// passes' Estimate (ExtOn) and, in rect frames, the one Vulkan pass inside the rect-aware D3D9 passes (ExtOnRect). True: drawn.
 	auto estimateRT = [&](IDirect3DSurface9* const* targets) -> bool {
@@ -1334,6 +1336,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reduced);
 			if (drawn && rtGI) giDrawn = true;	// ComputeGI's accumulate and apply take the bounce light from here
 			giDenoised = drawn && rtGIClean && giSingleHistory;	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory
+			giNoBlur = drawn && rtGIClean && giDenoisedNoBlur;	// UNOFFICIAL 2026-11-13 (rtgi-review R1)
 			// UNOFFICIAL 2026-10-30 DLSS RR (rrRaw above): Accumulate's history share 0 from here on (Estimate has read
 			// NVR_ALTemporal already; the passes after it read only .x's share from it, and .y / .z stay)
 			if (drawn && Upscaler::RayReconstructionWantsRaw()) {
@@ -1444,7 +1447,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				}
 				else if (p == 2 || p == 3) {
 					IDirect3DBaseTexture9* textures[] = { depth, bufferTexture[p == 2 ? 0 : 1] };
-					drawn = ExtDraw(ExtBlur, targets, 1, textures, p == 3 ? 1 : 0, reduced);
+					drawn = ExtDraw(ExtBlur, targets, 1, textures, (p == 3 ? 1u : 0u) | (giNoBlur ? 2u : 0u), reduced);	// (2026-11-13 rtgi-review R1: bit 1)
 				}
 				else if (p == 4) {
 					if (giDrawn && giTest != 1) {	// (ComputeGI) the bounce light kept from frame to frame too, in the bounce history

@@ -43,6 +43,8 @@ namespace RtDenoise {
 		IDirect3DBaseTexture9* Guide = nullptr;			// UNOFFICIAL 2026-11-07 (RGB mode): the game's lit frame (the scene as stored) and the
 		IDirect3DBaseTexture9* GuideAlbedo = nullptr;	// first surface's colour: the a-trous passes stop at the game's own shading edges
 		float	GuideSigma = 0.0f;						// (their ratio; this relative difference weighs a tap down by 1 / e; 0 = off)
+		bool	GuideOnce = false;						// UNOFFICIAL 2026-11-13 (rtgi-review B2, RGB mode with Guide): the first a-trous pass works the guide's
+														// value out per texel and hands it on in B's blue; the later passes read it there (the same picture, fewer reads)
 		float	AntiLag = 0.0f;			// UNOFFICIAL 2026-11-07 (RGB mode): a fast history (4 frames at 60 fps) beside the long one; where the long
 										// one's luminance leaves the fast mean's window (this many standard errors; 0 = off) it is clamped and
 										// restarts at the fast history's length: trails clear in a few frames (NRD ReBLUR's anti-lag; PTDenoiseAntiLag)

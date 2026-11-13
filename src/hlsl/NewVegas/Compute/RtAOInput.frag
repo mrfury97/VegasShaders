@@ -62,6 +62,26 @@ void main() {
         }
     } else N = POINT_LOD(t_normals, uv).xyz * 2.0 - 1.0;
     N = dot(N, -P) < 0.0 ? -N : N;
+    // UNOFFICIAL 2026-11-13 (rtgi-review R4) InputSamePixel (cb.skyLayout.y 1, with NormalGuard): the depth above is a LINEAR read at this texel's centre,
+    // the corner of 4 full-size pixels: their average. Along a silhouette that is a point in mid air between two surfaces, with the normal of one of
+    // them (the texel fetched above): its rays trace nonsense. Now the point is on the surface the normal came from: that pixel's own depth, and
+    // the texel centre's view ray met with the plane through it (the pixel's point and normal), so a flat surface gives exactly the centre's point
+    // (no half-pixel depth error at grazing angles); a plane the ray barely meets, or a result over 3 % off the pixel's depth, keeps the pixel's depth.
+    if (cb.skyLayout.y > 0.5) {
+        const ivec2 dsize = textureSize(t_depth, 0);
+        const ivec2 dpx = clamp(ivec2(uv * vec2(dsize)), ivec2(0), dsize - 1);
+        const float zp = projectedDepthFromLinear(texelFetch(t_depth, dpx, 0).x);
+        const vec2 sp = (vec2(dpx) + 0.5) / vec2(dsize) / cb.rtRect.xy;
+        vec4 a = cb.invProjectionTransform * vec4(sp.x * 2.0 - 1.0, (1.0 - sp.y) * 2.0 - 1.0, zp, 1.0);
+        const vec3 Pp = a.xyz / a.w;                      // the fetched pixel's point
+        a = cb.invProjectionTransform * vec4(s.x * 2.0 - 1.0, (1.0 - s.y) * 2.0 - 1.0, zp, 1.0);
+        const vec3 C = a.xyz / a.w;                       // the texel centre's ray at that depth
+        if (!(Pp.z < endFade) || Pp.z <= 0.0) { o_color = vec4(0.0); return; }
+        const float denom = dot(N, C);
+        const float t = abs(denom) > 0.05 * length(C) ? dot(N, Pp) / denom : 1.0;
+        P = C * (t > 0.97 && t < 1.03 ? t : 1.0);
+        N = dot(N, -P) < 0.0 ? -N : N;
+    }
     // UNOFFICIAL 2026-11-10 LegacyTilt (cb.skyLayout.x, 0-1, [Shaders.AmbientOcclusion.RT]; 0 = off): a tester preferred the much darker
     // AO / sky light / bounce the blank-normals bug above gave, without its wedge and trails. What the bug did over most of the screen: every
     // ray started from the view-space direction (-1, -1, -1) (left, down, toward the camera) instead of the surface's normal, so on open

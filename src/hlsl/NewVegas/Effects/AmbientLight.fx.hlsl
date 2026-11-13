@@ -396,7 +396,10 @@ float4 Blur(VSOUT IN, uniform float2 axis) : COLOR0 {
 			total += w;
 		}
 	}
-	return float4(bounce / total.y, visibility / total.x);
+	// UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur (NVR_ALGI.w 2 or 3): the bounce came through the RT denoiser (its a-trous passes test
+	// depth, normal, brightness and the game's shading): it passes through. This blur's loose depth step (25 %) and missing normal test carried it
+	// across the edges the denoiser had kept. The occlusion is blurred as before.
+	return float4(NVR_ALGI.w > 1.5f ? center.rgb : bounce / total.y, visibility / total.x);
 }
 
 // Pass 5 (UNOFFICIAL): this frame's blurred bounce (NVR_ALBuffer) blended into last frame's (NVR_ALHistory); see the top. The
@@ -468,7 +471,7 @@ AccumulateOut Accumulate(VSOUT IN) {
 		float3 marginC = (highC - lowC) * 0.25f;
 		bounceHistory = clamp(bounceHistory, lowC - marginC, highC + marginC);
 		// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (NVR_ALGI.w, STUDY F7): the RT denoiser's GI has its own history; keep 0 here
-		OUT.bounce = float4(lerp(current.rgb, bounceHistory, NVR_ALGI.w > 0.5f ? 0.0f : keep), viewZ);
+		OUT.bounce = float4(lerp(current.rgb, bounceHistory, frac(NVR_ALGI.w * 0.5f) > 0.25f ? 0.0f : keep), viewZ);	// (2026-11-13: w is 1 GISingleHistory + 2 GIDenoisedNoBlur)
 	}
 	return OUT;
 }
