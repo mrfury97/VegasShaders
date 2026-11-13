@@ -149,6 +149,11 @@ class Translator:
         self.missing = []
         self.bool_map = {}       # (2026-11-14) $Globals slot -> D3D9 bool register
         for name, off, size, used, typ in self.sh.members:
+            if off % 16 and "bool" in typ and used and size == 4:
+                # (2026-11-14) a bool packed inside a register: component (off % 16) / 4 of slot off // 16
+                if name not in self.ct or self.ct[name][0] != "b": raise Err("bool constant %s is not a bool register of the original" % name)
+                self.bool_map[(off // 16, (off % 16) // 4)] = self.ct[name][1]
+                continue
             if off % 16:
                 if used: raise Err("$Globals member %s starts inside a register (offset %d): not handled" % (name, off))
                 continue
@@ -159,7 +164,7 @@ class Translator:
                 if not used: continue
                 if name not in self.ct or self.ct[name][0] != "b": raise Err("bool constant %s is not a bool register of the original" % name)
                 if count != 1: raise Err("bool array %s: not handled" % name)
-                self.bool_map[base] = self.ct[name][1]
+                self.bool_map[(base, 0)] = self.ct[name][1]
                 continue
             if typ.startswith("int") and used: raise Err("int constant %s: not handled" % name)
             reg = None
@@ -262,9 +267,14 @@ class Translator:
             idx = "%s + %d" % (rel, const) if rel else str(const)
             e = "x%d[%s].%s" % (n, idx, full_swizzle(x.group(3)))
             return self.mods(self.conv_u(e, ty), ty, neg, absm)
-        if cb and re.fullmatch(r"\d+", cb.group(1).strip()) and int(cb.group(1)) in self.bool_map:
-            b = self.bool_map[int(cb.group(1))]
-            e = "uvec4(bitfieldExtract(specPsBools, %d, 1) != 0u ? 0xFFFFFFFFu : 0u).%s" % (b, full_swizzle(cb.group(2)))
+        if cb and re.fullmatch(r"\d+", cb.group(1).strip()) and any(k[0] == int(cb.group(1)) for k in self.bool_map):
+            slot = int(cb.group(1))
+            comps = []
+            for ch in full_swizzle(cb.group(2)):
+                b = self.bool_map.get((slot, "xyzw".index(ch)))
+                if b is None: raise Err("cb0[%d].%s mixes a bool with another member: not handled" % (slot, ch))
+                comps.append("(bitfieldExtract(specPsBools, %d, 1) != 0u ? 0xFFFFFFFFu : 0u)" % b)
+            e = "uvec4(%s)" % ", ".join(comps)
             return self.mods(self.conv_u(e, ty), ty, neg, absm)
         if cb:
             rel, const = self.rel_index(cb.group(1))
