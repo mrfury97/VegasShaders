@@ -125,21 +125,16 @@ namespace RtAmbient {
 		// Enabled / GI / Sky / RadianceCache / CacheExteriors on: the user's strength / quality keys stay. AmbientLight forces its own side (ExteriorBalance,
 		// AmbientReplace, AlbedoBuffer, the Status switch, the grid fallback; AmbientLight.cpp SunGIFrame). GIDenoiseSunGI (default true; missing key: true):
 		// with SunGI the GI denoiser gets the sun-GI settings (AmbientOcclusion.cpp RtDenoisedGI); false = the old settings, for the A/B.
-		// UNOFFICIAL 2026-11-13 (rtgi-review, RTGIReview/REVIEW.md R2 / R9 / R10 / R4), each on by default (a missing key: the default), read every frame:
-		// GICutByEnergy (AmbientOcclusion.cpp, the GI reuse's light keys), GIDenoiseTune (0-2; RtDenoisedGI, with SunGI outdoors), InputSamePixel (RtAOInput.frag).
-		bool	GICutByEnergy = true;
+		// UNOFFICIAL 2026-11-13 (rtgi-review, RTGIReview/REVIEW.md) GIDenoiseTune (0-2; RtDenoisedGI, with SunGI outdoors). The review's other fixes have no key any more
+		// (settings cleanup 2026-11-13): the history cut by energy (R2), the trace input from one pixel (R4), the hit textures' mip (R19) and the denoiser's
+		// guide worked out once (B2) are simply how it works; GICandidates and GISpatialVisibility were measured useless and are gone.
 		int		GIDenoiseTune = 2;
-		bool	InputSamePixel = true;
 		// UNOFFICIAL 2026-11-13 (rtgi-review B3, REVIEW.md R3 / R18) GISamplePoints (default false until benched; a missing key: false): ReSTIR GI with the
 		// sample's geometry (RtAOTrace.comp ReuseGIPoints): cosine at the receiving surface, Jacobian and one visibility ray on spatial reuse. GIValidate
 		// (default true, with GISamplePoints): 1 texel in 8 a frame re-traces the ray to its kept sample point and drops the history when the geometry changed.
 		bool	GISamplePoints = false;
 		bool	GIScreenAmbientOut = false;	// UNOFFICIAL 2026-11-13 (rtgi-review B6, R5) with GIScreenLight and AmbientReplace (SunGI) outdoors: on-screen bounce hits lose the game's ambient share and gain the cache's irradiance, as off-screen hits (RtAOTrace.comp Bounce)
 		bool	GIValidate = true;
-		int		GISpatialVisibility = 1;	// (B3b) with GISamplePoints: 1 = one visibility ray for a winner taken from a neighbour, 2 = one for every neighbour before it is merged
-		bool	GIDenoiseGuideOnce = true;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) the GI denoiser's guide worked out once a texel (RtDenoise Settings.GuideOnce); false = per tap in every pass, as before
-		bool	GIHitMips = true;	// UNOFFICIAL 2026-11-13 (rtgi-review R19) the bounce hits' textures at the mip of the ray's footprint (0.5 x its length); false = mip 0 as before
-		int		GICandidates = 1;	// UNOFFICIAL 2026-11-13 (rtgi-review B1) [1-2] new bounce candidates a texel and frame (GIReuse > 0; RtAOTrace.comp ReuseGI, reuse flag 8)
 		bool	SunGI = false;
 		bool	GIDenoiseSunGI = true;
 	};
@@ -226,16 +221,10 @@ namespace RtAmbient {
 			Current.SunGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
 			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
 			// UNOFFICIAL 2026-11-13 (rtgi-review)
-			Current.GICutByEnergy = !TheSettingManager->Config.FillNode(&node, s, "GICutByEnergy") || node.BoolValue;
 			Current.GIDenoiseTune = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseTune") ? std::clamp((int)node.IntValue, 0, 2) : 2;
-			Current.InputSamePixel = !TheSettingManager->Config.FillNode(&node, s, "InputSamePixel") || node.BoolValue;
-			Current.GICandidates = TheSettingManager->Config.FillNode(&node, s, "GICandidates") ? std::clamp((int)node.IntValue, 1, 2) : 1;
-			Current.GIHitMips = !TheSettingManager->Config.FillNode(&node, s, "GIHitMips") || node.BoolValue;
-			Current.GIDenoiseGuideOnce = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseGuideOnce") || node.BoolValue;
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
 			Current.GIScreenAmbientOut = TheSettingManager->Config.FillNode(&node, s, "GIScreenAmbientOut") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;
-			Current.GISpatialVisibility = TheSettingManager->Config.FillNode(&node, s, "GISpatialVisibility") ? std::clamp((int)node.IntValue, 1, 2) : 1;
 			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
 			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
 			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each
