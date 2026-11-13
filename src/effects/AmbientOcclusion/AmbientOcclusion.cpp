@@ -1003,6 +1003,20 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// UNOFFICIAL 2026-11-13 (rtgi-review B6) GIScreenAmbientOut: with AmbientReplace active and on-screen hits taking the lit frame, those hits lose the
 	// game's ambient share and gain the cache's irradiance (RtAOTrace.comp Bounce); + 32 in lamp slot 7's w (the off-screen flag is + 16)
 	const bool screenAmbientOut = gi && rt.GIScreenAmbientOut && rt.GIScreenLight && rt.DebugView != 7 && al && al->AmbientReplaceActive() && exterior;
+	// UNOFFICIAL 2026-11-13 (rtgi-review R21) the GI passes read lamp slot 7 as the cache's grid, strength and flags WHATEVER it holds: with the cache
+	// off and no flag set this block used to be skipped, and the slot kept what was there. The slot is the cache's in every GI frame now.
+	if (gi && !(cacheOn || offscreenView || screenAmbientOut)) {
+		static int logged = 0;
+		if (logged < 4) {
+			logged++;
+			Logger::Log("UNOFFICIAL RT AO: lamp slot 7 with the cache off held pos %.3f %.3f %.3f %.3f colour %.3f %.3f %.3f %.3f (gi.z %.1f): cleared (rtgi-review R21).",
+				c.lampPos[RtAmbient::GILampsMax - 1].x, c.lampPos[RtAmbient::GILampsMax - 1].y, c.lampPos[RtAmbient::GILampsMax - 1].z, c.lampPos[RtAmbient::GILampsMax - 1].w,
+				c.lampColor[RtAmbient::GILampsMax - 1].x, c.lampColor[RtAmbient::GILampsMax - 1].y, c.lampColor[RtAmbient::GILampsMax - 1].z, c.lampColor[RtAmbient::GILampsMax - 1].w, c.gi.z);
+		}
+		c.gi.z = (std::min)(c.gi.z, (float)(RtAmbient::GILampsMax - 1));
+		c.lampPos[RtAmbient::GILampsMax - 1] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		c.lampColor[RtAmbient::GILampsMax - 1] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
 	if (cacheOn || offscreenView || screenAmbientOut) {
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		const double size = rt.CacheCellSize;
