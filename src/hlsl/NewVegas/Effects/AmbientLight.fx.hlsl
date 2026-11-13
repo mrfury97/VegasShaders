@@ -384,11 +384,14 @@ float4 Blur(VSOUT IN, uniform float2 axis) : COLOR0 {
 	float3 bounce = center.rgb * weights[0];
 	float visibility = center.a * weights[0];
 	float2 total = weights[0];	// x occlusion, y bounce
+	float tapDepth[7];	// UNOFFICIAL 2026-11-13 (GIGrassBlur) the taps' depths along the axis, [3] this texel's
+	tapDepth[3] = depth;
 	[unroll] for (int i = 1; i < 4; i++) {
 		[unroll] for (int side = -1; side <= 1; side += 2) {
 			float2 tapUV = IN.UVCoord + axis * NVR_ALLayout.zw * (i * side * BlurStep);
 			tapUV = clampToRectIfOn(tapUV, NVR_ALLayout.zw);	// UNOFFICIAL 2026-10-27 RenderScale v2: no stale texels past the drawn part
-			float dz = abs(readDepthLod(tapUV) - depth);
+			tapDepth[3 + i * side] = readDepthLod(tapUV);
+			float dz = abs(tapDepth[3 + i * side] - depth);
 			float2 w = weights[i] * saturate(1.0f - dz / float2(tolerance, looseTolerance));
 			float4 tap = tex2Dlod(NVR_ALBuffer, float4(tapUV, 0.0f, 0.0f));
 			visibility += tap.a * w.x;
@@ -399,7 +402,16 @@ float4 Blur(VSOUT IN, uniform float2 axis) : COLOR0 {
 	// UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur (NVR_ALGI.w 2 or 3): the bounce came through the RT denoiser (its a-trous passes test
 	// depth, normal, brightness and the game's shading): it passes through. This blur's loose depth step (25 %) and missing normal test carried it
 	// across the edges the denoiser had kept. The occlusion is blurred as before.
-	return float4(NVR_ALGI.w > 1.5f ? center.rgb : bounce / total.y, visibility / total.x);
+	// UNOFFICIAL 2026-11-13 GIGrassBlur (NVR_ALGI.w + 4; user: GI sparkles on grass once the bounce passed through): grass and bushes are blades each at
+	// their own depth, so nothing depth-aware ever averages them (not the denoiser's a-trous, not its history, not the reuse) and every grass texel
+	// kept its own raw sample. Where the depth is busy along this axis (it bends here AND one texel either side: Apply's busy-depth rule for the
+	// occlusion; an object's single edge bends at two texels only) the loose blur is back, by how busy it is. Solid surfaces: as R1 left them.
+	float grassOn = step(3.5f, NVR_ALGI.w);
+	float noBlur = step(1.5f, NVR_ALGI.w - 4.0f * grassOn);
+	float bend = min(abs(tapDepth[2] + tapDepth[4] - 2.0f * depth), min(abs(tapDepth[1] + depth - 2.0f * tapDepth[2]), abs(depth + tapDepth[5] - 2.0f * tapDepth[4])));
+	float busy = saturate(bend / depth * 40.0f - 0.1f) * grassOn;
+	float3 blurred = bounce / total.y;
+	return float4(lerp(blurred, lerp(center.rgb, blurred, busy), noBlur), visibility / total.x);
 }
 
 // Pass 5 (UNOFFICIAL): this frame's blurred bounce (NVR_ALBuffer) blended into last frame's (NVR_ALHistory); see the top. The

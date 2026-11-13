@@ -23,10 +23,13 @@ vec4 Blur(vec2 uvIn, vec2 axis) {
     vec3 bounce = center.rgb * weights[0];
     float visibility = center.a * weights[0];
     vec2 total = vec2(weights[0]);
+    float tapDepth[7];   // UNOFFICIAL 2026-11-13 (GIGrassBlur) the taps' depths along the axis, [3] this texel's
+    tapDepth[3] = depth;
     [[unroll]] for (int i = 1; i < 4; i++) {   // (2026-10-26: [unroll] as the .fx; glslang keeps loops)
         [[unroll]] for (int side = -1; side <= 1; side += 2) {
             vec2 tapUV = uvIn + axis * cb.alLayout.zw * (float(i * side) * BlurStep);
-            float dz = abs(readDepthLod(t_depth, tapUV) - depth);
+            tapDepth[3 + i * side] = readDepthLod(t_depth, tapUV);
+            float dz = abs(tapDepth[3 + i * side] - depth);
             vec2 w = weights[i] * clamp(1.0 - dz * invTolerance, 0.0, 1.0);
             vec4 tap = pointLod(t_buffer, tapUV);
             visibility += tap.a * w.x;
@@ -35,7 +38,11 @@ vec4 Blur(vec2 uvIn, vec2 axis) {
         }
     }
     // UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur (variant bit 1): the RT-denoised bounce passes through (AmbientLight.fx.hlsl Blur)
-    return vec4((pc.variant & 2u) != 0u ? center.rgb : bounce / total.y, visibility / total.x);
+    // UNOFFICIAL 2026-11-13 GIGrassBlur (variant bit 2): where the depth is busy along the axis (grass, bushes) the loose blur is back (AmbientLight.fx.hlsl Blur)
+    const float bend = min(abs(tapDepth[2] + tapDepth[4] - 2.0 * depth), min(abs(tapDepth[1] + depth - 2.0 * tapDepth[2]), abs(depth + tapDepth[5] - 2.0 * tapDepth[4])));
+    const float busy = (pc.variant & 4u) != 0u ? clamp(bend / depth * 40.0 - 0.1, 0.0, 1.0) : 0.0;
+    const vec3 blurred = bounce / total.y;
+    return vec4((pc.variant & 2u) != 0u ? mix(center.rgb, blurred, busy) : blurred, visibility / total.x);
 }
 
 void main() { o_color = Blur(frameUV(), (pc.variant & 1u) != 0u ? vec2(0.0, 1.0) : vec2(1.0, 0.0)); }
