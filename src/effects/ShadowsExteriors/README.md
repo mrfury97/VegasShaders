@@ -95,7 +95,11 @@ Every key read by this pass or by its producer that changes what this pass draws
   object template (static, skinned, LOD), the near land up to 5 layers (s12 / c183-c187), the LOD land, grass (GRASS23x000TMS) and SpeedTree leaves (STLEAF2000/2001 + TMS; s10 / c160-c164); the cascades remain for 6-7
   layer land, skin/hair shaders (SkinTemplate, SM300x), parallax, points not seen last frame and past Range. While it runs `RtSunShadows::RealSun()` makes
   `SmoothedSunDir` the real sun (no SunSmoothing steps: the traced and the cascade shadows follow the N.L sun). Off, or no
-  ForwardShadows: the old combine into the red channel below (Mode 0 / 1).
+  ForwardShadows: the old combine into the red channel below (Mode 0 / 1). Since 2026-11-14 (later the same day) the gaps are covered by the DXVK fork's no-limits pixel shader replacements: an includer with
+  no sampler left sets SHADOW_SUN_CONTACT_EXTRA_IN, its ps_3_0 build is unchanged, its no-limits build (NVR_SM4 + NVR_NO_SM3_LIMITS,
+  tools/nvr-dxvk/replace/nolimits.py) reads the same values from NVR's own resources (set 4: cbuffer NvrExtra + the texture by Load,
+  core/ReplaceExtras.h binds them every frame). The set (66 shaders on 2026-11-14: 14 land, 27 parallax, 11 skin, 4 SM300x, 10 objects)
+  is matched by ps_3_0 bytecode hash: rebuild it with tools/nvr-dxvk/replace/rt_sun_set.py after a settings change that recompiles shaders.
 - `[_Shaders.ShadowsExteriors.Ortho]` and `[_Shaders.ShadowsExteriors.TerrainShadows]`: producer settings only.
 - `[_Shaders.ShadowsExteriors.SunSmoothing]`: producer settings only (quantised sun direction and cross-fade).
 - Interior settings under `[_Shaders.ShadowsInteriors.*]` do not affect this pass.
