@@ -1000,7 +1000,10 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	// update (its cells keep their light). Before, the flag itself followed PassesLeft(), and every flip started every cell over (GI pumping).
 	const bool coarseUpdate = cascade2 && RtCore::PassesLeft() >= 4;
 	const int cacheFlags = cacheOn ? (rt.CacheVisibility ? 1 : 0) | (cascade2 ? 2 : 0) : 0;
-	if (cacheOn || offscreenView) {
+	// UNOFFICIAL 2026-11-13 (rtgi-review B6) GIScreenAmbientOut: with AmbientReplace active and on-screen hits taking the lit frame, those hits lose the
+	// game's ambient share and gain the cache's irradiance (RtAOTrace.comp Bounce); + 32 in lamp slot 7's w (the off-screen flag is + 16)
+	const bool screenAmbientOut = gi && rt.GIScreenAmbientOut && rt.GIScreenLight && rt.DebugView != 7 && al && al->AmbientReplaceActive() && exterior;
+	if (cacheOn || offscreenView || screenAmbientOut) {
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		const double size = rt.CacheCellSize;
 		const double cell[3] = { floor(camera.x / size), floor(camera.y / size), floor(camera.z / size) };
@@ -1012,6 +1015,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		c.lampPos[RtAmbient::GILampsMax - 1] = cc.cacheA;
 		c.lampColor[RtAmbient::GILampsMax - 1] = cc.cacheB;
 		if (offscreenView) c.lampColor[RtAmbient::GILampsMax - 1].w += 16.0f;	// (the cache pass's own cacheB keeps the plain strength)
+		if (screenAmbientOut) c.lampColor[RtAmbient::GILampsMax - 1].w += 32.0f;	// (2026-11-13 B6)
 	}
 	RtAmbient::GIConstants g = {};
 	if (reuse && (giPass || merged)) {
@@ -1103,7 +1107,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	const bool mergedNow = merged && c.gi3.z > 0.5f;
 	const bool cacheNow = cacheOn && (giPass || mergedNow);
 	bool cacheReset = false;
-	if (cacheOn && !cacheNow) { c.lampColor[RtAmbient::GILampsMax - 1] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, offscreenView ? 16.0f : 0.0f); g.lampColor[RtAmbient::GILampsMax - 1] = c.lampColor[RtAmbient::GILampsMax - 1]; }
+	if (cacheOn && !cacheNow) { c.lampColor[RtAmbient::GILampsMax - 1] = D3DXVECTOR4(0.0f, 0.0f, 0.0f, (offscreenView ? 16.0f : 0.0f) + (screenAmbientOut ? 32.0f : 0.0f)); g.lampColor[RtAmbient::GILampsMax - 1] = c.lampColor[RtAmbient::GILampsMax - 1]; }
 	if (cacheNow) {
 		cc.origin = c.origin;
 		cc.gi = c.gi;

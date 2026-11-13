@@ -134,6 +134,7 @@ namespace RtAmbient {
 		// sample's geometry (RtAOTrace.comp ReuseGIPoints): cosine at the receiving surface, Jacobian and one visibility ray on spatial reuse. GIValidate
 		// (default true, with GISamplePoints): 1 texel in 8 a frame re-traces the ray to its kept sample point and drops the history when the geometry changed.
 		bool	GISamplePoints = false;
+		bool	GIScreenAmbientOut = false;	// UNOFFICIAL 2026-11-13 (rtgi-review B6, R5) with GIScreenLight and AmbientReplace (SunGI) outdoors: on-screen bounce hits lose the game's ambient share and gain the cache's irradiance, as off-screen hits (RtAOTrace.comp Bounce)
 		bool	GIValidate = true;
 		int		GISpatialVisibility = 1;	// (B3b) with GISamplePoints: 1 = one visibility ray for a winner taken from a neighbour, 2 = one for every neighbour before it is merged
 		bool	GIDenoiseGuideOnce = true;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) the GI denoiser's guide worked out once a texel (RtDenoise Settings.GuideOnce); false = per tap in every pass, as before
@@ -232,6 +233,7 @@ namespace RtAmbient {
 			Current.GIHitMips = !TheSettingManager->Config.FillNode(&node, s, "GIHitMips") || node.BoolValue;
 			Current.GIDenoiseGuideOnce = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseGuideOnce") || node.BoolValue;
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
+			Current.GIScreenAmbientOut = TheSettingManager->Config.FillNode(&node, s, "GIScreenAmbientOut") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;
 			Current.GISpatialVisibility = TheSettingManager->Config.FillNode(&node, s, "GISpatialVisibility") ? std::clamp((int)node.IntValue, 1, 2) : 1;
 			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
