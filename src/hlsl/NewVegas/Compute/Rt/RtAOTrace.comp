@@ -818,17 +818,6 @@ void ReuseGI(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool giTile, 
         weightSum += w;
         m += 1.0;
         if ((decorrelate ? Decide(texel, 131u, frame, 0.3247180) : fract(Ign(vec2(texel) + 131.0) + frame * 0.7548777)) * weightSum < w) chosen = light;
-        // UNOFFICIAL 2026-11-13 (rtgi-review B1) GICandidates 2 (reuse flag 8): a second new candidate into the same reservoir (streaming RIS, as the
-        // first: cosine-sampled, weight = its luminance). Its direction: the first one's numbers moved by (0.5, 0.25), which is no whole step of the
-        // per-frame R2 step (so it is not next frame's first ray), its decisions from their own salts. Twice the new light a frame for the rays' cost.
-        if ((reuseFlags & 8) != 0) {
-            const vec2 u2 = fract(u + vec2(0.5, 0.25));
-            const vec3 light2 = Bounce(p + n * bias, CosineDirection(n, u2), 0.05 * bias, Decide(texel, 103u, frame, 0.5497005)).rgb;
-            const float w2 = Luma(light2);
-            weightSum += w2;
-            m += 1.0;
-            if (Decide(texel, 139u, frame, 0.3247180) * weightSum < w2) chosen = light2;
-        }
     }
     float target = Luma(chosen);
     float W = m > 0.0 && target > 0.0 ? weightSum / (m * target) : 0.0;
@@ -958,42 +947,31 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
             float J = GIJacobian(s, xq, p);
             if (!(J > 0.1 && J < 10.0)) continue;
             float mk = min(b.x, max(cap * 0.5, 1.0)) * spread;
-            float tg = GITarget(s, p, n);
-            // (2026-11-13 B3b) GISpatialVisibility 2 (reuse flag 64): the visibility ray now, for every neighbour that could give light here: a blocked
-            // sample then has no chance of being chosen (the winner-only test gives 0 for the frame when it is)
-            if (tg > 0.0 && (reuseFlags & 64) != 0) {
-                vec3 d = s.x2 - start;
-                float len = length(d);
-                if (!Visible(start, d / max(len, 1.0e-3), s.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) continue;   // (B3c: rejected whole: counted with no weight it darkened the bounce 14 %, the loss kept in the reservoirs)
-            }
-            float w = tg * W * mk * J;
+            float w = GITarget(s, p, n) * W * mk * J;
             wSum += w;
             m += mk;
             if (w > 0.0 && Decide(texel, 257u + 31u * uint(k), frame, 0.4142136) * wSum < w) { sel = s; fromNeighbour = true; }
         }
     }
-    // this frame's own candidates (cosine-sampled: weight = luminance)
+    // this frame's own candidate (cosine-sampled: weight = luminance)
     if (giTile || cap < 0.5) {
-        const int candidates = (reuseFlags & 8) != 0 ? 2 : 1;
         vec2 u = SampleU(texel, frame, 41.0, 73.0, vec2(0.381966, 0.5), true);
-        for (int c = 0; c < candidates; c++) {
-            vec3 d = CosineDirection(n, c == 0 ? u : fract(u + vec2(0.5, 0.25)));
-            GISample s;
-            s.S = Bounce(start, d, 0.05 * bias, Decide(texel, c == 0 ? 97u : 103u, frame, 0.5497005)).rgb;
-            s.sky = gBounceT > 0.0 ? 0.0 : 1.0;
-            s.x2 = start + d * (gBounceT > 0.0 ? gBounceT : kGISky);
-            s.n2 = gBounceT > 0.0 ? gBounceN : -d;
-            float w = Luma(s.S);
-            wSum += w;
-            m += 1.0;
-            if (w > 0.0 && Decide(texel, c == 0 ? 131u : 139u, frame, 0.3247180) * wSum < w) { sel = s; fromNeighbour = false; }
-        }
+        vec3 d = CosineDirection(n, u);
+        GISample s;
+        s.S = Bounce(start, d, 0.05 * bias, Decide(texel, 97u, frame, 0.5497005)).rgb;
+        s.sky = gBounceT > 0.0 ? 0.0 : 1.0;
+        s.x2 = start + d * (gBounceT > 0.0 ? gBounceT : kGISky);
+        s.n2 = gBounceT > 0.0 ? gBounceN : -d;
+        float w = Luma(s.S);
+        wSum += w;
+        m += 1.0;
+        if (w > 0.0 && Decide(texel, 131u, frame, 0.3247180) * wSum < w) { sel = s; fromNeighbour = false; }
     }
     float target = GITarget(sel, p, n);
     float W = m > 0.0 && target > 0.0 ? wSum / (m * target) : 0.0;
     vec3 toSample = sel.x2 - start;
     float len = length(toSample);
-    if (fromNeighbour && (reuseFlags & 64) == 0 && W > 0.0 && !Visible(start, toSample / max(len, 1.0e-3), sel.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) W = 0.0;
+    if (fromNeighbour && W > 0.0 && !Visible(start, toSample / max(len, 1.0e-3), sel.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) W = 0.0;
     if (isnan(W) || isinf(W)) W = 0.0;
     vec3 dsel = sel.x2 - p;
     float dl = length(dsel);

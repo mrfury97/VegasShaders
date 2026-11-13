@@ -36,7 +36,6 @@ public:
 	int					historyIndex = 0;		// the one holding last frame's
 	bool				historyValid = false;
 	bool				exteriorBalance = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] ExteriorBalance (Apply)
-	bool				giDenoisedNoBlur = true;	// UNOFFICIAL 2026-11-13 (rtgi-review R1) [Shaders.AmbientLight.Main] GIDenoisedNoBlur (Blur)
 	bool				giSingleHistory = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] GISingleHistory (GI accumulate)
 	float				ambientReplace = 0.0f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientReplace (0-1; 0 = off)
 	float				ambientFloor = 0.15f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientFloor (0-1)
