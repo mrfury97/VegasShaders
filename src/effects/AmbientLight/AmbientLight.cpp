@@ -49,6 +49,7 @@ void AmbientLightEffect::UpdateSettings() {
 		SettingManager::Configuration::ConfigNode node;
 		exteriorBalance = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "ExteriorBalance") || node.BoolValue;
 		giSingleHistory = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GISingleHistory") || node.BoolValue;
+		giGrassBlur = !TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "GIGrassBlur") || node.BoolValue;	// UNOFFICIAL 2026-11-13 (GI sparkles on grass)
 		// UNOFFICIAL 2026-11-11 (sungi p2) AmbientReplace / AmbientFloor (missing key, an older toml: 0 / 0.15)
 		ambientReplace = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientReplace") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;
 		ambientFloor = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "AmbientFloor") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.15f;
@@ -1169,7 +1170,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	if (giHandle) {
 		// w: UNOFFICIAL 2026-11-11 (sungi) GISingleHistory: the RT denoiser's GI (it keeps its own history): Accumulate keeps no bounce history
 		D3DXVECTOR4 giFlags(giD3D9Texture ? 1.0f : 0.0f, giD3D9Texture && giTest != 1 ? 1.0f : 0.0f, 0.0f,
-			(giD3D9Texture && giSingleHistory && giD3D9Texture != rtGI ? 1.0f : 0.0f) + (giD3D9Texture && giD3D9Texture != rtGI ? 2.0f : 0.0f));	// z: set for Apply (below); w: + 2 = UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur: Blur passes the denoised bounce through
+			(giD3D9Texture && giSingleHistory && giD3D9Texture != rtGI ? 1.0f : 0.0f) + (giD3D9Texture && giD3D9Texture != rtGI ? 2.0f + (giGrassBlur ? 4.0f : 0.0f) : 0.0f));	/* + 4: 2026-11-13 GIGrassBlur */	// z: set for Apply (below); w: + 2 = UNOFFICIAL 2026-11-13 (rtgi-review R1) GIDenoisedNoBlur: Blur passes the denoised bounce through
 		Effect->SetVector(giHandle, &giFlags);
 	}
 	Effect->SetTechnique(technique);
@@ -1446,7 +1447,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				}
 				else if (p == 2 || p == 3) {
 					IDirect3DBaseTexture9* textures[] = { depth, bufferTexture[p == 2 ? 0 : 1] };
-					drawn = ExtDraw(ExtBlur, targets, 1, textures, (p == 3 ? 1u : 0u) | (giNoBlur ? 2u : 0u), reduced);	// (2026-11-13 rtgi-review R1: bit 1)
+					drawn = ExtDraw(ExtBlur, targets, 1, textures, (p == 3 ? 1u : 0u) | (giNoBlur ? 2u : 0u) | (giNoBlur && giGrassBlur ? 4u : 0u), reduced);	// (2026-11-13 rtgi-review R1: bit 1)
 				}
 				else if (p == 4) {
 					if (giDrawn && giTest != 1) {	// (ComputeGI) the bounce light kept from frame to frame too, in the bounce history
