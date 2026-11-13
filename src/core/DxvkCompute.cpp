@@ -289,6 +289,36 @@ bool DxvkCompute::ReplacementsOn() {
 static bool ReplacementExtras = false;	// UNOFFICIAL 2026-11-14 (rt-shadows): core/ReplaceExtras.h
 bool DxvkCompute::ReplacementExtrasUsed() { return ReplacementExtras; }
 
+// UNOFFICIAL 2026-11-14 (rt-shadows) the RT sun replacement set's list and what matched (DxvkCompute.h ReplacementSetStatus)
+#include <set>
+static std::set<std::string> ReplaceSetListed, ReplaceSetMatched;
+static bool ReplaceSetRead = false, ReplaceSetChecked = false;
+static void ReadReplacementSet() {
+	if (ReplaceSetRead) return;
+	ReplaceSetRead = true;
+	std::ifstream file(std::string(Paths::ComputeDir()) + "Replace\\rt_sun_set.txt");
+	std::string line;
+	while (std::getline(file, line)) {
+		while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+		if (!line.empty() && line[0] != '#') ReplaceSetListed.insert(line);
+	}
+}
+void DxvkCompute::ReplacementSetStatus(UINT& Listed, UINT& Matched, std::string* FirstMissing) {
+	Listed = (UINT)ReplaceSetListed.size();
+	Matched = 0;
+	for (const std::string& k : ReplaceSetListed) {
+		if (ReplaceSetMatched.count(k)) Matched++;
+		else if (FirstMissing && FirstMissing->empty()) *FirstMissing = k;
+	}
+}
+bool DxvkCompute::ReplacementSetStale() {
+	if (!ReplaceSetChecked) return false;
+	UINT listed = 0, matched = 0;
+	ReplacementSetStatus(listed, matched);
+	return matched < listed;
+}
+void DxvkCompute::MarkReplacementSetChecked() { ReplaceSetChecked = true; }
+
 // "textures=0,1,2" -> bit mask; "floats=0-3,8-15" -> 224-bit register mask; (2026-11-14) "extras=ubo,image" -> NVR's own resources in
 // set 4 (binding 0 the uniform buffer, 1 the image; core/ReplaceExtras.h's slot). Unknown lines are ignored.
 static bool ParseReplacementManifest(const char* Path, UINT& TextureMask, UINT* FloatMask, bool& FloatsGiven, std::string* Extras = nullptr) {
@@ -322,6 +352,7 @@ static bool ParseReplacementManifest(const char* Path, UINT& TextureMask, UINT* 
 
 bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UINT Size, const char* Template, const D3DXMACRO* Defines) {
 	if (!Name || !Bytecode || !Size || !ReplacementsOn()) return false;
+	ReadReplacementSet();	// (2026-11-14 rt-shadows)
 
 	// 2026-10-25: the interior and exterior records of a shader share its name but not its bytecode, so a replacement is
 	// looked up as <Name>@<hash>.spv first (FNV-1a of the bytecode, 8 hex digits), then <Name>.spv. With a Replace\dump
@@ -408,6 +439,7 @@ bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UI
 		return false;
 	}
 	if (extraCount) ReplacementExtras = true;
+	ReplaceSetMatched.insert(key);	// (2026-11-14 rt-shadows) for the set's stale check
 	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s will run as %s (textures %04X, %s float layout%s)", Name, path, desc.TextureMask, floatsGiven ? "listed" : "original compacted", extraCount ? ", NVR extras" : "");
 	return true;
 }

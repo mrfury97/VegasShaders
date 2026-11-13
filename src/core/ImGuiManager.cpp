@@ -4662,6 +4662,12 @@ struct HidingNote {
 	const char* Sets;		// what the button writes: "Section/Key=Value Section/Key=Value"; "!effect:Name" switches that effect on
 };
 static const HidingNote kHidingNotes[] = {
+	// UNOFFICIAL 2026-11-14 (rt-shadows) core/DxvkCompute.h ReplacementSetStale (checked once, 600 traced frames in)
+	{ []() { return DxvkCompute::ReplacementSetStale(); },
+		"RT sun shadows: some no-limits shader replacements no longer match their shaders (a shader file or a compile setting changed "
+		"since they were built), so 6-7 layer land, skin, hair, parallax or many-lamp objects may use the shadow maps instead of the "
+		"traced sun. Rebuild the set (tools/nvr-dxvk/replace/rt_sun_set.py); the log's 'RT sun replacements' line says how many.",
+		nullptr, nullptr },
 	{ []() { return !TheSettingManager->SettingsMain.Main.RenderEffects; },
 		"ALL effects are switched off (the master switch: the modifier key + the menu key, Alt+O by default). Changing settings shows "
 		"nothing until they are on again.", "Turn effects on", "Main.Main.Misc/RenderEffects=true" },

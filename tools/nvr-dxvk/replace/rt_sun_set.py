@@ -42,6 +42,11 @@ def main():
             continue
         shutil.copy2(spv, out); shutil.copy2(txt, out); kept += 1
     shutil.rmtree(tmp)
+    # (2026-11-14) the set's own list: the DLL checks it against what matched at load (DxvkCompute ReplacementSetStatus) and
+    # says so in the log and the menu when shaders changed since (add hand-made ones, e.g. SLS2027's full-puddle build, by hand)
+    keys = sorted(os.path.basename(f)[:-4] for f in glob.glob(os.path.join(out, "*.spv")))
+    NL = chr(10)
+    open(os.path.join(out, "rt_sun_set.txt"), "w", newline=NL).write("# rt_sun_set.py: the replacements of this set (Name@hash)" + NL + NL.join(keys) + NL)
     print("rt_sun_set: %d replacements kept (%d built but not needed) -> %s" % (kept, skipped, out))
 
 

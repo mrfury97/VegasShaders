@@ -173,8 +173,27 @@ namespace {
 		else if (S.cloudShadows) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun CloudShadows: no volumetric cloud shadow map at the helper's start (Volumetric Clouds and their Shadows on?); off until the next start.");
 	}
 
+	// UNOFFICIAL 2026-11-14 (rt-shadows) once, 600 traced frames in (every shader of the session is made by then): the no-limits
+	// replacement set against its list (DxvkCompute.h ReplacementSetStatus); a stale one is logged and shown in the menu's notes
+	void CheckReplacementSet() {
+		static bool done = false;
+		if (done || frames < 600) return;
+		done = true;
+		if (!DxvkCompute::ReplacementsOn()) return;
+		UINT listed = 0, matched = 0;
+		std::string missing;
+		DxvkCompute::ReplacementSetStatus(listed, matched, &missing);
+		DxvkCompute::MarkReplacementSetChecked();
+		if (!listed) { Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun replacements: no Compute\\Replace\\rt_sun_set.txt (no set, or one made before 2026-11-14): not checked"); return; }
+		if (matched == listed) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT sun replacements: all %u of the set match their shaders", listed);
+		else Logger::Log("[WARNING] Vegas Shaders DXVK: RT sun replacements STALE: %u of %u match (first missing %s): a shader file or a compile "
+			"setting changed since the set was built, so those shaders run without the RT sun (the shadow maps there). Rebuild the set: "
+			"tools/nvr-dxvk/replace/rt_sun_set.py (its notes).", matched, listed, missing.c_str());
+	}
+
 	void Record(IDirect3DDevice9* Device) {
 		tracedThisFrame = false;
+		CheckReplacementSet();
 		if (imageDepth < 0 || imageNormals < 0 || imageVisibility < 0 || shader < 0) return;
 		const UINT fw = TheRenderManager->width, fh = TheRenderManager->height;
 		const UINT scale = S.halfResolution ? 2u : 1u;
