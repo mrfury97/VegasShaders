@@ -184,6 +184,7 @@
     <ClCompile Include="..\src\effects\Particles\Particles.cpp" />
     <ClCompile Include="..\src\effects\ImageAdjust\ImageAdjust.cpp" />
     <ClCompile Include="..\src\effects\Lens\Lens.cpp" />
+    <ClCompile Include="..\src\effects\SunGlare\SunGlare.cpp" />
     <ClCompile Include="..\src\effects\LowHF\LowHF.cpp" />
     <ClCompile Include="..\src\effects\MotionBlur\MotionBlur.cpp" />
     <ClCompile Include="..\src\effects\Normals\Normals.cpp" />
@@ -369,6 +370,7 @@
     <ClInclude Include="..\src\effects\Particles\Particles.h" />
     <ClInclude Include="..\src\effects\ImageAdjust\ImageAdjust.h" />
     <ClInclude Include="..\src\effects\Lens\Lens.h" />
+    <ClInclude Include="..\src\effects\SunGlare\SunGlare.h" />
     <ClInclude Include="..\src\effects\LowHF\LowHF.h" />
     <ClInclude Include="..\src\effects\MotionBlur\MotionBlur.h" />
     <ClInclude Include="..\src\effects\Normals\Normals.h" />

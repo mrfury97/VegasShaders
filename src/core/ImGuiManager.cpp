@@ -4949,7 +4949,7 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Lighting", "AmbientLight, AmbientOcclusion, BounceLight, Specular, PBR, Reflections, Flashlight" },
 	{ "Shadows", "ShadowsExteriors, ShadowsInteriors, ContactHardening" },
 	{ "Ray tracing", nullptr },
-	{ "Sky and atmosphere", "Sky, VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, Sandstorm, HeatHaze" },
+	{ "Sky and atmosphere", "Sky, VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, SunGlare, Sandstorm, HeatHaze" },
 	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, HudRaindrops, WetWorld, Water, Underwater, WaterLens" },
 	{ "Ground and plants", "Terrain, POM, Grass, Plants" },
 	{ "Characters", "Skin, Cloth, PipboyFit, BloodFlow, HandBlood, Blood" },

@@ -19,6 +19,7 @@
 #include "GodRays/GodRays.h"
 #include "ImageAdjust/ImageAdjust.h"
 #include "Lens/Lens.h"
+#include "SunGlare/SunGlare.h"
 #include "LowHF/LowHF.h"
 #include "MotionBlur/MotionBlur.h"
 #include "Normals/Normals.h"

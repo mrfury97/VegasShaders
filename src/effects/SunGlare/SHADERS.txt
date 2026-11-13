@@ -1,0 +1,3 @@
+# The shader files the SunGlare effect loads (they stay where the game loads them from: src/hlsl/NewVegas mirrors
+# Data/Shaders/VegasShaders). Keep it up to date by hand.
+src/hlsl/NewVegas/Effects/SunGlare.fx.hlsl

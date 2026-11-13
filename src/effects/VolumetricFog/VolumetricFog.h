@@ -71,6 +71,9 @@ public:
 	// UNOFFICIAL 2026-10-30 GameFogFloor ([Shaders.VolumetricFog.Main] GameFogFloor, [Shaders.VolumetricFog.Night] GameFogFloorScale; UpdateConstants)
 	float	gameFogFloor = 0.0f, gameFogFloorNight = 1.0f;
 	float	layerOn = 0.0f, layerBase = 0.0f, layerThickness = 2000.0f; bool layerFollowsCamera = false;	// UNOFFICIAL 2026-11-01 HeightLayer (UpdateSettings)
+	// UNOFFICIAL 2026-11-13 (modern lighting) FoggyWeatherImpact: WeatherImpact as set, and the foggy weather's own share with the
+	// fog far distances it fades in between (UpdateConstants). foggyImpact < 0: off (one WeatherImpact for every weather).
+	float	weatherImpactSet = 0.5f, foggyImpact = -1.0f, foggyFar = 12000.0f, clearFar = 26000.0f;
 	float	shapeFalloff = 50.0f, shapeMaxHeight = 3.0f;	// HeightFalloff / MaxHeight as set (Shape.xy carry the layer while it is on: ApplyLayer)
 	void	ApplyLayer();
 	// UNOFFICIAL 2026-11-03 LampHaze ([Shaders.VolumetricFog.Interiors] LampHaze, LampHazeAnisotropy, LampHazeCore, LampHazeMaxLamps; read

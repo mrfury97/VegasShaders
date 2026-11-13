@@ -83,6 +83,8 @@
 //                                       when: always called (nothing outside a storm)
 //  37  GodRays                          God rays
 //                                       when: always called
+//  37b SunGlare                         The sun's lens glare (halo, starburst, streak) on the HDR picture
+//                                       when: SunGlare on, outdoors by day, the sun in front of the camera (ShouldRender)
 //  38  RayReconstruction                DLSS Ray Reconstruction point
 //                                       when: Effects.TAA (off: nothing)
 //  39  LumaExposureBloom                Average luma (compute or D3D9), exposure, bloom buffers
@@ -1127,6 +1129,19 @@ void ShaderManager::PreStep_GodRays(ChainContext& ctx) {
 	}
 }
 
+// UNOFFICIAL 2026-11-13 (modern lighting): the sun's lens glare, one pass into the current image (effects/SunGlare).
+void ShaderManager::PreStep_SunGlare(ChainContext& ctx) {
+	static GpuTimer sunGlareTimer("Sun glare");
+	IDirect3DDevice9* Device = ctx.Device;
+	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
+	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
+	if (!Effects.SunGlare) return;
+	{
+		GpuProfileScope gpu(sunGlareTimer, Device);
+		{ Effects.SunGlare->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, true, SourceSurface); PixelInspector::AfterFrame(Effects.SunGlare); }
+	}
+}
+
 void ShaderManager::PreStep_RayReconstruction(ChainContext& ctx) {
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
@@ -1581,6 +1596,7 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "DustMotes", EffectChain::PreTonemap, &ShaderManager::PreStep_DustMotes },
 	{ "Sandstorm", EffectChain::PreTonemap, &ShaderManager::PreStep_Sandstorm },
 	{ "GodRays", EffectChain::PreTonemap, &ShaderManager::PreStep_GodRays },
+	{ "SunGlare", EffectChain::PreTonemap, &ShaderManager::PreStep_SunGlare },
 	{ "RayReconstruction", EffectChain::PreTonemap, &ShaderManager::PreStep_RayReconstruction },
 	{ "LumaExposureBloom", EffectChain::PreTonemap, &ShaderManager::PreStep_LumaExposureBloom },
 	{ "LensAndPreTonemapLUT", EffectChain::PreTonemap, &ShaderManager::PreStep_LensAndPreTonemapLUT },

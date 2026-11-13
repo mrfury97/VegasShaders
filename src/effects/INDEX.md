@@ -25,7 +25,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [DustMotes](DustMotes/) | false | yes | 1 | 2 | DustMotes.cpp, DustMotes.h | Sparse, tiny specks of dust drifting in the air, visible only where light falls on them: round lamps, and (optionally) in the sun's shafts. A speck between you  |
 | [Exposure](Exposure/) | true | yes | 3 | 4 | Exposure.cpp, Exposure.h | Exposure is Vegas Shaders' automatic brightness correction. It measures how bright the frame is (through the AvgLuma result) and darkens or brightens the whole  |
 | [FXAA](FXAA/) | - | - | 3 | 0 | FXAA.cpp, FXAA.h |  |
-| [Flashlight](Flashlight/) | true | yes | 2 | 3 | Flashlight.cpp, Flashlight.h |  |
+| [Flashlight](Flashlight/) | true | yes | 2 | 4 | Flashlight.cpp, Flashlight.h |  |
 | [GodRays](GodRays/) | true | yes | 1 | 3 | GodRays.cpp, GodRays.h | When the sun is up in an exterior and bright sky (or the sun's own disc and glare) sits near or beside the view, soft shafts of light fan out from the sun's scr |
 | [GpuParticles](GpuParticles/) | - | - | 6 | 1 | GpuParticles.cpp, GpuParticles.h |  |
 | [Grass](Grass/) | true | - | 0 | 8 | GpuGrass.cpp, GpuGrass.h, Grass.cpp, Grass.h |  |
@@ -43,12 +43,13 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [PointShadows](PointShadows/) | - | yes | 15 | 0 | PointShadows.cpp, PointShadows.h | This pass builds one grey mask for the whole screen that says how much of the nearby point lights (lamps) and the one spot light reach each visible surface. A l |
 | [PointShadows2](PointShadows2/) | - | yes | 3 | 0 | PointShadows2.cpp, PointShadows2.h | PointShadows2 darkens or lights the scene for point lamps that PointShadows does not handle. It is a screen-space pass over the point-shadow buffer: for every p |
 | [Precipitations](Precipitations/) | true | yes | 3 | 2 | Rain.cpp, Rain.h | While it rains outdoors, the picture gets falling rain streaks laid over the view. Drops are drawn in layers at increasing distance from the camera, so near str |
+| [Puddles](Puddles/) | false | yes | 6 | 3 | PuddleMap.h, Puddles.cpp, Puddles.h | Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it ra |
 | [Reflections](Reflections/) | false | yes | 44 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
 | [SMAA](SMAA/) | true | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
 | [ShadowsExteriors](ShadowsExteriors/) | true | yes | 3 | 10 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
 | [ShadowsInteriors](ShadowsInteriors/) | true | yes | 10 | 7 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
-| [Sharpening](Sharpening/) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening adds local edge contrast to the whole picture so that near surfaces look crisper. It compares each pixel with the average of a small neighbourhood an |
+| [Sharpening](Sharpening/) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening makes near surfaces look crisper. CAS adapts per pixel: it measures how much headroom the pixel has before its 3x3 neighbourhood would clip, and shar |
 | [Skin](Skin/) | true | - | 3 | 5 | Skin.cpp, Skin.h |  |
 | [SkinScattering](SkinScattering/) | - | - | 3 | 0 | SkinScattering.cpp, SkinScattering.h |  |
 | [Sky](Sky/) | true | - | 16 | 4 | PhysSkyModel.h, Sky.cpp, Sky.h |  |
@@ -58,6 +59,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [SnowAccumulation](SnowAccumulation/) | false | yes | 3 | 2 | SnowAccumulation.cpp, SnowAccumulation.h | While it snows outdoors, snow builds up on the ground, on the tops of rocks, walls and cars, and stays for a while after the flakes stop, then melts over game h |
 | [Specular](Specular/) | false | - | 10 | 3 | Specular.cpp, Specular.h |  |
 | [SunFar](SunFar/) | true | - | 3 | 1 | SunFar.cpp, SunFar.h |  |
+| [SunGlare](SunGlare/) | false | yes | 1 | 2 | SunGlare.cpp, SunGlare.h | The sun's lens glare: what a camera lens (or the eye, through its lashes) makes of a small, very bright source. Round the sun's place on screen it adds - a tigh |
 | [SunShadows](SunShadows/) | - | yes | 13 | 0 | SunShadows.cpp, SunShadows.h | SunShadows writes the outdoor sun's shadow term into the two-channel buffer `TESR_PointShadowBuffer` (G16R16, 0..1). - Red: sun visibility, 1 = lit. It always h |
 | [TAA](TAA/) | false | - | 8 | 5 | TAA.cpp, TAA.h, TAAFSR.cpp, TAAUpscale.cpp |  |
 | [Terrain](Terrain/) | true | - | 0 | 13 | LandHeights.cpp, LandHeights.h, Terrain.cpp, Terrain.h |  |

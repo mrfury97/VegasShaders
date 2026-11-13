@@ -175,6 +175,7 @@ public:
 	void					PreStep_DustMotes(ChainContext& ctx);	// UNOFFICIAL 2026-11-03
 	void					PreStep_Sandstorm(ChainContext& ctx);
 	void					PreStep_GodRays(ChainContext& ctx);
+	void					PreStep_SunGlare(ChainContext& ctx);
 	void					PreStep_RayReconstruction(ChainContext& ctx);
 	void					PreStep_LumaExposureBloom(ChainContext& ctx);
 	void					PreStep_LensAndPreTonemapLUT(ChainContext& ctx);
@@ -227,6 +228,7 @@ public:
 		GodRaysEffect*			GodRays;
 		ImageAdjustEffect*		ImageAdjust;
 		LensEffect*				Lens;
+		SunGlareEffect*			SunGlare;	// UNOFFICIAL 2026-11-13 (modern lighting): the sun's lens glare
 		LowHFEffect*			LowHF;
 		MotionBlurEffect*		MotionBlur;
 		NormalsEffect*			Normals;

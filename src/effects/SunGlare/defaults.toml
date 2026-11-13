@@ -1,0 +1,23 @@
+[_Shaders.SunGlare.Main]
+Strength = 1.5                      # [0-10] UNOFFICIAL (2026-11-13), live: the sun's lens glare, all of it (halo, starburst, streak). It shows only as much as the sun's disc shows: behind a tree, a wall, the weapon or thick cloud it is gone. 0 = off.
+HaloSize = 0.02                     # [0.002-0.5] live: how wide the tight glow round the sun is, in screen heights (0.03 = 3 % of the picture's height).
+HaloStrength = 1.0                  # [0-10] live: how bright that glow is.
+Spikes = 16                         # [0-16] live: how many points the starburst has (even numbers; 0 = no starburst). A camera lens stopped down makes 6-18.
+SpikeLength = 0.08                  # [0.005-1] live: how long the longest points are, in screen heights. They differ in length, as a real lens makes them.
+SpikeWidth = 0.0014                 # [0.0003-0.05] live: how thick a point is at the sun, in screen heights.
+SpikeStrength = 2.5                 # [0-10] live: how bright the points are.
+SpikeRotation = 14.0                # live: the starburst turned by this many degrees (0 = one point straight to the right).
+StreakLength = 0.45                 # [0.01-2] live: how long the horizontal streak through the sun is, in screen heights.
+StreakWidth = 0.003                 # [0.0003-0.05] live: how thick that streak is.
+StreakStrength = 0.9                # [0-10] live: how bright that streak is. 0 = no streak.
+Chromatic = 0.25                    # [0-1] live: faint rainbow colour along the points and the streak, as glass splits light. 0 = white.
+SunSize = 0.012                     # [0.002-0.1] live: the size of the patch round the sun's centre that is checked for cover, in screen heights. About the sun disc's own size.
+CloudContrastLow = 1.4              # live: how much brighter than the sky round it the sun's patch must be before any glare shows (hidden behind cloud it is no brighter).
+CloudContrastHigh = 3.0             # live: at this much brighter the glare is at full strength.
+EaseFrames = 8                      # [1-60] live: how many frames the glare takes to follow the sun going behind something or coming out. 1 = at once (it then flickers behind moving leaves and under TAA / DLSS).
+SunsetStrength = 0.6                # [0-4] live: the glare's strength with the sun at the horizon, against 1 with the sun high.
+DebugView = 0                       # [0-2] diagnostic: 1 = the picture tinted green by how much of the sun counts as visible (red: none), 2 = the glare alone on black.
+
+[_Shaders.SunGlare.Status]
+Enabled = false                     # UNOFFICIAL (2026-11-13): the sun's lens glare: a tight halo, a starburst and a horizontal streak round the sun when it is in view and not covered. Off by default (a look change).
+

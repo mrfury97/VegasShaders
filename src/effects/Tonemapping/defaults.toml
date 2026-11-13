@@ -9,7 +9,7 @@ WeatherModifier = 1.0                 # Influence of the vanilla weather modifie
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush
 Saturation = 1.0                      # Saturation of the image before tonemapping
 ToneMappingColor = 1.0                # Changes the strength of the vanilla tint influence (not fades)
-TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura
+TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura. UNOFFICIAL (2026-11-13) also AgX (mode 9): contrast round mid grey before its curve; 1 = AgX as it was, 1.15-1.3 = punchier, bright things reach white sooner (no hard cut)
 TonemapBrightness = 1.0               # Brightness setting for Lottes, Uncharted, Uchimura
 TonemapMidpoint = 1.0                 # Midpoint setting for Lottes Tonemapper (avoid changing), Linear Section Start for Uchimura
 TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, should be left default), Black shoulder for Uchimura
@@ -31,7 +31,7 @@ WeatherModifier = 1.0                 # Influence of the vanilla weather modifie
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush notably in Interiors
 Saturation = 1.0                      # Saturation of the image before tonemapping
 ToneMappingColor = 1.0                # Changes the strength of the vanilla tint influence (not fades)
-TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura
+TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura. UNOFFICIAL (2026-11-13) also AgX (mode 9): contrast round mid grey before its curve; 1 = AgX as it was, 1.15-1.3 = punchier, bright things reach white sooner (no hard cut)
 TonemapBrightness = 1.0               # Brightness setting for Lottes, Uncharted, Uchimura
 TonemapMidpoint = 1.0                 # Midpoint setting for Lottes Tonemapper (avoid changing), Linear Section Start for Uchimura
 TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, should be left default), Black shoulder for Uchimura
@@ -51,7 +51,7 @@ WeatherModifier = 1.0                 # Influence of the vanilla weather modifie
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush notably in Interiors
 Saturation = 1.0                      # Saturation of the image before tonemapping
 ToneMappingColor = 1.0                # Changes the strength of the vanilla tint influence (not fades)
-TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura
+TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura. UNOFFICIAL (2026-11-13) also AgX (mode 9): contrast round mid grey before its curve; 1 = AgX as it was, 1.15-1.3 = punchier, bright things reach white sooner (no hard cut)
 TonemapBrightness = 1.0               # Brightness setting for Lottes, Uncharted, Uchimura
 TonemapMidpoint = 1.0                 # Midpoint setting for Lottes Tonemapper (avoid changing), Linear Section Start for Uchimura
 TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, should be left default), Black shoulder for Uchimura

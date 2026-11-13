@@ -386,3 +386,14 @@ about 120 and two reads for one it passes through (two atan, two sincos, two exp
 - compile-compute.sh (full run) stops at `SunShadowsApply c1` (variants.txt names `SunShadowsApply.frag`, which is not in this tree since
   the wave-3 SunShadows rewrite); every other shader and variant, the fog's included, compiles and validates.
 - The loader for `[_Shaders.VolumetricFog.Status] Enabled` was not traced (unchanged).
+
+
+## FoggyWeatherImpact (UNOFFICIAL 2026-11-13, modern lighting)
+
+One WeatherImpact for every weather cannot serve both ends: a clear weather whose fog far is 45000 with a power of 0.6 already greys trees at 50 m at 0.5, and at 0.2 a foggy weather loses its fog. With `[Shaders.VolumetricFog.Main] FoggyWeatherImpact` at 0 or more (default -1: off, as before), the share of the weather's own fog follows the weather's fog distance, outdoors:
+
+- `Sky::fogFarPlane` (the game's own blend of day / night and old / new weather) at `ClearWeatherFar` (26000) or farther: WeatherImpact as set.
+- At `FoggyWeatherFar` (12000) or nearer: FoggyWeatherImpact.
+- Between: eased (smoothstep on the distance's logarithm).
+
+It is worked out on the CPU each frame (`VolumetricFogEffect::UpdateConstants`, `TESR_VolumetricFogDensity.y`): no shader or SPIR-V change, the D3D9 and Vulkan paths read the same constant. Indoors and with LegacyFog: WeatherImpact as set. Bench (Zone, slot A): clear, part-cloud and overcast weathers (far 28000-56000) unchanged; foggy1 (far 10500) at 1.0: ground median L 28 -> 35, shade -1.84 -> -1.31 stops, pines fade in depth steps; 0 flicker spikes in 600 foggy frames.

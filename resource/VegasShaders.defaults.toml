@@ -967,6 +967,29 @@ Saturate = 0.0                        # Influence of the coloring setting. 0: us
 Enabled = true                        # Screenspace godrays/volumetric rays.
 
 
+[_Shaders.SunGlare.Main]
+Strength = 1.5                      # [0-10] UNOFFICIAL (2026-11-13), live: the sun's lens glare, all of it (halo, starburst, streak). It shows only as much as the sun's disc shows: behind a tree, a wall, the weapon or thick cloud it is gone. 0 = off.
+HaloSize = 0.02                     # [0.002-0.5] live: how wide the tight glow round the sun is, in screen heights (0.03 = 3 % of the picture's height).
+HaloStrength = 1.0                  # [0-10] live: how bright that glow is.
+Spikes = 16                         # [0-16] live: how many points the starburst has (even numbers; 0 = no starburst). A camera lens stopped down makes 6-18.
+SpikeLength = 0.08                  # [0.005-1] live: how long the longest points are, in screen heights. They differ in length, as a real lens makes them.
+SpikeWidth = 0.0014                 # [0.0003-0.05] live: how thick a point is at the sun, in screen heights.
+SpikeStrength = 2.5                 # [0-10] live: how bright the points are.
+SpikeRotation = 14.0                # live: the starburst turned by this many degrees (0 = one point straight to the right).
+StreakLength = 0.45                 # [0.01-2] live: how long the horizontal streak through the sun is, in screen heights.
+StreakWidth = 0.003                 # [0.0003-0.05] live: how thick that streak is.
+StreakStrength = 0.9                # [0-10] live: how bright that streak is. 0 = no streak.
+Chromatic = 0.25                    # [0-1] live: faint rainbow colour along the points and the streak, as glass splits light. 0 = white.
+SunSize = 0.012                     # [0.002-0.1] live: the size of the patch round the sun's centre that is checked for cover, in screen heights. About the sun disc's own size.
+CloudContrastLow = 1.4              # live: how much brighter than the sky round it the sun's patch must be before any glare shows (hidden behind cloud it is no brighter).
+CloudContrastHigh = 3.0             # live: at this much brighter the glare is at full strength.
+EaseFrames = 8                      # [1-60] live: how many frames the glare takes to follow the sun going behind something or coming out. 1 = at once (it then flickers behind moving leaves and under TAA / DLSS).
+SunsetStrength = 0.6                # [0-4] live: the glare's strength with the sun at the horizon, against 1 with the sun high.
+DebugView = 0                       # [0-2] diagnostic: 1 = the picture tinted green by how much of the sun counts as visible (red: none), 2 = the glare alone on black.
+
+[_Shaders.SunGlare.Status]
+Enabled = false                     # UNOFFICIAL (2026-11-13): the sun's lens glare: a tight halo, a starburst and a horizontal streak round the sun when it is in view and not covered. Off by default (a look change).
+
 [_Shaders.Tonemapping.Main]
 HueSafeClip = true                    # UNOFFICIAL: a colour too bright for the screen keeps its hue, losing a little saturation instead of having its brightest channel cut (bright lit orange used to turn yellow, red pink, e.g. under the flashlight). Colours that fit on screen are not touched. Off = the old cut. Applies everywhere, live.
 TonemappingMode = 10                  # Tonemapping Algorithm -  0:None (vanilla - DXVK HDR), 1:VTLottes, 2:Lottes (tuned), 3:Reinhard, 4:Reinhard Jodie, 5:ACES Filmic, 6:ACES Fitted, 7:Uncharted 2, 8:Uchimura (GT), 9:AGX, 10:DICE (default, most neutral/accurate), 11:Perceptual (Polyphony Digital, SIGGRAPH 2025)
@@ -978,7 +1001,7 @@ WeatherModifier = 1.0                 # Influence of the vanilla weather modifie
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush
 Saturation = 1.0                      # Saturation of the image before tonemapping
 ToneMappingColor = 1.0                # Changes the strength of the vanilla tint influence (not fades)
-TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura
+TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura. UNOFFICIAL (2026-11-13) also AgX (mode 9): contrast round mid grey before its curve; 1 = AgX as it was, 1.15-1.3 = punchier, bright things reach white sooner (no hard cut)
 TonemapBrightness = 1.0               # Brightness setting for Lottes, Uncharted, Uchimura
 TonemapMidpoint = 1.0                 # Midpoint setting for Lottes Tonemapper (avoid changing), Linear Section Start for Uchimura
 TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, should be left default), Black shoulder for Uchimura
@@ -1000,7 +1023,7 @@ WeatherModifier = 1.0                 # Influence of the vanilla weather modifie
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush notably in Interiors
 Saturation = 1.0                      # Saturation of the image before tonemapping
 ToneMappingColor = 1.0                # Changes the strength of the vanilla tint influence (not fades)
-TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura
+TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura. UNOFFICIAL (2026-11-13) also AgX (mode 9): contrast round mid grey before its curve; 1 = AgX as it was, 1.15-1.3 = punchier, bright things reach white sooner (no hard cut)
 TonemapBrightness = 1.0               # Brightness setting for Lottes, Uncharted, Uchimura
 TonemapMidpoint = 1.0                 # Midpoint setting for Lottes Tonemapper (avoid changing), Linear Section Start for Uchimura
 TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, should be left default), Black shoulder for Uchimura
@@ -1020,7 +1043,7 @@ WeatherModifier = 1.0                 # Influence of the vanilla weather modifie
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush notably in Interiors
 Saturation = 1.0                      # Saturation of the image before tonemapping
 ToneMappingColor = 1.0                # Changes the strength of the vanilla tint influence (not fades)
-TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura
+TonemapContrast = 1.0                 # Contrast setting for Lottes, Uchimura. UNOFFICIAL (2026-11-13) also AgX (mode 9): contrast round mid grey before its curve; 1 = AgX as it was, 1.15-1.3 = punchier, bright things reach white sooner (no hard cut)
 TonemapBrightness = 1.0               # Brightness setting for Lottes, Uncharted, Uchimura
 TonemapMidpoint = 1.0                 # Midpoint setting for Lottes Tonemapper (avoid changing), Linear Section Start for Uchimura
 TonemapShoulder = 1.0                 # White Shoulder for Lottes (max 1.0, should be left default), Black shoulder for Uchimura
@@ -2757,6 +2780,9 @@ Amount = 0.4                        # Global multiplier for the final fog streng
 FogSaturation = 1.7                 # Tune the saturation of the fog color.
 BaseDensity = 0.2                   # mod-authored fog density baseline, independent of vanilla weather fog.
 WeatherImpact = 0.5                 # How much the vanilla weather's own fog near/far/power/color feeds into density and color, on top of BaseDensity. 0 = ignore vanilla weather fog, 1 = fully vanilla-driven.
+FoggyWeatherImpact = -1.0           # UNOFFICIAL (2026-11-13), outdoors, applies immediately, -1 = off (WeatherImpact for every weather, as before). 0-2: WeatherImpact for FOGGY weather. One WeatherImpact either greys clear days from 50 m or strips the fog from foggy ones; with this set, WeatherImpact counts in clear weather and this in fog, by the weather's own fog distance (the two keys below).
+FoggyWeatherFar = 12000.0           # UNOFFICIAL (2026-11-13), with FoggyWeatherImpact: a weather whose fog far distance is this or nearer (game units) counts as fully foggy.
+ClearWeatherFar = 26000.0           # UNOFFICIAL (2026-11-13), with FoggyWeatherImpact: a weather whose fog far distance is this or farther counts as clear (WeatherImpact alone). Between the two the share eases over.
 GameFogFloor = 0.0                  # UNOFFICIAL (2026-10-30), [0-2], outdoors, applies immediately, 0 = off (as before): at least the game's own fog for the weather (its fog near / far / power, as the game fogs with the mod's fog off) hazes the picture, times this; where the mod's fog already covers as much, nothing changes. The mod's own fog is thin and the same in every weather (about 1 % of the colour at 20000 units by day; the game's 25 % in clear and 61 % in cloudy weather), so the hills stay crisp in clear weather. About 0.8 looks like the game's fog (the mod blends in linear light, the game in its stored curve); 1 = the game's curve. The colour is the mod's fog colour (WeatherImpact, WeatherFogColor, the sky look) without the sun's glow; never on the sky. The night share: [Shaders.VolumetricFog.Night] GameFogFloorScale. ClassicLook and LegacyFog ignore it.
 WeatherFogColor = 1.0               # UNOFFICIAL (2026-10-30), [0-1], outdoors, applies immediately, CHANGES THE IMAGE: the colour WeatherImpact blends in is the weather's own fog colour for the hour (with the sky's tint and saturation on top), so a weather's fog colour shows in the fog again (at WeatherImpact 0.5 half the fog's colour, the other half the sky's light; all of it at 1). Where the fog lies over the sky itself (Rainy / CloudyDisablesSkyFilter) it keeps the sky's colour, as the game's own fog leaves the sky alone. 0 = as before: the sky's colour toward the horizon, and the weather's fog colour only showed in very dense fog (a weather with a pure red fog changed nothing). ClassicLook and LegacyFog keep their original colours (they ignore this).
 MorningFogDip = 0.5                 # How much the mod-driven density dips around solar noon (0 = no change, 1 = fully cleared at noon). Ramps back to full by evening.

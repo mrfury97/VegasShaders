@@ -149,6 +149,11 @@ float3 agx(float3 c)
     // log2 encoding over [evLo, evHi]. UNOFFICIAL 2026-10-16: negative input gave a NaN log; 1e-6 is under evLo anyway.
     float3 enc = clamp(log2(max(inset, 1e-6)), evLo, evHi);
     enc = (enc - evLo) / (evHi - evLo);
+    // UNOFFICIAL 2026-11-13 (modern lighting) TonemapContrast for AgX: contrast in the log encoding, turned round mid grey
+    // (scene 0.18 sits at 0.606 of the encoded range), before the curve. Mid grey keeps its place; the curve's own toe and
+    // shoulder still round both ends off, so bright things reach white sooner without a hard cut. 1 = AgX as it was.
+    const float agxContrast = TESR_LotteData.x;
+    [flatten] if (agxContrast != 1.0f) enc = saturate((enc - 0.6060606f) * agxContrast + 0.6060606f);
     return agxEotf(agxLook(agxDefaultContrastApprox(enc)));
 }
 

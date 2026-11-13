@@ -100,6 +100,7 @@ void ShaderManager::Initialize() {
 	EnrollEffect<GodRaysEffect>(sm, sm->Effects.GodRays);
 	EnrollEffect<ImageAdjustEffect>(sm, sm->Effects.ImageAdjust);
 	EnrollEffect<LensEffect>(sm, sm->Effects.Lens);
+	EnrollEffect<SunGlareEffect>(sm, sm->Effects.SunGlare);
 	EnrollEffect<LowHFEffect>(sm, sm->Effects.LowHF);
 	EnrollEffect<MotionBlurEffect>(sm, sm->Effects.MotionBlur);
 	EnrollEffect<NormalsEffect>(sm, sm->Effects.Normals);
