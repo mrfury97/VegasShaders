@@ -763,6 +763,7 @@ struct VS_INPUT {
     #else
         #define OBJ_MULTI_IO PS_INPUT
         #define OBJ_LAMP_TC(n) TEXCOORD##n##_centroid
+        #define OBJ_PS_SPOSITION 1	// (2026-11-14 rt-shadows) this PS_INPUT carries sPosition : POSITION (SV_Position in the no-limits build)
     #endif
     struct OBJ_MULTI_IO {
         float4 vertexColor: COLOR0;	// rgb the vertex colour (OBJECT_SMOOTH_NORMALS: a the normal's z)
@@ -2037,7 +2038,13 @@ PS_OUTPUT main(PS_INPUT IN) {
     #define MANY_LAMPS_B 6
     #define MANY_LAMPS_C 5
     float4 NVR_ManyLampsB[2 * MANY_LAMPS_B] : register(c76);
+#if defined(NVR_SM4) && NVR_SM4
+    // (2026-11-14 rt-shadows) the no-limits build: SM4 refuses its overlap with Shadow.hlsl's c100-c107 matrices (ps_3_0 allows it: they
+    // are never both read there); placed by the compiler, the translator puts it back at c98 by name (the original's table)
+    float4 NVR_ManyLampsC[2 * MANY_LAMPS_C];
+#else
     float4 NVR_ManyLampsC[2 * MANY_LAMPS_C] : register(c98);
+#endif
     #if MANY_LAMPS_ON >= 2
         #ifdef LIGHT_COMMON_ROWS_N
             #define LIGHT_COMMON_ROWS LIGHT_COMMON_ROWS_N	// UNOFFICIAL 2026-10-31 LampTableStandalone / TableLamps: ManyLamps::TableRowsNow
@@ -2106,15 +2113,28 @@ float4 PSLightPosition[8] : register(c19);	// per lamp: xyz object space, w radi
 #endif
 
 #if defined(MANY_LAMPS) && MANY_LAMPS_ON == 3
+#if defined(NVR_SM4) && NVR_SM4 && defined(NVR_LAMP_SUMS)
+PS_OUTPUT main(PS_INPUT IN) {	// (2026-11-14 rt-shadows) the no-limits build: one SV_Position (LampSums declares it)
+    const float2 mlVPos = NVR_IN_VPOS;
+#elif defined(NVR_SM4) && NVR_SM4
+PS_OUTPUT main(PS_INPUT IN, float4 mlVPos4 : VPOS) {	// (2026-11-14 rt-shadows) the no-limits build: SV_Position, the pixel centre
+    const float2 mlVPos = mlVPos4.xy - 0.5f;
+#else
 PS_OUTPUT main(PS_INPUT IN, float2 mlVPos : VPOS) {	// UNOFFICIAL 2026-10-30 ClusteredLamps: the pixel's froxel
+#endif
     #if defined(OBJ_ALPHA_HASH)
         #define OBJ_HASH_VPOS mlVPos
     #endif
-#elif defined(OBJ_ALPHA_HASH)
+#elif defined(OBJ_ALPHA_HASH) && !(defined(NVR_SM4) && NVR_SM4 && (defined(NVR_LAMP_SUMS) || defined(OBJ_PS_SPOSITION)))
 PS_OUTPUT main(PS_INPUT IN ALPHA_HASH_VPOS_PARAM) {	// UNOFFICIAL 2026-11-03 SmoothCutouts: the pixel, for the noise
     #define OBJ_HASH_VPOS ALPHA_HASH_VPOS_VALUE
 #else
 PS_OUTPUT main(PS_INPUT IN) {
+    #if defined(OBJ_ALPHA_HASH) && defined(OBJ_PS_SPOSITION)
+        #define OBJ_HASH_VPOS (IN.sPosition.xy - 0.5f)	// (2026-11-14 rt-shadows) the no-limits build: sPosition is SV_Position (the centre)
+    #elif defined(OBJ_ALPHA_HASH)
+        #define OBJ_HASH_VPOS NVR_IN_VPOS	// (2026-11-14 rt-shadows) the no-limits build with LampSums: one SV_Position (IN.vpos4)
+    #endif
 #endif
     PS_OUTPUT pout;
     [branch] if (NVR_FlashLamp[0].x > 0.5f) flashLampCone = FlashLampCone(SHADOW_WP_LOAD(IN), SHADOW_WP_VALID(IN));	// UNOFFICIAL 2026-11-04

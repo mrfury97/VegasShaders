@@ -147,12 +147,21 @@ class Translator:
     def build_slot_map(self):
         m = {}
         self.missing = []
+        self.bool_map = {}       # (2026-11-14) $Globals slot -> D3D9 bool register
         for name, off, size, used, typ in self.sh.members:
             if off % 16:
                 if used: raise Err("$Globals member %s starts inside a register (offset %d): not handled" % (name, off))
                 continue
             base, count = off // 16, max(1, (size + 15) // 16)
-            if "bool" in typ or (typ.startswith("int") and used): raise Err("bool/int constant %s: not handled" % name)
+            # (2026-11-14 rt-shadows) a D3D9 bool constant (bN in the original): DXVK hands the pixel shader's bools over as the spec data's
+            # psBools word, bit N (masked by the bools the original reads: one it never read is 0 here too)
+            if "bool" in typ:
+                if not used: continue
+                if name not in self.ct or self.ct[name][0] != "b": raise Err("bool constant %s is not a bool register of the original" % name)
+                if count != 1: raise Err("bool array %s: not handled" % name)
+                self.bool_map[base] = self.ct[name][1]
+                continue
+            if typ.startswith("int") and used: raise Err("int constant %s: not handled" % name)
             reg = None
             if name in self.ct:
                 kind, idx, cnt = self.ct[name]
@@ -252,6 +261,10 @@ class Translator:
             n = int(x.group(1)); rel, const = self.rel_index(x.group(2))
             idx = "%s + %d" % (rel, const) if rel else str(const)
             e = "x%d[%s].%s" % (n, idx, full_swizzle(x.group(3)))
+            return self.mods(self.conv_u(e, ty), ty, neg, absm)
+        if cb and re.fullmatch(r"\d+", cb.group(1).strip()) and int(cb.group(1)) in self.bool_map:
+            b = self.bool_map[int(cb.group(1))]
+            e = "uvec4(bitfieldExtract(specPsBools, %d, 1) != 0u ? 0xFFFFFFFFu : 0u).%s" % (b, full_swizzle(cb.group(2)))
             return self.mods(self.conv_u(e, ty), ty, neg, absm)
         if cb:
             rel, const = self.rel_index(cb.group(1))
@@ -359,6 +372,11 @@ class Translator:
         if sem == "COLOR" and idx <= 1: return 9 + idx, "color%d" % idx
         if sem == "NORMAL" and idx == 0: return 0, "normal0"
         if sem == "FOG": return 11, "fog%d" % idx
+        # (2026-11-14 rt-shadows) TEXCOORD8 / TEXCOORD9: no fixed place, numbered 12, 13 by the VERTEX shader's declaration order (a
+        # replacement is linked to it by location, DXVK's semantic linking needs both stages compiled by DXVK). NVR's object and
+        # parallax vertex shaders declare TEXCOORD8 before TEXCOORD9 and no other non-fixed output (ParallaxTemplate.hlsl's layout
+        # note), so 12 and 13. A vertex shader that writes TEXCOORD9 alone would break this: none of NVR's do.
+        if sem == "TEXCOORD" and idx in (8, 9): return 12 + (idx - 8), "texcoord%d" % idx
         raise Err("input semantic %s%d has no fixed location in DXVK's D3D9 linkage" % (sem, idx))
 
     # ---- instructions
@@ -391,7 +409,8 @@ class Translator:
             if sat: return self.assign(args[0], S(args[1], "f"), "f", True)
             return self.assign(args[0], S(args[1], "u"), "u")
         if op == "movc":
-            if sat: raise Err("movc_sat")
+            if sat:   # (2026-11-14) the float result saturated
+                return self.assign(args[0], "mix(%s, %s, notEqual(%s, uvec4(0u)))" % (S(args[3], "f"), S(args[2], "f"), S(args[1], "u")), "f", True)
             return self.assign(args[0], "mix(%s, %s, notEqual(%s, uvec4(0u)))" % (S(args[3], "u"), S(args[2], "u"), S(args[1], "u")), "u")
         if op in ("dp2", "dp3", "dp4"):
             n = int(op[2]); sw = "xyzw"[:n]

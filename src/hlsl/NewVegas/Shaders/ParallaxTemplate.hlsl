@@ -491,7 +491,13 @@ VS_OUTPUT main(VS_INPUT vin)
 struct PS_INPUT	// vertex to pixel
 {
 #ifdef NVR_LAMP_SUMS
+#if defined(NVR_SM4) && NVR_SM4
+    float4 vpos4 : VPOS;	// (2026-11-14 rt-shadows) the no-limits build: SV_Position, the pixel centre (as ObjectTemplate.hlsl)
+    #define PAR_IN_VPOS (pin.vpos4.xy - 0.5f)
+#else
     float2 vpos : VPOS;	// UNOFFICIAL LampSums / HighlightSums: the pixel, to read the run's copy of the frame
+    #define PAR_IN_VPOS pin.vpos
+#endif
 #endif
 #ifdef PAR_VCOLOR
     float3 vertexColor : COLOR0;	// vertex colour
@@ -628,7 +634,7 @@ PS_OUTPUT main(PS_INPUT pin ALPHA_HASH_VPOS_PARAM)	// UNOFFICIAL 2026-11-03 Smoo
 #else
 PS_OUTPUT main(PS_INPUT pin)
     #if defined(PAR_ALPHA_HASH)
-        #define PAR_HASH_VPOS pin.vpos	// LampSums has it already
+        #define PAR_HASH_VPOS PAR_IN_VPOS	// LampSums has it already
     #endif
 #endif
 {
@@ -858,7 +864,7 @@ PS_OUTPUT main(PS_INPUT pin)
     #ifdef NVR_LAMP_SUMS
         // UNOFFICIAL 2026-10-25 LampSums / HighlightSums (see the top): c210 y 1 during the world's run of these passes, zw 1 / the frame's size.
         [branch] if (TESR_PassRedirect.y > 0.5f) {
-            const float3 runStart = max(tex2Dlod(NVR_LampRunStart, float4((pin.vpos + 0.5f) * TESR_PassRedirect.zw, 0.0f, 0.0f)).rgb, 0.0f);
+            const float3 runStart = max(tex2Dlod(NVR_LampRunStart, float4((PAR_IN_VPOS + 0.5f) * TESR_PassRedirect.zw, 0.0f, 0.0f)).rgb, 0.0f);
             outCol = LinEncode(LinColor(runStart) + max(litSum.rgb, 0.0f)) - runStart;
         }
     #endif
