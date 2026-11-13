@@ -168,7 +168,7 @@ void main() {
 			const bool testAlpha = p.alpha.x > 0.5;
 			// (rt-shadows F7) the NEAREST blocker when its distance is wanted (the denoiser / Penumbra size the penumbra by it); a
 			// first-hit query (cheaper) only for the plain hard visibility
-			const bool nearest = p.alpha.w > 0.5;
+			const bool nearest = p.alpha.w > 1.5;   // (alpha.w 2: the nearest, 1: the blocker distance of a first-hit query)
 			bool hit;
 			float hitT = 0.0;
 			// (2026-11-07 ptaaa-firstperson) a ray from within arm's reach of the eye (the first-person view model's pixels, a counter you

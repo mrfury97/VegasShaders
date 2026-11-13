@@ -65,7 +65,9 @@ void main() {
 	vec3 move = p.prevRight.w > 0.5 ? imageLoad(motionImage, src).xyz : vec3(0.0);
 	vec2 prevPixel;
 	float prevZ;
+	float speed = 0.0;   // (2026-11-14 rt-shadows) how far this surface moved on screen since last frame (pixels)
 	if (!reset && reproject(s.position, move, prevPixel, prevZ)) {
+		speed = length(prevPixel - (vec2(pixel) + 0.5));
 		vec2 f = prevPixel - 0.5;
 		ivec2 base = ivec2(floor(f));
 		vec2 fr = f - vec2(base);
@@ -96,6 +98,13 @@ void main() {
 	// along behind a moving camera through the reprojection's resampling)
 	float width0 = sig.y > 0.0 ? sig.y : (h.w > 0.0 ? h.z : 0.0);
 	hlen = min(hlen + 1.0, historyCap(width0, s.viewZ));
+#ifdef SUN
+	// UNOFFICIAL 2026-11-14 (rt-shadows: shadows smearing behind a running camera) motion-adaptive history: every frame the history is
+	// resampled bilinearly where the surface was, which blurs it along the motion; the faster the surface moves on screen, the fewer
+	// frames it keeps (all of them standing still, half at 2 pixels a frame, ~2 at 30), as REBLUR / SIGMA shorten theirs by motion.
+	// The blur takes over meanwhile (a short history widens it: newness).
+	hlen = min(hlen, max(1.0, p.params.x / (1.0 + 0.5 * speed)));
+#endif
 	float a = 1.0 / hlen;
 	float m1 = mix(h.x, sig.x, a);
 	float m2 = mix(h.y, sig.x * sig.x, a);

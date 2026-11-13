@@ -37,7 +37,9 @@ namespace {
 		float	denoiserHistory = 32.0f, denoiserMaxRadius = 32.0f, denoiserStabilize = 4.0f;
 		float	contact = 1.0f;			// 2026-11-07 (rtgap-tess) ContactShadows: the depth buffer's contact march (strength, 0 off; Mode 1 only)
 		float	contactLength = 24.0f;	// ContactLength (pixels)
-		bool	forward = true;			// 2026-11-14 (rt-shadows F1) Forward: the visibility into the lit shaders' sun term (core/BendContact.h's texture)
+		bool	forward = true;
+		bool	traceBackFaces = true;	// 2026-11-14 (rt-shadows) TraceBackFaces / NearestBlocker: the F4 / F7 costs, for A/B
+		bool	nearestBlocker = true;			// 2026-11-14 (rt-shadows F1) Forward: the visibility into the lit shaders' sun term (core/BendContact.h's texture)
 		int		debugView = 0;			// 1 RT only, 2 traced not applied, 3 hit distance, 4 the raw visibility over the picture, 5 state codes, 6 primary rays (4-6: grey over the picture)
 	} S;
 
@@ -125,6 +127,8 @@ namespace {
 		S.denoiserMaxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);
 		S.denoiserStabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
 		S.forward = TheSettingManager->GetSettingI(kSection, "Forward") != 0;
+		S.traceBackFaces = TheSettingManager->GetSettingI(kSection, "TraceBackFaces") != 0;
+		S.nearestBlocker = TheSettingManager->GetSettingI(kSection, "NearestBlocker") != 0;
 		if ((S.penumbra || S.shadowDenoiser) && S.sunAngle <= 0.0f) S.sunAngle = 0.53f;	// the sun's real angular diameter
 	}
 
@@ -233,7 +237,7 @@ namespace {
 		c.alpha[0] = RtCore::AlphaTested() ? 1.0f : 0.0f;
 		c.alpha[1] = (float)(frames & 1023);								// the jitter's frame
 		c.alpha[2] = tanf(0.5f * S.sunAngle * 0.0174532925f);				// the sun cone's half-angle tangent (0: hard)
-		c.alpha[3] = (wantHit && hitSurface) || helperDenoise ? 1.0f : 0.0f;	// 2026-10-31 Penumbra / 2026-11-07 ShadowDenoiser: the blocker distances (binding 7)
+		c.alpha[3] = (wantHit && hitSurface) || helperDenoise ? (S.nearestBlocker ? 2.0f : 1.0f) : 0.0f;	// (2026-11-14 rt-shadows F7: 2 = the nearest blocker)	// 2026-10-31 Penumbra / 2026-11-07 ShadowDenoiser: the blocker distances (binding 7)
 		// 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1) (1a) the bumps' slack: rays start the Strength further off the surface
 		// while the tessellated bumps are drawn. (1b) ContactShadows: in Mode 1 only (Mode 0 keeps the cascades, which hold the bumps' own
 		// shadows with CastShadows, and the raster contact shadows: a march here would darken twice); where the raster contact shadows run
@@ -282,7 +286,7 @@ namespace {
 		}
 		// UNOFFICIAL 2026-11-14 (rt-shadows F4) cloudCentre.w 1: faces turned from the sun are traced too (the forward path: only the sun
 		// term takes the result); the deferred combine darkens whole pixels, so there they keep 1 as before
-		c.cloudCentre[3] = ForwardOn() ? 1.0f : 0.0f;
+		c.cloudCentre[3] = ForwardOn() && S.traceBackFaces ? 1.0f : 0.0f;
 		// the camera's world position (the scene is camera relative): the clouds' map is in world metres
 		c.camera[0] = TheRenderManager->CameraPosition.x; c.camera[1] = TheRenderManager->CameraPosition.y; c.camera[2] = TheRenderManager->CameraPosition.z;
 		const int atlas = RtCore::AlphaAtlasImage();
