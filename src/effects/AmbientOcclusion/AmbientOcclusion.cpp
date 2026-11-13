@@ -789,6 +789,8 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 	const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 	RtAmbient::TraceConstants c = {};
+	// UNOFFICIAL 2026-11-13 (rtgi-review R21) '= {}' leaves the D3DX members as they were on the stack (their default constructor is empty): zeroed for real
+	memset(&c, 0, sizeof(c));
 	c.viewToWorld._11 = view._11; c.viewToWorld._12 = view._21; c.viewToWorld._13 = view._31;
 	c.viewToWorld._21 = view._12; c.viewToWorld._22 = view._22; c.viewToWorld._23 = view._32;
 	c.viewToWorld._31 = view._13; c.viewToWorld._32 = view._23; c.viewToWorld._33 = view._33;
@@ -994,6 +996,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 	const bool offscreenView = (rt.DebugView == 7 && (giPass || merged)) || (gi && !rt.GIScreenLight);
 	const int cacheRays = exterior ? rt.CacheRaysExterior : rt.CacheRays, cacheSpread = exterior ? rt.CacheSpreadExterior : rt.CacheSpread;
 	RtAmbient::CacheConstants cc = {}, cc2 = {};
+	memset(&cc, 0, sizeof(cc)); memset(&cc2, 0, sizeof(cc2));	// (2026-11-13 rtgi-review R21)
 	// the second level needs passes: the fine update, the coarse update, the AO / merged pass and the GI pass (of 8 a frame, the RT sun's among them)
 	const bool cascade2 = cacheOn && rt.CacheCascades >= 2;
 	// UNOFFICIAL 2026-11-12 (sungi p3 review) the layout flag follows the SETTING only; a frame short of pass slots just skips the coarse level's
@@ -1032,6 +1035,7 @@ void AmbientOcclusionEffect::RtRecord(IDirect3DDevice9* Device) {
 		if (screenAmbientOut) c.lampColor[RtAmbient::GILampsMax - 1].w += 32.0f;	// (2026-11-13 B6)
 	}
 	RtAmbient::GIConstants g = {};
+	memset(&g, 0, sizeof(g));	// (2026-11-13 rtgi-review R21)
 	if (reuse && (giPass || merged)) {
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
 		float light[GILightKeys] = {};
