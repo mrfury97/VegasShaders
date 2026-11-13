@@ -409,7 +409,16 @@ float4 Blur(VSOUT IN, uniform float2 axis) : COLOR0 {
 	float grassOn = step(3.5f, NVR_ALGI.w);
 	float noBlur = step(1.5f, NVR_ALGI.w - 4.0f * grassOn);
 	float bend = min(abs(tapDepth[2] + tapDepth[4] - 2.0f * depth), min(abs(tapDepth[1] + depth - 2.0f * tapDepth[2]), abs(depth + tapDepth[5] - 2.0f * tapDepth[4])));
-	float busy = saturate(bend / depth * 40.0f - 0.1f) * grassOn;
+	// (second step) the busy-depth rule alone caught too little (storm weather: the old full blur halved the flicker on grass, the rule alone did not).
+	// Grass is drawn by the game's own shader, so the albedo buffer has no texel for it (alpha 0; NVR_ALFlags.z 1 = it holds this frame's; bound on
+	// s12 for the blur passes too): the share of this texel's 2 x 2 full-size pixels without one is an exact grass mask.
+	float2 halfPx = 0.5f * TESR_ReciprocalResolution.xy;
+	float noAlbedo = step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(-halfPx.x, -halfPx.y), 0.0f, 0.0f)).a, 0.5f)
+		+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(halfPx.x, -halfPx.y), 0.0f, 0.0f)).a, 0.5f)
+		+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(-halfPx.x, halfPx.y), 0.0f, 0.0f)).a, 0.5f)
+		+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(halfPx.x, halfPx.y), 0.0f, 0.0f)).a, 0.5f);
+	noAlbedo *= 0.25f * step(0.5f, NVR_ALFlags.z);
+	float busy = max(saturate(bend / depth * 40.0f - 0.1f), noAlbedo) * grassOn;
 	float3 blurred = bounce / total.y;
 	return float4(lerp(blurred, lerp(center.rgb, blurred, busy), noBlur), visibility / total.x);
 }
