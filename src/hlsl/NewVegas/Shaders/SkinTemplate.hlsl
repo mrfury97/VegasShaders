@@ -93,6 +93,11 @@
 #ifdef PS
     #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
 #endif
+#ifdef PS
+// UNOFFICIAL 2026-11-14 (rt-shadows, no-limits replacements) the forward RT sun through NVR's own resources in this shader's no-limits
+// build only (Includes/Shadow.hlsl SHADOW_SUN_CONTACT_EXTRA; tools/nvr-dxvk/replace/nolimits.py): its ps_3_0 build is unchanged.
+    #define SHADOW_SUN_CONTACT_EXTRA_IN 1
+#endif
 #include "includes/Shadow.hlsl"	// shared code
 #define CAPTURED_ACTOR	// UNOFFICIAL 2026-10-28: every skin draw is an actor's (CapturedNormals alpha 2)
 #include "includes/CapturedNormals.hlsl"	// UNOFFICIAL 2026-10-28 CapturedNormals (COLOR3, see there)

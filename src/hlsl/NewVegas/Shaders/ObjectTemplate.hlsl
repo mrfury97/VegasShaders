@@ -414,6 +414,10 @@
 #if defined(PS) && !defined(NVR_SLOT_TIGHT) && !defined(NVR_CONTACT_NO_SAMPLER)
     #define SHADOW_SUN_CONTACT_PERDRAW 1
     #define SHADOW_SUN_CONTACT_IN 1   // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl): one lookup, so the 4+ lamp ones too
+#elif defined(PS)
+// UNOFFICIAL 2026-11-14 (rt-shadows, no-limits replacements) the forward RT sun through NVR's own resources in this shader's no-limits
+// build only (Includes/Shadow.hlsl SHADOW_SUN_CONTACT_EXTRA; tools/nvr-dxvk/replace/nolimits.py): its ps_3_0 build is unchanged.
+    #define SHADOW_SUN_CONTACT_EXTRA_IN 1
 #endif
 #include "includes/Shadow.hlsl"
 // 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).

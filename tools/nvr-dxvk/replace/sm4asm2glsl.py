@@ -83,7 +83,9 @@ def parse_d3d9_ct(path):
 # ---------------------------------------------------------------- the SM4 listing
 class Shader:
     def __init__(self, path):
-        self.members = []        # (name, offset, size, used)
+        self.members = []        # (name, offset, size, used, type) of $Globals
+        self.extra_members = []  # (2026-11-14 rt-shadows) members of cbuffer NvrExtra: NVR's own uniform buffer (set 4 binding 0)
+        cbname = None
         self.resources = []      # (name, type, dim, bind letter, bind index, count)
         self.isig = []           # (semantic, index, mask, register, sysvalue)
         self.body = []
@@ -96,13 +98,16 @@ class Shader:
                 self.version = line.strip()
                 self.body = lines[i + 1:]
                 break
-            if "cbuffer $Globals" in line or re.match(r"//\s*cbuffer\s", line): section = "cb"
+            mcb = re.match(r"//\s*cbuffer\s+(\S+)", line)
+            if mcb: section = "cb"; cbname = mcb.group(1)
             elif "Resource Bindings:" in line: section = "res"
             elif "Input signature:" in line: section = "in"
             elif "Output signature:" in line: section = "out"
             if section == "cb":
                 m = re.match(r"//\s+(.*?)\s+([A-Za-z_]\w*)(\[\d+\])?;\s*// Offset:\s*(\d+)\s+Size:\s*(\d+)(.*)$", line)
-                if m: self.members.append((m.group(2), int(m.group(4)), int(m.group(5)), "[unused]" not in m.group(6), m.group(1)))
+                if m:
+                    entry = (m.group(2), int(m.group(4)), int(m.group(5)), "[unused]" not in m.group(6), m.group(1))
+                    (self.extra_members if cbname == "NvrExtra" else self.members).append(entry)
             elif section == "res":
                 m = re.match(r"//\s+(\S+)\s+(sampler|texture|cbuffer|tbuffer|UAV\S*)\s+(\S+)\s+(\S+)\s+([a-z]+)(\d+)\s+(\d+)", line)
                 if m: self.resources.append((m.group(1), m.group(2), m.group(4), m.group(5), int(m.group(6)), int(m.group(7))))
@@ -130,6 +135,11 @@ class Translator:
         self.special = {}        # v register -> "position" / "front"
         self.icb = None
         self.has_output = set()
+        self.extra_tex = {}      # (2026-11-14) SM4 t index -> set 4 binding (NVR's own textures, NVRX_*; read with ld only)
+        self.extra_cb = None     # SM4 cb index of cbuffer NvrExtra (set 4 binding 0)
+        self.extra_regs = 0      # vec4s of it read
+        for name, typ, dim, letter, idx, count in self.sh.resources:
+            if typ == "cbuffer" and name == "NvrExtra": self.extra_cb = idx
         self.slot_map = self.build_slot_map()
         self.tex_map = self.build_tex_map()
 
@@ -162,6 +172,9 @@ class Translator:
         tm = {}
         for name, typ, dim, letter, idx, count in self.sh.resources:
             if typ != "texture": continue
+            if name.startswith("NVRX_") and name not in self.ct:
+                for k in range(count): self.extra_tex[idx + k] = 1 + len(self.extra_tex)
+                continue
             if name not in self.ct or self.ct[name][0] != "s":
                 # the original never read this texture (it was cut away there): a new slot would lie to DXVK's analysis
                 raise Err("texture %s is not a sampler of the original ps_3_0 shader" % name)
@@ -215,6 +228,14 @@ class Translator:
         m = re.fullmatch(r"(r|v|o)(\d+)(?:\.([xyzw]+))?", tok)
         x = re.fullmatch(r"x(\d+)\[([^\]]+)\](?:\.([xyzw]+))?", tok)
         cb = re.fullmatch(r"cb0\[([^\]]+)\](?:\.([xyzw]+))?", tok)
+        xcb = re.fullmatch(r"cb(\d+)\[([^\]]+)\](?:\.([xyzw]+))?", tok)
+        if xcb and self.extra_cb is not None and int(xcb.group(1)) == self.extra_cb:
+            rel, const = self.rel_index(xcb.group(2))
+            self.extra_regs = max(self.extra_regs, const + 1 if rel is None else 16)
+            e = "X[%s].%s" % (("%s + %d" % (rel, const)) if rel else str(const), full_swizzle(xcb.group(3)))
+            if ty == "i": e = "floatBitsToInt(%s)" % e
+            elif ty == "u": e = "floatBitsToUint(%s)" % e
+            return self.mods(e, ty, neg, absm)
         icb = re.fullmatch(r"icb\[([^\]]+)\](?:\.([xyzw]+))?", tok)
         if m:
             kind, n, sw = m.group(1), int(m.group(2)), full_swizzle(m.group(3))
@@ -431,6 +452,12 @@ class Translator:
         t = re.fullmatch(r"t(\d+)(?:\.([xyzw]+))?", args[2].strip())
         if not t: raise Err("resource operand not understood: " + args[2])
         ti = int(t.group(1))
+        if ti in self.extra_tex:
+            if op != "ld" or self.tex_dims.get(ti) != "2d": raise Err("NVR's own texture t%d: only ld of a 2D texture is handled" % ti)
+            co = "(%s).xy" % self.src(args[1], "i")
+            call = "texelFetch(XT%d, %s, (%s).w)" % (self.extra_tex[ti], co, self.src(args[1], "i"))
+            if t.group(2): call = "(%s).%s" % (call, full_swizzle(t.group(2)))
+            return self.assign(args[0], call, "f", sat)
         if ti not in self.tex_map: raise Err("t%d has no D3D9 slot" % ti)
         slot = self.tex_map[ti]
         dim = self.tex_dims.get(ti)
@@ -480,11 +507,16 @@ class Translator:
              "// Generated by tools/nvr-dxvk/replace/sm4asm2glsl.py from an NVR shader compiled without ps_3_0's limits (ps_4_0 /Gec).",
              "#extension GL_EXT_nonuniform_qualifier : enable",
              "#extension GL_EXT_scalar_block_layout : enable",
+             "#extension GL_EXT_samplerless_texture_functions : enable",
              "",
              "layout(set = 0, binding = 0) uniform sampler s_samplers[];"]
         for s, dim in sorted(self.used_tex.items()):
             o.append("layout(set = 1, binding = %d) uniform %s T%d;" % (s, {"2d": "texture2D", "cube": "textureCube", "3d": "texture3D"}[dim], s))
         if regs: o.append("layout(set = 2, binding = 6, std140) uniform Consts { vec4 c[%d]; };" % len(regs))
+        if self.extra_cb is not None:
+            o.append("layout(set = 4, binding = 0, std140) uniform NvrExtra { vec4 X[16]; };   // core/ReplaceExtras.h")
+        for ti, b in sorted(self.extra_tex.items(), key=lambda kv: kv[1]):
+            o.append("layout(set = 4, binding = %d) uniform texture2D XT%d;" % (b, b))
         o += ["// D3D9's spec data: DXVK turns each member into a specialization constant, so they must be plain uint members",
               "layout(set = 3, binding = 0, scalar) uniform SpecConsts {",
               "  uint specAlphaTest; uint specFog; uint specFixedFunction; uint specVsSamplers;",
@@ -553,6 +585,8 @@ class Translator:
         manifest = ["# generated by sm4asm2glsl.py (no-limits build)",
                     "textures=" + ",".join(str(s) for s in sorted(self.used_tex)),
                     "floats=" + ",".join(str(r) for r in regs)]
+        if self.extra_cb is not None or self.extra_tex:
+            manifest.append("extras=" + ",".join((["ubo"] if self.extra_cb is not None else []) + ["image"] * len(self.extra_tex)))
         return "\n".join(o) + "\n", "\n".join(manifest) + "\n"
 
 

@@ -286,14 +286,19 @@ bool DxvkCompute::ReplacementsOn() {
 	return TheSettingManager->SettingsMain.Main.NvrDxvkReplacements && Available();
 }
 
-// "textures=0,1,2" -> bit mask; "floats=0-3,8-15" -> 224-bit register mask. Unknown lines are ignored.
-static bool ParseReplacementManifest(const char* Path, UINT& TextureMask, UINT* FloatMask, bool& FloatsGiven) {
+static bool ReplacementExtras = false;	// UNOFFICIAL 2026-11-14 (rt-shadows): core/ReplaceExtras.h
+bool DxvkCompute::ReplacementExtrasUsed() { return ReplacementExtras; }
+
+// "textures=0,1,2" -> bit mask; "floats=0-3,8-15" -> 224-bit register mask; (2026-11-14) "extras=ubo,image" -> NVR's own resources in
+// set 4 (binding 0 the uniform buffer, 1 the image; core/ReplaceExtras.h's slot). Unknown lines are ignored.
+static bool ParseReplacementManifest(const char* Path, UINT& TextureMask, UINT* FloatMask, bool& FloatsGiven, std::string* Extras = nullptr) {
 	std::ifstream file(Path);
 	if (!file) return false;
 	std::string line;
 	while (std::getline(file, line)) {
 		const char* s = line.c_str();
 		while (*s == ' ' || *s == '\t') s++;
+		if (Extras && !_strnicmp(s, "extras=", 7)) { *Extras = s + 7; continue; }
 		bool textures = !_strnicmp(s, "textures=", 9), floats = !_strnicmp(s, "floats=", 7);
 		if (!textures && !floats) continue;
 		s += textures ? 9 : 7;
@@ -373,7 +378,8 @@ bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UI
 	_snprintf_s(manifest, sizeof(manifest), _TRUNCATE, "%sReplace\\%s.txt", Paths::ComputeDir(), key);
 	NVR_EXT_SHADER_REPLACEMENT_DESC desc = {};
 	bool floatsGiven = false;
-	if (!ParseReplacementManifest(manifest, desc.TextureMask, desc.FloatRegisterMask, floatsGiven)) {
+	std::string extras;
+	if (!ParseReplacementManifest(manifest, desc.TextureMask, desc.FloatRegisterMask, floatsGiven, &extras)) {
 		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s has no %s (textures= / floats= lines): %s stays as it is", path, manifest, Name);
 		return false;
 	}
@@ -383,12 +389,26 @@ bool DxvkCompute::RegisterReplacement(const char* Name, const void* Bytecode, UI
 	desc.pSpirv = words.data();
 	desc.SpirvSize = (UINT)words.size();
 	desc.pDebugName = Name;
+	// UNOFFICIAL 2026-11-14 (rt-shadows) NVR's own resources: "ubo" = set 4 binding 0, "image" = set 4 binding 1, both in slot 63 of their
+	// type (core/ReplaceExtras.h kSlot)
+	NVR_EXT_BINDING_DESC extraDescs[2] = {};
+	UINT extraCount = 0;
+	const bool wantsUbo = extras.find("ubo") != std::string::npos, wantsImage = extras.find("image") != std::string::npos;
+	if (extras.find("image,image") != std::string::npos) {
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s asks for more than one extra image (one is bound): %s stays as it is", path, Name);
+		return false;
+	}
+	if (wantsUbo) extraDescs[extraCount++] = { 4, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 63, NVR_EXT_VIEW_2D, FALSE, 0 };
+	if (wantsImage) extraDescs[extraCount++] = { 4, 1, NVR_EXT_BIND_SAMPLED_IMAGE, 63, NVR_EXT_VIEW_2D, FALSE, 0 };
+	desc.ExtraCount = extraCount;
+	desc.pExtra = extraCount ? extraDescs : nullptr;
 	HRESULT result = Ext->RegisterShaderReplacement(&desc);
 	if (FAILED(result)) {
 		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:RegisterShaderReplacement(%s) refused (%08lX; DXVK's log says why, usually textures= naming a sampler the original does not use): it stays as it is", Name, result);
 		return false;
 	}
-	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s will run as %s (textures %04X, %s float layout)", Name, path, desc.TextureMask, floatsGiven ? "listed" : "original compacted");
+	if (extraCount) ReplacementExtras = true;
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s will run as %s (textures %04X, %s float layout%s)", Name, path, desc.TextureMask, floatsGiven ? "listed" : "original compacted", extraCount ? ", NVR extras" : "");
 	return true;
 }
 

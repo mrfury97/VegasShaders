@@ -42,6 +42,17 @@ def define_args(defines):
 
 
 def spirv(frag, spv):
+    """GLSL -> SPIR-V. (2026-11-14 rt-shadows) Windows glslang when found (NOLIMITS_GLSLANG, or tools\dl\glslang-* of Claude Brain),
+    spirv-val after it when NOLIMITS_SPIRV_VAL names one; else WSL as before."""
+    win = os.environ.get("NOLIMITS_GLSLANG") or next(iter(sorted(glob.glob(r"F:\Claude Brain\tools\dl\glslang-*\x\bin\glslang.exe"))), None)
+    if win and os.path.exists(win):
+        r = subprocess.run([win, "-V", "--target-env", "vulkan1.1", "-o", spv, frag], capture_output=True, text=True)
+        if r.returncode: return 1, (r.stdout + r.stderr).strip()[-1500:]
+        val = os.environ.get("NOLIMITS_SPIRV_VAL")
+        if val and os.path.exists(val):
+            r = subprocess.run([val, "--target-env", "vulkan1.1", "--scalar-block-layout", spv], capture_output=True, text=True)
+            if r.returncode: return 1, (r.stdout + r.stderr).strip()[-1500:]
+        return 0, ""
     tools = "$HOME/vktools/root/usr/bin"
     cmd = "export PATH=%s:$PATH; glslangValidator -V --target-env vulkan1.1 -o '%s' '%s' > /tmp/nolimits_glslang.log 2>&1 || { tail -20 /tmp/nolimits_glslang.log; exit 1; }; spirv-val --target-env vulkan1.1 --scalar-block-layout '%s'" % (
         tools, wsl_path(spv), wsl_path(frag), wsl_path(spv))

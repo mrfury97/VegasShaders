@@ -191,6 +191,11 @@
 #ifdef PS
     #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
 #endif
+#ifdef PS
+// UNOFFICIAL 2026-11-14 (rt-shadows, no-limits replacements) the forward RT sun through NVR's own resources in this shader's no-limits
+// build only (Includes/Shadow.hlsl SHADOW_SUN_CONTACT_EXTRA; tools/nvr-dxvk/replace/nolimits.py): its ps_3_0 build is unchanged.
+    #define SHADOW_SUN_CONTACT_EXTRA_IN 1
+#endif
 #include "includes/Shadow.hlsl"	// shared code
 // 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
 #ifndef DUST_ON

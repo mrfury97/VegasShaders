@@ -77,6 +77,8 @@ public:
 	//                         absent: the original's own compacted register list (DXVK's layout, harder to write against)
 	// True when registered. A problem leaves the shader as it is (logged); it does not turn the other compute paths off.
 	static bool					ReplacementsOn();
+	// UNOFFICIAL 2026-11-14 (rt-shadows) a replacement with NVR's own resources ("extras=" in its manifest) was registered: core/ReplaceExtras.h binds them
+	static bool					ReplacementExtrasUsed();
 	// UNOFFICIAL 2026-10-26 (FORK-1026-LIMITS.md): with the Replace\dump folder, the shader's source file (template) and its defines
 	// are written next to the .pso as <Name>@<hash>.defines, so tools\nvr-dxvk\replace\nolimits.py can build the no-limits version
 	// (NVR_NO_SM3_LIMITS) of exactly that variant. Template/Defines may be null (nothing extra written).

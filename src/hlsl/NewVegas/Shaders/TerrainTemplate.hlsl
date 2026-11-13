@@ -61,6 +61,10 @@
     #define SHADOW_SUN_CONTACT_LAND 1
     #define SHADOW_SUN_CONTACT_S12 1
     #define SHADOW_SUN_CONTACT_RT_ONLY 1
+#elif defined(PS)
+    // 6-7 layers: no sampler in ps_3_0; the no-limits replacement takes it from NVR's own resources (Includes/Shadow.hlsl EXTRA)
+    #define SHADOW_SUN_CONTACT_EXTRA_IN 1
+    #define SHADOW_SUN_CONTACT_LAND 1
 #endif
 #include "includes/Shadow.hlsl"	// shared code
 // UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel), compiled in only when on at startup.

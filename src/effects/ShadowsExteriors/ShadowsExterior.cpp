@@ -6,6 +6,7 @@
 #include "../../core/SunDepthFit.h"	// UNOFFICIAL 2026-10-27 FitToDepth
 #include "../../core/RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
+#include "../../core/ReplaceExtras.h"	// UNOFFICIAL 2026-11-14 (rt-shadows) the no-limits replacements' RT sun
 
 // UNOFFICIAL 2026-10-16 lamp contact shadows (PointShadows.fx LampContactPS, technique 2; drawn by ShaderManager after the lamp
 // pass): every number the shader needs (see the constants' comments there). Kept out of ShadowsExterior.h (widely included).
@@ -30,6 +31,7 @@ static float ScreenSpaceNearFade = 0.0f;	// the setting (UpdateSettings); Screen
 void ShadowsExteriorEffect::UpdateConstants() {
 	// Contact-shadow start and end: NearFade, pushed out to where the land's bumps end while those are on (DxvkCompute::DisplaceContactFade).
 	BendContact::UpdateConstants();	// UNOFFICIAL 2026-11-06: last frame's Bend result, reprojected for this frame's lit shaders
+	ReplaceExtras::Bind();	// UNOFFICIAL 2026-11-14 (rt-shadows) the same, for the no-limits replacements (set 4)
 	ScreenSpaceFade = D3DXVECTOR4(ScreenSpaceNearFade * 0.5f, ScreenSpaceNearFade, 0.0f, 0.0f);
 	float displaceBegin = 0.0f, displaceEnd = 0.0f;
 	if (DxvkCompute::DisplaceContactFade(displaceBegin, displaceEnd)) {

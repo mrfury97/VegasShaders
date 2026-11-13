@@ -947,6 +947,23 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
 // including shader opts in (SHADOW_SUN_CONTACT_IN); not in the interior records; not with the sun cross-fade except in the land shaders
 // (the cross-fade owns c146-c166). Registers: s10 (s3 with LiveCube) / c160-c163 / c164 (+ b13 per draw; c148-c152 until 2026-11-08: Wetness.hlsl holds them); the land includers define SHADOW_SUN_CONTACT_LAND: s13 / c183-c187.
 // ---------------------------------------------------------------------------
+// UNOFFICIAL 2026-11-14 (rt-shadows, no-limits replacements) an includer with no sampler left in ps_3_0 (6-7 layer land, the slot-tight
+// and 4+ lamp objects, skin, hair, parallax) sets SHADOW_SUN_CONTACT_EXTRA_IN: its ps_3_0 build stays exactly as before (no lookup),
+// and its no-limits build (NVR_SM4 + NVR_NO_SM3_LIMITS: tools/nvr-dxvk/replace/nolimits.py -> a SPIR-V replacement the DXVK fork runs
+// in its place) takes the forward RT sun from NVR's own resources instead (cbuffer NvrExtra = set 4 binding 0, the texture = set 4
+// binding 1, read with Load: no sampler; core/ReplaceExtras.h binds them every frame). Bend's contact is not taken there (RT only).
+#if defined(NVR_SM4) && NVR_SM4 && defined(NVR_NO_SM3_LIMITS) && NVR_NO_SM3_LIMITS && defined(SHADOW_SUN_CONTACT_EXTRA_IN)
+    #undef SHADOW_SUN_CONTACT_IN
+    #define SHADOW_SUN_CONTACT_IN 1
+    #define SHADOW_SUN_CONTACT_EXTRA 1
+    #ifndef SHADOW_SUN_CONTACT_RT_ONLY
+        #define SHADOW_SUN_CONTACT_RT_ONLY 1
+    #endif
+    #undef SHADOW_SUN_CONTACT_PERDRAW
+#endif
+#ifndef SHADOW_SUN_CONTACT_EXTRA
+    #define SHADOW_SUN_CONTACT_EXTRA 0
+#endif
 #ifndef SHADOW_SUN_CONTACT_IN
     #define SHADOW_SUN_CONTACT_IN 0
 #endif
@@ -958,7 +975,14 @@ float SunCascadeTap(float c, float3 worldPos, float3 worldNormal, float offset, 
 #else
     #define SHADOW_SUN_CONTACT 0
 #endif
-#if SHADOW_SUN_CONTACT
+#if SHADOW_SUN_CONTACT && SHADOW_SUN_CONTACT_EXTRA
+cbuffer NvrExtra : register(b1) {
+    row_major float4x4 TESR_ContactReproject;   // as below
+    float4 TESR_ContactForwardData;
+    float4 TESR_ContactForwardSize;             // xy the texture's size (texels), zw 1 / that
+};
+Texture2D<float4> NVRX_ContactForward : register(t20);
+#elif SHADOW_SUN_CONTACT
 #if SHADOW_SUN_CONTACT_LAND && defined(SHADOW_SUN_CONTACT_S12)
     #define SUN_CONTACT_SAMPLER_REG s12   // (2026-11-14 rt-shadows) the near land, up to 5 layers (TerrainTemplate.hlsl)
     #define SUN_CONTACT_MATRIX_REG c183
@@ -993,6 +1017,8 @@ sampler2D TESR_ContactForward : register(SUN_CONTACT_SAMPLER_REG) = sampler_stat
     #define POINT
     #undef NVR_CONTACT_POINT_WAS_DEFINED
 #endif
+#endif
+#if SHADOW_SUN_CONTACT
 
 // Last frame's sun contact visibility at camera-relative point P: 1 lit, towards 0 in contact shadow. 1 where that frame did not see P.
 #if defined(SHADOW_SUN_CONTACT_PERDRAW)
@@ -1009,7 +1035,11 @@ float2 SunForwardLookup(float3 P) {
     float2 uv = float2(0.5f, -0.5f) * clip.xy / clip.w + 0.5f;
     const float miss = TESR_ContactForwardData.x > 2.5f ? 0.0f : 1.0f;   // BendDebug 2: misses black
     [branch] if (any(abs(uv - 0.5f) > 0.5f)) return float2(miss, -1.0f);
+#if SHADOW_SUN_CONTACT_EXTRA
+    float3 c = NVRX_ContactForward.Load(int3(min(uv * TESR_ContactForwardSize.xy, TESR_ContactForwardSize.xy - 1.0f), 0)).rgb;
+#else
     float3 c = tex2Dlod(TESR_ContactForward, float4(uv, 0.0f, 0.0f)).rgb;
+#endif
     [branch] if (c.g <= 0.0f || abs(c.g - clip.w) > abs(TESR_ContactForwardData.y) * clip.w) return float2(miss, -1.0f);
     // Bend: past its start distance (the cascades' reach), faded in
     float bend = clip.w <= TESR_ContactForwardData.z || TESR_ContactForwardData.x > 2.5f ? 1.0f :
