@@ -129,6 +129,9 @@ namespace RtAmbient {
 		// (settings cleanup 2026-11-13): the history cut by energy (R2), the trace input from one pixel (R4), the hit textures' mip (R19) and the denoiser's
 		// guide worked out once (B2) are simply how it works; GICandidates and GISpatialVisibility were measured useless and are gone.
 		int		GIDenoiseTune = 2;
+		// UNOFFICIAL 2026-11-16 (rtgi-review; user: grass still sparkles in the shade) GIGrassDenoise (0-3, RtDenoisedGI with the guide): RtDenoise Settings.Soft:
+		// 1 = the GI denoiser keeps its history on grass, 2 = its a-trous passes smooth across the blades, 3 = both (default).
+		int		GIGrassDenoise = 3;
 		// UNOFFICIAL 2026-11-13 (rtgi-review B3, REVIEW.md R3 / R18) GISamplePoints (default false until benched; a missing key: false): ReSTIR GI with the
 		// sample's geometry (RtAOTrace.comp ReuseGIPoints): cosine at the receiving surface, Jacobian and one visibility ray on spatial reuse. GIValidate
 		// (default true, with GISamplePoints): 1 texel in 8 a frame re-traces the ray to its kept sample point and drops the history when the geometry changed.
@@ -222,6 +225,7 @@ namespace RtAmbient {
 			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
 			// UNOFFICIAL 2026-11-13 (rtgi-review)
 			Current.GIDenoiseTune = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseTune") ? std::clamp((int)node.IntValue, 0, 2) : 2;
+			Current.GIGrassDenoise = TheSettingManager->Config.FillNode(&node, s, "GIGrassDenoise") ? std::clamp((int)node.IntValue, 0, 3) : 3;
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
 			Current.GIScreenAmbientOut = TheSettingManager->Config.FillNode(&node, s, "GIScreenAmbientOut") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;

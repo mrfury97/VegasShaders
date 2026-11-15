@@ -315,7 +315,7 @@ namespace RtDenoise {
 			tried = true;
 			temporal = Make("RtDenoiseTemporal", 5, 192, 1, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-03: + rect)	// 2026-10-31: + motion, backbone (stand-ins when off)
 			atrous = Make("RtDenoiseAtrous", 3, 48);
-			temporalRgb = Make("RtDenoiseTemporalRgb", 7, sizeof(TemporalPush), 3, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-07: + the captured normals, PeopleHistory; ptaaa-denoiser: + the firefly excess target)
+			temporalRgb = Make("RtDenoiseTemporalRgb", 8, sizeof(TemporalPush), 3, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-16: + the soft mask, Settings.Soft)	// (2026-11-07: + the captured normals, PeopleHistory; ptaaa-denoiser: + the firefly excess target)
 			fireflyPipe = Make("RtDenoiseFirefly", 3, sizeof(FireflyPush), 2);	// (2026-11-07 ptaaa-denoiser) AntiFirefly's spread (a missing .spv: AntiFirefly off)
 			backbonePipe = Make("RtBackbone", 3, 160);
 			atrousRgb = Make("RtDenoiseAtrousRgb", 5, 48, 2);	// (2026-11-07: + the guide frame and albedo)
@@ -434,8 +434,16 @@ namespace RtDenoise {
 			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? (S.People ? S.People : Texture("TESR_CapturedNormalsBuffer")) : nullptr;
 			t.peopleCap = captured ? RtHistoryTime::Frames(S.PeopleHistory, clock) : 0.0f;
 			t.antiLag = (std::max)(S.AntiLag, 0.0f);
-			IUnknown* temporalImages[7] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth };
-			if (!spec) ok = nowA && nowB && excess && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB, excess);
+			// UNOFFICIAL 2026-11-16 (rtgi-review) Settings.Soft: the albedo buffer as the soft mask (image 7; a stand-in when off), bit 1 rides in
+			// backbone.w (+ 2; RtDenoiseTemporalRgb.frag only: the specular pass gets its own copy of the head, taken from t, without it)
+			const int soft = !spec && S.GuideAlbedo ? S.Soft : 0;
+			IUnknown* temporalImages[8] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth,
+				soft ? (IUnknown*)S.GuideAlbedo : (IUnknown*)depth };
+			if (!spec) {
+				TemporalPush tr = t;
+				if (soft & 1) tr.backbone[3] += 2.0f;
+				ok = nowA && nowB && excess && Draw(temporalRgb, nowA, temporalImages, 8, &tr, sizeof(tr), nowB, excess);
+			}
 			else {	// (2026-11-07 ptaaa-denoiser) the specular temporal pass: + the roughness and history C; its push = t's head + spec before the sampler
 				IDirect3DSurface9* nowC = Surface(d->historyC[now]);
 				SpecPush ts = {};
@@ -475,6 +483,7 @@ namespace RtDenoise {
 				a.specular = (spec ? 1u : 0u) | (rgb && S.AntiFirefly > 0.0f && fireflyPipe ? 2u : 0u);	// (2026-11-07 ptaaa-denoiser) bit 0 specular mode (the roughness in the guide frame's slot), bit 1 the symmetric test (AntiFirefly)
 				const bool mirrorSurface = spec && S.MirrorSurface;	// (2026-11-09 pt-mirrors) bit 2: the marked mirrors smoothed (the raw image's hit distance in the guide albedo's slot)
 				if (mirrorSurface) a.specular |= 4u;
+				if (guide && (S.Soft & 2)) a.specular |= 16u;	// UNOFFICIAL 2026-11-16 (rtgi-review) bit 4: Settings.Soft, texels without an albedo texel are one soft surface
 				if (guide && S.GuideOnce && i > 0) a.specular |= 8u;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) bit 3: the guide's value is in B's blue (the pass before wrote it)
 				a.historyFix = RtHistoryTime::Frames((std::max)(S.HistoryFix, 0.0f), clock);	// (2026-11-07 ptaaa-denoiser; perf-history: frames at 60 fps)
 				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,

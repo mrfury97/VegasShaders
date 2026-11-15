@@ -12,6 +12,12 @@ layout(set = 1, binding = 3) uniform texture2D t_historyB;   // last frame's out
 layout(set = 1, binding = 4) uniform texture2D t_motion;     // UNOFFICIAL 2026-10-31 DenoiseBackbone: as RtDenoiseTemporal.frag
 layout(set = 1, binding = 5) uniform texture2D t_backbone;
 layout(set = 1, binding = 6) uniform texture2D t_captured;   // (2026-11-07) TESR_CapturedNormalsBuffer (a stand-in when peopleCap is 0)
+// UNOFFICIAL 2026-11-16 (rtgi-review, Settings.Soft bit 1: backbone.w + 2): the albedo buffer (full size; alpha 1 where a template wrote the
+// pixel, 0 on grass and whatever else the game's own shaders draw). A texel half or more of whose pixels have none is SOFT: grass blades sit
+// each at their own depth, sway, and their cut-out is hashed under TAA / DLSS, so the disocclusion mask called them newly seen every frame
+// and the depth test threw their history away: one raw sample a texel, for ever (the sparkles on grass in the shade). A soft texel keeps its
+// history: the mask does not restart it and the depth may differ by 25 % (the blade in front last frame, the ground behind it now).
+layout(set = 1, binding = 7) uniform texture2D t_soft;
 
 layout(push_constant) uniform Push {
     mat4 prevViewProj;
@@ -21,7 +27,7 @@ layout(push_constant) uniform Push {
     vec4 move;           // xyz camera move, w 1: reset
     vec4 params;         // x max history, y depth tolerance
     vec4 backbone;       // x 1: subtract the object motion, y 1: the shared disocclusion mask restarts, z the history cap on moving
-                         // pixels (0 none), w 1: half size (the mask's 2 x 2)
+                         // pixels (0 none), w 1: half size (the mask's 2 x 2), + 2 (2026-11-16): Settings.Soft (t_soft)
     vec4 rect;           // (2026-11-03) RenderScale < 1: xy this frame's RenderRect scale (the signal is in the top-left xy part),
                          // zw last frame's (its history's part); 1 when off
     uint samplerIndex;
@@ -110,7 +116,14 @@ void main() {
     vec4 b = vec4(luma(c) * luma(c), viewZ, NVR_FIREFLY_K > 0.0 ? luma(c) : l, NVR_FIREFLY_K > 0.0 ? l : l * l);
     // (2026-10-31, rt-ao-sky) at half size (backbone.w 1) the mask over this pixel's 2 x 2 full-size pixels (uv sits on their corner):
     // a thin newly seen edge is not missed by the one tap a point sample takes
-    const bool fresh = pc.backbone.y > 0.5 && (pc.backbone.w > 0.5
+    const bool halfSize = mod(pc.backbone.w, 2.0) > 0.5;
+    bool soft = false;
+    if (pc.backbone.w > 1.5) {   // (Settings.Soft) at half size the texel's 2 x 2 full-size pixels (uv sits on their corner), else its own
+        const vec4 written = halfSize ? textureGather(sampler2D(t_soft, NVR_SAMPLER(pc.samplerIndex)), uv, 3)
+            : vec4(textureLod(sampler2D(t_soft, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a);
+        soft = dot(step(written, vec4(0.5)), vec4(1.0)) >= 2.0;
+    }
+    const bool fresh = !soft && pc.backbone.y > 0.5 && (halfSize
         ? any(greaterThan(textureGather(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 2), vec4(0.5)))
         : textureLod(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).b > 0.5);
     if (pc.move.w < 0.5 && viewZ > 0.0 && !fresh) {
@@ -136,7 +149,7 @@ void main() {
         if (clip.w > 0.0) {
             if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)))) {
                 vec4 ha, hb;
-                if (HistoryAt(prevUv, clip.w, pc.params.y * max(clip.w, 1.0), ha, hb)) {
+                if (HistoryAt(prevUv, clip.w, (soft ? max(pc.params.y, 0.25) : pc.params.y) * max(clip.w, 1.0), ha, hb)) {
                     // (2026-11-06) HistoryClamp (PTDenoiseClamp): a moving camera / light leaves the history describing light that is no
                     // longer there (a trailing shadow, a lamp's pool lagging); clamp it to what this frame's 3 x 3 neighbourhood allows,
                     // wide (clampK deviations: one noisy path a pixel has a wide spread) so a still picture keeps accumulating.

@@ -715,6 +715,11 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 			s.GuideAlbedo = CapturedNormals::AlbedoTexture;
 			s.GuideSigma = 0.5f;
 			s.GuideOnce = true;	// UNOFFICIAL 2026-11-13 (rtgi-review B2; no key since the settings cleanup)
+			// UNOFFICIAL 2026-11-16 (rtgi-review; user: "its sparkling still under shadow", GIGrassBlur on or off) GIGrassDenoise: grass (no albedo texel) is one
+			// soft surface for the denoiser (RtDenoise.h Settings.Soft). Slot F, Zone, clear weather 10:00, the bounce alone: grass in the sun was calm, grass
+			// in the shade flickered 10-20 times more than solid ground beside it (there the bounce comes from a few sunlit spots: a high-variance sample, and
+			// on grass nothing averaged it: no history, no a-trous tap).
+			s.Soft = RtAmbient::Current.GIGrassDenoise;
 		}
 		// UNOFFICIAL 2026-11-13 (rtgi-review R9 / R10) GIDenoiseTune (0 off = the settings above; 1; 2 default): 1 = MeanVariance 4 (the a-trous brightness test
 		// with the variance of the accumulated mean: a converged pixel is no longer smoothed as hard as a new one) + HistoryFix 3 (a newly seen pixel is
@@ -723,7 +728,7 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 		if (RtAmbient::Current.GIDenoiseTune >= 1) { s.MeanVariance = 4.0f; s.HistoryFix = 3.0f; }
 		if (RtAmbient::Current.GIDenoiseTune >= 2) s.HistoryClamp = 0.0f;
 		static bool sunGiLogged = false;
-		if (!sunGiLogged) { sunGiLogged = true; Logger::Log("UNOFFICIAL SunGI: the GI denoiser runs with HistoryClamp 1.5, kernel 5 x 3 passes%s%s (GIDenoiseSunGI).", s.Guide ? ", guided by the lit frame + albedo buffer (sigma 0.5)" : ", unguided (no albedo buffer this frame)", s.ObjectMotion ? ", object motion" : ""); }
+		if (!sunGiLogged) { sunGiLogged = true; Logger::Log("UNOFFICIAL SunGI: the GI denoiser runs with HistoryClamp 1.5, kernel 5 x 3 passes%s%s (GIDenoiseSunGI).", s.Guide ? (s.Soft ? ", guided by the lit frame + albedo buffer (sigma 0.5), grass as one soft surface (GIGrassDenoise)" : ", guided by the lit frame + albedo buffer (sigma 0.5)") : ", unguided (no albedo buffer this frame)", s.ObjectMotion ? ", object motion" : ""); }
 	}
 	result = RtDenoise::Run(denoiser, Device, gi, rtDenoisedGISurface, s);
 	static bool logged = false;
