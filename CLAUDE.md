@@ -1,10 +1,65 @@
-# TESReloaded10 — Dev Notes for Claude
+# Room 02: New Vegas Reloaded (Vegas Shaders)
 
-## Project
-Vegas Shaders (formerly New Vegas Reloaded, NVR) — a post-process graphics injector for Fallout: New Vegas.
-Built as a 32-bit DLL, `VegasShaders.dll` (project NewVegasReloaded.vcxproj, `TargetName` VegasShaders), injected via xNVSE.
+Claude Code reads this file at the start of every session. The shared rules (about me, what needs my word, how to talk, decide,
+test and run sessions, safety, coding standards) live in `F:\Claude Brain\CLAUDE.md`, one folder up, which Claude Code loads
+too; this file adds what is specific to Vegas Shaders. The second half ("Project notes") is the technical knowledge gathered so far.
 
-### Runtime names (2026-11-02 rename) — `src/core/Paths.h/.cpp` owns every one
+Shared rules load automatically from `F:\Claude Brain\CLAUDE.md` (parent folder). Tool paths: `F:\Claude Brain\00_GLOBAL\TOOL_PATHS.md`.
+
+## What this room does
+Rendering: the Vegas Shaders plugin, DX9 and DXVK, the deferred renderer, shadows, post-processing and shaders, rendering
+performance. Not here: other engine plugins (room 01), pure engine research (room 05), cross-project test runs (room 06).
+Room index: `F:\Claude Brain\ROOMS.md`.
+
+## This repo and install
+- Repo: `F:\Claude Brain\VS`, cloned from my fork github.com/mrfury97/VegasShaders (remote `origin`, branch `main`); the original
+  github.com/adeesababa/VegasShaders is remote `upstream` (read only for me). Build output: `F:\VS-build`.
+  Scratch for big files: `F:\VS-scratch`.
+- Vegas Shaders is installed as the MO2 mod `VegasShaders-1.1.0` (enabled). Other VS mods in that profile: `VS RT test room` and
+  `VegasShaders-1.0.1-DLSS-helper` (enabled); `VegasShaders` and `VegasShaders-1.0.2-RT-lamp-shadows-test-2(1)` (disabled).
+  Old `NewVegasReloaded.dll` mods exist but none of them is enabled; keep it that way (two plugins must not load).
+- Decompiled game code sits in `NV source code\` in this folder and `IDA9\` holds the IDA copy that is never run; both are
+  excluded from git locally (`.git\info\exclude`). Address lookup: `F:\Claude Brain\fnv_decomp\build\units.json`.
+- Without asking you may also install into the `VegasShaders-1.1.0` MO2 mod (game closed, backup script, see the shared rules).
+
+## Agents in this room (`.claude\agents\`)
+`lead-architect` (reviews plans and diffs, read only), `shader-engineer` (HLSL and GLSL), `renderer-engineer` (C++ render
+pipeline), `performance-engineer` (frame time and profiling), `qa-engineer` (builds, offline checks, in-game tests),
+`research-agent` (engine, Gamebryo, DX9 and DXVK facts, read only). Risky changes get a `lead-architect` review before they are
+committed or installed.
+
+## The project in brief
+- Vegas Shaders (formerly New Vegas Reloaded) is a 32-bit xNVSE plugin for Fallout: New Vegas: `VegasShaders.dll`, built from
+  `NewVegasReloaded\NewVegasReloaded.vcxproj` (Release, Win32, MSVC toolset v142). Build command: "Build/deploy workflow" below.
+- Shaders under `src\hlsl\NewVegas\` are compiled at runtime, not built into the DLL: a shader change ships as files under
+  `<game>\Data\Shaders\VegasShaders\`. The shader cache reuses an entry only when the whole preprocessed text matches, so editing a
+  shared include recompiles every shader that uses it (minutes on a slow PC).
+- One folder per effect in `src\effects\<Name>\` with its C++, `README.md` and `defaults.toml`. Read the effect's README before
+  changing it and update it in the same change (details under "Effects are modular" below).
+- Settings: `resource\VegasShaders.defaults.toml` is what ships; a key missing from it is not read. Changing a default that players
+  may have saved needs a migration step in `Configuration::UpdateOldDefaults()` (`src\core\SettingManager.cpp`) and a higher
+  settings version, because the menu's Save writes every key.
+- Many players run the game under DXVK: window messages for keys, mouse wheel and raw input never reach the plugin, so menu input
+  is polled with `GetAsyncKeyState`. Read "DXVK input" below before touching input.
+- Check xNVSE (`src\NewVegas\nvse\`) before writing your own hook for input, UI or game objects.
+- Ray-traced effects run in a separate 64-bit helper through the project's DXVK fork, because 32-bit Vulkan has no ray tracing.
+- Design docs live in `docs\`. There is no doc index yet; when a doc goes stale, rewrite or delete it rather than leaving it.
+
+## Product rules
+- A feature that works ships on by default. Flipping a default that players may have saved needs a migration.
+- One switch, preset or quality level beats several separate switches.
+- **Deferred first (set by me 2026-11-18).** Shading and lighting work targets the deferred path first: the G-buffer
+  (COLOR2 bumped normal and material, COLOR3 smooth normal and distance), the deferred sun and lamp passes, and effects
+  that read them. Change the forward templates only for geometry that stays forward (water, sky, particles, decals,
+  first person, distant trees, glass, menus), and so that `DeferredRenderer = 0` still renders correctly; it need not gain
+  the feature. Every plan says which path each change uses, and why when it's forward. Background:
+  `docs\deferred-vs-forward.md` (on `vs-1.1.0-plus-fork`).
+
+---
+
+# Project notes
+
+## Runtime names (2026-11-02 rename) — `src/core/Paths.h/.cpp` owns every one
 | New | Old (still read when the new one is missing) |
 |---|---|
 | `Data\NVSE\Plugins\VegasShaders.dll` (+ `.pdb`) | `NewVegasReloaded.dll` (an old copy left beside the new one is logged as an error: two plugins) |
@@ -21,9 +76,14 @@ settings section/key, `TESR_*` names, preset formats, log line tags, and the leg
 New code that touches a runtime file or folder goes through `Paths::` (or `VS_LOGS_FOLDER` for the logs), never a literal path.
 
 ## Build/deploy workflow
-The user does **not** use `build.bat`. They compile the DLL themselves and always patch a
-live install by hand. When a change touches this repo, tell them exactly which files to copy
-and where, rather than pointing at `build.bat` or assuming a fresh `robocopy /mir` deploy:
+Don't use `build.bat` (it wipes and mirrors a deploy folder). Build with msbuild into `F:\VS-build` (proven 2026-11-18, about 2 minutes, warnings only; PowerShell, `$r` = repo root):
+`& "F:\Tools\VS2022BT\MSBuild\Current\Bin\MSBuild.exe" "$r\NewVegasReloaded\NewVegasReloaded.vcxproj" /p:Configuration=Release /p:Platform=Win32 "/p:SolutionDir=$r\\" /p:OutDir=F:\VS-build\ /p:IntDir=F:\VS-build\obj\ /m /nologo /v:minimal`
+(end the quoted SolutionDir with `\\`: a single `\` escapes the quote, MSB4184). Offline checks, built under `build\`:
+`effect-test\effect_compile.exe <file.fx.hlsl>` (D3DX only; Exposure and VolumetricFog fail there but load in game) and
+`template-compile\template_compile.exe <template> <profile> NAME[=VALUE]...`. Then install by copying only
+the changed files into the MO2 mod folder `E:\Mod Organizer 2 (Archive)-6194-2-1-5 (1)\mods\VegasShaders-1.1.0\` (its
+`NVSE\Plugins\` and `Shaders\VegasShaders\`), game closed, with the backup script from "How to test". Then tell the user in one
+line what changed. When installing somewhere else (another PC, a tester), list exactly which files go where:
 - `VegasShaders.dll` (+ `.pdb` if useful for a crash) -> `<deploy>\nvse\Plugins\`. If that folder still has an old
   `NewVegasReloaded.dll`, tell them to delete or rename it (two copies of the plugin must not load).
 - Any new/changed runtime `.hlsl` files under `src/hlsl/NewVegas/Shaders/` -> the same relative
@@ -113,8 +173,7 @@ Always check xNVSE (`src/NewVegas/nvse/`) before writing custom hooks for anythi
   `src/hlsl/NewVegas/`, mirroring the game's `Shaders\VegasShaders\` layout). Index: `src/effects/INDEX.md` (`tools/effects_index.py`).
 - **Read the effect's README.md before changing it, and update it in the same change.** A stale doc is worse than none.
 - Settings defaults: edit the fragment (`src/effects/<Name>/defaults.toml`, or `resource/defaults/<Name>.toml` / `Core.toml` for sections
-  without an effect folder), then `py -3.11 -I tools/defaults_tool.py merge .`; `check` verifies the committed
+  without an effect folder), then `py -3.10 -I tools/defaults_tool.py merge .` (this PC has only Python 3.10); `check` verifies the committed
   `resource/VegasShaders.defaults.toml` matches. A new section also needs its line in `resource/defaults/ORDER.txt`.
 - Frame order: `src/core/EffectChain.cpp` (two ordered step tables, pre- and post-tonemap). Adding an effect = a step there, a member in
   `ShaderManager` (Effects struct + registration), its folder, its README.
-
