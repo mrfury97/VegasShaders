@@ -11,14 +11,9 @@ void SharpeningEffect::UpdateSettings(){
 	Exterior = D3DXVECTOR4(TheSettingManager->GetSettingF("Shaders.Sharpening.Main", "Strength"),
 		TheSettingManager->GetSettingF("Shaders.Sharpening.Main", "Clamp"),
 		TheSettingManager->GetSettingF("Shaders.Sharpening.Main", "Offset"), 0.0f);
-	// UNOFFICIAL 2026-11-13 (fork port) [Shaders.Sharpening.Main] CAS (both places; a missing key: off): AMD FidelityFX CAS in place of the
-	// old filter, in w (Sharpening.fx.hlsl / Compute/Sharpening.frag). Strength is then CAS's sharpness, 0..1.
-	SettingManager::Configuration::ConfigNode node;
-	const float cas = TheSettingManager->Config.FillNode(&node, "Shaders.Sharpening.Main", "CAS") && node.BoolValue ? 1.0f : 0.0f;
-	Exterior.w = cas;
 	Interior = D3DXVECTOR4(TheSettingManager->GetSettingF("Shaders.Sharpening.Interiors", "Strength"),
 		TheSettingManager->GetSettingF("Shaders.Sharpening.Interiors", "Clamp"),
-		TheSettingManager->GetSettingF("Shaders.Sharpening.Interiors", "Offset"), cas);
+		TheSettingManager->GetSettingF("Shaders.Sharpening.Interiors", "Offset"), 0.0f);
 	Constants.Data = TheShaderManager->GameState.isExterior ? Exterior : Interior;
 }
 

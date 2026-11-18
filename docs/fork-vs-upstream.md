@@ -26,8 +26,9 @@ replacing `main` waits for the user's word after the in-game check.
 - RT texture table ("atlas full") fix: upstream's kept (idle-longest slot reuse + `RealTextureKeepFrames` release + the ported VRAM
   budget). The fork's COM-count sweep was measured only against the old code, not against upstream's design, and would redo 31 conflict
   hunks in `RtCore.cpp`.
-- CAS sharpening: upstream's kept (the same CAS code behind `[Shaders.Sharpening.Main] CAS = false`, Strength 0.75). Sharpening is off by
-  default; making CAS the only filter would change the picture for players who switched sharpening on. Left for the user (Open).
+- CAS sharpening (owner decision 2026-11-18: "include CAS"): CAS is the only filter again, Strength 0.5, upstream's `CAS` switch folded in
+  (one switch). Sharpening stays off by default. Settings step 90 moves a saved Strength 0.75 to 0.5 (unless the saved `CAS` was true) and
+  removes the `CAS` key. Maths identical to upstream's CAS path; the fork's `.spv` rebuilds byte for byte.
 - `GpuProfile` test key: dropped (a bench aid only).
 - The other four: ported (table above).
 
@@ -66,8 +67,10 @@ helper only adds a free-memory cap on start-up compile workers), the old `GunFX.
 - Anything in game. First start recompiles the changed shaders (minutes on a slow PC).
 
 ## Open
-- In-game check (see the report): deferred renderer, RT on the RTX card, TAA + FSR at 67 % render scale, contact shadows now off by default.
-- User's choice: make CAS the only sharpening filter (Strength 0.5, a migration), or keep upstream's switch (old filter by default).
+- In-game check (see the report): deferred renderer, RT on the RTX card, TAA + FSR at 67 % render scale, contact shadows now off by default,
+  CAS sharpening (switch Sharpening on in the menu: near surfaces crisper, no halos on strong edges, far land and sky untouched).
+- Settings version 90 is this branch's own: if upstream's next release also uses 90 for another step, a player who ran this build skips
+  it. Renumber ours above upstream's on the next upstream merge.
 - User's word: replace `main` (and GitHub) with this branch, or keep the fork as it is.
 - Upstream code points to `docs/next/*.md` from 209 places, but neither repo has `docs/next/`.
 - Upstream's fragments vs shipped defaults mismatch (58 lines): fix the fragments or ask upstream.

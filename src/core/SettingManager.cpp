@@ -58,7 +58,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 89;  // (89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 90;  // (90, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -853,6 +853,23 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 				changed += std::string(changed.empty() ? "" : ", ") +
 					"Main.Main.Quality.DeferredTransparents 0 -> 1 (glass under the new renderer, settings step 89: the silver-bottle fix is in; a restart key: compiled in from this start)";
 			}
+		}
+	}
+	// 90 (2026-11-18, owner decision: "include CAS"): Sharpening is AMD FidelityFX CAS only (the fork's filter; 1.1.0 had it behind
+	// [Shaders.Sharpening.Main] CAS = false, the old box-average filter by default). Strength is now CAS's sharpness, 0-1, default 0.5: a
+	// menu save holds the old filter's 0.75 (outdoors and indoors), which moves to 0.5 once; another saved value is a choice and stays (it
+	// reads as a CAS sharpness, clamped to 0-1). A player who had switched CAS on already saw CAS at their Strength: theirs stays. The CAS
+	// switch is gone: a saved one is removed here, so it is not reported as unknown. Enabled is untouched (off by default, as before).
+	if (version < 90) {
+		tomlValue* saved = UserSection("Shaders.Sharpening.Main");
+		const bool casWasOn = saved && saved->is_table() && saved->contains("CAS") && saved->at("CAS").is_boolean() && saved->at("CAS").as_boolean();
+		if (!casWasOn) {
+			replace("Shaders.Sharpening.Main", "Strength", 0.75, 0.5, false);
+			replace("Shaders.Sharpening.Interiors", "Strength", 0.75, 0.5, false);
+		}
+		if (saved && saved->is_table() && saved->contains("CAS")) {
+			saved->as_table().erase("CAS");
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.Sharpening.Main.CAS removed (CAS is now the only sharpening filter)";
 		}
 	}
 	if (!changed.empty())

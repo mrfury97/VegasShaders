@@ -2359,10 +2359,10 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.SMAA.Main", "Threshold", "Edge sensitivity", nullptr, "How easily edges are found. Lower smooths more of the picture but can soften detail." },
 	// Sharpening (Main)
 	{ "Shaders.Sharpening.Main", "Strength", "Sharpening strength", nullptr, "How much the picture is sharpened." },
-	{ "Shaders.Sharpening.Main", "Offset", "Sharpening width", nullptr, "How wide the sharpening reaches. Wider looks coarser." },
+	{ "Shaders.Sharpening.Main", "Offset", "Sharpening distance", nullptr, "How far from you the sharpening reaches before it fades out (thousands of units). 0 = no sharpening." },
 	// Sharpening (Interiors)
 	{ "Shaders.Sharpening.Interiors", "Strength", "Sharpening strength", nullptr, "How much the picture is sharpened." },
-	{ "Shaders.Sharpening.Interiors", "Offset", "Sharpening width", nullptr, "How wide the sharpening reaches. Wider looks coarser." },
+	{ "Shaders.Sharpening.Interiors", "Offset", "Sharpening distance", nullptr, "How far from you the sharpening reaches before it fades out (thousands of units). 0 = no sharpening." },
 	// DitherBuster (Main)
 	{ "Shaders.DitherBuster.Main", "Strength", "Strength", nullptr, "How strongly the dotted patterns on edges are smoothed out." },
 	{ "Shaders.DitherBuster.Main", "Radius", "Smoothing reach", nullptr, "How far along edges the smoothing reaches." },
