@@ -734,15 +734,6 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			logCompilerMessages(messages, Name);
 			EffectStatus::ShaderLoaded(binary ? EffectStatus::Compiled : EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
 			if (!binary) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
-			// UNOFFICIAL 2026-11-12 (fork port): a failed compile leaves the exact text D3DX was given, already preprocessed with this
-			// record's runtime defines, as <binary>.failed.hlsl. The offline template tool cannot reproduce it: its newer compiler fits
-			// shaders the game's D3DX9 one rejects, and its define list lacks the runtime ones. A later good compile removes the file.
-			const std::string failedPath = binaryPath + ".failed.hlsl";
-			if (!binary && source) {
-				std::ofstream failedFile(failedPath, std::ios::out | std::ios::binary);
-				failedFile.write((const char*)source->GetBufferPointer(), source->GetBufferSize());
-			}
-			else if (binary) DeleteFileA(failedPath.c_str());
 			if (binary) {
 				function = binary->GetBufferPointer();
 				std::ofstream binaryFile(binaryPath, std::ios::out | std::ios::binary);
@@ -760,6 +751,17 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 				else Logger::Log("Shader compiled: %s", binaryPath.c_str());
 			}
 		}
+
+		// UNOFFICIAL 2026-11-12 (fork port): no binary from any route (this compile, or a ParallelShaderCompile worker's) leaves the exact text
+		// D3DX was given, already preprocessed with this record's runtime defines, as <binary>.failed.hlsl. The offline template tool cannot
+		// reproduce it: its newer compiler fits shaders the game's D3DX9 one rejects, and its define list lacks the runtime ones. A binary
+		// (compiled or from the cache) removes an old one.
+		const std::string failedPath = binaryPath + ".failed.hlsl";
+		if (!function && source) {
+			std::ofstream failedFile(failedPath, std::ios::out | std::ios::binary);
+			failedFile.write((const char*)source->GetBufferPointer(), source->GetBufferSize());
+		}
+		else if (function) DeleteFileA(failedPath.c_str());
 
 		const HRESULT tableResult = D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table);
 		if (FAILED(tableResult)) {
