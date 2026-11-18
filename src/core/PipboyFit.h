@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cctype>
 #include <algorithm>
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale (crash fix)
 
 namespace PipboyFit {
 
@@ -51,6 +52,30 @@ namespace PipboyFit {
 
 	inline std::string Lower(const char* s) { std::string r = s ? s : ""; for (char& c : r) c = (char)std::tolower((unsigned char)c); return r; }
 
+	// UNOFFICIAL 2026-11-18 crash fix (a tester's CrashLogger 2026-11-18-09-20-54: ForGeometry -> _stricmp on a bone of a mod's first-person
+	// "VirtualLegs" mesh, BSDismemberSkinInstance, whose name pointer read 0xC1880000 = -17.0f: one of its skin's bone slots pointed at
+	// something that is not a live node). The forearm bones are no longer found by reading the name of every bone a skin points at: once a
+	// frame they are looked up by name in the player's own skeletons (live nodes: the third-person body and the first-person skeleton), and
+	// a mesh's bone slots are only compared with those pointers, never read through. Every node of each name in both skeletons is kept
+	// (a mod may hang a second copy of the skeleton under the player, a first-person body or legs) and a mesh matches any of them whatever
+	// the view, as the name match did.
+	inline const char* const kBoneNames[3] = { "Bip01 L ForeTwist", "Bip01 L Forearm", "Bip01 L Hand" };
+	inline const NiAVObject* PlayerBones[3][8] = {};	// [L ForeTwist, L Forearm, L Hand][up to 8 nodes of that name]
+	inline int PlayerBoneCount[3] = {};
+	inline void FindNamed(const NiAVObject* root) {
+		const NiAVObject* stack[512];
+		int top = 0;
+		if (root) stack[top++] = root;
+		while (top) {
+			const NiAVObject* o = stack[--top];
+			if (o->m_pcName)
+				for (int k = 0; k < 3; k++)
+					if (PlayerBoneCount[k] < 8 && !_stricmp(o->m_pcName, kBoneNames[k])) PlayerBones[k][PlayerBoneCount[k]++] = o;
+			if (NiNode* n = const_cast<NiAVObject*>(o)->IsNiNode())
+				for (UInt32 i = 0; i < n->m_children.end && top < 512; i++) if (n->m_children.data[i]) stack[top++] = n->m_children.data[i];
+		}
+	}
+
 	inline void BeginFrame() {
 		if (!TheSettingManager) return;
 		const char* section = "Shaders.PipboyFit.Main";
@@ -76,6 +101,9 @@ namespace PipboyFit {
 			Draws[0] = Draws[1] = Skipped = 0;
 		}
 		if (!S.On) return;
+		for (int k = 0; k < 3; k++) PlayerBoneCount[k] = 0;	// (2026-11-18 crash fix, above)
+		FindNamed(Player ? Player->GetNode() : nullptr);
+		FindNamed(Player ? Player->firstPersonNiNode : nullptr);
 		S.ThirdPerson = TheSettingManager->GetSettingI(section, "ThirdPerson") != 0;
 		S.PowerArmor = TheSettingManager->GetSettingI(section, "PowerArmor") != 0;
 		const bool wasInPowerArmor = InPowerArmor;
@@ -114,12 +142,14 @@ namespace PipboyFit {
 		if (!sd || !si->BoneObjects) return;
 		const std::string name = Lower(geometry->m_pcName);
 		for (const std::string& w : S.Exclude) if (name.find(w) != std::string::npos) return;
-		static const char* const bones[3] = { "Bip01 L ForeTwist", "Bip01 L Forearm", "Bip01 L Hand" };
+		// the player's own forearm nodes, compared by pointer (2026-11-18 crash fix: a skin's bone slot is never read through)
+		if (!PlayerBoneCount[0]) return;	// no forearm in the player's skeletons this frame
 		int found[3] = { -1, -1, -1 };
 		for (UInt32 b = 0; b < sd->Bones; b++) {
 			const NiAVObject* o = si->BoneObjects[b];
-			if (!o || !o->m_pcName) continue;
-			for (int k = 0; k < 3; k++) if (found[k] < 0 && !_stricmp(o->m_pcName, bones[k])) found[k] = (int)b;
+			if (!o) continue;
+			for (int k = 0; k < 3; k++)
+				if (found[k] < 0) for (int m = 0; m < PlayerBoneCount[k]; m++) if (o == PlayerBones[k][m]) { found[k] = (int)b; break; }
 		}
 		if (found[0] < 0) return;	// not on the left forearm
 		for (int k = 0; k < 3; k++) ActiveBone[k] = found[k];
@@ -160,7 +190,7 @@ namespace PipboyFit {
 		const NiSkinInstance* si = Active->skinInstance;
 		const NiSkinData* sd = si ? si->SkinData : nullptr;
 		const UInt16 first = part->pBones[0];
-		if (!sd || !sd->BoneData || first >= sd->Bones || !si->BoneObjects[first] || !si->BoneObjects[ActiveBone[0]]) { Off(device); return; }
+		if (!sd || !sd->BoneData || first >= sd->Bones || !SkinBones::Live(si->BoneObjects[first]) || !SkinBones::Live(si->BoneObjects[ActiveBone[0]])) { Off(device); return; }
 		float slots[4] = { -1.0f, -1.0f, -1.0f, S.WristScale };
 		bool any = false;
 		for (UInt16 sl = 0; sl < part->Bones; sl++)

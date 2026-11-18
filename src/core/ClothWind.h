@@ -39,6 +39,7 @@
 #include <condition_variable>
 #include <deque>
 #include "PipboyFit.h"	// UNOFFICIAL 2026-11-03 PipboyFit: its constants go out from DrawPartition too
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale
 #include <memory>
 #include <atomic>
 #include "ClothWeights.h"	// 2026-10-19 round 5: per-vertex weights of worn meshes (mask 5)
@@ -321,6 +322,8 @@ namespace ClothWind {
 		bool actor = false;				// it hangs on a human skeleton (any 'Bip01' bone): without usable legs it does not move at all
 		bool measured = false;			// 2026-10-19: the leg radii are the garment's own (MeasureLegs), not the fixed ones
 		const void* boneData = nullptr; UInt32 bones = 0;	// what it was made from (the skin data can be freed and reused)
+		bool unsure = false;			// 2026-11-18: a bone slot was not a live node (SkinBones.h): worked out again, at most once a frame
+		UInt32 frame = 0;				// the frame it was worked out in (for an unsure one)
 		float pts[12][4] = {};			// L hip, knee, ankle, toe tip, R hip, knee, ankle, toe tip, L elbow, wrist, R elbow, wrist (xyz, radius)
 		float hipZ = 0.0f, kneeZ = 0.0f, groundZ = 0.0f;
 		int bone[5] = { -1, -1, -1, -1, -1 };	// 2026-10-20 skin bone indices: pelvis (or the lowest spine bone), L thigh, L calf, R thigh, R calf
@@ -389,10 +392,12 @@ namespace ClothWind {
 		const NiSkinData* sd = si ? si->SkinData : nullptr;
 		if (!sd || !sd->BoneData || !si->BoneObjects) return none;
 		auto it = Skeletons.find(sd);
-		if (it != Skeletons.end() && it->second.boneData == sd->BoneData && it->second.bones == sd->Bones) return it->second;
+		if (it != Skeletons.end() && (!it->second.unsure || it->second.frame == (TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0)) &&
+			it->second.boneData == sd->BoneData && it->second.bones == sd->Bones) return it->second;
 		if (Skeletons.size() >= 2048) Skeletons.clear();
 		Skeleton k;
 		k.boneData = sd->BoneData; k.bones = sd->Bones;
+		k.frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
 		static const char* const names[12] = { "bip01 l thigh", "bip01 l calf", "bip01 l foot", "bip01 l toe0", "bip01 r thigh", "bip01 r calf",
 			"bip01 r foot", "bip01 r toe0", "bip01 l forearm", "bip01 l hand", "bip01 r forearm", "bip01 r hand" };
 		static const float radius[12] = { 7.0f, 5.0f, 5.0f, 3.5f, 7.0f, 5.0f, 5.0f, 3.5f, 3.5f, 2.5f, 3.5f, 2.5f };
@@ -403,8 +408,10 @@ namespace ClothWind {
 		const UInt32 count = (std::min)(sd->Bones, (UInt32)512);
 		for (UInt32 b = 0; b < count; b++) {
 			const NiAVObject* bone = si->BoneObjects[b];
-			const char* name = bone ? bone->m_pcName : nullptr;
-			if (!name) continue;
+			if (!bone) continue;
+			// (2026-11-18, SkinBones.h) the name copied under SEH: a slot left on a dropped node is skipped, never read through
+			char name[128];
+			if (!SkinBones::Name(bone, name, sizeof(name))) { if (!SkinBones::Live(bone)) k.unsure = true; continue; }
 			if (!_strnicmp(name, "bip01", 5)) k.actor = true;
 			if (!_stricmp(name, "bip01 pelvis")) k.bone[0] = (int)b;
 			else if (!_stricmp(name, "bip01 spine") && k.bone[0] < 0) k.bone[0] = (int)b;	// (replaced by the pelvis when it comes later)
@@ -439,7 +446,7 @@ namespace ClothWind {
 			if (!std::isfinite(k.hipZ) || !std::isfinite(k.kneeZ) || !std::isfinite(k.groundZ) || k.hipZ - k.groundZ > (float)ClothWeights::kMaxLegs) k.ok = false;	// 2026-10-20: broken bone data
 			if (k.ok) MeasureLegs(k, geometry);
 		}
-		if (SkeletonsLogged < 24 || S.LogMatches) {	// the check: bone heights, and how much of the mesh the mask moves
+		if (!k.unsure && (SkeletonsLogged < 24 || S.LogMatches)) {	// the check: bone heights, and how much of the mesh the mask moves (2026-11-18: not for an unsure one)
 			SkeletonsLogged++;
 			const NiGeometryData* gd = geometry->geomData;
 			UInt32 moving = 0, total = 0;
@@ -691,7 +698,7 @@ namespace ClothWind {
 	// Skin bone b: bind (skin) space -> world, i.e. the bone's world transform after its SkinToBone (p' = s R p + t each), as rows r | t.
 	inline bool BoneXf(const NiSkinInstance* si, int b, double out[3][4]) {
 		const NiSkinData* sd = si ? si->SkinData : nullptr;
-		if (b < 0 || !sd || !sd->BoneData || !si->BoneObjects || (UInt32)b >= sd->Bones || !si->BoneObjects[b]) return false;
+		if (b < 0 || !sd || !sd->BoneData || !si->BoneObjects || (UInt32)b >= sd->Bones || !SkinBones::Live(si->BoneObjects[b])) return false;	// (2026-11-18 SkinBones.h)
 		const NiTransform& W = si->BoneObjects[b]->m_worldTransform;
 		const NiTransform& S = sd->BoneData[b].SkinToBone;
 		const double sp[3] = { S.pos.x, S.pos.y, S.pos.z }, wp[3] = { W.pos.x, W.pos.y, W.pos.z };
@@ -1118,6 +1125,9 @@ namespace ClothWind {
 				v->name = std::string("'") + (geometry->m_pcName ? geometry->m_pcName : "?") + "' (" + diffuse->ddsPath1 + ", " + std::to_string(gd->m_usVertices) + " vertices)";
 				v->state = -1;
 				const Skeleton& k = SkeletonOf(geometry);
+				// (2026-11-18) a bone slot not live yet (an item's dropped bones before the game binds its skin): no verdict kept, asked
+				// again at a later draw (it would have said "no legs" for good)
+				if (k.unsure) { v->state = 0; VerdictOfData.erase(gd); return nullptr; }
 				std::vector<UInt16> tris;
 				const NiSkinPartition* sp = geometry->skinInstance ? geometry->skinInstance->SkinPartition : nullptr;
 				if (IsForcedOff(path)) LogVerdict(*v, "ForceOff");
@@ -1478,6 +1488,10 @@ namespace ClothWind {
 		if (!diffuse || !diffuse->ddsPath1) { ZeroFor(device, shadowPass); return; }
 		const bool skinned = geometry->skinInstance != nullptr;
 		if (!Exterior && !skinned) { ZeroFor(device, shadowPass); return; }
+		// UNOFFICIAL 2026-11-18 (NV-SMP-Physics; docs/smp-compatibility.md): a shape SMP simulates carries its "SMP Bones" string extra data
+		// (the plugin's own marker, one per skinned shape); its bones are already moved by the physics, with the weather's wind, so the cloth
+		// wind would move it a second time. Left still here.
+		if (skinned && geometry->ExtraDataNamed("SMP Bones")) { ZeroFor(device, shadowPass); return; }
 		bool cloth;
 		auto known = ByTexture.find(diffuse);
 		if (known != ByTexture.end() && known->second.first == diffuse->ddsPath1) cloth = known->second.second;

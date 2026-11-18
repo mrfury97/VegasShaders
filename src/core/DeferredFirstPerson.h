@@ -42,6 +42,7 @@
 //   - the game's MSAA (the view-model span refuses multisampled targets), the flashlight on (the deferred flashlight lights the world's
 //     pixels only, and the game's flashlight lamp is in no lamp pass of a deferred part), no directional light, the G-buffer not captured
 //     this frame, or anything the passes need missing (they did not load, no stencil in the depth surface).
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale
 #include "DeferredRenderer.h"
 #include "DeferredSkin.h"
 #include "FlashlightDeferred.h"
@@ -294,7 +295,7 @@ namespace DeferredFirstPerson {
 			RECT r;
 			if (skin && skin->SkinData && skin->SkinData->BoneData && skin->BoneObjects) {
 				for (UInt32 i = 0; i < skin->SkinData->Bones; i++)
-					if (skin->BoneObjects[i] && skin->SkinData->BoneData[i].Verts) {
+					if (SkinBones::Live(skin->BoneObjects[i]) && skin->SkinData->BoneData[i].Verts) {
 						const D3DXVECTOR4 s = GearWeather::Sphere(skin->BoneObjects[i]->m_worldTransform, skin->SkinData->BoneData[i].Bound, Eye);
 						if (GearWeather::Near(s) && GearWeather::SphereBox(s, Frame, r)) GearWeather::Grow(box, r, any);
 					}

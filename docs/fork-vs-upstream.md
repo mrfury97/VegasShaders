@@ -2,12 +2,13 @@
 
 The fork (mrfury97/VegasShaders `origin/main`, 46e575e) was compared with upstream 1.1.0 (adeesababa/VegasShaders tag v1.1.0,
 d3477de). Upstream had already absorbed almost all of the fork, so the fork's own items were brought over onto upstream 1.1.0 on the
-side branch `vs-1.1.0-plus-fork`, one commit each, and installed into the MO2 mod for an in-game check. `main` and GitHub are unchanged:
-replacing `main` waits for the user's word after the in-game check.
+side branch `vs-1.1.0-plus-fork`, one commit each, and installed into the MO2 mod for an in-game check. On the owner's word
+(2026-11-18) `main` was replaced by it (merge commit c63362a: the tree is this branch's plus the room 02 files; the old fork history
+stays reachable as its first parent, nothing force-pushed) and pushed.
 
 ## Where things are
 - Branch `vs-1.1.0-plus-fork` (worktree `F:\Claude Brain\VS-110plus`), on top of d3477de. Not pushed.
-- Backup of the old fork main: local branch `backup/fork-main-2026-11-18` = 46e575e.
+- Backup of the old fork main: local branch `backup/fork-main-2026-11-18` = 46e575e (also reachable from `main` through c63362a).
 - Upstream 1.1.0, read only: `F:\Claude Brain\VS-upstream` (detached at d3477de).
 - Build: `F:\VS-build\VegasShaders.dll` (release build: untracked marker `src\core\ReleaseBuild.h` in the worktree, as upstream's
   packages; it leaves out BloodFlow, dust motes, capsule shadows and the test tools). Detailed logs `F:\VS-build\build-110plus*.log`.
@@ -71,6 +72,6 @@ helper only adds a free-memory cap on start-up compile workers), the old `GunFX.
   CAS sharpening (switch Sharpening on in the menu: near surfaces crisper, no halos on strong edges, far land and sky untouched).
 - Settings version 90 is this branch's own: if upstream's next release also uses 90 for another step, a player who ran this build skips
   it. Renumber ours above upstream's on the next upstream merge.
-- User's word: replace `main` (and GitHub) with this branch, or keep the fork as it is.
+- (Done 2026-11-18: `main` replaced by this branch.)
 - Upstream code points to `docs/next/*.md` from 209 places, but neither repo has `docs/next/`.
 - Upstream's fragments vs shipped defaults mismatch (58 lines): fix the fragments or ask upstream.

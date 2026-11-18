@@ -33,6 +33,7 @@
 // Cost (designed for <= 0.15 ms at 1080p with the gun on a third of the screen): two copies of the G-buffer's view-model box (albedo and
 // material, fp16), one pass over the view model's pixels (two noise reads, four layers; a skinned part's bone loop). Nothing at all runs
 // while every amount is 0 (no copy, no pass): dry weather indoors costs nothing.
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale
 #include "CapturedNormals.h"
 #include "ShaderRecord.h"
 #include "RainState.h"
@@ -200,7 +201,7 @@ namespace GearWeather {
 			// the bones that move vertices, the largest bounds first when there are more than 16 (the hands and forearms carry most of the skin)
 			struct B { UInt32 i; float r; } list[128]; int n = 0;
 			for (UInt32 i = 0; i < skin->SkinData->Bones && n < 128; i++)
-				if (skin->BoneObjects[i] && skin->SkinData->BoneData[i].Verts) list[n++] = { i, skin->SkinData->BoneData[i].Bound.Radius * skin->BoneObjects[i]->m_worldTransform.scale };
+				if (SkinBones::Live(skin->BoneObjects[i]) && skin->SkinData->BoneData[i].Verts) list[n++] = { i, skin->SkinData->BoneData[i].Bound.Radius * skin->BoneObjects[i]->m_worldTransform.scale };
 			if (n > kMaxBones) std::partial_sort(list, list + kMaxBones, list + n, [](const B& a, const B& b) { return a.r > b.r; });
 			for (int k = 0; k < n && p.bones < kMaxBones; k++) {
 				Snap& b = p.bone[p.bones++];
