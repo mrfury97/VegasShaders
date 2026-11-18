@@ -1,3 +1,4 @@
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale
 #include "ShadowFaceCull.h"
 #include "../effects/Puddles/PuddleMap.h"	// 2026-11-12 Puddles map mode
 #include "PointShadowSchedule.h"
@@ -44,7 +45,7 @@ static bool SkinnedWorldBound(NiGeometry* geometry, NiBound& out) {
 	float radius = -1.0f;
 	for (UInt32 i = 0; i < data->Bones; i++) {
 		NiAVObject* bone = skin->BoneObjects[i];
-		if (!bone) return false;
+		if (!SkinBones::Live(bone)) return false;	// (2026-11-18 SkinBones.h) a stale slot: no bound from the bones this frame
 		const NiTransform& t = bone->m_worldTransform;
 		const NiBound& b = data->BoneData[i].Bound;
 		if (!(b.Radius >= 0.0f && b.Radius < 1.0e6f) || !(t.scale > 0.0f && t.scale < 1.0e3f)) return false;
@@ -3848,7 +3849,7 @@ static void ViewModelSpheres(NiAVObject* Object, const NiPoint3& Eye, std::vecto
 		NiSkinInstance* Skin = Geo->skinInstance;
 		if (Skin && Skin->SkinData && Skin->SkinData->BoneData && Skin->BoneObjects) {
 			for (UInt32 i = 0; i < Skin->SkinData->Bones; i++)
-				if (Skin->BoneObjects[i] && Skin->SkinData->BoneData[i].Verts) Add(Skin->BoneObjects[i]->m_worldTransform, Skin->SkinData->BoneData[i].Bound);
+				if (SkinBones::Live(Skin->BoneObjects[i]) && Skin->SkinData->BoneData[i].Verts) Add(Skin->BoneObjects[i]->m_worldTransform, Skin->SkinData->BoneData[i].Bound);
 		}
 		else if (Geo->geomData) Add(Geo->m_worldTransform, Geo->geomData->m_kBound);
 		return;

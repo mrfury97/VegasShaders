@@ -10,6 +10,7 @@
 // A draw counts when its geometry is skinned to head bones only (every bone's name has "head", "neck", "hair", "ponytail", "jaw",
 // "eye", "brow", "lip", "tongue" or "hat" in it, at least one "head"), or is not skinned and hangs under a node named like the head bone
 // ("Bip01 Head", "HeadAnims") within 8 parents. The verdict is kept per geometry (cleared now and then: pointers are reused).
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale
 #include <unordered_map>
 
 namespace CharacterObjectReach {
@@ -32,7 +33,10 @@ namespace CharacterObjectReach {
 		return false;
 	}
 
-	inline bool Classify(const NiGeometry* geometry, const char*& why) {
+	// sure (2026-11-18): false when a bone slot was not a live node (SkinBones.h: an item's dropped bones before the game binds its skin);
+	// the verdict is then not kept, and worked out again at the next draw
+	inline bool Classify(const NiGeometry* geometry, const char*& why, bool& sure) {
+		sure = true;
 		const NiSkinInstance* si = geometry->skinInstance;
 		const NiSkinData* sd = si ? si->SkinData : nullptr;
 		if (si && sd && si->BoneObjects) {
@@ -41,8 +45,9 @@ namespace CharacterObjectReach {
 			bool head = false;
 			for (UInt32 b = 0; b < count; b++) {
 				const NiAVObject* bone = si->BoneObjects[b];
-				const char* name = bone ? bone->m_pcName : nullptr;
-				if (!name) continue;
+				if (!bone) continue;
+				static char name[128];	// (why points at it after a return; read at once by the caller's log line)
+				if (!SkinBones::Name(bone, name, sizeof(name))) { if (!SkinBones::Live(bone)) sure = false; continue; }
 				if (!HeadBoneName(name)) { why = name; return false; }
 				if (Contains(name, "head")) head = true;
 			}
@@ -77,16 +82,19 @@ namespace CharacterObjectReach {
 		float flag = 0.0f;
 		if (On && world && geometry) {
 			auto it = Verdicts.find(geometry);
+			bool unsureHead = false, unsure = false;
 			if (it == Verdicts.end()) {
 				const char* why = "";
-				const bool head = Classify(geometry, why);
-				it = Verdicts.emplace(geometry, head).first;
+				bool sure = true;
+				const bool head = Classify(geometry, why, sure);
+				if (!sure) { unsure = true; unsureHead = head; }	// (2026-11-18) not kept: worked out again at the next draw
+				else it = Verdicts.emplace(geometry, head).first;
 				if (LogDraws && Logged < 400) {
 					Logged++;
 					Logger::Log("CharacterObjectReach: '%s' %s (%s)", geometry->m_pcName ? geometry->m_pcName : "?", head ? "HEAD" : "no", why ? why : "");
 				}
 			}
-			flag = it->second ? 1.0f : 0.0f;
+			flag = (unsure ? unsureHead : it->second) ? 1.0f : 0.0f;
 		}
 		if (flag == Sent) return;
 		Sent = flag;

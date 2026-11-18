@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cctype>
 #include <algorithm>
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale (crash fix)
 
 namespace PipboyFit {
 
@@ -189,7 +190,7 @@ namespace PipboyFit {
 		const NiSkinInstance* si = Active->skinInstance;
 		const NiSkinData* sd = si ? si->SkinData : nullptr;
 		const UInt16 first = part->pBones[0];
-		if (!sd || !sd->BoneData || first >= sd->Bones || !si->BoneObjects[first] || !si->BoneObjects[ActiveBone[0]]) { Off(device); return; }
+		if (!sd || !sd->BoneData || first >= sd->Bones || !SkinBones::Live(si->BoneObjects[first]) || !SkinBones::Live(si->BoneObjects[ActiveBone[0]])) { Off(device); return; }
 		float slots[4] = { -1.0f, -1.0f, -1.0f, S.WristScale };
 		bool any = false;
 		for (UInt16 sl = 0; sl < part->Bones; sl++)

@@ -2,6 +2,7 @@
 // tools\nvr-rt-helper (MIT, built on its own, 64-bit); the protocol is tools\nvr-rt-helper\NvrRtProtocol.h. The launch, the shared
 // block, the watchdog and the stop follow UpscalerDlss.cpp (the DLSS helper), which proved them.
 
+#include "SkinBones.h"	// 2026-11-18: a skin's bone slots may be stale
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -2125,7 +2126,7 @@ namespace {
 			for (UInt32 k = 0; k < part.Bones && ok; k++) {
 				const UInt32 g = part.pBones[k];
 				NiAVObject* bone = g < skin->SkinData->Bones ? skin->BoneObjects[g] : nullptr;
-				if (!bone) { ok = false; break; }
+				if (!SkinBones::Live(bone)) { ok = false; break; }	// (2026-11-18 SkinBones.h) a stale slot: the partition is not traced this frame
 				const NiTransform& a = bone->m_worldTransform;
 				const NiTransform& b = skin->SkinData->BoneData[g].SkinToBone;
 				float* m = &palette[k * 12u];
