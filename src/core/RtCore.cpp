@@ -3743,6 +3743,16 @@ namespace {
 		}
 		bool wanted = false;
 		for (const RtCore::User& user : users) wanted = wanted || (!Out(user) && user.Wants && user.Wants());
+		// UNOFFICIAL 2026-11-18 RtCore::SetupAgain: the screen-size stop below, for a user's Setup. Before the "nobody wants" return (the
+		// asking user may want only once its images exist), and only with no exchange open (ExchangeEarly calls this before the last
+		// overlapped exchange is collected; as IdleFrame's pendingN test), so no user's results are dropped.
+		if (setupAgainWhy && state == Core::Running && !recording && !pendingN) {
+			const char* why = setupAgainWhy;
+			setupAgainWhy = nullptr;
+			Stop(why);
+			state = Core::Idle;
+			return false;
+		}
 		// (a running helper stayed up, idle, until the game's exit: now IdleFrame stops it after IdleStopMinutes. 2026-11-12 audit: the hair tint
 		// map is only pruned by the scene walk: no notes while nothing traces)
 		if (!wanted) { RtHairTint::Wanted = false; IdleFrame(); return false; }
@@ -3752,13 +3762,6 @@ namespace {
 		if (state != Core::Running) return false;
 		if (TheRenderManager->width != width || TheRenderManager->height != height) {
 			Stop("the screen size changed (the shared images are made again)");
-			state = Core::Idle;
-			return false;
-		}
-		if (setupAgainWhy && !recording) {	// UNOFFICIAL 2026-11-18 RtCore::SetupAgain: the same stop, for a user's Setup
-			const char* why = setupAgainWhy;
-			setupAgainWhy = nullptr;
-			Stop(why);
 			state = Core::Idle;
 			return false;
 		}
@@ -4346,7 +4349,7 @@ bool RtCore::OthersWant(const char* Name) {	// UNOFFICIAL 2026-11-07 (ptaaa-fog;
 	return false;
 }
 bool RtCore::LeftOut(const char* Name) { for (const char* n : TheCore.leftOut) if (n == Name || (n && Name && !strcmp(n, Name))) return true; return false; }
-void RtCore::SetupAgain(const char* Why) { if (TheCore.state != Core::Off) TheCore.setupAgainWhy = Why; }	// UNOFFICIAL 2026-11-18 (RtCore.h)
+void RtCore::SetupAgain(const char* Why) { if (TheCore.state == Core::Running) TheCore.setupAgainWhy = Why; }	// UNOFFICIAL 2026-11-18 (RtCore.h; a helper still starting runs Setup anyway)
 void RtCore::Restart(const char* Why) {	// UNOFFICIAL 2026-11-02: as a screen-size change (Core::Ready)
 	Core& c = TheCore;
 	if (c.state == Core::Off || c.state == Core::Idle) return;
