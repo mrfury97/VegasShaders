@@ -19,6 +19,7 @@ layout(set = 1, binding = 9) uniform texture2D t_splashN;       // Precipitation
 layout(set = 1, binding = 10) uniform texture2D t_cloud;        // water\water_d.dds (LINEAR mips, WRAP)
 layout(set = 1, binding = 11) uniform texture2D t_puddleN;      // water\water_nrm.dds (LINEAR mips, WRAP)
 layout(set = 1, binding = 12) uniform texture2D t_streak;       // Precipitations\water-streaks_n.dds (LINEAR mips, WRAP)
+layout(set = 1, binding = 13) uniform texture2D t_shadingN;     // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: the shading normals, else TESR_NormalsBuffer (point, CLAMP)
 
 layout(push_constant) uniform Push {
     uint sLin;          // LINEAR, CLAMP (heap index, filled in by the extension)
@@ -33,6 +34,12 @@ layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 o_color;
 
 #include "WetWorldCommon.glsl"
+
+// (2026-11-18 DeferredBumpedNormals) GetWorldNormal on the shading normals: the bumped one while on, else the same normals buffer (WetWorld.fx.hlsl)
+vec3 GetWorldShadingNormal(vec2 uv) {
+    vec4 normal = vec4(texture(sampler2D(t_shadingN, NVR_SAMPLER(pc.sPoint)), uv).xyz * 2.0 - 1.0, 1.0);
+    return (c.view * normal).xyz;
+}
 
 // Shared constants of WetWorld.fx.hlsl (the wet pass's own)
 const float PI = 3.1415926538;	// the shader's PI: Helpers.hlsl's macro (it comes after the file's own PI)
@@ -225,7 +232,7 @@ vec3 GetSSRViewPosition(vec2 uv) {
 
 // FixedReflectionTrace: the corrected hit test (the D3D9 technique's loop exits do not work on the GPU; see WetWorld.fx.hlsl).
 // xy = hit UV, z = visibility (0 = miss).
-vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal) {
+vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal, vec3 groundNormal) {
     vec3 result = vec3(0.0);
     vec3 origin = GetSSRViewPosition(sourceUV);
     vec4 sourceClip = vec4(origin, 1.0) * c.projection;
@@ -234,6 +241,13 @@ vec3 TraceWetReflectionFixed(vec2 sourceUV, vec3 waterNormal) {
     vec3 viewNormal = normalize((vec4(waterNormal, 0.0) * c.view).xyz);
     if (dot(viewNormal, origin) > 0.0) viewNormal = -viewNormal;
     vec3 rayDirection = normalize(reflect(normalize(origin), viewNormal));
+    // (2026-11-18 DeferredBumpedNormals) as WetWorld.fx.hlsl: a ray sent below the surface itself is mirrored about its smooth normal
+    if (dot(groundNormal, groundNormal) > 0.5) {
+        vec3 g = normalize((vec4(groundNormal, 0.0) * c.view).xyz);
+        if (dot(g, origin) > 0.0) g = -g;
+        float below = dot(rayDirection, g);
+        if (below < 0.0) rayDirection = normalize(rayDirection - 2.0 * below * g);
+    }
     origin += viewNormal * PuddleSSRSurfaceBias;
     vec4 projectedOrigin = vec4(origin, 1.0) * c.projection;
     vec4 projectedDirection = vec4(rayDirection, 0.0) * c.projection;
@@ -364,6 +378,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     vec4 worldPos = vec4(c.cameraPosition.xyz + camera_vector, 1.0);
 
     vec3 normal = GetWorldNormal(uv);
+    vec3 shadingNormal = GetWorldShadingNormal(uv);	// (2026-11-18 DeferredBumpedNormals)
     vec3 up = vec3(0.0, 0.0, 1.0);
 
     float floorAngle = smoothstep(0.94, 1.0, dot(normal, up));
@@ -575,7 +590,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         combinedNormals.z));
 
     // Surface normals
-    vec3 baseN = normalize(mix(normal, up, puddlemask));
+    vec3 baseN = normalize(mix(shadingNormal, up, puddlemask));	// (2026-11-18 DeferredBumpedNormals: as WetWorld.fx.hlsl)
     vec3 N = normalize(mix(baseN, combinedNormals, specMask));
 
     N = normalize(N + streakNormalOffset);
@@ -727,8 +742,9 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
             && ssrTraceOpacity > PuddleSSRMinTraceOpacity)
         {
             vec3 ssrNormal = normalize(mix(baseN, N, saturate(PuddleSSRNormalInfluence)));
+            vec3 ssrGround = any(notEqual(shadingNormal, normal)) ? normalize(mix(normal, up, puddlemask)) : vec3(0.0);	// (2026-11-18)
             if (fixTrace)
-                ssrHit = TraceWetReflectionFixed(uv, ssrNormal);
+                ssrHit = TraceWetReflectionFixed(uv, ssrNormal, ssrGround);
         }
         float ssrCoverage = saturate(ssrHit.z * ssrMask * LODfade) * ssrOpacity;
 
@@ -869,8 +885,9 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         && ssrTraceOpacity > PuddleSSRMinTraceOpacity)
     {
         vec3 ssrNormal = normalize(mix(baseN, N, saturate(PuddleSSRNormalInfluence)));
+        vec3 ssrGround = any(notEqual(shadingNormal, normal)) ? normalize(mix(normal, up, puddlemask)) : vec3(0.0);	// (2026-11-18)
         if (fixTrace)
-            ssrHit = TraceWetReflectionFixed(uv, ssrNormal);
+            ssrHit = TraceWetReflectionFixed(uv, ssrNormal, ssrGround);
     }
     float ssrCoverage = saturate(ssrHit.z * ssrMask * LODfade) * ssrOpacity;
 

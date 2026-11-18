@@ -60,6 +60,11 @@ sampler2D TESR_CoverMapBuffer : register(s13) = sampler_state { ADDRESSU = WRAP;
 // (TESR_MaterialBufferData.x: 0 on native D3D9 with the game's MSAA, or with [Main.Main.Quality] MaterialBuffer off: the old guess stays).
 sampler2D TESR_MaterialBuffer : register(s14) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 float4 TESR_MaterialBufferData;
+// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredBumpedNormals (docs/bumped-normals-study.md "Puddles"): the normal the wet surface is
+// shaded and reflects with. No texture slot of its own: WetWorldEffect::BindShadingNormals sets it every frame, the G-buffer's normal-mapped
+// shading normal (core/FdIndirect.h ShadingNormals) while the switch is on, else TESR_NormalsBuffer itself (then every result is as before).
+// Where the puddles lie, splashes and streaks keep TESR_NormalsBuffer's smooth normal.
+sampler2D NVR_WetWorldShadingNormals : register(s15) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = NONE; MINFILTER = NONE; MIPFILTER = NONE; };
 #include "Includes/CoverMap.hlsl"
 
 // General settings
@@ -174,6 +179,13 @@ struct VSIN
 #include "Includes/Normals.hlsl"
 #include "Includes/Sky.hlsl"
 #include "Includes/PBR.hlsl"
+
+// (2026-11-18 DeferredBumpedNormals) GetWorldNormal (Includes/Normals.hlsl) on the shading normals above
+float3 GetWorldShadingNormal(float2 uv)
+{
+    float4 normal = float4(tex2D(NVR_WetWorldShadingNormals, uv).xyz * 2 - 1, 1);
+    return mul(TESR_ViewTransform, normal).xyz;
+}
 
 // Surface reconstruction and exposure
 float SampleOrthoDepth(float2 uv)
@@ -479,7 +491,7 @@ float3 GetSSRViewPosition(float2 uv)
     return viewPosition;
 }
 
-float3 TraceWetReflection(float2 sourceUV, float3 waterNormal)
+float3 TraceWetReflection(float2 sourceUV, float3 waterNormal, float3 groundNormal)
 {
     float3 selectedHit = float3(0, 0, 0);
     float3 origin = GetSSRViewPosition(sourceUV);
@@ -492,6 +504,14 @@ float3 TraceWetReflection(float2 sourceUV, float3 waterNormal)
 
     if (dot(viewNormal, origin) > 0.0f) viewNormal = -viewNormal;
     float3 rayDirection = normalize(reflect(normalize(origin), viewNormal));
+    // (2026-11-18 DeferredBumpedNormals) a ray the bumped normal sends below the surface itself is mirrored about its smooth normal (it
+    // would hit the ground beside its start and sparkle). groundNormal is 0 where the bumped and the smooth normal are the same (switch off)
+    if (dot(groundNormal, groundNormal) > 0.5f) {
+        float3 g = normalize(mul(float4(groundNormal, 0.0f), TESR_ViewTransform).xyz);
+        if (dot(g, origin) > 0.0f) g = -g;
+        float below = dot(rayDirection, g);
+        if (below < 0.0f) rayDirection = normalize(rayDirection - 2.0f * below * g);
+    }
     origin += viewNormal * PuddleSSRSurfaceBias;
     float4 projectedOrigin = mul(float4(origin, 1.0f), TESR_ProjectionTransform);
     float4 projectedDirection = mul(float4(rayDirection, 0.0f), TESR_ProjectionTransform);
@@ -580,7 +600,7 @@ float3 TraceWetReflection(float2 sourceUV, float3 waterNormal)
 // 2-step refinement only locates the surface to a quarter of it), fade to nothing towards the screen border and with distance
 // (Stachowiak, Stochastic Screen-Space Reflections, SIGGRAPH 2015). xy = hit UV, z = visibility (a weight, 0 = miss: the puddle
 // keeps its analytic sky/cloud colour as before).
-float3 TraceWetReflectionFixed(float2 sourceUV, float3 waterNormal)
+float3 TraceWetReflectionFixed(float2 sourceUV, float3 waterNormal, float3 groundNormal)
 {
     float3 result = float3(0, 0, 0);
     float3 origin = GetSSRViewPosition(sourceUV);
@@ -590,6 +610,14 @@ float3 TraceWetReflectionFixed(float2 sourceUV, float3 waterNormal)
     float3 viewNormal = normalize(mul(float4(waterNormal, 0.0f), TESR_ViewTransform).xyz);
     if (dot(viewNormal, origin) > 0.0f) viewNormal = -viewNormal;
     float3 rayDirection = normalize(reflect(normalize(origin), viewNormal));
+    // (2026-11-18 DeferredBumpedNormals) a ray the bumped normal sends below the surface itself is mirrored about its smooth normal (it
+    // would hit the ground beside its start and sparkle). groundNormal is 0 where the bumped and the smooth normal are the same (switch off)
+    if (dot(groundNormal, groundNormal) > 0.5f) {
+        float3 g = normalize(mul(float4(groundNormal, 0.0f), TESR_ViewTransform).xyz);
+        if (dot(g, origin) > 0.0f) g = -g;
+        float below = dot(rayDirection, g);
+        if (below < 0.0f) rayDirection = normalize(rayDirection - 2.0f * below * g);
+    }
     origin += viewNormal * PuddleSSRSurfaceBias;
     float4 projectedOrigin = mul(float4(origin, 1.0f), TESR_ProjectionTransform);
     float4 projectedDirection = mul(float4(rayDirection, 0.0f), TESR_ProjectionTransform);
@@ -800,6 +828,7 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
     float4 worldPos = float4(TESR_CameraPosition.xyz + camera_vector, 1.0f);
 
     float3 normal = GetWorldNormal(IN.UVCoord);
+    float3 shadingNormal = GetWorldShadingNormal(IN.UVCoord);	// (2026-11-18 DeferredBumpedNormals: the bumped one while on, else = normal)
     float3 up = float3(0, 0, 1);
 
     float floorAngle = smoothstep(0.94, 1, dot(normal, up));
@@ -1010,8 +1039,9 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
     combinedNormals = normalize(float3(combinedNormals.xy + puddleNormalOffset,
         combinedNormals.z));
 
-    // Surface normals
-    float3 baseN = normalize(lerp(normal, up, puddlemask));
+    // Surface normals (2026-11-18 DeferredBumpedNormals: the wet ground and a puddle's shallow rim keep the surface's bumps, flat water inside
+    // the puddle hides them; the ripples and the puddle's water normal go on top, as before)
+    float3 baseN = normalize(lerp(shadingNormal, up, puddlemask));
     float3 N = normalize(lerp(baseN, combinedNormals, specMask));
 
     N = normalize(N + streakNormalOffset);
@@ -1172,10 +1202,11 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
             && ssrTraceOpacity > PuddleSSRMinTraceOpacity)
         {
             float3 ssrNormal = normalize(lerp(baseN, N, saturate(PuddleSSRNormalInfluence)));
+            const float3 ssrGround = any(shadingNormal != normal) ? normalize(lerp(normal, up, puddlemask)) : float3(0.0f, 0.0f, 0.0f);	// (2026-11-18)
             if (fixTrace)
-            ssrHit = TraceWetReflectionFixed(IN.UVCoord, ssrNormal);
+            ssrHit = TraceWetReflectionFixed(IN.UVCoord, ssrNormal, ssrGround);
         else
-            ssrHit = TraceWetReflection(IN.UVCoord, ssrNormal);
+            ssrHit = TraceWetReflection(IN.UVCoord, ssrNormal, ssrGround);
         }
         float ssrCoverage = saturate(ssrHit.z * ssrMask * LODfade) * ssrOpacity;
 
@@ -1325,8 +1356,9 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
         && ssrTraceOpacity > PuddleSSRMinTraceOpacity)
     {
         float3 ssrNormal = normalize(lerp(baseN, N, saturate(PuddleSSRNormalInfluence)));
+        const float3 ssrGround = any(shadingNormal != normal) ? normalize(lerp(normal, up, puddlemask)) : float3(0.0f, 0.0f, 0.0f);	// (2026-11-18)
         if (fixTrace)
-            ssrHit = TraceWetReflectionFixed(IN.UVCoord, ssrNormal);
+            ssrHit = TraceWetReflectionFixed(IN.UVCoord, ssrNormal, ssrGround);
         // UNOFFICIAL 2026-10-18: no 'else' trace. Technique 0's TraceWetReflection returns (0,0,0) for every pixel (a hit whose refined
         // UV is on screen returns 0, and refined UVs are always on screen). In this fast path the same code compiled with dead loop exits
         // (break_ne -c,-c; evidence loopexits\disasm\WetWorld.txt 4611/4626/4654/4706) and kept the LAST bracket at full strength:
