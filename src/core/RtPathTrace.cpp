@@ -875,6 +875,21 @@ namespace {
 
 	void Setup() {
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
+		// UNOFFICIAL 2026-11-07 (fork port): the path tracer's shared images (11, up to 20 with PTDenoiseSplit and PTRestirGI) and its
+		// scratch store only when it is on as the helper starts. Order 1 already keeps it from pushing the other RT effects out, but its
+		// screen-sized images were still made, in the game and in the helper, while it was off (as it is for players: ReferencePT and
+		// PTRealtime are internal tools). Turning it on later needs a restart (StatusText says so); Record does nothing without imageA.
+		ReadSettings();
+		if (!S.enabled) {
+			imageA = imageB = imageDisplay = imageDepth = imageNormals = imageAlbedo = imagePano = imageFrame = imageMaterial = imageAlbedoOut = imageLamps = -1;
+			imageSpec = imageGIResult = -1;
+			for (int i = 0; i < 2; i++) imageResA[i] = imageResB[i] = imageResC[i] = imageSurf[i] = -1;
+			cacheLog2Setup = 0;
+			haveImage = false;
+			samples = 0;
+			Logger::Log("UNOFFICIAL RT reference path tracer: off as the RT helper starts, so its shared images are not made (turning ReferencePT / PTRealtime on needs a restart).");
+			return;
+		}
 		imageA = RtCore::AddImage("NVR RT path trace mean rg", w, h, NVR_EXT_SHARED_RG32F);
 		imageB = RtCore::AddImage("NVR RT path trace mean b", w, h, NVR_EXT_SHARED_RG32F);
 		imageDisplay = RtCore::AddImage("NVR RT path trace", w, h, NVR_EXT_SHARED_RGBA16F);
@@ -2103,6 +2118,7 @@ namespace RtPathTrace {
 
 	std::string StatusText() {
 		if (!S.enabled) return "RT reference path tracer off ([Main.Main.RayTracing] ReferencePT false)";
+		if (imageA < 0 && RtCore::Running()) return "RT reference path tracer turned on after the RT helper started: restart the game (its images are made only when it is on at start)";
 		char t[300];
 		sprintf_s(t, "RT reference path tracer on | %s | %ux%u, %u samples a pixel (of PTMaxSamples %d), %u restarts, %d bounces, %d paths a frame, PTDebugView %d",
 			RtCore::Running() ? "the core runs" : "the RT core is not running: nothing traced", textureWidth, textureHeight, samples, S.maxSamples, resets,
