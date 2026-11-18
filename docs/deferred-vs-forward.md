@@ -111,6 +111,58 @@ and no frame copy is needed.
   in the effect chain in both modes (`EffectChain.cpp:462-495`).
 - VolumetricLight, VolumetricFog and TAA have no DeferredRenderer branch in their C++ (grep).
 
+### Surface normals (added 2026-11-18)
+Two normals per pixel, both in camera-relative world axes, octahedral (`Includes/Shadow.hlsl:959-970`), at full fp16:
+- **Smooth normal**, COLOR3 = `TESR_CapturedNormalsBuffer` rg: the interpolated vertex normal (after skinning), before the normal map,
+  turned to the side the camera sees (`Includes/CapturedNormals.hlsl:1-31`); objects and parallax turn it by the triangle's side instead
+  (`:33-59`, the roof-ridge fix). b = camera distance (the light passes rebuild the position from it), a = 1 world / 2 actor + codes.
+- **Shading normal** (normal-mapped), COLOR2 = `TESR_MaterialBuffer` g and a under GBufferV2 (forced on by the renderer); g = 4 means
+  "none here, use the smooth one" (`CapturedNormals.hlsl:88-124`).
+- Both are written while the main opaque list draws, by Vegas Shaders' own templates and the grass / leaf shaders only (other draws are
+  masked off).
+
+Who writes what (mode 2):
+| Geometry | Smooth normal (COLOR3) | Shading normal (COLOR2) |
+|---|---|---|
+| Objects, armour, clothes, hair: LIGHTS 2/3 family | vertex normal (`ObjectTemplate.hlsl:2258-2270`) | the normal map through a tangent frame rebuilt from the screen derivatives of position and uv (Schuler 2013); two-sided cards seen from behind store the front's normal (`:1697-1701`, `CapturedNormals.hlsl:126-165`) |
+| Objects: many-lamp table family (LIGHTS 4+) | vertex normal (`:2849-2863`) | exact, from the vertex's own tangent rows (`:2641-2645`); that family's other records use the derivative frame (`:2647`) |
+| Parallax | vertex normal, triangle-faced (`ParallaxTemplate.hlsl:1016`) | derivative frame on the parallax normal map (`:840`) |
+| Near land | vertex normal (`TerrainTemplate.hlsl:884`) | the blended layers' normal map through the land's TBN, or the wet-world normal (`:850-852`) |
+| Far land (TerrainLODTemplate) | geometric normal (`TerrainLODTemplate.hlsl:259`) | the LOD normal map (`:234`) |
+| Skin | vertex normal after skinning (`SkinTemplate.hlsl:608`) | the skin normal map, into the same COLOR2 (`:633-634`) |
+| SpeedTree leaves | the card's flat face normal (`Includes/Leaf.hlsl:57`, `Shadow.hlsl:916-920`) | none |
+| Near grass | the grass vertex's lighting normal, bent toward the camera (`GRASS23x000TMS.pso.hlsl:267-269,306`) | none (g holds the grass mark) |
+| Slot-tight six-lamp shader (SLS2035) | the flat face normal (`ObjectTemplate.hlsl:2850-2855`) | as its family |
+| A draw whose vertex shader is the game's own (no world position) | as above | none: lit with the smooth normal (`ObjectTemplate.hlsl:1699-1701`) |
+| Water, sky, particles, decals, distant trees, first person, glass, game shaders | nothing | nothing |
+
+Who reads which:
+- **DeferredSun, DeferredLamps, FlashlightDeferred:** the shading normal where one is stored, else the smooth one (`DeferredSun.hlsl:151-159,231`,
+  `DeferredLamps.hlsl:133-144`). Their shadow lookups use the smooth normal, view-faced, for the normal offset (`DeferredSun.hlsl:238-240,311-313`,
+  `DeferredLamps.hlsl:214,267`); grass takes world up there.
+- **Every screen effect reads `TESR_NormalsBuffer`**, which is not the G-buffer: the Normals effect rebuilds a view-space normal from depth
+  (one flat normal per triangle, `Effects/Normals.fx.hlsl:1-4`), then the merge copies in the **smooth** normal wherever the pixel's
+  surface wrote one, its distance matches the depth, and it is within 60 degrees of the depth facet (`ShaderManager.cpp:2308-2310`,
+  `CapturedNormals.h:645-683`, least cosine 0.5 at `:54`). So AO, AmbientLight / bounce, the sun and point contact shadows, Specular,
+  Reflections (SSR), WetWorld and wetness reflections, Snow, and the RT inputs (RT AO / GI via `RtAOInput.frag`, RT sun and lamp shadows)
+  see the vertex normal, never the normal map.
+- Rebuilt from depth on purpose: the AO sky term with `[Shaders.AmbientOcclusion.Skylighting] DepthNormals` (default false,
+  `AmbientOcclusion.fx.hlsl:545-555`); the RT AO / GI input on a texel that holds no unit normal (`RtAOInput.frag:39-63`).
+- Normal-mapped readers besides the light passes, all off by default: DeferredReflections and DeferredRRGuides (a view-space copy of the
+  shading normal, `core/FdIndirect.h:10-32,60-77`); the path tracer's first hit (PTBumpNormals; path tracing is off by default).
+
+Gaps:
+- Proven: screen effects and RT AO / GI get no normal-map detail (above). Pixels where the merge test fails keep the flat depth normal.
+- Proven: leaves have no normal map in the deferred passes, only the card's flat normal; the slot-tight shader and far land store a flat
+  smooth normal; draws through the game's own vertex shader have no shading normal.
+- Proven: with `EffectsAfterUpscale` (developer test, off) the merge is skipped and every screen effect is back to the depth normal
+  (`ShaderManager.cpp:2309`, `TAA.cpp:111`).
+- Believed: the derivative-built tangent frame (most objects and parallax) differs a little from the vertex tangent frame the forward
+  shaders light with, mostly on small or distant triangles where the 2x2 pixel derivatives cross a triangle edge. Not measured.
+- Believed: the SunShadows effect (screen-space cascade lookup) samples the normals buffer with linear filtering (`SunShadows.fx.hlsl:39`), so normals blend
+  across silhouettes there. Not checked in game.
+- Precision: fp16 octahedral is about 0.03 degrees at worst; not a problem (arithmetic, not measured).
+
 ### Gaps the code itself lists
 - DeferredSun does not carry: metal's bridged tint, the wet film's sun highlight, the land's highlight with UsePBR off, parallax's
   vanilla sun with POM shadows off, and blended (fading) draws' terms (`Shaders/DeferredSun.hlsl:17-18`).
