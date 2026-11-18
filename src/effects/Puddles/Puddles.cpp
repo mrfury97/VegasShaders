@@ -30,9 +30,6 @@ void PuddlesShaders::UpdateSettings() {
 	Settings.Cavity = std::clamp(TheSettingManager->GetSettingF(main, "Cavity"), 0.0f, 2.0f);
 	Settings.WetRing = std::clamp(TheSettingManager->GetSettingF(main, "WetRing"), 0.0f, 0.5f);
 	Settings.Ripples = std::clamp(TheSettingManager->GetSettingF(main, "Ripples"), 0.0f, 2.0f);
-	Settings.Streaks = std::clamp(TheSettingManager->GetSettingF(main, "Streaks"), 0.0f, 2.0f);
-	Settings.StreakWidth = std::clamp(TheSettingManager->GetSettingF(main, "StreakWidth"), 1.0f, 64.0f);
-	Settings.StreakSpeed = std::clamp(TheSettingManager->GetSettingF(main, "StreakSpeed"), 0.0f, 8.0f);
 	Settings.ReflectionPuddles = TheSettingManager->GetSettingI(main, "ReflectionPuddles") != 0;
 	Settings.ObjectPuddles = TheSettingManager->GetSettingI(main, "ObjectPuddles") != 0;
 	Settings.LevelOverride = TheSettingManager->GetSettingF(debug, "LevelOverride");
@@ -88,14 +85,12 @@ void PuddlesShaders::UpdateConstants() {
 	const float level = Settings.LevelOverride >= 0.0f ? std::clamp(Settings.LevelOverride, 0.0f, 1.0f) : Level;
 
 	const bool on = Enabled && Settings.Quality > 0;
-	WetnessEffectsShaders* wetness = TheShaderManager->Shaders.Wetness;
-	const float raining = wetness ? wetness->Raining : Rain;
 
 	Constants.Data = D3DXVECTOR4(on && exterior ? level : 0.0f, Settings.Coverage, 1.0f / Settings.Size, on ? (float)Settings.Quality : 0.0f);
 	Constants.Look = D3DXVECTOR4(Settings.Roughness, Settings.Darkening, Settings.EdgeSoftness, Settings.Ripples);
 	Constants.Shape = D3DXVECTOR4(Settings.SlopeStart, Settings.SlopeFull, Settings.Cavity, Settings.WetRing);
 	PuddleMap::UpdateConstants();	// 2026-11-12 map mode: the built windows
-	Constants.Streak = D3DXVECTOR4(Settings.Streaks * raining, 1.0f / Settings.StreakWidth, Settings.StreakSpeed, on ? (float)Settings.DebugView : 0.0f);
+	Constants.Streak = D3DXVECTOR4(0.0f, 0.0f, 0.0f, on ? (float)Settings.DebugView : 0.0f);	// (x y z: the removed wall streaks')
 }
 
 bool PuddlesShaders::Active() const {

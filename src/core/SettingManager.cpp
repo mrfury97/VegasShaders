@@ -69,6 +69,7 @@ static const int UnofficialSettingsVersion = 90;  // (90, 2026-11-18: Sharpening
 static bool Retired(const std::string& Name) {
 	static const char* const kSections[] = { "Main.SleepingMode" };
 	static const char* const kKeys[] = { "Shaders.ShadowsInteriors.Main.TorchesCastShadows", "Shaders.ShadowsExteriors.ScreenSpace.LodOnly",	// (2026-11-06: always on now)
+		"Shaders.Puddles.Main.Streaks", "Shaders.Puddles.Main.StreakWidth", "Shaders.Puddles.Main.StreakSpeed",	// (2026-11-18: the wall streaks removed)
 		"Main.Menu.Keys.KeyAdd", "Main.Menu.Keys.KeyDown", "Main.Menu.Keys.KeyEditing", "Main.Menu.Keys.KeyLeft", "Main.Menu.Keys.KeyPageDown",
 		"Main.Menu.Keys.KeyPageUp", "Main.Menu.Keys.KeyRight", "Main.Menu.Keys.KeySave", "Main.Menu.Keys.KeySubtract", "Main.Menu.Keys.KeyUp",
 		"Main.Menu.Keys.EntryUseNumpad", "Main.Menu.Style.ItemColumnSize", "Main.Menu.Style.MainItemColumnSize", "Main.Menu.Style.PositionX",
