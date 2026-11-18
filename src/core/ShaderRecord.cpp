@@ -757,11 +757,18 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 		// reproduce it: its newer compiler fits shaders the game's D3DX9 one rejects, and its define list lacks the runtime ones. A binary
 		// (compiled or from the cache) removes an old one.
 		const std::string failedPath = binaryPath + ".failed.hlsl";
+		// (2026-11-18, deferred road map Phase 1a) and the define list it was made with, one NAME=VALUE a line, as <binary>.failed.defines: the
+		// same template with one define changed (its lighting-free record: LAMPS_DEFERRED=2) can then be compiled offline with
+		// D3DX9 (build\template-compile) to see whether that one fits
+		const std::string failedDefinesPath = binaryPath + ".failed.defines";
 		if (!function && source) {
 			std::ofstream failedFile(failedPath, std::ios::out | std::ios::binary);
 			failedFile.write((const char*)source->GetBufferPointer(), source->GetBufferSize());
+			std::ofstream definesFile(failedDefinesPath, std::ios::out | std::ios::binary);
+			for (int d = 0; d < 63 && Template.Defines[d].Name; d++)
+				definesFile << Template.Defines[d].Name << "=" << (Template.Defines[d].Definition ? Template.Defines[d].Definition : "") << "\r\n";
 		}
-		else if (function) DeleteFileA(failedPath.c_str());
+		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); }
 
 		const HRESULT tableResult = D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table);
 		if (FAILED(tableResult)) {

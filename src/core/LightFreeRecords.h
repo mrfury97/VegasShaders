@@ -8,6 +8,7 @@
 // [Shaders.ShadowsInteriors.Deferred] LightFreeRecords (test only, restart, off): the records are made at shader load and their load or the
 // device's refusal logged. Nothing binds them yet (selection is a later phase: the ExteriorRecords / DeferredLamps::Records side-map pattern).
 // Off: no record is made, the define lists and every shader as before.
+// (2026-11-18 DeferredStandalone, below) also for a shader whose forward records did not load: then the game's own shader is its partner.
 #include "ShaderRecord.h"
 #include "DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the far land gets one too (TerrainLODTemplate)
 
@@ -48,6 +49,27 @@ namespace LightFreeRecords {
 		return overrides;
 	}
 
+	// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredStandalone (restart, bug fix, default on; docs/deferred-roadmap.md Phase 1a): a shader
+	// whose forward (Default) record did not load still gets its lighting-free record, so the main view draws it deferred instead of the game's
+	// own shader. Seen 2026-11-18: the 5-7 layer land (SLS2124-2146) ran out of ps_3_0 temp registers (X4505) with Terrain Blending + Wetness
+	// Effects + Puddles; with no forward record nothing deferred was even tried, and those land pieces were the game's (pale, unlit) everywhere.
+	// The record has no sun, lamps or their shadows, so it is far shorter. Off: as before (no forward record, no lighting-free record).
+	inline int StandaloneWanted = -1;
+	inline bool Standalone() {
+		if (StandaloneWanted < 0) StandaloneWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredStandalone") != 0;
+		return StandaloneWanted != 0;
+	}
+	// The lean puddle path for a standalone record that does not fit with the full one (as ShaderManager::LoadShader does for the forward record).
+	inline const char* kLeanCache = "LightFreeLean\\";
+	inline const D3DXMACRO* LeanOverrides() {
+		static const D3DXMACRO overrides[4] = { { "LAMPS_DEFERRED", "2" }, { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };
+		return overrides;
+	}
+	inline bool PuddlesIn() {
+		return TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
+	}
+	inline unsigned StandaloneLoaded = 0;
+
 	// Which pixel shaders get one: the lit records of the three G-buffer-writing templates, not the game's added-light passes (the DIFFUSE lamp
 	// and ONLY_SPECULAR highlight passes a deferred frame skips: plan 4.5) and not the unlit texture pass (NO_LIGHT).
 	inline bool Eligible(const char* name, const ShaderTemplate& tmpl) {
@@ -66,13 +88,30 @@ namespace LightFreeRecords {
 
 	// ShaderManager::LoadShader (pixel), after the shader's own records: its lighting-free record, compiled now (at load, never on the render
 	// thread). The template as the family gives it (before BuildDefines fills it: LoadShader takes it by value).
-	inline void Load(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl) {
-		if (!WantedAtStartup() || !shader->ShaderProg[ShaderRecordType::Default] || !Eligible(name, tmpl)) return;
-		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, Overrides());
+	// Returns true when the record is the lean puddle one (DeferredStandalone; ShaderManager stamps its cache copy then). leanFirst: that copy
+	// is newer than the full one and the sources, so the full one failed last time (a failed compile is not cached): straight to the lean one.
+	inline bool Load(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl, bool leanFirst = false) {
+		const bool forwardLoaded = shader->ShaderProg[ShaderRecordType::Default] || shader->ShaderProg[ShaderRecordType::Exterior] ||
+			shader->ShaderProg[ShaderRecordType::Interior];
+		// (2026-11-18 DeferredStandalone) without a forward record only with the switch, and only with the game's own shader to fall back on
+		if (!WantedAtStartup() || !Eligible(name, tmpl) || (!forwardLoaded && (!Standalone() || !shader->ShaderHandleBackup))) return false;
+		const bool tryLean = !forwardLoaded && PuddlesIn();
+		ShaderRecordPixel* record = tryLean && leanFirst ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, Overrides());
+		bool usedLean = false;
+		if (!record && tryLean) {
+			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kLeanCache, LeanOverrides());
+			usedLean = record != nullptr;
+			if (record) Logger::Log("UNOFFICIAL DeferredStandalone: %s's lighting-free record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", name);
+		}
+		if (record && !forwardLoaded) {
+			StandaloneLoaded++;
+			Logger::Log("UNOFFICIAL DeferredStandalone: %s has no forward record (it did not load) but its lighting-free record loaded: the main view draws it "
+				"deferred; reflections, other cameras, blended draws and forward frames draw the game's shader (%u such so far)", name, StandaloneLoaded);
+		}
 		if (!record) {
 			Refused++;
 			Logger::Log("[WARNING] LIGHT-FREE RECORD %s: did not load (see the device's line above); %u loaded, %u not so far", name, Loaded, Refused);
-			return;
+			return false;
 		}
 		Records[shader] = record;
 		if (!strcmp(tmpl.Name, "TerrainLODTemplate")) FarLand.insert(shader);
@@ -86,5 +125,6 @@ namespace LightFreeRecords {
 		}
 		Loaded++;
 		Logger::Log("LIGHT-FREE RECORD %s: loaded (%u loaded, %u not so far)", name, Loaded, Refused);
+		return usedLean;
 	}
 }
