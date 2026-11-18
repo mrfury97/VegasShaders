@@ -33,8 +33,10 @@ found and changed on branch `pipboyfit-crash`.
   caster boxes, RtCore's RT skinning palette) skip a non-live slot.
 
 ## Still wrong with SMP (not crashes)
-- ClothWind's procedural wind can move garments SMP already simulates (double motion). Fix later: skip shapes with SMP's "SMP Bones" string
-  extra data (needs an extra-data reader in our headers).
+- (Fixed 2026-11-18) ClothWind's procedural wind moved garments SMP already simulates a second time. Now a skinned shape carrying SMP's
+  "SMP Bones" string extra data (the plugin's own marker, one per skinned shape: its README, ActorManager.cpp:110) gets no cloth wind:
+  `NiObjectNET::ExtraDataNamed` (GameNi.h; the extra-data list at +0x10, its count at +0x14, each entry's name at +0x08, as JIP LN's
+  headers have it; LayoutCheck.h asserts the offsets). SMP blows them in the weather's wind itself.
 - `Live` shows a slot looks like a node, not that it is still in the scene: a dropped node not yet freed passes, and for one frame its
   transform can be garbage in RT skinning, shadow bounds or cloth points during the bind wait.
 

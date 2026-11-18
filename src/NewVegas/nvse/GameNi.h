@@ -288,11 +288,17 @@ public:
 	bool IsExactKindOf(const NiRTTI* const type) const { return GetRTTI() == type; }
 };
 
+class NiExtraData;
 class NiObjectNET : public NiObject {	// 0x18 bytes
 public:
 	const char*			m_pcName;		// +0x08
 	NiTimeController*	m_controller;	// +0x0C
-	UInt32				pad10[2];
+	NiExtraData**		m_extraData;	// +0x10 (2026-11-18: named; was pad10[0])
+	UInt16				m_extraDataCount;		// +0x14
+	UInt16				m_extraDataCapacity;	// +0x16
+
+	// The extra data called Name (case-insensitive), or null.
+	inline NiExtraData* ExtraDataNamed(const char* Name) const;
 
 	// The game interns the string (0xA5B690) and makes it the object's name (0xA5B950).
 	void SetName(const char* Name) {
@@ -300,6 +306,19 @@ public:
 		ThisCall(0x00A5B950, this, &interned);
 	}
 };
+
+// UNOFFICIAL 2026-11-18 (NV-SMP-Physics compatibility, ClothWind): only the name is read; NiStringExtraData and the others keep their data
+// after it (a string extra data's text at +0x0C).
+class NiExtraData : public NiObject {	// 0x0C bytes
+public:
+	const char*	m_pcName;	// +0x08
+};
+inline NiExtraData* NiObjectNET::ExtraDataNamed(const char* Name) const {
+	if (!Name || !m_extraData) return nullptr;
+	for (UInt16 i = 0; i < m_extraDataCount; i++)
+		if (NiExtraData* x = m_extraData[i]) if (x->m_pcName && !_stricmp(x->m_pcName, Name)) return x;
+	return nullptr;
+}
 
 class NiAVObject : public NiObjectNET {	// 0x9C bytes
 public:

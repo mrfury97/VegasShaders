@@ -1488,6 +1488,10 @@ namespace ClothWind {
 		if (!diffuse || !diffuse->ddsPath1) { ZeroFor(device, shadowPass); return; }
 		const bool skinned = geometry->skinInstance != nullptr;
 		if (!Exterior && !skinned) { ZeroFor(device, shadowPass); return; }
+		// UNOFFICIAL 2026-11-18 (NV-SMP-Physics; docs/smp-compatibility.md): a shape SMP simulates carries its "SMP Bones" string extra data
+		// (the plugin's own marker, one per skinned shape); its bones are already moved by the physics, with the weather's wind, so the cloth
+		// wind would move it a second time. Left still here.
+		if (skinned && geometry->ExtraDataNamed("SMP Bones")) { ZeroFor(device, shadowPass); return; }
 		bool cloth;
 		auto known = ByTexture.find(diffuse);
 		if (known != ByTexture.end() && known->second.first == diffuse->ddsPath1) cloth = known->second.second;
