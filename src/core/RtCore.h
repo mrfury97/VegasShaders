@@ -122,6 +122,10 @@ public:
 	// UNOFFICIAL 2026-11-02 (bench warm slot, shot command reloadshaders): stop a running helper; it starts again on the next frame an RT
 	// effect wants it, so it loads every Compute\Rt\*.spv again (and settings read at its start: HitTextures ...). Users' Setup runs again.
 	static void			Restart(const char* Why);
+	// UNOFFICIAL 2026-11-18 (fork port: the path tracer's images only when it is on): a user whose Setup must run again (it was switched on
+	// after the helper started and registered no images then) asks for it here, from anywhere, even from its Wants inside Ready. The running
+	// helper is stopped at the next Ready, at the screen-size stop's safe point, and starts again on the following frame. Why: a literal.
+	static void			SetupAgain(const char* Why);
 	// UNOFFICIAL 2026-11-07 (rt-shutdown) the game is exiting (xNVSE ExitGame / ExitGame_Console, the window closing): the helper finishes
 	// every recorded frame, DXVK's queue is drained, the helper exits (Core::Stop's order; ~5 s at most); RT stays off from then on.
 	// Render (main) thread only, outside a frame's recording; any number of calls.

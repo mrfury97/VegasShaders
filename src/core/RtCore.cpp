@@ -348,6 +348,7 @@ namespace {
 		std::vector<RtCore::User> users;
 		std::vector<const char*> leftOut;				// (2026-11-05) users whose images did not fit (NVR_RT_MAX_IMAGES) at this helper start
 		UINT		scratchMB = 0;					// (2026-11-07) AskScratch's largest ask this helper start
+		const char*	setupAgainWhy = nullptr;		// (2026-11-18) RtCore::SetupAgain: stop at the next Ready (cleared when the users' Setup runs)
 		bool		Out(const RtCore::User& user) const { for (const char* n : leftOut) if (n == user.Name) return true; return false; }
 		ID3D9NvrExtShare*		share = nullptr;
 		ID3D9NvrExtRt*			rt = nullptr;
@@ -1495,6 +1496,7 @@ namespace {
 			}
 		}
 		inSetup = true;
+		setupAgainWhy = nullptr;	// (2026-11-18) every user's Setup runs now: a pending SetupAgain is answered
 		// (2026-11-05) users in their Order; one whose images take the count past the protocol's NVR_RT_MAX_IMAGES is left out for the
 		// session (its images rolled back) instead of the whole core turning off (rtext-land 11-05: lamps + sun + AO + reflections + the
 		// path tracer's 20 asked for more than 48, so nothing traced)
@@ -3753,6 +3755,13 @@ namespace {
 			state = Core::Idle;
 			return false;
 		}
+		if (setupAgainWhy && !recording) {	// UNOFFICIAL 2026-11-18 RtCore::SetupAgain: the same stop, for a user's Setup
+			const char* why = setupAgainWhy;
+			setupAgainWhy = nullptr;
+			Stop(why);
+			state = Core::Idle;
+			return false;
+		}
 		return true;
 	}
 
@@ -4337,6 +4346,7 @@ bool RtCore::OthersWant(const char* Name) {	// UNOFFICIAL 2026-11-07 (ptaaa-fog;
 	return false;
 }
 bool RtCore::LeftOut(const char* Name) { for (const char* n : TheCore.leftOut) if (n == Name || (n && Name && !strcmp(n, Name))) return true; return false; }
+void RtCore::SetupAgain(const char* Why) { if (TheCore.state != Core::Off) TheCore.setupAgainWhy = Why; }	// UNOFFICIAL 2026-11-18 (RtCore.h)
 void RtCore::Restart(const char* Why) {	// UNOFFICIAL 2026-11-02: as a screen-size change (Core::Ready)
 	Core& c = TheCore;
 	if (c.state == Core::Off || c.state == Core::Idle) return;

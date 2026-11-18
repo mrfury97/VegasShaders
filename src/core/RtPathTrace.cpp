@@ -713,10 +713,22 @@ namespace {
 		return true;
 	}
 
+	// (2026-11-18) Setup made no images (the path tracer was off as the helper started) and it was switched on since: one SetupAgain asked
+	bool		setupAsked = false;
+
 	bool Wants() {
 		ReadSettings();
 		if (!S.enabled || !S.viewModel) CapturedNormals::VmWanted = false;	// (2026-11-07 ptaaa-firstperson; Record turns it on)
-		return S.enabled;
+		if (!S.enabled) { setupAsked = false; return false; }
+		// UNOFFICIAL 2026-11-18 (fork port, Setup): switched on (the "Path tracing" menu rows are live) while the helper runs without its images:
+		// the helper is started again once (RtCore::SetupAgain, at the next Ready) so Setup makes them; wanted this frame so that Ready gets
+		// there. Asked once and still none (left out, or the images failed): not wanted, so none of PTRealtime's costs run for no picture.
+		if (imageA < 0 && RtCore::Running()) {
+			if (setupAsked) return false;
+			setupAsked = true;
+			RtCore::SetupAgain("the path tracer was switched on: the helper starts again to make its shared images");
+		}
+		return true;
 	}
 
 	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson; docs/next/RT-PATH-TRACING.md "ptaaa-firstperson") PTViewModel: the first-person model (arms,
@@ -877,8 +889,8 @@ namespace {
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
 		// UNOFFICIAL 2026-11-07 (fork port): the path tracer's shared images (11, up to 20 with PTDenoiseSplit and PTRestirGI) and its
 		// scratch store only when it is on as the helper starts. Order 1 already keeps it from pushing the other RT effects out, but its
-		// screen-sized images were still made, in the game and in the helper, while it was off (as it is for players: ReferencePT and
-		// PTRealtime are internal tools). Turning it on later needs a restart (StatusText says so); Record does nothing without imageA.
+		// screen-sized images were still made, in the game and in the helper, while it was off (by default, and whenever no path tracing
+		// preset is picked). Switched on later, Wants asks RtCore::SetupAgain once and this runs again; Record does nothing without imageA.
 		ReadSettings();
 		if (!S.enabled) {
 			imageA = imageB = imageDisplay = imageDepth = imageNormals = imageAlbedo = imagePano = imageFrame = imageMaterial = imageAlbedoOut = imageLamps = -1;
@@ -887,7 +899,7 @@ namespace {
 			cacheLog2Setup = 0;
 			haveImage = false;
 			samples = 0;
-			Logger::Log("UNOFFICIAL RT reference path tracer: off as the RT helper starts, so its shared images are not made (turning ReferencePT / PTRealtime on needs a restart).");
+			Logger::Log("UNOFFICIAL RT reference path tracer: off as the RT helper starts, so its shared images are not made (switched on later, the helper starts again once to make them).");
 			return;
 		}
 		imageA = RtCore::AddImage("NVR RT path trace mean rg", w, h, NVR_EXT_SHARED_RG32F);
@@ -2118,7 +2130,8 @@ namespace RtPathTrace {
 
 	std::string StatusText() {
 		if (!S.enabled) return "RT reference path tracer off ([Main.Main.RayTracing] ReferencePT false)";
-		if (imageA < 0 && RtCore::Running()) return "RT reference path tracer turned on after the RT helper started: restart the game (its images are made only when it is on at start)";
+		if (imageA < 0 && RtCore::Running()) return setupAsked ? "RT path tracer switched on, but the RT helper started again without its images (left out or failed: see the log): restart the game"
+			: "RT path tracer switched on: the RT helper starts again to make its images";
 		char t[300];
 		sprintf_s(t, "RT reference path tracer on | %s | %ux%u, %u samples a pixel (of PTMaxSamples %d), %u restarts, %d bounces, %d paths a frame, PTDebugView %d",
 			RtCore::Running() ? "the core runs" : "the RT core is not running: nothing traced", textureWidth, textureHeight, samples, S.maxSamples, resets,
