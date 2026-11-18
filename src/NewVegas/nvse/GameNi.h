@@ -1064,7 +1064,8 @@ public:
 	UInt8					padF5[3];
 	NiPointLight*			sourceLight;	// +0xF8
 	UInt32					padFC[5];
-	UInt16					bIsEnabled;		// +0x110
+	UInt16					bIsEnabled;		// +0x110 not an "enabled" flag: the game's usFrustumCull, set by ShadowSceneLight::TestFrustumCull
+											// (0x00B9E970); 0xFF = culled for this view, else in view (0 = every face). Name kept for the callers.
 	UInt16					pad112;
 	UInt32					pad114[79];
 };
