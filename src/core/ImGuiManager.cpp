@@ -800,7 +800,6 @@ static bool IsDeadSetting(const char* section, const char* key) {
 		{ "Shaders.ShadowsExteriors.Main", "OrthoMapResolution" },	// the ortho map size is [Shaders.ShadowsExteriors.Ortho] Resolution
 		{ "Shaders.ShadowsExteriors.Main", "OrthoRadius" },			// its reach is [Shaders.ShadowsExteriors.Ortho] Distance
 		{ "Shaders.ShadowsInteriors.Main", "Quality" },				// "Not currently used": only Oblivion's ShadowCube.hlsl read it
-		{ "Shaders.ShadowsInteriors.Main", "TorchesCastShadows" },	// its hook (AddCastShadowFlag) is not installed in New Vegas
 		{ "Shaders.ShadowsInteriors.Main", "UseCastShadowFlag" },	// read into Settings.Interiors, never used
 		{ "Shaders.ShadowsInteriors.Main", "PlayerShadowFirstPerson" },	// the same
 		{ "Shaders.ShadowsInteriors.Main", "PlayerShadowThirdPerson" },	// the same
@@ -1200,9 +1199,9 @@ static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, 
 // Whole numbers that pick one of a few modes get a dropdown of names. Keyed by "Section.Key": the key alone repeats ("Mode" is a
 // different thing for Cinema and DepthOfField).
 //
-// Cinema and DepthOfField Mode: the C++ also takes 3 and 4 (Cinema.cpp, DepthOfField.cpp), tests left from the Oblivion code that
-// check for persuasion. New Vegas has no persuasion, so 3 always switches the effect off ("Disabled") and 4 is a copy of 1 or 2 or
-// always off: only 3 is offered.
+// Cinema and DepthOfField Mode: the C++ also takes 3 and 4 (Cinema.cpp, DepthOfField.cpp), once Oblivion's persuasion tests
+// (2026-11-05: removed; New Vegas has no persuasion menu). 3 always switches the effect off ("Disabled"), 4 is Cinema's 2 and
+// DepthOfField's 3: only 3 is offered.
 
 static const char* const kToneMappers[] = {
 	"0 - None (vanilla)",

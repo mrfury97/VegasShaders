@@ -740,37 +740,10 @@ RemoveUnderwater = false    # Disables fog underwater. Not compatible with custo
 ReflectionClipFix = true # UNOFFICIAL, BUG FIX (on by default): water reflections lost the far buildings and showed below-water ground when you looked level or up. The game sets the reflection's water-height clip plane once, before the reflection pass binds a vertex shader, and the driver then applies it wrongly to that pass's draws; the mod re-issues the same plane at every draw of the pass so it takes. Off = the game's behaviour. Applies immediately.
 
 [_Main.Menu.Keys]
-KeyAdd = 78                 # Keycode for increment value shortcut in menu.
-KeyDown = 208               # Keycode for the hotkey to navigate down in the main menu.
-KeyEditing = 156            # Keycode for the hotkey to toggle custom value entry mode in menu.
 KeyEnable = 24              # Keycode for the hotkey to activate the main menu.
-KeyLeft = 203               # Keycode for the hotkey to navigate left in the main menu.
-KeyPageDown = 209           # Keycode for the hotkey to go to next page of options in the main menu.
-KeyPageUp = 201             # Keycode for the hotkey to go to previous page of options in the main menu.
-KeyRight = 205              # Keycode for the hotkey to navigate right in the main menu.
-KeySave = 28                # Keycode for the hotkey to save changes done in the main menu (if not used, will revert upon restart).
-KeySubtract = 74            # Keycode for decrement value shortcut in menu.
-KeyUp = 200                 # Keycode for the hotkey to navigate up in the main menu.
-EntryUseNumpad = true       # Wether to use the numpad numbers or the other numbers. Start entry with "=" or numpad "Enter"
 MasterSwitchModifier = 2    # Modifier for RenderEffects hotkey (toggle key + modifier): 0=off, 1=ctrl, 2=alt, 3=shift
 
 [_Main.Menu.Style]
-ItemColumnSize = 300                    # Custom size for menu columns.
-MainItemColumnSize = 100                # Custom size for menu leftmost column.
-PositionX = 60                          # Left position of the menu on the screen.
-PositionY = 60                          # Top position of the menu on the screen.
-RowSpace = 0                            # Custom padding between rows for the menu.
-RowsPerPage = 35                        # Max amount of items to display per page on the menu.
-TextColorEditing = '255,100,50'         # Custom color for value being edited during value entry.
-TextColorEnabled = '100,170,90'         # Custom color for active effects.
-TextColorNormal = '240,200,80'          # Custom color for normal menu text.
-TextColorSelected = '255,255,255'       # Custom color for selected menu text.
-TextFont = 'Calibri'                    # Custom font for menu text.
-TextFontStatus = 'Consolas'             # Custom font for enabled/disabled shader text.
-TextShadowColorEditing = '50,50,50'     # Custom shadow color for value being edited during value entry.
-TextShadowColorEnabled = '50,50,50'     # Custom shadow color for enabled/disabled text.
-TextShadowColorNormal = '50,50,50'      # Custom shadow color for normal text.
-TextShadowColorSelected = '50,50,50'    # Custom shadow color for selected text.
 TextSize = 22                           # Font size for normal text.
 SidebarWidth = 260                      # UNOFFICIAL (2026-10-25): width of the menu's left column (effects and shaders) in pixels. Drag the gap between the two columns to change it; double-click it for 260 again.
 Skin = "Default"                        # (2026-11-02) the menu's look: Default, Pip-Boy, Vault-Tec, Amber Terminal, NCR, Legion, Brotherhood, Strip Neon, Midnight, High Contrast, Light, or the Name of a skin file in Data\VegasShaders\Skins\ (View > Skin > Export writes one to start from: colours, rounding, a background picture). The Custom keys below change single parts on top of whichever skin is picked.
@@ -788,8 +761,6 @@ CustomOpacity = 0.0                     # (2026-11-02) your own opacity for the 
 CustomImage = ""                        # (2026-11-02) your own background picture for the menu: a file in Data\VegasShaders\Skins\ (or Skins\Backgrounds\, where View > Skin > Own colours > Browse copies it; best 1920x1080 or your screen size) or a full path (png, jpg, dds, bmp). "none" = no picture, empty = the skin's.
 CustomImageOpacity = -1.0               # (2026-11-02) how strongly the background picture shows (0-1). -1 = the skin's.
 CustomImageFit = ""                     # (2026-11-02) how the background picture fills the window: cover, contain or stretch. Empty = the skin's.
-TextSizeStatus = 12                     # Font size for enabled/disabled text.
-TitleColumnSize = 850                   # Custom size for title column.
 
 [_Main.Menu.NewInPatch]
 NewSince = "2026-10-19"      # UNOFFICIAL, hidden in the menu and read from this file only (never saved to your own settings): the menu tab "New in this patch" lists every setting whose description in this file holds a date (like "(2026-10-17)") on or after this day. It is the day after the last release (P81 playtest v8, 2026-10-18). Change it here when a new patch ships. Empty = no date rule.
@@ -2224,7 +2195,6 @@ PlayerLampMargin = 16.0              # [0-64] How close (world units, about 70 t
 Quality = 1                          # Not currently used.
 ShadowCubeMapSize = 512              # The resolution of one face for the point light shadow cubemaps.
 Statics = true                       # Wether to include objects with "Statics" flag when rendering shadowmaps.
-TorchesCastShadows = true            # Used in Oblivion to enable shadows on torches.
 SkinnedAlphaTest = true              # UNOFFICIAL BUG FIX (2026-11-02), live: in lamp shadows, characters' alpha-tested parts (hair cards, fringes, ragged cloth) cast only where their texture is solid. Before, the whole card cast, so hair under a lamp sat in its own shadow and came out near black. false = as before.
 TwoSidedCasters = false              # UNOFFICIAL (2026-10-29), live, TEST: lamp shadows drawn from both sides of every object, as the sun's are. Without it a lamp's shadow map kept the side of each object turned AWAY from the lamp, so open or thin things (cups, glasses, bowls, characters near a lamp) cast rings or shadows that trace the inside of the mesh. false = as before.
 DrawDistance = 4000                  # Max distance for point light shadow rendering.

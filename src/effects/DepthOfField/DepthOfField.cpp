@@ -12,15 +12,14 @@ void DepthOfFieldEffect::UpdateConstants() {
 		view = &Settings.ThirdPerson;
 
 	const auto& game = TheShaderManager->GameState;
-	const bool dialog = game.isDialog, persuasion = game.isPersuasion;
+	const bool dialog = game.isDialog;
 
 	// the mode can switch the effect off for the current situation
 	bool suppressed = false;
 	switch (view->Mode) {
-	case 1: suppressed = dialog || persuasion; break;
+	case 1: suppressed = dialog; break;
 	case 2: suppressed = !dialog; break;
-	case 3: suppressed = !persuasion; break;
-	case 4: suppressed = !dialog || !persuasion; break;
+	case 3: case 4: suppressed = true; break;	// (2026-11-05) Oblivion's persuasion tests: New Vegas has no persuasion menu, so always off
 	}
 	const int active = suppressed ? 0 : (int)view->Enabled;
 

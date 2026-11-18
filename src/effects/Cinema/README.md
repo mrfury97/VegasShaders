@@ -66,10 +66,10 @@ All keys are read in `Cinema.cpp` (`UpdateSettings`).
 | Mode | Bars are shown when |
 |---|---|
 | 0 | always (when AspectRatio is not 1) |
-| 1 | not in a dialogue and not in persuasion |
+| 1 | not in a dialogue |
 | 2 | only in a dialogue |
-| 3 | only in persuasion (the **default**) |
-| 4 | in a dialogue or in persuasion |
+| 3 | never (the **default**; it was Oblivion's "only in persuasion", and New Vegas has no persuasion menu) |
+| 4 | only in a dialogue (it was "in a dialogue or in persuasion") |
 
 The toml comment lists only 0, 1 and 2. Modes 3 and 4 exist in the code (see section 9). Any other value falls into "always" for the bars in the code's chain of tests, but the spec should state only the five values above.
 
@@ -142,7 +142,7 @@ The toml comment lists only 0, 1 and 2. Modes 3 and 4 exist in the code (see sec
 
 ## 9. Open questions
 
-1. **Mode 3 and 4 are missing from the toml.** The code treats Mode 3 (the default) as "bars only in persuasion" and Mode 4 as "bars in dialogue or persuasion". The toml describes only 0, 1 and 2. Confirm the meaning and update the comment.
+1. **Mode 3 and 4 are missing from the toml.** Since the persuasion tests were removed (2026-11-05), Mode 3 (the default) means "never" and Mode 4 the same as 2; New Vegas never had a persuasion menu, so neither changed on screen. The toml describes only 0, 1 and 2. Decide whether the default should stay 3 and update the comment.
 2. **Dirt lens (REMOVED 2026-11-02).** The shader term read TESR_CinemaSettings.x, which the C++ never sets, so it was always zero. The new shader does not read it; the constant stays registered with x unused.
 3. **Aspect of zero (FIXED 2026-11-02).** An aspect of zero (or below) now means no bars, instead of dividing by zero. The valid range (the toml gives none) is still not stated.
 4. **Letterbox in RenderScale frames.** The bars use the render target's aspect (`TESR_ReciprocalResolution.z`). Confirm that is right when a render rectangle is active.

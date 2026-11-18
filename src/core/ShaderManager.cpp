@@ -639,7 +639,6 @@ void ShaderManager::UpdateConstants() {
 	for (UInt32 menu : overlayMenus) overlay = overlay || ui->IsActive(menu);
 	GameState.OverlayIsOn = overlay;
 	GameState.isDialog = ui->IsActive(Menu::kMenuType_Dialog);
-	GameState.isPersuasion = ui->IsActive(Menu::kMenuType_Persuasion);
 	// UNOFFICIAL 2026-11-01 LockpickEffects (user: the lock is black in the lockpick view; "it's pbr"): while the lockpick screen is open the
 	// objects are drawn with the game's own shaders, as the menu's PBR switch does (the lock is lit by the menu's own light, which NVR's
 	// object shaders do not light it with). Back as they were when it closes. LockpickEffects = true: as before.

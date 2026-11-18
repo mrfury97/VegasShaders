@@ -95,12 +95,6 @@ struct SettingsMainStruct
 		float	CullMinSize, CullMinSizeReflection;
 	};
 
-	struct OcclusionCullingStruct {	// [Main.OcclusionCulling.Main]
-		bool	Enabled, OccludingStatic, OccludedStatic, OccludedDistantStatic, OccludedDistantStaticIC;
-		UInt32	OcclusionMapRatio;	// the occlusion map's size divider
-		float	OccludingStaticMin, OccludedStaticMin, OccludedStaticMax, OccludedDistantStaticMax;
-	};
-
 	struct CameraModeStruct {	// [Main.CameraMode.Main] and [Main.CameraMode.Positioning]
 		bool		Enabled, ChasingFirst, ChasingThird;
 		UInt8		Crosshair;	// the crosshair mode
@@ -108,78 +102,17 @@ struct SettingsMainStruct
 		float		FoV;		// degrees
 	};
 	
-	// The following groups come from the Oblivion side of the original project; they are still read from [Main.*] (and kept
-	// in the defaults), but nothing in New Vegas acts on most of them.
-	struct IKFootStruct {	// [Main.IKFoot.Main]
-		bool	Enabled;
-		float	Coeff, CoeffThigh, CoeffCalf, CoeffFoot, CoeffToe;
-	};
-
-	struct EquipmentModeStruct {	// [Main.EquipmentMode.Main] and [Main.EquipmentMode.Positioning]
-		bool		Enabled, SleepingEquipment, SwimmingEquipment;
-		UInt16		TorchKey, CombatEquipmentKey;
-		float		DualBlockDelay;	// seconds
-		NiPoint3	ShieldOnBackPos, ShieldOnBackRot;
-		NiPoint3	WeaponOnBackPos, WeaponOnBackRot;
-		NiPoint3	TwoHandWeaponOnBackPos, TwoHandWeaponOnBackRot;
-		NiPoint3	BowOnBackPos, BowOnBackRot;
-		NiPoint3	StaffOnBackPos, StaffOnBackRot;
-		NiPoint3	TorchOnBeltPos, TorchOnBeltRot;
-	};
-
-	struct GrassModeStruct { bool Enabled; };	// [Main.GrassMode.Main]
-
-	struct MountedCombatStruct {	// [Main.MountedCombat.Main] and [Main.MountedCombat.Positioning]
-		bool		Enabled;
-		NiPoint3	WeaponOnBackPos, WeaponOnBackRot;
-		NiPoint3	TwoHandWeaponOnBackPos, TwoHandWeaponOnBackRot;
-		NiPoint3	BowOnBackPos, BowOnBackRot;
-		NiPoint3	StaffOnBackPos, StaffOnBackRot;
-	};
-
 	struct WeatherModeStruct {	// [Main.WeatherMode.*]: the weathers' night, fog and sun colours are scaled by these
 		bool		Enabled;
 		NiPoint3	CoeffNight, CoeffFog, CoeffSun;
 	};
 
-	struct ShadowModeStruct { float NearQuality; };	// [Main.ShadowMode.Main]
 
-	struct ShadersStruct {	// not read: kept for its place in the struct
-		bool	Blood, Grass, HDR, NightEye, POM, Skin, Terrain, Water, Extra;
-	};
-
-
-	struct MenuStruct {	// [Main.Menu.Style] and [Main.Menu.Keys]
-		char	TextFont[40], TextFontStatus[40];
-		// "r,g,b" colours of the old text menu: normal, selected, editing and enabled rows, each with its shadow
-		UInt8	TextColorNormal[3], TextShadowColorNormal[3];
-		UInt8	TextColorSelected[3], TextShadowColorSelected[3];
-		UInt8	TextColorEditing[3], TextShadowColorEditing[3];
-		UInt8	TextColorEnabled[3], TextShadowColorEnabled[3];
-		UInt8	TextSize, TextSizeStatus;
-		// DirectInput key codes; KeyEnable opens the menu
-		UInt8	KeyEnable, KeyUp, KeyDown, KeyLeft, KeyRight, KeyPageUp, KeyPageDown;
-		UInt8	KeyAdd, KeySubtract, KeySave, KeyEditing, MasterSwitchModifier;
-		int		PositionX, PositionY;
-		int		TitleColumnSize, MainItemColumnSize, ItemColumnSize, RowSpace, RowsPerPage;
-		bool	UseNumpadForEditing;	// EntryUseNumpad
-	};
-
-	struct PurgerStruct {	// [Main.Purger.Main]
-		bool	Enabled, PurgeTextures, PurgeCells;
-		UInt16	Key;	// a DirectInput key code
-		int		Time;	// seconds between purges
-	};
-
-	struct GravityStruct {	// [Main.Gravity.Main]
-		bool	Enabled;	// Gravity: on
-		float	Value;		// its strength
-	};
-
-	struct DodgeStruct {	// [Main.Dodge.Main]
-		bool	Enabled, DoubleTap;
-		UInt8	AcrobaticsLevel;	// the skill needed
-		float	DoubleTapTime;		// seconds
+	struct MenuStruct {	// [Main.Menu.Style] and [Main.Menu.Keys]: what the ImGui menu reads from them (2026-11-05: the old text
+		// menu's fonts, colours, layout and navigation keys are gone; the menu skin reads its own keys)
+		UInt8	TextSize;				// the menu's text size, percent
+		UInt8	KeyEnable;				// DirectInput key code that opens the menu
+		UInt8	MasterSwitchModifier;	// with KeyEnable, switches every effect on or off
 	};
 
 	struct FlyCamStruct {	// [Main.FlyCam.Main]
@@ -198,20 +131,10 @@ struct SettingsMainStruct
 	// the groups, in their original order
 	MainStruct				Main;				// [Main.Main.*]
 	CullingProcessStruct	CullingProcess;		// [Main.CullingProcess.*]
-	OcclusionCullingStruct	OcclusionCulling;	// [Main.OcclusionCulling.*]
 	CameraModeStruct		CameraMode;			// [Main.CameraMode.*]
-	IKFootStruct			IKFoot;				// [Main.IKFoot.*]
-	EquipmentModeStruct		EquipmentMode;		// [Main.EquipmentMode.*]
 	FrameRateStruct			FrameRate;			// [Main.FrameRate.*]
-	GrassModeStruct			GrassMode;			// [Main.GrassMode.*]
-	MountedCombatStruct		MountedCombat;		// [Main.MountedCombat.*]
 	WeatherModeStruct		WeatherMode;		// [Main.WeatherMode.*]
-	ShadowModeStruct		ShadowMode;			// [Main.ShadowMode.*]
-	ShadersStruct			Shaders;			// not read
 	MenuStruct				Menu;				// [Main.Menu.*]
-	PurgerStruct			Purger;				// [Main.Purger.*]
-	GravityStruct			Gravity;			// [Main.Gravity.*]
-	DodgeStruct				Dodge;				// [Main.Dodge.*]
 	FlyCamStruct			FlyCam;				// [Main.FlyCam.*]
 	DevelopStruct			Develop;			// [Main.Develop.*]
 	TransitionsStruct		Transitions;		// [Main.Transitions.*]

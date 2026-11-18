@@ -557,7 +557,6 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	interiors.Quality = ShadowSettingI(interiorSection, "Quality");
 	interiors.LightPoints = (std::max)(0, (std::min)(ShadowSettingI(interiorSection, "LightPoints"), ShadowCubeMapsMax));
 	interiors.ExteriorLightPoints = (std::max)(0, (std::min)(ShadowSettingI(interiorSection, "ExteriorLightPoints"), ExteriorBatchedMax));
-	interiors.TorchesCastShadows = ShadowSettingI(interiorSection, "TorchesCastShadows");
 	// UNOFFICIAL 2026-10-16 (bug hunt): clamped -- 12 R32F cubes at 4096 are about 4.8 GB, and the size sets every cube's memory.
 	interiors.ShadowCubeMapSize = std::clamp(ShadowSettingI(interiorSection, "ShadowCubeMapSize"), 64, 2048);
 	interiors.Darkness = ShadowSettingF(interiorSection, "Darkness");
