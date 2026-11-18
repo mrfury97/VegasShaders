@@ -846,17 +846,12 @@ PS_OUTPUT main(PS_INPUT pin) {
     #if CAPTURED_NORMALS_ON >= 4
         // UNOFFICIAL 2026-11-14 GBufferV2 (Includes/CapturedNormals.hlsl): the blended layers' normal-mapped normal in world axes (exact: the land
         // is not rotated, tbnMat is its own frame), in g / a. (CAPTURED_PT 2's land code is not compiled with it: ShaderRecord caps CAPTURED_PT at 1.)
-        #ifdef TERRAIN_WETNESS
-            po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, wetWorldNormal);
-        #else
-            po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, mul(combinedNormal, tbnMat));
-        #endif
+        // (2026-11-18: one normal for both, the one the forward lighting uses: with the water layer it is combinedNormal AFTER standing
+        // water flattened it (above, Puddles). wetWorldNormal is the normal before that, and the deferred sun, lamps and reflections lit
+        // a puddle with the ground's bumps showing through the water.)
+        po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, mul(combinedNormal, tbnMat));
     #elif defined(CAPTURED_PT) && CAPTURED_PT >= 2 && CAPTURED_NORMALS_ON >= 3 && TEX_COUNT <= 5
-        #ifdef TERRAIN_WETNESS
-            po.capturedPad2 = CapturedLandBumpOut(wetWorldNormal);
-        #else
-            po.capturedPad2 = CapturedLandBumpOut(mul(combinedNormal, tbnMat));
-        #endif
+        po.capturedPad2 = CapturedLandBumpOut(mul(combinedNormal, tbnMat));	// (2026-11-18: after the standing water's flatten, as above)
     #endif
     #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 3
         // UNOFFICIAL 2026-11-14 DeferredSun (Includes/DeferredPixel.hlsl; Shaders/DeferredSun.hlsl's land model): the lighting-free code
