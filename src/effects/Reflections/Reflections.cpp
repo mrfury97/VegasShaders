@@ -31,9 +31,9 @@
 namespace {
 	// UNOFFICIAL 2026-11-15 DeferredReflections ([Main.Main.Quality], live, test only; core/FdIndirect.h): while the deferred renderer runs with
 	// it on, every pass of this effect (D3D9 and Vulkan, the RT RayGen and the RT denoiser) reads the G-buffer's normal-mapped shading normal
-	// where TESR_NormalsBuffer shows the captured surface. Off: normals itself.
+	// where TESR_NormalsBuffer shows the captured surface. Off: normals itself. (2026-11-18: DeferredBumpedNormals gives the same normals.)
 	IDirect3DBaseTexture9* FdReflNormals(IDirect3DDevice9* d, IDirect3DBaseTexture9* normals) {
-		if (!normals || !FdIndirect::ReflectionsOn()) return normals;
+		if (!normals || !(FdIndirect::ReflectionsOn() || FdIndirect::BumpedNormalsOn())) return normals;
 		std::string depthName = "TESR_DepthBuffer";
 		IDirect3DBaseTexture9** depth = TheTextureManager->GetTextureSlotByName(depthName);
 		return FdIndirect::ShadingNormals(d, normals, depth ? *depth : nullptr);

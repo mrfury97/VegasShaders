@@ -26,6 +26,7 @@ public:
 	struct WetnessReflectionsStruct {
 		D3DXVECTOR4	Data;		// x: strength, y: max distance, z: thickness, w: steps
 		D3DXVECTOR4	Fade;		// x: roughness cutoff, y: edge fade, z: debug view, w: max camera distance
+		D3DXVECTOR4	Bump = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-18 x: 1 = s4 holds the shading normals (BindShadingNormals)
 	};
 	WetnessReflectionsStruct	Constants;
 
@@ -33,4 +34,5 @@ public:
 	void	RegisterConstants();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	void	BindShadingNormals(IDirect3DDevice9* Device);	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals: stage 4 for the next Render
 };
