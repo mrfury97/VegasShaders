@@ -443,19 +443,6 @@ def gen_caustics():
     return np.concatenate([np.repeat(out[..., None], 3, -1), np.ones((n, n, 1))], -1)
 
 
-def gen_puddles():
-    """Puddle masks (2048, wrap, DXT5): three independent soft masks in R, G and B, 1 = dry, low = puddle.
-    No current shader reads it (the old Oblivion WetWorld did, red at three scales)."""
-    rng = np.random.default_rng(1011)
-    n = 2048
-    out = np.ones((n, n, 4))
-    for c, cover in enumerate((0.15, 0.21, 0.24)):
-        low = fbm(rng, n, n, 2.0, 2, 5) + 0.06 * fbm(rng, n, n, 1.5, 6, 30)
-        t = np.quantile(low, 1.0 - cover)
-        out[..., c] = 1.0 - smoothstep(t - 0.25, t + 0.45, low)
-    return out
-
-
 def gen_ripples():
     """Rain ripples (256, wrap). Per drop: red = 1 at the centre falling linearly to 0 at the rim, green/blue =
     the unit direction from the centre (x right, y up) as 0.5 + 0.5 * dir, alpha = the drop's random phase.
@@ -482,20 +469,6 @@ def gen_ripples():
             out[..., 1][inside] = 0.5 + 0.5 * dx[inside] / dd
             out[..., 2][inside] = 0.5 - 0.5 * dy[inside] / dd
             out[..., 3][inside] = rng.random()
-    return out
-
-
-def gen_snow():
-    """Snow albedo (512, wrap, DXT5): bright blue-white with fine grain and a few glints.
-    No current shader reads it (the old Oblivion SnowAccumulation did)."""
-    rng = np.random.default_rng(1013)
-    n = 512
-    grain = 0.6 * fbm(rng, n, n, 0.9, 16, 400) + 0.4 * fbm(rng, n, n, 1.6, 2, 40)
-    glint = (rng.random((n, n)) < 0.004) * rng.uniform(0.02, 0.05, (n, n))
-    out = np.ones((n, n, 4))
-    out[..., 0] = np.clip(0.947 + 0.020 * grain + glint, 0, 1)
-    out[..., 1] = np.clip(0.945 + 0.020 * grain + glint, 0, 1)
-    out[..., 2] = np.clip(0.986 + 0.012 * grain + glint, 0, 1)
     return out
 
 
@@ -539,9 +512,7 @@ SPECS = {
     "water_NRM_LOD":  ("Water/water_NRM_LOD.dds", gen_water_nrm_lod, "r8g8b8", 1, False, 0x81007, 0x1000),
     "watercalm_NRM":  ("Water/watercalm_NRM.dds", gen_watercalm_nrm, "bc3", 13, True, None, None),
     "caust_001":      ("Water/caust_001.dds", gen_caustics, "bc1", 9, False, None, None),
-    "puddles":        ("Precipitations/puddles.dds", gen_puddles, "bc3", 12, False, None, None),
     "ripples":        ("Precipitations/ripples.dds", gen_ripples, "a8r8g8b8", 9, False, 0xA1007, 0x401008),
-    "snow":           ("Precipitations/snow.dds", gen_snow, "bc3", 10, False, None, None),
     "snow_NRM":       ("Precipitations/snow_NRM.dds", gen_snow_nrm, "r8g8b8", 1, False, 0x100F, 0x1000),
     "neutral_lut":    ("VegasShaders/LUTs/neutral_lut.png", gen_neutral_lut, "lut", 1, False, None, None),
 }
