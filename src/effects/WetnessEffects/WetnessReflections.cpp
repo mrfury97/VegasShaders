@@ -1,10 +1,12 @@
 #include <algorithm>
 
 #include "WetnessReflections.h"
+#include "../../core/FdIndirect.h"	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals
 
 void WetnessReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_WetnessReflectionData", &Constants.Data);
 	TheShaderManager->RegisterConstant("TESR_WetnessReflectionFade", &Constants.Fade);
+	TheShaderManager->RegisterConstant("TESR_WetnessReflectionBump", &Constants.Bump);	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals
 }
 
 // Part of Wetness Effects: [Shaders.WetnessEffects.Reflections], switched on there. It has no Status of its
@@ -40,4 +42,24 @@ bool WetnessReflectionsEffect::ShouldRender() {
 	if (!Wetness || !Wetness->Enabled) return false;
 	if (Settings.DebugView) return true;
 	return Wetness->Constants.Flags.x > 0.5f && Settings.Strength > 0.0f;
+}
+
+// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredBumpedNormals (live, test only, off; core/FdIndirect.h, docs/bumped-normals-study.md):
+// the shader's NVR_WetShadingNormals (s4) has no texture slot, so it is set here before every Render (EffectChain): the G-buffer's
+// normal-mapped shading normal while the switch is on, else TESR_NormalsBuffer itself; TESR_WetnessReflectionBump.x says which (0: the
+// shader takes exactly its old path). The caller clears the stage after the Render (ClearPassTextures).
+void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
+	Constants.Bump.x = 0.0f;
+	if (!Enabled || !Effect || !ShouldRender()) return;	// Render draws nothing: no shading-normals pass for it either
+	std::string normalsName = "TESR_NormalsBuffer", depthName = "TESR_DepthBuffer";
+	IDirect3DBaseTexture9** normalsSlot = TheTextureManager->GetTextureSlotByName(normalsName);
+	IDirect3DBaseTexture9* normals = normalsSlot ? *normalsSlot : nullptr;
+	if (!normals) return;
+	IDirect3DBaseTexture9* shading = normals;
+	if (FdIndirect::BumpedNormalsOn()) {
+		IDirect3DBaseTexture9** depth = TheTextureManager->GetTextureSlotByName(depthName);
+		shading = FdIndirect::ShadingNormals(Device, normals, depth ? *depth : nullptr);
+	}
+	Constants.Bump.x = shading != normals ? 1.0f : 0.0f;
+	SetPassTexture(4, shading);	// set after each pass begins (EffectRecord::PassTextures)
 }
