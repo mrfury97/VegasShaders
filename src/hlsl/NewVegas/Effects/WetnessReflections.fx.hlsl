@@ -7,7 +7,8 @@
 //
 // Where it is wet, and how glossy, is worked out again here with the forward shaders' own function (Shaders/Includes/Wetness.hlsl,
 // GetWetness) from the depth and the normals buffer: the same weather, puddle noise and cover. What only the forward shaders know
-// (normal maps, ripples) is left out; the reflection is of the flat water surface.
+// (normal maps, ripples) is left out; the reflection is of the flat water surface. (2026-11-18: with [Main.Main.Quality]
+// DeferredBumpedNormals on and the deferred renderer running, the reflection takes the G-buffer's normal-mapped normal; off by default.)
 //
 // The scene holds the forward shaders' output, so the swap is done in its terms: the sky's share comes out (its radiance as the
 // forward shaders add it, WetSkyReflection, encoded as they encode their result, LinEncode), the hit's goes in, both scaled by the
@@ -18,10 +19,14 @@
 float4 TESR_ReciprocalResolution;
 float4 TESR_WetnessReflectionData;   // x: strength, y: max ray distance (game units), z: thickness, w: steps
 float4 TESR_WetnessReflectionFade;   // x: roughness cutoff, y: screen edge fade (uv), z: debug view, w: camera distance fade end
+float4 TESR_WetnessReflectionBump;   // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: x 1 = s4 holds the shading normals this frame (else 0: as before)
 
 sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 sampler2D TESR_NormalsBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-18 DeferredBumpedNormals: no texture slot of its own; WetnessReflectionsEffect::BindShadingNormals sets it every frame
+// (the shading normals, or TESR_NormalsBuffer while the switch is off). s3 is the wetness include's ortho / puddle map.
+sampler2D NVR_WetShadingNormals : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 
 #include "Includes/Depth.hlsl"
 // The forward shaders' colour encoding (Shaders/Includes/LinearLight.hlsl, whose own includes do not resolve from this folder) and
@@ -92,17 +97,36 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	float3 V = normalize(P);
 	float3 N = normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0.0f, 0.0f)).xyz * 2.0f - 1.0f);
 	if (dot(N, V) > 0.0f) N = -N;   // toward the camera
+	// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredBumpedNormals (docs/bumped-normals-study.md): the G-buffer's normal-mapped shading normal
+	// (s4) while the switch is on, else the normals buffer itself. N (smooth) still decides what is wet and where the ray starts.
+	float3 Ns = normalize(tex2Dlod(NVR_WetShadingNormals, float4(uv, 0.0f, 0.0f)).xyz * 2.0f - 1.0f);
+	if (dot(Ns, V) > 0.0f) Ns = -Ns;
 
 	float3 worldPos = mul(float4(P, 1.0f), TESR_InvViewTransform).xyz;
 	float3 worldN = normalize(mul(float4(N, 0.0f), TESR_InvViewTransform).xyz);
-	Wetness wet = GetWetness(worldPos, worldN, worldN);
+	float3 worldNs = normalize(mul(float4(Ns, 0.0f), TESR_InvViewTransform).xyz);
+	Wetness wet = GetWetness(worldPos, worldN, worldNs);
 	float gloss = wet.gloss;
 	float rough = wet.roughness;
 	float glossy = gloss * (1.0f - smoothstep(TESR_WetnessReflectionFade.x * 0.5f, TESR_WetnessReflectionFade.x, rough));
 	if (glossy <= 0.01f) return Result(scene, gloss, 0.0f);
 
+	// The normal the film reflects with. Off: N, exactly as before. On: the film's own normal as the forward shaders reflect with it
+	// (wet.normal: the bumped normal, flattened toward the smooth one under standing water and streaks, with the ripples on top), so a
+	// puddle does not mirror the ground's bumps beneath it. View space: the transpose of the view-to-world rotation.
+	const bool bumped = TESR_WetnessReflectionBump.x > 0.5f;
+	float3 worldNr = worldN;
+	float3 Nr = N;
+	if (bumped) {
+		worldNr = normalize(wet.normal);
+		Nr = normalize(mul((float3x3)TESR_InvViewTransform, worldNr));
+		if (dot(Nr, V) > 0.0f) { Nr = N; worldNr = worldN; }	// facing away from the camera: the smooth normal
+	}
+
 	// The reflected ray, in view space. One pointing back at the camera has nothing on screen to find.
-	float3 R = reflect(V, N);
+	float3 R = reflect(V, Nr);
+	// (bumped) a ray tilted into the surface would find the surface next to its start: mirrored about the smooth plane
+	if (bumped && dot(R, N) < 0.0f) R -= 2.0f * dot(R, N) * N;
 	float towardScreen = saturate(R.z * 4.0f + 0.25f);
 	if (towardScreen <= 0.0f) return Result(scene, gloss, 0.0f);
 
@@ -155,9 +179,11 @@ float4 WetReflections(VSOUT IN) : COLOR0
 
 	// The film's reflectance as the forward shaders weigh their sky reflection, and that sky.
 	float3 worldV = -normalize(worldPos);
-	float3 worldR = reflect(-worldV, worldN);
+	// (2026-11-18 DeferredBumpedNormals) the sky taken out along the same normal the hit comes along (worldNr: worldN while off), the
+	// horizon against the smooth surface, as the forward film (ObjectWetFilm) does
+	float3 worldR = reflect(-worldV, worldNr);
 	float horizon = saturate(1.0f + 1.2f * dot(worldR, worldN));
-	float reflectance = WetReflectance(saturate(dot(worldN, worldV)), rough, glossy) * horizon * horizon;
+	float reflectance = WetReflectance(saturate(dot(worldNr, worldV)), rough, glossy) * horizon * horizon;
 	float3 skySeen = LinEncode(max(WetSkyReflection(worldR), 0.0f));
 
 	float3 hitColor = tex2Dlod(TESR_RenderedBuffer, float4(hitUV, 0.0f, 0.0f)).rgb;

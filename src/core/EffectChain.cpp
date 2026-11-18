@@ -927,7 +927,12 @@ void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 		GpuProfileScope gpu(materialEffectsTimer, Device);
 		// UNOFFICIAL 2026-11-04 Wetness Effects' reflections (after the shadows, AO and bounce light, so what wet surfaces reflect is
 		// shaded as it is seen), and the wetness the HUD raindrops read next frame (as Physically-Based-Reloaded).
-		{ Effects.WetnessReflections->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.WetnessReflections); }
+		{	// (2026-11-18 DeferredBumpedNormals: its normal-mapped normal on stage 4, cleared after)
+			Effects.WetnessReflections->BindShadingNormals(Device);
+			Effects.WetnessReflections->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface);
+			Effects.WetnessReflections->ClearPassTextures();
+			PixelInspector::AfterFrame(Effects.WetnessReflections);
+		}
 		Effects.HudRaindrops->UpdateWetness(Device);
 		Device->SetRenderTarget(0, RenderTarget);
 		// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status], restart): the surface shaders make the world wet in its
