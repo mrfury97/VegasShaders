@@ -127,7 +127,7 @@ Who writes what (mode 2):
 | Objects, armour, clothes, hair: LIGHTS 2/3 family | vertex normal (`ObjectTemplate.hlsl:2258-2270`) | the normal map through a tangent frame rebuilt from the screen derivatives of position and uv (Schuler 2013); two-sided cards seen from behind store the front's normal (`:1697-1701`, `CapturedNormals.hlsl:126-165`) |
 | Objects: many-lamp table family (LIGHTS 4+) | vertex normal (`:2849-2863`) | exact, from the vertex's own tangent rows (`:2641-2645`); that family's other records use the derivative frame (`:2647`) |
 | Parallax | vertex normal, triangle-faced (`ParallaxTemplate.hlsl:1016`) | derivative frame on the parallax normal map (`:840`) |
-| Near land | vertex normal (`TerrainTemplate.hlsl:884`) | the blended layers' normal map through the land's TBN, or the wet-world normal (`:850-852`) |
+| Near land | vertex normal (`TerrainTemplate.hlsl:884`) | the blended layers' normal map through the land's TBN, after standing water flattens it, as the forward lighting uses it (`:847-850`; until 2026-11-18 the wet-world normal from before the flatten: bumps showed through puddles in the deferred light) |
 | Far land (TerrainLODTemplate) | geometric normal (`TerrainLODTemplate.hlsl:259`) | the LOD normal map (`:234`) |
 | Skin | vertex normal after skinning (`SkinTemplate.hlsl:608`) | the skin normal map, into the same COLOR2 (`:633-634`) |
 | SpeedTree leaves | the card's flat face normal (`Includes/Leaf.hlsl:57`, `Shadow.hlsl:916-920`) | none |
