@@ -246,6 +246,22 @@ VS_OUTPUT main(VS_INPUT vin) {
 
 #ifdef PS	// pixel shader
 
+// UNOFFICIAL 2026-11-15 DeferredSkin (core/DeferredSkin.h, Includes/SkinDeferred.hlsl; [Main.Main.Quality] DeferredSkin, test only): the skin's
+// deferred record, the full (ADTS) and many-lamp (ADTS10) families only. LAMPS_DEFERRED 2: the sun and every lamp compiled out (DeferredSun and
+// DeferredLamps add them with this file's own SkinLight); 3: the lamps out, the sun kept (DeferredRenderer 1). The ambient, the sky light and
+// reflection and the fog stay; COLOR1-3 hold G-buffer v2 (see SkinDeferred.hlsl) instead of the skin blur's targets. Never made otherwise:
+// every other record compiles exactly as before (SKIN_DEFERRED 0).
+#if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED >= 2
+    #if defined(ONLY_LIGHT) || !defined(CAPTURED_NORMALS_ON) || CAPTURED_NORMALS_ON < 4
+        #error DeferredSkin: a deferred skin record is made for the full and many-lamp families with GBufferV2 only
+    #endif
+    #define SKIN_DEFERRED LAMPS_DEFERRED
+    #include "includes/DeferredPixel.hlsl"
+    #include "includes/SkinDeferred.hlsl"
+#else
+    #define SKIN_DEFERRED 0
+#endif
+
 #include "includes/Skin.hlsl"
 // The lamps' shadows indoors (INTERIOR_SHADOWS records): lamp k of the draw is PSLightColor[k], looked up once at the top
 // into ptShadow<k> (POINT_SHADOW_SCALAR: plain numbers, the debug views' tint applied where they are used).
@@ -419,8 +435,8 @@ PS_OUTPUT main(PS_INPUT pin) {
     HudRain(pin.uv.xy, worldPos, true);
     const float2 uv = HudRainUV(pin.uv.xy);
 
-    // --- the lamps' shadows first, while little else is held (nothing without INTERIOR_SHADOWS)
-    #if INTERIOR_SHADOWS && POINTS > 0
+    // --- the lamps' shadows first, while little else is held (nothing without INTERIOR_SHADOWS; nothing in a deferred record: its lamps are DeferredLamps')
+    #if INTERIOR_SHADOWS && POINTS > 0 && !SKIN_DEFERRED
         const float3 ptWorldPos = worldPos;
         const float3 ptNormal = ShadowFacingNormal(pin.normal.xyz, worldPos);   // the smooth vertex normal, for the lookup's offset
         const float ptValid = 1.0f;
@@ -480,8 +496,8 @@ PS_OUTPUT main(PS_INPUT pin) {
     #endif
     const float3 albedo = LinColor(HudRainAlbedo(texColor.rgb));   // darker under the rain drops
 
-    // --- the sun's shadow (top level: derivatives), and vanilla's projected actor shadow
-    #ifndef DIFFUSE
+    // --- the sun's shadow (top level: derivatives), and vanilla's projected actor shadow (not in a lighting-free record: DeferredSun's)
+    #if !defined(DIFFUSE) && SKIN_DEFERRED != 2
         const float3 sunTS = float3(pin.uv.zw, pin.tangent.w);
         float sunVis = 1.0f;
         #if FORWARD_SHADOWS	// NVR sun shadows in the object pass
@@ -505,12 +521,13 @@ PS_OUTPUT main(PS_INPUT pin) {
     float3 ambientLight = 0.0f;   // kept apart for the debug views
     float3 specular;
 
-    #ifndef DIFFUSE
+    #if !defined(DIFFUSE) && SKIN_DEFERRED != 2
         const float3 sunLight = PBRLight(PSLightColor[0].rgb) * projShadow;
         diffuseLight += SkinLight(albedo, N, Nsoft, sunTS.z, V, sunTS, sunLight, sunVis, true, specular);
         specularLight += specular;
     #endif
 
+    #if !SKIN_DEFERRED	// (a deferred record's lamps: DeferredLamps')
     #if POINTS > 0
         diffuseLight += SkinLamp(0, pin.light1.xyz, SKIN_LAMP_SHADOW(SKIN_LAMP0), albedo, N, Nsoft, V, specular);
         specularLight += specular;
@@ -526,6 +543,7 @@ PS_OUTPUT main(PS_INPUT pin) {
     #if POINTS > 3
         diffuseLight += SkinLamp(3, float3(pin.light1.w, pin.light2.w, pin.light3.w), SKIN_LAMP_SHADOW(SKIN_LAMP3), albedo, N, Nsoft, V, specular);
         specularLight += specular;
+    #endif
     #endif
 
     // --- the sky and the ambient (the reflection first: it sets the share of the sky it takes)
@@ -560,8 +578,13 @@ PS_OUTPUT main(PS_INPUT pin) {
         specularShare *= fogOn ? 1.0f - pin.fog.a : 1.0f;
     #endif
 
+    #if SKIN_DEFERRED == 2	// (DeferredSkin: no direct light in a lighting-free record; a folded zero in LinEncode's pow is an infinity literal, X4579)
+        #define SKIN_DEBUG_DIRECT 1.0e-6f
+    #else
+        #define SKIN_DEBUG_DIRECT (diffuseLight - ambientLight)
+    #endif
     [branch] if (TESR_SkinDebug.x > 0.0f)
-        outColor.rgb = SkinDebugView(TESR_SkinDebug.x, diffuseLight - ambientLight, ambientLight, specularLight, albedo, adAlbedo);
+        outColor.rgb = SkinDebugView(TESR_SkinDebug.x, SKIN_DEBUG_DIRECT, ambientLight, specularLight, albedo, adAlbedo);
 
     #ifdef DIFFUSE
         outColor.a = 1.0f;
@@ -573,7 +596,7 @@ PS_OUTPUT main(PS_INPUT pin) {
 
     PS_OUTPUT pout;
     pout.color = outColor;
-    #if INTERIOR_SHADOWS && POINTS > 0 && POINT_SHADOW_RT
+    #if INTERIOR_SHADOWS && POINTS > 0 && POINT_SHADOW_RT && !SKIN_DEFERRED
         [branch] if (NVR_PointShadowRT.x > 2.5f) pout.color.rgb = PointShadowRtCoverage(ptWorldPos);	// UNOFFICIAL 2026-10-29 RT coverage view
     #endif
     pout.color.rgb = LinearSceneOut(pout.color.rgb);	// UNOFFICIAL 2026-10-28 LinearScene (includes/LinearLight.hlsl)
@@ -583,7 +606,7 @@ PS_OUTPUT main(PS_INPUT pin) {
         pout.capturedNormal = CAPTURED_NORMAL_INVALID;
     #else
         pout.capturedNormal = CapturedNormalOut(pin.normal.xyz, worldPos);
-        #if CAPTURED_NORMALS_ON == 2
+        #if CAPTURED_NORMALS_ON >= 2   // (2026-11-11: was == 2. With AlbedoBuffer on the define is 3, so skin kept alpha 2.0, SkinFill (clip(a - 2.02)) wrote nothing and skin pixels kept the MaterialBuffer class, roughness and metal of whatever was drawn before them)
             // UNOFFICIAL 2026-10-31 MaterialBufferSkin (core/CapturedNormals.h SkinFill): the skin's roughness rides in the alpha (2.05 + 0.4 x it;
             // worn gear stays 2), copied into MaterialBuffer as class 6 after the list (this template's COLOR2 is the skin blur's)
             [flatten] if (pout.capturedNormal.a > 1.5f) pout.capturedNormal.a = 2.05f + 0.4f * saturate(skinRoughness);
@@ -597,6 +620,19 @@ PS_OUTPUT main(PS_INPUT pin) {
         pout.albedo = float4(saturate(adAlbedo), luma(outColor.rgb * adAlbedo));   // what the engine multiplies in, and the colour once it has
     #else
         pout.albedo = float4(saturate(texColor.rgb), luma(outColor.rgb));
+    #endif
+    #if SKIN_DEFERRED
+        // UNOFFICIAL 2026-11-15 DeferredSkin: G-buffer v2 on COLOR1-3 (Includes/SkinDeferred.hlsl), the core binds the G-buffer's targets for this
+        // record (no skin blur's: core/DeferredSkin.h). keep = 1 - the fog this pass lerped COLOR0 with.
+        const float skinKeep = fogOn ? 1.0f - pin.fog.a : 1.0f;
+        #if SKIN_DEFERRED == 2
+            pout.scatter = float4(albedo, FD_LF_CODE(FD_LF_SPEC, skinKeep));	// lighting-free: DeferredSun and DeferredLamps light it
+        #else
+            pout.scatter = float4(albedo, FD_LAMPS_CODE(skinKeep));	// the sun kept: DeferredLamps lights it
+        #endif
+        const float2 skinOct = ShadowEncodeNormal(worldN);
+        pout.albedo = float4(6.0f, skinOct.x, skinRoughness, skinOct.y);	// model 6 (skin), no specular bit, metal 0; the bumped normal; roughness
+        pout.capturedNormal.a = FDSkinCode(normalTexel.a, skinThinness, FDSkinSoftness(N, Nsoft));
     #endif
     return pout;
 }

@@ -9,6 +9,9 @@ The one settings defaults file (resource/VegasShaders.defaults.toml) is assemble
 
 split: one-time, from the current defaults file -> fragments + ORDER.txt.
 merge: fragments + ORDER.txt -> the defaults file (the build runs this; the result is committed too, so nothing else changes).
+       Fail safe: everything is validated first; the file is written via a temp file and replaced only when the whole merge succeeded,
+       so an error never leaves it empty or half written. The merged file is always CRLF (as committed and shipped), whatever line
+       ends the fragments were saved with.
 check: merge into memory and compare with the committed defaults file byte for byte (exit 1 on a difference).
 """
 import os, re, sys
@@ -74,13 +77,21 @@ def merged(root):
     for own, rest in pool.items():
         extra = [k for k, v in rest.items() if k != '<preamble>' or v]
         if extra: sys.exit(f'fragment {own} has sections ORDER.txt does not list: {extra[:5]} (add them to ORDER.txt)')
-    return ''.join(out)
+    return re.sub(r'\r?\n', '\r\n', ''.join(out))  # CRLF like the committed file, whatever the fragments use
 
 if __name__ == '__main__':
     cmd, root = sys.argv[1], sys.argv[2]
     if cmd == 'split': split(root)
     elif cmd == 'merge':
-        open(os.path.join(root, DEFAULTS), 'wb').write(merged(root).encode('utf-8')); print('merged', DEFAULTS)
+        data = merged(root).encode('utf-8')  # exits on any error before anything is written
+        dst = os.path.join(root, DEFAULTS); tmp = dst + '.tmp'
+        try:
+            with open(tmp, 'wb') as f:
+                f.write(data); f.flush(); os.fsync(f.fileno())
+            os.replace(tmp, dst)
+        finally:
+            if os.path.exists(tmp): os.remove(tmp)
+        print('merged', DEFAULTS)
     elif cmd == 'check':
         same = merged(root) == read_raw(os.path.join(root, DEFAULTS))
         print('defaults file matches its fragments' if same else 'DIFFERENT: run merge (or fix ORDER.txt / the fragments)'); sys.exit(0 if same else 1)

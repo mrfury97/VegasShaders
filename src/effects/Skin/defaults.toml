@@ -39,6 +39,17 @@ FalloffRed = 1.0                    # How wide each colour spreads within the bl
 FalloffGreen = 0.37
 FalloffBlue = 0.3
 
+[_Shaders.Skin.SSS]
+Kernel = 1                          # UNOFFICIAL (2026-11-15; default 1 since 2026-11-16), live, test only, with [Main.Main.Quality] DeferredSkinSSS 2: 1 the separable blur ([Shaders.Skin.Scattering] / [Interiors] settings) with the highlights kept sharp (the look of forward skin); 0 the Burley profile sampled on a disc in the deferred pass (docs/next/FD-SKIN-RESULTS.md "SSS v2"): KNOWN BUG, a dark patch under a moustache or beard (docs/next/FD-FORWARD-GROUPS.md section 6).
+DebugView = 0                       # [0-2] UNOFFICIAL (2026-11-16), live, test only, with DeferredSkinSSS 2 and Kernel 0: 1 shows the light the disc spreads (x 0.25), 2 marks in red the skin pixels it leaves out because something was drawn over them (hair, brows, beards). 0 off.
+Radius = 1.0                        # [0.1-4] UNOFFICIAL (2026-11-15), live, test only: scales the three scatter distances below (2 = the forward skin's Scattering 1, twice real skin).
+ScatterRed = 3.5                    # [0.05-20] UNOFFICIAL (2026-11-15), live, test only: the Burley profile's scatter distance d per colour, in millimetres of skin (from skin's measured mean free paths 3.67 / 1.37 / 0.68 mm and Christensen & Burley's searchlight fit). Red reaches furthest.
+ScatterGreen = 0.9
+ScatterBlue = 0.32
+AlbedoDetail = 1.0                  # [0-1] UNOFFICIAL (2026-11-15), live, test only: 1 diffuses only the light (the texture stays sharp), 0 blurs the texture with it.
+DepthFollow = 1.0                   # [0.1-4] UNOFFICIAL (2026-11-15), live, test only: how sharply the profile stops at depth steps (nose against cheek); higher is stricter.
+Transmission = false                # UNOFFICIAL (2026-11-15), live, test only, with DeferredSkin and DeferredRenderer 2: light through thin parts (ears, nostrils, fingers) from behind by the sun, the thickness from the sun's shadow map, falling off as the profile does; replaces the curvature guess of [Shaders.Skin.Main] Translucency (which sets its strength).
+
 [_Shaders.Skin.Debug]
 DebugView = 0                       # Skin diagnostics, indoors and out. 0 off. 1 which pass drew the skin: green one full pass, cyan one full pass with several lamps, yellow a light-only pass the game multiplies by the texture afterwards, red added for every extra lamp pass on top. 2 which settings are in use: blue Interiors, orange outdoors; bright where the screen-space blur takes the skin, dark where the per-pixel scattering stands in. 3 direct light (sun and lamps) on white skin. 4 ambient and sky light on white skin. 5 highlights alone (lobes, sheen, sky reflection). 6 material: red roughness, green highlight strength, blue wetness. 7 curvature: red the per-pixel scattering, green thin features (Translucency). 8 the screen-space blur's skin test: green blurred, red rejected by distance, blue rejected by colour. 9 scene brightness against the skin's own pass: green equal, red brighter (extra lamp passes), blue darker. 10 what the blur changed: dark nothing, bright a lot.
 LogDraws = 0                        # Diagnostic: logs the first this-many skin draws of the world scene (pass, shader, blend). 0 off. Read at startup.

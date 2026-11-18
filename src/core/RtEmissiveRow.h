@@ -44,6 +44,31 @@ namespace RtEmissiveRow {
 		float		center[3] = {}, radius = 0.0f;	// its world bound, camera relative
 		float		rgb[3] = {};		// a guess of its colour (the record's average): only which instances are kept when there are more than kMax
 	};
+	// UNOFFICIAL 2026-11-11 (pt-emissive-cost; RtPathTrace.comp LoadEmCostKeys has the reasoning) PTEmissive's cost keys in the FRAME row (row 49),
+	// texels kCostTexel.y .. kCostTexel + 2 .x (289.y-291.x; 289.x is PTGlassSurface, 291.y free). All 0 = PTEmissive as before.
+	//   cut       PTEmissiveCut: an instance is a light-sample candidate at a hit only where its estimated light there is at least this share
+	//             of the sky's light + the sun's unshadowed light on that surface
+	//   floor     PTEmissiveFloor: the same test against an absolute light level (the trace's linear units, as the sun's colour)
+	//   hits      PTEmissiveHits: n >= 1 only the path's first n hits take an emissive sample
+	//   roulette  PTEmissiveRoulette: Russian roulette on a candidate under this share of the hit's other unshadowed direct light
+	// What is not light-sampled is counted in full by the bounce rays that meet it: every key leaves the picture's mean alone.
+	constexpr int kCostTexel = 289;
+	struct CostKeys { float cut = 0.0f, floor = 0.0f, hits = 0.0f, roulette = 0.0f; };
+	// Writes the keys into the frame row. The floor goes in EmWeight's units (an instance's power x cos / d^2; x PTGlow / pi = the light it
+	// gives a matte surface): base = floor + cut x skyLuma, the sun term = cut x sunLuma (the trace multiplies it by the surface's cosine
+	// to the sun). skyLuma / sunLuma: the sky's and the sun's luminance as the trace gets them (0 indoors / while the sun is down); glow:
+	// PTGlow; listed: this frame lists emissive instances. Returns the base (RtEmissiveBuild.comp's params.z: an instance under it everywhere
+	// is listed as not usable).
+	inline float PackCost(float* frameRow, const CostKeys& k, float skyLuma, float sunLuma, float glow, bool listed) {
+		const float unit = listed && glow > 0.0f ? 3.14159265f / glow : 0.0f;
+		const float base = ((std::max)(k.floor, 0.0f) + (std::max)(k.cut, 0.0f) * (std::max)(skyLuma, 0.0f)) * unit;
+		frameRow[2 * kCostTexel + 1] = base;
+		frameRow[2 * (kCostTexel + 1)] = (std::max)(k.cut, 0.0f) * (std::max)(sunLuma, 0.0f) * unit;
+		frameRow[2 * (kCostTexel + 1) + 1] = k.hits;
+		frameRow[2 * (kCostTexel + 2)] = k.roulette;
+		frameRow[2 * (kCostTexel + 2) + 1] = 0.0f;
+		return base;
+	}
 	struct Key { uint32_t geometryId = 0; double world[3] = {}; };
 	struct State { int count = 0; Key keys[kMax]; };
 	struct Mark { uint32_t record, number; };	// the record's bits 8-15 = number (emissive index + 1)

@@ -86,9 +86,9 @@ namespace RtVideoMemory {
 		return result;
 	}
 
-	// UNOFFICIAL 2026-11-13 (rt-audit F4, RTAudit\AUDIT.md) this PROCESS's local video memory budget (what WDDM lets it keep resident: 12.1 GB
-	// of a 16 GB card in the user's crash log) and its current use, from DXGI 1.4 QueryVideoMemoryInfo on the adapter with this LUID. The
-	// adapter is found once and kept. false: no DXGI 1.4 / no such adapter (the caller keeps its tier budget).
+	// UNOFFICIAL 2026-11-13 (fork port, RT audit F4; [Main.Main.RayTracing] VramWatch) this PROCESS's local video memory budget (what WDDM lets
+	// it keep resident: 12.1 GB of a 16 GB card in a tester's log) and its current use, from DXGI 1.4 QueryVideoMemoryInfo on the adapter with
+	// this LUID. The adapter is found once and kept. false: no DXGI 1.4 / no such adapter (the caller keeps its tier budget).
 	inline bool Local(const BYTE luid[8], bool luidValid, unsigned long long& budget, unsigned long long& usage) {
 		static IDXGIAdapter3* cached = nullptr;
 		static bool looked = false;

@@ -92,3 +92,52 @@ the control without the reprojection 0.0615. (Temporal 0.95 / no moving cap: 0.0
 **Not done / unproven.** Not run in game (the bench iGPU; a tester checks): the look of the shafts and fog, the cost on RTX, the copy's
 timing under real frames. Lamp light in the fog (VolumetricFog LampHaze) still has no shadows (a traced visibility for the few brightest
 lamps would be the next step). The fog's surface lookup past MaxDistance (FogSunVisibility) and ClassicLook stay the cascades.
+
+## "rt vol light = no worky" (2026-11-13, a tester on an RTX card)
+
+Full note with the measurements, the reference photographs and the targets: `docs/next/RT-LIGHT-SHAFTS-2026-11-13.md`. In short:
+
+- The RT version runs and reaches the picture (also under path tracing: it has no stand-down, the path tracer is its host), but it only
+  swaps the shadow lookup of the lit air. At the default look the picture changes within its frame-to-frame noise (bench, og-goodsprings:
+  mean |difference| 0.7 of 255 against 0.6 between two equal shots). With a strong look the traced air is the darker one near the ground
+  and buildings (the soft shadow maps leak light).
+- It does nothing, by design, indoors, without another ray-traced effect, and while no shafts are drawn (the sun's shadows faded).
+  Nothing said so. Now the Ray tracing page's Status block has a "Light shafts" line (`RtFogVisibility::MenuState`), the session log an
+  `RT LIGHT SHAFTS:` line when the reason changes, and the tips say "outdoors only, adds no light of its own".
+- `[Main.Main.RayTracing] RidersWithSameFrame` (on, bug fix): with the RT lamp shadows (SameFrame) as the only other RT effect neither this
+  rider nor the fog's lamp rider (LampHazeShadows) ever traced: `RtCore::OthersWant` was false after the lamps' early trace.
+- How visible the lit air and its shafts are is `[Shaders.VolumetricLight.Main]` Strength, Density, Darken, Anisotropy: the RT section has
+  no look of its own.
+
+## The expanded look (2026-11-13, branch claude/rtvol2-1113, `[Shaders.VolumetricLight.RT] Expanded`, off by default)
+
+**Why.** The traced version only swapped the shadow lookup, so it changed the picture by the noise (section above). What a current
+game's traced / froxel volumetric light has and this did not: a lit path long enough for far casters to shade the air, dust that sits
+near the ground, a forward glow that gathers round the sun, cloud shadows in the air.
+
+**What it does** while the last trace (this frame or the one before) was made with it (`RtFogVisibility::ExpandedLook`):
+- **Range.** The grid reaches `ExpandedDistance` (8000) instead of MaxDistance; the trace covers every cell (range 1.45 x the distance, the
+  grid's corners; not capped by SceneRadius: past it only what the scene holds blocks the sun, the rest counts lit as the shadow maps'
+  "past the shadow distance" did), and no fade back to the shadow maps inside the grid. `GridDistance()` returns it, so the trace and the
+  grid agree (mode 1).
+- **Density** `ExpandedDensity` (0.015 per 1000 units at the eye's height; the Night section's Density scales it as it scales the day's).
+- **Height** `ExpandedHeight` (1500): density falls as exp(-h / H) above the eye (full at and below it). The optical depth along a view is
+  closed form, `AirDepth` (sigma (1 - exp(-a t)) / a, a = the view's rise per planar unit / H). GridLight (D3D9 + Vulkan) and the grid
+  composite's all-air share (D3D9 GridAirAt, Vulkan VolumetricLightCompositeGrid) both use it, so lit + shaded air stay consistent.
+  `GridData.z` = 1 / H; 0 = exactly the old sigma * t. The march (Froxels off, and every FSR / DLSS RenderScale frame: the default FSR 0.67 runs the march, not the grid) weighs each sample by the same density and AirDepth.
+- **Sun glow** `ExpandedSunGlow` (0.3) / `ExpandedGlowSharpness` (0.85): a second Henyey-Greenstein lobe, mixed in by that share
+  (`AirPhase`; capped at 8 / (1 - g)). `GridData.w` = g x 100 + the share; 0 = the old phase exactly.
+- **Clouds** `ExpandedClouds` (on): the volumetric clouds' shadow map goes to the helper (its own image, registered at the helper's start
+  when the map exists then) and RtFogVisibility.comp multiplies each sample's visibility by the clouds' transmittance (as RtSunShadow.comp
+  CloudShadows). Constants appended to the pass block (RtFogGrid.h; cloud.x 0 = binding 5 not bound, as before).
+- **Who composites.** The fog's .fx is at ps_3_0's 224 constant registers (preshaders take a register per uniform-only expression; even
+  reading GridData.z broke it), so in expanded frames the fog leaves its FogGridLight out (`NVR_FogGridFlags.y` / `push.gridFlags.y` 0,
+  `gridApplied` false: `VolumetricLightEffect::expandedComposite`) and this effect's own grid composite draws the light. The fog's own sun
+  shading from the grid (flags x, and FogVolume's g / a channels) is unchanged.
+
+Off (Expanded false, DebugView 1, or no trace): GridData z / w are 0 and every formula is the old one; the fog composites as before.
+Not covered: the game's own cloud layers' shadows (`[Shaders.CloudShadows.Main]`, drawn by SunFar from the sky's textures: not in the
+helper); DustMotes still reads the grid with even air (its motes above the eye are a little dimmer with the height falloff on).
+
+## Idle targets (2026-11-12)
+With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the texture manager keeps 1 x 1 stand-ins in place of this effect's render targets while it is off (not made at start-up when it starts off; released that many seconds after it is switched off; made again, zero filled, before the frame draws when it is switched on). Which targets and why that is safe here: the march / blur / history / grid buffers and the RT fog visibility copy are written only behind the switch (EffectChain's wouldRender, RtFogVisibility::Wants); DustMotes reads the grid only when it was built this frame. A new reader or writer of these targets outside the effect's own switch, or a copy of their pointers kept past a frame, breaks this: then answer false in `TargetParkable` (the header). See `core/TextureManager.h`.

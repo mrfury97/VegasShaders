@@ -41,8 +41,10 @@ namespace CapsuleShadows {
 			(TheSettingManager->GetSettingI(kSection, "Capsules") != 0 || TheSettingManager->GetSettingI(kSection, "Contact") != 0);
 	}
 	// DropActors: ShadowManager leaves skinned casters (people, creatures) out of the lamp maps while the capsules are live
+	// (2026-11-15 docs/next/FD-NATIVEFIX.md: not while some lit shader's record has no capsule read, RtLampShadows::ReadDropped: people
+	// would cast no lamp shadow on its objects; native with Capsules, the six-lamp shiny records)
 	inline bool DropActors() {
-		return CompiledIn() && !TheShaderManager->GameState.isExterior && TheSettingManager->GetSettingI(kSection, "Capsules") != 0 &&
+		return CompiledIn() && !RtLampShadows::ReadDropped && !TheShaderManager->GameState.isExterior && TheSettingManager->GetSettingI(kSection, "Capsules") != 0 &&
 			TheSettingManager->GetSettingI(kSection, "DropActors") != 0;
 	}
 

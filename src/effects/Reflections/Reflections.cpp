@@ -1,4 +1,5 @@
 #include "Reflections.h"
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-11 PTStandDownRT
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/GpuProfiler.h"
 #include "../../core/ReflMaterial.h"
@@ -22,9 +23,22 @@
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2) the flashlight lights RT hits and keeps its highlight in the composite
 #include "../../core/RtFlashlightCode.h"
 #include "../../core/Paths.h"	// UNOFFICIAL 2026-11-08 (perf-reflfix4) the shader files' check (LogReflShaderFiles)
+#include "../../core/FdIndirect.h"	// UNOFFICIAL 2026-11-15 DeferredReflections (full deferred renderer, phase 6: docs/next/FD-GI-RESULTS.md)
 #include <fstream>
 #include <iterator>
 #include <string>
+
+namespace {
+	// UNOFFICIAL 2026-11-15 DeferredReflections ([Main.Main.Quality], live, test only; core/FdIndirect.h): while the deferred renderer runs with
+	// it on, every pass of this effect (D3D9 and Vulkan, the RT RayGen and the RT denoiser) reads the G-buffer's normal-mapped shading normal
+	// where TESR_NormalsBuffer shows the captured surface. Off: normals itself.
+	IDirect3DBaseTexture9* FdReflNormals(IDirect3DDevice9* d, IDirect3DBaseTexture9* normals) {
+		if (!normals || !FdIndirect::ReflectionsOn()) return normals;
+		std::string depthName = "TESR_DepthBuffer";
+		IDirect3DBaseTexture9** depth = TheTextureManager->GetTextureSlotByName(depthName);
+		return FdIndirect::ShadingNormals(d, normals, depth ? *depth : nullptr);
+	}
+}
 
 void ReflectionsEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-10-18: the frames drawn with the settings that are about to be replaced. 2026-10-19: only while the F10
@@ -70,6 +84,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.GlassReflect = std::clamp(TheSettingManager->GetSettingF(section, "GlassReflect"), 0.0f, 2.0f);	// UNOFFICIAL 2026-10-29 (core/GlassMask.h)
 	Settings.MaterialBufferRoughness = TheSettingManager->GetSettingI(section, "MaterialBufferRoughness") != 0;	// UNOFFICIAL 2026-10-30
 	Settings.CloudSky = TheSettingManager->GetSettingI(section, "CloudSky") != 0;	// UNOFFICIAL 2026-10-30
+	Settings.ReplaceForward = TheSettingManager->GetSettingI(section, "ReplaceForward") != 0;	// UNOFFICIAL 2026-11-12 (a missing key reads 0: the env-map pass as before)
 	// UNOFFICIAL 2026-10-25 Reflectivity: the PBR section's one reflectivity control reaches the floor reflections too (a missing key: 1).
 	SettingManager::Configuration::ConfigNode node;
 	Settings.ReflectivityExterior = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "ReflectivityExterior") ? std::clamp(node.FloatValue, 0.0f, 3.0f) : 1.0f;
@@ -125,6 +140,9 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtDenoiserDebugView = std::clamp(TheSettingManager->GetSettingI(rt, "DenoiserDebugView"), 0, 6);
 	Settings.RtMirrorJitter = std::clamp(TheSettingManager->GetSettingI(rt, "MirrorJitter"), 0, 2);	// UNOFFICIAL 2026-11-08 (perf-reflfix4)
 	Settings.RtMirrorJitterHistory = std::clamp(TheSettingManager->GetSettingF(rt, "MirrorJitterHistory"), 2.0f, 32.0f);
+	// UNOFFICIAL 2026-11-11 (cloud bench 029: a second helper round trip of 0.7-1.1 ms a frame; a missing key reads 0: as before)
+	Settings.RtRideMain = TheSettingManager->GetSettingI(rt, "RideMainExchange") != 0;
+	Settings.RtFollowRenderScale = TheSettingManager->GetSettingI(rt, "FollowRenderScale") != 0;
 }
 
 // --- UNOFFICIAL 2026-10-28 RT reflections (docs/next/FORK-RT-REFLECTIONS.md; Compute\ReflectionsRT.glsl has the whole frame) -----------
@@ -229,7 +247,7 @@ namespace {
 	// design (the other Vulkan passes draw whole targets); RT reflections' own passes (RayGen, Resolve, the sky panorama) keep to the rect,
 	// and Temporal, the blurs and the composite run as their rect-aware D3D9 techniques there. In a native frame the same as PassesOn.
 	bool RtPassesWanted() { return TheSettingManager->SettingsMain.Main.NvrDxvkPasses && DxvkCompute::Available(); }
-	bool RtUserWants() { return RtEffect && RtEffect->Enabled && RtEffect->Settings.RtEnabled && RtPassesWanted(); }
+	bool RtUserWants() { return RtEffect && RtEffect->Enabled && RtEffect->Settings.RtEnabled && RtPassesWanted() && !RtPathTrace::StandDownRT(); }	// (2026-11-11 PTStandDownRT)
 	void RtUserSetup() {
 		RtImageDir = RtCore::AddImage("NVR RT reflections direction", RtWidth(), RtHeight(), NVR_EXT_SHARED_RG32F);
 		RtImageRay = RtCore::AddImage("NVR RT reflections ray", RtWidth(), RtHeight(), NVR_EXT_SHARED_RG32F);
@@ -243,7 +261,13 @@ namespace {
 		if (!RtEffect || RtImageDir < 0 || RtImageRay < 0 || RtImageHit < 0 || RtImageShade < 0 || RtImageBounce < 0 || RtShader < 0) return;
 		const ReflectionsEffect::RtImagesStruct& rt = RtEffect->Rt;
 		if (!rt.Dir || !rt.Ray || !rt.HitSurface || !rt.ShadeSurface || !rt.BounceSurface) return;
-		if (!RtCore::CopyIn(RtImageDir, rt.Dir) || !RtCore::CopyIn(RtImageRay, rt.Ray)) return;
+		// UNOFFICIAL 2026-11-11 [Shaders.Reflections.RT] FollowRenderScale: in a RenderScale rect frame the helper reads and writes only the
+		// rect's texels (ReflectionsRTBody.glsl returns past Pass.size.xy; RayGen wrote "no ray" past it and Resolve skips those), so the two
+		// copies in and the three out take the rect alone instead of the whole half-size images. Off, or a native frame: whole images.
+		const UINT gridW = RtTraceWidth ? RtTraceWidth : RtWidth(), gridH = RtTraceHeight ? RtTraceHeight : RtHeight();	// (2026-11-03: the rect in rect frames)
+		const bool rectCopies = RtEffect->Settings.RtFollowRenderScale && (gridW < RtWidth() || gridH < RtHeight());
+		const RECT rectIn = { 0, 0, (LONG)gridW, (LONG)gridH };
+		if (!RtCore::CopyIn(RtImageDir, rt.Dir, rectCopies ? &rectIn : nullptr) || !RtCore::CopyIn(RtImageRay, rt.Ray, rectCopies ? &rectIn : nullptr)) return;
 		// With the core's alpha-tested casters in the scene, the pass that tests them (their alpha atlas as a fifth image).
 		const int atlas = RtCore::AlphaTested() ? RtCore::AlphaAtlasImage() : -1;
 		const bool alpha = atlas > 0 && RtShaderAlpha >= 0;
@@ -270,11 +294,35 @@ namespace {
 					alpha ? 1 : 0, tex ? 1 : 0, glow ? 1 : 0);
 			}
 		}
-		const UINT gridW = RtTraceWidth ? RtTraceWidth : RtWidth(), gridH = RtTraceHeight ? RtTraceHeight : RtHeight();	// (2026-11-03: the rect in rect frames)
 		if (!RtCore::AddPass(shader, images, count, 0xC, &RtPending, sizeof(RtPending), (gridW + 7) / 8, (gridH + 7) / 8)) return;
+		if (rectCopies) {	// UNOFFICIAL 2026-11-11 FollowRenderScale (above)
+			RtRecorded = RtCore::CopyOut(RtImageHit, rt.HitSurface, gridW, gridH) && RtCore::CopyOut(RtImageShade, rt.ShadeSurface, gridW, gridH) &&
+				RtCore::CopyOut(RtImageBounce, rt.BounceSurface, gridW, gridH);
+			static bool logged = false;
+			if (RtRecorded && !logged) {
+				logged = true;
+				Logger::Log("UNOFFICIAL Reflections: FollowRenderScale: the RT images are copied to and from the helper in the RenderScale rect only: %ux%u of %ux%u "
+					"(the trace itself already kept to the rect).", gridW, gridH, RtWidth(), RtHeight());
+			}
+		}
+		else
 		RtRecorded = RtCore::CopyOut(RtImageHit, rt.HitSurface) && RtCore::CopyOut(RtImageShade, rt.ShadeSurface) && RtCore::CopyOut(RtImageBounce, rt.BounceSurface);
 	}
 	const RtCore::User RtUser = { "RT reflections", RtUserWants, RtUserSetup, RtUserRecord, 1 };	// Point 1: only through RtCore::Exchange (RtTrace)
+	// UNOFFICIAL 2026-11-11 [Shaders.Reflections.RT] RideMainExchange: the same record as a Point-0 user of the frame's main exchange
+	// (RtCore::Frame), wanted only in a frame whose RayGen is already drawn (ReflectionsEffect::RtRideBeforeFrame). No Setup: the images
+	// are RtUser's. Added to the core the first time a frame is armed, so it records after every other user: with the frame's 8 passes
+	// taken, its AddPass fails and RtTrace makes its own exchange as before (nobody else loses a pass to it).
+	UINT RtRideArmedFrame = 0xFFFFFFFF;	// the FrameNumber whose main exchange should carry the rays
+	UINT RtRideRecordedFrame = 0xFFFFFFFF;	// the FrameNumber whose main exchange did (pass + copies recorded)
+	bool RtRideUserWants() { return RtRideArmedFrame == TheFrameRateManager->FrameNumber && RtUserWants(); }
+	void RtRideUserRecord(IDirect3DDevice9* Device) {
+		if (!RtCore::PassesLeft()) return;	// the frame's passes are taken: no copies recorded for nothing; RtTrace exchanges itself
+		RtUserRecord(Device);
+		if (RtRecorded) RtRideRecordedFrame = TheFrameRateManager->FrameNumber;
+	}
+	const RtCore::User RtRideUser = { "RT reflections (main exchange)", RtRideUserWants, nullptr, RtRideUserRecord, 0 };
+	bool RtRideUserAdded = false;
 }
 
 // UNOFFICIAL 2026-10-30 RT weapon reflections: tan(world FOV / 2) / tan(1st-person FOV / 2): the game draws the first-person weapon from
@@ -389,10 +437,9 @@ bool ReflectionsEffect::RtImages() {
 // RayGen (the march + the rays) into the RT images, the helper traces them at the RT core's late exchange, Resolve shades into the
 // trace's target. False before anything is drawn into target: the caller draws the normal trace. (A helper that has nothing this
 // frame costs the RayGen pass, then the normal trace.)
-bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* target) {
-	rtResolved = false;
-	weaponFrame = false;
-	waterFrame = false;
+// UNOFFICIAL 2026-11-11 (RideMainExchange) RtTrace's first half moved here unchanged, so RtRideBeforeFrame can draw it before the
+// frame's main exchange: the frame's weapon / water / lamps, RayGen into Rt.March / Dir / Ray / MarchHit, the helper pass's constants.
+bool ReflectionsEffect::RtRayGen(IDirect3DDevice9* Device) {
 	if (!RtWanted() || !RtImages()) return false;
 	// SplitTest (no helper): RayGen casts no ray, so Resolve must give the normal trace's picture exactly (the split checked on any GPU).
 	rtRays = RtCoreClient::Ready();
@@ -403,7 +450,6 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 	waterFrame = rtRays && Settings.RtWater && !TheShaderManager->GameState.isUnderwater;	// UNOFFICIAL 2026-10-31 (the same)
 	if (rtRays && Settings.RtHitLamps) RtGatherLamps(Settings.RtDistance); else { RtLampCount = 0; RtFlashIndex = -1; RtFlashCode = 0.0f; }	// UNOFFICIAL 2026-10-29 (before RayGen: both passes read them)
 	if (!ExtRender(Device, Rt.MarchSurface, Rt.MarchSurface, 8, false, Rt.MarchSurface)) return false;
-	bool traced = !rtRays;	// SplitTest: nothing to trace
 	if (rtRays) {
 		// The pass constants: the camera as RtSunShadows gives it (scene space = world minus CameraPosition, eye RtCore::Eye()), the sun, RayGen's pixel rule.
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
@@ -462,9 +508,37 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 		// stays the exact mirror direction (a mirror pixel keeps no Temporal history: the samples' noise would show as it is)
 		RtPending.frame = D3DXVECTOR4((float)(TheFrameRateManager->FrameNumber & 0xFFFFu),
 			-mirrorJitterCode, (float)(RtFlashIndex + 1), RtFlashCode);	// (2026-11-08 perf-reflfix4) y: -MirrorJitter's code (0 off)	// zw: the flashlight (perf-reflfix2); y 0 (2026-11-08 perf-reflfix3: the bounce's lobe sample is fixed per pixel, ReflectionsRTBody.glsl; 2 = test 11's per-frame sample, the host's test only)
-		static GpuTimer exchangeTimer("  Reflections RT (exchange)");
-		GpuProfileScope gpu(exchangeTimer, Device);
-		traced = RtCoreClient::Exchange(Device, RtUser) && RtRecorded;
+	}
+	return true;
+}
+
+bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* target) {
+	rtResolved = false;
+	// UNOFFICIAL 2026-11-11 [Shaders.Reflections.RT] RideMainExchange: this frame's RayGen was drawn before RtCore::Frame and the helper
+	// traced its rays in the frame's main exchange (Rt.Hit / Shade / Bounce are copied out already): straight to Resolve, no exchange
+	// here. Only when that RayGen was drawn with what this trace would use now (the same noise frame, denoiser mode and MirrorJitter
+	// point; RenderBuffers set them again just before this call). Anything else: the whole old path below, with its own exchange.
+	const UINT now = TheFrameRateManager->FrameNumber;
+	bool rode = false;
+	if (rtRideFrame == now) {
+		rode = RtRideRecordedFrame == now && rtRays && RtWanted() && rtRideNoise == Constants.Data2.w && rtRideDenoise == rtDenoiseFrame &&
+			rtRideJitter == mirrorJitterCode;
+		if (rode) rtRideFrames++; else rtRideMissed++;
+		if (GpuTimer::Enabled && ((rtRideFrames + rtRideMissed) % 600) == 0)
+			Logger::Log("UNOFFICIAL Reflections: RideMainExchange: %u frames' rays rode the main exchange, %u were armed but made their own exchange "
+				"(the main exchange was full, did not run, or the frame's mode changed).", rtRideFrames, rtRideMissed);
+	}
+	bool traced = rode;
+	if (!rode) {
+		weaponFrame = false;
+		waterFrame = false;
+		if (!RtRayGen(Device)) return false;
+		traced = !rtRays;	// SplitTest: nothing to trace
+		if (rtRays) {
+			static GpuTimer exchangeTimer("  Reflections RT (exchange)");
+			GpuProfileScope gpu(exchangeTimer, Device);
+			traced = RtCoreClient::Exchange(Device, RtUser) && RtRecorded;
+		}
 	}
 	if (!traced) {
 		weaponFrame = false;
@@ -477,6 +551,80 @@ bool ReflectionsEffect::RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* tar
 	rtResolved = true;	// UNOFFICIAL 2026-10-29: the blur passes read Rt.Spread this frame
 	if (++rtTraceFrames == 1) Logger::Log("UNOFFICIAL Reflections: the trace runs with RT ([Shaders.Reflections.RT]%s).", rtRays ? "" : ", SplitTest: no rays");
 	return true;
+}
+
+// UNOFFICIAL 2026-11-11 [Shaders.Reflections.RT] RideMainExchange (default off; cloud bench 029: "Reflections RT (exchange)" 0.7-1.1 ms
+// a frame beside the main exchange's 1.1-2.6 ms, the helper's reflection pass itself 0.01-0.08 ms: the cost is the second round trip).
+// Why there was a second one: the helper's inputs are RayGen's two images (Rt.Dir, Rt.Ray), and RayGen ran inside the Reflections step
+// of the chain, long after RtCore::Frame, because it was the screen trace's first half: its march reads the lit picture. With RaysOnly
+// (default since 2026-11-07) the march is skipped, and what is left of RayGen reads only things that exist before RtCore::Frame: the
+// depth, the normals, the first-person depth and weapon mask, the glass mask, TESR_MaterialBuffer, the ortho map, and MaterialAware's
+// material buffer, which CaptureMaterial fills from the scene's alpha (drawn here first, from the game target's own texture: the
+// chain's ChainBegin, which normally hands that texture to the effects, comes later). So: capture, RayGen, arm the Point-0 rider;
+// RtCore::Frame's exchange traces the rays with the other effects' passes; RtTrace goes straight to Resolve. Same frame's data
+// throughout: no latency, no reprojection. Not armed (RtTrace then runs as before, with its own exchange): RaysOnly off or an RT
+// DebugView (the march runs), SplitTest, the path tracer replacing the scene (it writes the scene between here and the chain), the
+// game target not a single-level texture while MaterialAware needs it, nothing reflecting, the helper not up.
+void ReflectionsEffect::RtRideBeforeFrame(IDirect3DDevice9* Device, IDirect3DSurface9* GameTarget) {
+	if (!Settings.RtRideMain) return;
+	const UINT now = TheFrameRateManager->FrameNumber;
+	const int rtView = (Settings.RtDebugView == 0 && Settings.RtRaysOnly) ? 3 : Settings.RtDebugView;	// (as ExtRender's RtConstants)
+	const char* why = nullptr;
+	if (!Enabled || !Effect || !GameTarget || !RtEffect) why = "Reflections is off or not loaded";
+	else if (!RtUserWants()) why = "RT reflections do not trace (off, the Vegas Shaders DXVK passes off, or the path tracer has them stand down)";
+	else if (Settings.RtSplitTest) why = "SplitTest";
+	else if (!RtWanted() || !RtCoreClient::Ready()) why = "the RT helper is not up yet (or an RT pass failed)";
+	else if (rtView != 3) why = "RaysOnly is off or an RT DebugView is set: RayGen's screen march reads the lit picture, which does not exist yet";
+	else if (RtPathTrace::Replacing()) why = "the path tracer replaces the scene this frame";
+	else if (TheShaderManager->GameState.isUnderwater) why = "under water";
+	if (!why && Textures.MaterialSurface && Settings.MaterialAware > 0) {
+		// CaptureMaterial reads the scene through TESR_RenderedBuffer; before ChainBegin that slot is not the scene yet, so it points at
+		// the game target's own texture for this one pass (what the frame chain publishes there later), then back.
+		IDirect3DTexture9* gameTexture = nullptr;
+		if (FAILED(GameTarget->GetContainer(IID_IDirect3DTexture9, (void**)&gameTexture)) || !gameTexture || gameTexture->GetLevelCount() != 1)
+			why = "the scene's target is not a plain texture (MaterialAware's capture cannot read it this early)";
+		else {
+			IDirect3DTexture9* const savedTexture = TheTextureManager->RenderedTexture;
+			IDirect3DSurface9* const savedSurface = TheTextureManager->RenderedSurface;
+			TheTextureManager->RenderedTexture = gameTexture;
+			TheTextureManager->RenderedSurface = GameTarget;
+			CaptureMaterial(Device);
+			TheTextureManager->RenderedTexture = savedTexture;
+			TheTextureManager->RenderedSurface = savedSurface;
+			materialEarlyFrame = now;	// the chain's MaterialCapture step returns at once this frame
+			Device->SetRenderTarget(0, GameTarget);
+		}
+		if (gameTexture) gameTexture->Release();
+	}
+	if (!why && !ShouldRender()) why = "nothing on screen reflects (the Reflections step does not run)";
+	if (!why) {
+		bool rrRaw, temporal;
+		RtFrameMode(rrRaw, temporal);
+		Constants.Data2.w = RtNoiseFrame(temporal, rrRaw);	// RayGen's noise frame (RenderBuffers sets the same again)
+		weaponFrame = false;
+		waterFrame = false;
+		const bool drawn = RtRayGen(Device);
+		Device->SetRenderTarget(0, GameTarget);
+		if (!drawn || !rtRays) { weaponFrame = false; waterFrame = false; why = "the RayGen pass could not be drawn"; }
+		else {
+			if (!RtRideUserAdded) { RtRideUserAdded = true; RtCore::AddUser(RtRideUser); }	// last in the core's list (see RtRideUser)
+			rtRideFrame = now;
+			rtRideNoise = Constants.Data2.w;
+			rtRideDenoise = rtDenoiseFrame;
+			rtRideJitter = mirrorJitterCode;
+			RtRideArmedFrame = now;
+		}
+	}
+	// one line per change of state (the first 12), so a log shows whether the second round trip is gone and why not
+	static const char* told = (const char*)1;
+	static int toldCount = 0;
+	if (why != told && toldCount < 12) {
+		toldCount++;
+		told = why;
+		if (why) Logger::Log("UNOFFICIAL Reflections: RideMainExchange is on but not used now: %s. The reflection rays make their own exchange, as before.", why);
+		else Logger::Log("UNOFFICIAL Reflections: RideMainExchange: RayGen is drawn before the frame's main RT exchange and the reflection rays ride it "
+			"(no \"Reflections RT (exchange)\" round trip; RT lamps for the hits %d, weapon %d, water %d).", RtLampCount, weaponFrame ? 1 : 0, waterFrame ? 1 : 0);
+	}
 }
 
 // UNOFFICIAL 2026-10-26 (deep/fork-hiz): outdoors only for now. Indoors (Lucky 38, a 3rd-person view looking down) the walk found no
@@ -500,6 +648,7 @@ void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsMaterial", &Constants.Material);
 	TheShaderManager->RegisterConstant("TESR_RTWaterData", &Constants.WaterData);	// UNOFFICIAL 2026-10-31 RT water (the water shaders)
 	TheShaderManager->RegisterConstant("TESR_RTWaterReproject", (D3DXVECTOR4*)&Constants.WaterReproject);
+	TheShaderManager->RegisterConstant("TESR_ReflReplace", (D3DXVECTOR4*)ReflMaterial::ForwardReplace);	// UNOFFICIAL 2026-11-12 ReplaceForward (EnvTemplate.hlsl; core/ReflMaterial.h keeps it 0 outside the world scene)
 }
 
 void ReflectionsEffect::RegisterTextures() {
@@ -621,6 +770,9 @@ void ReflectionsEffect::UpdateConstants() {
 // UNOFFICIAL 2026-10-20 MaterialAware (core/ReflMaterial.h): the world scene left each known material in the scene's alpha; it is
 // copied out into the material buffer (technique 7) at the start of the chain, before any effect writes the scene.
 void ReflectionsEffect::CaptureMaterial(IDirect3DDevice9* Device) {
+	// UNOFFICIAL 2026-11-11 (RideMainExchange) this frame's capture ran already, before the main RT exchange (RtRideBeforeFrame, from the
+	// same scene: nothing draws into it in between); its answer stands. Never true with the key off.
+	if (materialEarlyFrame == TheFrameRateManager->FrameNumber) return;
 	materialFilled = false;
 	Constants.Material.x = 0.0f;
 	if (!Enabled || !Effect || !Textures.MaterialSurface || Settings.MaterialAware <= 0 || TheShaderManager->GameState.isUnderwater) return;
@@ -631,13 +783,22 @@ void ReflectionsEffect::CaptureMaterial(IDirect3DDevice9* Device) {
 	Render(Device, Textures.MaterialSurface, Textures.MaterialSurface, 7, false, Textures.MaterialSurface);
 	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness for this (D3D9) effect too: where no _rmaos map is seen, the roughness and metal the
 	// game's shader lit with (core/CapturedNormals.h, b 0.5: the floor guess takes them, Reflections.fx.hlsl Reflectivity)
-	if (Settings.MaterialBufferRoughness) CapturedNormals::MergeIntoReflMaterial(Device, Textures.MaterialSurface);
+	// (2026-11-15 DeferredReflections, core/FdIndirect.h: G-buffer v2's specular bit, model, roughness and metal in its place while it is on)
+	if (!FdIndirect::ReflMaterial(Device, Textures.MaterialSurface) && Settings.MaterialBufferRoughness) CapturedNormals::MergeIntoReflMaterial(Device, Textures.MaterialSurface);
 	materialOnly = false;
 	materialFilled = true;
 	Constants.Material.x = Settings.MaterialAware == 1 ? 1.0f : 0.0f;
 }
 
 void ReflectionsEffect::BindMaterial() {
+	{	// UNOFFICIAL 2026-11-15 DeferredReflections: the shading normals on TESR_NormalsBuffer's stage (2) for the D3D9 passes (RenderBuffers' and
+		// the composite's: both call this before their passes; made once a frame); off: nothing set
+		std::string normalsName = "TESR_NormalsBuffer";
+		IDirect3DBaseTexture9** slot = TheTextureManager->GetTextureSlotByName(normalsName);
+		IDirect3DBaseTexture9* normals = slot ? *slot : nullptr;
+		IDirect3DBaseTexture9* shading = FdReflNormals(TheRenderManager->device, normals);
+		if (shading != normals) SetPassTexture(2, shading);	// set after each pass begins (EffectRecord::PassTextures)
+	}
 	if (!materialFilled || !Textures.MaterialTexture) return;
 	SetPassTexture(15, Textures.MaterialTexture);	// set after each pass begins (EffectRecord::PassTextures)
 	const DWORD point[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
@@ -647,6 +808,10 @@ void ReflectionsEffect::BindMaterial() {
 
 bool ReflectionsEffect::ShouldRender() {
 	if (cubeOnly || materialOnly) return true;	// RenderCubeOnly's / CaptureMaterial's own passes
+	// UNOFFICIAL 2026-11-12 [Main.Main.RayTracing] PTReflectionsOff (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 11; off, to test on an RTX
+	// card): the path traced picture has its own reflections, and this effect's composite still drew its screen-space / cube / RT ones
+	// over it (wet roads, polished floors and metal reflecting twice). On: no Reflections pass while the traced picture replaces the scene.
+	if (RtPathTrace::Replacing() && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTReflectionsOff") != 0) return false;
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
 	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f);
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
@@ -669,13 +834,15 @@ bool ReflectionsEffect::ShouldRender() {
 // The half-resolution passes (techniques: 1 Trace, 3 Temporal, 2 Blur X, 4 Blur Y), as VolumetricLight's:
 // Temporal on: Trace -> Trace buffer, Temporal -> Temp (copied to History), Blur X -> Trace, Blur Y -> Buffer.
 // Off: Trace -> Temp, then the same blurs. The composite (technique 0) then reads Buffer.
-void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
+// UNOFFICIAL 2026-11-11 (RideMainExchange) RenderBuffers' first lines moved here unchanged (RtRideBeforeFrame needs the same answers
+// before the frame's main exchange; nothing in them changes within a frame).
+void ReflectionsEffect::RtFrameMode(bool& rrRaw, bool& temporal) {
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (docs\next\FORK2-DLSS-RR.md): with the RT rays on while RR denoises the frame
 	// (Upscaler::RayReconstructionWantsRaw), the RT resolve reaches the composite as it is: no Temporal pass and no history (the
 	// Temporal 0 path, but the noise frame keeps turning, so RoughShare's 2 x 2 casters still rotate for RR to average), and no blurs
 	// (below). A frame the helper traced nothing draws the normal trace, which still gets the blurs.
-	const bool rrRaw = Upscaler::RayReconstructionWantsRaw() && RtWanted();
-	const bool temporal = Settings.Temporal > 0.0f && !rrRaw;
+	rrRaw = Upscaler::RayReconstructionWantsRaw() && RtWanted();
+	temporal = Settings.Temporal > 0.0f && !rrRaw;
 	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h): on frames the RT trace runs, native (rect frames keep the
 	// old chain: their passes are D3D9), not under DLSS RR (it wants the raw signal). Decided before RayGen (it changes RayGen's noise).
 	rtDenoiseFrame = Settings.RtDenoiser && RtWanted() && RtCoreClient::Ready() && !rrRaw && !RenderRect::Active() && !Settings.RtSplitTest;
@@ -702,6 +869,19 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 			Logger::Log("UNOFFICIAL RT reflections MirrorJitter (perf-reflfix4): %s (history %.0f frames)", why[state], Settings.RtMirrorJitterHistory);
 		}
 	}
+}
+
+// UNOFFICIAL 2026-11-01 SharedNoise: with Temporal the shared index (own offset); without (and under DLSS RR, a temporal resolve) the
+// trace's noise moves only while TAA / FSR / DLSS averages frames, else frame 0. Off: FrameNumber % 64 with Temporal or RR, else 0.
+// (2026-11-11: RenderBuffers' expression as a function, for RtRideBeforeFrame; call it after RtFrameMode, which sets rtDenoiseFrame.)
+float ReflectionsEffect::RtNoiseFrame(bool temporal, bool rrRaw) const {
+	return TemporalBackbone::Shared() ? (float)(temporal ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetReflections, 64) : TemporalBackbone::NoiseIndex() % 64) :
+		temporal || rrRaw || rtDenoiseFrame ? (float)(TheFrameRateManager->FrameNumber % 64) : 0.0f;	// (2026-11-07: the denoiser needs moving noise)
+}
+
+void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
+	bool rrRaw, temporal;
+	RtFrameMode(rrRaw, temporal);
 	const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
 
@@ -750,8 +930,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	Constants.Data3.x = usable ? Settings.Temporal : 0.0f;
 	// UNOFFICIAL 2026-11-01 SharedNoise: with Temporal the shared index (own offset); without (and under DLSS RR, a temporal resolve) the
 	// trace's noise moves only while TAA / FSR / DLSS averages frames, else frame 0. Off: FrameNumber % 64 with Temporal or RR, else 0.
-	Constants.Data2.w = sharedNoise ? (float)(temporal ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetReflections, 64) : TemporalBackbone::NoiseIndex() % 64) :
-		temporal || rrRaw || rtDenoiseFrame ? (float)(now % 64) : 0.0f;	// (2026-11-07: the denoiser needs moving noise)
+	Constants.Data2.w = RtNoiseFrame(temporal, rrRaw);	// (2026-11-11: the same expression, now a function)
 
 	// The surroundings cube, before the trace reads it; the light grid's constants.
 	CubeStep(Device);
@@ -868,6 +1047,45 @@ void ReflectionsEffect::UpdateWaterConstants() {
 		}
 	}
 	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, valid ? rtWaterScaleX : 1.0f);
+
+	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (README "Replace, not add"). The composite lays the reflection over the
+	// lit picture by its Fresnel share only (4 % on stone or glass looking straight on), so the game's env-map pass, an additive cube map at
+	// the artist's strength drawn before it, stayed almost whole under it: two reflections on one surface. That pass is drawn in the world
+	// scene, before this frame's trace, so (as the water above) it reads LAST frame's Buffer: its alpha is how much of each pixel's
+	// reflection the trace answered (the screen, the rays, the cube / grid / sky fallbacks; 0 where nothing reflects or nothing was found),
+	// and the pass takes that share out of its cube map (EnvTemplate.hlsl). So the traced reflection is THE reflection where there is one
+	// and the game's cube map stays as the probe where there is none. Same screen place, not reprojected (a pixel-wide fringe at outlines
+	// while turning). Usable only right after a frame whose composite drew from that Buffer. Off: not entered, the constant stays 0.
+	if (Settings.ReplaceForward || ReflMaterial::ForwardReplaceFrame[0] != 0.0f) {
+		static UINT replaceFrame = 0xFFFFFFFF;
+		if (replaceFrame != now) { replaceFrame = now; ReflMaterial::ForwardReplaceWorldUsed = false; }	// (this runs twice a frame)
+		const char* why = nullptr;
+		if (!Settings.ReplaceForward) why = "the key is off";
+		else if (!Enabled || !Effect) why = "the Reflections effect is off";
+		else if (!Textures.BufferTexture || !TheRenderManager->width || !TheRenderManager->height) why = "no reflection buffer";
+		else if (Settings.DebugView != 0 || Settings.RtDebugView != 0 || Settings.RtDenoiserDebugView != 0) why = "a Reflections DebugView is on (the buffer holds diagnostic colours)";
+		else if (RtPathTrace::Replacing()) why = "the path tracer replaces the scene";
+		else if (TheShaderManager->GameState.isUnderwater) why = "under water";
+		else if (lastRenderedFrame == 0 || lastRenderedFrame + 1 != now) why = "the reflections were not drawn last frame";
+		else {
+			const double jump[3] = { (double)invView._41 - lastInvView._41, (double)invView._42 - lastInvView._42, (double)invView._43 - lastInvView._43 };
+			if (TheShaderManager->GameState.isCameraCut || jump[0] * jump[0] + jump[1] * jump[1] + jump[2] * jump[2] >= 500.0 * 500.0) why = "the camera jumped";
+		}
+		const bool on = why == nullptr;
+		ReflMaterial::ForwardReplaceFrame[0] = on ? 1.0f : 0.0f;
+		ReflMaterial::ForwardReplaceFrame[1] = 0.0f;
+		ReflMaterial::ForwardReplaceFrame[2] = on ? 1.0f / (float)TheRenderManager->width : 0.0f;	// one pixel of the scene target (the pass's VPOS -> Buffer's UV; a
+		ReflMaterial::ForwardReplaceFrame[3] = on ? 1.0f / (float)TheRenderManager->height : 0.0f;	// RenderScale rect frame keeps to the same top-left part in both)
+		static const char* told = nullptr;	// one line per change (the literals above: compared by address)
+		static int toldCount = 0;
+		const char* state = on ? "on" : why;
+		if (state != told && toldCount < 32) {
+			told = state;
+			toldCount++;
+			if (on) Logger::Log("UNOFFICIAL Reflections ReplaceForward: on (the game's env-map pass leaves out the share of its cube map that last frame's reflection covered)");
+			else Logger::Log("UNOFFICIAL Reflections ReplaceForward: not used now: %s (the env-map pass is drawn in full)", why);
+		}
+	}
 }
 
 // UNOFFICIAL 2026-10-31 SkyPanorama ([Shaders.Reflections.RT], docs/next/FORK-RT-REFLECTIONS.md "Sky at a miss"): the sky as seen,
@@ -1167,7 +1385,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// The textures as SetCT binds them. Those read without a guard must exist; the guarded ones (the light grid, the sky
 	// visibility, the material buffer, the ortho map without the roof test) take the placeholder when absent, which is never read.
 	IDirect3DBaseTexture9* depth = SlotTexture("TESR_DepthBuffer");
-	IDirect3DBaseTexture9* normals = SlotTexture("TESR_NormalsBuffer");
+	IDirect3DBaseTexture9* normals = FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections: the shading normals while on)
 	IDirect3DBaseTexture9* viewModel = SlotTexture("TESR_DepthBufferViewModel");
 	IDirect3DBaseTexture9* ortho = SlotTexture("TESR_OrthoMapBuffer");
 	if (!depth || !normals || !viewModel || !TheTextureManager->RenderedTexture || (!ortho && Constants.Data4.y > 0.5f) ||
@@ -1233,7 +1451,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	static bool materialLooked = false;
 	// 2026-11-12 Puddles: the reflection pass also reads the surfaces' standing-water mask from it (Reflections.glsl PuddleStanding)
 	PuddlesShaders* puddlesMask = TheShaderManager->Shaders.Puddles;
-	const bool puddleMask = puddlesMask && puddlesMask->ReflectionsWanted();
+	const bool puddleMask = puddlesMask && puddlesMask->ReflectionsWanted() && !CapturedNormals::AlbedoCompiledIn();	// (test-after-110 merge: the mask is written only with the first layout; 3 / 4 keep the normal in a, so the field is used)
 	if ((Settings.MaterialBufferRoughness || puddleMask) && !materialLooked) {
 		materialLooked = true;
 		std::string name = "TESR_MaterialBuffer";
@@ -1404,7 +1622,7 @@ void ReflectionsEffect::RtDenoiseIdle() { RtDenoiser.Restart(); }	// a frame wit
 bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture9* signal, const D3DXMATRIX* reproject) {
 	if (RtDenoiserFailed) return false;
 	ID3D9NvrExt* ext = DxvkCompute::Extension();
-	IDirect3DBaseTexture9* normals = SlotTexture("TESR_NormalsBuffer");
+	IDirect3DBaseTexture9* normals = FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections)
 	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
 	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 	if (!ext || !normals || !signal || !Rt.Ray || !Rt.Spread || !Textures.BufferSurface || !linear || !point) return false;

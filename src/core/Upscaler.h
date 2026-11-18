@@ -108,7 +108,7 @@ namespace Upscaler {
 		bool	Wanted = false;			// RayReconstruction (with [Shaders.TAA.DLSS] Enabled); a change restarts the helper (its images)
 		bool	KeepDenoisers = false;	// RRKeepDenoisers: NVR's own RT denoisers keep running under RR (A/B)
 		int		Preset = 0;				// Preset: DLSS SR's model (NvrDlssPreset: 0 default, 1 CNN, 2 transformer, 3 transformer J)
-		int		RrPreset = 0;			// RRPreset (NvrDlssRrPreset: 0 default, 1 D, 2 E)
+		int		RrPreset = 0;			// RRPreset (NvrDlssRrPreset: 0 default, 1 D, 2 E, 3 F = the newer model, 4 auto by GPU generation)
 		bool	NormalsView = false;	// RRNormals 1: the normals guide in view space
 		bool	DepthLinear = false;	// RRDepthLinear: DLSS.Use.HW.Depth 0
 	};

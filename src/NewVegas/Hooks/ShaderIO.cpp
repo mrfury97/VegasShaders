@@ -1,3 +1,4 @@
+#include "../../core/GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 (the game's own shaders, noted as they are made)
 // The game creates its NiD3D shader objects here; NVR prepares the extra fields of each one,
 // gives the two noise shaders the water height-map names, and loads its own replacement.
 typedef NiD3DVertexShader* (__thiscall* CreateVertexShaderFn)(BSShader*, char*, char*, char*, char*);
@@ -16,6 +17,7 @@ static void PrepareNewShader(ShaderEx* Shader, const char* GameName, const char*
 	for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
 		Shader->ShaderProg[variant] = NULL;
 	Shader->ShaderHandleBackup = Shader->ShaderHandle;
+	GameShaderPairs::NoteMade(GameName, (IUnknown*)Shader->ShaderHandle, Kind[0] == 'p');	// UNOFFICIAL 2026-11-13 (core/GameShaderPairs.h: which shader package the game took them from)
 	ShaderOwnership::Mark(Shader);	// 2026-11-03: NVR's fields in this object are now its own (ShaderRecord.h ShaderOwnership)
 	Shader->SetName(GameName);
 

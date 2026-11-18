@@ -8,7 +8,9 @@ namespace {
 }
 
 RendererInitFn InitializeRenderer = (RendererInitFn)Hooks::InitializeRenderer;
+void GameMsaaBeforeRenderer();	// NewVegas/Hooks/Settings.cpp (UNOFFICIAL 2026-11-15: the game's MSAA off for the deferred renderer / upscaling)
 NiDX9Renderer* __fastcall InitializeRendererHook(NiDX9Renderer* self, UInt32 edx) {
+	GameMsaaBeforeRenderer();	// every INI is read by now; TESRenderer::Init reads the MSAA setting next
 	// the game allocated the renderer at NVR's size (AttachHooks), so it is NVR's RenderManager
 	RenderManager* renderer = (RenderManager*)InitializeRenderer(self);
 	TheRenderManager = renderer;

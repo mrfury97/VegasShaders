@@ -18,6 +18,9 @@ public:
 	static const UInt32 RenderReflections = 0x004E1BC0, RenderPipboy = 0x008761E0, ProcessImageSpaceShaders = 0x00B55AC0;
 	static const UInt32 RenderPassStandard = 0x00B98E80, RenderPassSkinned = 0x00B99110;	// BSBatchRenderer::RenderPassImmediately_* (cdecl)
 	static const UInt32 RenderBlended = 0x00B650C0;		// BSShaderAccumulator, blended stage (back to front, after the opaque groups)
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene): BSShaderUtil's scene walk and scene draw (both cdecl), which a
+	// plugin calls to draw the world from an extra camera (JIP LN's ProjectExtraCamera: B42 Optics' picture-in-picture scope)
+	static const UInt32 AccumulateScene = 0x00B6BEE0, RenderScene = 0x00B6C0D0;
 	static const UInt32 CreateRenderedTexture = 0x00B6B610;	// BSTextureManager
 	// water, forms, tools
 	static const UInt32 GetWaterHeightLOD = 0x0045CD80, IsWaterNodeVisible = 0x004E62E0, LoadForm = 0x004601D0;

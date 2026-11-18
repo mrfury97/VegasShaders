@@ -2,6 +2,8 @@
 #include <unordered_set>	// UNOFFICIAL 2026-10-30 SettingsCache
 #include "InstallCheck.h"	// 2026-11-03: the user toml's unknown keys and version mark, for the install self-check
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels / RenderDoc capture key ([Main.Develop.Main])
+#include "SettingForce.h"	// UNOFFICIAL 2026-11-14 full deferred renderer: its prerequisites read as forced
+#include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release build reads [Shaders.ShadowsInteriors.Capsules] Enabled as off
 
 // A settings file in <game>\Data\NVSE\Plugins (the game folder is read once, Paths::GameRoot: common-dialog calls can change the
 // current directory later). 2026-11-02 Vegas Shaders: forWrite gives the new name (VegasShaders.toml...); a read takes the new
@@ -56,7 +58,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 78;  // (78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 90;  // (90, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -76,7 +78,10 @@ static bool Retired(const std::string& Name) {
 		"Main.Menu.Style.TextShadowColorNormal", "Main.Menu.Style.TextShadowColorSelected", "Main.Menu.Style.TextSizeStatus",
 		"Main.Menu.Style.TitleColumnSize" };
 	for (const char* k : kKeys) if (Name == k) return true;
-	for (const char* sec : kSections) if (Name.compare(0, strlen(sec), sec) == 0) return true;
+	for (const char* sec : kSections) {	// the section itself or a key / table under it ("Main.SleepingMode.Main.Enabled"), not a longer name
+		const size_t n = strlen(sec);
+		if (Name.compare(0, n, sec) == 0 && (Name.size() == n || Name[n] == '.')) return true;
+	}
 	return false;
 }
 
@@ -660,6 +665,213 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		replace("Shaders.AmbientOcclusion.RT", "GIOffscreen", 0.1, 1.0, false);
 		toTrue("Shaders.AmbientLight.Main", "AlbedoBuffer");
 	}
+	// 79 (2026-11-12, a rain run on an RTX card: the land's mean brightness 94.5 dry, 121.7 in rain): rain lit the land and the objects BRIGHTER than
+	// dry weather. On 2026-09-19 the dry groups' LightingScale went from 1.0 to 0.725 ([Shaders.Terrain.Main], [Shaders.PBR.Main]) and their Rain
+	// siblings stayed at 1.0. The Rain groups' default is 0.725 now, the same as dry. A saved 1.0 (the old default) moves once; it stays where the
+	// player's own dry value is 1.0 or more (rain is then not brighter than dry, and 1.0 may be their choice).
+	if (version < 79) {
+		for (const char* family : { "Shaders.Terrain", "Shaders.PBR" }) {
+			const std::string dry = std::string(family) + ".Main", rain = std::string(family) + ".Rain";
+			const tomlValue* saved = UserSection(dry.c_str());
+			double dryScale = 0.725;	// (no saved value: the default)
+			if (saved && saved->contains("LightingScale")) {
+				const tomlValue& value = saved->at("LightingScale");
+				if (value.is_floating()) dryScale = value.as_floating();
+				else if (value.is_integer()) dryScale = (double)value.as_integer();
+			}
+			if (dryScale < 1.0) replace(rain.c_str(), "LightingScale", 1.0, 0.725, false);
+		}
+	}
+	// 80 (2026-11-12, the owner: "make a nice preset ... and ship that to users as the real default and they can go from there"): the daylight
+	// look tuned on the bench against photos of the real Mojave (a blue sky in place of the lavender one, sunlit ground about 1.7x as bright and
+	// warmer; night and interiors have their own groups and do not change). A look is a choice, so a saved configuration moves ONLY when every
+	// one of its values is still the old default (or was never saved): one changed value means the player tuned the look, and nothing moves.
+	if (version < 80) {
+		struct LookKey { const char* section; const char* key; double oldDefault, newDefault; };
+		static const LookKey look[] = {
+			{ "Shaders.Sky.Main", "TintDayR", 1.0, 0.55 }, { "Shaders.Sky.Main", "TintDayG", 1.0, 0.78 }, { "Shaders.Sky.Main", "TintDayB", 1.0, 1.0 },
+			{ "Shaders.Sky.Main", "SaturationDay", 1.0, 1.6 },
+			{ "Shaders.Tonemapping.Main", "Exposure", 1.5, 2.5 }, { "Shaders.Tonemapping.Main", "SkyMultiplier", 1.0, 0.6 },
+			{ "Shaders.PBR.Main", "LightingScale", 0.725, 1.15 }, { "Shaders.Terrain.Main", "LightingScale", 0.725, 1.15 },
+			{ "Shaders.PBR.Rain", "LightingScale", 0.725, 1.15 }, { "Shaders.Terrain.Rain", "LightingScale", 0.725, 1.15 }, { "Shaders.Grass.Main", "Brightness", 1.0, 1.3 },
+		};
+		const LookKey* touched = nullptr;
+		bool anySaved = false;
+		for (const LookKey& k : look) {
+			const tomlValue* saved = UserSection(k.section);
+			if (!saved || !saved->contains(k.key)) continue;	// never saved: the new default applies by itself
+			anySaved = true;
+			const tomlValue& value = saved->at(k.key);
+			const double v = value.is_integer() ? (double)value.as_integer() : value.is_floating() ? value.as_floating() : -1.0e9;
+			if (v != k.oldDefault) { touched = &k; break; }
+		}
+		if (touched)
+			Logger::Log("UNOFFICIAL settings: this build's new daylight look was NOT applied, because your saved %s.%s is your own value. To try it: "
+				"[Shaders.Sky.Main] TintDay 0.55 0.78 1.0, SaturationDay 1.6; [Shaders.Tonemapping.Main] Exposure 2.5, SkyMultiplier 0.6; LightingScale 1.15 in "
+				"[Shaders.PBR.Main], [Shaders.Terrain.Main] and their Rain groups; [Shaders.Grass.Main] Brightness 1.3.", touched->section, touched->key);
+		else if (anySaved) {
+			for (const LookKey& k : look) if (k.oldDefault != k.newDefault) replace(k.section, k.key, k.oldDefault, k.newDefault, false);
+			Logger::Log("UNOFFICIAL settings: the new daylight look was applied (none of its values had been changed). The old look: [Shaders.Sky.Main] TintDay "
+				"1 1 1, SaturationDay 1.0; [Shaders.Tonemapping.Main] Exposure 1.5, SkyMultiplier 1.0; LightingScale 0.725 in [Shaders.PBR.Main], "
+				"[Shaders.Terrain.Main] and their Rain groups; [Shaders.Grass.Main] Brightness 1.0.");
+		}
+	}
+	// 80, second part (2026-11-12, the owner: "have the default ... use taa fsr 3.1 native render scale with sharpening. use less repeating
+	// ground too"). Anti-aliasing is a choice too: the saved file moves only when all five of its keys are still the old defaults (TAA
+	// off, FSR off, FSR version 0, FSR sharpness 0, RenderScale 1): someone who switched TAA on, or FSR on with TAA, keeps exactly what they chose.
+	// RenderScale goes to 0.67 with it (FSR 3.1 Quality). Less-repeating ground is a plain switch: a saved false moves to true.
+	if (version < 80) {
+		auto savedIs = [&](const char* section, const char* key, bool wantBool, bool boolValue, double number) {
+			const tomlValue* saved = UserSection(section);
+			if (!saved || !saved->contains(key)) return true;	// never saved: the new default applies by itself
+			const tomlValue& value = saved->at(key);
+			if (wantBool) return value.is_boolean() && value.as_boolean() == boolValue;
+			return (value.is_integer() && (double)value.as_integer() == number) || (value.is_floating() && value.as_floating() == number);
+		};
+		auto setBool = [&](const char* section, const char* key) {
+			tomlValue* saved = UserSection(section);
+			if (!saved || !saved->contains(key) || !saved->at(key).is_boolean() || saved->at(key).as_boolean()) return;
+			(*saved)[key] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + section + "." + key + " false -> true";
+		};
+		if (savedIs("Shaders.TAA.Status", "Enabled", true, false, 0) && savedIs("Shaders.TAA.FSR", "Enabled", true, false, 0) &&
+			savedIs("Shaders.TAA.FSR", "Version", false, false, 0.0) && savedIs("Shaders.TAA.FSR", "Sharpness", false, false, 0.0) &&
+			savedIs("Shaders.TAA.FSR", "RenderScale", false, false, 1.0)) {
+			setBool("Shaders.TAA.Status", "Enabled");
+			setBool("Shaders.TAA.FSR", "Enabled");
+			replace("Shaders.TAA.FSR", "Version", 0, 1, true);
+			replace("Shaders.TAA.FSR", "Sharpness", 0.0, 0.4, false);
+			replace("Shaders.TAA.FSR", "RenderScale", 1.0, 0.67, false);	// FSR's Quality mode (native cost 5.6 ms on a GTX 1070 at 1080p)
+		}
+		setBool("Shaders.Terrain.Variation", "Enabled");
+	}
+	// 81 (2026-11-13): [Main.Main.Quality] CapturedGrass false -> true. The key was added on 2026-11-12 and switched off the same day (bright
+	// speckles on an RTX card, since fixed: the grass's own normal, shade and vertex colour are recorded now), so every file saved by 1.0.8
+	// holds false. Without its records, grass under path tracing took the land's colour or the game's own pixel by view angle (a tester:
+	// "grass disappears / reappears depending on viewing angle"). It only does anything while path tracing or ray traced bounce light runs.
+	if (version < 81) {
+		tomlValue* saved = UserSection("Main.Main.Quality");
+		if (saved && saved->contains("CapturedGrass") && saved->at("CapturedGrass").is_boolean() && !saved->at("CapturedGrass").as_boolean()) {
+			(*saved)["CapturedGrass"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Quality.CapturedGrass false -> true";
+		}
+	}
+	// UNOFFICIAL 2026-11-13 b (82): [Main.Main.Misc] GameShaderPairRepair false -> true. The key is one day old and was never released with
+	// false, so only files saved by the development builds of 2026-11-13 hold it.
+	if (version < 82) {
+		tomlValue* saved = UserSection("Main.Main.Misc");
+		if (saved && saved->contains("GameShaderPairRepair") && saved->at("GameShaderPairRepair").is_boolean() && !saved->at("GameShaderPairRepair").as_boolean()) {
+			(*saved)["GameShaderPairRepair"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Misc.GameShaderPairRepair false -> true";
+		}
+	}
+	// UNOFFICIAL 2026-11-13 c (83): [Shaders.ShadowsExteriors.RT] Mode 0 -> 1 and [Main.Main.RayTracing] Grass false -> true. The owner's
+	// rule: an enabled ray traced effect replaces its raster twin where the trace has an answer. Mode 1 was wrong before this build (the
+	// deferred apply could not stand in for the shaders' own lookup: people in shade came out sunlit); ForwardLookup fixes it. Without
+	// grass in the traced scene the grass casts no sun shadow inside the RT range, so the two move together. The menu's Save writes every
+	// key, so every saved file holds the old values. Neither does anything unless a ray traced effect is on.
+	if (version < 83) {
+		tomlValue* saved = UserSection("Shaders.ShadowsExteriors.RT");
+		if (saved && saved->contains("Mode") && saved->at("Mode").is_integer() && saved->at("Mode").as_integer() == 0) {
+			(*saved)["Mode"] = 1;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.RT.Mode 0 -> 1";
+		}
+		saved = UserSection("Main.Main.RayTracing");
+		if (saved && saved->contains("Grass") && saved->at("Grass").is_boolean() && !saved->at("Grass").as_boolean()) {
+			(*saved)["Grass"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.Grass false -> true";
+		}
+	}
+	// 84 (2026-11-14): the flash detector, beat detector and history watch are off by default (their per-frame read-backs measured
+	// 4-7 ms a frame on native D3D9 (a CPU wait in the HUD step) and 0.3-0.6 ms on DXVK at 1440p, GTX 1070, every other setting the same). Menu saves hold the old true.
+	if (version < 84) {
+		tomlValue* saved = UserSection("Main.Main.Misc");
+		for (const char* key : { "FlashDetect", "BeatDetect", "HistoryWatch" }) {
+			if (saved && saved->contains(key) && saved->at(key).is_boolean() && saved->at(key).as_boolean()) {
+				(*saved)[key] = false;
+				changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Misc." + key + " true -> false";
+			}
+		}
+	}
+	// 85 (2026-11-15, owner decision, docs/next/FULL-DEFERRED-RENDERER-PLAN.md section 7): the deferred renderer ships on by default,
+	// [Main.Main.Quality] DeferredRenderer 0 -> 2. The key never shipped in a public release (added 2026-11-14, default 0), so only files saved
+	// by the development and playtest builds hold the old 0. A saved 1 or 2 is a choice and stays.
+	if (version < 85) replace("Main.Main.Quality", "DeferredRenderer", 0, 2, true);
+	// 86 (2026-11-16, owner decision): SMAA and DitherBuster are off by default ([Shaders.SMAA.Status] / [Shaders.DitherBuster.Status]
+	// Enabled true -> false). A menu save holds the old true, which moves to false once; a saved false stays.
+	if (version < 86) {
+		for (const char* section : { "Shaders.SMAA.Status", "Shaders.DitherBuster.Status" }) {
+			tomlValue* saved = UserSection(section);
+			if (saved && saved->contains("Enabled") && saved->at("Enabled").is_boolean() && saved->at("Enabled").as_boolean()) {
+				(*saved)["Enabled"] = false;
+				changed += std::string(changed.empty() ? "" : ", ") + section + ".Enabled true -> false";
+			}
+		}
+	}
+	// 87 (2026-11-16, owner decision: "smooth cutouts should be part of the default if we're going to ship it with taa on"): [Shaders.TAA.Cutouts]
+	// Enabled false -> true (Mode 2, like the game's MSAA). A menu save holds the old false, which moves to true once. It is a restart key, read
+	// when the shaders are first compiled, which is after this step: it applies from this start. It does nothing without TAA / FSR / DLSS.
+	if (version < 87) {
+		tomlValue* saved = UserSection("Shaders.TAA.Cutouts");
+		if (saved && saved->contains("Enabled") && saved->at("Enabled").is_boolean() && !saved->at("Enabled").as_boolean()) {
+			(*saved)["Enabled"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.TAA.Cutouts.Enabled false -> true (Smooth Cutouts; a restart key: compiled in from this start)";
+		}
+	}
+	// 88 (2026-11-16, owner decision after the fd-fwdgroups pictures, docs/next/FD-FORWARD-GROUPS.md section 6): skin and hair join the
+	// deferred renderer by default (glass too at first, held back on 2026-11-17, on again in 89: below): [Main.Main.Quality] DeferredSkin false -> true,
+	// DeferredSkinSSS 0 -> 2 (with [Shaders.Skin.SSS] Kernel 1, the separable kernel) and DeferredHair false -> true. The keys never shipped in
+	// a public release (added 2026-11-15, test builds only); a menu save holds the old values, which move once. A saved non-default value stays.
+	// 2026-11-17 (owner: "glass off for now", claude/test-1117): [Main.Main.Quality] DeferredTransparents 1 turned pale glass bottles silver
+	// (docs/next/BOTTLE-GLOW.md), so its default went back to 0 and 88 no longer moves a saved 0 to 1. Editing 88 itself was safe then: no
+	// settings file outside the bench had been saved at 88. Glass is turned on again by migration 89 (below), not here: test-1117's first zip
+	// (rev1) ran this 88, so a file it saved is at 88 with DeferredTransparents 0, and only a newer step reaches it.
+	if (version < 88) {
+		replace("Main.Main.Quality", "DeferredSkinSSS", 0, 2, true);
+		replace("Shaders.Skin.SSS", "Kernel", 0, 1, true);	// the old default 0 (Burley) leaves a dark patch under a moustache
+		tomlValue* saved = UserSection("Main.Main.Quality");
+		for (const char* key : { "DeferredSkin", "DeferredHair" }) {
+			if (saved && saved->contains(key) && saved->at(key).is_boolean() && !saved->at(key).as_boolean()) {
+				(*saved)[key] = true;
+				changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Quality." + key + " false -> true";
+			}
+		}
+	}
+	// 89 (2026-11-17, owner: "Turn glass on", claude/test-1117 rev2): [Main.Main.Quality] DeferredTransparents 0 -> 1, glass under the deferred
+	// renderer on by default again. The silver bottles that held it back came from the forward+ lamp walk (Includes/ForwardPlus.hlsl FPLampSum):
+	// D3DX compiled its `if (k >= count) break` as a break that never fires in 20 records, so the walk ran past the froxel's lamp list and added
+	// lamps several times over; the list length is now the loop's own bound (claude/fd-glassglow 0e065a3a + 3479ea34, here 9046dea41 + debca731f;
+	// docs/next/FD-GLASSGLOW.md). A menu save holds the old 0 (the default from 2026-11-15 and again from 11-17 until this step), which moves to 1
+	// once, whether the file was saved at 85 (before 88) or at 88 (test-1117 rev1). A saved 1 stays. It is a restart key read when the shaders
+	// are first compiled, which is after this step: the glass records are compiled in from this start.
+	if (version < 89) {
+		tomlValue* saved = UserSection("Main.Main.Quality");
+		if (saved && saved->contains("DeferredTransparents")) {
+			const tomlValue& value = saved->at("DeferredTransparents");
+			if ((value.is_integer() && value.as_integer() == 0) || (value.is_floating() && value.as_floating() == 0.0)) {
+				(*saved)["DeferredTransparents"] = 1;
+				changed += std::string(changed.empty() ? "" : ", ") +
+					"Main.Main.Quality.DeferredTransparents 0 -> 1 (glass under the new renderer, settings step 89: the silver-bottle fix is in; a restart key: compiled in from this start)";
+			}
+		}
+	}
+	// 90 (2026-11-18, owner decision: "include CAS"): Sharpening is AMD FidelityFX CAS only (the fork's filter; 1.1.0 had it behind
+	// [Shaders.Sharpening.Main] CAS = false, the old box-average filter by default). Strength is now CAS's sharpness, 0-1, default 0.5: a
+	// menu save holds the old filter's 0.75 (outdoors and indoors), which moves to 0.5 once; another saved value is a choice and stays (it
+	// reads as a CAS sharpness, clamped to 0-1). A player who had switched CAS on already saw CAS at their Strength: theirs stays. The CAS
+	// switch is gone: a saved one is removed here, so it is not reported as unknown. Enabled is untouched (off by default, as before).
+	if (version < 90) {
+		tomlValue* saved = UserSection("Shaders.Sharpening.Main");
+		const bool casWasOn = saved && saved->is_table() && saved->contains("CAS") && saved->at("CAS").is_boolean() && saved->at("CAS").as_boolean();
+		if (!casWasOn) {
+			replace("Shaders.Sharpening.Main", "Strength", 0.75, 0.5, false);
+			replace("Shaders.Sharpening.Interiors", "Strength", 0.75, 0.5, false);
+		}
+		if (saved && saved->is_table() && saved->contains("CAS")) {
+			saved->as_table().erase("CAS");
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.Sharpening.Main.CAS removed (CAS is now the only sharpening filter)";
+		}
+	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "
 			"Change them in the menu and press Save if you want the old values back.", changed.c_str());
@@ -1219,16 +1431,41 @@ static const CachedSetting* CachedNode(SettingManager* manager, const char* sect
 	return &slot->second;
 }
 
+// UNOFFICIAL 2026-11-14 full deferred renderer (core/SettingForce.h): the prerequisites [Main.Main.Quality] DeferredRenderer turns on read as
+// forced while it is on at startup (decided at the session's first read; nothing is written into the settings). Off: State 0, nothing more.
+static bool ForcedValue(SettingManager* manager, const char* section, const char* key, int& value) {
+	if (SettingForce::State < 0) {
+		CachedSetting scratch;
+		const CachedSetting* mode = CachedNode(manager, "Main.Main.Quality", "DeferredRenderer", scratch);
+		if (!mode->ok) {	// a key every defaults file has: missing too = the settings are not loaded yet (decide at a later read)
+			CachedSetting other;
+			if (!CachedNode(manager, "Main.Main.Quality", "CapturedNormals", other)->ok) return false;
+		}
+		const int m = mode->ok ? mode->i : 0;
+		SettingForce::RendererMode = m < 0 ? 0 : m > 2 ? 2 : m;
+		SettingForce::State = SettingForce::RendererMode > 0 ? 1 : 0;
+		// (logged by DeferredRenderer::BeginFrame, not here: under the cache lock)
+	}
+	return SettingForce::State == 1 && SettingForce::Find(section, key, value);
+}
+
 int SettingManager::GetSettingI(const char* section, const char* key) {
 	std::lock_guard<std::mutex> lock(SettingCacheLock);
 	CachedSetting scratch;
-	return CachedNode(this, section, key, scratch)->i;	// the typed value directly, no string re-parse (0 when the setting does not exist)
+	if (SettingForce::State) { int forced; if (ForcedValue(this, section, key, forced)) return forced; }
+	const CachedSetting* node = CachedNode(this, section, key, scratch);
+	if constexpr (ShelvedEffects::Active) { if (ShelvedEffects::ForcedOff(section, key, node->i)) return 0; }	// UNOFFICIAL 2026-11-16 (release builds only)
+	return node->i;	// the typed value directly, no string re-parse (0 when the setting does not exist)
 }
 
 float SettingManager::GetSettingF(const char* section, const char* key) {
 	std::lock_guard<std::mutex> lock(SettingCacheLock);
 	CachedSetting scratch;
-	return CachedNode(this, section, key, scratch)->f;
+	if (SettingForce::State) { int forced; if (ForcedValue(this, section, key, forced)) return (float)forced; }	// UNOFFICIAL 2026-11-14 (above)
+	float value = CachedNode(this, section, key, scratch)->f;
+	if constexpr (ShelvedEffects::Active) { if (ShelvedEffects::ForcedOff(section, key, value != 0.0f)) return 0.0f; }	// UNOFFICIAL 2026-11-16 (release builds only)
+	if (SettingForce::State == 1) SettingForce::FloorF(section, key, value);	// UNOFFICIAL 2026-11-15 linear gamma floor (SettingForce.h)
+	return value;
 }
 
 char* SettingManager::GetSettingS(const char* section, const char* key, char* out) {
@@ -1657,6 +1894,7 @@ bool SettingManager::GetMenuShaderEnabled(const char* name) {
 	if (!strcmp(name, "AmbientLight")) {
 		Configuration::ConfigNode sunGi;
 		if (Config.FillNode(&sunGi, "Shaders.AmbientLight.Main", "SunGI") && sunGi.BoolValue) return true;
+		if (Config.FillNode(&sunGi, "Shaders.AmbientLight.Main", "RoomGI") && sunGi.BoolValue) return true;
 	}
 
 	char section[256];

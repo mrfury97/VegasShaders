@@ -64,6 +64,17 @@ namespace ReflMaterial {
 	inline UInt32 DiagBound = 0, DiagChanged = 0, DiagFlagged = 0, DiagMask[16] = {};	// diagnostic counts for the log (per report)
 	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the other passes' own alpha (ReflMaterialRule.h Own / Cover)
 	inline bool FirstPersonLive = false;		// the first-person scene writes alpha (BeginFirstPerson)
+	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (effects/Reflections/README.md "Replace, not add"): TESR_ReflReplace as
+	// the game's env-map pass (EnvTemplate.hlsl) reads it: x the share of last frame's reflection coverage taken out of the env map (0: off,
+	// the pass is exactly as before), zw one pixel of the scene target in UV. The Reflections effect makes the frame's value once
+	// (UpdateWaterConstants); it is LIVE only inside the frame's first world scene and the first-person scene. Any other scene the game
+	// draws (the planar water reflection, a second world pass) has another camera or target, where a lookup by screen place would read
+	// someone else's pixels: there the pass gets 0. With the key off everything here stays 0 (the calls below copy four zeros).
+	inline float ForwardReplace[4] = { 0.0f, 0.0f, 0.0f, 0.0f };		// the registered constant: what a shader bound now is sent
+	inline float ForwardReplaceFrame[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// this frame's value (zeros: off, or not usable this frame)
+	inline bool ForwardReplaceWorldUsed = false;						// this frame's first world scene has taken it
+	inline bool ForwardReplaceInWorld = false;							// inside that world scene (a first-person scene nested in it hands it back)
+	inline void ForwardReplaceLive(bool live) { for (int i = 0; i < 4; i++) ForwardReplace[i] = live ? ForwardReplaceFrame[i] : 0.0f; }
 	inline int NeutralDepth = 0;				// NeutralBegin calls open (the dispatcher's round the pass hook's: the outer one decides)
 	inline ReflMaterialRule::Write NeutralWrite = ReflMaterialRule::Keep;
 	inline bool NeutralAlphaAdded = false, NeutralBlendChanged = false;
@@ -171,6 +182,7 @@ namespace ReflMaterial {
 	}
 
 	inline void BeginWorld(NiDX9RenderState* state, IDirect3DDevice9* device, bool live) {
+		ForwardReplaceInWorld = !ForwardReplaceWorldUsed; ForwardReplaceWorldUsed = true; ForwardReplaceLive(ForwardReplaceInWorld);	// UNOFFICIAL 2026-11-12 ReplaceForward (above; before the early return: it does not need MaterialAware)
 		Writing = CompiledIn() && live;
 		Current = -1.0f;
 		NeutralDepth = 0;
@@ -184,16 +196,19 @@ namespace ReflMaterial {
 	// the effects copy the material out (the arms and gun over a mirror kept its material: a chrome gun). No material passes here; every
 	// pass that replaces the colour writes its own alpha (Own), under the same separate alpha blend as the world scene.
 	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live) {
+		ForwardReplaceLive(true);	// UNOFFICIAL 2026-11-12 ReplaceForward: the gun's env map too (same target and screen as the world)
 		FirstPersonLive = CompiledIn() && live && state && device && !StatesSet;
 		NeutralDepth = 0;
 		if (FirstPersonLive) SetSceneStates(state, device);
 	}
 	inline void EndFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device) {
+		ForwardReplaceLive(ForwardReplaceInWorld);	// UNOFFICIAL 2026-11-12 ReplaceForward
 		if (FirstPersonLive) RestoreSceneStates(state, device, "first-person");
 		FirstPersonLive = false;
 	}
 
 	inline void EndWorld(NiDX9RenderState* state, IDirect3DDevice9* device) {
+		ForwardReplaceInWorld = false; ForwardReplaceLive(false);	// UNOFFICIAL 2026-11-12 ReplaceForward: nothing drawn after the world scene reads it
 		if (device && Current != 0.0f && Current != -1.0f) Send(device, 0.0f);
 		RestoreSceneStates(state, device, "world");
 		Writing = false;

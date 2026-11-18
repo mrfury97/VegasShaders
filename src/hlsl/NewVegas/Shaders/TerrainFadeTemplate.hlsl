@@ -19,7 +19,7 @@
 #ifdef PS
     #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
     #define SHADOW_SUN_CONTACT_ALWAYS 1
-    #define SHADOW_SUN_CONTACT_IN 1     // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl), land registers s13 / c183-c187
+    #define SHADOW_SUN_CONTACT_IN 1     // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl; only with Bend on at start), land registers s13 / c183-c187
     #define SHADOW_SUN_CONTACT_LAND 1
 #endif
 #include "includes/Shadow.hlsl"	// shared code
@@ -144,14 +144,23 @@ PS_OUTPUT main(PS_INPUT pin) {
     // the sun colour only; ambient is added afterwards and stays untouched.
     // ddx/ddy must stay at top level, outside dynamic flow control.
     float3 geoNormal = GetShadowGeometricNormal(pin.shadowPos);
-    float sunShadow = FORWARD_SHADOWS ? GetSunShadow(pin.shadowPos, geoNormal) : 1.0f;
+    float sunShadow = FORWARD_SHADOWS ? GetSunShadowMaps(pin.shadowPos, geoNormal) : 1.0f;	// (2026-11-13: the cascades alone; far land is past the RT sun shadows' range)
 
 #if TERRAIN_MACRO
     const float3 groundColor = MacroVary(LinColor(albedo), pin.shadowPos);	// 2026-11-04 macro variation, as the near land
 #else
     const float3 groundColor = LinColor(albedo);
 #endif
+    // UNOFFICIAL 2026-11-15 (DeferredSun, bench batch 5: a bright band across the ground where the near land hands over to the far land, in
+    // every mid-distance view) the lighting-free record (LAMPS_DEFERRED 2, the deferred renderer's mode 2 with DeferredDistant): this band is
+    // drawn blended over land whose deferred record has its sun taken out and marked for DeferredSun, which adds the whole sun under it, so the
+    // band's own sun came on top (the forward band blends lit over lit). Here the band blends its ambient only; the pass's sun of the land
+    // under it lights the whole pixel. Without LAMPS_DEFERRED 2 nothing changes.
+#if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED >= 2
+    float3 lit = getSunLighting(pin.sunDir.xyz, (0.0f).xxx, viewDir, nrm.xyz, LinColor(AmbientColor.rgb), groundColor, nrm.a, LandLODSpec.x, 1.0, sunShadow, geoNormal);
+#else
     float3 lit = getSunLighting(pin.sunDir.xyz, LinColor(PSLightColor.rgb), viewDir, nrm.xyz, LinColor(AmbientColor.rgb), groundColor, nrm.a, LandLODSpec.x, 1.0, sunShadow, geoNormal);
+#endif
 
     float3 col = LinEncode(lit);	// UNOFFICIAL linear lighting: back to the stored (gamma) space, before the fog
     col = lerp(col, col * (noiseSample * fNoiseScale + fNoiseOffset), saturate(TESR_TerrainExtraData.z)); // Apply noise.

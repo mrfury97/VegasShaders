@@ -61,6 +61,10 @@ float Rand() { return float(Pcg() >> 8) * (1.0 / 16777216.0); }
 bool AlphaTest() { return (uint(p.rect.z + 0.5) & 1u) != 0u; }
 bool History() { return (uint(p.rect.z + 0.5) & 2u) != 0u; }
 bool Demodulate() { return (uint(p.rect.z + 0.5) & 4u) != 0u; }
+// UNOFFICIAL 2026-11-15 (rt-reuse, docs/next/RT-REUSE-CGNS.md) two test switches in the flags (both 0: the pass as before, the same random numbers):
+//   8: PTRestirDupMap, the duplication count (below, Confidence);  16 x K (K 1-31): PTRestirCGNS, compatibility-guided neighbour selection
+uint CgnsCandidates() { return (uint(p.rect.z + 0.5) >> 4u) & 31u; }
+bool DupMap() { return (uint(p.rect.z + 0.5) & 8u) != 0u; }
 
 // (2026-11-11 PTDenoiseCeiling, rect.w; RtPathTrace.comp gDenoiseCeil has the why) the demodulated light for the denoiser is capped so its
 // square still fits a half float: above about 256 the denoiser's second moment is infinite and the pixel black (a tester's video: an
@@ -123,6 +127,60 @@ void LoadPrev(ivec2 pixel, out Sample s, out float W, out float M) {
 	W = max(c.a, 0.0);
 	M = rgiUnpackM(b.y);
 	if (any(isnan(s.L)) || isnan(W) || isinf(W)) { W = 0.0; M = 0.0; }
+}
+
+// UNOFFICIAL 2026-11-15 PTRestirDupMap (rt-reuse; the idea of "duplication maps" from Lin, Kettunen and Wyman, ReSTIR PT Enhanced, I3D 2026,
+// whose text could not be read: this is our own form of it). Temporal and spatial reuse copy one sample into many pixels; each copy then
+// enters the next frame's merges with its full count M, so a blob of copies keeps outvoting new candidates and the same light sits on the same
+// pixels for many frames (the correlation DLSS RR and the denoiser smear into blotches). The count of last frame's reservoir at `pixel` is
+// shared among the copies of its sample there: divided by 1 + the number of its 4 neighbours that hold the bit-identical sample point (a
+// copied sample keeps its point bit for bit; two independent samples never share one). No stored map: the count is read where it is used.
+float Confidence(ivec2 pixel, float m) {
+	if (!DupMap()) return m;
+	const vec2 a = imageLoad(prevA, pixel).rg;
+	const float bz = imageLoad(prevB, pixel).r;
+	float copies = 0.0;
+	const ivec2 around[4] = ivec2[4](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1));
+	for (int k = 0; k < 4; k++) {
+		const ivec2 q = pixel + around[k];
+		if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(p.size.xy)))) continue;
+		if (imageLoad(prevA, q).rg == a && imageLoad(prevB, q).r == bz) copies += 1.0;
+	}
+	return m / (1.0 + copies);
+}
+
+// UNOFFICIAL 2026-11-15 PTRestirCGNS (rt-reuse; Junkins, Kettunen, Lin, Ramamoorthi and Wyman, "Compatibility-Guided Neighbor Selection for
+// ReSTIR", HPG 2026; written from the paper's description and its BSD-3 Falcor sample github.com/orion-junkins/ReSTIR-CGNS, read for the
+// formula only): K candidates in the same disk as the plain picks, each scored by how well its surface matches this one,
+//   h = exp(-|x - y| / s) x max(n_x . n_y, 0)^8, s = sqrt(0.05 sr / pi) x the distance from the eye (the paper's Omega 0.05, beta 8),
+// then `count` of them drawn without replacement in proportion to h (weighted reservoir sampling, Efraimidis-Spirakis keys log(u) / h: the
+// largest are kept). The choice depends on the surfaces only, never on the samples, so the merge below weighs a picked neighbour exactly as
+// a randomly placed one. Fewer picks land on another surface (a wall's edge, a post) and are thrown away by SameSurface.
+const int kCgnsMax = 16;
+int CgnsPick(ivec2 centre, vec3 x1, vec3 n1, float t1, int count, uint K, out ivec2 picks[kCgnsMax]) {
+	float keys[kCgnsMax];
+	int n = 0;
+	if (count <= 0) return 0;
+	const float s = max(0.12615663 * t1, 1.0e-3);   // sqrt(0.05 / pi)
+	K = max(K, uint(count));   // (never fewer candidates than neighbours)
+	for (uint k = 0u; k < K; k++) {
+		const float r = p.params.y * sqrt(Rand()), a = 6.2831853 * Rand();
+		const float u = Rand();
+		const ivec2 q = centre + ivec2(round(vec2(cos(a), sin(a)) * r));
+		if (q == centre || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(p.size.xy)))) continue;
+		vec3 px, pn;
+		if (!PrevSurface(q, px, pn)) continue;
+		float c = max(dot(pn, n1), 0.0);
+		c *= c; c *= c; c *= c;
+		const float h = exp(-distance(px, x1) / s) * c;
+		if (!(h > 1.0e-8)) continue;
+		const float key = log(max(u, 1.0e-30)) / h;
+		if (n < count) { picks[n] = q; keys[n] = key; n++; continue; }
+		int low = 0;
+		for (int j = 1; j < n; j++) if (keys[j] < keys[low]) low = j;
+		if (key > keys[low]) { picks[low] = q; keys[low] = key; }
+	}
+	return n;
 }
 
 #define Proceed(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && \
@@ -188,7 +246,7 @@ void main() {
 			Sample s;
 			float W, m;
 			LoadPrev(prev, s, W, m);
-			m = min(m, maxM);
+			m = Confidence(prev, min(m, maxM));   // (PTRestirDupMap off: min(m, maxM))
 			if (m > 0.0) {
 				const float w = Target(s, x1, n1) * W * m;
 				wSum += w;
@@ -198,16 +256,24 @@ void main() {
 		}
 		// spatial: neighbours of last frame round where this surface was (or this pixel, off last frame's screen)
 		const ivec2 centre = onScreen ? prev : pixel;
-		const int count = int(p.params.x + 0.5);
+		int count = int(p.params.x + 0.5);
+		// (2026-11-15 PTRestirCGNS) the neighbours picked by their surfaces' match instead of at random
+		const uint cgnsK = CgnsCandidates();
+		ivec2 picks[kCgnsMax];
+		if (cgnsK > 0u) count = CgnsPick(centre, x1, n1, t1, min(count, kCgnsMax), cgnsK, picks);
 		for (int k = 0; k < count; k++) {
-			const float r = p.params.y * sqrt(Rand()), a = 6.2831853 * Rand();
-			const ivec2 q = centre + ivec2(round(vec2(cos(a), sin(a)) * r));
-			if (q == centre || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(p.size.xy)))) continue;
+			ivec2 q;
+			if (cgnsK > 0u) q = picks[k];
+			else {
+				const float r = p.params.y * sqrt(Rand()), a = 6.2831853 * Rand();
+				q = centre + ivec2(round(vec2(cos(a), sin(a)) * r));
+				if (q == centre || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(p.size.xy)))) continue;
+			}
 			if (!PrevSurface(q, px, pn) || !SameSurface(x1, n1, t1, px, pn)) continue;
 			Sample s;
 			float W, m;
 			LoadPrev(q, s, W, m);
-			m = min(m, maxM);
+			m = Confidence(q, min(m, maxM));
 			if (!(m > 0.0) || !(W > 0.0)) continue;
 			const float J = Jacobian(s, px, x1);
 			if (!(J > 0.1 && J < 10.0)) continue;

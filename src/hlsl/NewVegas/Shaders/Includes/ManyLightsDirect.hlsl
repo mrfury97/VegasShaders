@@ -6,7 +6,11 @@
 // UNOFFICIAL 2026-10-29 ShadowContrast (SHADOW_CONTRAST_ON, ObjectTemplate.hlsl): each shadowed lamp's term is worked out unshadowed and
 // split (SC_SPLIT) into the light kept (added to lighting) and the light its shadow takes (added to scLost). Off: the lines as before.
 
-#ifdef MANY_LAMPS
+#ifdef NVR_LIGHT_DEFERRED
+// UNOFFICIAL 2026-11-14 the lighting-free record (ObjectTemplate.hlsl NVR_LIGHT_DEFERRED, LAMPS_DEFERRED 2): no sun, no lamp; the deferred
+// passes add them. The ambient the includer adds after this stays.
+    lighting = 0.0f;
+#elif defined(MANY_LAMPS)
 // UNOFFICIAL 2026-10-27 ManyLampsOnePass (core/ManyLamps.h, ObjectTemplate.hlsl MANY_LAMPS; after Conor (mrfury97)'s fork, see ManyLamps.h): every lamp of the object from c37-c63,
 // its direction taken into tangent space per pixel through the frame's rows (light2/3/4 .xyz) and its falloff from the distance, all in
 // the object's own space as the game makes its lamp constants (2026-10-27 first version: camera-relative world space; reached nothing).
@@ -324,4 +328,4 @@ LAMP_IFK(2, att)   // UNOFFICIAL 2026-10-17 LampReachSkip (ObjectTemplate.hlsl):
         lighting += (5 >= lightsUsed ? 0.0 : 1.0) * getPointLightLightingAtt(IN.light6.xyz, att, SHADOWED(PSLightColor[5].rgb, 5, att), viewDir.xyz, normal.xyz, baseColor.rgb, LIGHT_FINISH);
 #endif
 #endif
-#endif // MANY_LAMPS
+#endif // MANY_LAMPS (and NVR_LIGHT_DEFERRED)

@@ -57,6 +57,8 @@ public:
 	// read-only copy (...\CacheShipped\) when that one was made from exactly this source. True = the cache entry is now fresh.
 	static bool				SeedFromShipped(const char* PreprocessedPath, const char* CompiledPath, const std::string& Text);
 	static long				ShippedSeeds();
+	// UNOFFICIAL 2026-11-16: makes every missing level of a folder path (CreateDirectoryA makes only the last one).
+	static void				CreateFolders(const std::string& Path);
 
 	// Drops the cached IDirect3DTexture9* for a named sampler so that SetCT re-resolves it
 	// on the next draw. MUST be called on every consumer of a texture that is released and
@@ -84,6 +86,7 @@ public:
 	static void				BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overrides);	// UNOFFICIAL: the defines LoadShader compiles with
 	static ShaderRecord*	LoadShader(const char* Name, const char* SubPath, ShaderTemplate Template = ShaderTemplate{},
 		const char* CacheSubPath = nullptr, const D3DXMACRO* Overrides = nullptr);
+	static void				LogCompileTimes();	// UNOFFICIAL 2026-11-11: once, the start's slowest game-shader compiles (ShaderPrecompile.h; log only)
 
 	const char*				Name;
 	bool					HasRenderedBuffer, HasDepthBuffer;

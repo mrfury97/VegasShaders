@@ -38,6 +38,8 @@ float4 TESR_ReciprocalResolution;
 float4 NVR_ALLayout;            // xy: half-resolution size / full size, zw: 1 / half-resolution size
 float4 NVR_ALFlags;             // x: apply the sun shadows here (ShaderManager skips their own pass), y: NoEdgeOutline (UNOFFICIAL 2026-10-21), z: 1 = NVR_ALAlbedo holds this frame's albedo (UNOFFICIAL 2026-10-31 AlbedoBuffer), w: 1 = EdgeReject (UNOFFICIAL 2026-11-01, Apply)
 float4 NVR_ALInterior;          // UNOFFICIAL 2026-10-18 (ambfix2): x 1 = indoor balance (InteriorBalance), y 1 = last frames' balance usable, z InteriorBounceShare, w share of last frames' balance kept per frame
+                                // UNOFFICIAL 2026-11-12 AmbientReplaceInterior (RoomGI): indoors x = 1 + q, q = AmbientReplaceInterior x (1 - AmbientFloorInterior), the share of the room's ambient Apply takes out (0: x = 1, as before)
+float4 NVR_ALRoom;              // UNOFFICIAL 2026-11-12 AmbientReplaceInterior: x = 1 - the scale the lit shaders put on the ambient (LIN_SCALE_AMBIENT) while the replace mode runs with the real albedo, else 0 (never set = 0 = scale 1; Apply, indoors)
 float4 NVR_ALReach;             // UNOFFICIAL 2026-11-01 MinReach: x 1 = every read at least y texels from the pixel (Estimate; y MinReachTexels, 2026-11-02)
 float4 NVR_ALScene;             // UNOFFICIAL 2026-10-18 (ambfix): rgb the light every surface gets (linear, on a white surface: the cell's ambient + half its directional indoors, the sky's ambient outdoors), w: share of the grid light's colour kept (GridColour)
 float4 NVR_ALTemporal;          // x: share of last frame's bounce kept (0 none), y: moved pixels that halve it, z: frame number (0-1023),
@@ -87,6 +89,13 @@ sampler2D NVR_ALAlbedo : register(s12) = sampler_state { ADDRESSU = CLAMP; ADDRE
 float4 NVR_ALGI;
 sampler2D NVR_ALRTGI : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 sampler2D NVR_ALGIHistory : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 passes ([Shaders.AmbientOcclusion.RT] OcclusionOnD3D9, on), BUG FIX: with NvrDxvkAmbientLight off
+// (the default) these passes kept their own screen search, so the traced occlusion was made every frame and read by nothing: RT ambient occlusion
+// changed no pixel while the log said it ran. NVR_ALRT.x 1: Estimate takes the traced visibility (NVR_ALRTAO, bound by hand on s6, the stage of
+// Estimate's own target, which it never reads; denoised when the RT denoiser ran) with AmbientLightEstimateRT.frag's mapping and skips its screen
+// search. 0 (never set, the key off, nothing traced): Estimate exactly as before.
+float4 NVR_ALRT;
+sampler2D NVR_ALRTAO : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 
 static const float Radius = max(TESR_AmbientLightData.x, 1.0f);
 static const float OcclusionStrength = TESR_AmbientLightData.y;
@@ -283,6 +292,16 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 	[branch] if (DebugView > 2.5f && DebugView < 3.5f) return float4(normal * 0.5f + 0.5f, 1.0f);
 	[branch] if (DebugView > 3.5f && DebugView < 4.5f) return float4(origin.z / 2000.0f, frac(origin.z / 100.0f), 0.0f, 1.0f);
 	[branch] if (DebugView > 4.5f && DebugView < 5.5f) return float4(screenRadius * 10.0f, Radius / 1000.0f, 1.0f);
+	// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 passes (NVR_ALRT.x, see the samplers): the traced visibility in place of the screen search
+	// below, as AmbientLightEstimateRT.frag writes it: Estimate's mapping (OcclusionStrength means the same on both), the near / far fade and
+	// RtFarFade (the trace stops at endFade); rgb the traced bounce light when it is on (NVR_ALGI.x), else none.
+	[branch] if (NVR_ALRT.x > 0.5f) {
+		float rtFade = fade * (NVR_ALReach.w > 0.5f ? 1.0f - smoothstep(0.75f * endFade, (float)endFade, origin.z) : 1.0f);
+		float rtVisibility = pow(saturate(tex2Dlod(NVR_ALRTAO, float4(uv, 0.0f, 0.0f)).x), 1.5f * OcclusionStrength);
+		float3 rtBounce = 0.0f;
+		[branch] if (NVR_ALGI.x > 0.5f) rtBounce = tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb * rtFade;
+		return float4(rtBounce, saturate(lerp(1.0f, rtVisibility, rtFade)));
+	}
 	float visibility = 0.0f, weightSum = 0.0f;
 	float3 bounce = 0.0f;
 	float firstCos = 0.0f, firstLow = 0.0f;
@@ -412,12 +431,17 @@ float4 Blur(VSOUT IN, uniform float2 axis) : COLOR0 {
 	// (second step) the busy-depth rule alone caught too little (storm weather: the old full blur halved the flicker on grass, the rule alone did not).
 	// Grass is drawn by the game's own shader, so the albedo buffer has no texel for it (alpha 0; NVR_ALFlags.z 1 = it holds this frame's; bound on
 	// s12 for the blur passes too): the share of this texel's 2 x 2 full-size pixels without one is an exact grass mask.
-	float2 halfPx = 0.5f * TESR_ReciprocalResolution.xy;
-	float noAlbedo = step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(-halfPx.x, -halfPx.y), 0.0f, 0.0f)).a, 0.5f)
-		+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(halfPx.x, -halfPx.y), 0.0f, 0.0f)).a, 0.5f)
-		+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(-halfPx.x, halfPx.y), 0.0f, 0.0f)).a, 0.5f)
-		+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(halfPx.x, halfPx.y), 0.0f, 0.0f)).a, 0.5f);
-	noAlbedo *= 0.25f * step(0.5f, NVR_ALFlags.z);
+	// (2026-11-15 Vegas Shaders port) the four reads only while GIGrassBlur runs on a bound albedo buffer: this blur runs for every player with
+	// Ambient light on, RT or not, and the fork read them always (x 0 after).
+	float noAlbedo = 0.0f;
+	[branch] if (grassOn * NVR_ALFlags.z > 0.5f) {
+		float2 halfPx = 0.5f * TESR_ReciprocalResolution.xy;
+		noAlbedo = step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(-halfPx.x, -halfPx.y), 0.0f, 0.0f)).a, 0.5f)
+			+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(halfPx.x, -halfPx.y), 0.0f, 0.0f)).a, 0.5f)
+			+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(-halfPx.x, halfPx.y), 0.0f, 0.0f)).a, 0.5f)
+			+ step(tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord + float2(halfPx.x, halfPx.y), 0.0f, 0.0f)).a, 0.5f);
+		noAlbedo *= 0.25f;
+	}
 	float busy = max(saturate(bend / depth * 40.0f - 0.1f), noAlbedo) * grassOn;
 	float3 blurred = bounce / total.y;
 	return float4(lerp(blurred, lerp(center.rgb, blurred, busy), noBlur), visibility / total.x);
@@ -1075,7 +1099,12 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	[branch] if (DebugView > 2.5f) return float4(tex2Dlod(NVR_ALBuffer, float4(IN.UVCoord, 0.0f, 0.0f)).rgb, 1.0f);
 	[branch] if (DebugView > 0.5f) return delinearize(float4(DebugView < 1.5f ? ao.xxx : gridBounce * albedo, 1.0f));	// 2: the bounce (the light grid's)
 	// UNOFFICIAL 2026-10-18 (ambfix2): indoors the occlusion takes only from the ambient share (see above StatsSample).
-	[branch] if (NVR_ALInterior.x > 0.5f) lin = lin - (1.0f - ao) * min(lin, albedo * NVR_ALScene.rgb) + gridBounce * albedo;
+	// UNOFFICIAL 2026-11-12 AmbientReplaceInterior (RoomGI; AmbientReplace's interior counterpart, in the same branch: no new boolean register): A = the
+	// room's ambient share of the pixel, q = NVR_ALInterior.x - 1 the share of it the traced bounce replaces: lit = lin - A + (1 - q) A ao
+	// = lin - ((1 - ao) + ao q) A, so the occlusion darkens only the ambient that stays and the RT bounce (giLight, below) fills the rest. With q = 0 and
+	// NVR_ALRoom.x = 0 (the key off) (1 - ao) + ao * 0 and A * (1 - 0) are the old values exactly. The balance passes (StatsAt) are unchanged: the grid's
+	// bounce still gives back at most what the occlusion alone took.
+	[branch] if (NVR_ALInterior.x > 0.5f) lin = lin - ((1.0f - ao) + ao * max(NVR_ALInterior.x - 1.0f, 0.0f)) * min(lin, albedo * NVR_ALScene.rgb * (1.0f - NVR_ALRoom.x)) + gridBounce * albedo;
 	else {
 		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (NVR_ALInterior.w > 0 outdoors = the ambient scale): the occlusion darkens only the
 		// ambient share of the pixel (as indoors), not the direct sun: lit = lin * ao took the sun's light out of every crease.

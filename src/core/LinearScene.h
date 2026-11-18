@@ -21,6 +21,9 @@
 #include <d3dx9.h>
 #include "LinearSceneShaders.h"
 #include "DrawState.h"	// UNOFFICIAL 2026-10-29 SharedDrawState: CapturedNormals' tracked device state
+#include "MergeCopies.h"	// UNOFFICIAL 2026-11-14 MergeCopies (test only): its merged draw / checks in the innermost draw hook
+#include "FailOnce.h"	// UNOFFICIAL 2026-11-16 fd-batchB: a failure retried after the next cell change
+#include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 903)
 
 namespace LinearScene {
 
@@ -30,7 +33,12 @@ namespace LinearScene {
 	inline bool Linear = false;					// the frame is in linear light now (only ever inside the span)
 	inline IDirect3DSurface9* SpanTarget = nullptr;	// the scene target the span began with (draws into other targets are left alone)
 	inline float Gamma = 1.0f;
-	inline bool Hooked = false, Failed = false;
+	inline bool Hooked = false;
+	// UNOFFICIAL 2026-11-16 fd-batchB (deferred gaps audit item 8): a failure here (the frame's copy or the conversion shader not made, a
+	// copy refused) switched LinearScene off for the session, and with it the deferred renderer (DeferredSun needs it), after ONE bad
+	// moment. Now a FailOnce latch: off for the rest of that cell, tried again after the next cell change (3 tries in all;
+	// [Main.Main.Misc] RetryFailedEffects false = off for the session as before). Logged and listed in the menu's status bar either way.
+	inline FailOnce::Latch Fail{ "LinearScene" };
 	inline IDirect3DTexture9* CopyTex = nullptr;  inline IDirect3DSurface9* Copy = nullptr;
 	inline D3DSURFACE_DESC Made = {};
 	inline IDirect3DPixelShader9* ConvertPS = nullptr;
@@ -54,8 +62,8 @@ namespace LinearScene {
 		if (Copy) { Copy->Release(); Copy = nullptr; }
 		if (CopyTex) { CopyTex->Release(); CopyTex = nullptr; }
 		if (FAILED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, t.Format, D3DPOOL_DEFAULT, &CopyTex, NULL)) || FAILED(CopyTex->GetSurfaceLevel(0, &Copy))) {
-			Logger::Log("UNOFFICIAL LinearScene: could not make the frame's copy (%ux%u format %u): off for the session", t.Width, t.Height, (unsigned)t.Format);
-			Failed = true;
+			Logger::Log("UNOFFICIAL LinearScene: could not make the frame's copy (%ux%u format %u)", t.Width, t.Height, (unsigned)t.Format);
+			Fail.Set("could not make the frame's copy");
 			return false;
 		}
 		Made = t;
@@ -69,12 +77,12 @@ namespace LinearScene {
 			ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
 			if (FAILED(D3DXCompileShader(kPS, (UINT)strlen(kPS), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) || !code ||
 				FAILED(d->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &ConvertPS))) {
-				Logger::Log("UNOFFICIAL LinearScene: conversion shader failed (%s): off for the session", errors ? (const char*)errors->GetBufferPointer() : "?");
-				Failed = true;
+				Logger::Log("UNOFFICIAL LinearScene: conversion shader failed (%s)", errors ? (const char*)errors->GetBufferPointer() : "?");
+				Fail.Set("its conversion shader failed");
 			}
 			if (errors) errors->Release();
 			if (code) code->Release();
-			if (Failed) return false;
+			if (!ConvertPS) return false;
 		}
 		Logger::Log("UNOFFICIAL LinearScene: on (frame copy %ux%u format %u, msaa %u)", t.Width, t.Height, (unsigned)t.Format, (unsigned)t.MultiSampleType);
 		return true;
@@ -84,10 +92,11 @@ namespace LinearScene {
 	// put back exactly (it is called from inside that draw).
 	inline bool Convert(IDirect3DDevice9* d, IDirect3DSurface9* target, bool toLinear) {
 		D3DSURFACE_DESC t = {};
-		if (Failed || !target || FAILED(target->GetDesc(&t)) || !MakeResources(d, t)) return false;
+		if (Fail.failed || !target || FAILED(target->GetDesc(&t)) || !MakeResources(d, t)) return false;
 		D3DVIEWPORT9 vp = {};
 		d->GetViewport(&vp);
-		if (FAILED(d->StretchRect(target, NULL, Copy, NULL, D3DTEXF_NONE))) { Failed = true; Logger::Log("UNOFFICIAL LinearScene: frame copy failed: off for the session"); return false; }
+		// (2026-11-16 fd-batchB) a refused copy: the latch (FdTestFault 903 forces one, test only)
+		if (FdTestFault::Take(903) || FAILED(d->StretchRect(target, NULL, Copy, NULL, D3DTEXF_NONE))) { Logger::Log("UNOFFICIAL LinearScene: frame copy failed"); Fail.Set("its frame copy failed"); return false; }
 		const bool msaa = t.MultiSampleType != D3DMULTISAMPLE_NONE;
 
 		// Save what the draw needs.
@@ -144,7 +153,12 @@ namespace LinearScene {
 		d->SetPixelShaderConstantF(191, c, 1);
 	}
 
+	// UNOFFICIAL 2026-11-15 (DeferredSun, batch 6) a one-draw watcher: called at the next draw (this hook sees every DrawPrimitive /
+	// DrawIndexedPrimitive while hooked) with that draw's constants on the device; DeferredSun arms it at a land record's bind. Null: nothing.
+	inline void (*DrawWatch)(IDirect3DDevice9*) = nullptr;
+
 	inline void BeforeDraw(IDirect3DDevice9* d) {
+		if (DrawWatch) DrawWatch(d);
 		if (!Live || !InSpan) return;
 		const bool shared = SharedWanted && SharedDrawState::Valid;
 		if (shared) SharedDraws++;
@@ -173,6 +187,8 @@ namespace LinearScene {
 
 	inline HRESULT STDMETHODCALLTYPE DIPHook(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, INT b, UINT mi, UINT nv, UINT s, UINT pc) {
 		BeforeDraw(d);
+		// (UNOFFICIAL 2026-11-14 MergeCopies, core/MergeCopies.h: when this is the innermost of NVR's hooks, after the conversion above)
+		if (MergeCopies::DrawAction && MergeCopies::Inner((void*)NextDIP)) return MergeCopies::AtDraw(d, NextDIP, t, b, mi, nv, s, pc);
 		return NextDIP(d, t, b, mi, nv, s, pc);
 	}
 	inline HRESULT STDMETHODCALLTYPE DPHook(IDirect3DDevice9* d, D3DPRIMITIVETYPE t, UINT s, UINT pc) {
@@ -187,6 +203,7 @@ namespace LinearScene {
 		if (!VirtualProtect(&table[81], 2 * sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return;
 		NextDP = (DPFn)table[81];  table[81] = (void*)&DPHook;
 		NextDIP = (DIPFn)table[82]; table[82] = (void*)&DIPHook;
+		MergeCopies::OurHooks[1] = (void*)&DIPHook;	// UNOFFICIAL 2026-11-14 MergeCopies (which hook is the innermost)
 		VirtualProtect(&table[81], 2 * sizeof(void*), old, &old);
 		Hooked = true;	// stays for the session (other hooks chain through it); off, it only passes the draw on
 	}
@@ -220,7 +237,7 @@ namespace LinearScene {
 		}
 		const D3DXVECTOR4& l = TheShaderManager->Shaders.PBR->Constants.Linear;
 		Gamma = l.x;
-		Live = Compiled && !Failed && Gamma > 1.0f && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "LinearScene") != 0;
+		Live = Compiled && !Fail.Blocked() && Gamma > 1.0f && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "LinearScene") != 0;
 		SharedWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "SharedDrawState") != 0;
 		if (Live && !Hooked) Hook(d);
 		if (Live && ++Frames >= 600) {

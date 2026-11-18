@@ -4,7 +4,7 @@
 // UNOFFICIAL 2026-11-01 diagnostics for logs players share (user: "logs players share publicly must let us diagnose problems we can't
 // reproduce"). Three parts, each switchable, privacy-safe (every line goes through the Logger's scrubber; no character or save names),
 // bounded and close to free while nothing happens (docs/UNOFFICIAL-TECHNICAL.md "Diagnostics"):
-//   1. the automatic flash / flicker detector ([Main.Main.Misc] FlashDetect, on): each rendered frame the finished picture (before the
+//   1. the automatic flash / flicker detector ([Main.Main.Misc] FlashDetect, off by default since 2026-11-14): each rendered frame the finished picture (before the
 //      HUD) is shrunk to 8 x 8 on the GPU (a chain of 2:1 StretchRects, an exact box average) and copied to one of 4 system-memory
 //      surfaces (GetRenderTargetData); the copy made 3 frames earlier is locked with D3DLOCK_DONOTWAIT (the CPU never waits for the
 //      GPU: a copy not finished yet is skipped). The 64 cell luminances of the last frames are judged by core/FlashRule.h. A FLASH
@@ -42,6 +42,9 @@ class EffectRecord;
 namespace Diagnostics {
 	// NewVegas/Hooks/Render.cpp: the finished picture before the HUD, once a rendered frame (after the screenshot key)
 	void OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* picture);
+	// UNOFFICIAL 2026-11-11: at the start of the world scene (Render.cpp): one "SESSION world target" line the first time, and again when
+	// the target's or the depth buffer's size / format / multisampling changes (at most 8 lines). Reads two surface descriptions.
+	void WorldTargetNote(IDirect3DDevice9* device);
 	// SessionLog's HEARTBEAT (every 60 s in game): the minute's effect counts, the detector's counts and cost, cache and failure counts
 	void Heartbeat();
 	// UNOFFICIAL 2026-11-01 stage probes (above). StageAfterEffect: after every frame effect's Render (PixelInspector::AfterFrame's call
@@ -60,7 +63,7 @@ namespace Diagnostics {
 	bool SelfTestSkip(const EffectRecord* effect);
 
 	// --- UNOFFICIAL 2026-11-01 the history watch (part 5) ---
-	//   5. the history watch ([Main.Main.Misc] HistoryWatch, on; docs/next/TESTER-REPORTS-2026-11-01.md): for pictures that smear, melt or
+	//   5. the history watch ([Main.Main.Misc] HistoryWatch, off by default since 2026-11-14; docs/next/TESTER-REPORTS-2026-11-01.md): for pictures that smear, melt or
 	//      wash out over several frames (a temporal history that stops converging on the picture) rather than flash. A temporal effect
 	//      hands its input and its output of the frame here each frame (TAA / FSR 2 / DLSS at native resolution: the picture before the
 	//      resolve and the upscaler's output; RenderScale's upscale: the small picture and the upscaled one). Each is shrunk to 8 x 8 as

@@ -122,6 +122,11 @@ public:
 	void					CreateFrameVertex(UInt32 width, UInt32 height, IDirect3DVertexBuffer9** vertexBuffer, float scaleX = 1.0f, float scaleY = 1.0f);
 	void					InitializeConstants();	// the screen-size constants, no weather yet
 	void					UpdateConstants();		// the per-frame game state and constants
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera (core/ScopeCamera.h; Render.cpp ScopeScene): round another camera's scene (a
+	// picture-in-picture scope), the camera-dependent constants are that camera's; End puts every one back exactly. Begin is false
+	// (nothing changed) when the camera cannot be used or a scene is already open.
+	bool					BeginExtraCamera(NiCamera* camera, UINT width, UINT height, D3DXMATRIX* projection);
+	void					EndExtraCamera();
 	void					GetNearbyLights(ShadowSceneLight* shadowLights[], NiPointLight* lights[], NiSpotLight* spotLights[]);
 	bool					LoadShader(NiD3DVertexShader* vertexShader);
 	bool					LoadShader(NiD3DPixelShader* pixelShader);

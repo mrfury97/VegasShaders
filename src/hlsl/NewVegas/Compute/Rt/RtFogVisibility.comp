@@ -39,10 +39,17 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 prevRight;     // xyz right * projection[0][0] (onto NDC x), w its columns
 	vec4 prevUp;        // xyz up * projection[1][1] (onto NDC y), w its rows
 	vec4 prevOrigin;    // xyz last frame's eye in this frame's scene space (camera then - camera now), w unused
+	// UNOFFICIAL 2026-11-13 (rtvol2) ExpandedClouds ([Shaders.VolumetricLight.RT] Expanded): the volumetric clouds' shadow map (binding 5) in
+	// the air's visibility, as RtSunShadow.comp cloudTransmittance reads it. cloud.x 0 = none (binding 5 not bound, never read): as before.
+	vec4 cloud;         // x strength, y map width (m), z map size (texels), w cloud base (m)
+	vec4 cloudCentre;   // xy the map's centre (m, on the cloud base), z metres per unit (1 / 70), w unused
+	vec4 cloudLight;    // xyz the light the map was drawn along (z >= 0.25), w unused
+	vec4 camera;        // xyz the camera's world position (units): the scene is camera relative
 } p;
 layout(set = 0, binding = 2, r16f) uniform writeonly image2D visibilityImage;
 layout(set = 0, binding = 3, r16f) uniform readonly image2D historyImage;
 layout(set = 0, binding = 4, r16f) uniform readonly image2D alphaAtlas;      // RtCore::AlphaAtlasImage() (or a stand-in, rays.w 0)
+layout(set = 0, binding = 5, rgba16f) uniform readonly image2D cloudImage;   // (rtvol2) the clouds' shadow map, red = sunlight let through (cloud.x > 0)
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
 
@@ -84,6 +91,27 @@ float sunRay(vec3 position) {
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT ? 0.0 : 1.0;
+}
+
+// UNOFFICIAL 2026-11-13 (rtvol2) ExpandedClouds: the sunlight the clouds let through to a scene-space point, times their strength
+// (RtSunShadow.comp cloudTransmittance: the map where the light from the point meets the cloud base, bilinear, 1 outside it faded in over
+// its last tenth). Only called with cloud.x > 0.
+float cloudTransmittance(vec3 position) {
+	const vec3 world = (p.camera.xyz + position) * p.cloudCentre.z;
+	const vec2 q = world.xy + p.cloudLight.xy * ((p.cloud.w - world.z) / p.cloudLight.z);
+	const vec2 suv = (q - p.cloudCentre.xy) / p.cloud.y + 0.5;
+	const vec2 edge = min(suv, 1.0 - suv);
+	const float inside = clamp(min(edge.x, edge.y) * 10.0, 0.0, 1.0);
+	if (inside <= 0.0) return 1.0;
+	const int n = int(p.cloud.z);
+	const vec2 t = suv * p.cloud.z - 0.5;
+	const ivec2 i0 = ivec2(floor(t));
+	const vec2 f = t - vec2(i0);
+	const float a = imageLoad(cloudImage, clamp(i0, ivec2(0), ivec2(n - 1))).r;
+	const float b = imageLoad(cloudImage, clamp(i0 + ivec2(1, 0), ivec2(0), ivec2(n - 1))).r;
+	const float c = imageLoad(cloudImage, clamp(i0 + ivec2(0, 1), ivec2(0), ivec2(n - 1))).r;
+	const float d = imageLoad(cloudImage, clamp(i0 + ivec2(1, 1), ivec2(0), ivec2(n - 1))).r;
+	return mix(1.0, mix(1.0, mix(mix(a, b, f.x), mix(c, d, f.x), f.y), inside), clamp(p.cloud.x, 0.0, 1.0));
 }
 
 // Last frame's value at a scene-space point (trilinear over its grid); false: the point was outside last frame's grid. moved: how far
@@ -129,7 +157,9 @@ void main() {
 		for (int k = 0; k < n; k++) {
 			const vec3 o = cellPoint(k, n, cell);
 			const vec3 position = p.origin.xyz + viewRay((vec2(cell.xy) + o.xy) / p.grid.xy) * mix(near, far, o.z);
-			lit += length(position - p.origin.xyz) > p.forward.w ? 1.0 : sunRay(position);
+			float v = length(position - p.origin.xyz) > p.forward.w ? 1.0 : sunRay(position);
+			if (p.cloud.x > 0.0 && v > 0.0) v *= cloudTransmittance(position);	// (rtvol2) ExpandedClouds; cloud.x 0: as before
+			lit += v;
 		}
 		result = lit / float(n);
 	}

@@ -7,6 +7,7 @@
 #include "../../core/PassSums.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo target is its skin source (NoteSkinAlbedo)
+#include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 DeferredSkin: its records write the G-buffer, not these targets; DeferredSkinBlur fills them
 
 static const float SkinScatterMMPerUnit = 14.2857f;   // one game unit is 1/70 m
 
@@ -280,6 +281,8 @@ void SkinScatteringEffect::BindForSkinDraw(NiD3DPixelShaderEx* PixelShader) {
 	// Only NVR's own skin pixel shaders write the second target.
 	if (!PixelShader || PixelShader->ShaderHandle == PixelShader->ShaderHandleBackup) return;
 	if (TheRenderManager->renderState->GetPixelShader() != PixelShader->ShaderHandle) return;
+	// UNOFFICIAL 2026-11-15 DeferredSkin (core/DeferredSkin.h): a deferred skin record writes the G-buffer on targets 1-3 (CapturedNormals binds them)
+	if (DeferredSkin::IsHandle(PixelShader->ShaderHandle)) return;
 
 	IDirect3DDevice9* Device = TheRenderManager->device;
 
@@ -455,6 +458,32 @@ void SkinScatteringEffect::Unbind() {
 	Device->SetRenderState(D3DRS_COLORWRITEENABLE2, SavedWriteMask2);
 	Bound = false;
 	HighlightsBound = false;
+}
+
+// UNOFFICIAL 2026-11-15 DeferredSkinBlur (core/DeferredSkin.h): after the deferred light passes (Render.cpp DeferredSpan), the two targets filled
+// from the G-buffer for the deferred skin's pixels, as the forward skin record fills them during its draw; then the blur runs as for any skin.
+void SkinScatteringEffect::FillFromDeferredSkin() {
+	if (!Enabled || !ScreenSpace || !Supported || Effect == nullptr) return;
+	if (!TheSettingManager->SettingsMain.Main.RenderEffects || !TheShaderManager->Shaders.Skin->Enabled || !TheShaderManager->Shaders.Skin->Active()) return;
+	IDirect3DDevice9* Device = TheRenderManager->device;
+	IDirect3DSurface9* Scene = nullptr;
+	if (FAILED(Device->GetRenderTarget(0, &Scene)) || !Scene) return;
+	D3DSURFACE_DESC SceneDesc;
+	Scene->GetDesc(&SceneDesc);
+	if (SceneDesc.MultiSampleType != D3DMULTISAMPLE_NONE || !EnsureTarget(SceneDesc)) { Scene->Release(); return; }
+	if (!ClearedThisFrame) { ClearTarget(Scene); ClearedThisFrame = true; }
+	Scene->Release();
+	if (DeferredSkin::FillBlurTargets(Device, MSAASurface ? MSAASurface : TextureSurface, AlbedoMSAASurface ? AlbedoMSAASurface : AlbedoTextureSurface, PassSums::Gamma, LinearScene::Linear))
+		SkinDrawn = true;
+}
+
+void DeferredSkin::AfterPasses(IDirect3DDevice9* d) {
+	if (DrawnThisSpan) {
+		if (BurleyWanted()) BurleyApply(d);	// (2026-11-15 SSS v2, Kernel 0: the Burley disc, Shaders\DeferredSkinSSS.hlsl)
+		else if (BlurWanted() && TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->FillFromDeferredSkin();
+	}
+	DrawnThisSpan = false;
+	DeferredLamps::SkinSpecSurface = nullptr;
 }
 
 bool SkinScatteringEffect::ShouldRender() {

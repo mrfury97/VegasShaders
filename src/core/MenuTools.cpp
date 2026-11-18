@@ -160,7 +160,7 @@ const Drive kDrives[] = {
 	{ "Shaders.Tonemapping.Main", "TonemapContrast", &EncabStart::tmContrast, &EncabGain::tmContrast, 0, 1.0f, Bound::None },
 	// Y: focus / dream
 	{ "Shaders.DepthOfField.FirstPersonView", "BaseBlurRadius", &EncabStart::dofBlur, &EncabGain::dofBlur, 1, 1.0f, Bound::NonNegative },
-	{ "Shaders.Sharpening.Main", "Strength", &EncabStart::sharpening, &EncabGain::sharpening, 1, -1.0f, Bound::NonNegative },
+	{ "Shaders.Sharpening.Main", "Strength", &EncabStart::sharpening, &EncabGain::sharpening, 1, -1.0f, Bound::Unit },	// (2026-11-18: CAS sharpness, 0-1)
 	{ "Shaders.Bloom.Main", "Strength", &EncabStart::bloom, &EncabGain::bloom, 1, 1.0f, Bound::NonNegative },
 	{ "Shaders.GodRays.Main", "DayMultiplier", &EncabStart::godRaysMult, &EncabGain::godRays, 1, 1.0f, Bound::NonNegative },
 	// Z: grime / cinema

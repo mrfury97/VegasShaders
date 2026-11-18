@@ -58,6 +58,8 @@ void TonemappingShaders::UpdateConstants() {
 
 	// operator 1 (VTLottes/AMDLottes) wants its curve constants derived from the raw values
 	if (Constants.HDRData.x == 1.0) ScaleLotte(Constants.LotteData, Constants.BloomData.w);
+	// UNOFFICIAL 2026-11-13 (fork port) AgX reads LotteData.x as its contrast (Tonemapping.hlsl agx; 1 = AgX as it was): only with AgxContrast on
+	if (Constants.HDRData.x == 9.0f && !AgxContrast) Constants.LotteData.x = 1.0f;
 }
 
 // The VTLottes (mode 1) constants from the raw LotteData (contrast, brightness, midpoint, shoulder) and the white point; moved out of
@@ -116,4 +118,8 @@ void TonemappingShaders::UpdateSettings() {
 	ReadTonemapGroup("Shaders.Tonemapping.Night", "Shaders.Bloom.Night", Settings.Night);
 	ReadTonemapGroup("Shaders.Tonemapping.Interiors", "Shaders.Bloom.Interiors", Settings.Interiors);
 	NightShiftEnabled = TheSettingManager->GetSettingI("Shaders.Tonemapping.Main", "NightShiftEnabled") != 0;
+	{	// UNOFFICIAL 2026-11-13 (fork port) a missing key: off
+		SettingManager::Configuration::ConfigNode node;
+		AgxContrast = TheSettingManager->Config.FillNode(&node, "Shaders.Tonemapping.Main", "AgxContrast") && node.BoolValue;
+	}
 }

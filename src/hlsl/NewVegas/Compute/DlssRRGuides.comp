@@ -50,7 +50,27 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 options;               // x: RRAlbedo (0 grey, 1 the picture's chroma, 2 t_albedo where written, else the chroma), y: 1 = normals in view space, z: 1 = t_material holds this frame's,
                                 // w: (2026-11-07) 1 the path tracer's diffuse albedo, 2 + its specular albedo and roughness
     vec4 size;                  // xy: the screen size in pixels
+#ifdef NVR_RR_MIRROR_MOTION
+    vec4 prevRight;             // (2026-11-15 rt-denoise-inputs) the -mirror variant: last frame's camera axes (FSRPrep's prevViewTransform columns)
+    vec4 prevUp;
+    vec4 prevForward;
+    vec4 prevProjection;        // x, y: last frame's projMatrix._11, _22; z farZ
+    vec4 cameraDelta;           // xyz: the camera position now minus last frame's
+#endif
 } cb;
+#ifdef NVR_RR_MIRROR_MOTION
+// UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md) [Main.Main.RayTracing] RRMirrorMotion, the -mirror variant
+// (variants.txt): PRIMARY SURFACE REPLACEMENT's motion for FLAT path-traced mirrors, as NVIDIA's DLSS-RR documentation recommends (the
+// nvpro-samples vk_denoise_dlssrr README: mirrors denoise better with PSR; specular motion vectors are better than a hit distance). Written
+// from that documentation, no code of theirs. A mirror's picture is the reflected thing, which moves with the VIRTUAL point behind the mirror
+// (the view ray lengthened by the reflection's hit distance), not with the glass: FSRPrep's motion there (the surface's) made RR reproject the
+// reflection from the wrong place. Where the path tracer marks a smooth metal as a mirror (PTDenoiseMirrorSurface: its specular image's
+// alpha = -hit distance) and the surface is flat (its 4 neighbours' normals within 1.8 degrees, same depth), the motion image (FSRPrep's,
+// already written this frame) gets the virtual point's motion. Curved mirrors, glass and water keep the surface's motion. The depth and the
+// normal guides stay the mirror's.
+layout(set = 1, binding = 13, rg16f) writeonly uniform image2D o_motion;   // FSRPrep's o_motion (rewritten at flat marked mirrors only)
+layout(set = 1, binding = 14) uniform texture2D t_ptSpec;                  // the path tracer's specular image (a: hit distance, < 0 a marked mirror)
+#endif
 
 layout(push_constant) uniform Push {
     uint pointIndex;            // 0: POINT, CLAMP (the extension writes the heap index)
@@ -92,6 +112,9 @@ void main() {
     if (cb.options.z > 0.5) {
         material = texelFetch(sampler2D(t_material, POINT_S), pixel, 0);
         if (material.r > 0.5 && material.b >= 0.0) roughness = material.b;
+        // (2026-11-12 ptbump) b in -3 .. -2: coded "no highlight on this mesh" for the path tracer (Shaders/Includes/CapturedNormals.hlsl):
+        // the same roughness as before the code, -2 - b
+        else if (material.r > 0.5 && material.b < -1.99 && material.b > -3.01) roughness = -2.0 - material.b;
     }
     roughness = sky ? 1.0 : saturate(roughness);
 
@@ -133,6 +156,36 @@ void main() {
 
     vec3 normal = cb.options.y > 0.5 ? n : n.x * cb.right.xyz + n.y * cb.up.xyz + n.z * cb.forward.xyz;
 
+#ifdef NVR_RR_MIRROR_MOTION
+    if (!sky && cb.cameraDelta.w > 0.5) {
+        const float a = texelFetch(sampler2D(t_ptSpec, POINT_S), pixel, 0).a;
+        if (a < -0.9) {   // a marked mirror whose hit is known this frame (-0.5: not known)
+            const vec3 n0 = texelFetch(sampler2D(t_normals, POINT_S), pixel, 0).xyz * 2.0 - 1.0;
+            bool isFlat = length(n0) > 1e-3;
+            int same = 0;
+            for (int k = 0; k < 4 && isFlat; k++) {
+                const ivec2 q = clamp(pixel + ivec2(k == 0 ? 1 : k == 1 ? -1 : 0, k == 2 ? 1 : k == 3 ? -1 : 0), ivec2(0), ivec2(cb.size.xy) - 1);
+                const float zq = texelFetch(sampler2D(t_depth, POINT_S), q, 0).x;
+                if (abs(zq - linear01) > 0.05 * linear01) continue;   // another surface: no say
+                const vec3 nq = texelFetch(sampler2D(t_normals, POINT_S), q, 0).xyz * 2.0 - 1.0;
+                if (dot(normalize(nq), normalize(n0)) < 0.9995) isFlat = false;
+                same++;
+            }
+            if (isFlat && same >= 2) {
+                // FSRPrep's toWorld: the view ray with view z 1 (camera-relative world), x the view depth = the mirror point
+                const vec3 ray = cb.forward.xyz + ((2.0 * uv.x - 1.0) * cb.view.x) * cb.right.xyz + ((1.0 - 2.0 * uv.y) * cb.view.y) * cb.up.xyz;
+                const vec3 point = ray * (linear01 * cb.prevProjection.z);
+                const float d = length(point);
+                const vec3 fromPrev = point * ((d - a) / max(d, 1e-4)) + cb.cameraDelta.xyz;   // the virtual point (a = -hit)
+                const float viewZ = dot(fromPrev, cb.prevForward.xyz);
+                if (viewZ > 0.0) {
+                    const vec2 ndc = vec2(dot(fromPrev, cb.prevRight.xyz) * cb.prevProjection.x, dot(fromPrev, cb.prevUp.xyz) * cb.prevProjection.y) / viewZ;
+                    imageStore(o_motion, pixel, vec4(vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5) - uv, 0.0, 0.0));
+                }
+            }
+        }
+    }
+#endif
     imageStore(o_color, pixel, vec4(color, 1.0));
     imageStore(o_diffuse, pixel, vec4(diffuse, 1.0));
     imageStore(o_specular, pixel, vec4(specular, 1.0));

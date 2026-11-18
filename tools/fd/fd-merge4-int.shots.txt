@@ -1,0 +1,84 @@
+# MergeCopies batch 4, interiors (docs/next/FD-MERGE-RESULTS.md "Batch 3"). Toml: tools/fd/fd-merge4-int.toml (DeferredRenderer 1, PassSort 2;
+# both runtimes). Start: the batch-3 save (lucky22). Spots as batch 3's fd3-t-merge (Vault 21, the Ultra-Luxe).
+# Per spot: the self-check (MergeCopies 1, 2 windows), ABBA 0 / 2 (0 2 2 0 0 2 2 0, 300-frame windows; the first mode-2 window holds the
+# probation), then the picture: parity MergeCopies 0 vs 2 and its 0 vs 0 control (after the mode-2 windows: the keys are proven).
+# Read: MERGE COPIES (deferred 1; planned and merged copies "ad"), every MERGE CHECK mismatch, PASS SORT (mode 0's hook time: MergeCopies off
+# logs nothing), PARITY v1 (world).
+frames 300
+profile
+shot settle
+console tgm
+console sgtm 0.001
+wait 300
+shot go-v21
+console player.moveto 0017A642
+wait 300
+shot place-v21
+console sgtm 1
+console player.setpos x -232.6
+console player.setpos y 1789.6
+console player.setpos z 7425.0
+console player.setangle x 5.2
+console player.setangle z 236.8
+console sgtm 0.001
+wait 300
+shot v21-chk1
+set Main.Main.Performance MergeCopies 1
+shot v21-chk2
+set Main.Main.Performance MergeCopies 1
+shot v21-m0-1
+set Main.Main.Performance MergeCopies 0
+shot v21-m2-1
+set Main.Main.Performance MergeCopies 2
+shot v21-m2-2
+set Main.Main.Performance MergeCopies 2
+shot v21-m0-2
+set Main.Main.Performance MergeCopies 0
+shot v21-m0-3
+set Main.Main.Performance MergeCopies 0
+shot v21-m2-3
+set Main.Main.Performance MergeCopies 2
+shot v21-m2-4
+set Main.Main.Performance MergeCopies 2
+shot v21-m0-4
+set Main.Main.Performance MergeCopies 0
+shot v21-par
+parity Main.Main.Performance MergeCopies 64 3 0 2
+shot v21-parctl
+parity Main.Main.Performance MergeCopies 64 3 0 0
+shot go-lux
+console player.moveto 0017B84A
+wait 300
+shot place-lux
+console sgtm 1
+console player.setpos x 3429.85
+console player.setpos y 3136.56
+console player.setpos z 7680.76
+console player.setangle x 7.41
+console player.setangle z 243.80
+console sgtm 0.001
+wait 300
+shot lux-chk1
+set Main.Main.Performance MergeCopies 1
+shot lux-chk2
+set Main.Main.Performance MergeCopies 1
+shot lux-m0-1
+set Main.Main.Performance MergeCopies 0
+shot lux-m2-1
+set Main.Main.Performance MergeCopies 2
+shot lux-m2-2
+set Main.Main.Performance MergeCopies 2
+shot lux-m0-2
+set Main.Main.Performance MergeCopies 0
+shot lux-m0-3
+set Main.Main.Performance MergeCopies 0
+shot lux-m2-3
+set Main.Main.Performance MergeCopies 2
+shot lux-m2-4
+set Main.Main.Performance MergeCopies 2
+shot lux-m0-4
+set Main.Main.Performance MergeCopies 0
+shot lux-par
+parity Main.Main.Performance MergeCopies 64 3 0 2
+shot lux-parctl
+parity Main.Main.Performance MergeCopies 64 3 0 0

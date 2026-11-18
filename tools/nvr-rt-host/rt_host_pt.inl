@@ -441,5 +441,77 @@ static bool sceneSpecularFurnace(Ctx& c) {
 		ok = ok && pass;
 		releaseWorld(h, ids);
 	}
+	// (c) (2026-11-12 ptbump; a tester: "a gross sheen over everything ... reflecting the sky") the SHEEN, measured: one bounce off a BLACK
+	// non-metal floor (colour 0: no diffuse light, so the picture is the GGX lobe's reflection of the sky alone; F0 0.04) under a uniform
+	// sky L, seen from low over it. Picture / L = the share of the sky the lobe sends back, by view cosine, for the roughness the game's
+	// records give plain stone and brick (rule codes 4 / 5 / 6 = 0.33 / 0.51 / 0.73) and the matte 1 (code 7: PTMatteNoHighlight's value).
+	// With PTRoughFresnel 1 (frame row texel 295.x) a rough non-metal's grazing reflectance falls with its roughness: the share must
+	// not rise anywhere, must fall by a third or more at view cosines under 0.2 for roughness 0.51 and 0.73, and stay within 15 % at
+	// cosines over 0.6 (there the lobe is the surface's F0, which the key leaves alone).
+	{
+		Mesh floor; floor.quad({ -40000, -40000, 0 }, { 40000, -40000, 0 }, { 40000, 40000, 0 }, { -40000, 40000, 0 });
+		floor.uv.assign(floor.pos.size() * 2, 0.0f);
+		World fw; fw.meshes = { floor };
+		const Camera fc = Camera::lookDir({ 0, -1500, 500 }, { 0, 1, -0.45f }, { 0, 0, 1 }, 0.9f, 0.9f);
+		const float bins[5] = { 0.03f, 0.1f, 0.2f, 0.4f, 0.6f };   // view cosine: 0.03-0.1, 0.1-0.2, 0.2-0.4, 0.4-0.6, 0.6-1
+		for (int k7 : { 4, 5, 6, 7 }) {
+			Object o; o.mesh = 0; o.albedo = { 0, 0, 0 }; o.textured = true; o.alphaSlot = 50; o.rough = k7 * k7 / 49.0f; o.metal = 0.0f;
+			fw.objects = { o };
+			std::vector<uint32_t> ids;
+			if (!stageWorld(h, fw, ids)) return false;
+			double share[2][5] = {}; int count[5] = {};
+			for (int key = 0; key < 2; key++) {
+				std::vector<double> acc(size_t(S) * S, 0.0);
+				const int frames = 8;
+				for (int f = 0; f < frames; f++) {
+					PathConstants k = PathConstants();
+					cameraConstants(fc, k.size, k.forward, k.right, k.up, k.origin);
+					k.origin[3] = float(707 + f * 7919);
+					put4(k.accum, 0.0f, 1.0f, 16.0f, float(128u | 1024u | (noTable ? 0u : 1048576u)));
+					put4(k.sunDir, 0, 0, 1, 0);
+					put4(k.skyZenith, L, 1.0f); put4(k.skyHorizon, L, 0.0f);
+					put4(k.misc, 0.0f, 0.0f, 60000.0f, 0.0f);
+					k.rect[3] = 1.0f;
+					std::vector<float> image(size_t(kLightTexels) * kLampRows * 2, 0.0f);
+					RtRestirRow::State state; RtRestirRow::Keys keys;
+					const double camWorld[3] = { fc.eye.x, fc.eye.y, fc.eye.z };
+					const float eye[3] = { 0, 0, 0 };
+					RtRestirRow::Build(state, &image[size_t(kLightTexels) * kFrameRowIndex * 2], image.data(), nullptr, 0, 8, camWorld, eye, k.forward, k.right, k.up, S, S, keys);
+					image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 295] = float(key);   // PTRoughFresnel
+					if (!h.Upload(gM.ptLamps, image)) return false;
+					const std::vector<int> imgs{ c.ptA, c.ptB, c.ptDisplay, c.ptDisplay, c.ptDisplay, c.ptDisplay, c.depth, c.normals, c.aux16, c.pano, c.aux16,
+						c.ptDisplay, c.aux16, c.aux16, gM.ptLamps };
+					h.AddPass(c.shPath, imgs, 0x7u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+					if (!h.Exchange(fw, ids, fc.eye)) return false;
+					std::vector<float> disp;
+					if (!h.Read(c.ptDisplay, disp)) return false;
+					h.EndFrame();
+					for (size_t p = 0; p < size_t(S) * S; p++) acc[p] += disp[p * 4] / L.x / frames;
+				}
+				if (key == 0) for (int b = 0; b < 5; b++) count[b] = 0;
+				for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) {
+					const V3 d = normalize(fc.ray((i + 0.5f) / S, (j + 0.5f) / S));
+					const float nv = -d.z;
+					if (!(nv > bins[0])) continue;
+					int b = 4; while (b > 0 && nv < bins[b]) b--;
+					share[key][b] += acc[size_t(j) * S + i];
+					if (key == 0) count[b]++;
+				}
+			}
+			bool pass = true;
+			for (int b = 0; b < 5; b++) {
+				if (count[b] < 50) { pass = false; continue; }
+				share[0][b] /= count[b]; share[1][b] /= count[b];
+				if (share[1][b] > share[0][b] * 1.03 + 0.0005) pass = false;                                  // never more
+				if (b <= 1 && (k7 == 5 || k7 == 6) && share[1][b] > share[0][b] * 0.67) pass = false;          // the grazing sheen: down by a third or more
+				if (b == 4 && std::fabs(share[1][b] - share[0][b]) > 0.15 * share[0][b] + 0.0005) pass = false; // face on: the surface's own F0
+			}
+			say("  the sky a black non-metal floor sends back, roughness %.2f (rule code %d), by view cosine 0.03-0.1 / 0.1-0.2 / 0.2-0.4 / 0.4-0.6 / 0.6-1: "
+				"%.4f %.4f %.4f %.4f %.4f; with PTRoughFresnel 1: %.4f %.4f %.4f %.4f %.4f -> %s\n", k7 * k7 / 49.0f, k7,
+				share[0][0], share[0][1], share[0][2], share[0][3], share[0][4], share[1][0], share[1][1], share[1][2], share[1][3], share[1][4], pass ? "ok" : "BAD");
+			ok = ok && pass;
+			releaseWorld(h, ids);
+		}
+	}
 	return ok;
 }

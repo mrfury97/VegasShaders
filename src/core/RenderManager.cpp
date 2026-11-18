@@ -2,6 +2,7 @@
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
 #include "DxvkLoader.h"	// UNOFFICIAL 2026-11-04: the d3d9.dll in use may be a mod's (DxvkLoader.h)
 #include "RtLampShadows.h"	// UNOFFICIAL 2026-10-28 RT lamp shadows
+#include "RtSunShadows.h"	// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup
 #include "MixCheck.h"	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 #include "TestTools.h"
 #if NVR_TEST_TOOLS
@@ -167,6 +168,114 @@ void RenderManager::SetupSceneCamera() {
 	CameraData = D3DXVECTOR4(zNear, zFar, width / height, FOVData.x);
 }
 
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera (core/ScopeCamera.h; ShaderManager::BeginExtraCamera / EndExtraCamera use these).
+// The main camera's values of this object's own members, kept while another camera's scene is drawn and put back after it.
+void RenderManager::SaveCameraState(CameraState* state) {
+	state->WorldViewProj = WorldViewProjMatrix;
+	state->ViewProj = ViewProjMatrix;
+	state->InvViewProj = InvViewProjMatrix;
+	state->InvProj = InvProjMatrix;
+	state->InvView = InvViewMatrix;
+	state->View = ViewMatrix;
+	state->CameraData = CameraData;
+	state->FOVData = FOVData;
+	state->CameraForward = CameraForward;
+	state->CameraPosition = CameraPosition;
+}
+
+void RenderManager::RestoreCameraState(const CameraState* state) {
+	WorldViewProjMatrix = state->WorldViewProj;
+	ViewProjMatrix = state->ViewProj;
+	InvViewProjMatrix = state->InvViewProj;
+	InvProjMatrix = state->InvProj;
+	InvViewMatrix = state->InvView;
+	ViewMatrix = state->View;
+	CameraData = state->CameraData;
+	FOVData = state->FOVData;
+	CameraForward = state->CameraForward;
+	CameraPosition = state->CameraPosition;
+}
+
+// SetupSceneCamera's values for ANOTHER camera (a picture-in-picture scope's), into this object's own members only: what
+// TESR_InvViewTransform, TESR_InvProjectionTransform, TESR_ViewProjectionTransform, TESR_InvViewProjectionTransform,
+// TESR_WorldViewProjectionTransform, TESR_CameraPosition, TESR_CameraForward and TESR_CameraData read. The same formulas as above, from
+// the camera's own frustum and world transform. NOT written: the renderer's worldMatrix / viewMatrix / projMatrix / invViewMatrix and
+// the game's camera globals (the game fills those itself when it makes this camera current for the scene: BSShaderUtil::RenderScene calls
+// NiRenderer::SetCurrentCamera first), and DepthConstants (it describes the frame's depth texture, not this picture's). The field of
+// view comes from the frustum (WorldSceneGraph->cameraFOV is the main camera's). projection: the matrix made here, for the caller.
+bool RenderManager::SetupExtraCamera(NiCamera* cam, D3DXMATRIX* projection) {
+	if (!cam || !projection) return false;
+	const NiFrustum& frustum = cam->Frustum;
+	const float width = frustum.Right - frustum.Left;
+	const float height = frustum.Top - frustum.Bottom;
+	const float zNear = frustum.Near;
+	const float zFar = frustum.Far;
+	// a perspective frustum with room between its planes: anything else is not a scope's camera (nothing is changed)
+	if (frustum.Ortho || !(width > 1.0e-6f) || !(height > 1.0e-6f) || !(zNear > 0.0f) || !(zFar > zNear)) return false;
+	const float zStep = 1.0f / (zFar - zNear);
+	const float sumX = frustum.Right + frustum.Left;
+	const float sumY = frustum.Top + frustum.Bottom;
+
+	const NiMatrix33& axes = cam->m_worldTransform.rot;
+	const NiPoint3& place = cam->m_worldTransform.pos;
+	// The same eye as SetupSceneCamera's view (the game's camera location, about 0: every draw is relative to its camera).
+	const NiPoint3 gameEye = *Pointers::Generic::CameraLocation;
+	const D3DXVECTOR3 eye(gameEye.x, gameEye.y, gameEye.z);
+	// The camera's axes are the columns of its rotation.
+	const D3DXVECTOR3 fwd(axes.data[0][0], axes.data[1][0], axes.data[2][0]);
+	const D3DXVECTOR3 up(axes.data[0][1], axes.data[1][1], axes.data[2][1]);
+	const D3DXVECTOR3 side(axes.data[0][2], axes.data[1][2], axes.data[2][2]);
+	const D3DXVECTOR3 axisOf[3] = { side, up, fwd };
+
+	D3DXMATRIX world, view, invView;
+	D3DXMatrixIdentity(&world);
+	world._41 = -place.x;
+	world._42 = -place.y;
+	world._43 = -place.z;
+	D3DXMatrixIdentity(&view);
+	D3DXMatrixIdentity(&invView);
+	for (int c = 0; c < 3; c++) {
+		view.m[0][c] = axisOf[c].x;
+		view.m[1][c] = axisOf[c].y;
+		view.m[2][c] = axisOf[c].z;
+		view.m[3][c] = -D3DXVec3Dot(&axisOf[c], &eye);
+	}
+	for (int r = 0; r < 3; r++) {
+		invView.m[r][0] = axisOf[r].x;
+		invView.m[r][1] = axisOf[r].y;
+		invView.m[r][2] = axisOf[r].z;
+	}
+	invView.m[3][0] = eye.x;
+	invView.m[3][1] = eye.y;
+	invView.m[3][2] = eye.z;
+
+	const bool reversed = IsReversedDepth();
+	const float zTerm = reversed ? -(zNear * zStep) : zFar * zStep;
+	const float wTerm = reversed ? zNear * zFar * zStep : -(zNear * zFar * zStep);
+	*projection = D3DXMATRIX(2.0f / width, 0.0f, 0.0f, 0.0f,
+		0.0f, 2.0f / height, 0.0f, 0.0f,
+		-sumX / width, -sumY / height, zTerm, 1.0f,
+		0.0f, 0.0f, wTerm, 0.0f);
+
+	D3DXMATRIX worldView;
+	D3DXMatrixMultiply(&worldView, &world, &view);
+	D3DXMatrixMultiply(&WorldViewProjMatrix, &worldView, projection);
+	D3DXMatrixMultiply(&ViewProjMatrix, &view, projection);
+	D3DXMatrixInverse(&InvProjMatrix, nullptr, projection);
+	D3DXMatrixMultiply(&InvViewProjMatrix, &InvProjMatrix, &invView);
+	InvViewMatrix = invView;
+	ViewMatrix = view;
+
+	CameraForward = D3DXVECTOR4(fwd.x, fwd.y, fwd.z, 1.0f);
+	CameraPosition = D3DXVECTOR4(place.x, place.y, place.z, 1.0f);
+	// The frustum's sides are tangents (at distance 1): the angles follow from them. x, y in degrees (x horizontal), z, w in radians.
+	const float horizontalRad = 2.0f * atanf(0.5f * width);
+	const float verticalRad = 2.0f * atanf(0.5f * height);
+	FOVData = D3DXVECTOR4(D3DXToDegree(horizontalRad), D3DXToDegree(verticalRad), horizontalRad, verticalRad);
+	CameraData = D3DXVECTOR4(zNear, zFar, width / height, FOVData.x);
+	return true;
+}
+
 // detect if dxvk is present
 // UNOFFICIAL 2026-10-27: see RenderManager::Initialize (stock DXVK on NVIDIA: no world depth). Shown once on screen, the first
 // frame the player is in the world (the interface does not exist yet while the render manager starts).
@@ -298,6 +407,7 @@ void RenderManager::Initialize() {
 #endif
 	DxvkCompute::Initialize(device);	// UNOFFICIAL 2026-10-23 (NVR DXVK): is the NVR extension on this d3d9.dll? (logged)
 	RtLampShadows::Initialize();	// UNOFFICIAL 2026-10-28: POINT_SHADOW_RT for the session, before any shader is loaded (logged)
+	RtSunShadows::Initialize();	// UNOFFICIAL 2026-11-13: RT_SUN_FORWARD for the session, likewise
 	ShaderWarmUp2::Install(device);	// UNOFFICIAL ShaderWarmUp2 (off unless [Main.Main.Performance] ShaderWarmUp2 is 1 or 2): before any shader is created
 	SessionLog::OnDevice(device);	// UNOFFICIAL 2026-11-01: the session header's GPU, D3D9 runtime and screen lines (SessionLog.h)
 }

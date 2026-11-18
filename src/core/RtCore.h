@@ -34,6 +34,9 @@ public:
 		UINT		Point = 0;							// (2026-10-28 RT reflections) 0: recorded in Frame; 1: only through Exchange
 		UINT		Order = 0;							// (2026-11-05) Setup order at a helper start, low first: a user whose images do not fit
 												// the protocol's NVR_RT_MAX_IMAGES is left out for the session (the others keep tracing)
+		// UNOFFICIAL 2026-11-11 (PT early kick, docs/next/PT-EARLY-KICK-BUDGET-2026-11-11.md Q1) a Point-0 user whose Record reads nothing
+		// of this frame's draws: SubmitEarly records it too (same record, same collect), so it costs no second exchange at Frame
+		bool		RidesEarly = false;
 	};
 
 	static void			AddUser(const User& user);
@@ -89,11 +92,28 @@ public:
 	// this user's Record went with this game frame's SubmitEarly (true from the submit to the frame's end, also after the collect):
 	// RtCore::Frame does not record it again
 	static bool			SubmittedEarlyThisFrame(const User* user);
+	// UNOFFICIAL 2026-11-16 (fd-batchH, docs/next/FD-BATCH-H.md) [Main.Main.RayTracing] OverlapExchange (0 off, the default; 1 collect at the
+	// next frame's RT point; 2 collect at the next frame's start): Frame's exchange signals the helper without the game's GPU waiting for it;
+	// it is collected (the wait + the copies out) before the next exchange records anything. True from Frame until that collect when this
+	// frame's exchange was left open: the Point-0 users' targets then hold the PREVIOUS exchange's results (traced with the camera, jitter
+	// and constants their previous Record used). Only while the camera is still (< 0.1 deg, < 2 units since the last Frame exchange) and every copy was made by one of the last 4 Frame exchanges; otherwise it waits as before (false).
+	// No user reads this yet: a user that reprojects its result (stamps a camera in Record) needs it to keep last frame's stamp.
+	static bool			OutputsLate();
 	// The eye in scene space. The scene is world minus TheRenderManager->CameraPosition, the NiCamera's world translation (the eye), so
 	// this is (0, 0, 0). Use it for every ray origin from the camera: Pointers::Generic::CameraLocation is NOT the eye (it read ~0
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).
 	static D3DXVECTOR3	Eye();
 	static bool			Running();							// the helper is ready (users trace from the frame after it got ready)
+	// UNOFFICIAL 2026-11-15 (RT master switches, docs/next/RT-MASTER-SWITCHES.md) [Main.Main.RayTracing] RTInteriors / RTExteriors (live, both
+	// true by default; a missing key counts as true). Gated(): the switch for the space the player is in (GameState.isExterior: an interior cell
+	// with a sky or without a worldspace is an interior) is off. While gated the core behaves as if the helper were not running: Running(),
+	// the atlas / actors / grass / decals questions and Exchange say no, Frame / ExchangeEarly / SubmitEarly exchange nothing, every RT effect
+	// takes the path it takes without a helper (its raster twin), and the idle clock (IdleStopMinutes) runs. The effects' settings are not touched.
+	static bool			Gated();
+	// ShaderManager::UpdateConstants, once a frame, after the cell and isCameraCut are known: reads the two switches and sets Gated() for the
+	// frame. True when the gate changed this frame while the helper was up (ShaderManager then makes the frame a camera cut, so every history,
+	// raster and traced, starts over instead of blending what it kept from before the change).
+	static bool			UpdateGate(bool Exterior);
 	// UNOFFICIAL 2026-11-07 (ptaaa-fog) another user than Name (not left out) wants to trace this frame. A user that only rides along with
 	// the RT effects the player switched on (RT fog visibility: on by default) asks this in its Wants, with Running(), so it never starts the
 	// helper or keeps it tracing by itself.
@@ -102,6 +122,10 @@ public:
 	// UNOFFICIAL 2026-11-02 (bench warm slot, shot command reloadshaders): stop a running helper; it starts again on the next frame an RT
 	// effect wants it, so it loads every Compute\Rt\*.spv again (and settings read at its start: HitTextures ...). Users' Setup runs again.
 	static void			Restart(const char* Why);
+	// UNOFFICIAL 2026-11-18 (fork port: the path tracer's images only when it is on): a user whose Setup must run again (it was switched on
+	// after the helper started and registered no images then) asks for it here, from anywhere, even from its Wants inside Ready. The running
+	// helper is stopped at the next Ready, at the screen-size stop's safe point, and starts again on the following frame. Why: a literal.
+	static void			SetupAgain(const char* Why);
 	// UNOFFICIAL 2026-11-07 (rt-shutdown) the game is exiting (xNVSE ExitGame / ExitGame_Console, the window closing): the helper finishes
 	// every recorded frame, DXVK's queue is drained, the helper exits (Core::Stop's order; ~5 s at most); RT stays off from then on.
 	// Render (main) thread only, outside a frame's recording; any number of calls.

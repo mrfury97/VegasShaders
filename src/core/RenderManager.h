@@ -10,6 +10,13 @@ public:
 	void				GetScreenSpaceBoundSize(NiPoint2* sizeOut, NiBound* sphere, float tolerance = 1e-5f);
 	void				UpdateSceneCameraData();
 	void				SetupSceneCamera();
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera (core/ScopeCamera.h): another camera's scene (a picture-in-picture scope) drawn
+	// with this mod's shaders. CameraState: what SetupSceneCamera fills of this object's OWN members (the renderer's worldMatrix / viewMatrix /
+	// projMatrix / invViewMatrix are the game's: it sets them itself for the camera it draws with).
+	struct CameraState { D3DXMATRIX WorldViewProj, ViewProj, InvViewProj, InvProj, InvView, View; D3DXVECTOR4 CameraData, FOVData, CameraForward, CameraPosition; };
+	void				SaveCameraState(CameraState* state);
+	void				RestoreCameraState(const CameraState* state);
+	bool				SetupExtraCamera(NiCamera* cam, D3DXMATRIX* projection);	// false (nothing changed): a frustum that cannot be used
 	void				CheckAndTakeScreenShot(IDirect3DSurface9* source, bool asHdr);
 	float				GetObjectDistance(NiBound* sphere);
 	bool				IsReversedDepth();

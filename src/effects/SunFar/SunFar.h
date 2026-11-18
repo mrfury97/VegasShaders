@@ -8,6 +8,8 @@
 class SunFarEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the factor buffer is drawn in RenderFactor behind the switch; the sun shadow pass multiplies its read by TESR_SunFarApply.x, 0 while off (it needs a texture there, which the stand-in is)
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	SunFarEffect() : EffectRecord("SunFar") {};
 
 	struct SettingsStruct {

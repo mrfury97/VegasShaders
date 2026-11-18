@@ -1,0 +1,31 @@
+# MergeCopies batch 4, interiors (docs/next/FD-MERGE-RESULTS.md "Batch 3"): the partial run toml for tools/fd/fd-merge4-int.shots.txt.
+# Release defaults + the batch-3 bench keys (no bodycam, no grain, RenderScale 1, the 4-7 ms detectors off) + DeferredRenderer 1 (restart:
+# set before the launch) so the AD2 / AD3 path (v2's indoor merges, deferred records) runs, PassSort 2 (every planned pass sorted).
+# MergeCopies itself is switched live by the shot list.
+
+[_Unofficial]
+SettingsVersion = 999    # partial test file: no UpdateOldDefaults migrations on these keys
+
+[_Shaders.Bodycam.Status]
+Enabled = false
+
+[_Shaders.Cinema.Main]
+FilmGrainAmount = 0
+
+[_Shaders.TAA.FSR]
+RenderScale = 1.0
+
+[_Main.Main.Misc]
+FlashDetect = false
+BeatDetect = false
+HistoryWatch = false
+GBufferCensus = 0
+GBufferCensusMerge = 0
+
+[_Main.Main.Quality]
+DeferredRenderer = 1    # the lamps deferred (records LAMPS_DEFERRED 3): v2 merges AD2 / AD3 with c0-c3 and c25 per copy
+DeferredRendererLive = true
+
+[_Main.Main.Performance]
+PassSort = 2
+MergeCopies = 0

@@ -1,0 +1,73 @@
+# Full deferred renderer, batch 5 (2026-11-15, docs/next/FD-INTERIORS-RESULTS.md "Batch 4"): Vault 21's parity residual, one suspect at a time,
+# and native's one-pass emittance fix. Scene: lucky22 (as fd3-c-int1's moves). Toml: batch 4's dr1 toml for the runtime (native AND fork) + the
+# F10 profile. Each -fd shot is forward vs deferred on DeferredRendererLive; the suspect's setting is set on BOTH sides of the A/B (the shot's set).
+#   v21-fd    as batch 4 (the reference for this launch)
+#   v21-vb0   [Shaders.PBR.Main] VanillaBridgeAmount 0: the forward records' authored highlight strength (per-draw gloss + normal-map mask ->
+#             the highlight's F0, BridgeSpecF0) off; the lamp pass never had it (no G-buffer channel): if this one falls into the band, that is the cause
+#   v21-ls0   [Shaders.ShadowsInteriors.Forward] Strength 0: every lamp shadow off on both sides (forward cube maps and the pass's atlas)
+#   v21-both  both
+# Then Lucky 38 with DeferredRendererOnePass 1 (the emittance now matched per draw, objects kept in one pass) against 0, and the counts window.
+frames 300
+profile
+shot settle
+console tgm
+console sgtm 0.001
+wait 240
+shot go-v21
+console player.moveto 0017A642
+wait 300
+shot place-v21
+console sgtm 1
+console player.setpos x -232.6
+console player.setpos y 1789.6
+console player.setpos z 7425.0
+console player.setangle x 5.2
+console player.setangle z 236.8
+console sgtm 0.001
+wait 300
+shot v21-ctl
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot v21-fd
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-vb0
+set Shaders.PBR.Main VanillaBridgeAmount 0.0
+wait 60
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-ls0
+set Shaders.ShadowsInteriors.Forward Strength 0.0
+wait 60
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-both
+set Shaders.PBR.Main VanillaBridgeAmount 0.0
+set Shaders.ShadowsInteriors.Forward Strength 0.0
+wait 60
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-counts
+wait 600
+shot go-l38
+console player.moveto 00174BEB
+wait 300
+shot place-l38
+console sgtm 1
+console player.setpos x 860.53
+console player.setpos y -3364.16
+console player.setpos z 7681.03
+console player.setangle x 11.97
+console player.setangle z 65.39
+console sgtm 0.001
+wait 300
+shot l38-fd1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-fd0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-vb0
+set Shaders.PBR.Main VanillaBridgeAmount 0.0
+wait 60
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-counts1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 600

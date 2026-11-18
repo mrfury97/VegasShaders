@@ -9,6 +9,8 @@
 class VolumetricLightEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the march / blur / history / grid buffers and the RT fog visibility copy are written only behind the switch (EffectChain's wouldRender, RtFogVisibility::Wants); DustMotes reads the grid only when it was built this frame
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	VolumetricLightEffect() : EffectRecord("VolumetricLight") {};
 
 	// The look by day ([Shaders.VolumetricLight.Main]) and by night ([Shaders.VolumetricLight.Night]), blended by the
@@ -40,11 +42,16 @@ public:
 		D3DXVECTOR4	Layout;		// xy: one half-resolution texel in screen UV
 		D3DXMATRIX	Reproject;	// camera-relative world -> last frame's clip space
 		D3DXVECTOR4	GridLayout;	// xy: froxel grid columns and rows, zw: one atlas texel in UV
-		D3DXVECTOR4	GridData;	// x: fog volume on, y: scale of the lit share in the grid (keeps it in half-float range)
+		D3DXVECTOR4	GridData;	// x: fog volume on, y: scale of the lit share in the grid (keeps it in half-float range),
+								// (UNOFFICIAL 2026-11-13 rtvol2, Expanded; 0 = off) z: 1 / the dust's scale height above the eye, w: the sun
+								// glow's tight lobe, g x 100 as the whole part + its share as the fraction
 		D3DXVECTOR4	Rt;			// UNOFFICIAL 2026-11-07 (ptaaa-fog) TESR_VolumetricLightRt (core/RtFogVisibility.h Constant): x 0 the cascades,
 								// 1 the traced visibility on this grid, 2 on another MaxDistance's; y RT range, z fade, w the traced MaxDistance
 	};
 	ConstantsStruct	Constants;
+	// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded is in use this frame: this effect's own composite draws the light
+	// (VolumetricFog leaves its FogGridLight out: NVR_FogGridFlags.y 0, gridApplied false), since the fog's .fx has no constant left for it
+	bool	expandedComposite = false;
 
 	struct TexturesStruct {
 		IDirect3DTexture9* MarchTexture = nullptr;
@@ -101,4 +108,5 @@ private:
 	bool		lastRect = false;		// UNOFFICIAL 2026-10-27 RenderScale v2: the last drawn frame was a rect frame
 	TemporalHistoryStats	stats;		// the march path's history use, for the log
 	void		ReportHistory(const char* when);
+	void		ApplyExpandedLook();	// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded (the .cpp)
 };

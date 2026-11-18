@@ -2,6 +2,7 @@
 #include "../../core/PassSums.h"
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-29 ShadowContrast (the game's lamp passes)
 #include "../../core/LinearPreDecode.h"
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
 
 void PBRShaders::RegisterConstants() {
 	ShaderManager* sm = TheShaderManager;
@@ -30,15 +31,18 @@ void PBRShaders::RegisterConstants() {
 	sm->RegisterConstant("TESR_MicroShadow", &MicroShadow);	// 2026-11-04 micro-shadowing
 }
 
-// The first-person model's metal strength for its pass. Shaders upload their constants when bound, so the one still bound
-// from the world pass gets it directly (c34: TESR_PBRMetal in Object.hlsl).
+// The first-person model's metal strength and grey parts' metal (GreyMetal) for its pass; the world's (World, WorldGreyMetal)
+// after it. Shaders upload their constants when bound, so the one still bound from the world pass gets it directly (c34:
+// TESR_PBRMetal in Object.hlsl).
 void PBRShaders::BeginFirstPerson(IDirect3DDevice9* Device) {
 	Constants.Metal.x = MetalSettings.FirstPerson;
+	Constants.Metal.y = MetalSettings.GreyMetal;
 	if (Device) Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
 }
 
 void PBRShaders::EndFirstPerson(IDirect3DDevice9* Device) {
 	Constants.Metal.x = MetalSettings.World;
+	Constants.Metal.y = MetalSettings.WorldGreyMetal;
 	if (Device) Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
 }
 
@@ -73,8 +77,13 @@ void PBRShaders::UpdateSettings() {
 	MetalSettings.FirstPerson = metalOn ? std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "FirstPerson"), 0.0f, 1.0f) : 0.0f;
 	MetalSettings.World = metalOn ? std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "World"), 0.0f, 1.0f) : 0.0f;
 	MetalSettings.FadeDistance = (std::max)(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "FadeDistance"), 0.0f);
+	// GreyMetal: the first-person weapon's bare grey parts (most of a gun's body). WorldGreyMetal: the world's, 0 by default
+	// (2026-11-16, owner's pick): bare grey rock and concrete read as wet metal without _rmaos maps; there only the painted
+	// shininess mask makes a surface metal. A missing key reads 0, the shipped default.
+	MetalSettings.GreyMetal = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "GreyMetal"), 0.0f, 1.0f);
+	MetalSettings.WorldGreyMetal = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "WorldGreyMetal"), 0.0f, 1.0f);
 	Constants.Metal.x = MetalSettings.World;
-	Constants.Metal.y = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "GreyMetal"), 0.0f, 1.0f);
+	Constants.Metal.y = MetalSettings.WorldGreyMetal;
 	Constants.Metal.z = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "ColourStart"), 0.0f, 1.0f);
 	Constants.Metal.w = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "ColourEnd"), 0.0f, 1.0f);
 	Constants.MetalLook.x = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "Roughness"), 0.05f, 1.0f);
@@ -244,7 +253,14 @@ void PBRShaders::UpdateConstants() {
 		DustData = D3DXVECTOR4(here ? DustSettings.Amount : 0.0f, 1.0f / DustSettings.Size, DustSettings.UpFrom, DustSettings.UpFull);
 		DustColor = D3DXVECTOR4(DustSettings.Color.x, DustSettings.Color.y, DustSettings.Color.z, DustSettings.Patchiness);
 		DustOrigin = TheRenderManager->CameraPosition;
+		DustOrigin.w = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Dust", "Variation"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-12 (ObjectDust.hlsl)
 		MicroShadow.x = MicroShadowStrength;
+		MicroShadow.y = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.MicroShadow", "Bounce"), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-12
+		// UNOFFICIAL 2026-11-16 fd-sunvis (Includes/Object.hlsl FDSunVis*): the deferred renderer's lighting-free records read here their switches
+		// for the forward sun's terms they record for DeferredSun, 0 = on: z CanopyShadow off + 2 x MicroShadow off, w ParallaxShadow off
+		const char* deferred = "Shaders.ShadowsExteriors.Deferred";
+		MicroShadow.z = (TheSettingManager->GetSettingI(deferred, "CanopyShadow") ? 0.0f : 1.0f) + (TheSettingManager->GetSettingI(deferred, "MicroShadow") ? 0.0f : 2.0f);
+		MicroShadow.w = TheSettingManager->GetSettingI(deferred, "ParallaxShadow") ? 0.0f : 1.0f;
 	}
 
 	// UNOFFICIAL 2026-10-21 LampFalloff (Includes/LampFalloff.hlsl), live: the shape outdoors with Exterior, indoors with Interior.
@@ -290,8 +306,11 @@ void PBRShaders::UpdateConstants() {
 	Constants.Translucency.w = TheShaderManager->Shaders.Grass ? TheShaderManager->Shaders.Grass->BendPush : 0.0f;	// UNOFFICIAL 2026-11-04 the grass bend's push per unit of blade height (Grass.cpp; was Grass Collision's scale)
 
 	// the stronger of the rain animator and the puddle animator drives the dry-to-wet blend
-	const auto& wet = TheShaderManager->Effects.WetWorld->Constants;
-	const float rainFactor = max(wet.Data.x, wet.Data.z);
+	// UNOFFICIAL 2026-11-12 RainStateGuard ([Shaders.WetWorld.Main] RainStateGuard, core/RainState.h): from the one rain state (0-1, this
+	// frame's, the weather's whether WetWorld and Precipitations are on or off). This function runs every frame, the object shaders on
+	// or off (ShaderManager::UpdateConstants), so this call is also what keeps the rain state running when everything else is off.
+	// With the guard off this is the old expression, max of WetWorld's Data.x and Data.z as that effect last left them.
+	const float rainFactor = RainState::Factor();
 
 	// One value blended over day / night / interiors, and then dry to wet by rainFactor.
 	auto weather = [&](float PBRSettings::* member) {

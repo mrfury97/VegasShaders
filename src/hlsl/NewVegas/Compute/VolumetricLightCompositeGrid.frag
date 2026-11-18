@@ -24,8 +24,7 @@ vec2 GridAirAt(vec2 at, float depth) {
     vec2 local = at * GridSize;
     float farSide = LINEAR_LOD(t_grid, GridUV(z, local)).r;
     float nearSide = z > 0.5 ? LINEAR_LOD(t_grid, GridUV(z - 1.0, local)).r : 0.0;
-    float sigma = Density * length(toWorld(at));
-    return vec2(mix(nearSide, farSide, saturate(s - z)) / cb.gridData.y, 1.0 - exp(-sigma * planar));
+    return vec2(mix(nearSide, farSide, saturate(s - z)) / cb.gridData.y, 1.0 - exp(-AirDepth(toWorld(at), planar)));   // (rtvol2)
 }
 
 vec2 MsaaAirMix(vec2 at, float depth, vec2 air) {

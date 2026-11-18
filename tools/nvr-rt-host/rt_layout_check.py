@@ -38,6 +38,8 @@ PAIRS = [
     (("src/core/RtDenoise.cpp", "SpecPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseTemporalSpec.frag"]),
     (("src/core/RtDenoise.cpp", "AtrousPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseAtrous.frag", "src/hlsl/NewVegas/Compute/RtDenoiseAtrousRgb.frag"]),
     (("src/core/RtDenoise.cpp", "FireflyPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseFirefly.frag"]),
+    # (2026-11-15 rt-denoise-inputs) Settings.Confidence: the 1/5-size pass (the -conf temporal variant's 4 extra scalars are the same bytes)
+    (("src/core/RtDenoise.cpp", "ConfPush"), ["src/hlsl/NewVegas/Compute/RtDenoiseConfidence.frag"]),
 ]
 # the host's mirrors -> the game's structs
 MIRRORS = [
@@ -127,6 +129,8 @@ def cpp_layout(path, name):
 
 def glsl_layout(path):
     text = strip_comments(open(os.path.join(ROOT, path), encoding="utf-8", errors="replace").read())
+    # (2026-11-15 rt-denoise-inputs) the test-only variants' extra members (variants.txt -D...): the plain pass is the one checked here
+    text = re.sub(r"#ifdef\s+(?:NVR_CONFIDENCE|NVR_RR_MIRROR_MOTION).*?#endif", "", text, flags=re.S)
     blocks = list(re.finditer(r"std140\)\s*uniform\s+\w+\s*\{", text))
     if not blocks:   # (2026-11-07) or the push block (vec4 / mat4 / uint members: no std140 padding differences then)
         blocks = list(re.finditer(r"push_constant\)\s*uniform\s+\w+\s*\{", text))

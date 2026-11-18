@@ -32,10 +32,11 @@ void main() {
     float dt = planar / Steps;
     float offset = GradientNoise(vpos);
 
+    float rise = max(ray.z, 0.0) * cb.gridData.z;   // (UNOFFICIAL 2026-11-13 rtvol2: the .fx line for line; gridData.z 0 = as before)
     float lit = 0.0, all = 0.0;
     for (float i = 0.0; i < Steps; i += 1.0) {
         float t = (i + offset) * dt;
-        float transmittance = exp(-sigma * t);
+        float transmittance = exp(-AirDepth(ray, t)) * exp(-rise * t);
         lit += SunVisibility(ray * t) * transmittance;   // (UNOFFICIAL 2026-11-07 ptaaa-fog: MarchShadow, or the traced visibility)
         all += transmittance;
     }

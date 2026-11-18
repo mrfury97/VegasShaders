@@ -3,6 +3,9 @@
 class SMAAEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the edge and weight buffers are drawn only by Render; Debug's thumbnails read them through the slot
+	bool	TargetParkable(const char* SamplerName) override { return true; }
+	bool	TargetsWanted() override;	// (off, or standing aside while TAA runs: EffectChain's PostStep_SMAA)
 	SMAAEffect() : EffectRecord("SMAA") {};
 
 	enum Input { INPUT_LUMA, INPUT_COLOR, INPUT_DEPTH, INPUT_LUMADEPTH };

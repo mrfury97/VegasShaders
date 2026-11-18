@@ -8,6 +8,8 @@
 class BounceLightEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): made on its first enabled Render; all used only from Render (deferredTexture is handed to Specular only in a frame it was drawn)
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	BounceLightEffect() : EffectRecord("BounceLight") {};
 
 	struct BounceLightStruct {

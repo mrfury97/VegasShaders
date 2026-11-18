@@ -11,6 +11,16 @@ void SMAAEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_SMAAPred", &Constants.Pred);
 };
 
+// UNOFFICIAL 2026-11-12 (memleak) idle targets: SMAA stays enabled as the fallback while TAA runs and draws nothing then (EffectChain's
+// PostStep_SMAA, the same test): its two screen-size buffers are not needed until TAA goes off or [Shaders.SMAA.Main] WithTAA is set.
+bool SMAAEffect::TargetsWanted() {
+	if (!Enabled) return false;
+	const TAAEffect* taa = TheShaderManager->Effects.TAA;
+	if (!taa || !taa->Enabled) return true;
+	SettingManager::Configuration::ConfigNode node;
+	return TheSettingManager->Config.FillNode(&node, "Shaders.SMAA.Main", "WithTAA") && node.BoolValue;
+}
+
 void SMAAEffect::RegisterTextures() {
 	int width = TheRenderManager->width;
 	int height = TheRenderManager->height;

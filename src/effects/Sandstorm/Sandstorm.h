@@ -15,6 +15,8 @@
 class SandstormEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): made on the fast path's first use; drawn and read only behind the switch (EffectChain's wouldRender)
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	SandstormEffect() : EffectRecord("Sandstorm") {
 		memset(&Constants, 0, sizeof(Constants));
 		Constants.LeafStorm = D3DXVECTOR4(1.0f, 0.0f, 0.0f, 0.0f);	// no storm until UpdateConstants says so

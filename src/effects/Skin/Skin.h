@@ -30,6 +30,7 @@ public:
 		D3DXVECTOR4		Material;   // TESR_SkinMaterial (c192): x SpecularStrength, y Roughness, z Scattering, w Translucency
 		D3DXVECTOR4		Look;       // TESR_SkinLook (c193): x SkyReflection (0 indoors), y wetness (rain x RainWetness), z ShadowScatter, w VanillaMatchedHighlights
 		D3DXVECTOR4		Debug;      // TESR_SkinDebug (c195): x [Shaders.Skin.Debug] DebugView 1-7, y 1 while the Interiors settings are in use, z LegacyFaceShadows
+		D3DXVECTOR4		SSS;        // UNOFFICIAL 2026-11-15 TESR_SkinSSS (c196, the deferred skin's passes only): xyz the Burley scatter distances (world units), w Transmission
 	};
 	SkinStruct Constants = {};
 

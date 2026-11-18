@@ -31,7 +31,7 @@ namespace PipboyFit {
 		bool CompiledIn = false;	// Enabled at startup (PIPBOY_FIT_ON in the shaders)
 		bool On = false;
 		bool ThirdPerson = true;	// the player's own body in third person too
-		bool PowerArmor = false;	// also fit while wearing power armor
+		bool PowerArmor = true;	// also fit while wearing power armor (default true here: as before the port)
 		int Axis = 0;				// which axis of the ForeTwist bone runs along the forearm (0 x, 1 y, 2 z)
 		float Strength = 1.0f, Knee = 0.7f, Falloff = 2.0f;
 		float Start = 4.5f, End = 17.0f, CenterY = 0.1f, CenterZ = 0.4f, RadiusY = 2.6f, RadiusZ = 2.6f, WristScale = 0.6f;	// measured on pipboyarm.nif (ForeTwist frame, wrist at x 18.1)
@@ -79,7 +79,7 @@ namespace PipboyFit {
 		S.ThirdPerson = TheSettingManager->GetSettingI(section, "ThirdPerson") != 0;
 		S.PowerArmor = TheSettingManager->GetSettingI(section, "PowerArmor") != 0;
 		const bool wasInPowerArmor = InPowerArmor;
-		InPowerArmor = Player && Player->process && ((bool(__thiscall*)(BaseProcess*))0x008D8290)(Player->process);	// the player's process is always a high one
+		InPowerArmor = !S.PowerArmor && Player && Player->process && ((bool(__thiscall*)(BaseProcess*))0x008D8290)(Player->process);	// (port: the game is asked only while PowerArmor is off, so the default path calls nothing new)	// the player's process is always a high one
 		if (InPowerArmor != wasInPowerArmor) Logger::Log("UNOFFICIAL PipboyFit: power armor %s (%s)", InPowerArmor ? "on" : "off", InPowerArmor && !S.PowerArmor ? "sleeves not fitted, PowerArmor is off" : "sleeves fitted");
 		S.Axis = std::clamp(TheSettingManager->GetSettingI(section, "Axis"), 0, 2);
 		S.Strength = std::clamp(TheSettingManager->GetSettingF(section, "Strength"), 0.0f, 1.0f);

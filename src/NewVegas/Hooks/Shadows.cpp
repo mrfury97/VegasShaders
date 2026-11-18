@@ -1,10 +1,13 @@
-// Shadow hooks: NVR's shadow maps drawn in place of the game's shadow call, and the name of the leaves node of a SpeedTree.
+// Shadow hooks: NVR's shadow maps drawn in place of the game's actor shadow maps, and the name of the leaves node of a SpeedTree.
 // (2026-11-05: the Oblivion torch cast-shadow flag hook, AddCastShadowFlag, never installed in New Vegas, was removed.)
 
 #include "../../core/GpuProfiler.h"
 #include "../../core/SessionLog.h"	// 2026-11-04: CRASH lines' stage
 
-// The game's own shadow render, which the hooked call site used to reach directly.
+// RenderShadowMapHook replaces the whole of TESMain::DrawWorld_UpdateOffscreenBuffers (0x871290, a jump at its entry, Hooks.cpp): the
+// game's actor shadow maps there are skipped for NVR's own. 0x871A50 is not a shadow render: it is TESMain::UpdateOffscreenInterface (the
+// rendered menu, the Pip-Boy screen, drawn into its render texture), the last thing 0x871290 does, so the hook still calls it.
+// (Name kept from when it was believed to be the game's shadow render; checked against the exe in Ghidra by room 05, 2026-11-18.)
 static constexpr UInt32 kGameRenderShadowMaps = 0x871A50;
 
 void __fastcall RenderShadowMapHook(void* apThis) {
@@ -24,8 +27,8 @@ void __fastcall RenderShadowMapHook(void* apThis) {
 		TheShadowManager->RenderShadowMaps();
 	}
 
-	// Then the call this hook replaced, timed so its share of the frame is visible.
-	static GpuTimer gameShadowTimer("Game call 0x871A50");
+	// Then the rendered-menu (Pip-Boy screen) texture update that 0x871290 ends with, timed so its share of the frame is visible.
+	static GpuTimer gameShadowTimer("Game call 0x871A50 (rendered-menu texture)");
 	GpuProfileScope scope(gameShadowTimer, TheRenderManager->device);
 	CdeclCall(kGameRenderShadowMaps);
 }

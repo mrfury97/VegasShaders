@@ -120,6 +120,76 @@ static bool sceneNormalMaps(Ctx& c) {
 			kinds[1] + kinds[3] ? (sum[1] + sum[3]) / (kinds[1] + kinds[3]) : 0.0, kinds[2] ? sum[2] / kinds[2] : 0.0, 0.5 * flatLight, offErr, noneErr, ok ? "ok" : "BAD");
 		if (!ok) { dumpPfm("normalmaps_pt_lit", lit, S, S, 4, 0); dumpPfm("normalmaps_pt_off", litOff, S, S, 4, 0); }
 		allOk = allOk && ok;
+
+		// ---- 1b (2026-11-12 ptbump, PTBumpNormals; a tester: "textures are missing their normals/bumpmaps"). The same floor as the
+		// SCREEN's first surface (PTPrimary: the G-buffer's depth, smooth normal and colour; flag 8), which the path tracer lit with the
+		// smooth normal whatever the map (the bumps were left to PTDetail). Key on (frame row texel 293.y): its shading normal is the
+		// traced record's own normal map at the camera ray's hit, the same bend as above; key off: flat, as before. The display's alpha
+		// marks the bumped pixels for the show pass (2 + PTBumpDetail).
+		{
+			std::vector<float> depth(size_t(S) * S), normals(size_t(S) * S * 4), albedo(size_t(S) * S * 4);
+			for (UINT q = 0; q < S * S; q++) {
+				depth[q] = cam.eye.z / cam.farZ;   // view z / farZ: the floor under an eye looking straight down
+				const V3 n = { 0, 0, 1 }, vs = { dot(n, cam.r), dot(n, cam.u), dot(n, cam.f) };
+				put4(&normals[q * 4], vs * 0.5f + V3(0.5f, 0.5f, 0.5f), 0.0f);
+				put4(&albedo[q * 4], 0.5f, 0.5f, 0.5f, 1.0f);
+			}
+			if (!h.Upload(c.depth, depth) || !h.Upload(c.normals, normals) || !h.Upload(c.aux16, albedo)) return false;
+			auto runScreen = [&](float key, int view, std::vector<float>& out) {
+				World v = w; Object o; o.mesh = 0; o.textured = true; o.alphaSlot = slotStripes; o.normalMap = true; o.albedo = { 0.5f, 0.5f, 0.5f }; v.objects = { o };
+				std::vector<uint32_t> ids;
+				if (!stageWorld(h, v, ids)) return false;
+				std::vector<float> image(size_t(kLightTexels) * kLampRows * 2, 0.0f);
+				image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 293 + 1] = key;       // PTBumpNormals
+				image[size_t(kLightTexels) * kFrameRowIndex * 2 + 2 * 294] = 0.25f;         // PTBumpDetail
+				if (!h.Upload(gM.ptLamps, image)) return false;
+				PathConstants k = {};
+				cameraConstants(cam, k.size, k.forward, k.right, k.up, k.origin);
+				k.origin[3] = 5.0f;
+				put4(k.accum, 0.0f, 0.0f, 1.0f, float(8u | 1024u));   // the G-buffer's first surface, the lamp image (the frame row's keys)
+				put4(k.sunDir, sun, 1.0f); put4(k.sunColor, 1.0f, 1.0f, 1.0f, 0.0f);
+				put4(k.skyZenith, 0, 0, 0, 1); put4(k.skyHorizon, 0, 0, 0, 0);
+				put4(k.misc, 0.0f, 0.0f, 60000.0f, float(view));
+				k.rect[3] = 1.0f;
+				h.AddPass(c.shPath, imgs, 0x7u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+				if (!h.Exchange(v, ids, cam.eye)) return false;
+				const bool read = h.Read(c.ptDisplay, out);
+				h.EndFrame();
+				releaseWorld(h, ids);
+				return read;
+			};
+			std::vector<float> sLit, sNrm, sOff;
+			if (!runScreen(1.0f, 3, sLit) || !runScreen(1.0f, 2, sNrm) || !runScreen(0.0f, 3, sOff)) return false;
+			int sChecked = 0, sBad = 0, sShown = 0, sKinds[4] = {}, alphaBad = 0;
+			double sSum[4] = {}, sOffErr = 0;
+			for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) {
+				const V3 d = cam.ray((i + 0.5f) / S, (j + 0.5f) / S);
+				if (!(d.z < 0)) continue;
+				const V3 q = cam.eye + d * (-cam.eye.z / d.z);
+				if (std::fabs(q.x) > L - 10 || std::fabs(q.y) > L - 10) continue;
+				const float u = (q.x + L) / (2 * L) * K, tex = fract(u) * R;
+				const float edge = std::fmod(tex, 16.0f);
+				if (edge < 2.0f || edge > 14.0f) continue;
+				const int kind = int(tex / 16.0f) & 3;
+				const V3 bent = nmBend({ 0, 0, 1 }, { -L, -L, 0 }, { L, -L, 0 }, { L, L, 0 }, uv0, uv1, uv2, stripeT[kind]);
+				const float want = 0.5f * std::max(dot(bent, sun), 0.0f);
+				const float* g = &sLit[(j * S + i) * 4];
+				const float* gn = &sNrm[(j * S + i) * 4];
+				const V3 gotN = normalize({ gn[0] * 2 - 1, gn[1] * 2 - 1, gn[2] * 2 - 1 });
+				sChecked++; sKinds[kind]++; sSum[kind] += g[0];
+				sOffErr = std::max(sOffErr, (double)std::fabs(sOff[(j * S + i) * 4] - 0.5f * flatLight));
+				// the display's alpha: 2.25 wherever the record's map gave the normal (its flat texels too), 1 with the key off
+				if (std::fabs(g[3] - 2.25f) > 2e-3f || std::fabs(sOff[(j * S + i) * 4 + 3] - 1.0f) > 2e-3f) alphaBad++;
+				const bool good = std::fabs(g[0] - want) < 3e-3f && std::fabs(g[1] - want) < 3e-3f && dot(gotN, bent) > 0.999f;
+				if (!good) { sBad++; if (sShown++ < 5) say("    pixel (%u, %u) stripe %d: light %.4f normal (%.3f %.3f %.3f) alpha %.3f, expected %.4f (%.3f %.3f %.3f)\n", i, j, kind, g[0], gotN.x, gotN.y, gotN.z, g[3], want, bent.x, bent.y, bent.z); }
+			}
+			const bool sOk = sChecked > 4000 && sBad <= sChecked / 500 && sKinds[0] > 500 && sKinds[2] > 500 && sOffErr < 2e-3 && alphaBad <= sChecked / 500;
+			say("  path tracer, the SCREEN's first surface with PTBumpNormals: %d pixels checked, %d off the CPU's bend; direct light by stripe: toward the sun %.4f, flat %.4f, away %.4f "
+				"(flat surface %.4f); the key off: largest difference from flat %.5f; the display's alpha wrong on %d pixels -> %s\n", sChecked, sBad, sKinds[0] ? sSum[0] / sKinds[0] : 0.0,
+				sKinds[1] + sKinds[3] ? (sSum[1] + sSum[3]) / (sKinds[1] + sKinds[3]) : 0.0, sKinds[2] ? sSum[2] / sKinds[2] : 0.0, 0.5 * flatLight, sOffErr, alphaBad, sOk ? "ok" : "BAD");
+			if (!sOk) { dumpPfm("normalmaps_screen_lit", sLit, S, S, 4, 0); dumpPfm("normalmaps_screen_off", sOff, S, S, 4, 0); }
+			allOk = allOk && sOk;
+		}
 	}
 
 	// ---- 2. bounce hits: a ceiling with one uniform tilt over a floor that is only in the G-buffer (no RT floor: the ceiling's sun rays

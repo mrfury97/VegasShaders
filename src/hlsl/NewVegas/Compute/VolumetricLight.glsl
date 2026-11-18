@@ -177,12 +177,29 @@ float MarchShadow(vec3 position) {
 }
 #endif
 
+// UNOFFICIAL 2026-11-13 (rtvol2) VolumetricLight.fx.hlsl AirDepth ([Shaders.VolumetricLight.RT] Expanded: gridData.z = 1 / the dust's scale
+// height above the eye; 0: even air, sigma * t as before)
+float AirDepth(vec3 ray, float t) {
+    float sigma = Density * length(ray);
+    float a = max(ray.z, 0.0) * cb.gridData.z;
+    return a * t > 1.0e-4 ? sigma * (1.0 - exp(-a * t)) / a : sigma * t;
+}
+
 #ifdef VL_COMPOSITE
+// UNOFFICIAL 2026-11-13 (rtvol2) VolumetricLight.fx.hlsl AirPhase (gridData.w: the sun glow's tight lobe, g x 100 + its share; 0: none)
+float AirPhase(float cosTheta) {
+    float g = Anisotropy;
+    float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4), 1.5), 8.0);
+    float packed = cb.gridData.w;
+    float gt = floor(packed) * 0.01;
+    float tight = min((1.0 - gt * gt) / pow(max(1.0 + gt * gt - 2.0 * gt * cosTheta, 1.0e-4), 1.5), 8.0 / (1.0 - gt));
+    return mix(phase, tight, packed - floor(packed));
+}
+
 // VolumetricLight.fx.hlsl CompositeAir
 vec4 CompositeAir(vec2 coord, vec4 color, vec2 air) {
     float cosTheta = dot(normalize(toWorld(coord)), cb.smoothedSunDir.xyz);
-    float g = Anisotropy;
-    float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4), 1.5), 8.0);
+    float phase = AirPhase(cosTheta);
 
     vec3 lin = linearize(max(color.rgb, vec3(0.0)));
     float shadedAir = saturate(air.g - air.r);

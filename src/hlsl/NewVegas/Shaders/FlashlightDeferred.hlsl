@@ -22,6 +22,16 @@
 #include "includes/Object.hlsl"
 #include "includes/LampFalloff.hlsl"
 #include "includes/Shadow.hlsl"
+// UNOFFICIAL 2026-11-14 DeferredSun: the lighting-free records' code in COLOR1.a decoded to the keep (as DeferredLamps.hlsl DL_KEEP_OF)
+#if defined(FD_LIGHT_FREE) && FD_LIGHT_FREE
+    #include "includes/DeferredPixel.hlsl"
+    #define FL_KEEP_OF(a) FDAddedLightKeep(a)
+#elif defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 4
+    #include "includes/DeferredPixel.hlsl"
+    #define FL_KEEP_OF(a) FDAddedLightKeep(a)	// GBufferV2: 1 + (1 - fog), the "sun kept" records' 5 + (1 - fog) (2026-11-14), a forward record's 1
+#else
+    #define FL_KEEP_OF(a) (a)
+#endif
 
 // The pass's own constants (c0-c19: nothing the includes declare lives there; FlashlightDeferred::Apply).
 float4 FL_Depth    : register(c0);	// x, y the projection's _33, _43 (depth = x + y / view z), z the share and w the units the surface is pulled toward the camera
@@ -36,6 +46,9 @@ float4 FL_Gamma    : register(c8);	// z the gamma (copy path), w 1 / the gamma; 
 float4 FL_Shadow   : register(c9);	// x 1 = the shadow map is there, y its texel size (0-1), z the depth bias (share of the reach), w PCF radius (texels)
 float4 FL_Look     : register(c10);	// x cookie strength (0 none), y DebugView (0 off, 1 the light alone, 2 the shadow, 3 the normal), z Falloff (0: the lamps' 1 - d^2 / r^2), w NearFade (units, 0 off; UNOFFICIAL 2026-11-11)
 row_major float4x4 FL_LightViewProj : register(c11);	// c11-c14: camera-relative world -> the shadow map's clip space
+#if CAPTURED_NORMALS_ON >= 4
+float4 FL_Model    : register(c15);	// UNOFFICIAL 2026-11-16 fd-batchA item 6: x 1 = the record's specular bit picks the model ([Shaders.Flashlight.Deferred] SpecularBit)
+#endif
 
 sampler2D FL_Frame    : register(s0);	// the frame's copy (only when it is not linear)
 sampler2D FL_Albedo   : register(s1);	// TESR_AlbedoBuffer: rgb linear base colour, a 1 - the draw's fog
@@ -87,12 +100,21 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     // a jagged edge): not for the land (MaterialBuffer class 4), which writes 1 there whatever its fog, but in terrain blending's Smooth fade
     // is drawn alpha-blended, so the albedo buffer's alpha came out 0 on stretches of it while its colour and normal were right (flashlight
     // DebugView checks): the beam skipped that land and lit only the rest. The land takes the full light.
+#if CAPTURED_NORMALS_ON >= 4
+    // UNOFFICIAL 2026-11-14 GBufferV2 (Includes/CapturedNormals.hlsl): the land is 4 + 16 (its lamps have a highlight), and a deferred
+    // record's albedo alpha is 1 + (1 - fog) (forward records 1, as before)
+    const float landClass = floor(tex2Dlod(FL_Material, uv4).r + 0.01f) - 16.0f;
+    const float keepStored = tex2Dlod(FL_Albedo, uv4).a;
+    const float keep = abs(landClass - 4.0f) < 0.5f ? 1.0f : FL_KEEP_OF(keepStored);
+#else
     const float landClass = floor(tex2Dlod(FL_Material, uv4).r + 0.01f);
-    const float keep = abs(landClass - 4.0f) < 0.5f ? 1.0f : tex2Dlod(FL_Albedo, uv4).a;
+    const float keep = abs(landClass - 4.0f) < 0.5f ? 1.0f : FL_KEEP_OF(tex2Dlod(FL_Albedo, uv4).a);
+#endif
     clip(keep - 1.0e-4f);
 
-    // the pixel's camera-relative position along its view ray (DeferredLamps.hlsl DLPixel)
-    const float2 local = (IN.vpos - FL_View.zw + 0.5f) * FL_View.xy;
+    // the pixel's camera-relative position along its view ray (DeferredLamps.hlsl DLPixel). (2026-11-15 fd-lightpass) at the pixel's own
+    // centre, without + 0.5 on VPOS (Includes/DeferredDepth.hlsl DDRay: the D3D9 pixel at VPOS i is at ndc 2 (i - X) / W - 1; FD-SUN-FSR-RESULTS.md)
+    const float2 local = (IN.vpos - FL_View.zw) * FL_View.xy;
     const float3 ray = normalize(FL_Fwd.xyz + FL_Right.xyz * ((local.x * 2.0f - 1.0f) * FL_Right.w) + FL_Up.xyz * ((1.0f - local.y * 2.0f) * FL_Up.w));
     const float3 position = ray * stored.b;
     // 2026-11-04 (user: hair see-through in the beam): the G-buffer holds only what its writers drew; a draw that does not write it (hair,
@@ -121,15 +143,41 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
 
     float2 mapUV;
     const float shadow = FLShadow(position, dist / FL_Pos.w, mapUV);
-    const float cookie = lerp(1.0f, tex2Dlod(FL_Cookie, float4(mapUV, 0.0f, 0.0f)).r * 2.0f, FL_Look.x);
+    // UNOFFICIAL 2026-11-11 (BUG FIX, a tester: "Cookie just brightens and darkens the light ... at 1 it is invisible"). Two faults: stage 7
+    // held no texture (FlashlightDeferred::CookieTexture loads it now; no file = FL_Look.x 0), and the cookie was read at the shadow map's
+    // uv, which is only right while the map is drawn (Shadows off, or a frame without it: an old or empty matrix, the whole beam one texel).
+    // Its uv from the cone itself now, the same frame the map has (ShadowManager::RenderShadowSpotlight: LookAtRH with Z up, a square FOV of
+    // twice the cone's half-angle), so the pattern's rim (r = 1) is the cone's outer edge and it follows Angle with or without shadows.
+    float cookie = 1.0f;
+    [branch] if (FL_Look.x > 0.0f) {
+        float3 side = cross(float3(0.0f, 0.0f, 1.0f), -FL_Dir.xyz);
+        side /= max(length(side), 1.0e-4f);
+        const float3 upAxis = cross(-FL_Dir.xyz, side);
+        const float invTan = FL_Dir.w / sqrt(max(1.0f - FL_Dir.w * FL_Dir.w, 1.0e-6f));   // 1 / tan(half-angle)
+        const float2 cookieUV = float2(dot(-toLight, side), -dot(-toLight, upAxis)) * (invTan / max(dot(-toLight, FL_Dir.xyz), 1.0e-3f)) * 0.5f + 0.5f;
+        cookie = lerp(1.0f, tex2Dlod(FL_Cookie, float4(cookieUV, 0.0f, 0.0f)).r * 2.0f, saturate(FL_Look.x));
+    }
 
     const float3 N = ShadowDecodeNormal(stored.rg);
     const float4 m = tex2Dlod(FL_Material, uv4);
-    const float roughness = m.b >= 0.0f ? m.b : 0.7f;
+    // (2026-11-12 ptbump) b in -3 .. -2: a record coded "the game draws no highlight on this mesh" for the path tracer (Includes/
+    // CapturedNormals.hlsl CapturedNoHighlight): the roughness this pass always lit it with is -2 - b. The land's b (-8 .. -6 with its
+    // bump recorded, else -1): no roughness, as before.
+    // (2026-11-16 fd-sunvis) the deferred passes' one decode (Includes/Object.hlsl GBufferRoughness): the foliage records' 2 + sun weight fully
+    // rough as before; none (-1) and the land's old -8 .. -6 fully rough (0.7 here until then)
+    const float roughness = GBufferRoughness(m.b);
     const float metal = saturate((m.r - floor(m.r)) / 0.49f);
     SetDiffuseEnergyKeep(N, -ray, roughness);
     const float3 albedo = tex2Dlod(FL_Albedo, uv4).rgb;
     float3 lit = getPointLightLightingAtt(toLight, att, FL_Color.rgb, -ray, N, albedo, roughness, metal);
+#if CAPTURED_NORMALS_ON >= 4
+    // UNOFFICIAL 2026-11-16 fd-batchA item 6 (docs/next/FD-BATCH-A.md): the record's specular bit (COLOR2.r + 16, the SPECULAR variants) picks the
+    // model as the forward shaders' objLampTerm did and DeferredLamps.hlsl does for the lamps: PBR for the shiny records (above), PBRDiffuse for
+    // the others (the plain and light-only records: meshes the game draws without a highlight, whose b is the DXT1 alpha's ~0.04, so the beam
+    // left a sharp GGX hot spot on matte walls). FL_Model.x 0: PBR for every pixel, as before.
+    [branch] if (FL_Model.x > 0.5f && floor(m.r + 0.01f) < 15.5f)
+        lit = LampAtt(att) * MICRO_SHADOW(N, toLight) PBRDiffuse(metal, roughness, lerp(luma(albedo), albedo, TESR_PBRExtraData.x), N, -ray, toLight, FL_Color.rgb * LIN_SCALE_LIGHT);
+#endif
     // UNOFFICIAL 2026-11-11 SoftEdges (the old flashlight's wrap: 0.75 x ((N.L + 1) / 2)^2 for the clamped N.L, the same mean light over
     // all normals, less speckle where the normals scatter): the diffuse's plain Lambert part (PBRDiffuse's: (1 - metal) x colour x N.L x
     // light) swapped for the wrap; the highlight as it is. Off: nothing changes.
@@ -140,11 +188,13 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
         lit = max(lit + LampAtt(att) * (1.0f - metal) * graded * FL_Color.rgb * LIN_SCALE_LIGHT * (0.75f * wrap * wrap - saturate(ndl)), 0.0f);
     }
     float3 light = lit * (shadow * cookie * keep);
-    // UNOFFICIAL 2026-11-11 HotspotLimit (the old flashlight's Reinhard-style roll-off on the added light only): the pool's centre stops
-    // short of clipping without dimming the falloff round it; 0 off
+    // UNOFFICIAL 2026-11-11 HotspotLimit (the old flashlight's Reinhard-style roll-off, s' = s x L / max(L, s), L = 1 / HotspotLimit): the
+    // pool's centre stops short of clipping without dimming the falloff round it; 0 off. s is the beam's own shape, falloff x cone^2 (1 on
+    // its axis at the light; no NearFade, colour, Dimmer or surface), NOT the light added (whose luma stayed under 0.5: no roll-off at all).
+    // The path tracer applies the same ratio s' / s from the same shape (RtPathTrace.comp FlashShape): the same pool from the same number.
     [branch] if (FL_Gamma.x > 0.0f) {
         const float limit = 1.0f / FL_Gamma.x;
-        light *= limit / max(limit, luma(light));
+        light *= limit / max(limit, falloff * cone * cone);
     }
 
     [branch] if (FL_Look.y > 0.5f) {	// the debug views, written over the frame (blend off: FlashlightDeferred::Apply)

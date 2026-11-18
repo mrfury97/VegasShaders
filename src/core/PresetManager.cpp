@@ -79,6 +79,9 @@ namespace {
 		// UNOFFICIAL 2026-10-19: this build's own machine / player preferences, same reason as above (a location preset, or
 		// the defaults applied where none exists, must never switch the player's speed, quality or gun-effect choices).
 		"Main.GunFX.Main",
+		// 2026-11-16 (gunfx-builtin): the old GunFX.ini, now in the settings: the player's gun-effect tuning
+		"Main.GunFX.Muzzle", "Main.GunFX.Puff", "Main.GunFX.Wisp", "Main.GunFX.Trail", "Main.GunFX.Volume", "Main.GunFX.Ejection",
+		"Main.GunFX.Glow", "Main.GunFX.Haze", "Main.GunFX.Blast", "Main.GunFX.General",
 		"Main.Main.Performance", "Main.Main.Quality", "Main.Main.ReducedQuality",
 		"Main.Menu.NewInPatch",
 		"Main.Menu.Developer",	// UNOFFICIAL 2026-10-25: the menu's Developer options box

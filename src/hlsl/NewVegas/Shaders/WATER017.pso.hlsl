@@ -25,6 +25,7 @@ uniform float4 TESR_WaterLODColor : register(c22);
 uniform float4 TESR_DebugVar : register(c23);
 uniform float4 TESR_SunAmount : register(c24);
 uniform float4 TESR_RenderScale : register(c25); // UNOFFICIAL 2026-10-27 RenderScale: xy = the internal resolution / the screen's while the world is drawn smaller (the refraction copy is made mid-scene, so its picture fills only that part), else 1
+uniform float4 TESR_ReciprocalResolution : register(c45); // UNOFFICIAL 2026-11-16: one pixel of the screen (= the refraction copy) in uv, for refractionLookup (Includes/Water.hlsl)
 
 uniform sampler2D ReflectionMap : register(s0);
 uniform sampler2D RefractionMap : register(s1);
@@ -85,7 +86,7 @@ PS_OUTPUT main(PS_INPUT pa) {
     refraction_pos.y = refraction_pos.w - reflection_pos.y;
     float3 refracted_depth = tex2Dproj(DepthMap, refraction_pos).rgb;
 
-    float4 pix = linearize(tex2Dproj(RefractionMap, float4(refraction_pos.xy * TESR_RenderScale.xy, refraction_pos.zw)));
+    float4 pix = linearize(tex2Dproj(RefractionMap, refractionLookup(refraction_pos, TESR_RenderScale, TESR_ReciprocalResolution)));
     pix = getLightTravel(refracted_depth, lin_shallow_color, lin_deep_color, sun_luma, TESR_WaterSettings, pix);
     pix = lerp(getTurbidityFog(refracted_depth, lin_shallow_color, TESR_WaterVolume, sun_luma, pix), linearize(TESR_WaterLODColor) * sun_luma, lodfade); // fade to full fog to hide LOD seam
     // color = getTurbidityFog(refractedDepth, linShallowColor, TESR_WaterVolume, sunLuma, color); // fade to full fog to hide LOD seam

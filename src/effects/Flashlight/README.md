@@ -15,8 +15,32 @@ What it is now:
 - `core/FlashlightLamp.h` (`GameLight`): the Pip-Boy light moved onto the beam, so the game lights what the G-buffer does not hold, with a
   per-pixel cone in the object shaders; `core/EnvLightFade.h` shapes the env-map shine of light-fade assets per pixel.
 
+- Hair and eyes (`HairAndEyes`, 2026-11-12): `Shaders/Includes/FlashBeam.hlsl` gives the hair shaders (`SM3002.pso`, `SM3003.pso`, their
+  vertex shader `SM3003.vso`) and the eye variant (`ObjectTemplate.hlsl` NVR_EYE) the same beam; see the section below.
+
 Settings: `[Shaders.Flashlight.Main]` Dimmer, Distance, AttachToWeapon; `[Shaders.Flashlight.Deferred]` the light pass's options;
 `[Shaders.Flashlight.Status]` Enabled.
+
+## Hair and eyes (2026-11-12, `[Shaders.Flashlight.Deferred] HairAndEyes`, default on, live)
+Why: the game's own hair, brows and beards are blended without an alpha test, so the game draws them in its sorted blended list,
+after the main list and so after the light pass, through none of the per-object hooks. The pass never lights them, and the game lamp
+reached them unshaped (full strength, no cone, no shadow, on every head in its reach) or not at all (GameLight off, the lamp not among
+the hair's three lamps, path tracing). Eyeballs do write records, and the pass lit them like a smooth object: a flat veil in the
+light's colour over iris and pupil.
+What it does (`core/FlashlightDeferred.h` BeamBegin / BeamShow, constants `TESR_FlashBeam[5]`):
+- the hair and eye shaders add the beam themselves: reach, Falloff, cone, NearFade, HotspotLimit, the shadow map (16 point taps) and
+  for hair the lens pattern (Cookie); hair with its own lamp terms (diffuse + strand highlight), the eye with its wrapped diffuse;
+- the hair shader leaves the flashlight's game lamp out of its lamps while the beam is on (the lamp in the beam's own direction);
+- the eye marks its record's distance as "far" (60000), which the pass skips by its reach test; hair drawn in the main list
+  (alpha-tested hair of a hair mod) writes the same mark over the record under it (`core/CapturedNormals.h` BeamMarkers);
+- the beam is there from the main list's start to the end of the world's pass; never in reflections, the first-person pass, a
+  scope's camera, with the light or the key off, without the G-buffer, or while path tracing replaces the picture.
+Not done: the eye has no lens pattern; SoftEdges (the pass's wrap) is not applied to hair or eyes; under the game's MSAA (DXVK) a
+marked pixel next to an unmarked one resolves to "far" as a whole (one pixel of rim, not checked in game); nothing changes under path
+tracing. Log: `UNOFFICIAL FlashlightDeferred: HairAndEyes on ...` once, `CapturedNormals: HairAndEyes: ...` with the 600-frame lines
+(hair shader binds before / after the pass, marks, eye draws).
+Correct: hair in the beam is lit and shadowed like the head it sits on, dark outside the cone; an eye keeps its iris and pupil.
+Wrong: hair twice as bright as the skin beside it (the game lamp was not left out), a black ring round an eye, unlit eyes.
 
 ## Ray tracing without the path tracer (2026-11-07, perf-flashlight)
 No RT lamp-shadow pass traces the flashlight: its game lamp is left out of every NVR lamp list (GetNearbyLights, so no cube slot and no

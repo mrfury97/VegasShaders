@@ -210,7 +210,9 @@ namespace ConstantFilter {
 	inline HRESULT STDMETHODCALLTYPE HookPixel(IDirect3DDevice9* self, UINT start, const float* data, UINT count) {
 		DeferredResync(self);
 		const HRESULT result = SendPixel(self, start, data, count);
-		if (PixelWriteAfter) PixelWriteAfter(start, count);
+		// (2026-11-11: not inside one of NVR's own effect draws, SharedDrawState::OwnPass: those uploads are the effect's own constants,
+		// and putting the lamp block "back" over them blackened Reflections' D3D9 composite in RenderScale rect frames)
+		if (PixelWriteAfter && SharedDrawState::OwnPassDepth == 0) PixelWriteAfter(start, count);
 		// UNOFFICIAL LinearPreDecode: while a LIN_PREDECODED shader is bound, the game's new values of c1 and c3-c12 get their
 		// decoded copies at once. A write into c64-c75 by anything else makes the copies stale (remade at the next bind).
 		if (data && count && !LinearPreDecode::Shaders.empty() && PreDecodeThread()) {

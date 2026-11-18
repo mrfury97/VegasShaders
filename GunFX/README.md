@@ -1,19 +1,15 @@
-# GunFX plugin
+# GunFX assets
 
-Source of `GunFX.dll`, the xNVSE plugin behind this build's experimental gun effects (muzzle puff, heat smoke,
-ejection smoke; it also drives NVR's barrel glow, heat haze and muzzle blast). The player guide and the notes for
-developers of other builds are in [`docs/GUNFX.md`](../docs/GUNFX.md).
+GunFX used to be a plugin of its own (`GunFX.dll`); since 2026-11-16 it is built into Vegas Shaders: the source is
+in [`src/gunfx/`](../src/gunfx/) and its settings are in Vegas Shaders' own settings (`[Main.GunFX.*]`). The player
+guide is [`docs/GUNFX.md`](../docs/GUNFX.md); the move is described in
+[`docs/next/GUNFX-BUILTIN.md`](../docs/next/GUNFX-BUILTIN.md).
 
-- `src/GunFX.cpp`: the whole plugin. Game addresses for FalloutNV.exe 1.4.0.525 are listed at the top.
-- `src/IniDefaults.h`: creates `GunFX.ini` from `GunFX.ini.defaults`, and later adds only missing keys.
-- `config/GunFX.ini.defaults`: shipped as `Data\NVSE\Plugins\GunFX.ini.defaults`. Never ship an active `GunFX.ini`:
-  it would overwrite players' settings.
+What is left here:
+
 - `assets/Meshes/GunFX/`: the baked smoke effects, shipped as `Data\Meshes\GunFX\`. They are vanilla
-  `effects\fxlightsmoke.nif` rebuilt with different numbers. The plugin only sets their emitter rate at run time
-  (the puff and port bursts start when spawned and stop after `fBurstSeconds`); it does not rewrite particle modifiers.
+  `effects\fxlightsmoke.nif` rebuilt with different numbers. GunFX only sets their emitter rate at run time
+  (the puff and port bursts start when spawned and stop after `BurstSeconds`); it does not rewrite particle modifiers.
 
-Build: Visual Studio 2019 C++ tools (v142), Win32 Release:
-
-    MSBuild GunFX\GunFX.vcxproj /p:Configuration=Release /p:Platform=Win32
-
-The output is `GunFX\build\GunFX.dll`.
+The old `GunFX.vcxproj` and `config/GunFX.ini.defaults` were removed (git history has them; `src/gunfx/GunFXKeys.h`
+keeps every key with its shipped default).

@@ -921,6 +921,13 @@ bool DxvkCompute::DisplaceLandActive() {
 	return DisplaceInterface && DisplaceRegistered[0] && DisplaceRegistered[1] && DisplaceBase.Enable;
 }
 
+float DxvkCompute::DisplaceMaxStrength() {
+	float strength = 0.0f;
+	if (DisplaceLandActive()) strength = (std::max)(strength, fabsf(DisplaceBase.EvalParams[0]));
+	if (DisplaceObjectsActive()) strength = (std::max)(strength, fabsf(DisplaceObj.EvalParams[0]));
+	return strength;
+}
+
 bool DxvkCompute::DisplaceObjectsActive() {
 	return DisplaceInterface && DisplaceObjRegistered[0] && DisplaceObjRegistered[1] && DisplaceObj.Enable;
 }

@@ -18,7 +18,10 @@
 layout(local_size_x = 64) in;
 
 layout(set = 0, binding = 1, std140) uniform Pass {   // core\RtPathTrace.cpp EmissiveConstants
-	vec4 params;        // x emissive instances, y the scratch word the list starts at / 4096, zw unused
+	vec4 params;        // x emissive instances, y the scratch word the list starts at / 4096, w unused
+	                    // z (2026-11-11 pt-emissive-cost; PTEmissiveCut / PTEmissiveFloor) the trace's lowest weight floor (RtPathTrace.comp
+	                    // gEmFloorBase, the same float): an instance whose weight is under it EVERYWHERE (its power / r^2, the weight
+	                    // inside its bound) is listed as not usable, as the trace would weigh it 0 at every hit anyway. 0: off
 } p;
 layout(set = 0, binding = 2, rg32f) uniform readonly image2D lampImage;     // (pass image 0) RtPathTrace's lamp image: row 50
 layout(set = 0, binding = 3, rgba8) uniform readonly image2D glowAtlas;     // (pass image 1) the glow atlas (GlowTextures)
@@ -131,9 +134,11 @@ void main() {
 		barrier();
 	}
 	if (t == 0) {
-		const bool usable = ok && carry > 0.0 && all(lessThanEqual(sLo[0], sHi[0])) && sOutside == 0u;   // (ptaaa-hangfix: + every triangle in the data)
+		bool usable = ok && carry > 0.0 && all(lessThanEqual(sLo[0], sHi[0])) && sOutside == 0u;   // (ptaaa-hangfix: + every triangle in the data)
 		const vec3 centre = 0.5 * (sLo[0] + sHi[0]);
 		const float radius = 0.5 * length(sHi[0] - sLo[0]) * 1.001 + 0.5;   // (float slack: every point of every triangle inside)
+		// (2026-11-11 pt-emissive-cost) under the trace's floor at every point: not usable (EmWeight's largest value is carry / radius^2)
+		if (p.params.z > 0.0 && !(carry >= p.params.z * radius * radius)) usable = false;
 		scratch.words[block] = usable ? g + 1u : 0u;
 		scratch.words[block + 1u] = floatBitsToUint(usable ? carry : 0.0);
 		scratch.words[block + 2u] = floatBitsToUint(centre.x); scratch.words[block + 3u] = floatBitsToUint(centre.y);

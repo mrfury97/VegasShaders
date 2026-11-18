@@ -1,0 +1,30 @@
+# MergeCopies batch 4, outdoors (docs/next/FD-MERGE-RESULTS.md "Batch 3"): the partial run toml for tools/fd/fd-merge4-out.shots.txt.
+# As fd-merge4-int.toml, but DeferredRenderer 2 (restart; the lighting-free records, DeferredSun, DeferredDepth 2 and DeferredDistant forced
+# by it) so v2's lit passes (ADTS / ADTS2 / ADT / ADT2, c0-c3 / c16 / c25 per copy) and AD with the lighting-free records run.
+
+[_Unofficial]
+SettingsVersion = 999    # partial test file: no UpdateOldDefaults migrations on these keys
+
+[_Shaders.Bodycam.Status]
+Enabled = false
+
+[_Shaders.Cinema.Main]
+FilmGrainAmount = 0
+
+[_Shaders.TAA.FSR]
+RenderScale = 1.0
+
+[_Main.Main.Misc]
+FlashDetect = false
+BeatDetect = false
+HistoryWatch = false
+GBufferCensus = 0
+GBufferCensusMerge = 0
+
+[_Main.Main.Quality]
+DeferredRenderer = 2    # all direct light deferred (the lighting-free records): v2 merges the lit passes too
+DeferredRendererLive = true
+
+[_Main.Main.Performance]
+PassSort = 2
+MergeCopies = 0

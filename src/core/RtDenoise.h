@@ -45,6 +45,13 @@ namespace RtDenoise {
 		float	GuideSigma = 0.0f;						// (their ratio; this relative difference weighs a tap down by 1 / e; 0 = off)
 		bool	GuideOnce = false;						// UNOFFICIAL 2026-11-13 (rtgi-review B2, RGB mode with Guide): the first a-trous pass works the guide's
 														// value out per texel and hands it on in B's blue; the later passes read it there (the same picture, fewer reads)
+		int		Soft = 0;				// UNOFFICIAL 2026-11-16 (rtgi-review, RGB mode with GuideAlbedo; RT GI: GIGrassDenoise): texels the albedo buffer has
+										// no texel for (grass: the game's own shader draws it) are ONE soft surface. Blades each sit at their own depth and
+										// normal, sway, and their cut-out is hashed under TAA / DLSS, so the disocclusion mask restarted their history every
+										// frame and no a-trous tap passed the depth / normal tests: every grass texel kept one raw sample (sparkles in the
+										// shade, where the bounce comes from a few bright spots). Bit 1: the temporal pass keeps their history (no mask
+										// restart, depth tolerance 25 %); bit 2: the a-trous passes take every tap within 25 % of the depth (no normal
+										// and no brightness test). Solid surfaces: unchanged. 0 = off.
 		float	AntiLag = 0.0f;			// UNOFFICIAL 2026-11-07 (RGB mode): a fast history (4 frames at 60 fps) beside the long one; where the long
 										// one's luminance leaves the fast mean's window (this many standard errors; 0 = off) it is clamped and
 										// restarts at the fast history's length: trails clear in a few frames (NRD ReBLUR's anti-lag; PTDenoiseAntiLag)
@@ -74,6 +81,12 @@ namespace RtDenoise {
 		float	HistoryFix = 0.0f;		// (RGB mode) pixels with this many frames of history or fewer are smoothed by geometry only in the a-trous
 										// passes, more the newer (NRD ReLAX's history fix; 0 off): a newly seen pixel's single noisy path is not kept
 										// as a speckle by the brightness test (trails behind a moving lamp / object). The path tracer: PTDenoiseHistoryFix
+		float	Confidence = 0.0f;		// UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md; RGB mode, not Specular): history
+										// confidence at 1/5 resolution (NRD's IN_DIFF_CONFIDENCE, A-SVGF's gradient): each 5 x 5 tile's fresh samples vs
+										// the reprojected history of the same points (Compute\RtDenoiseConfidence.frag); where their means differ by more
+										// than this many standard errors of the fresh mean the light changed (a lamp out / moved, a door, a turning
+										// object) and the history there is cut to confidence^2 x MaxHistory (RtDenoiseTemporalRgb-conf.spv). 0 = off
+										// (the plain pass, as before). The path tracer: PTDenoiseConfidence; RT GI: GIDenoiseConfidence
 	};
 	struct Denoiser;
 

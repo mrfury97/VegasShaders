@@ -25,6 +25,9 @@ namespace RtDenoise {
 		IDirect3DTexture9*	historyC[2] = {};		// (2026-11-07 ptaaa-denoiser) Specular: (tracked hit distance, roughness, virtual share, 0)
 		bool				specular = false;
 		IDirect3DTexture9*	park = nullptr;			// 8 x 8: the device's render target while the passes run (a pass may not draw into it)
+		IDirect3DTexture9*	conf = nullptr;			// (2026-11-15 rt-denoise-inputs) Settings.Confidence: the 1/5-size confidence (G16R16F)
+		UINT				confW = 0, confH = 0;
+		bool				confLogged = false;
 		int					channels = 0;
 		GpuTimer*			timer = nullptr;			// "RT denoise: <name>" in the GPU profile
 		UINT				width = 0, height = 0;
@@ -42,6 +45,10 @@ namespace RtDenoise {
 		ID3D9NvrExtPipeline* atrousRgb = nullptr;
 		ID3D9NvrExtPipeline* temporalSpec = nullptr;	// (2026-11-07 ptaaa-denoiser) Settings.Specular
 		ID3D9NvrExtPipeline* fireflyPipe = nullptr;		// (2026-11-07 ptaaa-denoiser) Settings.AntiFirefly
+		ID3D9NvrExtPipeline* confPipe = nullptr;		// (2026-11-15 rt-denoise-inputs) Settings.Confidence: RtDenoiseConfidence.frag
+		ID3D9NvrExtPipeline* temporalRgbConf = nullptr;	// and the RGB temporal pass' -conf variant
+		bool confTried = false;
+		const UINT kConfTile = 5;						// NRD's "about 1/5 resolution"
 		bool specTried = false;
 		bool tried = false;
 		// UNOFFICIAL 2026-10-30 DLSS RR: counts the calls Run skipped for RR (0 while it never did). A denoiser that ran before it changed
@@ -164,6 +171,16 @@ namespace RtDenoise {
 			UInt32 pad0, pad1, pad2;
 		};
 		static_assert(offsetof(SpecPush, spec) == offsetof(TemporalPush, samplerIndex), "SpecPush = TemporalPush's head + spec");
+		struct ConfPush {		// (2026-11-15 rt-denoise-inputs) RtDenoiseConfidence.frag and RtDenoiseTemporalRgb-conf: TemporalPush + 4 scalars
+			float prevViewProj[16];	// (flat, = TemporalPush's members: tools/nvr-rt-host/rt_layout_check.py compares it with both shaders)
+			float forward[4], right[4], up[4], move[4], params[4];
+			float backbone[4];
+			float rect[4];
+			UInt32 samplerIndex;
+			float clampK, peopleCap, antiLag, fireflyK, fastFrames;
+			float conf[4];		// confidence pass: k, the tile, the gain, -; the -conf temporal pass: 1, the tile, the grid's size (scalars in GLSL)
+		};
+		static_assert(sizeof(ConfPush) == 216 && offsetof(ConfPush, conf) == sizeof(TemporalPush), "RtDenoiseConfidence.frag's push block");
 
 		IDirect3DSurface9* Surface(IDirect3DTexture9* t) {
 			IDirect3DSurface9* s = nullptr;
@@ -315,7 +332,7 @@ namespace RtDenoise {
 			tried = true;
 			temporal = Make("RtDenoiseTemporal", 5, 192, 1, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-03: + rect)	// 2026-10-31: + motion, backbone (stand-ins when off)
 			atrous = Make("RtDenoiseAtrous", 3, 48);
-			temporalRgb = Make("RtDenoiseTemporalRgb", 7, sizeof(TemporalPush), 3, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-07: + the captured normals, PeopleHistory; ptaaa-denoiser: + the firefly excess target)
+			temporalRgb = Make("RtDenoiseTemporalRgb", 8, sizeof(TemporalPush), 3, 0xFu, offsetof(TemporalPush, samplerIndex));	// (2026-11-16: + the soft mask, Settings.Soft)	// (2026-11-07: + the captured normals, PeopleHistory; ptaaa-denoiser: + the firefly excess target)
 			fireflyPipe = Make("RtDenoiseFirefly", 3, sizeof(FireflyPush), 2);	// (2026-11-07 ptaaa-denoiser) AntiFirefly's spread (a missing .spv: AntiFirefly off)
 			backbonePipe = Make("RtBackbone", 3, 160);
 			atrousRgb = Make("RtDenoiseAtrousRgb", 5, 48, 2);	// (2026-11-07: + the guide frame and albedo)
@@ -338,6 +355,7 @@ namespace RtDenoise {
 			IDirect3DTexture9** all[] = { &d->history[0], &d->history[1], &d->chain[0], &d->chain[1], &d->historyB[0], &d->historyB[1],
 				&d->chainB[0], &d->chainB[1], &d->scratchB, &d->historyC[0], &d->historyC[1], &d->park };
 			for (IDirect3DTexture9** t : all) if (*t) { (*t)->Release(); *t = nullptr; }
+			if (d->conf) { d->conf->Release(); d->conf = nullptr; }	// (2026-11-15 rt-denoise-inputs: made again below on its first use)
 			d->specular = spec;
 			const int count = spec ? 11 : rgb ? 9 : 4;
 			for (int i = 0; i < count; i++) Device->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, all[i], nullptr);
@@ -434,8 +452,53 @@ namespace RtDenoise {
 			IDirect3DBaseTexture9* captured = S.PeopleHistory > 0.0f ? (S.People ? S.People : Texture("TESR_CapturedNormalsBuffer")) : nullptr;
 			t.peopleCap = captured ? RtHistoryTime::Frames(S.PeopleHistory, clock) : 0.0f;
 			t.antiLag = (std::max)(S.AntiLag, 0.0f);
-			IUnknown* temporalImages[7] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth };
-			if (!spec) ok = nowA && nowB && excess && Draw(temporalRgb, nowA, temporalImages, 7, &t, sizeof(t), nowB, excess);
+			// UNOFFICIAL 2026-11-16 (rtgi-review) Settings.Soft: the albedo buffer as the soft mask (image 7; a stand-in when off), bit 1 rides in
+			// backbone.w (+ 2; RtDenoiseTemporalRgb.frag only: the specular pass gets its own copy of the head, taken from t, without it)
+			const int soft = !spec && S.GuideAlbedo ? S.Soft : 0;
+			IUnknown* temporalImages[8] = { Noisy, d->history[last], depth, d->historyB[last], motionImage, sharedImage, captured ? (IUnknown*)captured : (IUnknown*)depth,
+				soft ? (IUnknown*)S.GuideAlbedo : (IUnknown*)depth };
+			// (2026-11-15 rt-denoise-inputs) Settings.Confidence: the 1/5-size history confidence first, then the temporal pass' -conf variant
+			// reads it. Off (0, or a .spv missing): the plain pass with its old push block, exactly as before.
+			bool confidence = false;
+			if (!spec && S.Confidence > 0.0f) {
+				if (!confTried) {
+					confTried = true;
+					confPipe = Make("RtDenoiseConfidence", 5, sizeof(ConfPush), 1, 0x3u, offsetof(TemporalPush, samplerIndex));
+					temporalRgbConf = Make("RtDenoiseTemporalRgb-conf", 9, sizeof(ConfPush), 3, 0xFu, offsetof(TemporalPush, samplerIndex));
+				}
+				const UINT cw = (w + kConfTile - 1) / kConfTile, ch = (h + kConfTile - 1) / kConfTile;
+				if (confPipe && temporalRgbConf && (!d->conf || d->confW != cw || d->confH != ch)) {
+					if (d->conf) { d->conf->Release(); d->conf = nullptr; }
+					Device->CreateTexture(cw, ch, 1, D3DUSAGE_RENDERTARGET, D3DFMT_G16R16F, D3DPOOL_DEFAULT, &d->conf, nullptr);
+					d->confW = cw; d->confH = ch;
+				}
+				IDirect3DSurface9* confSurface = confPipe && temporalRgbConf ? Surface(d->conf) : nullptr;
+				if (confSurface) {
+					ConfPush c = {};
+					memcpy(&c, &t, sizeof(t));
+					c.conf[0] = S.Confidence; c.conf[1] = (float)kConfTile; c.conf[2] = 2.0f;
+					IUnknown* confImages[5] = { Noisy, d->history[last], depth, d->historyB[last], motionImage };
+					confidence = Draw(confPipe, confSurface, confImages, 5, &c, sizeof(c));
+					confSurface->Release();
+					if (confidence && !d->confLogged) {
+						d->confLogged = true;
+						Logger::Log("UNOFFICIAL RT denoiser %s: history confidence on (k %.1f, %ux%u tiles of %u px)", d->effect.c_str(), S.Confidence, cw, ch, kConfTile);
+					}
+				}
+			}
+			if (!spec && confidence) {
+				ConfPush c = {};
+				memcpy(&c, &t, sizeof(t));
+				if (soft & 1) c.backbone[3] += 2.0f;	// (test-after-110 merge: Settings.Soft as in the plain pass)
+				c.conf[0] = 1.0f; c.conf[1] = (float)kConfTile; c.conf[2] = (float)d->confW; c.conf[3] = (float)d->confH;
+				IUnknown* images[9] = { temporalImages[0], temporalImages[1], temporalImages[2], temporalImages[3], temporalImages[4], temporalImages[5], temporalImages[6], temporalImages[7], d->conf };	// (test-after-110 merge: the soft mask on 7, the confidence on 8)
+				ok = nowA && nowB && excess && Draw(temporalRgbConf, nowA, images, 9, &c, sizeof(c), nowB, excess);
+			}
+			else if (!spec) {
+				TemporalPush tr = t;
+				if (soft & 1) tr.backbone[3] += 2.0f;
+				ok = nowA && nowB && excess && Draw(temporalRgb, nowA, temporalImages, 8, &tr, sizeof(tr), nowB, excess);
+			}
 			else {	// (2026-11-07 ptaaa-denoiser) the specular temporal pass: + the roughness and history C; its push = t's head + spec before the sampler
 				IDirect3DSurface9* nowC = Surface(d->historyC[now]);
 				SpecPush ts = {};
@@ -475,6 +538,7 @@ namespace RtDenoise {
 				a.specular = (spec ? 1u : 0u) | (rgb && S.AntiFirefly > 0.0f && fireflyPipe ? 2u : 0u);	// (2026-11-07 ptaaa-denoiser) bit 0 specular mode (the roughness in the guide frame's slot), bit 1 the symmetric test (AntiFirefly)
 				const bool mirrorSurface = spec && S.MirrorSurface;	// (2026-11-09 pt-mirrors) bit 2: the marked mirrors smoothed (the raw image's hit distance in the guide albedo's slot)
 				if (mirrorSurface) a.specular |= 4u;
+				if (guide && (S.Soft & 2)) a.specular |= 16u;	// UNOFFICIAL 2026-11-16 (rtgi-review) bit 4: Settings.Soft, texels without an albedo texel are one soft surface
 				if (guide && S.GuideOnce && i > 0) a.specular |= 8u;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) bit 3: the guide's value is in B's blue (the pass before wrote it)
 				a.historyFix = RtHistoryTime::Frames((std::max)(S.HistoryFix, 0.0f), clock);	// (2026-11-07 ptaaa-denoiser; perf-history: frames at 60 fps)
 				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,

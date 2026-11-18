@@ -378,6 +378,31 @@ static bool sceneTexPack(Ctx& c) {
 		check(!pin.PickVictims(60, 100, 5000, 600, v), "only pinned ones left: refused");
 		pin.Free(p1, 5000, 0); const uint32_t p3 = pin.Alloc(5000); pin.Add(p3, 10, 5000);
 		check(!pin.Pinned(p3), "a freed id comes back unpinned");
+		// UNOFFICIAL 2026-11-12 RealTextureKeepFrames: release by age (budget not full): oldest first, capped, never a pinned or recent one
+		Residency age; age.Reset(8);
+		const uint32_t g1 = age.Alloc(0), g2 = age.Alloc(0), g3 = age.Alloc(0), g4 = age.Alloc(0);
+		age.Add(g1, 10, 0); age.Add(g2, 10, 100); age.Add(g3, 10, 200); age.Add(g4, 10, 4000); age.Pin(g1);
+		age.PickStale(4000, 3600, 16, v);
+		check(v.size() == 2 && v[0] == g2 && v[1] == g3, "stale by age: the two old unpinned ones, oldest first");
+		age.PickStale(4000, 3600, 1, v);
+		check(v.size() == 1 && v[0] == g2, "stale by age: capped");
+		age.Use(g2, 3990);
+		age.PickStale(4000, 3600, 16, v);
+		check(v.size() == 1 && v[0] == g3, "stale by age: one used again stays");
+		age.PickStale(3000, 3600, 16, v);
+		check(v.empty(), "stale by age: nothing old enough yet");
+		// UNOFFICIAL 2026-11-12 (memleak) DisplaceTextureRelease: a pin taken off (the last displaced copy that read the texture is gone):
+		// the id is an ordinary one again, with its idle time counted from the unpin
+		check(age.Pinned(g1) && age.PinnedCount() == 1, "the pinned one is counted");
+		age.PickStale(9000, 3600, 16, v);
+		check(std::find(v.begin(), v.end(), g1) == v.end(), "a pinned id is never stale, however old");
+		age.Unpin(g1, 9000);
+		check(!age.Pinned(g1) && age.PinnedCount() == 0, "unpinned");
+		age.PickStale(9000 + 3599, 3600, 16, v);
+		check(std::find(v.begin(), v.end(), g1) == v.end(), "an unpinned id has its idle time first");
+		age.PickStale(9000 + 3600, 3600, 16, v);
+		check(std::find(v.begin(), v.end(), g1) != v.end(), "then it is released by age");
+		check(age.PickVictims(35, 40, 9000 + 600, 600, v) && std::find(v.begin(), v.end(), g1) != v.end(), "and the budget may take it");
 	}
 	say("  texpack: %s\n", bad ? "WRONG answers above" : "every rule as RtCore applies it");
 	return bad == 0;

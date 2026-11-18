@@ -6,6 +6,8 @@
 
 #include "BloodFlow.h"
 #include "BloodFluid.h"
+#include "BloodSurface.h"	// UNOFFICIAL 2026-11-12 Surface
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 Surface (asks for TESR_AlbedoBuffer)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/FrameClock.h"
 
@@ -479,7 +481,35 @@ static float BloodFlowBaseSplatDrips = 1.0f;
 // times brighter than the blood's own red. OldLook (test only): (1, 1, 0, 0) = the look before, exactly.
 static D3DXVECTOR4 BloodFlowLook(1.0f, 1.0f, 0.0f, 0.0f);
 
+// UNOFFICIAL 2026-11-12 Surface ([Shaders.BloodFlow.Surface], off by default; BloodSurface.h, Includes/BloodSurface.hlsl; user:
+// the pools are perfect circles that float, the blood clips into things and does not follow the game's light). Blood as a thin
+// layer of liquid simulated on the ground it lies on, in a patch of the world per splat and per body, with plain D3D9 passes.
+// Kept here, not in BloodFlow.h (a widely included header). The state atlas (fp16 rgba, two copies, 16 MB each) is made the
+// first time the mode has a patch; TESR_BloodSurface binds the copy a pass reads (SurfaceRead).
+static BloodSurface::Settings SurfaceSettings;
+static BloodSurface::Atlas SurfaceAtlas;
+static IDirect3DTexture9* SurfaceTexture[2] = {};
+static IDirect3DSurface9* SurfaceTarget[2] = {};
+static IDirect3DTexture9* SurfaceRead = nullptr;
+static bool SurfaceFailed = false;	// the card cannot draw into or filter fp16 rgba: the mode stays off (logged)
+// A frozen patch's cell is read back once to find where its blood lies (BloodSurface::Atlas::Measure): a target of a cell's size
+// it is copied to, and the system-memory surface that is read into. Made on first use; failing them only leaves the boxes whole.
+static IDirect3DSurface9* SurfaceMeasureTarget = nullptr;
+static IDirect3DSurface9* SurfaceMeasureRead = nullptr;
+static bool SurfaceMeasureFailed = false;
+static double SurfaceMeasuredAt = -1.0;
+static bool SurfaceTestPour = false;	// TEST: a pool bleeding ahead of the player (AddTestSplats)
+static double SurfaceLastTime = -1.0;
+// TESR_BloodSurfaceSize, TESR_BloodSurfaceSim, TESR_BloodSurfaceFlow, TESR_BloodSurfaceLook (Includes/BloodSurface.hlsl).
+static D3DXVECTOR4 SurfaceSizeConstants(0.0f, 0.0f, 0.0f, 0.0f), SurfaceSimConstants(0.0f, 0.0f, 0.0f, 0.0f), SurfaceFlowConstants(0.0f, 0.0f, 0.0f, 0.0f),
+	SurfaceLookConstants(0.0f, 0.0f, 0.0f, 0.0f);
+static VolumetricSmokeQuads::Vertex SurfaceSimVertices[BloodSurface::Cells * 6], SurfaceBoxVertices[BloodSurface::Cells * 36];
+
 void BloodFlowEffect::RegisterConstants() {
+	TheShaderManager->RegisterConstant("TESR_BloodSurfaceSize", &SurfaceSizeConstants);	// UNOFFICIAL 2026-11-12 Surface
+	TheShaderManager->RegisterConstant("TESR_BloodSurfaceSim", &SurfaceSimConstants);
+	TheShaderManager->RegisterConstant("TESR_BloodSurfaceFlow", &SurfaceFlowConstants);
+	TheShaderManager->RegisterConstant("TESR_BloodSurfaceLook", &SurfaceLookConstants);
 	TheShaderManager->RegisterConstant("TESR_BloodFlowFresh", &Constants.Fresh);
 	TheShaderManager->RegisterConstant("TESR_BloodFlowMatch", &Constants.Match);
 	TheShaderManager->RegisterConstant("TESR_BloodFlowDryRatio", &Constants.DryRatio);
@@ -506,6 +536,8 @@ void BloodFlowEffect::RegisterTextures() {
 	TheTextureManager->InitTexture("TESR_BloodFlowBounds", &BoundsTexture, &BoundsSurface, 2, ItemMax, D3DFMT_A32B32G32R32F);
 	// UNOFFICIAL 2026-10-22 (SplatMask): registered now, made in Render the first time the mask is used (none while it is off).
 	TheTextureManager->RegisterTexture("TESR_BloodSplatMask", (IDirect3DBaseTexture9**)&MaskTexture);
+	// UNOFFICIAL 2026-11-12 Surface: registered now, made the first time the mode has a patch (none while it is off).
+	TheTextureManager->RegisterTexture("TESR_BloodSurface", (IDirect3DBaseTexture9**)&SurfaceRead);
 }
 
 int BloodFlowEffect::SlotFor(UInt64 key) {
@@ -586,6 +618,30 @@ void BloodFlowEffect::UpdateSettings() {
 	else BloodFlowLook = D3DXVECTOR4(std::clamp(TheSettingManager->GetSettingF(section, "Sheen"), 0.0f, 2.0f), 0.25f,
 		std::clamp(TheSettingManager->GetSettingF(section, "SheenTint"), 0.0f, 1.0f), SrgbToLinear(std::clamp(TheSettingManager->GetSettingF(section, "MatchFloor"), 0.0f, 0.6f)));
 	TheBloodFluid().ReadSettings();	// UNOFFICIAL 2026-10-26 BloodFluid: [Shaders.BloodFlow.Fluid]
+	{
+		// UNOFFICIAL 2026-11-12 Surface: [Shaders.BloodFlow.Surface]. Turned off, its patches go (BloodFlow's own passes are as before).
+		const char* surface = "Shaders.BloodFlow.Surface";
+		BloodSurface::Settings& s = SurfaceSettings;
+		const bool was = s.Enabled;
+		s.Enabled = TheSettingManager->GetSettingI(surface, "Enabled") != 0;
+		s.Splats = TheSettingManager->GetSettingI(surface, "Splats") != 0;
+		s.Pools = TheSettingManager->GetSettingI(surface, "Pools") != 0;
+		s.SplatAmount = std::clamp(TheSettingManager->GetSettingF(surface, "SplatAmount"), 0.2f, 3.0f);
+		s.PoolAmount = std::clamp(TheSettingManager->GetSettingF(surface, "PoolAmount"), 0.2f, 3.0f);
+		s.BleedTime = std::clamp(TheSettingManager->GetSettingF(surface, "BleedTime"), 1.0f, 30.0f);
+		s.FlowTime = std::clamp(TheSettingManager->GetSettingF(surface, "FlowTime"), 5.0f, 90.0f);
+		s.Viscosity = std::clamp(TheSettingManager->GetSettingF(surface, "Viscosity"), 0.3f, 5.0f);
+		s.Roughness = std::clamp(TheSettingManager->GetSettingF(surface, "Roughness"), 0.0f, 0.6f);
+		s.Lifetime = std::clamp(TheSettingManager->GetSettingF(surface, "Lifetime"), 30.0f, 3600.0f);
+		s.MaxPatches = std::clamp(TheSettingManager->GetSettingI(surface, "MaxPatches"), 1, (int)BloodSurface::Cells);
+		s.UseAlbedo = TheSettingManager->GetSettingI(surface, "UseAlbedo") != 0;
+		s.DebugView = TheSettingManager->GetSettingI(surface, "DebugView");
+		SurfaceTestPour = TheSettingManager->GetSettingI(surface, "TestPour") != 0;
+		if (was != s.Enabled) {
+			SurfaceAtlas.Clear();
+			Logger::Log("BloodFlow: Surface %s%s", s.Enabled ? "on: pools and fresh splats are simulated on the ground they lie on" : "off", SurfaceFailed ? " (cannot run on this card: see above)" : "");
+		}
+	}
 	Settings.SplatterAtlas = GetFileAttributesA("Data\\Textures\\decals\\fxbloodsplatterdecals01.dds") != INVALID_FILE_ATTRIBUTES;
 	// UNOFFICIAL fixes-b #53: this runs at every settings refresh (every cell change): log only the first time and when the answer changes
 	static int loggedAtlas = -1;
@@ -974,6 +1030,34 @@ void BloodFlowEffect::GatherPools() {
 // camera looked when it was turned on), 70 units apart, radius 20-60 as the game's, thrown straight down; they age from then on.
 // Off (0): nothing, and the next time starts afresh.
 void BloodFlowEffect::AddTestSplats() {
+	// UNOFFICIAL 2026-11-12 Surface, TEST ONLY ([Shaders.BloodFlow.Surface] TestPour): a body's pool on the ground 150 units ahead of
+	// the player, bleeding from when this is turned on (a save holds bodies that are long dead, never a fresh death).
+	static double pourStart = -1.0;
+	static D3DXVECTOR3 pourAt(0.0f, 0.0f, 0.0f);
+	if (!SurfaceTestPour || !Player) pourStart = -1.0;
+	else {
+		if (pourStart < 0.0) {
+			D3DXVECTOR3 forward(TheRenderManager->viewMatrix._13, TheRenderManager->viewMatrix._23, 0.0f);
+			const float l = BloodFlowBoxes::Length(forward);
+			forward = l > 1e-4f ? forward / l : D3DXVECTOR3(0.0f, 1.0f, 0.0f);
+			pourAt = D3DXVECTOR3(Player->pos.x, Player->pos.y, Player->pos.z) + forward * 150.0f;
+			pourStart = Clock;
+			Logger::Log("BloodFlow: TEST a pool bleeding at (%.1f %.1f %.1f)", pourAt.x, pourAt.y, pourAt.z);
+		}
+		const int slot = Count < ItemMax ? SlotFor(0x7E57A00000000000ull + (UInt64)(UInt32)(pourStart * 16.0)) : -1;
+		if (slot >= 0) {
+			Item& item = Items[Count++];
+			item = Item();
+			item.Center = pourAt;
+			item.Normal = D3DXVECTOR3(0.0f, 0.0f, 1.0f);
+			item.Radius = 26.0f;
+			item.Age = (float)(Clock - pourStart);
+			item.Seed = Hash01((UInt32)(pourStart * 16.0));
+			item.Fade = 1.0f;
+			item.Pool = true;
+			item.Slot = slot;
+		}
+	}
 	if (Settings.TestSplats <= 0 || !Player) { TestStart = -1.0; return; }
 	if (TestStart < 0.0) {
 		D3DXVECTOR3 forward(TheRenderManager->viewMatrix._13, TheRenderManager->viewMatrix._23, 0.0f);
@@ -1057,12 +1141,45 @@ void BloodFlowEffect::UpdateConstants() {
 		}
 		Count = kept;
 	}
+	// UNOFFICIAL 2026-11-12 Surface (BloodSurface.h): the items it has (bodies' pools, fresh splats; older splats keep the game's
+	// decal only) are left out of the passes below (once a frame); its patches are brought up to date on both calls (the second
+	// has this frame's camera). While it has a patch it asks for the albedo record (core/CapturedNormals.h AlbedoWanted).
+	if (SurfaceSettings.Enabled && !SurfaceFailed) {
+		const D3DXVECTOR4& c = TheRenderManager->CameraPosition;
+		const D3DXVECTOR3 eye(c.x, c.y, c.z);
+		const D3DXMATRIX& inv = TheRenderManager->InvViewMatrix;
+		const double now = TheFrameRateManager->Time;
+		// Through a door, or a jump (fast travel, a load): the blood stays behind (as BloodFluid: interiors share their coordinates).
+		// Walking from one exterior cell into the next keeps it. Bodies in the new place get their pools as they are met.
+		static bool lastExterior = true;
+		static D3DXVECTOR3 lastEye(0.0f, 0.0f, 0.0f);
+		const bool exterior = TheShaderManager->GameState.isExterior;
+		if (SurfaceAtlas.Any() && ((TheShaderManager->GameState.isCellChanged && !(exterior && lastExterior)) || BloodFlowBoxes::Length(eye - lastEye) > 3000.0f)) SurfaceAtlas.Clear();
+		lastExterior = exterior;
+		lastEye = eye;
+		if (gathered) {
+			int kept = 0;
+			OnScreenCount = 0;
+			for (int i = 0; i < Count; i++) {
+				if (SurfaceAtlas.Offer(Items[i].Slot >= 0 ? Slots[Items[i].Slot].Key : 0, Items[i], eye, now, SurfaceSettings)) continue;
+				OnScreenCount += Items[i].Visible ? 1 : 0;
+				if (kept != i) Items[kept] = Items[i];
+				kept++;
+			}
+			Count = kept;
+		}
+		SurfaceAtlas.Update(eye, D3DXVECTOR3(inv._41, inv._42, inv._43), TheRenderManager->ViewProjMatrix, now, SurfaceSettings);
+	}
+	CapturedNormals::BloodWantsAlbedo = SurfaceSettings.Enabled && !SurfaceFailed && SurfaceSettings.UseAlbedo && SurfaceAtlas.Any();
 	// UNOFFICIAL 2026-10-13: with F10 on, how many it draws (next to the Blood timers), every 240 frames.
 	if (GpuTimer::Enabled && ++ItemLogTick >= 240) {
 		ItemLogTick = 0;
 		int pools = 0;
 		for (int i = 0; i < Count; i++) pools += Items[i].Pool ? 1 : 0;
 		Logger::Log("BLOOD ITEMS: %d splats, %d pools (bodies' and cut limbs')", Count - pools, pools);
+		if (SurfaceSettings.Enabled)	// UNOFFICIAL 2026-11-12 Surface
+			Logger::Log("BLOOD SURFACE: %d patches, %d still running (made %d so far, %d took another's cell, %d found none, %d splats landed on another's patch)", SurfaceAtlas.Count(),
+				SurfaceAtlas.Running(), SurfaceAtlas.made, SurfaceAtlas.reclaimed, SurfaceAtlas.refused, SurfaceAtlas.shared);
 	}
 
 	Constants.Fresh = D3DXVECTOR4(SrgbToLinear(Settings.FreshColor[0]), SrgbToLinear(Settings.FreshColor[1]), SrgbToLinear(Settings.FreshColor[2]), Settings.Gloss);
@@ -1088,7 +1205,153 @@ void BloodFlowEffect::UpdateConstants() {
 }
 
 bool BloodFlowEffect::ShouldRender() {
-	return (Count > 0 && OnScreenCount > 0) || TheBloodFluid().Active();	// UNOFFICIAL 2026-10-16: only blood on screen (2026-10-26: or the fluid's)
+	return (Count > 0 && OnScreenCount > 0) || TheBloodFluid().Active()	// UNOFFICIAL 2026-10-16: only blood on screen (2026-10-26: or the fluid's)
+		|| (SurfaceSettings.Enabled && !SurfaceFailed && SurfaceAtlas.Any());	// UNOFFICIAL 2026-11-12 Surface: or a patch (running ones step off screen too)
+}
+
+// UNOFFICIAL 2026-11-12 Surface (BloodSurface.h; Includes/BloodSurface.hlsl): the patches' steps (BloodSurfaceSim: atlas copy 0 ->
+// 1 -> 0, so copy 0 always holds the newest state; a pair a frame, eight more for a patch catching up), then their blood into
+// the image (BloodSurface), which is read as it was from TESR_SourceBuffer (the area the boxes cover is copied there). True when
+// it drew into the image.
+static bool RenderSurface(BloodFlowEffect* self, IDirect3DDevice9* device, IDirect3DSurface9* image, IDirect3DSurface9* source, IDirect3DSurface9* depthStencil,
+	const D3DXVECTOR3& eye, const D3DXMATRIX& inv, float rw, float rh, float maxDistance, IDirect3DVertexDeclaration9* declaration) {
+	static EffectRecord::CachedHandle simCache, drawCache;
+	D3DXHANDLE sim = self->TechniqueHandle(simCache, "BloodSurfaceSim");
+	D3DXHANDLE draw = self->TechniqueHandle(drawCache, "BloodSurface");
+	if (!sim || !draw) return false;	// (a shader file older than the mode)
+	if (!SurfaceTexture[0]) {
+		IDirect3D9* d3d = nullptr;
+		D3DDEVICE_CREATION_PARAMETERS creation = {};
+		D3DDISPLAYMODE mode = {};
+		bool usable = false;
+		if (SUCCEEDED(device->GetDirect3D(&d3d)) && d3d) {
+			if (SUCCEEDED(device->GetCreationParameters(&creation)) && SUCCEEDED(device->GetDisplayMode(0, &mode)))
+				usable = SUCCEEDED(d3d->CheckDeviceFormat(creation.AdapterOrdinal, creation.DeviceType, mode.Format,
+					D3DUSAGE_RENDERTARGET | D3DUSAGE_QUERY_FILTER, D3DRTYPE_TEXTURE, D3DFMT_A16B16G16R16F));
+			d3d->Release();
+		}
+		for (int k = 0; k < 2 && usable; k++) {
+			if (FAILED(device->CreateTexture(BloodSurface::AtlasWidth, BloodSurface::AtlasHeight, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT,
+					&SurfaceTexture[k], NULL))) { SurfaceTexture[k] = nullptr; usable = false; break; }
+			SurfaceTexture[k]->GetSurfaceLevel(0, &SurfaceTarget[k]);
+			device->ColorFill(SurfaceTarget[k], NULL, 0);
+		}
+		if (!usable) {
+			for (int k = 0; k < 2; k++) {
+				if (SurfaceTarget[k]) { SurfaceTarget[k]->Release(); SurfaceTarget[k] = nullptr; }
+				if (SurfaceTexture[k]) { SurfaceTexture[k]->Release(); SurfaceTexture[k] = nullptr; }
+			}
+			SurfaceFailed = true;
+		}
+		Logger::Log("BloodFlow: Surface state atlas (%d x %d, fp16 rgba, two copies): %s", BloodSurface::AtlasWidth, BloodSurface::AtlasHeight,
+			usable ? "made" : "NOT made (the card cannot draw into or filter that format): Surface is off, BloodFlow's own pools and streams are back");
+		if (!usable) { SurfaceAtlas.Clear(); return false; }
+	}
+	const double now = TheFrameRateManager->Time;
+	float seconds = SurfaceLastTime < 0.0 ? 1.0f / 60.0f : (float)(now - SurfaceLastTime);
+	const bool newFrame = SurfaceLastTime != now;	// (Render can run more than once a frame: the blood steps once)
+	SurfaceLastTime = now;
+	seconds = std::clamp(seconds, 0.0f, 0.1f);
+	const BloodSurface::Settings& s = SurfaceSettings;
+	SurfaceSizeConstants = BloodSurface::SizeConstants();
+	SurfaceFlowConstants = BloodSurface::FlowConstants(s);
+	SurfaceLookConstants = BloodSurface::LookConstants(s);
+	static GpuTimer simTimer("  Blood surface steps"), drawTimer("  Blood surface draw");
+	UINT passes = 0;
+	if (newFrame && seconds > 0.0f && SurfaceAtlas.Running() > 0) {
+		GpuProfileScope gpu(simTimer, device);
+		int normal = 0;
+		const int pairs = SurfaceAtlas.Pairs(seconds, normal);
+		// A new patch's cell still holds the last one's blood: cleared in both copies (before its first pair).
+		for (int i = 0; i < BloodSurface::Cells && normal > 0; i++) {
+			const BloodSurface::Patch& p = SurfaceAtlas.patches[i];
+			if (!p.Used || !p.Reset || !p.Seen) continue;
+			RECT cell;
+			BloodSurface::Atlas::CellRect(i, cell);
+			for (int k = 0; k < 2; k++) device->ColorFill(SurfaceTarget[k], &cell, 0);
+		}
+		device->SetDepthStencilSurface(nullptr);	// (the atlas can be bigger than the game's depth-stencil)
+		self->Effect->SetTechnique(sim);
+		for (int pair = 0; pair < pairs; pair++) {
+			const int kind = BloodSurface::Atlas::Kind(pair, normal);
+			bool drew = false;
+			for (int k = 0; k < 2; k++) {
+				const int triangles = SurfaceAtlas.BuildSim(kind, k, eye, SurfaceSimVertices);
+				if (!triangles) continue;
+				SurfaceSimConstants = BloodSurface::SimConstants(s, BloodSurface::Atlas::StepOf(kind), kind == 0 && k == 0);
+				SurfaceRead = SurfaceTexture[k];
+				// (Not bound to its own sampler while drawn into: TESR_BloodSurface is the 14th sampler declared, register 13.)
+				device->SetTexture(13, nullptr);
+				TheRenderManager->renderState->NoteDeviceTexture(13, nullptr);
+				device->SetRenderTarget(0, SurfaceTarget[1 - k]);
+				self->SetCT();
+				if (SUCCEEDED(self->Effect->Begin(&passes, 0))) {
+					self->Effect->BeginPass(0);
+					device->SetVertexDeclaration(declaration);
+					device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, triangles, SurfaceSimVertices, sizeof(VolumetricSmokeQuads::Vertex));
+					self->Effect->EndPass();
+					self->Effect->End();
+					drew = true;
+				}
+			}
+			if (drew) SurfaceAtlas.AfterPair(kind, now);
+		}
+		device->SetDepthStencilSurface(depthStencil);
+		static int loggedSteps = 0;
+		if (loggedSteps < 3 && pairs > 0) { loggedSteps++; Logger::Log("BloodFlow: Surface stepped %d patches, %d pairs of steps (%d patches in all)", SurfaceAtlas.Running(), pairs, SurfaceAtlas.Count()); }
+	}
+	// A patch that has frozen: its blood's box, from its cell read back (one patch at a time, a quarter of a second apart: the
+	// read waits for the graphics card).
+	const int toMeasure = SurfaceMeasureFailed || fabs(now - SurfaceMeasuredAt) < 0.25 ? -1 : SurfaceAtlas.NextToMeasure();
+	if (toMeasure >= 0) {
+		SurfaceMeasuredAt = now;
+		if (!SurfaceMeasureTarget) {
+			if (FAILED(device->CreateRenderTarget(BloodSurface::CellSize, BloodSurface::CellSize, D3DFMT_A16B16G16R16F, D3DMULTISAMPLE_NONE, 0, FALSE, &SurfaceMeasureTarget, NULL)) ||
+				FAILED(device->CreateOffscreenPlainSurface(BloodSurface::CellSize, BloodSurface::CellSize, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &SurfaceMeasureRead, NULL))) {
+				SurfaceMeasureFailed = true;
+				Logger::Log("BloodFlow: Surface cannot read a frozen patch back: frozen patches keep their whole box (they cost more to draw)");
+			}
+		}
+		RECT cell;
+		BloodSurface::Atlas::CellRect(toMeasure, cell);
+		D3DLOCKED_RECT locked;
+		if (!SurfaceMeasureFailed && SUCCEEDED(device->StretchRect(SurfaceTarget[0], &cell, SurfaceMeasureTarget, NULL, D3DTEXF_NONE)) &&
+			SUCCEEDED(device->GetRenderTargetData(SurfaceMeasureTarget, SurfaceMeasureRead)) && SUCCEEDED(SurfaceMeasureRead->LockRect(&locked, NULL, D3DLOCK_READONLY))) {
+			SurfaceAtlas.Measure(toMeasure, locked.pBits, locked.Pitch);
+			SurfaceMeasureRead->UnlockRect();
+			const BloodSurface::Patch& p = SurfaceAtlas.patches[toMeasure];
+			static int loggedMeasures = 0;
+			if (loggedMeasures < 6) {
+				loggedMeasures++;
+				Logger::Log("BloodFlow: Surface patch %d frozen after %.1f s: %s (its box %.0f x %.0f x %.0f of %.0f x %.0f x %.0f units)", toMeasure, p.SimAge, p.Empty ? "no blood left on it" : "measured",
+					p.Box[3] - p.Box[0], p.Box[4] - p.Box[1], p.Box[5] - p.Box[2], 2.0f * p.Half, 2.0f * p.Half, 2.0f * p.Half * BloodSurface::BoxUp);
+			}
+		}
+		else SurfaceAtlas.patches[toMeasure].Measured = true;	// (not again)
+	}
+	SurfaceRead = SurfaceTexture[0];
+	float bounds[4];
+	const int triangles = SurfaceAtlas.BuildBoxes(eye, D3DXVECTOR3(inv._41, inv._42, inv._43), TheRenderManager->ViewProjMatrix, now, maxDistance, s, SurfaceBoxVertices, bounds);
+	RECT area;
+	area.left = (LONG)max(0.0f, floorf(std::clamp(bounds[0], 0.0f, 1.0f) * rw) - 2.0f);
+	area.top = (LONG)max(0.0f, floorf(std::clamp(bounds[1], 0.0f, 1.0f) * rh) - 2.0f);
+	area.right = (LONG)min(rw, ceilf(std::clamp(bounds[2], 0.0f, 1.0f) * rw) + 2.0f);
+	area.bottom = (LONG)min(rh, ceilf(std::clamp(bounds[3], 0.0f, 1.0f) * rh) + 2.0f);
+	if (!triangles || area.right <= area.left || area.bottom <= area.top) return false;
+	GpuProfileScope gpu(drawTimer, device);
+	if (source) device->StretchRect(image, &area, source, &area, D3DTEXF_NONE);
+	device->SetRenderTarget(0, image);
+	RenderRect::ApplyViewport(device);
+	self->Effect->SetTechnique(draw);
+	self->SetCT();
+	if (SUCCEEDED(self->Effect->Begin(&passes, 0))) {
+		self->Effect->BeginPass(0);
+		device->SetVertexDeclaration(declaration);
+		device->DrawPrimitiveUP(D3DPT_TRIANGLELIST, triangles, SurfaceBoxVertices, sizeof(VolumetricSmokeQuads::Vertex));
+		self->Effect->EndPass();
+		self->Effect->End();
+	}
+	return true;
 }
 
 void BloodFlowEffect::Render(IDirect3DDevice9* device, IDirect3DSurface9* target, IDirect3DSurface9* rendered,
@@ -1333,6 +1596,10 @@ void BloodFlowEffect::Render(IDirect3DDevice9* device, IDirect3DSurface9* target
 		}
 	}
 	bindVertexBounds(false);
+	// UNOFFICIAL 2026-11-12 Surface (BloodSurface.h): its patches' steps and their blood, over what is left of BloodFlow's paint.
+	bool surfaceDrew = false;
+	if (SurfaceSettings.Enabled && !SurfaceFailed && SurfaceAtlas.Any())
+		surfaceDrew = RenderSurface(this, device, image, source, previousDepth, eye, inv, rw, rh, Settings.MaxDistance, Declaration);
 	// UNOFFICIAL 2026-10-26 BloodFluid (BloodFluid.h): the simulated blood, over BloodFlow's paint (NVR DXVK only).
 	static GpuTimer fluidTimer("  Blood fluid");
 	bool fluidDrew = false;
@@ -1351,7 +1618,7 @@ void BloodFlowEffect::Render(IDirect3DDevice9* device, IDirect3DSurface9* target
 	if (previousDeclaration) previousDeclaration->Release();
 	if (previousStream) previousStream->Release();
 	// Without the chain the rendered texture is kept equal to the target.
-	if (fluidDrew && !chained && rendered && rendered != target)
+	if ((fluidDrew || surfaceDrew) && !chained && rendered && rendered != target)	// (surfaceDrew: UNOFFICIAL 2026-11-12 Surface)
 		device->StretchRect(target, NULL, rendered, NULL, D3DTEXF_NONE);
 	else if (triangles && area.right > area.left && area.bottom > area.top && !chained && rendered && rendered != target)
 		device->StretchRect(target, &area, rendered, &area, D3DTEXF_NONE);

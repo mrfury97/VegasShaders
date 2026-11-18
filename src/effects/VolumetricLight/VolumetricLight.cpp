@@ -42,8 +42,32 @@ void VolumetricLightEffect::RegisterConstants() {
 }
 
 float VolumetricLightEffect::GridDistance() const {	// UNOFFICIAL 2026-11-07 (ptaaa-fog): as UpdateConstants' Data.w
+	const float expanded = RtFogVisibility::ExpandedGridDistance();	// UNOFFICIAL 2026-11-13 (rtvol2) Expanded: its own reach
+	if (expanded > 0.0f) return expanded;
 	const float day = std::clamp(TheShaderManager->GameState.isDayTime, 0.0f, 1.0f);
 	return std::lerp(Settings.Night.MaxDistance, Settings.Day.MaxDistance, day);
+}
+
+// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded (core/RtFogVisibility.h ExpandedLook): while the last trace was the
+// expanded one, the grid reaches its distance at its density (scaled by night as the Night section scales the day's), and GridData z / w
+// carry the height falloff and the sun glow to the grid and every composite that reads it (this .fx, the Vulkan VolumetricLight passes,
+// the fog's FogGridAir / FogGridLight, D3D9 and Vulkan). z, w 0: exactly the old formulas.
+void VolumetricLightEffect::ApplyExpandedLook() {
+	Constants.GridData.z = 0.0f;
+	Constants.GridData.w = 0.0f;
+	expandedComposite = false;
+	RtFogVisibility::Look look;
+	if (!RtFogVisibility::ExpandedLook(look)) return;
+	const float day = std::clamp(TheShaderManager->GameState.isDayTime, 0.0f, 1.0f);
+	const float nightScale = Settings.Day.Density > 1.0e-6f ? std::lerp(Settings.Night.Density, Settings.Day.Density, day) / Settings.Day.Density : 1.0f;
+	Constants.Data.w = look.distance;
+	Constants.Data.z = look.density * nightScale * 0.001f;
+	expandedComposite = true;	// this effect's own composite draws the light this frame (the fog's has no room for these terms)
+	// the height falloff: the grid (GridLight, GridAirAt) and the march (MarchPS: its lit and all-air shares both), so FSR / DLSS frames
+	// (a RenderScale rect: the march runs) get it too
+	Constants.GridData.z = look.heightInv;
+	// the tight lobe: its g in hundredths as the whole part, its share (at most 0.9) as the fraction
+	if (look.glow > 0.0f) Constants.GridData.w = floorf(std::clamp(look.sharpness, 0.6f, 0.95f) * 100.0f + 0.5f) + std::clamp(look.glow, 0.0f, 0.9f);
 }
 
 void VolumetricLightEffect::RegisterTextures() {
@@ -93,6 +117,7 @@ void VolumetricLightEffect::UpdateConstants() {
 	Constants.Data2.y = std::lerp(n.Anisotropy, d.Anisotropy, day);
 	Constants.Data2.z = fade;
 	Constants.Data3.y = Settings.BlurRadius;
+	ApplyExpandedLook();	// UNOFFICIAL 2026-11-13 (rtvol2): Data.z / w and GridData.z / w; nothing (z, w 0) while it is off
 
 	// The grid's lit share is scaled to about 1 for a view through the whole grid (the half-float grid would round the
 	// small per-cell values of thin air away), and divided back out where it is read.

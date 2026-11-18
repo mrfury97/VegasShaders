@@ -300,24 +300,28 @@ VSOUT FrameVS(VSIN IN)
 }
 
 
-// hash based 3d value noise, same as SnowAccumulation.fx.hlsl's snow-coverage noise
-// function taken from https://www.shadertoy.com/view/XslGRr - Inigo Quilez, 2013, CC BY-NC-SA 3.0
-float hash(float nV)
+// The same noise as SnowAccumulation.fx.hlsl's snow coverage.
+// 3D value noise: a random value in [0, 1) at each whole-number lattice point, blended between the 8 corners of the cell
+// with a smoothstep curve. Output in [0, 1), mean 0.5, one lattice cell per unit. Written for Vegas Shaders (2026-11-15);
+// it replaces upstream's copy of a Shadertoy noise under CC BY-NC-SA 3.0 (not GPL-compatible), with the same range and scale.
+// Lattice hash: Dave Hoskins' "Hash without Sine" hash13, MIT, Copyright (c) 2014 David Hoskins (shadertoy.com/view/4djSRW).
+float hash(float3 p3)
 {
-	return frac(sin(nV) * 43758.5453);
+	p3 = frac(p3 * 0.1031);
+	p3 += dot(p3, p3.zyx + 31.32);
+	return frac((p3.x + p3.y) * p3.z);
 }
 
 float noise(float3 x)
 {
-	float3 pV = floor(x);
-	float3 fV = frac(x);
-	fV = fV * fV * (3.0 - 2.0 * fV);
-	float nV = pV.x + pV.y * 57.0 + 113.0 * pV.z;
-
-	return lerp(lerp(lerp(hash(nV + 0.0), hash(nV + 1.0), fV.x),
-			lerp(hash(nV + 57.0), hash(nV + 58.0), fV.x), fV.y),
-			lerp(lerp(hash(nV + 113.0), hash(nV + 114.0), fV.x),
-			lerp(hash(nV + 170.0), hash(nV + 171.0), fV.x), fV.y), fV.z);
+	float3 iV = floor(x);
+	float3 uV = frac(x);
+	uV = uV * uV * (3.0 - 2.0 * uV);
+	float z0 = lerp(lerp(hash(iV), hash(iV + float3(1, 0, 0)), uV.x),
+			lerp(hash(iV + float3(0, 1, 0)), hash(iV + float3(1, 1, 0)), uV.x), uV.y);
+	float z1 = lerp(lerp(hash(iV + float3(0, 0, 1)), hash(iV + float3(1, 0, 1)), uV.x),
+			lerp(hash(iV + float3(0, 1, 1)), hash(iV + float3(1, 1, 1)), uV.x), uV.y);
+	return lerp(z0, z1, uV.z);
 }
 
 // 3-octave FBM, recentered from noise()'s [0,1] range around a mid value so it can modulate
@@ -497,8 +501,26 @@ float2 LampHazePhase(float2 cosTheta, float g) {
 	return min((1.0 - g * g) * rsqrt(k * k * k), 8.0);
 }
 
+// UNOFFICIAL 2026-11-12 LampHazeShadows ([Shaders.VolumetricFog.Interiors] LampHazeShadows, off by default; VolumetricFog.cpp SetLampHaze,
+// core/RtFogVisibility.h RtFogLamps, Compute/Rt/RtFogLamps.comp): the lamps' light in the air shadowed by the room. The RT core traces,
+// per lamp and screen cell, the share of the lamp's light along the view that really reaches the air (weighed as the integral below
+// weighs it), into 4 x 4 tiles of one texture, one tile a lamp. The lamp's code is its colour texel's alpha: 0 = no trace (the light
+// as before: the branch below is not taken), > 0 = tile + 1 + 32 x the cell size in pixels, < 0 = traced but this lamp has no tile yet
+// (no light in the air this frame). The tiles are bound on stage 11 and read through NVR_FogGrid's sampler (linear, clamp): indoors
+// the volumetric light's grid is never bound, and a sampler of its own was one more than ps_3_0 has (s15 is the sky shares').
+// s01: the pixel's screen position (0..1; rectToScreen of its texture coordinate), kept half a cell inside the tile so the linear read
+// never takes the next lamp's tile in.
+float LampHazeVisibility(float code, float2 s01) {
+	const float cell = floor(code * (1.0 / 32.0));
+	const float tile = code - 32.0 * cell - 1.0;
+	const float2 margin = 0.5 * cell * TESR_ReciprocalResolution.xy;
+	const float row = floor(tile * 0.25);
+	const float2 tileUV = (float2(tile - 4.0 * row, row) + clamp(s01, margin, 1.0 - margin)) * 0.25;
+	return code > 0.5 ? saturate(tex2Dlod(NVR_FogGrid, float4(tileUV, 0.0, 0.0)).r) : 0.0;
+}
+
 // The lamps' light scattered toward the camera along the unit view dir, out to dist (game units), through fog with extinction sigmaT per unit.
-float3 LampHazeLight(float3 dir, float dist, float sigmaT) {
+float3 LampHazeLight(float3 dir, float dist, float sigmaT, float2 s01) {
 	float3 sum = 0.0;
 	const float g = TESR_VolumetricFogLamps.z;
 	const float core = TESR_VolumetricFogLamps.w;
@@ -526,7 +548,11 @@ float3 LampHazeLight(float3 dir, float dist, float sigmaT) {
 				const float2 s = hp * sn / cs;
 				const float2 cosTheta = -s * rsqrt(h2 + s * s + 1.0e-4);	// light's direction at the point vs. toward the camera
 				const float2 phaseT = LampHazePhase(cosTheta, g) * exp(-sigmaT * max(t0 + s, 0.0));
-				sum += tex2Dlod(NVR_FogLamps, float4(u, 0.75, 0.0, 0.0)).rgb * (along * 0.5 * (phaseT.x + phaseT.y));
+				const float4 lampColour = tex2Dlod(NVR_FogLamps, float4(u, 0.75, 0.0, 0.0));
+				float3 lampLight = lampColour.rgb * (along * 0.5 * (phaseT.x + phaseT.y));
+				// UNOFFICIAL 2026-11-12 LampHazeShadows: the lamp's traced visibility along this view (alpha 0, the key off or nothing traced: as before)
+				[branch] if (lampColour.a != 0.0) lampLight *= LampHazeVisibility(lampColour.a, s01);
+				sum += lampLight;
 			}
 		}
 	}
@@ -1061,7 +1087,7 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	// the rest. (ClassicLook: never, the original fog had no lamp light.)
 	if (lamps && !classic) {
 		[branch] if (TESR_VolumetricFogLamps.x > 0.0) {
-			fogAdd += LampHazeLight(eyeDirV, length(eyeVec), strV * nExt * 0.0001) * (TESR_VolumetricFogLamps.x * strV * nIns * 10.0 * skyMaskF);
+			fogAdd += LampHazeLight(eyeDirV, length(eyeVec), strV * nExt * 0.0001, rectToScreen(uvV)) * (TESR_VolumetricFogLamps.x * strV * nIns * 10.0 * skyMaskF);
 		}
 	}
 
@@ -1117,13 +1143,29 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	// the composite pass with the physical sky (DedicatedFogComposite), which sits at ps_3_0's 224 constant registers: any reference
 	// to the floor's constant pushed it over, so those rare pixels (thin edges, foliage gaps) keep NVR's own fog there (the Vulkan
 	// passes, on by default, have no such limit and floor every pixel).
+	// UNOFFICIAL 2026-11-15 FogWall ([Shaders.VolumetricFog.Interiors] GameFogFloor, default 1; docs/next/FOG-WALL.md): indoors the same
+	// constants carry the fade into the cell's fog before its clip distance (the camera's far plane, farZ). Past the clip the game draws
+	// nothing (the cleared background, at the far depth: isDome), and the game's own fog, off while this effect draws, was full by the
+	// cell's fog far and hid that cut. Indoors: the cell's curve, from its fog near to min(fog far, clip) (full fog by the clip even in
+	// the few cells whose fog far lies past it), times a fade over the outer half of that way (t 0.5 to 1), so rooms whose far walls are
+	// nearer keep the look they had; the background (the dome) included, and the cell's own fog colour (pureFog) on both sides of the
+	// cut, so no edge is left. TESR_VolumetricFogSun.x indoors (SunGlow there, an exterior-only setting): 1 / (min(fog far, clip) - near),
+	// 0 for a cell without fog distances (no fade, as the game) (VolumetricFog.cpp UpdateConstants; worked out there because every
+	// constant expression here becomes a preshader register, and the composite passes sit at 224).
+	// Outdoors as before (vfIsExterior 1: the weather's curve, no fade, never on the sky, the mod's fog colour).
 	[branch] if (gameFloor && !classic && TESR_VolumetricFogSun.z > 0.0) {
 		float gameNear = TESR_VolumetricFogSun.w;
-		float gameFog = vfFarFog > gameNear + 1.0 ? pows(saturate((length(eyeVec) - gameNear) / (vfFarFog - gameNear)), vfFogPower) : 0.0;
-		float want = saturate(TESR_VolumetricFogSun.z * gameFog) * (1.0 - isDome);
+		float dist = length(eyeVec);
+		float tOut = vfFarFog > gameNear + 1.0 ? saturate((dist - gameNear) / (vfFarFog - gameNear)) : 0.0;
+		float tIn = saturate((dist - gameNear) * TESR_VolumetricFogSun.x);
+		float t = lerp(tIn, tOut, vfIsExterior);
+		float gameFog = pows(t, vfFogPower);
+		float clipT = saturate(t * 2.0 - 1.0);	// indoors: 0 halfway from the fog near to min(fog far, clip), 1 there
+		float clipFade = lerp(clipT * clipT * (3.0 - 2.0 * clipT), 1.0, vfIsExterior);
+		float want = saturate(TESR_VolumetricFogSun.z * gameFog * clipFade) * (1.0 - isDome * vfIsExterior);
 		float kept = luma(fogMul);	// the share of the picture NVR's fog leaves (its luma weights: no new constant in this full pass)
 		float topUp = saturate((want - (1.0 - kept)) / max(kept, 0.0001));
-		float3 haze = fogTint(ambSkyC, pureFog, strV, vfFogSkyColorCoeff, black, vfFogSaturation).rgb * lerp(float3(1, 1, 1), vfNightTint, nightFactor);
+		float3 haze = lerp(pureFog.rgb, fogTint(ambSkyC, pureFog, strV, vfFogSkyColorCoeff, black, vfFogSaturation).rgb * lerp(float3(1, 1, 1), vfNightTint, nightFactor), vfIsExterior);
 		fogMul *= 1.0 - topUp;
 		fogAdd = lerp(fogAdd, haze, topUp);
 	}

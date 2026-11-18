@@ -1,6 +1,7 @@
 // UNOFFICIAL 2026-11-01: the effects' status registry (EffectStatus.h), the automatic flash detector and the report key (Diagnostics.h).
 #include "Diagnostics.h"
 #include "FlashRule.h"
+#include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the world draw's per-frame series, matched against a beat
 #include "TemporalBackbone.h"
 #include "ImGuiManager.h"
 #include "EffectSelfTestCore.h"	// SelfTestCore::ConvertRow / SavePng (WIC, no device) for the report burst
@@ -685,6 +686,44 @@ namespace {
 
 	const char* Ordinal(int n) { return n == 2 ? "nd" : n == 3 ? "rd" : "th"; }
 
+	// UNOFFICIAL 2026-11-11 BeatSeries (BeatSeries.h): each frame's values of the world draw's series, next to the 64 frames of pictures.
+	// SeriesText: for a beat of that period and phase over the frames first .. last, every series that has the same period and phase.
+	struct SeriesRing { unsigned frame[FinalRing] = {}; unsigned value[FinalRing][BeatSeries::Count] = {}; } Sr;
+	void SeriesEndFrame(unsigned frame, bool on) {
+		BeatSeries::On = on;
+		BeatSeries::Take(Sr.value[frame % FinalRing]);
+		Sr.frame[frame % FinalRing] = on ? frame : 0;
+	}
+	std::string SeriesText(unsigned first, unsigned last, int period, int phase) {
+		if (period < 2 || last < first) return "";
+		enum { Max = 64 };
+		unsigned values[Max]; bool valid[Max], beat[Max];
+		int count = 0, have = 0;
+		for (unsigned f = first; f <= last && count < Max; f++, count++) {
+			valid[count] = f != 0 && Sr.frame[f % FinalRing] == f;
+			beat[count] = (int)(f % (unsigned)period) == phase;
+			have += valid[count] ? 1 : 0;
+		}
+		if (have < 3 * period) { char t[96]; sprintf_s(t, "matches: not judged (the series of only %d of these frames are kept)", have); return t; }
+		std::string matched, rest;
+		for (int id = 0; id < BeatSeries::Count; id++) {
+			for (int i = 0; i < count; i++) values[i] = valid[i] ? Sr.value[(first + i) % FinalRing][id] : 0;
+			const BeatSeries::Match m = BeatSeries::Test(values, valid, beat, count, BeatSeries::IsHash[id]);
+			if (!m.match) { rest += (rest.empty() ? "" : ", ") + std::string(BeatSeries::Name[id]); continue; }
+			char t[320];
+			if (m.kind == 1 && BeatSeries::IsHash[id])
+				_snprintf_s(t, _TRUNCATE, "%s (same period, phase; on the beat frames another value than %08X on all %d others)", BeatSeries::Name[id], m.offLo, m.offFrames);
+			else if (m.kind == 1)
+				_snprintf_s(t, _TRUNCATE, "%s (same period, phase; value on beat frames %u-%u vs %u-%u)", BeatSeries::Name[id], m.onLo, m.onHi, m.offLo, m.offHi);
+			else
+				_snprintf_s(t, _TRUNCATE, "%s (same period; it changes exactly on %s, and on no other; values %u-%u on beat frames, %u-%u on the others)",
+					BeatSeries::Name[id], m.kind == 2 ? "the beat frames" : "the frames after the beat frames", m.onLo, m.onHi, m.offLo, m.offHi);
+			matched += (matched.empty() ? "" : "; ") + std::string(t);
+		}
+		if (matched.empty()) return "matches: none of " + rest + " (" + std::to_string(have) + " frames compared)";
+		return "matches: " + matched + " | not matching: " + (rest.empty() ? "none" : rest);
+	}
+
 	// The upscaler path, as the REPORT block prints it (the TAA state of the given frame; the rest as it is now)
 	std::string UpscalingText(unsigned frame) {
 		SettingManager* s = TheSettingManager;
@@ -921,7 +960,7 @@ namespace {
 	}
 
 	// A flash at frame t: does the flashing part of the picture repeat? The mask's mean over the last frames through BeatRule::Find.
-	std::string PeriodText(unsigned t, uint64_t mask) {
+	std::string PeriodText(unsigned t, uint64_t mask, int* periodOut = nullptr, int* phaseOut = nullptr, unsigned* firstOut = nullptr) {
 		float values[BeatRule::MaxValues];
 		bool valid[BeatRule::MaxValues];
 		unsigned frames[BeatRule::MaxValues];
@@ -934,6 +973,9 @@ namespace {
 			values[count] = valid[count] ? FlashRule::MaskMean(s.luma, mask) : 0.0f;
 		}
 		const BeatRule::Result r = BeatRule::Find(values, valid, frames, count);
+		if (periodOut) *periodOut = r.beat ? r.period : 0;	// UNOFFICIAL 2026-11-11 BeatSeries: a periodic flash is matched against the series
+		if (phaseOut) *phaseOut = r.phase;
+		if (firstOut) *firstOut = first;
 		char text[240];
 		if (r.beat)
 			_snprintf_s(text, _TRUNCATE, "period %d: every %d%s frame over the last %d frames (this frame %s one of them; %.1f x the noise)", r.period, r.period,
@@ -1048,6 +1090,10 @@ namespace {
 			t, b.period, Ordinal(b.period), b.period, b.phase, b.cells, b.amplitude < 0.0 ? "darker" : "brighter", fabs(b.amplitude), fabs(b.amplitude) * 255.0,
 			finalRel * 100.0f, BeatRule::Window, b.score, region, cells, summary.c_str());
 		if (!detail.empty()) Logger::Log("BEAT %u %s", t, detail.c_str());
+		{	// UNOFFICIAL 2026-11-11 BeatSeries: which of the world draw's series beat with it
+			const std::string series = SeriesText(t + 1 - BeatRule::Window, t, b.period, b.phase);
+			if (!series.empty()) Logger::Log("BEAT %u %s", t, series.c_str());
+		}
 		if (now - Bt.lastDump >= 60.0) {
 			Bt.lastDump = now;
 			Logger::Log("BEAT %u conditions: %s", t, ConditionsText(t).c_str());
@@ -1088,7 +1134,10 @@ namespace {
 		const float change = v.meanPrev + v.meanNext > 1e-4f ? (v.meanThis / (0.5f * (v.meanPrev + v.meanNext)) - 1.0f) * 100.0f : 0.0f;
 		char region[48];
 		FlashRule::RegionText(v.mask, region);	// UNOFFICIAL 2026-11-01 step 2: where, and does it repeat
-		const std::string period = PeriodText(t, v.mask);
+		int beatPeriod = 0, beatPhase = 0; unsigned beatFirst = 0;
+		const std::string period = PeriodText(t, v.mask, &beatPeriod, &beatPhase, &beatFirst);
+		// UNOFFICIAL 2026-11-11 BeatSeries: a flash that repeats: which of the world draw's series repeat with it (the frames up to t + 1)
+		const std::string series = beatPeriod >= 2 ? SeriesText(beatFirst, t + 1, beatPeriod, beatPhase) : std::string();
 		char text[1200];
 		_snprintf_s(text, _TRUNCATE, "FLASH at frame %u: %d of 64 cells %s by up to %.3f%s%s%s (picture mean %.3f -> %.3f -> %.3f, %+.0f %%) in %s | cells, top row first: %s | "
 			"camera turn %.1f deg, frame %.1f ms | %s",
@@ -1104,6 +1153,7 @@ namespace {
 			Logger::Log("%s | %s -- automatic flash detector dump %u of at most 50 ([Main.Main.Misc] FlashDetect); paste from here to 'FLASH %u end' into a bug report",
 				text, stageSummary.c_str(), F.dumps, t);
 			if (!stageDetail.empty()) Logger::Log("FLASH %u %s", t, stageDetail.c_str());
+			if (!series.empty()) Logger::Log("FLASH %u %s", t, series.c_str());
 			char head[48];
 			sprintf_s(head, "FLASH %u event", t);
 			FrameJournal::Dump(head, t > 30 ? t - 30 : 0, t + 3);
@@ -1117,6 +1167,7 @@ namespace {
 			F.shortLines++;
 			F.lastShort = now;
 			Logger::Log("%s | %s (no dump: %s)", text, stageSummary.c_str(), F.dumps >= 50 ? "50 dumps written this session" : "one dump per 10 s");
+			if (!series.empty()) Logger::Log("FLASH %u %s", t, series.c_str());
 		}
 		StagesArm("a flash");	// UNOFFICIAL 2026-11-01: armed mode: the probes run for the next 60 s so the next flash is attributed
 	}
@@ -2134,9 +2185,11 @@ namespace {
 		Logger::Log("REPORT %u environment: %s", n, SessionLog::Environment().c_str());
 		{	// UNOFFICIAL 2026-11-01: every setting that differs from the defaults NOW (a tester's preset, loaded live after the SESSION
 			// header, changed ~190 settings the header never saw): the same list as the header's, from the live values
-			char settingsHead[48];
+			char settingsHead[72];
 			sprintf_s(settingsHead, "REPORT %u settings", n);
 			SessionLog::LogSettingsDiff(settingsHead);
+			sprintf_s(settingsHead, "REPORT %u test / internal settings changed", n);	// UNOFFICIAL 2026-11-12: the Developer options and Internal ones
+			SessionLog::LogTestSettingsDiff(settingsHead);
 		}
 		Logger::Log("REPORT %u ray tracing: core: %s | %s | %s | %s", n, RtCore::StatusText() ? RtCore::StatusText() : "?", RtSunShadows::StatusText().c_str(),
 			TheShaderManager->Effects.Reflections ? TheShaderManager->Effects.Reflections->RtStatusText().c_str() : "no Reflections effect", AmbientOcclusionEffect::RtStatusText().c_str());
@@ -2298,7 +2351,8 @@ void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* pi
 		Bt.onRead = true;
 		Bt.on = beat;
 		const bool watch = TheSettingManager->GetSettingI("Main.Main.Misc", "HistoryWatch") != 0;	// UNOFFICIAL 2026-11-01 part 5
-		if (Wt.onRead && watch != Wt.on) {
+		if (watch != Wt.on) {
+			// 2026-11-14: off by default now, and the first frames run before this first read: their probes' surfaces are freed here too
 			Logger::Log("HISTORY watch %s ([Main.Main.Misc] HistoryWatch)", watch ? "on" : "off");
 			if (!watch) for (int k = 0; k < Wt.count; k++) WatchRelease(Wt.slots[k]);
 		}
@@ -2311,8 +2365,43 @@ void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* pi
 	// The burst (this frame's capture, or the read-back / writing after it); the flash detector below keeps running meanwhile
 	if (device) BurstStep(device, picture, frame);
 
+	SeriesEndFrame(frame, (O.flash && !F.failed) || Bt.on);	// UNOFFICIAL 2026-11-11 BeatSeries: this frame's values kept, the counters back to 0
 	if (device) StagesEndFrame(device, frame);	// UNOFFICIAL 2026-11-01: this frame's stage copies, the ones of 3 frames ago read (before the detector judges that frame)
 	if (O.flash && !F.failed && device && picture) FlashFrame(device, picture, frame);
+}
+
+// UNOFFICIAL 2026-11-11: what the world is drawn into (the period-3 interior beat appears only with the game's own MSAA so far).
+void Diagnostics::WorldTargetNote(IDirect3DDevice9* device) {
+	static D3DSURFACE_DESC lastTarget = {}, lastDepth = {};
+	static unsigned lines = 0, calls = 0;
+	if (!device || lines >= 8 || (lines && (++calls & 255))) return;	// the first world scene, then a look every 256th
+	IDirect3DSurface9* target = nullptr; IDirect3DSurface9* depth = nullptr; IDirect3DSurface9* back = nullptr;
+	D3DSURFACE_DESC t = {}, z = {}, b = {};
+	if (SUCCEEDED(device->GetRenderTarget(0, &target)) && target) target->GetDesc(&t);
+	if (SUCCEEDED(device->GetDepthStencilSurface(&depth)) && depth) depth->GetDesc(&z);
+	if (SUCCEEDED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) && back) back->GetDesc(&b);
+	const bool isBack = target && target == back;
+	IDirect3DTexture9* owner = nullptr;	// a texture's level: the game can sample it; a plain surface has to be copied (resolved) first
+	const bool isTexture = target && SUCCEEDED(target->GetContainer(IID_IDirect3DTexture9, (void**)&owner)) && owner;
+	if (owner) owner->Release();
+	const bool same = lines && t.Width == lastTarget.Width && t.Height == lastTarget.Height && t.Format == lastTarget.Format &&
+		t.MultiSampleType == lastTarget.MultiSampleType && t.MultiSampleQuality == lastTarget.MultiSampleQuality && z.Width == lastDepth.Width &&
+		z.Height == lastDepth.Height && z.Format == lastDepth.Format && z.MultiSampleType == lastDepth.MultiSampleType;
+	if (!same) {
+		lines++;
+		lastTarget = t; lastDepth = z;
+		Logger::Log("SESSION world target%s: the world scene is drawn into %s, %ux%u format %u, multisample %u quality %u (%s) | depth-stencil %ux%u format %u, multisample %u quality %u | "
+			"back buffer %ux%u format %u, multisample %u quality %u",
+			lines > 1 ? " (changed)" : "", !target ? "no render target" : isBack ? "the back buffer itself" : isTexture ? "a texture" : "a plain render-target surface (not a texture)",
+			t.Width, t.Height, (unsigned)t.Format, (unsigned)t.MultiSampleType, (unsigned)t.MultiSampleQuality,
+			t.MultiSampleType == D3DMULTISAMPLE_NONE ? "not multisampled: sampled as it is" :
+			isBack ? "multisampled: resolved by a StretchRect out of the back buffer, or by Present" : "multisampled: it must be resolved by a StretchRect into a texture before anything reads it",
+			z.Width, z.Height, (unsigned)z.Format, (unsigned)z.MultiSampleType, (unsigned)z.MultiSampleQuality,
+			b.Width, b.Height, (unsigned)b.Format, (unsigned)b.MultiSampleType, (unsigned)b.MultiSampleQuality);
+	}
+	if (target) target->Release();
+	if (depth) depth->Release();
+	if (back) back->Release();
 }
 
 // --- the report burst's volumetric light stages (VL stages, above; each returns at once unless a burst captures this frame) ---

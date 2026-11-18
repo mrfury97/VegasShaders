@@ -122,8 +122,43 @@ static bool sceneSun(Ctx& c) {
 	const bool ok = bad == 0 && checked > int(T * T) / 2 && byCard > 40 && shadowed > byCard + 20;
 	say("  sun (half resolution %ux%u, alpha card + block): %d pixels checked, %d mismatches; %d shadowed (%d by the card's checker)\n", T, T, checked, bad, shadowed, byCard);
 	if (!ok) { dumpPfm("sun_vis", vis, T, T, 1); dumpPfm("sun_hit", hit, T, T, 1); }
+	// UNOFFICIAL 2026-11-13 ForwardLookup (sun.w 2; RtSunShadows.cpp Record, RtSunShadow.comp): faces turned from the sun are traced too,
+	// the ray started on the face's SUN side (the block's shaded sides: inside the block, so the block itself blocks). Faces toward the
+	// sun must come out exactly as above.
+	put4(k.sun, sun, 2.0f);
+	h.AddPass(gM.shSun, { c.depth, c.normals, gM.sunVis, c.alphaAtlas, c.normals, gM.sunHit }, 0x4, &k, sizeof(k), (T + 7) / 8, (T + 7) / 8);
+	if (!h.Exchange(w, ids, cam.eye)) return false;
+	std::vector<float> vis2;
+	if (!h.Read(gM.sunVis, vis2)) return false;
+	h.EndFrame();
+	int checked2 = 0, bad2 = 0, turned = 0, turnedDark = 0, shown2 = 0;
+	for (UINT j = 0; j < T; j++) for (UINT i = 0; i < T; i++) {
+		bool stable = true, away = false; float wantVis = 1;
+		for (int s = 0; s < 5 && stable; s++) {
+			const float du = s == 1 ? -0.3f : s == 2 ? 0.3f : 0.0f, dv = s == 3 ? -0.3f : s == 4 ? 0.3f : 0.0f;
+			const UINT si = 2 * i + 1, sj = 2 * j + 1;
+			const V3 d = cam.ray((si + 0.5f + du) / S, (sj + 0.5f + dv) / S);
+			const Hit sh = trace(w, cam.eye, d, 1e-3f, 1e9f, 0xFF, true);
+			if (!sh.hit) { if (s == 0) { wantVis = 1; break; } stable = false; break; }
+			const float viewZ = sh.t;
+			const V3 pos = cam.ray((i + 0.5f) / T + du / S, (j + 0.5f) / T + dv / S) * viewZ;
+			const bool back = !(dot(sh.n, sun) > 0);
+			const V3 start = pos + sh.n * ((back ? -1.0f : 1.0f) * (1.0f + 0.001f * viewZ)) + sun * 0.5f;
+			const Hit r = trace(w, cam.eye + start, sun, 0.0f, 30000.0f, 0xFF, true);
+			const float v = r.hit ? 0.0f : 1.0f;
+			if (s == 0) { wantVis = v; away = back; }
+			else if (v != wantVis || back != away) stable = false;
+		}
+		if (!stable) continue;
+		checked2++;
+		if (away) { turned++; if (wantVis == 0) turnedDark++; }
+		if (vis2[j * T + i] != wantVis) { bad2++; if (shown2++ < 5) say("    turned-face pass, pixel (%u, %u): got %.2f, expected %.0f (%s)\n", i, j, vis2[j * T + i], wantVis, away ? "turned from the sun" : "toward the sun"); }
+	}
+	const bool ok2 = bad2 == 0 && checked2 > int(T * T) / 2 && turned >= 3 && turnedDark >= 3;	// (the block's shaded side is a thin strip from above)
+	say("  sun, faces turned from the sun traced too (ForwardLookup, sun.w 2): %d pixels checked, %d mismatches; %d on turned faces, %d of them blocked\n", checked2, bad2, turned, turnedDark);
+	if (!ok2) dumpPfm("sun_vis_turned", vis2, T, T, 1);
 	releaseWorld(h, ids);
-	return ok;
+	return ok && ok2;
 }
 
 // ==============================================================================================================================
@@ -649,6 +684,7 @@ static bool sceneRestirLamps(Ctx& c) {
 struct FragPass {
 	ID3D9NvrExtPipeline* pipe = nullptr;
 	UINT images = 0, push = 0;
+	UINT callerImages = 0;	// (2026-11-15 GIGrassDenoise port) > 0: the callers pass this many; the slots after it get images[2] (the depth) as a stand-in
 };
 static ID3D9NvrExtSampler* gPointClamp = nullptr;
 static bool makeFrag(Host& h, const std::string& file, UINT images, UINT pushSize, FragPass& out) {

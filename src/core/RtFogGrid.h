@@ -23,6 +23,11 @@ namespace RtFogGrid {
 		float prevRight[4];     // xyz right * P00, w its columns
 		float prevUp[4];        // xyz up * P11, w its rows
 		float prevOrigin[4];    // xyz last frame's eye minus this frame's (world units)
+		// UNOFFICIAL 2026-11-13 (rtvol2) ExpandedClouds: the volumetric clouds' shadow map (binding 5); cloud[0] 0 = none (Fill leaves them 0)
+		float cloud[4];         // x strength, y map width (m), z map size (texels), w cloud base (m)
+		float cloudCentre[4];   // xy the map's centre (m), z metres per unit (1 / 70)
+		float cloudLight[4];    // xyz the light the map was drawn along
+		float camera[4];        // xyz the camera's world position (units)
 	};
 
 	// A camera as the grid sees it: unit forward / right / up (scene axes: world, z up), the projection's [0][0] and [1][1], the eye's

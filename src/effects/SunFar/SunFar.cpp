@@ -265,8 +265,13 @@ static void UnshadePlants(IDirect3DDevice9* Device, IDirect3DSurface9* Target) {
 	D3DSURFACE_DESC t = {}, m = {};
 	if (FAILED(Target->GetDesc(&t)) || FAILED(material->GetLevelDesc(0, &m)) || t.Width != m.Width || t.Height != m.Height) return;
 	if (!shader) {
-		static const char* source = "sampler2D M : register(s0); float4 main(float2 uv : TEXCOORD0) : COLOR0 { float4 c = tex2D(M, uv); "
+		static const char* sourceOld = "sampler2D M : register(s0); float4 main(float2 uv : TEXCOORD0) : COLOR0 { float4 c = tex2D(M, uv); "
 			"return float4(1, 1, 1, c.r <= 5.5 * c.a ? saturate(c.r - 4.0 * c.a) : 0.0); }";
+		// UNOFFICIAL 2026-11-14 GBufferV2 (core/CapturedNormals.h): there a is a normal's y and r may carry the specular bit (+16): plants are
+		// the texels whose shading model is 5 (no share at MSAA edges: the old form's r - 4a had one)
+		static const char* sourceV2 = "sampler2D M : register(s0); float4 main(float2 uv : TEXCOORD0) : COLOR0 { float4 c = tex2D(M, uv); "
+			"float k = floor(c.r + 0.01); k -= k >= 16.0 ? 16.0 : 0.0; return float4(1, 1, 1, abs(k - 5.0) < 0.5 ? 1.0 : 0.0); }";
+		const char* source = CapturedNormals::V2Compiled ? sourceV2 : sourceOld;
 		ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
 		if (FAILED(D3DXCompileShader(source, (UINT)strlen(source), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) || !code ||
 			FAILED(Device->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &shader))) shader = nullptr;

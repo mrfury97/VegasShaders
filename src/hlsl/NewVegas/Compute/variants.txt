@@ -71,3 +71,8 @@ AmbientLightEstimate gi0 -DNVR_GI -DGI_SLICES=2 -DGI_STEPS=4
 AmbientLightEstimate gi1 -DNVR_GI -DGI_SLICES=3 -DGI_STEPS=6
 AmbientLightEstimate gi2 -DNVR_GI -DGI_SLICES=4 -DGI_STEPS=8
 AmbientLightApply gi -DNVR_GI_APPLY
+# UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md): test-only switches of [Main.Main.RayTracing], each its own .spv so the
+# plain pass stays byte for byte as before. PTDenoiseConfidence / GIDenoiseConfidence: the RGB temporal pass reading the 1/5-size history
+# confidence (RtDenoiseConfidence.frag). RRMirrorMotion: DLSS RR's guide pass writing the virtual point's motion at flat path-traced mirrors.
+RtDenoiseTemporalRgb conf -DNVR_CONFIDENCE
+DlssRRGuides mirror -DNVR_RR_MIRROR_MOTION

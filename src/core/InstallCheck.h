@@ -33,6 +33,8 @@ namespace InstallCheck {
 
 	const std::vector<Result>& Results();
 	int Count(Level level);
+	// UNOFFICIAL 2026-11-13 a result found later, while the game runs (core/GameShaderPairs.h: shader files of two mods that do not fit)
+	void Note(Level level, const char* group, const std::string& title, const std::string& fix);
 	const char* LevelName(Level level);
 
 	// The whole report, scrubbed, ready for the clipboard

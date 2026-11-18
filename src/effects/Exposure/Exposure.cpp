@@ -51,6 +51,12 @@ void ExposureEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_GT7AdaptData", &Constants.GT7);	// UNOFFICIAL GT7 adaptation (Effects/Includes/GT7Adaptation.hlsl)
 }
 
+// UNOFFICIAL 2026-11-15 fpnative-fix (Exposure.h): the same tests EffectRecord::Render makes before it draws.
+void ExposureEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) {
+	if (Enabled && Effect && ShouldRender()) DrawnFrame = TheFrameRateManager->FrameNumber;
+	EffectRecord::Render(Device, Target, Rendered, techniqueIndex, ClearTarget, Source);
+}
+
 // UNOFFICIAL 2026-10-23 (NVR DXVK): Exposure.frag; the textures and constants the technique reads (EffectRecord::ExtTexturePass).
 bool ExposureEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
 	if (techniqueIndex != 0) return false;	// (technique 1, the GT7 adaptation, has no Vulkan port: it draws its D3D9 pass)

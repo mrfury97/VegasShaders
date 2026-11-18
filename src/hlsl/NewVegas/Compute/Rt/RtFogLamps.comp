@@ -1,0 +1,152 @@
+#version 460
+// UNOFFICIAL 2026-11-12 LampHazeShadows ([Shaders.VolumetricFog.Interiors] LampHazeShadows; core\RtFogVisibility.cpp RtFogLamps, constants by
+// core\RtFogLampGrid.h): the lamps' light in the indoor fog's air (LampHaze, Effects\VolumetricFog.fx.hlsl LampHazeLight) had no shadows: a
+// lamp whose sphere of light reaches through a wall made the air glow on the other side too. The fog works a lamp's light out in closed
+// form along each view (no march), so this pass gives it ONE number per lamp and screen cell: of the light that the fog would scatter
+// toward the camera along this view, the share that really reaches the air. For the lamp of each slot (up to 16) and each cell (one per
+// Cell x Cell pixels):
+//   - the view through the cell, clipped to the lamp's sphere (its reach) and to the first solid surface (one camera ray against the land,
+//     the objects, the lamp models and the far LOD: mask 0x8B, so the hidden first-person body, people and cut-outs never end it);
+//   - forward.w points along that part, spread evenly in phi = atan(s / h') (s along the view from the point nearest the lamp, h' =
+//     sqrt(h^2 + e^2), e = core x reach): that is the density of the glow's main term e^2 / (d^2 + e^2), so the points sit where the light
+//     is; each weighs 1 - w (d^2 + e^2) / e^2 (the fog's f(d) over that density, w = e^2 / (r^2 + e^2): 0 at the reach);
+//   - from each point one ray to the lamp, as the RT lamp shadows trace theirs (RtLampTrace.comp): stopping params.y short of the lamp, the
+//     last params2.x with the near mask (lamp models do not shadow their own light), alpha-tested casters by their texture when params2.y,
+//     decals and glass never block (rtAlphaPassShadow), the hidden first-person body passed over by rays that start or end within reach
+//     of the eye (RtHidden.glsl).
+//   The cell's value = the weighted share of the points that see the lamp. A view that misses the sphere, or whose part of it lies behind
+//   the surface: 1 (the fog adds nothing there anyway).
+//   params2.w 1: the points and the view inside the cell move every frame, and right.w > 0 blends in last frame's value of the same texel
+//   (no reprojection: the value belongs to a whole view, not to a point; the game lowers the weight while the camera moves and drops it
+//   for a slot that changed its lamp, params2.z).
+// Output: R16F 0 .. 1 (binding 2), 4 x 4 tiles of columns x rows: tile (slot mod 4, slot / 4); binding 3 last frame's output.
+// Runs in the 64-bit helper (NvrRtHelper.exe; the binding layout is the helper's: FORK-RT-CORE.md), one thread per cell and lamp.
+// Compile: glslangValidator -V --target-env vulkan1.2 -I. RtFogLamps.comp -o RtFogLamps.spv
+#extension GL_EXT_ray_query : require
+#extension GL_GOOGLE_include_directive : enable
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform accelerationStructureEXT scene;
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 grid;          // x columns, y rows of ONE tile, z tiles across (4), w slots traced (the highest used + 1)
+	vec4 forward;       // xyz camera forward (scene space, unit), w points per cell and lamp (1-8)
+	vec4 right;         // xyz camera right / projection[0][0], w last frame's weight (0: no history this frame)
+	vec4 up;            // xyz camera up / projection[1][1], w the frame (the points' shift)
+	vec4 params;        // x the glow's core as a share of the reach, y a ray stops this far short of its lamp, z far cull mask, w near cull mask
+	vec4 params2;       // x LampModelDistance (0: one segment), y 1: alpha-tested casters tested (binding 4 the atlas),
+	                    // z bit s: slot s holds the same lamp as last frame, w 1: the points move every frame
+	vec4 lamps[16];     // xyz the lamp in scene space (the eye is 0), w its reach (0: an empty slot)
+} p;
+layout(set = 0, binding = 2, r16f) uniform writeonly image2D visibilityImage;
+layout(set = 0, binding = 3, r16f) uniform readonly image2D historyImage;
+layout(set = 0, binding = 4, r16f) uniform readonly image2D alphaAtlas;      // RtCore::AlphaAtlasImage() (or a stand-in, params2.y 0)
+#define RT_ALPHA_ATLAS alphaAtlas
+#include "RtAlpha.glsl"
+#include "RtHidden.glsl"
+
+// The scene-space direction through screen uv (Depth.hlsl toWorld; RtFogVisibility.comp viewRay), not unit
+vec3 viewRay(vec2 uv) { return p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0); }
+
+bool finite3(vec3 v) { const vec3 a = abs(v); return a.x < 1.0e30 && a.y < 1.0e30 && a.z < 1.0e30; }
+
+// A shadow ray over [tMin, tMax] of origin + segment t: true when blocked (RtLampTrace.comp blocked, any hit)
+bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
+	if (!(tMax > tMin)) return false;
+	const bool testAlpha = p.params2.y > 0.5;
+	const uint m = testAlpha ? (mask | 0x10u) : (mask & 0xEFu);
+	// from or toward a point within arm's reach of the eye (the air right in front of the camera, a lamp carried at the eye): the
+	// hidden first-person body is passed over (RtHidden.glsl), as the lamp shadows on the surfaces do
+	if (rtHiddenPassOver(origin, origin + segment, vec3(0.0)))
+		return rtBlockedPassHidden(origin, segment, tMin, tMax, m, testAlpha, kRtAnyHit);
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT), m, origin, tMin, segment, tMax);
+	// at most 256 candidates (a confirmed one still blocks); decals and glass never block a shadow ray (rtAlphaPassShadow)
+	for (uint cap = 0u; rayQueryProceedEXT(q); ) if (++cap > 256u) { rayQueryTerminateEXT(q); break; } else
+		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT &&
+			rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+				rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
+	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+}
+
+// One ray from a point in the air to the lamp: 1 free, 0 blocked
+float lampRay(vec3 point, vec3 lamp) {
+	const vec3 segment = lamp - point;
+	const float len2 = dot(segment, segment);
+	if (!finite3(point) || !finite3(segment) || !(len2 < 1.0e30)) return 1.0;	// not a sane ray: not traced, lit
+	const float stop = max(p.params.y, 0.0);
+	if (len2 <= stop * stop) return 1.0;                                        // at the lamp
+	const float invLen = inversesqrt(len2);
+	const float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
+	const float tSplit = clamp(1.0 - p.params2.x * invLen, 0.0, tEnd);
+	return (blocked(point, segment, 0.0, tSplit, uint(p.params.z)) || blocked(point, segment, tSplit, tEnd, uint(p.params.w))) ? 0.0 : 1.0;
+}
+
+// The first solid surface along a unit view direction from the eye, at most tMax away (the fog's own clip is the depth buffer's surface:
+// the drawn, opaque world. People, the hidden first-person body and cut-outs are left out: they would only move the weights a little)
+float surfaceT(vec3 dir, float tMax) {
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0x8Bu, vec3(0.0), 0.0, dir, tMax);
+	for (uint cap = 0u; rayQueryProceedEXT(q); ) if (++cap > 256u) { rayQueryTerminateEXT(q); break; } else {}
+	return rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT ? rayQueryGetIntersectionTEXT(q, true) : tMax;
+}
+
+void main() {
+	const ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 size = ivec2(p.grid.xy);
+	const int across = clamp(int(p.grid.z + 0.5), 1, 4);
+	if (size.x <= 0 || size.y <= 0 || texel.x >= size.x * across || texel.y >= size.y * across)
+		return;
+	const ivec2 tile = texel / size;
+	const int slot = tile.y * across + tile.x;
+	if (slot >= min(int(p.grid.w + 0.5), 16))
+		return;
+	const ivec2 cell = texel - tile * size;
+	const vec4 lamp = p.lamps[slot];
+
+	float result = 1.0;
+	bool traced = false;
+	if (lamp.w > 0.0 && finite3(lamp.xyz) && lamp.w < 1.0e30) {
+		// the view inside the cell and the points' shift along it: fixed (the centre), or moved per cell, lamp and frame
+		vec3 o = vec3(0.5);
+		if (p.params2.w > 0.5) {
+			const float h = fract(52.9829189 * fract(0.06711056 * float(cell.x + 13 * slot) + 0.00583715 * float(cell.y + 29 * slot)));
+			o = fract(vec3(h, fract(h * 1.618034), fract(h * 2.236068)) + p.up.w * vec3(0.7548777, 0.5698403, 0.6180340));
+		}
+		const vec3 dir = normalize(viewRay((vec2(cell) + o.xy) / p.grid.xy));
+		const float t0 = dot(lamp.xyz, dir);                    // along the view to the point nearest the lamp (LampHazeLight's names)
+		const float h2 = max(dot(lamp.xyz, lamp.xyz) - t0 * t0, 0.0);
+		const float r2 = lamp.w * lamp.w;
+		if (h2 < r2) {
+			const float chord = sqrt(r2 - h2);
+			const float ta = max(t0 - chord, 0.0);
+			float tb = t0 + chord;
+			if (tb > ta) tb = surfaceT(dir, tb);
+			if (tb > ta) {
+				const float core = clamp(p.params.x, 0.05, 1.0);
+				const float e2 = core * core * r2;
+				const float hp = sqrt(h2 + e2);
+				const float pa = atan((ta - t0) / hp), pb = atan((tb - t0) / hp);
+				const float w = e2 / (r2 + e2);
+				const int n = clamp(int(p.forward.w + 0.5), 1, 8);
+				float lit = 0.0, total = 0.0;
+				for (int k = 0; k < n; k++) {
+					const float s = hp * tan(mix(pa, pb, (float(k) + o.z) / float(n)));
+					const float weight = max(1.0 - w * (h2 + s * s + e2) / e2, 0.0);
+					if (weight > 0.0) {
+						lit += weight * lampRay(dir * clamp(t0 + s, ta, tb), lamp.xyz);
+						total += weight;
+					}
+				}
+				if (total > 1.0e-6) { result = lit / total; traced = true; }
+			}
+		}
+	}
+	// last frame's value of this texel: only for a view that was traced now, in a slot that kept its lamp
+	if (traced && p.right.w > 0.0 && ((uint(p.params2.z + 0.5) >> uint(slot)) & 1u) != 0u) {
+		const float last = imageLoad(historyImage, texel).r;
+		if (last >= 0.0 && last <= 1.0) result = mix(result, last, min(p.right.w, 0.97));
+	}
+	imageStore(visibilityImage, texel, vec4(result, 0.0, 0.0, 0.0));
+}

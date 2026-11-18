@@ -2031,3 +2031,7 @@ technique BloodSplatMaskBake
 		ColorWriteEnable = 15;
 	}
 }
+
+// UNOFFICIAL 2026-11-12 Surface ([Shaders.BloodFlow.Surface], off by default): blood as a layer of liquid lying on the ground, simulated
+// per splat and per body in a small patch of the world (techniques BloodSurfaceSim, BloodSurface). Last: its samplers take the next stages.
+#include "Includes/BloodSurface.hlsl"

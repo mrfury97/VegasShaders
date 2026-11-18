@@ -90,6 +90,13 @@ namespace ForwardCloudShadows {
 		device->SetVertexShaderConstantF(160, data, 1);
 		device->SetVertexShaderConstantF(161, Light, 1);
 	}
+	// UNOFFICIAL 2026-11-16 fd-batchB (deferred gaps audit item 22): pixel c169 for a full-screen pass that lights many objects at once
+	// (DeferredSun.h Apply): the frame's strength, not the last object pass's (PassPlant, which Send above follows). PassPlant is left as it is.
+	inline void SendFrame(IDirect3DDevice9* device) {
+		if (!Compiled) return;
+		const float data[4] = { Data[0], Data[1], Data[2], Active ? Data[3] : 0.0f };
+		device->SetPixelShaderConstantF(169, data, 1);
+	}
 	inline void ForPass(IDirect3DDevice9* device, bool plant) {
 		if (!Compiled) return;
 		PassPlant = plant;

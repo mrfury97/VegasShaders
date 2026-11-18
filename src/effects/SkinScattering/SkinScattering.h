@@ -90,6 +90,7 @@ public:
 	void	BindForSkinDraw(NiD3DPixelShaderEx* PixelShader);
 	bool	BindForGameHighlights(NiD3DPixelShaderEx* PixelShader);
 	void	Unbind();
+	void	FillFromDeferredSkin();	// UNOFFICIAL 2026-11-15 DeferredSkinBlur (core/DeferredSkin.h AfterPasses): the targets filled for the deferred skin
 
 	void	UpdateConstants();
 	void	RegisterConstants();

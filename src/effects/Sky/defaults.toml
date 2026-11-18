@@ -10,8 +10,8 @@ SunsetG = 0.0                       # Color boost for sunset/sunrise sun color (
 SunsetB = 0.03                      # Color boost for sunset/sunrise sun color (Blue)
 StarTwinkle = 1.0                   # Speed of the star twinkling
 ColorLook = true                    # UNOFFICIAL (2026-10-28), live: the master switch for the mod's sky colour settings below (TintDay / TintNight, the horizon tints, SaturationDay / SaturationNight) and the sunset colour boost (SunsetR / G / B). Off = all of them stand aside (on the sky, the sky light on objects and the fog's sky colours) and the sky is the weather's own (or the physical sky's). For checking whether a colour on the sky comes from these settings. true = as before.
-TintDayR = 1.0                      # UNOFFICIAL (2026-10-25), live: colour of the sky by day (a colour wheel in the menu). The sky, the sky the clouds blend into, and the sky light on objects are multiplied by it. White = no change. Fades into TintNight over dusk on the same curve as SkyMultiplier.
-TintDayG = 1.0
+TintDayR = 0.55                     # UNOFFICIAL (2026-10-25), live: colour of the sky by day (a colour wheel in the menu). The sky, the sky the clouds blend into, and the sky light on objects are multiplied by it. White = no change. Fades into TintNight over dusk on the same curve as SkyMultiplier. UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.0.
+TintDayG = 0.78                     # UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.0.
 TintDayB = 1.0
 TintNightR = 1.0                    # UNOFFICIAL (2026-10-25), live: colour of the sky at night (a colour wheel in the menu), e.g. a little blue for moonlit nights. White = no change.
 TintNightG = 1.0
@@ -24,7 +24,7 @@ TintHorizonNightR = 1.0             # UNOFFICIAL (2026-10-26), live: the same at
 TintHorizonNightG = 1.0
 TintHorizonNightB = 1.0
 TintGradientHeight = 0.3            # UNOFFICIAL (2026-10-26), live [0.01-1.0]: how high up the horizon colour reaches before it has faded out (0.3 = about 17 degrees above the horizon, 1 = all the way overhead).
-SaturationDay = 1.0                 # UNOFFICIAL (2026-10-26), live [0.0-2.0]: how colourful the sky is by day, without changing its brightness. 1 = no change, lower = paler and greyer (e.g. 0.6 tones down a strong weather blue), higher = more colourful. Also the sky the clouds blend into and the sky light on objects.
+SaturationDay = 1.6                 # UNOFFICIAL (2026-10-26), live [0.0-2.0]: how colourful the sky is by day, without changing its brightness. 1 = no change, lower = paler and greyer (e.g. 0.6 tones down a strong weather blue), higher = more colourful. Also the sky the clouds blend into and the sky light on objects. UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.0.
 SaturationNight = 1.0               # UNOFFICIAL (2026-10-26), live [0.0-2.0]: the same at night.
 MoonBrightness = 1.0                # UNOFFICIAL (2026-10-25), live [0.0-4.0]: how bright the moon is at night: the moon disc in the sky and the moonlight on the world (the game's night light, and the mod's effects that use it). 1 = no change, 0.5 half as bright, 2 twice. Outdoors only; the sun is untouched.
 

@@ -6,6 +6,14 @@ with `CAS_BETTER_DIAGONALS` and AMD's default one weight for all channels (green
 src/hlsl/NewVegas/Effects/Sharpening.fx.hlsl (D3D9) and src/hlsl/NewVegas/Compute/Sharpening.frag (Vulkan); keep the two equal.
 The C++ is unchanged. The old shader (a weighted 3x3 average, pushed away by a luma-weighted contrast) is gone.
 
+2026-11-18 (owner decision, branch vs-1.1.0-plus-fork): upstream 1.1.0 had ported this CAS behind a switch, `[Shaders.Sharpening.Main] CAS`
+(default false: the old filter, Strength 0.75). That switch is folded in: CAS is the only filter again and the `CAS` key is gone (w of
+`TESR_SharpeningData` is always 0). Settings step 90 (`Configuration::UpdateOldDefaults`) moves a saved Strength of 0.75 (the old default,
+outdoors and indoors) to 0.5 once, unless the saved `CAS` was true (that player already saw CAS at their Strength), keeps any other saved
+Strength (it reads as a CAS sharpness, clamped to 0..1), and removes a saved `CAS` key so it is not reported as unknown. `Enabled` stays off
+by default. A Strength of 0 is CAS's lightest setting, not "off" (it was no sharpening with the old filter): use `Enabled`. The menu's
+"Sharpening distance" (Offset) is the fade-out distance, not a width.
+
 ## 1. Purpose
 
 Sharpening makes near surfaces look crisper. CAS adapts per pixel: it measures how much headroom the pixel has before its 3x3 neighbourhood

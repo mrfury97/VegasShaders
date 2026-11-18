@@ -53,6 +53,27 @@ namespace FlashlightLamp {
 	inline std::unordered_set<const void*> Wrote[2];	// geometry that wrote the G-buffer: this frame, the last
 	inline int Current = 0;
 	inline unsigned long long StatZero = 0, StatCone = 0, StatOut = 0;
+	// UNOFFICIAL 2026-11-13 (docs/next/FLASHLIGHT-AUDIT-2026-11-13.md, raster: objects drawn without records got no flashlight) the pass
+	// the hooks are drawing now (ForPass .. AfterPass), the pixel shader bound for it, and a look at what the lamp does per pass:
+	// with GameLightTest 10 or more, the 60th frame after it was set is logged in full ("FLASHLAMP" lines).
+	inline const NiGeometry* PassGeometry = nullptr;
+	inline const char* BoundName = "";
+	inline bool BoundGame = false;	// the bound pixel shader is the game's own (no record of the mod's)
+	inline const char* BoundVertexName = "";
+	inline bool BoundVertexGame = false;	// ... and the vertex shader bound with it
+	inline int TestMode = 0;		// [Shaders.Flashlight.Deferred] GameLightTest (test only), its ones: 2 = the lamp is never zeroed for an object with records
+	inline int DiagRaw = 0, DiagSeen = 0;	// ... the whole value: 10 or more = the look at one frame, 60 frames after each change of it
+	inline int DiagNamed = 0, DiagDumps = 0;
+	inline char PendLights[160] = "";
+	inline unsigned DiagFrames = 0;
+	inline bool DiagNow = false;
+	inline int DiagLines = 0, DiagOwnLines = 0;
+	struct DiagPass { bool valid; const NiGeometry* geometry; UInt16 type; UInt8 lights, maxLights; int index; float dimmer, cone, dist, radius; bool wrote0, wrote1, span; };
+	inline DiagPass Pend = {};
+	inline unsigned DPasses = 0, DListed = 0, DZero = 0, DCone = 0, DOut = 0, DUnlistedInBeam = 0, DNotes = 0, DNoteNoHook = 0, DNoteOther = 0, DGameInBeam = 0, DGameLit = 0;
+	inline const char* BoundPairNote = "";	// (core/GameShaderPairs.h: the bound pair does not fit / was repaired)
+	inline unsigned DGameMisfit = 0;
+	inline void NoteBind(const char* name, bool game, const char* vertexName, bool vertexGame, const char* pairNote = "") { BoundName = name ? name : ""; BoundGame = game; BoundVertexName = vertexName ? vertexName : ""; BoundVertexGame = vertexGame; BoundPairNote = pairNote ? pairNote : ""; }
 
 	inline bool Is(const void* light) { return light && light == Lamp; }
 
@@ -64,13 +85,44 @@ namespace FlashlightLamp {
 			frames = 0; StatZero = StatCone = StatOut = 0;
 		}
 		Current ^= 1; Wrote[Current].clear();
+		if (DiagNow) {
+			Logger::Log("FLASHLAMP frame: %u hooked passes; the lamp in the pass's list %u (dimmer 0 because the object wrote records %u, lit by its cone %u, cone 0 %u); in the beam and reach but the lamp NOT in the list %u; the game's own pixel shader on a pass in the beam %u, of them lit by the lamp %u, of those with a shader pair that does not fit (GameShaderPairs) and was not repaired %u; record notes %u (outside a hooked pass %u, the engine's current pass was another object than the hooked one %u); test mode %d",
+				DPasses, DListed, DZero, DCone, DOut, DUnlistedInBeam, DGameInBeam, DGameLit, DGameMisfit, DNotes, DNoteNoHook, DNoteOther, TestMode);
+			DiagNow = false;
+		}
+		DPasses = DListed = DZero = DCone = DOut = DUnlistedInBeam = DNotes = DNoteNoHook = DNoteOther = DGameInBeam = DGameLit = DGameMisfit = 0;
+		if (DiagRaw != DiagSeen) { DiagSeen = DiagRaw; DiagFrames = 0; }
+		if (Lamp && DiagRaw >= 10) {
+			if (++DiagFrames == 60) {
+				DiagNow = true; DiagLines = DiagOwnLines = DiagNamed = DiagDumps = 0;
+				// the lamp as the game's scene holds it: its entry, and the objects the game says it lights
+				const ShadowSceneLight* entry = nullptr;
+				for (NiTList<ShadowSceneLight>::Entry* e = SceneNode ? SceneNode->lights.start : nullptr; e && !entry; e = e->next) if (e->data && e->data->sourceLight == Lamp) entry = e->data;
+				if (!entry) Logger::Log("FLASHLAMP lamp: NOT in the scene's light list (reach %.0f, dimmer %.2f)", Lamp->Spec.r, Lamp->Dimmer);
+				else {
+					std::string names; int n = 0, rocks = 0;
+					for (NiTList<NiGeometry>::Entry* g = entry->kGeometryList.start; g && n < 4000; g = g->next, n++) {
+						const char* nm = g->data && g->data->m_pcName ? g->data->m_pcName : "?";
+						if (strstr(nm, "Rock") || strstr(nm, "rock")) rocks++;
+						if (n < 14) { names += nm; names += ", "; }
+					}
+					Logger::Log("FLASHLAMP lamp: in the scene's list: enabled %u, point %d, LOD dimmer %.2f, fade %.2f, reach %.0f, dimmer %.2f, at %.0f %.0f %.0f; its own geometry list holds %d objects (%u counted by the game), %d with 'rock' in the name; first: %s",
+						(unsigned)entry->bIsEnabled, entry->bPointLight ? 1 : 0, entry->fLODDimmer, entry->fFade, Lamp->Spec.r, Lamp->Dimmer, Lamp->m_worldTransform.pos.x, Lamp->m_worldTransform.pos.y, Lamp->m_worldTransform.pos.z,
+						n, (unsigned)entry->kGeometryList.numItems, rocks, names.c_str());
+				}
+			}
+		}
+		else DiagFrames = 0;
 	}
 
 	// CapturedNormals::BeforeDraw, for a draw that writes the G-buffer: the object of the pass being drawn (BSShaderManager::pCurrentRenderPass).
 	inline void NoteWrite() {
 		if (!Lamp) return;
 		const void* pass = *(void* const*)0x011F91E0;
-		if (pass) if (const void* geometry = *(void* const*)pass) Wrote[Current].insert(geometry);
+		const void* engine = pass ? *(void* const*)pass : nullptr;
+		DNotes++;
+		if (!PassGeometry) DNoteNoHook++; else if (engine != (const void*)PassGeometry) DNoteOther++;
+		if (engine) Wrote[Current].insert(engine);
 	}
 
 	// The share of a bound inside the beam: the cone (smooth from the outer edge to the full-strength edge, squared as the light pass's)
@@ -91,23 +143,44 @@ namespace FlashlightLamp {
 	// Before the game sets a pass up (Render.cpp ForwardShadowsForPass). pass: BSShaderProperty::RenderPass (+0 geometry, +4 the pass
 	// type, +9 the light count, +0xC the ShadowSceneLight list); inGBufferSpan: the world's main list, while the G-buffer is captured.
 	inline void ForPass(const void* pass, bool inGBufferSpan) {
+		Pend.valid = false;
+		PassGeometry = pass ? *(NiGeometry* const*)pass : nullptr;
 		if (!Lamp || !pass) return;
 		const UInt8* p = (const UInt8*)pass;
 		const UInt8 count = p[9];
 		ShadowSceneLight* const* lights = *(ShadowSceneLight* const* const*)(p + 0xC);
 		int index = -1;
 		for (UInt8 i = 0; lights && i < count && index < 0; i++) if (lights[i] && lights[i]->sourceLight == Lamp) index = i;
-		if (index < 0) return;
 		NiGeometry* geometry = *(NiGeometry* const*)p;
 		const UInt16 type = *(const UInt16*)(p + 4);
+		if (DiagNow && geometry) {	// (the look at one frame: this pass, for AfterPass's line once its shader is known)
+			const NiBound* b = geometry->m_kWorldBound;
+			const float cone = ConeAt(b);
+			float dist = 0.0f, radius = 0.0f;
+			if (b) { const D3DXVECTOR3 v(b->Center.x - Position.x, b->Center.y - Position.y, b->Center.z - Position.z); dist = D3DXVec3Length(&v); radius = b->Radius; }
+			Pend = { true, geometry, type, count, p[0xA], index, 0.0f, cone, dist, radius, Wrote[0].count(geometry) != 0, Wrote[1].count(geometry) != 0, inGBufferSpan };
+			PendLights[0] = 0;
+			for (UInt8 i = 0; lights && i < count && i < 5; i++) {
+				char one[40];
+				const ShadowSceneLight* l = lights[i];
+				if (!l) snprintf(one, sizeof(one), "[%u empty] ", (unsigned)i);
+				else snprintf(one, sizeof(one), "[%u %s r %.0f d %.2f] ", (unsigned)i, l->sourceLight == Lamp ? "FLASH" : l->bPointLight ? "lamp" : "sun", l->sourceLight ? l->sourceLight->Spec.r : 0.0f, l->sourceLight ? l->sourceLight->Dimmer : 0.0f);
+				strncat(PendLights, one, sizeof(PendLights) - strlen(PendLights) - 1);
+			}
+			DPasses++;
+			if (index >= 0) DListed++;
+			else if (cone > 0.0f && dist - radius < Lamp->Spec.r) DUnlistedInBeam++;
+		}
+		if (index < 0) return;
 		const bool envPass = type >= 0x244 && type <= 0x24B;
 		float dimmer;
-		if (inGBufferSpan && !envPass && geometry && (Wrote[0].count(geometry) || Wrote[1].count(geometry))) { dimmer = 0.0f; StatZero++; }
+		if (TestMode != 2 && inGBufferSpan && !envPass && geometry && (Wrote[0].count(geometry) || Wrote[1].count(geometry))) { dimmer = 0.0f; StatZero++; if (DiagNow) DZero++; }
 		else {
 			const float cone = ConeAt(geometry ? geometry->m_kWorldBound : nullptr);
 			dimmer = Dimmer * cone;
-			if (cone > 0.0f) StatCone++; else StatOut++;
+			if (cone > 0.0f) { StatCone++; if (DiagNow) DCone++; } else { StatOut++; if (DiagNow) DOut++; }
 		}
+		Pend.dimmer = dimmer;
 		Lamp->Dimmer = dimmer;
 		Changed = true;
 		// 2026-11-04 the per-pixel cone (ObjectTemplate.hlsl NVR_FlashLamp, c28-c30): which slot of the shader's lamps it is (light k of the
@@ -130,6 +203,56 @@ namespace FlashlightLamp {
 		else if (!BoundWants && SlotSet) { static const float none[3][4] = {}; TheRenderManager->device->SetPixelShaderConstantF(28, &none[0][0], 3); SlotSet = false; }
 	}
 	inline void AfterPass() {
+		if (DiagNow && Pend.valid && Lamp) {	// one frame's look: passes in the beam drawn by the game's own shader, and a few of the mod's the lamp lights
+			const bool inBeam = Pend.cone > 0.0f && Pend.dist - Pend.radius < Lamp->Spec.r;
+			if (BoundGame && inBeam) { DGameInBeam++; if (Pend.index >= 0 && Pend.dimmer > 0.0f) { DGameLit++; if (strstr(BoundPairNote, "NOT")) DGameMisfit++; } }
+			const bool own = !BoundGame && Pend.index >= 0 && Pend.dimmer > 0.0f;
+			const char* name = Pend.geometry->m_pcName ? Pend.geometry->m_pcName : "(unnamed)";
+			const NiAVObject* parent = (const NiAVObject*)Pend.geometry->m_parent;
+			const char* parentName = parent && parent->m_pcName ? parent->m_pcName : "?";
+			const bool named = strstr(name, "Rock") || strstr(parentName, "Rock") || strstr(name, "rock") || strstr(parentName, "rock");
+			if ((named && DiagNamed < 30 && ++DiagNamed) || (BoundGame && inBeam && Pend.dist < 3000.0f && DiagLines < 16 && ++DiagLines) || (own && DiagOwnLines < 8 && ++DiagOwnLines)) {
+				Logger::Log("FLASHLAMP pass 0x%03X %s (%s) with %s (%s)%s '%s' < '%s': lights %u of %u, the lamp %s (index %d), dimmer %.2f of %.2f, cone at its bound %.2f, bound %.0f from the light, radius %.0f, lamp reach %.0f; records this frame %d, last %d; main list %d",
+					Pend.type, BoundName, BoundGame ? "the game's shader" : "the mod's shader", BoundVertexName, BoundVertexGame ? "the game's" : "the mod's", BoundPairNote, name, parentName, Pend.lights, Pend.maxLights,
+					Pend.index >= 0 ? "IN its list" : "NOT in its list", Pend.index, Pend.dimmer, Dimmer, Pend.cone, Pend.dist, Pend.radius, Lamp->Spec.r, Pend.wrote0 ? 1 : 0, Pend.wrote1 ? 1 : 0, Pend.span ? 1 : 0);
+				Logger::Log("FLASHLAMP      its lights: %s", PendLights);
+				if (named && Pend.index >= 0 && DiagDumps < 3) {	// what the device holds right after this pass's draw
+					DiagDumps++;
+					IDirect3DDevice9* d = TheRenderManager->device;
+					float ps[5][4] = {}, vs[4][4] = {};
+					d->GetPixelShaderConstantF(1, ps[0], 1); d->GetPixelShaderConstantF(3, ps[1], 3); d->GetPixelShaderConstantF(27, ps[4], 1);
+					d->GetVertexShaderConstantF(16, vs[0], 1); d->GetVertexShaderConstantF(25, vs[1], 3);
+					Logger::Log("FLASHLAMP      device: PS c1 ambient %.3f %.3f %.3f %.3f | c3 light0 %.3f %.3f %.3f %.3f | c4 light1 %.3f %.3f %.3f %.3f | c5 light2 %.3f %.3f %.3f %.3f | c27 toggles %.2f %.2f %.2f %.2f",
+						ps[0][0], ps[0][1], ps[0][2], ps[0][3], ps[1][0], ps[1][1], ps[1][2], ps[1][3], ps[2][0], ps[2][1], ps[2][2], ps[2][3], ps[3][0], ps[3][1], ps[3][2], ps[3][3], ps[4][0], ps[4][1], ps[4][2], ps[4][3]);
+					Logger::Log("FLASHLAMP      device: VS c16 eye %.1f %.1f %.1f %.2f | c25 light0 %.3f %.3f %.3f %.2f | c26 light1 %.1f %.1f %.1f r %.1f | c27 light2 %.1f %.1f %.1f r %.1f",
+						vs[0][0], vs[0][1], vs[0][2], vs[0][3], vs[1][0], vs[1][1], vs[1][2], vs[1][3], vs[2][0], vs[2][1], vs[2][2], vs[2][3], vs[3][0], vs[3][1], vs[3][2], vs[3][3]);
+					const NiTexture* attXY = *(NiTexture**)0x011F9534; const NiTexture* attZ = *(NiTexture**)0x011F9538;
+					const void* dXY = attXY && attXY->rendererData ? (const void*)attXY->rendererData->dTexture : nullptr;
+					const void* dZ = attZ && attZ->rendererData ? (const void*)attZ->rendererData->dTexture : nullptr;
+					std::string stages;
+					for (DWORD s = 0; s < 8; s++) {
+						IDirect3DBaseTexture9* t = nullptr; d->GetTexture(s, &t);
+						D3DSURFACE_DESC desc = {};
+						if (t && t->GetType() == D3DRTYPE_TEXTURE) ((IDirect3DTexture9*)t)->GetLevelDesc(0, &desc);
+						DWORD au = 0, mag = 0, mip = 0, srgb = 0; d->GetSamplerState(s, D3DSAMP_ADDRESSU, &au); d->GetSamplerState(s, D3DSAMP_MAGFILTER, &mag); d->GetSamplerState(s, D3DSAMP_MIPFILTER, &mip); d->GetSamplerState(s, D3DSAMP_SRGBTEXTURE, &srgb);
+						char one[120]; snprintf(one, sizeof(one), "s%u %p%s %ux%u f%d addr %u mag %u mip %u srgb %u | ", (unsigned)s, (void*)t, (const void*)t == dXY ? " =attXY" : (const void*)t == dZ ? " =attZ" : "", desc.Width, desc.Height, (int)desc.Format, (unsigned)au, (unsigned)mag, (unsigned)mip, (unsigned)srgb);
+						stages += one;
+						if (t) t->Release();
+					}
+					{	// the shaders on the device (their bytecode's length and version: a replaced or repaired shader shows here)
+						IDirect3DPixelShader9* dp = nullptr; IDirect3DVertexShader9* dv = nullptr; d->GetPixelShader(&dp); d->GetVertexShader(&dv);
+						UINT pn = 0, vn = 0; DWORD pt[2] = {}, vt[2] = {};
+						if (dp) { dp->GetFunction(nullptr, &pn); if (pn >= 4) { std::string code(pn, '\0'); if (SUCCEEDED(dp->GetFunction(&code[0], &pn))) memcpy(pt, code.data(), 4); } dp->Release(); }
+						if (dv) { dv->GetFunction(nullptr, &vn); if (vn >= 4) { std::string code(vn, '\0'); if (SUCCEEDED(dv->GetFunction(&code[0], &vn))) memcpy(vt, code.data(), 4); } dv->Release(); }
+						Logger::Log("FLASHLAMP      device: pixel shader %p, %u bytes, ps_%u_%u | vertex shader %p, %u bytes, vs_%u_%u", (void*)dp, (unsigned)pn, (unsigned)((pt[0] >> 8) & 0xFF), (unsigned)(pt[0] & 0xFF), (void*)dv, (unsigned)vn, (unsigned)((vt[0] >> 8) & 0xFF), (unsigned)(vt[0] & 0xFF));
+					}
+					DWORD ab = 0, sb = 0, db = 0, cw = 0, zf = 0, zw = 0; d->GetRenderState(D3DRS_ALPHABLENDENABLE, &ab); d->GetRenderState(D3DRS_SRCBLEND, &sb); d->GetRenderState(D3DRS_DESTBLEND, &db); d->GetRenderState(D3DRS_COLORWRITEENABLE, &cw); d->GetRenderState(D3DRS_ZFUNC, &zf); d->GetRenderState(D3DRS_ZWRITEENABLE, &zw);
+					Logger::Log("FLASHLAMP      device: the game's falloff textures XY %p Z %p; stages: %s blend %u src %u dst %u, colour write %X, z func %u write %u", dXY, dZ, stages.c_str(), (unsigned)ab, (unsigned)sb, (unsigned)db, (unsigned)cw, (unsigned)zf, (unsigned)zw);
+				}
+			}
+		}
+		Pend.valid = false;
+		PassGeometry = nullptr;
 		if (Changed) { if (Lamp) Lamp->Dimmer = Dimmer; Changed = false; }
 		HasPending = false;
 		if (SlotSet) { static const float none[4] = {}; TheRenderManager->device->SetPixelShaderConstantF(28, none, 1); SlotSet = false; }	// (no other draw takes it)

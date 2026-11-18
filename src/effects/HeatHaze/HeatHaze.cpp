@@ -5,6 +5,7 @@
 
 #include "HeatHaze.h"
 #include "../../core/FrameClock.h"
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 
 void HeatHazeEffect::RegisterConstants() {
@@ -45,7 +46,7 @@ void HeatHazeEffect::UpdateConstants() {
 	if (TheShaderManager->GameState.isCloudy) weatherTarget = Settings.CloudyScale;
 	if (TheShaderManager->GameState.isRainy || TheShaderManager->GameState.isSnow) weatherTarget = 0.0f;
 	WetWorldEffect* wet = TheShaderManager->Effects.WetWorld;
-	if (wet) weatherTarget *= 1.0f - std::clamp(max(wet->Constants.Data.x, wet->Constants.Data.z), 0.0f, 1.0f);
+	if (wet) weatherTarget *= 1.0f - std::clamp(RainState::Factor(), 0.0f, 1.0f);	// UNOFFICIAL 2026-11-12 RainStateGuard (core/RainState.h; off: the old max of WetWorld's Data.x and z)
 	// Eased over about ten seconds, so a weather change fades the haze rather than switching it.
 	float ease = min(1.0f, elapsed / 10.0f);
 	WeatherHeat += (weatherTarget - WeatherHeat) * ease;

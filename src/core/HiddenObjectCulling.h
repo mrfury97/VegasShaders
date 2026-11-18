@@ -23,6 +23,7 @@
 // answers are keyed by the NiGeometry pointer: when a cell loads, a new object can be created at a freed object's address
 // and inherit its "hidden" answers. Each state now keeps the object's parent, world position and scale, and forgets its
 // answers when they differ (this also stops culling objects while they move).
+#include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 namespace HiddenObjectCulling {
 
 	enum { Slots = 8 };		// answers kept per object (frames F .. F-7); usable ages 1 .. Slots-1
@@ -35,6 +36,7 @@ namespace HiddenObjectCulling {
 	};
 
 	inline bool Enabled = false;		// the setting, read each frame
+	inline bool BoundLamp = false;		// UNOFFICIAL 2026-11-11 BeatSeries: the shader bound last is a lamp-only one (whether or not culling is on)
 	inline bool LampPass = false;		// the pass about to be drawn is a lamp-only pass (OnBind; used once by Before)
 	inline bool Active = false;			// culling the current world scene
 	inline bool WorldSeen = false;		// a world scene was already drawn this frame
@@ -61,11 +63,13 @@ namespace HiddenObjectCulling {
 	// them (both are additive lamp passes).
 	inline void OnBind(const NiD3DPixelShaderEx* shader) {
 		LampPass = false;
-		if (!Active || !shader || !shader->Name) return;
+		BoundLamp = false;
+		if (!shader || !shader->Name) return;
 		const char* name = shader->Name;
 		if (strncmp(name, "SLS20", 5) || strlen(name) != 11 || strcmp(name + 7, ".pso")) return;
 		const int number = (name[5] - '0') * 10 + (name[6] - '0');
-		LampPass = number == 45 || number == 46 || (number >= 51 && number <= 56);
+		BoundLamp = number == 45 || number == 46 || (number >= 51 && number <= 56);
+		LampPass = Active && BoundLamp;	// (as before: only while culling the world scene)
 	}
 
 	inline void ReleaseAll() {
@@ -173,7 +177,7 @@ namespace HiddenObjectCulling {
 		s.lastSeen = FrameNo;
 		if (s.frame == FrameNo) {
 			if (s.passes < 0xFFFF) s.passes++;
-			if (s.hidden && lampPass) { if (GpuTimer::Enabled) StatSkipped += 1; return true; }
+			if (s.hidden && lampPass) { BeatSeries::Add(BeatSeries::LampPassesHidden); if (GpuTimer::Enabled) StatSkipped += 1; return true; }
 			if (GpuTimer::Enabled) { StatDrawnLater += 1; if (s.hidden) StatKept += 1; }
 			return false;
 		}

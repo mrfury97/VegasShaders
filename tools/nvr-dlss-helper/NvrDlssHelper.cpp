@@ -254,6 +254,85 @@ namespace {
 		PFN_vkImportSemaphoreWin32HandleKHR	importSemaphoreWin32Handle = nullptr;
 	};
 
+	// UNOFFICIAL 2026-11-15 (docs/next/DLSS-RR-MODEL.md) Ray Reconstruction's model. nvngx_dlssd.dll 310.9.16 (the one NVR ships)
+	// already holds NVIDIA's second-generation RR transformer ("DLSS 4.5 Ray Reconstruction", NGX preset F, "RR2" in its strings, with
+	// kernels for sm_75 .. sm_120) and gates it on driver 580.00: an explicit F on an older driver fails the feature creation. PCGH
+	// (2026-08-25): F runs about as fast as the first-generation model on RTX 40 / 50 but costs up to 25-29 % of the frame rate on
+	// RTX 20 / 30 (no FP8 in their tensor cores). So RRPreset 4 (auto) sends F on Ada and newer and E (the first-generation transformer,
+	// the model DLSS itself falls back to without the driver) on Turing / Ampere. The generation comes from the PCI device id, NVIDIA's
+	// ranges by chip family: Vulkan has no portable "architecture" query, and NGX's only one (FeatureRequirement.MinHWArchitecture) is
+	// a minimum, not the GPU's own. Outside the SDK guard so the pass-through build and --probe run the same choice.
+	enum class NvidiaGeneration { Unknown, BeforeTuring, Turing, Ampere, AdaOrNewer };
+
+	NvidiaGeneration GenerationOf(uint32_t deviceId) {
+		if (deviceId < 0x1E00) return NvidiaGeneration::BeforeTuring;						// Pascal, Volta and older (no DLSS)
+		if (deviceId < 0x2000) return NvidiaGeneration::Turing;							// TU102 / TU104 / TU106 / TU117 (RTX 20, GTX 16)
+		if (deviceId < 0x2180) return NvidiaGeneration::Ampere;							// GA100
+		if (deviceId < 0x2200) return NvidiaGeneration::Turing;							// TU116 (GTX 16)
+		if (deviceId < 0x2300) return NvidiaGeneration::Ampere;							// GA102 (RTX 3080 / 3090, A-series)
+		if (deviceId < 0x2400) return NvidiaGeneration::AdaOrNewer;						// GH100 (Hopper: FP8 tensor cores, data centre)
+		if (deviceId < 0x2600) return NvidiaGeneration::Ampere;							// GA103 / GA104 / GA106 / GA107 (RTX 30)
+		if (deviceId < 0x3000) return NvidiaGeneration::AdaOrNewer;						// AD10x (RTX 40, L4, L40) 0x26xx-0x28xx; GB10x / GB20x (RTX 50) 0x29xx-0x2Fxx
+		return NvidiaGeneration::Unknown;												// later families: not guessed
+	}
+
+	const char* GenerationName(NvidiaGeneration g) {
+		switch (g) {
+		case NvidiaGeneration::BeforeTuring: return "older than RTX 20";
+		case NvidiaGeneration::Turing: return "RTX 20 class (Turing)";
+		case NvidiaGeneration::Ampere: return "RTX 30 class (Ampere)";
+		case NvidiaGeneration::AdaOrNewer: return "RTX 40 / 50 class (Ada, Blackwell or Hopper)";
+		default: return "an unknown generation";
+		}
+	}
+
+	// NVIDIA's Vulkan driverVersion packing: 10 bits major, 8 bits minor (581.57 = 581 << 22 | 57 << 14).
+	uint32_t NvidiaDriverMajor(uint32_t driverVersion) { return driverVersion >> 22; }
+	uint32_t NvidiaDriverMinor(uint32_t driverVersion) { return (driverVersion >> 14) & 0xFF; }
+	const uint32_t kRrPresetFMinDriverMajor = 580;	// nvngx_dlssd.dll 310.9.16: "Preset_F selected but driver %d.%02d is older than required 580.00"
+
+	const char* const kRrModelNames[NVR_DLSS_RR_PRESET_COUNT] = { "NVIDIA's default for this nvngx_dlssd.dll (no hint)", "preset D",
+		"preset E (the first-generation transformer, the current model)", "preset F (the second-generation transformer, the newer model)",
+		"auto" };
+
+	// The NvrDlssRrPreset the helper sends to NGX for NVR's RRPreset (never AUTO), and why, in words for the log.
+	uint32_t ChooseRrModel(uint32_t nvrPreset, uint32_t deviceId, uint32_t driverVersion, std::string& why) {
+		char text[320];
+		const uint32_t major = NvidiaDriverMajor(driverVersion), minor = NvidiaDriverMinor(driverVersion);
+		const bool driverForF = major >= kRrPresetFMinDriverMajor;
+		const NvidiaGeneration gen = GenerationOf(deviceId);
+		if (nvrPreset >= NVR_DLSS_RR_PRESET_COUNT) {
+			snprintf(text, sizeof(text), "RRPreset %u is out of range, read as 0", nvrPreset);
+			why = text;
+			return NVR_DLSS_RR_PRESET_DEFAULT;
+		}
+		if (nvrPreset == NVR_DLSS_RR_PRESET_F) {
+			if (driverForF) { why = "RRPreset 3 (the newer model) as set"; return NVR_DLSS_RR_PRESET_F; }
+			snprintf(text, sizeof(text), "RRPreset 3 (the newer model) asked for, but driver %u.%02u is older than 580.00, which it needs "
+				"(NGX would refuse it): preset E instead; update the NVIDIA driver to get it", major, minor);
+			why = text;
+			return NVR_DLSS_RR_PRESET_E;
+		}
+		if (nvrPreset != NVR_DLSS_RR_PRESET_AUTO) {
+			snprintf(text, sizeof(text), "RRPreset %u as set", nvrPreset);
+			why = text;
+			return nvrPreset;
+		}
+		if (gen == NvidiaGeneration::AdaOrNewer && driverForF) {
+			snprintf(text, sizeof(text), "RRPreset 4 (auto): GPU device 0x%04X is %s and driver %u.%02u is 580.00 or newer", deviceId,
+				GenerationName(gen), major, minor);
+			why = text;
+			return NVR_DLSS_RR_PRESET_F;
+		}
+		if (gen == NvidiaGeneration::AdaOrNewer) snprintf(text, sizeof(text), "RRPreset 4 (auto): GPU device 0x%04X is %s, but driver %u.%02u "
+			"is older than 580.00, which the newer model needs", deviceId, GenerationName(gen), major, minor);
+		else if (gen == NvidiaGeneration::Turing || gen == NvidiaGeneration::Ampere) snprintf(text, sizeof(text), "RRPreset 4 (auto): GPU "
+			"device 0x%04X is %s, where the newer model costs up to a quarter of the frame rate", deviceId, GenerationName(gen));
+		else snprintf(text, sizeof(text), "RRPreset 4 (auto): GPU device 0x%04X is %s: the current model to be safe", deviceId, GenerationName(gen));
+		why = text;
+		return NVR_DLSS_RR_PRESET_E;
+	}
+
 #ifndef NVR_DLSS_NO_SDK
 	// NVR's own project id for NGX's custom-engine identification (NVR has no NVIDIA application id).
 	const char* const kNgxProjectId = "4f1c2b7e-9a63-4d0e-8b25-6e3d1a7c9f40";
@@ -765,12 +844,13 @@ namespace {
 	const char* const kRrPresetKeys[6] = { "RayReconstruction.Hint.Render.Preset.DLAA", "RayReconstruction.Hint.Render.Preset.Quality",
 		"RayReconstruction.Hint.Render.Preset.Balanced", "RayReconstruction.Hint.Render.Preset.Performance",
 		"RayReconstruction.Hint.Render.Preset.UltraPerformance", "RayReconstruction.Hint.Render.Preset.UltraQuality" };
-	const unsigned int kRrPresetHints[NVR_DLSS_RR_PRESET_COUNT] = { 0, 4, 5 };	// default (no hint), D, E: the same in every mode
-	const char* const kRrPresetNames[NVR_DLSS_RR_PRESET_COUNT] = { "default (no hint)", "D", "E" };
+	// default (no hint), D, E, F: the same in every mode. UNOFFICIAL 2026-11-15: F = 6 (nvngx_dlssd.dll 310.9.16 names Preset_A ..
+	// Preset_F in this order after Default 0, as D 4 and E 5 above). AUTO is never sent (ChooseRrModel turns it into F or E): 5 to be safe.
+	const unsigned int kRrPresetHints[NVR_DLSS_RR_PRESET_COUNT] = { 0, 4, 5, 6, 5 };
+	const char* const kRrPresetNames[NVR_DLSS_RR_PRESET_COUNT] = { "default (no hint)", "D", "E", "F", "auto" };
 
 	// NVR's numbers, anything out of range = the default (no hint).
 	uint32_t SrPreset(uint32_t preset) { return preset < NVR_DLSS_PRESET_COUNT ? preset : (uint32_t)NVR_DLSS_PRESET_DEFAULT; }
-	uint32_t RrPreset(uint32_t preset) { return preset < NVR_DLSS_RR_PRESET_COUNT ? preset : (uint32_t)NVR_DLSS_RR_PRESET_DEFAULT; }
 
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction's capability keys (the driver NGX core's), from the capability parameters DLSS
 	// SR's check reads. True: RR can be tried (its feature creation still decides); false with the reason. Reads only (the probe
@@ -993,10 +1073,14 @@ namespace {
 			return false;
 		}
 		const uint32_t quality = (uint32_t)QualityFor(f.renderWidth, out.width);
-		const uint32_t rrPreset = RrPreset(f.rrPreset);
+		// UNOFFICIAL 2026-11-15 RRPreset 3 / 4 (DLSS-RR-MODEL.md): the model actually sent (auto resolved, F without its driver -> E)
+		std::string modelWhy;
+		const uint32_t rrPreset = ChooseRrModel(f.rrPreset, h.vk.properties.deviceID, h.vk.properties.driverVersion, modelWhy);
 		const uint32_t depthLinear = (f.rrOptions & NVR_DLSS_RR_DEPTH_LINEAR) ? 1u : 0u;
 		const uint32_t key[7] = { f.renderWidth, f.renderHeight, out.width, out.height, quality, rrPreset, depthLinear };
 		if (h.dlssd && !memcmp(key, h.dlssdKey, sizeof(key))) return true;
+		// One line per feature (re)creation, also into the game's log (Status): which model and why.
+		Status("NGX: Ray Reconstruction model: %s (%s)", kRrModelNames[rrPreset], modelWhy.c_str());
 		if (h.dlssd) {
 			vkDeviceWaitIdle(h.vk.device);
 			NVSDK_NGX_VULKAN_ReleaseFeature(h.dlssd);
@@ -2015,6 +2099,14 @@ namespace {
 #else
 		Log("probe: Ray Reconstruction not built in; nvngx_dlssd.dll next to the helper: %s", dlssdHere ? "yes" : "no");
 #endif
+		{
+			// UNOFFICIAL 2026-11-15 (DLSS-RR-MODEL.md): what [Shaders.TAA.DLSS] RRPreset 4 (auto) and 3 would send on this GPU and driver
+			std::string why;
+			const uint32_t autoModel = ChooseRrModel(NVR_DLSS_RR_PRESET_AUTO, h.vk.properties.deviceID, h.vk.properties.driverVersion, why);
+			Log("probe: Ray Reconstruction model with RRPreset 4 (auto): %s (%s)", kRrModelNames[autoModel], why.c_str());
+			const uint32_t newer = ChooseRrModel(NVR_DLSS_RR_PRESET_F, h.vk.properties.deviceID, h.vk.properties.driverVersion, why);
+			Log("probe: Ray Reconstruction model with RRPreset 3 (newer): %s (%s)", kRrModelNames[newer], why.c_str());
+		}
 		DestroyVulkanDevice(h.vk);
 		return 0;
 	}

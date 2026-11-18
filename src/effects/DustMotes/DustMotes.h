@@ -10,6 +10,8 @@
 class DustMotesEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): its buffer is drawn and read only in RenderFrame, behind the switch
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	DustMotesEffect() : EffectRecord("DustMotes") { ZeroMemory(&Constants, sizeof(Constants)); };
 
 	static const int LampsMax = 8;	// lamps the pass lights the specks from (the nearest, brightest of the frame's 24)

@@ -8,6 +8,7 @@
 #include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-10-27 [Shaders.Grass.Main] CastShadows
 #include "../../core/FrameClock.h"
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-04 the deferred flashlight on the grass (UpdateLights)
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 grass records (SetForDraw: GrassBind)
 
 void GrassShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_GrassScale", &Constants.Scale);
@@ -15,6 +16,8 @@ void GrassShaders::RegisterConstants() {
 	// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded)
 	Constants.Brightness = D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f);
 	TheShaderManager->RegisterConstant("TESR_GrassBrightness", &Constants.Brightness);
+	Constants.Record = D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-12 CapturedGrassTint (UpdateSettings): colour x 1, its own saturation, the tint off
+	TheShaderManager->RegisterConstant("TESR_GrassRecord", &Constants.Record);
 	TheShaderManager->RegisterConstant("TESR_GrassBend", &Constants.Bend);
 	TheShaderManager->RegisterConstant("TESR_GrassLightData", &Constants.LightData);
 	TheShaderManager->RegisterConstant("TESR_GrassLightPosition", LightPosition);
@@ -47,6 +50,37 @@ void GrassShaders::UpdateSettings() {
 	// UNOFFICIAL 2026-11-04, from Physically-Based-Reloaded (effects/Grass.cpp).
 	Constants.Brightness.x = std::clamp(TheSettingManager->GetSettingF("Shaders.Grass.Main", "Brightness"), 0.0f, 4.0f);
 	NightBrightness = std::clamp(TheSettingManager->GetSettingF("Shaders.Grass.Main", "NightBrightness"), 0.0f, 4.0f);
+	{	// UNOFFICIAL 2026-11-12 CapturedGrass, second pass (GRASS23x000TMS.pso.hlsl, the records at main's end; live; read by the record
+		// outputs only, which exist only in a shader compiled with the AlbedoBuffer): z = 1 - [Main.Main.Quality] CapturedGrassShade
+		// (0-1, a missing key = 1: the recorded colour times the tuft's own light scale, as the game shades each tuft; 0 = the texture
+		// alone), w = the material class written: 7 ground cover (plain matte), or 5 plants with CapturedGrassPlant (a missing key = off:
+		// the path tracer's thin-leaf model, as the first version wrote it, for an A/B).
+		SettingManager::Configuration::ConfigNode node;
+		const float shade = TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedGrassShade") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 1.0f;
+		const bool plant = TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedGrassPlant") && node.BoolValue;
+		Constants.Brightness.z = 1.0f - shade;
+		Constants.Brightness.w = plant ? 5.0f : 7.0f;
+		// UNOFFICIAL 2026-11-12 CapturedGrassTint, third pass (an RTX run of the second: the tufts steady, but bright yellow-orange under the
+		// path tracer where the game shows a muted brown). The record lacked the grass mesh's vertex colour, which the game multiplies into
+		// the sun alone (GRASS23x000TMS.pso.hlsl, main's end, has the maths). TESR_GrassRecord, live, a missing key = the default:
+		//   z CapturedGrassTint (0-1, default 1): how much of "the share of the light the game leaves the tuft" the recorded colour takes;
+		//     0 = the second pass's colour. Written 0 while CapturedGrass itself is off, so the shader's branch is not taken.
+		//   x CapturedGrassColour (0-4, default 1) and y CapturedGrassSaturation (0-1, default 1): what is left to tune by eye in one launch
+		//     (the self-check line in core/CapturedNormals.h AlbedoCheck prints the grass's luma and red / blue against the land's).
+		const bool records = TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedGrass") && node.BoolValue;
+		const float tint = TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedGrassTint") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 1.0f;
+		const float colour = TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedGrassColour") ? std::clamp(node.FloatValue, 0.0f, 4.0f) : 1.0f;
+		const float saturation = TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedGrassSaturation") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 1.0f;
+		Constants.Record = D3DXVECTOR4(colour, saturation, records ? tint : 0.0f, 0.0f);
+		CapturedNormals::GrassColourKeys[0] = tint; CapturedNormals::GrassColourKeys[1] = colour; CapturedNormals::GrassColourKeys[2] = saturation;
+		// one line when the records' colour settings are first in use or change (never while CapturedGrass is off)
+		static float logged[4] = { -1.0f, -1.0f, -1.0f, -1.0f };
+		if (records && (logged[0] != tint || logged[1] != colour || logged[2] != saturation || logged[3] != shade)) {
+			logged[0] = tint; logged[1] = colour; logged[2] = saturation; logged[3] = shade;
+			Logger::Log("CapturedGrass: the recorded colour = texture x Brightness x tuft shade (CapturedGrassShade %.2f) x the game's light share with the vertex colour (CapturedGrassTint %.2f%s), saturation %.2f (CapturedGrassSaturation), x %.2f (CapturedGrassColour)",
+				shade, tint, tint > 0.0f ? "" : ": OFF, the texture alone as before", saturation, colour);
+		}
+	}
 
 	const char* bend = "Shaders.Grass.Interaction";
 	Interaction.Enabled = TheSettingManager->GetSettingI(bend, "Enabled") != 0;
@@ -103,6 +137,9 @@ void GrassShaders::UpdateLights() {
 		const FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
 		SpotShadow = D3DXVECTOR4(1.0f, desc.Width ? 1.0f / (float)desc.Width : 0.0f, f->Deferred.ShadowBias, FlashlightDeferred::SoftnessTexels(desc.Width));
 	}
+	// UNOFFICIAL 2026-11-12 CapturedGrass: while the grass lights itself by this beam, its records are not written for the raster frame's
+	// RT GI (core/CapturedNormals.h BeginFrame: the light pass lights everything the records hold, the grass would get the beam twice)
+	CapturedNormals::GrassOwnBeam = Spot[0].w > 0.0f;
 	if (!Lights.Enabled || Lights.MaxLights <= 0 || Lights.Strength <= 0.0f) return;
 
 	struct Candidate { float key; D3DXVECTOR4 pos; D3DXVECTOR4 color; };
@@ -215,6 +252,10 @@ void GrassShaders::SetForDraw(NiD3DVertexShaderEx* VertexShader, NiD3DPixelShade
 	// variants are 0 and 2, the others light real meshes by their normals and are never replaced by blades).
 	NewGrass::LastVariant = strlen(VertexShader->Name) >= 11 ? VertexShader->Name[10] : 0;
 	BindSerial++;	// UNOFFICIAL 2026-10-28 (GrassFirst: whether this frame's early run saw a grass bind of its own)
+	// UNOFFICIAL 2026-11-12 grass records (core/CapturedNormals.h GrassWriters; audit item 1): the grass draws that follow this bind write
+	// their colour, material and normal records while the path tracer replaces the picture. GrassFirst's early run (DrawPart 1) opens the
+	// capture's span here, before the main list; a bind after the list arms the draw hook. Nothing otherwise.
+	CapturedNormals::GrassBind(TheRenderManager->device, DrawPart);
 	LastBindName = VertexShader->Name;
 	LastBindNVR = false;
 	if (!VertexShader->ShaderHandleBackup || VertexShader->ShaderHandle == VertexShader->ShaderHandleBackup) return;	// the game's own VS

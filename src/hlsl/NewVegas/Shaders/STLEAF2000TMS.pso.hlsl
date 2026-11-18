@@ -15,5 +15,8 @@ PS_OUTPUT main(PS_INPUT IN) {
     OUT.color.rgb = lit;
     OUT.color.a = albedo.a + albedo.a;
 
+    LeafRecords(OUT, IN, albedo)	// UNOFFICIAL 2026-11-12 leaf records (Includes/Leaf.hlsl; nothing without the AlbedoBuffer)
+    LeafDeferred(OUT, IN, albedo, 0.0f, 0.0f)	// UNOFFICIAL 2026-11-14 full deferred renderer: the deferred record's split (Includes/Leaf.hlsl; nothing without FOLIAGE_DEFERRED)
+
     return OUT;
 };

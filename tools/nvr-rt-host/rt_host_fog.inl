@@ -249,3 +249,201 @@ static bool sceneFogVis(Ctx& c) {
 	releaseWorld(h, ids);
 	return ok;
 }
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// UNOFFICIAL 2026-11-12 LampHazeShadows (scene foglamps; Compute\Rt\RtFogLamps.comp, constants and slots by the game's
+// src\core\RtFogLampGrid.h): the lamps' visibility along each view, for the indoor fog's lamp light, against the CPU's rays.
+// NOT wired in yet (written without a build of the host): define NVR_HOST_FOGLAMPS, add @("RtFogLamps", "RtFogLamps", "") to build.ps1's
+// shader list, call registerFogLamps next to registerFog and add the scene line
+//   { "foglamps", "RT fog lamps: a lamp's light in the air behind a wall with a doorway = the CPU's rays per cell and lamp (RtFogLamps + RtFogLampGrid.h)", [&] { return sceneFogLamps(c); } },
+// The world: fogWorld's room cut in two by a wall at x = 0 with a doorway (y -100 .. 100, z 0 .. 300). Lamp A (slot 0) in the far half,
+// lamp B (slot 5: a sparse table) in the camera's half. The camera stands in the near half and looks at the wall and the doorway.
+//   1 fixed points, 1 and 4 a cell: every stable cell of both tiles = the CPU's weighted rays (the shader's own steps); lamp A's tile
+//     holds both fully shadowed cells (views that end on the wall) and lit ones (through the doorway), lamp B's is lit nearly everywhere
+//   2 jittered points + the history, a still camera, 16 frames: closer to a 16-view reference than one frame is
+#ifdef NVR_HOST_FOGLAMPS
+#include "RtFogLampGrid.h"
+
+struct FogLampCtx { int visA = -1, visB = -1, shader = -1; };
+static FogLampCtx gFogLamp;
+static const unsigned kLampCols = 48, kLampRows = 32;
+
+static bool registerFogLamps(Host& h, const std::string& spv) {
+	gFogLamp.visA = h.AddImage("fog lamps 0", kLampCols * RtFogLampGrid::kTilesAcross, kLampRows * RtFogLampGrid::kTilesAcross, NVR_EXT_SHARED_R16F);
+	gFogLamp.visB = h.AddImage("fog lamps 1", kLampCols * RtFogLampGrid::kTilesAcross, kLampRows * RtFogLampGrid::kTilesAcross, NVR_EXT_SHARED_R16F);
+	gFogLamp.shader = h.AddShader(spv + "\\RtFogLamps.spv");
+	return gFogLamp.visA > 0 && gFogLamp.visB > 0;
+}
+
+static World fogLampWorld() {
+	World w = fogWorld();
+	Mesh wall;
+	const float Y = 600, H = 500;
+	wall.quad({ 0, -Y, 0 }, { 0, -100, 0 }, { 0, -100, H }, { 0, -Y, H });
+	wall.quad({ 0, 100, 0 }, { 0, Y, 0 }, { 0, Y, H }, { 0, 100, H });
+	wall.quad({ 0, -100, 300 }, { 0, 100, 300 }, { 0, 100, H }, { 0, -100, H });
+	w.meshes.push_back(wall);
+	Object o; o.mesh = int(w.meshes.size()) - 1; o.id = 4;
+	w.objects.push_back(o);
+	return w;
+}
+
+static float fogLampDot(V3 a, V3 b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+// RtFogLamps.comp main for one cell and slot, in the same steps; ou / ov / oz: the cell's point (0.5 = the shader's fixed one).
+// traced: the view meets the lamp's sphere in front of the surface
+static float fogLampCpu(const World& w, V3 eye, const RtFogLampGrid::PassConstants& k, int cx, int cy, int slot, float ou, float ov, float oz, bool* traced = nullptr) {
+	if (traced) *traced = false;
+	const V3 lamp = { k.lamps[slot][0], k.lamps[slot][1], k.lamps[slot][2] };
+	const float reach = k.lamps[slot][3];
+	if (!(reach > 0.0f)) return 1.0f;
+	const V3 f = { k.forward[0], k.forward[1], k.forward[2] }, r = { k.right[0], k.right[1], k.right[2] }, up = { k.up[0], k.up[1], k.up[2] };
+	const float u = (float(cx) + ou) / k.grid[0], v = (float(cy) + ov) / k.grid[1];
+	const V3 dir = normalize(f + r * (2.0f * u - 1.0f) - up * (2.0f * v - 1.0f));
+	const float t0 = fogLampDot(lamp, dir);
+	const float h2 = (std::max)(fogLampDot(lamp, lamp) - t0 * t0, 0.0f), r2 = reach * reach;
+	if (!(h2 < r2)) return 1.0f;
+	const float chord = std::sqrt(r2 - h2);
+	const float ta = (std::max)(t0 - chord, 0.0f);
+	float tb = t0 + chord;
+	if (!(tb > ta)) return 1.0f;
+	const Hit surface = trace(w, eye, dir, 0.0f, tb, 0x8Bu, false);
+	if (surface.hit) tb = surface.t;
+	if (!(tb > ta)) return 1.0f;
+	const float core = (std::min)((std::max)(k.params[0], 0.05f), 1.0f);
+	const float e2 = core * core * r2, hp = std::sqrt(h2 + e2);
+	const float pa = std::atan((ta - t0) / hp), pb = std::atan((tb - t0) / hp), wk = e2 / (r2 + e2);
+	const int n = (std::min)((std::max)(int(k.forward[3] + 0.5f), 1), 8);
+	const bool testAlpha = k.params2[1] > 0.5f;
+	float lit = 0, total = 0;
+	for (int i = 0; i < n; i++) {
+		const float s = hp * std::tan(pa + (pb - pa) * ((float(i) + oz) / float(n)));
+		const float weight = (std::max)(1.0f - wk * (h2 + s * s + e2) / e2, 0.0f);
+		if (!(weight > 0.0f)) continue;
+		const V3 point = dir * (std::min)((std::max)(t0 + s, ta), tb);
+		const V3 segment = lamp - point;
+		const float len = length(segment), stop = k.params[1];
+		float vis = 1.0f;
+		if (len > stop) {
+			const float tEnd = (std::min)((std::max)(1.0f - stop / len, 0.0f), 1.0f);
+			const float tSplit = (std::min)((std::max)(1.0f - k.params2[0] / len, 0.0f), tEnd);
+			const uint32_t farMask = uint32_t(k.params[2]), nearMask = uint32_t(k.params[3]);
+			const uint32_t add = testAlpha ? 0x10u : 0u, keep = testAlpha ? 0xFFu : 0xEFu;
+			if (tSplit > 0.0f && trace(w, eye + point, segment, 0.0f, tSplit, (farMask | add) & keep, testAlpha, true).hit) vis = 0.0f;
+			else if (tEnd > tSplit && trace(w, eye + point, segment, tSplit, tEnd, (nearMask | add) & keep, testAlpha, true).hit) vis = 0.0f;
+		}
+		lit += weight * vis; total += weight;
+	}
+	if (!(total > 1.0e-6f)) return 1.0f;
+	if (traced) *traced = true;
+	return lit / total;
+}
+
+static float fogLampValue(const std::vector<float>& img, int cx, int cy, int slot) {
+	const int across = int(RtFogLampGrid::kTilesAcross);
+	return img[size_t((slot / across) * kLampRows + cy) * (kLampCols * across) + size_t((slot % across) * kLampCols + cx)];
+}
+
+static bool sceneFogLamps(Ctx& c) {
+	Host& h = *c.host;
+	World w = fogLampWorld();
+	if (!uploadSlot(h, c.alphaAtlas, kFogSlot, w.slots[kFogSlot])) return false;
+	std::vector<uint32_t> ids;
+	if (!stageWorld(h, w, ids)) return false;
+	const Camera cam = Camera::lookDir({ -450, -250, 220 }, { 0.92f, 0.38f, -0.03f }, { 0, 0, 1 }, 1.0f, 1.5f);
+	RtFogLampGrid::Slots slots;
+	slots.used[0] = true; slots.lamp[0].world[0] = 350; slots.lamp[0].world[1] = 150; slots.lamp[0].world[2] = 380; slots.lamp[0].reach = 900;	// A: behind the wall
+	slots.used[5] = true; slots.lamp[5].world[0] = -300; slots.lamp[5].world[1] = 300; slots.lamp[5].world[2] = 400; slots.lamp[5].reach = 500;	// B: this side
+	const float fwd[3] = { cam.f.x, cam.f.y, cam.f.z }, rgt[3] = { cam.r.x, cam.r.y, cam.r.z }, upv[3] = { cam.u.x, cam.u.y, cam.u.z };
+	const double eye[3] = { cam.eye.x, cam.eye.y, cam.eye.z };
+	RtFogLampGrid::Settings s;
+	s.core = 0.1f; s.lampStop = 12.0f; s.modelDistance = 0.0f; s.farMask = 0xEBu; s.nearMask = 0xEBu; s.alphaTested = true;
+	const unsigned across = RtFogLampGrid::kTilesAcross;
+	auto run = [&](const RtFogLampGrid::PassConstants& k, int out, int hist, std::vector<float>& img) -> bool {
+		const std::vector<int> imgs = { out, hist, c.alphaAtlas };
+		h.AddPass(gFogLamp.shader, imgs, 0x1u, &k, sizeof(k), (kLampCols * across + 7) / 8, (kLampRows * RtFogLampGrid::TileRows(k) + 7) / 8);
+		if (!h.Exchange(w, ids, cam.eye)) return false;
+		if (!h.Read(out, img)) return false;
+		h.EndFrame();
+		return true;
+	};
+	bool ok = true;
+
+	// ---- 1: fixed points
+	for (int n : { 1, 4 }) {
+		s.samples = n; s.weight = 0.0f; s.jitter = false;
+		RtFogLampGrid::PassConstants k;
+		RtFogLampGrid::Fill(k, fwd, rgt, upv, cam.p00, cam.p11, eye, kLampCols, kLampRows, slots, 0u, s, 0);
+		std::vector<float> img;
+		if (!run(k, gFogLamp.visA, gFogLamp.visB, img)) return false;
+		int checked = 0, bad = 0, unstable = 0, shown = 0, dark[2] = { 0, 0 }, lit[2] = { 0, 0 }, part[2] = { 0, 0 };
+		for (int li = 0; li < 2; li++) {
+			const int slot = li == 0 ? 0 : 5;
+			for (int cy = 0; cy < int(kLampRows); cy++) for (int cx = 0; cx < int(kLampCols); cx++) {
+				bool traced = false;
+				const float want = fogLampCpu(w, cam.eye, k, cx, cy, slot, 0.5f, 0.5f, 0.5f, &traced);
+				// a cell is stable when the view a hundredth of a cell to each side gives the same number within 0.002
+				bool stable = true;
+				const float e[4][2] = { { 0.49f, 0.5f }, { 0.51f, 0.5f }, { 0.5f, 0.49f }, { 0.5f, 0.51f } };
+				for (const auto& d : e) if (std::fabs(fogLampCpu(w, cam.eye, k, cx, cy, slot, d[0], d[1], 0.5f) - want) > 0.002f) { stable = false; break; }
+				if (!stable) { unstable++; continue; }
+				const float got = fogLampValue(img, cx, cy, slot);
+				checked++;
+				if (traced) { if (want < 0.02f) dark[li]++; else if (want > 0.98f) lit[li]++; else part[li]++; }
+				if (std::fabs(got - want) > 4e-3f) { bad++; if (shown++ < 5) say("    lamp %c cell (%d, %d): got %.3f, the CPU's rays %.3f\n", li ? 'B' : 'A', cx, cy, got, want); }
+			}
+		}
+		const int cells = int(kLampCols * kLampRows * 2);
+		bool pass = bad == 0 && checked > cells * 8 / 10;
+		if (n == 4) pass = pass && dark[0] > 100 && lit[0] > 20 && lit[1] > 200 && dark[1] < lit[1] / 4;
+		say("  fixed points, %d a cell: %d of %d cells checked (%d on an edge skipped), %d mismatches; lamp A (behind the wall): %d dark, %d lit, %d part lit; "
+			"lamp B (this side): %d dark, %d lit, %d part lit -> %s\n", n, checked, cells, unstable, bad, dark[0], lit[0], part[0], dark[1], lit[1], part[1], pass ? "ok" : "BAD");
+		if (!pass) { ok = false; dumpPfm(n == 1 ? "foglamps_fixed1" : "foglamps_fixed4", img, kLampCols * across, kLampRows * across, 1); }
+	}
+
+	// ---- 2: moving points + the history against a 4 x 4 views x 8 points reference (lamp A's tile, its partly lit cells)
+	{
+		s.samples = 2; s.jitter = true;
+		std::vector<float> ref(size_t(kLampCols) * kLampRows, -1.0f);
+		RtFogLampGrid::PassConstants kr;
+		RtFogLampGrid::Settings sr = s; sr.samples = 8; sr.weight = 0.0f; sr.jitter = false;
+		RtFogLampGrid::Fill(kr, fwd, rgt, upv, cam.p00, cam.p11, eye, kLampCols, kLampRows, slots, 0u, sr, 0);
+		for (int cy = 0; cy < int(kLampRows); cy++) for (int cx = 0; cx < int(kLampCols); cx++) {
+			float sum = 0; int count = 0;
+			for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
+				bool traced = false;
+				const float v = fogLampCpu(w, cam.eye, kr, cx, cy, 0, (a + 0.5f) / 4, (b + 0.5f) / 4, 0.5f, &traced);
+				if (traced) { sum += v; count++; }
+			}
+			if (count == 16) ref[size_t(cy) * kLampCols + cx] = sum / 16.0f;
+		}
+		auto rms = [&](const std::vector<float>& img) {
+			double sq = 0; int n = 0;
+			for (int cy = 0; cy < int(kLampRows); cy++) for (int cx = 0; cx < int(kLampCols); cx++) {
+				const float r = ref[size_t(cy) * kLampCols + cx];
+				if (r < 0.02f || r > 0.98f) continue;	// the partly lit cells
+				const double d = double(fogLampValue(img, cx, cy, 0)) - r; sq += d * d; n++;
+			}
+			return n ? std::sqrt(sq / n) : 0.0;
+		};
+		std::vector<float> img;
+		int out = gFogLamp.visA, hist = gFogLamp.visB;
+		double single = 0, converged = 0;
+		for (int i = 0; i < 16; i++) {
+			s.weight = RtFogGrid::HistoryWeight(unsigned(i), 0.9f);
+			RtFogLampGrid::PassConstants k;
+			RtFogLampGrid::Fill(k, fwd, rgt, upv, cam.p00, cam.p11, eye, kLampCols, kLampRows, slots, i ? 0xFFFFu : 0u, s, 200u + unsigned(i));
+			if (i == 0) k.params2[3] = 1.0f;	// the first frame's points move too (no history yet: Fill leaves them fixed)
+			if (!run(k, out, hist, img)) return false;
+			if (i == 0) single = rms(img);
+			std::swap(out, hist);
+		}
+		converged = rms(img);
+		const bool pass = converged < 0.6 * single;
+		say("  two moving points a cell, 16 frames with the history: RMS of lamp A's partly lit cells %.4f vs one frame's %.4f -> %s\n", converged, single, pass ? "ok" : "BAD");
+		if (!pass) ok = false;
+	}
+	releaseWorld(h, ids);
+	return ok;
+}
+#endif

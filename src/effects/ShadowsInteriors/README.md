@@ -103,6 +103,11 @@ Since 2026-11-07 (rtgap-tess, docs/next/RT-DETAIL-GAPS.md section 1) `[_Shaders.
 has and the RT scene lacks; it stays off while this effect's own lamp contact shadows (`[_Shaders.ShadowsInteriors.Main]
 ContactShadows` > 0) draw. With the tessellated bumps on the traced rays start the bumps' Strength further off the surface
 (`[Main.Main.RayTracing] TessStartSlack`). Nothing here changes.
+Since 2026-11-11 `[_Shaders.ShadowsInteriors.RT] Enabled` switched off while the game runs stops the trace at once (it was read only at
+start; `RtLampShadows::EnabledNow`), and on again resumes it in a session that started with it on. `FollowRenderScale` (default false):
+with `SameFrame` and RenderScale below 1 the trace before the world, its camera rays and its denoiser run at the world's render size
+(`TAAEffect::WorldDrawnSmall`), not the screen's; the readers find the result through the same scaled reprojection the after-the-world
+trace of a rect frame always used. Not run in the game yet. Nothing here changes.
 
 ## 5. Passes and outputs
 

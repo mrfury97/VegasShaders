@@ -1,10 +1,5 @@
 # Puddles (rain puddles, wet ground, wall streaks)
 
-> User rule (2026-11-12): "This codebase is yours: what it's for and how it's built are your call, and you'll keep building on it."
-> For this effect: the puddle room decides its direction, design and architecture without asking for approval. Still ask first
-> (F:\Claude Brain\CLAUDE.md): pushes, PRs or anything public, permanent deletion of user data, purchases, the user's own tuned
-> settings, and reversing an earlier user decision.
-
 ## 1. Purpose
 Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it rains and shrink back from their edges after it stops, at a pace set in game hours. Inside a puddle the surface is a flat, near-mirror water layer (IOR 1.33, F0 0.02) that hides the material's bumps, darkens what is under it with depth and ripples with the rain. Around each puddle a ring of soaked ground. On walls and other steep faces open to the rain, water runs down in streaks. Puddles reflect the sky (forward shaders), the scene on screen (Wetness Effects' reflections) and, with the Vulkan reflection passes, ray-traced reflections.
 

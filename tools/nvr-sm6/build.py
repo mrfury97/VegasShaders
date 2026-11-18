@@ -31,6 +31,7 @@ MACROS = [
     ("REFL_ADD_ON", [None, "1"]),
     ("REFL_SPECOCC_ON", [None, "1"]),
     ("CHARACTER_SHADOW_MAP", [None, "1"]),
+    ("GBUFFER_V2", [None, "1"]),   # 2026-11-14 GBufferV2 (core/CapturedNormals.h; EffectRecord::BuildMacros)
 ]
 
 

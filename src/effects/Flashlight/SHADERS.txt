@@ -3,3 +3,5 @@
 # 2026-11-04: only the stub effect (the light is drawn by core/FlashlightDeferred.h with Shaders/FlashlightDeferred.hlsl).
 src/hlsl/NewVegas/Effects/Flashlight.fx.hlsl
 src/hlsl/NewVegas/Shaders/FlashlightDeferred.hlsl
+# 2026-11-12 HairAndEyes: the beam for the hair and eye shaders (included by SM3002.pso, SM3003.pso, SM3003.vso and ObjectTemplate.hlsl)
+src/hlsl/NewVegas/Shaders/Includes/FlashBeam.hlsl

@@ -92,6 +92,17 @@ float4 getReflectionSamplePosition(PS_INPUT v, float3 waveN, float bend) {
     return mul(toClip, pushed);
 }
 
+// UNOFFICIAL 2026-11-16 RenderScale (docs/next/INTERIOR-WATER.md): the projective lookup of the game's refraction copy. While the world is
+// drawn smaller (renderScale.xy < 1) the copy holds its picture in its top-left renderScale.xy part, the world target's own layout, so the
+// projected position is scaled by it; a lookup the waves bend past that part's right or bottom edge is held at its last texel, as the
+// sampler's clamp holds one bent past the copy's own edge at full size (unheld, it read the target's stale area outside the picture: a dark
+// band where the water meets the frame's right or bottom edge). min() hands back one of its operands, so with RenderScale off (1) the
+// lookup is exactly the plain projected position, as before.
+float4 refractionLookup(float4 pos, float4 renderScale, float4 reciprocalResolution) {
+    float2 last = (renderScale.x < 0.999 || renderScale.y < 0.999) ? renderScale.xy - 0.5 * reciprocalResolution.xy : 1e6;
+    return float4(min(pos.xy * renderScale.xy, last * pos.w), pos.zw);
+}
+
 #ifdef RT_WATER
 // UNOFFICIAL 2026-10-31 RT water reflections ([Shaders.Reflections.RT] Water, docs/next/FORK-RT-REFLECTIONS.md "Water"): last frame's
 // RT reflection of this spot (TESR_ReflectionsBuffer, half resolution: Tame(colour) x confidence, confidence), found by reprojecting

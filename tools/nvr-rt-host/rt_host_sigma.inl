@@ -249,6 +249,44 @@ static bool sceneSigmaLamps(Ctx& c) {
 			ok = ok && moveOk;
 		}
 	}
+
+	// --- 4. (2026-11-12) the lamp table's disc radius (texel 3.y, the game's RtLampShadows::WriteTable e[7]) is the size the denoised
+	// lamps are traced with: the same scene and camera with both lamps' discs at 1, 12 and 24 units (the game's LampRadius 1 against
+	// [Shaders.ShadowsInteriors.RT] PhysicalLampUnknown 12 / 24). The raw signal's penumbra half-width (signal.y = disc x blocker distance /
+	// (lamp distance - blocker distance); the mean over the blocked lamp-pixels of 8 frames) must grow with the disc, and so must the share
+	// of the denoised lamp-pixels that are neither lit nor dark. A trace that took its radius from anywhere but the table would give the
+	// same numbers three times.
+	{
+		const std::vector<Lamp> kept = lamps;
+		const float discs[3] = { 1.0f, 12.0f, 24.0f };
+		double width[3] = {}, soft[3] = {};
+		for (int d = 0; d < 3; d++) {
+			for (Lamp& l : lamps) l.disc = discs[d];
+			layers.Clear();
+			double sum = 0;
+			long count = 0;
+			for (unsigned f = 1; f <= 16; f++) {
+				if (!runFrame(still, f > 1 ? &still : nullptr, 200 + f, false, result, signal)) { lamps = kept; releaseWorld(h, ids); return false; }
+				if (f <= 8) continue;
+				for (size_t i = 0; i + 1 < signal.size(); i += 2) if (signal[i] < 0.5f && signal[i + 1] > 0.0f) { sum += signal[i + 1]; count++; }
+			}
+			width[d] = sum / std::max(count, 1L);
+			split(result, est);
+			long lit = 0, mid = 0;
+			for (size_t i = 0; i < est.size(); i++) {
+				if (est[i] < 0 || !stable[i % (S * S)]) continue;
+				lit++;
+				if (est[i] > 0.1f && est[i] < 0.9f) mid++;
+			}
+			soft[d] = double(mid) / std::max(lit, 1L);
+		}
+		lamps = kept;
+		const bool discOk = width[0] > 0 && width[1] > 4.0 * width[0] && width[2] > 1.3 * width[1] && soft[2] > soft[0];
+		say("  table disc 1 / 12 / 24 units: raw penumbra half-width %.3f / %.3f / %.3f units (x %.1f, x %.1f of disc 1's; a disc the trace ignored gives x 1.0), "
+			"denoised lamp-pixels between lit and dark %.2f / %.2f / %.2f %% -> %s\n", width[0], width[1], width[2], width[1] / std::max(width[0], 1e-9),
+			width[2] / std::max(width[0], 1e-9), 100.0 * soft[0], 100.0 * soft[1], 100.0 * soft[2], discOk ? "ok" : "FAIL");
+		ok = ok && discOk;
+	}
 	releaseWorld(h, ids);
 	return ok;
 }

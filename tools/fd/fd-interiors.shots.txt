@@ -1,0 +1,45 @@
+# Full deferred renderer phase 2, interiors (2026-11-14, docs/next/FD-INTERIORS-RESULTS.md "Bench request").
+# Start: a save in the Lucky 38. Spots and moves as tools/fd/parity-validate.shots.txt (deferred-c1-confirm-b). Toml: release defaults +
+# [Main.Main.Quality] DeferredRenderer = 1 + [Shaders.Bodycam.Status] Enabled = false + the F10 profile on. A = forward, B = deferred.
+# Each parity shot: 3 measurements x 4 blocks x 64 frames = 768 frames after the shot's wait.
+frames 120
+shot settle
+console tgm
+console sgtm 0.001
+wait 240
+shot l38-ctl
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot l38-fd
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot go-v21
+console player.moveto 0017A642
+wait 120
+shot v21-place
+console sgtm 1
+console player.setpos x -232.6
+console player.setpos y 1789.6
+console player.setpos z 7425.0
+console player.setangle x 5.2
+console player.setangle z 236.8
+console sgtm 0.001
+wait 300
+shot v21-ctl
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot v21-fd
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot go-sal
+console player.moveto 00106195
+wait 120
+shot sal-place
+console sgtm 1
+console player.setpos x 204.43
+console player.setpos y -542.5
+console player.setpos z 3457.1
+console player.setangle x 10.9
+console player.setangle z 58.2
+console sgtm 0.001
+wait 300
+shot sal-ctl
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot sal-fd
+parity Main.Main.Quality DeferredRendererLive 64 3 false true

@@ -123,4 +123,7 @@ bool NormalsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rende
 	
 void NormalsEffect::RegisterTextures() {
 	TheTextureManager->InitTexture("TESR_NormalsBuffer", &Textures.NormalsTexture, &Textures.NormalsSurface, TheRenderManager->width, TheRenderManager->height, D3DFMT_A16B16G16R16F);
+	// UNOFFICIAL 2026-11-12: the spare texture is made on first use (RenderSmooth), but the effect file names its sampler at load, which
+	// logged "[ERROR] Texture TESR_NormalsSmoothTemp not found" in every session. The name is known from the start now (an empty slot).
+	TheTextureManager->RegisterTexture("TESR_NormalsSmoothTemp", (IDirect3DBaseTexture9**)&SmoothTempTexture);
 }

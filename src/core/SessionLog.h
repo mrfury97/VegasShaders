@@ -60,9 +60,19 @@ namespace SessionLog {
 	// SESSION header's list (head "SESSION settings") and the REPORT block's (head "REPORT n settings", core/Diagnostics.cpp)
 	void LogSettingsDiff(const char* head);
 	// 2026-11-03: the same list as data ("[section] key=yours (default), ..." per section), and the counts
-	std::vector<std::string> SettingsDiff(unsigned& differ, unsigned& total);
+	// UNOFFICIAL 2026-11-12: one setting that differs, as data: its values as the list prints them, the default as SetSettingS takes
+	// it, and its menu level (ImGuiManager::SettingLevel: 1 Developer options, 2 Internal)
+	struct ChangedSetting { std::string Section, Key, Mine, Default, DefaultValue; int Level; };
+	std::vector<std::string> SettingsDiff(unsigned& differ, unsigned& total, std::vector<ChangedSetting>* changed = nullptr);
+	// UNOFFICIAL 2026-11-12 (testers switched Developer options on and flipped switches at random; the results came back as bug
+	// reports): the Developer and Internal settings that differ from their defaults NOW, and their log line: "<head>: N (M internal)"
+	// then "<head>: Section.Key=yours (default) | ..." (at most 60 named), or "<head>: none". The SESSION header (head "SESSION test /
+	// internal settings changed"), the REPORT block and the bug report list them; the menu's View > Reset puts them back.
+	std::vector<ChangedSetting> TestSettingsChanged();
+	void LogTestSettingsDiff(const char* head);
 	void OnDevice(IDirect3DDevice9* device);	// RenderManager::Initialize: GPU, runtime, screen
 	void OnDeferredInit();					// xNVSE DeferredInit: the game INI values, the load order, the plugin DLLs
+	int  GridsToLoad();	// UNOFFICIAL 2026-11-12: the game INI's uGridsToLoad as the game read it (5 when not seen, clamped 5-21)
 	void NoteIni(const GameSetting* setting);	// ReadSettingHook: keeps the few INI values the header lists
 	void OnFrame();							// ShaderManager::RenderEffects, first thing every rendered frame
 	void OnSettingChanged(const char* section, const char* key, const char* before, const char* after);	// SettingManager::SetSetting

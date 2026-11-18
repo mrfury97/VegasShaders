@@ -5,7 +5,8 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/SunDepthFit.h"	// UNOFFICIAL 2026-10-27 FitToDepth
 #include "../../core/RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
-#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
+#include "../../core/SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (the deferred renderer's sun steps)
+#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (fork port 2026-11-13)
 
 // UNOFFICIAL 2026-10-16 lamp contact shadows (PointShadows.fx LampContactPS, technique 2; drawn by ShaderManager after the lamp
 // pass): every number the shader needs (see the constants' comments there). Kept out of ShadowsExterior.h (widely included).
@@ -28,8 +29,8 @@ static D3DXVECTOR4 ScreenSpaceFade(0.0f, 0.0f, 0.0f, 0.0f);
 static float ScreenSpaceNearFade = 0.0f;	// the setting (UpdateSettings); ScreenSpaceFade is made from it each frame (UpdateConstants)
 
 void ShadowsExteriorEffect::UpdateConstants() {
-	// Contact-shadow start and end: NearFade, pushed out to where the land's bumps end while those are on (DxvkCompute::DisplaceContactFade).
 	BendContact::UpdateConstants();	// UNOFFICIAL 2026-11-06: last frame's Bend result, reprojected for this frame's lit shaders
+	// Contact-shadow start and end: NearFade, pushed out to where the land's bumps end while those are on (DxvkCompute::DisplaceContactFade).
 	ScreenSpaceFade = D3DXVECTOR4(ScreenSpaceNearFade * 0.5f, ScreenSpaceNearFade, 0.0f, 0.0f);
 	float displaceBegin = 0.0f, displaceEnd = 0.0f;
 	if (DxvkCompute::DisplaceContactFade(displaceBegin, displaceEnd)) {
@@ -108,6 +109,9 @@ void ShadowsExteriorEffect::UpdateConstants() {
 		// cascades (faded out inside the RT range) and the traced visibility is multiplied in after it (core/RtSunShadows.cpp).
 		if (RtSunShadows::Replacing()) Constants.ForwardData.x = 1.0f;
 		RtSunShadows::ReplaceRange();
+		// UNOFFICIAL 2026-11-13 ForwardLookup: Mode 1 through the lookups themselves (they stay on; the traced visibility where last frame's
+		// trace saw the point). This frame's constants; all 0 (the cascades) when it does not run or the lookups are off.
+		RtSunShadows::UpdateForward(true, Constants.ForwardData.x == 0.0f && Constants.ShadowFade.y != 0.0f);
 #if NVR_TEST_TOOLS
 		// DIAGNOSTIC SkipWhenFadedCheck 3: the lookups off at any hour (what they cost; by day the sun shadows leave the lit
 		// shaders, so the picture changes).
@@ -134,6 +138,7 @@ void ShadowsExteriorEffect::UpdateConstants() {
 	}
 	else {
 		SunFaded = false;	// UNOFFICIAL 2026-10-16 SkipWhenFaded: nothing to skip indoors
+		RtSunShadows::UpdateForward(false, false);	// UNOFFICIAL 2026-11-13 ForwardLookup: nothing indoors
 		Constants.ForwardData.x = Settings.Exteriors.ForwardShadows ? 0.0f : 1.0f;
 		// the interior shadows' enabled flag; point lights always on indoors
 		Constants.ShadowFade.y = TheShaderManager->Effects.ShadowsInteriors->Enabled;
@@ -564,6 +569,12 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	interiors.PlayerInsideLamp = ShadowSettingI(interiorSection, "PlayerInsideLamp") != 0;
 	interiors.RedrawActorsOnly = ShadowSettingI(interiorSection, "RedrawActorsOnly") != 0;
 	interiors.PlayerLampMargin = (std::max)(ShadowSettingF(interiorSection, "PlayerLampMargin"), 1.0f);
+	{	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds (ShadowsExterior.h): missing key = 30; 0 (or less) = never release, as before. At least
+		// 1 s when on: the sweep sees a slow frame as 0.25 s, so a shorter time could release a cube map used the frame before.
+		SettingManager::Configuration::ConfigNode releaseNode;
+		const float seconds = TheSettingManager->Config.FillNode(&releaseNode, interiorSection, "CubeReleaseSeconds") ? releaseNode.FloatValue : 30.0f;
+		CubeReleaseSeconds = seconds > 0.0f ? (std::min)((std::max)(seconds, 1.0f), 3600.0f) : 0.0f;
+	}
 
 	{	// UNOFFICIAL: [Shaders.ShadowsInteriors.Forward], read once per settings change
 		InteriorsStruct::ForwardStruct& forward = interiors.Forward;
@@ -604,6 +615,10 @@ void ShadowsExteriorEffect::UpdateSettings() {
 		forward.LampModelShadows = ShadowSettingI(section, "LampModelShadows") != 0;
 		forward.LampModelDistance = std::clamp(ShadowSettingF(section, "LampModelDistance"), 0.0f, 512.0f);
 		LampFixtures::OwnLightDistance = std::clamp(ShadowSettingF(section, "LampModelOwnDistance"), -1.0f, 128.0f);
+		// UNOFFICIAL SkipOwnFixture (2026-11-11): switched live, the cell's fixtures are listed (or dropped) at the next frame
+		forward.SkipOwnFixture = ShadowSettingI(section, "SkipOwnFixture") != 0;
+		forward.OwnFixtureDistance = std::clamp(ShadowSettingF(section, "OwnFixtureDistance"), 0.0f, 160.0f);
+		if (LampFixtures::WantFixtures != forward.SkipOwnFixture) { LampFixtures::WantFixtures = forward.SkipOwnFixture; LampFixtures::GlowListed = -1.0e9; }
 		{	// UNOFFICIAL NoShadowLampModels (2026-10-27): the whole text (GetSettingS cuts a string at 79 characters, as ClothWind reads its lists)
 			SettingManager::Configuration::ConfigNode node;
 			LampFixtures::SetNoShadowWords(TheSettingManager->Config.FillNode(&node, section, "NoShadowLampModels") ?
@@ -810,6 +825,11 @@ void ShadowsExteriorEffect::RegisterConstants() {
 	bind("TESR_SmoothedSunDir", &Constants.SmoothedSunDir);
 	BendContact::RegisterConstants();	// UNOFFICIAL 2026-11-06 TESR_ContactReproject, TESR_ContactForwardData
 	bind("TESR_RtSunReplace", RtSunShadows::ReplaceConstant());	// UNOFFICIAL 2026-10-28 RT sun shadows Mode 1
+	// UNOFFICIAL 2026-11-13 ForwardLookup (Includes/Shadow.hlsl RT_SUN_FORWARD)
+	bind("TESR_RtSunRowX", RtSunShadows::ForwardConstant(0));
+	bind("TESR_RtSunRowY", RtSunShadows::ForwardConstant(1));
+	bind("TESR_RtSunRowW", RtSunShadows::ForwardConstant(2));
+	bind("TESR_RtSunData", RtSunShadows::ForwardConstant(3));
 	bind("TESR_ShadowData", &Constants.Data);
 	bind("TESR_ShadowFormatData", &Constants.FormatData);
 	bind("TESR_ShadowForwardData", &Constants.ForwardData);
@@ -897,7 +917,8 @@ static void MakeCascadeSurfaces(ShadowsExteriorEffect& fx, ULONG cascadeSize, UL
 
 void ShadowsExteriorEffect::RegisterTextures() {
 	TerrainShadows.RegisterTextures();	// UNOFFICIAL 2026-10-19
-	BendContact::RegisterTextures();	// UNOFFICIAL 2026-11-06 TESR_ContactForward
+	RtSunShadows::RegisterForwardTexture();	// UNOFFICIAL 2026-11-13 ForwardLookup: TESR_RtSunForward (nothing unless compiled in)
+	BendContact::RegisterTextures();	// UNOFFICIAL 2026-11-06 TESR_ContactForward (only when Bend is on at start)
 	PuddleMap::RegisterTextures();		// 2026-11-12 Puddles map mode: TESR_PuddleMap (only in map mode)
 	const ULONG cascadeSize = Settings.ShadowMaps.CascadeResolution;
 	const ULONG cubeSize = Settings.Interiors.ShadowCubeMapSize;
@@ -908,11 +929,18 @@ void ShadowsExteriorEffect::RegisterTextures() {
 	// SunSmoothing CrossFade: the copy of the atlas from before a sun step. Only when the setting is on at startup,
 	// which is also when the shaders get the fade compiled in (SUN_CROSSFADE). Forward shadows only (the default): the
 	// deferred lookup in SunShadows.fx has no fade, so without forward shadows the steps keep gliding.
-	if (Settings.SunSmoothing.CrossFade && Settings.Exteriors.ForwardShadows) {
+	// (2026-11-15 fd-smoothsun) Not while the deferred sun pass carries the fade (core/SunFadeDeferred.h): then the name is registered
+	// empty, and the copy is made at the first step that fades (StartDeferredFade), so nothing is spent before the deferred sun runs.
+	if (Settings.SunSmoothing.CrossFade && Settings.Exteriors.ForwardShadows && !SunFadeDeferred::CompiledIn()) {
 		TheTextureManager->InitTexture("TESR_ShadowAtlasOld", &ShadowAtlasOldTexture, &ShadowAtlasOldSurface, atlasSize, atlasSize, Settings.ShadowMaps.Format, false);
 		SunCrossFadeReady = ShadowAtlasOldTexture && ShadowAtlasOldSurface;
 		Logger::Log("UNOFFICIAL sun shadow cross-fade %s (%lux%lu copy of the shadow atlas).", SunCrossFadeReady ? "on" : "FAILED, off",
 			atlasSize, atlasSize);
+	}
+	else if (SunFadeDeferred::CompiledIn()) {
+		TheTextureManager->RegisterTexture("TESR_ShadowAtlasOld", (IDirect3DBaseTexture9**)&ShadowAtlasOldTexture);
+		Logger::Log("UNOFFICIAL deferred sun steps: %.1f degrees, each faded over %.1f s by the deferred sun pass (the %lux%lu copy of the shadow atlas is made at the first step)",
+			SunFadeDeferred::StepDegrees, SunFadeDeferred::FadeSeconds, atlasSize, atlasSize);
 	}
 
 	MakeCascadeSurfaces(*this, cascadeSize, atlasSize);
@@ -993,6 +1021,7 @@ void ShadowsExteriorEffect::RegisterTextures() {
  */
 bool ShadowsExteriorEffect::EnsureCubeMap(int slot) {
 	if (slot < 0 || slot >= ShadowCubeMapsMax || !CubeMapSizeCreated) return false;
+	CubeUsed[slot] = CubeClock;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: the slot has a lamp this frame (drawn, or kept and published)
 	if (Textures.ShadowCubeMapTexture[slot]) return true;
 	if (FAILED(TheRenderManager->device->CreateCubeTexture(CubeSizeFor(slot), 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT,
 		&Textures.ShadowCubeMapTexture[slot], NULL)) || !Textures.ShadowCubeMapTexture[slot]) {
@@ -1003,7 +1032,15 @@ bool ShadowsExteriorEffect::EnsureCubeMap(int slot) {
 	}
 	for (int j = 0; j < 6; j++) Textures.ShadowCubeMapTexture[slot]->GetCubeMapSurface((D3DCUBEMAP_FACES)j, 0, &Textures.ShadowCubeMapSurface[slot][j]);
 	CubeGeneration++;
-	Logger::Log("UNOFFICIAL point shadows: cube map for slot %d created (%u x %u)", slot, CubeSizeFor(slot), CubeSizeFor(slot));
+	CubeMapsMade++;
+	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: a released cube map is made again, so this line can come any number of times now. The
+	// first 64 are written; after that the "lamp shadow cube maps" count line (ShadowManager.cpp) has the numbers.
+	static unsigned lines = 0;
+	if (lines < 64) {
+		lines++;
+		Logger::Log("UNOFFICIAL point shadows: cube map for slot %d created (%u x %u)%s", slot, CubeSizeFor(slot), CubeSizeFor(slot),
+			lines == 64 ? " (said 64 times; later ones are only counted, see the 'lamp shadow cube maps' lines)" : "");
+	}
 	return true;
 }
 
@@ -1011,6 +1048,7 @@ bool ShadowsExteriorEffect::EnsureCubeMap(int slot) {
 // has people in reach. Same size and format as the slot's cube map, so a face copies over with StretchRect.
 bool ShadowsExteriorEffect::EnsureStaticCubeMap(int slot) {
 	if (slot < 0 || slot >= ShadowCubeMapsMax || !CubeMapSizeCreated) return false;
+	CubeStaticUsed[slot] = CubeClock;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: wanted this frame (people near the lamp, or the pool's spare)
 	if (Textures.ShadowCubeMapStaticTexture[slot]) return true;
 	if (FAILED(TheRenderManager->device->CreateCubeTexture(CubeSizeFor(slot), 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT,
 		&Textures.ShadowCubeMapStaticTexture[slot], NULL)) || !Textures.ShadowCubeMapStaticTexture[slot]) {
@@ -1021,7 +1059,96 @@ bool ShadowsExteriorEffect::EnsureStaticCubeMap(int slot) {
 	}
 	for (int j = 0; j < 6; j++) Textures.ShadowCubeMapStaticTexture[slot]->GetCubeMapSurface((D3DCUBEMAP_FACES)j, 0, &Textures.ShadowCubeMapStaticSurface[slot][j]);
 	CubeGeneration++;
-	Logger::Log("UNOFFICIAL RedrawActorsOnly: static cube map for slot %d created (%u x %u)", slot, CubeSizeFor(slot), CubeSizeFor(slot));
+	CubeMapsMade++;
+	static unsigned lines = 0;	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: the first 64 (as EnsureCubeMap)
+	if (lines < 64) {
+		lines++;
+		Logger::Log("UNOFFICIAL RedrawActorsOnly: static cube map for slot %d created (%u x %u)%s", slot, CubeSizeFor(slot), CubeSizeFor(slot),
+			lines == 64 ? " (said 64 times; later ones are only counted, see the 'lamp shadow cube maps' lines)" : "");
+	}
+	return true;
+}
+
+// UNOFFICIAL 2026-11-12 CubeReleaseSeconds: every sampler record (the replaced game shaders' three records each, and the effects) that
+// holds this texture forgets it, by pointer: SetCT resolves the sampler again from its name's slot. The game shaders keep the pointer
+// they bound first for good (the crash class of the ortho map: a shader binding a released texture); the effects read their slot again
+// at each bind, but the copy they keep in between goes too. Only the screen-space lamp pass can ever hold a cube map past the 12 made
+// at start (ShaderManager::RenderPointShadowBatches puts them in the first 12 names' slots while it draws); the walk does not rely on it.
+static unsigned ForgetTextureInSamplers(const IDirect3DBaseTexture9* texture) {
+	unsigned forgotten = 0;
+	auto forget = [&](ShaderProgram* program) {
+		if (!program) return;
+		for (UInt32 i = 0; i < program->TextureShaderValuesCount; i++) {
+			TextureRecord* record = program->TextureShaderValues[i].Texture;
+			if (record && record->Texture == texture) { record->Texture = nullptr; forgotten++; }
+		}
+	};
+	for (const auto& named : TheShaderManager->EffectsNames) forget(named.second ? *named.second : nullptr);
+	for (const auto& named : TheShaderManager->ShaderNames) {
+		ShaderCollection* collection = named.second ? *named.second : nullptr;
+		if (!collection) continue;
+		for (auto& vertex : collection->VertexShaderList)
+			for (int kind = 0; vertex && kind < 3; kind++) forget(vertex->ShaderProg[kind]);	// Default / Exterior / Interior
+		for (auto& pixel : collection->PixelShaderList)
+			for (int kind = 0; pixel && kind < 3; kind++) forget(pixel->ShaderProg[kind]);
+	}
+	return forgotten;
+}
+
+// UNOFFICIAL 2026-11-12 CubeReleaseSeconds (ShadowsExterior.h). Order: nothing may hold the texture when it is released.
+//  1. a face that is a render target now: not released (false);
+//  2. the 16 pixel and 4 vertex texture stages: where the device holds it (the effects and the atlas conversion bind there directly)
+//     or the game's own record of the stage does (NiDX9RenderState, which the forward lamp shadows bind through and compare against:
+//     a stale entry there would make the next bind of a new cube map at the same address a no-op), both are emptied;
+//  3. the sampler records (above);
+//  4. the six face surfaces, the texture, the slot's pointers, and CubeGeneration (the readers that keep a pointer to compare:
+//     ShadowManager's face records).
+// ShadowManager's own records of the slot (its slot state, the published lamp table, the atlas tile) are the caller's to clear.
+bool ShadowsExteriorEffect::ReleaseCubeMap(int slot, bool staticTwin) {
+	if (slot < 0 || slot >= ShadowCubeMapsMax) return false;
+	if (!staticTwin && slot < ShadowCubeMapsScreen) return false;	// made at start, registered as TESR_ShadowCubeMapBuffer<slot>: kept
+	IDirect3DCubeTexture9*& texture = staticTwin ? Textures.ShadowCubeMapStaticTexture[slot] : Textures.ShadowCubeMapTexture[slot];
+	IDirect3DSurface9** faces = staticTwin ? Textures.ShadowCubeMapStaticSurface[slot] : Textures.ShadowCubeMapSurface[slot];
+	if (!texture) return false;
+	IDirect3DDevice9* device = TheRenderManager->device;
+	NiDX9RenderState* state = TheRenderManager->renderState;
+
+	for (DWORD target = 0; target < 4; target++) {
+		IDirect3DSurface9* bound = nullptr;
+		if (FAILED(device->GetRenderTarget(target, &bound)) || !bound) continue;
+		bool ours = false;
+		for (int face = 0; face < 6; face++) ours |= bound == faces[face];
+		bound->Release();
+		if (ours) return false;
+	}
+
+	for (DWORD stage = 0; stage < 16; stage++) {
+		IDirect3DBaseTexture9* bound = nullptr;
+		const bool onDevice = FAILED(device->GetTexture(stage, &bound)) || bound == texture;	// (a stage that cannot be read counts as holding it)
+		if (bound) bound->Release();	// (GetTexture's reference; ours keep the cube map alive)
+		const bool noted = state->GetTexture(stage) == texture || state->unk10A0[stage] == (UInt32)texture;
+		if (!onDevice && !noted) continue;
+		// Both to empty, as EffectRecord::ClearPassTextures: the game's record must say what the device holds, or the game's next bind
+		// of its own texture on this stage would be skipped as already there.
+		device->SetTexture(stage, nullptr);
+		state->NoteDeviceTexture(stage, nullptr);
+		if (state->GetTexture(stage) == texture) state->SetTexture(stage, nullptr);	// (should the game's getter read another record than the note)
+	}
+	for (DWORD stage = D3DVERTEXTEXTURESAMPLER0; stage <= D3DVERTEXTEXTURESAMPLER3; stage++) {
+		IDirect3DBaseTexture9* bound = nullptr;
+		if (SUCCEEDED(device->GetTexture(stage, &bound)) && bound) {
+			if (bound == texture) device->SetTexture(stage, nullptr);
+			bound->Release();
+		}
+	}
+
+	ForgetTextureInSamplers(texture);
+
+	for (int face = 0; face < 6; face++)
+		if (faces[face]) { faces[face]->Release(); faces[face] = nullptr; }
+	texture->Release();
+	texture = nullptr;
+	CubeGeneration++;
 	return true;
 }
 
@@ -1063,6 +1190,14 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 			Constants.CrossFade.x = 0.0f;
 			TheShaderManager->Effects.SunShadows->ClearSampler("TESR_ShadowAtlasOld", 19);
 			TheShaderManager->ClearShaderSamplers("TESR_ShadowAtlasOld", 19);
+		}
+		// (2026-11-15 fd-smoothsun) the deferred steps' copy: released, made again at the next step at the new size (DeferredSun::Apply
+		// re-reads the slot at every pass); a fade in progress ends
+		else if (ShadowAtlasOldTexture) {
+			ReleaseAndClear(ShadowAtlasOldSurface);
+			ReleaseAndClear(ShadowAtlasOldTexture);
+			DeferredFading = DeferredHolding = false;
+			Constants.CrossFade.x = 0.0f;
 		}
 
 		MakeCascadeSurfaces(*this, cascadeSize, atlasSize);
@@ -1140,6 +1275,47 @@ bool ShadowsExteriorEffect::EnsureCharacterMap() {
 	return true;
 }
 
+// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: count maps of size x size (R32F, as the player's) and one depth surface they share;
+// remade when either changes. Bound by hand per draw (NpcCharacterMaps.h), so no sampler name is registered for them.
+bool ShadowsExteriorEffect::EnsureCharacterNpcMaps(int count, UINT size) {
+	count = std::clamp(count, 0, CharacterNpcMax);
+	if (count == CharacterNpcCountCreated && size == CharacterNpcSizeCreated && (count == 0 || CharacterNpcDepthSurface)) return count > 0;
+	auto release = [this]() {
+		for (int i = 0; i < CharacterNpcMax; i++) {
+			if (CharacterNpcSurface[i]) { CharacterNpcSurface[i]->Release(); CharacterNpcSurface[i] = nullptr; }
+			if (CharacterNpcTexture[i]) { CharacterNpcTexture[i]->Release(); CharacterNpcTexture[i] = nullptr; }
+		}
+		if (CharacterNpcDepthSurface) { CharacterNpcDepthSurface->Release(); CharacterNpcDepthSurface = nullptr; }
+		CharacterNpcCountCreated = 0;
+		CharacterNpcSizeCreated = 0;
+		CharacterNpcLive = 0;
+	};
+	release();
+	if (count == 0) return false;
+	IDirect3DDevice9* device = TheRenderManager->device;
+	for (int i = 0; i < count; i++) {
+		if (FAILED(device->CreateTexture(size, size, 1, D3DUSAGE_RENDERTARGET, D3DFMT_R32F, D3DPOOL_DEFAULT, &CharacterNpcTexture[i], NULL)) || !CharacterNpcTexture[i] ||
+			FAILED(CharacterNpcTexture[i]->GetSurfaceLevel(0, &CharacterNpcSurface[i]))) {
+			Logger::Log("UNOFFICIAL CharacterShadowMapNpcs: could not make NPC map %d (%u x %u); off until it can be.", i, size, size);
+			release();
+			return false;
+		}
+	}
+	if (FAILED(device->CreateDepthStencilSurface(size, size, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &CharacterNpcDepthSurface, NULL)) || !CharacterNpcDepthSurface) {
+		CharacterNpcDepthSurface = nullptr;
+		Logger::Log("UNOFFICIAL CharacterShadowMapNpcs: could not make the %u x %u depth surface; off until it can be.", size, size);
+		release();
+		return false;
+	}
+	CharacterNpcCountCreated = count;
+	CharacterNpcSizeCreated = size;
+	CharacterNpcMap.ShadowMapViewPort = { 0, 0, size, size, 0.0f, 1.0f };
+	CharacterNpcMap.ShadowMapResolution = (float)size;
+	CharacterNpcMap.ShadowMapInverseResolution = 1.0f / (float)size;
+	Logger::Log("UNOFFICIAL CharacterShadowMapNpcs: %d NPC maps of %u x %u", count, size, size);
+	return true;
+}
+
 // UNOFFICIAL 2026-10-23 CharacterShadowMap: the fit (docs/next/CHARACTER-SHADOW-MAP-DESIGN.md, "Map fit"). A sphere round the player --
 // Fit 0: the head and upper body, the segment from the Spine2 bone to the head bone plus the margin (hat brims, hair, shoulders);
 // Fit 1: the actor node's world bound plus the margin -- seen from the sun as an ortho box 2R across and 2R deep (eye R toward the
@@ -1181,6 +1357,52 @@ static Character* CharacterMapNpc(float maxDistance) {
 	return best;
 }
 
+// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: the people in the high and middle-high process lists (as CharacterMapNpc), not
+// disabled or culled, with a skeleton, whose head is within maxDistance of the camera, nearest first; skip: a node already in the
+// player's map (CharacterShadowMapTarget's NPC in first person). Behind and beside the camera too: their shadows still show nearby.
+static int CharacterNpcsRaw(Character** out, float* distances, int max, float maxDistance, NiNode* skip) {
+	const NiPoint3 eye = WorldSceneGraph->camera->m_worldTransform.pos;
+	int n = 0;
+	__try {
+		UInt8* lists = (UInt8*)0x11E0E80;	// ProcessLists
+		Actor** data = *(Actor***)(lists + 0x08);
+		for (int level = 0; data && level < 2; level++) {
+			const UInt32 begin = *(UInt32*)(lists + 0x14 + level * 4), end = *(UInt32*)(lists + 0x24 + level * 4);
+			if (end < begin || end - begin > 4096) continue;
+			for (UInt32 i = begin; i < end; i++) {
+				Actor* actor = data[i];
+				if (!actor || (TESObjectREFR*)actor == (TESObjectREFR*)Player || !actor->baseForm || actor->baseForm->formType != TESForm::FormType::kFormType_NPC) continue;
+				if ((actor->flags & 0x800) != 0) continue;	// disabled
+				Character* npc = (Character*)actor;
+				NiNode* node = npc->GetNode();
+				if (!node || node == skip || (node->m_flags & NiAVObject::APP_CULLED) || !npc->ActorSkinInfo || !npc->ActorSkinInfo->HeadNode || !npc->ActorSkinInfo->Spine2Node) continue;
+				const NiPoint3& h = npc->ActorSkinInfo->HeadNode->m_worldTransform.pos;
+				const float dx = h.x - eye.x, dy = h.y - eye.y, dz = h.z - eye.z;
+				const float distance = sqrtf(dx * dx + dy * dy + dz * dz);
+				if (!(distance < maxDistance)) continue;
+				// insert in order, keeping the nearest max
+				int at = n < max ? n : max;
+				while (at > 0 && distances[at - 1] > distance) at--;
+				if (at >= max) continue;
+				for (int k = (n < max ? n : max - 1); k > at; k--) { out[k] = out[k - 1]; distances[k] = distances[k - 1]; }
+				out[at] = npc;
+				distances[at] = distance;
+				if (n < max) n++;
+			}
+		}
+	}
+	__except (EXCEPTION_EXECUTE_HANDLER) {
+		static bool logged = false;
+		if (!logged) { logged = true; Logger::Log("[ERROR] CharacterShadowMapNpcs: reading the actors failed (once)"); }
+	}
+	return n;
+}
+
+int ShadowsExteriorEffect::PickCharacterNpcs(Character** out, int max, float maxDistance, NiNode* skip) {
+	float distances[CharacterNpcMax];
+	return CharacterNpcsRaw(out, distances, (std::min)(max, (int)CharacterNpcMax), maxDistance, skip);
+}
+
 bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DXMATRIX& viewProj) {
 	CharacterTargetNode = nullptr;
 	if (!Player) return false;
@@ -1193,6 +1415,15 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	NiNode* node = target->GetNode();
 	if (!node || (node->m_flags & NiAVObject::APP_CULLED)) return false;
 	CharacterTargetNode = node;
+	const float mapSize = CharacterMap.ShadowMapResolution > 0.0f ? CharacterMap.ShadowMapResolution : (float)Settings.ShadowMaps.CharacterMapResolution;
+	if (!FitCharacterBox(target, node, sunDir, mapSize, CharacterMap, viewProj, Constants.CharacterCenter, Constants.CharacterData)) return false;
+	Constants.CharacterCameraToLight = viewProj;
+	return true;
+}
+
+// UNOFFICIAL 2026-11-08: GetCharacterViewProj's fit, for any person (CharacterShadowMapNpcs fits the NPC maps with it too).
+bool ShadowsExteriorEffect::FitCharacterBox(Character* target, NiNode* node, const D3DXVECTOR3& sunDir, float mapSize, ShadowMapSettings& map,
+	D3DXMATRIX& viewProj, D3DXVECTOR4& centerOut, D3DXVECTOR4& dataOut) {
 	const NiPoint3 cameraPosition = WorldSceneGraph->camera->m_worldTransform.pos;
 	D3DXVECTOR3 centre;
 	float radius;
@@ -1227,7 +1458,6 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	viewProj = view * proj;
 
 	// the world origin on a texel corner (GetCascadeViewProj's rounding): the picture moves by whole texels as the character moves
-	const float mapSize = CharacterMap.ShadowMapResolution > 0.0f ? CharacterMap.ShadowMapResolution : (float)Settings.ShadowMaps.CharacterMapResolution;
 	D3DXVECTOR4 origin(-cameraPosition.x, -cameraPosition.y, -cameraPosition.z, 1.0f);
 	D3DXVec4Transform(&origin, &origin, &viewProj);
 	const float ox = origin.x * mapSize * 0.5f, oy = origin.y * mapSize * 0.5f;
@@ -1236,7 +1466,6 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	viewProj = view * proj;
 
 	// the map's settings for the draw (as AmbientLight::GridSunViewProj): actors only, alpha test on (hair cards, hat meshes), nothing too small
-	ShadowMapSettings& map = CharacterMap;
 	map.Forms = {};
 	map.Forms.Actors = true;
 	map.Forms.AlphaEnabled = true;
@@ -1253,11 +1482,10 @@ bool ShadowsExteriorEffect::GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DX
 	map.ShadowMapFrustumPlanes.SetActivePlaneState(62);
 
 	// the lookups' constants (w: set by the caller once the map holds the draw)
-	Constants.CharacterCameraToLight = viewProj;
-	Constants.CharacterCenter = D3DXVECTOR4(centre.x, centre.y, centre.z, radius);
-	Constants.CharacterData.x = 1.0f / mapSize;
-	Constants.CharacterData.y = (std::min)(Settings.ShadowMaps.CharacterMapBlend / radius, 0.9f);
-	Constants.CharacterData.z = Settings.ShadowMaps.CharacterMapBias / (2.0f * radius);	// world units -> the map's depth (0..1 over 2R)
+	centerOut = D3DXVECTOR4(centre.x, centre.y, centre.z, radius);
+	dataOut.x = 1.0f / mapSize;
+	dataOut.y = (std::min)(Settings.ShadowMaps.CharacterMapBlend / radius, 0.9f);
+	dataOut.z = Settings.ShadowMaps.CharacterMapBias / (2.0f * radius);	// world units -> the map's depth (0..1 over 2R)
 	return true;
 }
 
@@ -1274,9 +1502,41 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateSmoothedSunDir() {
 	const float jumpLimit = D3DXToRadian(Settings.SunSmoothing.MaxJumpAngle);	// a bigger move than this is applied at once
 
 	const bool quantized = Settings.SunSmoothing.QuantizeSun && yawStep > 0.0f && pitchStep > 0.0f;
+
+	// UNOFFICIAL 2026-11-16 [Shaders.ShadowsExteriors.RT] RealSun (port of mrfury97/VegasShaders fef7c30ba, rt-shadows F2; off by default):
+	// while the traced sun shadow is read by the shaders (RtSunShadows::RealSun) every sun shadow follows the REAL sun, the one the lit
+	// shaders' N.L uses: the 15-degree steps exist to keep shadow-map texels from swimming, which traced shadows do not have; quantized, a
+	// low sun was traced up to 7.5 degrees off the lit one. The cascades take the same sun (they cover past the RT range). Only a light
+	// per-frame ease against jitter; a jump (waiting, sleeping, a load) is taken at once.
+	if (RtSunShadows::RealSun()) {
+		D3DXVECTOR3 sunNow(TheShaderManager->ShaderConst.SunDir);
+		D3DXVECTOR3 eased(Constants.SmoothedSunDir);
+		const float lengthSq = D3DXVec3LengthSq(&eased);
+		if (lengthSq > 0.25f && D3DXVec3Dot(&eased, &sunNow) / sqrtf(lengthSq) > 0.99939f) {	// within 2 degrees
+			D3DXVec3Lerp(&eased, &eased, &sunNow, 0.5f);
+			D3DXVec3Normalize(&eased, &eased);
+		}
+		else eased = sunNow;
+		SunGlideValid = false;
+		SunCrossFading = false;
+		Constants.CrossFade.x = 0.0f;
+		Constants.SmoothedSunDir = D3DXVECTOR4(eased, 0.0f);
+		return eased;
+	}
 	const bool smoothed = Settings.SunSmoothing.SmoothSun && factor > 0.0f;
 
 	D3DXVECTOR3 sunDir(TheShaderManager->ShaderConst.SunDir);
+
+	// UNOFFICIAL 2026-11-15 fd-smoothsun (core/SunFadeDeferred.h): while the deferred sun pass draws the sun with the fade compiled in, outdoors,
+	// with SmoothSun on: half-degree steps, each faded by that pass. Otherwise (indoors, a frame drawn forward, DeferredFade off) as before;
+	// a switch between the two jumps.
+	if (Settings.SunSmoothing.SmoothSun && SunFadeDeferred::Live() && TheShaderManager->GameState.isExterior)
+		return CalculateDeferredSunDir(sunDir);
+	SunFadeDeferred::Fading = false;
+	if (DeferredSunValid) {
+		DeferredSunValid = DeferredFading = DeferredHolding = false;
+		Constants.CrossFade = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	}
 
 	if (quantized) {
 		// Snap yaw and pitch to their steps.
@@ -1361,7 +1621,7 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateSmoothedSunDir() {
 * as the last frame left it -- the shadows of the previous sun direction -- with the matrices and centres its
 * cascades were drawn with, and have every cascade redrawn this frame for the new direction.
 */
-bool ShadowsExteriorEffect::StartSunCrossFade() {
+bool ShadowsExteriorEffect::StartSunCrossFade(bool forceAllCascades) {
 	HRESULT copied = TheRenderManager->device->StretchRect(ShadowAtlasSurface, NULL, ShadowAtlasOldSurface, NULL, D3DTEXF_NONE);
 	if (FAILED(copied)) {
 		static bool reported = false;
@@ -1374,7 +1634,7 @@ bool ShadowsExteriorEffect::StartSunCrossFade() {
 		SunFadeCenter[i] = ShadowMaps[i].ShadowMapCascadeCenterRadius;
 		SunFadeCamera[i] = ShadowMaps[i].CameraTranslation;
 	}
-	TheShadowManager->ForceAllCascades = true;
+	if (forceAllCascades) TheShadowManager->ForceAllCascades = true;	// (2026-11-15: the deferred steps wait for the schedule instead)
 	return true;
 }
 
@@ -1394,6 +1654,121 @@ void ShadowsExteriorEffect::UpdateSunCrossFade(float oldWeight) {
 			SunFadeCenter[i].z - moved.z, SunFadeCenter[i].w);
 	}
 	Constants.CrossFade.x = oldWeight;
+}
+
+/*
+* UNOFFICIAL 2026-11-15 fd-smoothsun (core/SunFadeDeferred.h, docs/next/FD-SMOOTHSUN-RESULTS.md): the deferred renderer's sun for the shadow
+* maps. It stands still at DeferredSunHeld and steps to the real sun once that is StepDegrees away and no fade is running; the deferred sun
+* pass then fades from the maps of before the step (kept here: the atlas, its cascades' matrices and centres, the sun they were drawn for in
+* TESR_ShadowCrossFade.yzw) to the new ones over FadeSeconds. The fade's clock starts once every cascade has been redrawn for the new sun
+* (the far ones follow their 4 / 8 frame schedule; nothing is forced), at most MaxHoldFrames frames after the step: until then the old maps
+* alone, so no cascade is seen switching. A move past MaxJumpAngle (waiting, sleeping, fast travel, the sun / moon swap) or the camera put elsewhere (loading),
+* or the sun's shadows faded out (the cascades not drawn) jumps at once. Called before this frame's cascades are drawn.
+*/
+D3DXVECTOR3 ShadowsExteriorEffect::CalculateDeferredSunDir(D3DXVECTOR3 sunDir) {
+	SunGlideValid = false;	// (the forward glide starts over if it takes over again)
+	SunCrossFading = false;
+	const float lengthSq = D3DXVec3LengthSq(&sunDir);
+	if (lengthSq > 1.0e-12f) sunDir /= sqrtf(lengthSq);
+	else sunDir = D3DXVECTOR3(0.0f, 0.0f, 1.0f);
+	const ULONGLONG now = GetTickCount64();
+	const float stepAngle = D3DXToRadian(SunFadeDeferred::StepDegrees);
+	const float jumpLimit = D3DXToRadian(Settings.SunSmoothing.MaxJumpAngle);	// [5-30] degrees
+	const float angle = acosf(std::clamp(D3DXVec3Dot(&sunDir, &DeferredSunHeld), -1.0f, 1.0f));
+	const bool noMaps = SunFaded || TheShadowManager->SunCascadesSkipped;	// nothing drawn to fade from (the sun's shadows faded out)
+	// the camera put somewhere else (loading, fast travel, a door to another worldspace): the kept maps are of another place
+	const D3DXVECTOR3 camera = WorldSceneGraph->camera->m_worldTransform.pos.toD3DXVEC3();
+	const D3DXVECTOR3 cameraMoved = camera - DeferredLastCamera;
+	const bool teleported = DeferredSunValid && D3DXVec3LengthSq(&cameraMoved) > 2048.0f * 2048.0f;
+	DeferredLastCamera = camera;
+
+	static unsigned stepLines = 0, jumpLines = 0;
+	const bool watch = TheSettingManager->GetSettingI("Shaders.CloudShadows.Main", "FlickerWatch") != 0;
+	const bool jump = DeferredSunValid && (angle > jumpLimit || teleported);
+	if (!DeferredSunValid || jump || (noMaps && angle >= stepAngle)) {
+		if (jump) {
+			DeferredJumps++;
+			if (jumpLines < 40 || watch) {
+				jumpLines++;
+				Logger::Log("UNOFFICIAL sun step %.2f degrees at hour %.2f (to %.3f %.3f %.3f): jumps (deferred: %s)", D3DXToDegree(angle),
+					TheShaderManager->ShaderConst.GameTime.y, sunDir.x, sunDir.y, sunDir.z,
+					angle > jumpLimit ? "more than MaxJumpAngle: waiting, sleeping, fast travel, loading or the sun / moon swap" : "the camera was put somewhere else");
+			}
+		}
+		DeferredSunHeld = sunDir;
+		DeferredSunValid = true;
+		DeferredFading = DeferredHolding = false;
+	}
+	else if (angle >= stepAngle && !DeferredFading) {
+		const D3DXVECTOR3 oldSun = DeferredSunHeld;
+		DeferredFading = !noMaps && StartDeferredFade(oldSun);
+		DeferredHolding = DeferredFading;
+		DeferredHoldFrames = 0;
+		DeferredFadeStart = now;
+		DeferredSunHeld = sunDir;
+		DeferredSteps++;
+		if (stepLines < 40 || watch || DeferredSteps % 50 == 0) {
+			stepLines++;
+			Logger::Log("UNOFFICIAL sun step %.2f degrees at hour %.2f (to %.3f %.3f %.3f): %s (deferred step %u, %u jumps so far; the last fade waited %.1f frames for the cascades on average)",
+				D3DXToDegree(angle), TheShaderManager->ShaderConst.GameTime.y, sunDir.x, sunDir.y, sunDir.z,
+				DeferredFading ? "cross-fades" : "jumps (the copy of the shadow atlas failed)", DeferredSteps, DeferredJumps,
+				DeferredSteps > 1 ? DeferredHoldSum / (float)(DeferredSteps - 1) : 0.0f);
+		}
+	}
+
+	if (DeferredFading) {
+		if (DeferredHolding) {
+			// the fade waits until every cascade holds a draw for the new sun (ShadowManager: CascadeRefreshSun, set at each cascade's draw)
+			bool redrawn = true;
+			for (int i = MapNear; i <= MapLod; i++) redrawn = redrawn && D3DXVec3Dot(&TheShadowManager->CascadeRefreshSun[i], &DeferredSunHeld) > 0.999999f;
+			if (redrawn || DeferredHoldFrames >= SunFadeDeferred::MaxHoldFrames) {
+				DeferredHolding = false;
+				DeferredHoldSum += (unsigned)DeferredHoldFrames;
+				DeferredFadeStart = now;
+			}
+			else DeferredHoldFrames++;
+		}
+		const float t = DeferredHolding ? 0.0f : std::clamp((now - DeferredFadeStart) / (1000.0f * SunFadeDeferred::FadeSeconds), 0.0f, 1.0f);
+		if (t < 1.0f) UpdateSunCrossFade(1.0f - t * t * (3.0f - 2.0f * t));	// eased at both ends, as the glide
+		else DeferredFading = false;
+	}
+	if (!DeferredFading) Constants.CrossFade.x = 0.0f;
+	SunFadeDeferred::Fading = DeferredFading;
+
+	Constants.SmoothedSunDir = D3DXVECTOR4(DeferredSunHeld, 0.0f);
+	return DeferredSunHeld;
+}
+
+/*
+* fd-smoothsun: a deferred step. The copy of the atlas is made here at the first step (registered empty at startup: nothing spent before),
+* at the live atlas' size and format; then the atlas as the last frame left it is copied with its cascades (StartSunCrossFade, without
+* forcing a redraw) and the sun it was drawn for goes to TESR_ShadowCrossFade.yzw.
+*/
+bool ShadowsExteriorEffect::StartDeferredFade(const D3DXVECTOR3& oldSun) {
+	if (DeferredFadeFailed || !ShadowAtlasTexture || !ShadowAtlasSurface) return false;
+	if (!ShadowAtlasOldTexture) {
+		D3DSURFACE_DESC desc = {};
+		ShadowAtlasTexture->GetLevelDesc(0, &desc);
+		TheTextureManager->InitTexture("TESR_ShadowAtlasOld", &ShadowAtlasOldTexture, &ShadowAtlasOldSurface, desc.Width, desc.Height, desc.Format, false);
+		D3DSURFACE_DESC made = {};
+		if (ShadowAtlasOldTexture) ShadowAtlasOldTexture->GetLevelDesc(0, &made);
+		if (!ShadowAtlasOldTexture || !ShadowAtlasOldSurface || made.Width != desc.Width || made.Height != desc.Height) {
+			// (out of video memory, most likely; this effect's targets are never parked: TargetParkable is false)
+			Logger::Log("UNOFFICIAL deferred sun steps: the %ux%u copy of the shadow atlas could not be made: no fades this session (the steps jump)", desc.Width, desc.Height);
+			DeferredFadeFailed = true;
+			return false;
+		}
+		Logger::Log("UNOFFICIAL deferred sun steps: the %ux%u copy of the shadow atlas made (%.0f MB)", desc.Width, desc.Height,
+			TextureManager::TargetBytes((int)desc.Width, (int)desc.Height, desc.Format, false) / 1048576.0);
+	}
+	if (!StartSunCrossFade(false)) {
+		DeferredFadeFailed = true;
+		return false;
+	}
+	Constants.CrossFade.y = oldSun.x;
+	Constants.CrossFade.z = oldSun.y;
+	Constants.CrossFade.w = oldSun.z;
+	return true;
 }
 
 

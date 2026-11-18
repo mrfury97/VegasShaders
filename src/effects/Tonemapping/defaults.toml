@@ -1,10 +1,10 @@
 [_Shaders.Tonemapping.Main]
 HueSafeClip = true                    # UNOFFICIAL: a colour too bright for the screen keeps its hue, losing a little saturation instead of having its brightest channel cut (bright lit orange used to turn yellow, red pink, e.g. under the flashlight). Colours that fit on screen are not touched. Off = the old cut. Applies everywhere, live.
 TonemappingMode = 10                  # Tonemapping Algorithm -  0:None (vanilla - DXVK HDR), 1:VTLottes, 2:Lottes (tuned), 3:Reinhard, 4:Reinhard Jodie, 5:ACES Filmic, 6:ACES Fitted, 7:Uncharted 2, 8:Uchimura (GT), 9:AGX, 10:DICE (default, most neutral/accurate), 11:Perceptual (Polyphony Digital, SIGGRAPH 2025)
-Exposure = 1.5                        # Scales the engine lighting strength/brightness range before tonemap, useful for HDR rendering
+Exposure = 2.5                        # Scales the engine lighting strength/brightness range before tonemap, useful for HDR rendering UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.5.
 Gamma = 2.2                           # Gamma modifier to be applied after tonemapping, delinearises output. If placed at 1.0, outputs at linear space for HDR (UI unaffected)
 Linearization = 2.2                   # Converts image to corrected linear space before tonemapping. 1.0 is non-linear, if so place Gamma at 1.0 as well
-SkyMultiplier = 1.0                   # Scales the brightness of the sky/sun textures. Requires Sky shader enabled
+SkyMultiplier = 0.6                   # Scales the brightness of the sky/sun textures. Requires Sky shader enabled UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 1.0.
 WeatherModifier = 1.0                 # Influence of the vanilla weather modifiers (brightness, contrast, saturation)
 WeatherContrast = 0.0                 # Influence of the vanilla contrast setting, applies post-tonemap. Scales atop WeatherModifier, can cause black crush
 Saturation = 1.0                      # Saturation of the image before tonemapping
@@ -17,6 +17,7 @@ TonemapWhitePoint = 1.0               # White point Setting for Lottes, Reinhard
 HighlightSaturation = 1.0             # Highlight saturation for VT Lottes, controls how saturated bright elements are as they approach the White Point. For Perceptual (11): where colours fade to white near the peak (1.0 = the reference, higher = colours stay saturated longer)
 PointLightMultiplier = 1.0            # Experimental - modifies the strength of all point lights
 NightShiftEnabled = false          # UNOFFICIAL (2026-11-04) Night colour shift: in the dark the eye sees with its rods, which lose colour and see blue-green best, so dim parts of the picture turn paler and cooler while lamps and lit areas keep their colour (the Purkinje shift; Red Dead Redemption 2 and Ghost of Tsushima do it at night). Off by default.
+AgxContrast = false                # UNOFFICIAL (2026-11-13), applies immediately, with TonemappingMode 9 (AgX): TonemapContrast (the Main, Night and Interiors values) also acts in AgX, as contrast round mid grey before its curve (1.15-1.3 = punchier; bright things reach white sooner without a hard cut). false = AgX ignores TonemapContrast, as before.
 NightShift = 0.0                   # [0.0-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how much by day (0: none; the dark corners of a sunny day are rarely dim enough for it).
 NightShiftLevel = 0.15             # [0.01-1.0] UNOFFICIAL (2026-11-04), with the Night colour shift: how dark a spot must be before it shifts (in the tone mapper's input, after Exposure: 0.18 is a mid grey). The shift grows below this and is full at a tenth of it.
 

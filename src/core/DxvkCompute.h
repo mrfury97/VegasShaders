@@ -149,6 +149,10 @@ public:
 	// UNOFFICIAL 2026-11-07 (rtgap-tessblas) the RT scene's displaced copies (RtCore::Displace): the land's / the parallax objects'
 	// tessellation is registered and switched on (as last sent: [Shaders.Terrain.Displacement] / [Shaders.POM.Displacement] Enabled)
 	static bool					DisplaceLandActive();
+	// UNOFFICIAL 2026-11-11 (PTScreenOwn, core/RtViewModel.h OwnReach) the largest Strength of the tessellation families on now (game
+	// units; 0: none drawn): how far a bump can lie from the surface its pixel shader reports. Not gated by TessStartSlack, not shortened
+	// by the RT scene's displaced copies (DisplaceRtSlack is).
+	static float				DisplaceMaxStrength();
 	static bool					DisplaceObjectsActive();
 
 	// Marks every compute path off for the session (logged once with the reason).

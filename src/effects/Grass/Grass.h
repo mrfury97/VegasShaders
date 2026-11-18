@@ -11,6 +11,10 @@ public:
 		D3DXVECTOR4		Brightness;		// x: multiplies the lit grass colour (before fog), y: the night brightness on the sun and ambient (not lamps)
 		D3DXVECTOR4		Bend;			// xyz: the bend origin (camera-relative world), w: 1 / reach (the push per unit of blade height rides in TESR_Translucency.w)
 		D3DXVECTOR4		LightData;		// x: lamps in LightPosition (0: none, the shader skips them), y: Strength
+		// UNOFFICIAL 2026-11-12 CapturedGrassTint (the grass's colour record, GRASS23x000TMS.pso.hlsl main's end; TESR_GrassRecord, bound only
+		// in a shader compiled with the records): x [Main.Main.Quality] CapturedGrassColour, y CapturedGrassSaturation, z CapturedGrassTint
+		// (0 while CapturedGrass is off: the shader skips the maths).
+		D3DXVECTOR4		Record;
 	};
 	GrassStruct	Constants;
 	bool		GameShaderFix = true;	// UNOFFICIAL 2026-10-17 [Shaders.Grass.Main] GameShaderFix (see SetForDraw)

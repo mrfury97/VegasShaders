@@ -4,6 +4,8 @@
 class GodRaysEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the ray buffers and the reduction chains are used only from Render, behind the switch
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	GodRaysEffect() : EffectRecord("GodRays") {};
 
 	struct GodRaysStruct { D3DXVECTOR4 Ray, RayColor, Data; };

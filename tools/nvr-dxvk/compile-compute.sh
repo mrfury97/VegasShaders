@@ -52,8 +52,10 @@ while read -r frag suffix defs; do
   case "$frag" in ""|\#*) continue ;; esac
   [ ${#NAMES[@]} -eq 0 ] || want "$frag" || continue
   out="$frag-$suffix.spv"
+  # UNOFFICIAL 2026-11-15 (rt-denoise-inputs): a compute pass' variant too (DlssRRGuides-mirror): <frag>.comp when there is no <frag>.frag
+  src="$frag.frag"; [ -e "$src" ] || src="$frag.comp"
   # shellcheck disable=SC2086
-  if ! log=$(glslangValidator -V --target-env vulkan1.1 $defs -o "$out.tmp" "$frag.frag" 2>&1); then echo "$log" >&2; echo "FAILED: $frag $suffix" >&2; exit 1; fi
+  if ! log=$(glslangValidator -V --target-env vulkan1.1 $defs -o "$out.tmp" "$src" 2>&1); then echo "$log" >&2; echo "FAILED: $frag $suffix" >&2; exit 1; fi
   spirv-opt -O --target-env=vulkan1.1 "$out.tmp" -o "$out"
   rm -f "$out.tmp"
   spirv-val --target-env vulkan1.1 "$out"

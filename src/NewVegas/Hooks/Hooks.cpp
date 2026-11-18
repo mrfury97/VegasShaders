@@ -3,6 +3,9 @@
 #include "../../core/ClothWind.h"	// UNOFFICIAL 2026-10-19 cloth round 5: the partition draw hook
 #include "../../core/ParticleSize.h"	// UNOFFICIAL 2026-11-04 soft particles
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds, GrassTiming key)
+#include "../../core/DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the RenderGeometryGroup detour (only with the switch on at startup)
+
+void AttachScopeCameraHooks();	// Render.cpp (UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect: a plugin's extra-camera scene of the world)
 
 namespace {
 	// One Detours redirection: the game function pointer variable and the function that replaces it.
@@ -55,6 +58,8 @@ void AttachHooks() {
 		NVR_REDIRECT(RenderFirstPerson), NVR_REDIRECT(SetShaders), NVR_REDIRECT(SetSamplerState),
 	});
 	AttachGrassFirstRenderPassHook();	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless DrawFirst is on
+	DeferredDistant::Attach();	// UNOFFICIAL 2026-11-14 [Main.Main.Quality] DeferredDistant (test only): not attached with it off at startup
+	AttachScopeCameraHooks();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene): pass-through for the game's own calls; not installed with Detect off
 	LampReachMargin = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.Misc", "LampReachMargin"));
 	if (LampReachMargin > 0.0f) {	// UNOFFICIAL, Render.cpp
 		const LONG attached = DetourAttach(&(PVOID&)BoundWithinLightRadius, &BoundWithinLightRadiusHook);

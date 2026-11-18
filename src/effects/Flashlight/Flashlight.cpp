@@ -1,6 +1,7 @@
 #include "Flashlight.h"
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-04 the deferred spot light (Usable)
-#include "../../core/FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 the Pip-Boy light as its real game lamp
+#include "../../core/FlashlightLamp.h"
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-11 GameLightUnderPT (Replacing)	// UNOFFICIAL 2026-11-04 the Pip-Boy light as its real game lamp
 
 
 // Settings readers for this file: the section and key exactly as the settings file names them.
@@ -54,11 +55,28 @@ void FlashlightEffect::UpdateSettings() {
 	Deferred.Cookie = (std::min)((std::max)(FlashSettingF(deferredSection, "Cookie"), 0.0f), 1.0f);
 	Deferred.Falloff = (std::min)((std::max)(FlashSettingF(deferredSection, "Falloff"), 0.0f), 32.0f);
 	Deferred.GameLight = FlashSettingI(deferredSection, "GameLight") != 0;
+	Deferred.GameLightUnderPT = FlashSettingOr(deferredSection, "GameLightUnderPT", 0.0f) != 0.0f;	// (a missing key: off)
 	Deferred.DebugView = (std::max)(0, (std::min)(3, (int)FlashSettingI(deferredSection, "DebugView")));
 	Deferred.TestForceOn = FlashSettingI(deferredSection, "TestForceOn") != 0;
+	Deferred.HairAndEyes = FlashSettingOr(deferredSection, "HairAndEyes", 1.0f) != 0.0f;	// UNOFFICIAL 2026-11-12 (a missing key: on, it is a bug fix)
+	Deferred.HairUnderPT = FlashSettingOr(deferredSection, "HairUnderPT", 1.0f) != 0.0f;	// UNOFFICIAL 2026-11-13 (a missing key: on, it is a bug fix)
+	{	// UNOFFICIAL 2026-11-13, test only (core/FlashlightLamp.h): the ones the mode, 10 or more = one frame logged
+		const int test = (int)FlashSettingOr(deferredSection, "GameLightTest", 0.0f);
+		FlashlightLamp::TestMode = test % 10; FlashlightLamp::DiagRaw = test;
+	}
 
 	if (!SpotLight) SpotLight = NiSpotLight::CreateObject();
 };
+
+// UNOFFICIAL 2026-11-12 HairAndEyes: the beam for the hair and eye shaders (Includes/FlashBeam.hlsl), filled round the world's main list
+// by FlashlightDeferred::BeamBegin / BeamEnd; all zero (off) at any other time.
+void FlashlightEffect::RegisterConstants() {
+	TheShaderManager->RegisterConstant("TESR_FlashBeam", FlashlightDeferred::Beam);
+}
+// The lens pattern for the same shaders: the light pass's own texture, empty until the pass loads it (a Cookie above 0).
+void FlashlightEffect::RegisterTextures() {
+	TheTextureManager->RegisterTexture("TESR_FlashBeamCookie", &FlashlightDeferred::CookieSlot);
+}
 
 // The weapon types the light does not ride on: melee, grenades, mines and thrown weapons (there is no sight to look down).
 static bool IsMeleeWeaponType(UInt8 type) {
@@ -202,7 +220,13 @@ void FlashlightEffect::UpdateConstants() {
 	// The Pip-Boy light (the game's, a child of the player's node): the flashlight's game lamp with GameLight (core/FlashlightLamp.h; not
 	// culled then: the game hands no culled light to the objects), else culled and darkened while the flashlight is on.
 	NiNode* playerNode = Player->GetNode();
-	const bool drive = FlashlightDeferred::Usable() && Deferred.GameLight;
+	// UNOFFICIAL 2026-11-11 GameLightUnderPT (BUG FIX; a player on an RTX-class card: with path tracing and the flashlight on, an object
+	// close in the beam flickered hard, gone with GameLight off): the game lamp is a real light in the game's lists, the nearest one to
+	// whatever the beam is on, and it sways with the weapon. Its rank against the room's lamps changes from frame to frame, the game
+	// splits that object's lamps into passes differently each time, and the raster shading under the traced picture changes shape;
+	// PTDetail (and the pixels that keep the game's own) carry that into the path traced frame. The path tracer has the flashlight as
+	// its own lamp, so while its picture replaces the scene the game lamp steps aside (as GameLight off), unless this key is on.
+	const bool drive = FlashlightDeferred::Usable() && Deferred.GameLight && (Deferred.GameLightUnderPT || !RtPathTrace::Replacing());
 	for (UINT32 i = 0; playerNode && i < playerNode->m_children.capacity; i++) {
 		NiAVObject* child = playerNode->m_children.data[i];
 		if (!child || child->GetRTTI() != (void*)0x11F4A98) continue;

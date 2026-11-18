@@ -1,0 +1,72 @@
+# Full deferred renderer, batch 7 (2026-11-15, docs/next/FD-INTERIORS-RESULTS.md "Batch 6"). Scene lucky22 (as fd3-c-int1's moves).
+# Toml: batch 6's dr1 toml for the runtime (native AND fork), DeferredRenderer 1, the F10 profile.
+# Vault 21: is the residual the folded light-only passes' highlights? (fixed in this build: the specular bit for a folded AD pass)
+#   v21-fd     forward vs deferred, this build (the fix in)
+#   v21-fh0    [Shaders.PBR.Main] FoldHighlights false on both sides (live): no fold, the game's highlight passes drawn forward in both pictures
+#   v21-ls0    [Shaders.ShadowsInteriors.Forward] Strength 0 on both sides (batch 6: 4.24 -> 3.31 % on the fork), for the remainder
+#   v21-gb7    picture: GBufferView 7 (specular bit) with the renderer live: the walls' AD objects must now show the bit
+# Lucky 38: Live off must be the game's forward again on native (batch 6: off vs on 2.57 %, forward over-bright glow).
+frames 300
+profile
+shot settle
+console tgm
+console sgtm 0.001
+wait 240
+shot go-v21
+console player.moveto 0017A642
+wait 300
+shot place-v21
+console sgtm 1
+console player.setpos x -232.6
+console player.setpos y 1789.6
+console player.setpos z 7425.0
+console player.setangle x 5.2
+console player.setangle z 236.8
+console sgtm 0.001
+wait 300
+shot v21-ctl
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot v21-fd
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-fh0
+set Shaders.PBR.Main FoldHighlights false
+wait 60
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-ls0
+set Shaders.ShadowsInteriors.Forward Strength 0.0
+wait 60
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-off
+set Main.Main.Quality DeferredRendererLive false
+wait 120
+shot v21-on
+set Main.Main.Quality DeferredRendererLive true
+wait 120
+shot v21-gb7
+set Main.Main.Quality GBufferView 7
+wait 30
+shot v21-counts
+wait 600
+shot go-l38
+console player.moveto 00174BEB
+wait 300
+shot place-l38
+console sgtm 1
+console player.setpos x 860.53
+console player.setpos y -3364.16
+console player.setpos z 7681.03
+console player.setangle x 11.97
+console player.setangle z 65.39
+console sgtm 0.001
+wait 300
+shot l38-fd
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-off
+set Main.Main.Quality DeferredRendererLive false
+wait 120
+shot l38-on
+set Main.Main.Quality DeferredRendererLive true
+wait 120
+shot l38-off2
+set Main.Main.Quality DeferredRendererLive false
+wait 300

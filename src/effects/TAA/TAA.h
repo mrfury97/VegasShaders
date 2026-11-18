@@ -18,6 +18,8 @@
 class TAAEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the resolve and history buffers (the upscalers' inputs look after themselves: made and released by size)
+	bool	TargetParkable(const char* SamplerName) override { return strncmp(SamplerName, "TESR_TAA", 8) == 0; }
 	TAAEffect() : EffectRecord("TAA") {};
 
 	struct TAASettingsStruct {
@@ -75,6 +77,11 @@ public:
 	static bool			IsWorldViewport(const D3DVIEWPORT9& port);
 	static bool			UpscaledBeforeEffects();	// UNOFFICIAL 2026-10-28: upscaled already (LowResEffects off): the effects see the screen, not the rect
 	static bool			UpscaledThisFrame();		// this frame's world was drawn at the lower resolution and upscaled (TAA's resolve skips)
+	// UNOFFICIAL 2026-11-11 ([Shaders.ShadowsInteriors.RT] FollowRenderScale): true from BeginJitter to the end of the frame's first world
+	// scene while that scene is drawn at the lower internal resolution (Up.Active): its render size, and its jitter as a screen-uv offset
+	// (what LowResJitterUV gives once the frame waits for its upscale; a pixel of the small frame lies on the unjittered ray through
+	// uv + this). RenderRect is not on yet at that point (it begins with the effects). False: the outputs are untouched.
+	static bool			WorldDrawnSmall(UINT& renderWidth, UINT& renderHeight, D3DXVECTOR2& jitterUV);
 	static void			NoteWorldDraw(bool firstPerson = false);	// RenderPassStandard/SkinnedHook, world (and v2: first-person) passes: counts which viewport they drew with (a check)
 	static D3DXVECTOR4	RenderScaleConstant;		// TESR_RenderScale: xy = render size / screen size while the low-resolution world draws, else 1
 	// UNOFFICIAL 2026-10-28: in an FSR / DLSS LowResEffects frame whose world was jittered, the jitter as a screen-uv offset (a pixel of the
@@ -147,6 +154,7 @@ public:
 		int		Albedo = 0;			// RRAlbedo: 0 flat grey 0.5, 1 the picture's own chroma at a fixed luminance, 2 TESR_AlbedoBuffer where written (2026-10-31 AlbedoBuffer)
 		float	Roughness = 0.6f;	// RRRoughness [0-1]: where no TESR_MaterialBuffer roughness exists
 		int		Normals = 0;		// RRNormals: 0 camera-relative world space, 1 view space
+		bool	MirrorMotion = false;	// UNOFFICIAL 2026-11-15 (rt-denoise-inputs) [Main.Main.RayTracing] RRMirrorMotion: PSR motion at flat path-traced mirrors
 	};
 	RRSettingsStruct	RRSettings;
 	bool				rrAlbedoMissingLogged = false;	// UNOFFICIAL 2026-10-31 AlbedoBuffer: RRAlbedo 2 without the buffer, said once
@@ -228,6 +236,10 @@ private:
 	ID3D9NvrExtPipeline*	rrGuides = nullptr;
 	ExtPass			rrComposite;
 	ExtUniformBuffer	rrPrepUniforms, rrGuidesUniforms;
+	ID3D9NvrExtPipeline*	rrGuidesMirror = nullptr;	// UNOFFICIAL 2026-11-15 (rt-denoise-inputs) DlssRRGuides-mirror.spv (RRMirrorMotion), made on its first use
+	ExtUniformBuffer	rrGuidesMirrorUniforms;
+	bool		rrMirrorTried = false;
+	UInt32		rrMirrorLogs = 0;
 	bool		rrTried = false;		// RR's pipelines created (or failed) once
 	bool		rrFailed = false;		// RR is off for the session (logged)
 	UInt32		rrLogged = 0;			// the frame checks' reasons already logged (each once)
@@ -276,6 +288,7 @@ private:
 		bool		Failed = false;			// RenderScale is off for the session (logged)
 		bool		Whole = false;			// UpscaleRun found the world drawn at full resolution anyway (nothing to put back)
 		UInt32		DrawsSmall = 0, DrawsFull = 0, DrawsOther = 0;	// this world scene's passes by viewport (NoteWorldDraw)
+		UInt32		DrawsElsewhere = 0;		// UNOFFICIAL 2026-11-16: ... with the whole viewport of another render target (the game's water refraction copy): left as drawn
 		bool		MixedLogged = false;
 		UInt32		Frames = 0, SkippedFrames = 0, LoggedSkips = 0;
 		float		LoggedScale = 0.0f;

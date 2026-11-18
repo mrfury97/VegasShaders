@@ -394,18 +394,26 @@ vec3 FogGridLight(vec3 gammaColor, vec2 coord) {
     return delinearize(max(lin, vec3(0.0)));
 }
 
-// hash, noise, fbm3 (master's procedural noise, ClassicLook)
-float hash(float n) { return fract(sin(n) * 43758.5453); }
+// hash, valueNoise, fbm3: master's procedural noise for the Classic look (VolumetricFog.fx.hlsl: hash, noise, fbm3).
+// 3D value noise: a random value in [0, 1) at each whole-number lattice point, blended between the 8 corners of the cell
+// with a smoothstep curve. Output in [0, 1), mean 0.5, one lattice cell per unit. Written for Vegas Shaders (2026-11-15);
+// it replaces upstream's copy of a Shadertoy noise under CC BY-NC-SA 3.0 (not GPL-compatible), with the same range and scale.
+// Lattice hash: Dave Hoskins' "Hash without Sine" hash13, MIT, Copyright (c) 2014 David Hoskins (shadertoy.com/view/4djSRW).
+float hash(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+}
 
 float valueNoise(vec3 x) {
-    vec3 p = floor(x);
-    vec3 f = fract(x);
-    f = f * f * (3.0 - 2.0 * f);
-    float n = p.x + p.y * 57.0 + 113.0 * p.z;
-    return mix(mix(mix(hash(n + 0.0), hash(n + 1.0), f.x),
-               mix(hash(n + 57.0), hash(n + 58.0), f.x), f.y),
-               mix(mix(hash(n + 113.0), hash(n + 114.0), f.x),
-               mix(hash(n + 170.0), hash(n + 171.0), f.x), f.y), f.z);
+    vec3 i = floor(x);
+    vec3 u = fract(x);
+    u = u * u * (3.0 - 2.0 * u);
+    float z0 = mix(mix(hash(i), hash(i + vec3(1, 0, 0)), u.x),
+                   mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), u.x), u.y);
+    float z1 = mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), u.x),
+                   mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), u.x), u.y);
+    return mix(z0, z1, u.z);
 }
 
 float fbm3(vec3 p) {
@@ -928,13 +936,22 @@ void ModernFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nigh
 
     // UNOFFICIAL 2026-10-30 GameFogFloor (VolumetricFog.fx.hlsl ModernFogTerms): at least the game's own fog curve for the weather,
     // times cb.fogSun.z, with the weather's raw near (w); toward NVR's fog colour without the sun's glow; not on the sky dome.
+    // UNOFFICIAL 2026-11-15 FogWall (VolumetricFog.fx.hlsl ModernFogTerms): indoors the fade into the cell's fog (its curve times a fade
+    // ending at min(fog far, clip), over the outer half of the way from the fog near), the background past the clip included, toward the cell's fog colour.
+    // cb.fogSun.x indoors: 1 / (min(fog far, clip) - near), 0 without fog distances (VolumetricFog.cpp UpdateConstants).
     if (!classic && cb.fogSun.z > 0.0) {
         float gameNear = cb.fogSun.w;
-        float gameFog = farFog > gameNear + 1.0 ? pows(saturate((length(eyeVector) - gameNear) / (farFog - gameNear)), FogPower) : 0.0;
-        float want = saturate(cb.fogSun.z * gameFog) * (1.0 - isSkyDome);
+        float dist = length(eyeVector);
+        float tOut = farFog > gameNear + 1.0 ? saturate((dist - gameNear) / (farFog - gameNear)) : 0.0;
+        float tIn = saturate((dist - gameNear) * cb.fogSun.x);
+        float t = mix(tIn, tOut, isExterior);
+        float gameFog = pows(t, FogPower);
+        float clipT = saturate(t * 2.0 - 1.0);
+        float clipFade = mix(clipT * clipT * (3.0 - 2.0 * clipT), 1.0, isExterior);
+        float want = saturate(cb.fogSun.z * gameFog * clipFade) * (1.0 - isSkyDome * isExterior);
         float kept = luma(fogMul);
         float topUp = saturate((want - (1.0 - kept)) / max(kept, 0.0001));
-        vec3 haze = fogColor(ambientSkyColor, pureFogColor, strength, FogSkyColorCoeff, vec4(0.0), FogSaturation).rgb * mix(vec3(1.0), NightTint, nightFactor);
+        vec3 haze = mix(pureFogColor.rgb, fogColor(ambientSkyColor, pureFogColor, strength, FogSkyColorCoeff, vec4(0.0), FogSaturation).rgb * mix(vec3(1.0), NightTint, nightFactor), isExterior);
         fogMul *= 1.0 - topUp;
         fogAdd = mix(fogAdd, haze, topUp);
     }

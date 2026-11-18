@@ -41,7 +41,7 @@ namespace RtAmbient {
 		bool	RtFarFade = true;
 		int		DebugView = 0;		// 1 RT visibility (before strength), 2 RT sky visibility, 3 rays that started inside something / hit distance,
 									// 4 / 5 the helper's input (view distance / 2000, normal up), test only, 6 the GI bounce light alone,
-									// 7 (2026-10-31) as 6 with every bounce hit lit as if off screen (RadianceCache's whole share shows); 8 (2026-11-09, rtgi-lock) the AO / GI rays' tangent frame (white flat normals, grey tilted, the shade = the tangent's angle)
+									// 7 (2026-10-31) as 6 with every bounce hit lit as if off screen (RadianceCache's whole share shows); 8 (2026-11-09, rtgi-lock) the AO / GI rays' tangent frame (white flat normals, grey tilted, the shade = the tangent's angle); 9 (2026-11-12, test) the light the bounce hits are lit with, at the pixel's own surface, in the bounce's place (RtAOTrace.comp BounceOrTest; AmbientLight's view 13 shows it)
 		// UNOFFICIAL 2026-10-29 (rt-ao-gi) one-bounce diffuse GI: one ray per half-resolution pixel and frame, GIDistance long; at the
 		// hit the light it sends back = its albedo (the core's per-instance record) x (the sun with a shadow ray + the ambient + the
 		// nearest lamps); into AmbientLight's bounce light (ComputeGI's accumulate and apply), strength GIStrength. AmbientLight only.
@@ -129,6 +129,9 @@ namespace RtAmbient {
 		// (settings cleanup 2026-11-13): the history cut by energy (R2), the trace input from one pixel (R4), the hit textures' mip (R19) and the denoiser's
 		// guide worked out once (B2) are simply how it works; GICandidates and GISpatialVisibility were measured useless and are gone.
 		int		GIDenoiseTune = 2;
+		// UNOFFICIAL 2026-11-16 (rtgi-review; user: grass still sparkles in the shade) GIGrassDenoise (0-3, RtDenoisedGI with the guide): RtDenoise Settings.Soft:
+		// 1 = the GI denoiser keeps its history on grass, 2 = its a-trous passes smooth across the blades, 3 = both (default).
+		int		GIGrassDenoise = 3;
 		// UNOFFICIAL 2026-11-13 (rtgi-review B3, REVIEW.md R3 / R18) GISamplePoints (default false until benched; a missing key: false): ReSTIR GI with the
 		// sample's geometry (RtAOTrace.comp ReuseGIPoints): cosine at the receiving surface, Jacobian and one visibility ray on spatial reuse. GIValidate
 		// (default true, with GISamplePoints): 1 texel in 8 a frame re-traces the ray to its kept sample point and drops the history when the geometry changed.
@@ -137,6 +140,32 @@ namespace RtAmbient {
 		bool	GIValidate = true;
 		bool	SunGI = false;
 		bool	GIDenoiseSunGI = true;
+		// UNOFFICIAL 2026-11-12 RoomGI: [Shaders.AmbientLight.Main] RoomGI, the one switch for the interior bounce (missing key: off), SunGI's counterpart.
+		// UpdateSettings reads it here (in memory only, never the toml) and, while the player is indoors (InteriorNow), forces Enabled / GI / RadianceCache on
+		// (the cache is the second bounce on: a lamp round a corner; no Sky, no CacheExteriors: there is no sky in a room), GIAmbient 0 (see UpdateSettings)
+		// and GlowGI = RoomGIGlow when the user's own is 0 (glow-mapped windows and lamp shades are a room's light sources). AmbientLight forces its own
+		// side only while the RT core runs (InteriorBalance, AmbientReplaceInterior, AlbedoBuffer; AmbientLight.cpp RoomGIFrame). GIDenoiseRoomGI (default
+		// true; missing key: true): indoors with RoomGI the GI denoiser gets SunGI's settings (AmbientOcclusion.cpp RtDenoisedGI); false = the old ones.
+		bool	RoomGI = false;
+		bool	GIDenoiseRoomGI = true;
+		// UNOFFICIAL 2026-11-13 OcclusionOnD3D9 (default true; missing key: true), BUG FIX: AmbientLight's D3D9 Estimate takes the traced occlusion
+		// (AmbientLight.cpp aoD3D9Texture, AmbientLight.fx.hlsl NVR_ALRT). Before, with [Main.Main.Performance] NvrDxvkAmbientLight off (its default since
+		// 2026-11-01) the occlusion was traced and thrown away: AmbientLight kept its own screen search and only the bounce light (GI) reached the picture.
+		bool	OcclusionOnD3D9 = true;
+		float	RoomGIGlow = 1.0f;	// [0-4] the GlowGI RoomGI uses when GlowGI (GlowGIInterior) is 0; 0 = leave it off
+		// UNOFFICIAL 2026-11-12 (sungi nights) the exterior chain at night and at dusk / dawn; every key works alone, a missing key = its default, and
+		// with the defaults and SunGI off nothing changes (the helpers below return the day values / 0 / false). Outdoors only.
+		// GlowGINight (-1 = GlowGI all day): GlowGI at night, blended by the game's day-night curve as GIStrengthNight is. At night neon, lit windows
+		//   and lamp globes are what lights a street; by day the same glow maps are on but the sun drowns them. SunGI: 1 when this is -1 and GlowGI is 0.
+		// GIClampNight (-1 = GIClamp all day): GIClamp at night (the cap is absolute: 1 is 2 x a sunlit bounce but 50-100 x a moonlit one).
+		// SkyMissNightAmbient (-1 = auto: 0, or 1 with SunGI; 0-1): with SkyMissSH, how far a ray miss at night brings the game's flat ambient instead
+		//   of the sky's harmonics. The harmonics are the sky DOME's colours, near black at night, while the game's night ambient (the light AmbientReplace
+		//   takes out of the pixel) is many times brighter: by day the two are alike, at night the replace mode took the ambient and gave almost nothing back.
+		// GISunDuskFade (-1 = auto: off, or on with SunGI; 0 off; 1 on): the sun's (moon's) light at the bounce hits fades to 0 toward the middle of dusk
+		//   and dawn and back in after it, instead of switching off and on in one frame where the game's shadows fade out (ShadowFade.x reaching 1).
+		// GILeafTransmission (0-0.9, 0 = off): the share of the sunlight a covered plant cut-out lets through to a bounce hit (RtAOTrace.comp Shade).
+		float	GlowGINight = -1.0f, GIClampNight = -1.0f, SkyMissNightAmbient = -1.0f, GISunDuskFade = -1.0f;
+		float	GILeafTransmission = 0.0f;
 	};
 	inline Settings Current;
 	inline bool InteriorNow = false;	// UNOFFICIAL 2026-11-10: set by AmbientOcclusion's RT pass each frame; UpdateSettings applies the <Key>Interior values while true
@@ -160,7 +189,7 @@ namespace RtAmbient {
 			Current.CacheCascades = TheSettingManager->Config.FillNode(&node, s, "CacheCascades") ? std::clamp((int)node.IntValue, 1, 2) : 2;
 			Current.SkyMissSH = !TheSettingManager->Config.FillNode(&node, s, "SkyMissSH") || node.BoolValue;
 		}
-		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 8);
+		Current.DebugView = std::clamp(TheSettingManager->GetSettingI(s, "DebugView"), 0, 9);	// (9: UNOFFICIAL 2026-11-12)
 		Current.GI = TheSettingManager->GetSettingI(s, "GI") != 0;
 		Current.GIDistance = std::clamp(TheSettingManager->GetSettingF(s, "GIDistance"), 100.0f, 8000.0f);
 		Current.GIStrength = std::clamp(TheSettingManager->GetSettingF(s, "GIStrength"), 0.0f, 20.0f);	// UNOFFICIAL 2026-11-09: 20 (was 4); the menu clamps to the same [0-20] its description gives
@@ -220,8 +249,15 @@ namespace RtAmbient {
 			SettingManager::Configuration::ConfigNode node;
 			Current.SunGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
 			Current.GIDenoiseSunGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseSunGI") || node.BoolValue;
+			// UNOFFICIAL 2026-11-12 (sungi nights): the keys as written (a missing key: -1 / 0 = nothing changes); what is in use: the helpers below
+			Current.GlowGINight = TheSettingManager->Config.FillNode(&node, s, "GlowGINight") ? std::clamp(node.FloatValue, -1.0f, 4.0f) : -1.0f;
+			Current.GIClampNight = TheSettingManager->Config.FillNode(&node, s, "GIClampNight") ? (node.FloatValue < 0.0f ? -1.0f : std::clamp(node.FloatValue, 0.05f, 4.0f)) : -1.0f;
+			Current.SkyMissNightAmbient = TheSettingManager->Config.FillNode(&node, s, "SkyMissNightAmbient") ? std::clamp(node.FloatValue, -1.0f, 1.0f) : -1.0f;
+			Current.GISunDuskFade = TheSettingManager->Config.FillNode(&node, s, "GISunDuskFade") ? std::clamp(node.FloatValue, -1.0f, 1.0f) : -1.0f;
+			Current.GILeafTransmission = TheSettingManager->Config.FillNode(&node, s, "GILeafTransmission") ? std::clamp(node.FloatValue, 0.0f, 0.9f) : 0.0f;
 			// UNOFFICIAL 2026-11-13 (rtgi-review)
 			Current.GIDenoiseTune = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseTune") ? std::clamp((int)node.IntValue, 0, 2) : 2;
+			Current.GIGrassDenoise = TheSettingManager->Config.FillNode(&node, s, "GIGrassDenoise") ? std::clamp((int)node.IntValue, 0, 3) : 3;
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
 			Current.GIScreenAmbientOut = TheSettingManager->Config.FillNode(&node, s, "GIScreenAmbientOut") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;
@@ -231,6 +267,22 @@ namespace RtAmbient {
 			// wall got the open sky's light. With SunGI the sky already comes in through the ray misses (and the cache, both visibility-tested), so
 			// GIAmbient is an unshadowed second copy of it that drowns the sun's bounce: 0 outdoors with SunGI (the key stays for the old chain).
 			if (Current.SunGI && !InteriorNow) Current.GIAmbient = 0.0f;
+			// UNOFFICIAL 2026-11-12 RoomGI: the one switch indoors. Indoors only: outdoors every key is the user's own (or SunGI's). A ray MISS indoors keeps
+			// bringing nothing (AmbientOcclusion.cpp giSky: 0 unless outdoors; a miss in a room is a gap in the walls or the ray's end, not the sky).
+			// GIAmbient is forced to 0, for SunGI's reason and two more: (1) it lights EVERY bounce hit with a flat ambient and no visibility test, and in a
+			// room nearly every ray hits, so it comes back as one even layer of the hits' colour that is strongest in the corners (all rays hit there): the
+			// very light AmbientReplaceInterior takes out, put back unoccluded; (2) the share of the room's ambient that is meant to stay is AmbientFloorInterior,
+			// kept at the pixel itself and darkened by the occlusion (its visibility test); (3) the colour the trace has for it is the sky object's ambient
+			// (TESR_SunAmbient), not the cell's own ambient colour AmbientLight reads from the cell. The GIAmbient / GIAmbientInterior keys stay for RoomGI off.
+			Current.RoomGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "RoomGI") && node.BoolValue;
+			Current.GIDenoiseRoomGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseRoomGI") || node.BoolValue;
+			Current.OcclusionOnD3D9 = !TheSettingManager->Config.FillNode(&node, s, "OcclusionOnD3D9") || node.BoolValue;	// UNOFFICIAL 2026-11-13
+			if (Current.RoomGI && InteriorNow) {
+				Current.Enabled = Current.GI = Current.RadianceCache = true;
+				Current.GIAmbient = 0.0f;
+				Current.RoomGIGlow = TheSettingManager->Config.FillNode(&node, s, "RoomGIGlow") ? std::clamp(node.FloatValue, 0.0f, 4.0f) : 1.0f;
+				if (Current.GlowGI <= 0.0f) Current.GlowGI = Current.RoomGIGlow;
+			}
 		}
 	}
 
@@ -311,14 +363,31 @@ namespace RtAmbient {
 	// UNOFFICIAL 2026-11-12 (sungi p4) the ray-traced path can run at all (the Ready() states 1 and 2 passed): false = SunGI's fallback (the light grid's bounce).
 	inline bool SunGIRtRunning() { return PassesWanted() && CoreReady(); }
 	inline bool SunGIOutdoors() { return Current.SunGI && !InteriorNow; }
+	inline bool RoomGIIndoors() { return Current.RoomGI && InteriorNow; }	// UNOFFICIAL 2026-11-12 RoomGI
+	// UNOFFICIAL 2026-11-12 (sungi nights) the night keys' values in use. day: the game's day-night blend as the caller reads it (outdoors
+	// GameState.transitionCurve, 1 by day .. 0 at night; indoors pass 1). With the keys at their defaults and SunGI off each returns the day value
+	// itself (not a blend of it), 0 or false: bit-identical constants.
+	inline float GlowGINow(float day) {
+		const float night = Current.GlowGINight >= 0.0f ? Current.GlowGINight : SunGIOutdoors() && Current.GlowGI <= 0.0f ? 1.0f : -1.0f;
+		return night < 0.0f || day >= 1.0f ? Current.GlowGI : Current.GlowGI * day + night * (1.0f - day);
+	}
+	inline float GIClampNow(float day) {
+		return Current.GIClampNight < 0.0f || day >= 1.0f ? Current.GIClamp : Current.GIClamp * day + Current.GIClampNight * (1.0f - day);
+	}
+	inline float SkyMissNightAmbientNow(float day) {
+		const float share = Current.SkyMissNightAmbient >= 0.0f ? Current.SkyMissNightAmbient : SunGIOutdoors() ? 1.0f : 0.0f;
+		return day >= 1.0f ? 0.0f : share * (1.0f - (day > 0.0f ? day : 0.0f));
+	}
+	inline bool GISunDuskFadeOn() { return Current.GISunDuskFade >= 0.0f ? Current.GISunDuskFade > 0.5f : SunGIOutdoors(); }
 	inline bool Ready() {
 		static int reported = -1;
-		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : !CoreReady() ? 2 : 3;
+		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : RtCore::Gated() ? 5 : !CoreReady() ? 2 : 3;	// (2026-11-15: 5 the RT master switches)
 		if (state != reported && (state != 0 || reported > 0)) {
 			const char* text[] = { "off", "on but the Vegas Shaders DXVK passes are off ([Main.Main.Performance] NvrDxvkPasses): Vegas Shaders' AO runs",
 				"on but the RT core is not running (see its log line: no NvrRtHelper, no fork 0028, or a GPU without ray tracing): Vegas Shaders' AO runs",
 				"running (ray-traced occlusion in place of the screen estimate)",
-				"on but not at RenderScale below 1 (FSR / DLSS with LowResEffects: frames drawn small, not supported yet): Vegas Shaders' AO runs" };
+				"on but not at RenderScale below 1 (FSR / DLSS with LowResEffects: frames drawn small, not supported yet): Vegas Shaders' AO runs",
+				"on but ray tracing is off in this kind of space ([Main.Main.RayTracing] RTInteriors / RTExteriors): Vegas Shaders' AO runs" };
 			Logger::Log("UNOFFICIAL RT AO: %s.", text[state]);
 		}
 		reported = state;

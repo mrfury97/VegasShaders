@@ -183,6 +183,8 @@ public:
 			float OwnGlassDistance;		// UNOFFICIAL (2026-10-30): world units; a lamp part this near a light casts nothing into that light's map (below 0 off)
 			bool LampModelShadows;		// UNOFFICIAL (2026-10-20): false = a light leaves lamp models near it out of its shadow map (LampFixtures::NearLampModel)
 			float LampModelDistance;	// UNOFFICIAL (2026-10-20): world units, how near (to a lamp model's bound) that is
+			bool SkipOwnFixture;		// UNOFFICIAL (2026-11-11), BUG FIX: a light's own fixture casts nothing into its cube map (LampFixtures::OwnFixture)
+			float OwnFixtureDistance;	// UNOFFICIAL (2026-11-11): world units from a fixture's bound within which a light counts as that fixture's
 			float InvisibleShadowFromLamp;	// UNOFFICIAL (2026-10-20): world units; invisible lights cast from the nearest lamp part within it (0 off)		// UNOFFICIAL (2026-10-20): false = lamp parts (LampFixtures::LampPart) cast no lamp shadows; true = as before
 			bool EvenTaps;				// UNOFFICIAL (2026-10-21): High/Ultra's extra taps spread evenly (POINT_SHADOW_EVEN, read at startup)
 			float MagnifiedSoftness;	// UNOFFICIAL (2026-10-21): texels; the least spread where a cube texel covers many pixels (0 off; compiled in when above 0 at startup)
@@ -286,6 +288,25 @@ public:
 	// Constants.CharacterCameraToLight / CharacterCenter / CharacterData (w left to the caller).
 	bool		GetCharacterViewProj(const D3DXVECTOR3& sunDir, D3DXMATRIX& viewProj);
 	NiNode*		CharacterTargetNode = nullptr;	// UNOFFICIAL 2026-10-31 CharacterShadowMapTarget: whose node the map is fitted round and walks (GetCharacterViewProj)
+	// The fit itself, for any person (the player's map and the NPC maps): the box round target (its node), the draw's settings in map,
+	// and the lookup's constants (CharShadowCameraToLight / Center / Data, w left to the caller) in the out parameters.
+	bool		FitCharacterBox(Character* target, NiNode* node, const D3DXVECTOR3& sunDir, float mapSize, ShadowMapSettings& map,
+					D3DXMATRIX& viewProj, D3DXVECTOR4& centerOut, D3DXVECTOR4& dataOut);
+	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs ([Shaders.ShadowsExteriors.ShadowMaps], 0 = off): the nearest people round the camera
+	// each get a map of their own like the player's (ShadowManager::RenderNpcCharacterMaps), and their own draws read it instead of the
+	// player's (NpcCharacterMaps.h: the texture on s11 and the c206-c214 constants swapped per draw). No shader change.
+	static const int CharacterNpcMax = 4;
+	struct CharacterNpcTile { NiNode* node; D3DXMATRIX toLight; D3DXVECTOR4 center, data; };
+	IDirect3DTexture9* CharacterNpcTexture[CharacterNpcMax] = {};
+	IDirect3DSurface9* CharacterNpcSurface[CharacterNpcMax] = {};
+	IDirect3DSurface9* CharacterNpcDepthSurface = nullptr;
+	UINT		CharacterNpcSizeCreated = 0;
+	int			CharacterNpcCountCreated = 0;
+	ShadowMapSettings CharacterNpcMap = {};
+	CharacterNpcTile CharacterNpcTiles[CharacterNpcMax] = {};
+	int			CharacterNpcLive = 0;	// tiles drawn this frame (0: none; the draws keep the player's map)
+	bool		EnsureCharacterNpcMaps(int count, UINT size);
+	int			PickCharacterNpcs(Character** out, int max, float maxDistance, NiNode* skip);	// the nearest people (head within maxDistance of the camera), nearest first
 
 	void		clearShadowsBuffer();
 	bool		ShouldRender() override;
@@ -307,6 +328,23 @@ public:
 	static const int NearCubeSlots = 8;
 	UINT		CubeSizeFor(int slot) const { return (slot >= 0 && slot < NearCubeSlots && NearCubeSize > CubeMapSizeCreated) ? NearCubeSize : CubeMapSizeCreated; }
 	unsigned	CubeGeneration = 0;	// UNOFFICIAL 2026-10-18 CubeFaceCopySkip: counts lamp cube map creations (a new texture may reuse an old address)
+	// UNOFFICIAL 2026-11-12 CubeReleaseSeconds ([Shaders.ShadowsInteriors.Main], seconds, live; 0 = never, as before; missing key = 30).
+	// The lamp cube maps were made on first use and never released: after one busy interior the session held up to 48 of them
+	// (LightPoints 24 and each slot's static twin, 6 MB each at 512; 128 at LightPoints 64), outdoors too, where 12 at most are read.
+	// A cube map past the ShadowCubeMapsScreen made at start, and any static twin, that no frame has wanted for this long is released
+	// (ShadowManager.cpp ReleaseIdleCubeMaps, which clears the other records of it first); EnsureCubeMap / EnsureStaticCubeMap make it
+	// again, and it is drawn afresh.
+	//  - CubeClock: seconds of drawn frames. A frame counts 0.25 s at most, so a loading screen or a pause ages nothing.
+	//  - CubeUsed / CubeStaticUsed: the clock when the slot's cube map / static twin was last wanted (the slot had a lamp: drawn or
+	//    kept and published; the twin: drawn into or copied from).
+	//  - ReleaseCubeMap: unbinds the slot's cube map (staticTwin: its static twin) from every texture stage and every sampler record,
+	//    then releases it and bumps CubeGeneration. false: there is none, it is one of the cube maps made at start (never released: the
+	//    screen-space passes read them by name), or one of its faces is a render target right now (the caller tries again later).
+	float		CubeReleaseSeconds = 30.0f;
+	double		CubeClock = 0.0;
+	double		CubeUsed[ShadowCubeMapsMax] = {}, CubeStaticUsed[ShadowCubeMapsMax] = {};
+	unsigned	CubeMapsMade = 0;	// cube maps made on first use (or again after a release) since the start, for the log's count line
+	bool		ReleaseCubeMap(int slot, bool staticTwin);
 
 	D3DXVECTOR3	CalculateSmoothedSunDir();
 	// UNOFFICIAL sun glide (SunSmoothing GlideSeconds): the quantized step being slid over.
@@ -323,8 +361,19 @@ public:
 	D3DXMATRIX	SunFadeMatrix[4];
 	D3DXVECTOR4	SunFadeCenter[4];
 	D3DXVECTOR3	SunFadeCamera[4];
-	bool		StartSunCrossFade();
+	bool		StartSunCrossFade(bool forceAllCascades = true);
 	void		UpdateSunCrossFade(float oldWeight);
+	// UNOFFICIAL 2026-11-15 fd-smoothsun (core/SunFadeDeferred.h): under the deferred renderer the maps' sun stands still and steps by
+	// SunFadeDeferred::StepDegrees, each step faded by the deferred sun pass. DeferredSunHeld: the direction the maps are drawn for;
+	// DeferredHolding: the step's fade waits for every cascade to be redrawn (at most MaxHoldFrames frames); the copy of the atlas is made
+	// at the first fading step (ShadowAtlasOldTexture, registered empty at startup).
+	D3DXVECTOR3	CalculateDeferredSunDir(D3DXVECTOR3 sunDir);
+	bool		StartDeferredFade(const D3DXVECTOR3& oldSun);
+	D3DXVECTOR3	DeferredSunHeld = D3DXVECTOR3(0.0f, 0.0f, 1.0f), DeferredLastCamera = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+	bool		DeferredSunValid = false, DeferredFading = false, DeferredHolding = false, DeferredFadeFailed = false;
+	ULONGLONG	DeferredFadeStart = 0;
+	int			DeferredHoldFrames = 0;
+	unsigned	DeferredSteps = 0, DeferredJumps = 0, DeferredHoldSum = 0;
 
 	void		GetCascadeDepths();
 	// UNOFFICIAL 2026-10-31 SunLayers: ExtentScale > 1 widens the map's square (not its depth) by that factor, drawn at MapSize texels

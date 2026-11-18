@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <vector>
 #include "EffectCompiler47.h"	// UNOFFICIAL 2026-10-29 NewEffectCompiler
+#include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release build compiles no shelved effect, even from an older install's files
 
 // UNOFFICIAL 2026-10-28 (user: "we should port it"): NVR's effects compiled in parallel at startup, after Conor (mrfury97)'s fork
 // (github.com/mrfury97/Conor-sClaudeHell-NVR-SAL-Fork, commit ee3ac888, GPL-3.0-or-later: its ShaderPrecompile also does the effects;
@@ -102,7 +103,7 @@ namespace EffectPrecompile {
 		if (!TheSettingManager->GetSettingI("Main.Main.Performance", "ParallelShaderCompile")) return;
 		StartTime = (double)GetTickCount64();
 		EffectCompiler47::ReadSetting();	// UNOFFICIAL 2026-10-29 (main thread; the workers read Use)
-		D3DXMACRO macros[8] = {};
+		D3DXMACRO macros[10] = {};	// (2026-11-14: room for 10, EffectRecord::BuildMacros)
 		EffectRecord::BuildMacros(macros);	// string literals: safe to share with the workers
 		CreateDirectoryA((std::string(EffectsPath) + "Cache\\").c_str(), NULL);
 		WIN32_FIND_DATAA find;
@@ -112,6 +113,7 @@ namespace EffectPrecompile {
 			std::string file(find.cFileName);
 			if (file.size() <= 8) continue;
 			const std::string name = file.substr(0, file.size() - 8);	// without ".fx.hlsl"
+			if (ShelvedEffects::Name(name.c_str())) continue;	// UNOFFICIAL 2026-11-16 (release builds only; false in development builds)
 			Job* job = new Job();
 			job->Source = std::string(EffectsPath) + file;
 			job->Preprocessed = std::string(EffectsPath) + "Cache\\" + name + ".fx.hlsl";

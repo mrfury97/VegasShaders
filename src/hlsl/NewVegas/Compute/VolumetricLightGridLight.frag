@@ -48,8 +48,8 @@ void main() {
         shadowA = mix(MarchShadow(positionA), traced, rtShare);
         shadowB = mix(MarchShadow(positionB), traced, rtShare);
     }
-    float sigma = Density * length(toWorld((cell + 0.5) / GridSize));
-    vec4 cellValue = vec4(0.5 * (shadowA + shadowB) * (exp(-sigma * near) - exp(-sigma * far)) * cb.gridData.y, 0.0, 0.0, 0.0);
+    vec3 cellRay = toWorld((cell + 0.5) / GridSize);   // (UNOFFICIAL 2026-11-13 rtvol2: AirDepth, the .fx line for line)
+    vec4 cellValue = vec4(0.5 * (shadowA + shadowB) * (exp(-AirDepth(cellRay, near)) - exp(-AirDepth(cellRay, far))) * cb.gridData.y, 0.0, 0.0, 0.0);
     if (cb.gridData.x > 0.5) {
         float nightFactor = cb.fogWeather.y * (1.0 - smoothstep(0.4, 0.8, cb.sunAmount.x));
         float share = 0.5 * (far - near) / MarchDistance;

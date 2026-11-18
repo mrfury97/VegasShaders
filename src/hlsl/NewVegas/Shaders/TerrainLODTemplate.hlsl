@@ -19,7 +19,7 @@
 #ifdef PS
     #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
     #define SHADOW_SUN_CONTACT_ALWAYS 1
-    #define SHADOW_SUN_CONTACT_IN 1     // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl), land registers s13 / c183-c187
+    #define SHADOW_SUN_CONTACT_IN 1     // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl; only with Bend on at start), land registers s13 / c183-c187
     #define SHADOW_SUN_CONTACT_LAND 1
 #endif
 #include "includes/Shadow.hlsl"	// shared code
@@ -30,6 +30,26 @@
 #endif
 #if TERRAIN_MACRO && defined(PS)
 #include "includes/TerrainMacro.hlsl"
+#endif
+// UNOFFICIAL 2026-11-14 full deferred renderer, phase 3 (docs/next/FD-LOD-RESULTS.md; [Main.Main.Quality] DeferredDistant, core/DeferredDistant.h):
+// DISTANT_GBUFFER 1 (ShaderRecord::BuildDefines, this template only, only with the switch on at startup) = the far land writes the G-buffer as
+// the near land does (TerrainTemplate.hlsl): COLOR1 its linear colour (x the detail noise), COLOR2 class 4 (land) with its normal map's normal
+// (GBufferV2) and COLOR3 the face normal with the camera distance; the game's geometry group 0 (LOD land, LOD objects, distant trees) is drawn
+// inside the main list's G-buffer span for it. With LAMPS_DEFERRED 2 (LightFreeRecords, the deferred renderer's mode 2) the lighting-free
+// record: no sun (nor its cascades or cloud shadow), the ambient, noise and fog kept, COLOR1.a the lighting-free code (Includes/DeferredPixel.hlsl:
+// the land's PBRSun, DeferredSun's land model) and COLOR2.b the roughness the land's sun takes. Without the define nothing below changes.
+#ifndef DISTANT_GBUFFER
+    #define DISTANT_GBUFFER 0
+#endif
+#if DISTANT_GBUFFER && defined(PS)
+    #include "includes/CapturedNormals.hlsl"	// (needs Includes/Shadow.hlsl first: above)
+    #if !CAPTURED_NORMALS_ON
+        #undef DISTANT_GBUFFER
+        #define DISTANT_GBUFFER 0	// (no G-buffer compiled in: the far land as before)
+    #elif defined(LAMPS_DEFERRED) && LAMPS_DEFERRED == 2 && CAPTURED_NORMALS_ON >= 3	// (the code needs the albedo target: the sun is never taken out without it)
+        #define NVR_LIGHT_DEFERRED
+        #include "includes/DeferredPixel.hlsl"
+    #endif
 #endif
 
 
@@ -109,6 +129,12 @@ struct PS_INPUT	// vertex to pixel
 
 struct PS_OUTPUT {	// render targets
     float4 finalColor : COLOR0;
+#if DISTANT_GBUFFER
+    // (ps_3_0 needs COLOR0..COLOR3 contiguous; core/CapturedNormals.h binds the three only for the writers' draws in the main list's span)
+    float4 capturedPad1 : COLOR1;	// AlbedoBuffer (0 below its level)
+    float4 capturedPad2 : COLOR2;	// MaterialBuffer
+    float4 capturedNormal : COLOR3;	// CapturedNormals
+#endif
 };
 
 #ifdef PS	// pixel shader
@@ -170,14 +196,22 @@ PS_OUTPUT main(PS_INPUT pin) {
     // the sun colour only; ambient is added afterwards and stays untouched.
     // ddx/ddy must stay at top level, outside dynamic flow control.
     float3 geoNormal = GetShadowGeometricNormal(pin.shadowPos);
-    float sunShadow = FORWARD_SHADOWS ? GetSunShadow(pin.shadowPos, geoNormal) : 1.0f;
+#ifdef NVR_LIGHT_DEFERRED
+    float sunShadow = 1.0f;	// (the lighting-free record: no sun, so no lookup; DeferredSun adds the sun with its own)
+#else
+    float sunShadow = FORWARD_SHADOWS ? GetSunShadowMaps(pin.shadowPos, geoNormal) : 1.0f;	// (2026-11-13: the cascades alone; far land is past the RT sun shadows' range)
+#endif
 
 #if TERRAIN_MACRO
     const float3 groundColor = MacroVary(LinColor(albedo), pin.shadowPos);	// 2026-11-04 macro variation, as the near land
 #else
     const float3 groundColor = LinColor(albedo);
 #endif
+#ifdef NVR_LIGHT_DEFERRED
+    float3 lit = getSunLighting(pin.sunDir.xyz, (0.0f).xxx, viewDir, nrm.xyz, LinColor(AmbientColor.rgb), groundColor, nrm.a, LandLODSpec.x, 1.0, sunShadow, geoNormal);
+#else
     float3 lit = getSunLighting(pin.sunDir.xyz, LinColor(PSLightColor.rgb), viewDir, nrm.xyz, LinColor(AmbientColor.rgb), groundColor, nrm.a, LandLODSpec.x, 1.0, sunShadow, geoNormal);
+#endif
 
     float3 col = LinEncode(lit);	// UNOFFICIAL linear lighting: back to the stored (gamma) space, before the fog
     col = lerp(col, col * (0.8 * noiseSample + 0.55), saturate(TESR_TerrainExtraData.z)); // Apply noise.
@@ -185,6 +219,45 @@ PS_OUTPUT main(PS_INPUT pin) {
 
     po.finalColor.rgb = col;
     po.finalColor.a = 1;
+#if DISTANT_GBUFFER
+    // UNOFFICIAL 2026-11-14 DeferredDistant (see the top): the far land's records, as TerrainTemplate.hlsl writes the near land's.
+    // COLOR1: the linear colour the light is multiplied by. The detail noise multiplies the finished colour in the stored curve above (x m),
+    // which in linear light is x dec(m): it goes into the albedo, so the light a pass adds is noised as the forward light was.
+    {
+        const float noiseMul = lerp(1.0f, 0.8f * noiseSample + 0.55f, saturate(TESR_TerrainExtraData.z));
+        po.capturedPad1 = CapturedAlbedoOut(groundColor * LinColor(noiseMul.xxx));
+    }
+    #if CAPTURED_NORMALS_ON >= 4
+        // GBufferV2: land (class 4), its lamps lit with a highlight as the near land's (LandLODSpec), no roughness (-1, as the near land's
+        // forward record); the normal map's normal (world axes: the LOD tiles are not rotated) as the shading normal. An opaque draw: no
+        // CapturedCoverage mark (z 0), so no NVR_SpecFade (c211 is not set for this pass).
+        po.capturedPad2 = CapturedShadingNormalZ(float4(4.0f + GBV2_SPEC_BIT, GBV2_NO_NORMAL, -1.0f, 1.0f), nrm.xyz, 0.0f);
+    #elif CAPTURED_NORMALS_ON >= 2
+        po.capturedPad2 = float4(4.0f, 0.0f, -1.0f, 1.0f);	// MaterialBuffer: class 4, land (no bound radius: 0)
+    #else
+        po.capturedPad2 = 0.0f;
+    #endif
+    #ifdef NVR_LIGHT_DEFERRED
+        // the lighting-free code (the land's sun is PBRSun: base 3; keep = 1 - fog), the roughness the land's sun takes ((1 - gloss) x
+        // RoughnessScale: Includes/Terrain.hlsl getSunLighting), and without GBufferV2 the normal map's normal in the older deferred code
+        po.capturedPad1.a = FD_LF_CODE(FD_LF_SPEC, 1.0f - pin.fogTerm.a);
+        po.capturedPad2.b = saturate((1.0f - nrm.a) * TESR_TerrainData.y);
+        #if CAPTURED_NORMALS_ON >= 4
+        // (2026-11-16 batch D, DEFERRED-GAPS-AUDIT item 11) the far land's mark in r's fraction (Includes/DeferredPixel.hlsl
+        // FD_FAR_LAND_MARK): still model 4; DeferredSun gives it no ShadowBounce, which this shader's forward record never had
+        po.capturedPad2.r += FD_FAR_LAND_MARK;
+        #endif
+        #if CAPTURED_NORMALS_ON == 3
+        {
+            const float2 fdOct = ShadowEncodeNormal(normalize(nrm.xyz));
+            po.capturedPad2.g = fdOct.x;
+            po.capturedPad2.a = 1.01f + 0.49f * (fdOct.y + 1.0f);
+        }
+        #endif
+    #endif
+    // COLOR3: the far land has no vertex normal (its normal map is in world axes): the triangle's face normal, with the camera distance
+    po.capturedNormal = CapturedNormalOut(geoNormal, pin.shadowPos);
+#endif
 
     return po;
 };

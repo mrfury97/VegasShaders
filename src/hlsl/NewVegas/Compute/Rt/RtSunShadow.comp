@@ -15,8 +15,10 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 forward;       // xyz camera forward (scene space), w farZ (the depth buffer holds view z / farZ)
 	vec4 right;         // xyz camera right / projection[0][0]
 	vec4 up;            // xyz camera up / projection[1][1]
-	vec4 origin;        // xyz the eye in scene space (RtCore::Eye(): 0), w unused
-	vec4 sun;           // xyz toward the sun (scene space, normalized), w 1: the sun is up
+	vec4 origin;        // xyz the eye in scene space (RtCore::Eye(): 0), w (2026-11-12) LeafTransmission: the share of the sunlight a
+	                    // covered leaf / plant cut-out lets through (0: leaves are solid, the old path; RtSunFoliage.glsl)
+	vec4 sun;           // xyz toward the sun (scene space, normalized), w 1: the sun is up; 2 (2026-11-13 ForwardLookup): up, and faces
+	                    // turned from the sun are traced too (see main)
 	vec4 bias;          // x normal offset (units), y normal offset per unit of view distance, z start offset along the ray, w ray length
 	vec4 range;         // x RT range (view distance), y fade length, z cull mask, w debug (1: hit distance / 4096 instead of visibility,
 	                    // 2: state codes, 3: a primary camera ray's hit distance / 8192: FORK-RT-SUN.md "Debug views")
@@ -27,13 +29,16 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	// UNOFFICIAL 2026-10-30 CloudShadows ([Shaders.ShadowsExteriors.RT]): the volumetric clouds' shadow map (binding 6), as
 	// VolumetricClouds.fx.hlsl CloudShadowAt reads it; cloud.x 0 = none (binding 6 is a stand-in)
 	vec4 cloud;         // x strength (ShadowStrengthForSunFar: day and sun height in it), y map width (m), z map size (texels), w cloud base (m)
-	vec4 cloudCentre;   // xy the map's centre (m, on the cloud base), z metres per unit (1 / 70)
-	vec4 cloudLight;    // xyz the light the map was drawn along (z >= 0.25)
+	vec4 cloudCentre;   // xy the map's centre (m, on the cloud base), z metres per unit (1 / 70), w (2026-11-12) 1: LeafSoftEdges
+	                    // (plants' alpha hashed at every mip, a new hash each frame; nothing to do with the clouds: a free slot)
+	vec4 cloudLight;    // xyz the light the map was drawn along (z >= 0.25), w (2026-11-12) 1: LeafTransmission as a coin toss (the
+	                    // visibility stays 0 or 1, a leaf passes its share of the RAYS: for a denoiser that reads lit / blocked bits)
 	vec4 camera;        // xyz the camera's world position (units): the scene is camera relative
 	// UNOFFICIAL 2026-11-07 (rtgap-tess; docs/next/RT-DETAIL-GAPS.md section 1, RtContact.glsl; core/RtTessContact.h fills them)
 	vec4 slack;         // the tessellated bumps: x Strength, y FadeStart, z FadeEnd (0: none): the ray starts that much more off the surface
 	vec4 contact;       // ContactShadows: x length (pixels of the depth), y longest (units), z thickness, w strength (0 off: Mode 0, or raster ones)
-	vec4 contactGate;   // xy the march fades out between these view depths (the raster contact shadows from there), z thickness per unit
+	vec4 contactGate;   // xy the march fades out between these view depths (the raster contact shadows from there), z thickness per unit,
+	                    // w (2026-11-16, port of mrfury97's fef7c30ba) 1: TraceFixes (geometric normal, slope-scaled start, independent disc samples)
 } p;
 layout(set = 0, binding = 2, r32f) uniform readonly image2D depthImage;      // TESR_DepthBuffer's red: view z / farZ
 layout(set = 0, binding = 3, rgba16f) uniform readonly image2D normalImage;  // TESR_NormalsBuffer: view-space normal * 0.5 + 0.5
@@ -44,6 +49,7 @@ layout(set = 0, binding = 7, r16f) uniform writeonly image2D hitImage;          
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
 #include "RtHidden.glsl"   // (2026-11-07 ptaaa-firstperson)
+#include "RtSunFoliage.glsl"   // UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges (the sun ray's own loop through plants)
 #define RT_CONTACT_DEPTH depthImage
 #include "RtContact.glsl"
 
@@ -113,11 +119,51 @@ void main() {
 		vec3 normal = normalize(right * n.x + up * n.y + forward * n.z);
 
 		float facing = dot(normal, p.sun.xyz);
-		if (facing > 0.0) {
+		// UNOFFICIAL 2026-11-16 (port of mrfury97/VegasShaders fef7c30ba, rt-shadows F4-F6; [Shaders.ShadowsExteriors.RT] TraceFixes, contactGate.w 1):
+		// the GEOMETRIC normal from the depth buffer (the nearer neighbour on each axis, so a silhouette does not tilt it), turned toward the
+		// camera; a face counts as facing the sun when either normal does, the ray starts on the sun's side of the geometric face, and the start
+		// offsets scale with the slope (a grazing face's depth steps grow with 1 / cos). Off: the buffer normal alone, as before.
+		const bool traceFixes = p.contactGate.w > 0.5;
+		vec3 geo = normal;
+		float facingGeo = facing;
+		if (traceFixes) {
+			const ivec2 fullMax = ivec2(p.full.xy) - 1;
+			const vec2 texel = 1.0 / p.full.xy;
+			const ivec2 sr = min(source + ivec2(1, 0), fullMax), sl = max(source - ivec2(1, 0), ivec2(0));
+			const ivec2 sd = min(source + ivec2(0, 1), fullMax), su = max(source - ivec2(0, 1), ivec2(0));
+			const float zr = imageLoad(depthImage, sr).r * p.forward.w, zl = imageLoad(depthImage, sl).r * p.forward.w;
+			const float zd = imageLoad(depthImage, sd).r * p.forward.w, zu = imageLoad(depthImage, su).r * p.forward.w;
+			const vec3 pr = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * (uv.x + texel.x) - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * zr;
+			const vec3 pl = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * (uv.x - texel.x) - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * zl;
+			const vec3 pd = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * (uv.y + texel.y) - 1.0)) * zd;
+			const vec3 pu = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * (uv.y - texel.y) - 1.0)) * zu;
+			const vec3 dx = abs(zr - viewZ) < abs(viewZ - zl) ? pr - position : position - pl;
+			const vec3 dy = abs(zd - viewZ) < abs(viewZ - zu) ? pd - position : position - pu;
+			const vec3 c = cross(dy, dx);
+			if (dot(c, c) > 1.0e-12) geo = normalize(c);
+			if (dot(geo, position - p.origin.xyz) > 0.0) geo = -geo;   // toward the camera
+			facingGeo = dot(geo, p.sun.xyz);
+			facing = max(facingGeo, facing);
+		}
+		// UNOFFICIAL 2026-11-13 ForwardLookup (sun.w 2; core\RtSunShadows.cpp): the object shaders read this visibility in place of their
+		// cascade lookup and light with the NORMAL-MAPPED normal, so a face whose flat normal (the buffer's, rebuilt from the depth) is
+		// turned from the sun can still take sunlight: a wall under a porch roof at noon came out lit in streaks, where the cascades had
+		// it in the roof's shade. Those faces are traced too, the ray started on the face's SUN side (inside a wall: the wall or the roof
+		// blocks it; behind a leaf card: lit unless something else is in the way, as the cascades have it). Without it (1): they are "lit",
+		// as before (the deferred apply's pixels are dark there by their own N.L).
+		const bool turned = !(facing > 0.0);
+		if (facing > 0.0 || p.sun.w > 1.5) {
 			// Bias: along the normal (grows with distance: depth and normal precision), then a little toward the sun
 			// (2026-11-07 rtgap-tess 1a) + the bumps' Strength while they are drawn: a point in a hollow of the depth buffer lies under the
 			// flat RT surface, and its ray was blocked at once
-			vec3 start = position + normal * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ)) + p.sun.xyz * p.bias.z;
+			vec3 start = position + normal * ((turned ? -1.0 : 1.0) * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ))) + p.sun.xyz * p.bias.z;
+			if (traceFixes) {	// (TraceFixes, fork F6) the sun's side of the geometric face; offsets by the pixel's footprint and 1 / cos (capped at 4x)
+				const vec3 sunSide = facingGeo >= 0.0 ? geo : -geo;
+				const float slope = min(1.0 / max(abs(facingGeo), 0.05), 4.0);
+				const float footprint = 2.0 * viewZ * length(p.up.xyz) / max(p.full.y, 1.0);
+				const float normalOffset = p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ) + 0.5 * footprint * slope;
+				start = position + sunSide * normalOffset + p.sun.xyz * (p.bias.z * slope);
+			}
 			rayQueryEXT q;
 			// Soft shadows: one ray a pixel toward a point of the sun's disc, a different one each pixel and frame (the denoiser averages)
 			vec3 toSun = p.sun.xyz;
@@ -125,21 +171,41 @@ void main() {
 				const vec3 t1 = normalize(abs(toSun.z) < 0.9 ? cross(toSun, vec3(0.0, 0.0, 1.0)) : cross(toSun, vec3(1.0, 0.0, 0.0)));
 				const vec3 t2 = cross(toSun, t1);
 				// interleaved gradient noise + the frame's golden-ratio step: a low-discrepancy disc point
-				const float n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
-				const float n2 = fract(n1 * 1.618034 + 0.7548777 * p.alpha.y + 0.5 * float((pixel.x ^ pixel.y) & 1));
+				float n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
+				float n2 = fract(n1 * 1.618034 + 0.7548777 * p.alpha.y + 0.5 * float((pixel.x ^ pixel.y) & 1));
+				if (traceFixes) {	// (TraceFixes, fork F5) two INDEPENDENT numbers a pixel and frame (before, the angle followed the radius)
+					n1 = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.7548777 * p.alpha.y);
+					n2 = fract(52.9829189 * fract(0.06711056 * float(pixel.y + 37) + 0.00583715 * float(pixel.x + 113)) + 0.5698403 * p.alpha.y);
+				}
 				const float r = sqrt(n1) * p.alpha.z, phi = 6.2831853 * n2;
 				toSun = normalize(toSun + (t1 * cos(phi) + t2 * sin(phi)) * r);
 			}
 			// Alpha-tested casters (non-opaque, mask 0x10) come as candidates: their diffuse alpha decides (RtAlpha.glsl)
 			const bool testAlpha = p.alpha.x > 0.5;
+			// UNOFFICIAL 2026-11-16 (port of mrfury97's fef7c30ba / d593ff599, F7; [Shaders.ShadowsExteriors.RT] NearestBlocker, alpha.w 2): the
+			// NEAREST blocker when its distance is wanted (the denoiser / Penumbra size the penumbra by it); else the cheaper first hit, as before
+			const bool nearest = p.alpha.w > 1.5;
 			bool hit;
 			float hitT = 0.0;
+			// UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges: `through` is the sunlight left behind what the ray met (0 on the old
+			// paths: a hit is black). Both keys off (origin.w 0, cloudCentre.w 0): the old queries below, untouched.
+			float through = 0.0;
+			if (testAlpha && (p.origin.w > 0.0 || p.cloudCentre.w > 0.5)) {
+				through = rtSunFoliageTrace(start, toSun, p.bias.w, uint(p.range.z) & 0xFFu, rtHiddenNear(start, p.origin.xyz), p.origin.w,
+					p.cloudCentre.w > 0.5, p.alpha.y, hitT);
+				// the coin toss (cloudLight.w): the pixel is lit or blocked, lit for `through` of the frames (its own noise, not the disc's)
+				if (p.cloudLight.w > 0.5 && through > 0.0 && through < 1.0)
+					through = fract(52.9829189 * fract(0.06711056 * float(pixel.x + 17) + 0.00583715 * float(pixel.y + 59)) + 0.754877666 * p.alpha.y) < through ? 1.0 : 0.0;
+				hit = through < 1.0;
+				if (!hit) hitT = 0.0;
+			}
+			else
 			// (2026-11-07 ptaaa-firstperson) a ray from within arm's reach of the eye (the first-person view model's pixels, a counter you
 			// stand at) passes over the hidden first-person body (RtHidden.glsl): the third-person head and arms round the eye shadowed the gun
 			if (rtHiddenNear(start, p.origin.xyz))
-				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, kRtAnyHit, hitT);
+				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, nearest ? kRtClosest : kRtAnyHit, hitT);
 			else {
-			rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
+			rayQueryInitializeEXT(q, scene, (nearest ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 				uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), start, 0.0, toSun, p.bias.w);
 			// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
 			for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else
@@ -155,13 +221,13 @@ void main() {
 			if (debug == 1)
 				result = hit ? clamp(hitT / 4096.0, 0.0, 1.0) : 1.0;
 			else
-				result = hit ? 0.0 : 1.0;
+				result = hit ? through : 1.0;   // (2026-11-12: through leaves; 0 without LeafTransmission)
 			// (2026-11-07 rtgap-tess 1b) ContactShadows: what the depth buffer has and the RT scene lacks (the bumps, grass, small props)
-			if (!hit && debug == 0 && p.contact.w > 0.0) {
+			if ((!hit || through > 0.0) && debug == 0 && p.contact.w > 0.0 && !turned) {   // (2026-11-13: not from a face turned away: its own surface is in the way)   // (2026-11-12: also under a leaf's light shadow)
 				const float noise = fract(52.9829189 * fract(0.06711056 * float(pixel.x) + 0.00583715 * float(pixel.y)) + 0.618034 * p.alpha.y);
-				const float contact = rtContactShadow(position, normal, toSun, 30000.0, viewZ, p.forward, p.right.xyz, p.up.xyz, p.origin.xyz,
+				const float contact = rtContactShadow(position, traceFixes && !(dot(normal, p.sun.xyz) > 0.0) ? geo : normal, toSun, 30000.0, viewZ, p.forward, p.right.xyz, p.up.xyz, p.origin.xyz,
 					p.full.zw, p.full.xy, p.contact, p.contactGate, noise);
-				if (contact < 1.0) { result = contact; blocker = 1.0; }   // (a blocker right at the surface: a sharp edge for the penumbra / denoiser)
+				if (contact < 1.0) { result *= contact; blocker = 1.0; }   // (a blocker right at the surface: a sharp edge for the penumbra / denoiser)
 			}
 			// The last FadeLength units of the RT range fade to "free" (the cascades take over there)
 			result = mix(result, 1.0, clamp((viewZ - (p.range.x - p.range.y)) / max(p.range.y, 1.0), 0.0, 1.0));

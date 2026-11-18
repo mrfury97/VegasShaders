@@ -385,6 +385,11 @@ static bool sceneReflBounce(Ctx& c) {
 // the game's RtLightGrid::Build), (4) + PTRestirDI (RtRestirRow), (5) RtPathTraceGI (PTRestirGI's tracer), each with the ray budget's
 // defaults (PTRestirDIRays 0, PTBounceLights 0, one camera query: RtPtCost). (6) The picture (PTDebugView 0, 3 bounces, ReSTIR DI) over 32
 // frames: the beam's floor = its direct light + the room's bounce light (1 .. 1.35 x the direct), beside the beam well under it (bounce only).
+// (2026-11-13, docs/next/FLASHLIGHT-AUDIT-2026-11-13.md) (7) PTFlashOwnPixels (frame row texel 305.x): the floor as the GAME's own pixel
+// (a G-buffer whose depth holds the floor while nothing is recorded there, or another surface's record lies behind it with the sure
+// mark): the picture is the game's frame, + the flashlight's direct light on the traced floor inside the beam with the key, never a
+// first surface; not on a land texel (the light pass lights that). (8) PTFlashRasterShape (texels 305.y, 306, 298): the first hit's
+// direct light with the raster light pass's beam shape, (falloff x cone^2)^k x the light scale, and with the physical lamp shape's decode.
 static bool scenePtFlashlight(Ctx& c) {
 	Host& h = *c.host;
 	World w;
@@ -419,6 +424,8 @@ static bool scenePtFlashlight(Ctx& c) {
 		if (l == 0) { const V3 t = Lv * (-1.0f / d); spot = RtFlashlightCode::Spot(lamps[l].w, t.x, t.y, t.z); }
 		return fall * ndl * spot;
 	};
+	// (2026-11-13) the frame row's keys of parts 7 and 8 (0: the row as parts 1-6 always had it)
+	float xOwn = 0.0f, xScale = 0.0f, xK = 0.0f, xShapeExp = 0.0f, xShapeY = 0.0f, xShapeZ = 0.0f, xFalloff = 0.0f, xNarrow = 0.0f;
 	auto image = [&](bool grid, PathConstants& k, std::vector<float>& img, bool restir) {
 		img.assign(size_t(kLightTexels) * kLampRows * 2, 0.0f);
 		std::vector<float> list(size_t(n) * 8);
@@ -437,6 +444,9 @@ static bool scenePtFlashlight(Ctx& c) {
 		frameRow[30] = code; frameRow[31] = 0.0f;   // (RtPathTrace.cpp: texel 15, after RtRestirRow's 0-14)
 		RtPtCost::Keys cost; cost.restirRays = 0; cost.bounceLights = 0; cost.oneCameraQuery = 1;   // (the defaults)
 		RtPtCost::PackRow(frameRow, cost);
+		frameRow[2 * 288 + 1] = xFalloff; frameRow[2 * 292] = xNarrow;   // (the beam's Deferred Falloff; PTScreenOwnNarrow)
+		frameRow[2 * 305] = xOwn; frameRow[2 * 305 + 1] = xScale; frameRow[2 * 306] = xK; frameRow[2 * 306 + 1] = xShapeExp;
+		frameRow[2 * 298] = xShapeY; frameRow[2 * 298 + 1] = xShapeZ;
 		if (grid) {
 			RtLightGrid::Info info;
 			std::vector<float> gridData(size_t(kLightTexels) * kGridRows * 2, 0.0f);
@@ -553,6 +563,152 @@ static bool scenePtFlashlight(Ctx& c) {
 		say("  6 the picture (3 bounces, PTRestirDI, 32 frames): the beam's floor %.4f = %.3f x its direct light (limit 0.98 .. 1.35), the floor "
 			"beside it (within 900 units, bounce light only) %.5f = %.3f x the beam's (limit 0.15) -> %s\n", in, ratio, outv, in > 0 ? outv / in : 0.0, ok ? "ok" : "BAD");
 		allOk = allOk && ok;
+	}
+	// (7) PTFlashOwnPixels: the game's own pixels
+	{
+		const float frameStored[3] = { 0.20f, 0.30f, 0.25f };
+		const V3 frameLin = { std::pow(frameStored[0], 2.2f), std::pow(frameStored[1], 2.2f), std::pow(frameStored[2], 2.2f) };
+		std::vector<float> depth(size_t(S) * S, 1.0f), normalsA(size_t(S) * S * 4, 0.5f), zero(size_t(S) * S * 4, 0.0f), albedoB(size_t(S) * S * 4), materialB(size_t(S) * S * 4),
+			materialLand(size_t(S) * S * 4), frameImg(size_t(S) * S * 4);
+		for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) {
+			const size_t px = size_t(j) * S + i;
+			const V3 d = cam.ray((i + 0.5f) / S, (j + 0.5f) / S);
+			const Hit hh = trace(w, cam.eye, d, 1e-3f, 1e9f, 0xFF, false);
+			if (hh.hit) depth[px] = hh.t / cam.farZ;   // (d . f = 1: t is the view z)
+			const V3 up = { 0, 0, 1 };   // the floor's normal, view space x 0.5 + 0.5 (RtPathTrace.comp ScreenHit)
+			float* nn = &normalsA[px * 4];
+			nn[0] = 0.5f + 0.5f * dot(up, cam.r); nn[1] = 0.5f + 0.5f * dot(up, cam.u); nn[2] = 0.5f + 0.5f * dot(up, cam.f); nn[3] = 1.0f;
+			float* ab = &albedoB[px * 4]; ab[0] = 0.9f; ab[1] = 0.05f; ab[2] = 0.05f; ab[3] = 1.0f;   // another surface's record: red (never the floor's grey)
+			float* mb = &materialB[px * 4]; mb[0] = 1.0f; mb[1] = 100.0f; mb[2] = 0.7f; mb[3] = 1.0f;
+			float* ml = &materialLand[px * 4]; ml[0] = 4.0f; ml[1] = 100.0f; ml[2] = -1.0f; ml[3] = 0.0f;   // a land texel whose alpha a blended draw left 0
+			float* fr = &frameImg[px * 4]; fr[0] = frameStored[0]; fr[1] = frameStored[1]; fr[2] = frameStored[2]; fr[3] = 1.0f;
+		}
+		std::vector<float> normalsB = normalsA;
+		for (size_t px = 0; px < size_t(S) * S; px++) normalsB[px * 4 + 3] = 1.0f + RtViewModel::kOwnSure;   // the prep pass's sure mark
+		auto frameG = [&](const std::vector<float>& normals, const std::vector<float>& albedo, const std::vector<float>& material, float seed, std::vector<float>& out, std::vector<float>& first) {
+			PathConstants k = PathConstants();
+			cameraConstants(cam, k.size, k.forward, k.right, k.up, k.origin);
+			k.origin[3] = seed;
+			put4(k.accum, 0.0f, 1.0f, 4.0f, float(1u | 8u | 32u | 256u | 512u | 1024u | 2048u));   // alpha test, G-buffer, frame, MaterialBuffer, demodulated (the first-surface image is written), lamp image, the game's falloff
+			put4(k.sunDir, 0, 0, 1, 0); put4(k.sunColor, 0, 0, 0, 0);
+			put4(k.skyZenith, 0, 0, 0, 0); put4(k.skyHorizon, 0, 0, 0, 0);
+			put4(k.misc, float(n), 0.0f, 60000.0f, 0.0f);
+			k.rect[3] = 1.0f;
+			for (int l = 0; l < n && l < 8; l++) { put4(k.lampPos[l], lamps[l].pos, lamps[l].reach); put4(k.lampColor[l], lamps[l].colour, lamps[l].w); }
+			std::vector<float> img;
+			if (!image(false, k, img, false)) return false;
+			if (!h.Upload(gM.ptLamps, img) || !h.Upload(c.depth, depth) || !h.Upload(c.normals, normals) || !h.Upload(c.aux16, albedo) || !h.Upload(c.histA, material) ||
+				!h.Upload(gM.aoLight, frameImg)) return false;
+			const std::vector<int> imgs = { c.ptA, c.ptB, c.ptDisplay, c.alphaAtlas, c.ptDisplay, c.ptDisplay, c.depth, c.normals, c.aux16, c.pano,
+				gM.aoLight, c.ptDisplay, c.histA, gM.ptAlbedoOut, gM.ptLamps };
+			h.AddPass(c.shPath, imgs, 0x7u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+			if (!h.Exchange(w, ids, cam.eye)) return false;
+			const bool ok = h.Read(c.ptDisplay, out) && h.Read(gM.ptAlbedoOut, first);
+			h.EndFrame();
+			return ok;
+		};
+		struct Case { const char* name; float own, narrow; const std::vector<float>* normals; const std::vector<float>* albedo; const std::vector<float>* material; bool lit; };
+		const Case cases[] = {
+			{ "nothing recorded, the key off (as before)", 0.0f, 1.0f, &normalsA, &zero, &zero, false },
+			{ "nothing recorded, the key on", 1.0f, 1.0f, &normalsA, &zero, &zero, true },
+			{ "another surface's record behind it (sure mark), the key off", 0.0f, 1.0f, &normalsB, &albedoB, &materialB, false },
+			{ "another surface's record behind it (sure mark), the key on", 1.0f, 1.0f, &normalsB, &albedoB, &materialB, true },
+			{ "a land texel with alpha 0 (the light pass lights it), the key on", 1.0f, 1.0f, &normalsA, &zero, &materialLand, false } };
+		int caseNo = 0;
+		for (const Case& cs : cases) {
+			xOwn = cs.own; xNarrow = cs.narrow;
+			std::vector<float> out, first;
+			if (!frameG(*cs.normals, *cs.albedo, *cs.material, 301.0f + caseNo++, out, first)) { releaseWorld(h, ids); return false; }
+			int inside = 0, outside = 0, badIn = 0, badOut = 0, firstBad = 0, nan = 0, shown = 0;
+			double meanIn = 0, meanOut = 0;
+			for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) {
+				const float* g = &out[(j * S + i) * 4];
+				if (!std::isfinite(g[0]) || !std::isfinite(g[1]) || !std::isfinite(g[2])) { nan++; continue; }
+				float spotLo = 1, spotHi = 0, flashLo = 1e30f, flashHi = 0;
+				bool floorAll = true;
+				for (int sgl = 0; sgl < 5; sgl++) {
+					const V3 d = sgl == 0 ? cam.ray((i + 0.5f) / S, (j + 0.5f) / S) : cam.ray((i + (sgl & 1 ? 0.95f : 0.05f)) / S, (j + (sgl & 2 ? 0.95f : 0.05f)) / S);
+					const Hit hh = trace(w, cam.eye, d, 1e-3f, 1e9f, 0xFF, false);
+					if (!hh.hit || hh.object != 0) { floorAll = false; break; }
+					float sp = 1;
+					const float fl = lampLight(0, d * hh.t, sp);
+					spotLo = std::min(spotLo, sp); spotHi = std::max(spotHi, sp); flashLo = std::min(flashLo, fl); flashHi = std::max(flashHi, fl);
+				}
+				if (!floorAll) continue;
+				const bool in = spotLo >= 0.999f, outv = spotHi <= 0.0f;
+				if (!in && !outv) continue;
+				if (first[(j * S + i) * 4 + 3] >= 0.5f) firstBad++;   // the game's pixel: never a first surface
+				if (in) { inside++; meanIn += g[1]; } else { outside++; meanOut += g[1]; }
+				for (int ch = 0; ch < 3; ch++) {
+					const float base = (&frameLin.x)[ch], c3 = (&flashColour.x)[ch];
+					const float lo = base + (in && cs.lit ? 0.5f * c3 * flashLo : 0.0f), hi = base + (in && cs.lit ? 0.5f * c3 * flashHi : 0.0f);
+					const float err = (g[ch] < lo ? lo - g[ch] : g[ch] > hi ? g[ch] - hi : 0.0f) / std::max(hi, 0.01f);
+					if (err > 0.03f) { if (in) badIn++; else badOut++; if (shown++ < 4) say("    pixel (%u, %u) %s: %.4f, want %.4f .. %.4f\n", i, j, in ? "inside" : "outside", g[ch], lo, hi); }
+				}
+			}
+			const bool ok = nan == 0 && inside > 300 && outside > 300 && badIn == 0 && badOut == 0 && firstBad == 0;
+			say("  7 the floor as the game's own pixel, %-62s inside the beam mean green %.4f (%s), outside %.4f (the frame's %.4f): %d / %d wrong of %d / %d, first-surface marks %d, NaN %d -> %s\n",
+				cs.name, inside ? meanIn / inside : 0.0, cs.lit ? "the frame + the beam on the traced floor" : "the frame alone", outside ? meanOut / outside : 0.0, frameLin.y,
+				badIn, badOut, inside, outside, firstBad, nan, ok ? "ok" : "BAD");
+			allOk = allOk && ok;
+			if (!ok) dumpPfm("ptflashlight_own", out, S, S, 4, 1);
+		}
+		xOwn = 0.0f; xNarrow = 0.0f;
+		h.Upload(c.histA, zero);   // (the history image as the host's start left it)
+	}
+	// (8) PTFlashRasterShape: the first hit's direct light with the raster light pass's beam (FlashlightDeferred.hlsl: its Falloff shape x
+	// cone^2 through Includes/LampFalloff.hlsl LampAtt, x the lamps' light scale)
+	{
+		const float F = 4.0f, scale = 0.8f, kExp = 2.2f, shapeE = 1.0f, shapeY = 16.0f, shapeZ = 1.3f;
+		auto rasterLight = [&](V3 at, bool shaped, float& spot) {
+			const V3 Lv = lamps[0].pos - at;
+			const float d = length(Lv);
+			spot = 0.0f;
+			if (d >= lamps[0].reach || d < 1e-3f) return 0.0f;
+			const V3 t = Lv * (-1.0f / d);
+			spot = RtFlashlightCode::Spot(lamps[0].w, t.x, t.y, t.z);
+			const float q = d * d / (lamps[0].reach * lamps[0].reach), wv = std::min(std::max(1.0f - q, 0.0f), 1.0f);
+			float att = wv * wv / (1.0f + F * q) * spot * spot;
+			if (shaped) { const float qa = 1.0f - att; float win = 1.0f - qa * qa; win *= win; att = std::pow(std::fabs(shapeZ * win / (1.0f + qa * shapeY)), shapeE); }
+			else att = std::pow(att, kExp);
+			return att * scale * std::max(Lv.z / d, 0.0f);
+		};
+		for (int shaped = 0; shaped < 2; shaped++) {
+			xFalloff = F; xScale = scale; xK = kExp; xShapeExp = shaped ? shapeE : 0.0f; xShapeY = shaped ? shapeY : 0.0f; xShapeZ = shaped ? shapeZ : 0.0f;
+			std::vector<float> out;
+			if (!frame(2, 3.0f, 3.0f, 401.0f + shaped, out)) { releaseWorld(h, ids); return false; }
+			int lit = 0, dark = 0, bad = 0, nan = 0, shown = 0;
+			double worst = 0, mean = 0;
+			for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) {
+				const float* g = &out[(j * S + i) * 4];
+				if (!std::isfinite(g[0]) || !std::isfinite(g[1]) || !std::isfinite(g[2])) { nan++; continue; }
+				float lo = 1e30f, hi = 0, spotHi = 0;
+				bool floorAll = true;
+				for (int sgl = 0; sgl < 5; sgl++) {
+					const V3 d = sgl == 0 ? cam.ray((i + 0.5f) / S, (j + 0.5f) / S) : cam.ray((i + (sgl & 1 ? 0.95f : 0.05f)) / S, (j + (sgl & 2 ? 0.95f : 0.05f)) / S);
+					const Hit hh = trace(w, cam.eye, d, 1e-3f, 1e9f, 0xFF, false);
+					if (!hh.hit || hh.object != 0) { floorAll = false; break; }
+					float sp = 0;
+					const float fl = rasterLight(d * hh.t, shaped != 0, sp);
+					lo = std::min(lo, fl); hi = std::max(hi, fl); spotHi = std::max(spotHi, sp);
+				}
+				if (!floorAll) continue;
+				if (spotHi > 0.0f) { lit++; mean += g[1]; } else dark++;
+				for (int ch = 0; ch < 3; ch++) {
+					const float c3 = (&flashColour.x)[ch], wl = 0.5f * c3 * lo, wh = 0.5f * c3 * hi;
+					// (relative to the larger of the pixel's light and 0.5 % of the beam's peak: the cone's rim falls steeply inside one pixel)
+					const float err = (g[ch] < wl ? wl - g[ch] : g[ch] > wh ? g[ch] - wh : 0.0f) / std::max(wh, 0.005f * c3);
+					worst = std::max(worst, double(err));
+					if (err > 0.03f) { bad++; if (shown++ < 4) say("    pixel (%u, %u): %.5f, want %.5f .. %.5f\n", i, j, g[ch], wl, wh); }
+				}
+			}
+			const bool ok = nan == 0 && lit > 300 && dark > 300 && bad == 0;
+			say("  8 PTFlashRasterShape, %-44s first hit's direct light: %d pixels in the beam (mean green %.4f, worst %.2f %%), %d outside it (0), %d wrong, NaN %d -> %s\n",
+				shaped ? "the physical lamp shape's decode" : "the lamps' falloff decode (att^2.2)", lit, lit ? mean / lit : 0.0, worst * 100, dark, bad, nan, ok ? "ok" : "BAD");
+			allOk = allOk && ok;
+			if (!ok) dumpPfm("ptflashlight_shape", out, S, S, 4, 1);
+		}
+		xFalloff = xScale = xK = xShapeExp = xShapeY = xShapeZ = 0.0f;
 	}
 	releaseWorld(h, ids);
 	return allOk;

@@ -61,6 +61,29 @@ namespace LampFixtures {
 	inline std::unordered_map<const void*, int> ObjectRoots;
 	inline constexpr float MaxLampModel = 200.0f;			// bound radius: a ceiling fan is ~150; buildings named '...light...' are not lamps
 
+	// UNOFFICIAL SkipOwnFixture (2026-11-11, [Shaders.ShadowsInteriors.Forward], BUG FIX): a light's own FIXTURE casts nothing into that
+	// light's cube map. A tester's mod interior: a flat ceiling light panel with the game's point light right next to / behind it; the
+	// game has no lamp shadows, so authors put a light anywhere near its fixture, and with cube-map shadows the panel threw a hard wedge
+	// of darkness over the ceiling and the back wall. The ray-traced lamp shadows already skip lamp models and glass ([...RT]
+	// SkipLampModels / SkipLampGlass / LampStop); the cube maps did so only with the look options LampModelShadows false (which keeps a
+	// lamp's OWN light shadowed) and OwnGlassDistance (glowing parts up to MaxLampPart only: not a panel's housing, not a large pane).
+	// A fixture is a placed object that
+	//   - has a STATIC or LIGHT base form with a model file (never an actor, a door, furniture, an activator or a container),
+	//   - is small: root bound radius up to MaxLampModel (room pieces are larger), and
+	//   - is a lamp: a LIGHT form's own model, or a lamp by its file name (LampName), or it has a glowing mesh (Emission >= 0.25) and
+	//     is up to MaxGlowFixture in radius (the glowing wall and window pieces measured in the saloon were 109-138 as meshes alone).
+	// A light leaves a fixture out when it is built into it (the light's node hangs under the fixture's root) or stands within
+	// OwnFixtureDistance of the fixture's bound. Walls, floors, furniture and people are never fixtures, so a lamp mounted 5 units from
+	// a wall still has the wall's shadow. Kept apart from Models / ModelOf (LampModelShadows, the RT masks): those stay as they were.
+	struct Fixture { float x, y, z, radius; const NiNode* root; const char* name; char kind; };	// kind: 'L' a light form's model, 'N' by name, 'G' glows
+	inline constexpr float MaxGlowFixture = 128.0f;			// root bound radius of a fixture known only by its glow
+	inline bool WantFixtures = false;						// SkipOwnFixture: list them (off: the lists stay empty)
+	inline std::vector<Fixture> Fixtures;
+	inline std::unordered_map<const void*, int> FixtureOf;		// NiGeometry* -> index in Fixtures
+	inline std::unordered_map<const void*, int> FixtureRoots;	// the fixture's root NiNode* -> index in Fixtures
+	inline unsigned FixtureGeneration = 0;					// bumped whenever the fixture list changes (the cube maps' caster hash)
+	inline UInt64 FixtureHash = 0;
+
 	// A lamp model by its file name (or, without one, its root node's name): light, lamp, fan, chandelier, sconce, bulb, lantern,
 	// candle, torch. FalloutNV.esm's fixtures: dlc04lightwall01on.nif, LamplightChandelier.NIF, NV_Fan.NIF, ShackHangingLight01.NIF,
 	// LamplightLamp.NIF, dlc04bwalklight01.nif, LampGenericR01.NIF, OperatingLightR01.NIF, dlc04lighthousebulb.nif, ...
@@ -132,6 +155,10 @@ namespace LampFixtures {
 		std::vector<Model> models;
 		std::unordered_map<const void*, int> modelOf, objectRoots;
 		std::vector<NiAVObject*> stack;
+		std::vector<Fixture> fixtures;								// UNOFFICIAL SkipOwnFixture (2026-11-11)
+		std::unordered_map<const void*, int> fixtureOf, fixtureRoots;
+		std::vector<NiGeometry*> refGeometries;
+		UInt64 fixtureHash = 1469598103934665603ull;
 		UInt64 hash = 1469598103934665603ull;
 		unsigned refs = 0, geometries = 0;
 		for (TList<TESObjectREFR>::Entry* entry = &cell->objectList.First; entry; entry = entry->next) {
@@ -152,6 +179,10 @@ namespace LampFixtures {
 				models.push_back({ rootBound->Center.x, rootBound->Center.y, rootBound->Center.z, rootBound->Radius, root, {}, path && *path ? path : root->m_pcName });
 				hash = (hash ^ (UInt64)(SInt64)(rootBound->Center.x * 8.0f + rootBound->Center.y * 32.0f + rootBound->Center.z * 128.0f)) * 1099511628211ull;
 			}
+			// UNOFFICIAL SkipOwnFixture: a small static or light form with a model may be a fixture (decided after its meshes are seen)
+			const bool fixtureForm = WantFixtures && path && *path && rootBound && rootBound->Radius > 0.0f && rootBound->Radius <= MaxLampModel;
+			bool refGlows = false;
+			refGeometries.clear();
 			stack.clear();
 			stack.push_back(root);
 			while (!stack.empty()) {
@@ -166,6 +197,7 @@ namespace LampFixtures {
 						if (NiBound* b = geo->GetWorldBound()) models[model].parts.push_back({ b->Center.x, b->Center.y, b->Center.z, b->Radius });
 					}
 					const float emit = Emission(geo);
+					if (fixtureForm) { refGeometries.push_back(geo); if (emit >= 0.25f) refGlows = true; }
 					if (emit < 0.25f) continue;
 					NiBound* bound = geo->GetWorldBound();
 					if (!bound || !(bound->Radius > 0.0f) || bound->Radius > MaxLampPart) continue;	// a lamp part (LampPart), not a light shaft
@@ -176,7 +208,32 @@ namespace LampFixtures {
 				if (NiNode* node = object->IsNiNode())
 					for (int i = 0; i < node->m_children.end; i++) stack.push_back(node->m_children.data[i]);
 			}
+			if (fixtureForm && !refGeometries.empty()) {	// UNOFFICIAL SkipOwnFixture: a light form's model, a lamp by name, or it glows
+				const bool lightForm = ref->baseForm->formType == TESForm::FormType::kFormType_Light, named = LampName(path);
+				if (!lightForm && !named) refGlows = refGlows && rootBound->Radius <= MaxGlowFixture;
+				if (lightForm || named || refGlows) {
+					const int index = (int)fixtures.size();
+					fixtures.push_back({ rootBound->Center.x, rootBound->Center.y, rootBound->Center.z, rootBound->Radius, root, path, lightForm ? 'L' : named ? 'N' : 'G' });
+					fixtureRoots[root] = index;
+					for (NiGeometry* g : refGeometries) fixtureOf[g] = index;
+					fixtureHash = (fixtureHash ^ (UInt64)(SInt64)(rootBound->Center.x * 8.0f + rootBound->Center.y * 32.0f + rootBound->Center.z * 128.0f) ^
+						((UInt64)refGeometries.size() << 48)) * 1099511628211ull;
+				}
+			}
 		}
+		fixtureHash ^= fixtures.size();
+		const bool fixturesChanged = fixtureHash != FixtureHash;
+		if (fixturesChanged) { FixtureHash = fixtureHash; FixtureGeneration++; }
+		if (log && fixturesChanged && WantFixtures) {
+			Logger::Log("UNOFFICIAL LampFixtures: %u fixtures (%u meshes) for SkipOwnFixture: small static / light objects that are a light form's model (L), lamps by name (N) or glow (G)",
+				(unsigned)fixtures.size(), (unsigned)fixtureOf.size());
+			for (size_t i = 0; i < fixtures.size() && i < 80; i++)
+				Logger::Log("  FIXTURE %3u %c at %.0f %.0f %.0f radius %.0f | '%s'", (unsigned)i, fixtures[i].kind, fixtures[i].x, fixtures[i].y, fixtures[i].z,
+					fixtures[i].radius, fixtures[i].name ? fixtures[i].name : "");
+		}
+		Fixtures.swap(fixtures);
+		FixtureOf.swap(fixtureOf);
+		FixtureRoots.swap(fixtureRoots);
 		hash ^= found.size() ^ ((UInt64)models.size() << 20) ^ ((UInt64)(refs > 0) << 40);
 		Ready = refs > 0;
 		const bool changed = hash != GlowHash;
@@ -291,12 +348,49 @@ namespace LampFixtures {
 		return answer == 1;
 	}
 
+	// UNOFFICIAL SkipOwnFixture (2026-11-11): the fixture this light is built into (its node hangs under the fixture's root), -1 none.
+	inline int BuiltIntoFixture(const NiPointLight* light) {
+		if (FixtureRoots.empty()) return -1;
+		for (const NiAVObject* node = light; node; node = node->m_parent) {
+			auto it = FixtureRoots.find(node);
+			if (it != FixtureRoots.end()) return it->second;
+		}
+		return -1;
+	}
+
+	// UNOFFICIAL SkipOwnFixture: is this caster a mesh of the light's own fixture: the one the light is built into (builtInto), or one
+	// whose bound's edge is within distance of the light? cache: per cube draw, fixture index -> 0 unknown, 1 leave out, 2 keep.
+	inline bool OwnFixture(const NiGeometry* geo, const NiPointLight* light, const NiPoint3* at, float distance, int builtInto, std::unordered_map<int, int>& cache) {
+		auto it = FixtureOf.find(geo);
+		if (it == FixtureOf.end()) return false;
+		const Fixture& f = Fixtures[it->second];
+		// The mesh must still lie in its fixture's bound (a freed mesh's address taken by another object's mesh before the next listing)
+		if (const NiBound* b = geo->m_kWorldBound) {
+			const float cx = b->Center.x - f.x, cy = b->Center.y - f.y, cz = b->Center.z - f.z, reach = f.radius + 1.0f;
+			if (cx * cx + cy * cy + cz * cz > reach * reach) return false;
+		}
+		int& answer = cache[it->second];
+		if (!answer) {
+			const float dx = f.x - at->x, dy = f.y - at->y, dz = f.z - at->z;
+			const float edge = sqrtf(dx * dx + dy * dy + dz * dz) - f.radius;
+			const bool own = it->second == builtInto;
+			answer = own || edge <= distance ? 1 : 2;
+			if (LogModels && answer == 1 && LogModelLines < 400) {
+				LogModelLines++;
+				Logger::Log("FIXTURE light %p at %.0f %.0f %.0f: fixture '%s' (%c, radius %.0f) edge %.0f units%s: LEFT OUT of its shadow map (SkipOwnFixture)",
+					(const void*)light, at->x, at->y, at->z, f.name ? f.name : "", f.kind, f.radius, edge, own ? ", the light is built into it" : "");
+			}
+		}
+		return answer == 1;
+	}
+
 	// Once per frame, indoors: list the cell's glowing meshes when the cell changed, every second for its first 10 seconds,
 	// then every 10 seconds. log: LogLamps (a line whenever the list changes).
 	inline void Update(TESObjectCELL* cell, bool log) {
 		if (!cell) return;
 		const double now = Now();
-		if (cell != GlowCell) { GlowCell = cell; CellEntered = now; GlowListed = -1.0e9; Answers.clear(); Ready = false; Models.clear(); ModelOf.clear(); ObjectRoots.clear(); }
+		if (cell != GlowCell) { GlowCell = cell; CellEntered = now; GlowListed = -1.0e9; Answers.clear(); Ready = false; Models.clear(); ModelOf.clear(); ObjectRoots.clear();
+			if (!Fixtures.empty()) { Fixtures.clear(); FixtureOf.clear(); FixtureRoots.clear(); FixtureHash = 0; FixtureGeneration++; } }	// UNOFFICIAL SkipOwnFixture
 		const double period = now - CellEntered < 10.0 ? 1.0 : 10.0;
 		if (now - GlowListed < period) return;
 		GlowListed = now;

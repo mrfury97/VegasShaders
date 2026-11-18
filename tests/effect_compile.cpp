@@ -9,7 +9,9 @@
 #include <cstdlib>
 
 static bool CompileOne(const char* path, const char* forwardShadows) {
-	D3DXMACRO macros[] = { { "FORWARD_SHADOWS", forwardShadows }, { NULL, NULL } };
+	// UNOFFICIAL 2026-11-14 EFFECT_DEFINE=NAME (test only): one more define, value 1 (GBUFFER_V2: core/CapturedNormals.h, EffectRecord::BuildMacros)
+	const char* extra = getenv("EFFECT_DEFINE");
+	D3DXMACRO macros[] = { { "FORWARD_SHADOWS", forwardShadows }, { extra && *extra ? extra : NULL, "1" }, { NULL, NULL } };
 	ID3DXBuffer *source = nullptr, *errors = nullptr, *effect = nullptr;
 	ID3DXEffectCompiler* compiler = nullptr;
 	HRESULT hr = D3DXPreprocessShaderFromFileA(path, macros, NULL, &source, &errors);

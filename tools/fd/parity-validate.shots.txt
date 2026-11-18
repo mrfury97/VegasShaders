@@ -1,0 +1,45 @@
+# Parity self-test, first validation (2026-11-14, docs/next/FD-PARITY-RESULTS.md "Bench request").
+# Start: a save in the Lucky 38 (the deferred-c1 lists' start). Spots and moves are the ones of
+# W\bench\foundations\lists\deferred-c1-confirm-b.txt (rounds 3c-3e). Toml: release defaults + [Shaders.Bodycam.Status] Enabled = false.
+# Each parity shot: 3 measurements x 4 blocks x 64 frames = 768 frames after the shot's wait.
+frames 120
+shot settle
+console tgm
+console sgtm 0.001
+wait 240
+shot l38-ctl
+parity Shaders.ShadowsInteriors.Deferred Live 64 3 false false
+shot l38-dl
+parity Shaders.ShadowsInteriors.Deferred Live 64 3 false true
+shot go-v21
+console player.moveto 0017A642
+wait 120
+shot v21-place
+console sgtm 1
+console player.setpos x -232.6
+console player.setpos y 1789.6
+console player.setpos z 7425.0
+console player.setangle x 5.2
+console player.setangle z 236.8
+console sgtm 0.001
+wait 300
+shot v21-ctl
+parity Shaders.ShadowsInteriors.Deferred Live 64 3 false false
+shot v21-dl
+parity Shaders.ShadowsInteriors.Deferred Live 64 3 false true
+shot go-sal
+console player.moveto 00106195
+wait 120
+shot sal-place
+console sgtm 1
+console player.setpos x 204.43
+console player.setpos y -542.5
+console player.setpos z 3457.1
+console player.setangle x 10.9
+console player.setangle z 58.2
+console sgtm 0.001
+wait 300
+shot sal-ctl
+parity Shaders.ShadowsInteriors.Deferred Live 64 3 false false
+shot sal-dl
+parity Shaders.ShadowsInteriors.Deferred Live 64 3 false true

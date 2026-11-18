@@ -64,6 +64,13 @@ struct VtxVaryings {
     float3 f_sun_dir        : TEXCOORD3;   // DiffuseDir, for the PS
     float4 f_amount         : TEXCOORD6;   // UNOFFICIAL: x ambient amount, y sun amount, z the sun amount before N.L, w the translucency (plain numbers, see below)
     float4 f_fog            : COLOR0;      // .w = fog amount
+#if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 3 && !defined(GRASS_SHADOW_CASTER)
+    // UNOFFICIAL 2026-11-12 CapturedGrassTint (GRASS23x000TMS.pso.hlsl, the records at main's end; only in a build with the AlbedoBuffer's
+    // records, so every other build is the shader it was): the sun's colour WITHOUT the vertex colour. f_sun carries vertex colour x sun
+    // colour; the grass's colour record needs to know how much of the sun the vertex colour takes away, and dividing f_sun by the vertex
+    // colour fails where that is 0 (blade roots). A register copy: no literal, no constant register (this shader has none free).
+    float3 f_sun_colour     : TEXCOORD7;
+#endif
 };
 
 // UNOFFICIAL: backlit translucency (docs/research/foliage-translucency.md). Light that reaches the eye through a blade
@@ -227,6 +234,9 @@ VtxVaryings main(VtxAttrs va) {
     vr.f_amount = float4(light_scale, light_scale * n_dot_l * AddlParams.x, light_scale * AddlParams.x, translucent_f);
     vr.f_light_normal = float4(loc_orient, n_dot_l - translucent_f);
     vr.f_sun_dir = DiffuseDir;
+#if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 3
+    vr.f_sun_colour = DiffuseColor;   // UNOFFICIAL 2026-11-12 CapturedGrassTint (see VtxVaryings)
+#endif
 
     // Fog from clip-space xyz distance.
     float fog_dist = length(float3(vr.f_position.xy, vr.f_position.w - vr.f_position.z));

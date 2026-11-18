@@ -47,15 +47,22 @@ foreach ($entry in $folders.GetEnumerator()) {
 	foreach ($file in $tracked) { $known[$file.Substring($entry.Key.Length).Replace('/', '\').ToLowerInvariant()] = $true }
 	foreach ($item in Get-ChildItem $dir -Recurse -File) {
 		$relative = $item.FullName.Substring($dir.Length)
-		if ($relative.ToLowerInvariant().StartsWith('cache\')) { continue }	# the shipped shader cache, checked below
-		if (!$known.ContainsKey($relative.ToLowerInvariant())) { Write-Host "EXTRA    $($item.FullName)"; $problems++ }
+		# the shipped shader cache, checked below: Cache\ (older packages) and CacheShipped\ (2026-11-17: the read-only cache a release
+		# ships since 1.1.0; the DLL copies an entry into Cache\ when its text equals this start's, ShaderProgram::SeedFromShipped)
+		$lower = $relative.ToLowerInvariant()
+		if ($lower.StartsWith('cache\') -or $lower.StartsWith('cacheshipped\')) { continue }
+		if (!$known.ContainsKey($lower)) { Write-Host "EXTRA    $($item.FullName)"; $problems++ }
 	}
-	$cache = Join-Path $dir 'Cache'
-	if (Test-Path $cache) {
-		foreach ($item in Get-ChildItem $cache -Recurse -File -Filter '*.hlsl') {
-			$compiled = $item.FullName.Substring(0, $item.FullName.Length - 5)
-			if (!(Test-Path $compiled)) { Write-Host "CACHE    no compiled file for $($item.FullName)"; $problems++ }
-			if (Select-String -Path $item.FullName -Pattern '#line \d+ "[A-Za-z]:' -Quiet) { Write-Host "CACHE    install path in $($item.FullName)"; $problems++ }
+	foreach ($cacheName in 'Cache', 'CacheShipped') {
+		$cache = Join-Path $dir $cacheName
+		if (!(Test-Path $cache)) { continue }
+		foreach ($item in Get-ChildItem $cache -Recurse -File) {
+			if ($item.Name -like '*.hlsl') {
+				$compiled = $item.FullName.Substring(0, $item.FullName.Length - 5)
+				if (!(Test-Path $compiled)) { Write-Host "CACHE    no compiled file for $($item.FullName)"; $problems++ }
+				if (Select-String -Path $item.FullName -Pattern '#line \d+ "[A-Za-z]:' -Quiet) { Write-Host "CACHE    install path in $($item.FullName)"; $problems++ }
+			}
+			elseif (!(Test-Path ($item.FullName + '.hlsl'))) { Write-Host "CACHE    no preprocessed text for $($item.FullName) (an entry is a pair)"; $problems++ }
 		}
 	}
 }
@@ -66,7 +73,7 @@ foreach ($item in Get-ChildItem $pkg) {
 	if ($allowed -notcontains $item.Name) { Write-Host "EXTRA    $($item.FullName)"; $problems++ }
 }
 foreach ($item in Get-ChildItem (Join-Path $pkg 'NVSE\Plugins')) {
-	if ('VegasShaders.dll', 'VegasShaders.pdb', 'VegasShaders.defaults.toml', 'VegasShaders.materials.txt', 'VegasShaders.maxquality.toml', 'GunFX.dll', 'GunFX.pdb', 'GunFX.ini.defaults', 'NvrRt' -notcontains $item.Name) { Write-Host "EXTRA    $($item.FullName)"; $problems++ }
+	if ('VegasShaders.dll', 'VegasShaders.pdb', 'VegasShaders.defaults.toml', 'VegasShaders.materials.txt', 'VegasShaders.maxquality.toml', 'NvrRt' -notcontains $item.Name) { Write-Host "EXTRA    $($item.FullName)"; $problems++ }
 }
 foreach ($file in 'COPYING.txt', 'License.md', 'README.md') {
 	if (!(Test-Path (Join-Path $pkg $file))) { Write-Host "MISSING  $file"; $problems++ }
@@ -96,13 +103,12 @@ if (Test-Path $optional) {
 	}
 }
 
-# 5. GunFX (since P67): the plugin is the latest local build; its defaults, effect meshes and guide are the repo's.
-# Never an active GunFX.ini (it would overwrite players' settings).
-if ((Get-FileHash (Join-Path $plugins 'GunFX.dll')).Hash -ne (Get-FileHash (Join-Path $repo 'GunFX\build\GunFX.dll')).Hash) {
-	Write-Host "STALE    NVSE\Plugins\GunFX.dll (not GunFX\build's)"; $problems++
+# 5. GunFX (since P67; built into VegasShaders.dll since 2026-11-16, gunfx-builtin): no GunFX.dll, GunFX.pdb, GunFX.ini or
+# GunFX.ini.defaults any more (an old GunFX.dll is switched off by Vegas Shaders; shipping one would only confuse). Its effect meshes and
+# guide are the repo's.
+foreach ($old in 'GunFX.dll', 'GunFX.pdb', 'GunFX.ini', 'GunFX.ini.defaults') {
+	if (Test-Path (Join-Path $plugins $old)) { Write-Host "EXTRA    NVSE\Plugins\$old (GunFX is built into VegasShaders.dll)"; $problems++ }
 }
-if ((Text (Join-Path $plugins 'GunFX.ini.defaults')) -ne (Text (Join-Path $repo 'GunFX\config\GunFX.ini.defaults'))) { Write-Host "STALE    GunFX.ini.defaults"; $problems++ }
-if (Test-Path (Join-Path $plugins 'GunFX.ini')) { Write-Host "EXTRA    NVSE\Plugins\GunFX.ini (players' settings must not be shipped)"; $problems++ }
 if ((Text (Join-Path $pkg 'GunFX-README.txt')) -ne (Text (Join-Path $repo 'docs\GUNFX.md'))) { Write-Host "STALE    GunFX-README.txt"; $problems++ }
 $meshes = & git -C $repo -c safe.directory=* ls-files -- 'GunFX/assets/Meshes/'
 foreach ($file in $meshes) {

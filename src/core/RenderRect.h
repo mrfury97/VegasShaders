@@ -66,4 +66,5 @@ namespace RenderRect {
 	// whole of it, so those readers see the layout they always did.
 	void RescaleAfterUpscale(IDirect3DSurface9* Surface);
 	void RescaleRegistered(IDirect3DDevice9* Device);
+	void ForgetSurface(IDirect3DSurface9* Surface);	// UNOFFICIAL 2026-11-12 (memleak): a registered buffer is being released: its spare too
 }

@@ -42,6 +42,10 @@ public:
 
 	// UNOFFICIAL 2026-10-23 (NVR DXVK): the pass as src\hlsl\NewVegas\Compute\Exposure.frag (EffectRecord::ExtRender)
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	// UNOFFICIAL 2026-11-15 (fpnative-fix, docs/next/FPNATIVE-SEETHROUGH.md): the frame number the pass last drew in (the chain may skip
+	// it: off, identity); FirstPersonNative::Flush gives the full-size arms the same exposure only in such a frame.
+	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) override;
+	UInt32	DrawnFrame = 0xFFFFFFFF;
 private:
 	ExtPass				extPass;
 };

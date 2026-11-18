@@ -21,6 +21,15 @@ public:
 	virtual void			RegisterConstants() {}	// TESR_ constants into TheShaderManager's table
 	virtual void			RegisterTextures() {}	// render targets/textures the effect owns
 	virtual bool			ShouldRender() { return true; }	// false skips Render under the effect's own conditions
+	// UNOFFICIAL 2026-11-12 (memleak) [Main.Main.Performance] TargetReleaseSeconds (core/TextureManager.h, the idle targets). An effect
+	// answers true for a target of its own (made with TextureManager::InitTexture into one of its members) that NOTHING draws into or
+	// needs the contents or size of while TargetsWanted() is false, and whose pointer nobody keeps past a frame: the texture manager
+	// then keeps a 1 x 1 stand-in in its place while the effect is off and makes the real one again when it is switched on. The base
+	// answer is no (kept as before). Before answering yes for a new effect: every reader and writer of the target outside the effect,
+	// every method of the effect reachable while it is off, every copy of the pointer (docs: the effect's README, "Idle targets").
+	virtual bool			TargetParkable(const char* SamplerName) { return false; }
+	// ... and whether the effect needs its targets now. Enabled, unless it is on but stands aside (SMAA while TAA runs).
+	virtual bool			TargetsWanted() { return Enabled; }
 	virtual void			BeforeDraw(IDirect3DDevice9* Device) {};	// UNOFFICIAL 2026-10-22: right before each pass's draw (legacy path; SunFar's HazardLog)
 	virtual bool			SwitchEffect();			// flips the menu switch, loads or disposes accordingly
 	virtual void			Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source);
@@ -77,7 +86,7 @@ public:
 	// ClearSampler is inherited from ShaderProgram -- game shaders need the same thing.
 	void					DisposeEffect();	// releases the ID3DXEffect and the tables (LoadGeneration moves on)
 	bool					LoadEffect();		// compiles/reads the effect file; false when it failed
-	static int				BuildMacros(D3DXMACRO* EffectMacros);	// UNOFFICIAL 2026-10-26: the effects' compile-time defines (room for 8; core\Sm6Pass)
+	static int				BuildMacros(D3DXMACRO* EffectMacros);	// UNOFFICIAL 2026-10-26: the effects' compile-time defines (room for 10; core\Sm6Pass)
 	// UNOFFICIAL 2026-10-26 (deep/fork-sm6, NvrSm6Shaders): a pass of this effect's technique with an SM6 build (core\Sm6Pass.h), ready;
 	// null otherwise. Render draws such a pass from it when it is Plain (FrameVS, no render states); Sm6Covers: every pass of the
 	// technique is, so the hand-ported ExtRender is skipped for it.

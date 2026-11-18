@@ -1,0 +1,76 @@
+# MergeCopies batch 4, outdoors (docs/next/FD-MERGE-RESULTS.md "Batch 3"). Toml: tools/fd/fd-merge4-out.toml (DeferredRenderer 2, PassSort 2;
+# both runtimes). Start: the batch-3 save (lucky22). Spots as batch 3's fd3-t-merge (Freeside, Goodsprings), 13:00.
+# Per spot as fd-merge4-int.shots.txt: the self-check (2 windows), ABBA 0 / 2, parity 0 vs 2 and the 0 vs 0 control.
+# Read: MERGE COPIES (deferred 2; planned and merged copies "opt", "ad", "lit"), every MERGE CHECK mismatch, PASS SORT, PARITY v1 (world).
+frames 300
+profile
+shot settle
+console tgm
+console sgtm 0.001
+wait 300
+shot go-fs
+console player.moveto 00161D92
+wait 300
+shot place-fs
+console sgtm 1
+console set gamehour to 13
+console fw 000FFC88
+console sgtm 0.001
+wait 600
+shot fs-chk1
+set Main.Main.Performance MergeCopies 1
+shot fs-chk2
+set Main.Main.Performance MergeCopies 1
+shot fs-m0-1
+set Main.Main.Performance MergeCopies 0
+shot fs-m2-1
+set Main.Main.Performance MergeCopies 2
+shot fs-m2-2
+set Main.Main.Performance MergeCopies 2
+shot fs-m0-2
+set Main.Main.Performance MergeCopies 0
+shot fs-m0-3
+set Main.Main.Performance MergeCopies 0
+shot fs-m2-3
+set Main.Main.Performance MergeCopies 2
+shot fs-m2-4
+set Main.Main.Performance MergeCopies 2
+shot fs-m0-4
+set Main.Main.Performance MergeCopies 0
+shot fs-par
+parity Main.Main.Performance MergeCopies 64 3 0 2
+shot fs-parctl
+parity Main.Main.Performance MergeCopies 64 3 0 0
+shot go-gsp
+console player.moveto 000CDF51
+wait 300
+shot place-gsp
+console sgtm 1
+console set gamehour to 13
+console fw 000FFC88
+console sgtm 0.001
+wait 900
+shot gsp-chk1
+set Main.Main.Performance MergeCopies 1
+shot gsp-chk2
+set Main.Main.Performance MergeCopies 1
+shot gsp-m0-1
+set Main.Main.Performance MergeCopies 0
+shot gsp-m2-1
+set Main.Main.Performance MergeCopies 2
+shot gsp-m2-2
+set Main.Main.Performance MergeCopies 2
+shot gsp-m0-2
+set Main.Main.Performance MergeCopies 0
+shot gsp-m0-3
+set Main.Main.Performance MergeCopies 0
+shot gsp-m2-3
+set Main.Main.Performance MergeCopies 2
+shot gsp-m2-4
+set Main.Main.Performance MergeCopies 2
+shot gsp-m0-4
+set Main.Main.Performance MergeCopies 0
+shot gsp-par
+parity Main.Main.Performance MergeCopies 64 3 0 2
+shot gsp-parctl
+parity Main.Main.Performance MergeCopies 64 3 0 0

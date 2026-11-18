@@ -5,7 +5,7 @@ Metallicness = 0.0                  # Add metallicness.
 AmbientScale = 0.5                  # Scale ambient lighting.
 SkylightingScale = 0.5              # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
-LightingScale = 0.725               # Scale non-ambient lighting (sun or spotlights).
+LightingScale = 1.15               # Scale non-ambient lighting (sun or spotlights). UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 0.725.
 TerrainSaturation = 1.0             # Control terrain saturation.
 
 [_Shaders.Terrain.Rain]
@@ -14,7 +14,7 @@ Metallicness = 0.0                  # Add metallicness.
 AmbientScale = 0.5                  # Scale ambient lighting.
 SkylightingScale = 0.5              # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
-LightingScale = 1.0                 # Scale non-ambient lighting (sun or spotlights).
+LightingScale = 1.15               # Scale non-ambient lighting (sun or spotlights). UNOFFICIAL (2026-11-12), was 1.0: the dry value ([Shaders.Terrain.Main]) had gone to 0.725 and this one had not, so rain lit the land brighter than dry weather. Now the same as dry; the wet look itself comes from Roughness and the WetWorld effect. UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 0.725.
 TerrainSaturation = 1.0             # Control terrain saturation.
 
 [_Shaders.Terrain.Night]
@@ -44,12 +44,13 @@ HighQuality = true                  # Turn on high quality. Double the number of
 MaxDistance = 2048                  # Controls the maximum distance for the parallax and shadow effects.
 Height = 0.1						# Controls the height. Changing can break the visuals, especially with low max steps.
 ShadowsIntensity = 2.0              # Intensity of self shadowing.
+ShadowBounce = 0.3                  # UNOFFICIAL (2026-11-12) [0.0-1.0], applies immediately: light inside the ground's small shadows. The ground's relief took all of the sun out of its cracks and off the shaded sides of its bumps, so under a strong sun they went pure black. A hollow is lit by the sunlit ground beside it: with this, this share of the sun the relief took comes back, in the ground's own colour. Not inside a cast shadow. 0 = as before (black); 0.6 = a strong fill (the relief looks flatter).
 IsoHeightTaps = true                # UNOFFICIAL: the parallax height lookups take one plain filtered sample each (at the same detail level) instead of the anisotropic filtering the game's iMaxAnisotropy puts on the land maps; colour and normals keep it. Measured at noon: ground 4.0 -> 2.4 ms, a change below the frame-to-frame flicker. Off = the old lookups.
 SkipEmptyLayers = true              # UNOFFICIAL: skip the colour and normal lookups of ground layers that have no weight at a pixel (they add exactly nothing). Same picture (largest difference 3e-7); measured at noon: ground -0.36 ms on top of IsoHeightTaps.
 
 [_Shaders.Terrain.Blending]
 Enabled = false                     # UNOFFICIAL, needs a game restart to turn ON (off works at once): blend objects into the ground where they meet it (from the Physically-Based-Reloaded fork, after Community Shaders' Terrain Blending). The land fades out over the part of a rock, wall or prop just below it, so it sinks softly into the terrain instead of ending in a hard line. Exteriors only. Smooth (below) fades it without needing TAA. Costs one depth copy a frame plus a little on the land. Not with SunSmoothing CrossFade (no sampler left on the land shaders).
-Smooth = true                       # UNOFFICIAL: fade the land by blending it over the object (smooth without TAA). Off: the old dither (smooth only with TAA, a fine stipple without).
+Smooth = true                       # UNOFFICIAL: fade the land by blending it over the object (smooth without TAA). Off: the old dither (smooth only with TAA, a fine stipple without). With [Main.Main.Quality] DeferredRenderer 2 (the default) it is always off (greyed in the menu): a blended land would mix its G-buffer with the objects under it and leave patches of the ground see-through; TAA / FSR / DLSS smooth the dither.
 BlendDistance = 10.0                # [0.5-20.0] How deep below the land surface an object still shows through, fading out (game units, 70 = 1 m). Larger = a wider, softer seam.
 GroundWidth = 24.0                  # [0-100] (ported from mrfury97's fork) The blend band's width across the ground, at most (game units): shallow objects such as road shoulders get a seam this wide instead of metres of see-through land, and meshes lying parallel just under the land get none.
 HeightBlend = 1.0                   # [0-2] How much the land texture's height map shapes the edge: sand between pebbles reaches further over the object. 0 gives a smooth fade.
@@ -76,7 +77,7 @@ LODNoiseScale = 0.7                 # Amount of noise applied to LOD.
 LODNoiseTile = 2.7                  # LOD noise texture tiling modifier.
 
 [_Shaders.Terrain.Variation]
-Enabled = false                     # UNOFFICIAL (2026-10-19) Less repeating ground: each ground texture is read twice at shifted, randomised spots and blended, so the desert stops looking like the same tile laid over and over (slightly softer contrast in exchange). Needs a restart. Some GPU time on the ground (its first Layers textures read twice); StartDistance can keep it off nearby. Ported from Conor's (mrfury97) fork, after Community Shaders' Terrain Variation (both GPL-3.0), after Deliot and Heitz 2019.
+Enabled = true                      # UNOFFICIAL (2026-10-19) Less repeating ground: each ground texture is read twice at shifted, randomised spots and blended, so the desert stops looking like the same tile laid over and over (slightly softer contrast in exchange). Needs a restart. Some GPU time on the ground (its first Layers textures read twice); StartDistance can keep it off nearby. Ported from Conor's (mrfury97) fork, after Community Shaders' Terrain Variation (both GPL-3.0), after Deliot and Heitz 2019. UNOFFICIAL (2026-11-12) default was false.
 Layers = 2                          # [1-7] (2026-10-19) How many of a ground patch's textures (the first ones) get the variation. Needs a restart. Each one doubles that texture's reads; most open ground uses one to three.
 Scale = 1.0                         # (2026-10-19) Random cells per texture repeat. Lower: bigger patches (keeps more of the texture's own large shapes); higher: changes more often but blends more, softening contrast.
 HeightInfluence = 0.3               # [0-4] (2026-10-19) How much the textures' height decides the blend between the two reads. 0: a plain crossfade (both half-visible across the seam); higher: the taller one wins its own area, so seams follow stones and cracks.

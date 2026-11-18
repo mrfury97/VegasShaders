@@ -2,6 +2,7 @@
 #include <string>
 #include "TestTools.h"
 #include "ManyLamps.h"	// UNOFFICIAL 2026-10-27 ManyLampsOnePass: the compare goes to 12 + f lamps
+#include "DeferredRenderer.h"	// UNOFFICIAL 2026-11-14 full deferred renderer: one pass per object while it is live indoors
 
 // UNOFFICIAL 2026-10-18 LampsInOnePass ([Main.Main.Misc] LampsInOnePass, live, default off).
 //
@@ -39,6 +40,7 @@ namespace LampsInOnePass {
 	constexpr UInt32 kOptCapByte = 0x00BDEA3F;		// MoreLampsPerObject's byte (ADD ECX,imm8 in AddPass_Opt): 5 when it is on
 	constexpr UInt32 kEnabledPasses = 0x011F91D8;	// BSShaderManager::iEnabledPasses
 	constexpr UInt32 kRebuildBit = 0x10000000;
+	constexpr UInt32 kGlowRebuildBit = 0x02000000;	// ManyLampsGlow's own (2026-11-15)
 	constexpr UInt32 kGlowSite = 0x00BE0134;		// JNZ multi-pass (75 45) after CMP bGlowMap,0 (80 7C 24 3C 00) in GetRenderPasses_2x
 	constexpr UInt32 kEmitSite = 0x00B7BAFA;		// the OPT range test (24 bytes) choosing SetEmitConstant / AddEmitToAmbient in 0x00B7BA70
 
@@ -50,6 +52,13 @@ namespace LampsInOnePass {
 	// Pass enums whose emittance the game adds to the ambient colour (bit set): the OPT passes without a glow map. Read by the code at
 	// kEmitSite while ManyLampsGlow is on (BT with a bit offset: the enum, below 0x300).
 	inline UInt32 AmbientEmitEnums[0x300 / 32] = {};
+	inline bool EmitOnlyApplied = false, EmitOnlyRefused = false;	// (2026-11-15 ApplyEmitOnly / EmitForPass)
+	inline UInt32 EmitCleared = 0;	// the enum whose bit EmitForPass cleared for the draw under way
+	inline bool IsGlowOptEnum(UInt32 e) { return e == 0xC4 || e == 0xC7 || e == 0xCB || e == 0xCE || e == 0xD2 || e == 0xD5; }
+	inline void InitAmbientEmitEnums() {	// the game's own choice: every OPT enum adds its emittance to the ambient but the glow ones
+		if (AmbientEmitEnums[0xC3 / 32] || AmbientEmitEnums[0xD6 / 32]) return;
+		for (UInt32 e = 0xC3; e <= 0xD6; e++) if (!IsGlowOptEnum(e)) AmbientEmitEnums[e / 32] |= 1u << (e % 32);
+	}
 
 	// UNOFFICIAL 2026-10-27 ManyLampsGlow ([Main.Main.Misc] ManyLampsGlow, live while ManyLampsOnePass is on; after Conor (mrfury97)'s fork, see ManyLamps.h). F10 census in the Vault 21
 	// lobby with ManyLampsOnePass (log 14-58-42): of the highlight passes still drawn, 739 of ~790 a frame were glow-mapped shiny objects
@@ -90,16 +99,67 @@ namespace LampsInOnePass {
 			GlowRefusedLogged = true;
 			return;
 		}
-		if (!AmbientEmitEnums[0xC3 / 32] && !AmbientEmitEnums[0xD6 / 32])
-			for (UInt32 e = 0xC3; e <= 0xD6; e++)
-				if (e != 0xC4 && e != 0xC7 && e != 0xCB && e != 0xCE && e != 0xD2 && e != 0xD5) AmbientEmitEnums[e / 32] |= 1u << (e % 32);
+		InitAmbientEmitEnums();
 		static const UInt8 kNops[] = { 0x90, 0x90 }, kJnz[] = { 0x75, 0x45 };
 		SafeWriteBuf(kEmitSite, want ? emitPatched : kEmitOriginal, sizeof(kEmitOriginal));
 		SafeWriteBuf(kGlowSite, want ? kNops : kJnz, 2);
-		*(UInt32*)kEnabledPasses ^= kRebuildBit;	// every object rebuilds its passes this frame
+		// (2026-11-15 bench batch 6: its own bit. With the compare's bit, a glow switch and a compare switch in the same frame (the deferred
+		// renderer going forward on native: both follow DeferredRenderer::OnePass) flipped 0x10000000 twice: no rebuild, every object kept its
+		// one-pass list, and the glow OPT passes, now without the patch, added their whole emittance to the ambient (Live off over-bright,
+		// one-pass speed). 0x02000000 is read nowhere else (PbrPop.h's bits: 0x04, 0x08, 0x20, 0x40 x 0x1000000; FoldFog 0x20000000).)
+		*(UInt32*)kEnabledPasses ^= kGlowRebuildBit;	// every object rebuilds its passes this frame
 		GlowApplied = want;
 		Logger::Log("UNOFFICIAL ManyLampsGlow: %s (glow-mapped objects %s; every object's passes rebuilt)", want ? "on" : "off",
 			want ? "take the one pass too, their emittance masked by the glow map" : "drawn in several passes, as the game does");
+	}
+	inline bool ApplyEmitOnly(bool want) {
+		if (GlowApplied) { EmitOnlyApplied = false; return want; }	// (2026-11-15) the site is ManyLampsGlow's patch: the same bit lookup, owned there
+		if (want == EmitOnlyApplied || (want && EmitOnlyRefused)) return EmitOnlyApplied;
+		static const UInt8 kEmitOriginal[] = { 0x0F, 0xB7, 0x46, 0x04, 0xBA, 0xC3, 0x00, 0x00, 0x00, 0x66, 0x3B, 0xC2, 0x72, 0x0A,
+			0xBA, 0xD6, 0x00, 0x00, 0x00, 0x66, 0x3B, 0xC2, 0x76, 0x0C };	// (as ApplyGlow)
+		UInt8 emitPatched[sizeof(kEmitOriginal)];
+		memset(emitPatched, 0x90, sizeof(emitPatched));
+		static const UInt8 kEmitHead[] = { 0x0F, 0xB7, 0x46, 0x04, 0x0F, 0xA3, 0x05 };	// movzx eax,[esi+4] ; bt [AmbientEmitEnums],eax
+		memcpy(emitPatched, kEmitHead, sizeof(kEmitHead));
+		*(UInt32*)(emitPatched + 7) = (UInt32)AmbientEmitEnums;
+		emitPatched[11] = 0x72; emitPatched[12] = (UInt8)(0x00B7BB1E - (kEmitSite + 13));	// jc AddEmitToAmbient; else SetEmitConstant
+		const UInt8* emit = (const UInt8*)kEmitSite;
+		if (memcmp(emit, want ? kEmitOriginal : emitPatched, sizeof(kEmitOriginal))) {
+			EmitOnlyRefused = true;
+			Logger::Log("UNOFFICIAL DeferredRenderer: the game's emittance code at %08X is not as expected (another plugin?); not changed: emissive objects are held at the game's own one-pass limit instead", kEmitSite);
+			return EmitOnlyApplied;
+		}
+		InitAmbientEmitEnums();
+		SafeWriteBuf(kEmitSite, want ? emitPatched : kEmitOriginal, sizeof(kEmitOriginal));
+		EmitOnlyApplied = want;
+		Logger::Log("UNOFFICIAL DeferredRenderer: %s", want ? "one-pass emittance per object on (an OPT draw adds its emittance to the ambient only where the game's own passes would have drawn it in one pass)" :
+			"one-pass emittance per object off (the game's code back)");
+		return EmitOnlyApplied;
+	}
+
+	// UNOFFICIAL 2026-11-15 (bench batch 4) the emittance code site alone (no glow patch), for the deferred renderer's one-pass compare on
+	// native: AmbientEmitEnums then decides per OPT enum between AddEmitToAmbient (bit set) and SetEmitConstant, and EmitForPass sets that bit
+	// before each OPT draw from the object's forward reference (OnePassLimit::ForwardMulti). Only while ManyLampsGlow has not patched the site
+	// (it never does on native now). Off: the game's code back.
+	inline bool ApplyEmitOnly(bool want);	// (below ApplyGlow's tables)
+	inline void EmitAfterPass();
+	inline void EmitForPass(const PointShadowForward::RenderPassView* pass) {
+		EmitAfterPass();	// (a pass hook that returned before its after-draw call left a bit cleared)
+		if (!(EmitOnlyApplied || (GlowApplied && OnePassLimit::EmitExact)) || !pass || !pass->geometry) return;
+		const UInt16 e = pass->passEnum;
+		if (e < 0xC3 || e > 0xD6 || IsGlowOptEnum(e)) return;
+		const bool multi = OnePassLimit::ForwardMulti(pass->geometry);
+		if (!multi) return;
+		AmbientEmitEnums[e / 32] &= ~(1u << (e % 32));	// this draw: SetEmitConstant (no emittance in the ambient)
+		EmitCleared = e;
+		OnePassLimit::EmitDraws++;
+	}
+	// After the draw (Render.cpp, next to GlowAfterDraw): the game's own choice back for every other draw of that enum (draws that do not
+	// pass through EmitForPass keep the game's behaviour).
+	inline void EmitAfterPass() {
+		if (!EmitCleared) return;
+		AmbientEmitEnums[EmitCleared / 32] |= 1u << (EmitCleared % 32);
+		EmitCleared = 0;
 	}
 
 	// The glow OPT passes read the glow map on stage 4. The game binds it there (SetupGeometryTextures 0x00B7D200) through its texture
@@ -149,7 +209,14 @@ namespace LampsInOnePass {
 
 	// Once a frame, before the game's scene walk registers its objects.
 	inline void BeginFrame() {
-		ApplyGlow(Applied && AppliedImm == (UInt8)ManyLamps::CompareImm);	// last frame's limit (a frame late after a switch)
+		// (2026-11-15 batch 3, native: the deferred renderer's own 23 + f compare switched ManyLampsGlow on too, and native's many-lamp SI
+		// shaders (MANY_LAMPS_ON 0) have no glow (ObjectTemplate.hlsl ManyLampsGlow: only with MANY_LAMPS_ON): glow-mapped objects (Lucky 38's
+		// red globes) went dark in the deferred picture. The glow patch now follows ManyLamps itself, the only time its shaders exist.)
+		// (2026-11-15 batch 5: native Vault 21 kept ~1,400 extra draws a frame: its glow-mapped objects (wall lights, 177 a frame, 8.5 lamps
+		// each) in several passes again. ManyLampsGlow now also runs for the renderer's compare on native, where the glow comes from the
+		// lamps-deferred records (ObjectTemplate.hlsl: SI glow with LAMPS_DEFERRED 3); forward draws of those passes outside the G-buffer
+		// span (reflections) have no glow on native.)
+		ApplyGlow(Applied && AppliedImm == (UInt8)ManyLamps::CompareImm && (ManyLamps::Active() || (DeferredRenderer::OnePass && DeferredRenderer::Native)));	// last frame's limit (a frame late after a switch)
 		if (!GpuTimer::Enabled) { GlowDraws = GlowRebound = GlowCacheStale = GlowLost = 0; GlowFrames = 0; }
 		else if (GlowDraws && ++GlowFrames >= 600) {
 			Logger::Log("UNOFFICIAL ManyLampsGlow (F10): per frame %.1f glow one-pass draws, s4 not their glow map before Vegas Shaders' bind %.1f (the game's cache showed it already: %.1f), "
@@ -165,18 +232,42 @@ namespace LampsInOnePass {
 		// own draw, with 6 lamp slots and no glow in their many-lamp shaders): otherwise LampsInOnePass's limit, and ManyLampsGlow off.
 		const bool nvrObjectShaders = TheSettingManager->SettingsMain.Main.RenderEffects && TheShaderManager->Shaders.PBR && TheShaderManager->Shaders.PBR->Enabled;
 		const bool manyLamps = ManyLamps::Active() && nvrObjectShaders && TheSettingManager->GetSettingI("Main.Main.Misc", "ManyLampsOnePass") != 0;
-		const UInt8 onImm = manyLamps ? (UInt8)ManyLamps::CompareImm : (UInt8)0x05;
+		// UNOFFICIAL 2026-11-14 full deferred renderer (core/DeferredRenderer.h, plan 4.5): while it is live indoors (any runtime) the game draws
+		// shiny objects with up to 23 + f lamps in ONE pass (the deferred record lights none of them; the lamp pass lights every lamp of the
+		// table), so native D3D9 draws one pass per object. Its forward fallbacks then light only the shader's slots: DeferredRenderer counts
+		// those draws. Not outdoors and not while it is forward: the limit goes back (every object's passes rebuilt).
+		// (2026-11-14 fd-fixes) It cannot be limited to the G-buffer span: the compare is read when an object's pass list is built, at
+		// registration (BSShaderAccumulator::RegisterObject_Standard 0x00B64020 -> GetRenderPasses 0x00B67BE0 -> GetRenderPasses_2x 0x00BDF790),
+		// before the main list draws, and the list is kept until the pass key changes; flipping it twice a frame would only rebuild every
+		// object's passes twice a frame. It is read per object, though: the per-object limit below holds the objects that draw forward at
+		// the forward shader's limit (native); what is left is counted on DeferredRenderer's F10 line (docs/next/FD-FIXES-RESULTS.md).
+		const bool deferred = DeferredRenderer::OnePass;
+		{	// UNOFFICIAL 2026-11-14 fd-fixes (bench batch 2, native D3D9: forward draws lost the lamps past the game's cap of 6 + f): without
+			// ManyLamps feeding the forward shaders (native), the objects that may draw forward keep the forward limit, per object, in
+			// ActorsInOnePass's cave at 0x00BE00E3 (OnePassLimit.h, PbrPop.h ActorPasses::DeferredLimit). A switch on (interior again) forgets the learned set.
+			const UInt8 limitOn = deferred && !manyLamps ? 1 : 0;
+			if (limitOn && !OnePassLimit::On) OnePassLimit::Clear();
+			OnePassLimit::On = limitOn;
+			OnePassLimit::ForwardImm = *(const UInt8*)kOptCapByte == 0x05 ? 5 : 2;
+			OnePassLimit::ReferenceImm = TheSettingManager->GetSettingI("Main.Main.Misc", "LampsInOnePass") != 0 ? 5 : 2;	// (the forward reference's compare)
+			// (2026-11-15 batch 4) mode 1: the emittance matched per draw (EmitForPass); the hold only if the code site could not be patched
+			const bool exact = ApplyEmitOnly(limitOn && DeferredRenderer::OnePassMode == 1);
+			if (exact && !OnePassLimit::EmitExact) { OnePassLimit::ClearMulti(); OnePassLimit::RebuildWanted = true; }	// (every object's forward choice noted at its next build)
+			OnePassLimit::EmitExact = exact ? 1 : 0;
+			OnePassLimit::HoldEmissive = limitOn && DeferredRenderer::OnePassMode == 1 && !exact ? 1 : 0;
+		}
+		const UInt8 onImm = manyLamps || deferred ? (UInt8)ManyLamps::CompareImm : (UInt8)0x05;
 		// UNOFFICIAL 2026-10-28 (port onto P84 v3 / LinearScene): LampsInOnePass is developer-only and off by default now (LinearScene makes the
 		// game's several passes add up exactly, so its picture reason is gone), so ManyLampsOnePass switches the one-pass limit on by itself:
 		// ManyLampsOnePass off (live) = LampsInOnePass's own setting (off: the game's 2 + f).
-		const bool want = manyLamps || TheSettingManager->GetSettingI("Main.Main.Misc", "LampsInOnePass") != 0;
+		const bool want = manyLamps || deferred || TheSettingManager->GetSettingI("Main.Main.Misc", "LampsInOnePass") != 0;
 		if ((want ? onImm : (UInt8)0x02) == AppliedImm) return;
 		if (code[0] != 0x83 || code[1] != 0xC0 || (code[2] != 0x02 && code[2] != 0x05 && code[2] != (UInt8)ManyLamps::CompareImm)) {
 			if (!RefusedLogged) Logger::Log("UNOFFICIAL LampsInOnePass: the game's code at %08X is not as expected (another plugin?); not changed", kCompareSite);
 			RefusedLogged = true;
 			return;
 		}
-		if (want && *(const UInt8*)kOptCapByte != 0x05) {
+		if (want && !deferred && *(const UInt8*)kOptCapByte != 0x05) {	// (deferred: the game's cap only bounds its own arrays; no lamp is lost to it)
 			if (!RefusedLogged) Logger::Log("UNOFFICIAL LampsInOnePass: needs MoreLampsPerObject (the game's cap of 3 would drop lamps); not changed");
 			RefusedLogged = true;
 			return;
@@ -186,8 +277,8 @@ namespace LampsInOnePass {
 		Applied = want;
 		AppliedImm = want ? onImm : (UInt8)0x02;
 		Switches++;
-		Logger::Log("UNOFFICIAL LampsInOnePass: %s (shiny objects with up to %s lamps in one pass; every object's passes rebuilt)",
-			want ? "on" : "off", want ? (onImm == 0x05 ? "5-6" : "23-24") : "2-3");
+		Logger::Log("UNOFFICIAL LampsInOnePass: %s (shiny objects with up to %s lamps in one pass; every object's passes rebuilt)%s",
+			want ? "on" : "off", want ? (onImm == 0x05 ? "5-6" : "23-24") : "2-3", deferred ? " for the deferred renderer" : "");
 	}
 
 #if NVR_TEST_TOOLS

@@ -43,6 +43,31 @@ in docs/next/FORK-RT-REFLECTIONS.md).
   read), `lastJitter` is kept with `lastView`. The RT denoiser's own reprojection is not shifted (not measured). Off: as before. Without
   TAA's Jitter the shift is 0. Wrong would look like the reflection drifting by a pixel each frame on a still camera with TAA on.
 
+## One helper round trip a frame: RideMainExchange, FollowRenderScale (2026-11-11; both default off, NOT yet run in a game)
+Cloud bench 029 (L4, 720p): RT reflections' helper pass costs 0.01-0.08 ms, but the effect made its own second exchange with the helper
+every frame ("Reflections RT (exchange)" 0.7-1.1 ms, beside the main "RT exchange: helper round trip" 1.1-2.6 ms).
+- **Why a second exchange**: the helper's inputs are RayGen's images (Rt.Dir, Rt.Ray), and RayGen ran in the Reflections step of the
+  chain, after RtCore::Frame, because its screen march reads the lit picture. With `RaysOnly` (default) the march is skipped; the rest
+  of RayGen reads the depth, normals, first-person depth / weapon mask, glass mask, TESR_MaterialBuffer, the ortho map and MaterialAware's
+  material buffer: all there before RtCore::Frame, except the material buffer, which CaptureMaterial fills at the chain's start.
+- **`[Shaders.Reflections.RT] RideMainExchange`**: `RtRideBeforeFrame` (EffectChain PreStep_RtCore, right before `RtCore::Frame`) runs
+  CaptureMaterial early (TESR_RenderedBuffer pointed at the game target's own texture for that pass; the chain's MaterialCapture step
+  then returns at once), draws RayGen (`RtRayGen`, RtTrace's first half) and arms a second core user, "RT reflections (main exchange)"
+  (Point 0, no Setup, added last so it never takes a pass from another effect). `RtCore::Frame` records it with the others; `RtTrace`
+  sees the frame rode and goes straight to Resolve. Same frame's data: no latency. Falls back to the old exchange (per frame) when:
+  RaysOnly off / an RT DebugView / SplitTest, the path tracer replacing the scene, the scene target not a single-level texture with
+  MaterialAware on, the main exchange's 8 passes full, the main exchange not run. Log: `Reflections: RideMainExchange: RayGen is drawn
+  before the frame's main RT exchange ...` or `... is on but not used now: <why>` (a line per change); with the F10 profile a count
+  line every 600 armed frames. Correct: the same picture as off, the "Reflections RT (exchange)" profiler line gone (no samples),
+  the helper log's "runs" per pass equal for ReflectionsRT* and the other passes. Wrong would look like: reflections on surfaces that
+  should not reflect / missing on mirrors (the early material capture read something else), or reflections lagging a frame.
+- **`FollowRenderScale`**: the trace, RayGen, Resolve, Temporal, the blurs and the composite have kept to the RenderScale rect since
+  2026-11-03 (the bench's own log: "RT traced in the RenderScale rect: 428x240 of 640x360"); what did not shrink is the round trip.
+  The key only makes the five image copies (Dir, Ray in; Hit, Shade, Bounce out) take the rect too. Log: `Reflections:
+  FollowRenderScale: the RT images are copied ... in the RenderScale rect only`. Still not in rect frames: the RT reflection denoiser
+  (its passes have no rect rules: reprojection, taps and history would need rectToScreen / screenToRect and a rect clamp in all seven
+  RtReflDenoise*.frag), MirrorJitter, weapon rays.
+
 ## MaterialAware: what owns the scene's alpha (2026-11-07, perf-mirrorfix)
 The per-pixel material (MaterialAware, core/ReflMaterial.h) lives in the world target's alpha: 2 + 0.25 x metal + 0.24 x roughness,
 written by the first pass of an object with an `_rmaos` map; [2, 3) reads as a material (CaptureMaterial, technique 7), anything else
@@ -179,3 +204,45 @@ docs/next/RT-PATH-TRACING.md "Team perf-reflfix4" has the facts (each checked ag
   and NPCs' hair in the colour the game draws it. Wrong: the room orange in the mirror again (an old ReflectionsComposite.spv: the log
   line says so); blocks in the gold (an old ReflectionsRTResolve.spv); white hair with `tint from none` in the hair lines (the property
   held no written colour: the line shows what it held).
+
+
+## Replace, not add: ReplaceForward (2026-11-12; default off, NOT yet run in a game)
+What the frame already holds when the composite runs, and what the composite does with it (`lin = mix(lin, reflected, share)`, share =
+saturate(amount x the split-sum Fresnel of the material's F0 and roughness) x the trace's coverage; ReflectionsComposite.frag / the .fx):
+- **The game's env-map pass** (SLS2057 / SLS2058 = `Shaders/EnvTemplate.hlsl`, an additive pass after the object's lit pass: its cube map x
+  the mask x the artist's strength, by the light with `[Shaders.PBR.EnvMaps]`). DOUBLE-COUNTED: the mix only takes `share` of it away,
+  and on stone, tile or glass seen straight on that is about 4 %, so the painted cube map stayed almost whole under the real reflection.
+- **Metal's surroundings** (`Includes/Object.hlsl` getMetalAmbient, added in ObjectTemplate.hlsl's lit pass: sky / ambient / the live cube x
+  EnvBRDFApprox). Mostly replaced already: on metal the share is its F0 (0.5-0.95), so 5-50 % of it is left under the reflection. Not
+  changed here (the object shaders are at their instruction limits and have no per-pixel knowledge of the reflection).
+- **The Specular effect's sky reflection** (`Effects/Specular.fx.hlsl` SkyStrength, outdoors, the chain step before this one). Same as
+  metal: (1 - share) of it is left; at glancing angles, where it is strongest, the share is near 1. Not changed here (another effect).
+- Lamp and sun highlights are lights, not the environment: the mix dims them by the share too (KeepFlashlight puts the flashlight's back).
+- A ray that finds nothing: the surroundings cube, the light grid, then the sky fill the missing share (the trace / Resolve); what they
+  cannot fill stays out of the alpha, so the surface keeps its own colour there (never black).
+
+**`[Shaders.Reflections.Main] ReplaceForward`** (live): the env-map pass reads LAST frame's Buffer at its own pixel (the pass is drawn
+before this frame's trace, as the water with RT Water) and leaves out `alpha` of its cube map: where the effect answered the reflection
+(screen, rays, its fallbacks) the surface shows that one reflection; where it did not (the surface does not reflect for this effect: no
+material, too rough, past DrawDistance; or nothing was found) the game's cube map stays as the probe. The composite is unchanged.
+- C++: `UpdateWaterConstants` makes the frame's value (TESR_ReflReplace: x 1, zw one scene pixel in UV) when last frame's composite drew
+  from that Buffer (the effect on, drawn last frame, no camera jump, no DebugView, not under water, not while the path tracer replaces the
+  scene); `core/ReflMaterial.h` hands it to the shaders only inside the frame's first world scene and the first-person scene (the planar
+  water reflection and any other scene get 0). Log, a line per change: `UNOFFICIAL Reflections ReplaceForward: on ...` / `... not used now: <why>`.
+- Off: the constant is 0, the shader's branch is not taken, the picture is as before. The pass itself is a little larger than before
+  (one constant, one sampler on s11, a skipped branch); `REFL_REPLACE_FORWARD 0` compiles it out byte for byte.
+- What correct looks like: the Ultra-Luxe's marble, polished counters, glass and chrome props show the room once (the real reflection),
+  not the room over a painted sheen; the same things at a distance / in a rough spot / with the Reflections effect off keep the game's
+  sheen. With RT Weapon the gun shows the traced room without its painted chrome under it.
+- What wrong would look like: an env-mapped surface gone matte where the effect reflects weakly (by design where the material is nearly
+  too rough: MaterialMaxRoughness's fade; and where SpecularOcclusion dims the reflection: lower it with this on); a thin bright or dark
+  outline on shiny props for one frame while turning (the mask is a frame old, half resolution, not reprojected); the sheen flickering
+  (the log line then alternates between `on` and `not used now`).
+- Energy: the composite's weight already follows the material's Fresnel and roughness and is a mix (never more than 1); only ReflectAdd
+  (default 0) adds on purpose. Nothing was changed there.
+- What a reflection shows (RT hits out of view): the sun through a shadow ray (`[Shaders.Reflections.RT] SunShadows`, default on), or
+  indoors / at night the lamp that lights the hit most through one (`HitLamps`, reflecting surfaces under roughness 0.25); the other 11
+  lamps and the flashlight unshadowed, the ambient from the light grid at the hit. `Rt/ReflectionsRTBody.glsl` ShadeHit.
+
+## Idle targets (2026-11-12)
+With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the texture manager keeps 1 x 1 stand-ins in place of this effect's render targets while it is off (not made at start-up when it starts off; released that many seconds after it is switched off; made again, zero filled, before the frame draws when it is switched on). Which targets and why that is safe here: the four screen buffers. The water and env-map game shaders declare TESR_ReflectionsBuffer and read it only behind TESR_RTWaterData.x / TESR_ReflReplace.x (0 while off); their cached pointer is cleared at the swap. Not the cube maps, the RT images or the material buffer (made by hand). A new reader or writer of these targets outside the effect's own switch, or a copy of their pointers kept past a frame, breaks this: then answer false in `TargetParkable` (the header). See `core/TextureManager.h`.

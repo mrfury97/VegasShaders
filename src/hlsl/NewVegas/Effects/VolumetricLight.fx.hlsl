@@ -133,6 +133,7 @@ float MarchShadow(float3 position) {
 }
 
 float SunVisibility(float3 position);	// UNOFFICIAL 2026-11-07 (ptaaa-fog): MarchShadow, or the traced visibility (below the grid's code)
+float AirDepth(float3 ray, float t);	// UNOFFICIAL 2026-11-13 (rtvol2): the optical depth along a view (below CompositeAir)
 
 // ---- 1: March, half resolution ----
 float4 MarchPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
@@ -146,10 +147,13 @@ float4 MarchPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float dt = planar / Steps;
 	float offset = GradientNoise(vpos);
 
+	// UNOFFICIAL 2026-11-13 (rtvol2) Expanded: the air thins above the eye (TESR_VolumetricLightGridData.z = 1 / its scale height): each sample's
+	// share is its density relative to the eye's, its transmittance AirDepth's. z 0: density 1 and sigma * t, exactly as before.
+	float rise = max(ray.z, 0.0) * TESR_VolumetricLightGridData.z;
 	float lit = 0.0, all = 0.0;
 	[loop] for (float i = 0.0; i < Steps; i += 1.0) {
 		float t = (i + offset) * dt;
-		float transmittance = exp(-sigma * t);
+		float transmittance = exp(-AirDepth(ray, t)) * exp(-rise * t);
 		lit += SunVisibility(ray * t) * transmittance;
 		all += transmittance;
 	}
@@ -236,13 +240,35 @@ float4 BlurAxis(sampler2D source, float2 vpos, float2 axis) {
 float4 BlurXPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 { return BlurAxis(TESR_VolumetricLightTemp, vpos, float2(1.0, 0.0)); }
 float4 BlurYPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 { return BlurAxis(TESR_VolumetricLightMarch, vpos, float2(0.0, 1.0)); }
 
-// The lit and shaded air over the frame: the sunlight added, the shaded air's darkening (air: r lit share, g all air).
-float4 CompositeAir(float2 uv, float4 color, float2 air) {
-	// Henyey-Greenstein phase, times 4 pi (1 for air that scatters evenly), capped so looking straight at the sun
-	// cannot blow out.
-	float cosTheta = dot(normalize(toWorld(uv)), TESR_SmoothedSunDir.xyz);
+// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded (VolumetricLight.cpp ApplyExpandedLook; 0 = off, the old formulas):
+//   TESR_VolumetricLightGridData.z  1 / the dust's scale height above the eye: the air thins upward (full at and below the eye's height), so
+//                                   the lit air hugs the ground where the shafts stand and the sky above takes less haze
+//   TESR_VolumetricLightGridData.w  the sun glow's tight forward lobe: its g x 100 as the whole part, its share as the fraction
+// With the expanded look this effect's own composite draws the light (VolumetricFog.cpp leaves its FogGridLight out that frame: the fog's
+// .fx has no constant register left for these terms), so the fog's composites need no change.
+// The optical depth from the eye to planar depth t along the view ray (toWorld: per unit of planar depth): sigma t for even air, else
+// sigma (1 - exp(-a t)) / a with a the ray's rise per planar unit over the scale height (a view going down keeps the eye's density).
+float AirDepth(float3 ray, float t) {
+	float sigma = Density * length(ray);
+	float a = max(ray.z, 0.0) * TESR_VolumetricLightGridData.z;
+	return a * t > 1.0e-4 ? sigma * (1.0 - exp(-a * t)) / a : sigma * t;
+}
+
+// Henyey-Greenstein phase, times 4 pi (1 for air that scatters evenly), capped so looking straight at the sun cannot blow out; with the
+// expanded look a share of the light goes into a tight forward lobe (dust's Mie peak: the glow gathers round the sun).
+float AirPhase(float cosTheta) {
 	float g = Anisotropy;
 	float phase = min((1.0 - g * g) / pow(max(1.0 + g * g - 2.0 * g * cosTheta, 1.0e-4), 1.5), 8.0);
+	float packed = TESR_VolumetricLightGridData.w;
+	float gt = floor(packed) * 0.01;
+	float tight = min((1.0 - gt * gt) / pow(max(1.0 + gt * gt - 2.0 * gt * cosTheta, 1.0e-4), 1.5), 8.0 / (1.0 - gt));	// (cap: 53 at g 0.85)
+	return lerp(phase, tight, packed - floor(packed));
+}
+
+// The lit and shaded air over the frame: the sunlight added, the shaded air's darkening (air: r lit share, g all air).
+float4 CompositeAir(float2 uv, float4 color, float2 air) {
+	float cosTheta = dot(normalize(toWorld(uv)), TESR_SmoothedSunDir.xyz);
+	float phase = AirPhase(cosTheta);	// (UNOFFICIAL 2026-11-13 rtvol2: was the Henyey-Greenstein lobe inline; the same with Expanded off)
 
 	float3 lin = linearize(max(color.rgb, 0.0));
 	float shadedAir = saturate(air.g - air.r);
@@ -397,8 +423,9 @@ float4 GridLightPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 		shadowA = lerp(MarchShadow(positionA), traced, rtShare);
 		shadowB = lerp(MarchShadow(positionB), traced, rtShare);
 	}
-	float sigma = Density * length(toWorld((cell + 0.5) / GridSize));
-	float4 cellValue = float4(0.5 * (shadowA + shadowB) * (exp(-sigma * near) - exp(-sigma * far)) * TESR_VolumetricLightGridData.y, 0.0, 0.0, 0.0);
+	// (UNOFFICIAL 2026-11-13 rtvol2: AirDepth, the even air's sigma * depth unless the expanded look thins it with height)
+	float3 cellRay = toWorld((cell + 0.5) / GridSize);
+	float4 cellValue = float4(0.5 * (shadowA + shadowB) * (exp(-AirDepth(cellRay, near)) - exp(-AirDepth(cellRay, far))) * TESR_VolumetricLightGridData.y, 0.0, 0.0, 0.0);
 	[branch] if (TESR_VolumetricLightGridData.x > 0.5) {
 		float nightFactor = TESR_VolumetricFogWeather.y * (1.0 - smoothstep(0.4, 0.8, TESR_SunAmount.x));
 		float share = 0.5 * (far - near) / MarchDistance;   // each point's share of the grid's depth
@@ -435,8 +462,7 @@ float2 GridAirAt(float2 uv, float depth) {
 	float2 local = uv * GridSize;
 	float farSide = tex2Dlod(TESR_VolumetricLightGrid, float4(GridUV(z, local), 0, 0)).r;
 	float nearSide = z > 0.5 ? tex2Dlod(TESR_VolumetricLightGrid, float4(GridUV(z - 1.0, local), 0, 0)).r : 0.0;
-	float sigma = Density * length(toWorld(uv));
-	return float2(lerp(nearSide, farSide, saturate(s - z)) / TESR_VolumetricLightGridData.y, 1.0 - exp(-sigma * planar));
+	return float2(lerp(nearSide, farSide, saturate(s - z)) / TESR_VolumetricLightGridData.y, 1.0 - exp(-AirDepth(toWorld(uv), planar)));	// (rtvol2)
 }
 
 // UNOFFICIAL 2026-11-05 MsaaEdgeFix: the air of a pixel by its exact sky share (Includes/MsaaSkyEdge.hlsl). Surface by depth: its sky share

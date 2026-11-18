@@ -32,6 +32,7 @@ namespace ShadowPool {
 		UInt32 drawn = 0;			// UNOFFICIAL 2026-10-30 ShadowAtlas: counts the draws of this entry (its atlas tile is converted again after one)
 		UInt32 used = 0;			// frame last published
 		double since = 0.0;			// when it was first published (FadeIn)
+		UInt64 fixtureKey = 0;		// UNOFFICIAL 2026-11-11 SkipOwnFixture: the switch / distance / fixture list it was drawn with (ShadowManager)
 	};
 	inline std::vector<Cube> Cubes;
 	inline std::unordered_map<const ShadowSceneLight*, int> ByLight;

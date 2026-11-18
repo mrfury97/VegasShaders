@@ -73,14 +73,43 @@ namespace NewGrass {
 	// Rects: the tiles of its texture the model's cards use (u0 v0 du dv each; the vertex texture coordinates clustered), up to 4.
 	// SwayA, SwayB (2026-10-20 grass field wind): the card's sway weight (the game's: vertex alpha squared) against the vertex's height
 	// on the model, a line fitted to its own vertices (SwayA + SwayB x height), so a strand moves as the card does at its height.
-	struct Model { unsigned VertsPerModel = 0, Capacity = 0, Total = 0; float Height = 0.0f, Width = 0.0f; bool Card = false, FromBound = false; float Rects[4][4] = { { 0.0f, 0.0f, 1.0f, 1.0f } }; unsigned RectCount = 1; float SwayA = 0.0f, SwayB = 0.0f; };
+	struct Model { unsigned VertsPerModel = 0, Capacity = 0, Total = 0; float Height = 0.0f, Width = 0.0f; bool Card = false, FromBound = false; float Rects[4][4] = { { 0.0f, 0.0f, 1.0f, 1.0f } }; unsigned RectCount = 1; float SwayA = 0.0f, SwayB = 0.0f; ULONGLONG LastUse = 0; };
 	inline std::unordered_map<const void*, Model> Models;
+	// UNOFFICIAL 2026-11-12 (memleak) [Shaders.Grass.GPUGrass] ModelCacheSeconds: Models and Ramps (below) were only ever added to, one entry
+	// for every grass geometry address the session met (each cell's grass is made anew: a long walk leaves thousands of dead entries, about
+	// 0.7 KB each with its ramp). Once a table holds `cap` entries, those no draw asked for in that many seconds are dropped; when most are
+	// still in use the cap doubles instead (so a place with a lot of grass is not looked through on every draw). A dropped model that is
+	// drawn again is learned again, as a new one is. 0 = nothing is ever dropped, as before. Callers keep the returned reference for one
+	// draw only (GpuGrass.cpp, Render.cpp, Early below), and the trim runs before the lookup, never after.
+	inline size_t ModelsCap = 512, RampsCap = 512;
+	template <typename Table> inline void TrimCache(Table& table, size_t& cap, ULONGLONG now) {
+		if (table.size() < cap) return;
+		static ULONGLONG checkedAt = 0;
+		static float seconds = 60.0f;
+		if (now - checkedAt >= 1000) {
+			checkedAt = now;
+			SettingManager::Configuration::ConfigNode node;
+			seconds = TheSettingManager->Config.FillNode(&node, "Shaders.Grass.GPUGrass", "ModelCacheSeconds") ?
+				TheSettingManager->GetSettingF("Shaders.Grass.GPUGrass", "ModelCacheSeconds") : 60.0f;	// (a missing key: 60)
+		}
+		if (!(seconds > 0.0f)) return;
+		const ULONGLONG keep = (ULONGLONG)(seconds * 1000.0f);
+		const size_t before = table.size();
+		for (auto it = table.begin(); it != table.end(); ) it = now - it->second.LastUse > keep ? table.erase(it) : std::next(it);
+		if (table.size() > cap / 4 * 3 && cap < 65536) cap *= 2;
+		static unsigned told = 0;
+		if (told < 8 && table.size() != before) {
+			told++;
+			Logger::Log("UNOFFICIAL NewGrass: %u of %u grass model entries not drawn for %.0f s dropped (ModelCacheSeconds; next look at %u entries)",
+				(unsigned)(before - table.size()), (unsigned)before, seconds, (unsigned)cap);
+		}
+	}
 	// The colour ramp of a grass type (per texture, read from a small mip; refreshed every 60 s in case the address is reused).
 	// C: colour per height band (root -> tip); Fill: alpha coverage per band; Radius: the band's mean |u - 0.5| x 2 (0..1 of the card's half
 	// width); Top: the highest opaque row (0..1 of the card's height) = the plant's top. The shape of the plant on the card, for the blades.
 	// Bright: the bright-weighted mean colour per band (alpha x luma^4: the bright twigs), what the strands wear in the hybrid.
 	// Edge: the band's outermost texel with alpha > 0.15, as a share of the half width (the card's outline the strand tips keep to).
-	struct Ramp { float C[4][4] = {}; float Bright[4][4] = {}; float Fill[4] = {}, Radius[4] = {}, Edge[4] = {}; float Top = 1.0f; bool Read = false, Cutout = false; float Coverage = 1.0f; ULONGLONG When = 0; const void* Texture = nullptr; char Info[384] = ""; };
+	struct Ramp { float C[4][4] = {}; float Bright[4][4] = {}; float Fill[4] = {}, Radius[4] = {}, Edge[4] = {}; float Top = 1.0f; bool Read = false, Cutout = false; float Coverage = 1.0f; ULONGLONG When = 0; const void* Texture = nullptr; char Info[384] = ""; ULONGLONG LastUse = 0; };
 	inline std::unordered_map<const void*, Ramp> Ramps;	// per model (its own rectangle of its texture)
 	// The GPU reduction for textures the CPU cannot lock (D3DPOOL_DEFAULT, the case in game: launch 1): a 4x1 target, one pixel per band.
 	inline IDirect3DVertexShader9* RampVS = nullptr;
@@ -169,9 +198,13 @@ namespace NewGrass {
 	// The grass model behind a pass's geometry: vertices per tuft (the TEXCOORD1 instance index run of 0), the card's height and width.
 	inline const Model& GetModel(NiGeometry* geometry) {
 		NiGeometryData* gd = geometry->geomData;
+		const ULONGLONG useTick = GetTickCount64();
+		TrimCache(Models, ModelsCap, useTick);	// UNOFFICIAL 2026-11-12 (memleak) ModelCacheSeconds
 		Model& m = Models[gd];
+		m.LastUse = useTick;
 		if (m.Total && m.Total == gd->m_usVertices) return m;	// (a freed address reused by another model: learned again)
 		m = Model();
+		m.LastUse = useTick;
 		m.Total = gd->m_usVertices;
 		const unsigned uvSets = gd->m_usDataFlags & 0x3F;
 		unsigned vpm = 0;
@@ -447,8 +480,10 @@ namespace NewGrass {
 	// The grass type's colours and shape: 4 bands (root -> tip) from a mip (<= 32 wide) of its card texture, over the model's own rectangle.
 	inline const Ramp& GetRamp(IDirect3DDevice9* device, IDirect3DBaseTexture9* base, const void* modelKey, const Model& model) {
 		const float* rect = model.Rects[0];
-		Ramp& r = Ramps[modelKey];
 		const ULONGLONG now = GetTickCount64();
+		TrimCache(Ramps, RampsCap, now);	// UNOFFICIAL 2026-11-12 (memleak) ModelCacheSeconds (a dropped ramp is read again: its "first" log line too)
+		Ramp& r = Ramps[modelKey];
+		r.LastUse = now;
 		if (r.When && r.Texture == base && now - r.When < 300000) return r;
 		const bool first = r.When == 0;
 		r.When = now;

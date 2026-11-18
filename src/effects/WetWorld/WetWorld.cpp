@@ -1,23 +1,64 @@
 #include "WetWorld.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 PuddlesLandOnly (TESR_MaterialBuffer's classes)
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
+#include <algorithm>	// std::clamp
 
 void WetWorldEffect::UpdateConstants() {
-	Animator& puddles = Constants.PuddlesAnimator;
-	const bool raining = TheShaderManager->GameState.isRainy;
+	// UNOFFICIAL 2026-11-12 RainStateGuard (core/RainState.h): on, the one rain state drives both animators and fills Data.x (the rain),
+	// y (raining) and z (the puddles) every frame, whether this effect is on or off. Off: animated here as before, so only while this
+	// effect is on (and the rain only while Precipitations is on).
+	if (!RainState::Tick()) {
+		Animator& puddles = Constants.PuddlesAnimator;
+		const bool raining = TheShaderManager->GameState.isRainy;
+		// puddles fill when the rain begins and drain when it stops
+		if (raining && !puddles.switched) {
+			puddles.switched = true;
+			puddles.Start(increaseRate, 1);
+		}
+		else if (!raining && puddles.switched) {
+			puddles.switched = false;
+			puddles.Start(decreaseRate, 0);
+		}
+		Constants.Data.x = TheShaderManager->Effects.Rain->Constants.RainAnimator.GetValue();
+		Constants.Data.y = raining;
+		Constants.Data.z = puddles.GetValue();
+	}
 
-	// puddles fill when the rain begins and drain when it stops
-	if (raining && !puddles.switched) {
-		puddles.switched = true;
-		puddles.Start(increaseRate, 1);
+	// UNOFFICIAL 2026-11-12 PuddlesLandOnly: the mode the shaders take this frame. Land only (2) needs the land drawn by NVR's terrain
+	// template (the only writer of the land class): without it no pixel would count as land and every puddle would go, so it steps down
+	// to ground-like (1). Whether the buffer holds this frame is the shader's own test (TESR_MaterialBufferData; ExtRender for Vulkan).
+	int mode = puddlesLandOnly;
+	if (mode == 2 && !(TheShaderManager->Shaders.Terrain && TheShaderManager->Shaders.Terrain->Enabled)) mode = 1;
+	HudRaindropsEffect* const hud = TheShaderManager->Effects.HudRaindrops;
+	const bool weaponOff = weaponRainHandOff && hud && hud->Enabled && hud->IsLoaded();
+	Constants.Look.y = (float)mode + (weaponOff ? 4.0f : 0.0f);
+	Constants.Look.z = puddlesMinObjectSize;
+	// ReflectionsOwnPuddles: only while the Reflections effect has wetness of its own to draw (it follows the rain falling now, not the
+	// puddles left after it: Reflections.cpp UpdateConstants); after the rain the puddles keep their own image.
+	ReflectionsEffect* const reflections = TheShaderManager->Effects.Reflections;
+	Constants.Look.w = reflectionsOwnPuddles && reflections && reflections->Enabled && reflections->IsLoaded() &&
+		reflections->Settings.RainWetness > 0.0f && Constants.Data.x > 0.0f ? 1.0f : 0.0f;
+	// One line when it starts, one when it cannot run (while there is something wet to draw outdoors; at most 8 lines a session).
+	if ((Constants.Data.x > 0.0f || Constants.Data.z > 0.0f) && TheShaderManager->GameState.isExterior) {
+		const bool buffer = CapturedNormals::MaterialTexture != nullptr && CapturedNormals::MaterialData.x > 0.5f;	// (last frame's)
+		const int state = mode == 0 ? 0 : buffer ? 2 + mode : 1;
+		if (state != puddleLogState && puddleLogLines < 8) {
+			puddleLogLines++;
+			if (state == 0) Logger::Log("UNOFFICIAL WetWorld PuddlesLandOnly: off (0): puddles and wetness by the old guess alone (faces up, lies in a hollow).");
+			else if (state == 1) Logger::Log("UNOFFICIAL WetWorld PuddlesLandOnly: cannot run: the material buffer holds nothing this frame ([Main.Main.Quality] "
+				"MaterialBuffer off, or native D3D9 with the game's MSAA): the old guess stays.");
+			// (2026-11-16 fd-batchCG) the layout the shaders decode, both runtimes (the fork's wet map reads v2 too now); v2 holds no object size
+			else Logger::Log("UNOFFICIAL WetWorld PuddlesLandOnly: running, mode %d (%s)%s; material buffer layout %s; PuddlesMinObjectSize %.0f%s; WeaponRainHandOff %s; ReflectionsOwnPuddles %s.", mode,
+				mode == 2 ? "land only" : "ground-like: land and rigid objects, never people, cloth or plants",
+				mode != puddlesLandOnly ? " (2 was asked: the Terrain shaders are off, so no pixel is marked as land)" : "",
+				CapturedNormals::V2Compiled ? "v2" : "old", puddlesMinObjectSize,
+				CapturedNormals::V2Compiled && mode == 1 ? " (no effect with v2: every rigid object counts as ground)" : "",
+				weaponOff ? "acting" : weaponRainHandOff ? "on, waiting for the HUD raindrops" : "off", Constants.Look.w > 0.5f ? "acting" : reflectionsOwnPuddles ? "on, waiting for Reflections in rain" : "off");
+		}
+		puddleLogState = state;
 	}
-	else if (!raining && puddles.switched) {
-		puddles.switched = false;
-		puddles.Start(decreaseRate, 0);
-	}
-	Constants.Data.x = TheShaderManager->Effects.Rain->Constants.RainAnimator.GetValue();
-	Constants.Data.y = raining;
-	Constants.Data.z = puddles.GetValue();
 
 	// the ortho shadow map is needed while it rains or puddles stand
 	if (Constants.Data.x || Constants.Data.z) TheShaderManager->orthoRequired = true;
@@ -39,6 +80,17 @@ void WetWorldEffect::UpdateSettings() {
 	Constants.Look.x = cfg->GetSettingI(section, "KeepHighlights") ? 1.0f : 0.0f;
 	fastPaths = cfg->GetSettingI(section, "FastPaths") != 0;
 	fixedTrace = cfg->GetSettingI(section, "FixedReflectionTrace") != 0;
+
+	// UNOFFICIAL 2026-11-12 PuddlesLandOnly, PuddlesMinObjectSize, WeaponRainHandOff, ReflectionsOwnPuddles, RainStateGuard (WetWorld.h).
+	// A key missing from the defaults toml (an older one) gives its default: 1, 0, off, off, on. RainStateGuard is read here, so with
+	// this effect off too (every effect reads its settings, on or off).
+	SettingManager::Configuration::ConfigNode node;
+	puddlesLandOnly = cfg->Config.FillNode(&node, section, "PuddlesLandOnly") ? std::clamp(node.IntValue, 0, 2) : 1;
+	puddlesMinObjectSize = cfg->Config.FillNode(&node, section, "PuddlesMinObjectSize") ? std::clamp(node.FloatValue, 0.0f, 100000.0f) : 0.0f;
+	weaponRainHandOff = cfg->Config.FillNode(&node, section, "WeaponRainHandOff") && node.BoolValue;
+	reflectionsOwnPuddles = cfg->Config.FillNode(&node, section, "ReflectionsOwnPuddles") && node.BoolValue;
+	rainStateGuard = !cfg->Config.FillNode(&node, section, "RainStateGuard") || node.BoolValue;
+	puddleLogLines = 0;	// a settings change may log its new state
 }
 
 void WetWorldEffect::RegisterConstants() {
@@ -116,7 +168,8 @@ static_assert(sizeof(WetWorldUniforms) == 1376, "WetWorldUniforms must match the
 
 // The push block of both passes (32 bytes): the four sampler heap indices (filled in by the extension at offsets 0, 4, 8, 12), then
 // the mode: the map pass's passIndex (0 WetMap, 1 and 2 the blurs), or the wet pass's bits (1 fast, 2 fixTrace).
-struct WetWorldPush { UInt32 samplers[4]; UInt32 mode; UInt32 pad[3]; };
+// (2026-11-16 fd-batchCG) the map passes' next word: 1 = the material buffer is in layout v2 (WetWorldMap.frag gbufferV2; the wet pass ignores it).
+struct WetWorldPush { UInt32 samplers[4]; UInt32 mode; UInt32 gbufferV2; UInt32 pad[2]; };
 
 // The registered constant the D3D9 path uploads from (ShaderManager's table; the same memory).
 static const D3DXVECTOR4* WetRegisteredConstant(const char* name) {
@@ -195,8 +248,8 @@ bool WetWorldEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 
 	if (!extMap.Tried) {
 		extMap.Tried = true;
-		NVR_EXT_BINDING_DESC bindings[8] = {};
-		const UINT count = WetBindings(bindings, 5, 2);
+		NVR_EXT_BINDING_DESC bindings[12] = {};
+		const UINT count = WetBindings(bindings, 6, 2);	// UNOFFICIAL 2026-11-12 PuddlesLandOnly: + TESR_MaterialBuffer (binding 5)
 		extMap.Pipeline = DxvkCompute::CreateGraphicsPipeline("WetWorldMap", bindings, count, sizeof(WetWorldPush), true);
 	}
 	if (!extWet.Tried) {
@@ -236,6 +289,16 @@ bool WetWorldEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		&& WetCopyConstant(uniforms.shadowLightPosition, "TESR_ShadowLightPosition", 12)
 		&& WetCopyConstant(uniforms.lightColor, "TESR_LightColor", 24);
 	if (!copied) return false;
+	// UNOFFICIAL 2026-11-12 PuddlesLandOnly: the D3D9 pass tests TESR_MaterialBufferData itself; here the mode (y, without
+	// WeaponRainHandOff's 4) is sent as 0 while the buffer holds nothing this frame, and the depth texture stands in for it (not read).
+	IDirect3DBaseTexture9* material = CapturedNormals::MaterialTexture;
+	// UNOFFICIAL 2026-11-16 fd-batchCG (DEFERRED-GAPS-AUDIT item 4): the Vulkan wet map reads GBufferV2 too (Compute/WetWorldMap.frag, told by
+	// the map passes' push word gbufferV2), as the D3D9 pass does (WetWorld.fx.hlsl GBUFFER_V2). Before, v2 sent "no buffer" here and the fork
+	// kept the old guess (puddles on people, cloth, plants) while the log said "running".
+	if (!material || CapturedNormals::MaterialData.x < 0.5f) {
+		material = depth;
+		uniforms.wetWorldLook.y = uniforms.wetWorldLook.y >= 3.5f ? 4.0f : 0.0f;
+	}
 	ID3D9NvrExtBuffer* constants = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!constants) return false;
 
@@ -253,18 +316,19 @@ bool WetWorldEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		}
 		WetWorldPush push = {};
 		push.mode = mode;
+		push.gbufferV2 = CapturedNormals::V2Compiled ? 1u : 0u;
 		return ExtFullScreen(Device, RenderTarget, surface, source, pass.Pipeline, resources, n, &push, sizeof(push), last);
 	};
 
 	// WetMap: the current image is bound (the shader declares it) but not read; it writes the chain's spare texture and commits.
-	IDirect3DBaseTexture9* mapTextures[5] = { TheTextureManager->RenderedTexture, depth, depthViewModel, ortho, normals };
+	IDirect3DBaseTexture9* mapTextures[6] = { TheTextureManager->RenderedTexture, depth, depthViewModel, ortho, normals, material };
 	ID3D9NvrExtSampler* mapSamplers[2] = { linearClamp, pointClamp };
-	if (!drawPass(extMap, mapTextures, 5, mapSamplers, 2, 0, RenderedSurface, SourceBuffer, false)) return false;
+	if (!drawPass(extMap, mapTextures, 6, mapSamplers, 2, 0, RenderedSurface, SourceBuffer, false)) return false;
 
 	// BlurWetMap across, then down: each reads the image the previous pass committed.
 	for (UINT blur = 1; blur <= 2; blur++) {
 		mapTextures[0] = TheTextureManager->RenderedTexture;
-		if (!drawPass(extMap, mapTextures, 5, mapSamplers, 2, blur, TheTextureManager->RenderedSurface, nullptr, false)) return true;
+		if (!drawPass(extMap, mapTextures, 6, mapSamplers, 2, blur, TheTextureManager->RenderedSurface, nullptr, false)) return true;
 	}
 
 	// Wet: the blurred wet map is the current image; TESR_SourceBuffer is the frame before the effect.

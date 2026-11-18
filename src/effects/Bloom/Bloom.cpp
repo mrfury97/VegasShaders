@@ -251,6 +251,7 @@ void BloomEffect::RenderBloomBuffer(IDirect3DSurface9* RenderTarget) {
 	}
 
 	auto timer = TimeLogger();
+	BufferFrame = TheFrameRateManager->FrameNumber;	// UNOFFICIAL 2026-11-15 fpnative-fix (Bloom.h)
 
 	IDirect3DDevice9* Device = TheRenderManager->device;
 	NiDX9RenderState* RenderState = TheRenderManager->renderState;

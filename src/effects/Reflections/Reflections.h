@@ -7,6 +7,9 @@
 class ReflectionsEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the four screen buffers. The water and env-map game shaders declare TESR_ReflectionsBuffer and read it only behind TESR_RTWaterData.x / TESR_ReflReplace.x (0 while off); their cached pointer is cleared at the swap. Not the cube maps, the RT images or the material buffer (made by hand)
+	bool	TargetParkable(const char* SamplerName) override { return !strcmp(SamplerName, "TESR_ReflectionsTrace") || !strcmp(SamplerName, "TESR_ReflectionsBuffer") ||
+		!strcmp(SamplerName, "TESR_ReflectionsTemp") || !strcmp(SamplerName, "TESR_ReflectionsHistory"); }
 	ReflectionsEffect() : EffectRecord("Reflections") {};
 
 	struct SettingsStruct {
@@ -43,6 +46,7 @@ public:
 		float	GlassReflect;	// UNOFFICIAL 2026-10-29 (core/GlassMask.h, Vulkan passes only): how much see-through glass reflects (0 off: nothing hooked)
 		bool	MaterialBufferRoughness;	// UNOFFICIAL 2026-10-30 (Vulkan passes only): the floor guess takes TESR_MaterialBuffer's roughness where written
 		bool	CloudSky;		// UNOFFICIAL 2026-10-30 (Vulkan passes only, with VolumetricClouds): the sky fallback shows the clouds (the cloud sky probe)
+		bool	ReplaceForward;	// UNOFFICIAL 2026-11-12: the game's env-map pass leaves out the share of its cube map that last frame's reflection covered (README "Replace, not add")
 		bool	HiZSafeCells;		// test only: coarse cells read as min/max of their two channels, "behind" skip on the finest level only
 		bool	HiZInteriorsTest;	// test only: HiZ indoors too (the interior picture is not yet the old trace's; DebugView 9 / 10 to find why)
 		float	ReflectivityExterior;	// UNOFFICIAL 2026-10-25 [Shaders.PBR.Main] ReflectivityExterior / Interior: times the dry sheen and
@@ -89,6 +93,8 @@ public:
 		float	RtDenoiserMirrorHistory;	// frames of history at the mirror limit (growing to History by roughness 0.25)
 		int		RtMirrorJitter;			// UNOFFICIAL 2026-11-08 (perf-reflfix4) 0 off, 1 with the denoiser, 2 also under DLSS RR
 		float	RtMirrorJitterHistory;	// ... frames of history on jittered mirror pixels
+		bool	RtRideMain;				// UNOFFICIAL 2026-11-11 RideMainExchange: RayGen before RtCore::Frame, the rays in the frame's main exchange (no second round trip)
+		bool	RtFollowRenderScale;	// UNOFFICIAL 2026-11-11 FollowRenderScale: in a RenderScale rect frame the five RT image copies take the rect only
 		float	RtDenoiserBlur;		// ours: the blur's widest reach (grid pixels)
 		float	RtDenoiserAntiLag;	// ours: history further than this many sigmas from this frame's neighbourhood is cut
 		float	RtDenoiserClip;		// FFX: its temporal stability (history clip weight)
@@ -194,6 +200,11 @@ public:	// (the RT core user in Reflections.cpp reads the images)
 	};
 	RtImagesStruct		Rt;
 	void				RtRegister();		// its RT core user (ShaderManager, once, before the core's first frame)
+	// UNOFFICIAL 2026-11-11 [Shaders.Reflections.RT] RideMainExchange (off: returns at once). Right before RtCore::Frame (EffectChain
+	// PreStep_RtCore; GameTarget = the scene's target): the material buffer and RayGen are drawn now, so the reflection rays go into
+	// the frame's main exchange as a Point-0 user and RtTrace later needs no exchange of its own. Any reason it cannot (logged per
+	// change): nothing is armed and RtTrace runs as before.
+	void				RtRideBeforeFrame(IDirect3DDevice9* Device, IDirect3DSurface9* GameTarget);
 	std::string			RtStatusText() const;	// UNOFFICIAL 2026-11-01: the RT trace's state as of its last frame, for the REPORT block
 	bool				NothingReflects() const { return nothingReflects; }	// UNOFFICIAL 2026-11-05: ShouldRender found no reflecting surface (the Ray tracing page)
 private:
@@ -225,6 +236,18 @@ private:
 	bool				RtImages();			// makes Rt on first use
 	float				RtSunAmount() const;	// the sun's share for the hits (0 at night and indoors)
 	bool				RtTrace(IDirect3DDevice9* Device, IDirect3DSurface9* target);	// RayGen, the helper, Resolve into target; false: draw the normal trace
+	// UNOFFICIAL 2026-11-11 (RideMainExchange) RtTrace's first half, as it was: this frame's weapon / water / lamps, the RayGen pass and
+	// the helper pass's constants (RtPending). False: RayGen was not drawn.
+	bool				RtRayGen(IDirect3DDevice9* Device);
+	// ... and RenderBuffers' first lines, as they were: what this frame's trace is (DLSS RR raw, Temporal, the denoiser, MirrorJitter)
+	// and the trace's noise frame (TESR_ReflectionsData2.w). The same answers at any point of a frame.
+	void				RtFrameMode(bool& rrRaw, bool& temporal);
+	float				RtNoiseFrame(bool temporal, bool rrRaw) const;
+	UINT				materialEarlyFrame = 0xFFFFFFFF;	// the FrameNumber RtRideBeforeFrame ran CaptureMaterial in (the chain's own call then returns at once)
+	UINT				rtRideFrame = 0xFFFFFFFF;	// the FrameNumber RtRideBeforeFrame drew RayGen in
+	float				rtRideNoise = 0.0f, rtRideJitter = 0.0f;	// what that RayGen was drawn with (RtTrace checks them again)
+	bool				rtRideDenoise = false;
+	UINT				rtRideFrames = 0, rtRideMissed = 0;	// for the log: frames the rays rode the main exchange / armed but not recorded there
 	ExtUniformBuffer	extUniforms;
 	D3DXVECTOR4			extSky = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// NVR_ReflectionsSky as RenderBuffers set it
 	IDirect3DTexture9*	extSkyTexture = nullptr;	// the sky visibility it bound on stage 14 (null: none)

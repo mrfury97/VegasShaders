@@ -83,11 +83,16 @@ enum NvrDlssPreset : uint32_t {
 	NVR_DLSS_PRESET_COUNT         = 4,
 };
 // NvrDlssFrame::rrPreset ([Shaders.TAA.DLSS] RRPreset)
+// UNOFFICIAL 2026-11-15 (docs/next/DLSS-RR-MODEL.md): F (NVIDIA's second-generation RR transformer, "DLSS 4.5 Ray Reconstruction",
+// already inside the nvngx_dlssd.dll 310.9.16 that ships; needs driver 580.00 or newer) and AUTO (the helper picks F on RTX 40 / 50
+// class GPUs and E on RTX 20 / 30). No protocol change: a helper from before reads 3 and 4 as out of range, i.e. as DEFAULT (no hint).
 enum NvrDlssRrPreset : uint32_t {
 	NVR_DLSS_RR_PRESET_DEFAULT = 0,      // no hint
 	NVR_DLSS_RR_PRESET_D       = 1,      // NGX's RR preset D (4)
-	NVR_DLSS_RR_PRESET_E       = 2,      // NGX's RR preset E (5)
-	NVR_DLSS_RR_PRESET_COUNT   = 3,
+	NVR_DLSS_RR_PRESET_E       = 2,      // NGX's RR preset E (5): the first-generation transformer, "the current model"
+	NVR_DLSS_RR_PRESET_F       = 3,      // NGX's RR preset F (6): the second-generation transformer, "the newer model"
+	NVR_DLSS_RR_PRESET_AUTO    = 4,      // the helper decides by GPU generation and driver: F or E (its log says which and why)
+	NVR_DLSS_RR_PRESET_COUNT   = 5,
 };
 
 // What the fork's ID3D9NvrExtSharedImage::GetInfo reported, plus the NT handle duplicated into the helper's process.

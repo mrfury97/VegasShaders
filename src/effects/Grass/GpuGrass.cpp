@@ -6,6 +6,7 @@
 #include "../../core/NewGrass.h"	// the card's model (height, width, sway) and colour ramp / silhouette, read once per grass model
 #include "../../core/GrassWind.h"	// [Shaders.Grass.Wind]: the field wind's lanes and clock (the card shaders get the same)
 #include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-11-04 Enabled ([Shaders.Grass.Main] CastShadows) for the flashlight casters
+#include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 grass records (EndEarly: BeforeForeignDraw)
 
 // UNOFFICIAL 2026-10-27 GPU grass: see GpuGrass.h. Shaders: src\hlsl\NewVegas\Compute\GpuGrass* (.glsl, Cull.comp, .vert, .frag).
 
@@ -717,6 +718,7 @@ void EndEarly(IDirect3DDevice9* Device) {
 	if (!Tufts.empty() && HaveGlobals) {
 		static GpuTimer timer("GPU grass (cull + draw)");
 		GpuProfileScope gpu(timer, Device);
+		CapturedNormals::BeforeForeignDraw(Device);	// UNOFFICIAL 2026-11-12 grass records: the strands' draws pass the capture's draw hook by; its targets go off first
 		RenderStrands(Device);
 	}
 	if (Frames <= 3 || Frames % 3600 == 0)

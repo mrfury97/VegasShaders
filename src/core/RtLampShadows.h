@@ -19,9 +19,11 @@
 #include <cstddef>	// offsetof (the block layout checks)
 #include <unordered_map>
 #include "PointShadowSchedule.h"	// PointShadowSlotState (KeepCube)
+#include "ShadowHold.h"	// UNOFFICIAL 2026-11-12 DenoiseLampsByCoverage: ShadowHold::VisiblePixels (LampVisibility's answers, null while not measured)
 #include "LampFixtures.h"
 #include "DxvkCompute.h"
 #include "RtCore.h"
+#include "RtPathTrace.h"	// UNOFFICIAL 2026-11-11 PTStandDownRT
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-03 RenderScale < 1 (docs/next/RT-RENDERSCALE.md)
 #include "RtDenoise.h"
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
@@ -48,7 +50,20 @@ namespace RtLampShadows {
 		return !RtCore::Actors() && TheSettingManager->GetSettingI(kSection, "ActorsFromCubeMaps");
 	}
 
+	// UNOFFICIAL 2026-11-11 BUG FIX (RTX bench: Enabled switched to 0 while the game ran, the helper's lamp passes kept running every
+	// frame). Enabled was read once, in Initialize (RtEnabled: the shaders' POINT_SHADOW_RT is a startup choice), and the per-frame switch
+	// was Live alone. Now Enabled is also read every frame wherever Live is: off = nothing submitted, Wants false, no trace before the
+	// world, the cube maps drawn and read again (exactly Live false, plus the capsule pass may take the buffer); on again = traced again
+	// from the next frame. Coming on when it was off at startup still needs the restart (the shaders).
+	// (2026-11-15 RT master switches) and not while RtCore::Gated (RTInteriors / RTExteriors off for this space): exactly Enabled switched off,
+	// indoors and outdoors (Exteriors) alike, without touching the setting
+	inline bool EnabledNow() { return TheSettingManager->GetSettingI(kSection, "Enabled") != 0 && !RtCore::Gated(); }
+	inline bool LiveNow() { return EnabledNow() && TheSettingManager->GetSettingI(kSection, "Live") != 0; }
+
 	inline bool CompiledIn = false;			// POINT_SHADOW_RT in the object shaders (fixed at startup)
+	// UNOFFICIAL 2026-11-15 (docs/next/FD-NATIVEFIX.md): some lit shader's Interior record loaded only without the read (ShaderManager::
+	// LoadShader's last level, POINT_SHADOW_RT 0): its objects see people's lamp shadows only in the maps, so CapsuleShadows::DropActors is held off
+	inline bool ReadDropped = false;
 	// UNOFFICIAL 2026-10-31 CapsuleShadows (core/CapsuleShadows.h): a second writer of the same buffer, a D3D9 pass (people's capsules and
 	// contact shadows), no RT needed. RtEnabled: the RT section on at startup with the RT core's interface (the RT path may trace);
 	// ScreenCompiledIn: [Shaders.ShadowsInteriors.Capsules] Enabled at startup. ScreenSourceFrame: this frame's buffer is the pass's
@@ -398,9 +413,13 @@ namespace RtLampShadows {
 		ExtraCount = 0;
 		ManyNoting = false;
 		ScreenSourceFrame = false;
+		// UNOFFICIAL 2026-11-15 RT master switches: a result traced before the gate shut is never reprojected after it opens again (another
+		// place, minutes ago): the first frames after use the cube maps until this frame's (SameFrame) or the next trace
+		if (RtCore::Gated()) Traced.valid = false;
 		if (!CompiledIn) return;
 		MaxLamps = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "MaxLamps"), 0), TableSlots);
-		const bool many = ManyOn() && TheSettingManager->GetSettingI(kSection, "Live") != 0;
+		const bool live = LiveNow();	// (2026-11-11) Enabled and Live, both read now
+		const bool many = ManyOn() && live;
 		// The table: every published lamp in cube slots 0-62, in NVR's order (its ranking), up to MaxLamps
 		for (int i = 0; i < MapSlots; i++) PendingMap[i] = -1;
 		for (int i = 0; i < count && LampCount < MaxLamps; i++)
@@ -430,9 +449,10 @@ namespace RtLampShadows {
 			}
 			ExtraCount = top - 63;
 		}
-		LampsThisFrame = RtEnabled && TheSettingManager->GetSettingI(kSection, "Live") != 0;
+		LampsThisFrame = RtEnabled && live;
 		// UNOFFICIAL 2026-10-31 CapsuleShadows: the pass writes the buffer when the RT path is not running (no RT GPU, or RT off)
-		const bool rtSource = RtEnabled && RtCore::Running();
+		// (2026-11-11: "RT off" also when Enabled was switched off while the game runs)
+		const bool rtSource = RtEnabled && EnabledNow() && RtCore::Running();
 		if (!rtSource && ScreenWants() && count > 0) { ScreenSourceFrame = true; LampsThisFrame = true; }
 		Aim(rtSource);
 	}
@@ -543,7 +563,9 @@ namespace RtLampShadows {
 
 	// --- The RT core user -----------------------------------------------------------------------------------------------------------
 	inline bool Wants() {
-		return (RtEnabled && !ScreenSourceFrame && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
+		if (RtPathTrace::StandDownRT()) return false;	// UNOFFICIAL 2026-11-11 PTStandDownRT: the path traced picture has its own lamp shadows
+		// (2026-11-11) EnabledNow: the live switch (LampsThisFrame already holds it from Submit; asked again here for a frame without a Submit)
+		return (RtEnabled && EnabledNow() && !ScreenSourceFrame && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
 			FlashWanted();
 	}
 
@@ -641,8 +663,19 @@ namespace RtLampShadows {
 
 	// The lamp table into its GPU texture (scene space = world minus CameraPosition), for the copy into imageTable
 	// (2026-11-07) physical: the denoised lamps (ShadowDenoiser) get their glowing part's size x physicalScale as the disc (PhysicalLampSize)
-	inline bool WriteTable(const D3DXVECTOR4& camera, float discRadius, float invisibleRadius, const RtShadowDenoise::Layers* physical = nullptr,
-		float physicalScale = 1.0f, float physicalMin = 1.0f, float physicalMax = 48.0f) {
+	// UNOFFICIAL 2026-11-12 PhysicalLampSizeAll / PhysicalLampUnknown / PhysicalLampPerReach (all off: exactly the table of before).
+	// layers: the denoised lamps (null: none this frame); all: every lamp of the table takes its size, not only the denoised ones;
+	// unknown + perReach x the game's radius: the size of a lamp with NO glowing part known (size 0). Why: Forward's InvisibleLightSize
+	// is 0 by default, so no lamp's fade is ever negative and InvisibleLightRadius never applied: the game's invisible fill lights (most
+	// of a room's lights) were traced as LampRadius (1 unit, a point) and cast hard shadows at every distance, denoised or not.
+	struct PhysicalSizes {
+		const RtShadowDenoise::Layers* layers = nullptr;
+		bool all = false;
+		float scale = 1.0f, smallest = 1.0f, largest = 48.0f, unknown = 0.0f, perReach = 0.0f;
+	};
+	// written (UNOFFICIAL 2026-11-12, Record's "disc radius traced" log line only; null: nothing): ManyIds floats the caller preset; [slot]
+	// gets the disc radius put into that lamp's entry (texel 4 slot + 3, .y: the only radius the trace shaders aim a lamp's rays at).
+	inline bool WriteTable(const D3DXVECTOR4& camera, float discRadius, float invisibleRadius, const PhysicalSizes* physical = nullptr, float* written = nullptr) {
 		IDirect3DDevice9* device = TheRenderManager->device;
 		if (!TableTexture) {
 			TheTextureManager->InitTexture("TESR_RtLampTable", &TableTexture, &TableSurface, TableWidth, 1, D3DFMT_G32R32F);
@@ -664,9 +697,14 @@ namespace RtLampShadows {
 			e[2] = l.position.z - camera.z; e[3] = l.reach;
 			e[4] = (std::max)(l.intensity, 0.001f); e[5] = (std::max)(l.radius, 1.0f);
 			e[6] = l.stop; e[7] = l.fade < 0.0f && invisibleRadius >= 0.0f ? invisibleRadius : discRadius;	// negative fade: an invisible light
-			if (physical && l.size > 0.0f && l.fade >= 0.0f)
-				for (int k = 0; k < RtShadowDenoise::MaxLayers; k++)
-					if (physical->slot[k] == l.slot) { e[7] = (std::min)((std::max)(l.size * physicalScale, physicalMin), physicalMax); break; }
+			if (physical && l.fade >= 0.0f) {
+				// (2026-11-12) its glowing part's size, else (keys above 0 only) the size given to a lamp with none known
+				const float size = l.size > 0.0f ? l.size : physical->unknown + l.radius * physical->perReach;
+				bool takes = physical->all && size > 0.0f;
+				for (int k = 0; !takes && size > 0.0f && physical->layers && k < RtShadowDenoise::MaxLayers; k++) takes = physical->layers->slot[k] == l.slot;
+				if (takes) e[7] = (std::min)((std::max)(size * physical->scale, physical->smallest), physical->largest);
+			}
+			if (written) written[l.slot] = e[7];	// (2026-11-12, the log)
 		}
 		TableStaging->UnlockRect(0);
 		IDirect3DSurface9* staging = nullptr;
@@ -676,12 +714,41 @@ namespace RtLampShadows {
 		return SUCCEEDED(hr);
 	}
 
+	// UNOFFICIAL 2026-11-11 (log only) one line when a recorded trace starts to cover the RenderScale rect instead of the whole screen grid,
+	// by which path, and one when it goes back (8 lines a session at most; a session that starts at the full size says nothing)
+	inline void LogTracedSize(UINT tw, UINT th, UINT w, UINT h, bool followed) {
+		static int state = -1, logs = 0;
+		const int now = tw < w || th < h ? (followed ? 2 : 1) : 0;
+		if (now == state) return;
+		const bool first = state < 0;
+		state = now;
+		if ((first && !now) || logs >= 8) return;
+		logs++;
+		if (now) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced in the RenderScale rect: %ux%u of %ux%u (scale %.2f x %.2f; %s).", tw, th, w, h,
+			(float)tw / (float)w, (float)th / (float)h, followed ? "before the world, FollowRenderScale" : "after the world, on the frame's depth");
+		else Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced at the full size again: %ux%u (%s).", w, h,
+			InPrimary ? "before the world: FollowRenderScale off or the world not drawn small" : "after the world: a native frame");
+	}
+
 	inline void Record(IDirect3DDevice9* Device) {
 		if (imageDepth < 0 || imageNormals < 0 || imageResult < 0 || imageTable < 0 || shader < 0) return;
 		const UINT w = TheRenderManager->width, h = TheRenderManager->height;
 		// (2026-11-03) RenderScale < 1: trace only the frame's top-left RenderRect part (uv = pixel / rect size is the screen's; the
 		// depth is read in the rect); the forward shaders read it through Reproject's scaled uv. Off: the whole screen, as before.
-		const UINT tw = RenderRect::Width(w), th = RenderRect::Height(h);
+		UINT tw = RenderRect::Width(w), th = RenderRect::Height(h);
+		// UNOFFICIAL 2026-11-11 FollowRenderScale ([Shaders.ShadowsInteriors.RT], off; RTX bench: "RT lamp shadows traced (1280x720" at
+		// RenderScale 0.67). With SameFrame the trace runs BEFORE the world, where RenderRect is not on yet (it begins with the effects), so
+		// the camera rays, the trace and the denoiser covered the whole screen grid while the world was drawn at 856x480. On: that trace
+		// takes the size the world is about to be drawn at (TAAEffect::WorldDrawnSmall) and its jitter, so a traced texel is a drawn pixel;
+		// the result is in the top-left tw x th of its texture and every reader (the forward draws, the deferred lamps, the land) finds it
+		// through Reproject, which Aim scales by Traced.sx / sy as it always did for the after-the-world trace of a rect frame. Off, a
+		// native frame, or the after-the-world path: nothing here runs.
+		bool followed = false;
+		D3DXVECTOR2 followedJitter(0.0f, 0.0f);
+		if (InPrimary && tw == w && th == h && TheSettingManager->GetSettingI(kSection, "FollowRenderScale") != 0) {
+			UINT rw = 0, rh = 0;
+			if (TAAEffect::WorldDrawnSmall(rw, rh, followedJitter) && rw <= w && rh <= h && (rw < w || rh < h)) { tw = rw; th = rh; followed = true; }
+		}
 		if (!ResultTexture || TextureWidth != w || TextureHeight != h) {
 			if (ResultSurface) { ResultSurface->Release(); ResultSurface = nullptr; }
 			if (ResultTexture) { ResultTexture->Release(); ResultTexture = nullptr; }
@@ -747,6 +814,7 @@ namespace RtLampShadows {
 		c.size[0] = (float)tw; c.size[1] = (float)th; c.size[2] = 1.0f / tw; c.size[3] = 1.0f / th;
 		D3DXVECTOR2 jitter(0.0f, 0.0f);	// (2026-11-03) the depth's jitter, for the trace and (Traced) the lookup
 		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
+		if (followed) jitter = followedJitter;	// (2026-11-11 FollowRenderScale) the small world's jitter (DepthJitterUV has it only once the frame waits for its upscale)
 		c.jitter[0] = jitter.x; c.jitter[1] = jitter.y;
 		c.jitter[2] = AlphaOn() && TheSettingManager->GetSettingI(kSection, "AlphaTest") != 0 ? 1.0f : 0.0f;	// (2026-11-03 rtalpha) test alpha-tested casters (the shaders add 0x10 to the masks)
 		c.forward[0] = view._13; c.forward[1] = view._23; c.forward[2] = view._33; c.forward[3] = cameraData->y;
@@ -807,23 +875,133 @@ namespace RtLampShadows {
 			RtShadowDenoise::Candidate candidates[TableSlots];
 			int n = 0;
 			const D3DXVECTOR3 eyeWorld(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z);
+			const bool coverageScore = ShadowHold::VisiblePixels != nullptr && TheSettingManager->GetSettingI(kSection, "DenoiseLampsByCoverage") != 0;	// (2026-11-12)
+			const float coveragePixels = 160.0f * 90.0f;	// LampVisibility's measuring pass (W x H there): its answers are pixels of that, weighted by the lamp's falloff
+			{
+				static int coverageLogged = -1;
+				if ((int)coverageScore != coverageLogged) {
+					const bool asked = TheSettingManager->GetSettingI(kSection, "DenoiseLampsByCoverage") != 0;
+					if (coverageScore || (asked && coverageLogged != 0) || coverageLogged == 1)
+						Logger::Log("UNOFFICIAL RT lamp shadows: DenoiseLampsByCoverage %s", coverageScore ? "on: the denoised lamps are picked by the visible picture they light" :
+							asked ? "cannot run: no visible-pixel measurement here ([Shaders.ShadowsInteriors.Forward] VisibleRanking 0, or outdoors); picked by brightness x reach / distance" : "off");
+					coverageLogged = (int)coverageScore;
+				}
+			}
 			for (int i = 0; i < LampCount && n < TableSlots; i++) {
 				const SlotLamp& l = Lamps[i];
 				if (l.slot < 0 || l.slot >= TableSlots || !(l.reach > 0.0f)) continue;
 				const D3DXVECTOR3 d = l.position - eyeWorld;
 				const float distance = sqrtf(d.x * d.x + d.y * d.y + d.z * d.z);
 				candidates[n++] = { l.slot, (std::max)(l.intensity, 0.001f) * l.reach / (std::max)(distance, 0.25f * l.reach), { l.position.x, l.position.y, l.position.z } };
+				// UNOFFICIAL 2026-11-12 DenoiseLampsByCoverage (off: the score above, unchanged). The score above knows nothing of walls: a
+				// bright lamp in the next room took one of the few denoiser layers while a lamp lighting half the picture got a hard shadow.
+				// On: brightness x the share of the visible picture the lamp lights, as VisibleRanking measures it for the shadow slots
+				// (LampVisibility::Pixels through ShadowHold::VisiblePixels; null while VisibleRanking is 0 or outdoors: the old score).
+				// Not measured yet (-1): the old score scaled into the same 0..1 range. Lights nothing visible (0): last. A lamp that
+				// holds a layer counts 25 % more, so two lamps of about the same score do not swap (a swap restarts both histories).
+				if (coverageScore) {
+					RtShadowDenoise::Candidate& c = candidates[n - 1];
+					const float pixels = l.light ? ShadowHold::VisiblePixels(l.light) : -1.0f;
+					const float intensity = (std::max)(l.intensity, 0.001f);
+					if (pixels < 0.0f) c.score *= 0.25f;	// (the old score is intensity x 0..4)
+					else c.score = intensity * (std::max)(pixels / coveragePixels, 1.0e-6f);
+					for (int k = 0; k < RtShadowDenoise::MaxLayers; k++) if (DenoiseLayers.slot[k] == l.slot) { c.score *= 1.25f; break; }
+				}
 			}
 			const int wanted = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiseLamps"), 1), DenoiserLayers);
 			DenoiseLayers.Update(candidates, n, wanted);
 			c.flags[2] = 1.0f; c.flags[3] = 0.0f;	// every pixel every frame (the denoiser's history is per pixel)
 		}
-		const bool physicalSize = shadowDenoiser && TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
-		if (!WriteTable(camera, radius, invisible, physicalSize ? &DenoiseLayers : nullptr, TheSettingManager->GetSettingF(kSection, "PhysicalLampScale"),
-			(std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMin"), 0.0f), (std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMax"), 1.0f))) {
+		// UNOFFICIAL 2026-11-12 PhysicalLampSizeAll (off): with PhysicalLampSize, EVERY lamp of the table is as big as its glowing part, not
+		// only the DenoiseLamps denoised ones (the others were LampRadius: a point, hard at every distance); with or without the denoiser.
+		// Their soft edge is the per-pixel trace's 1-ray noise: TAA / FSR / DLSS, Filter, ManyLights' history or Rays 4+ resolve it.
+		// PhysicalLampUnknown / PhysicalLampPerReach (0): the size of a lamp with no glowing part known (WriteTable's PhysicalSizes).
+		const bool physicalKey = TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
+		const bool physicalAll = physicalKey && TheSettingManager->GetSettingI(kSection, "PhysicalLampSizeAll") != 0;
+		const bool physicalSize = physicalKey && (shadowDenoiser || physicalAll);
+		PhysicalSizes sizes;
+		int sizeKeys = 0;	// (2026-11-12) 1 PhysicalLampSizeAll on, 2 PhysicalLampUnknown / PhysicalLampPerReach above 0 (the block's sizesNow)
+		if (physicalSize) {
+			sizes.layers = shadowDenoiser ? &DenoiseLayers : nullptr;
+			sizes.all = physicalAll;
+			sizes.scale = TheSettingManager->GetSettingF(kSection, "PhysicalLampScale");
+			sizes.smallest = (std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMin"), 0.0f);
+			sizes.largest = (std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMax"), 1.0f);
+			sizes.unknown = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampUnknown"), 0.0f), 64.0f);
+			sizes.perReach = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampPerReach"), 0.0f), 0.25f);
+			static int sizesLogged = -1;
+			const int sizesNow = (physicalAll ? 1 : 0) | (sizes.unknown > 0.0f || sizes.perReach > 0.0f ? 2 : 0);
+			if (sizesNow != sizesLogged && (sizesNow || sizesLogged > 0)) {
+				int unknownLamps = 0;
+				for (int i = 0; i < LampCount; i++) if (!(Lamps[i].size > 0.0f) && Lamps[i].fade >= 0.0f) unknownLamps++;
+				Logger::Log("UNOFFICIAL RT lamp shadows: lamp sizes: %s; a lamp with no glowing part known: %s (%.1f units + %.3f x its radius; %d of this frame's %d lamps)",
+					physicalAll ? "PhysicalLampSizeAll on, every traced lamp takes its size" : "the denoised lamps only (PhysicalLampSizeAll off)",
+					sizesNow & 2 ? "PhysicalLampUnknown / PhysicalLampPerReach" : "LampRadius, as before", sizes.unknown, sizes.perReach, unknownLamps, LampCount);
+			}
+			sizesLogged = sizesNow;
+			sizeKeys = sizesNow;
+		}
+		// UNOFFICIAL 2026-11-12 (log only) "RT lamp shadows: disc radius traced". With ShadowDenoiser and one of PhysicalLampSizeAll /
+		// PhysicalLampUnknown / PhysicalLampPerReach in use (all off: discsAsked is false and nothing here runs), the radius WriteTable
+		// really put into the lamp table for each denoised lamp (texel 4 slot + 3, .y: the disc RtLampTraceSigma aims that lamp's one ray
+		// at and sizes its penumbra from; no other field carries a lamp's size), so one launch proves from the log that a size reached
+		// the trace. Why: on the RTX bench PhysicalLampUnknown 24 changed no pixel and no DenoiserDebugView 3 value, and the size was
+		// thought lost on the way. By the code (and this block's text run outside the game on that room's lamps) it was in the table: the
+		// four denoised lamps were the four nearest the camera, a denoised lamp's result is read only where that lamp is one of the
+		// pixel's LampsPerPixel strongest (the trace's entries), and by a model of that room next to no shadow of those four fell there
+		// (0.03 % of the picture); the table's shadows in view came from the lamps above it, not denoised, so still LampRadius. Not yet
+		// seen in game: this line is the proof to look for.
+		// A line when a size setting changes (at most one every 30 traces; the line after the keys go off shows LampRadius again), and
+		// up to 30 times a session when only the denoised lamps changed.
+		static float discLogged[7 + 2 * RtShadowDenoise::MaxLayers];	// what the last line said: 7 settings, then each layer's cube slot and disc
+		static float discs[ManyIds];
+		static UInt32 discLoggedAt = 0;
+		static int discLayerLogs = 0;
+		const bool discsAsked = shadowDenoiser && physicalSize && (sizeKeys != 0 || discLogged[0] > 0.0f);
+		if (discsAsked) for (int i = 0; i < ManyIds; i++) discs[i] = -1.0f;
+		if (!WriteTable(camera, radius, invisible, physicalSize ? &sizes : nullptr, discsAsked ? discs : nullptr)) {
 			static bool logged = false;
 			if (!logged) { logged = true; Logger::Log("UNOFFICIAL RT lamp shadows: the lamp table could not be written; not traced"); }
 			return;
+		}
+		if (discsAsked) {
+			float state[7 + 2 * RtShadowDenoise::MaxLayers] = { (float)sizeKeys, sizes.unknown, sizes.perReach, sizes.scale, sizes.smallest, sizes.largest, radius };
+			for (int k = 0; k < RtShadowDenoise::MaxLayers; k++) {
+				const int slot = DenoiseLayers.slot[k];
+				state[7 + 2 * k] = (float)slot;
+				state[8 + 2 * k] = slot >= 0 && slot < ManyIds ? discs[slot] : -1.0f;
+			}
+			const bool keysChanged = memcmp(state, discLogged, 7 * sizeof(float)) != 0;
+			const bool layersChanged = memcmp(state + 7, discLogged + 7, 2 * RtShadowDenoise::MaxLayers * sizeof(float)) != 0;
+			if ((keysChanged || (layersChanged && discLayerLogs < 30)) && (discLoggedAt == 0 || frame - discLoggedAt >= 30)) {
+				if (!keysChanged) discLayerLogs++;
+				memcpy(discLogged, state, sizeof(discLogged));
+				discLoggedAt = frame;
+				char text[512] = "";
+				for (int k = 0; k < RtShadowDenoise::MaxLayers; k++) {
+					const int slot = DenoiseLayers.slot[k];
+					if (slot < 0 || slot >= ManyIds) continue;
+					const char* kind = "not in the table";
+					for (int i = 0; i < LampCount; i++)
+						if (Lamps[i].slot == slot) { kind = Lamps[i].fade < 0.0f ? "invisible light" : Lamps[i].size > 0.0f ? "its glowing part" : "no glowing part"; break; }
+					char one[64];
+					snprintf(one, sizeof(one), "%s %d: %.1f (%s)", text[0] ? "," : "", slot, discs[slot], kind);
+					strncat_s(text, one, _TRUNCATE);
+				}
+				int others = 0; float least = 0.0f, most = 0.0f;	// the lamps the denoiser does not take: the per-pixel trace's discs
+				for (int i = 0; i < LampCount; i++) {
+					const int slot = Lamps[i].slot;
+					if (slot < 0 || slot >= ManyIds || !(discs[slot] >= 0.0f)) continue;
+					bool layer = false;
+					for (int k = 0; k < RtShadowDenoise::MaxLayers && !layer; k++) layer = DenoiseLayers.slot[k] == slot;
+					if (layer) continue;
+					least = others ? (std::min)(least, discs[slot]) : discs[slot];
+					most = others ? (std::max)(most, discs[slot]) : discs[slot];
+					others++;
+				}
+				Logger::Log("UNOFFICIAL RT lamp shadows: disc radius traced for the denoised lamps (world units, lamp table texel 3.y; cube slot: radius):%s; the other %d lamp(s): %.1f to %.1f (LampRadius %.1f). A denoised lamp's soft shadow shows only where it is one of a pixel's %d strongest lamps (LampsPerPixel).",
+					text[0] ? text : " none", others, least, most, radius, (int)c.flags[1]);
+			}
 		}
 
 		if (InPrimary) {
@@ -973,6 +1151,7 @@ namespace RtLampShadows {
 					FramesTraced, cell, oneRay ? "one ray a pixel" : "2 exact + rest rays", MotionFrames, LampCount, LampCount - ExtraCount, ExtraCount, RefusedCount, SkippedCubes, listed ? list : " none", ExtraCount > listed ? " ..." : "");
 				SkippedCubes = 0;
 			}
+			LogTracedSize(tw, th, w, h, followed);	// (2026-11-11)
 			if (FramesTraced++ == 0)
 				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced, ManyLights (%ux%u, %d lamps, %s).", w, h, LampCount, oneRay ? "one ray a pixel" : "2 exact + rest rays");
 			return;
@@ -1084,6 +1263,7 @@ namespace RtLampShadows {
 				FramesTraced, LampCount, SkippedCubes, LampCount ? text : "");
 			SkippedCubes = 0;
 		}
+		LogTracedSize(tw, th, w, h, followed);	// (2026-11-11)
 		if (FramesTraced++ == 0)
 			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT lamp shadows traced (%ux%u, %d lamps, %d rays).", w, h, LampCount, (int)c.params[0]);
 	}
@@ -1271,7 +1451,7 @@ namespace RtLampShadows {
 	// which then look this frame's result up (Aim: this frame's camera). When the helper is not running or refuses (outdoors with Grass),
 	// nothing happens and RtCore::Frame traces after the world as before (the next frame's draws reproject into it).
 	inline void TraceBeforeWorld(IDirect3DDevice9* Device) {
-		if (!CompiledIn || !RtEnabled || SameFrameTraced() || !SameFrameOn()) return;
+		if (!CompiledIn || !RtEnabled || !EnabledNow() || SameFrameTraced() || !SameFrameOn()) return;	// (2026-11-11: Enabled read now)
 		if (ScreenSourceFrame || !LampsThisFrame || LampCount <= 0) return;
 		if (TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) return;	// the outdoor mask: a screen pass after the world
 		const UInt32 before = FramesTraced;

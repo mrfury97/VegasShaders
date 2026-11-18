@@ -112,8 +112,10 @@ in the headers; the code uses the name without it). Defaults are the toml values
 | Main.Transitions.Main | TransitionCurvePower | float | 1.0 | shape of the day/night curve used for the ray strength |
 | Shaders.Sky.Main | SunsetR, SunsetG, SunsetB | float | (sky values) | the sunset colour boost (through TESR_SunsetColor) |
 
-Keys hidden from the menu (DevOnly list in the defaults file, shown only with Developer options): SkipEmpty, SkipIdle,
-SunGlareEnabled, SunsetGlareFix, and the Performance keys above. The DevOnly list is not an on/off switch by itself.
+Keys hidden from the menu (2026-11-12): SunGlareEnabled and NvrDxvkPasses are shown only with Developer options (the DevOnly list
+in the defaults file). SkipEmpty, SkipIdle, SunsetGlareFix, ProbeLog and LightShaftPasses are Internal (the Internal list there):
+never shown, unless `[Main.Menu.Developer] ShowInternal = true` is typed into the settings file. Neither list is an on/off switch
+by itself: hidden keys keep their saved values and work as before.
 
 ## 5. Passes and outputs
 
@@ -368,3 +370,6 @@ Not done, or changed:
   the mask is colour or scalar, so colour was kept.
 - Vulkan frags (GodRaysSkyMask, GodRaysLightMask, GodRaysBlur, GodRaysCombine, GodRaysMaxReduce) are not written.
 - Rect frames: not handled here (the C++ does not draw the Vulkan path in rect frames anyway).
+
+## Idle targets (2026-11-12)
+With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the texture manager keeps 1 x 1 stand-ins in place of this effect's render targets while it is off (not made at start-up when it starts off; released that many seconds after it is switched off; made again, zero filled, before the frame draws when it is switched on). Which targets and why that is safe here: the ray buffers and the reduction chains are used only from Render, behind the switch. A new reader or writer of these targets outside the effect's own switch, or a copy of their pointers kept past a frame, breaks this: then answer false in `TargetParkable` (the header). See `core/TextureManager.h`.

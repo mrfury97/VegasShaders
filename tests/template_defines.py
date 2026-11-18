@@ -21,7 +21,7 @@ import argparse, os, re, sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 DEFAULTS = os.path.join(ROOT, "resource", "VegasShaders.defaults.toml")
-TABLES = ["src/effects/PBR/PBR.h", "src/effects/POM/POM.h", "src/effects/Terrain/Terrain.h", "src/effects/Skin/Skin.h"]  # 2026-11-04: the effect folders
+TABLES = ["src/effects/PBR/PBR.h", "src/effects/POM/POM.h", "src/effects/Terrain/Terrain.h", "src/effects/Skin/Skin.h"]	# (2026-11-14: the 11-02 modular layout)
 
 # ---------------------------------------------------------------- settings
 def parse_toml(path, into):
@@ -77,7 +77,9 @@ PAIR = re.compile(r'\{\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\}')
 def records():
     out = []
     for rel in TABLES:
-        text = open(os.path.join(ROOT, rel), encoding="utf-8", errors="replace").read()
+        path = os.path.join(ROOT, rel)
+        if not os.path.exists(path): path = os.path.join(ROOT, os.path.dirname(rel), os.path.basename(rel)[:-2], os.path.basename(rel))
+        text = open(path, encoding="utf-8", errors="replace").read()
         for m in ENTRY.finditer(text):
             name, template, pairs = m.group(1), m.group(2), [(k, v) for k, v in PAIR.findall(m.group(3))]
             out.append((name, template, pairs, os.path.basename(rel)))
@@ -106,10 +108,6 @@ def build(settings, template_pairs, overrides, opt):
     on = lambda sec, key: "1" if s.i(sec, key) else "0"
     if opt.reversed_depth: d.append("REVERSED_DEPTH", "")
     d.append("FORWARD_SHADOWS", on("Shaders.ShadowsExteriors.Main", "ForwardShadows"))
-    # 2026-11-06 Bend forward contact shadows: appended only when on (Bend && InLighting && ForwardShadows), default true for both keys
-    ss = "Shaders.ShadowsExteriors.ScreenSpace"
-    flag = lambda key: s.raw(ss, key) is None or s.i(ss, key)
-    if flag("Bend") and flag("InLighting") and s.i("Shaders.ShadowsExteriors.Main", "ForwardShadows"): d.append("SUN_CONTACT_FORWARD", "1")
     d.append("CONTACT_HARDENING", on("Shaders.ContactHardening.Status", "Enabled"))
     d.append("SHADOW_SLACK_CAP_ALL", on("Shaders.ShadowsExteriors.Main", "CasterReachEverywhere"))
     d.append("POINT_SHADOW_SMOOTH", on("Shaders.ShadowsInteriors.Forward", "SmoothEdges"))
@@ -120,9 +118,18 @@ def build(settings, template_pairs, overrides, opt):
     d.append("LIVE_CUBE", "1" if (s.f("Shaders.PBR.Metal", "CubeReflections") > 0.0 or s.f("Shaders.PBR.EnvMaps", "CubeReflections") > 0.0) else "0")
     d.append("MATERIAL_RULES_ON", on("Shaders.PBR.MaterialRules", "Enabled"))
     d.append("RMAOS_ON", on("Shaders.PBR.Rmaos", "Enabled"))
+    # 2026-11-14 (fd-records): the defines BuildDefines gained after 10-31, in its order
+    if s.i("Shaders.PBR.Dust", "Enabled"): d.append("DUST_ON", "1")
+    if s.i("Shaders.PBR.MicroShadow", "Enabled"): d.append("MICRO_SHADOW_ON", "1")
+    if s.i("Shaders.PBR.EnvMaps", "FromGameData"): d.append("ENV_FROM_DATA_ON", "1")
+    if s.i("Shaders.PBR.Main", "VanillaBridge"):
+        d.append("VANILLA_BRIDGE_ON", "1")
+        dm = s.f("Shaders.PBR.Main", "VanillaBridgeDielectricMax")
+        if 0.0 < dm < 1.0: d.append("VANILLA_BRIDGE_DIELECTRIC_MAX", "%.4ff" % max(dm, 0.01))
+    if s.i("Shaders.PBR.Rmaos", "Enabled") and not s.i("Shaders.PBR.Rmaos", "SpecularFromMap"): d.append("RMAOS_SPEC_OFF", "1")
     if s.i("Shaders.Reflections.Main", "MaterialAware") > 0 and s.i("Shaders.Reflections.Status", "Enabled") and s.i("Shaders.PBR.Rmaos", "Enabled"):
         d.append("REFL_MATERIAL_ON", "1")
-    d.append("HUD_RAIN_ON", "1" if s.f("Shaders.WetnessEffects.HudRaindrops", "Enabled") else "0")
+    d.append("HUD_RAIN_ON", on("Shaders.WetnessEffects.HudRaindrops", "Enabled"))	# (2026-11-04: Wetness Effects' HudRaindrops in place of Wet World's HudDrops)
     d.append("LINEAR_LIGHTING_ON", on("Shaders.PBR.Linear", "Enabled"))
     d.append("LINEAR_SCENE_ON", "1" if (s.i("Shaders.PBR.Linear", "Enabled") and s.i("Shaders.PBR.Linear", "LinearScene")) else "0")
     captured = s.i("Shaders.SnowAccumulation.Main", "CapturedNormals") or s.i("Main.Main.Quality", "CapturedNormals")
@@ -130,6 +137,9 @@ def build(settings, template_pairs, overrides, opt):
     albedo = material and s.i("Main.Main.Quality", "AlbedoBuffer")
     if captured: d.append("CAPTURED_NORMALS_ON", "3" if albedo else "2" if material else "1")
     if s.i("Main.Main.Quality", "CapturedNormals"): d.append("CAPTURED_NORMALS_FORWARD", "1")
+    if albedo and opt.runtime == "dxvk":	# 2026-11-12 ptbump (CapturedNormals::PtCodesCompiled): DXVK fork only; a missing key = on
+        bump = s.raw("Main.Main.Quality", "CapturedBumpNormals")
+        d.append("CAPTURED_PT", "1" if (bump is not None and not s.i("Main.Main.Quality", "CapturedBumpNormals")) else "2")
     if opt.dev and s.i("Main.Main.Misc", "LampCapsCensus"): d.append("LAMP_CAPS_VIEW", "1")
     d.append("PHYSICAL_SKY_ON", on("Shaders.Sky.Physical", "Enabled"))
     d.append("SPECULAR_LAMPS6", on("Main.Main.Misc", "MoreLampsPerObject"))
@@ -167,17 +177,25 @@ def build(settings, template_pairs, overrides, opt):
     d.append("TERRAIN_BLEND", on("Shaders.Terrain.Blending", "Enabled"))
     d.append("TERRAIN_VARIATION", on("Shaders.Terrain.Variation", "Enabled"))
     d.append("TERRAIN_VARIATION_LAYERS", str(min(max(s.i("Shaders.Terrain.Variation", "Layers"), 1), 7)))
+    d.append("TERRAIN_MACRO", on("Shaders.Terrain.Macro", "Enabled"))
     d.append("HAND_BLOOD", on("Shaders.HandBlood.Status", "Enabled"))
     d.append("CLOTH_WIND_ON", on("Shaders.Cloth.Main", "Enabled"))
+    d.append("PIPBOY_FIT_ON", on("Shaders.PipboyFit.Main", "Enabled"))
     d.append("PLANT_WIND_ON", on("Shaders.Plants.Wind", "Enabled"))
-    d.append("SUN_CROSSFADE", "1" if (s.i("Shaders.ShadowsExteriors.SunSmoothing", "CrossFade") and s.i("Shaders.ShadowsExteriors.Main", "ForwardShadows")) else "0")
+    if s.i("Shaders.TAA.Cutouts", "Enabled"): d.append("ALPHA_HASH_ON", "1")	# (AlphaHash::CompiledIn)
+    # (2026-11-15 fd-smoothsun: SunFadeDeferred::ForwardCrossFade, not while the deferred sun pass carries the fade)
+    deferred_fade = s.i("Shaders.ShadowsInteriors.Deferred", "LightFreeRecords") and s.i("Shaders.ShadowsExteriors.Main", "ForwardShadows") and s.i("Shaders.ShadowsExteriors.SunSmoothing", "DeferredFade")
+    d.append("SUN_CROSSFADE", "1" if (s.i("Shaders.ShadowsExteriors.SunSmoothing", "CrossFade") and s.i("Shaders.ShadowsExteriors.Main", "ForwardShadows") and not deferred_fade) else "0")
     d.append("SKYLIGHTING_MODE", on("Shaders.PBR.Main", "SkylightingMode"))
     d.append("SHADOW_FIXED_MODE", "3")
     if s.i("Shaders.ShadowsExteriors.Main", "CharacterObjectReach"): d.append("SHADOW_CHARACTER_OBJECTS", "1")
     if s.i("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMap"): d.append("CHARACTER_SHADOW_MAP", "1")
+    if s.i("Shaders.VolumetricClouds.Main", "ForwardShadows") and s.i("Shaders.VolumetricClouds.Status", "Enabled"): d.append("FORWARD_CLOUD_SHADOWS", "1")
+    if s.i("Shaders.WetnessEffects.Status", "Enabled"): d.append("WETNESS_EFFECTS", "1")
     d.append("OBJECT_SMOOTH_NORMALS", on("Shaders.PBR.Main", "SmoothObjectNormals"))
     if s.i("Main.Main.Performance", "NvrDxvkDisplacement"): d.append("NVR_DISPLACE_DEPTH", "1")
     if opt.displace_objects: d.append("NVR_DISPLACE_OBJECTS", "1")
+    if getattr(opt, "rt_sun", False): d.append("RT_SUN_FORWARD", "1")	# (RtSunShadows::ForwardCompiled: RT sun shadows on at startup, the fork)
     return d
 
 def lamp_falloff_interior_define(s):

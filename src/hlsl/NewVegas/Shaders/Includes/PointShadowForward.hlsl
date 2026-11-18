@@ -157,6 +157,13 @@ float4 NVR_PointShadowSoft      : register(c189); // UNOFFICIAL contact hardenin
 #ifndef POINT_SHADOW_RT
     #define POINT_SHADOW_RT 0
 #endif
+// UNOFFICIAL 2026-11-15 (docs/next/FD-NATIVEFIX.md) POINT_SHADOW_S15_TAKEN 1: a record compiled WITHOUT the traced / capsule read (POINT_SHADOW_RT
+// 0) in a session that has it (ShaderManager's last Interior level on native: the six-lamp shiny records do not fit with it), where the DLL
+// binds the traced / capsule result on s15 for every draw (PointShadowForward::Publish, rtStage). Then s15 is not the sixth lamp's cube map:
+// that lamp is lit, as in the POINT_SHADOW_RT records where it has no trace. 0 (every other record): nothing changes.
+#ifndef POINT_SHADOW_S15_TAKEN
+    #define POINT_SHADOW_S15_TAKEN 0
+#endif
 
 #if POINT_SHADOW_RT
 #if POINT_SHADOW_RT_ONLY
@@ -202,7 +209,7 @@ samplerCUBE NVR_PointShadowCube1 : register(s11);
 samplerCUBE NVR_PointShadowCube2 : register(s12);
 samplerCUBE NVR_PointShadowCube3 : register(s13);
 samplerCUBE NVR_PointShadowCube4 : register(s14);
-#if !POINT_SHADOW_RT
+#if !POINT_SHADOW_RT && !POINT_SHADOW_S15_TAKEN
 samplerCUBE NVR_PointShadowCube5 : register(s15);
 #endif
 #endif
@@ -781,7 +788,7 @@ float3 PointShadowFactor(float shadow, float4 tint) {
 // 40% when the lamp is not one of the draw's lights. Dark blue: beyond the cube's reach. Orange: no lamp data reached the
 // draw. Grey: the vertex shader gave no position.
 float3 PointShadowTrace(float3 worldPos, float3 normal, float valid) {
-#if POINT_SHADOW_RT
+#if POINT_SHADOW_RT || (POINT_SHADOW_S15_TAKEN && !POINT_SHADOW_ATLAS)
     return 0.5f;    // (RT builds: the focus lamp's cube map has no sampler, see NVR_RtLampVis)
 #else
     float4 light = NVR_PointShadowFocus;
@@ -818,6 +825,9 @@ float PointShadow5(float3 worldPos, float3 normal, float att) {
     float traced = PointShadowTraced(NVR_PointShadowRTSlot[1].y, worldPos);
     return traced < 0.0f ? 1.0f : lerp(1.0f, traced, NVR_PointShadowParams.x * abs(NVR_PointShadowTint[5].w));
 }
+#elif POINT_SHADOW_S15_TAKEN && !POINT_SHADOW_ATLAS
+// (2026-11-15) s15 holds the traced / capsule result, which this record does not read: the sixth light has no shadow (lit)
+float PointShadow5(float3 worldPos, float3 normal, float att) { return 1.0f; }
 #else
 float PointShadow5(float3 worldPos, float3 normal, float att) { return PointShadowCube(NVR_PointShadowCube5, NVR_PointShadowLight[5], NVR_PointShadowTint[5].w, worldPos, normal, att POINT_SHADOW_RT_ARG(NVR_PointShadowRTSlot[1].y)); }
 #endif

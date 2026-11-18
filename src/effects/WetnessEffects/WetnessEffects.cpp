@@ -1,6 +1,7 @@
 #include <algorithm>
 
 #include "WetnessEffects.h"
+#include "../../core/ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (Wetness Effects left out of the shaders)
 
 void WetnessEffectsShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_WetnessData", &Constants.Data);
@@ -56,6 +57,20 @@ static bool IsRainy(TESWeather* weather) {
 }
 
 void WetnessEffectsShaders::UpdateConstants() {
+	// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h): the ground shaders had to be built without Wetness Effects (with it
+	// they are too long for the driver on native Direct3D 9). Ground without it next to objects with it would be dry land under wet
+	// rocks, and with this collection on Wet World's screen pass does not draw (EffectChain.cpp reads Enabled). So it is off for the
+	// session on every surface: the flag the shaders test goes to 0 (the ones still built with it skip it), the wetness reflections stand
+	// down (they read Enabled) and Wet World draws the rain wetness. Held every time the menu switches it back on. This function is
+	// only called while Enabled, so the constants are zeroed here, once per switch.
+	if (ShaderFallback::Dropped(ShaderFallback::Wetness, ShaderFallback::Land)) {
+		static bool said = false;
+		if (!said) { said = true; Logger::Log("ShaderFallback: Wetness Effects is off for this session (left out of the shaders so the ground shaders load): Wet World's screen pass draws the rain wetness"); }
+		Enabled = false;
+		Constants.Flags = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		Constants.Sun.w = 0.0f;	// (the ShowCover debug view)
+		return;
+	}
 	float elapsed = std::clamp((float)TheFrameRateManager->ElapsedTime, 0.0f, 0.25f);
 	bool exterior = TheShaderManager->GameState.isExterior;
 	Sky* WorldSky = Tes ? Tes->sky : nullptr;

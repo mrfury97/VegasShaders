@@ -38,7 +38,7 @@ namespace ShadowAtlas {
 	inline unsigned long long StatLive = 0, StatPool = 0, StatPoolConverted = 0, StatNoTile = 0;
 
 	inline bool CompiledIn() {
-		if (Wanted < 0) Wanted = PointShadowForward::AtlasWanted() ? 1 : 0;	// (P85: DXVK only)
+		if (Wanted < 0) Wanted = PointShadowForward::AtlasRuns() ? 1 : 0;	// (P85: DXVK only; 2026-11-14 or native for the deferred renderer's lamp pass)
 		return Wanted != 0;
 	}
 

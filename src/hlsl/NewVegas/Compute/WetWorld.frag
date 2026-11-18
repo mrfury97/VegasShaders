@@ -345,11 +345,19 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     // Surface reconstruction and weather
     vec4 baseColor = texture(sampler2D(t_source, NVR_SAMPLER(pc.sLin)), uv);
 
+    // UNOFFICIAL 2026-11-12 PuddlesLandOnly / WeaponRainHandOff / ReflectionsOwnPuddles (WetWorld.fx.hlsl Wet, line for line): the wet
+    // map's alpha is this pixel's class (WetWorldMap.frag GetSurfaceWetClass), exactly 0, 0.5, 1 or 1.5; 1 with the keys off, and
+    // every product below is then x 1.
+    vec4 wetMapSample = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.sLin)), uv);
+    float puddleAllow = floor(wetMapSample.a);
+    float wetAllow = max(puddleAllow, ceil(fract(wetMapSample.a)));
+    float reflectionAllow = puddleAllow - puddleAllow * fract(wetMapSample.a) - puddleAllow * fract(wetMapSample.a);
+
     float depth = readDepth(uv);
 
     vec4 worldPosRelRoof = GetOrthoSurfacePosition(uv);
     vec4 orthoRoofPos = worldPosRelRoof * c.shadowToLight;
-    float roofMask = GetRoofMask(orthoRoofPos);
+    float roofMask = GetRoofMask(orthoRoofPos) * wetAllow;
 
     vec3 eyeDirection = toWorld(uv);
     vec3 camera_vector = eyeDirection * depth;
@@ -435,9 +443,9 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
     float LODfade = smoothstepH(DrawD, 0.0, depth);
 
     // Puddle coverage and wetness
-    vec3 blurredWetCoverage = saturate(texture(sampler2D(t_rendered, NVR_SAMPLER(pc.sLin)), uv).rgb);
+    vec3 blurredWetCoverage = saturate(wetMapSample.rgb);
     float puddles = blurredWetCoverage.r;
-    puddles *= (1.0 - puddleVMExclude) * (1.0 - vmMask);
+    puddles *= (1.0 - puddleVMExclude) * (1.0 - vmMask) * puddleAllow;
     puddles *= smoothstep(DepressionSlopeCutoff, DepressionSlopeFadeStart, dotUp);
 
     float puddleFade = smoothstep(PuddleAccumulationStart, PuddleAccumulationFull,
@@ -610,7 +618,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
 
         // the SSR trace condition of the main path below (same expressions)
         float fLinger = puddleFade * flatCoverage;
-        float fSsrMask = saturate(max(rippleMask, max(fLinger, puddlemask)));
+        float fSsrMask = saturate(max(rippleMask, max(fLinger, puddlemask))) * reflectionAllow;
         float fScreen = smoothstep(PuddleSSRScreenFadeStart, PuddleSSRScreenFadeFull, uv.y);
         float fAngle = 1.0 - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, saturate(dot(-V, up)));
         float fOpacity = fScreen * fAngle;
@@ -670,7 +678,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         puddleBase *= (1.0 - rimDark);
 
         float reflMix = min(PuddleSkyMaxBlend, reflStrength * (1.0 + depthish * 0.20 + rimReflBoost));
-        reflMix *= smoothstep(0.03, 0.12, puddlemask);
+        reflMix *= smoothstep(0.03, 0.12, puddlemask) * reflectionAllow;
 
         vec3 reflectionSky = max(fresnelColor, vec3(0.0));
         float reflectionSkyLuma = max(luma(reflectionSky), 0.0);
@@ -705,7 +713,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
 
         // Screen-space reflections
         float lingeringReflectionMask = puddleFade * flatCoverage;
-        float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask)));
+        float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask))) * reflectionAllow;
         float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
             PuddleSSRScreenFadeFull, uv.y);
         float ssrDownAngle = saturate(dot(-V, up));
@@ -848,7 +856,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
 
     // Screen-space reflections (FixedReflectionTrace only: the D3D9 fast path has no other trace)
     float lingeringReflectionMask = puddleFade * flatCoverage;
-    float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask)));
+    float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask))) * reflectionAllow;
     float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
         PuddleSSRScreenFadeFull, uv.y);
     float ssrDownAngle = saturate(dot(-V, up));
@@ -929,7 +937,7 @@ vec4 WetPass(vec2 uv, bool fast, bool fixTrace) {
         puddleBase *= (1.0 - rimDark);
 
         float reflMix = min(PuddleSkyMaxBlend, reflStrength * (1.0 + depthish * 0.20 + rimReflBoost));
-        reflMix *= smoothstep(0.03, 0.12, puddlemask);
+        reflMix *= smoothstep(0.03, 0.12, puddlemask) * reflectionAllow;
 
         vec3 reflectionSky = max(fresnelColor, vec3(0.0));
         float reflectionSkyLuma = max(luma(reflectionSky), 0.0);

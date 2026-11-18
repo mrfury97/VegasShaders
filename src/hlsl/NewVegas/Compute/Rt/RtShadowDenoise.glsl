@@ -35,7 +35,7 @@ layout(set = 0, binding = 1, std140) uniform Pass {
 	vec4 layerSlot[2];  // lamps: layer k's cube slot (-1: none)
 	vec4 layerReset[2]; // 1: layer k's history restarts this frame (another lamp in it, or the lamp moved)
 	vec4 antiLag;       // x AntiLag (sigmas; 0 off), y its floor, z BlurFrames (radius x sqrt(it / history); 0 off), w BlurMinScale
-	vec4 history;       // x MinHistory (frames: where the penumbra is under a pixel the one ray is already the answer), y HistoryRadius
+	vec4 history;       // x MinHistory (frames: where the penumbra is under a pixel the one ray is already the answer), y HistoryRadius, w (2026-11-16, port of mrfury97 d593ff599) 1: sun history by screen motion (DenoiserFixes)
 	                    // (pixels of penumbra radius from which the whole MaxHistory is kept; between: in proportion)
 	                    // z core: 0 these stages, 1 AMD FidelityFX Shadows (RtShadowDenoiseFfx.hlsl; the helper picks the stages)
 } p;

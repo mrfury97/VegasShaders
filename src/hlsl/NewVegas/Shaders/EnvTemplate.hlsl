@@ -111,6 +111,11 @@ VS_OUTPUT main(VS_INPUT vin) {
     #include "includes/LiveCube.hlsl"
 #endif
 
+// UNOFFICIAL 2026-11-12 ReplaceForward (below, at TESR_ReflReplace): compiled in unless the includer defines it 0
+#ifndef REFL_REPLACE_FORWARD
+    #define REFL_REPLACE_FORWARD 1
+#endif
+
 struct PS_INPUT {	// vertex to pixel
     float2 texc : TEXCOORD0;
     float4 frameX : TEXCOORD1_centroid;
@@ -119,6 +124,9 @@ struct PS_INPUT {	// vertex to pixel
     float2 fog : TEXCOORD4;
     float3 rel : TEXCOORD5;
     float3 vcolor : COLOR0;
+#if REFL_REPLACE_FORWARD
+    float2 vpos : VPOS;          // UNOFFICIAL 2026-11-12 ReplaceForward: the pixel (D3D9: whole numbers at pixel centres)
+#endif
 };
 
 sampler2D NormalMap : register(s0);	// passes without the colour texture take the normal map first
@@ -135,6 +143,18 @@ float4 TESR_PBREnv : register(c35);      // x: Lighting (0 the game's fixed brig
 // per-object fade F (already in AmbientColor.a), z the sun's luminance, w the lamp's; [1] the lamp, camera-relative, w its reach;
 // [2] the flashlight's beam axis, w cos of its outer edge; [3] x cos of its full-strength edge, y 1 = the lamp is the flashlight's
 float4 EnvLightFade[4] : register(c28);
+// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (effects/Reflections/README.md "Replace, not add"): where the Reflections
+// effect answered this pixel's reflection last frame (TESR_ReflectionsBuffer's alpha: the screen, the rays, its cube / grid / sky), this
+// pass leaves that share of its cube map out, so the surface shows ONE reflection; where it had no answer (alpha 0: nothing reflects
+// there, or the ray found nothing) the game's cube map stays, as the probe. TESR_ReflReplace (Reflections.cpp UpdateWaterConstants,
+// core/ReflMaterial.h): x the share (0: off, or not the main scene: the branch is not taken and the picture is exactly as before), zw one
+// pixel of the scene target in UV. c36 and s11 are free in this pass (it reads c1, c27-c35, the sky's c136-c145, c190; s0, s1, s3, s10).
+// A build that wants the pass byte for byte as before can define REFL_REPLACE_FORWARD 0 (as LIVE_CUBE).
+#if REFL_REPLACE_FORWARD
+float4 TESR_ReflReplace : register(c36);
+// One line (ShaderTextureValue::GetSamplerStateString reads the states only to the end of the register's line).
+sampler2D TESR_ReflectionsBuffer : register(s11) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+#endif
 
 float4 main(PS_INPUT pin) : COLOR0 {
     // The game's reflection, as it worked it out.
@@ -178,6 +198,11 @@ float4 main(PS_INPUT pin) : COLOR0 {
     float metalFade = TESR_PBRExtraData.w > 0.0f ? 1.0f - smoothstep(0.6f * TESR_PBRExtraData.w, TESR_PBRExtraData.w, pin.fog.y) : 1.0f;
     refl *= lerp(1.0f, TESR_PBREnv.z, saturate(TESR_PBRMetal.x) * metalFade);
     refl *= 1.0f + TESR_PBREnv.w;  // UNOFFICIAL 2026-10-25 [Shaders.PBR.Main] Reflectivity
+    #if REFL_REPLACE_FORWARD
+    // UNOFFICIAL 2026-11-12 ReplaceForward (above): less by what the Reflections composite shows here instead (last frame's coverage)
+    [branch] if (TESR_ReflReplace.x > 0.0f)
+        refl *= 1.0f - TESR_ReflReplace.x * saturate(tex2Dlod(TESR_ReflectionsBuffer, float4((pin.vpos + 0.5f) * TESR_ReflReplace.zw, 0.0f, 0.0f)).a);
+    #endif
     // UNOFFICIAL 2026-11-04 EnvLightFade: the lamp's share per pixel, a smooth fall to its reach (and the flashlight's cone), in place of the
     // game's one value for the whole object (its distance to the object's centre, a straight 1 - d/r)
     [branch] if (EnvLightFade[0].x < -0.5f && EnvLightFade[0].y > 1.0e-4f) {

@@ -12,6 +12,8 @@ void HdrOutputNoteDesktop();	// in Render.cpp (UNOFFICIAL 2026-10-29)
 #include "../src/core/IOWorker2.h"	// UNOFFICIAL 2026-10-20 (EXPERIMENTAL, off by default): a second loading thread for model / texture tasks
 #include "../src/core/DxvkLoader.h"	// UNOFFICIAL 2026-11-04: the DXVK fork's d3d9.dll from a mod manager's mod
 #include "../src/core/RtCore.h"	// UNOFFICIAL 2026-11-07 (rt-shutdown): RtCore::Shutdown at the game's exit
+#include "../src/gunfx/GunFX.h"	// 2026-11-16 (gunfx-builtin): GunFX built into this DLL
+#include "../src/gunfx/GunFXHost.h"
 
 namespace {
 	const UInt32 kPluginVersion = 441;
@@ -134,11 +136,12 @@ extern "C" {
 			EffectSelfTest::RegisterLink();	// UNOFFICIAL, TEST ONLY: after every plugin is loaded (critic-notes 14)
 #endif
 			return;
-#if NVR_TEST_TOOLS
 		case Msg::kMessage_MainGameLoop:
+			GunFX::MainGameLoop();	// 2026-11-16 (gunfx-builtin): GunFX's game loop (it was GunFX.dll's own listener)
+#if NVR_TEST_TOOLS
 			SettingShots::MainLoop();	// UNOFFICIAL, TEST ONLY: the auto-test's console commands, between frames (SettingShots.h)
-			return;
 #endif
+			return;
 		case Msg::kMessage_PreLoadGame:
 			TheSettingManager->GameLoading = true;
 			SessionLog::OnEvent("loading a save");	// UNOFFICIAL 2026-11-01 (SessionLog.h; the save's name and path are never logged)
@@ -261,11 +264,16 @@ extern "C" {
 		if (!nvse->IsEditor) {	// UNOFFICIAL 2026-11-09 (DxvkLoader.h): before the game makes its Direct3D; a missing key reads as on
 			SettingManager::Configuration::ConfigNode node;
 			DxvkLoader::DescriptorHeapOff(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkDescriptorHeapOff") || node.BoolValue);
+			// UNOFFICIAL 2026-11-17 (DxvkLoader.h, docs/next/DXVK-LAUNCHER.md): DXVK names the card as FalloutPrefs.ini does (the launcher loop)
+			DxvkLoader::AdapterNameFromPrefs(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkAdapterNameFromPrefs") || node.BoolValue);
 		}
 		LoadStep = "reading the presets";
 		PresetManager::Initialize();
 		LoadStep = "installing the hooks";
 		AttachHooks();
+		LoadStep = "GunFX";	// 2026-11-16 (gunfx-builtin): GunFX built in (src/gunfx); was GunFX.dll, a plugin of its own
+		GunFXHost::ImportIniOnce();	// an old GunFX.ini into the settings, once
+		if (GunFX::Load(nvse->GameVersion)) GunFXHost::SyncSwitches();
 		LoadStep = "the HDR display check";
 		HdrOutputNoteDesktop();	// UNOFFICIAL 2026-10-29: Windows' HDR state before the game's fullscreen window changes it (HdrOutput.h)
 		LoadStep = "IOWorker2";

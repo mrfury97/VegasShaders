@@ -38,6 +38,7 @@
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the history watch (HistoryProbe)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask
+#include "../../core/ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
 #include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) the render size's maths, shared with RR's plan
 
 D3DXVECTOR4 TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -186,7 +187,19 @@ bool TAAEffect::UpscaledThisFrame() {
 	return taa && (taa->Up.Upscaled || taa->Up.Deferred);	// UNOFFICIAL 2026-10-27 v2: also while the frame waits for its upscale
 }
 
+// UNOFFICIAL 2026-11-11 (TAA.h; RtLampShadows::Record before the world)
+bool TAAEffect::WorldDrawnSmall(UINT& renderWidth, UINT& renderHeight, D3DXVECTOR2& jitterUV) {
+	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
+	if (!taa || !taa->Up.Active || !taa->Up.RenderWidth || !taa->Up.RenderHeight) return false;
+	renderWidth = taa->Up.RenderWidth;
+	renderHeight = taa->Up.RenderHeight;
+	jitterUV = taa->Up.Jittered ? D3DXVECTOR2(taa->Up.JitterX / (float)taa->Up.RenderWidth, -taa->Up.JitterY / (float)taa->Up.RenderHeight) : D3DXVECTOR2(0.0f, 0.0f);
+	return true;
+}
+
+extern bool NvrFirstPersonNativeNow;	// UNOFFICIAL 2026-11-13 Hooks/Render.cpp FirstPersonNative: this first-person pass draws into a full-size layer
 void TAAEffect::NoteWorldDraw(bool firstPerson) {
+	if (firstPerson && NvrFirstPersonNativeNow) return;	// (its viewport is the whole layer on purpose)
 	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
 	// UNOFFICIAL 2026-10-27 RenderScale v2: first-person passes while the frame waits for its upscale (the weapon into the same rect).
 	if (!taa || !(firstPerson ? taa->Up.Deferred : taa->Up.Active)) return;
@@ -195,6 +208,22 @@ void TAAEffect::NoteWorldDraw(bool firstPerson) {
 	UpscaleStruct& up = taa->Up;
 	if (port.X == 0 && port.Y == 0 && port.Width == up.RenderWidth && port.Height == up.RenderHeight) up.DrawsSmall++;
 	else if (port.X == 0 && port.Y == 0 && port.Width == up.Width && port.Height == up.Height) {
+		// UNOFFICIAL 2026-11-16 (owner: "in interior cells, water reflections seem to be broken. almost like the old reflection clip plane
+		// but somehow even more bizarre looking"; docs/next/INTERIOR-WATER.md): only a pass into the world's own target belongs in the
+		// render viewport. Before its water passes the game copies the world's target into its water refraction texture
+		// (BSShaderAccumulator::FinishAccumulating_Standard_PostResolveDepth -> ImageSpaceManager::RenderEffect -> ImageSpaceShader::Render
+		// -> BSBatchRenderer::RenderPassImmediately: through this same pass hook, in the world context). That texture has the screen's
+		// size, so its whole viewport looked like a reset one, and the copy was put into the render viewport: the whole target squeezed
+		// into RenderScale of the copy, the world's picture into RenderScale squared. The water shaders, which read the copy at the
+		// projected position x TESR_RenderScale (the world target's own layout), then showed the room magnified and, past RenderScale of
+		// the frame in x or y, flat blue (indoors) or white (the Strip fountain). A world-scene pass into another target keeps the viewport
+		// it has. First-person passes (the weapon, v2) are put into the render rect as before, without this test.
+		if (!firstPerson) {
+			IDirect3DSurface9* target = nullptr;
+			TheRenderManager->device->GetRenderTarget(0, &target);
+			if (target) target->Release();	// (compared only: the device holds it)
+			if (target != up.Target) { up.DrawsElsewhere++; return; }
+		}
 		// Something reset the viewport to the whole target mid-scene (a SetRenderTarget without the game's SetCameraData after it):
 		// this world pass is put back into the render viewport, where the rest of the scene is.
 		up.DrawsFull++;
@@ -248,7 +277,7 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	Up.Active = false;
 	UpscaleReleaseTargets();
 	RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
-	Up.DrawsSmall = Up.DrawsFull = Up.DrawsOther = 0;
+	Up.DrawsSmall = Up.DrawsFull = Up.DrawsOther = Up.DrawsElsewhere = 0;
 	// A second world scene in the same frame (rare: menus' 3D backgrounds) is drawn as it always was; the frame's upscale (and
 	// TAA's skip of its resolve) belongs to the first one, so Upscaled is kept.
 	if (!firstWorld) { if (FSRSettings.Enabled && FSRSettings.RenderScale < 0.999f) Up.SkippedFrames++; return false; }
@@ -267,7 +296,16 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	if (fabsf(port.l) > 1e-4f || fabsf(port.r - 1.0f) > 1e-4f || fabsf(port.t - 1.0f) > 1e-4f || fabsf(port.b) > 1e-4f) return skip(SkipPort);
 	IDirect3DDevice9* device = TheRenderManager->device;
 	DWORD scissor = FALSE;
-	if (SUCCEEDED(device->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor)) && scissor) return skip(SkipScissor);
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale (core/ScopeOverlay.h; user at RenderScale 0.33 on 2560x1440: the frame rate
+	// "drops in half when i scope"): the game's own rifle scope draws the world through a scissor rectangle, and this frame was then left
+	// at native resolution with every effect. With the key on and the game's scope up, the frame is taken and the scissor rectangle is
+	// moved into the render rectangle below (the game switches the test off itself after the world). Any other scissor: as before.
+	RECT scopeScissor = {};
+	bool scopeScissorOn = false;
+	if (SUCCEEDED(device->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissor)) && scissor) {
+		if (!ScopeOverlay::KeepRenderScale || !ScopeOverlay::Visible() || FAILED(device->GetScissorRect(&scopeScissor))) return skip(SkipScissor);
+		scopeScissorOn = true;
+	}
 
 	IDirect3DSurface9* target = nullptr;
 	IDirect3DSurface9* depth = nullptr;
@@ -316,6 +354,19 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	Up.Camera = camera;
 	Up.PortSet = true;
 	Up.Active = true;
+	if (scopeScissorOn) {	// UNOFFICIAL 2026-11-12 KeepRenderScale: the game's scope scissor, in the render rectangle's pixels
+		const float kx = (float)renderWidth / (float)width, ky = (float)renderHeight / (float)height;
+		RECT r = { (LONG)floorf(scopeScissor.left * kx), (LONG)floorf(scopeScissor.top * ky), (LONG)ceilf(scopeScissor.right * kx), (LONG)ceilf(scopeScissor.bottom * ky) };
+		r.left = (std::max)(r.left, (LONG)0); r.top = (std::max)(r.top, (LONG)0);
+		r.right = (std::min)(r.right, (LONG)renderWidth); r.bottom = (std::min)(r.bottom, (LONG)renderHeight);
+		if (r.right > r.left && r.bottom > r.top) device->SetScissorRect(&r);
+		static bool told = false;
+		if (!told) {
+			told = true;
+			Logger::Log("UNOFFICIAL Scope KeepRenderScale: the game's scope is up: the frame stays at RenderScale %.2f (%ux%u); the game's scissor rectangle (%ld,%ld)-(%ld,%ld) of %ux%u is moved to (%ld,%ld)-(%ld,%ld) in the render rectangle.",
+				scale, renderWidth, renderHeight, scopeScissor.left, scopeScissor.top, scopeScissor.right, scopeScissor.bottom, width, height, r.left, r.top, r.right, r.bottom);
+		}
+	}
 	// UNOFFICIAL 2026-10-27 RenderScale v2: zw = 1 / scale (Includes/RenderRect.hlsl; the water shaders read only xy).
 	const float sx = (float)renderWidth / (float)width, sy = (float)renderHeight / (float)height;
 	RenderScaleConstant = D3DXVECTOR4(sx, sy, 1.0f / sx, 1.0f / sy);
@@ -442,6 +493,13 @@ bool TAAEffect::UpscaleCheckDrawn(IDirect3DDevice9* Device) {
 		Logger::Log("UNOFFICIAL RenderScale: of this world scene's passes %u used the render viewport (0,0 %ux%u), %u the whole screen and %u another "
 			"(logged once; whole-screen ones found the viewport reset mid-scene and were put back into the render one). The scene ended with %u,%u %ux%u.",
 			drawsSmall, Up.RenderWidth, Up.RenderHeight, drawsFull, drawsOther, (unsigned)drawn.X, (unsigned)drawn.Y, (unsigned)drawn.Width, (unsigned)drawn.Height);
+	}
+	// UNOFFICIAL 2026-11-16 (NoteWorldDraw): passes into another target with its whole viewport (the game's water refraction copy), once
+	static bool elsewhereLogged = false;
+	if (Up.DrawsElsewhere > 0 && !elsewhereLogged) {
+		elsewhereLogged = true;
+		Logger::Log("UNOFFICIAL RenderScale: %u pass(es) of this world scene drew into another render target than the world's with its whole viewport "
+			"(the game's water refraction copy): left as drawn, so the copy keeps the world target's layout (logged once).", Up.DrawsElsewhere);
 	}
 	return true;
 }

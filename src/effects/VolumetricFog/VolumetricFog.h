@@ -4,6 +4,8 @@
 class VolumetricFogEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the two fog buffers are used only from Render (RenderDedicated), behind the switch
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	VolumetricFogEffect() : EffectRecord("VolumetricFog"), rainyDisablesSkyFilter(true), cloudyDisablesSkyFilter(true), weatherFilterWasActive(true),
 		nightMinDarkness(1.0f - 0.35f) {	// matches ShadowsExteriors.Main's own NightMinDarkness default (0.35), until the first exterior settings pass sets it for real
 		Constants.WeatherFilterAnimator.Initialize(1);
@@ -70,6 +72,10 @@ public:
 	bool	weatherFilterWasActive; // edge-detect for the animator, mirrors RainAnimator.switched
 	// UNOFFICIAL 2026-10-30 GameFogFloor ([Shaders.VolumetricFog.Main] GameFogFloor, [Shaders.VolumetricFog.Night] GameFogFloorScale; UpdateConstants)
 	float	gameFogFloor = 0.0f, gameFogFloorNight = 1.0f;
+	// UNOFFICIAL 2026-11-15 FogWall ([Shaders.VolumetricFog.Interiors] GameFogFloor, default 1; docs/next/FOG-WALL.md): indoors the same
+	// constants (Sun.z the strength, Sun.w the cell's raw fog near) drive the fade into the cell's fog before its clip distance.
+	// fogWallCell / fogWallFrames: the player's cell and the frames spent in it, for the diagnostic line (UpdateConstants).
+	const void* fogWallCell = nullptr; UInt32 fogWallFrames = 0;
 	float	layerOn = 0.0f, layerBase = 0.0f, layerThickness = 2000.0f; bool layerFollowsCamera = false;	// UNOFFICIAL 2026-11-01 HeightLayer (UpdateSettings)
 	// UNOFFICIAL 2026-11-13 (modern lighting) FoggyWeatherImpact: WeatherImpact as set, and the foggy weather's own share with the
 	// fog far distances it fades in between (UpdateConstants). foggyImpact < 0: off (one WeatherImpact for every weather).
@@ -85,6 +91,13 @@ public:
 	IDirect3DTexture9* lampTexture = nullptr;
 	void	SetLampHaze(IDirect3DDevice9* Device);
 	bool	LampHazeOn() const { return Constants.Lamps.x > 0.0f && !IsLegacy() && !IsClassic(); }
+	// UNOFFICIAL 2026-11-12 LampHazeShadows ([Shaders.VolumetricFog.Interiors] LampHazeShadows, off by default; LampHazeShadowCell,
+	// LampHazeShadowSamples, LampHazeShadowTemporal; read by UpdateSettings, a missing key takes the default): the lamps' light in the air
+	// shadowed by the room, traced by the RT core's rider core\RtFogVisibility.h RtFogLamps (which reads these). SetLampHaze hands it the
+	// frame's lamps and writes each lamp's tile code into the lamp table's row 1 alpha (0 = unshadowed, as before); Render binds the
+	// tiles on stage 11 (NVR_FogGrid's sampler: the volumetric light's grid is never bound indoors).
+	bool	lampHazeShadows = false; int lampHazeShadowCell = 8, lampHazeShadowSamples = 4; float lampHazeShadowTemporal = 0.8f;
+	IDirect3DTexture9* lampShadowTexture = nullptr;	// this frame's tiles (SetLampHaze; null: no lamp carries a tile code)
 
 	// cached from UpdateSettings (Shaders.ShadowsExteriors.Main/NightMinDarkness), consumed by
 	// UpdateConstants to drive the moon-phase night-ambient ceiling

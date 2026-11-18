@@ -1,0 +1,118 @@
+# Full deferred renderer, batch 4 (2026-11-15, docs/next/FD-INTERIORS-RESULTS.md "Batch 3"): native parity per one-pass mode.
+# Scene: lucky22 (a Lucky 38 start save, as fd3-c-int2). Toml: batch3-native-dr1.toml (DeferredRenderer 1) + the F10 profile. Moves and spots
+# are batch 3's (fd3-c-int1 / fd3-c-int2). Per room: DeferredRendererOnePass 0 (the game's own pass lists), 1 (the fix: emissive objects
+# held at the game's own one-pass limit), 2 (every shiny object one pass, = batch 3), each with a forward-vs-forward control and the
+# forward-vs-deferred shot; then the same view's pictures (forward, deferred per mode) and one F10 counts window per mode.
+# A mode change rebuilds the held objects' pass lists (the cave's rebuild bit): each shot waits 120 frames before its parity run.
+frames 300
+profile
+shot settle
+console tgm
+console sgtm 0.001
+wait 240
+shot go-l38
+console player.moveto 00174BEB
+wait 300
+shot place-l38
+console sgtm 1
+console player.setpos x 860.53
+console player.setpos y -3364.16
+console player.setpos z 7681.03
+console player.setangle x 11.97
+console player.setangle z 65.39
+console sgtm 0.001
+wait 300
+shot l38-ctl0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot l38-fd0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-fd1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-fd2
+set Main.Main.Quality DeferredRendererOnePass 2
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot l38-off
+set Main.Main.Quality DeferredRendererLive false
+wait 120
+shot l38-on0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+shot l38-on1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 120
+shot l38-on2
+set Main.Main.Quality DeferredRendererOnePass 2
+wait 120
+shot l38-counts1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 600
+shot l38-counts0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 600
+shot go-lux
+console player.moveto 0017B84A
+wait 300
+shot place-lux
+console sgtm 1
+console player.setpos x 3429.85
+console player.setpos y 3136.56
+console player.setpos z 7680.76
+console player.setangle x 7.41
+console player.setangle z 243.80
+console sgtm 0.001
+wait 300
+shot lux-ctl0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false false
+shot lux-fd0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot lux-fd1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot lux-fd2
+set Main.Main.Quality DeferredRendererOnePass 2
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot lux-off
+set Main.Main.Quality DeferredRendererLive false
+wait 120
+shot lux-on1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 120
+shot lux-counts1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 600
+shot go-v21
+console player.moveto 0017A642
+wait 300
+shot place-v21
+console sgtm 1
+console player.setpos x -232.6
+console player.setpos y 1789.6
+console player.setpos z 7425.0
+console player.setangle x 5.2
+console player.setangle z 236.8
+console sgtm 0.001
+wait 300
+shot v21-fd0
+set Main.Main.Quality DeferredRendererOnePass 0
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-fd1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 120
+parity Main.Main.Quality DeferredRendererLive 64 3 false true
+shot v21-counts1
+set Main.Main.Quality DeferredRendererOnePass 1
+wait 600

@@ -151,6 +151,7 @@
 //                             when: FlickerWatch on outdoors
 
 #include "OrthoProbe.h"	// UNOFFICIAL 2026-10-17 test tools (AfterCombine)
+#include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16 BloodFlow and DustMotes: not in release builds (no step, no slot)
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals (TESR_CapturedNormalsData)
 #include "ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (TESR_ObjectMotionData)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the flash detector's stage probes (StageMark), the report burst's VL stages
@@ -161,6 +162,7 @@
 #include "PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "PointShadowSlots.h"
 #include "PointShadowForward.h"
+#include "DeferredLamps.h"	// UNOFFICIAL 2026-11-16 fd-batchA item 2 (LampShadowsDrawn)
 #include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth
 #include "EffectSelfTest.h"
@@ -169,7 +171,7 @@
 #include "../effects/CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness and snow
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
-#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows
+#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (fork port 2026-11-13)
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
@@ -299,10 +301,15 @@ void ShaderManager::PreStep_ShadowPlan(ChainContext& ctx) {
 	// cleared to "no shadow" for the effects that read it (indoors only Underwater).
 	// (Only while the PBR object shaders, which draw the forward shadows, are on and were drawing this frame: with PBR off
 	// the old screen-space shadows run instead of none at all.)
+	// UNOFFICIAL 2026-11-16 fd-batchA item 2 (docs/next/FD-BATCH-A.md; [Shaders.ShadowsInteriors.Deferred] ReplaceScreenShadows): the deferred lamp
+	// pass shadows its lamps from the atlas too, and in the deferred renderer the forward lamp-shadow shaders are not bound in a frame without
+	// skin, glass or the weapon (their deferred records are): the screen-space shadows were then laid over a room already shadowed (doubled,
+	// soft and darker, flipping as an NPC or the weapon came into view). Off: as before.
 	const bool forwardInterior = !GameState.isExterior && Effects.ShadowsInteriors->Enabled && PointShadowForward::Active &&
-		PointShadowForward::BoundThisFrame && Shaders.PBR && Shaders.PBR->Enabled;
+		(PointShadowForward::BoundThisFrame || DeferredLamps::LampShadowsDrawn()) && Shaders.PBR && Shaders.PBR->Enabled;
 	const bool keepDarkening = !forwardInterior || Effects.ShadowsExteriors->Settings.Interiors.Forward.KeepDarkening;
 	ctx.forwardInterior = forwardInterior;
+	DeferredLamps::NoteScreenShadows(!GameState.isExterior, PointShadowForward::BoundThisFrame, !forwardInterior);	// UNOFFICIAL 2026-11-16 fd-batchA item 2 diagnostic (F10 profile only)
 	ctx.keepDarkening = keepDarkening;
 }
 
@@ -317,6 +324,9 @@ void ShaderManager::PreStep_RtCore(ChainContext& ctx) {
 		// UNOFFICIAL 2026-11-10 (PT early kick, env NVR_RT_EARLY_PT; a no-op without it) the path tracer's early frame collected. Before
 		// Frame, not between Frame and Replace: Frame's exchange collects anything still open first (RtCore's safety net), which would
 		// leave this call nothing to do.
+		// UNOFFICIAL 2026-11-11 [Shaders.Reflections.RT] RideMainExchange (off: returns at once): RT reflections' RayGen drawn now, so its
+		// rays go with Frame's exchange below instead of a second round trip from the Reflections step
+		Effects.Reflections->RtRideBeforeFrame(Device, ctx.RenderTarget);
 		RtPathTrace::CollectBeforeShow(Device);
 		RtCore::Frame(Device);
 		RtPathTrace::Replace(Device);	// UNOFFICIAL 2026-11-03 [Main.Main.RayTracing] PTReplace: the path traced picture into the scene (off)
@@ -498,6 +508,7 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 			}
 #endif
 		}
+		RtPathTrace::MaskShadowBuffer(Device, Effects.ShadowsExteriors->Textures.ShadowPassSurface);	// UNOFFICIAL 2026-11-12 PTOwnShadows: no deferred shadow over the traced pixels (off / no path tracing: nothing)
 	}
 	else {
 		// Nothing above ran this frame, so ShadowPassSurface keeps whatever it last
@@ -684,7 +695,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 		if (Effects.ShadowsExteriors->Constants.ShadowBlur.y > 0.5f) FlickerWatch::Flags |= FlickerWatch::kLodUpdated;
 		if (GameState.isCellChanged) FlickerWatch::Flags |= FlickerWatch::kCellChanged;
 		ShadowsExteriorEffect* sx = Effects.ShadowsExteriors;
-		if (sx->SunGlideValid && GetTickCount64() - sx->SunGlideStart < (ULONGLONG)(1000.0f * sx->Settings.SunSmoothing.GlideSeconds))
+		if ((sx->SunGlideValid && GetTickCount64() - sx->SunGlideStart < (ULONGLONG)(1000.0f * sx->Settings.SunSmoothing.GlideSeconds)) || sx->DeferredFading)	// (2026-11-15 + the deferred steps' fades)
 			FlickerWatch::Flags |= FlickerWatch::kSunGlide;
 		FlickerWatch::Hour = ShaderConst.GameTime.y;
 		FlickerWatch::SunZ = sx->Constants.SmoothedSunDir.z;
@@ -892,6 +903,7 @@ void ShaderManager::PreStep_BounceLight(ChainContext& ctx) {
 }
 
 void ShaderManager::PreStep_BloodFlow(ChainContext& ctx) {
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: release builds have no BloodFlow (and no step row below)
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
@@ -902,6 +914,7 @@ void ShaderManager::PreStep_BloodFlow(ChainContext& ctx) {
 		GpuProfileScope gpu(bloodFlowTimer, Device);
 		{ Effects.BloodFlow->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.BloodFlow); }
 	}
+#endif
 }
 
 void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
@@ -1085,6 +1098,7 @@ void ShaderManager::PreStep_VolumetricLight(ChainContext& ctx) {
 }
 
 void ShaderManager::PreStep_DustMotes(ChainContext& ctx) {
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: release builds have no DustMotes (and no step row below)
 	static GpuTimer dustMotesTimer("Dust motes");
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
@@ -1095,6 +1109,7 @@ void ShaderManager::PreStep_DustMotes(ChainContext& ctx) {
 		GpuProfileScope gpu(dustMotesTimer, Device);
 		Effects.DustMotes->RenderFrame(Device, RenderTarget, ctx.lightGrid);
 	}
+#endif
 }
 
 void ShaderManager::PreStep_Sandstorm(ChainContext& ctx) {
@@ -1418,6 +1433,12 @@ void ShaderManager::PostStep_DitherBuster(ChainContext& ctx) {
 
 void ShaderManager::PostStep_SMAA(ChainContext& ctx) {
 	static GpuTimer smaaTimer("SMAA");
+	// UNOFFICIAL 2026-11-12 [Shaders.SMAA.Main] WithTAA (off): TAA is on by default now (FSR 3.1 at native size under the DXVK build, its own
+	// resolve on plain Direct3D 9). SMAA stays enabled as the fallback and stands aside while TAA runs: one anti-aliasing at a time.
+	if (Effects.TAA && Effects.TAA->Enabled) {
+		SettingManager::Configuration::ConfigNode node;
+		if (!(TheSettingManager->Config.FillNode(&node, "Shaders.SMAA.Main", "WithTAA") && node.BoolValue)) return;
+	}
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
@@ -1524,6 +1545,7 @@ void ShaderManager::PostStep_RtSunDebug(ChainContext& ctx) {
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	RtSunShadows::RenderDebug(Device, RenderTarget);	// UNOFFICIAL 2026-10-28 [Shaders.ShadowsExteriors.RT] DebugView 4 (nothing otherwise)
 	RtPathTrace::RenderDebug(Device, RenderTarget);	// UNOFFICIAL 2026-11-02 [Main.Main.RayTracing] ReferencePT (nothing otherwise)
+	CapturedNormals::ViewRender(Device, RenderTarget);	// UNOFFICIAL 2026-11-14 [Main.Main.Quality] GBufferView (test only; nothing otherwise)
 }
 
 void ShaderManager::PostStep_Debug(ChainContext& ctx) {
@@ -1586,14 +1608,18 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "AmbientLight", EffectChain::PreTonemap, &ShaderManager::PreStep_AmbientLight },
 	{ "LitProbes", EffectChain::PreTonemap, &ShaderManager::PreStep_LitProbes },
 	{ "BounceLight", EffectChain::PreTonemap, &ShaderManager::PreStep_BounceLight },
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h
 	{ "BloodFlow", EffectChain::PreTonemap, &ShaderManager::PreStep_BloodFlow },
+#endif
 	{ "WetFlashlightSpecularUnderwater", EffectChain::PreTonemap, &ShaderManager::PreStep_WetFlashlightSpecularUnderwater },
 	{ "SpillSelfTest", EffectChain::PreTonemap, &ShaderManager::PreStep_SpillSelfTest },
 	{ "Reflections", EffectChain::PreTonemap, &ShaderManager::PreStep_Reflections },
 	{ "VolumetricLightGrid", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricLightGrid },
 	{ "VolumetricFog", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricFog },
 	{ "VolumetricLight", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricLight },
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h
 	{ "DustMotes", EffectChain::PreTonemap, &ShaderManager::PreStep_DustMotes },
+#endif
 	{ "Sandstorm", EffectChain::PreTonemap, &ShaderManager::PreStep_Sandstorm },
 	{ "GodRays", EffectChain::PreTonemap, &ShaderManager::PreStep_GodRays },
 	{ "SunGlare", EffectChain::PreTonemap, &ShaderManager::PreStep_SunGlare },
@@ -1634,6 +1660,7 @@ static const EffectChain::Step PostTonemapSteps[] = {
 };
 
 void EffectChain::Run(ShaderManager* manager, Stage stage, ChainContext& ctx) {
+	TheTextureManager->TargetsFrame();	// UNOFFICIAL 2026-11-12 (memleak) idle targets: an effect switched on since the frame began
 	const Step* steps = stage == PreTonemap ? PreTonemapSteps : PostTonemapSteps;
 	const size_t count = stage == PreTonemap ? _countof(PreTonemapSteps) : _countof(PostTonemapSteps);
 	for (size_t i = 0; i < count && !ctx.stop; i++) {

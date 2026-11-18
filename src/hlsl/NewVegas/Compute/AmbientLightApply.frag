@@ -174,7 +174,10 @@ vec4 Apply(vec2 uv, bool sky) {
     if (DebugView > 6.5) return delinearize(vec4(gridBounce * albedo, 1.0));
     if (DebugView > 2.5) return vec4(pointLod(t_buffer, uv).rgb, 1.0);
     if (DebugView > 0.5) return delinearize(vec4(DebugView < 1.5 ? vec3(ao) : gridBounce * albedo, 1.0));
-    if (cb.alInterior.x > 0.5) lin = lin - (1.0 - ao) * min(lin, albedo * cb.alScene.rgb) + gridBounce * albedo;
+    // UNOFFICIAL 2026-11-12 AmbientReplaceInterior (RoomGI; AmbientLight.fx.hlsl Apply): indoors alInterior.x = 1 + q, q the share of the room's ambient
+    // the traced bounce replaces; q = 0 (the key off): (1 - ao) + ao * 0, the old value exactly. NVR_ALRoom.x (1 - the ambient scale for the real albedo) is
+    // not here: this pass only runs without the albedo buffer (AmbientLight.cpp: with it the D3D9 Apply runs), where that scale is 1.
+    if (cb.alInterior.x > 0.5) lin = lin - ((1.0 - ao) + ao * max(cb.alInterior.x - 1.0, 0.0)) * min(lin, albedo * cb.alScene.rgb) + gridBounce * albedo;
     else {
         // UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (AmbientLight.fx.hlsl Apply; alInterior.w > 0 outdoors = the ambient scale)
         // UNOFFICIAL 2026-11-12 (sungi p2b) ExteriorBalance + AmbientReplace as one select (AmbientLight.fx.hlsl Apply, line for line; r = 0 = ExteriorBalance)

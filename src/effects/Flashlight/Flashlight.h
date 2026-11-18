@@ -26,7 +26,7 @@ public:
 		// UNOFFICIAL 2026-11-11 the old flashlight's look keys back on this one (each a no-op at its default)
 		bool		useOwnColour;	// ColorR/G/B instead of the Pip-Boy colour (its hue: brightness stays Dimmer's)
 		float		NearFade;		// > 0: the light fades out on surfaces nearer the light than this (units)
-		float		HotspotLimit;	// > 0: a soft roll-off of the added light above 1 / HotspotLimit (luma)
+		float		HotspotLimit;	// > 0: a soft roll-off where the beam's shape (falloff x cone^2, 1 on its axis at the light) is above 1 / HotspotLimit (2026-11-11: was the added light's luma)
 		bool		softEdges;		// wrap lighting instead of the clamped N.L (the raster pass only)
 	};
 	FlashlightSettingsStruct	Settings = {};
@@ -42,12 +42,18 @@ public:
 		float	ShadowBias;		// share of the reach
 		float	Cookie;			// the cookie texture's strength (0 none; the old Main CookieStrength's successor)
 		float	Falloff;		// > 0 a windowed inverse square, (1 - d^2/r^2)^2 / (1 + F d^2/r^2); 0 the lamps' 1 - d^2/r^2
+		bool	GameLightUnderPT;	// UNOFFICIAL 2026-11-11: GameLight also while the path traced picture replaces the scene (off: it steps aside there)
 		bool	GameLight;		// the Pip-Boy light as the beam's real game lamp for what the light pass cannot see (core/FlashlightLamp.h)
 		int		DebugView;		// 1 the light alone, 2 the shadow, 3 the normal
 		bool	TestForceOn;	// test only: on as if the Pip-Boy light were (and the game's Pip-Boy light switched on)
+		bool	HairAndEyes;	// UNOFFICIAL 2026-11-12: hair and eyes take the beam in their own shaders and the light pass skips them (core/FlashlightDeferred.h BeamBegin)
+		bool	HairUnderPT;	// UNOFFICIAL 2026-11-13: with HairAndEyes, the game's blended hair (drawn after the main list) takes the beam under path tracing too (BeamBegin)
 	};
 	DeferredSettingsStruct	Deferred = {};
 	bool	WantsShadowMap() const { return Deferred.Shadows; }
+	// UNOFFICIAL 2026-11-11 TheFrameRateManager->FrameNumber of the last frame the shadow map was drawn (ShadowManager::RenderShadowSpotlight,
+	// with SpotLightWorldToLightMatrix[0]); FlashlightDeferred::ShadowMap gives the map only in that frame (an old map + matrix = wrong shadows)
+	unsigned	ShadowMapFrame = ~0u;
 
 	// The Pip-Boy light while the flashlight is on: the flashlight's game lamp (GameLight) or, with GameLight off, darkened (else the game
 	// could still hand it to the objects round the player as one of their few lamps). Its own values, put back when the flashlight is off.
@@ -66,6 +72,8 @@ public:
 
 	void	UpdateConstants();
 	void	UpdateSettings();
+	void	RegisterConstants();	// UNOFFICIAL 2026-11-12 TESR_FlashBeam (HairAndEyes)
+	void	RegisterTextures();		// UNOFFICIAL 2026-11-12 TESR_FlashBeamCookie
 	bool	ShouldRender() { return false; }	// nothing drawn here (see above)
 	void	PublishLightConstants(bool abActive);
 };

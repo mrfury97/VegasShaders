@@ -8,5 +8,5 @@ DeDither = false                      # Judge the isolated-pixel test on the pic
 DebugView = 0                         # 1 = show the picture with the recomputed dither noise taken out (turn SMAA off to see it): it must match the same frame with the dither off. Proves DeDither reads the right pixel and frame.
 
 [_Shaders.DitherBuster.Status]
-Enabled = true                        # Reduces dithering artifacts via luma-edge anti-aliasing.
+Enabled = false                       # Reduces dithering artifacts via luma-edge anti-aliasing.  (2026-11-16, owner: off by default; settings migration 86 moves a saved true to false once)
 

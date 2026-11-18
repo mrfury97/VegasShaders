@@ -41,6 +41,7 @@
 #include "RtPtCost.h"        // (2026-11-07 perf-ptcost) the path tracer's ray budget keys (src/core): the NVR_RT_HOST_PTCOST knob
 #include "RtFlashlightCode.h" // (2026-11-07 perf-reflfix2) the path tracer's flashlight code (src/core), run by the ptflashlight scene
 #include "RtHairTint.h"      // (2026-11-08 perf-reflfix3) the hair's tint for the RT scene (src/core), run by the hairtint scene
+#include "RtFarHandOver.h"   // (2026-11-12) the path tracer's far hand-over: PTGameFog / PTFarMatch / PTFarBlend (src/core), run by the farhandover scene
 #include "../../src/effects/Reflections/RtReflLamps.h"   // (2026-11-07 perf-reflfix2) RT reflections' lamps as the game lights them (reflorbs)
 #include <d3dcompiler.h>
 
@@ -401,7 +402,9 @@ struct Host {
 		const ULONGLONG start = GetTickCount64();
 		// (2026-11-07 ptaaa-firstperson: 30 s -> 180 s; the first start after a shader change compiles every pipeline, ~45-90 s while
 		// other runs share the iGPU, and a timed-out start never finished the driver's pipeline cache: every rerun timed out again)
-		while (shared->state == NVR_RT_STATE_STARTING && GetTickCount64() - start < 180000) {
+		// (2026-11-15 fury-rtgi port: 180 s -> 420 s; RtAOTrace grew by ReSTIR GI's sample points and its pipeline alone took over 180 s on the
+		// iGPU's first build after the change (113 s before it), so the start timed out before the driver's cache had it)
+		while (shared->state == NVR_RT_STATE_STARTING && GetTickCount64() - start < 420000) {
 			HANDLE waits[2] = { statusEvent, helper.hProcess };
 			if (WaitForMultipleObjects(2, waits, FALSE, 200) == WAIT_OBJECT_0 + 1) break;
 		}
@@ -1335,8 +1338,10 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_refl.inl"	// (2026-11-07) the RT reflection denoiser vs the exact glossy reflection (docs/next/RT-REFLECTION-DENOISER.md)
 #include "rt_host_light.inl"	// (2026-11-06) the path tracer's lamp falloff: game vs physical (PTLampFalloff)	// (2026-11-06) chain-link: fine cut-outs through the 64 x 64 atlas slot
 #include "rt_host_pt.inl"	// (2026-11-07) the path tracer's quality scenes: ReSTIR DI (PTRestirDI)
+#include "rt_host_cgns.inl"	// (2026-11-15 rt-reuse) PTRestirCGNS / PTRestirDupMap: the reuse's neighbour picks and duplication count, off vs on (docs/next/RT-REUSE-CGNS.md)
 #include "rt_host_emissive.inl"	// (2026-11-07 ptaaa-emissive) PTEmissive: glowing triangles as lights vs the exact glow
 #include "rt_host_ptcost.inl"	// (2026-11-07 perf-ptcost) the path tracer's ray budget: rays a pixel, picture vs the old budget
+#include "rt_host_ptemcost.inl"	// (2026-11-11 pt-emissive-cost) PTEmissive's cost keys: rays a pixel, picture vs PTEmissive as it was
 #include "rt_host_pthidden.inl"	// (2026-11-07) the path tracer's camera rays pass over the hidden first-person body
 #include "rt_host_denoisepeople.inl"	// (2026-11-07) RtDenoise RGB: PeopleHistory (the path tracer's dialogue ghosting)
 #include "rt_host_aniso.inl"	// (2026-11-07) anisotropic filtering at ray-traced hits (ray cones)
@@ -1361,7 +1366,11 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_reflfix4.inl"	// (2026-11-08 perf-reflfix4) the gold smooth in a mirror / chrome (5 x 5 tent), the mirror's silver F0, the hair's tint from its property
 #include "rt_host_mirroraa.inl"	// (2026-11-08 perf-reflfix4) blocky mirrors: MirrorJitter vs 4x rays vs the old centred ray
 #include "rt_host_rrrect.inl"	// (2026-11-07 perf-rr) DLSS RR at RenderScale < 1: the guide pass at the render size, the composite's rect mapping
+#include "rt_host_rrv2.inl"	// (2026-11-15 fd-gi) the DLSS RR guides on G-buffer v2 inputs (DeferredRRGuides)
+#include "rt_host_screenown.inl"	// (2026-11-11 PTScreenOwn) hair and skin in front of a wall: the first surface's colour / material are their own, not the wall's
 #include "rt_host_flashhead.inl"	// (2026-11-07 perf-flashlight) a lamp in the hidden first-person head under SameFrame lamp shadows (RtLampPrimary + RtLampTrace / Sigma + RtLampEye)
+#include "rt_host_far.inl"	// (2026-11-12) the path tracer's far hand-over at the loaded cells' edge: fog, level gain, band, shadow buffer, measurement
+#include "rt_host_denoiseinputs.inl"	// (2026-11-15 rt-denoise-inputs) history confidence, PSR motion at mirrors for RR, the sky's motion (docs/next/RT-DENOISE-INPUTS.md)
 
 // ------------------------------------------------------------------------------------------------------------------------------
 int main(int argc, char** argv) {
@@ -1479,7 +1488,10 @@ int main(int argc, char** argv) {
 		{ "cache", "path tracer radiance cache (PTRadianceCache): 2 bounces + the cache vs 32 bounces, the light halved", [&] { return sceneRadianceCache(c); } },
 		{ "emissive", "path tracer PTEmissive: glowing triangles as lights (MIS, ReSTIR DI with lamps) vs the exact glow, bounce-only brute force, noise + cost", [&] { return sceneEmissive(c); } },
 		{ "ptcost", "path tracer ray budget (PTRestirDIRays, PTBounceLights, one camera query): rays a pixel and the picture vs the old budget, PTRealtime-like", [&] { return scenePtCost(c); } },
+		{ "ptemcost", "PTEmissive's cost keys (PTEmissiveCut / Floor / Hits / Roulette): rays a pixel, mean and noise vs PTEmissive as it was: at noon, at night, in a lamp room", [&] { return scenePtEmCost(c); } },
 		{ "restirgi", "ReSTIR GI on the path tracer (RtPathTraceGI + RtRestirGI)", [&] { return sceneRestirGI(c); } },
+		{ "cgnsdi", "PTRestirCGNS on ReSTIR DI (rt-reuse): posts + lamps, off vs on against the exact lamp sum: SMAPE, temporal correlation, GPU time", [&] { return sceneCgnsDI(c); } },
+		{ "cgnsgi", "PTRestirCGNS / PTRestirDupMap on ReSTIR GI (rt-reuse): posts under the sun, off vs on against the 1024-path mean: SMAPE, temporal correlation, GPU time", [&] { return sceneCgnsGI(c); } },
 		{ "denoise", "the game's RtDenoise passes (fork, D3D9 side)", [&] { return sceneDenoise(c); } },
 		{ "sigmalamps", "RT shadow denoiser, lamps of physical size vs the exact soft shadow, still + moving (RtLampTraceSigma + RtShadowDenoise)", [&] { return sceneSigmaLamps(c); } },
 		{ "sigmasun", "RT shadow denoiser on the sun (10 deg disc + the real 0.53 deg) vs the exact soft shadow, still + moving (RtSunShadow + RtShadowDenoise)", [&] { return sceneSigmaSun(c); } },
@@ -1495,6 +1507,10 @@ int main(int argc, char** argv) {
 		{ "denoiseantilag", "RtDenoise RGB temporal AntiLag: a step clears in a few frames, a still noisy pixel keeps its mean and noise", [&] { return sceneDenoiseAntiLag(c); } },
 		{ "historytime", "the denoisers' history in SECONDS (RtHistoryTime.h): 60 fps bit for bit as before; at 20 fps a step's ghost and a moving light's trail clear in the same seconds (RtDenoiseTemporalRgb)", [&] { return sceneHistoryTime(c); } },
 		{ "rrrect", "DLSS RR at RenderScale < 1 (perf-rr): DlssRRGuides one thread per render pixel on rect-layout inputs (outside the rect untouched, the view ray over the render size) + DlssRRComposite filling the screen from the rect (nearest alpha, bilinear weapon) and its native branch", [&] { return sceneRrRect(c); } },
+		{ "rrv2", "DLSS RR guides on G-buffer v2 (fd-gi DeferredRRGuides): material r = model + 16 x spec bit + 0.49 x metal and the albedo buffer in fp16 targets, the shading normals in the normals buffer's encoding; diffuse, specular, normal, roughness vs the CPU, the metal within fp16's step", [&] { return sceneRrV2(c); } },
+		{ "ptconfidence", "RtDenoise RGB chain with the 1/5-size history confidence (PTDenoiseConfidence / GIDenoiseConfidence) vs without: a lamp off / on / sliding, the ghost, the still noise and flicker, false alarms, cost at 720p", [&] { return scenePtConfidence(c); } },
+		{ "rrmirror", "DlssRRGuides-mirror (RRMirrorMotion): PSR motion at a flat marked mirror vs the CPU's mirror image; curved / unmarked / sky untouched; the other guides unchanged", [&] { return sceneRrMirror(c); } },
+		{ "rrsky", "FSRPrep's motion on the sky (the far plane) vs a direction at infinity: does RR's sky need motion of its own", [&] { return sceneRrSky(c); } },
 		{ "lamplookup", "the lamp shaders' lookup PointShadowTraced (D3D9 ps_3_0)", [&] { return sceneLampLookup(c); } },
 		{ "scenepick", "RtCore's scene picking rules + record packing (RtScenePick.h)", [&] { return sceneScenePick(c); } },
 		{ "decals", "decals (lifted cut-outs, NVR_RT_CUSTOM_DECAL): lamp / AO / sun rays pass them, reflections and camera rays see them (RtLampTrace, ReflectionsRTAlpha, RtAOTrace)", [&] { return sceneDecals(c); } },
@@ -1517,7 +1533,9 @@ int main(int argc, char** argv) {
 		{ "facemorph", "FaceMorphs: a skinned head whose vertices change with still bones is re-posed by its hash, an unchanged one is not; the CPU-vertex copy (RtFaceMorph.h + StageSkinnedGeometry + RtLampPrimary)", [&] { return sceneFaceMorph(c); } },
 		{ "fogvis", "RT fog visibility: the froxel grid's traced sun visibility (a window's shaft, an alpha-tested card) = the CPU's rays per cell; the history converges and follows a moving camera (RtFogVisibility + RtFogGrid.h)", [&] { return sceneFogVis(c); } },
 		{ "ptviewmodel", "the first-person view model lit by the path tracer (PTViewModel: its G-buffer, its own FOV, the hidden body round the eye passed over; not-captured pixels keep the game's) (RtPathTrace)", [&] { return scenePtViewModel(c); } },
+		{ "screenown", "hair and skin take on the wall's material (PTScreenOwn): a blended hair cap over a head, a face, a body before a wall and an armour plate, the G-buffer as the game leaves it; the prep pass's marks (RtViewModel.h, ps_3_0) vs the CPU, then the first surface's colour / roughness / metal / normal before and after (RtPathTrace)", [&] { return sceneScreenOwn(c); } },
 		{ "vmprep", "PTViewModel's prep pass (src/core/RtViewModel.h, ps_3_0 on the fork's D3D9 device): the view model's code (4 + s / -1), its captured view-space normal, people 2, the world 1, vs the CPU", [&] { return sceneVmPrep(c); } },
+		{ "farhandover", "the path tracer's far hand-over (src/core/RtFarHandOver.h, ps_3_0 on the fork's D3D9 device): the weather's fog on traced pixels, the level gain's ramp, the band into the game's own pixel at the loaded square's edge, the shadow buffer in the band, the measured ratio, vs the CPU", [&] { return sceneFarHandOver(c); } },
 		{ "hiddennear","rays that start or end within reach of the eye pass over the hidden first-person body (a lamp in the head, a counter under the third-person gun); beyond reach its shadow stays (RtSunShadow, RtLampTrace, RtAOTrace)", [&] { return sceneHiddenNear(c); } },
 		{ "flashhead", "a lamp inside the hidden first-person head (the Pip-Boy light as a game lamp) under SameFrame lamp shadows: camera rays, the lamp trace, the denoiser's signal and the eye pass match the absent body bit for bit; a visible head blocks it (RtLampPrimary + RtLampTrace + RtLampTraceSigma + RtLampEye)", [&] { return sceneFlashHead(c); } },
 		{ "shutdown", "the RT helper's shutdown on second hosts: quit with 4 frames pending, then the game killed mid-flight (a frame whose inputs never come + 2 never run): every published frame's output ready signalled, the GPU idle, the helper exits by itself (NvrRtHelper ShutdownDrain + RtCore Core::Stop's order)", [&] { return sceneShutdown(); } },

@@ -136,7 +136,7 @@ public:
 
 	struct PBRStruct {
 		D3DXVECTOR4		Data, ExtraData;	// UNOFFICIAL ExtraData w: where the metal has faded out with distance (Object.hlsl getMetalFade)
-		D3DXVECTOR4		Metal;		// UNOFFICIAL TESR_PBRMetal: x strength this pass, y grey parts' metal, zw saturation ruling metal out
+		D3DXVECTOR4		Metal;		// UNOFFICIAL TESR_PBRMetal: x strength this pass, y grey parts' metal this pass, zw saturation ruling metal out
 		D3DXVECTOR4		MetalLook;	// UNOFFICIAL TESR_PBRMetalLook: x bare metal roughness, y polished, z sky reflections, w debug view
 		D3DXVECTOR4		Env;		// UNOFFICIAL TESR_PBREnv (EnvTemplate.hlsl): x Lighting, y Strength, z WithMetal
 		D3DXVECTOR4		Math = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_PBRMath (Includes/PBR.hlsl, c223): x EnergySplit on
@@ -165,6 +165,9 @@ public:
 	// for the first-person model (BeginFirstPerson / EndFirstPerson round that pass) and for the world.
 	struct MetalSettingsStruct {
 		float FirstPerson = 0.0f, World = 0.0f;
+		// GreyMetal (first-person weapon) / WorldGreyMetal (everything else): the metal share where the shininess mask is bare,
+		// TESR_PBRMetal.y, swapped round the first-person pass like FirstPerson / World. 2026-11-16: bare rock and concrete read as metal.
+		float GreyMetal = 0.0f, WorldGreyMetal = 0.0f;
 		float FadeDistance = 0.0f;	// FadeDistance; 0: where the game starts dropping highlights
 		float CubeReflections = 0.0f;	// UNOFFICIAL [Shaders.PBR.Metal] CubeReflections: share of the live surroundings cube
 		float EnvCubeReflections = 0.0f;	// UNOFFICIAL [Shaders.PBR.EnvMaps] CubeReflections: the same for the env-map pass

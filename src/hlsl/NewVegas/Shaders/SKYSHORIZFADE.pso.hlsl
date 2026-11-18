@@ -20,30 +20,27 @@ struct VtxVaryings {
     float4 f_color_0 : COLOR0;
 };
 
-// hash based 3d value noise
-// function taken from https://www.shadertoy.com/view/XslGRr
-// Created by inigo quilez - iq/2013
-// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
-// ported from GLSL to HLSL by https://stackoverflow.com/questions/15628039/simplex-noise-shader
-float hash( float nn )
+// 3D value noise: a random value in [0, 1) at each whole-number lattice point, blended between the 8 corners of the cell
+// with a smoothstep curve. Output in [0, 1), mean 0.5, one lattice cell per unit. Written for Vegas Shaders (2026-11-15);
+// it replaces upstream's copy of a Shadertoy noise under CC BY-NC-SA 3.0 (not GPL-compatible), with the same range and scale.
+// Lattice hash: Dave Hoskins' "Hash without Sine" hash13, MIT, Copyright (c) 2014 David Hoskins (shadertoy.com/view/4djSRW).
+float hash(float3 p3)
 {
-    return frac(sin(nn)*43758.5453);
+    p3 = frac(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return frac((p3.x + p3.y) * p3.z);
 }
 
-float noise( float3 xx )
+float noise(float3 xx)
 {
-    // The noise function returns a value in the range -1.0f -> 1.0f
-
-    float3 pt = floor(xx);
+    float3 cell = floor(xx);
     float3 ff = frac(xx);
-
-    ff       = ff*ff*(3.0-2.0*ff);
-    float nn = pt.x + pt.y*57.0 + 113.0*pt.z;
-
-    return lerp(lerp(lerp( hash(nn+0.0), hash(nn+1.0),ff.x),
-            lerp( hash(nn+57.0), hash(nn+58.0),ff.x),ff.y),
-            lerp(lerp( hash(nn+113.0), hash(nn+114.0),ff.x),
-            lerp( hash(nn+170.0), hash(nn+171.0),ff.x),ff.y),ff.z);
+    ff = ff * ff * (3.0 - 2.0 * ff);
+    float z0 = lerp(lerp(hash(cell), hash(cell + float3(1, 0, 0)), ff.x),
+                    lerp(hash(cell + float3(0, 1, 0)), hash(cell + float3(1, 1, 0)), ff.x), ff.y);
+    float z1 = lerp(lerp(hash(cell + float3(0, 0, 1)), hash(cell + float3(1, 0, 1)), ff.x),
+                    lerp(hash(cell + float3(0, 1, 1)), hash(cell + float3(1, 1, 1)), ff.x), ff.y);
+    return lerp(z0, z1, ff.z);
 }
 
 #include "includes/Helpers.hlsl"

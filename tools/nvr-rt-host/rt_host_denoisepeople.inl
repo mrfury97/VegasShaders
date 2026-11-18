@@ -7,7 +7,7 @@
 // half must blend by 1 / 5 (history capped to 4, + this frame) and the right half by 1 / 32 (MaxHistory); with 0 both by 1 / 32.
 static bool sceneDenoisePeople(Ctx& c) {
 	Host& h = *c.host;
-	// the pass with its two targets (as RtDenoise.cpp Make("RtDenoiseTemporalRgb", 7, 192, 2))
+	// the pass with its two targets (as RtDenoise.cpp Make("RtDenoiseTemporalRgb", 8, 192, 2); 7 images before 2026-11-15)
 	FragPass pass;
 	{
 		FILE* f = nullptr; const std::string file = gM.compute + "\\RtDenoiseTemporalRgb.spv"; fopen_s(&f, file.c_str(), "rb");
@@ -15,16 +15,16 @@ static bool sceneDenoisePeople(Ctx& c) {
 		std::vector<char> spirv; char buf[65536]; size_t n;
 		while ((n = fread(buf, 1, sizeof(buf), f)) > 0) spirv.insert(spirv.end(), buf, buf + n);
 		fclose(f);
-		NVR_EXT_BINDING_DESC bindings[8] = {};
-		for (UINT i = 0; i < 7; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
-		bindings[7] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 176 };
+		NVR_EXT_BINDING_DESC bindings[9] = {};	// (2026-11-15 GIGrassDenoise port: + the soft mask, image 7; the depth stands in)
+		for (UINT i = 0; i < 8; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
+		bindings[8] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 176 };
 		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 		desc.pFragmentSpirv = spirv.data(); desc.FragmentSpirvSize = UINT(spirv.size());
-		desc.BindingCount = 8; desc.pBindings = bindings; desc.PushConstantSize = 200;	// (ptaaa-denoiser: + fireflyK; perf-history: + fastFrames)
+		desc.BindingCount = 9; desc.pBindings = bindings; desc.PushConstantSize = 200;	// (ptaaa-denoiser: + fireflyK; perf-history: + fastFrames)
 		desc.UsesSamplerHeap = TRUE; desc.SamplerHeapSet = 0; desc.SamplerHeapBinding = 0;
 		desc.ColorTargetCount = 2; desc.Blend = NVR_EXT_BLEND_NONE; desc.ColorWriteMask = 0xF; desc.pDebugName = "RtDenoiseTemporalRgb";
 		CHECKHR(h.ext->CreateGraphicsPipeline(&desc, &pass.pipe), "CreateGraphicsPipeline");
-		pass.images = 7; pass.push = 200;
+		pass.images = 8; pass.push = 200;
 		if (!gPointClamp) { NVR_EXT_SAMPLER_DESC sd = { NVR_EXT_FILTER_NEAREST, NVR_EXT_ADDRESS_CLAMP }; CHECKHR(h.ext->CreateSampler(&sd, &gPointClamp), "CreateSampler"); }
 	}
 	World w;
@@ -58,13 +58,13 @@ static bool sceneDenoisePeople(Ctx& c) {
 		put4(t.params, 32.0f, 0.03f, 1.0f / S, 1.0f / S);
 		put4(t.rect, 1, 1, 1, 1);
 		t.peopleCap = people;
-		IUnknown* images[7] = { noisy.t, histA.t, depth.t, histB.t, depth.t, depth.t, captured.t };
-		NVR_EXT_RESOURCE_BINDING b[8] = {};
-		for (UINT i = 0; i < 7; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = images[i]; }
-		b[7].Slot = 0; b[7].Type = NVR_EXT_BIND_SAMPLER; b[7].pResource = gPointClamp;
+		IUnknown* images[8] = { noisy.t, histA.t, depth.t, histB.t, depth.t, depth.t, captured.t, depth.t };
+		NVR_EXT_RESOURCE_BINDING b[9] = {};
+		for (UINT i = 0; i < 8; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = images[i]; }
+		b[8].Slot = 0; b[8].Type = NVR_EXT_BIND_SAMPLER; b[8].pResource = gPointClamp;
 		NVR_EXT_DRAW_DESC d = {};
 		d.pPipeline = pass.pipe; d.TargetCount = 2; d.Targets[0].pResource = outA.s; d.Targets[1].pResource = outB.s;
-		d.BindingCount = 8; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 200;
+		d.BindingCount = 9; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 200;
 		CHECKHR(h.ext->Draw(&d), "Draw");
 		std::vector<float> out;
 		if (!readTex(h, outA, out, 4)) return false;
@@ -102,13 +102,13 @@ static bool sceneDenoisePeople(Ctx& c) {
 			put4(t.params, 32.0f, 0.03f, 1.0f / S, 1.0f / S);
 			put4(t.rect, 1, 1, 1, 1);
 			t.peopleCap = 4.0f;
-			IUnknown* images[7] = { noisy.t, histA.t, depth.t, histB.t, depth.t, depth.t, captured.t };
-			NVR_EXT_RESOURCE_BINDING b[8] = {};
-			for (UINT i = 0; i < 7; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = images[i]; }
-			b[7].Slot = 0; b[7].Type = NVR_EXT_BIND_SAMPLER; b[7].pResource = gPointClamp;
+			IUnknown* images[8] = { noisy.t, histA.t, depth.t, histB.t, depth.t, depth.t, captured.t, depth.t };
+			NVR_EXT_RESOURCE_BINDING b[9] = {};
+			for (UINT i = 0; i < 8; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = images[i]; }
+			b[8].Slot = 0; b[8].Type = NVR_EXT_BIND_SAMPLER; b[8].pResource = gPointClamp;
 			NVR_EXT_DRAW_DESC d = {};
 			d.pPipeline = pass.pipe; d.TargetCount = 2; d.Targets[0].pResource = outA.s; d.Targets[1].pResource = outB.s;
-			d.BindingCount = 8; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 200;
+			d.BindingCount = 9; d.pBindings = b; d.pPushData = &t; d.PushDataSize = 200;
 			CHECKHR(h.ext->Draw(&d), "Draw");
 			std::vector<float> out;
 			if (!readTex(h, outA, out, 4)) return false;
@@ -144,16 +144,16 @@ static bool sceneDenoiseAntiLag(Ctx& c) {
 		std::vector<char> spirv; char buf[65536]; size_t n;
 		while ((n = fread(buf, 1, sizeof(buf), f)) > 0) spirv.insert(spirv.end(), buf, buf + n);
 		fclose(f);
-		NVR_EXT_BINDING_DESC bindings[8] = {};
-		for (UINT i = 0; i < 7; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
-		bindings[7] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 176 };
+		NVR_EXT_BINDING_DESC bindings[9] = {};	// (2026-11-15 GIGrassDenoise port: + the soft mask, image 7; the depth stands in)
+		for (UINT i = 0; i < 8; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
+		bindings[8] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 176 };
 		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 		desc.pFragmentSpirv = spirv.data(); desc.FragmentSpirvSize = UINT(spirv.size());
-		desc.BindingCount = 8; desc.pBindings = bindings; desc.PushConstantSize = 200;	// (ptaaa-denoiser: + fireflyK; perf-history: + fastFrames)
+		desc.BindingCount = 9; desc.pBindings = bindings; desc.PushConstantSize = 200;	// (ptaaa-denoiser: + fireflyK; perf-history: + fastFrames)
 		desc.UsesSamplerHeap = TRUE; desc.SamplerHeapSet = 0; desc.SamplerHeapBinding = 0;
 		desc.ColorTargetCount = 2; desc.Blend = NVR_EXT_BLEND_NONE; desc.ColorWriteMask = 0xF; desc.pDebugName = "RtDenoiseTemporalRgb";
 		CHECKHR(h.ext->CreateGraphicsPipeline(&desc, &pass.pipe), "CreateGraphicsPipeline");
-		pass.images = 7; pass.push = 200;
+		pass.images = 8; pass.push = 200;
 		if (!gPointClamp) { NVR_EXT_SAMPLER_DESC sd = { NVR_EXT_FILTER_NEAREST, NVR_EXT_ADDRESS_CLAMP }; CHECKHR(h.ext->CreateSampler(&sd, &gPointClamp), "CreateSampler"); }
 	}
 	World w;
@@ -185,13 +185,13 @@ static bool sceneDenoiseAntiLag(Ctx& c) {
 		put4(t.params, 32.0f, 0.03f, 1.0f / S, 1.0f / S);
 		put4(t.rect, 1, 1, 1, 1);
 		t.antiLag = antiLag;
-		IUnknown* images[7] = { noisy.t, histA.t, depth.t, histB.t, depth.t, depth.t, captured.t };
-		NVR_EXT_RESOURCE_BINDING bd[8] = {};
-		for (UINT i = 0; i < 7; i++) { bd[i].Slot = i; bd[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bd[i].pResource = images[i]; }
-		bd[7].Slot = 0; bd[7].Type = NVR_EXT_BIND_SAMPLER; bd[7].pResource = gPointClamp;
+		IUnknown* images[8] = { noisy.t, histA.t, depth.t, histB.t, depth.t, depth.t, captured.t, depth.t };
+		NVR_EXT_RESOURCE_BINDING bd[9] = {};
+		for (UINT i = 0; i < 8; i++) { bd[i].Slot = i; bd[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bd[i].pResource = images[i]; }
+		bd[8].Slot = 0; bd[8].Type = NVR_EXT_BIND_SAMPLER; bd[8].pResource = gPointClamp;
 		NVR_EXT_DRAW_DESC d = {};
 		d.pPipeline = pass.pipe; d.TargetCount = 2; d.Targets[0].pResource = outA.s; d.Targets[1].pResource = outB.s;
-		d.BindingCount = 8; d.pBindings = bd; d.pPushData = &t; d.PushDataSize = 200;
+		d.BindingCount = 9; d.pBindings = bd; d.pPushData = &t; d.PushDataSize = 200;
 		CHECKHR(h.ext->Draw(&d), "Draw");
 		return readTex(h, outA, a, 4) && readTex(h, outB, b, 4);
 	};

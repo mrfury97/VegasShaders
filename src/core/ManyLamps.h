@@ -3,6 +3,9 @@
 #include "GpuProfiler.h"
 #include "PointShadowForward.h"
 #include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 (the table leaves the flashlight's game lamp out)
+#include "LampTableCore.h"	// UNOFFICIAL 2026-11-14 LampTableFast (the table's data work, shared with tests/lamp_table_bench.cpp)
+#include "LampTableThread.h"	// UNOFFICIAL 2026-11-14 LampTableThread (the binning on FrameWorker's thread, shared with the bench)
+#include "ForwardPlusHeader.h"	// UNOFFICIAL 2026-11-15 DeferredTransparents (the forward+ records' header texels; nothing while it is off)
 #include <unordered_map>
 
 // Ported 2026-10-28 from Conor (mrfury97)'s fork onto P84 v3 (github.com/mrfury97/NVR-Unofficial-Optimized pull request 1, branch
@@ -149,8 +152,10 @@ namespace ManyLamps {
 	// froxel lists and the tile rows every frame, so they are made as for LampTableStandalone + TableLamps (without TABLE_LAMP_SHADOWS).
 	inline int DeferredWanted = -1;
 	inline bool DeferredAtStartup() {
-		if (DeferredWanted < 0) DeferredWanted = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Deferred", "Enabled") != 0 && ShadersWant() &&
-			TableAtStartup() && PointShadowForward::AtlasWanted() &&
+		// UNOFFICIAL 2026-11-14 full deferred renderer (core/DeferredRenderer.h): with [Main.Main.Quality] DeferredRenderer on, on any runtime
+		// (native D3D9 too): the table then comes from LampTableStandalone, the atlas from PointShadowForward::AtlasRuns; not ManyLampsOnePass.
+		if (DeferredWanted < 0) DeferredWanted = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Deferred", "Enabled") != 0 &&
+			(SettingForce::Mode() > 0 || (ShadersWant() && TableAtStartup())) && PointShadowForward::AtlasRuns() &&
 			TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
 		return DeferredWanted != 0;
 	}
@@ -214,6 +219,7 @@ namespace ManyLamps {
 	enum { TileRows = 2 };	// UNOFFICIAL 2026-10-31 TableLamps: row T 2 texels a lamp (tile u, v, span, fade | camera-relative position, 1 / radius),
 							// row T + 1 one texel a lamp (cube slot, RT id, fixture size (0: not per lamp yet), 1) (LightCommon.hlsl LightCommonTile)
 	inline int TilesX = 0, TilesY = 0;
+	inline int TileSize = TilePx;	// UNOFFICIAL 2026-11-15 the lists' tile size in pixels (LampTableCore::TileSizeFor: 64 up to 2,560 x 1,536, larger past it)
 	inline float BinWidth = 0.0f, BinHeight = 0.0f;	// UNOFFICIAL 2026-10-31 DeferredLamps: the viewport the lists were made for (its pass maps its pixels by screen share)
 	inline bool ClusterLive = false;	// this frame: compiled in, the setting on, the lists made
 	inline bool WorldDraw = false;		// the pass being set up is drawn in the world scene (the only camera / viewport the lists are made for)
@@ -223,7 +229,8 @@ namespace ManyLamps {
 	inline IDirect3DTexture9* Table = nullptr;
 	inline bool TableFailed = false;
 	inline UInt32 TableFrame = 0;		// FrameId the table was filled for
-	inline std::unordered_map<const ShadowSceneLight*, int> TableIndex;
+	// (2026-11-14: a flat map, no allocation per lamp: the same finds and inserts; LampTableCore.h PtrMap)
+	inline LampTableCore::PtrMap<int> TableIndex;
 	// UNOFFICIAL 2026-11-03 (rtspec) the table's ACTIVE lamps (the ones the deferred pass bins) for the reference path tracer (RtPathTrace.cpp
 	// PTGameLamps 4): world position, reach (Spec.r), colour as in the table (linear when linear lighting is compiled in); TableFrame says when
 	struct ActiveLamp { float pos[3], reach, colour[3]; };
@@ -236,6 +243,45 @@ namespace ManyLamps {
 	// UNOFFICIAL 2026-10-31 LampTableStandalone / TableLamps (F10 line, BeginFrame)
 	inline double StatBuildMs = 0;
 	inline unsigned long long StatBuilds = 0, StatTiled = 0, StatTiledPool = 0;
+	// UNOFFICIAL 2026-11-14 LampTableFast / LampTableCheck ([Main.Main.Misc], live, read once a frame in BeginFrame; docs/next/FD-LAMPTABLE-RESULTS.md):
+	// the same table and froxel lists for less main-thread CPU (LampTableCore.h BinFast; row 0 made in cached memory and copied: the locked
+	// dynamic texture is write-combined memory on native D3D9, where reading the lamps back for ActiveLamps / AllLamps cost ~0.45 ms a make in
+	// the micro-benchmark). Check: the other path made too, into cached rows, and compared (F10 "LAMP TABLE CPU" line). Off: as before.
+	inline bool FastLive = false, CheckLive = false;
+	inline std::vector<LampTableCore::SceneLamp> SceneLamps;	// the scene walk's lamps, in table order
+	inline std::vector<int> ActiveIndex;						// table indices of the lamps the game has on (the froxel lists' lamps)
+	inline LampTableCore::RefState BinRefState;
+	inline LampTableCore::FastState* BinFastState = nullptr;	// (1 MB of scratch, made at the first fast make)
+	inline LampTableCore::ColourMemo* RowMemo = nullptr;
+	inline std::vector<float> RowStaged, CheckRows;
+	inline UInt32 BinSerial = 0;	// one more each binning (either path): stable keys count only from the binning just before
+	inline UInt32 RefLastSerial = 0;	// UNOFFICIAL 2026-11-15 the binning BinReference last ran on (made or checked): LampTableCheck's seeding
+	// UNOFFICIAL 2026-11-15 DeferredTiledLight (core/DeferredLamps.h DeferredLamps::Tiles; docs/next/FD-LIGHTPASS-RESULTS.md): which binning made the
+	// lists the shaders read this frame, so the deferred lamp passes can draw only over the tiles whose lists hold a lamp. CountsFrame = the
+	// FrameId of the last binning (in place or on the worker: its counts are complete after FinishTable), CountsFast = BinFast made them
+	// (BinFastState->counts), else BinReference (BinRefState.counts). LampTableCheck's other path bins into the OTHER state, never this one.
+	inline UInt32 CountsFrame = 0;
+	inline bool CountsFast = false;
+	// The making binning's lamp count of froxel f (LampTableCore's index (slice x TilesY + ty) x TilesX + tx), or -1 when unknown.
+	inline int FroxelCount(int f) {
+		if (f < 0 || f >= TilesX * TilesY * (int)Slices) return -1;
+		if (CountsFast) return BinFastState ? (int)BinFastState->counts[f] : -1;
+		return f < (int)BinRefState.counts.size() ? (int)BinRefState.counts[f] : -1;
+	}
+	inline double StatWalkMs = 0, StatRowMs = 0, StatUploadMs = 0;
+	inline unsigned long long StatActive = 0, StatChecks = 0, StatCheckRow = 0, StatCheckLists = 0, StatCheckCounts = 0;
+	// UNOFFICIAL 2026-11-14 LampTableThread ([Main.Main.Misc], live, read once a frame in BeginFrame, default false; docs/next/FD-LAMPTHREAD-RESULTS.md):
+	// with LampTableFast, the froxel binning (BinFast: plain data) runs on FrameWorker's thread while the game goes on drawing; the table stays
+	// locked until FinishTable (the first reader: DeferredLamps::Apply; else the end of the game's render call), which waits for the job if it
+	// is not done and unlocks. Only where no draw reads the table before that (Active() off: native D3D9, or ManyLampsOnePass off): with
+	// ManyLampsOnePass the frame's first world draw binds the table at once, so the binning stays in place there. Same lists, same counts.
+	inline bool ThreadLive = false;
+	inline LampTableThread::Job TableJob;
+	inline bool JobCheck = false;	// LampTableCheck when the job was started (its comparison runs at the finish, the lists complete)
+	inline double StatThreadWorkerMs = 0, StatThreadWaitMs = 0;
+	inline unsigned long long StatThreadJobs = 0, StatThreadInPlace = 0;
+	static_assert(LampTableCore::TableLamps == 1024 && LampTableCore::TilePx == 64 && LampTableCore::MaxTilesX == 40 && LampTableCore::MaxTilesY == 24 &&
+		LampTableCore::Slices == 8, "LampTableCore.h's grid is ManyLamps' (LightCommon.hlsl)");
 
 	// UNOFFICIAL 2026-10-31 TableLampsParity ([Shaders.ShadowsInteriors.Atlas], live, a test): the tile row as written (8 floats + cube slot a
 	// lamp), and the counts of ParityCheck (F10 line).
@@ -263,99 +309,112 @@ namespace ManyLamps {
 	// dimmers are this frame's: the scene walk sets them). Position in the world (the draw adds its lighting offset), reach, colour as Put.
 	// UNOFFICIAL 2026-10-30 ClusteredLamps: the active lamps into the froxel lists (rows 1+ of the locked table; pitch in floats).
 	// standalone (LampTableStandalone): the lists made whatever ClusteredLamps says live; ClusterLive (the shaders' c46.w) still follows it.
-	inline void BinFroxels(float* t, int pitch, const std::vector<const ShadowSceneLight*>& active, bool standalone = false) {
+	inline void CheckLists(const LampTableCore::View& v, const float* lists, int pitch, UInt32 serial, const LampTableCore::BinStats& stats);	// (below)
+	inline void BinFroxels(float* t, int pitch, bool standalone = false) {
 		const bool live = ClusterAtStartup() && TheSettingManager->GetSettingI("Main.Main.Misc", "ClusteredLamps") != 0;
 		if (!live && !standalone) return;
 		LARGE_INTEGER freq, c0, c1; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&c0);
 		D3DVIEWPORT9 vp = {};
 		TheRenderManager->device->GetViewport(&vp);
-		TilesX = (std::min)((int)MaxTilesX, (int)(vp.Width + TilePx - 1) / TilePx);
-		TilesY = (std::min)((int)MaxTilesY, (int)(vp.Height + TilePx - 1) / TilePx);
+		LampTableCore::View v;
+		v.width = vp.Width; v.height = vp.Height;
+		v.tilePx = TileSize = LampTableCore::TileSizeFor(vp.Width, vp.Height);	// UNOFFICIAL 2026-11-15 (was 64 always: the grid's cap broke 4K)
+		TilesX = LampTableCore::TilesX(v);
+		TilesY = LampTableCore::TilesY(v);
 		BinWidth = (float)vp.Width; BinHeight = (float)vp.Height;
 		if (TilesX <= 0 || TilesY <= 0) return;
 		const D3DXMATRIX& inv = TheRenderManager->InvViewMatrix;
-		const D3DXVECTOR3 right(inv._11, inv._12, inv._13), up(inv._21, inv._22, inv._23), fwd(inv._31, inv._32, inv._33);
-		const float tanX = fabsf(TheRenderManager->InvProjMatrix._11), tanY = fabsf(TheRenderManager->InvProjMatrix._22);
+		v.right[0] = inv._11; v.right[1] = inv._12; v.right[2] = inv._13;
+		v.up[0] = inv._21; v.up[1] = inv._22; v.up[2] = inv._23;
+		v.fwd[0] = inv._31; v.fwd[1] = inv._32; v.fwd[2] = inv._33;
+		v.tanX = fabsf(TheRenderManager->InvProjMatrix._11); v.tanY = fabsf(TheRenderManager->InvProjMatrix._22);
 		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
-		auto sliceOf = [](float z) { return z < 64.0f ? 0 : (std::min)((int)Slices - 1, (int)floorf(log2f(z)) - 5); };
-		struct L { int index; float key; float x, y, z, r; const ShadowSceneLight* light; };
-		std::vector<L> lamps; lamps.reserve(active.size());
+		v.cam[0] = cam.x; v.cam[1] = cam.y; v.cam[2] = cam.z;
+		v.listTexels = ListTexelsNow();
 		// UNOFFICIAL 2026-11-01 StableOrder ([Shaders.ShadowsInteriors.Deferred] StableOrder, live; docs/next/FLICKER-PROGRAM.md part 3): the
 		// lists were sorted by brightness x reach / distance from the camera, so walking re-ordered them, and the deferred pass gives the first
 		// 16 lamps of a pixel's list the full shadow filter and the rest the inline one (DeferredLamps.hlsl): lamps near 16th place switched
 		// filter as you moved and their shadow edges shimmered. On: brightness x reach only (no distance: the same order wherever you stand),
 		// ties by the lamp (its address: steady while it lives), and a lamp's key kept from the frame before while it changes by under 10 %
 		// (flickering lamps, LOD dimmer steps). A full list still drops the least important. Also the forward ClusteredLamps' first 31.
-		// Off: as before.
-		const bool stableOrder = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Deferred", "StableOrder") != 0;
-		static std::unordered_map<const ShadowSceneLight*, std::pair<float, UInt32>> stableKeys;	// lamp -> key used, frame last seen
-		static UInt32 stableFrame = 0;
-		stableFrame++;
-		for (const ShadowSceneLight* light : active) {
-			const NiPointLight* s = light->sourceLight;
-			const D3DXVECTOR3 v(s->m_worldTransform.pos.x - cam.x, s->m_worldTransform.pos.y - cam.y, s->m_worldTransform.pos.z - cam.z);
-			const float x = D3DXVec3Dot(&v, &right), y = D3DXVec3Dot(&v, &up), z = D3DXVec3Dot(&v, &fwd), r = s->Spec.r;
-			if (r <= 0.0f || z + r <= 1.0f) continue;	// wholly behind the camera
-			const float brightness = (s->Diff.r + s->Diff.g + s->Diff.b) * s->Dimmer * light->fLODDimmer;
-			float key;
-			if (stableOrder) {
-				key = brightness * r;
-				auto& kept = stableKeys[light];
-				if (kept.second && kept.second + 1 >= stableFrame && fabsf(key - kept.first) < 0.1f * kept.first) key = kept.first;
-				kept = { key, stableFrame };
-			}
-			else {
-				const float dist = (std::max)(sqrtf(x * x + y * y + z * z), 0.25f * r + 1.0f);
-				key = brightness * r / dist;
-			}
-			lamps.push_back({ TableIndex[light], key, x, y, z, r, light });
-		}
-		if (stableOrder) {
-			if ((stableFrame & 1023) == 0) for (auto it = stableKeys.begin(); it != stableKeys.end();) it = stableFrame - it->second.second > 1024 ? stableKeys.erase(it) : std::next(it);
-			std::sort(lamps.begin(), lamps.end(), [](const L& a, const L& b) { return a.key != b.key ? a.key > b.key : (uintptr_t)a.light < (uintptr_t)b.light; });
-		}
-		else {
-			if (!stableKeys.empty()) stableKeys.clear();
-			std::sort(lamps.begin(), lamps.end(), [](const L& a, const L& b) { return a.key > b.key; });	// a full list drops the least important
-		}
-		static std::vector<UInt8> counts;
-		counts.assign((size_t)TilesX * TilesY * Slices, 0);
+		// Off: as before. (2026-11-14: the binning itself is LampTableCore.h's BinReference, or BinFast with LampTableFast.)
+		v.stableOrder = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Deferred", "StableOrder") != 0;
+		const UInt32 serial = ++BinSerial;
+		const int active = (int)ActiveIndex.size();
 		float* lists = t + pitch;	// row 1
-		auto put = [&](int froxel, int k, float value) {	// entry k of the froxel's list (-1 = its count)
-			const int texel = froxel * ListTexelsNow() + (k + 1) / 4, comp = (k + 1) % 4;
-			lists[(texel / TableTexels) * pitch + (texel % TableTexels) * 4 + comp] = value;
-		};
-		for (const L& l : lamps) {
-			const float zmin = l.z - l.r, zmax = l.z + l.r;
-			int x0 = 0, x1 = TilesX - 1, y0 = 0, y1 = TilesY - 1;
-			if (zmin > 8.0f) {	// a conservative screen rect of the sphere (each side taken at the depth that makes it widest)
-				const float lx = l.x - l.r, hx = l.x + l.r, ly = l.y - l.r, hy = l.y + l.r;
-				const float nx0 = lx / ((lx < 0.0f ? zmin : zmax) * tanX), nx1 = hx / ((hx > 0.0f ? zmin : zmax) * tanX);
-				const float ny0 = ly / ((ly < 0.0f ? zmin : zmax) * tanY), ny1 = hy / ((hy > 0.0f ? zmin : zmax) * tanY);
-				if (nx0 > 1.0f || nx1 < -1.0f || ny0 > 1.0f || ny1 < -1.0f) continue;	// off screen
-				x0 = (std::max)(0, (int)floorf((nx0 * 0.5f + 0.5f) * vp.Width / TilePx));
-				x1 = (std::min)(TilesX - 1, (int)floorf((nx1 * 0.5f + 0.5f) * vp.Width / TilePx));
-				y0 = (std::max)(0, (int)floorf((0.5f - ny1 * 0.5f) * vp.Height / TilePx));
-				y1 = (std::min)(TilesY - 1, (int)floorf((0.5f - ny0 * 0.5f) * vp.Height / TilePx));
-			}
-			const int s0 = sliceOf((std::max)(zmin, 0.0f)), s1 = sliceOf(zmax);
-			StatClusterLamps++;
-			for (int sl = s0; sl <= s1; sl++)
-				for (int ty = y0; ty <= y1; ty++)
-					for (int tx = x0; tx <= x1; tx++) {
-						const int froxel = (sl * TilesY + ty) * TilesX + tx;
-						UInt8& c = counts[froxel];
-						if (c >= ListLampsNow()) { StatClusterOver++; continue; }
-						put(froxel, c, (float)l.index);
-						c++;
-						StatClusterEntries++;
-					}
-		}
-		for (size_t f = 0; f < counts.size(); f++) put((int)f, -1, (float)counts[f]);
+		if (FastLive && !BinFastState) BinFastState = new LampTableCore::FastState();
 		ClusterLive = live;
+		StatClusterFrames++;
+		// UNOFFICIAL 2026-11-15 LampTableCheck (FD-LAMPTHREAD-RESULTS.md "Batch 3"): the checking path starts from the making path's stable-key
+		// history when it did not run on the binning before (a check window's first binning; LampTableCore::SeedRefFromFast). Without it, kept
+		// keys of flickering / fading lamps differed between the two for the whole window and the check reported every binning (Vault 21, the
+		// cave), although the lists the shaders read were right. Before the making path bins (it replaces that history).
+		if (CheckLive) {
+			if (!BinFastState) BinFastState = new LampTableCore::FastState();
+			if (FastLive) { if (RefLastSerial + 1 != serial) LampTableCore::SeedRefFromFast(*BinFastState, serial, BinRefState); }
+			else if (BinFastState->lastSerial + 1 != serial) LampTableCore::SeedFastFromRef(BinRefState, serial, *BinFastState);
+		}
+		// UNOFFICIAL 2026-11-14 LampTableThread: the binning onto the worker (FinishTable takes its counts, runs the check and unlocks)
+		if (FastLive && ThreadLive) {
+			LampTableThread::Job& j = TableJob;
+			j.view = v; j.table = SceneLamps.data(); j.active = ActiveIndex.data(); j.nActive = active;
+			j.lists = lists; j.pitch = pitch; j.serial = serial; j.state = BinFastState;
+			if (!Active() && LampTableThread::Start(j)) {
+				JobCheck = CheckLive;
+				CountsFast = true; CountsFrame = FrameId;	// UNOFFICIAL 2026-11-15 DeferredTiledLight (complete after FinishTable)
+				QueryPerformanceCounter(&c1);
+				StatClusterMs += 1000.0 * (c1.QuadPart - c0.QuadPart) / freq.QuadPart;	// (+ the wait, at the finish)
+				return;
+			}
+			StatThreadInPlace++;	// ManyLampsOnePass's draws read the table at once, or the worker holds another job (SkyOnWorker): in place
+		}
+		LampTableCore::BinStats stats;
+		if (FastLive) LampTableCore::BinFast(v, SceneLamps.data(), ActiveIndex.data(), active, lists, pitch, serial, *BinFastState, stats);
+		else { LampTableCore::BinReference(v, SceneLamps.data(), ActiveIndex.data(), active, lists, pitch, serial, BinRefState, stats); RefLastSerial = serial; }
+		CountsFast = FastLive; CountsFrame = FrameId;	// UNOFFICIAL 2026-11-15 DeferredTiledLight
+		StatClusterLamps += stats.lamps; StatClusterEntries += stats.entries; StatClusterOver += stats.over;
 		QueryPerformanceCounter(&c1);
 		StatClusterMs += 1000.0 * (c1.QuadPart - c0.QuadPart) / freq.QuadPart;
-		StatClusterFrames++;
+		if (CheckLive) CheckLists(v, lists, pitch, serial, stats);
+	}
+
+	// LampTableCheck: the binning made the other way into cached rows (row 1 on), compared with what the shaders read (not timed). lists: the
+	// binning as made (row 1 of the locked table), complete.
+	inline void CheckLists(const LampTableCore::View& v, const float* lists, int pitch, UInt32 serial, const LampTableCore::BinStats& stats) {
+		if (!BinFastState) BinFastState = new LampTableCore::FastState();
+		const int active = (int)ActiveIndex.size();
+		const int checkPitch = TableTexels * 4;
+		CheckRows.assign((size_t)checkPitch * (FroxelTableRows() - 1), 0.0f);
+		LampTableCore::BinStats other;
+		if (FastLive) { LampTableCore::BinReference(v, SceneLamps.data(), ActiveIndex.data(), active, CheckRows.data(), checkPitch, serial, BinRefState, other); RefLastSerial = serial; }
+		else LampTableCore::BinFast(v, SceneLamps.data(), ActiveIndex.data(), active, CheckRows.data(), checkPitch, serial, *BinFastState, other);
+		StatChecks++;
+		if (LampTableCore::ListsEqual(v, lists, pitch, CheckRows.data(), checkPitch) >= 0) StatCheckLists++;
+		if (other.lamps != stats.lamps || other.entries != stats.entries || other.over != stats.over) StatCheckCounts++;
+	}
+
+	// UNOFFICIAL 2026-11-14 LampTableThread: the table's make finished: the worker's binning waited for (if not done yet), its counts, the
+	// check, the unlock. Called before anything reads the table or the make's data: DeferredLamps::Apply, SetForPass's bind, BuildTable,
+	// BeginFrame, and the end of the game's render call (Render.cpp: the table never stays locked past the frame). Nothing pending: one test.
+	inline void FinishTable() {
+		if (!TableJob.pending) return;
+		LARGE_INTEGER freq, c0, c1, c2, c3; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&c0);
+		const double wait = LampTableThread::Finish(TableJob);
+		const LampTableCore::BinStats& stats = TableJob.stats;
+		StatClusterLamps += stats.lamps; StatClusterEntries += stats.entries; StatClusterOver += stats.over;
+		StatThreadJobs++;
+		StatThreadWorkerMs += TableJob.workerMs;
+		StatThreadWaitMs += wait;
+		QueryPerformanceCounter(&c1);
+		if (JobCheck) CheckLists(TableJob.view, TableJob.lists, TableJob.pitch, TableJob.serial, stats);
+		JobCheck = false;
+		QueryPerformanceCounter(&c2);
+		if (Table) Table->UnlockRect(0);
+		QueryPerformanceCounter(&c3);
+		const double ms = 1000.0 / freq.QuadPart;
+		StatClusterMs += ms * (c1.QuadPart - c0.QuadPart);	// the wait (the binning's part of the main thread)
+		StatUploadMs += ms * (c3.QuadPart - c2.QuadPart);	// the unlock
+		StatBuildMs += ms * ((c1.QuadPart - c0.QuadPart) + (c3.QuadPart - c2.QuadPart));	// (the check is not timed, as in place)
 	}
 
 	// UNOFFICIAL 2026-10-31 TableLamps: each table lamp's shadow-atlas tile (rows TileRow(), TileRow() + 1; zeros = no tile, unshadowed), from
@@ -393,7 +452,8 @@ namespace ManyLamps {
 	}
 
 	inline void BuildTable() {
-		LARGE_INTEGER freq, c0, c1; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&c0);
+		FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread: a make still on the worker finished first (its own timing)
+		LARGE_INTEGER freq, c0, c1, c2, c3, c4, c5; QueryPerformanceFrequency(&freq); QueryPerformanceCounter(&c0);
 		TableFrame = FrameId;
 		TableIndex.clear();
 		IDirect3DDevice9* d = TheRenderManager->device;
@@ -403,59 +463,128 @@ namespace ManyLamps {
 			TableFailed = true;
 			return;
 		}
-		D3DLOCKED_RECT r = {};
-		if (FAILED(Table->LockRect(0, &r, NULL, D3DLOCK_DISCARD))) return;
-		float* t = (float*)r.pBits;
-		memset(t, 0, TableTexels * 4 * sizeof(float));
-		if (TileRowsWanted()) for (UINT row = TileRow(); row < rows; row++) memset((UInt8*)t + row * r.Pitch, 0, TableTexels * 4 * sizeof(float));
-		std::vector<const ShadowSceneLight*> active;	// UNOFFICIAL 2026-10-30 ClusteredLamps: the lamps the game has on
+		// The scene walk (2026-11-14: first, into plain data, LampTableCore::SceneLamp; the lock comes after it): every point lamp of
+		// ShadowSceneNode's list once, the flashlight's game lamp left out (UNOFFICIAL 2026-11-04: the light pass is the flashlight here).
 		static std::vector<const ShadowSceneLight*> order;	// UNOFFICIAL 2026-10-31 TableLamps: lamp n of the table
 		order.clear();
-		ActiveLamps.clear();
-		AllLamps.clear();
-		const bool linear = LinearCompiled && LinearPreDecode::Gamma > 1.0f;
-		const float gamma = LinearPreDecode::Gamma;
+		if (SceneLamps.size() != (size_t)TableLamps) SceneLamps.resize(TableLamps);
+		ActiveIndex.clear();
 		int n = 0;
 		for (NiTList<ShadowSceneLight>::Entry* e = SceneNode ? SceneNode->lights.start : nullptr; e && n < TableLamps; e = e->next) {
 			const ShadowSceneLight* light = e->data;
 			const NiPointLight* source = light ? light->sourceLight : nullptr;
-			if (!source || !light->bPointLight || TableIndex.count(light)) continue;
-			if (FlashlightLamp::Is(source)) continue;	// UNOFFICIAL 2026-11-04: the flashlight's game lamp (the light pass is the flashlight here)
-			float* p = t + n * 8;
-			p[0] = source->m_worldTransform.pos.x; p[1] = source->m_worldTransform.pos.y; p[2] = source->m_worldTransform.pos.z;
-			p[3] = source->Spec.r;
-			float dimmer = source->Dimmer;
-			if (!*(const bool*)0x011F941E && dimmer > 1.0f) dimmer = 1.0f;	// BSShaderManager::bHDR (as Put)
-			const float lod = light->fLODDimmer;
-			const float raw[4] = { source->Diff.r * dimmer * lod, source->Diff.g * dimmer * lod, source->Diff.b * dimmer * lod, 0.0f };
-			if (linear) LinearPreDecode::DecodeFast(p + 4, raw, gamma);
-			else memcpy(p + 4, raw, sizeof(raw));
-			TableIndex[light] = n++;
-			order.push_back(light);
+			if (!source || !light->bPointLight) continue;
+			if (FlashlightLamp::Is(source)) continue;
+			if (!TableIndex.insert(light, n)) continue;	// (in the table already)
+			LampTableCore::SceneLamp& l = SceneLamps[n];
+			l.id = light;
+			l.pos[0] = source->m_worldTransform.pos.x; l.pos[1] = source->m_worldTransform.pos.y; l.pos[2] = source->m_worldTransform.pos.z;
+			l.reach = source->Spec.r;
+			l.diff[0] = source->Diff.r; l.diff[1] = source->Diff.g; l.diff[2] = source->Diff.b;
+			l.dimmer = source->Dimmer;
+			l.lod = light->fLODDimmer;
 			// as GetNumberOfActiveNonShadowLights: not switched off for the view (+0x110), not culled, not flagged (+0xEC)
 			const UInt8* raw8 = (const UInt8*)light;
-			if (!(((const UInt8*)source)[0x30] & 1)) AllLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });	// (2026-11-07) not hidden
-			if (*(const UInt16*)(raw8 + 0x110) != 0xFF && !(((const UInt8*)source)[0x30] & 1) && !raw8[0xEC]) {
-				active.push_back(light);
-				ActiveLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });
-			}
+			l.hidden = (((const UInt8*)source)[0x30] & 1) != 0;	// (2026-11-07) AllLamps: not hidden
+			l.active = *(const UInt16*)(raw8 + 0x110) != 0xFF && !l.hidden && !raw8[0xEC];
+			if (l.active) ActiveIndex.push_back(n);
+			order.push_back(light);
+			n++;
 		}
+		QueryPerformanceCounter(&c1);
+		D3DLOCKED_RECT r = {};
+		if (FAILED(Table->LockRect(0, &r, NULL, D3DLOCK_DISCARD))) { TableIndex.clear(); return; }
+		QueryPerformanceCounter(&c2);
+		float* t = (float*)r.pBits;
+		const int pitch = r.Pitch / (int)sizeof(float);
+		if (TileRowsWanted()) for (UINT row = TileRow(); row < rows; row++) memset((UInt8*)t + row * r.Pitch, 0, TableTexels * 4 * sizeof(float));
+		// Row 0: position in the world (the draw adds its lighting offset), reach, colour as Put (LampTableCore::FillRow).
+		const bool linear = LinearCompiled && LinearPreDecode::Gamma > 1.0f;
+		const float gamma = LinearPreDecode::Gamma;
+		const bool hdr = *(const bool*)0x011F941E;	// BSShaderManager::bHDR (as Put)
+		auto decode = [](float* out, const float* in, float g) { LinearPreDecode::DecodeFast(out, in, g); };
+		const float* row;
+		if (FastLive) {	// made in cached memory (decodes kept for unchanged colours), copied in one go, read back from the copy
+			if (!RowMemo) RowMemo = new LampTableCore::ColourMemo();
+			RowStaged.resize((size_t)TableTexels * 4);
+			LampTableCore::FillRow(RowStaged.data(), SceneLamps.data(), n, hdr, linear, gamma, decode, RowMemo);
+			memcpy(t, RowStaged.data(), (size_t)TableTexels * 4 * sizeof(float));
+			row = RowStaged.data();
+		}
+		else {
+			LampTableCore::FillRow(t, SceneLamps.data(), n, hdr, linear, gamma, decode, nullptr);
+			row = t;
+		}
+		// UNOFFICIAL 2026-11-03 / 11-07 the path tracer's lamps (RtPathTrace.cpp PTGameLamps / PTAllLamps), from row 0 as written
+		ActiveLamps.clear();
+		AllLamps.clear();
+		for (int k = 0; k < n; k++) {
+			const float* p = row + k * 8;
+			if (!SceneLamps[k].hidden) AllLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });
+			if (SceneLamps[k].active) ActiveLamps.push_back({ { p[0], p[1], p[2] }, p[3], { p[4], p[5], p[6] } });
+		}
+		if (CheckLive) {	// LampTableCheck: row 0 made the other way, byte for byte (not timed apart: the row 0 time includes it)
+			if (!RowMemo) RowMemo = new LampTableCore::ColourMemo();
+			CheckRows.assign((size_t)TableTexels * 4, 0.0f);
+			LampTableCore::FillRow(CheckRows.data(), SceneLamps.data(), n, hdr, linear, gamma, decode, FastLive ? nullptr : RowMemo);
+			if (memcmp(CheckRows.data(), row, (size_t)TableTexels * 4 * sizeof(float))) StatCheckRow++;
+		}
+		QueryPerformanceCounter(&c3);
 		ClusterLive = false;
 		// (the lists only at a world-scene draw: an earlier draw of the frame may be a reflection or a cube map, with its own camera and size)
 		if (WorldBuild() && WorldDraw) ListsFrame = FrameId;
-		if (FroxelRows() && WorldDraw) BinFroxels(t, r.Pitch / (int)sizeof(float), active, StandaloneAtStartup() || DeferredAtStartup());
-		if (TileRowsWanted()) PutTiles(t, r.Pitch / (int)sizeof(float), order);
-		Table->UnlockRect(0);
+		if (FroxelRows() && WorldDraw) BinFroxels(t, pitch, StandaloneAtStartup() || DeferredAtStartup());
+		if (TileRowsWanted()) PutTiles(t, pitch, order);
+		if (TileRowsWanted() && ForwardPlusHeader::Enabled) {	// UNOFFICIAL 2026-11-15 DeferredTransparents: the forward+ records' camera and grid (ForwardPlusHeader.h)
+			const D3DXMATRIX& inv = TheRenderManager->InvViewMatrix;
+			const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+			const float camera[3] = { cam.x, cam.y, cam.z }, right[3] = { inv._11, inv._12, inv._13 }, up[3] = { inv._21, inv._22, inv._23 }, forward[3] = { inv._31, inv._32, inv._33 };
+			ForwardPlusHeader::Put(t + pitch * (TileRow() + 1), camera, right, up, forward, fabsf(TheRenderManager->InvProjMatrix._11), fabsf(TheRenderManager->InvProjMatrix._22),
+				BinWidth / (float)TileSize, BinHeight / (float)TileSize, TilesX, TilesY, WorldDraw && FroxelRows() && ListsFrame == FrameId);
+		}
+		QueryPerformanceCounter(&c4);
+		if (!TableJob.pending) Table->UnlockRect(0);	// (LampTableThread: the binning on the worker: FinishTable unlocks)
+		QueryPerformanceCounter(&c5);
 		StatTableLamps = n;
-		QueryPerformanceCounter(&c1);
-		StatBuildMs += 1000.0 * (c1.QuadPart - c0.QuadPart) / freq.QuadPart;
+		StatActive += ActiveIndex.size();
+		const double ms = 1000.0 / freq.QuadPart;
+		StatWalkMs += ms * (c1.QuadPart - c0.QuadPart);
+		StatRowMs += ms * (c3.QuadPart - c2.QuadPart);
+		StatUploadMs += ms * ((c2.QuadPart - c1.QuadPart) + (c5.QuadPart - c4.QuadPart));	// lock + unlock
+		StatBuildMs += ms * (c5.QuadPart - c0.QuadPart);
 		StatBuilds++;
+	}
+
+	// UNOFFICIAL 2026-11-14 the F10 line of the table's CPU cost per make, any runtime (LampTableStandalone / LightCommonLamps), from BeginFrame
+	// before it resets StatBuildMs / StatBuilds / StatCluster*; resets its own counters.
+	inline void LogTableCpu(unsigned frames) {
+		if (!StatBuilds || !frames) {
+			StatWalkMs = StatRowMs = StatUploadMs = 0; StatActive = StatChecks = StatCheckRow = StatCheckLists = StatCheckCounts = 0;
+			StatThreadWorkerMs = StatThreadWaitMs = 0; StatThreadJobs = StatThreadInPlace = 0;
+			return;
+		}
+		const double b = (double)StatBuilds, cf = StatClusterFrames ? (double)StatClusterFrames : 1.0;
+		char check[192] = "";
+		if (CheckLive || StatChecks || StatCheckRow) sprintf_s(check, " | CHECK against the %s path: %llu binnings, row 0 differed %llu, lists %llu, counts %llu",
+			FastLive ? "old" : "fast", StatChecks, StatCheckRow, StatCheckLists, StatCheckCounts);
+		// UNOFFICIAL 2026-11-14 LampTableThread: everything above is main-thread time (the make, and in its froxel binning the hand-off plus
+		// the wait at the finish); the worker's own time apart. "in place": wanted, but the worker held another job (or ManyLampsOnePass on).
+		char thread[256] = "";
+		if (ThreadLive || StatThreadJobs || StatThreadInPlace) sprintf_s(thread, " | THREAD %llu of %llu binnings on the worker (%llu in place): worker %.3f ms a binning, main thread waited %.3f ms a binning, %.3f ms a frame",
+			StatThreadJobs, StatClusterFrames, StatThreadInPlace, StatThreadJobs ? StatThreadWorkerMs / StatThreadJobs : 0.0,
+			StatThreadJobs ? StatThreadWaitMs / StatThreadJobs : 0.0, StatThreadWaitMs / frames);
+		Logger::Log("LAMP TABLE CPU %u frames, %s path: made %.2f a frame; a make %.3f ms = walk %.3f + row 0 %.3f + froxel binning %.3f + lock/unlock %.3f (+ tile rows); "
+			"%u lamps, %.1f active, %.1f binned, %.0f list entries, %dx%dx%d froxels x %d texels%s%s",
+			frames, FastLive ? "fast" : "old", b / frames, StatBuildMs / b, StatWalkMs / b, StatRowMs / b, StatClusterMs / cf, StatUploadMs / b,
+			StatTableLamps, StatActive / b, StatClusterLamps / cf, StatClusterEntries / cf, TilesX, TilesY, (int)Slices, ListTexelsNow(), check, thread);
+		StatWalkMs = StatRowMs = StatUploadMs = 0; StatActive = StatChecks = StatCheckRow = StatCheckLists = StatCheckCounts = 0;
+		StatThreadWorkerMs = StatThreadWaitMs = 0; StatThreadJobs = StatThreadInPlace = 0;
 	}
 
 	inline int TableSlot(const ShadowSceneLight* light) {
 		if (!light) return NoLamp;
 		auto found = TableIndex.find(light);
-		if (found != TableIndex.end()) return found->second;
+		if (found) return *found;
 		if (GpuTimer::Enabled) StatTableMissing++;
 		return NoLamp;	// a lamp the scene's list did not hold at the frame's first draw: left out this frame
 	}
@@ -518,11 +647,12 @@ namespace ManyLamps {
 				Block[8][3] = (toWorld.m[3][0] - cam.x) * f[0] + (toWorld.m[3][1] - cam.y) * f[1] + (toWorld.m[3][2] - cam.z) * f[2];
 			}
 			else memset(Block[8], 0, sizeof(Block[8]));
-			Block[9][0] = 1.0f / TilePx; Block[9][1] = (float)TilesX; Block[9][2] = (float)(TilesX * TilesY); Block[9][3] = on ? 1.0f : 0.0f;
+			Block[9][0] = 1.0f / TileSize; Block[9][1] = (float)TilesX; Block[9][2] = (float)(TilesX * TilesY); Block[9][3] = on ? 1.0f : 0.0f;
 			Block[10][0] = (float)Slices - 1.0f; Block[10][1] = (float)FroxelTableRows(); Block[10][2] = Block[10][3] = 0.0f;
 			BlockRegisters = 11;
 		}
 		Upload();
+		FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread (never pending here: the binning stays in place while Active(); a backstop)
 		TheRenderManager->renderState->SetTexture(3, Table);	// through the game's state cache, so its own binds there still happen
 		for (DWORD s : { D3DSAMP_MINFILTER, D3DSAMP_MAGFILTER }) TheRenderManager->renderState->SetSamplerState(3, (D3DSAMPLERSTATETYPE)s, D3DTEXF_POINT, false);
 		TheRenderManager->renderState->SetSamplerState(3, D3DSAMP_MIPFILTER, D3DTEXF_NONE, false);
@@ -727,8 +857,8 @@ namespace ManyLamps {
 			if (!l || !l->bPointLight) continue;
 			auto found = TableIndex.find(l);
 			const bool drawHas = light[k][3] > 0.0f && tint[k][2] > 0.0f;	// a tile (the atlas path; traced-only lamps carry no tile)
-			if (found == TableIndex.end() || (size_t)found->second * 9 + 9 > TileCopy.size()) { if (drawHas) ParityNotInTable++; continue; }
-			const float* row = &TileCopy[found->second * 9];
+			if (!found || (size_t)*found * 9 + 9 > TileCopy.size()) { if (drawHas) ParityNotInTable++; continue; }
+			const float* row = &TileCopy[*found * 9];
 			const bool tableHas = row[2] > 0.0f;
 			if (!drawHas && !tableHas) continue;
 			ParityLamps++;
@@ -766,6 +896,7 @@ namespace ManyLamps {
 
 	// Once a frame (Render.cpp). restoreHooked: ConstantFilter's pixel hook is in (without it the game's zeros stay and the lamps are lost).
 	inline void BeginFrame(bool restoreHooked) {
+		FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread (Render.cpp finishes it at the end of the render call; this is the backstop)
 		FrameId++;
 		SteadyShadows = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "SteadyLampShadows") != 0;	// UNOFFICIAL 2026-10-31
 		if ((FrameId & 255) == 0 || !SteadyShadows) {	// objects not drawn for a while (or the setting off): their kept lamps forgotten
@@ -773,11 +904,15 @@ namespace ManyLamps {
 			else for (auto it = SteadyMemory.begin(); it != SteadyMemory.end();) it = FrameId - it->second.frame > 64 ? SteadyMemory.erase(it) : std::next(it);
 		}
 		StandaloneLive = StandaloneAtStartup() && TheSettingManager->GetSettingI("Main.Main.Misc", "LampTableStandalone") != 0;
+		FastLive = TheSettingManager->GetSettingI("Main.Main.Misc", "LampTableFast") != 0;	// UNOFFICIAL 2026-11-14
+		CheckLive = TheSettingManager->GetSettingI("Main.Main.Misc", "LampTableCheck") != 0;
+		ThreadLive = TheSettingManager->GetSettingI("Main.Main.Misc", "LampTableThread") != 0;	// UNOFFICIAL 2026-11-14
 		if (!Active()) {
 			// UNOFFICIAL 2026-10-31 LampTableStandalone: the table's cost where nothing else here runs (native D3D9, ManyLampsOnePass off)
 			if (!StandaloneAtStartup() || !GpuTimer::Enabled) { StatFrames = 0; return; }
 			if (++StatFrames < 240) return;
 			const double f = StatFrames;
+			LogTableCpu(StatFrames);	// UNOFFICIAL 2026-11-14
 			Logger::Log("LAMP TABLE standalone %u frames: made %.2f a frame, %.3f ms CPU a frame (%.3f a make), %u lamps, froxel binning %.3f ms a frame, %.1f lamps binned",
 				StatFrames, StatBuilds / f, StatBuildMs / f, StatBuilds ? StatBuildMs / StatBuilds : 0.0, StatTableLamps, StatClusterMs / f, StatClusterLamps / f);
 			StatFrames = 0; StatBuildMs = 0; StatBuilds = 0; StatClusterMs = 0; StatClusterLamps = StatClusterEntries = StatClusterOver = StatClusterFrames = 0;
@@ -795,6 +930,7 @@ namespace ManyLamps {
 		for (int k = 0; k <= MaxLamps; k++) if (StatByCount[k]) n += sprintf_s(line + n, sizeof(line) - n, " %d:%.1f", k, StatByCount[k] / f);
 		n += sprintf_s(line + n, sizeof(line) - n, " | capped many-lamp passes given their other lamps %.1f (%.1f lamps), lamps past %d dropped %.2f",
 			StatExtraDraws / f, StatExtras / f, (int)MaxLamps, StatOver / f);
+		LogTableCpu(StatFrames);	// UNOFFICIAL 2026-11-14 (before StatBuildMs and the CLUSTERED counters are reset below)
 		if (TableMode()) n += sprintf_s(line + n, sizeof(line) - n, " | lamp table %u lamps, lamps not in it %.2f, made %.2f a frame %.3f ms CPU",
 			StatTableLamps, StatTableMissing / f, StatBuilds / f, StatBuildMs / f);
 		if (TileRowsWanted()) n += sprintf_s(line + n, sizeof(line) - n, " | TABLE LAMPS tiled %.1f a make (%.1f pool)",	// UNOFFICIAL 2026-10-31 TableLamps

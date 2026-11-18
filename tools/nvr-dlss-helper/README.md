@@ -102,6 +102,14 @@ verified: denoise mode 1, `DLSS.Use.HW.Depth` 1 = hardware depth, the normals' s
 `NvrDlssHelper.cpp`, above `RayReconstructionCapability`. RR presets (`RRPreset`): 0 none, 1 D, 2 E, the same at every
 quality mode.
 
+2026-11-15 (`docs/next/DLSS-RR-MODEL.md`): `RRPreset` 3 = preset F, NVIDIA's second-generation RR transformer ("DLSS 4.5 Ray
+Reconstruction"). It is already in `nvngx_dlssd.dll` 310.9.16 (its strings name Preset_A to Preset_F and the "RR2" kernels for
+sm_75 to sm_120); it needs driver 580.00 or newer, so with an older driver the helper sends E instead and says so. `RRPreset` 4 =
+auto: F on Ada and newer (RTX 40 / 50, L4), E on Turing and Ampere (RTX 20 / 30, where PCGH measured up to 25-29 % lower frame
+rate), from the PCI device id (`GenerationOf` in `NvrDlssHelper.cpp`). Each RR feature creation logs "NGX: Ray Reconstruction
+model: ... (why)", also in the game's log. `--probe` prints what 3 and 4 would send on the PC. A helper from before reads 3 and 4
+as 0 (no hint); the protocol is unchanged.
+
 In the pass-through test (`HelperTest = 1`), RR frames need no NGX. The helper stretches the colour as always and draws the
 four guides as thumbnails along the bottom edge of the picture: each a sixth of its width, from the left diffuse albedo,
 specular albedo, normals, roughness. Roughness shows as red, and the normals' negative parts as black. This shows on any NVIDIA

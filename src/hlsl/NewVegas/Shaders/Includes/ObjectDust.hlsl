@@ -13,7 +13,7 @@
 
 float4 TESR_DustData : register(c192);	// x amount (0: skipped), y 1 / patch size (game units), z UpFrom, w UpFull (world normal height)
 float4 TESR_DustColor : register(c193);	// rgb the dust's colour (linear), w Patchiness (0 an even coat, 1 patchy)
-float4 TESR_DustOrigin : register(c195);	// xyz the camera's world position (the pattern stays on the world as the camera moves)
+float4 TESR_DustOrigin : register(c195);	// xyz the camera's world position (the pattern stays on the world as the camera moves), w Variation
 // Per draw, not by name (core/DustDraw.h): x 1 = a static mesh in the world scene; 0 = skinned (people, creatures, armour, the
 // first-person arms), first person, reflections. A pixel shader cannot tell skinned from static by itself (SKIN is a vertex define).
 bool NVR_DustDraw : register(b14);	// (2026-11-05: was c169.x, which ForwardCloudShadows' NVR_CloudSun took (X4500 with both on); every float
@@ -42,7 +42,11 @@ float3 DustCoverDraw(float3 albedo, float3 worldNormal, float3 cameraRelative, b
     const float up = smoothstep(TESR_DustData.z, TESR_DustData.w, worldNormal.z);
     [branch] if (up <= 0.0f) return albedo;
     const float2 w = (cameraRelative.xy + TESR_DustOrigin.xy) * TESR_DustData.y;
-    const float noise = DustNoise(w) * 0.7f + DustNoise(w * 4.3f + 11.7f) * 0.3f;
+    float noise = DustNoise(w) * 0.7f + DustNoise(w * 4.3f + 11.7f) * 0.3f;
+    // UNOFFICIAL 2026-11-12 Variation (TESR_DustOrigin.w; the owner: "the dust should be patchy and inconsistent"): every upward face got
+    // the same patch pattern at the same strength, so it read as one even coat. A much larger pattern (about five patches across) scales
+    // it from 0.3 to 1.5, so whole rocks and roofs differ: some nearly clean, some well dusted. 0 = as before.
+    noise *= lerp(1.0f, lerp(0.3f, 1.5f, DustNoise(w * 0.19f + 5.3f)), TESR_DustOrigin.w);
     const float patches = lerp(1.0f, saturate(noise * 2.4f - 0.7f), TESR_DustColor.w);
     const float cover = saturate(up * patches * TESR_DustData.x);
     // a third of the texture's own light and dark kept under the dust (a coat, not paint)

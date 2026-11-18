@@ -153,6 +153,8 @@
     <ClCompile Include="..\src\core\Sm6Pass.cpp" />
     <ClCompile Include="..\src\core\DxvkCompute.cpp" />
     <ClCompile Include="..\src\core\SessionLog.cpp" />
+    <ClCompile Include="..\src\core\GBufferCensus.cpp" />
+    <ClCompile Include="..\src\core\MergeCopies.cpp" />
     <ClCompile Include="..\src\core\Paths.cpp" />
     <ClCompile Include="..\src\core\InstallCheck.cpp" />
     <ClCompile Include="..\src\core\Diagnostics.cpp" />
@@ -241,6 +243,10 @@
     <ClCompile Include="..\src\effects\Underwater\Underwater.cpp" />
     <ClCompile Include="..\src\effects\VolumetricFog\VolumetricFog.cpp" />
     <ClCompile Include="..\src\effects\VolumetricSmoke\VolumetricSmoke.cpp" />
+    <ClCompile Include="..\src\gunfx\GunFX.cpp">
+      <ForcedIncludeFiles></ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="..\src\gunfx\GunFXHost.cpp" />
     <ClCompile Include="..\src\effects\Water\Water.cpp" />
     <ClCompile Include="..\src\effects\WaterLens\WaterLens.cpp" />
     <ClCompile Include="..\src\effects\WetWorld\WetWorld.cpp" />
@@ -449,6 +455,11 @@
     <ClInclude Include="..\src\NewVegas\Managers.h" />
     <ClInclude Include="..\src\NewVegas\Plugin.h" />
     <ClInclude Include="resource.h" />
+    <ClInclude Include="..\src\gunfx\GunFX.h" />
+    <ClInclude Include="..\src\gunfx\GunFXHost.h" />
+    <ClInclude Include="..\src\gunfx\GunFXKeys.h" />
+    <ClInclude Include="..\src\gunfx\GunShape.h" />
+    <ClInclude Include="..\src\gunfx\IniDefaults.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\NewVegas\nvse\GameNi.cpp" />

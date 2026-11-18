@@ -5,6 +5,16 @@
 // lighting, so the PS matches vanilla at shadow = 1.
 #include "includes/Shadow.hlsl"
 
+// UNOFFICIAL 2026-11-16 fd-fwdgroups DeferredFoliageLamps (Includes/Leaf.hlsl LEAF_FORWARD_PLUS): with G-buffer v2 compiled in (the deferred
+// renderer on), two more interpolators for the deferred leaf record that lights the leaf with every lamp of its froxel: the bent normal in
+// the world (TEXCOORD5) and this shader's own point lamp's light apart (TEXCOORD6, so the record takes it out before adding the table's).
+// The forward records read neither. Without v2: as before, byte for byte.
+#if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 4
+    #define LEAF_VS_LAMPS 1
+#else
+    #define LEAF_VS_LAMPS 0
+#endif
+
 uniform row_major float4x4 ModelViewProj : register(c0);
 uniform float4 AmbientColor  : register(c5);
 uniform float4 DiffuseColor  : register(c6);
@@ -51,6 +61,10 @@ struct VtxVaryings {
     float4 f_fog            : TEXCOORD2;   // rgb colour, w amount
     float3 f_sun            : TEXCOORD3;   // shadowable part of .lighting
     float4 f_shadow_world_pos : TEXCOORD4;
+#if LEAF_VS_LAMPS
+    float4 f_bent_world     : TEXCOORD5;   // UNOFFICIAL 2026-11-16 the bent normal, camera-relative world axes (not unit)
+    float4 f_point          : TEXCOORD6;   // UNOFFICIAL 2026-11-16 rgb: the point lamp's share of .lighting (0 without one)
+#endif
 };
 
 // Wrap to -pi..pi (mad/frc/mad).
@@ -172,6 +186,11 @@ VtxVaryings main(VtxAttrs va) {
 
     vr.f_uv = va.f_uv;
     vr.f_shadow_world_pos = float4(shadow_world_pos, SHADOW_VS_SENTINEL);
+#if LEAF_VS_LAMPS
+    // the model-space bent normal carried into the world as the point it leads to is (exact for the leaf's affine transform)
+    vr.f_bent_world = float4(GetShadowWorldPos(vr.f_position + mul(ModelViewProj, float4(N, 0.0f))) - shadow_world_pos, 0.0f);
+    vr.f_point = float4(0.0f, 0.0f, 0.0f, 0.0f);
+#endif
 
     return vr;
 };

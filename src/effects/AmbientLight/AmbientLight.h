@@ -8,6 +8,8 @@
 class AmbientLightEffect : public EffectRecord
 {
 public:
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): the half-size buffers (prep, the two results, both histories, stats, balance, the GI light). NOT the light grid's (NVR_Grid*): Reflections keeps their pointers in its own slots (GridLightSlot / GridColorSlot)
+	bool	TargetParkable(const char* SamplerName) override { return strncmp(SamplerName, "NVR_AmbientLight", 16) == 0; }
 	AmbientLightEffect() : EffectRecord("AmbientLight") {};
 
 	struct ConstantsStruct {
@@ -24,6 +26,7 @@ public:
 	CachedHandle		paramLayout, paramFlags, paramTemporal, paramReproject, paramReach;
 	CachedHandle		paramSunFarFlags;	// UNOFFICIAL 2026-10-19 SunFar (NVR_SunFarFlags)
 	CachedHandle		paramGI;			// UNOFFICIAL 2026-11-03 NVR_ALGI: the RT bounce light in the D3D9 passes (Render)
+	CachedHandle		paramRT;			// UNOFFICIAL 2026-11-13 NVR_ALRT: the RT occlusion in the D3D9 Estimate (Render)
 	CachedHandle		paramScene;					// UNOFFICIAL 2026-10-18 (ambfix): NVR_ALScene, the scene's own light
 	CachedHandle		techSky;					// UNOFFICIAL 2026-10-20 (skyamb) Skylighting: technique AmbientLightSky
 	D3DXVECTOR4			sceneLight = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 1.0f);	// the light every surface gets (linear; Render)
@@ -38,8 +41,14 @@ public:
 	bool				exteriorBalance = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] ExteriorBalance (Apply)
 	bool				giGrassBlur = true;	// UNOFFICIAL 2026-11-13 [Shaders.AmbientLight.Main] GIGrassBlur (Blur: the loose blur back where the depth is busy)
 	bool				giSingleHistory = true;	// UNOFFICIAL 2026-11-11 (sungi) [Shaders.AmbientLight.Main] GISingleHistory (GI accumulate)
+	float				debugGIExposure = 1.0f;	// UNOFFICIAL 2026-11-12 [Shaders.AmbientLight.Main] DebugGIExposure (0.01-64; 1 = off): a factor on the bounce-light test views 13-15 only (Render)
 	float				ambientReplace = 0.0f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientReplace (0-1; 0 = off)
 	float				ambientFloor = 0.15f;	// UNOFFICIAL 2026-11-11 (sungi p2) [Shaders.AmbientLight.Main] AmbientFloor (0-1)
+	// UNOFFICIAL 2026-11-12 (sungi nights) [Shaders.AmbientLight.Main] AmbientReplaceNight / AmbientFloorNight (-1 = the day value; 0-1): the two at night,
+	// blended by the game's day-night curve; AmbientReplaceNow / AmbientFloorNow are the values in use outdoors (Render, AmbientReplaceActive)
+	float				ambientReplaceNight = -1.0f, ambientFloorNight = -1.0f;
+	float				AmbientReplaceNow() const;
+	float				AmbientFloorNow() const;
 	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, in memory only): UpdateSettings keeps the toml's keys apart from the values in use
 	// (gridBounceKey / ambientReplaceKey; ambientReplace and gridBounce are the values in use) and SunGIFrame, once a frame, applies the parts that depend on
 	// the RT core running (the grid fallback) and on being outdoors; sunGiForced = SunGI has Status Enabled on (the user's switch is off): ShouldRender then
@@ -48,6 +57,18 @@ public:
 	float				gridBounceKey = 0.0f, ambientReplaceKey = 0.0f, ambientReplaceSunGI = 0.8f;
 	int					sunGiState = 0;
 	void				SunGIFrame();
+	// UNOFFICIAL 2026-11-12 RoomGI ([Shaders.AmbientLight.Main] RoomGI, in memory only): SunGI's interior counterpart, on the same plumbing. UpdateSettings keeps
+	// the toml's keys apart (interiorBalanceKey, albedoBufferKey, ambientReplaceInteriorKey); RoomGIFrame (from SunGIFrame, once a frame) puts the forced values
+	// in use only while the player is indoors AND the RT core runs (roomGiOn), else the keys: without the ray-traced bounce nothing is new. AmbientReplaceInterior
+	// / AmbientFloorInterior: AmbientReplace / AmbientFloor indoors (Render: NVR_ALInterior.x = 1 + replace x (1 - floor), NVR_ALRoom.x = 1 - the ambient scale).
+	bool				roomGi = false, roomGiForced = false, roomGiOn = false;
+	bool				interiorBalanceKey = true, albedoBufferKey = false;
+	float				ambientReplaceInterior = 0.0f, ambientReplaceInteriorKey = 0.0f, ambientFloorInterior = 0.3f;
+	int					roomGiState = 0;
+	bool				roomShareSet = false;	// NVR_ALRoom was set last frame (Render sets it back to 0 once after)
+	CachedHandle		paramRoom;
+	void				RoomGIApply(bool room);
+	void				RoomGIFrame(bool outdoors, bool rt);
 	bool				AmbientReplaceActive() const;	// UNOFFICIAL 2026-11-11 (sungi p2) outdoors and AmbientReplace > 0 (AmbientOcclusion forces the sky-miss weight)
 	bool				temporal = true;
 	D3DXMATRIX			lastView, lastInvView, lastProj;
@@ -93,6 +114,7 @@ public:
 	float				albedoFallbackCap = 0.12f;	// UNOFFICIAL 2026-11-10 AlbedoFallbackCap: the guessed colour's cap where the albedo buffer has no texel (0 = the old 0.6)
 	bool				albedoLogged = false;
 	bool				giD3D9Logged = false;	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes: logged once
+	int					aoD3D9Logged = -1;		// UNOFFICIAL 2026-11-13 RT occlusion on the D3D9 Estimate: the state last logged
 	// UNOFFICIAL 2026-10-21 (alrocks; the occlusion cut off hard along low-poly rocks' triangle edges): NormalSmoothing (half-resolution
 	// texels the normal is averaged over after Prepare, 0 off) and HorizonBias (degrees above the tangent plane each horizon starts, 0 off); NVR_ALEdges.
 	int					normalSmoothing = 36;

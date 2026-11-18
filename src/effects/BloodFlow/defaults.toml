@@ -78,6 +78,22 @@ SteadyTiles = true                     # UNOFFICIAL (2026-11-01), BUG FIX, appli
 TileCap = 256                          # UNOFFICIAL (2026-11-01), [64-1024], applies immediately: how many blood particles one 16 x 16 pixel tile draws (was 128). Higher = fewer full tiles where many pools lie together, a little more memory and drawing time.
 
 
+[_Shaders.BloodFlow.Surface]
+Enabled = false                        # UNOFFICIAL (2026-11-12, BloodFlow v3): blood as a thin layer of liquid lying on the ground, worked out on the graphics card for each fresh splat and each body. It runs downhill over the real ground (read from the depth buffer): into cracks and hollows, round stones, so a pool's outline is the ground's, never a drawn disc. It is drawn only on the ground it lies on (not on a body, plants, your weapon or anything passing through) and takes the light that is already there: dark in shadow, lit in the sun or by a lamp. While on it replaces BloodFlow's own pools, streams and splat shapes (the game's own blood decals stay). Plain Direct3D 9: no DXVK fork needed. 32 MB of video memory, made when the first blood appears. BloodFlow must be on. Applies immediately
+Splats = true                          # Fresh blood splats lay down liquid blood in the shape of the game's own decal (a drawn blob where that texture is not a loose file), which then runs. Splats that were already there when you arrive stay as the game drew them. Off: BloodFlow's own splat shapes and streams.
+Pools = true                           # A body bleeds a pool that spreads and runs over the real ground. A body that was already dead when you first see it gets its pool at once, dried. Off: BloodFlow's own pools.
+SplatAmount = 1.0                      # [0.2-3] How much blood a splat lays down (more: it runs further).
+PoolAmount = 1.0                       # [0.2-3] How much blood a body loses (1: a pool about as wide as BloodFlow's own on level ground).
+BleedTime = 8.0                        # [1-30] Seconds a body bleeds.
+FlowTime = 25.0                        # [5-90] Seconds blood keeps moving after its splat has landed or its body has stopped bleeding (it stiffens over the last 40 % of this). After that it is frozen and costs only its drawing.
+Viscosity = 1.0                        # [0.3-5] Higher: thicker blood that creeps. Lower: thin blood that runs fast and far.
+Roughness = 0.15                       # [0-0.6] Fine unevenness of the ground that the depth buffer does not show (game units, about 1.4 cm each): it breaks up a pool's edge on a perfectly flat floor. 0: on a flat floor a pool spreads evenly, near a circle.
+Lifetime = 600.0                       # [30-3600] Seconds blood stays after the game has removed its splat or body (it fades over the last 10); sooner if its place is needed for new blood.
+MaxPatches = 32                        # [1-32] Most splats and pools kept at once (each a 256 x 256 patch of the ground, a game unit or less a texel).
+UseAlbedo = true                       # The light on the blood is worked out from the picture and the surface's own recorded colour ([Main.Main.Quality] AlbedoBuffer, which this asks for while there is blood): blood is darker than a pale wall it lies on and still red on black asphalt. Off, or where there is no record: from the picture and a typical mid-grey surface (blood comes out too dark on very dark ground and too light on pale ground).
+DebugView = 0                          # 1: each patch's area, green where the ground's height was read, yellow where it is guessed from the ground round it, blue where something tall stands; blood red (brighter = thicker); magenta where there is blood but the pixel is not its surface (something in the way, which is not painted). 2: the same with the heights as bands every 2 units.
+TestPour = false                       # Test only: a body's pool bleeds on the ground a little ahead of the player (once each time this is turned on; saves hold no fresh deaths).
+
 [_Shaders.BloodFlow.Status]
 Enabled = false                        # Blood flow: blood splats run down walls and slopes, gather on ledges and floors, drip off edges, and dry; blood pools spread under bodies and run downhill. Costs nothing when no blood is near.
 

@@ -23,6 +23,9 @@ float4 TESR_WetWorldData;
 // UNOFFICIAL 2026-10-16 x: KeepHighlights. This pass writes every pixel while it rains (the sky too, through the far branch) into
 // the HDR scene before the tonemapper; saturate() cut everything brighter than 1 (sun, bright sky, lit wet highlights). On: only
 // negative values are cut, so what this pass does not change reaches the tonemapper as it was.
+// UNOFFICIAL 2026-11-12 y: PuddlesLandOnly (0 off, 1 ground-like surfaces, 2 land only), z: PuddlesMinObjectSize (game units),
+// + 4 on y: WeaponRainHandOff (the first-person weapon is left to the HUD raindrops); w: 1 while ReflectionsOwnPuddles hands the
+// puddles' mirror image to the Reflections effect. y, z, w all 0: every pass draws exactly what it drew before.
 float4 TESR_WetWorldLook;
 float3 WetOut(float3 c) { return TESR_WetWorldLook.x > 0.5f ? max(c, 0.0f) : saturate(c); }
 float4 TESR_SunPosition;
@@ -50,6 +53,13 @@ sampler2D TESR_WaterStreakSampler : register(s12) < string ResourceName = "Preci
 // UNOFFICIAL 2026-10-27 Persistent ([Shaders.WetWorld.Main] Persistent, CoverMap.h): wetness and puddle water kept per spot. Declared
 // last (samplers bind in declaration order); only techniques 5 and 6 read it.
 sampler2D TESR_CoverMapBuffer : register(s13) = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-12 PuddlesLandOnly ([Shaders.WetWorld.Main] PuddlesLandOnly; core/CapturedNormals.h TESR_MaterialBuffer): what each
+// pixel IS (r: 1 object, 2 worn gear, 3 cloth, 4 land, 5 plants, 6 skin, + 0.49 x metal; g: the drawn object's bound radius; a: 1 written),
+// so puddles and the wet look stop at people, cloth and plants instead of going by "faces up and lies in a hollow" alone. Declared last
+// (samplers bind in declaration order); read by the wet-map pass only, and only while the key is on and the buffer holds this frame
+// (TESR_MaterialBufferData.x: 0 on native D3D9 with the game's MSAA, or with [Main.Main.Quality] MaterialBuffer off: the old guess stays).
+sampler2D TESR_MaterialBuffer : register(s14) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+float4 TESR_MaterialBufferData;
 #include "Includes/CoverMap.hlsl"
 
 // General settings
@@ -244,6 +254,56 @@ float GetPuddleViewModelExclusion(float2 uv, float centerMask)
     mask = max(mask, GetViewModelMask(uv + float2(0, pixel.y)));
     mask = max(mask, GetViewModelMask(uv - float2(0, pixel.y)));
     return mask;
+}
+
+// UNOFFICIAL 2026-11-12 PuddlesLandOnly / WeaponRainHandOff: what the wet pass may put on this pixel, written to the wet map's alpha by
+// the wet-map pass and read back by the wet pass (the blur passes hand the centre's alpha on untouched):
+//   1    everything (the old behaviour; also every pixel while the keys are off, or while the material buffer holds nothing)
+//   1.5  as 1, but the puddle's own mirror image (sky, clouds, the screen-space trace) is left out: ReflectionsOwnPuddles, while
+//        the Reflections effect draws the wet ground's reflections after this effect (TESR_WetWorldLook.w)
+//   0.5  the wet look (shine, ripples, splashes, wall streaks) but no puddle and no puddle reflection
+//   0    nothing
+// PuddlesLandOnly 1 (ground-like): land, rigid objects (roads, pavements, floors, rocks, cars: this game's roads are objects, not
+//   land) and pixels no template wrote (the game's own shaders, far land: the old guess decides) = 1; a rigid object whose bound radius is
+//   below PuddlesMinObjectSize (small props; 0 = no size test), cloth and plants = 0.5; people and creatures (worn gear, skin) = 0.
+// PuddlesLandOnly 2 (land only): land = 1; people and creatures = 0; everything else, unwritten pixels included = 0.5.
+// The material buffer resolved from the game's MSAA holds averages (a = the share of samples a template wrote): class and radius are
+// divided by that share; a pixel on the edge between two classes may read as a third for one pixel's width.
+// The first-person weapon is not in the buffer (the world behind it is): its pixels keep 1, or 0 with WeaponRainHandOff.
+float GetSurfaceWetClass(float2 uv, float vmMask)
+{
+    float wetClass = 1.0f;
+    float weaponOff = step(3.5f, TESR_WetWorldLook.y);
+    float mode = (TESR_WetWorldLook.y - 4.0f * weaponOff) * step(0.5f, TESR_MaterialBufferData.x);
+    [branch]
+    if (mode > 0.5f)
+    {
+        float4 material = tex2Dlod(TESR_MaterialBuffer, float4(uv, 0.0f, 0.0f));
+#ifdef GBUFFER_V2
+        // UNOFFICIAL 2026-11-14 GBufferV2 (core/CapturedNormals.h): r the shading model (+16 specular), written = r > 0.5; a is a normal's y and
+        // the bound radius is gone: every object counts as large enough (PuddlesMinObjectSize has no effect with it)
+        float written = step(0.5f, material.r);
+        float kind = floor(material.r + 0.01f);
+        kind -= 16.0f * step(15.5f, kind);
+        kind = (kind == 8.0f || kind == 9.0f) ? 2.0f : kind;	// hair, eyes: an actor's, as worn gear
+        float radius = TESR_WetWorldLook.z;
+#else
+        float share = clamp(material.a, 0.5f, 1.0f);
+        float written = step(0.5f, material.a) * step(0.5f, material.r);
+        float kind = floor(material.r / share + 0.01f);
+        float radius = material.g / share;
+#endif
+        float isActor = (kind == 2.0f || kind == 6.0f) ? 1.0f : 0.0f;
+        float isLand = (kind == 4.0f) ? 1.0f : 0.0f;
+        float isObject = (kind == 1.0f) ? 1.0f : 0.0f;
+        float groundLike = max(isLand, isObject * step(TESR_WetWorldLook.z, radius));
+        float puddleSurface = mode > 1.5f ? isLand : groundLike;
+        float unwritten = mode > 1.5f ? 0.5f : 1.0f;
+        float known = isActor > 0.5f ? 0.0f : lerp(0.5f, 1.0f, puddleSurface);
+        wetClass = written > 0.5f ? known : unwritten;
+    }
+    wetClass = lerp(wetClass, 1.0f - weaponOff, vmMask);
+    return wetClass + 0.5f * step(0.75f, wetClass) * step(0.5f, TESR_WetWorldLook.w);
 }
 
 // Puddle coverage helper
@@ -615,13 +675,16 @@ float4 WetMap(VSOUT IN) : COLOR0
         return float4(0, 0, 0, 1);
     float4 surfacePosition = GetOrthoSurfacePosition(IN.UVCoord);
     float vmMask = GetViewModelMask(IN.UVCoord);
-    float coverage = ComputeDepressionMask(surfacePosition, depth, vmMask);
+    // UNOFFICIAL 2026-11-12 PuddlesLandOnly: no puddle starts on a surface that may not hold one (x 1 with the key off), and the
+    // class rides in alpha for the wet pass
+    float wetClass = GetSurfaceWetClass(IN.UVCoord, vmMask);
+    float coverage = ComputeDepressionMask(surfacePosition, depth, vmMask) * step(0.75f, wetClass);
     float dotUp = dot(GetWorldNormal(IN.UVCoord), float3(0, 0, 1));
     float4 roofPosition = mul(surfacePosition, TESR_ShadowCameraToLightTransformOrtho);
     float flatCoverage = GetRoofMask(roofPosition) * smoothstep(0.65f, 0.92f, dotUp)
         * (1.0f - vmMask);
     float flatWetCoverage = flatCoverage * smoothstep(0.90f, 0.97f, dotUp);
-    return float4(coverage, flatCoverage, flatWetCoverage, 1.0f);
+    return float4(coverage, flatCoverage, flatWetCoverage, wetClass);
 }
 
 // Wet-map blur pass
@@ -632,7 +695,8 @@ float4 BlurWetMap(VSOUT IN, uniform float2 OffsetMask, uniform float blurRadius)
     float2 blurStep = TESR_ReciprocalResolution.xy * OffsetMask * max(blurRadius, 0.0f) * 0.5f;
     float depthTolerance = max(PuddleBlurDepthTolerance * max(centerDepth, 1.0f), 0.0001f);
     float weightSum = 0.375f;
-    float3 coverage = tex2D(TESR_RenderedBuffer, uv).rgb * weightSum;
+    float4 centre = tex2D(TESR_RenderedBuffer, uv);	// UNOFFICIAL 2026-11-12 PuddlesLandOnly: a = this pixel's class (WetMap), not blurred
+    float3 coverage = centre.rgb * weightSum;
     [unroll]
     for (int tap = -2; tap <= 2; tap++)
     {
@@ -649,7 +713,7 @@ float4 BlurWetMap(VSOUT IN, uniform float2 OffsetMask, uniform float blurRadius)
         }
     }
     coverage /= weightSum;
-    return float4(coverage, 1.0f);
+    return float4(coverage, centre.a);
 }
 
 // UNOFFICIAL 2026-10-17 FastPaths helpers (see Wet below)
@@ -713,11 +777,23 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
     // Surface reconstruction and weather
     float4 baseColor = tex2D(TESR_SourceBuffer, IN.UVCoord);
 
+    // UNOFFICIAL 2026-11-12 PuddlesLandOnly / WeaponRainHandOff (GetSurfaceWetClass): the wet map's alpha is this pixel's class, 1 with
+    // the keys off (every product below is then x 1: the same picture, bit for bit). wetAllow 0: no rain reaches the pixel as far as
+    // this pass goes (people, creatures; the weapon with WeaponRainHandOff); puddleAllow 0: no puddle and no puddle reflection.
+    // ReflectionsOwnPuddles (alpha 1.5): the Reflections effect draws the wet ground's mirror image after this pass, so the puddles'
+    // own sky / cloud image and screen-space trace stand down (reflectionAllow 0); their sun and lamp glints stay.
+    // (Only floor, ceil and frac of the alpha, no constant of this pass's own: its largest variant sits at ps_3_0's 224 constant
+    // registers, and one more uniform, TESR_WetWorldLook.w read here, failed its compile. Alpha is exactly 0, 0.5, 1 or 1.5.)
+    float4 wetMapSample = tex2D(TESR_RenderedBuffer, IN.UVCoord);
+    float puddleAllow = floor(wetMapSample.a);
+    float wetAllow = max(puddleAllow, ceil(frac(wetMapSample.a)));
+    float reflectionAllow = puddleAllow - puddleAllow * frac(wetMapSample.a) - puddleAllow * frac(wetMapSample.a);
+
     float depth = readDepth(IN.UVCoord);
 
     float4 worldPosRelRoof = GetOrthoSurfacePosition(IN.UVCoord);
     float4 orthoRoofPos = mul(worldPosRelRoof, TESR_ShadowCameraToLightTransformOrtho);
-    float roofMask = GetRoofMask(orthoRoofPos);
+    float roofMask = GetRoofMask(orthoRoofPos) * wetAllow;
 
     float3 eyeDirection = toWorld(IN.UVCoord);
     float3 camera_vector = eyeDirection * depth;
@@ -803,9 +879,9 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
     float LODfade = smoothstep(DrawD, 0, depth);
 
     // Puddle coverage and wetness
-    float3 blurredWetCoverage = saturate(tex2D(TESR_RenderedBuffer, IN.UVCoord).rgb);
+    float3 blurredWetCoverage = saturate(wetMapSample.rgb);
     float puddles = blurredWetCoverage.r;
-    puddles *= (1.0f - puddleVMExclude) * (1.0f - vmMask);
+    puddles *= (1.0f - puddleVMExclude) * (1.0f - vmMask) * puddleAllow;
     puddles *= smoothstep(DepressionSlopeCutoff, DepressionSlopeFadeStart, dotUp);
 
     // UNOFFICIAL 2026-10-27 persist: this spot's wetness (x) and puddle water (y) from the cover map
@@ -983,7 +1059,7 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
 
         // the SSR trace condition of the main path below (same expressions)
         float fLinger = puddleFade * flatCoverage;
-        float fSsrMask = saturate(max(rippleMask, max(fLinger, puddlemask)));
+        float fSsrMask = saturate(max(rippleMask, max(fLinger, puddlemask))) * reflectionAllow;
         float fScreen = smoothstep(PuddleSSRScreenFadeStart, PuddleSSRScreenFadeFull, IN.UVCoord.y);
         float fAngle = 1.0f - smoothstep(PuddleSSRFadeStart, PuddleSSRFadeFull, saturate(dot(-V, up)));
         float fOpacity = fScreen * fAngle;
@@ -1047,7 +1123,7 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
         puddleBase *= (1.0f - rimDark);
 
         float reflMix = min(PuddleSkyMaxBlend, reflStrength * (1.0f + depthish * 0.20f + rimReflBoost));
-        reflMix *= smoothstep(0.03f, 0.12f, puddlemask);
+        reflMix *= smoothstep(0.03f, 0.12f, puddlemask) * reflectionAllow;
 
         float3 reflectionSky = max(fresnelColor, 0.0f.xxx);
         float reflectionSkyLuma = max(luma(reflectionSky), 0.0f);
@@ -1083,7 +1159,7 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
 
         // Screen-space reflections
         float lingeringReflectionMask = puddleFade * flatCoverage;
-        float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask)));
+        float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask))) * reflectionAllow;
         float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
             PuddleSSRScreenFadeFull, IN.UVCoord.y);
         float ssrDownAngle = saturate(dot(-V, up));
@@ -1235,7 +1311,7 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
 
     // Screen-space reflections
     float lingeringReflectionMask = puddleFade * flatCoverage;
-    float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask)));
+    float ssrMask = saturate(max(rippleMask, max(lingeringReflectionMask, puddlemask))) * reflectionAllow;
     float ssrScreenOpacity = smoothstep(PuddleSSRScreenFadeStart,
         PuddleSSRScreenFadeFull, IN.UVCoord.y);
     float ssrDownAngle = saturate(dot(-V, up));
@@ -1326,7 +1402,7 @@ float4 Wet(VSOUT IN, uniform bool fast, uniform bool fixTrace, uniform bool pers
         puddleBase *= (1.0f - rimDark);
 
         float reflMix = min(PuddleSkyMaxBlend, reflStrength * (1.0f + depthish * 0.20f + rimReflBoost));
-        reflMix *= smoothstep(0.03f, 0.12f, puddlemask);
+        reflMix *= smoothstep(0.03f, 0.12f, puddlemask) * reflectionAllow;
 
         float3 reflectionSky = max(fresnelColor, 0.0f.xxx);
         float reflectionSkyLuma = max(luma(reflectionSky), 0.0f);

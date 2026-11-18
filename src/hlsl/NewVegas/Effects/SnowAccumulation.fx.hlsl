@@ -140,31 +140,27 @@ float GetOrtho(float4 sn_wpos){
 	return sn_out || (sn_below && sn_above);
 }
 
-// hash based 3d value noise
-// function taken from https://www.shadertoy.com/view/XslGRr
-// Created by inigo quilez - iq/2013
-// License Creative Commons Attribution-NonCommercial-ShareAlike 3.0 Unported License.
-// ported from GLSL to HLSL by https://stackoverflow.com/questions/15628039/simplex-noise-shader
-
-float snHash( float sn_n )
+// 3D value noise: a random value in [0, 1) at each whole-number lattice point, blended between the 8 corners of the cell
+// with a smoothstep curve. Output in [0, 1), mean 0.5, one lattice cell per unit. Written for Vegas Shaders (2026-11-15);
+// it replaces upstream's copy of a Shadertoy noise under CC BY-NC-SA 3.0 (not GPL-compatible), with the same range and scale.
+// Lattice hash: Dave Hoskins' "Hash without Sine" hash13, MIT, Copyright (c) 2014 David Hoskins (shadertoy.com/view/4djSRW).
+float snHash(float3 sn_p3)
 {
-    return frac(sin(sn_n)*43758.5453);
+    sn_p3 = frac(sn_p3 * 0.1031);
+    sn_p3 += dot(sn_p3, sn_p3.zyx + 31.32);
+    return frac((sn_p3.x + sn_p3.y) * sn_p3.z);
 }
 
-float snNoise( float3 x )
+float snNoise(float3 x)
 {
-    // The noise function returns a value in the range -1.0f -> 1.0f
-
-    float3 sn_pp = floor(x);
-    float3 sn_f = frac(x);
-
-    sn_f       = sn_f*sn_f*(3.0-2.0*sn_f);
-    float sn_n = sn_pp.x + sn_pp.y*57.0 + 113.0*sn_pp.z;
-
-    return lerp(lerp(lerp( snHash(sn_n+0.0), snHash(sn_n+1.0),sn_f.x),
-            lerp( snHash(sn_n+57.0), snHash(sn_n+58.0),sn_f.x),sn_f.y),
-            lerp(lerp( snHash(sn_n+113.0), snHash(sn_n+114.0),sn_f.x),
-            lerp( snHash(sn_n+170.0), snHash(sn_n+171.0),sn_f.x),sn_f.y),sn_f.z);
+    float3 sn_i = floor(x);
+    float3 sn_u = frac(x);
+    sn_u = sn_u * sn_u * (3.0 - 2.0 * sn_u);
+    float sn_z0 = lerp(lerp(snHash(sn_i), snHash(sn_i + float3(1, 0, 0)), sn_u.x),
+                       lerp(snHash(sn_i + float3(0, 1, 0)), snHash(sn_i + float3(1, 1, 0)), sn_u.x), sn_u.y);
+    float sn_z1 = lerp(lerp(snHash(sn_i + float3(0, 0, 1)), snHash(sn_i + float3(1, 0, 1)), sn_u.x),
+                       lerp(snHash(sn_i + float3(0, 1, 1)), snHash(sn_i + float3(1, 1, 1)), sn_u.x), sn_u.y);
+    return lerp(sn_z0, sn_z1, sn_u.z);
 }
 
 // returns a point light contribution with no shadow map sampling

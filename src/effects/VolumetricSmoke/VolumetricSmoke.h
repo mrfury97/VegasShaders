@@ -1,10 +1,11 @@
 #pragma once
 
 #include "VolumetricSmokeQuads.h"
+#include "../../gunfx/GunFX.h"	// 2026-11-16 (gunfx-builtin): GunFX built in; its smoke by direct calls
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK): PassesOn in Render
 
-// GunFX volumetric smoke (prototype). GunFX.dll keeps its smoke as chains of points and hands over one record per tube
+// GunFX volumetric smoke (prototype). GunFX (built in since 2026-11-16, src/gunfx; was GunFX.dll) keeps its smoke as chains of points and hands over one record per tube
 // segment (GunFX_GetVolumeSmoke). Step 1 draws every segment that can be on screen as a quad over the area it reaches,
 // adding its optical depth into TESR_SmokeBuffer; step 2 (the effect chain's pass) lights the total and lays it over
 // the image, only inside the area the smoke covers (scissor). The cost follows the smoke's size on screen.
@@ -113,6 +114,13 @@ namespace VolumetricSmoke {
         state.Cleared(surface);
     }
 
+    // UNOFFICIAL 2026-11-12 (memleak), with [Main.Main.Performance] TargetReleaseSeconds above 0: the buffers (a full-screen and a
+    // half-screen half-float target and three small ones: 23 MB at 1080p, 92 MB at 4K) were made at start-up for every player, whether
+    // GunFX ever makes smoke or not (it is off by default). Now they are made the first frame GunFX hands over smoke to draw (Fetch), and
+    // kept from then on. BuffersLazy: not made at start-up; BuffersTried: MakeBuffers ran (made, or failed: not tried again).
+    inline bool BuffersLazy = false, BuffersTried = false;
+    void MakeBuffers();   // VolumetricSmoke.cpp
+
     // Segments and haze for this frame (fetched once; ShouldRender and Render both ask). Returns how much there is to draw.
     inline int Fetch() {
         if (FetchedFrame == FrameNumber) return Count + CountBig + HazeCount;
@@ -122,39 +130,17 @@ namespace VolumetricSmoke {
         static CpuTimer fetchCpuTimer("Smoke fetch (CPU)");
         CpuProfileScope fetchCpu(fetchCpuTimer);
         const ULONGLONG now = GetTickCount64();
-        // GunFX_GetVolumeSmoke2 gives 16 floats per record (with the smoke's own noise coordinate and the age at both
-        // ends); an older GunFX only has GunFX_GetVolumeSmoke (12). GunFX_GetSmokeFlash: the muzzle flash's light.
-        typedef int (__cdecl* GetFn)(float*, int, float*);
-        typedef void (__cdecl* FlashFn)(float*);
-        typedef int (__cdecl* HazeFn)(float*, int);
-        typedef void (__cdecl* ViewFn)(const float*);
-        typedef int (__cdecl* BulletsFn)(float*, int);
-        typedef void (__cdecl* BulletLookFn)(float*);
-        typedef float (__cdecl* MovingFn)();
-        static GetFn get = nullptr;
-        static FlashFn getFlash = nullptr;
-        static HazeFn getHaze = nullptr;
-        static ViewFn setView = nullptr;
-        static BulletsFn getBullets = nullptr;
-        static BulletLookFn getBulletLook = nullptr;
-        static MovingFn getMoving = nullptr;
-        static int stride = 12;
-        static bool looked = false;
-        if (!looked) {
-            looked = true;
-            HMODULE gunfx = GetModuleHandleA("GunFX.dll");
-            if (gunfx) {
-                get = (GetFn)GetProcAddress(gunfx, "GunFX_GetVolumeSmoke2");
-                if (get) stride = 16;
-                else get = (GetFn)GetProcAddress(gunfx, "GunFX_GetVolumeSmoke");
-                getFlash = (FlashFn)GetProcAddress(gunfx, "GunFX_GetSmokeFlash");
-                getHaze = (HazeFn)GetProcAddress(gunfx, "GunFX_GetSmokeHaze");
-                setView = (ViewFn)GetProcAddress(gunfx, "GunFX_SetView");
-                getBullets = (BulletsFn)GetProcAddress(gunfx, "GunFX_GetBullets");
-                getBulletLook = (BulletLookFn)GetProcAddress(gunfx, "GunFX_GetBulletLook");   // GunFX 1.38 and newer
-                getMoving = (MovingFn)GetProcAddress(gunfx, "GunFX_GetMoving");                // GunFX 1.39 and newer
-            }
-        }
+        // GunFX's volumetric smoke: 16 floats per record (with the smoke's own noise coordinate and the age at both ends), the muzzle
+        // flash's light, the haze, the bullets. 2026-11-16 (gunfx-builtin): GunFX is built in (src/gunfx/GunFX.h), so these are its
+        // functions themselves, always the newest versions (before: GunFX.dll's GunFX_* exports, found with GetProcAddress).
+        static int (* const get)(float*, int, float*) = &GunFX::GetVolumeSmoke2;
+        static void (* const getFlash)(float*) = &GunFX::GetSmokeFlash;
+        static int (* const getHaze)(float*, int) = &GunFX::GetSmokeHaze;
+        static void (* const setView)(const float*) = &GunFX::SetView;
+        static int (* const getBullets)(float*, int) = &GunFX::GetBullets;
+        static void (* const getBulletLook)(float*) = &GunFX::GetBulletLook;
+        static float (* const getMoving)() = &GunFX::GetMoving;
+        static const int stride = 16;
         // The camera, for GunFX's bullets (they fly to where you aim): the eye in world space (NVR's space is centred on
         // it, so it is CameraPosition) and the way it looks (the inverse view's third row).
         if (setView) {
@@ -167,7 +153,8 @@ namespace VolumetricSmoke {
             }
         }
         Count = CountBig = HazeCount = BulletCount = 0;
-        if (!get || !FullSurface) return 0;
+        const bool unmade = BuffersLazy && !BuffersTried;   // (2026-11-12 memleak) the buffers wait for the first smoke
+        if (!get || (!FullSurface && !unmade)) return 0;
         static float records[FetchMax * 16];
         float params[8] = {};
         int total = get(records, FetchMax, params);
@@ -177,9 +164,15 @@ namespace VolumetricSmoke {
         // Menu switches (Main > GunFX) for the two most expensive parts: off, they are not fetched, so their passes are skipped.
         const bool hazeOn = TheSettingManager->GetSettingI("Main.GunFX.Main", "SmokeHaze") != 0;
         const bool tunnelsOn = TheSettingManager->GetSettingI("Main.GunFX.Main", "BulletTunnels") != 0;
-        int hazeTotal = hazeOn && getHaze && HazeSurface && EnvSurface ? getHaze(haze, HazeMax) : 0;
+        int hazeTotal = hazeOn && getHaze && ((HazeSurface && EnvSurface) || unmade) ? getHaze(haze, HazeMax) : 0;
         if (hazeTotal < 0 || hazeTotal > HazeMax) hazeTotal = 0;
         if (!total && !hazeTotal) return 0;
+        if (unmade) {   // (2026-11-12 memleak) the first smoke of the session: its buffers now
+            MakeBuffers();
+            if (!FullSurface) return 0;
+            if (!HazeSurface || !EnvSurface) hazeTotal = 0;
+            if (!total && !hazeTotal) return 0;
+        }
         // GunFX's points are absolute world positions; NVR's world space is centred on the camera (objects are drawn at
         // their position minus CameraPosition, and the eye sits at the inverse view's origin). Convert every end into it.
         const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
@@ -278,7 +271,7 @@ public:
     bool ShouldRender() override { return VolumetricSmoke::Fetch() > 0; }
     void Render(IDirect3DDevice9* device, IDirect3DSurface9* target, IDirect3DSurface9* rendered,
         UINT technique, bool clear, IDirect3DSurface9* source) override {
-        // GunFX.ini holds the tuning; the switch is Main > GunFX > VolumetricSmoke.
+        // [Main.GunFX.Volume] holds the tuning; the switch is Main > GunFX > VolumetricSmoke.
         Enabled = Effect != nullptr;
         if (!Enabled || !ShouldRender()) { renderTime = 0; return; }
         using namespace VolumetricSmoke;

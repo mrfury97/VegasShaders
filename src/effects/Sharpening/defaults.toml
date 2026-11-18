@@ -10,3 +10,4 @@ Strength = 0.5                      # [0-1] As Main (CAS sharpness), indoors.
 
 [_Shaders.Sharpening.Status]
 Enabled = false                     # AMD FidelityFX Contrast Adaptive Sharpening (CAS) on the finished picture, faded out with distance.
+

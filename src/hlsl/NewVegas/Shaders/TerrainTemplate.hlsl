@@ -7,6 +7,18 @@
 
 #define TERRAIN	// implied: land
 
+// UNOFFICIAL 2026-11-14 full deferred renderer, phase 0 (ObjectTemplate.hlsl NVR_LIGHT_DEFERRED, docs/next/FD-RECORDS-RESULTS.md): LAMPS_DEFERRED 2 =
+// the lighting-free land record: no sun (nor its cascades, cloud shadow, parallax self-shadow, ShadowBounce or the wet film's sun
+// highlight), no lamp (nor their RT shadows); the weather and sky ambient, fog and the G-buffer kept, COLOR1.a = 1 - fog. Without it
+// nothing below changes.
+#if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED == 2
+    #define NVR_LIGHT_DEFERRED
+    #define TERRAIN_SUN_RGB (0.0f).xxx
+    #include "includes/DeferredPixel.hlsl"	// UNOFFICIAL 2026-11-14 DeferredSun: the lighting-free code in COLOR1.a (see the outputs)
+#else
+    #define TERRAIN_SUN_RGB LinColor(SunColor.rgb)
+#endif
+
 // UNOFFICIAL 2026-10-26 (NVR DXVK fork, docs\next\FORK-1026-LIMITS.md): NVR_NO_SM3_LIMITS and NVR_SM4 are defined only for the
 // no-limits build of these shaders (tools\nvr-dxvk\replace\nolimits.py: fxc ps_4_0 -> GLSL -> SPIR-V, which the fork runs in place of
 // the ps_3_0 shader the game loads). That build has no 32-temp or instruction limit, so the cuts ps_3_0 forced (marked
@@ -53,6 +65,21 @@
 #ifdef PS
     #define SHADOW_CLOUD_VALUE 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): no sampler is free here, the vertex shader looks the map up
 #endif
+// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (Includes/Shadow.hlsl RT_SUN_FORWARD): the land's own registers (the DLL writes
+// c146-c165 for the land's lamps; c192, c193, c195, c196 are named only by the skin and object shaders and nothing uploads them by
+// number) and a sampler NormalMap leaves free (as TESR_DisplaceDepth takes BaseMap's): s13 below 7 layers, or with Wetness Effects (its
+// rain cover map is on s13 then) s12 below 6. A piece with no sampler left (7 layers; 6 with Wetness Effects) keeps the cascades.
+#if TEX_COUNT < 7 && !defined(WETNESS_EFFECTS)
+    #define RT_SUN_SAMPLER_REG s13
+#elif TEX_COUNT < 6
+    #define RT_SUN_SAMPLER_REG s12
+#else
+    #define RT_SUN_FORWARD_OFF 1
+#endif
+#define RT_SUN_ROWX_REG c192
+#define RT_SUN_ROWY_REG c193
+#define RT_SUN_ROWW_REG c195
+#define RT_SUN_DATA_REG c196
 #include "includes/Shadow.hlsl"	// shared code
 // UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel), compiled in only when on at startup.
 #if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
@@ -312,7 +339,8 @@ float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3
 // the sun cross-fade's: not with the cross-fade; with the lamp slots (TERRAIN_LAMP_RT) they move (2026-11-09, WETNESS_ALT_REGS). The rain cover map on s13, free below seven texture layers (the seventh layer's normal map
 // there): seven-layer land goes without the cover test (open everywhere). The layers' height maps shape the wetness and the puddles
 // (WETNESS_HEIGHT, c158: [Shaders.WetnessEffects.Main] HeightAwareness, CreviceFill, NormalAwareness), as in Physically-Based-Reloaded.
-#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE
+// (2026-11-13 fork port) the lamp record's water layer (WETNESS_ALT_REGS) only with Puddles (WETNESS_EFFECTS 2+): Wetness Effects alone as before
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS) && WETNESS_EFFECTS < 2)
     #define TERRAIN_WETNESS
     #if TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS)
         #define WETNESS_ALT_REGS    // 2026-11-09: the lamp slots hold c146-c173 here; the water layer takes c2, c4-c17, c98-c99 (Wetness.hlsl)
@@ -628,15 +656,17 @@ PS_OUTPUT main(PS_INPUT pin) {
     float3 sunTS = mul(tbnMat, SunDir.xyz);
     float sunMul = 1.0;
     [branch] if (parallax) sunMul = getParallaxShadowMultipler(viewDist, offsetUV, gradX, gradY, sunTS, texLayers, blendW, hStat, BaseMap);
+    const float crackShadow = sunMul;	// UNOFFICIAL 2026-11-12 ShadowBounce: the self-shadow alone, before the cast shadows fold in
 
     // Forward sun shadows. Folded into sunMul, which getSunLighting
     // applies to the sun colour only -- ambient is added afterwards and stays untouched.
-    #if FORWARD_SHADOWS	// NVR sun shadows in the object pass
+    #if FORWARD_SHADOWS && !defined(NVR_LIGHT_DEFERRED)	// NVR sun shadows in the object pass (the lighting-free record: no sun)
     #if SHADOW_CLOUD_FROM_VALUE
     NvrCloudSun = SHADOW_VS_PRESENT(pin.texc.w) ? pin.texc.z : 1.0f;	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the vertex shader's lookup
     #endif
     sunMul *= GetSunShadow(camPos, geoN);
     #endif
+    const float castSun = sunMul / max(crackShadow, 1.0e-3f);	// the cast shadows alone (1 without them)
 
     #ifdef TERRAIN_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the albedo darkens before any light sees it (land is porous: full darkening)
         float3 wetWorldNormal = normalize(mul(combinedNormal, tbnMat));	// tangent space -> the land piece's (world-aligned) space
@@ -681,11 +711,22 @@ PS_OUTPUT main(PS_INPUT pin) {
             baseColor = lerp(baseColor, wet.debris.rgb, wet.debris.a);
         #endif
     #endif
-    float3 litCol = getSunLighting(sunTS, LinColor(SunColor.rgb), toEye, combinedNormal, LinColor(AmbientColor.rgb), baseColor, glossV, specPow, 1.0, sunMul, geoN);
+    float3 litCol = getSunLighting(sunTS, TERRAIN_SUN_RGB, toEye, combinedNormal, LinColor(AmbientColor.rgb), baseColor, glossV, specPow, 1.0, sunMul, geoN);
+    // UNOFFICIAL 2026-11-12 [Shaders.Terrain.Parallax] ShadowBounce (the owner: the ground's small shadows "appear to be pure black", "give
+    // those ... a bit more depth"). The ground's relief takes the sun away twice: the parallax self-shadow (a crack's floor behind its wall)
+    // and the bumps' own shaded sides (the normal map facing away from the sun). Both left only the sky's ambient, so under a strong sun
+    // they read as black holes. A hollow is lit by the sunlit ground beside it: one bounce off that ground (its colour) onto the hollow (its
+    // colour again). The sun the relief took (what the flat land would get, less what this pixel got) comes back times the ground's colour x
+    // ShadowBounce. (Tinted once: tinted twice, as two real bounces would be, left nothing on dark ground such as asphalt, bench the same
+    // day.) Not inside a cast shadow (castSun). 0 = as before.
+    // (First try the same day: the parallax self-shadow alone. It changed nothing visible on the bench: the dark parts were the bumps'
+    // shaded sides.)
+    const float reliefLoss = max(0.0f, saturate(sunTS.z) - crackShadow * saturate(dot(combinedNormal, sunTS)));
+    litCol += TERRAIN_SUN_RGB * LinScale(TESR_TerrainData.z) * baseColor * (reliefLoss * castSun * TESR_TerrainParallaxIso.z);
     #ifdef TERRAIN_WETNESS	// the water film: the sun's highlight on it and its reflection of the sky, over the land
         [branch] if (wet.gloss > 0.001f) {
             float3 wetV = -normalize(camPos);
-            float3 wetSun = LinColor(SunColor.rgb) * LinScale(TESR_TerrainData.z) * sunMul;	// as getSunLighting takes the sun
+            float3 wetSun = TERRAIN_SUN_RGB * LinScale(TESR_TerrainData.z) * sunMul;	// as getSunLighting takes the sun
             litCol += WetSpecular(wet.normal, wetV, TESR_WetnessSun.xyz, wetSun, wet.roughness) * smoothstep(0.0f, 0.2f, wet.gloss);
             float3 wetR = reflect(-wetV, wet.normal);
             float wetHorizon = saturate(1.0f + 1.2f * dot(wetR, geoN));
@@ -697,7 +738,7 @@ PS_OUTPUT main(PS_INPUT pin) {
         }
     #endif
 
-    #if defined(NUM_PT_LIGHTS)	// point lights
+    #if defined(NUM_PT_LIGHTS) && !defined(NVR_LIGHT_DEFERRED)	// point lights (the lighting-free record: none)
         #if TERRAIN_LAMP_RT
             float3 tlVis, tlP0, tlP1, tlP2, tlOk;
             TerrainLampEntries(camPos, tlVis, tlP0, tlP1, tlP2, tlOk);
@@ -793,8 +834,47 @@ PS_OUTPUT main(PS_INPUT pin) {
     // UNOFFICIAL 2026-10-31 AlbedoBuffer (Includes/CapturedNormals.hlsl): the land's blended linear colour; with terrain blending's fade (alpha 1, a
     // replace) it overwrites an object's albedo in the fade strip, as the normal does
     po.capturedPad1 = CapturedAlbedoOut(baseColor);
-    po.capturedPad2 = CapturedMaterialOutClass(4.0f, -1.0f);	// UNOFFICIAL 2026-10-29 MaterialBuffer: class 4, land (0 without it)
-    #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON >= 2
+    #if CAPTURED_NORMALS_ON >= 4
+        po.capturedPad2 = CapturedMaterialOutClass(4.0f + GBV2_SPEC_BIT, -1.0f);	// UNOFFICIAL 2026-11-14 GBufferV2: land, its lamps lit with a highlight (glossV, specPow)
+    #else
+        po.capturedPad2 = CapturedMaterialOutClass(4.0f, -1.0f);	// UNOFFICIAL 2026-10-29 MaterialBuffer: class 4, land (0 without it)
+    #endif
+    // UNOFFICIAL 2026-11-12 (ptbump) [Main.Main.Quality] CapturedBumpNormals (CAPTURED_PT 2: the DXVK fork, the AlbedoBuffer level): the
+    // layers' normal-mapped normal, in world axes (the land is not rotated), in the record's g / b for the path tracer's first hit, which
+    // lit the land with the smooth normal below (Includes/CapturedNormals.hlsl CapturedLandBumpOut; no other reader takes g or b from a
+    // land texel). Not the 6- and 7-layer shaders (no temp register left: see CapturedCoverage's note below): their land stays smooth there.
+    #if CAPTURED_NORMALS_ON >= 4
+        // UNOFFICIAL 2026-11-14 GBufferV2 (Includes/CapturedNormals.hlsl): the blended layers' normal-mapped normal in world axes (exact: the land
+        // is not rotated, tbnMat is its own frame), in g / a. (CAPTURED_PT 2's land code is not compiled with it: ShaderRecord caps CAPTURED_PT at 1.)
+        #ifdef TERRAIN_WETNESS
+            po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, wetWorldNormal);
+        #else
+            po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, mul(combinedNormal, tbnMat));
+        #endif
+    #elif defined(CAPTURED_PT) && CAPTURED_PT >= 2 && CAPTURED_NORMALS_ON >= 3 && TEX_COUNT <= 5
+        #ifdef TERRAIN_WETNESS
+            po.capturedPad2 = CapturedLandBumpOut(wetWorldNormal);
+        #else
+            po.capturedPad2 = CapturedLandBumpOut(mul(combinedNormal, tbnMat));
+        #endif
+    #endif
+    #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 3
+        // UNOFFICIAL 2026-11-14 DeferredSun (Includes/DeferredPixel.hlsl; Shaders/DeferredSun.hlsl's land model): the lighting-free code
+        // (the land lights its sun with PBRSun: base 3), and in COLOR2.b the roughness the land's PBR sun takes (Terrain.hlsl getSunLighting:
+        // (1 - the layers' gloss) x RoughnessScale), which the land's record had none of (-1). Without GBufferV2 (which writes it in g / a)
+        // also the layers' normal-mapped normal in world axes, in the older deferred code (g oct.x, a 1.01 + 0.49 (oct.y + 1)).
+        po.capturedPad1.a = FD_LF_CODE(FD_LF_SPEC, 1.0f - fogTerm.a);	// (the lighting-free record's COLOR1.a, its one writer: 1 - fog + the code)
+        po.capturedPad2.b = saturate((1.0f - glossV) * TESR_TerrainData.y);
+        #if CAPTURED_NORMALS_ON == 3
+        {
+            const float2 fdOct = ShadowEncodeNormal(normalize(mul(combinedNormal, tbnMat)));
+            po.capturedPad2.g = fdOct.x;
+            po.capturedPad2.a = 1.01f + 0.49f * (fdOct.y + 1.0f);
+        }
+        #endif
+    #endif
+    // (test-after-110 merge) only with the MaterialBuffer's first layout: 3 / 4 (AlbedoBuffer, GBufferV2, the deferred renderer) use a for the normal
+    #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON == 2
         // 2026-11-12 Puddles: the standing water drawn here, for the SSR/RT reflection pass (Reflections.glsl PuddleStanding: a - 1)
         po.capturedPad2.a += PuddleStandingOut;
     #endif
@@ -802,6 +882,26 @@ PS_OUTPUT main(PS_INPUT pin) {
     // with tessellation the normal its evaluation shader passes on), before the layers' normal maps. Alpha 1 also with terrain blending's
     // Smooth fade (the land drawn blended over objects): the land's normal replaces what is there, with its depth.
     po.capturedNormal = CapturedNormalOut(pin.nrmO.xyz, camPos);
+    #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 4
+        // UNOFFICIAL 2026-11-16 fd-sunvis (Includes/DeferredPixel.hlsl FDSunVisCode): the height self-shadow (the crack shadows) this record's sun
+        // would have had, for DeferredSun ([Shaders.ShadowsExteriors.Deferred] LandCrackShadow is the pass's); no highlight F0 (none recorded)
+        po.capturedNormal.a = FDSunVisCode(po.capturedNormal.a, crackShadow, -1.0f, NVR_SpecFade.z);
+    #endif
+    // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl; audit item 7): in terrain blending's Smooth fade the land is
+    // drawn blended over the objects with alpha = its share (terrainKeep). The land's records replace the object's only where the land is
+    // half or more of the pixel; below, alpha 0 = the object's records stay (with the object's distance). A land draw that is not blended,
+    // and alpha 1 (all the land away from the seams): x 1, as before. Only with terrain blending compiled in (without it the alpha is 1),
+    // and NOT in the 6- and 7-layer land shaders: with the blend they have no temp register left (fxc, PREFER_FLOW_CONTROL: X4505 with
+    // any form of this, 2026-11-12; ShaderRecord's note of 2026-10-29 on the same shaders), and a land shader that fails to compile is
+    // the game's own land. Their seam strips record the land over the whole strip, as before.
+    #if CAPTURED_NORMALS_ON >= 3 && TERRAIN_BLEND_ACTIVE && TEX_COUNT <= 5
+    {
+        const float capKeep = CapturedCoverage(po.finalCol.a);
+        po.capturedPad1.a *= capKeep;
+        po.capturedPad2.a *= capKeep;
+        po.capturedNormal.a *= capKeep;
+    }
+    #endif
 #endif
 
     return po;

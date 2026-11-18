@@ -149,7 +149,7 @@ bool Sm6Pass::Prepare(EffectRecord* Effect, const char* Technique, UINT Pass) {
 	std::string index = Sm6Folder() + Key + ".txt";
 	std::ifstream indexFile(index);
 	if (!indexFile) { Failed = true; return false; }	// the normal case: no SM6 build of this pass (quiet)
-	D3DXMACRO macros[8];
+	D3DXMACRO macros[10];	// (2026-11-14: room for 10, EffectRecord::BuildMacros)
 	EffectRecord::BuildMacros(macros);
 	std::string line, variant;
 	while (std::getline(indexFile, line)) {

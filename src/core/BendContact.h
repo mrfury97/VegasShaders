@@ -1,7 +1,7 @@
 #pragma once
 
-// UNOFFICIAL 2026-11-06 forward contact shadows ([Shaders.ShadowsExteriors.ScreenSpace] Bend + InLighting; user: "lets try porting
-// the skyrim CS screen space shadows as forward to fnv"). Skyrim Community Shaders' Screen-Space Shadows (Bend Studio's, Apache 2.0,
+// UNOFFICIAL 2026-11-06 forward contact shadows ([Shaders.ShadowsExteriors.ScreenSpace] Bend + InLighting; ported 2026-11-13 from a
+// tester fork, default off). Skyrim Community Shaders' Screen-Space Shadows (Bend Studio's, Apache 2.0,
 // Copyright 2023 Sony Interactive Entertainment) multiply only the SUN term inside the lit shaders. Skyrim draws a depth pre-pass;
 // New Vegas does not, so here:
 //   1. after the frame's world (effect chain step 11, where the old contact pass runs), Compute/BendContact.comp marches Bend's rays

@@ -1,4 +1,5 @@
 #pragma once
+#include "../../gunfx/GunFX.h"	// 2026-11-16 (gunfx-builtin): GunFX built in; its haze by direct calls
 
 // Captured from the gun's actual MVP, including the first-person projection.
 namespace BarrelHaze {
@@ -51,27 +52,13 @@ namespace BarrelHaze {
     inline void CaptureWorld(const float* state, bool firstPerson, const void* weaponNode) {
         // V2 also gives the muzzle in world space from the game loop: while the first-person model is drawn, its
         // nodes are in another space (the muzzle read about (61, 59, 121) with the camera at (2818, 1914, 7543)).
-        typedef bool (__cdecl* GetHazeFn)(float* out, const void*);
-        // V3 adds the muzzle blast (out[14] pixels now, out[15] radius).
-        static GetHazeFn get = nullptr;
-        static bool v2 = false, v3 = false;
-        if (!get) {
-            HMODULE smoke = GetModuleHandleA("GunFX.dll");
-            if (smoke) {
-                get = (GetHazeFn)GetProcAddress(smoke, "GunFX_GetHazeV3");
-                v2 = v3 = get != nullptr;
-                if (!get) { get = (GetHazeFn)GetProcAddress(smoke, "GunFX_GetHazeV2"); v2 = get != nullptr; }
-                if (!get) get = (GetHazeFn)GetProcAddress(smoke, "GunFX_GetHaze");
-            }
-        }
+        // V3 adds the muzzle blast (out[14] pixels now, out[15] radius). (2026-11-16: GunFX is built in: always V3.)
         float haze[16] = {};
         D3DXVECTOR3 muzzle(state[0], state[1], state[2]), axis(state[4], state[5], state[6]);
-        if (!get) { LogMiss(firstPerson, "GunFX_GetHaze missing", muzzle); return; }
-        if (!get(haze, weaponNode)) { LogMiss(firstPerson, "no haze data for this gun", muzzle); return; }
-        const float blast = v3 ? haze[14] : 0.0f;
+        if (!GunFX::GetHazeV3(haze, weaponNode)) { LogMiss(firstPerson, "no haze data for this gun", muzzle); return; }
+        const float blast = haze[14];
         if (haze[0] <= 0.001f && blast <= 0.01f) return;
         if (firstPerson) {
-            if (!v2) { LogMiss(firstPerson, "GunFX too old for first person (no GetHazeV2)", muzzle); return; }
             muzzle = D3DXVECTOR3(haze[8], haze[9], haze[10]);
             axis = D3DXVECTOR3(haze[11], haze[12], haze[13]);
         }
@@ -91,18 +78,12 @@ namespace BarrelHaze {
         Data = D3DXVECTOR4(haze[0], haze[1], haze[2], haze[3]);
         Captured = GetTickCount64();
         Animation = D3DXVECTOR4(float(Captured % 3600000) * 0.001f, haze[4], haze[6], depth);
-        Blast = D3DXVECTOR4(blast, v3 ? haze[15] : 0.0f, 0.0f, 0.0f);
+        Blast = D3DXVECTOR4(blast, haze[15], 0.0f, 0.0f);
     }
 
     inline void Capture(const float* local, float scale, const void* weaponNode) {
-        typedef bool (__cdecl* GetHazeFn)(float out[8], const void*);
-        static GetHazeFn get = nullptr;
-        if (!get) {
-            HMODULE smoke = GetModuleHandleA("GunFX.dll");
-            if (smoke) get = (GetHazeFn)GetProcAddress(smoke, "GunFX_GetHaze");
-        }
         float haze[8] = {}, matrix[16];
-        if (!get || !get(haze, weaponNode) || haze[0] <= 0.001f ||
+        if (!GunFX::GetHaze(haze, weaponNode) || haze[0] <= 0.001f ||
             FAILED(TheRenderManager->device->GetVertexShaderConstantF(0, matrix, 4))) return;
         float clipDepth = 0;
         auto project = [&](const D3DXVECTOR3& p, float& u, float& v) {
@@ -138,7 +119,7 @@ public:
     }
     void Render(IDirect3DDevice9* device, IDirect3DSurface9* target, IDirect3DSurface9* rendered,
         UINT technique, bool clear, IDirect3DSurface9* source) override {
-        // GunFX.ini holds the tuning; the on/off switches are in the NVR menu (Main > GunFX) and reach GunFX.dll
+        // [Main.GunFX.Haze] / [Blast] hold the tuning; the on/off switches are in the menu (Gun effects) and reach GunFX
         // through GunFX_SetSwitches, which then publishes no haze/blast when they are off.
         Enabled = Effect != nullptr;
         if (!Enabled || !ShouldRender()) { renderTime = 0; return; }

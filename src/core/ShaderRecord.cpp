@@ -11,6 +11,10 @@
 #include "PointShadowForward.h"
 #include "ManyLamps.h"	// UNOFFICIAL 2026-10-27 ManyLampsOnePass
 #include "DeferredLamps.h"	// UNOFFICIAL 2026-10-31 DeferredLamps
+#include "DeferredRenderer.h"	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2
+#include "DeferredSkin.h"	// UNOFFICIAL 2026-11-15 full deferred renderer phase 4 skin ([Main.Main.Quality] DeferredSkin)
+#include "DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list
+#include "DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant (DISTANT_GBUFFER for the far land)
 #include "LandLamps.h"	// UNOFFICIAL 2026-10-30 LandAllLamps
 #include "ShaderPrecompile.h"
 #include "TestTools.h"	// NVR_TEST_TOOLS (FailShaders)
@@ -18,11 +22,15 @@
 #include <unordered_set>	// SetCT's once-only "not bound" notes
 #include "GpuProfiler.h"
 #include "LinearPreDecode.h"	// UNOFFICIAL 2026-10-17
-#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (SUN_CONTACT_FORWARD)
+#include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (SUN_CONTACT_FORWARD; fork port 2026-11-13)
 #include "ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (ALPHA_HASH_ON)
 #include "LandLight.h"	// UNOFFICIAL 2026-10-25 (SunFar)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (FORWARD_CLOUD_SHADOWS)
+#include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (a family too long for the driver goes without optional features)
+#include "RtSunShadows.h"	// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (RT_SUN_FORWARD)
+#include "SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (the forward records' SUN_CROSSFADE)
+#include "GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 GameShaderPairs (a freed shader leaves its list of the game's shaders)
 // Small helpers for the shader loader: a template's define list is searched by name, and a held interface
 // is released and cleared in one step.
 namespace {
@@ -122,6 +130,15 @@ bool ShaderProgram::CheckPreprocessResult(const char* CachedPath, ID3DXBuffer* S
 // renamed): nothing changes. Called from the compile worker threads too: each shader has its own files.
 static std::atomic<long> gShippedSeeds{ 0 };
 long ShaderProgram::ShippedSeeds() { return gShippedSeeds.load(); }
+
+// UNOFFICIAL 2026-11-16: a cache sub-folder two levels deep (Cache\Deferred\Depth\, Cache\Deferred\Fit3\Past16Lit\) was never made,
+// because CreateDirectoryA makes only the last level: the deferred passes compiled again at every start and their shipped cache
+// entries could not be copied in. Every level of the path is made now (existing ones are left as they are).
+void ShaderProgram::CreateFolders(const std::string& Path) {
+	for (size_t at = Path.find_first_of("\\/"); at != std::string::npos; at = Path.find_first_of("\\/", at + 1))
+		if (at > 0 && Path[at - 1] != ':') CreateDirectoryA(Path.substr(0, at).c_str(), NULL);
+	CreateDirectoryA(Path.c_str(), NULL);
+}
 bool ShaderProgram::SeedFromShipped(const char* PreprocessedPath, const char* CompiledPath, const std::string& Text) {
 	auto shipped = [](const char* path) {
 		std::string s = path;
@@ -166,6 +183,96 @@ std::string ShaderProgram::PortableSource(ID3DXBuffer* Source) {
 	return Text;
 }
 
+// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h): once, before the first define list is made (BuildDefines calls it, so the
+// parallel compile's job list already has the remembered drops). The memory's key is the whole define list as the settings alone give
+// it (IgnoreDrops), plus this build: any setting that changes a shader, another cap, DXVK or a new build tries the full shaders again.
+static void FallbackInit() {
+	static bool started = false;
+	if (started) return;
+	started = true;	// (first: BuildDefines below comes back here)
+	ShaderTemplate probe = {};
+	ShaderFallback::IgnoreDrops = true;
+	ShaderRecord::BuildDefines(probe, nullptr);
+	ShaderFallback::IgnoreDrops = false;
+	unsigned hash = 2166136261u;
+	auto mix = [&hash](const char* text) {
+		for (; text && *text; text++) hash = (hash ^ (unsigned char)*text) * 16777619u;
+		hash = (hash ^ 0xFFu) * 16777619u;
+	};
+	for (int d = 0; d < 63 && probe.Defines[d].Name; d++) { mix(probe.Defines[d].Name); mix(probe.Defines[d].Definition); }
+	mix(__DATE__ " " __TIME__);
+	ShaderFallback::Init(hash, std::string(ShadersPath) + "Cache\\");
+}
+
+// UNOFFICIAL 2026-11-12 ShaderFallback: after a drop, every default record of the family is compiled again on worker threads (as
+// ShaderPrecompile does at the start: one after another on the main thread the 29 land shaders take minutes) and counted. While the
+// longest is still over the cap the next feature goes too, before the device is asked again. The cache then holds the results, so
+// the loads that follow (the refused shader's retry, the members ShaderManager loads again, the ones the game has not made yet) are
+// cache hits. The records with their own levels (Interiors\, ExteriorLamps\) are not compiled here: their loads compile them as before.
+static void FallbackPrepareFamily(const char* TemplateName) {
+	const ShaderFallback::Family family = ShaderFallback::FamilyOf(TemplateName);
+	if (family == ShaderFallback::Other || !TheShaderManager) return;
+	for (unsigned round = 0; round <= ShaderFallback::FeatureCount; round++) {
+		const auto roundStart = std::chrono::steady_clock::now();
+		std::vector<ShaderPrecompile::Job*> jobs;
+		for (const auto& [CollectionName, Pointer] : TheShaderManager->ShaderNames) {
+			ShaderCollection* Collection = Pointer ? *Pointer : nullptr;
+			if (!Collection) continue;
+			for (const auto& [ShaderName, ShaderTemplateOf] : Collection->Templates()) {
+				if (ShaderFallback::FamilyOf(ShaderTemplateOf.Name) != family) continue;
+				ShaderPrecompile::Job* job = new ShaderPrecompile::Job();
+				job->Name = std::string(ShaderName);
+				ShaderPrecompile::Paths(job->Name.c_str(), NULL, NULL, ShaderTemplateOf.Name, job);
+				if (!ShaderProgram::FileExists(job->Source.c_str())) { delete job; continue; }
+				// The start's own job for this file (the full shader) is waited for and retired: it must neither write the cache after
+				// ours nor be handed to LoadShader in place of the shorter one.
+				const auto startJob = ShaderPrecompile::ByCompiledPath.find(job->Compiled);
+				if (startJob != ShaderPrecompile::ByCompiledPath.end() && !startJob->second->Taken) {
+					ShaderPrecompile::Job* stale = startJob->second;
+					while (!stale->Done) Sleep(1);
+					if (stale->SourceBuffer) stale->SourceBuffer->Release();
+					if (stale->ShaderBuffer) stale->ShaderBuffer->Release();
+					stale->SourceBuffer = stale->ShaderBuffer = nullptr;
+					stale->Taken = true;
+				}
+				job->Template = ShaderTemplateOf;
+				ShaderRecord::BuildDefines(job->Template, nullptr);
+				jobs.push_back(job);
+			}
+		}
+		std::atomic<size_t> next{ 0 };
+		const unsigned cores = std::thread::hardware_concurrency();
+		const unsigned threadCount = (std::max)(1u, (std::min)((std::min)(cores > 1 ? cores - 1 : 1u, 12u), (unsigned)jobs.size()));
+		std::vector<std::thread> threads;
+		for (unsigned i = 0; i < threadCount; i++)
+			threads.emplace_back([&jobs, &next] { for (size_t at; (at = next.fetch_add(1)) < jobs.size(); ) ShaderPrecompile::Run(jobs[at]); });
+		for (std::thread& thread : threads) thread.join();
+
+		unsigned longest = 0, over = 0, failed = 0;
+		std::string longestName = "none";
+		for (ShaderPrecompile::Job* job : jobs) {
+			if (!job->Log.empty()) { Logger::Log("%s", job->Log.c_str()); RegisterClash::Check(job->Name.c_str(), job->Log.c_str()); }
+			if (job->ShaderBuffer) {
+				const bool vertex = strstr(job->Name.c_str(), ".vso") != nullptr;
+				const unsigned slots = ShaderFallback::CountSlots((const DWORD*)job->ShaderBuffer->GetBufferPointer(), job->ShaderBuffer->GetBufferSize() / 4);
+				const unsigned cap = ShaderFallback::Cap(vertex);
+				if (cap && slots > cap) over++;
+				if (slots > longest) { longest = slots; longestName = job->Name; }
+			}
+			else failed++;
+			if (job->SourceBuffer) job->SourceBuffer->Release();
+			if (job->ShaderBuffer) job->ShaderBuffer->Release();
+			delete job;
+		}
+		Logger::Log("ShaderFallback: the %s shaders (%u) compiled again on %u threads in %.1f s: the longest is %s with %u instruction slots (cap %u), %u over the cap, %u did not compile",
+			ShaderFallback::FamilyNames[family], (unsigned)jobs.size(), threadCount,
+			std::chrono::duration<double>(std::chrono::steady_clock::now() - roundStart).count(), longestName.c_str(), longest,
+			ShaderFallback::Cap(false), over, failed);
+		if (!over || !ShaderFallback::DropNext(family)) break;	// they fit, or nothing is left to drop (the device's refusals then say so)
+	}
+	ShaderFallback::Summarize(family);
+}
+
 // UNOFFICIAL 2026-10-14: the defines every NVR game shader is compiled with (the template's, the overrides first, then the
 // settings'), in its own function so ShaderPrecompile works them out the same way.
 void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overrides) {
@@ -183,6 +290,11 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 		list[used] = { DefineName, Value };
 		list[used + 1] = { NULL, NULL };	// keep the list terminated
 	};
+
+	// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h): the optional features this template's family is built without (it
+	// was too long for the driver on native Direct3D 9) are left out below, whatever their settings say. Nothing dropped: the list as before.
+	FallbackInit();
+	const ShaderFallback::Family fallbackFamily = ShaderFallback::FamilyOf(Template.Name);
 
 	// UNOFFICIAL: overrides first, so the global defines below with the same name are skipped.
 	if (Overrides)
@@ -205,7 +317,8 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL sun shadow cross-fade (SunSmoothing CrossFade): compiled in only when on, so that otherwise the
 	// shaders are exactly what they were. Read here for the same reason as FORWARD_SHADOWS; takes effect on restart.
 	// UNOFFICIAL optional contact-hardening sun shadows: compiled in only when on at startup, like SUN_CROSSFADE.
-	AppendDefine("CONTACT_HARDENING", TheSettingManager->GetSettingI("Shaders.ContactHardening.Status", "Enabled") ? "1" : "0");
+	AppendDefine("CONTACT_HARDENING", TheSettingManager->GetSettingI("Shaders.ContactHardening.Status", "Enabled") &&
+		!ShaderFallback::Dropped(ShaderFallback::LandContactHardening, fallbackFamily) ? "1" : "0");	// (2026-11-12 ShaderFallback: the land's last drop)
 	// UNOFFICIAL 2026-10-22 CasterReachEverywhere, a TEST switch: CharacterShadowReach's slack cap (Includes/Shadow.hlsl ShadowSlackCap)
 	// compiled into every forward shader instead of the skin shaders only. Off (the default): the other shaders are exactly what they were.
 	AppendDefine("SHADOW_SLACK_CAP_ALL", TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "CasterReachEverywhere") ? "1" : "0");
@@ -243,7 +356,7 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// 2026-11-04 dust on top surfaces (Includes/ObjectDust.hlsl) and micro-shadowing (Includes/Object.hlsl, needs RMAOS_ON): compiled in
 	// only when on at startup, so that off the object and parallax shaders are exactly what they were.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.Dust", "Enabled")) AppendDefine("DUST_ON", "1");
-	if (TheSettingManager->GetSettingI("Shaders.PBR.MicroShadow", "Enabled")) AppendDefine("MICRO_SHADOW_ON", "1");
+	if (TheSettingManager->GetSettingI("Shaders.PBR.MicroShadow", "Enabled") && !ShaderFallback::Dropped(ShaderFallback::MicroShadow, fallbackFamily)) AppendDefine("MICRO_SHADOW_ON", "1");	// (2026-11-12 ShaderFallback)
 	// UNOFFICIAL 2026-11-09 FromGameData (Includes/Object.hlsl NVR_EnvData, Render.cpp RmaosDraw; needs RMAOS_ON): metal from the game's env-map
 	// flag, strength and mask. Defined only when on at startup, so that off the define list and the shaders are exactly as before.
 	if (TheSettingManager->GetSettingI("Shaders.PBR.EnvMaps", "FromGameData")) AppendDefine("ENV_FROM_DATA_ON", "1");
@@ -284,10 +397,33 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// smooth vertex normal to COLOR3; compiled in only when a reader's switch is on at startup, so that otherwise they are exactly as before
 	// (defined only then: the define list, and so the shader cache's keys, stay as they were with it off).
 	// UNOFFICIAL 2026-10-29: 2 = with MaterialBuffer; 2026-10-31: 3 = with AlbedoBuffer too (COLOR1; docs/next/DEFERRED-RENDERING-PLAN.md rung A)
-	if (CapturedNormals::CompiledIn()) AppendDefine("CAPTURED_NORMALS_ON", CapturedNormals::AlbedoCompiledIn() ? "3" : CapturedNormals::MaterialCompiledIn() ? "2" : "1");
+	// UNOFFICIAL 2026-11-14: 4 = GBufferV2 too (the MaterialBuffer's layout v2: core/CapturedNormals.h V2CompiledIn; a new value, no new define)
+	if (CapturedNormals::CompiledIn()) AppendDefine("CAPTURED_NORMALS_ON", CapturedNormals::V2CompiledIn() ? "4" : CapturedNormals::AlbedoCompiledIn() ? "3" : CapturedNormals::MaterialCompiledIn() ? "2" : "1");
+	// UNOFFICIAL 2026-11-16 fd-batchE ([Main.Main.Quality] DeferredADFog, restart, default off; docs/next/FD-BATCH-E.md item 19): the light-only
+	// base pass (AD) sends the game's fog amount and its deferred records keep 1 - that fog (ObjectTemplate.hlsl / ParallaxTemplate.hlsl
+	// AD_FOG_KEEP_ON). Defined only when on, so the define lists (and the shader cache's keys) are as before with it off.
+	if (CapturedNormals::AlbedoCompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredADFog")) AppendDefine("AD_FOG_KEEP_ON", "1");
+	// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h, TerrainLODTemplate.hlsl): the far land writes the G-buffer. Defined for that
+	// template only and only with the switch on at startup, so that otherwise every define list (and the shader cache's keys) is as before.
+	if (Template.Name && !strcmp(Template.Name, "TerrainLODTemplate") && DeferredDistant::CompiledIn()) AppendDefine("DISTANT_GBUFFER", "1");
 	// UNOFFICIAL 2026-10-28 [Main.Main.Quality] CapturedNormals also gives the land and parallax templates their smooth vertex normal for
 	// the sun lookup and the sky ambient (TerrainTemplate / ParallaxTemplate CAPTURED_NORMALS_FORWARD), as SmoothObjectNormals did for objects.
 	if (CapturedNormals::MergeWanted()) AppendDefine("CAPTURED_NORMALS_FORWARD", "1");
+	// UNOFFICIAL 2026-11-12 (ptbump) CAPTURED_PT (core/CapturedNormals.h PtCodesCompiled / BumpCompiled; Includes/CapturedNormals.hlsl): the
+	// MaterialBuffer's two record codes that only the path tracer reads. 1 = the object / parallax shaders can code "no highlight on this
+	// mesh"; 2 = also the land shaders (up to 5 layers) write their normal-mapped normal ([Main.Main.Quality] CapturedBumpNormals,
+	// restart; a missing key = on). Only with the AlbedoBuffer level, and only under the DXVK fork (the one place path tracing runs: on
+	// native Direct3D 9, where these shaders sit nearest the driver's slot limit, they stay exactly as they were). Defined only then.
+	{
+		SettingManager::Configuration::ConfigNode bumpNode;
+		const bool bumpKey = !TheSettingManager->Config.FillNode(&bumpNode, "Main.Main.Quality", "CapturedBumpNormals") || bumpNode.BoolValue;
+		CapturedNormals::PtCodesCompiled = CapturedNormals::AlbedoCompiledIn() && TheRenderManager && !strncmp(TheRenderManager->D3D9RuntimeDescription(), "DXVK", 4);
+		CapturedNormals::BumpCompiled = CapturedNormals::PtCodesCompiled && bumpKey;
+		// UNOFFICIAL 2026-11-14 GBufferV2: the land's bump code (2) sits in g / b, where v2 has the shading normal (every family's, the land's
+		// included): with v2 only the no-highlight code (1)
+		if (CapturedNormals::V2CompiledIn()) CapturedNormals::BumpCompiled = false;
+		if (CapturedNormals::PtCodesCompiled) AppendDefine("CAPTURED_PT", CapturedNormals::BumpCompiled ? "2" : "1");
+	}
 #if NVR_TEST_TOOLS
 	// UNOFFICIAL 2026-10-31 LampCapsCensus ([Main.Main.Misc], development builds; Includes/PointShadowForward.hlsl LAMP_CAPS_VIEW, the lamps without a
 	// shadow source as debug view 4): defined only when on at startup, so that otherwise the define list and the shaders are exactly as before.
@@ -372,17 +508,20 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL terrain blending (TerrainTemplate.hlsl, from Physically-Based-Reloaded): compiled in only when on at startup,
 	// like LIVE_CUBE, so that otherwise the land shaders are exactly what they were. TextureManager makes its depth copy
 	// under the same condition.
-	AppendDefine("TERRAIN_BLEND", TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled") ? "1" : "0");
+	AppendDefine("TERRAIN_BLEND", TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Enabled") &&
+		!ShaderFallback::Dropped(ShaderFallback::TerrainBlend, fallbackFamily) ? "1" : "0");	// (2026-11-12 ShaderFallback)
 	// UNOFFICIAL 2026-10-19 Terrain Variation (Includes/TerrainVariation.hlsl): compiled in only when on at startup, and only for the
 	// first Layers blend layers (after Conor's port, 66653eea + d07ff4b9: it changes the shape of the land's sampling, not a value).
 	{
-		AppendDefine("TERRAIN_VARIATION", TheSettingManager->GetSettingI("Shaders.Terrain.Variation", "Enabled") ? "1" : "0");
+		AppendDefine("TERRAIN_VARIATION", TheSettingManager->GetSettingI("Shaders.Terrain.Variation", "Enabled") &&
+			!ShaderFallback::Dropped(ShaderFallback::TerrainVariation, fallbackFamily) ? "1" : "0");	// (2026-11-12 ShaderFallback)
 		static char layerDefine[2] = { '3', 0 };
 		layerDefine[0] = (char)('0' + std::clamp(TheSettingManager->GetSettingI("Shaders.Terrain.Variation", "Layers"), 1, 7));
 		AppendDefine("TERRAIN_VARIATION_LAYERS", layerDefine);
 	}
 	// 2026-11-04 macro variation (Includes/TerrainMacro.hlsl): compiled in only when on at startup, like TERRAIN_VARIATION.
-	AppendDefine("TERRAIN_MACRO", TheSettingManager->GetSettingI("Shaders.Terrain.Macro", "Enabled") ? "1" : "0");
+	AppendDefine("TERRAIN_MACRO", TheSettingManager->GetSettingI("Shaders.Terrain.Macro", "Enabled") &&
+		!ShaderFallback::Dropped(ShaderFallback::TerrainMacro, fallbackFamily) ? "1" : "0");	// (2026-11-12 ShaderFallback)
 
 	// UNOFFICIAL 2026-10-13 blood on the first-person weapon and gloves (Includes/HandBlood.hlsl, HandBlood.cpp): compiled in only
 	// when on at startup, like TERRAIN_BLEND (the per-draw switch alone cost every lit object 2-5 %).
@@ -396,9 +535,12 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl, core/AlphaHash.h): the hashed alpha test, compiled in only when on at
 	// startup (defined only then: the define list, and so the shader cache's keys, stay as they were with it off).
 	if (AlphaHash::CompiledIn()) AppendDefine("ALPHA_HASH_ON", "1");
+	// UNOFFICIAL 2026-11-16 FarCoverage (Includes/AlphaHash.hlsl AlphaCutCoverage): far cut-outs keep their coverage; likewise only when on at startup.
+	if (AlphaHash::CoverageCompiledIn()) AppendDefine("ALPHA_COVERAGE_ON", "1");
 
-	AppendDefine("SUN_CROSSFADE", TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.SunSmoothing", "CrossFade") &&
-		TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") ? "1" : "0");
+	// (2026-11-15 fd-smoothsun) not while the deferred sun pass carries the fade itself (core/SunFadeDeferred.h): the forward records then
+	// keep their constant and sampler room (Terrain Blending, Wetness Effects, RT sun shadows' ForwardLookup) and take each step as it comes
+	AppendDefine("SUN_CROSSFADE", SunFadeDeferred::ForwardCrossFade() ? "1" : "0");
 
 	// Which skylighting model is compiled in. 0 = spherical harmonic irradiance, 1 = the older
 	// single directional sample. Compile time rather than a runtime branch: ps_3_0 flattens
@@ -438,11 +580,9 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	if (ForwardCloudShadows::CompiledIn()) AppendDefine("FORWARD_CLOUD_SHADOWS", "1");
 	// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status] Enabled at startup; Includes/Wetness.hlsl): the water layer in the
 	// object, parallax and land pixel shaders. Defined only when on, and last, as above.
-	// 2026-11-08 Puddles ([Shaders.Puddles.Status] Enabled at startup, effects/Puddles): WETNESS_EFFECTS 2 compiles the puddle model in
-	// (Includes/Wetness.hlsl PUDDLES_COMPILED), without a define of its own (the list is near its cap).
-	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled"))
-		// 2026-11-12: 3 = puddle map mode (effects/Puddles/PuddleMap.h: the NVR DXVK extension there and [Shaders.Puddles.Main] MapMode on)
-		AppendDefine("WETNESS_EFFECTS", TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") ? (PuddleMap::ModeAtStart() ? "3" : "2") : "1");
+	// (2026-11-12 ShaderFallback: left out of every family when the land cannot carry it; WetnessEffectsShaders::UpdateConstants then
+	// switches the collection off for the session, so Wet World's screen pass draws the wetness.)
+	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled") && !ShaderFallback::Dropped(ShaderFallback::Wetness, fallbackFamily)) AppendDefine("WETNESS_EFFECTS", TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") ? (PuddleMap::ModeAtStart() ? "3" : "2") : "1");	// (2026-11-13 fork port: 2 = Puddles compiled in, Includes/Wetness.hlsl PUDDLES_COMPILED; 3 = its map mode, effects/Puddles/PuddleMap.h)
 	// UNOFFICIAL 2026-10-24 SmoothObjectNormals ([Shaders.PBR.Main], restart): the object and skin shaders' shadow lookups and sky ambient take
 	// the vertex normal instead of the per-triangle one (Includes/Shadow.hlsl ShadowFacingNormal). 0: the shaders exactly as before.
 	AppendDefine("OBJECT_SMOOTH_NORMALS", TheSettingManager->GetSettingI("Shaders.PBR.Main", "SmoothObjectNormals") ? "1" : "0");
@@ -456,8 +596,14 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// carries a shadow position in COLOR1, which DXVK does not clamp). Defined only when on, and last, as above.
 	if (DxvkCompute::DisplaceObjectsLayout())
 		AppendDefine("NVR_DISPLACE_OBJECTS", "1");
+	// UNOFFICIAL 2026-11-13 RT sun shadows' ForwardLookup (core/RtSunShadows.h; Includes/Shadow.hlsl RT_SUN_FORWARD): the sun lookup reads
+	// the traced visibility in Mode 1. Only with RT sun shadows on at startup on the DXVK fork. Defined only when on, and last, as above.
+	if (RtSunShadows::ForwardCompiled())
+		AppendDefine("RT_SUN_FORWARD", "1");
 
 }
+
+void ShaderRecord::LogCompileTimes() { ShaderPrecompile::LogCompileTimes(); }	// UNOFFICIAL 2026-11-11 (ImGuiManager::Initialize)
 
 /*
 Loads a game shader by name from a subfolder (when given). It is compiled when no usable cache exists.
@@ -466,6 +612,9 @@ Loads a game shader by name from a subfolder (when given). It is compiled when n
 ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, ShaderTemplate Template, const char* CacheSubPath,
 	const D3DXMACRO* Overrides) {
 	TimeLogger loadClock;
+	// UNOFFICIAL 2026-11-12 ShaderFallback: the template as given, for the retry without an optional feature (BuildDefines fills Template)
+	const ShaderTemplate fallbackTemplate = Template;
+	bool retryFallback = false;
 	ShaderPrecompile::StartOnce();	// UNOFFICIAL: the first shader starts the parallel compile (once)
 
 	ShaderRecord* record = nullptr;
@@ -483,7 +632,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 	if (SubPath) sourceDir += SubPath;
 	if (CacheSubPath) {
 		cacheDir += CacheSubPath;
-		CreateDirectoryA(cacheDir.c_str(), NULL);	// nothing else writes there
+		CreateFolders(cacheDir);	// nothing else writes there (every level: Deferred\Depth\ is two)
 	}
 	else if (SubPath) cacheDir += SubPath;
 
@@ -564,6 +713,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 		if (!precompiled && (recompile || !function)) {
 			// compile if option was enabled or compiled version not found
+			const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (ShaderPrecompile::LogCompileTimes)
 			D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile, NULL, &binary, &messages, &table);
 			// UNOFFICIAL 2026-10-29: D3DX ran out of ps_3_0 temp registers (X4505). Measured: the 6-layer land shaders SLS2132-2138 with terrain
 			// blending and captured normals both on fail in Includes/Parallax.hlsl at flags 0 while 5 and 7 layers compile -- an allocation
@@ -579,16 +729,11 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 				D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile,
 					D3DXSHADER_PREFER_FLOW_CONTROL, &binary, &messages, &table);
 			}
+			ShaderPrecompile::MainCompiles.emplace_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count(),
+				binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
 			logCompilerMessages(messages, Name);
 			EffectStatus::ShaderLoaded(binary ? EffectStatus::Compiled : EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
 			if (!binary) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
-			// 2026-11-12 (puddle room): the exact source that failed, preprocessed with this record's defines, next to where the binary would
-			// be (<name>.failed.hlsl): tools\landc\landcf.exe compiles it as the game does (the offline template tool's newer compiler fits
-			// shaders the game's D3DX9 one does not, and its define list misses runtime ones).
-			if (!binary && source) {
-				std::ofstream failedFile(binaryPath + ".failed.hlsl", std::ios::out | std::ios::binary);
-				failedFile.write((const char*)source->GetBufferPointer(), source->GetBufferSize());
-			}
 			if (binary) {
 				function = binary->GetBufferPointer();
 				std::ofstream binaryFile(binaryPath, std::ios::out | std::ios::binary);
@@ -607,6 +752,17 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			}
 		}
 
+		// UNOFFICIAL 2026-11-12 (fork port): no binary from any route (this compile, or a ParallelShaderCompile worker's) leaves the exact text
+		// D3DX was given, already preprocessed with this record's runtime defines, as <binary>.failed.hlsl. The offline template tool cannot
+		// reproduce it: its newer compiler fits shaders the game's D3DX9 one rejects, and its define list lacks the runtime ones. A binary
+		// (compiled or from the cache) removes an old one.
+		const std::string failedPath = binaryPath + ".failed.hlsl";
+		if (!function && source) {
+			std::ofstream failedFile(failedPath, std::ios::out | std::ios::binary);
+			failedFile.write((const char*)source->GetBufferPointer(), source->GetBufferSize());
+		}
+		else if (function) DeleteFileA(failedPath.c_str());
+
 		const HRESULT tableResult = D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table);
 		if (FAILED(tableResult)) {
 			Logger::Log("Encountered an issue getting constant table for %s", Name); ReportError(tableResult);	// no record
@@ -619,7 +775,12 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			if (FAILED(descResult)) Logger::Log("Issues getting constants descriptions for %s", Name);
 			else if (binary) {
 				HRESULT created = E_FAIL;
-				if (profile[0] == 'v') {
+				// UNOFFICIAL 2026-11-12 ShaderFallback: the slots as the runtime counts them (ShaderFallback.h THE COUNT). ShaderSlotCapOverride
+				// (test only) refuses here what a driver with that cap would refuse; otherwise the device itself decides, below.
+				const unsigned runtimeSlots = ShaderFallback::CountSlots((const DWORD*)function, D3DXGetShaderSize((const DWORD*)function) / 4);
+				const bool overForcedCap = ShaderFallback::OverForcedCap(runtimeSlots, profile[0] == 'v');
+				if (overForcedCap) created = D3DERR_INVALIDCALL;
+				else if (profile[0] == 'v') {
 					record = new ShaderRecordVertex(Name);
 					// UNOFFICIAL 2026-10-27 (NVR DXVK 1.7-displace, core\DxvkCompute.h): with NvrDxvkDisplacement on at load, the land's
 					// vertex shader is registered with its tessellation control shader. Off, or no NVR DXVK: nothing happens.
@@ -654,8 +815,9 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						if (isOne(lastDefinition(Template, "LINEAR_SCENE_ON"))) LinearScene::NoteCapable(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the pixel shaders that write the normal target (COLOR3).
 						const char* capturedOn = lastDefinition(Template, "CAPTURED_NORMALS_ON");
-						const bool writes = capturedOn && (!strcmp(capturedOn, "1") || !strcmp(capturedOn, "2") || !strcmp(capturedOn, "3"));	// (3: 2026-10-31 AlbedoBuffer)
+						const bool writes = capturedOn && (!strcmp(capturedOn, "1") || !strcmp(capturedOn, "2") || !strcmp(capturedOn, "3") || !strcmp(capturedOn, "4"));	// (3: 2026-10-31 AlbedoBuffer; 4: 2026-11-14 GBufferV2)
 						if (writes) CapturedNormals::NoteWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+						if (writes) CapturedNormals::ViewEnsure(TheRenderManager->device);	// UNOFFICIAL 2026-11-14 GBufferView: compiled here, at record load (GBufferV2 only)
 						// UNOFFICIAL 2026-10-29 MaterialBuffer: Object / Parallax / Terrain write it on COLOR2 (the skin templates' COLOR2 is the skin blur's)
 						if (writes && Template.Name && (!strcmp(Template.Name, "ObjectTemplate") || !strcmp(Template.Name, "ParallaxTemplate") || !strcmp(Template.Name, "TerrainTemplate"))) {
 							CapturedNormals::NoteMaterialWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
@@ -663,13 +825,52 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 							// no writer); the ONLY_LIGHT / DIFFUSE records are counted apart (their albedo is the texture a later pass multiplies in)
 							if (CapturedNormals::AlbedoCompiledIn()) {
 								const bool specOnly = hasDefine(Template, "ONLY_SPECULAR");
-								const bool lightOnly = hasDefine(Template, "ONLY_LIGHT") || hasDefine(Template, "DIFFUSE");
+								// (2026-11-16 fd-batchE: + the parallax light-only base pass, whose records name it AD, never ONLY_LIGHT; it writes its texture now)
+								const bool lightOnly = hasDefine(Template, "ONLY_LIGHT") || hasDefine(Template, "DIFFUSE") || hasDefine(Template, "AD");
 								if (!specOnly) CapturedNormals::NoteAlbedoWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle, lightOnly);
 							}
 						}
+						// UNOFFICIAL 2026-11-15 DeferredSkin (core/DeferredSkin.h): the skin's deferred record writes the whole G-buffer v2 (SkinTemplate.hlsl
+						// SKIN_DEFERRED): the draw hook binds the material and albedo targets for it (the skin blur's are not bound for it)
+						if (writes && !strcmp(Template.Name, "SkinTemplate") && hasDefine(Template, "LAMPS_DEFERRED") && CapturedNormals::AlbedoCompiledIn()) {
+							CapturedNormals::NoteMaterialWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+							CapturedNormals::NoteAlbedoWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle, false);
+						}
+						// UNOFFICIAL 2026-11-12 CapturedCoverage (core/CapturedNormals.h CodeWriters): the records whose alpha is a code (skinned
+						// gear: the normals' 2; the DeferredLamps records: the material's and the albedo's) take no part in it
+						if (writes && (hasDefine(Template, "SKIN") || hasDefine(Template, "LAMPS_DEFERRED")))
+							CapturedNormals::NoteCodeWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						// UNOFFICIAL 2026-10-29 ShadowContrast: the object shader's added lamp passes (DIFFUSE) give their shadows' light to it
 						if (writes && PBRShaders::ShadowContrastCompiledIn() && !strcmp(Template.Name, "ObjectTemplate")) {
 							if (hasDefine(Template, "DIFFUSE")) CapturedNormals::NoteContrastWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+						}
+					}
+					// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h): the far land's pixel shaders compiled with DISTANT_GBUFFER write all
+					// three targets as the near land does (TerrainLODTemplate.hlsl); the lighting-free record's alpha is a code (CapturedCoverage: no part)
+					if (pixelProfile && Template.Name && !strcmp(Template.Name, "TerrainLODTemplate") && isOne(lastDefinition(Template, "DISTANT_GBUFFER"))) {
+						const char* capturedOn = lastDefinition(Template, "CAPTURED_NORMALS_ON");
+						if (capturedOn && strcmp(capturedOn, "0")) {
+							IDirect3DPixelShader9* handle = static_cast<ShaderRecordPixel*>(record)->ShaderHandle;
+							CapturedNormals::NoteWriter(handle);
+							if (strcmp(capturedOn, "1")) CapturedNormals::NoteMaterialWriter(handle);
+							if (CapturedNormals::AlbedoCompiledIn()) CapturedNormals::NoteAlbedoWriter(handle, false);
+							if (hasDefine(Template, "LAMPS_DEFERRED")) CapturedNormals::NoteCodeWriter(handle);
+						}
+					}
+					// UNOFFICIAL 2026-11-12 foliage records (core/CapturedNormals.h GrassWriters / LeafWriters; audit items 1 and 9): the grass and
+					// SpeedTree leaf pixel shaders (no templates) write the three records when compiled with the AlbedoBuffer level
+					// (Includes/CapturedNormals.hlsl CAPTURED_FOLIAGE). The draw hook binds the targets for them; the keys are live there.
+					if (pixelProfile && !Template.Name && CapturedNormals::AlbedoCompiledIn()) {
+						const char* capturedOn = lastDefinition(Template, "CAPTURED_NORMALS_ON");
+						if (capturedOn && (!strcmp(capturedOn, "3") || !strcmp(capturedOn, "4"))) {	// (4: 2026-11-14 GBufferV2)
+							if (!_stricmp(Name, "GRASS23x000.pso") || !_stricmp(Name, "GRASS23x000TMS.pso"))
+								CapturedNormals::NoteGrassWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+							else if (!_stricmp(Name, "STLEAF2000.pso") || !_stricmp(Name, "STLEAF2000TMS.pso") || !_stricmp(Name, "STLEAF2001.pso") || !_stricmp(Name, "STLEAF2001TMS.pso"))
+								CapturedNormals::NoteLeafWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+							// UNOFFICIAL 2026-11-12 HairAndEyes (core/CapturedNormals.h BeamMarkers): the hair shaders, built at this level with
+							// the mark for the deferred flashlight (SM3002 / SM3003.pso.hlsl FLASH_BEAM_MARK)
+							else if (!_stricmp(Name, "SM3002.pso") || !_stricmp(Name, "SM3003.pso"))
+								CapturedNormals::NoteBeamMarker(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						}
 					}
 					// UNOFFICIAL 2026-10-17 LinearPreDecode (core/LinearPreDecode.h): ObjectTemplate pixel shaders compiled with linear lighting
@@ -693,8 +894,18 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						if (at) sscanf_s(at, "approximately %u", &slots);
 						listing->Release();
 					}
-					Logger::Log("ERROR: Failed to create DirectX shader for %s (%s): the device refused it (hr 0x%08X), %u instruction slots",
-						Name, binaryPath.c_str(), (unsigned)created, slots);
+					// UNOFFICIAL 2026-11-12 ShaderFallback: a default record's family is built again without an optional feature (the records
+					// with their own levels, the lamp-shadow ones, are their callers' to shorten). [ERROR] only when the game's own shader
+					// draws as a result: the line was "ERROR:", which no tool and no HEARTBEAT count picked up. D3DFail counts every one.
+					const bool ownLevels = CacheSubPath != nullptr || Overrides != nullptr;
+					EffectStatus::D3DFail(pixelProfile ? "CreatePixelShader refused a shader (too long for the driver)" : "CreateVertexShader refused a shader (too long for the driver)", (long)created);
+					if (!ownLevels) retryFallback = ShaderFallback::OnRefused(Template.Name, runtimeSlots);
+					Logger::Log("%s Failed to create DirectX shader for %s (%s): the device refused it (hr 0x%08X), %u instruction slots (%u as the runtime counts them, cap %u%s)%s",
+						retryFallback || ownLevels ? "[WARNING]" : "[ERROR]", Name, binaryPath.c_str(), (unsigned)created, slots, runtimeSlots,
+						ShaderFallback::Cap(!pixelProfile), overForcedCap ? ", forced by ShaderSlotCapOverride: the device was not asked" : "",
+						retryFallback ? "; its family is built again without an optional feature (ShaderFallback)" :
+						ownLevels ? "; a record with levels of its own: its caller decides" : ": the game's own shader draws instead");
+					if (!retryFallback && !ownLevels) EffectStatus::Level(Name, "REFUSED by the device (too long): the game's own shader draws instead", false);
 					ReportError(created);
 					delete record;
 					record = nullptr;
@@ -707,6 +918,12 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 	for (ID3DXBuffer* buffer : { source, binary, messages })
 		if (buffer) buffer->Release();
+	// UNOFFICIAL 2026-11-12 ShaderFallback: the device refused it and its family lost an optional feature: the family's shaders are
+	// compiled again (worker threads, counted against the cap), then this one is loaded again, from the cache.
+	if (retryFallback) {
+		FallbackPrepareFamily(fallbackTemplate.Name);
+		return LoadShader(Name, SubPath, fallbackTemplate, CacheSubPath, Overrides);
+	}
 	return record;
 }
 
@@ -1029,6 +1246,7 @@ void __fastcall NiD3DVertexShaderEx::Free(NiD3DVertexShaderEx* Shader) {
 	// (2026-11-03) another plugin's shader: its slots are not NVR's records, nothing of NVR's to free
 	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89B70, Shader); return; }
 	ShaderOwnership::Forget(Shader);
+	GameShaderPairs::Forget(Shader->ShaderHandleBackup);	// UNOFFICIAL 2026-11-13 (its handle goes with it)
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {
 		auto& members = family->VertexShaderList;
@@ -1107,6 +1325,32 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 			return;
 		}
 	}
+	// UNOFFICIAL 2026-11-14 full deferred renderer (core/DeferredRenderer.h): every lit family's deferred record while the main list's G-buffer is
+	// bound (indoors; mode 2 outdoors too once DeferredSun is ready). Off: nothing.
+	if (ShaderRecordPixel* deferred = DeferredRenderer::Live ? DeferredRenderer::Choose(this, Player->GetWorldSpace() != nullptr) : nullptr) {
+		ShaderHandle = deferred->ShaderHandle;
+		if (BoundHandle != ShaderHandle) deferred->SetCT();
+		return;
+	}
+	// UNOFFICIAL 2026-11-15 phase 4 skin (core/DeferredSkin.h): the skin's deferred record inside the G-buffer span. Off: nothing.
+	if (ShaderRecordPixel* skin = DeferredSkin::Records.empty() ? nullptr : DeferredSkin::Choose(this, Player->GetWorldSpace() != nullptr)) {
+		ShaderHandle = skin->ShaderHandle;
+		if (BoundHandle != ShaderHandle) skin->SetCT();
+		return;
+	}
+	// UNOFFICIAL 2026-11-14 phase 3 foliage (core/DeferredFoliage.h): the leaf / grass deferred record inside the G-buffer span. Off: nothing.
+	if (ShaderRecordPixel* foliage = DeferredFoliage::Live ? DeferredFoliage::Choose(this, Name) : nullptr) {
+		ShaderHandle = foliage->ShaderHandle;
+		if (BoundHandle != ShaderHandle) foliage->SetCT();
+		return;
+	}
+	// UNOFFICIAL 2026-11-15 DeferredTransparents (core/DeferredTransparents.h): in the blended list indoors, the forward+ record (every lamp of
+	// the pixel's froxel from the frame's table) while this frame's table and lists are there. Off: nothing.
+	if (ShaderRecordPixel* forwardPlus = DeferredTransparents::Live ? DeferredTransparents::Choose(this) : nullptr) {
+		ShaderHandle = forwardPlus->ShaderHandle;
+		if (BoundHandle != ShaderHandle) forwardPlus->SetCT();
+		return;
+	}
 	// UNOFFICIAL 2026-10-31 DeferredLamps: indoors, the many-lamp shader's deferred record while the main list's G-buffer is bound
 	if (!Player->GetWorldSpace()) {
 		if (ShaderRecordPixel* deferred = DeferredLamps::Choose(this)) {
@@ -1140,6 +1384,7 @@ ShaderRecordPixel* NiD3DPixelShaderEx::GetShaderRecord(ShaderRecordType Variant)
 void __fastcall NiD3DPixelShaderEx::Free(NiD3DPixelShaderEx* Shader) {
 	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89970, Shader); return; }	// (2026-11-03) as the vertex version
 	ShaderOwnership::Forget(Shader);
+	GameShaderPairs::Forget(Shader->ShaderHandleBackup);	// UNOFFICIAL 2026-11-13 (its handle goes with it)
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {
 		auto& members = family->PixelShaderList;

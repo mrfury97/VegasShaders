@@ -7,6 +7,24 @@
 // TESR_SmokeHaze for the haze and TESR_SmokeEnv for the room light.
 void VolumetricSmokeEffect::RegisterTextures() {
 	using namespace VolumetricSmoke;
+	// UNOFFICIAL 2026-11-12 (memleak): with [Main.Main.Performance] TargetReleaseSeconds above 0 only the names are registered here
+	// (the slots are empty: a sampler follows its slot and binds when the texture appears); MakeBuffers runs at the first smoke (Fetch).
+	BuffersLazy = TheTextureManager->TargetReleaseSeconds > 0.0f;
+	if (BuffersLazy) {
+		TheTextureManager->RegisterTexture("TESR_SmokeBuffer", (IDirect3DBaseTexture9**)&Texture);
+		TheTextureManager->RegisterTexture("TESR_SmokeBufferLow", (IDirect3DBaseTexture9**)&LowTexture);
+		TheTextureManager->RegisterTexture("TESR_SmokeHaze", (IDirect3DBaseTexture9**)&HazeTexture);
+		TheTextureManager->RegisterTexture("TESR_SmokeCut", (IDirect3DBaseTexture9**)&CutTexture);
+		TheTextureManager->RegisterTexture("TESR_SmokeEnv", (IDirect3DBaseTexture9**)&EnvTexture);
+		Logger::Log("VolumetricSmoke: its buffers (%.0f MB at this screen size) are made when GunFX first has smoke to draw ([Main.Main.Performance] "
+			"TargetReleaseSeconds; 0 = made now, as before)", (TheRenderManager->width * (double)TheRenderManager->height * 8.0 * (1.0 + 0.25 + 1.0 / 64.0 + 2.0 / 16.0)) / 1048576.0);
+		return;
+	}
+	MakeBuffers();
+}
+
+void VolumetricSmoke::MakeBuffers() {
+	BuffersTried = true;
 	// The surfaces made below are new, so whatever the clear flags knew about the old ones does not apply (VolumetricSmoke.h).
 	FullState.Forget();
 	HalfState.Forget();

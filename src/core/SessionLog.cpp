@@ -6,6 +6,9 @@
 #include "SettingChanges.h"
 #include "InstallCheck.h"
 #include "DxvkLoader.h"
+#include "ImGuiManager.h"	// UNOFFICIAL 2026-11-12: SettingLevel (which changed settings are Developer options / Internal ones)
+#include "PtApplies.h"	// UNOFFICIAL 2026-11-12: the "PT APPLIES" block (what the enabled effects do while path tracing replaces the scene)
+#include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-13: the "RT LIGHT SHAFTS" line (what the traced light shafts do right now)
 #include <intrin.h>
 #include <tlhelp32.h>
 #include <cstdarg>
@@ -236,6 +239,39 @@ namespace {
 		return false;
 	}
 
+	// UNOFFICIAL 2026-11-12 (memleak) the game's own out-of-memory routine, by address (FalloutNV.exe 1.4.0.525 loads at 00400000, no
+	// relocation; the names are from the engine symbol map, WallSoGB's): MemoryManager::ProcessMemoryProblem 00866A90-00866D10 is what an
+	// allocation that failed calls; it then tries to free memory (TES::CleanUpUnusedTextures 00452490-004524F0 ->
+	// BSTexturePalette::PurgeUnusedTextures 00A61CD0-00A61E60) and asks again, for as long as it takes: a game "frozen" at 3.2-3.3 GB of
+	// address space sits in this loop (a tester's stall stack, 2026-11-12). A stall or a crash whose stack passes through it gets one
+	// plain line saying so (OutOfMemoryLine), so that such a report explains itself. 0: none of them; else the routine's name.
+	const char* OutOfMemoryRoutine(UINT_PTR address) {
+		if (address >= 0x00866A90 && address < 0x00866D10) return "MemoryManager::ProcessMemoryProblem";
+		if (address >= 0x00452490 && address < 0x004524F0) return "TES::CleanUpUnusedTextures";
+		if (address >= 0x00A61CD0 && address < 0x00A61E60) return "BSTexturePalette::PurgeUnusedTextures";
+		return nullptr;
+	}
+	// The line's text for a stack (the instruction pointer and its return addresses): empty when the routine is not in it. Only
+	// ProcessMemoryProblem decides (the two texture routines also run at every cell change, with memory to spare).
+	void OutOfMemoryText(UINT_PTR eip, const UINT_PTR* returns, unsigned count, char* out, size_t size) {
+		out[0] = 0;
+		bool problem = false, purge = false;
+		for (unsigned i = 0; i <= count; i++) {
+			const char* name = OutOfMemoryRoutine(i ? returns[i - 1] : eip);
+			if (!name) continue;
+			if (name[0] == 'M') problem = true; else purge = true;
+		}
+		if (!problem) return;
+		MEMORYSTATUSEX memory = { sizeof(memory) };
+		GlobalMemoryStatusEx(&memory);
+		sprintf_s(out, size, "the game ran out of address space: %.0f of %.0f MB in use. The stack passes through the game's own out-of-memory routine "
+			"(MemoryManager::ProcessMemoryProblem%s): an allocation failed and the game is trying to free memory, which can take very long or never end. "
+			"A 32-bit game has %.0f MB at most; this is not a fault of one shader. What helps: fewer or smaller texture mods, lower texture / shadow "
+			"resolutions, a heap replacement (NVTF / New Vegas Heap Replacer), switching effects off (their buffers are released), and restarting the "
+			"game after long sessions.", (memory.ullTotalVirtual - memory.ullAvailVirtual) / 1048576.0, memory.ullTotalVirtual / 1048576.0,
+			purge ? ", purging unused textures" : "", memory.ullTotalVirtual / 1048576.0);
+	}
+
 	// Return addresses on the crashing thread's stack, from ESP up (16 KB at most, inside the stack): a scan, not an unwind (release
 	// code keeps no frame pointers), so a stale address can sit between real ones; the first few are nearly always the real callers.
 	unsigned ScanStack(const CONTEXT* context, UINT_PTR* out, unsigned max) {
@@ -313,6 +349,9 @@ namespace {
 				strncat_s(line, entry, _TRUNCATE);
 			}
 			Logger::LogUnbuffered("CRASH call stack (callers, newest first; a stack scan, so an old entry can appear): %s", count ? line : "(none found)");
+			char oom[900];	// UNOFFICIAL 2026-11-12 (memleak): a crash inside the game's out-of-memory routine says so in plain words
+			OutOfMemoryText((UINT_PTR)c->Eip, returns, count, oom, sizeof(oom));
+			if (oom[0]) Logger::LogUnbuffered("CRASH cause: %s", oom);
 		}
 		Logger::LogUnbuffered("CRASH: please send this whole log file (Fallout New Vegas\\VegasShaders-Logs) with the report.");
 	}
@@ -539,6 +578,41 @@ const char* SessionLog::CppExceptionType(const _EXCEPTION_RECORD* record) {
 
 void SessionLog::OnSettingsLoaded() {
 	LogSettingsDiff("SESSION settings");
+	LogTestSettingsDiff("SESSION test / internal settings changed");	// UNOFFICIAL 2026-11-12
+}
+
+// UNOFFICIAL 2026-11-12: the Developer options and Internal settings among the changed ones (SessionLog.h). The menu's own keys
+// ([Main.Menu.*]) and the effects' switches (.Status) are left out: they are not test switches whatever their comments say.
+std::vector<SessionLog::ChangedSetting> SessionLog::TestSettingsChanged() {
+	unsigned differ = 0, total = 0;
+	std::vector<ChangedSetting> all, test;
+	SettingsDiff(differ, total, &all);
+	for (ChangedSetting& c : all) {
+		const bool status = c.Section.size() > 7 && c.Section.compare(c.Section.size() - 7, 7, ".Status") == 0;
+		if (c.Level > 0 && !status && c.Section.compare(0, 10, "Main.Menu.") != 0) test.push_back(std::move(c));
+	}
+	return test;
+}
+
+void SessionLog::LogTestSettingsDiff(const char* head) {
+	if (!TheSettingManager || !TheSettingManager->Config.DefaultConfig.is_table()) return;
+	const std::vector<ChangedSetting> changed = TestSettingsChanged();
+	if (changed.empty()) {
+		Logger::Log("%s: none (every Developer options and internal setting is at its default)", head);
+		return;
+	}
+	const size_t cap = 60;	// named at most: about five log lines
+	unsigned internal = 0;
+	std::vector<std::string> items;
+	for (size_t i = 0; i < changed.size(); i++) {
+		const ChangedSetting& c = changed[i];
+		if (c.Level > 1) internal++;
+		if (i < cap) items.push_back(c.Section + "." + c.Key + "=" + c.Mine + " (" + c.Default + ")" + (c.Level > 1 ? " [internal]" : ""));
+	}
+	if (changed.size() > cap) items.push_back("and " + std::to_string(changed.size() - cap) + " more");
+	Logger::Log("%s: %u (%u of them internal, never shown in the menu); the menu's View > Reset test and internal settings puts them back "
+		"(key=yours (default)):", head, (unsigned)changed.size(), internal);
+	LogList((std::string(head) + ": ").c_str(), items, " | ");
 }
 
 // UNOFFICIAL 2026-11-01: the live values (Config.TomlConfig: a change made in the menu, a preset loaded or a settings file reloaded
@@ -553,7 +627,7 @@ void SessionLog::LogSettingsDiff(const char* head) {
 }
 
 // 2026-11-03: the walk LogSettingsDiff logged, as data (the bug report, InstallCheck.h, lists the same)
-std::vector<std::string> SessionLog::SettingsDiff(unsigned& differ, unsigned& total) {
+std::vector<std::string> SessionLog::SettingsDiff(unsigned& differ, unsigned& total, std::vector<ChangedSetting>* changed) {
 	typedef SettingManager::Configuration Config;
 	std::vector<std::string> items;
 	differ = total = 0;
@@ -573,6 +647,14 @@ std::vector<std::string> SessionLog::SettingsDiff(unsigned& differ, unsigned& to
 		if (v.is_string()) { std::string s = v.as_string(); if (s.size() > 60) s = s.substr(0, 57) + "..."; return "\"" + s + "\""; }
 		return "?";
 	};
+	auto raw = [](const tomlValue& v) -> std::string {	// UNOFFICIAL 2026-11-12: the default as SettingManager::SetSettingS takes it
+		char t[64];
+		if (v.is_boolean()) return v.as_boolean() ? "true" : "false";
+		if (v.is_integer()) { sprintf_s(t, "%lld", (long long)v.as_integer()); return t; }
+		if (v.is_floating()) { sprintf_s(t, "%.9g", (double)v.as_floating()); return t; }
+		if (v.is_string()) return v.as_string().str;
+		return std::string();
+	};
 	auto walk = [&](auto& self, const tomlValue& defaults, const tomlValue* user, const std::string& path) -> void {
 		std::vector<std::string> here;
 		for (const auto& [key, value] : defaults.as_table()) {
@@ -589,6 +671,11 @@ std::vector<std::string> SessionLog::SettingsDiff(unsigned& differ, unsigned& to
 			if (same) continue;
 			differ++;
 			here.push_back(key + "=" + text(*mine) + " (" + text(value) + ")");
+			if (changed) {	// UNOFFICIAL 2026-11-12: as data, with its menu level (the description as the menu reads it: the first comment)
+				const auto& notes = value.comments();
+				changed->push_back({ path, key, text(*mine), text(value), raw(value),
+					ImGuiManager::SettingLevel(path.c_str(), key.c_str(), notes.empty() ? "" : notes.front().c_str()) });
+			}
 		}
 		if (!here.empty() && items.size() < 600) {
 			std::string group = "[" + path + "] ";
@@ -749,6 +836,20 @@ void SessionLog::OnDevice(IDirect3DDevice9* device) {
 		present.BackBufferWidth, present.BackBufferHeight, mode, (unsigned)present.BackBufferFormat, (unsigned)present.MultiSampleType,
 		present.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE ? "immediate (no vsync)" : present.PresentationInterval == D3DPRESENT_INTERVAL_ONE ? "1 (vsync)" : "other",
 		present.FullScreen_RefreshRateInHz ? present.FullScreen_RefreshRateInHz : desktop.RefreshRate, desktop.Width, desktop.Height, desktop.RefreshRate);
+	{	// UNOFFICIAL 2026-11-11: the swap chain as it is (a period-3 picture beat is open: a rotation over the chain's buffers is one suspect)
+		static const char* const effects[] = { "?", "DISCARD", "FLIP", "COPY", "OVERLAY", "FLIPEX" };
+		const unsigned effect = (unsigned)present.SwapEffect;
+		IDirect3DSurface9* back = nullptr; IDirect3DSurface9* depth = nullptr;
+		D3DSURFACE_DESC b = {}, z = {};
+		if (device && SUCCEEDED(device->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &back)) && back) { back->GetDesc(&b); back->Release(); }
+		if (device && SUCCEEDED(device->GetDepthStencilSurface(&depth)) && depth) { depth->GetDesc(&z); depth->Release(); }
+		Logger::Log("SESSION swap chain (as the device reports it): %u back buffer%s, swap effect %s (%u), multisample %u quality %u, flags 0x%X, auto depth-stencil %s format %u | "
+			"back buffer surface %ux%u format %u multisample %u quality %u | depth-stencil surface %ux%u format %u multisample %u quality %u",
+			present.BackBufferCount, present.BackBufferCount == 1 ? "" : "s", effect < 6 ? effects[effect] : "?", effect, (unsigned)present.MultiSampleType,
+			(unsigned)present.MultiSampleQuality, (unsigned)present.Flags, present.EnableAutoDepthStencil ? "yes" : "no", (unsigned)present.AutoDepthStencilFormat,
+			b.Width, b.Height, (unsigned)b.Format, (unsigned)b.MultiSampleType, (unsigned)b.MultiSampleQuality,
+			z.Width, z.Height, (unsigned)z.Format, (unsigned)z.MultiSampleType, (unsigned)z.MultiSampleQuality);
+	}
 	SettingManager* s = TheSettingManager;
 	Logger::Log("SESSION anti-aliasing / upscaling: TAA %s, FSR %s (version %d, RenderScale %.2f), DLSS %s (RenderScale %.2f, Ray Reconstruction %s), SMAA %s",
 		s->GetSettingI("Shaders.TAA.Status", "Enabled") ? "on" : "off", s->GetSettingI("Shaders.TAA.FSR", "Enabled") ? "on" : "off",
@@ -771,6 +872,13 @@ void SessionLog::NoteIni(const GameSetting* setting) {
 		IniValues[i] = text;
 		return;
 	}
+}
+
+// UNOFFICIAL 2026-11-12 (docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 12): the loaded grid's size for RtCore's far-LOD-land test
+int SessionLog::GridsToLoad() {
+	for (size_t i = 0; i < sizeof(IniNames) / sizeof(IniNames[0]); i++)
+		if (!_stricmp(IniNames[i], "uGridsToLoad:General")) { const int n = IniValues[i].empty() ? 5 : atoi(IniValues[i].c_str()); return n < 3 ? 5 : n > 21 ? 21 : n; }	// (2026-11-13: 3 is a real setting, a 3 x 3 square; it was read as 5, so the far-land tests took unloaded land as loaded)
+	return 5;
 }
 
 void SessionLog::OnDeferredInit() {
@@ -885,7 +993,24 @@ void SessionLog::OnFrame() {
 			lastStallTest = stall;
 		}
 		FlushChanges(false);
-		PeakAddressMB = (std::max)(PeakAddressMB, AddressSpaceMB());
+		{	// UNOFFICIAL 2026-11-12 (memleak): one warning when the address space gets tight (3000 MB of a large-address-aware game's 4096;
+			// three quarters of whatever the process has otherwise). The game's own out-of-memory loop starts near 3.2-3.3 GB.
+			double totalMB = 0.0;
+			const double usedMB = AddressSpaceMB(&totalMB);
+			PeakAddressMB = (std::max)(PeakAddressMB, usedMB);
+			static bool warned = false;
+			const double limitMB = (std::min)(3000.0, totalMB * 0.75);
+			if (!warned && totalMB > 0.0 && usedMB >= limitMB) {
+				warned = true;
+				Logger::Log("MEMORY WARNING: the game uses %.0f of %.0f MB of address space (%s, up %s). Above about 3200 MB allocations start to fail and the "
+					"game freezes in its own out-of-memory routine or crashes. Vegas Shaders releases what it does not need (unused material maps, lamp "
+					"shadow maps, the buffers of effects that are off, idle ray tracing data); the rest is the game and its mods: fewer or smaller texture "
+					"mods, a heap replacement (NVTF / New Vegas Heap Replacer) and a restart after long sessions help. (Said once a session.)",
+					usedMB, totalMB, LastCell.c_str(), Uptime(now - StartSeconds).c_str());
+			}
+		}
+		PtApplies::LogIfChanged();	// UNOFFICIAL 2026-11-12: nothing unless the path traced picture replaces the scene; then once, and when the set changes
+		RtFogVisibility::LogIfChanged();	// UNOFFICIAL 2026-11-13: nothing unless the RT core runs; then the traced light shafts' state, when its reason changes
 		if (Player && Player->parentCell) {	// in game, once more: a crash handler set since PostLoad goes under ours
 			static bool checked = false;
 			if (!checked) { checked = true; SessionLog::ReassertCrashReport("in game"); }
@@ -913,7 +1038,12 @@ void SessionLog::OnFrame() {
 		TESWorldSpace* world = interior ? nullptr : cell->worldSpace;
 		const bool report = interior || lastInterior || world != lastWorld || !lastCell;
 		LastCell = CellText(cell);
-		if (report) { FlushChanges(true); Logger::Log("CELL %s (game time %s)", LastCell.c_str(), GameClock().c_str()); }
+		// (2026-11-12 memleak) + the address space, and a short line for the outdoor cell crossings that had none: memory against the
+		// places visited can be read from any log
+		double totalMB = 0.0;
+		const double usedMB = AddressSpaceMB(&totalMB);
+		if (report) { FlushChanges(true); Logger::Log("CELL %s (game time %s) | address space %.0f of %.0f MB", LastCell.c_str(), GameClock().c_str(), usedMB, totalMB); }
+		else Logger::Log("CELL crossing: %s | address space %.0f of %.0f MB", LastCell.c_str(), usedMB, totalMB);
 		lastCell = cell; lastWorld = world; lastInterior = interior;
 	}
 	// Weather changes
@@ -1044,6 +1174,7 @@ namespace {
 		DWORD faultsStart = 0;
 		unsigned samples = 0;
 		struct Spot { UINT_PTR eip; unsigned count; } spots[8] = {};
+		bool toldOutOfMemory = false;	// (2026-11-12 memleak) the "STALL cause" line went out for this stall
 	};
 
 	ULONGLONG StallThreadCpu() {
@@ -1131,6 +1262,12 @@ namespace {
 			s.inRender ? "inside the game frame (RenderHook)" : "BETWEEN game frames: the game's update, Present, or a pause", stages, where, eip ? StallKind(eip) : "?",
 			count ? stack : "(none found)", cpuMs, ms > 0 ? 100.0 * cpuMs / ms : 0.0, ms > 0 && cpuMs < 0.2 * ms ? "it waits" : "it computes", (unsigned long)(faults - s.faultsStart),
 			memory, extra[0] ? " | " : "", extra);
+		// UNOFFICIAL 2026-11-12 (memleak): a stall inside the game's out-of-memory routine says so in plain words (once a stall)
+		if (!s.toldOutOfMemory) {
+			char oom[900];
+			OutOfMemoryText(eip, returns, count, oom, sizeof(oom));
+			if (oom[0]) { s.toldOutOfMemory = true; Logger::Log("STALL cause: %s", oom); }
+		}
 	}
 
 	DWORD WINAPI StallMain(void*) {

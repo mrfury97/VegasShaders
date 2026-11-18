@@ -70,9 +70,9 @@ float3 ParticleLight(float3 vertexLight, float3 cameraRelativePos) {
     [branch] if (TESR_ParticleData.w > 0.0f) {
         // Facing the camera; only the shadow bias uses it.
 #ifdef PARTICLE_SUN_PHASE
-        light += TESR_SunColor.rgb * GetSunShadow(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z * ParticleSunPhase(cameraRelativePos);
+        light += TESR_SunColor.rgb * GetSunShadowMaps(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z * ParticleSunPhase(cameraRelativePos);
 #else
-        light += TESR_SunColor.rgb * GetSunShadow(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z;
+        light += TESR_SunColor.rgb * GetSunShadowMaps(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z;
 #endif
     }
     return lerp(1.0f, light * TESR_ParticleData.y, TESR_ParticleData.x);

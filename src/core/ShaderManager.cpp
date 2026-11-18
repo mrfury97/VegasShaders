@@ -7,6 +7,7 @@
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (TESR_AlphaHash)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (Diagnostics::VLCapturing)
 #include "LampVisibility.h"	// UNOFFICIAL 2026-10-30 VisibleRanking
+#include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "GpuProfiler.h"
 #include "HiZ.h"	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
@@ -15,6 +16,13 @@
 #include "PointShadowSlots.h"
 #include "PointShadowForward.h"
 #include "DeferredLamps.h"	// UNOFFICIAL 2026-10-31 DeferredLamps (the deferred records)
+#include "DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDepth
+#include "DeferredSun.h"	// UNOFFICIAL 2026-11-14 DeferredSun
+#include "LightFreeRecords.h"	// UNOFFICIAL 2026-11-14 full deferred renderer phase 0 (the lighting-free records)
+#include "DeferredRenderer.h"	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2
+#include "DeferredSkin.h"	// UNOFFICIAL 2026-11-15 full deferred renderer phase 4 skin
+#include "DeferredFirstPerson.h"	// UNOFFICIAL 2026-11-15 first person through the deferred renderer (+ GearWeather)
+#include "DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list
 #include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows (INTERIOR-SHADOWS-MODERN steps 2-3)
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth (ROOT-ASSUMPTIONS-PLAN B3)
 #include "EffectPrecompile.h"	// UNOFFICIAL 2026-10-28 the effects compiled in parallel at startup
@@ -27,7 +35,12 @@
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (RayReconstructionFrameBegin)
 #include "EffectChain.h"	// UNOFFICIAL 2026-11-02 the post-process chain as step tables
+#include "ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] (its settings, read below)
+#include "ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] the picture-in-picture scope (its settings; BeginExtraCamera below)
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the cell serial its latches wait for
+#include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (the family's members loaded again after a drop)
+#include "GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck / GameShaderPairRepair (its settings, read below)
+#include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16 BloodFlow and DustMotes are left out of release builds
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
 
@@ -127,7 +140,9 @@ void ShaderManager::Initialize() {
 	EnrollEffect<HeatHazeEffect>(sm, sm->Effects.HeatHaze);
 	EnrollEffect<SandstormEffect>(sm, sm->Effects.Sandstorm);
 	EnrollEffect<VolumetricLightEffect>(sm, sm->Effects.VolumetricLight);
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: not in release builds
 	EnrollEffect<DustMotesEffect>(sm, sm->Effects.DustMotes);	// UNOFFICIAL 2026-11-03
+#endif
 	EnrollEffect<LocalExposureEffect>(sm, sm->Effects.LocalExposure);	// 2026-11-04
 	EnrollEffect<SkyDitherEffect>(sm, sm->Effects.SkyDither);
 	EnrollEffect<BodycamEffect>(sm, sm->Effects.Bodycam);
@@ -136,7 +151,9 @@ void ShaderManager::Initialize() {
 	EnrollEffect<WetnessReflectionsEffect>(sm, sm->Effects.WetnessReflections);	// UNOFFICIAL 2026-11-04 Wetness Effects
 	EnrollEffect<HudRaindropsEffect>(sm, sm->Effects.HudRaindrops);
 	EnrollEffect<VolumetricCloudsEffect>(sm, sm->Effects.VolumetricClouds);
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: not in release builds
 	EnrollEffect<BloodFlowEffect>(sm, sm->Effects.BloodFlow);
+#endif
 	sm->Effects.BarrelHaze->Enabled = sm->Effects.BarrelHaze->Effect != nullptr;
 	EnrollEffect<VolumetricSmokeEffect>(sm, sm->Effects.VolumetricSmoke);
 	sm->Effects.VolumetricSmoke->Enabled = sm->Effects.VolumetricSmoke->Effect != nullptr;
@@ -144,6 +161,13 @@ void ShaderManager::Initialize() {
 	EnrollEffect<SMAAEffect>(sm, sm->Effects.SMAA);
 	EnrollEffect<FXAAEffect>(sm, sm->Effects.FXAA);
 	EnrollEffect<TAAEffect>(sm, sm->Effects.TAA);
+#if NVR_SHELVED_OUT
+	sm->Effects.DustMotes = nullptr;	// never created: the chain steps and every reader skip a null slot
+	sm->Effects.BloodFlow = nullptr;
+	Logger::Log("%s", ShelvedEffects::LogLine());
+	TheSettingManager->GetSettingI(ShelvedEffects::kSettingSections[0], "Enabled");	// (reads as 0; notes whether the saved file had it on)
+	if (ShelvedEffects::SavedOn) Logger::Log("Capsule shadows ([Shaders.ShadowsInteriors.Capsules] Enabled) are not part of this release (work in progress): left off although your settings file has them on; the setting is kept as it is.");
+#endif
 
 	EnrollCollection<TonemappingShaders>(sm, sm->Shaders.Tonemapping);
 	EnrollCollection<POMShaders>(sm, sm->Shaders.POM);
@@ -218,7 +242,11 @@ void ShaderManager::Initialize() {
 	};
 	for (const ConstantBinding& binding : secondBlock) sm->RegisterConstant(binding.Name, binding.Value);
 
+	sm->RegisterConstant("TESR_DeferredDepthFrame", DeferredDepth::Frame);	// UNOFFICIAL 2026-11-14 DeferredDepth (Includes/DeferredDepth.hlsl)
 	sm->InitializeConstants();
+	DeferredDepth::LoadShaders();	// UNOFFICIAL 2026-11-14 DeferredDepth: its linear pass and the probe, at startup (nothing when off)
+	DeferredSun::LoadShaders();	// UNOFFICIAL 2026-11-14 DeferredSun: the sun pass, at startup (only with the lighting-free records)
+	DeferredFirstPerson::Load();	// UNOFFICIAL 2026-11-15 DeferredFirstPerson / GearWeather: their passes, at startup (nothing when off)
 	startClock.LogTime("ShaderManager::Initialize");
 }
 
@@ -302,6 +330,17 @@ void RenderRect::RescaleAfterUpscale(IDirect3DSurface9* Surface) {
 	RescaleList.push_back(Surface);
 }
 
+// UNOFFICIAL 2026-11-12 (memleak): the buffer is released (TextureManager's idle targets): its spare goes with it (it was kept for the
+// session, keyed by a pointer that then names nothing, or another surface)
+void RenderRect::ForgetSurface(IDirect3DSurface9* Surface) {
+	RescaleList.erase(std::remove(RescaleList.begin(), RescaleList.end(), Surface), RescaleList.end());
+	auto found = RescaleTemps.find(Surface);
+	if (found == RescaleTemps.end()) return;
+	if (found->second.Surface) found->second.Surface->Release();
+	if (found->second.Texture) found->second.Texture->Release();
+	RescaleTemps.erase(found);
+}
+
 void RenderRect::RescaleRegistered(IDirect3DDevice9* Device) {
 	for (IDirect3DSurface9* buffer : RescaleList) {
 		D3DSURFACE_DESC desc = {};
@@ -338,10 +377,13 @@ template <typename T> void ShaderManager::RegisterEffect(T** slot) {
 	*slot = made;
 
 	EffectsNames[made->Name] = (EffectRecord**)slot;
+	// UNOFFICIAL 2026-11-12 (memleak) idle targets (TextureManager.h): the effect's object and its switch, before it makes its targets
+	TheTextureManager->NoteEffect(made, sizeof(T), TheSettingManager->GetMenuShaderEnabled(made->Name));
 	made->UpdateSettings();
 	made->RegisterConstants();
 	made->RegisterTextures();
 	made->LoadEffect();
+	TheTextureManager->StartingEffect = nullptr;
 }
 
 
@@ -385,6 +427,124 @@ void ShaderManager::ClearShaderSamplers(const char* textureName, size_t byteCoun
 void ShaderManager::RegisterConstant(const char* constantName, D3DXVECTOR4* value) { ConstantsTable[constantName] = value; }
 
 
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera (core/ScopeCamera.h; Render.cpp ScopeScene calls these round the scene).
+// A picture-in-picture scope is the world drawn again by another camera, with this mod's shaders bound, outside the frame's own passes.
+// The shaders take their camera from the memory the TESR_ constants point at, uploaded when a shader's handle changes
+// (ShaderRecord::SetCT). For the length of that scene the memory holds the scene's camera:
+//  - RenderManager::SetupExtraCamera: the view / projection / inverse matrices, camera position and direction, camera and FOV data;
+//  - TESR_ReciprocalResolution: the picture's size (the sky's view direction is rebuilt from the pixel: Includes/Sky.hlsl);
+//  - TESR_RenderScale: 1 (the picture is never drawn into a part of its target);
+//  - TESR_ViewSpaceLightDir / TESR_ScreenSpaceLightDir: the sun through this camera, as UpdateConstants makes them;
+//  - the sun shadow cascades, the ortho map, the cross-fade's old cascades and the character map: their matrices take positions
+//    relative to the camera they were drawn for, and their centres are relative to it too. Each is moved to this camera's position
+//    (T(this camera - that camera) x matrix, centre minus the same), exactly as ShadowManager moves a cascade it keeps for a frame.
+//    The maps themselves are the last drawn ones (the picture is drawn before the frame's own shadow maps): what they cover round the
+//    player is shaded in the picture, what lies past the last cascade behaves as it does in the main view at that distance.
+// Everything is saved first and put back as it was by EndExtraCamera (plain copies: the main frame's values are bit-identical). The
+// caller forces the next shader bind to upload again after each call (Render.cpp ForcePixelConstants / ForceVertexConstants): the
+// uploads pass ConstantFilter like any other, which compares them with what the device holds, so nothing stale is skipped.
+// Not handled (they stay the main camera's; small or unused in a scope's picture): TESR_WetnessCamera, TESR_DustOrigin and the
+// clouds' shadow origin (patterns anchored to the world, off by the distance between the two cameras), TESR_DepthConstants and
+// every screen-space buffer a shader reads by pixel position (soft particles' depth, terrain blending, the reflection buffer).
+namespace {
+	struct ExtraCameraSave {
+		bool						active = false, shadows = false;
+		RenderManager::CameraState	camera;
+		D3DXVECTOR4					reciprocal, viewLight, screenLight, renderScale;
+		D3DXMATRIX					cascade[5];
+		D3DXVECTOR4					centre[5];
+		D3DXMATRIX					oldCascade[4];
+		D3DXVECTOR4					oldCentre[4];
+		D3DXMATRIX					character;
+		D3DXVECTOR4					characterCentre;
+	};
+	ExtraCameraSave ExtraSave;
+
+	// A matrix that takes positions relative to the camera at `from`, changed to take positions relative to the camera at `to`
+	// (row vectors: p_from = p_to + (to - from), so T(to - from) x matrix), and its camera-relative centre moved the same way.
+	// A map never drawn has no camera position yet (not a number, or far off): left alone.
+	void MoveCameraRelative(D3DXMATRIX& matrix, D3DXVECTOR4& centre, const D3DXVECTOR3& from, const D3DXVECTOR3& to) {
+		const D3DXVECTOR3 delta = to - from;
+		if (!(D3DXVec3LengthSq(&delta) < 1.0e14f)) return;
+		D3DXMATRIX translation;
+		D3DXMatrixTranslation(&translation, delta.x, delta.y, delta.z);
+		matrix = translation * matrix;
+		centre.x -= delta.x;
+		centre.y -= delta.y;
+		centre.z -= delta.z;
+	}
+}
+
+bool ShaderManager::BeginExtraCamera(NiCamera* camera, UINT width, UINT height, D3DXMATRIX* projection) {
+	ExtraCameraSave& s = ExtraSave;
+	if (s.active || !camera || !width || !height || !projection) return false;
+	TheRenderManager->SaveCameraState(&s.camera);
+	if (!TheRenderManager->SetupExtraCamera(camera, projection)) return false;	// (it changed nothing)
+	s.active = true;
+
+	s.reciprocal = ShaderConst.ReciprocalResolution;
+	s.viewLight = ShaderConst.ViewSpaceLightDir;
+	s.screenLight = ShaderConst.ScreenSpaceLightDir;
+	s.renderScale = TAAEffect::RenderScaleConstant;
+	// x, y: one pixel of the picture in uv; z: its aspect ratio; w: kept (the field of view value CameraManager puts there)
+	ShaderConst.ReciprocalResolution = D3DXVECTOR4(1.0f / (float)width, 1.0f / (float)height, (float)width / (float)height, s.reciprocal.w);
+	TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	D3DXVec4Transform(&ShaderConst.ScreenSpaceLightDir, &ShaderConst.SunDir, &TheRenderManager->ViewProjMatrix);
+	D3DXVec4Normalize(&ShaderConst.ScreenSpaceLightDir, &ShaderConst.ScreenSpaceLightDir);
+	D3DXVec4Transform(&ShaderConst.ViewSpaceLightDir, &ShaderConst.SunDir, &TheRenderManager->ViewMatrix);
+	D3DXVec4Normalize(&ShaderConst.ViewSpaceLightDir, &ShaderConst.ViewSpaceLightDir);
+
+	ShadowsExteriorEffect* shadows = Effects.ShadowsExteriors;
+	s.shadows = shadows != nullptr;
+	if (shadows) {
+		const NiPoint3& at = camera->m_worldTransform.pos;
+		const D3DXVECTOR3 eye(at.x, at.y, at.z);
+		for (int i = ShadowsExteriorEffect::MapNear; i <= ShadowsExteriorEffect::MapOrtho; i++) {
+			ShadowsExteriorEffect::ShadowMapSettings& map = shadows->ShadowMaps[i];
+			s.cascade[i] = map.ShadowCameraToLight;
+			s.centre[i] = map.ShadowMapCascadeCenterRadius;
+			MoveCameraRelative(map.ShadowCameraToLight, map.ShadowMapCascadeCenterRadius, map.CameraTranslation, eye);
+		}
+		// The cross-fade's old cascades were set relative to the main camera of the last frame: the near cascade's camera position
+		// is that one (ShadowManager sets it every frame, drawn or kept).
+		const D3DXVECTOR3 mainEye = shadows->ShadowMaps[ShadowsExteriorEffect::MapNear].CameraTranslation;
+		for (int i = 0; i < 4; i++) {
+			s.oldCascade[i] = shadows->Constants.OldCameraToLight[i];
+			s.oldCentre[i] = shadows->Constants.OldCenter[i];
+			MoveCameraRelative(shadows->Constants.OldCameraToLight[i], shadows->Constants.OldCenter[i], mainEye, eye);
+		}
+		s.character = shadows->Constants.CharacterCameraToLight;
+		s.characterCentre = shadows->Constants.CharacterCenter;
+		if (shadows->Constants.CharacterData.w > 0.0f)	// (0: the map is not read: the first-person pass leaves it so)
+			MoveCameraRelative(shadows->Constants.CharacterCameraToLight, shadows->Constants.CharacterCenter, shadows->CharacterMap.CameraTranslation, eye);
+	}
+	return true;
+}
+
+void ShaderManager::EndExtraCamera() {
+	ExtraCameraSave& s = ExtraSave;
+	if (!s.active) return;
+	s.active = false;
+	TheRenderManager->RestoreCameraState(&s.camera);
+	ShaderConst.ReciprocalResolution = s.reciprocal;
+	ShaderConst.ViewSpaceLightDir = s.viewLight;
+	ShaderConst.ScreenSpaceLightDir = s.screenLight;
+	TAAEffect::RenderScaleConstant = s.renderScale;
+	ShadowsExteriorEffect* shadows = Effects.ShadowsExteriors;
+	if (!s.shadows || !shadows) return;
+	for (int i = ShadowsExteriorEffect::MapNear; i <= ShadowsExteriorEffect::MapOrtho; i++) {
+		shadows->ShadowMaps[i].ShadowCameraToLight = s.cascade[i];
+		shadows->ShadowMaps[i].ShadowMapCascadeCenterRadius = s.centre[i];
+	}
+	for (int i = 0; i < 4; i++) {
+		shadows->Constants.OldCameraToLight[i] = s.oldCascade[i];
+		shadows->Constants.OldCenter[i] = s.oldCentre[i];
+	}
+	shadows->Constants.CharacterCameraToLight = s.character;
+	shadows->Constants.CharacterCenter = s.characterCentre;
+}
+
+
 void ShaderManager::InitializeConstants() {
 	ShaderConst.pWeather = nullptr;	// no weather seen yet
 
@@ -423,6 +583,10 @@ void ShaderManager::UpdateConstants() {
 		SettingManager::Configuration::ConfigNode node;
 		GameShadersInMenus = !TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "GameShadersInMenus") || node.BoolValue;
 	}
+	ScopeOverlay::ReadSettings();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack, FullFrame (core/ScopeOverlay.h; Render.cpp SetShadersHook, RenderHook)
+	GameShaderPairs::ReadSettings();	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck, GameShaderPairRepair (core/GameShaderPairs.h; Render.cpp SetShadersHook)
+	ScopeOverlay::UpscalerSmall = Effects.TAA && Effects.TAA->Enabled && Effects.TAA->FSRSettings.Enabled && Effects.TAA->FSRSettings.RenderScale < 0.999f;	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
+	ScopeCamera::ReadSettings();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect, OwnCamera, ... (core/ScopeCamera.h; live, read every 30th frame)
 	GameShaderEyes = TheSettingManager->GetSettingI("Shaders.PBR.Main", "GameShaderEyes") != 0;	// UNOFFICIAL 2026-10-27 (Render.cpp SetShadersHook)
 	EyeShaderOld = TheSettingManager->GetSettingI("Shaders.PBR.Main", "EyeShaderOld") != 0;	// UNOFFICIAL 2026-11-09 (Render.cpp GameEyes)
 	NvrMsaaWarningTick();
@@ -519,6 +683,10 @@ void ShaderManager::UpdateConstants() {
 		cutCamera = camera;
 		cutInterior = interior;
 		cutKnown = true;
+		// UNOFFICIAL 2026-11-15 RT master switches ([Main.Main.RayTracing] RTInteriors / RTExteriors, RtCore::Gated): the frame's gate, from
+		// the same interior test as everything else here. A gate that changes with the helper up (a switch flipped in place; a door is a cut
+		// already) makes this frame a camera cut, so the traced histories and their raster twins' start over instead of blending old frames.
+		if (RtCore::UpdateGate(!interior)) cameraCutThisFrame = true;
 	}
 	GameState.isCellChanged = cellChangedThisFrame;
 	GameState.isCameraCut = cameraCutThisFrame;
@@ -670,6 +838,8 @@ void ShaderManager::UpdateConstants() {
 		updateClock.LogTime("ShaderManager::UpdateSettings for shaders & effects");
 	}
 
+	TheTextureManager->TargetsFrame();	// UNOFFICIAL 2026-11-12 (memleak) idle targets: an effect switched on has its real buffers before it draws
+
 	// Constants of what is on: the families, then the effects (each effect's time kept for the menu).
 	for (const auto& entry : ShaderNames) {
 		ShaderCollection* family = *entry.second;
@@ -813,6 +983,56 @@ void ShaderManager::ReloadShaders() {
 }
 
 /*
+* UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h, ShaderRecord::LoadShader): at the end of every game shader's load. When
+* that load made a template family lose an optional feature (a shader of it was too long for the driver on native Direct3D 9), the
+* family's members made BEFORE the drop still hold the feature: ground with it next to ground without. They are loaded again here, as
+* ReloadShaders does it (their shorter builds are in the cache by now: ShaderRecord.cpp FallbackPrepareFamily). A load in here may drop
+* one more feature: the loop goes round again. Nothing dropped this session: two tests and out.
+*/
+static void ShaderFallbackAfterLoad(ShaderManager* manager) {
+	if (!ShaderFallback::Reload && !ShaderFallback::Mask[ShaderFallback::Land]) return;
+	// The C++ side follows what the land shaders hold: no depth copy and no shadow drop for a blend that is not compiled in
+	// (TerrainShaders::UpdateSettings keeps it so afterwards; Wetness Effects: WetnessEffectsShaders::UpdateConstants).
+	if (manager->Shaders.Terrain && ShaderFallback::Dropped(ShaderFallback::TerrainBlend, ShaderFallback::Land))
+		manager->Shaders.Terrain->BlendingSettings.Enabled = false;
+	static bool busy = false;
+	if (busy || !ShaderFallback::Reload) return;	// (busy: a load below dropped one more; the loop below takes it)
+	busy = true;
+	auto timer = TimeLogger();
+	GameEyesForgetRecords();
+	unsigned loaded = 0;
+	while (ShaderFallback::Reload) {
+		const unsigned families = ShaderFallback::Reload;
+		ShaderFallback::Reload = 0;
+		for (const auto& Named : manager->ShaderNames) {
+			ShaderCollection* collection = Named.second ? *Named.second : nullptr;
+			if (!collection) continue;
+			const auto affected = [&](const char* name) {
+				return name && ((families >> (unsigned)ShaderFallback::FamilyOf(collection->GetTemplate(name).Name)) & 1u) != 0;
+			};
+			// taken out of the family's lists first: LoadShader puts each back
+			std::vector<NiD3DVertexShaderEx*> vertex;
+			std::vector<NiD3DPixelShaderEx*> pixel;
+			for (NiD3DVertexShaderEx* s : collection->VertexShaderList) if (affected(s->Name)) vertex.push_back(s);
+			for (NiD3DPixelShaderEx* s : collection->PixelShaderList) if (affected(s->Name)) pixel.push_back(s);
+			for (NiD3DVertexShaderEx* s : vertex) {
+				auto& members = collection->VertexShaderList;
+				members.erase(std::remove(members.begin(), members.end(), s), members.end());
+			}
+			for (NiD3DPixelShaderEx* s : pixel) {
+				auto& members = collection->PixelShaderList;
+				members.erase(std::remove(members.begin(), members.end(), s), members.end());
+			}
+			for (NiD3DVertexShaderEx* s : vertex) { s->DisposeShader(); manager->LoadShader(s); loaded++; }
+			for (NiD3DPixelShaderEx* s : pixel) { s->DisposeShader(); manager->LoadShader(s); loaded++; }
+		}
+	}
+	busy = false;
+	Logger::Log("ShaderFallback: %u shaders made before the drop loaded again without the dropped features", loaded);
+	timer.LogTime("ShaderManager ShaderFallbackAfterLoad");
+}
+
+/*
 * A game vertex shader's replacements: the generic record and the exterior/interior ones, each where its file exists.
 * Returns the family's switch (false when the shader belongs to no family, or the sets are not made yet).
 */
@@ -841,6 +1061,7 @@ bool ShaderManager::LoadShader(NiD3DVertexShader* Shader) {
 		collection->VertexShaderList.push_back(vertex);
 		Logger::Log("Loaded %s Vertex Shader %s", collection->Name, vertex->Name);
 	}
+	ShaderFallbackAfterLoad(this);	// UNOFFICIAL 2026-11-12 ShaderFallback: a feature dropped while this one loaded
 	return familyOn;
 }
 
@@ -924,11 +1145,18 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		// UNOFFICIAL 2026-10-20 (P82 tester): when the GPU refuses a record (too long), shorter ones in turn (PointShadowForward.hlsl
 		// POINT_SHADOW_FIT, each with its own cache folder; the first is the old one exactly, also what ShaderPrecompile makes), and
 		// PointShadowForward::FitLevel / Refused keep every object to what the shortest one loaded can do.
-		static D3DXMACRO overrides[4][7] = {
+		// UNOFFICIAL 2026-11-15 (docs/next/FD-NATIVEFIX.md, bench batch 8) a last level, only with the traced / capsule read compiled in
+		// (RtLampShadows::CompiledIn: CapsuleShadows on native, RT lamp shadows on the fork): the full filter WITHOUT that read (POINT_SHADOW_RT 0;
+		// POINT_SHADOW_S15_TAKEN: s15 stays the read's, the sixth lamp lit). On native with Capsules the six-lamp shiny records (SLS2034-2036)
+		// did not fit at any level with the read (4,038-5,120 slots, since 1.0.9 at least): the [ERROR] below set Refused, and that turned
+		// every lamp shadow map off for the session (forward AND the deferred passes: 0 atlas tiles). Without the read: 3,117-3,146 slots.
+		// Those objects then take people's lamp shadows from the maps (CapsuleShadows::DropActors is held off: RtLampShadows::ReadDropped).
+		static D3DXMACRO overrides[5][8] = {
 			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { NULL, NULL } },
 			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { "POINT_SHADOW_FIT", "1" }, { NULL, NULL } },
 			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { "POINT_SHADOW_FIT", "2" }, { NULL, NULL } },
-			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { "POINT_SHADOW_FIT", "3" }, { NULL, NULL } } };
+			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { "POINT_SHADOW_FIT", "3" }, { NULL, NULL } },
+			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { "POINT_SHADOW_RT", "0" }, { "POINT_SHADOW_S15_TAKEN", "1" }, { NULL, NULL } } };
 		// UNOFFICIAL 2026-10-21 LampFalloff (Includes/LampFalloff.hlsl): these records draw indoors only, so without [Shaders.PBR.LampFalloff]
 		// Interior they get no lamp shape (LAMP_FALLOFF_ON 1 = MatchEverywhere only, 0 = nothing): the six-lamp shaders stay as long as they
 		// were (SLS2035: 3592 slots with the user's settings; the shape takes it to ~3700, past what the GPU takes, and the next level).
@@ -938,17 +1166,25 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			return value != nullptr;
 		}();
 		(void)lampFalloffOverride;
-		static const char* const cache[4] = { "Interiors\\", "Interiors\\Fit1\\", "Interiors\\Fit2\\", "Interiors\\Fit3\\" };
-		static const char* const what[4] = { "", "the High/Ultra taps in a loop (the same shadows)",
-			"no High/Ultra: lamp shadow Quality is held at Medium for every object", "also no blocker search: contact hardening and LampSize are off for every object's lamp shadows" };
+		static const char* const cache[5] = { "Interiors\\", "Interiors\\Fit1\\", "Interiors\\Fit2\\", "Interiors\\Fit3\\", "Interiors\\NoRtRead\\" };
+		static const char* const what[5] = { "", "the High/Ultra taps in a loop (the same shadows)",
+			"no High/Ultra: lamp shadow Quality is held at Medium for every object", "also no blocker search: contact hardening and LampSize are off for every object's lamp shadows",
+			"the full filter without the capsule / traced lamp shadow read: the objects drawn with it take people's lamp shadows from the shadow maps (DropActors held off)" };
+		const int levels = RtLampShadows::CompiledIn ? 5 : 4;
 		ShaderRecordPixel* record = nullptr;
 		int level = 0;
-		for (; level < 4 && !record; level++) {
-			if (level) Logger::Log("UNOFFICIAL lamp shadows: %s with lamp shadows did not load; trying a shorter version (%d of 3: %s).", pixel->Name, level, what[level]);
+		for (; level < levels && !record; level++) {
+			if (level) Logger::Log("UNOFFICIAL lamp shadows: %s with lamp shadows did not load; trying a shorter version (%d of %d: %s).", pixel->Name, level, levels - 1, what[level]);
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, cache[level], overrides[level]);
 		}
 		if (record) {
-			if (--level) {
+			if (--level == 4) {	// (2026-11-15) the full filter: FitLevel unchanged; the read is gone for this shader only
+				Logger::Log("[WARNING] UNOFFICIAL lamp shadows: %s loaded without the capsule / traced lamp shadow read (its other versions are too long for this GPU): "
+					"its objects keep their lamp shadow maps at the full filter and take people's shadows from the maps; CapsuleShadows' DropActors is held off.", pixel->Name);
+				RtLampShadows::ReadDropped = true;
+				EffectStatus::Level((std::string(pixel->Name) + " lamp shadows").c_str(), "no capsule / traced read (DropActors held off)", false);
+			}
+			else if (level) {
 				Logger::Log("UNOFFICIAL lamp shadows: %s with lamp shadows loaded at the shorter version %d (%s).", pixel->Name, level, what[level]);
 				if (level > PointShadowForward::FitLevel) PointShadowForward::FitLevel = level;
 				EffectStatus::Level((std::string(pixel->Name) + " lamp shadows").c_str(), what[level], false);	// UNOFFICIAL 2026-11-01 (REPORT / FLASH dumps)
@@ -956,6 +1192,8 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			record->PointShadowForward = true;
 			pixel->ShaderProg[ShaderRecordType::Interior] = record;
 			if (!level) DeferredLamps::LoadRecord(pixel, pixel->Name, tmpl, overrides[0], record);	// UNOFFICIAL 2026-10-31 DeferredLamps (the many-lamp family's deferred record)
+			DeferredRenderer::LoadInterior(pixel, pixel->Name, tmpl, overrides[0], record);	// UNOFFICIAL 2026-11-14 full deferred renderer 1 (LAMPS_DEFERRED 3; off: nothing)
+			DeferredTransparents::Load(pixel, pixel->Name, tmpl, overrides[0]);	// UNOFFICIAL 2026-11-15 forward+ for blended draws (LAMPS_DEFERRED 4; off: nothing)
 			PointShadowForward::CompiledIn = true;
 			PointShadowForward::CompiledCount++;
 		}
@@ -1016,7 +1254,8 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		// 2026-11-11 Puddles: a record that did not fit with the water layer is never cached, so trying it again cost ~11 s at EVERY start
 		// (SLS2027, the flow-control retry). Its dry copy in Cache\ExteriorLampsDry, newer than any fitted copy in Cache\ExteriorLamps, says it did not
 		// fit last time: straight to the dry one. (Delete Cache\ExteriorLampsDry to try the water layer again after a template change.)
-		const bool wetAll = !skin && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
+		// (2026-11-13 fork port) only with Puddles on: with Wetness Effects alone the outdoor lamp records stay dry, as before
+		const bool wetAll = !skin && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled");
 		if (wetAll) {
 			const std::string cache = std::string(ShadersPath) + "Cache\\";
 			// (2026-11-11 second try: a fitted copy from before the water layer existed stays in Cache\ExteriorLamps, so "no fitted copy" never
@@ -1068,7 +1307,8 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			// 2026-11-12: a dry copy newer than the fitted one and than the sources = it did not fit last time (a failed compile is not
 			// cached; each retry cost seconds at every start): straight to the dry one
 			bool skipWet = false;
-			if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+			const bool landWet = TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled");	// (2026-11-13 fork port: Puddles only)
+			if (landWet) {
 				const std::string cache = std::string(ShadersPath) + "Cache\\";
 				WIN32_FILE_ATTRIBUTE_DATA dry = {}, wet = {};
 				const bool hasDry = GetFileAttributesExA((cache + "ExteriorLampsDry\\" + pixel->Name).c_str(), GetFileExInfoStandard, &dry) != 0;
@@ -1079,7 +1319,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			ShaderRecordPixel* record = skipWet ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLamps\\", terrainLamps);
 			// 2026-11-09 Puddles: the land's lamp record carries the water layer on its own registers (TerrainTemplate WETNESS_ALT_REGS); if that
 			// does not fit, the record is made again without it rather than losing the lamp shadows (as the objects' above).
-			if (!record && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+			if (!record && landWet) {
 				static D3DXMACRO terrainLampsDry[3] = { { "TERRAIN_LAMP_RT", "1" }, { "WETNESS_OFF", "1" }, { NULL, NULL } };
 				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "ExteriorLampsDry\\", terrainLampsDry);
 				if (record && !skipWet) TouchCacheCopy("ExteriorLampsDry\\", pixel->Name);	// 2026-11-12: the note that the wet one failed
@@ -1093,12 +1333,20 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			else Logger::Log("[ERROR] UNOFFICIAL RT lamp shadows: %s (land) with outdoor lamp shadows did not load (ExteriorForward).", pixel->Name);
 		}
 	}
+	LightFreeRecords::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 full deferred renderer phase 0 (test only, off: nothing made)
+	// (2026-11-15) the lamp pass may be compiled at the first record, before any Interior record handed DeferredLamps its lamp shape: take it here
+	if (DeferredRenderer::On() && !DeferredLamps::LampFalloffOverride) DeferredLamps::LampFalloffOverride = PBRShaders::LampFalloffInteriorDefine();
+	DeferredRenderer::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2 ([Main.Main.Quality] DeferredRenderer; off: nothing)
+	DeferredFoliage::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 phase 3 foliage ([Main.Main.Quality] DeferredFoliage; off: nothing)
+	DeferredSkin::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-15 phase 4 skin ([Main.Main.Quality] DeferredSkin; off: nothing)
+	DeferredTransparents::Hair::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-16 the game's blended hair's forward+ record ([Main.Main.Quality] DeferredHair; off: nothing)
 	pixel->Enabled = familyOn;
 
 	if (HasAnyRecord(pixel)) {
 		family->PixelShaderList.push_back(pixel);
 		Logger::Log("Loaded %s Pixel Shader %s", family->Name, pixel->Name);
 	}
+	ShaderFallbackAfterLoad(this);	// UNOFFICIAL 2026-11-12 ShaderFallback: a feature dropped while this one loaded
 	return familyOn;
 }
 
@@ -1170,6 +1418,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 	const float invisibleStrength = indoorsForward ? lampCfg->Forward.InvisibleLightShadowStrength : 1.0f;
 	const bool classifyLamps = indoorsForward && (invisibleStrength < 1.0f || lampCfg->Forward.InvisibleLightSize > 0.0f ||
 		!lampCfg->Forward.LampModelShadows || lampCfg->Forward.InvisibleShadowFromLamp > 0.0f || !LampFixtures::NoShadowWords.empty() || logLamps ||
+		lampCfg->Forward.SkipOwnFixture ||	// UNOFFICIAL 2026-11-11 (its fixture list)
 		(lampCfg->Forward.ShadowClusterEnabled && lampCfg->Forward.ShadowClusterInvisibleOnly));	// (they need the cell's lamps listed)
 	if (classifyLamps) LampFixtures::Update(Player->parentCell, logLamps);
 	LampFixtures::LogModels = logLamps;
@@ -1201,6 +1450,12 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 		// Culled, or too dim to matter (lights placed with a near-black colour): skipped.
 		const bool isCulled = lamp->m_flags & NiAVObject::NiFlags::APP_CULLED;
 		const bool isLit = (lamp->Diff.r + lamp->Diff.g + lamp->Diff.b) * lamp->Dimmer > 5.0 / 255.0;
+		if (BeatSeries::On) {	// UNOFFICIAL 2026-11-11 BeatSeries: every lamp's on / off state for the main view this frame (read only)
+			const unsigned mask = node->data->bIsEnabled;
+			BeatSeries::Mix(BeatSeries::LampStateHash, BeatSeries::Item((uintptr_t)node->data, mask, (isCulled ? 1u : 0u) | (isLit ? 2u : 0u)));
+			if (mask == 0xFF) BeatSeries::Add(BeatSeries::LampsOffForView);
+			if (isCulled || !isLit) BeatSeries::Add(BeatSeries::LampsCulledOrDark);
+		}
 		if (isCulled || !isLit) {
 			if (GpuTimer::Enabled && ShadowHold::Continuous(node->data)) (isCulled ? ShadowHold::StatCulled : ShadowHold::StatDimmed)++;	// UNOFFICIAL 2026-10-30
 			note(node->data, isCulled ? 1 : 2, lamp->GetDistance(&Player->pos), 0.0f, lamp);
@@ -1320,6 +1575,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 	// ShadowClusterDistance share one shadow. The brightest lamp of each group keeps its shadow; the others light exactly as
 	// before but without a shadow of their own, so a room of many bulbs no longer runs out of shadow slots. Off: as before.
 	std::vector<const void*> clusterMembers;
+	std::vector<const void*> clusterLeaders;	// UNOFFICIAL 2026-11-11 BeatSeries: clusterMembers[i] shares clusterLeaders[i]'s shadow (diagnostic only)
 	if (lampCfg->Forward.ShadowClusterEnabled && !TheShaderManager->GameState.isExterior && lampCfg->Forward.ShadowClusterDistance > 0.0f) {
 		struct Cand { const void* key; NiPointLight* light; float brightness; };
 		std::vector<Cand> cands;
@@ -1361,7 +1617,7 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 				if (taken[m] || !mayJoin[m]) continue;
 				const NiPoint3& mp = cands[m].light->m_worldTransform.pos;
 				const float dx = mp.x - rp.x, dy = mp.y - rp.y, dz = mp.z - rp.z;
-				if (dx * dx + dy * dy + dz * dz < d2max) { taken[m] = true; clusterMembers.push_back(cands[m].key); }
+				if (dx * dx + dy * dy + dz * dz < d2max) { taken[m] = true; clusterMembers.push_back(cands[m].key); clusterLeaders.push_back(cands[r].key); }
 			}
 		}
 		static int logCountdown = 0;
@@ -1370,6 +1626,34 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 			Logger::Log("ShadowCluster: %u candidate lamps, %u share a brighter neighbour's shadow (%u groups), distance %.0f",
 				(unsigned)cands.size(), (unsigned)clusterMembers.size(), (unsigned)(cands.size() - clusterMembers.size()), lampCfg->Forward.ShadowClusterDistance);
 		}
+	}
+
+	// UNOFFICIAL 2026-11-11 BeatSeries: the grouping as numbers for the beat detector, and a journal line when a lamp's group lamp is
+	// not last frame's (a flicker lamp crossing its neighbour's brightness, or a lamp switched off for the view, moves a shadow from
+	// one lamp to another with no slot change). Read only: the grouping above is used exactly as before.
+	if (BeatSeries::On) {
+		static std::vector<const void*> lastMembers, lastLeaders;
+		unsigned flips = 0;
+		int journalled = 0;
+		for (size_t m = 0; m < clusterMembers.size(); m++) {
+			BeatSeries::Mix(BeatSeries::ClusterHash, BeatSeries::Item((uintptr_t)clusterMembers[m], (unsigned)(uintptr_t)clusterLeaders[m]));
+			const void* before = nullptr;
+			for (size_t k = 0; k < lastMembers.size(); k++) if (lastMembers[k] == clusterMembers[m]) { before = lastLeaders[k]; break; }
+			if (before == clusterLeaders[m]) continue;
+			flips++;
+			if (journalled++ < 4) {
+				if (before) FRAME_JOURNAL("lamp shadow group: lamp %p now shares lamp %p's shadow (was lamp %p's)", clusterMembers[m], clusterLeaders[m], before);
+				else FRAME_JOURNAL("lamp shadow group: lamp %p now shares lamp %p's shadow (had its own or none)", clusterMembers[m], clusterLeaders[m]);
+			}
+		}
+		for (size_t k = 0; k < lastMembers.size(); k++) {
+			if (std::find(clusterMembers.begin(), clusterMembers.end(), lastMembers[k]) != clusterMembers.end()) continue;
+			flips++;
+			if (journalled++ < 4) FRAME_JOURNAL("lamp shadow group: lamp %p left lamp %p's group (its own shadow again, or out of the ranking)", lastMembers[k], lastLeaders[k]);
+		}
+		BeatSeries::Set(BeatSeries::ClusterMembers, (unsigned)clusterMembers.size());
+		BeatSeries::Set(BeatSeries::ClusterFlips, flips);
+		lastMembers = clusterMembers; lastLeaders = clusterLeaders;
 	}
 
 	auto v = rankedLamps.begin();
@@ -2030,6 +2314,10 @@ void ShaderManager::RenderDepthAndNormals(IDirect3DSurface9* RenderTarget) {
 }
 
 void ShaderManager::RenderEffectsPreTonemapping(IDirect3DSurface9* RenderTarget) {
+	// UNOFFICIAL 2026-11-11 (the "black stain", core/DrawState.h): nothing below is one of the game's object draws, so no pixel-constant
+	// upload in here is "the game writing over the lamp registers": ManyLamps / LandLamps leave them alone (many effects draw their D3DX
+	// passes themselves, not through EffectRecord::Render).
+	SharedDrawState::OwnPass ownPass;
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: every effect below may read the sky's results (some copy them by name)
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (core/Upscaler.h; off by default: nothing changes): once a frame, before anything below
 	// (the RT point first of all), last frame's RR result becomes what the RT effects' denoisers go by this frame (RayReconstructionWantsRaw),
@@ -2144,6 +2432,7 @@ static void LogActiveSwitches(bool force) {
 * The post-tonemap chain, once a frame (and before it the per-frame bookkeeping: session log, F10 profile, frame interval).
 */
 void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
+	SharedDrawState::OwnPass ownPass;	// UNOFFICIAL 2026-11-11 (as RenderEffectsPreTonemapping: the effects' constants are their own)
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker (as RenderEffectsPreTonemapping)
 	VolumetricSmoke::FrameNumber++;   // the smoke is fetched once a frame (VolumetricSmoke::Fetch)
 	SessionLog::OnFrame();	// UNOFFICIAL 2026-11-01: heartbeat, cell / weather / loading lines, setting changes, the frame journal switch (SessionLog.h)
@@ -2155,13 +2444,7 @@ void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
 	// effects-off run still logs its real frame time for comparison. This is the last NVR call
 	// of the frame, after the pre-tonemap chain, so the toggle takes effect from the next frame.
 	static CpuTimer frameIntervalTimer("Frame interval (CPU)");
-	// UNOFFICIAL 2026-11-05 (test aid): [Main.Main.Performance] GpuProfile, live, switches the same profile from the settings, so an
-	// unattended bench (console NVRSetSetting "Main.Main.Performance" "GpuProfile" 1/0) can measure effects without pressing F10.
-	static int profileSetting = -1;
-	const int profileNow = TheSettingManager->GetSettingI("Main.Main.Performance", "GpuProfile") != 0 ? 1 : 0;
-	const bool profileFlip = profileSetting >= 0 && profileNow != profileSetting && (profileNow != 0) != GpuTimer::Enabled;
-	profileSetting = profileNow;
-	if (Player->parentCell && !InterfaceManager->IsActive(Menu::kMenuType_Loading) && (Global->OnKeyDown(0x44) || profileFlip)) {
+	if (Player->parentCell && !InterfaceManager->IsActive(Menu::kMenuType_Loading) && Global->OnKeyDown(0x44)) {
 		GpuTimer::Enabled = !GpuTimer::Enabled;
 		Logger::Log("GPU PROFILE P78 test (forward quality + culling + lamp trims) %s (F10), effects %s, D3D9 runtime: %s", GpuTimer::Enabled ? "enabled" : "paused",
 			TheSettingManager->SettingsMain.Main.RenderEffects ? "on" : "OFF", TheRenderManager->D3D9RuntimeDescription());

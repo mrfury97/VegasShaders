@@ -4,10 +4,12 @@
 #include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "Sm6Pass.h"	// UNOFFICIAL 2026-10-26 (deep/fork-sm6)
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
+#include "DrawState.h"	// UNOFFICIAL 2026-11-11 SharedDrawState::OwnPass (the lamp registers' restore keeps off an effect's constants)
 #include "GpuDebug.h"	// UNOFFICIAL 2026-10-26: GpuDebugLabels (each effect is a named group in a capture)
 #include "PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the flash detector's self-test (SelfTestSkip)
 #include "ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections (REFL_MATERIAL_ON)
+#include "CapturedNormals.h"	// UNOFFICIAL 2026-11-14 GBufferV2 (GBUFFER_V2)
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31 register-clash guard (X4500)
 #include "EffectPrecompile.h"	// UNOFFICIAL 2026-10-28 the effects compiled in parallel at startup
 #include "EffectCompiler47.h"	// UNOFFICIAL 2026-10-29 NewEffectCompiler (d3dcompiler_47 for the effects)
@@ -80,7 +82,7 @@ bool EffectRecord::LoadEffect() {
 	// Effects get the same compile-time defines the game shaders do. Only the PREPROCESS call
 	// needs them -- D3DXCreateEffectCompiler below is handed the already-preprocessed source.
 	// Toggling any of these changes that source, so CheckPreprocessResult forces a recompile.
-	D3DXMACRO macros[8];	// UNOFFICIAL 2026-10-23: 8 (CHARACTER_SHADOW_MAP)
+	D3DXMACRO macros[10];	// UNOFFICIAL 2026-10-23: 8 (CHARACTER_SHADOW_MAP); 2026-11-14: 10 (GBUFFER_V2, and room)
 	BuildMacros(macros);
 	EffectPrecompile::Wait(compiledPath.c_str());	// UNOFFICIAL 2026-10-28 ParallelShaderCompile: a worker may be making this cache now
 	EffectCompiler47::ReadSetting();	// UNOFFICIAL 2026-10-29 NewEffectCompiler: also part of the cache check (CacheText)
@@ -202,7 +204,7 @@ bool EffectRecord::LoadEffect() {
 
 /*
 * UNOFFICIAL 2026-10-26 (deep/fork-sm6): the compile-time defines every effect is preprocessed with, terminated by { NULL, NULL };
-* EffectMacros needs room for 8. Shared by LoadEffect and core\Sm6Pass (which picks the SM6 build made with the same defines; keep
+* EffectMacros needs room for 10 (2026-11-14: was 8; GBUFFER_V2 made it 9 at most). Shared by LoadEffect and core\Sm6Pass (which picks the SM6 build made with the same defines; keep
 * tools\nvr-sm6\build.py MACROS in step with this list). Returns the number of defines.
 */
 int EffectRecord::BuildMacros(D3DXMACRO* EffectMacros) {
@@ -221,6 +223,9 @@ int EffectRecord::BuildMacros(D3DXMACRO* EffectMacros) {
 	// UNOFFICIAL 2026-10-23 CharacterShadowMap (SunShadows.fx.hlsl's deferred lookup): only when on at startup, as the game shaders
 	// (ShaderRecord::BuildDefines reads the same setting), so that off the effect's preprocessed source is exactly what it was.
 	if (TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMap")) define("CHARACTER_SHADOW_MAP", "1");
+	// UNOFFICIAL 2026-11-14 GBufferV2 (core/CapturedNormals.h; the MaterialBuffer's layout v2): the effects that read TESR_MaterialBuffer
+	// (WetWorld, BloodFlow's surface) read it the v2 way. Only when on at startup: off, the preprocessed sources are exactly as before.
+	if (CapturedNormals::V2CompiledIn()) define("GBUFFER_V2", "1");
 
 	EffectMacros[count] = { nullptr, nullptr };	// terminator, not counted
 	return count;
@@ -471,6 +476,9 @@ void EffectRecord::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTar
 		return;
 	}
 	EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn);	// UNOFFICIAL 2026-11-01 (core/EffectStatus.h)
+	// UNOFFICIAL 2026-11-11 (the "black stain", core/DrawState.h): from here to the return every pixel-constant upload is this effect's
+	// (D3DX's, at BeginPass): ManyLamps / LandLamps must not put their lamp registers back over them.
+	SharedDrawState::OwnPass ownPass;
 
 	// UNOFFICIAL 2026-10-26 pixel inspector ([Main.Develop.PixelInspector]): when this effect has drawn, the picture after it (or its
 	// own target) is recorded at the inspected pixel. Off: one bool test at the end of the call.

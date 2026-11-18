@@ -139,23 +139,26 @@ float getOrtho(vec4 worldPos) {
     return (outOfBounds || (belowGround && aboveGround)) ? 1.0 : 0.0;
 }
 
-// hash based 3d value noise (SnowAccumulation.fx.hlsl: noise, hash)
-float hashH(float n) {
-    return fract(sin(n) * 43758.5453);
+// The same noise as SnowAccumulation.fx.hlsl (snNoise, snHash).
+// 3D value noise: a random value in [0, 1) at each whole-number lattice point, blended between the 8 corners of the cell
+// with a smoothstep curve. Output in [0, 1), mean 0.5, one lattice cell per unit. Written for Vegas Shaders (2026-11-15);
+// it replaces upstream's copy of a Shadertoy noise under CC BY-NC-SA 3.0 (not GPL-compatible), with the same range and scale.
+// Lattice hash: Dave Hoskins' "Hash without Sine" hash13, MIT, Copyright (c) 2014 David Hoskins (shadertoy.com/view/4djSRW).
+float hashH(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 float snowNoise(vec3 x) {
-    // The noise function returns a value in the range -1.0f -> 1.0f
-    vec3 p = floor(x);
-    vec3 f = fract(x);
-
-    f = f * f * (3.0 - 2.0 * f);
-    float n = p.x + p.y * 57.0 + 113.0 * p.z;
-
-    return lerpH(lerpH(lerpH(hashH(n + 0.0), hashH(n + 1.0), f.x),
-            lerpH(hashH(n + 57.0), hashH(n + 58.0), f.x), f.y),
-            lerpH(lerpH(hashH(n + 113.0), hashH(n + 114.0), f.x),
-            lerpH(hashH(n + 170.0), hashH(n + 171.0), f.x), f.y), f.z);
+    vec3 i = floor(x);
+    vec3 u = fract(x);
+    u = u * u * (3.0 - 2.0 * u);
+    float z0 = lerpH(lerpH(hashH(i), hashH(i + vec3(1, 0, 0)), u.x),
+                     lerpH(hashH(i + vec3(0, 1, 0)), hashH(i + vec3(1, 1, 0)), u.x), u.y);
+    float z1 = lerpH(lerpH(hashH(i + vec3(0, 0, 1)), hashH(i + vec3(1, 0, 1)), u.x),
+                     lerpH(hashH(i + vec3(0, 1, 1)), hashH(i + vec3(1, 1, 1)), u.x), u.y);
+    return lerpH(z0, z1, u.z);
 }
 
 // returns a point light contribution with no shadow map sampling

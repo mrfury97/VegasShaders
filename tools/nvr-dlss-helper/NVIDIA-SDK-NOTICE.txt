@@ -4,13 +4,14 @@ NvrDlssHelper.exe, when built with NVIDIA's DLSS SDK (github.com/NVIDIA/DLSS; th
   - nvsdk_ngx_s.lib (NVIDIA's NGX loader, linked in as object code), and
   - the inline helper functions of nvsdk_ngx_helpers_vk.h / nvsdk_ngx_helpers.h (compiled in).
     This software contains source code provided by NVIDIA Corporation.
-and loads at run time NVIDIA's DLSS runtime, nvngx_dlss.dll, which is shipped next to it unmodified (NVIDIA's signature intact).
+and loads at run time NVIDIA's DLSS runtimes, nvngx_dlss.dll (DLSS) and nvngx_dlssd.dll (DLSS Ray Reconstruction, 1.0.6), both from the
+same SDK release and shipped next to it unmodified (NVIDIA's signatures intact).
 
 Those parts are NVIDIA's and are licensed under the "NVIDIA RTX SDKs LICENSE" (with its RTX supplement), the LICENSE.txt that comes
-with the SDK. Anyone distributing NvrDlssHelper.exe or nvngx_dlss.dll must ship that LICENSE.txt with them and follow it, among
+with the SDK. Anyone distributing NvrDlssHelper.exe, nvngx_dlss.dll or nvngx_dlssd.dll must ship that LICENSE.txt with them and follow it, among
 other things:
   - DLSS may only be used in applications for systems with NVIDIA GPUs (the helper refuses to run on any other GPU);
-  - nvngx_dlss.dll must not be modified, and NVIDIA's development nvngx_dlss.dll (lib\dev, with the on-screen overlay) must never be
+  - nvngx_dlss.dll and nvngx_dlssd.dll must not be modified, and NVIDIA's development nvngx_dlss.dll (lib\dev, with the on-screen overlay) must never be
     part of a public release;
   - no reverse engineering of the SDK; it may not be distributed on its own or made subject to an open-source licence;
   - NVIDIA must be notified before a commercial release; a public release must credit NVIDIA's DLSS SDK (splash/about/credits), and

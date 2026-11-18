@@ -17,6 +17,7 @@ public:
 	struct TonemappingSettingsStruct { ValuesStruct Main, Night, Interiors; };
 	TonemappingSettingsStruct Settings;
 	bool NightShiftEnabled = false;	// [Shaders.Tonemapping.Main] NightShiftEnabled
+	bool AgxContrast = false;	// UNOFFICIAL 2026-11-13 (fork port) [Shaders.Tonemapping.Main] AgxContrast: TonemapContrast also acts in AgX (mode 9)
 
 	struct TonemappingStruct {
 		D3DXVECTOR4		ToneMapping, BloomData, SkyData, HDRData, LotteData;

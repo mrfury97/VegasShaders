@@ -161,10 +161,13 @@ float4 NVR_EnvData : register(c94);	// x 1 = on for this draw, y the env-map str
 // channel; without a map (or with the feature off) the factor is exactly 1. Strength blends it in (c194.x).
 #if defined(RMAOS) && defined(MICRO_SHADOW_ON) && MICRO_SHADOW_ON
 #define MICRO_SHADOW_ACTIVE
-float4 TESR_MicroShadow : register(c194);	// x strength (0: none, 1: the map as it is, up to 3: its crevices that much deeper)
+float4 TESR_MicroShadow : register(c194);	// x strength (0: none, 1: the map as it is, up to 3: its crevices that much deeper), y Bounce
 static float MicroShadowAO = 1.0f;	// the map's occlusion at this pixel, toward 1 by (1 - strength); set in RmaosRead
 float MicroShadowTerm(float3 N, float3 L) {
-    return MicroShadowAO >= 1.0f ? 1.0f : saturate(abs(dot(N, normalize(L))) + 2.0f * MicroShadowAO * MicroShadowAO - 1.0f);
+    // UNOFFICIAL 2026-11-12 Bounce (TESR_MicroShadow.y; the owner: cranked up, the crevices "appear to be pure black"): a crevice is never
+    // without light, its walls throw some of the light around it back in. The shadowed share keeps Bounce of the light (0 = as before).
+    const float shade = saturate(abs(dot(N, normalize(L))) + 2.0f * MicroShadowAO * MicroShadowAO - 1.0f);
+    return MicroShadowAO >= 1.0f ? 1.0f : shade + (1.0f - shade) * TESR_MicroShadow.y;
 }
 // MICRO_SHADOW(N, L) is a factor with its own "*": "x * MICRO_SHADOW(N, L) y". Off it expands to nothing at all, so the compiled
 // shaders stay byte-identical (a literal 1.0f factor reordered the compiler's constant pool in four parallax shaders).
@@ -218,6 +221,35 @@ float3 RmaosDebug(float3 color, float3 albedo) { return color; }
 #endif
 #ifndef MICRO_SHADOW
 #define MICRO_SHADOW(N, L)	// micro-shadowing off (or no _rmaos maps): nothing, the lights exactly as before
+#endif
+
+// UNOFFICIAL 2026-11-16 fd-sunvis (Includes/DeferredPixel.hlsl FDSunVisCode; docs/next/FD-SUN-RESULTS.md section 4): the GBufferV2
+// lighting-free records (LAMPS_DEFERRED 2) compute the share of the sun the forward record would have let through besides the cascades
+// (canopy PROJ_SHADOW / STBB, the parallax self-shadow, the _rmaos micro-shadow) and the highlight's F0, for DeferredSun. Live switches
+// from [Shaders.ShadowsExteriors.Deferred] ride in TESR_MicroShadow's spare z / w (PBR.cpp; a register no object or parallax shader uses
+// for anything else, declared here when micro-shadowing is not compiled in), 0 = on (a register never written keeps them all on):
+//   z = CanopyShadow off + 2 x MicroShadow off,  w = ParallaxShadow off
+// Only in those records: every other shader compiles exactly as before.
+#if defined(NVR_LIGHT_DEFERRED) && defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 4
+    #ifndef MICRO_SHADOW_ACTIVE
+        float4 TESR_MicroShadow : register(c194);
+    #endif
+    #define FD_SV_RECORD
+    // the game's canopy shadow on the sun (sunAndProj before the cascades: lerp(1, its map, its mask), or STBB's 0.85), as one share
+    float FDSunVisCanopy(float3 sunAndProj) { return frac(TESR_MicroShadow.z * 0.5f) < 0.25f ? dot(saturate(sunAndProj), float3(0.2126f, 0.7152f, 0.0722f)) : 1.0f; }
+    float FDSunVisSelf(float self) { return TESR_MicroShadow.w < 0.5f ? self : 1.0f; }
+    #ifdef MICRO_SHADOW_ACTIVE
+        float FDSunVisMicro(float3 N, float3 L) { return TESR_MicroShadow.z < 1.5f ? MicroShadowTerm(N, L) : 1.0f; }
+    #else
+        #define FDSunVisMicro(N, L) 1.0f
+    #endif
+    // the non-metal highlight's F0 the record would have lit the sun with (BridgeSpecF0 / PBR_SPEC_FRESNEL's, before Reflectivity): the
+    // bridged authored strength, else the dielectric's (0.04, or 0.04 x the _rmaos map's specular level). Metal's tinted strength is not kept.
+    #ifdef NVR_VANILLA_BRIDGE
+        #define FD_SV_F0 BridgeSpecF0((0.0f).xxx, 0.0f).x
+    #else
+        #define FD_SV_F0 (PBR_DIELECTRIC_F0)
+    #endif
 #endif
 
 // UNOFFICIAL 2026-10-20 MaterialAware reflections ([Shaders.Reflections.Main] MaterialAware, core/ReflMaterial.h): the first
@@ -383,6 +415,35 @@ float3 getSunLighting(float3 toSun, float3 radiance, float3 toEye, float3 N, flo
 
 float3 getSunLighting(float3 toSun, float3 radiance, float3 toEye, float3 N, float3 baseColor, float r) {
     return getSunLighting(toSun, radiance, toEye, N, baseColor, r, 0.0f);
+}
+
+// UNOFFICIAL 2026-11-14 DeferredSun (Shaders/DeferredSun.hlsl): getSunLighting above with its variant chosen per pixel, for a pass that
+// lights pixels of both kinds of record: specular > 0.5 = the SPECULAR variants' PBRSun, else the plain ones' PBRDiffuse (the
+// ONLY_SPECULAR highlight passes have no deferred record). Same scale, saturation and micro-shadow; keep the two in step (tests/fd_sun_math
+// checks them against each other). No template calls it: the templates compile exactly as before.
+// UNOFFICIAL 2026-11-16 fd-sunvis: FD_SUN_SPEC_FADE (the includer's per-pixel value, DeferredSun.hlsl) = SpecularFade's highlight fade on
+// the specular model: PBR.hlsl's PBR_SPEC_FADE form of PBRSun (the highlight x f, the diffuse slid to (1 - metal) x colour / pi by 1 - f)
+// is lerp((1 - metal) x colour x N.L x light, PBRSun without the fade, f).
+float3 getSunLightingModel(float specular, float3 toSun, float3 radiance, float3 toEye, float3 N, float3 baseColor, float r, float metal) {
+    float3 scaled = radiance * LIN_SCALE_LIGHT;
+    float3 graded = lerp(luma(baseColor), baseColor, TESR_PBRExtraData.x);
+    [branch] if (specular > 0.5f) {
+#ifdef FD_SUN_SPEC_FADE
+        const float3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled);
+        return MICRO_SHADOW(N, toSun) lerp((1.0f - metal) * graded * shades(normalize(N), normalize(toSun)) * scaled, sunLit, FD_SUN_SPEC_FADE);
+#else
+        return MICRO_SHADOW(N, toSun) PBRSun(metal, r, graded, N, toEye, toSun, scaled);
+#endif
+    }
+    return MICRO_SHADOW(N, toSun) PBRDiffuse(metal, r, graded, N, toEye, toSun, scaled);
+}
+
+// UNOFFICIAL 2026-11-16 fd-sunvis (the deferred passes' one roughness decode: DeferredSun.hlsl, DeferredLamps.hlsl, FlashlightDeferred.hlsl):
+// the roughness a record lit with, from the G-buffer's COLOR2.b (Includes/CapturedNormals.hlsl): 0 .. 1 as written; -3 .. -2 the path
+// tracer's "no highlight" code (CapturedNoHighlight: -2 - roughness); -1 (none: a record that lit nothing) and anything else, the foliage
+// records' 2 + sun weight (Includes/FoliageDeferred.hlsl) among them, as fully rough.
+float GBufferRoughness(float b) {
+    return b >= 0.0f && b <= 1.0f ? b : (b <= -1.99f && b >= -3.01f) ? -2.0f - b : 1.0f;
 }
 
 #ifdef NVR_FOLD

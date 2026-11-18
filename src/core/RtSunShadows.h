@@ -21,4 +21,21 @@ namespace RtSunShadows {
 	// UNOFFICIAL 2026-10-30 [Shaders.ShadowsExteriors.RT] CloudShadows: true when this frame's Apply put a visibility with the volumetric
 	// clouds' shadow in it into the sun shadow buffer: SunFar and the clouds' composite leave the clouds' shadow out this frame
 	bool	CloudsApplied();
+	// UNOFFICIAL 2026-11-16 [Shaders.ShadowsExteriors.RT] RealSun (port of mrfury97's fef7c30ba F2, off by default): every sun shadow follows the
+	// real sun (no SunSmoothing steps) while the traced lookup runs; never while the deferred sun fade holds the sun
+	bool	RealSun();
+
+	// UNOFFICIAL 2026-11-13 ForwardLookup ([Shaders.ShadowsExteriors.RT], on; Shaders\Includes\Shadow.hlsl RT_SUN_FORWARD): Mode 1 through
+	// the object / skin / land shaders' own sun lookup. The old Mode 1 switched those lookups off and left the sun to the deferred apply,
+	// which scales the finished pixel (ambient and lamp light with the sun's) and which the lamps' mask cancels wherever a lamp reaches:
+	// surfaces the trace had in shade came out sunlit. Now Apply packs the traced visibility with the frame's depth into
+	// TESR_RtSunForward and the next frame's lookups take it where the depth there is their own point's (else the cascades); the
+	// deferred apply keeps only the contact shadows, as it does with the forward lookups running. Off, the forward lookups not compiled
+	// ([Shaders.ShadowsExteriors.Main] ForwardShadows off): the old Mode 1.
+	void	Initialize();					// RenderManager, before any shader is loaded: RT_SUN_FORWARD for the session (logged)
+	bool	ForwardCompiled();				// the shaders hold the lookup (ShaderRecord::BuildDefines)
+	bool	ForwardActive();				// Mode 1 runs through the lookup now
+	void	RegisterForwardTexture();		// ShadowsExteriorEffect::RegisterTextures: TESR_RtSunForward (once: game shaders keep the pointer)
+	D3DXVECTOR4* ForwardConstant(int Index);	// 0-3: TESR_RtSunRowX, RowY, RowW, TESR_RtSunData
+	void	UpdateForward(bool Exterior, bool LookupsRun);	// ShadowsExteriorEffect::UpdateConstants, every frame: this frame's constants
 }

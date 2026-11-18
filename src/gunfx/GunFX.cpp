@@ -3,7 +3,11 @@
 //   - a small puff at the muzzle on each shot (optional);
 //   - after you stop firing, a thin wisp rising from the barrel like a lit cigarette, longer the more you fired.
 //   - a soft orange glow at the muzzle while the barrel is hot.
-// Settings in GunFX.ini next to the DLL.
+// Settings: until 2026-11-16 GunFX.ini next to the DLL; now Vegas Shaders' own settings, [Main.GunFX.<section>] (the menu's Gun
+// effects page), read through GunFXHost (GunFXKeys.h lists every key). Per-gun files still override them (see UpdateGunSettings).
+// 2026-11-16 (gunfx-builtin): built into Vegas Shaders (VegasShaders.dll) instead of a plugin of its own. Its own translation
+// unit: everything below lives in an anonymous namespace (its NiPoint3, UInt32, Look ... never meet Vegas Shaders' types), and
+// Vegas Shaders calls the functions of GunFX.h (Load from its NVSEPlugin_Load, MainGameLoop from its xNVSE message handler).
 //
 // Game addresses (FalloutNV.exe 1.4.0.525):
 //   TESObjectWEAP::Fire                0x00523150  thiscall (weapon, actor); called from 0x008BADE9 (attacks),
@@ -12,7 +16,6 @@
 //   BSTempEffectParticle::Spawn        0x006890B0  cdecl (cell, lifetime, model, up direction, position, scale, flags, parent)
 //   PlayerCharacter singleton pointer  0x011DEA3C
 #include <windows.h>
-#include "IniDefaults.h"
 #include <cstdio>
 #include <share.h>
 #include <cstdarg>
@@ -22,29 +25,20 @@
 #include <cctype>
 #include <string>
 #include <vector>
-#include "GunShape.h"
+#include <cstdint>
 
 extern "C" IMAGE_DOS_HEADER __ImageBase;
+#include "GunFX.h"
+#include "GunFXHost.h"
+#include "GunFXKeys.h"
+
+namespace {   // closed before the GunFX:: functions at the end
+#include "IniDefaults.h"
+#include "GunShape.h"
 
 typedef unsigned int UInt32;
 typedef unsigned char UInt8;
 
-// xNVSE plugin interface (only what is used).
-struct PluginInfo { UInt32 infoVersion; const char* name; UInt32 version; };
-struct NVSEInterface {
-	UInt32 nvseVersion, runtimeVersion, editorVersion, isEditor;
-	bool (*RegisterCommand)(void*);
-	void (*SetOpcodeBase)(UInt32);
-	void* (*QueryInterface)(UInt32);
-	UInt32 (*GetPluginHandle)(void);
-};
-struct NVSEMessage { const char* sender; UInt32 type; UInt32 dataLen; void* data; };
-struct NVSEMessagingInterface {
-	UInt32 version;
-	bool (*RegisterListener)(UInt32 listener, const char* sender, void (*handler)(NVSEMessage*));
-};
-static const UInt32 kInterface_Messaging = 2;
-static const UInt32 kMessage_MainGameLoop = 20;
 
 struct NiPoint3 { float x, y, z; };
 
@@ -120,19 +114,35 @@ static struct {
 	float ejectScale, ejectLifetime, ejectInterval, ejectHotScale, ejectBurst, puffBurst, ejectBurstRate, puffBurstRate;
 	float hazeStart, hazeFull, hazeRise, hazePixels, hazeHeight, hazeWidth, hazeSpeed, hazeLength, hazeMinSize;
 	int flags, logEvents;
+	int debugLog;                         // [Main.GunFX.General] DebugLog: the chatty lines too
 } Settings;
 
-static FILE* Log = nullptr;
-static void LogLine(const char* format, ...) {
+static FILE* Log = nullptr;   // GUNFX_REPLAY only (the replay rig's own log file); the game build logs into the Vegas Shaders log
+static void LogText(const char* line) {
+#ifndef GUNFX_REPLAY
+	GunFXHost::Log(line);
+#else
 	if (!Log) return;
 	// The clock time on every line, so it can be lined up with NVR's log and with what you did in the game.
-	char line[4096];
-	va_list args; va_start(args, format); _vsnprintf_s(line, sizeof(line), _TRUNCATE, format, args); va_end(args);
 	SYSTEMTIME t;
 	GetLocalTime(&t);
 	fprintf(Log, "%02d:%02d:%02d.%03d  %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds, line);
 	fflush(Log);
+#endif
 }
+static void LogLine(const char* format, ...) {
+	char line[4096];
+	va_list args; va_start(args, format); _vsnprintf_s(line, sizeof(line), _TRUNCATE, format, args); va_end(args);
+	LogText(line);
+}
+// 2026-11-16: the chatty lines (per shot, per burst, per gun, timing) only with [Main.GunFX.General] DebugLog on.
+static void DebugLine(const char* format, ...) {
+	if (!Settings.debugLog) return;
+	char line[4096];
+	va_list args; va_start(args, format); _vsnprintf_s(line, sizeof(line), _TRUNCATE, format, args); va_end(args);
+	LogText(line);
+}
+
 // Seconds on the high-resolution counter. GetTickCount64 moves in 15.6 ms steps, too coarse for anything that changes
 // from one frame to the next: at 75-80 frames a second, one frame in six saw no time pass and the others 15.6 ms.
 static double PreciseSeconds() {
@@ -221,7 +231,7 @@ static int StopEmitters(UInt8* object, int depth) {
 			if (!LoggedControllers && strlen(names) + strlen(name) + 2 < sizeof(names)) { strcat_s(names, name); strcat_s(names, " "); }
 			if (!strcmp(name, "NiPSysEmitterCtlr")) { *(unsigned short*)(ctrl + 0x08) &= ~0x8; stopped++; }
 		}
-		if (!LoggedControllers) { LoggedControllers = true; LogLine("particle system controllers: %s", names); }
+		if (!LoggedControllers) { LoggedControllers = true; DebugLine("particle system controllers: %s", names); }
 		return stopped;
 	}
 	if (((IsFn)vtable[3])(object)) {
@@ -258,7 +268,7 @@ static void LogNodeNames(UInt8* node, int& budget, int depth = 0) {
 	if (!node || budget <= 0 || depth > 24) return;
 	--budget;
 	const char* name = *(const char**)(node + 8);
-	if (name && *name) LogLine("weapon node: %s", name);
+	if (name && *name) DebugLine("weapon node: %s", name);
 	typedef void* (__thiscall* IsFn)(void*);
 	if (!((IsFn)(*(void***)node)[3])(node)) return;
 	UInt8** children = *(UInt8***)(node + 0xA0);
@@ -415,13 +425,13 @@ static void Puff(MuzzleFlash* flash, ULONGLONG now) {
 	const NiPoint3 position = NodePosition(flash->node, Settings.puffOffset);
 	if (flash->sourceActor == Player() && VolumeWanted(ChainPuff)) {
 		StartVolumeBurst(ChainPuff, flash->node, Settings.puffOffset, Settings.puffBurst, 1.0f);
-		if (LogEvent()) LogLine("puff at (%.1f, %.1f, %.1f) -> volumetric", position.x, position.y, position.z);
+		if (LogEvent()) DebugLine("puff at (%.1f, %.1f, %.1f) -> volumetric", position.x, position.y, position.z);
 		return;
 	}
 	void* effect = SpawnBurst(cell, Settings.puffLifetime, Settings.puffModel, position, Settings.puffScale, Settings.puffBurst, Settings.puffBurstRate, now,
 		flash->sourceActor == Player() ? flash->node : nullptr, Settings.puffOffset);
 	// v24: the NIF already contains this look. Avoid heuristic writes into a live particle object.
-	if (LogEvent()) LogLine("puff at (%.1f, %.1f, %.1f) -> %s (NIF look)", position.x, position.y, position.z,
+	if (LogEvent()) DebugLine("puff at (%.1f, %.1f, %.1f) -> %s (NIF look)", position.x, position.y, position.z,
 		effect ? "created" : "NOT created");
 }
 
@@ -523,12 +533,17 @@ static FILETIME IniWritten = {};
 static char WeaponIniPath[MAX_PATH] = "";   // the equipped gun's settings file ("" = none), see UpdateGunSettings
 static FILETIME WeaponIniWritten = {};
 static int OwnGunValues(const char* path);
+static bool MainValue(const char* section, const char* key, char* out, DWORD size);   // (the settings layer, below)
+#ifndef GUNFX_REPLAY
+static std::string SettingsPrint();
+static std::string LoadedPrint;   // the GunFX values LoadSettings last read (SettingsPrint)
+#endif
 static ULONGLONG LastIniCheck = 0;
 
-// Re-reads GunFX.ini when it is saved while the game runs (checked once a second), so settings can be tried
-// without restarting.
+// Reads the settings again when they change while the game runs (the menu; the replay rig: GunFX.ini saved), and this gun's
+// settings file when it is saved.
 static void ReloadIniIfChanged(ULONGLONG now) {
-	if (now - LastIniCheck < 1000) return;
+	if (now - LastIniCheck < 250) return;   // (2026-11-16: 4 times a second, was 1: the menu)
 	LastIniCheck = now;
 	WIN32_FILE_ATTRIBUTE_DATA info;
 	if (WeaponIniPath[0] && GetFileAttributesExA(WeaponIniPath, GetFileExInfoStandard, &info) &&
@@ -537,6 +552,24 @@ static void ReloadIniIfChanged(ULONGLONG now) {
 		LogLine("this gun's settings file changed, reloading (%d own value(s))", OwnGunValues(WeaponIniPath));
 		LoadSettings();
 	}
+#ifndef GUNFX_REPLAY
+	// 2026-11-16: a menu change applies live. The settings revision changes with any setting (and with every step of a slider
+	// drag), so the GunFX values are compared, and read again only once they have stood still for half a second: each new smoke
+	// look writes a NIF of its own (BakeLook), and a drag would leave one per step on the disk.
+	static unsigned seenRevision = 0xFFFFFFFFu;
+	static std::string pending;
+	static ULONGLONG pendingSince = 0;
+	const unsigned revision = GunFXHost::Revision();
+	if (revision == seenRevision && pending.empty()) return;
+	seenRevision = revision;
+	const std::string print = SettingsPrint();
+	if (print == LoadedPrint) { pending.clear(); return; }
+	if (print != pending) { pending = print; pendingSince = now; return; }
+	if (now - pendingSince < 500) return;
+	pending.clear();
+	LogLine("settings changed in the menu, reading them again");
+	LoadSettings();
+#else
 	if (!GetFileAttributesExA(IniPath, GetFileExInfoStandard, &info)) return;
 	if (CompareFileTime(&info.ftLastWriteTime, &IniWritten) == 0) return;
 	const bool first = IniWritten.dwLowDateTime == 0 && IniWritten.dwHighDateTime == 0;
@@ -544,6 +577,7 @@ static void ReloadIniIfChanged(ULONGLONG now) {
 	if (first) return;
 	LogLine("GunFX.ini changed, reloading");
 	LoadSettings();
+#endif
 	GlowUnavailable = false;
 	if (FollowEffect) LogLine("running wisp keeps its baked NIF look");
 }
@@ -690,7 +724,7 @@ static void ReleaseWisp(const char* why) {
 	ReleaseCopies(WispCopies);
 	UInt8* root = *(UInt8**)(FollowEffect + 0x18);
 	if (root && FollowUntil > GetTickCount64()) StopEmitters(root, 0);
-	if (why) LogLine("wisp released: %s (heat %.1f)", why, Heat);
+	if (why) DebugLine("wisp released: %s (heat %.1f)", why, Heat);
 	NodeRelease(FollowEffect);
 	FollowEffect = nullptr;
 	RateValue = nullptr;
@@ -702,7 +736,7 @@ static void ReleaseAfter(const char* why) {
 	if (!AfterEffect) return;
 	ReleaseCopies(AfterCopies);
 	if (AfterRate) *AfterRate = 0.0f;
-	if (why) LogLine("after-fire trail released: %s (heat %.1f)", why, Heat);
+	if (why) DebugLine("after-fire trail released: %s (heat %.1f)", why, Heat);
 	NodeRelease(AfterEffect);
 	AfterEffect = nullptr;
 	AfterRate = nullptr;
@@ -775,7 +809,7 @@ static void ProbeShapes(UInt8* object, UInt8* root, ShapeProbe& p, int depth) {
 		const UInt8 keep = data ? *(data + 0x38) : 0;
 		const char* name = *(const char**)(object + 8);
 		if (p.lines++ < 48)
-			LogLine("gun shape probe: %s '%s': %u vertices%s, %u triangles%s, keep flags 0x%02X%s", RttiName(object), name ? name : "",
+			DebugLine("gun shape probe: %s '%s': %u vertices%s, %u triangles%s, keep flags 0x%02X%s", RttiName(object), name ? name : "",
 				verts, pos ? "" : " (positions not kept)", tris, index ? "" : " (indices not kept)", keep, skinned ? ", skinned" : "");
 		if (!pos || !verts) return;
 		p.readable++;
@@ -807,10 +841,10 @@ static void ProbeGunShape(UInt8* root, UInt8* muzzle) {
 	__try { ProbeShapes(root, root, p, 0); }
 	__except (EXCEPTION_EXECUTE_HANDLER) { LogLine("gun shape probe: stopped by a fault after %d part(s)", p.parts); }
 	const NiPoint3 m = IntoNode(root, *(NiPoint3*)(muzzle + 0x8C));
-	LogLine("gun shape probe: %d mesh part(s), %d with readable positions (%d skinned): %d vertices, %d triangles", p.parts, p.readable,
+	DebugLine("gun shape probe: %d mesh part(s), %d with readable positions (%d skinned): %d vertices, %d triangles", p.parts, p.readable,
 		p.skinned, p.vertices, p.triangles);
 	if (p.lo.x <= p.hi.x)
-		LogLine("gun shape probe: extent in the gun's own space x %.1f..%.1f, y %.1f..%.1f, z %.1f..%.1f; muzzle at (%.1f, %.1f, %.1f)",
+		DebugLine("gun shape probe: extent in the gun's own space x %.1f..%.1f, y %.1f..%.1f, z %.1f..%.1f; muzzle at (%.1f, %.1f, %.1f)",
 			p.lo.x, p.hi.x, p.lo.y, p.hi.y, p.lo.z, p.hi.z, m.x, m.y, m.z);
 }
 
@@ -936,7 +970,7 @@ static void UpdateGunShape(UInt8* root, UInt8* muzzleNode) {
 			delete Shape;
 			Shape = done->result;
 			done->result = nullptr;
-			LogLine("gun shape: ready - %d part(s) (%d left out), %d triangles -> map %d x %d x %d at %.2f units (%.1f MB) in %.0f ms; "
+			DebugLine("gun shape: ready - %d part(s) (%d left out), %d triangles -> map %d x %d x %d at %.2f units (%.1f MB) in %.0f ms; "
 				"barrel along the gun's own axis: %s", done->parts, done->skipped, done->triangles, Shape->nx, Shape->ny, Shape->nz,
 				Shape->voxel, Shape->d.size() * 4.0 / 1048576.0, done->ms, ShapeAlongX ? "yes" : "no");
 		}
@@ -1011,7 +1045,7 @@ static NiPoint3 WorldPoint(UInt8* node, NiPoint3 at) {
 	static int logged = 0;
 	if (logged < 3) {
 		logged++;
-		LogLine("first-person point (%.1f, %.1f, %.1f), player at (%.1f, %.1f, %.1f): %s", at.x, at.y, at.z, pos[0], pos[1], pos[2],
+		DebugLine("first-person point (%.1f, %.1f, %.1f), player at (%.1f, %.1f, %.1f): %s", at.x, at.y, at.z, pos[0], pos[1], pos[2],
 			local ? "player-relative, converted to world" : "world space");
 	}
 	if (local) { at.x += pos[0]; at.y += pos[1]; at.z += pos[2]; }
@@ -1077,7 +1111,7 @@ static bool SpawnGlow(float heatFraction) {
 			(UInt32)Settings.trailFlags, nullptr);
 		if (!effect) { LogLine("barrel glow NOT created; disabled until INI reload"); GlowUnavailable = true; return false; }
 	}
-	if (LogEvent()) LogLine("barrel glow pulse: %d point(s) across %.1f units", points, Settings.glowLength);
+	if (LogEvent()) DebugLine("barrel glow pulse: %d point(s) across %.1f units", points, Settings.glowLength);
 	return true;
 }
 
@@ -1093,7 +1127,7 @@ static bool SpawnWisp(ULONGLONG now, const NiPoint3& position) {
 	NodeAddRef(FollowEffect);
 	FollowHeld = *(volatile LONG*)(FollowEffect + 4) > 1;
 	// v24: use the NIF's baked look; do not scan and modify the live modifier list.
-	if (LogEvent()) LogLine("wisp uses baked NIF look");
+	if (LogEvent()) DebugLine("wisp uses baked NIF look");
 	FollowUntil = now + (ULONGLONG)(Settings.effectSeconds * 1000.0f) - 150;
 	// Our own effects (in Meshes\GunFX) are always taken over, whatever rate they start with; other models only
 	// when their rate matches fFileRate.
@@ -1104,7 +1138,7 @@ static bool SpawnWisp(ULONGLONG now, const NiPoint3& position) {
 	const unsigned short startFlags = RateController ? *(unsigned short*)(RateController + 0x08) : 0;
 	if (RateValue) { *RateValue = 0.0f; *(unsigned short*)(RateController + 0x08) |= 0x8; }
 	SpawnCopies(WispCopies, Settings.wispEmitters, cell, Settings.effectSeconds, Settings.trailModel, Settings.trailScale, position);
-	LogLine("wisp %s at (%.1f, %.1f, %.1f) for up to %.0f s, heat %.1f (game reference %s); smoke rate %s (started at %.1f, emitter %s; controller %p, rate %p)",
+	DebugLine("wisp %s at (%.1f, %.1f, %.1f) for up to %.0f s, heat %.1f (game reference %s); smoke rate %s (started at %.1f, emitter %s; controller %p, rate %p)",
 		Settings.trailModel, position.x, position.y, position.z, Settings.effectSeconds, Heat, FollowHeld ? "yes" : "no",
 		RateValue ? "under control" : "NOT found (on/off only; check fFileRate matches the file)", startRate,
 		(startFlags & 0x8) ? "on" : "OFF", RateController, RateValue);
@@ -1127,7 +1161,7 @@ static bool SpawnAfter(ULONGLONG now, const NiPoint3& position) {
 	AfterRate = root ? FindRate(root, 0, OwnModel(Settings.afterModel), &AfterController) : nullptr;
 	if (AfterRate) { *AfterRate = 0.0f; *(unsigned short*)(AfterController + 0x08) |= 0x8; }
 	SpawnCopies(AfterCopies, Settings.afterEmitters, cell, Settings.effectSeconds, Settings.afterModel, Settings.afterScale, position);
-	LogLine("after-fire trail %s, heat %.1f, %d emitter(s); smoke rate %s", Settings.afterModel, Heat, AfterCopies.count + 1,
+	DebugLine("after-fire trail %s, heat %.1f, %d emitter(s); smoke rate %s", Settings.afterModel, Heat, AfterCopies.count + 1,
 		AfterRate ? "under control" : "NOT found");
 	return true;
 }
@@ -1170,18 +1204,18 @@ static void ReportRibbon(UInt8* root, ULONGLONG now) {
 		const NiPoint3 world = *(NiPoint3*)(psys + 0x8C);
 		const float* bound = *(float**)(psys + 0x20);
 		const unsigned short active = *(unsigned short*)(data + 0x50), maxPoints = *(unsigned short*)(data + 0x80);
-		LogLine("ribbon @%llu: %u strands (max points %u); system at (%.0f, %.0f, %.0f) scale %.2f flags %#x; muzzle (%.0f, %.0f, %.0f); bound %s",
+		DebugLine("ribbon @%llu: %u strands (max points %u); system at (%.0f, %.0f, %.0f) scale %.2f flags %#x; muzzle (%.0f, %.0f, %.0f); bound %s",
 			now % 100000, active, maxPoints, world.x, world.y, world.z, *(float*)(psys + 0x98), *(UInt32*)(psys + 0x30),
 			muzzle.x, muzzle.y, muzzle.z, bound && !IsBadReadPtr(bound, 16) ? "" : "none");
 		if (bound && !IsBadReadPtr(bound, 16))
-			LogLine("  bound centre (%.0f, %.0f, %.0f) radius %.1f", bound[0], bound[1], bound[2], bound[3]);
+			DebugLine("  bound centre (%.0f, %.0f, %.0f) radius %.1f", bound[0], bound[1], bound[2], bound[3]);
 		UInt8* info = *(UInt8**)(data + 0x70);
 		UInt8* strips = *(UInt8**)(data + 0x7C);
 		NiPoint3* positions = *(NiPoint3**)(data + 0x20);
 		float* colours = *(float**)(data + 0x28);
 		int totalPoints = 0;
 		for (unsigned short i = 0; strips && i < active; i++) totalPoints += *(unsigned short*)(strips + i * 0x20 + 4);
-		LogLine("  points in all strands: %d", totalPoints);
+		DebugLine("  points in all strands: %d", totalPoints);
 		for (unsigned short i = 0; strips && info && i < active && i < 4; i++) {
 			UInt8* s = strips + i * 0x20;
 			UInt8* points = *(UInt8**)s;
@@ -1189,7 +1223,7 @@ static void ReportRibbon(UInt8* root, ULONGLONG now) {
 			const float age = *(float*)(info + i * 0x1C + 0xC), life = *(float*)(info + i * 0x1C + 0x10);
 			const NiPoint3 head = positions ? positions[i] : NiPoint3{};
 			const float headAlpha = colours ? colours[i * 4 + 3] : -1.0f;
-			LogLine("  strand %u: age %.2f of %.2f s, head (%.0f, %.0f, %.0f) alpha %.2f, %d points (ring %d, oldest %d, next %d)",
+			DebugLine("  strand %u: age %.2f of %.2f s, head (%.0f, %.0f, %.0f) alpha %.2f, %d points (ring %d, oldest %d, next %d)",
 				i, age, life, head.x, head.y, head.z, headAlpha, count, ring, oldest, next);
 			if (!points || ring <= 0 || count <= 0) continue;
 			const int idx[3] = { oldest % ring, (oldest + count / 2) % ring, ((next - 1) % ring + ring) % ring };
@@ -1198,7 +1232,7 @@ static void ReportRibbon(UInt8* root, ULONGLONG now) {
 				UInt8* pt = points + idx[k] * 0x84;
 				const NiPoint3 at = *(NiPoint3*)pt;
 				const float* c = (float*)(pt + 0x6C);
-				LogLine("    %s point (%.0f, %.0f, %.0f) [%.0f above muzzle, %.0f away] width %.2f (size %.2f x radius %.2f) colour %.2f %.2f %.2f alpha %.2f",
+				DebugLine("    %s point (%.0f, %.0f, %.0f) [%.0f above muzzle, %.0f away] width %.2f (size %.2f x radius %.2f) colour %.2f %.2f %.2f alpha %.2f",
 					label[k], at.x, at.y, at.z, at.z - muzzle.z,
 					sqrtf((at.x - muzzle.x) * (at.x - muzzle.x) + (at.y - muzzle.y) * (at.y - muzzle.y) + (at.z - muzzle.z) * (at.z - muzzle.z)),
 					*(float*)(pt + 0x7C) * *(float*)(pt + 0x80), *(float*)(pt + 0x7C), *(float*)(pt + 0x80), c[0], c[1], c[2], c[3]);
@@ -1235,23 +1269,22 @@ static void* SettingsWeapon = nullptr;
 static const char* const GunSections[] = { "Muzzle", "Puff", "Wisp", "Trail", "Volume", "Glow", "Haze", "Blast", "Ejection" };
 static bool SkippedGunKey(const char* key) {   // test switches, not meant per gun
 	return !_stricmp(key, "iRibbonReports") || !_stricmp(key, "bFollowMuzzle") || !_stricmp(key, "fConstantRate") ||
-		!_stricmp(key, "iFlags") || !_stricmp(key, "fFileRate");
+		!_stricmp(key, "iFlags") || !_stricmp(key, "fFileRate") || !_stricmp(key, "bSmokeOnly");
 }
 static void WriteGunIni(const char* path, const char* name, UInt32 formId) {
 	FILE* f = nullptr;
 	if (fopen_s(&f, path, "w") || !f) { LogLine("could not create %s", path); return; }
 	fprintf(f, "; GunFX settings for %s (form %08X).\n", name, formId);
-	fprintf(f, "; Every line starting with ; uses the value from the main GunFX.ini (shown here as it was when this\n");
+	fprintf(f, "; Every line starting with ; uses the main value (Vegas Shaders' menu, Gun effects; shown here as it was when this\n");
 	fprintf(f, "; file was made). To give this gun its own value, delete the ; at the start of the line and change the value.\n");
 	fprintf(f, "; Put the ; back to return to the main setting. Changes apply while the game runs. Delete this file to start over.\n");
-	char keys[8192], value[512];
+	char value[512];
 	for (const char* section : GunSections) {
 		fprintf(f, "\n[%s]\n", section);
-		GetPrivateProfileStringA(section, NULL, "", keys, sizeof(keys), IniPath);
-		for (const char* k = keys; *k; k += strlen(k) + 1) {
-			if (SkippedGunKey(k)) continue;
-			GetPrivateProfileStringA(section, k, "", value, sizeof(value), IniPath);
-			fprintf(f, ";%s=%s\n", k, value);
+		for (const GunFXKeys::Key& k : GunFXKeys::kKeys) {   // (2026-11-16: the keys of the old GunFX.ini, in its order)
+			if (_stricmp(k.Section, section) || SkippedGunKey(k.Ini)) continue;
+			if (!MainValue(section, k.Ini, value, sizeof(value))) strcpy_s(value, k.Default);
+			fprintf(f, ";%s=%s\n", k.Ini, value);
 		}
 	}
 	fclose(f);
@@ -1306,7 +1339,7 @@ static void UpdateGunSettings() {
 		}
 		WIN32_FILE_ATTRIBUTE_DATA info;
 		if (GetFileAttributesExA(WeaponIniPath, GetFileExInfoStandard, &info)) WeaponIniWritten = info.ftLastWriteTime;
-		LogLine("equipped %s: settings from GunFX\\Weapons\\%s.ini (%d own value(s)), the rest from GunFX.ini",
+		DebugLine("equipped %s: settings from GunFX\\Weapons\\%s.ini (%d own value(s)), the rest from the menu",
 			name, file, OwnGunValues(WeaponIniPath));
 	}
 	LoadSettings();
@@ -1442,7 +1475,7 @@ static void UpdateAirAndPlayer(float dt) {
 	if (logged < 10 && (fabsf(speed - loggedSpeed) > 0.1f || fabsf(raw - loggedRaw) > 0.5f || indoors != loggedIndoors)) {
 		logged++;
 		loggedSpeed = speed; loggedRaw = raw; loggedIndoors = indoors;
-		LogLine("volumetric smoke wind: %s, speed %.2f, direction %.2f (raw) -> drift (%.1f, %.1f) units/s", indoors ? "indoors (none)" : "outdoors",
+		DebugLine("volumetric smoke wind: %s, speed %.2f, direction %.2f (raw) -> drift (%.1f, %.1f) units/s", indoors ? "indoors (none)" : "outdoors",
 			speed, raw, VolumeWind.x, VolumeWind.y);
 	}
 	// Your body: where you stand and how fast you move (smoothed; a jump of over 25 units per frame is a teleport).
@@ -2180,7 +2213,7 @@ static void NoteJumps(const SmokeChain& c, const NiPoint3* before, const char* r
 		for (int k = 0; k < ChainCount; k++) if (&c == &Chains[k]) name = ChainNames[k];
 		if (&c == &Twins[0] || &c == &Twins[1]) name = "twin arm";
 		JumpsLogged++;
-		LogLine("volumetric smoke jump: %s point %.2f s old moved %.1f units in one frame by %s (gun moving %.0f units/s, you %.0f; frame %.0f ms)",
+		DebugLine("volumetric smoke jump: %s point %.2f s old moved %.1f units in one frame by %s (gun moving %.0f units/s, you %.0f; frame %.0f ms)",
 			name, SmokeClock - c.p[i].born, sqrtf(moved2), rule,
 			sqrtf(VolumeGunVel.x * VolumeGunVel.x + VolumeGunVel.y * VolumeGunVel.y + VolumeGunVel.z * VolumeGunVel.z),
 			sqrtf(VolumePlayerVel.x * VolumePlayerVel.x + VolumePlayerVel.y * VolumePlayerVel.y), dt * 1000.0f);
@@ -2957,7 +2990,7 @@ static void UpdateVolumeSmoke(float dt, const SmokeSource sources[ChainCount]) {
 		char one[64];
 		sprintf_s(one, ", twin arms %d + %d, tendrils %d", Twins[0].count, Twins[1].count, tendrils);
 		strcat_s(counts, one);
-		LogLine("volumetric smoke: %d segment(s); points: %s; first segment end (%.1f, %.1f, %.1f) radius %.2f, density %.4f; "
+		DebugLine("volumetric smoke: %d segment(s); points: %s; first segment end (%.1f, %.1f, %.1f) radius %.2f, density %.4f; "
 			"player at (%.1f, %.1f, %.1f)", n, counts, out[0], out[1], out[2], out[3], out[8], player[0], player[1], player[2]);
 	}
 }
@@ -2987,7 +3020,7 @@ static void NoteVolumeTime(const LARGE_INTEGER& start) {
 	if (now - since < 5000) return;
 	if (logged < 40) {
 		logged++;
-		LogLine("volumetric smoke CPU: %.3f ms a frame on average, worst %.3f ms, over %d frames (up to %d points, %d segments)",
+		DebugLine("volumetric smoke CPU: %.3f ms a frame on average, worst %.3f ms, over %d frames (up to %d points, %d segments)",
 			total / frames, worst, frames, mostPoints, mostSegments);
 	}
 	total = worst = 0.0; frames = 0; mostPoints = mostSegments = 0; since = now;
@@ -3133,7 +3166,7 @@ static void MainLoop() {
 			static void* loggedGun = nullptr;
 			if (CurrentWeapon != loggedGun) {
 				loggedGun = CurrentWeapon;
-				LogLine("volumetric smoke: the barrel's direction from %s (the muzzle node's own axis and the line to its parent are %.0f degrees apart)",
+				DebugLine("volumetric smoke: the barrel's direction from %s (the muzzle node's own axis and the line to its parent are %.0f degrees apart)",
 					off <= 45.0f ? "the muzzle node's own axis" : "the line to the muzzle node's parent", off);
 			}
 			// The gun shape probe, once per gun, on the gun model GunFX follows (the one you see), naming which it is.
@@ -3141,7 +3174,7 @@ static void MainLoop() {
 			if (CurrentWeapon != probedGun) {
 				probedGun = CurrentWeapon;
 				UInt8* player = (UInt8*)Player();
-				LogLine("gun shape probe: the %s model's gun (the game's own third-person switch: %d)",
+				DebugLine("gun shape probe: the %s model's gun (the game's own third-person switch: %d)",
 					InFirstPersonModel(TrailNode) ? "first-person" : "third-person", player ? (int)*(player + 0x64C) : -1);
 				if (UInt8* gunRoot = *(UInt8**)(TrailNode + 0x18)) ProbeGunShape(gunRoot, TrailNode);
 			}
@@ -3326,7 +3359,7 @@ static void TimedMainLoop() {
 	static int frames = 0, slowLogged = 0, reports = 0;
 	if (ms > 4.0 && slowLogged < 40) {
 		slowLogged++;
-		LogLine("slow game-loop step: GunFX took %.1f ms this frame", ms);
+		DebugLine("slow game-loop step: GunFX took %.1f ms this frame", ms);
 	}
 	total += ms;
 	frames++;
@@ -3335,13 +3368,12 @@ static void TimedMainLoop() {
 	if (end - windowStart < 5.0) return;
 	if (reports < 60) {
 		reports++;
-		LogLine("GunFX per frame (whole step): %.3f ms on average, worst %.3f ms, over %d frames", total / frames, worst, frames);
+		DebugLine("GunFX per frame (whole step): %.3f ms on average, worst %.3f ms, over %d frames", total / frames, worst, frames);
 	}
 	total = worst = 0.0;
 	frames = 0;
 	windowStart = end;
 }
-static void MessageHandler(NVSEMessage* msg) { if (msg->type == kMessage_MainGameLoop) TimedMainLoop(); }
 
 // ---- Hooks -----------------------------------------------------------------------------------------------------
 // Every shot of a ranged weapon goes through TESObjectWEAP::Fire, with or without a muzzle flash. The hook only notes
@@ -3417,7 +3449,7 @@ static void OnShot(UInt8* actor, void* weapon, ULONGLONG now) {
 		}
 		loggedWeapons[LoggedShots++] = weapon;
 		const char* name = node ? *(const char**)(node + 0x08) : nullptr;
-		LogLine("first shot of a gun: weapon type %u%s, projectile node %s%s", type, (*((UInt8*)weapon + 0x100) & 0x2) ? " automatic" : "",
+		DebugLine("first shot of a gun: weapon type %u%s, projectile node %s%s", type, (*((UInt8*)weapon + 0x100) & 0x2) ? " automatic" : "",
 			node ? (name ? name : "(no name)") : "NOT found (no smoke)",
 			!node || actor != Player() ? "" : InFirstPersonModel(node) ? " (first-person model)" : " (third-person model)");
 	}
@@ -3491,7 +3523,7 @@ static void OnEject(UInt8* actor, void* weapon, ULONGLONG now) {
 		LoggedEjectsView[view]++;
 		UInt8* muzzle = root ? GetFireNode(weapon, root) : nullptr;
 		const NiPoint3 m = muzzle ? *(NiPoint3*)(muzzle + 0x8C) : NiPoint3{};
-		LogLine("ejection smoke at (%.1f, %.1f, %.1f) on the %s model, %.1f units from the muzzle; %s, scale %.2f, %.1f s -> %s",
+		DebugLine("ejection smoke at (%.1f, %.1f, %.1f) on the %s model, %.1f units from the muzzle; %s, scale %.2f, %.1f s -> %s",
 			at.x, at.y, at.z, InFirstPersonModel(port) ? "first-person" : "third-person",
 			muzzle ? sqrtf((at.x - m.x) * (at.x - m.x) + (at.y - m.y) * (at.y - m.y) + (at.z - m.z) * (at.z - m.z)) : -1.0f,
 			Settings.ejectModel, scale, Settings.ejectLifetime, volume ? "volumetric" : effect ? "created" : (cell ? "NOT created" : "no cell"));
@@ -3528,21 +3560,48 @@ static bool HookCall(UInt32 site, void* hook, FireFn* original) {
 // Each gun gets Data\NVSE\Plugins\GunFX\Weapons\<gun name>.ini the first time it is equipped. Its lines start
 // with ';' (= use the main GunFX.ini); a line without ';' gives that gun its own value. While a gun is equipped,
 // every setting is read from its file first, then from the main INI. [Main] always comes from the main INI.
+// 2026-11-16: the main value of a GunFX.ini key now comes from Vegas Shaders' settings ([Main.GunFX.<section>], GunFXKeys.h maps
+// the names); an effect's bEnabled reads 1 there, since its menu switch decides (a per-gun file can still turn it off for one gun).
+// False: no such setting (the code's own fallback stands). The replay rig (GUNFX_REPLAY) still reads GunFX.ini.
+static bool MainValue(const char* section, const char* key, char* out, DWORD size) {
+#ifndef GUNFX_REPLAY
+	if (GunFXKeys::SwitchOf(section, key)) { strcpy_s(out, size, "1"); return true; }
+	return GunFXHost::GetValue(section, key, out, size);
+#else
+	GetPrivateProfileStringA(section, key, "\x01", out, size, IniPath);
+	return out[0] != 1;
+#endif
+}
 static UINT LayerInt(const char* section, const char* key, INT fallback, const char* path) {
 	if (WeaponIniPath[0] && path == IniPath && _stricmp(section, "Main")) {
 		char value[64];
 		GetPrivateProfileStringA(section, key, "\x01", value, sizeof(value), WeaponIniPath);
 		if (value[0] != 1) return GetPrivateProfileIntA(section, key, fallback, WeaponIniPath);
 	}
-	return GetPrivateProfileIntA(section, key, fallback, path);
+	char value[64];
+	return MainValue(section, key, value, sizeof(value)) ? (UINT)atoi(value) : (UINT)fallback;   // (GetPrivateProfileInt reads the same way)
 }
 static DWORD LayerStr(const char* section, const char* key, const char* fallback, char* out, DWORD size, const char* path) {
 	if (WeaponIniPath[0] && path == IniPath && key && _stricmp(section, "Main")) {
 		const DWORD n = GetPrivateProfileStringA(section, key, "\x01", out, size, WeaponIniPath);
 		if (out[0] != 1) return n;
 	}
-	return GetPrivateProfileStringA(section, key, fallback, out, size, path);
+	if (!key || !MainValue(section, key, out, size)) strcpy_s(out, size, fallback);
+	return (DWORD)strlen(out);
 }
+#ifndef GUNFX_REPLAY
+// Every main value in one string, to see whether the GunFX settings changed (the settings revision changes with any setting).
+static std::string SettingsPrint() {
+	std::string print;
+	char value[MAX_PATH];
+	for (const GunFXKeys::Key& k : GunFXKeys::kKeys) {
+		if (!MainValue(k.Section, k.Ini, value, sizeof(value))) value[0] = 0;
+		print += value;
+		print += '\x1f';
+	}
+	return print;
+}
+#endif
 
 static float IniFloat(const char* section, const char* key, const char* fallback) {
 	char buffer[64];
@@ -3708,7 +3767,7 @@ static void BakeLook(const char* section, char* model) {
 	const float* a = (const float*)&built; const float* b = (const float*)&look;
 	int changed = 0;
 	for (size_t k = 0; k < sizeof(SmokeLook) / sizeof(float); k++) changed += fabsf(a[k] - b[k]) > 1e-5f;
-	if (!changed) { LogLine("%s look: %s as built", section, model); return; }
+	if (!changed) { DebugLine("%s look: %s as built", section, model); return; }
 	UInt32 hash = 2166136261u;                                 // FNV-1a over the model name and the values
 	for (const char* c = model; *c; c++) hash = (hash ^ (UInt8)tolower(*c)) * 16777619u;
 	for (size_t k = 0; k < sizeof(SmokeLook); k++) hash = (hash ^ ((const UInt8*)&look)[k]) * 16777619u;
@@ -3728,7 +3787,7 @@ static void BakeLook(const char* section, char* model) {
 		fwrite(file.data(), 1, file.size(), f);
 		fclose(f);
 	}
-	LogLine("%s look: %d value(s) from the settings -> %s", section, changed, generated);
+	DebugLine("%s look: %d value(s) from the settings -> %s", section, changed, generated);
 	strcpy_s(model, MAX_PATH, generated);
 }
 
@@ -3737,11 +3796,17 @@ static void LoadSettings() {
 	char* slash = strrchr(IniPath, 0x5C);
 	strcpy_s(slash ? slash + 1 : IniPath, MAX_PATH - (slash ? (slash + 1 - IniPath) : 0), "GunFX.ini");
 
+	// (IniPath stays: the per-gun folder and Data/Meshes are found from it.)
+#ifdef GUNFX_REPLAY
 	char defaults[MAX_PATH];
 	sprintf_s(defaults, "%s.defaults", IniPath);
 	int migrated = MergeIniDefaults(defaults, IniPath);
 	if (migrated > 0) LogLine("bundled INI defaults applied (created file or added %d missing keys)", migrated);
 	if (migrated < 0) LogLine("INI defaults migration incomplete; check file permissions or configuration size");
+#else
+	LoadedPrint = SettingsPrint();
+#endif
+	Settings.debugLog = LayerInt("Main", "bDebugLog", 0, IniPath);
 	Settings.puff = LayerInt("Puff", "bEnabled", 1, IniPath);
 	IniModel("Puff", "sModel", "GunFX/barrelpuff.nif", Settings.puffModel);
 	Settings.puffLifetime = IniFloat("Puff", "fLifetime", "1.8");
@@ -3970,19 +4035,19 @@ static void LoadSettings() {
 	Settings.hazeSpeed=bounded("Haze","fSpeed","1",0.01f,10);
 	Settings.hazeLength=bounded("Haze","fLength","8",0.1f,40);
 	Settings.hazeMinSize=bounded("Haze","fMinSize","0.35",0,1);
-	LogLine("haze %s: %.2f pixels; ejection %s: node %s; smoke anchors puff '%s', wisp '%s'", Settings.haze?"on":"off",
+	DebugLine("haze %s: %.2f pixels; ejection %s: node %s; smoke anchors puff '%s', wisp '%s'", Settings.haze?"on":"off",
 		Settings.hazePixels,Settings.eject?"on":"off",Settings.ejectNode,Settings.puffNode,Settings.wispNode);
 	Settings.flags = LayerInt("Main", "iFlags", 3, IniPath);
 	ReadLook("Wisp", *WispBuilt, WispLook);
 	ReadLook("Puff", PuffFile, PuffLook);
 	Settings.logEvents = LayerInt("Main", "iLogEvents", 20, IniPath);
 
-	LogLine("puff: %s, model %s, %.2f s, scale %.2f, every %.2f s at most, player only %d", Settings.puff ? "on" : "off",
+	DebugLine("puff: %s, model %s, %.2f s, scale %.2f, every %.2f s at most, player only %d", Settings.puff ? "on" : "off",
 		Settings.puffModel, Settings.puffLifetime, Settings.puffScale, Settings.puffInterval, Settings.puffPlayerOnly);
-	LogLine("wisp: %s, model %s, scale %.2f, heat +%.2f per shot, cools %.2f/s, max %.1f; smoke from heat %.1f, full (%.1f/s) at %.1f",
+	DebugLine("wisp: %s, model %s, scale %.2f, heat +%.2f per shot, cools %.2f/s, max %.1f; smoke from heat %.1f, full (%.1f/s) at %.1f",
 		Settings.trail ? "on" : "off", Settings.trailModel, Settings.trailScale, Settings.heatPerShot, Settings.coolPerSecond,
 		Settings.maxHeat, Settings.heatStart, Settings.maxRate, Settings.heatFull);
-	LogLine("barrel shader heat: %s, preview %s, length %.1f..%.1f, radius %.1f, forward %.1f, offset (%.1f, %.1f, %.1f), spread %.0f shots, cool %.0f s; starts at heat %.1f, full over %.1f heat, rise %.1f s", Settings.glow ? "on" : "off", Settings.glowPreview ? "on" : "off",
+	DebugLine("barrel shader heat: %s, preview %s, length %.1f..%.1f, radius %.1f, forward %.1f, offset (%.1f, %.1f, %.1f), spread %.0f shots, cool %.0f s; starts at heat %.1f, full over %.1f heat, rise %.1f s", Settings.glow ? "on" : "off", Settings.glowPreview ? "on" : "off",
 		Settings.glowMinLength, Settings.glowLength, Settings.glowRadius, Settings.glowForwardLength,
 		Settings.glowOffsetX, Settings.glowOffsetY, Settings.glowOffsetZ,
 		Settings.glowSpreadShots, Settings.glowSpreadCoolSeconds, Settings.glowStart, Settings.glowHeatSpan, Settings.glowRiseSeconds);
@@ -4021,16 +4086,19 @@ static bool ReadHeatForNVR(float* out, const void* weaponNode, bool extended) {
 	return belongs;
 }
 
-extern "C" {
-__declspec(dllexport) bool __cdecl GunFX_GetHeatV2(float out[8], const void* weaponNode) {
+}   // the anonymous namespace
+
+// ---- What Vegas Shaders calls (GunFX.h; until 2026-11-16 the GunFX_* exports of GunFX.dll) ----------------------------
+namespace GunFX {
+bool GetHeatV2(float out[8], const void* weaponNode) {
 	return ReadHeatForNVR(out, weaponNode, false);
 }
 
-__declspec(dllexport) bool __cdecl GunFX_GetHeatV3(float out[10], const void* weaponNode) {
+bool GetHeatV3(float out[10], const void* weaponNode) {
 	return ReadHeatForNVR(out, weaponNode, true);
 }
 
-__declspec(dllexport) bool __cdecl GunFX_GetHaze(float out[8], const void* weaponNode) {
+bool GetHaze(float out[8], const void* weaponNode) {
 	float heat[10];
 	if (!out || !ReadHeatForNVR(heat, weaponNode, true)) return false;
 	EnterCriticalSection(&HeatLock);
@@ -4041,7 +4109,7 @@ __declspec(dllexport) bool __cdecl GunFX_GetHaze(float out[8], const void* weapo
 
 // As GunFX_GetHaze, plus out[8..10] the muzzle and out[11..13] the rearward axis in world space, from the game
 // loop (for the first-person model, whose render-time positions are in another space).
-__declspec(dllexport) bool __cdecl GunFX_GetHazeV2(float out[14], const void* weaponNode) {
+bool GetHazeV2(float out[14], const void* weaponNode) {
 	float heat[10];
 	if (!out || !ReadHeatForNVR(heat, weaponNode, true)) return false;
 	EnterCriticalSection(&HeatLock);
@@ -4053,7 +4121,7 @@ __declspec(dllexport) bool __cdecl GunFX_GetHazeV2(float out[14], const void* we
 
 // As V2, plus out[14] the muzzle blast displacement in pixels right now and out[15] its radius in pixels. True while
 // either the barrel haze or the blast is showing.
-__declspec(dllexport) bool __cdecl GunFX_GetHazeV3(float out[16], const void* weaponNode) {
+bool GetHazeV3(float out[16], const void* weaponNode) {
 	float heat[10];
 	if (!out || !ReadHeatForNVR(heat, weaponNode, true)) return false;
 	EnterCriticalSection(&HeatLock);
@@ -4065,17 +4133,17 @@ __declspec(dllexport) bool __cdecl GunFX_GetHazeV3(float out[16], const void* we
 }
 
 // NVR's menu switches (see Switch()); called by NVR every frame.
-__declspec(dllexport) void __cdecl GunFX_SetSwitches(UInt32 bits) {
+void SetSwitches(UInt32 bits) {
 	if ((LONG)bits != NvrSwitches) {
 		InterlockedExchange(&NvrSwitches, (LONG)bits);
-		LogLine("NVR menu switches: puff %d, heat smoke %d, ejection smoke %d, glow %d, haze %d, muzzle blast %d, energy weapons %d, after-fire trail %d, volumetric %d",
+		LogLine("menu switches: puff %d, heat smoke %d, ejection smoke %d, glow %d, haze %d, muzzle blast %d, energy weapons %d, after-fire trail %d, volumetric %d",
 			bits & 1, (bits >> 1) & 1, (bits >> 2) & 1, (bits >> 3) & 1, (bits >> 4) & 1, (bits >> 5) & 1, (bits >> 6) & 1, (bits >> 7) & 1, (bits >> 8) & 1);
 	}
 }
 
 // Volumetric smoke for NVR: up to maxRecords records of 12 floats (see VolumePublished) and params[8] (noise,
 // brightness, self-shadow, clock, debug view, gun in front, colour, depth shading). Returns the number of records.
-__declspec(dllexport) int __cdecl GunFX_GetVolumeSmoke(float* out, int maxRecords, float* params) {
+int GetVolumeSmoke(float* out, int maxRecords, float* params) {
 	if (!out || !params || !HeatLockReady) return 0;
 	EnterCriticalSection(&HeatLock);
 	const int n = VolumePublishedCount < maxRecords ? VolumePublishedCount : maxRecords;
@@ -4085,7 +4153,7 @@ __declspec(dllexport) int __cdecl GunFX_GetVolumeSmoke(float* out, int maxRecord
 	return n;
 }
 // The same with records of 16 floats (see VolumePublished): NVR P70 and newer.
-__declspec(dllexport) int __cdecl GunFX_GetVolumeSmoke2(float* out, int maxRecords, float* params) {
+int GetVolumeSmoke2(float* out, int maxRecords, float* params) {
 	if (!out || !params || !HeatLockReady) return 0;
 	EnterCriticalSection(&HeatLock);
 	const int n = VolumePublishedCount < maxRecords ? VolumePublishedCount : maxRecords;
@@ -4096,7 +4164,7 @@ __declspec(dllexport) int __cdecl GunFX_GetVolumeSmoke2(float* out, int maxRecor
 }
 // The camera, from NVR every frame: eye (world) x, y, z and the way it looks x, y, z (unit length). Bullets fly to where
 // you aim.
-__declspec(dllexport) void __cdecl GunFX_SetView(const float* v) {
+void SetView(const float* v) {
 	if (!v || !HeatLockReady) return;
 	EnterCriticalSection(&HeatLock);
 	ViewEye = NiPoint3{ v[0], v[1], v[2] };
@@ -4107,7 +4175,7 @@ __declspec(dllexport) void __cdecl GunFX_SetView(const float* v) {
 // The bullets whose holes are still open ([Volume] fBulletSeconds), for the tunnels NVR clears through the smoke: up to
 // maxBullets of 8 floats, where it was fired from (world) x, y, z, seconds since, the way it flew x, y, z, how hard
 // ([Volume] fBullet). Returns how many.
-__declspec(dllexport) int __cdecl GunFX_GetBullets(float* out, int maxBullets) {
+int GetBullets(float* out, int maxBullets) {
 	if (!out || Settings.volumeBullet <= 0.0f) return 0;
 	int n = 0;
 	for (const Bullet& b : Bullets) {
@@ -4121,19 +4189,19 @@ __declspec(dllexport) int __cdecl GunFX_GetBullets(float* out, int maxBullets) {
 }
 // How a bullet's hole runs, for NVR's shader: out[0] = seconds it takes to open ([Volume] fBulletOpen), out[1] = seconds until
 // the smoke has filled it again ([Volume] fBulletSeconds).
-__declspec(dllexport) void __cdecl GunFX_GetBulletLook(float* out) {
+void GetBulletLook(float* out) {
 	if (!out) return;
 	out[0] = Settings.volumeBulletOpen;
 	out[1] = Settings.volumeBulletSeconds;
 }
 // How much you are moving (0 standing .. 1 walking or running, eased), for NVR's shader: while you move, bullets leave your
 // own smoke close to you alone (it streams past their tunnels, which stay where they were fired, and flickered).
-__declspec(dllexport) float __cdecl GunFX_GetMoving() {
+float GetMoving() {
 	return VolumeMoving;
 }
 // The gun-smoke haze for NVR's haze pass (NVR P71 and newer): up to maxBlobs blobs of 8 floats (see SmokeHazePublished).
 // Returns how many.
-__declspec(dllexport) int __cdecl GunFX_GetSmokeHaze(float* out, int maxBlobs) {
+int GetSmokeHaze(float* out, int maxBlobs) {
 	if (!out || !HeatLockReady) return 0;
 	EnterCriticalSection(&HeatLock);
 	const int n = SmokeHazePublishedCount < maxBlobs ? SmokeHazePublishedCount : maxBlobs;
@@ -4143,7 +4211,7 @@ __declspec(dllexport) int __cdecl GunFX_GetSmokeHaze(float* out, int maxBlobs) {
 }
 // The light the player's last muzzle flash throws on the volumetric smoke: out[8] = x, y, z (world), light (0 = none;
 // [Volume] fFlash at the shot, gone after about fFlashSeconds x 4), colour r, g, b, reach (fFlashRadius).
-__declspec(dllexport) void __cdecl GunFX_GetSmokeFlash(float* out) {
+void GetSmokeFlash(float* out) {
 	if (!out) return;
 	memset(out, 0, 8 * sizeof(float));
 	if (!HeatLockReady) return;
@@ -4160,22 +4228,15 @@ __declspec(dllexport) void __cdecl GunFX_GetSmokeFlash(float* out) {
 	out[7] = Settings.volumeFlashRadius;
 }
 
-__declspec(dllexport) bool NVSEPlugin_Query(const NVSEInterface* nvse, PluginInfo* info) {
-	info->infoVersion = 1;
-	info->name = "GunFX";
-	info->version = 59;
-	return !nvse->isEditor && nvse->runtimeVersion == 0x040020D0; // 1.4.0.525
-}
-
-__declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
-	if (nvse->isEditor) return true;
-	Log = _fsopen("GunFX.log", "w", _SH_DENYWR); // readable while the game runs
+// From Vegas Shaders' NVSEPlugin_Load (game only, not the editor), after its settings are read. False: GunFX stays off (another
+// game version: its addresses are FalloutNV.exe 1.4.0.525's, which GunFX.dll's own NVSEPlugin_Query required too).
+static bool Loaded = false;
+bool Load(unsigned runtimeVersion) {
+	// (2026-11-16: no GunFX.log of its own any more: its lines go into the Vegas Shaders log, "GunFX:" in front)
 	LogLine("GunFX 1.39 (volumetric smoke prototype: heat smoke, trail, puff and ejection smoke; edge detail, sun and muzzle flash light, colour, wind, pushed by your body, smoothed strands, depth shading, drift aside, flows around the gun, tendrils, unzips and fans out around you and the gun, swirls behind the barrel and your body, recoil smoothed out, barrel direction from the muzzle node, no random flicks, gun shape probe, puff carried with the gun, smoke eased out of the gun and your body, air flows round your body and the gun, the gun's real shape, smoke you run into parts at once, stirred smoke spreads out and frays, heat smoke and trail flow out of the barrel, bursts when you run or swing through smoke, only a hanging trail unzips, CPU time logged, gun-smoke haze, haze in one pass of its own and stacking where you fire, bullets punch through the smoke and the haze, billowy puffs and fibrous strands, smoke timed on the precise clock, smoke inside you slides out instead of popping, clock time on each log line, hitch diagnostic: whole-step timing, smoke streams back along the gun as you move instead of being thrown aside by your body, and spreads over it, bullet holes open and fill in at your pace, and leave your own smoke near you alone while you move)");
+	if (runtimeVersion != 0x040020D0) { LogLine("not FalloutNV.exe 1.4.0.525 (runtime %08X): GunFX stays off", runtimeVersion); return false; }
 	LoadSettings();
-	if (GetModuleHandleA("BarrelSmoke.dll")) {
-		LogLine("BarrelSmoke.dll is also installed: GunFX replaces it. Remove BarrelSmoke.dll from Data\\NVSE\\Plugins; GunFX stays off until then.");
-		return true;
-	}
+	// (GunFX.dll stood down when the old BarrelSmoke.dll was installed; dropped 2026-11-16: that mod hardly circulated)
 	InitializeCriticalSection(&PendingLock);
 	InitializeCriticalSection(&HeatLock);
 	HeatLockReady = true;
@@ -4184,9 +4245,24 @@ __declspec(dllexport) bool NVSEPlugin_Load(const NVSEInterface* nvse) {
 	HookCall(CallSites[2], (void*)FireHook2, &OriginalFire[2]);
 	HookCall(EjectSites[0], (void*)EjectHook0, &OriginalEject[0]);
 	HookCall(EjectSites[1], (void*)EjectHook1, &OriginalEject[1]);
-	NVSEMessagingInterface* messaging = (NVSEMessagingInterface*)nvse->QueryInterface(kInterface_Messaging);
-	const bool listening = messaging && messaging->RegisterListener(nvse->GetPluginHandle(), "NVSE", MessageHandler);
-	LogLine(listening ? "listening to the game loop" : "could not register for the game loop: no wisp");
+	LogLine("built into Vegas Shaders: settings in [Main.GunFX.*] (the menu's Gun effects page), the game loop from its xNVSE message handler");
+	Loaded = true;
 	return true;
 }
+
+// xNVSE's kMessage_MainGameLoop, forwarded by Vegas Shaders' message handler (no listener of its own).
+// 2026-11-16: with every effect switched off (the default) and nothing left to fade out, GunFX does no work at all: the shots are
+// dropped, so no heat, gun-shape builds or smoke steps (before, every player who had GunFX.dll installed paid for those even with
+// everything off; a player without it paid nothing, which is what built-in GunFX must keep).
+static bool Idle() {
+	if (NvrSwitches & 0x1BF) return false;   // an effect is on (bit 6, energy weapons, is no effect of its own)
+	// (the glow and haze ease toward zero and never quite reach it: below what Vegas Shaders draws counts as gone)
+	return Heat <= 0.0f && VisualHeat < 1e-4f && VisualHaze < 1e-4f && HeatStrength < 1e-4f && HazePublished[0] <= 0.001f &&
+		HazeBlast[0] <= 0.01f && !FollowEffect && !AfterEffect && !VolumePublishedCount && !SmokeHazePublishedCount;
 }
+void MainGameLoop() {
+	if (!Loaded) return;
+	if (Idle()) { EnterCriticalSection(&PendingLock); PendingCount = 0; LeaveCriticalSection(&PendingLock); return; }
+	TimedMainLoop();
+}
+}   // namespace GunFX

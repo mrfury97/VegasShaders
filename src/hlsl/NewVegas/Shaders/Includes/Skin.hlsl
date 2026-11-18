@@ -28,7 +28,7 @@
 #if defined(__INTELLISENSE__)
     #include "PBR.hlsl"
     #include "PBRScale.hlsl"
-#else
+#elif !defined(SKIN_IN_SCREEN_PASS)	// UNOFFICIAL 2026-11-15 DeferredSkin (Includes/SkinDeferred.hlsl): the screen passes have PBR.hlsl already (no include guard)
     #include "includes/PBR.hlsl"
     #include "includes/PBRScale.hlsl"
 #endif
@@ -40,7 +40,9 @@ float4 TESR_SkinLook     : register(c193); // x SkyReflection (0 indoors), y wet
 // Per draw, set by the SkinShader hook (Hooks/Shaders.cpp) after the shader binds (so NVR_, not TESR_: ShaderRecord re-uploads
 // every TESR_ constant when the shader changes): x 1 while the screen-space blur's targets are bound for this draw (the blur
 // then does the diffusion: doing both doubled it), y 1 while the FaceGen maps are bound to a light-only pass.
+#ifndef SKIN_IN_SCREEN_PASS	// (DeferredSkin: c194 is Object.hlsl's TESR_MicroShadow in the screen passes, which need no per-draw value)
 float4 NVR_SkinDraw      : register(c194);
+#endif
 // x [Shaders.Skin.Debug] DebugView 1-7 (0 off, or one of the blur's views), y 1 while the Interiors settings are in use,
 // z 1 = LegacyFaceShadows (the template's shadow reach; see SHADOW_REACH_ALONG_RAY). Declared by the template ahead of
 // Shadow.hlsl when it needs it there (SKIN_DEBUG_DECLARED).

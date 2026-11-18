@@ -32,6 +32,10 @@ static bool loadFragN(Host& h, const char* name, UINT images, UINT push, UINT ta
 	std::vector<char> spirv; char buf[65536]; size_t n;
 	while ((n = fread(buf, 1, sizeof(buf), f)) > 0) spirv.insert(spirv.end(), buf, buf + n);
 	fclose(f);
+	// (2026-11-15, port of mrfury97's GIGrassDenoise) RtDenoiseTemporalRgb has an 8th image (the soft mask, RtDenoise.cpp Make(.., 8, ..)); the
+	// scenes still pass 7 and the 8th is the depth (as RtDenoise.cpp's stand-in while Settings.Soft is 0)
+	UINT callerImages = 0;
+	if (std::string(name) == "RtDenoiseTemporalRgb" && images == 7) { callerImages = 7; images = 8; }
 	NVR_EXT_BINDING_DESC bindings[12] = {};
 	for (UINT i = 0; i < images; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
 	bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, samplerAt != 0xFFFFFFFFu ? samplerAt : push - 16 };
@@ -41,13 +45,13 @@ static bool loadFragN(Host& h, const char* name, UINT images, UINT push, UINT ta
 	desc.UsesSamplerHeap = TRUE; desc.SamplerHeapSet = 0; desc.SamplerHeapBinding = 0;
 	desc.ColorTargetCount = targets; desc.Blend = NVR_EXT_BLEND_NONE; desc.ColorWriteMask = 0xF; desc.pDebugName = name;
 	CHECKHR(h.ext->CreateGraphicsPipeline(&desc, &out.pipe), "CreateGraphicsPipeline");
-	out.images = images; out.push = push;
+	out.images = images; out.push = push; out.callerImages = callerImages;
 	if (!gPointClamp) { NVR_EXT_SAMPLER_DESC sd = { NVR_EXT_FILTER_NEAREST, NVR_EXT_ADDRESS_CLAMP }; CHECKHR(h.ext->CreateSampler(&sd, &gPointClamp), "CreateSampler"); }
 	return true;
 }
 static bool drawN(Host& h, const FragPass& p, IDirect3DSurface9* const* targets, UINT targetCount, IUnknown* const* images, const void* push) {
 	NVR_EXT_RESOURCE_BINDING b[12] = {};
-	for (UINT i = 0; i < p.images; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = images[i]; }
+	for (UINT i = 0; i < p.images; i++) { b[i].Slot = i; b[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[i].pResource = p.callerImages && i >= p.callerImages ? images[2] : images[i]; }
 	b[p.images].Slot = 0; b[p.images].Type = NVR_EXT_BIND_SAMPLER; b[p.images].pResource = gPointClamp;
 	NVR_EXT_DRAW_DESC d = {};
 	d.pPipeline = p.pipe; d.TargetCount = targetCount;
@@ -444,6 +448,18 @@ struct DnChain {
 	Tex hA, hB, hC, oA, oB, oC, oD, tA, tB, cA[2], cB[2], scratch, out;
 	float meanVariance = 0.0f;	// the a-trous' Settings.MeanVariance (frames, 0 off)
 	float antiFirefly = 0.0f;	// the temporal passes' Settings.AntiFirefly (k, 0 off)
+	// (2026-11-15 rt-denoise-inputs) Settings.Confidence (k, 0 off): RtDenoiseConfidence.frag at 1/5 size, then RtDenoiseTemporalRgb-conf
+	// instead of the plain RGB temporal pass (RtDenoise::Run). makeConf loads them; confK 0 = the plain pass, as before.
+	float confK = 0.0f;
+	bool confPassOnly = false;	// (the cost scene) the confidence pass, then the PLAIN temporal pass: the pass' own cost
+	FragPass confPass, temporalConf;
+	Tex conf;
+	UINT confW = 0, confH = 0;
+	bool makeConf(Host& h, UINT w, UINT hh) {
+		confW = (w + 4) / 5; confH = (hh + 4) / 5;
+		return makeTex(h, confW, confH, D3DFMT_G16R16F, true, conf) && loadFragN(h, "RtDenoiseConfidence", 5, 216, 1, confPass, 176) &&
+			loadFragN(h, "RtDenoiseTemporalRgb-conf", 9, 216, 3, temporalConf, 176);	// (test-after-110 merge: + the soft mask on 7, the confidence on 8)
+	}
 	bool make(Host& h, UINT w, UINT hh) {
 		const D3DFORMAT F = D3DFMT_A16B16G16R16F;
 		// (only oA and out are read back: the others without a system-memory twin, so two 720p chains fit the 32-bit host)
@@ -458,7 +474,7 @@ struct DnChain {
 		return loadFragN(h, "RtDenoiseTemporalRgb", 7, 200, 3, temporalRgb, 176) && loadFragN(h, "RtDenoiseTemporalSpec", 10, 216, 4, temporalSpec, 192) && loadFragN(h, "RtDenoiseFirefly", 3, 32, 2, firefly) &&
 			loadFragN(h, "RtDenoiseAtrousRgb", 5, 48, 2, atrous);
 	}
-	void free() { freeTex({ &hA, &hB, &hC, &oA, &oB, &oC, &oD, &tA, &tB, &cA[0], &cA[1], &cB[0], &cB[1], &scratch, &out }); }
+	void free() { freeTex({ &hA, &hB, &hC, &oA, &oB, &oC, &oD, &tA, &tB, &cA[0], &cA[1], &cB[0], &cB[1], &scratch, &out }); if (conf.t) freeTex({ &conf }); }
 	// the history for next frame (RtDenoise ping-pongs its textures; here a copy, which the cost scene leaves out of its timing)
 	void keep(Host& h, bool spec) {
 		h.dev->StretchRect(oA.s, nullptr, hA.s, nullptr, D3DTEXF_POINT); h.dev->StretchRect(oB.s, nullptr, hB.s, nullptr, D3DTEXF_POINT);
@@ -475,7 +491,19 @@ struct DnChain {
 			IDirect3DSurface9* t3[3] = { firstA, firstB, oD.s };
 			DnTemporalPush t; dnCamera(t, cam, cam, w, hh, 32.0f, reset); t.antiLag = gAntiLag; t.peopleCap = 0.0f; t.fireflyK = antiFirefly;
 			IUnknown* images[7] = { noisy, hA.t, depth, hB.t, standIn, standIn, standIn };
-			if (!drawN(h, temporalRgb, t3, 3, images, &t)) return false;
+			if (confK > 0.0f) {	// (2026-11-15 rt-denoise-inputs) as RtDenoise::Run with Settings.Confidence
+				struct { DnTemporalPush t; float conf[4]; } c;
+				static_assert(sizeof(c) == 216, "RtDenoise.cpp ConfPush");
+				c.t = t; c.conf[0] = confK; c.conf[1] = 5.0f; c.conf[2] = 2.0f; c.conf[3] = 0.0f;
+				IUnknown* ci[5] = { noisy, hA.t, depth, hB.t, standIn };
+				IDirect3DSurface9* ct[1] = { conf.s };
+				if (!drawN(h, confPass, ct, 1, ci, &c)) return false;
+				c.conf[0] = 1.0f; c.conf[1] = 5.0f; c.conf[2] = float(confW); c.conf[3] = float(confH);
+				IUnknown* ti[9] = { noisy, hA.t, depth, hB.t, standIn, standIn, standIn, depth, conf.t };	// (7: the soft mask's stand-in, the depth, as the game's)
+				if (confPassOnly) { if (!drawN(h, temporalRgb, t3, 3, images, &t)) return false; }
+				else if (!drawN(h, temporalConf, t3, 3, ti, &c)) return false;
+			}
+			else if (!drawN(h, temporalRgb, t3, 3, images, &t)) return false;
 		} else {
 			IDirect3DSurface9* t4[4] = { firstA, firstB, oC.s, oD.s };
 			DnSpecPush t; dnCamera(t, cam, cam, w, hh, 32.0f, reset); t.antiLag = gAntiLag; put4(t.spec, 12.0f, 1.0f, 0, 0); t.fireflyK = antiFirefly;

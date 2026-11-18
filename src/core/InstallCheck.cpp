@@ -4,6 +4,7 @@
 #include "SessionLog.h"
 #include "imgui.h"	// the screen size for the report
 #include <algorithm>
+#include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release zip leaves out BloodFlow's three textures
 #if __has_include("NvrBuildCommit.h")
 #include "NvrBuildCommit.h"	// written by the project's pre-build step: #define NVR_BUILD_COMMIT "<git commit>[-dirty] <branch>"
 #endif
@@ -21,7 +22,11 @@ namespace {
 	// The textures the effects load from loose files (TextureManager reads them with D3DX: a BSA does not count). The release zip's
 	// Textures folder (resource\Textures) has exactly these; missing ones mean the Textures folder was not copied into Data.
 	const char* const kTextures[] = {
+#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: BloodDrops, BloodRuns and BloodSpatterSmall are BloodFlow's alone (not in a release zip)
 		"Effects\\BloodDrops.dds", "Effects\\bloodlens.dds", "Effects\\BloodRuns.dds", "Effects\\BloodSpatterSmall.dds", "Effects\\bluenoise256.dds",
+#else
+		"Effects\\bloodlens.dds", "Effects\\bluenoise256.dds",
+#endif
 		"Effects\\CloudDetail.dds", "Effects\\CloudShape.dds", "Effects\\CloudWeather.dds", "Effects\\noise.dds", "Effects\\NoiseVolume.dds",
 		"Effects\\SMAA_AreaTex.dds", "Effects\\SMAA_SearchTex.dds", "Effects\\Snownoise256.dds", "Effects\\water_NRM_lens.dds",
 		"Precipitations\\ripples.dds", "Precipitations\\snow_NRM.dds",	// (2026-11-05: puddles.dds and snow.dds, read by nothing, removed)
@@ -59,6 +64,7 @@ namespace {
 
 const char* InstallCheck::LevelName(Level level) { return level == Level::Problem ? "PROBLEM" : level == Level::Warning ? "warning" : "info"; }
 const std::vector<InstallCheck::Result>& InstallCheck::Results() { return gResults; }
+void InstallCheck::Note(Level level, const char* group, const std::string& title, const std::string& fix) { Add(level, group, title, fix); }	// UNOFFICIAL 2026-11-13
 
 int InstallCheck::Count(Level level) {
 	int n = 0;
@@ -226,6 +232,15 @@ std::string InstallCheck::BugReport() {
 		TheSettingManager && TheSettingManager->Config.MaxQualityActive ? "; Max Quality is ON" : "");
 	r += line;
 	for (const std::string& d : diff) r += "  " + d + "\r\n";
+	{	// UNOFFICIAL 2026-11-12: the Developer options and Internal settings among them, named apart (SessionLog.h)
+		const std::vector<SessionLog::ChangedSetting> test = SessionLog::TestSettingsChanged();
+		sprintf_s(line, "\r\nTest and internal settings changed: %u%s\r\n", (unsigned)test.size(),
+			test.empty() ? "" : " (View > Reset test and internal settings puts them back: try that first)");
+		r += line;
+		for (size_t i = 0; i < test.size() && i < 60; i++)
+			r += "  " + test[i].Section + "." + test[i].Key + "=" + test[i].Mine + " (" + test[i].Default + ")" + (test[i].Level > 1 ? " [internal]" : "") + "\r\n";
+		if (test.size() > 60) r += "  and " + std::to_string(test.size() - 60) + " more\r\n";
+	}
 	r += "\r\nWhat happened (where, what you see, what you expected):\r\n\r\n";
 	return Logger::Scrub(r);	// <GAME> for the game folder, no user / computer names (LogScrub.h)
 }

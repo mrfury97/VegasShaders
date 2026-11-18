@@ -16,6 +16,7 @@
 #include "../../core/PointShadowForward.h"
 #include "../../core/ShaderWarmUp.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections (RenderBlendedHook)
+#include "../../core/WaterMask.h"	// UNOFFICIAL 2026-11-12 PTWaterMask: the game's water pixels for the path tracer (RenderPassStandardHook)
 #include "../../core/ShaderWarmUp2.h"
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds)
 #include "../../core/IOWorker2.h"	// UNOFFICIAL 2026-10-20: second loading thread (its once-a-minute log line)
@@ -39,9 +40,20 @@
 #define MIXCHECK_IMPLEMENTATION	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck: the check's bodies are compiled here, once
 #include "../../core/MixCheck.h"
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals: the main list's surfaces write their smooth normals
+#include "../../core/GBufferCensus.h"	// UNOFFICIAL 2026-11-14 GBufferCensus (test only): every draw of one frame by place, shader, blend and G-buffer write
+#include "../../core/PassSort.h"	// UNOFFICIAL 2026-11-14 PassSort (test only): pass 0xFC sorted by mesh before the main list (FD-BATCH-DESIGN.md iv)
+#include "../../core/MergeCopies.h"	// UNOFFICIAL 2026-11-14 MergeCopies (test only): pass 0xFC copies as one instanced draw (FD-MERGE-RESULTS.md)
 #include "../../core/DeferredLamps.h"	// UNOFFICIAL 2026-10-31 DeferredLamps: the lamps of the deferred pixels in one pass
+#include "../../core/DeferredRenderer.h"	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2 ([Main.Main.Quality] DeferredRenderer)
+#include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 phase 4 skin (DeferredSkinBlur's fill after the light passes)
+#include "../../core/DeferredFirstPerson.h"	// UNOFFICIAL 2026-11-15 the first-person view model through the deferred renderer (+ GearWeather)
+#include "../../core/DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list ([Main.Main.Quality] DeferredTransparents)
+#include "../../core/DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDepth: the world depth for the deferred passes
+#include "../../core/DeferredSun.h"	// UNOFFICIAL 2026-11-14 DeferredSun: the lighting-free records' sun in one pass
+#include "../../core/DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the far world (geometry group 0) drawn in the G-buffer span
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-04 the flashlight as a real spot light on the G-buffer
 #include "../../core/FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 and as a real game lamp for what the G-buffer does not hold
+#include "../../core/GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 GameShaderPairCheck / GameShaderPairRepair: a pixel shader drawn with a vertex shader that does not feed it
 #include "../../core/EnvLightFade.h"	// UNOFFICIAL 2026-11-04 the env-map light fade per pixel
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion: what moved, noted as the main list draws it
 #include "../../core/FoldHighlights.h"	// UNOFFICIAL 2026-10-21 FoldHighlights: several-pass objects draw their highlights with their lamps' light
@@ -56,6 +68,7 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections
 #include "../../core/RtHairTint.h"	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene
 #include "../../core/AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts
+#include "../../core/NpcCharacterMaps.h"	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs: an NPC's draws get its own character map
 #include "../../core/CharacterObjectReach.h"	// UNOFFICIAL 2026-10-23 CharacterObjectReach: head/face/headgear object draws flagged (c204)
 #include "../../core/DustDraw.h"	// 2026-11-04 dust on top surfaces: static world draws flagged (b14)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-26: DXVK PROFILE lines (F10 profiling on NVR DXVK 1.5)
@@ -65,8 +78,14 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04 SkyCoverage: the game's MSAA, exact sky shares
 #include "../../core/WeaponMask.h"	// UNOFFICIAL 2026-11-09 WeaponMask: the weapon's own pixels of the first-person model (RT weapon reflections, not the hands)
+#include "../../core/ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack / FullFrame: the game's own rifle scope overlay
+#include <intrin.h>	// _ReturnAddress (ScopeScene below)
+#include "../../core/ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect / OwnCamera / ...: the picture-in-picture scope's scene (ScopeScene below)
+#include "../../core/ScopeFog.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] PostEffects 1: distance fog on that picture
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow in the surface shaders
-#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (LOD only, per draw)
+#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (LOD only, per draw; fork port 2026-11-13)
+#include "../../gunfx/GunFX.h"	// 2026-11-16 (gunfx-builtin): GunFX built in: its heat, haze and smoke by direct calls
+#include "../../gunfx/GunFXHost.h"
 
 namespace RmaosDraw { static void Upload(); }	// UNOFFICIAL _rmaos maps (below)
 
@@ -94,7 +113,11 @@ static void EndPreSceneTimer() {
 // longest stall between two binds (the draws of a pass happen between its bind and the next one, so a
 // driver compiling a shader at its first draw shows up there).
 namespace ShaderSplit {
-	enum Context : unsigned char { World, Reflections, FirstPerson, ContextCount, Outside = ContextCount };
+	// UNOFFICIAL 2026-11-12 ExtraCamera ([Main.Main.Scope] Detect, core/ScopeCamera.h): the world drawn once more by another camera, by a
+	// plugin, outside the game's own passes (B42 Optics' picture-in-picture scope; ScopeScene below opens and closes it). Its value is
+	// past Outside on purpose: every table sized by ContextCount and every `== World / Reflections / FirstPerson` test goes on treating
+	// it as "other", exactly as before; OnBind counts it as Outside; the rules for draws outside the passes ask NotAPass().
+	enum Context : unsigned char { World, Reflections, FirstPerson, ContextCount, Outside = ContextCount, ExtraCamera };
 	static const char* const ContextNames[ContextCount + 1] = { "world scene", "reflections", "first person", "other" };
 	static const unsigned MaxLabels = 32; // label 0: from the start of the pass to its first shader bind
 	static_assert(ContextCount * MaxLabels * 2 <= GpuTimeline::KeyCount, "split keys do not fit the timeline");
@@ -106,6 +129,11 @@ namespace ShaderSplit {
 
 	static unsigned char CurrentContext = Outside;
 	static unsigned char CurrentKey = GpuTimeline::NoKey;
+	// Outside the world / reflection / first-person passes (an extra camera's scene included).
+	static bool NotAPass() { return CurrentContext >= Outside; }
+	// The world's pass, or an extra camera's scene of the world while the lamp-shadow lookups are right in it ([Main.Main.Scope]
+	// OwnCamera; not outdoors while the traced lamp shadows are the only ones: their result is the main view's screen).
+	static bool WorldOrScope() { return CurrentContext == World || (CurrentContext == ExtraCamera && ScopeCamera::Shadows && !PointShadowForward::ExteriorActive); }
 	static unsigned char SavedContext[8], SavedKey[8];
 	static unsigned Depth = 0;
 
@@ -430,15 +458,20 @@ namespace ShaderSplit {
 		if (Depth < 8) { SavedContext[Depth] = CurrentContext; SavedKey[Depth] = CurrentKey; RecSaved[Depth] = RecKey; }
 		Depth++;
 		CurrentContext = context;
-		CurrentKey = Timeline.InFrame() ? KeyOf(context, 0, false) : GpuTimeline::NoKey;
+		// UNOFFICIAL 2026-11-12 HairAndEyes (core/FlashlightDeferred.h): the flashlight's beam for the hair and eye shaders belongs to one
+		// world pass, from its main list's start: a new world pass starts without it, a pass nested in it never sees it
+		if (context == World) FlashlightDeferred::BeamNewScene(); else FlashlightDeferred::BeamShow(false);
+		// (ExtraCamera has no timeline keys: KeyOf would run past them. Its GPU time is the "Scope scene" timer's.)
+		CurrentKey = Timeline.InFrame() && context < ContextCount ? KeyOf(context, 0, false) : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
-		RecMark(KeyOf(context, 0, false));
+		RecMark(context < ContextCount ? KeyOf(context, 0, false) : (unsigned char)GpuTimeline::NoKey);
 	}
 
 	static void EndContext() {
 		if (!Depth) return;
 		Depth--;
 		CurrentContext = Depth < 8 ? SavedContext[Depth] : (unsigned char)Outside;
+		FlashlightDeferred::BeamShow(CurrentContext == World);	// UNOFFICIAL 2026-11-12 HairAndEyes: back in the world's pass, or out of it
 		CurrentKey = Depth < 8 ? SavedKey[Depth] : GpuTimeline::NoKey;
 		Timeline.Mark(CurrentKey);
 		RecMark(Depth < 8 ? RecSaved[Depth] : GpuTimeline::NoKey);
@@ -446,7 +479,7 @@ namespace ShaderSplit {
 
 	// Called from SetShadersHook once the pixel shader for the pass is chosen. Start: when the hook began.
 	static void OnBind(const NiD3DPixelShader* shader, const IDirect3DPixelShader9* previous, double start) {
-		const unsigned char context = CurrentContext;
+		const unsigned char context = CurrentContext > Outside ? (unsigned char)Outside : CurrentContext;	// (ExtraCamera: counted as "other", as before)
 		const IDirect3DPixelShader9* handle = shader ? shader->ShaderHandle : nullptr;
 		const bool nvr = handle && handle != (const IDirect3DPixelShader9*)shader->ShaderHandleBackup;
 		bool firstUse = false;
@@ -653,6 +686,7 @@ static void PrepareSceneCameras() {
 
 using RenderMethod = void(__thiscall*)(Main*, BSRenderedTexture*, int, int);
 RenderMethod Render = reinterpret_cast<RenderMethod>(Hooks::Render);
+static bool MaterialWFor(const void* Pass, float& w, bool inSpan);	// UNOFFICIAL 2026-11-15 (below, MaterialForPass): c211.w for MergeCopies' key
 void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTexture, int Arg2, int Arg3) {
 	SessionLog::StageScope stage("game frame");	// 2026-11-04: the CRASH lines' stage (SessionLog.h)
 	SessionLog::StallWatch::FrameScope stallFrame;	// UNOFFICIAL 2026-11-07 (perf-ptcost): the STALL watchdog's frame begin / end (SessionLog.h)
@@ -716,9 +750,14 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 #if NVR_TEST_TOOLS
 	LampPassTest::BeginFrame();	// UNOFFICIAL, diagnostic: LampPassTestSkip
 #endif
+	DeferredRenderer::BeginFrame();	// UNOFFICIAL 2026-11-14 full deferred renderer (before LampsInOnePass: its one-pass wish; before DeferredLamps: its live switch)
+	DeferredTransparents::BeginFrame();	// UNOFFICIAL 2026-11-15 forward+ for the blended list (off: nothing)
 	LampsInOnePass::BeginFrame();	// UNOFFICIAL 2026-10-18 LampsInOnePass (before the scene walk builds the objects' passes)
 	ManyLamps::BeginFrame(ConstantFilter::Hooked);	// UNOFFICIAL 2026-10-27 ManyLampsOnePass (F10 statistics)
 	DeferredLamps::BeginFrame();	// UNOFFICIAL 2026-10-31 DeferredLamps
+	DeferredSun::BeginFrame();	// UNOFFICIAL 2026-11-14 DeferredSun
+	DeferredFirstPerson::BeginFrame();	// UNOFFICIAL 2026-11-15 DeferredFirstPerson / GearWeather (off: nothing)
+	DeferredDistant::BeginFrame();	// UNOFFICIAL 2026-11-14 DeferredDistant (its F10 line)
 	LandLamps::BeginFrame();	// UNOFFICIAL 2026-10-30 LandAllLamps
 	// UNOFFICIAL ManyLampsOnePass: the block back after the game's writes; 2026-10-30 LandAllLamps: the land's other lamps after VPT's
 	struct AfterWrite { static void Both(UINT start, UINT count) { ManyLamps::AfterPixelWrite(start, count); LandLamps::AfterPixelWrite(start, count); } };
@@ -741,6 +780,19 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 		DisplaceHeight::BeginFrame();	// UNOFFICIAL 2026-11-01 SameHeight: it needs the draw hook (pass-through outside the main list)
 		FlashlightLamp::BeginFrame();	// UNOFFICIAL 2026-11-04: the objects the G-buffer holds, this frame and the last
 		if (DisplaceHeight::On) CapturedNormals::Hook(TheRenderManager->device);
+		// UNOFFICIAL 2026-11-14 GBufferCensus ([Main.Main.Misc] GBufferCensus, test only; core/GBufferCensus.h): its census frames see
+		// every draw through CapturedNormals' draw hooks (pass-through outside the main list), so they go in while it is on
+		if (!GBufferCensus::ContextOf) GBufferCensus::ContextOf = []() -> int { return ShaderSplit::CurrentContext; };
+		if (!GBufferCensus::EnsureHooks) GBufferCensus::EnsureHooks = [](IDirect3DDevice9* d) { LinearScene::EnsureHooked(d); CapturedNormals::EnsureHooked(d); };
+		if (GBufferCensus::BeginFrame(TheRenderManager->device)) CapturedNormals::Hook(TheRenderManager->device);
+		// UNOFFICIAL 2026-11-14 MergeCopies ([Main.Main.Performance] MergeCopies, test only; core/MergeCopies.h): its merged draws and checks
+		// are made in the innermost of NVR's draw hooks, so they go in while it is on
+		if (!MergeCopies::SpecFadeOf) MergeCopies::SpecFadeOf = [](const void* geometry) -> float {
+			return PbrPop::SpecFade::Compiled && PbrPop::SpecFade::On ? PbrPop::GameSpecularFade(PbrPop::LitProperty((const NiGeometry*)geometry)) : 1.0f; };
+		if (!MergeCopies::DeferredMode) MergeCopies::DeferredMode = []() -> int { return DeferredRenderer::Live ? DeferredRenderer::Mode() : 0; };	// (v2: the passes past 0xFC)
+		if (!MergeCopies::DeferredPS) MergeCopies::DeferredPS = [](IDirect3DPixelShader9* ps) -> bool { return ps && DeferredRenderer::Handles.count(ps) != 0; };
+		if (!MergeCopies::MaterialWOf) MergeCopies::MaterialWOf = [](const void* pass, float& w) -> bool { return MaterialWFor(pass, w, true); };	// (batch 3: c211.w a key part)
+		if (MergeCopies::BeginFrame(TheRenderManager->device)) CapturedNormals::Hook(TheRenderManager->device);
 	}
 	ObjectMotion::BeginFrame();	// UNOFFICIAL 2026-10-29 ObjectMotion
 	// UNOFFICIAL 2026-10-30 [Main.Main.Performance] NvrDxvkMixCheck (core/MixCheck.h): the setup line at the first frame; with the check on
@@ -765,8 +817,11 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 		TheShaderManager->Effects.SkinScattering->BeginFrame();
 	UpdateFaceGenInteriorFlag();
 	ShaderSplit::BeginFrame(TheRenderManager->device);
+	ScopeOverlay::BeginWorld();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] FullFrame (core/ScopeOverlay.h): nothing unless it is on and the scope is up
 	Render(This, RenderedTexture, Arg2, Arg3);
+	ScopeOverlay::EndWorld();
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: never past the frame it was started in
+	ManyLamps::FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread: the lamp table never stays locked past the frame's render call
 	ShaderSplit::EndFrame();
 	EndPreSceneTimer();
 	ReportWorldRender(RenderedTexture, Arg2, Arg3);
@@ -781,6 +836,9 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 // bind is told that no pixel shader is bound: an NVR shader then uploads even if the game keeps the one
 // already bound. Nothing else changes (the game still sets the device shader itself).
 static bool ForcePixelConstants = false;
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera: the same for the vertex shader (the camera's matrices live in both). Set with the
+// flag above before and after an extra camera's scene (ScopeScene below), whose camera constants differ from the frame's.
+static bool ForceVertexConstants = false;
 
 // ReducedQuality CheapReflections: the water reflection map is drawn without the forward sun-shadow
 // lookup (TESR_ShadowForwardData.x = 1, the forward path's own off switch) and without terrain parallax
@@ -1429,33 +1487,17 @@ namespace ReflectionProbe {
 	}
 }
 
-// GunFX master switches (menu Main > GunFX, all off by default): sent to GunFX.dll, which runs the effects, about five
-// times a second. Bits: 0 puff, 1 heat smoke strand, 2 ejection smoke, 3 barrel glow, 4 heat haze, 5 muzzle blast,
-// 6 energy weapons too (off = no GunFX on lasers, plasma, ...), 7 after-fire trail, 8 volumetric heat smoke/trail.
+// GunFX master switches (menu Main > GunFX, all off by default). Bits: 0 puff, 1 heat smoke strand, 2 ejection smoke, 3 barrel glow,
+// 4 heat haze, 5 muzzle blast, 6 energy weapons too (off = no GunFX on lasers, plasma, ...), 7 after-fire trail, 8 volumetric heat
+// smoke/trail. 2026-11-16 (gunfx-builtin): GunFX is built in (src/gunfx), so this is a direct call, made only when a setting changed
+// (SettingsRevision), not five times a second; GunFXHost also switches off an old GunFX.dll left in the plugins folder, once.
 namespace GunFXSwitches {
-	static void Update() {
-		static ULONGLONG last = 0;
-		const ULONGLONG now = GetTickCount64();
-		if (now - last < 200) return;
-		last = now;
-		typedef void (__cdecl* SetFn)(UInt32);
-		static SetFn set = nullptr;
-		if (!set) {
-			HMODULE gunfx = GetModuleHandleA("GunFX.dll");
-			if (gunfx) set = (SetFn)GetProcAddress(gunfx, "GunFX_SetSwitches");
-			if (!set) return;
-		}
-		static const char* const keys[] = { "Puff", "HeatSmoke", "EjectionSmoke", "BarrelGlow", "HeatHaze", "MuzzleBlast", "EnergyWeapons", "AfterFireTrail", "VolumetricSmoke" };
-		UInt32 bits = 0;
-		for (UInt32 i = 0; i < 9; ++i)
-			if (TheSettingManager->GetSettingI("Main.GunFX.Main", keys[i])) bits |= 1u << i;
-		set(bits);
-	}
+	static void Update() { GunFXHost::FrameStart(); }
 }
 
 namespace BarrelHeat {
-	typedef bool (__cdecl* GetHeatFn)(float out[10], const void* weaponNode);
-	static GetHeatFn GetHeat = nullptr;
+	typedef bool (* GetHeatFn)(float out[10], const void* weaponNode);
+	static const GetHeatFn GetHeat = &GunFX::GetHeatV3;	// (2026-11-16: built in; was GunFX.dll's GunFX_GetHeatV3)
 	static bool Active = false;
 	static bool ProbeFrame = false;
 	// UNOFFICIAL 2026-10-13 (user: the glow disappears in some lighting): the game binds an object shader once and then draws
@@ -1512,10 +1554,6 @@ namespace BarrelHeat {
 		const ULONGLONG now = GetTickCount64();
 		if (now - LastProbe < 1000) return;
 		LastProbe = now;
-		if (!GetHeat) {
-			HMODULE smoke = GetModuleHandleA("GunFX.dll");
-			if (smoke) GetHeat = (GetHeatFn)GetProcAddress(smoke, "GunFX_GetHeatV3");
-		}
 		NiNode* weapon = Player->ActorSkinInfo ? Player->ActorSkinInfo->WeaponNode : nullptr;
 		memset(ProbeHeat, 0, sizeof(ProbeHeat));
 		ProbeBridge = weapon && GetHeat && GetHeat(ProbeHeat, weapon);
@@ -1571,11 +1609,6 @@ namespace BarrelHeat {
 	static void BeginFrame() {
 		FrameHeat = 0.0f;
 		if (!Player) return;
-		if (!GetHeat) {
-			HMODULE smoke = GetModuleHandleA("GunFX.dll");
-			if (smoke) GetHeat = (GetHeatFn)GetProcAddress(smoke, "GunFX_GetHeatV3");
-			if (!GetHeat) return;
-		}
 		SkinInfo* skins[2] = { Player->firstPersonSkinInfo, Player->ActorSkinInfo };
 		for (SkinInfo* skin : skins) {
 			float state[10] = {};
@@ -1617,11 +1650,7 @@ namespace BarrelHeat {
 			NiAVObject* node = geometry;
 			for (int depth = 0; node && depth < 32; ++depth, node = node->m_parent) {
 				if (node == weaponNode) {
-					if (!GetHeat) {
-						HMODULE smoke = GetModuleHandleA("GunFX.dll");
-						if (smoke) GetHeat = (GetHeatFn)GetProcAddress(smoke, "GunFX_GetHeatV3");
-					}
-					if (GetHeat && GetHeat(state, weaponNode)) {
+					if (GetHeat(state, weaponNode)) {
 						BarrelHaze::CaptureWorld(state, firstPerson, weaponNode);
 						const char* failure = "none";
 						const bool aligned = ToGunLocal(geometry, state, failure);
@@ -1687,6 +1716,19 @@ namespace BarrelHeat {
 	}
 }
 
+// UNOFFICIAL 2026-11-12 lookup caps: the per-texture lookups below (MaterialRulesDraw, RmaosDraw) were only ever added to, one entry for
+// every texture address the session met. At the cap the lookup is emptied (as PlantWind's is): a texture still in use is looked up again
+// at its next draw. If it fills again within 600 frames the place really uses that many textures: the cap doubles, so that it is not
+// emptied every frame. True: emptied (the caller's iterators into it are dead).
+template <typename Lookup> static bool CapTextureLookup(Lookup& lookup, size_t& cap, unsigned& clearedFrame) {
+	if (lookup.size() < cap) return false;
+	const unsigned frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+	if (clearedFrame != ~0u && frame - clearedFrame < 600 && cap < 65536) cap *= 2;
+	clearedFrame = frame;
+	lookup.clear();
+	return true;
+}
+
 // UNOFFICIAL material rules ([Shaders.PBR.MaterialRules], core/MaterialRules.h, Object.hlsl): before each object, the class of
 // its diffuse texture (from VegasShaders.materials.txt next to the DLL, read once) goes to pixel c197-c199. Resolved
 // once per texture and kept by the texture's address (with its path, as a freed texture's address can be reused). Only the
@@ -1697,6 +1739,8 @@ namespace MaterialRulesDraw {
 	static bool Loaded = false;
 	struct Entry { std::string Path; int Rule; unsigned Frame = ~0u; };	// Frame: UNOFFICIAL 2026-11-04, the frame its path was last compared in
 	static std::unordered_map<const NiSourceTexture*, Entry> ByTexture;
+	static size_t ByTextureCap = 4096;	// UNOFFICIAL 2026-11-12: ByTexture is bounded (CapTextureLookup above)
+	static unsigned ByTextureCleared = ~0u;
 	static float Current[12] = {};
 	static bool Active = false;		// Current holds a rule's values (sent; resent after each bind)
 
@@ -1730,6 +1774,7 @@ namespace MaterialRulesDraw {
 		if (known != ByTexture.end() && known->second.Frame == frame) return known->second.Rule;
 		if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) { known->second.Frame = frame; return known->second.Rule; }
 		const int rule = Table.Match(MaterialRules::Normalize(diffuse->ddsPath1));
+		CapTextureLookup(ByTexture, ByTextureCap, ByTextureCleared);	// UNOFFICIAL 2026-11-12: was insert-only (known is not used past here)
 		ByTexture[diffuse] = { std::string(diffuse->ddsPath1), rule, frame };
 		if (log && rule) Logger::Log("[MaterialRules] %s -> %s", diffuse->ddsPath1, Table.Get(rule).Name.c_str());
 		return rule;
@@ -1806,17 +1851,42 @@ const char* RtMaterialClassOf(NiGeometry* geometry) {
 // is bound on texture stage 2, and pixel c220 tells the object shader whether it has one. Loose files only (not BSAs). Each
 // diffuse path is looked up once; the files are read on a worker thread and made into textures a few per frame, so a new
 // area's maps arrive over a few frames instead of stalling one (until then those objects draw as they did). The textures are
-// kept (GPU memory only, D3DPOOL_DEFAULT, so nothing of them sits in the game's 4 GB) for the rest of the session.
+// D3DPOOL_DEFAULT (no system-memory copy).
+// UNOFFICIAL 2026-11-12 BudgetMB / KeepSeconds (memory growth): the textures were kept for the rest of the session, on the idea that
+// nothing of them sits in the game's 4 GB. They do take its address space (a log: 2983 -> 3209 MB in nine minutes outdoors, the D3D9
+// texture memory left 470 -> 0 MB; an install can hold 5 GB of these maps), and the game freezes in its own out-of-memory routine
+// above 3.2 GB. Now a working set: over BudgetMB, the maps not drawn for KeepSeconds are released, the longest unseen first (Trim).
+// A released map loads again through the same queue when a draw needs it. BudgetMB 0 = no limit, as before.
 namespace RmaosDraw {
+	// (Queued: a read of its file is on its way, from the draw that asked to the frame its texture is made or fails. Bytes, LastDrawMs,
+	// LastSeenMs: UNOFFICIAL 2026-11-12, the texture's size over all mip levels, when a draw last used it (BudgetClockMs) and when a
+	// draw last asked for this path at all (FrameNowMs))
 	struct Map { std::string File; IDirect3DTexture9* Texture = nullptr; bool Missing = false; bool Queued = false; double ArrivedMs = 0.0;
-		float ReflRough = -1.0f; unsigned ReflGeneration = 0; };	// UNOFFICIAL 2026-10-21 RoughnessOverrides (core/ReflMaterial.h), cached per map
+		float ReflRough = -1.0f; unsigned ReflGeneration = 0;	// UNOFFICIAL 2026-10-21 RoughnessOverrides (core/ReflMaterial.h), cached per map
+		unsigned long long Bytes = 0; double LastDrawMs = 0.0, LastSeenMs = 0.0; };
 	static std::unordered_map<std::string, Map> ByPath;			// normalised diffuse path -> its map
 	struct Entry { std::string Path; Map* Found; };
 	static std::unordered_map<const NiSourceTexture*, Entry> ByTexture;
+	static size_t ByTextureCap = 4096;	// UNOFFICIAL 2026-11-12: ByTexture is bounded (CapTextureLookup above; Forget)
+	static unsigned ByTextureCleared = ~0u;
 	struct Job { Map* Target; std::string File; std::vector<char> Bytes; };
 	static std::mutex Lock;
 	static std::condition_variable Wake;
 	static std::deque<Job> ToRead, Read;
+	// UNOFFICIAL 2026-11-12: the worker read whole files into the heap as fast as the disk gave them while the render thread makes two
+	// textures a frame, so after arriving somewhere new Read held a few hundred MB of file bytes for seconds. Now it waits while Read
+	// holds this many (Upload wakes it after each one it takes).
+	static const size_t kReadAhead = 4;
+	// UNOFFICIAL 2026-11-12 BudgetMB / KeepSeconds: the loaded maps, their bytes, and the state of the releasing (Trim)
+	static std::vector<Map*> Held;				// every map with a texture (ByPath's nodes do not move)
+	static unsigned long long HeldBytes = 0;
+	static double BudgetClockMs = 0.0;			// runs only after frames in which a map was drawn: a pause, a menu or a loading screen ages nothing
+	static unsigned BudgetDraws = 0;			// draws with a map since Upload
+	static int BudgetMB = 512;					// [Shaders.PBR.Rmaos] BudgetMB (0 = no limit), read once a second
+	static float KeepSeconds = 30.0f;			// [Shaders.PBR.Rmaos] KeepSeconds
+	static bool Trimming = false, ToldBudget = false, ToldAllInUse = false;
+	static double SettingsAtMs = -1.0e30, ScanAtMs = 0.0, CountAtMs = 0.0;
+	static unsigned long long Released = 0, ReleasedTold = 0, ReleasedBytes = 0;
 	static bool WorkerStarted = false, Checked = false, Compiled = false;
 	static float Current[4] = { -1.0f, 0.0f, 0.0f, 0.0f };	// c220 as last sent this frame
 	static bool ThisDraw = false;	// UNOFFICIAL 2026-10-20: the object being drawn has its map on (MaterialAware reflections, core/ReflMaterial.h)
@@ -1842,7 +1912,7 @@ namespace RmaosDraw {
 			Job job;
 			{
 				std::unique_lock<std::mutex> hold(Lock);
-				Wake.wait(hold, [] { return !ToRead.empty(); });
+				Wake.wait(hold, [] { return !ToRead.empty() && Read.size() < kReadAhead; });	// UNOFFICIAL 2026-11-12: no reading ahead of the uploads (kReadAhead)
 				job = std::move(ToRead.front());
 				ToRead.pop_front();
 			}
@@ -1883,6 +1953,151 @@ namespace RmaosDraw {
 		return &map;
 	}
 
+	// UNOFFICIAL 2026-11-12: ByTexture at its cap is emptied; then nothing points into ByPath but Held (maps with a texture) and a read
+	// on its way (Queued), so the other paths that no draw asked for in ten minutes go too, once ByPath holds 16384. A path that comes
+	// back is looked up on disk again. Called before Find, never with a Map* in hand.
+	static void Forget() {
+		if (!CapTextureLookup(ByTexture, ByTextureCap, ByTextureCleared) || ByPath.size() < 16384) return;
+		for (auto entry = ByPath.begin(); entry != ByPath.end();) {
+			const Map& map = entry->second;
+			if (!map.Texture && !map.Queued && FrameNowMs - map.LastSeenMs > 600000.0) entry = ByPath.erase(entry); else ++entry;
+		}
+	}
+
+	// UNOFFICIAL 2026-11-12 BudgetMB: a texture's size in bytes over all its mip levels, from its level descriptions.
+	static unsigned long long BytesOf(IDirect3DTexture9* texture) {
+		unsigned long long bytes = 0;
+		const DWORD levels = texture->GetLevelCount();
+		for (DWORD level = 0; level < levels; level++) {
+			D3DSURFACE_DESC d = {};
+			if (FAILED(texture->GetLevelDesc(level, &d))) continue;
+			const unsigned long long blocks = (unsigned long long)((d.Width + 3) / 4) * ((d.Height + 3) / 4);
+			const unsigned long long pixels = (unsigned long long)d.Width * d.Height;
+			switch ((DWORD)d.Format) {
+			case D3DFMT_DXT1: case MAKEFOURCC('A', 'T', 'I', '1'): bytes += blocks * 8; break;
+			case D3DFMT_DXT2: case D3DFMT_DXT3: case D3DFMT_DXT4: case D3DFMT_DXT5: case MAKEFOURCC('A', 'T', 'I', '2'): bytes += blocks * 16; break;
+			case D3DFMT_A8: case D3DFMT_L8: case D3DFMT_P8: case D3DFMT_A4L4: case D3DFMT_R3G3B2: bytes += pixels; break;
+			case D3DFMT_R5G6B5: case D3DFMT_X1R5G5B5: case D3DFMT_A1R5G5B5: case D3DFMT_A4R4G4B4: case D3DFMT_X4R4G4B4: case D3DFMT_A8L8:
+			case D3DFMT_A8R3G3B2: case D3DFMT_A8P8: case D3DFMT_L16: case D3DFMT_V8U8: case D3DFMT_R16F: bytes += pixels * 2; break;
+			case D3DFMT_R8G8B8: bytes += pixels * 3; break;
+			case D3DFMT_A16B16G16R16: case D3DFMT_A16B16G16R16F: case D3DFMT_Q16W16V16U16: case D3DFMT_G32R32F: bytes += pixels * 8; break;
+			case D3DFMT_A32B32G32R32F: bytes += pixels * 16; break;
+			default: bytes += pixels * 4; break;	// the 32-bit formats
+			}
+		}
+		return bytes;
+	}
+
+	// UNOFFICIAL 2026-11-12 BudgetMB: what the device has on its 16 pixel texture stages, read once before a frame's releases. Addresses
+	// to compare only: the reference GetTexture takes is given back at once (a map's own reference keeps it alive until Drop).
+	struct Stages {
+		IDirect3DBaseTexture9* Bound[16] = {};
+		bool Known[16] = {};
+		Stages() {
+			for (DWORD stage = 0; stage < 16; stage++) {
+				Known[stage] = SUCCEEDED(TheRenderManager->device->GetTexture(stage, &Bound[stage]));
+				if (Bound[stage]) Bound[stage]->Release();
+				if (!Known[stage]) Bound[stage] = nullptr;
+			}
+		}
+	};
+
+	// UNOFFICIAL 2026-11-12 BudgetMB: the one place a map's texture is given up (Trim, ReloadTest); the caller takes the map out of Held.
+	// Nothing may keep the texture's address past this (this code base has crashed that way: shaders kept a texture the plugin had
+	// released, and SetTexture touched freed memory). Where the address lives, and what is done about each:
+	// (1) Map::Texture: cleared here. No draw is in flight: this runs from Upload, before the frame's scene, on the render thread, and
+	//     ForObject reads Map::Texture afresh at every draw. A read of the file on its way cannot exist: a map has one read at a time
+	//     (Queued), and it ended when this texture was made.
+	// (2) The device's stage 2, where Send binds it, or any stage a save / restore of the stages put it back on: taken off.
+	// (3) The game's note of each stage's texture (NiDX9RenderState, NoteDeviceTexture): with a dead address in it the game would skip
+	//     its own bind of a new texture that got the same address. Cleared, with the device's stage, so the two stay in step.
+	// Not held anywhere else: the object shaders' sampler is NVR_RmaosMap, not a TESR_ one, so no ShaderRecord caches the pointer
+	// (ShaderManager::ClearShaderSamplers has nothing to clear); ReflMaterial takes a yes / no and a roughness, not the texture; state
+	// blocks and the effects' GetTexture saves hold their own reference. A stage that could not be read counts as holding it if it is 2.
+	static void Drop(Map& map, Stages& stages) {
+		IDirect3DTexture9* texture = map.Texture;
+		if (!texture) return;
+		NiDX9RenderState* state = TheRenderManager->renderState;
+		for (DWORD stage = 0; stage < 16; stage++) {
+			const bool onDevice = stages.Known[stage] ? stages.Bound[stage] == texture : stage == 2;
+			if (!onDevice && state->unk10A0[stage] != (UInt32)texture) continue;
+			TheRenderManager->device->SetTexture(stage, nullptr);
+			state->NoteDeviceTexture(stage, nullptr);
+			stages.Bound[stage] = nullptr;
+			stages.Known[stage] = true;
+		}
+		texture->Release();
+		map.Texture = nullptr;
+		map.Queued = false;
+		HeldBytes -= (std::min)(HeldBytes, map.Bytes);
+		ReleasedBytes += map.Bytes;
+		map.Bytes = 0;
+		Loaded--;
+		Released++;
+	}
+
+	// UNOFFICIAL 2026-11-12 BudgetMB / KeepSeconds ([Shaders.PBR.Rmaos], live, read once a second; a build whose defaults lack the keys:
+	// 512 and 30). Once a frame from Upload. Over the budget, the maps no draw used for KeepSeconds are released, the longest unseen
+	// first, at most kPerFrame a frame, until 85 % of the budget is left in use (so it does not release one map for every map that
+	// arrives). KeepSeconds are counted on BudgetClockMs, which stands still while no map is drawn: coming back from a pause or a
+	// loading screen does not find the whole view released. When every loaded map was drawn within KeepSeconds the place really
+	// needs more than the budget: nothing is released (it would only load again next frame) and the log says so once.
+	static void Trim() {
+		static const size_t kPerFrame = 8;
+		const double lastFrameMs = FrameNowMs;
+		FrameNowMs = CpuTimer::NowMs();
+		if (BudgetDraws && lastFrameMs > 0.0) BudgetClockMs += std::clamp(FrameNowMs - lastFrameMs, 0.0, 250.0);
+		BudgetDraws = 0;
+		if (FrameNowMs - SettingsAtMs >= 1000.0) {
+			SettingsAtMs = FrameNowMs;
+			SettingManager::Configuration::ConfigNode node;
+			const int budget = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Rmaos", "BudgetMB") ? std::clamp(node.IntValue, 0, 4096) : 512;
+			KeepSeconds = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Rmaos", "KeepSeconds") ? std::clamp(node.FloatValue, 1.0f, 3600.0f) : 30.0f;
+			if (budget != BudgetMB) { BudgetMB = budget; Trimming = false; ToldBudget = false; ToldAllInUse = false; }	// a new budget: its lines again
+		}
+		const double mb = 1.0 / (1024.0 * 1024.0);
+		if (Released != ReleasedTold && FrameNowMs >= CountAtMs) {	// a count now and then, not a line per release
+			Logger::Log("UNOFFICIAL Rmaos budget: %llu maps released so far (%llu since the last line, %.0f MB in all); now %u loaded, %.0f of %d MB",
+				Released, Released - ReleasedTold, ReleasedBytes * mb, (unsigned)Held.size(), HeldBytes * mb, BudgetMB);
+			ReleasedTold = Released;
+			CountAtMs = FrameNowMs + 60000.0;
+		}
+		if (BudgetMB <= 0) { Trimming = false; return; }
+		const unsigned long long budget = (unsigned long long)BudgetMB << 20, target = budget / 100 * 85;
+		if (!Trimming) {
+			if (HeldBytes <= budget) return;
+			Trimming = true;
+			ScanAtMs = 0.0;
+			if (!ToldBudget) {
+				ToldBudget = true;
+				CountAtMs = FrameNowMs + 10000.0;
+				Logger::Log("UNOFFICIAL Rmaos budget: %u maps loaded, %.0f MB, over the budget of %d MB: maps not drawn for %.0f s are released from now on, "
+					"the longest unseen first (they load again when drawn; [Shaders.PBR.Rmaos] BudgetMB, KeepSeconds)", (unsigned)Held.size(), HeldBytes * mb, BudgetMB, KeepSeconds);
+			}
+		}
+		if (HeldBytes <= target) { Trimming = false; return; }
+		if (FrameNowMs < ScanAtMs) return;
+		static std::vector<Map*> unseen;
+		unseen.clear();
+		const double before = BudgetClockMs - 1000.0 * KeepSeconds;
+		for (Map* map : Held) if (map->LastDrawMs <= before) unseen.push_back(map);
+		if (unseen.empty()) {
+			ScanAtMs = FrameNowMs + 1000.0;	// nothing old enough: looked at again in a second, not every frame
+			if (HeldBytes > budget && !ToldAllInUse) {
+				ToldAllInUse = true;
+				Logger::Log("UNOFFICIAL Rmaos budget: %u maps loaded, %.0f MB, over the budget of %d MB, but every one was drawn in the last %.0f s: "
+					"this place needs more than the budget, nothing is released (said once)", (unsigned)Held.size(), HeldBytes * mb, BudgetMB, KeepSeconds);
+			}
+			return;
+		}
+		const size_t count = (std::min)(unseen.size(), kPerFrame);
+		std::partial_sort(unseen.begin(), unseen.begin() + count, unseen.end(), [](const Map* a, const Map* b) { return a->LastDrawMs < b->LastDrawMs; });
+		Stages stages;
+		for (size_t i = 0; i < count && HeldBytes > target; i++) Drop(*unseen[i], stages);
+		Held.erase(std::remove_if(Held.begin(), Held.end(), [](const Map* map) { return !map->Texture; }), Held.end());
+		if (HeldBytes <= target) Trimming = false;
+	}
+
 	// Once a frame: the files the worker has read, made into textures (at most two a frame), and c220 resent with the first object
 	// (the effects drawn between frames use the high constant registers too).
 #if NVR_TEST_TOOLS
@@ -1905,6 +2120,7 @@ namespace RmaosDraw {
 #if NVR_TEST_TOOLS
 		ReloadTest();
 #endif
+		Trim();	// UNOFFICIAL 2026-11-12 BudgetMB: before this frame's uploads and draws
 		const float budget = TheSettingManager->GetSettingF("Shaders.PBR.Rmaos", "UploadBudget");
 		FadeSeconds = (std::max)(TheSettingManager->GetSettingF("Shaders.PBR.Rmaos", "FadeIn"), 0.0f);
 		const double start = CpuTimer::NowMs();
@@ -1918,12 +2134,24 @@ namespace RmaosDraw {
 				job = std::move(Read.front());
 				Read.pop_front();
 			}
+			Wake.notify_one();	// UNOFFICIAL 2026-11-12: room in Read again, the worker reads the next file (kReadAhead)
 			IDirect3DTexture9* texture = nullptr;
 			if (!job.Bytes.empty())
 				D3DXCreateTextureFromFileInMemoryEx(TheRenderManager->device, job.Bytes.data(), (UINT)job.Bytes.size(), D3DX_DEFAULT_NONPOW2,
 					D3DX_DEFAULT_NONPOW2, D3DX_DEFAULT, 0, D3DFMT_UNKNOWN, D3DPOOL_DEFAULT, D3DX_DEFAULT, D3DX_DEFAULT, 0, NULL, NULL, &texture);
-			if (texture) { job.Target->Texture = texture; job.Target->ArrivedMs = CpuTimer::NowMs(); Loaded++; }
-			else { job.Target->Missing = true; Logger::Log("[Rmaos] could not load %s", job.File.c_str()); }
+			// UNOFFICIAL 2026-11-12 BudgetMB: the map's read is over (Queued off: a map released later may be asked for again), and a
+			// texture is counted: its bytes, in Held, and as drawn now, so it has KeepSeconds to be seen before it can be released.
+			// (A map that already has a texture cannot come here, one read at a time; if it ever did, the new one is not kept.)
+			Map& target = *job.Target;
+			target.Queued = false;
+			if (texture && target.Texture) texture->Release();
+			else if (texture) {
+				target.Texture = texture; target.ArrivedMs = CpuTimer::NowMs(); Loaded++;
+				target.Bytes = BytesOf(texture); target.LastDrawMs = BudgetClockMs;
+				HeldBytes += target.Bytes;
+				Held.push_back(&target);
+			}
+			else { target.Missing = true; Logger::Log("[Rmaos] could not load %s", job.File.c_str()); }
 			uploaded++;
 		}
 #if NVR_TEST_TOOLS
@@ -1952,16 +2180,14 @@ namespace RmaosDraw {
 		if (!want) return;
 		TheRenderManager->device->SetTexture(2, nullptr);
 		TheRenderManager->renderState->NoteDeviceTexture(2, nullptr);
-		int dropped = 0;
-		for (auto& entry : ByPath) {
-			Map& map = entry.second;
-			if (!map.Texture) continue;
-			map.Texture->Release();
-			map.Texture = nullptr;
-			map.Queued = false;
-			dropped++;
-		}
-		Loaded -= dropped;
+		// UNOFFICIAL 2026-11-12 BudgetMB: through Drop, as the budget's releases (the bytes, Held and the stages kept right); its
+		// counts are put back, these are not the budget's releases
+		const unsigned long long released = Released, releasedBytes = ReleasedBytes;
+		Stages stages;
+		for (Map* map : Held) Drop(*map, stages);
+		const int dropped = (int)Held.size();
+		Held.clear();
+		Released = released; ReleasedBytes = releasedBytes;
 		Logger::Log("RMAOS STREAM: ReloadTest %d: %d maps dropped (they load again as they are drawn)", want, dropped);
 	}
 #endif
@@ -2006,12 +2232,16 @@ namespace RmaosDraw {
 				auto known = ByTexture.find(diffuse);
 				if (known != ByTexture.end() && known->second.Path == diffuse->ddsPath1) map = known->second.Found;
 				else {
+					Forget();	// UNOFFICIAL 2026-11-12: ByTexture was insert-only; bounded now (known is not used past here)
 					map = Find(MaterialRules::Normalize(diffuse->ddsPath1), pbr && pbr->RmaosSettings.LogMatches);
 					ByTexture[diffuse] = { std::string(diffuse->ddsPath1), map };
 				}
 			}
 		}
-		if (map && !map->Missing && !map->Texture && !map->Queued) {
+		if (map) map->LastSeenMs = FrameNowMs;	// UNOFFICIAL 2026-11-12 (Forget)
+		// UNOFFICIAL 2026-11-12: only with the live switch on. The maps used to start loading with On off too (only their use below
+		// read it), filling memory for nothing. Switched on later, they load at the next draw, as at a first sight.
+		if (map && !map->Missing && !map->Texture && !map->Queued && pbr && pbr->RmaosSettings.On) {
 			map->Queued = true;
 			std::lock_guard<std::mutex> hold(Lock);
 			if (!WorkerStarted) { WorkerStarted = true; std::thread(Worker).detach(); }
@@ -2019,6 +2249,7 @@ namespace RmaosDraw {
 			Wake.notify_one();
 		}
 		const bool on = map && map->Texture && pbr && pbr->RmaosSettings.On;
+		if (on) { map->LastDrawMs = BudgetClockMs; BudgetDraws++; }	// UNOFFICIAL 2026-11-12 BudgetMB: in use (Trim releases the longest unseen)
 		float share = 1.0f;	// UNOFFICIAL FadeIn: the map's share while it comes in
 		if (on && FadeSeconds > 0.0f) share = std::clamp((float)((FrameNowMs - map->ArrivedMs) / (1000.0 * FadeSeconds)), 0.001f, 1.0f);
 		values[0] = on ? share : 0.0f;
@@ -2261,6 +2492,17 @@ namespace GrassFirst {
 	static void(__cdecl* RenderPassImmediately)(void*, UInt32, UInt32, UInt32, UInt32) = (void(__cdecl*)(void*, UInt32, UInt32, UInt32, UInt32))kRenderPassImmediately;
 
 	static inline bool IsGrass(UInt32 id) { return id >= kGrassFirstId && id <= kGrassLastId; }
+
+	// UNOFFICIAL 2026-11-12 PTGrassOwnPixel (core/CapturedNormals.h GrassPass): round one world grass pass's draw (not the game's grass shadow
+	// passes, 0x284-0x287): its draws that write no record go once more into the path tracer's mask of the game's own pixels. One flag
+	// test otherwise.
+	struct OwnPixelScope {
+		bool on;
+		explicit OwnPixelScope(UInt32 passId) : on(CapturedNormals::GrassOwnOk && IsGrass(passId) && passId <= 0x283 && ShaderSplit::CurrentContext == ShaderSplit::World) {
+			if (on) { CapturedNormals::GrassPassFrame = TheFrameRateManager->FrameNumber; CapturedNormals::GrassPass = true; }
+		}
+		~OwnPixelScope() { if (on) CapturedNormals::GrassPass = false; }
+	};
 
 	// UNOFFICIAL 2026-10-30 RT grass ([Main.Main.RayTracing] Grass; RtCore::NoteGrass): a world grass pass just drawn: TallGrassShader's
 	// instance table still holds its tufts, ScaleMask (c2), the card texture (stage 0) and the alpha reference are its own. Nothing is
@@ -2650,6 +2892,14 @@ namespace GrassFirst {
 
 	// The game's RenderBatches(1, 0x25B) call: the near grass first, then the main list as the game does it.
 	static void __fastcall MainListHook(void* accumulator, void* edx, UInt32 first, UInt32 last, UInt32 arg3, SInt32 group) {
+		// UNOFFICIAL 2026-11-14 PassSort ([Main.Main.Performance] PassSort, test only; core/PassSort.h): declared first, so it sorts before
+		// anything below reads the lists and its F10 timer spans the whole hook.
+		PassSort::ListScope passSort(accumulator, first, last, group, ShaderSplit::CurrentContext == ShaderSplit::World);
+		// UNOFFICIAL 2026-11-14 MergeCopies ([Main.Main.Performance] MergeCopies, test only; core/MergeCopies.h): the groups planned on the
+		// sorted lists, before anything draws; not with LampsDepthFirst (it draws the OPT passes twice, the second time with z EQUAL) or
+		// HiddenObjectCulling (it queries first passes) on.
+		MergeCopies::ListScope mergeCopies(accumulator, first, last, group, ShaderSplit::CurrentContext == ShaderSplit::World,
+			OnePassDepth::Mode != 0 || HiddenObjectCulling::Enabled);
 		// UNOFFICIAL 2026-10-30 ReactiveMask (core/ReactiveMask.h): the colour as the main opaque list leaves it. Declared first so it runs
 		// last, after LinearScene has encoded the target back (its span ends at this function's end too).
 		struct ReactiveSpan { bool on; ReactiveSpan(bool main) : on(main && ShaderSplit::CurrentContext == ShaderSplit::World) {}
@@ -2660,23 +2910,30 @@ namespace GrassFirst {
 		// UNOFFICIAL 2026-10-28 LinearScene: the world's main list in linear light, left encoded at its end (core/LinearScene.h).
 		struct LinearSpan { bool on; LinearSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) LinearScene::BeginSpan(TheRenderManager->device); }
 			~LinearSpan() { if (on) LinearScene::EndSpan(TheRenderManager->device); } } linearSpan;
+		// (UNOFFICIAL 2026-11-14 DeferredDepth, core/DeferredDepth.h: the world depth copied for the deferred passes first, off by default)
 		// UNOFFICIAL 2026-10-31 DeferredLamps (core/DeferredLamps.h): declared between LinearSpan and the CaptureSpans, so its end runs after
 		// CapturedNormals::EndSpan (the G-buffer resolved) and before LinearScene::EndSpan (the encode): the lamps of the deferred pixels.
 		struct DeferredSpan { bool on; DeferredSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) {}
-			~DeferredSpan() { if (on) { DeferredLamps::Apply(TheRenderManager->device); FlashlightDeferred::Apply(TheRenderManager->device); } } } deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight
+			~DeferredSpan() { if (on) { DeferredDepth::AtSpanEnd(TheRenderManager->device); DeferredRenderer::AtSpanEnd(TheRenderManager->device); DeferredSkin::BeforePasses(TheRenderManager->device); DeferredSun::Apply(TheRenderManager->device); DeferredLamps::Apply(TheRenderManager->device); FlashlightDeferred::Apply(TheRenderManager->device); DeferredSkin::AfterPasses(TheRenderManager->device); } } } deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight
 		ActiveAccumulator = nullptr;
 		// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the normal target bound around the game's own call only (the early
 		// grass part above it draws grass and the grass shadows, which write none).
-		struct CaptureSpan { bool on; CaptureSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) CapturedNormals::BeginSpan(TheRenderManager->device); }
-			~CaptureSpan() { if (on) CapturedNormals::EndSpan(TheRenderManager->device); } };
-		if (first == 1 && last == 0x25B && group < 0) DepthFirst(accumulator, arg3, group);	// UNOFFICIAL 2026-10-26 LampsDepthFirst
+		// (UNOFFICIAL 2026-11-12 HairAndEyes: the flashlight's beam for the hair and eye shaders starts with this span, and its marks
+		// end with it; the beam stays for the rest of the world's pass: core/FlashlightDeferred.h BeamBegin)
+		struct CaptureSpan { bool on; CaptureSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) { CapturedNormals::BeginSpan(TheRenderManager->device); FlashlightDeferred::BeamBegin(); } }
+			~CaptureSpan() { if (on) { FlashlightDeferred::BeamSpanEnd(); CapturedNormals::EndSpan(TheRenderManager->device); } } };
+		if (first == 1 && last == 0x25B && group < 0) { GBufferCensus::SpanScope census(GBufferCensus::SpanDepthFirst); DepthFirst(accumulator, arg3, group); }	// UNOFFICIAL 2026-10-26 LampsDepthFirst
 		if (first == 1 && last == 0x25B && group < 0 && Allowed(accumulator)) {
 			PassIdNode* lists[2] = {};
 			unsigned count = 0;
 			bool ok = Lists(accumulator, lists, count);
 			// fixes-b #29: no grass pass queued in this accumulator (interiors, bare land): nothing to draw first, so no device
 			// work at all (the state save / restore reads back ~500 constants and ~250 states) -- the game's own calls run as is.
-			if (ok && !AnyGrass(lists, count)) { CaptureSpan capture; ThisCall(kRenderBatches, accumulator, first, last, arg3, group); return; }
+			if (ok && !AnyGrass(lists, count)) {
+				GBufferCensus::SpanScope census(GBufferCensus::SpanMain); CaptureSpan capture; ThisCall(kRenderBatches, accumulator, first, last, arg3, group);
+				if (ShaderSplit::CurrentContext == ShaderSplit::World) DeferredDistant::DrawEarly(accumulator, TheRenderManager->device);	// UNOFFICIAL 2026-11-14 (as below)
+				return;
+			}
 			for (unsigned i = 0; ok && i < count; i++) ok = Rewrite(lists[i], true);
 			if (ok) {
 				ForgetIfStale(TheShaderManager->Shaders.Grass);	// UNOFFICIAL 2026-10-28
@@ -2692,7 +2949,7 @@ namespace GrassFirst {
 				const bool gpuGrass = GpuGrass::BeginEarly(TheRenderManager->device, TheShaderManager->Shaders.Grass->Enabled);
 				if (!gpuGrass) NewGrass::BeginEarly(TheRenderManager->device, TheShaderManager->Shaders.Grass->Enabled);	// UNOFFICIAL 2026-10-18 NewGrass (core/NewGrass.h)
 				EarlySerial = GrassShaders::BindSerial;	// UNOFFICIAL 2026-10-28: only this run's grass binds teach RenderPassImmediatelyHook
-				ThisCall(kRenderBatches, accumulator, (UInt32)kGrassFirstId, (UInt32)kGrassLastId, arg3, group);
+				{ GBufferCensus::SpanScope census(GBufferCensus::SpanGrassEarly); ThisCall(kRenderBatches, accumulator, (UInt32)kGrassFirstId, (UInt32)kGrassLastId, arg3, group); }
 				if (!gpuGrass) NewGrass::EndEarly(TheRenderManager->device, StatEarly);
 				GpuGrass::EndEarly(TheRenderManager->device);	// the strands: one cull pass + two indirect draws, before the land
 				Recording = false;
@@ -2709,13 +2966,19 @@ namespace GrassFirst {
 			for (unsigned i = 0; i < count; i++) Rewrite(lists[i], false);	// ascending again, whatever happened
 		}
 		else if (first == 1 && last == 0x25B && group < 0 && ShadowOnlyAllowed(accumulator)) ShadowOnlyEarly(accumulator, arg3, group);	// UNOFFICIAL 2026-10-28
+		GBufferCensus::SpanScope census(GBufferCensus::SpanMain);	// UNOFFICIAL 2026-11-14 (ends before DeferredSpan's passes: declared after it)
 		CaptureSpan capture;
 		ThisCall(kRenderBatches, accumulator, first, last, arg3, group);
+		// UNOFFICIAL 2026-11-14 DeferredDistant ([Main.Main.Quality] DeferredDistant, test only; core/DeferredDistant.h): the game's geometry group 0
+		// (the far land, far objects and distant trees, which the game draws right after this call) drawn here, still inside the G-buffer and
+		// LinearScene spans, before the depth copy and the deferred passes; the game's own group-0 call is then skipped. Off: nothing.
+		if (first == 1 && last == 0x25B && group < 0 && ShaderSplit::CurrentContext == ShaderSplit::World) DeferredDistant::DrawEarly(accumulator, TheRenderManager->device);
 	}
 
 	// The game's RenderBatches(0x25C, 0x287) call: the fading tufts of the grass drawn early, and whole the grass passes that were
 	// not drawn early, in their recorded order; then the game's call (which normally finds nothing left).
 	static void __fastcall GrassListHook(void* accumulator, void* edx, UInt32 first, UInt32 last, UInt32 arg3, SInt32 group) {
+		GBufferCensus::SpanScope census(GBufferCensus::SpanGrassLate);	// UNOFFICIAL 2026-11-14 GBufferCensus
 		if (ActiveAccumulator && ActiveAccumulator == accumulator && first == kGrassFirstId && last == kGrassLastId &&
 			RecordedFrame != TheFrameRateManager->FrameNumber) {
 			// fixes-b #29: records from an earlier frame (the pass objects may be gone): never replayed
@@ -2748,7 +3011,7 @@ namespace GrassFirst {
 				// 0x00B994F0 itself calls BSRenderState::SetAlphaToCoverageEnable(pass wants it, 0) for every pass when the game's
 				// TMS flag (0x011F9421) is set (Ghidra dump of the exe, psycho-master graphics_fnv_atmosphere_alpha_coverage_state_followup).
 				ReflMaterial::NeutralScope neutral(r.pass, r.pass ? ((const PointShadowForward::RenderPassView*)r.pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);	// (perf-mirrorfix: the grass replay's own alpha)
-				RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
+				{ OwnPixelScope ownPixel(r.passId); RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5); }	// (2026-11-12 PTGrassOwnPixel)
 				NoteRtGrass(r.pass, r.passId);	// UNOFFICIAL 2026-10-30 RT grass (a pass drawn early is noted once: RtCore skips the repeat)
 				if (gpuGrass) {
 					const bool took = arm && GpuGrass::Took();
@@ -2814,13 +3077,15 @@ namespace GrassFirst {
 	static void __cdecl RenderPassImmediatelyHook(void* pass, UInt32 passId, UInt32 a3, UInt32 a4, UInt32 a5) {
 		// UNOFFICIAL 2026-10-28 (native D3D9): the runtime puts its own device-table entries back; the main list's draw hooks are put in
 		// again at every pass (in the order they were first put in: LinearScene, then CapturedNormals).
-		if (LinearScene::InSpan) LinearScene::EnsureHooked(TheRenderManager->device);
-		if (CapturedNormals::InSpan) CapturedNormals::EnsureHooked(TheRenderManager->device);
+		// (UNOFFICIAL 2026-11-14 GBufferCensus: in a census frame at every pass, in the list or not, so that no draw of the frame is lost)
+		GBufferCensus::PassScope census(passId, pass);	// (the RenderPass too: the merge census reads its first-pass flag and lamps)
+		if (LinearScene::InSpan || GBufferCensus::Active || MergeCopies::InList) LinearScene::EnsureHooked(TheRenderManager->device);
+		if (CapturedNormals::InSpan || GBufferCensus::Active || MergeCopies::InList) CapturedNormals::EnsureHooked(TheRenderManager->device);	// (2026-11-14 MergeCopies: its merged draw is made in these hooks)
 		if (OnePassDepth::Recording && OnePassDepth::IsOpt(passId)) { DepthFirstPass(pass, passId, a3, a4, a5); return; }	// UNOFFICIAL LampsDepthFirst
 		// UNOFFICIAL 2026-11-07 perf-mirrorfix: every world / first-person pass writes its own alpha (core/ReflMaterial.h; grass comes only through here)
 		ReflMaterial::NeutralScope neutral(pass, pass ? ((const PointShadowForward::RenderPassView*)pass)->geometry : nullptr, ShaderSplit::CurrentContext == ShaderSplit::World, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, TheRenderManager->device);
 		if (!Recording || !IsGrass(passId)) {
-			RenderPassImmediately(pass, passId, a3, a4, a5);
+			{ OwnPixelScope ownPixel(passId); RenderPassImmediately(pass, passId, a3, a4, a5); }	// (2026-11-12 PTGrassOwnPixel: the game's own grass call, GrassFirst off)
 			if (IsGrass(passId)) NoteRtGrass(pass, passId);	// UNOFFICIAL 2026-10-30 RT grass (GrassFirst off: the game's own grass call)
 			return;
 		}
@@ -3021,6 +3286,25 @@ namespace GameEyes {
 		TheRenderManager->device->SetPixelShader(record->ShaderHandle);
 		EyePS = ps;
 		Eye = true;
+		// UNOFFICIAL 2026-11-15 (full deferred renderer phase 4, docs/next/FD-SKIN-RESULTS.md "Eyes") the eye draws FORWARD with its own record (model 9,
+		// a forward code: no light pass lights it), so it is not "an object drawn deferred": its added lamp passes stay (DeferredRenderer::AfterDraw
+		// marks only while BoundDeferred; the bind chose the base shader's deferred record). Put back in After. Nothing while the renderer is off.
+		DeferredRenderer::BoundDeferred = DeferredRenderer::BoundPlain = false;
+		CapturedNormals::EyeDrawNow = true;	// UNOFFICIAL 2026-11-12 HairAndEyes (the log's counts; After clears it)
+		{	// ... and what the first eye draws with the flashlight's beam on really got (4 lines a session)
+			static int told = 0;
+			if (told < 4 && CapturedNormals::BeamHeld) {
+				UInt32 reg = 0; float sent[4] = {};
+				for (UInt32 i = 0; i < record->FloatShaderValuesCount; i++)
+					if (record->FloatShaderValues[i].Name && !strcmp(record->FloatShaderValues[i].Name, "TESR_FlashBeam")) reg = record->FloatShaderValues[i].RegisterIndex;
+				if (reg) {	// (the eye's added lamp passes have no beam: only the pass with the ambient takes it)
+					told++;
+					TheRenderManager->device->GetPixelShaderConstantF(reg, sent, 1);
+					Logger::Log("UNOFFICIAL eye variant: HairAndEyes: an eye draw with %s: the beam's reach as the shader has it %.0f (register c%u; 0 = off), main list %s, marks %s",
+						ps->Name ? ps->Name : "?", sent[3], (unsigned)reg, CapturedNormals::InSpan ? "open" : "NOT open", CapturedNormals::BeamNow ? "on" : "off");
+				}
+			}
+		}
 		return true;
 	}
 
@@ -3075,11 +3359,13 @@ namespace GameEyes {
 
 	static void After() {
 		if (ProbePass) ProbeLog();
+		CapturedNormals::EyeDrawNow = false;
 		IDirect3DDevice9* device = TheRenderManager->device;
 		if (Eye) {
 			// NVR's own handle back, and its record's constants (the eye record's table set them last)
 			if (EyePS) {
 				device->SetPixelShader(EyePS->ShaderHandle);
+				DeferredRenderer::OnBind(EyePS->ShaderHandle, EyePS->Name);	// (2026-11-15) the run's own record again (see ApplyEye)
 				for (int v = ShaderRecordType::Default; v <= ShaderRecordType::Interior; v++) {
 					ShaderRecordPixel* own = (ShaderRecordPixel*)EyePS->ShaderProg[v];
 					if (own && own->ShaderHandle == EyePS->ShaderHandle) {	// (constants only: the stages hold the game's textures for the next draws)
@@ -3105,6 +3391,15 @@ namespace GameEyes {
 // (ShaderManager::ReloadShaders, the warm slot's reloadshaders) the eye records are made again from the .hlsl on their next use
 void GameEyesForgetRecords() { GameEyes::EyeRecords.clear(); }
 
+// UNOFFICIAL 2026-11-12 HairAndEyes (core/FlashlightDeferred.h BeamBegin), for the log's counts only: a hair shader bound in the world's
+// pass while the flashlight's beam is in it: in the main list (before the light pass: its draws mark their pixels) or after it (the
+// game's sorted blended list, where its own blended hair, brows and beards are drawn: after the light pass).
+static void HairBeamBind(NiD3DPixelShaderEx* ps) {
+	if (!CapturedNormals::BeamHeld || ShaderSplit::CurrentContext != ShaderSplit::World) return;
+	if (!ps || !ps->ShaderHandle || !CapturedNormals::BeamMarkers.count((IDirect3DPixelShader9*)ps->ShaderHandle)) return;
+	if (CapturedNormals::InSpan) CapturedNormals::BeamHairInList++; else CapturedNormals::BeamHairAfter++;
+}
+
 void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	BarrelHeat::Clear();
 	const bool profiling = ShaderSplit::FrameProfiled;
@@ -3123,13 +3418,18 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// uploaded below. In the reflection pass, the clouds note its target, depth buffer and camera (DrawIntoReflection).
 	if (VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds) {
 		const bool reflections = ShaderSplit::CurrentContext == ShaderSplit::Reflections;
-		clouds->Constants.Hide.x = reflections ? clouds->HideGameCloudsInReflection : clouds->HideGameClouds;
+		// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Clouds: in an extra camera's picture (a picture-in-picture scope) the game's layers
+		// stay: the volumetric clouds are a post effect of the main view and are never drawn there (the lens had a cloudless sky).
+		const bool scopeClouds = ShaderSplit::CurrentContext == ShaderSplit::ExtraCamera && ScopeCamera::Clouds;
+		clouds->Constants.Hide.x = reflections ? clouds->HideGameCloudsInReflection : scopeClouds ? 0.0f : clouds->HideGameClouds;
 		if (reflections && clouds->HideGameCloudsInReflection > 0.0f) clouds->CaptureReflection(TheRenderManager->device);
 	}
 
 	// 2026-11-03: only shaders NVR made are set up (ShaderRecord.h ShaderOwnership: Real Time Reflections' own env shaders stay its own)
 	if (VertexShader) {
-		if (ShaderOwnership::MaySetUp(VertexShader, "vertex")) VertexShader->SetupShader(VertexShader2);
+		// (UNOFFICIAL 2026-11-12 ForceVertexConstants: as ForcePixelConstants below, round an extra camera's scene)
+		if (ShaderOwnership::MaySetUp(VertexShader, "vertex")) VertexShader->SetupShader(ForceVertexConstants ? nullptr : VertexShader2);
+		ForceVertexConstants = false;
 	}
 	else
 		Logger::Log("Error getting vertex shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
@@ -3137,9 +3437,15 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	ClothWind::NoteVertexShader(VertexShader ? VertexShader->Name : nullptr);
 	ClothWind::NoteShaders(ClothWind::PassGeometry ? ClothWind::PassGeometry : Geometry, VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup &&
 		ClothWind::CapableName(VertexShader->Name), VertexShader ? VertexShader->Name : nullptr);
+	// UNOFFICIAL 2026-11-14 phase 3 foliage (core/DeferredFoliage.h): GrassFirst's early grass opens the G-buffer span at its bind
+	// (GrassShaders::SetForDraw, below); while the foliage is deferred that happens here, before the pixel shader is set up, so the first
+	// early grass pass of the frame already takes its deferred record (CapturedNormals::GrassBind is idempotent: the later call finds it open).
+	if (DeferredFoliage::Live && VertexShader && VertexShader->Name && !memcmp(VertexShader->Name, "GRASS", 5) && TheShaderManager->Shaders.Grass && TheShaderManager->Shaders.Grass->Enabled)
+		CapturedNormals::GrassBind(TheRenderManager->device, GrassShaders::DrawPart);
 	if (PixelShader) {
 		if (ShaderOwnership::MaySetUp(PixelShader, "pixel")) PixelShader->SetupShader(ForcePixelConstants ? nullptr : PixelShader2);
 		ForcePixelConstants = false;
+		NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)(ClothWind::PassGeometry ? ClothWind::PassGeometry : Geometry), ShaderSplit::CurrentContext == ShaderSplit::World, true);	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs
 	} else
 		Logger::Log("Error getting pixel shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
 	// UNOFFICIAL 2026-10-22 MarkShaders (test only, [Shaders.PBR.Main] MarkShadersTo > 0): the vertex + pixel shader pairs the game draws with,
@@ -3168,11 +3474,29 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		if (VertexShader && VertexShader->ShaderHandleBackup) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
 		if (PixelShader && PixelShader->ShaderHandleBackup) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
 	}
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Shaders 2 / Water 1 (core/ScopeCamera.h): in an extra camera's picture (a picture-in-picture
+	// scope) every draw (Shaders 2: the cheapest picture), or the water's alone (Water 1: this mod's water shaders read the main view's
+	// depth and reflection by screen position, which is not the picture's), takes the game's own pair, by the same switch as the
+	// reflection's above (the next bind picks this mod's again). The water shader binds are counted for the Scope WATER log line.
+	if (ShaderSplit::CurrentContext == ShaderSplit::ExtraCamera) {
+		const bool water = PixelShader && PixelShader->Name && !strncmp(PixelShader->Name, "WATER", 5);
+		if (water) {
+			ScopeCamera::WaterBinds++;
+			if (PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup && !ScopeCamera::GameShaders && !ScopeCamera::GameWater) ScopeCamera::WaterBindsOurs++;
+		}
+		if (ScopeCamera::GameShaders || (ScopeCamera::GameWater && water)) {
+			if (VertexShader && VertexShader->ShaderHandleBackup) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
+			if (PixelShader && PixelShader->ShaderHandleBackup) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
+		}
+	}
 	// UNOFFICIAL 2026-10-27 race menu face (tester report): skin drawn outside the world scene, first person and reflections --
 	// the character creation menu's head (its own camera, lights and picture; no world scene is drawn while it is open) and
 	// other 3D menu views -- gets the game's own skin shaders. NVR's skin shaders take the world camera's shadow, sky and lamp
 	// data, which do not belong to that picture: the face came out invisible outdoors (Novac) and yellow indoors (Doc Mitchell's).
-	if (ShaderSplit::CurrentContext == ShaderSplit::Outside && PixelShader && PixelShader->Name && !strncmp(PixelShader->Name, "SKIN", 4)) {
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Skin (core/ScopeCamera.h): not in an extra camera's picture of the world while its constants
+	// are that camera's (OwnCamera): the world's shadow, sky and lamp data do belong to that picture, so its skin takes this mod's skin
+	// shaders like the world's (no screen-space blur there: its targets are bound in the world scene only, as for the first-person arms).
+	if (ShaderSplit::NotAPass() && !(ShaderSplit::CurrentContext == ShaderSplit::ExtraCamera && ScopeCamera::OurSkin) && PixelShader && PixelShader->Name && !strncmp(PixelShader->Name, "SKIN", 4)) {
 		static bool announced = false;
 		const bool nvrPixel = PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
 		const bool nvrVertex = VertexShader && VertexShader->Name && !strncmp(VertexShader->Name, "SKIN", 4) &&
@@ -3191,7 +3515,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// the menu's own lights are not in it, ManyLamps skips them), ambient and light scales made for a frame the tone chain finishes. While
 	// the character creation / face menu is open, everything it draws outside the world scene takes the game's own shaders, as a pair
 	// (as GameShadersInReflections above). Other 'Outside' pictures (a scope lens) keep the mod's.
-	if (GameShadersInMenus && ShaderSplit::CurrentContext == ShaderSplit::Outside && TheShaderManager->GameState.FaceMenuIsOn) {
+	if (GameShadersInMenus && ShaderSplit::NotAPass() && TheShaderManager->GameState.FaceMenuIsOn) {
 		const bool nvrPixel = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
 		const bool nvrVertex = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
 		if (nvrPixel) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
@@ -3202,6 +3526,21 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 			Logger::Log("UNOFFICIAL GameShadersInMenus: the character creation menu's 3D view is drawn with the game's own shaders (first: %s + %s)",
 				VertexShader && VertexShader->Name ? VertexShader->Name : "?", PixelShader && PixelShader->Name ? PixelShader->Name : "?");
 		}
+	}
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepOverlayBlack (core/ScopeOverlay.h; user: "the game's base scope texture seems to get lightened by
+	// our effects on the edges ... It's supposed to be black but it looks almost grey"): the game draws its scope overlay (a 3D model under
+	// HUDMainMenu::spScopeModel) after the whole effect chain, so no post effect touches it. The grey was the mod's OBJECT shaders on the
+	// overlay's one lit quad (New Vegas' reticle scopes: the black mask round the lens, with the reticle): they add highlights and the sky's
+	// reflection by the normal map's gloss channel (highest at the quad's edges), made for the world camera, where the game's own shader
+	// leaves a black texture black. Every draw of that model takes the game's own pair, as the menu's 3D view above (the next bind picks the
+	// mod's again). Asked only outside the world / first-person / reflection passes, and the model is walked only while the game says the
+	// scope is up. B42 Optics' lens is drawn in the first-person pass: untouched. false = the mod's shaders there, as before.
+	if (ScopeOverlay::KeepBlack && ShaderSplit::CurrentContext == ShaderSplit::Outside && ScopeOverlay::InDraw(Geometry)) {
+		const bool nvrPixel = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
+		const bool nvrVertex = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
+		if (nvrPixel) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
+		if (nvrVertex) VertexShader->ShaderHandle = (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup;
+		ScopeOverlay::Note(nvrPixel || nvrVertex, VertexShader ? VertexShader->Name : nullptr, PixelShader ? PixelShader->Name : nullptr);
 	}
 	// UNOFFICIAL 2026-10-27 [Shaders.PBR.Main] GameShaderEyes (user: "pbr seems to apply to eyeballs and can darken them in some areas. it
 	// looks a bit odd. can we skip eyeballs?"): an eyeball is a small sphere, and NVR's object shaders light it as one -- the sun's and the
@@ -3262,7 +3601,16 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		//DWNode::AddNode(Name, Geometry->m_parent, Geometry);
 	}
 	FlashlightLamp::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr);	// UNOFFICIAL 2026-11-04 its c28-c30 only for a shader that reads them
+	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck / GameShaderPairRepair (core/GameShaderPairs.h): a pair with a half that is
+	// not this mod's, whose pixel shader reads coordinates its vertex shader does not write (loose shader files of two other mods), is named
+	// once in the log; with the repair on it is bound as a pair that fits, for the length of the game's bind.
+	GameShaderPairs::BeforeBind(VertexShader, PixelShader);
+	DeferredTransparents::BeforeBind(ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-15 DeferredTransparents: the bind's context, for SetupShader
 	SetShaders(This, PassIndex);
+	GameShaderPairs::AfterBind(VertexShader, PixelShader);
+	FlashlightLamp::NoteBind(PixelShader ? PixelShader->Name : "", PixelShader && PixelShader->ShaderHandle == (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup,
+		VertexShader ? VertexShader->Name : "", VertexShader && VertexShader->ShaderHandle == (IDirect3DVertexShader9*)VertexShader->ShaderHandleBackup, GameShaderPairs::BoundNote);	// UNOFFICIAL 2026-11-13 (the FLASHLAMP look: the pair this pass draws with)
+	HairBeamBind(PixelShader);	// UNOFFICIAL 2026-11-12 HairAndEyes: the log's counts
 	GameEyes::OnBind(PixelShader, VertexShader);	// UNOFFICIAL GameShaderEyes: inside an eye's draw, the game's shaders on the device (see above)
 	MaterialRulesDraw::AfterBind();	// UNOFFICIAL material rules: this object's class again over the bind's "no rule"
 	ReflectionProbe::AfterBind();  // UNOFFICIAL ReflectionClipFix: the clip plane re-issued once the pass's shaders are bound
@@ -3277,19 +3625,24 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	PointShadowForward::LastVertexShaderNvr = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
 	PointShadowForward::LastPixelShaderNvr = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
 	FoldHighlights::OnBind(PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr, PassIndex);	// UNOFFICIAL FoldHighlights
+	if (GBufferCensus::Mode) GBufferCensus::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr);	// UNOFFICIAL 2026-11-14 GBufferCensus (test only)
 #if NVR_TEST_TOOLS
 	PassFamilyView::OnBind(TheRenderManager->device, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr,
 		ShaderSplit::CurrentContext == ShaderSplit::World, PassIndex);	// UNOFFICIAL, diagnostic: PassFamilyView
 	CasterView::OnBind(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic
 	LinearSceneCensus::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr, PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr, PassIndex);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
-	PointShadowForward::SetForDraw(PixelShader, ShaderSplit::CurrentContext == ShaderSplit::World,
+	PointShadowForward::SetForDraw(PixelShader, ShaderSplit::WorldOrScope(),	// (UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera: lamp shadows in a scope's picture too)
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson,
 		PixelShader && PointShadowForward::LastPixelShaderNvr && ManyLamps::IsOurs(PixelShader->Name) && ManyLamps::Active() ?
 			ManyLamps::Steady(*(const PointShadowForward::RenderPassView**)0x011F91E0) : nullptr);	// UNOFFICIAL 2026-10-31 SteadyLampShadows
 	LandLamps::OnBind(PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr);	// UNOFFICIAL 2026-10-30 LandAllLamps
 	ManyLamps::OnBind(PixelShader ? PixelShader->Name : nullptr, PointShadowForward::LastPixelShaderNvr, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-27 ManyLampsOnePass: the run's first object
+	DeferredSun::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr);	// UNOFFICIAL 2026-11-14 DeferredSun: counts the lighting-free binds of the span
 	DeferredLamps::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr);	// UNOFFICIAL 2026-10-31 DeferredLamps: counts the deferred binds, reads the frame globals once
+	DeferredRenderer::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr, PixelShader ? PixelShader->Name : nullptr);	// UNOFFICIAL 2026-11-14 full deferred renderer: is a deferred record bound
+	if (GameEyes::Eye) DeferredRenderer::BoundDeferred = DeferredRenderer::BoundPlain = false;	// UNOFFICIAL 2026-11-15: an eye's bind inside its draw: the eye record is forward (GameEyes::ApplyEye)
+	DeferredTransparents::OnBind(PixelShader ? PixelShader->ShaderHandle : nullptr);	// UNOFFICIAL 2026-11-15 a forward+ record: the table, the atlas, c180 / c181 (after the others' binds)
 	ScopeSunShadows::ForDraw(*(const PointShadowForward::RenderPassView**)0x011F91E0);	// UNOFFICIAL ScopeFix outdoors
 	OnePassDepth::Reapply(TheRenderManager->device);	// UNOFFICIAL LampsDepthFirst: a bind inside a depth-only draw keeps the depth-only shader
 #if NVR_TEST_TOOLS
@@ -3316,6 +3669,15 @@ namespace ScopeSunShadows {
 	static bool Overridden = false;
 	static unsigned LensFrame = 0;		// PointShadowForward::Frame when a B42 lens was last drawn
 	static bool Announced = false;
+	static unsigned LensLogs = 0;
+
+	// ScopeScene::Draw, when an extra camera's scene ends: its last draw may have left the off switch on the device.
+	static void Reset() {
+		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+		if (!Overridden || !shadows) return;
+		TheRenderManager->device->SetPixelShaderConstantF(133, (const float*)&shadows->Constants.ForwardData, 1);
+		Overridden = false;
+	}
 
 	static void ForDraw(const PointShadowForward::RenderPassView* pass) {
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
@@ -3326,8 +3688,33 @@ namespace ScopeSunShadows {
 			if (context == ShaderSplit::FirstPerson) {
 				suppress = PointShadowForward::IsLens(pass);
 				if (suppress) LensFrame = PointShadowForward::Frame;
+				// UNOFFICIAL 2026-11-12 (the open question of a reactive mask for the lens, core/ScopeCamera.h report): how the lens shapes are
+				// drawn, said for the first four draws. A shape that writes depth is inside the first-person depth mask, which FSR / DLSS
+				// already take as rendered ([Shaders.TAA.FSR] WeaponReactive, [Shaders.TAA.DLSS] WeaponMask).
+				if (suppress && LensLogs < 4 && pass && pass->geometry) {
+					LensLogs++;
+					DWORD zwrite = 0, blend = 0, ztest = 0;
+					TheRenderManager->device->GetRenderState(D3DRS_ZWRITEENABLE, &zwrite);
+					TheRenderManager->device->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+					TheRenderManager->device->GetRenderState(D3DRS_ZENABLE, &ztest);
+					Logger::Log("UNOFFICIAL Scope lens: the B42 lens shape '%s' (pass %03X) is drawn in the first-person pass with depth test %s, depth write %s, alpha blending %s.",
+						pass->geometry->m_pcName ? pass->geometry->m_pcName : "?", (unsigned)pass->passEnum, ztest ? "on" : "off", zwrite ? "on" : "off", blend ? "on" : "off");
+				}
 			}
-			else if (context != ShaderSplit::Reflections && LensFrame && PointShadowForward::Frame - LensFrame <= 2) {
+			else if (context == ShaderSplit::ExtraCamera) {
+				// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect / OwnCamera (core/ScopeCamera.h): the picture is known exactly (ScopeScene
+				// below), from its first frame on and without waiting for a lens draw. With its own camera's constants the shaders rebuild
+				// the right positions and the cascades are moved to its camera: the sun shadows stay ON. Without (OwnCamera false, or the
+				// game's shaders): off there, as before.
+				suppress = !ScopeCamera::Shadows;
+				if (suppress && !Announced) {
+					Announced = true;
+					Logger::Log("UNOFFICIAL ScopeFix: the scope picture (an extra camera's scene) is drawn without sun shadows ([Main.Main.Scope] OwnCamera is off or not in effect).");
+				}
+			}
+			// (while the hooks see the scope's scene, the size guess below is not used: the scene's own context answers above. Detect off, or
+			// no such scene seen in the last frames: the guess, as before)
+			else if (!ScopeCamera::Exact() && context != ShaderSplit::Reflections && LensFrame && PointShadowForward::Frame - LensFrame <= 2) {
 				const D3DVIEWPORT9& port = TheRenderManager->m_kD3DPort;
 				if (!TAAEffect::IsWorldViewport(port)) {	// UNOFFICIAL 2026-10-27: RenderScale's world viewport is the world's too
 					suppress = true;
@@ -3350,6 +3737,211 @@ namespace ScopeSunShadows {
 			Overridden = false;
 		}
 	}
+}
+
+// UNOFFICIAL 2026-11-12 [Main.Main.Scope] (core/ScopeCamera.h has the whole story): the picture-in-picture scope's scene, recognised at
+// the two game functions a plugin draws it with (JIP LN's ProjectExtraCamera for B42 Optics), both __cdecl, checked in the machine code
+// of FalloutNV 1.4.0.525:
+//  - BSShaderUtil::AccumulateScene 0x00B6BEE0 (camera, scene, culling process): walks the scene for the camera;
+//  - BSShaderUtil::RenderScene 0x00B6C0D0 (camera, accumulator, unused): makes the camera current (NiRenderer::SetCurrentCamera
+//    0x004E9BB0) and draws what was accumulated.
+// The game calls both itself (the world's own scene, the screen splatter, menus' 3D views, cube maps): those calls come from inside
+// FalloutNV.exe and end here at one compare each. A call from a plugin (return address outside the exe) with a camera that is not the
+// world's, over the world's own scene graph, is an extra camera's picture of the world: AccumulateSceneHook notes its camera, and the
+// RenderScene call that follows with the same camera is drawn inside ShaderSplit::ExtraCamera, with that camera's constants
+// (OwnCamera), the cheap switches (Shaders), the "Scope scene" timers and, after its last draw, the fog (PostEffects).
+// Installed inside AttachHooks' Detours transaction while Detect is on at startup; Detect off later = both pass straight through.
+namespace ScopeScene {
+	typedef void (__cdecl* AccumulateSceneFn)(NiCamera*, NiAVObject*, void*, UInt32);
+	typedef void (__cdecl* RenderSceneFn)(NiCamera*, void*, UInt32);
+	static AccumulateSceneFn AccumulateSceneNext = (AccumulateSceneFn)Hooks::AccumulateScene;
+	static RenderSceneFn RenderSceneNext = (RenderSceneFn)Hooks::RenderScene;
+	static unsigned DetectLogs = 0, OtherSceneLogs = 0;
+	static UInt32 LoggedSignature = 0;
+
+	// The scene a plugin walks is the world's: the world's ShadowSceneNode itself, a node above it or one below it.
+	static bool WorldRooted(const NiAVObject* scene) {
+		const NiAVObject* world = (const NiAVObject*)BSShaderManager::GetShadowSceneNode(BSShaderManager::BSSM_SSN_WORLD);
+		if (!scene || !world) return false;
+		const NiAVObject* node = world;
+		for (int depth = 0; node && depth < 8; depth++, node = node->m_parent) if (node == scene) return true;
+		node = scene->m_parent;
+		for (int depth = 0; node && depth < 16; depth++, node = node->m_parent) if (node == world) return true;
+		return false;
+	}
+
+	static void NotePlugin(NiCamera* camera, NiAVObject* scene, UInt32 caller) {
+		if (!WorldRooted(scene)) {
+			if (OtherSceneLogs < 3) {
+				OtherSceneLogs++;
+				char module[MAX_PATH];
+				CpuSplit::ModuleName(caller, module, sizeof(module));
+				Logger::Log("UNOFFICIAL Scope Detect: %s draws a scene that is not the world's (root '%s') with its own camera '%s': left alone.",
+					module, scene && scene->m_pcName ? scene->m_pcName : "?", camera->m_pcName ? camera->m_pcName : "?");
+			}
+			return;
+		}
+		ScopeCamera::Pending = camera;
+		ScopeCamera::PendingCaller = caller;
+	}
+
+	static void __cdecl AccumulateSceneHook(NiCamera* camera, NiAVObject* scene, void* culler, UInt32 flag) {
+		// The game's own walk of the world ends at the camera compare, its other walks at the address test.
+		if (ScopeCamera::Detect && camera && WorldSceneGraph && camera != WorldSceneGraph->camera) {
+			const UInt32 caller = (UInt32)_ReturnAddress();
+			if (!CpuSplit::InExe(caller)) NotePlugin(camera, scene, caller);
+		}
+		AccumulateSceneNext(camera, scene, culler, flag);
+	}
+
+	// Shaders 1: the picture's cheap switches, each the documented "off" of a setting, put back when the scene ends. Terrain parallax
+	// (TESR_TerrainParallaxData.x 0, as CheapReflections does for the water's reflection) and the contact-hardening search of the sun
+	// shadows (TESR_ContactHardeningData.x 0 = plain filtering). The per-object extras (wind, material rules, _rmaos maps, the
+	// specular fade) are left running: each sets a constant the next draw would otherwise inherit from the main view's last draw.
+	struct CheapScope {
+		float* Parallax = nullptr;
+		float* Hardening = nullptr;
+		float SavedParallax = 0.0f, SavedHardening = 0.0f;
+		explicit CheapScope(bool on) {
+			if (!on) return;
+			if (TerrainShaders* terrain = TheShaderManager->Shaders.Terrain) {
+				Parallax = &terrain->ParallaxConstants.Data.x;
+				SavedParallax = *Parallax;
+				*Parallax = 0.0f;
+			}
+			if (TheShadowManager) {
+				Hardening = &TheShadowManager->ContactHardeningData.x;
+				SavedHardening = *Hardening;
+				*Hardening = 0.0f;
+			}
+		}
+		~CheapScope() {
+			if (Parallax) *Parallax = SavedParallax;
+			if (Hardening) *Hardening = SavedHardening;
+		}
+	};
+
+	// The log's proof, when the picture, its camera or what is done with it changes (at most 8 times a session).
+	static void LogScene(NiCamera* camera, UINT width, UINT height, D3DFORMAT format, bool own, const D3DXVECTOR4& mainPosition) {
+		const UInt32 signature = (width << 16) ^ height ^ ((UInt32)format << 8) ^ (own ? 0x80000000u : 0u) ^ ((UInt32)ScopeCamera::Shaders << 28) ^
+			((UInt32)ScopeCamera::PostEffects << 26) ^ ((UInt32)ScopeCamera::Water << 25) ^ (ScopeCamera::Clouds ? 0x01000000u : 0u) ^ (ScopeCamera::OurSkin ? 0x02000000u : 0u);
+		if (signature == LoggedSignature || DetectLogs >= 8) return;
+		LoggedSignature = signature;
+		DetectLogs++;
+		char module[MAX_PATH];
+		CpuSplit::ModuleName(ScopeCamera::PendingCaller, module, sizeof(module));
+		const NiFrustum& frustum = camera->Frustum;
+		Logger::Log("UNOFFICIAL Scope Detect: an extra camera's scene of the world: camera '%s', drawn by %s into a %ux%u target (format %d), field of view %.2f x %.2f degrees, near %.1f, far %.0f. Shaders %d, Clouds %s, Water %d, PostEffects %d.",
+			camera->m_pcName ? camera->m_pcName : "?", module, width, height, (int)format,
+			D3DXToDegree(2.0f * atanf(0.5f * (frustum.Right - frustum.Left))), D3DXToDegree(2.0f * atanf(0.5f * (frustum.Top - frustum.Bottom))), frustum.Near, frustum.Far,
+			ScopeCamera::Shaders, ScopeCamera::Clouds ? "on" : "off", ScopeCamera::Water, ScopeCamera::PostEffects);
+		if (own) {
+			const NiPoint3& at = camera->m_worldTransform.pos;
+			const float dx = at.x - mainPosition.x, dy = at.y - mainPosition.y, dz = at.z - mainPosition.z;
+			Logger::Log("UNOFFICIAL Scope OwnCamera: the picture is drawn with its own camera's constants (camera at %.0f %.0f %.0f, %.1f units from the main camera of the last frame; reciprocal resolution 1/%u x 1/%u): sun shadows and interior lamp shadows are ON in it, skin takes %s shaders.",
+				at.x, at.y, at.z, sqrtf(dx * dx + dy * dy + dz * dz), width, height, ScopeCamera::OurSkin ? "this mod's" : "the game's");
+		}
+		else
+			Logger::Log("UNOFFICIAL Scope OwnCamera: NOT in effect (%s): the picture is drawn with the main camera's constants, without sun and lamp shadows, as before.",
+				ScopeCamera::GameShaders ? "Shaders 2: the game's own shaders" : !ScopeCamera::OwnCamera ? "OwnCamera is off" : "the camera's frustum cannot be used");
+	}
+
+	// The Scope WATER line ([Main.Main.Scope] Water): what the last 300 pictures showed about water, then the counts start again.
+	static void WaterReport() {
+		if (++ScopeCamera::WaterScenes < 300) return;
+		static unsigned lines = 0;
+		if (lines < 6) {
+			lines++;
+			Logger::Log("UNOFFICIAL Scope WATER: in the last %u scope pictures: %u water shader binds inside the picture (%u with this mod's water shaders), %u water reflection renders by the game in those frames (%u of them for the picture's camera).",
+				ScopeCamera::WaterScenes, ScopeCamera::WaterBinds, ScopeCamera::WaterBindsOurs, ScopeCamera::ReflectionCalls, ScopeCamera::ReflectionCallsExtra);
+		}
+		ScopeCamera::WaterScenes = ScopeCamera::WaterBinds = ScopeCamera::WaterBindsOurs = ScopeCamera::ReflectionCalls = ScopeCamera::ReflectionCallsExtra = 0;
+	}
+
+	static void Draw(NiCamera* camera, void* accumulator, UInt32 flag) {
+		SessionLog::StageScope stage("the scope picture");
+		IDirect3DDevice9* device = TheRenderManager->device;
+		// The picture's target: the plugin made it current before the walk.
+		UINT width = 0, height = 0;
+		D3DFORMAT format = D3DFMT_UNKNOWN;
+		IDirect3DSurface9* target = nullptr;
+		if (SUCCEEDED(device->GetRenderTarget(0, &target)) && target) {
+			D3DSURFACE_DESC desc = {};
+			if (SUCCEEDED(target->GetDesc(&desc))) { width = desc.Width; height = desc.Height; format = desc.Format; }
+			target->Release();
+		}
+		static GpuTimer gpuTimer("Scope scene");
+		static CpuTimer cpuTimer("Scope scene (CPU)");
+		CpuProfileScope cpu(cpuTimer);
+		GpuProfileScope gpu(gpuTimer, device);
+
+		const D3DXVECTOR4 mainPosition = TheRenderManager->CameraPosition;
+		ScopeCamera::InScene = true;
+		ScopeCamera::Camera = camera;
+		ScopeCamera::GameShaders = ScopeCamera::Shaders == 2;
+		ScopeCamera::GameWater = ScopeCamera::Water == 1;
+		D3DXMATRIX projection;
+		D3DXMatrixIdentity(&projection);
+		// Its own camera's constants (not for a picture drawn with the game's shaders: they read none of them).
+		const bool own = ScopeCamera::OwnCamera && !ScopeCamera::GameShaders && TheShaderManager->BeginExtraCamera(camera, width, height, &projection);
+		ScopeCamera::Own = own;
+		ScopeCamera::Shadows = own;
+		ScopeCamera::OurSkin = own && ScopeCamera::Skin;
+		{
+			CheapScope cheap(ScopeCamera::Shaders == 1);
+			// The constants reach a shader only when its handle changes: the scene's first bind uploads whatever was bound before.
+			ForcePixelConstants = ForceVertexConstants = true;
+			ShaderSplit::BeginContext(ShaderSplit::ExtraCamera);
+			RenderSceneNext(camera, accumulator, flag);
+			ShaderSplit::EndContext();
+			ScopeSunShadows::Reset();
+			// The picture's fog, while its target, depth buffer and camera are still current.
+			if (own && ScopeCamera::PostEffects >= 1) ScopeFog::Draw(device, projection, width, height, ScopeCamera::FogStrength);
+		}
+		if (own) TheShaderManager->EndExtraCamera();
+		// ... and the frame's first bind uploads the main camera's again (ConstantFilter compares with what the device holds: none is skipped).
+		ForcePixelConstants = ForceVertexConstants = true;
+		LogScene(camera, width, height, format, own, mainPosition);
+		ScopeCamera::InScene = ScopeCamera::Own = ScopeCamera::Shadows = ScopeCamera::GameShaders = ScopeCamera::OurSkin = ScopeCamera::GameWater = false;
+		ScopeCamera::Camera = nullptr;
+		ScopeCamera::LastCamera = camera;
+		ScopeCamera::LastSceneFrame = ScopeCamera::FrameNumber();
+		ScopeCamera::ScenesDrawn++;
+		WaterReport();
+	}
+
+	static void __cdecl RenderSceneHook(NiCamera* camera, void* accumulator, UInt32 flag) {
+		// The game's own calls end here: no plugin walked the world for this camera just before.
+		if (camera != ScopeCamera::Pending || !camera) { RenderSceneNext(camera, accumulator, flag); return; }
+		ScopeCamera::Pending = nullptr;
+		if (!ScopeCamera::Detect || ScopeCamera::InScene || CpuSplit::InExe((UInt32)_ReturnAddress())) { RenderSceneNext(camera, accumulator, flag); return; }
+		Draw(camera, accumulator, flag);
+	}
+}
+
+// Inside AttachHooks' Detours transaction (Hooks.cpp). Each function is hooked only where its first bytes are the game's, or a jump
+// another plugin put there (Detours then chains through that plugin's hook).
+void AttachScopeCameraHooks() {
+	ScopeCamera::ReadSettings(true);
+	if (!ScopeCamera::Detect) {
+		Logger::Log("UNOFFICIAL Scope Detect: off at startup: the extra-camera hooks are not installed; a scope's picture is recognised by its viewport, as before (restart to change).");
+		return;
+	}
+	const UInt8* accumulate = (const UInt8*)Hooks::AccumulateScene;
+	const UInt8* render = (const UInt8*)Hooks::RenderScene;
+	const bool accumulateKnown = (accumulate[0] == 0x6A && accumulate[1] == 0xFF && accumulate[2] == 0x68) || accumulate[0] == 0xE9;	// PUSH -1; PUSH handler
+	const bool renderKnown = (render[0] == 0x8B && render[1] == 0x0D && render[6] == 0x56) || render[0] == 0xE9;	// MOV ECX,[renderer]; PUSH ESI
+	if (!accumulateKnown || !renderKnown) {
+		Logger::Log("UNOFFICIAL Scope Detect: the code at %08X / %08X is not the game's (first bytes %02X %02X / %02X %02X; another plugin?): not hooked; a scope's picture is recognised by its viewport, as before.",
+			Hooks::AccumulateScene, Hooks::RenderScene, accumulate[0], accumulate[1], render[0], render[1]);
+		return;
+	}
+	const LONG first = DetourAttach(&(PVOID&)ScopeScene::AccumulateSceneNext, &ScopeScene::AccumulateSceneHook);
+	const LONG second = first == NO_ERROR ? DetourAttach(&(PVOID&)ScopeScene::RenderSceneNext, &ScopeScene::RenderSceneHook) : first;
+	ScopeCamera::HooksIn = first == NO_ERROR && second == NO_ERROR;
+	Logger::Log("UNOFFICIAL Scope Detect: BSShaderUtil::AccumulateScene / RenderScene %s (%ld, %ld)%s: a plugin's extra camera drawing the world (B42 Optics' picture-in-picture scope) %s.",
+		ScopeCamera::HooksIn ? "hooked" : "NOT hooked", first, second, accumulate[0] == 0xE9 || render[0] == 0xE9 ? ", through another plugin's hook" : "",
+		ScopeCamera::HooksIn ? "is recognised exactly ([Main.Main.Scope])" : "is recognised by its viewport, as before");
 }
 
 // UNOFFICIAL, diagnostic (2026-10-13, with [Shaders.ShadowsInteriors.Forward] LogLamps): how many lamps the game gives each
@@ -3507,10 +4099,17 @@ static bool PlantPass(NiGeometry* geometry) {
 	return plant->second.second;
 }
 
+// UNOFFICIAL 2026-11-15 (MergeCopies batch 3: c211.w differed between merged copies) the value MaterialForPass sends, in one place: false when
+// it sends nothing for this pass (then c211.w keeps what the last pass left).
+// MergeCopies plans before the G-buffer span opens (its world draws are all inside it): it asks with inSpan = true.
 static void MaterialForPass(void* Pass) {
-	if (!CapturedNormals::InSpan || !CapturedNormals::MaterialCompiled || !CapturedNormals::MaterialTexture) return;
+	float w = 0.0f;
+	if (MaterialWFor(Pass, w, CapturedNormals::InSpan)) PbrPop::SpecFade::SendMaterial(TheRenderManager->device, w);	// c211.w (c217 is the RT lamp shadows')
+}
+static bool MaterialWFor(const void* Pass, float& w, bool inSpan) {
+	if (!inSpan || !CapturedNormals::MaterialCompiled || !CapturedNormals::MaterialTexture) return false;
 	NiGeometry* geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;
-	if (!geometry) return;
+	if (!geometry) return false;
 	float materialClass = geometry->skinInstance ? 2.0f : 1.0f;
 	BSShaderProperty* property = (BSShaderProperty*)geometry->GetProperty(NiProperty::PropertyType::kType_Shade);
 	if (property && property->IsLightingProperty()) {
@@ -3523,7 +4122,16 @@ static void MaterialForPass(void* Pass) {
 		}
 	}
 	const float radius = geometry->m_kWorldBound ? std::clamp(geometry->m_kWorldBound->Radius, 0.0f, 1.0e6f) : 0.0f;
-	PbrPop::SpecFade::SendMaterial(TheRenderManager->device, materialClass + 8.0f * floorf(radius));	// c211.w (c217 is the RT lamp shadows')
+	// UNOFFICIAL 2026-11-12 (ptbump; core/CapturedNormals.h NoHighlightFlag, Includes/CapturedNormals.hlsl CapturedNoHighlight): while the
+	// path tracer runs with PTMatteNoHighlight, and the shaders were compiled to read it (CAPTURED_PT: the DXVK fork), a mesh WITHOUT the
+	// specular shader flag (the game draws no highlight on it, near or far, in one pass or several) sends the same value negative: its
+	// record's roughness is then coded "no highlight". Otherwise positive, as always. Not a mesh with an environment map (the plain,
+	// the eye's or a window's: its shine is the game's env pass, which writes no record; it keeps its recorded gloss).
+	constexpr UInt32 kEnvMapped = (1u << BSSP_ENVIRONMENT_MAPPING) | (1u << BSSP_EYE_ENVIRONMENT_MAPPING) | (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING);
+	const bool noHighlight = CapturedNormals::NoHighlightFlag && CapturedNormals::PtCodesCompiled && property && property->IsLightingProperty() &&
+		!(property->ulFlags[0] & (BSShaderProperty::Specular | kEnvMapped));
+	w = (noHighlight ? -1.0f : 1.0f) * (materialClass + 8.0f * floorf(radius));
+	return true;
 }
 
 static void ForwardShadowsForPass(void* Pass) {
@@ -3532,6 +4140,11 @@ static void ForwardShadowsForPass(void* Pass) {
 	EnvLightFade::ForPass(Pass);	// UNOFFICIAL 2026-11-04 (after it: the game reads that lamp's dimmer for the fade too)
 	if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) ShadowManager::ViewModelLogDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry);	// UNOFFICIAL 2026-11-04 CharacterShadowMapLog
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) MaterialForPass(Pass);	// UNOFFICIAL 2026-10-29 MaterialBuffer
+	// UNOFFICIAL 2026-11-12 (ptbump) the first-person model's records (PTViewModel's span) took whatever the last world draw had sent: with the
+	// no-highlight code in that value a gun could come out matte by chance. While the code is in use, its own class, radius and flag.
+	// (2026-11-15 DeferredFirstPerson) and always while the view model draws deferred records: their shading model in the G-buffer comes from this
+	// class (GBufferV2), and a world draw's left over (land, a plant) would send the gun through the wrong light model
+	else if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson && CapturedNormals::VmSpan && ((CapturedNormals::NoHighlightFlag && CapturedNormals::PtCodesCompiled) || CapturedNormals::VmDeferred)) MaterialForPass(Pass);
 	if (ForwardCloudShadows::Compiled)	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: this draw's strength (0 for plants with PlantShadows off)
 		ForwardCloudShadows::ForPass(TheRenderManager->device, !ForwardCloudShadows::PlantShadows && PlantPass(((const PointShadowForward::RenderPassView*)Pass)->geometry));
 	LampCountStats::Count((const PointShadowForward::RenderPassView*)Pass);
@@ -3540,7 +4153,8 @@ static void ForwardShadowsForPass(void* Pass) {
 	const PointShadowForward::RenderPassView* lamps = ManyLamps::Bound ? ManyLamps::Steady((const PointShadowForward::RenderPassView*)Pass) : (const PointShadowForward::RenderPassView*)Pass;
 	ManyLamps::ForPass(lamps, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-27 ManyLampsOnePass: the object's lamps in c37-c63
 	LampsInOnePass::GlowForPass((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsGlow: the glow map on s4
-	PointShadowForward::OnRenderPass(lamps, ShaderSplit::CurrentContext == ShaderSplit::World,
+	LampsInOnePass::EmitForPass((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL 2026-11-15 DeferredRenderer (native one pass): the emittance as the forward reference has it
+	PointShadowForward::OnRenderPass(lamps, ShaderSplit::WorldOrScope(),	// (UNOFFICIAL 2026-11-12 [Main.Main.Scope] OwnCamera, as SetForDraw)
 		ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);
 	ManyLamps::ParityCheck((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-31 TableLampsParity (a test)
 	ScopeSunShadows::ForDraw((const PointShadowForward::RenderPassView*)Pass);
@@ -3580,6 +4194,90 @@ void InstallSoftParticleHook() {
 	NoLightingConstantsDetour.ReplaceVirtualFunc(0x010BB2AC, &NoLightingConstantsHook);
 }
 
+// UNOFFICIAL 2026-11-12 PTWaterMask ([Main.Main.RayTracing] PTWaterMask; core/WaterMask.h, docs/next/PT-COMPAT-AUDIT-2026-11-12.md item 4):
+// the game's water draws of the frame's world scene, each drawn once more into the path tracer's water mask. The game draws its water
+// pass groups (0x28A and up; 0x288 / 0x289 are the water's stencil-only passes) after the opaque groups and before the blended stage
+// (0x00B65C60), each pass through RenderPassStandardHook below. For a pass whose geometry carries a water shade property, in the first
+// world scene of the frame, on the world's own depth surface (noted as the scene starts: never the water reflection render, a cube map
+// or another off-screen scene drawn in between) and writing colour, DrawIndexedPrimitive (device table slot 82) is hooked for the length
+// of that one pass, as RenderBlendedHook does for its stage, and put back after it. Nothing is noted, compared or hooked unless a path
+// traced frame asked for the mask in the last two frames (WaterMask::Wanted) and the camera is above water: one null check a pass.
+namespace WaterMaskDraw {
+	typedef HRESULT (STDMETHODCALLTYPE* DrawIndexedPrimitiveFn)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+	static DrawIndexedPrimitiveFn Next = nullptr;
+	static IDirect3DSurface9* WorldDepth = nullptr;	// the depth surface bound as the frame's first world scene starts, while the mask is wanted (compared only)
+	static bool InPass = false, Stuck = false;
+
+	static HRESULT STDMETHODCALLTYPE DrawHook(IDirect3DDevice9* Device, D3DPRIMITIVETYPE Type, INT Base, UINT MinIndex, UINT Vertices, UINT Start, UINT Count) {
+		const HRESULT result = Next(Device, Type, Base, MinIndex, Vertices, Start, Count);
+		if (InPass && SUCCEEDED(result)) {
+			// a draw that shows water: colour written, depth tested (the mask takes the draw's own z test: nothing behind a wall)
+			DWORD colour = 0, ztest = D3DZB_FALSE;
+			Device->GetRenderState(D3DRS_COLORWRITEENABLE, &colour);
+			Device->GetRenderState(D3DRS_ZENABLE, &ztest);
+			if (colour != 0 && ztest != D3DZB_FALSE)
+				WaterMask::Redraw(Device, TheFrameRateManager->FrameNumber, [&]() { return Next(Device, Type, Base, MinIndex, Vertices, Start, Count); });
+		}
+		return result;
+	}
+
+	static void BeginWorld(bool firstWorldOfFrame) {
+		WorldDepth = nullptr;
+		// (the camera under water: left as it was, the surface seen from below is not masked)
+		if (Stuck || !firstWorldOfFrame || !TheFrameRateManager || !WaterMask::Wanted(TheFrameRateManager->FrameNumber) || TheShaderManager->GameState.isUnderwater) return;
+		IDirect3DSurface9* depth = nullptr;
+		TheRenderManager->device->GetDepthStencilSurface(&depth);
+		WorldDepth = depth;
+		if (depth) depth->Release();
+	}
+
+	static void EndWorld() { WorldDepth = nullptr; }
+
+	static bool IsWaterPass(const PointShadowForward::RenderPassView* pass) {
+		if (!WorldDepth || ShaderSplit::CurrentContext != ShaderSplit::World || !pass || !pass->geometry) return false;
+		if (pass->passEnum == 0x288 || pass->passEnum == 0x289) return false;	// the water's stencil passes: no water colour of their own
+		NiShadeProperty* shade = (NiShadeProperty*)pass->geometry->GetProperty(NiProperty::kType_Shade);
+		if (!shade || shade->m_eShaderType != NiShadeProperty::kProp_Water) return false;
+		IDirect3DDevice9* device = TheRenderManager->device;
+		IDirect3DSurface9* depth = nullptr;
+		device->GetDepthStencilSurface(&depth);
+		if (depth) depth->Release();
+		return depth == WorldDepth;
+	}
+
+	// Round one water pass's RenderPassStandard: its draws go out through DrawHook.
+	struct PassScope {
+		bool hooked = false;
+		explicit PassScope(const PointShadowForward::RenderPassView* pass) {
+			if (!IsWaterPass(pass)) return;
+			void** table = *(void***)TheRenderManager->device;
+			if (table[82] == (void*)&DrawHook) return;	// (never nested: left to the outer scope)
+			DWORD old = 0;
+			if (!VirtualProtect(&table[82], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) return;
+			Next = (DrawIndexedPrimitiveFn)table[82];
+			table[82] = (void*)&DrawHook;
+			VirtualProtect(&table[82], sizeof(void*), old, &old);
+			hooked = InPass = true;
+		}
+		~PassScope() {
+			if (!hooked) return;
+			InPass = false;
+			void** table = *(void***)TheRenderManager->device;
+			DWORD old = 0;
+			if (table[82] == (void*)&DrawHook && VirtualProtect(&table[82], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+				table[82] = (void*)Next;
+				VirtualProtect(&table[82], sizeof(void*), old, &old);
+			}
+			else {
+				// something else put its own entry there during the pass (or the page could not be written): ours may stay under it, passing
+				// every draw on (InPass false). Hooking again on top would call round in a ring: no mask for the rest of the session.
+				Stuck = true;
+				Logger::Log("[WARNING] UNOFFICIAL RT path trace: PTWaterMask: the draw hook could not be taken out after a water pass: the water mask is off for the session.");
+			}
+		}
+	};
+}
+
 void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 Arg4) {
 	OnePassDepth::HookSeen = true;
 	if (OnePassDepth::InDepth) { DepthOnlyStandard(Pass, Arg2, Arg3, Arg4); return; }	// UNOFFICIAL LampsDepthFirst, step 1
@@ -3592,6 +4290,8 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	if (PassFamilyView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL, diagnostic: PassFamilyView
 	if (CasterView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL 2026-10-28, diagnostic: CasterView
 #endif
+	if (DeferredRenderer::Skip(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot))) return;	// UNOFFICIAL 2026-11-14 full deferred renderer: the lamp pass adds this light
+	if (DeferredTransparents::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL 2026-11-15 forward+ lit the object's lamps already
 	if (FoldFog::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL FoldFog: the object's lit pass fogged
 	if (FoldHighlights::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) {	// UNOFFICIAL FoldHighlights: drawn with the object's lamps
 #if NVR_TEST_TOOLS
@@ -3603,6 +4303,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	ClothWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL cloth wind
 	PlantWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-10-20 plant wind (cleaned by ClothWind::AfterDraw)
 	if (HiddenObjectCulling::Before(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) { ClothWind::AfterDraw(TheRenderManager->device); return; }	// UNOFFICIAL HiddenObjectCulling
+	if (ShaderSplit::CurrentContext == ShaderSplit::World) { BeatSeries::Add(BeatSeries::WorldPasses); if (HiddenObjectCulling::BoundLamp) BeatSeries::Add(BeatSeries::LampPasses); }	// UNOFFICIAL 2026-11-11 BeatSeries (the pass is drawn)
 	ReflectionProbe::OnObject(Pass, false);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
@@ -3612,6 +4313,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 		PbrPop::SpecFade::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, fold, foldVertexColor);
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
+	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
 	DustDraw::ForDraw(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// 2026-11-04: a static mesh in the world scene takes dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	BendContact::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-06 LodOnly
@@ -3643,7 +4345,17 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	DisplaceHeight::Geometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-11-01 SameHeight
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
-	RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	{
+		WaterMaskDraw::PassScope waterMask((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL 2026-11-12 PTWaterMask: a water pass's draws once more into the path tracer's water mask (nothing otherwise)
+		// UNOFFICIAL 2026-11-14 MergeCopies (test only, core/MergeCopies.h): a planned pass-0xFC entry of the world's main list: the first of
+		// its group drawn with its copies as one instanced draw, a merged copy's engine setup skipped (every NVR step above and below still
+		// runs for it), or the self-check
+		DeferredRenderer::BeforeDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot), TheRenderManager->device);	// UNOFFICIAL 2026-11-14 fd-fixes: a blended draw takes the forward record
+		if (MergeCopies::InList) MergeCopies::Entry(Pass, Arg2, Arg3, Arg4, RenderPassStandard);
+		else RenderPassStandard(Pass, Arg2, Arg3, Arg4);
+	}
+	DeferredRenderer::AfterDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot));	// UNOFFICIAL 2026-11-14 full deferred renderer: mark / count
+	DeferredTransparents::AfterDraw(Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-15 forward+: mark / count
 	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	AlphaHash::AfterPass(TheRenderManager->device);
 	FlashlightLamp::AfterPass();	// UNOFFICIAL 2026-11-04 the flashlight's game lamp back to its own dimmer
@@ -3654,6 +4366,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	if (countOpt) OnePassDepth::Counts::After();
 	ManyLamps::AfterDraw((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsOnePass: the first person's lighting offset
 	LampsInOnePass::GlowAfterDraw(Pass);	// UNOFFICIAL ManyLampsGlow (statistics)
+	LampsInOnePass::EmitAfterPass();	// UNOFFICIAL 2026-11-15 (the game's own emittance choice back)
 	ReflMaterial::AfterPass(TheRenderManager->device);
 	ReflMaterial::NeutralEnd(TheRenderManager->device);	// (perf-mirrorfix)
 #if NVR_TEST_TOOLS
@@ -3681,6 +4394,8 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (PassFamilyView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL, diagnostic: PassFamilyView
 	if (CasterView::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL 2026-10-28, diagnostic: CasterView
 #endif
+	if (DeferredRenderer::Skip(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot))) return;	// UNOFFICIAL 2026-11-14 full deferred renderer: the lamp pass adds this light
+	if (DeferredTransparents::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL 2026-11-15 forward+ lit the object's lamps already
 	if (FoldFog::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) return;	// UNOFFICIAL FoldFog: the object's lit pass fogged
 	if (FoldHighlights::Skip(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) {	// UNOFFICIAL FoldHighlights: drawn with the object's lamps
 #if NVR_TEST_TOOLS
@@ -3692,6 +4407,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	ClothWind::ForGeometry(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, false, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL cloth wind
 	PipboyFit::ForGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-11-03 PipboyFit
 	if (HiddenObjectCulling::Before(Pass, ShaderSplit::CurrentContext == ShaderSplit::World)) { PipboyFit::AfterDraw(); ClothWind::AfterDraw(TheRenderManager->device); return; }	// UNOFFICIAL HiddenObjectCulling
+	if (ShaderSplit::CurrentContext == ShaderSplit::World) { BeatSeries::Add(BeatSeries::WorldPasses); if (HiddenObjectCulling::BoundLamp) BeatSeries::Add(BeatSeries::LampPasses); }	// UNOFFICIAL 2026-11-11 BeatSeries (the pass is drawn)
 	ReflectionProbe::OnObject(Pass, true);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
@@ -3701,6 +4417,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 		PbrPop::SpecFade::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, fold, foldVertexColor);
 	}
 	CharacterObjectReach::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-10-23
+	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
 	DustDraw::ForDraw(TheRenderManager->device, false);	// 2026-11-04: skinned (people, creatures, armour, arms): no dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
 	BendContact::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-06 LodOnly
@@ -3720,7 +4437,10 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	else if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) TAAEffect::NoteWorldDraw(true);	// v2: the weapon into the world's rect
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
+	DeferredRenderer::BeforeDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot), TheRenderManager->device);	// UNOFFICIAL 2026-11-14 fd-fixes: a blended draw takes the forward record
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
+	DeferredRenderer::AfterDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot));	// UNOFFICIAL 2026-11-14 full deferred renderer: mark / count
+	DeferredTransparents::AfterDraw(Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-15 forward+: mark / count
 	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
 	if (ShaderSplit::CurrentContext == ShaderSplit::World)	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the hair's tint for the RT scene (core/RtHairTint.h)
 		RtHairTint::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, TheRenderManager->device);
@@ -3732,6 +4452,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (countOpt) OnePassDepth::Counts::After();
 	ManyLamps::AfterDraw((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL ManyLampsOnePass: the first person's lighting offset
 	LampsInOnePass::GlowAfterDraw(Pass);	// UNOFFICIAL ManyLampsGlow (statistics)
+	LampsInOnePass::EmitAfterPass();	// UNOFFICIAL 2026-11-15 (the game's own emittance choice back)
 	ReflMaterial::AfterPass(TheRenderManager->device);
 	ReflMaterial::NeutralEnd(TheRenderManager->device);	// (perf-mirrorfix)
 #if NVR_TEST_TOOLS
@@ -3896,7 +4617,10 @@ namespace MaterialDraw {
 		ReflMaterial::DrawBegin(device, true, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
 		WeaponMask::DrawState weaponTag;	// UNOFFICIAL 2026-11-09 (core/WeaponMask.h): a first-person draw tags the stencil (a skinned one: the arms, never the gun)
 		if (c.firstPerson) WeaponMask::DrawBegin(device, c.pass ? c.pass->geometry : nullptr, weaponTag);
+		GearWeather::DrawState gearTag;	// UNOFFICIAL 2026-11-15 GearWeather (core/GearWeather.h): the part's id into the stencil's low bits
+		if (c.firstPerson) GearWeather::DrawBegin(device, c.pass ? c.pass->geometry : nullptr, weaponTag.tagged, gearTag);
 		PartitionNext[Site](renderer, edx, buffer, partition, unused);
+		GearWeather::DrawEnd(device, gearTag);
 		WeaponMask::DrawEnd(device, weaponTag);
 		ReflMaterial::DrawEnd(device, s);
 		if (c.world && c.pass) RtHairTint::NoteHairDraw(c.pass->geometry, c.pixelShader, device);
@@ -3909,7 +4633,10 @@ namespace MaterialDraw {
 		ReflMaterial::DrawBegin(device, false, c.world, c.firstPerson, c.pass ? c.pass->passEnum : 0, c.pixelShader, s);
 		WeaponMask::DrawState weaponTag;	// UNOFFICIAL 2026-11-09 (core/WeaponMask.h): a first-person draw tags the stencil (the gun's: 1, the rest: 0)
 		if (c.firstPerson) WeaponMask::DrawBegin(device, geometry, weaponTag);
+		GearWeather::DrawState gearTag;	// UNOFFICIAL 2026-11-15 GearWeather (core/GearWeather.h): the part's id into the stencil's low bits
+		if (c.firstPerson) GearWeather::DrawBegin(device, geometry, weaponTag.tagged, gearTag);
 		StillNext[Slot](renderer, edx, geometry);
+		GearWeather::DrawEnd(device, gearTag);
 		WeaponMask::DrawEnd(device, weaponTag);
 		ReflMaterial::DrawEnd(device, s);
 		// (2026-11-08 perf-reflfix4) the rigid hair, beards and brows draw HERE (the vanilla hair NIFs hold no skin instance): its c2, noted as
@@ -3923,7 +4650,7 @@ void InstallMaterialDrawHooks() {
 	const bool rtActors = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Actors") != 0;
 	// UNOFFICIAL 2026-11-09 WeaponMask: the RT weapon reflections tag the weapon's draws through these hooks too
 	const bool rtWeapon = TheSettingManager->GetSettingI("Shaders.Reflections.RT", "Enabled") != 0 && TheSettingManager->GetSettingF("Shaders.Reflections.RT", "Weapon") > 0.0f;
-	if (!ReflMaterial::CompiledIn() && !rtActors && !rtWeapon) return;
+	if (!ReflMaterial::CompiledIn() && !rtActors && !rtWeapon && !GearWeather::WantedAtStartup()) return;	// (2026-11-15 + GearWeather's part ids)
 	static const UInt32 kSites[2] = { 0x00B992E3, 0x00B99339 };
 	const bool callsThere = *(const UInt8*)kSites[0] == 0xE8 && *(const UInt8*)kSites[1] == 0xE8;
 	if (callsThere) {
@@ -3948,6 +4675,8 @@ void InstallMaterialDrawHooks() {
 void __fastcall RenderBlendedHook(void* This, UInt32 edx, UInt32 Arg) {
 	// UNOFFICIAL 2026-11-07 perf-mirrorfix2: the sorted blended list's draws, named in MaterialAware's session list
 	struct BlendedListScope { BlendedListScope() { ReflMaterial::InBlendedList = true; } ~BlendedListScope() { ReflMaterial::InBlendedList = false; } } blendedList;
+	GBufferCensus::SpanScope census(GBufferCensus::SpanBlended);	// UNOFFICIAL 2026-11-14 GBufferCensus
+	DeferredTransparents::ListScope forwardPlus;	// UNOFFICIAL 2026-11-15 DeferredTransparents: the table finished and checked for this list (off: nothing)
 	using namespace SandstormGlass;
 	bool hide = false, glass = false;
 	if (InWorldScene && (WorldDepth || GlassDepth)) {
@@ -3997,6 +4726,338 @@ using RenderWorldSceneGraphMethod = void(__thiscall*)(Main*, Sun*, UInt8, UInt8,
 RenderWorldSceneGraphMethod RenderWorldSceneGraph = reinterpret_cast<RenderWorldSceneGraphMethod>(Hooks::RenderWorldSceneGraph);
 
 // Resolves the viewmodel depth buffer into its own texture (third person, and the end of the first-person pass).
+// UNOFFICIAL 2026-11-13 [Main.Main.Quality] FirstPersonNativeScale (off by default; experimental). With RenderScale below 1 and FSR / DLSS
+// waiting for their upscale (TAAEffect::UpscalePending: the world, and so the arms and weapon, drawn into the small frame), the
+// first-person pass is drawn where the game draws it (its camera, field of view and shader constants are only right there: replaying the
+// call later drew garbage) but into a layer of its own at the screen's full size (Begin / End, from RenderFirstPersonHook), and the layer
+// is laid over the picture right after the upscale (Flush, from FlushRenderScale). The layer's alpha is its coverage: 1 where the pass
+// wrote depth, 0 elsewhere (End). Edges: FirstPersonNativeSamples (the layer multisampled). KNOWN GAPS: alpha-blended first-person glass comes out a little too bright; effects that run in
+// the small frame (AO, the sun shadows' screen pass, fog) do not see the arms (2026-11-15: bloom is made again from the picture with the
+// arms in it, and the arms get the small frame's exposure, in Flush; the GT7 exposure, Mode 1, not yet); the
+// viewmodel depth texture is empty this frame; no device-reset handling of the layer. Off, path tracing replacing the picture, or a frame
+// not waiting for an upscale: as before.
+bool NvrFirstPersonNativeNow = false;	// TAAUpscale.cpp NoteWorldDraw: this first-person pass keeps the full viewport
+namespace FirstPersonNative {
+	struct FpVertex { float x, y, z, rhw, u, v; };
+	IDirect3DTexture9* layer = nullptr;
+	IDirect3DSurface9* layerSurface = nullptr;
+	UINT layerW = 0, layerH = 0;
+	D3DFORMAT layerFormat = D3DFMT_UNKNOWN;
+	IDirect3DSurface9* savedTarget = nullptr;	// the scene target the game was drawing into (a reference, Begin .. End)
+	IDirect3DSurface9* passDepth = nullptr;		// the depth buffer bound when the pass began (a reference, Begin .. End)
+	IDirect3DSurface9* heldExtra[3] = {};		// the scene's render targets 1-3 (references, Begin .. End): not written by this pass
+	// FirstPersonNativeSamples: the pass is drawn multisampled (its own colour and depth surfaces) and resolved into the layer, so the
+	// resolved alpha is each pixel's covered share and the overlay's edges are smooth. 0 / 1: no multisampling (hard edges).
+	IDirect3DSurface9* msSurface = nullptr;
+	IDirect3DSurface9* msDepth = nullptr;
+	int msMade = 0, msTried = 0;
+	D3DVIEWPORT9 savedPort = {};
+	bool ready = false;		// the layer holds this frame's first-person pass
+	int state = -1;			// -1 unknown, 0 inactive, 1 active: the one log line per change
+
+	bool Wanted() { return TheSettingManager->GetSettingI("Main.Main.Quality", "FirstPersonNativeScale") != 0; }
+	void Note(int now, const char* why) {
+		if (state == now) return;
+		state = now;
+		Logger::Log("UNOFFICIAL FirstPersonNativeScale: %s: %s", now ? "ACTIVE" : "inactive", why);
+	}
+	void ReleaseLayer() {
+		if (layerSurface) { layerSurface->Release(); layerSurface = nullptr; }
+		if (msSurface) { msSurface->Release(); msSurface = nullptr; }
+		if (msDepth) { msDepth->Release(); msDepth = nullptr; }
+		msMade = msTried = 0;
+		if (layer) { layer->Release(); layer = nullptr; }
+		layerW = layerH = 0;
+	}
+	void Drop() { ready = false; }
+	void Quad(IDirect3DDevice9* device, float w, float h, float z) {
+		const FpVertex v[4] = {
+			{ -0.5f, -0.5f, z, 1.0f, 0.0f, 0.0f }, { w - 0.5f, -0.5f, z, 1.0f, 1.0f, 0.0f },
+			{ -0.5f, h - 0.5f, z, 1.0f, 0.0f, 1.0f }, { w - 0.5f, h - 0.5f, z, 1.0f, 1.0f, 1.0f } };
+		device->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, v, sizeof(FpVertex));
+	}
+	// The states both of our full-screen draws share (fixed function, no depth write, nothing the game left on).
+	void QuadStates(IDirect3DDevice9* device) {
+		device->SetVertexShader(nullptr);
+		device->SetPixelShader(nullptr);
+		device->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+		device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+		device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+		device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+		device->SetRenderState(D3DRS_CULLMODE, D3DCULL_NONE);
+		device->SetRenderState(D3DRS_FOGENABLE, FALSE);
+		device->SetRenderState(D3DRS_LIGHTING, FALSE);
+		device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+		device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+		device->SetRenderState(D3DRS_SEPARATEALPHABLENDENABLE, FALSE);
+		device->SetRenderState(D3DRS_CLIPPLANEENABLE, 0);
+		device->SetRenderState(D3DRS_DEPTHBIAS, 0);	// (the game leaves a bias on some passes: our depth compare must be exact)
+		device->SetRenderState(D3DRS_SLOPESCALEDEPTHBIAS, 0);
+		device->SetTextureStageState(1, D3DTSS_COLOROP, D3DTOP_DISABLE);
+		device->SetTextureStageState(1, D3DTSS_ALPHAOP, D3DTOP_DISABLE);
+	}
+	// From RenderFirstPersonHook, before its depth clear: true = this pass goes into the layer.
+	bool Begin() {
+		NvrFirstPersonNativeNow = false;
+		if (!Wanted()) return false;
+		TAAEffect* taa = TheShaderManager->Effects.TAA;
+		if (RtPathTrace::Replacing()) { Note(0, "path tracing replaces the picture; the first-person pass is drawn where it was"); return false; }
+		if (!taa || !taa->UpscalePending()) {
+			Note(0, "no upscale waits for this frame (RenderScale 1, FSR / DLSS off, or the frame is not drawn small)");
+			return false;
+		}
+		IDirect3DDevice9* device = TheRenderManager->device;
+		IDirect3DSurface9* target = nullptr;
+		D3DSURFACE_DESC desc = {};
+		if (FAILED(device->GetRenderTarget(0, &target)) || !target) return false;
+		if (FAILED(target->GetDesc(&desc)) || desc.MultiSampleType != D3DMULTISAMPLE_NONE) {
+			target->Release();
+			Note(0, "the scene target is multisampled or unreadable");
+			return false;
+		}
+		const D3DFORMAT format = (desc.Format == D3DFMT_A16B16G16R16F || desc.Format == D3DFMT_A8R8G8B8 || desc.Format == D3DFMT_A32B32G32R32F)
+			? desc.Format : D3DFMT_A16B16G16R16F;
+		if (!layer || layerW != desc.Width || layerH != desc.Height || layerFormat != format) {
+			ReleaseLayer();
+			if (FAILED(device->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET, format, D3DPOOL_DEFAULT, &layer, nullptr)) || !layer ||
+				FAILED(layer->GetSurfaceLevel(0, &layerSurface)) || !layerSurface) {
+				ReleaseLayer();
+				target->Release();
+				Note(0, "the full-size layer could not be made");
+				return false;
+			}
+			layerW = desc.Width; layerH = desc.Height; layerFormat = format;
+		}
+		int samples = TheSettingManager->GetSettingI("Main.Main.Quality", "FirstPersonNativeSamples");
+		samples = samples >= 8 ? 8 : samples >= 4 ? 4 : samples >= 2 ? 2 : 0;
+		if (samples != msTried) {
+			if (msSurface) { msSurface->Release(); msSurface = nullptr; }
+			if (msDepth) { msDepth->Release(); msDepth = nullptr; }
+			msTried = samples; msMade = 0;
+			if (samples) {
+				if (SUCCEEDED(device->CreateRenderTarget(layerW, layerH, layerFormat, (D3DMULTISAMPLE_TYPE)samples, 0, FALSE, &msSurface, nullptr)) && msSurface &&
+					SUCCEEDED(device->CreateDepthStencilSurface(layerW, layerH, D3DFMT_D24S8, (D3DMULTISAMPLE_TYPE)samples, 0, FALSE, &msDepth, nullptr)) && msDepth) msMade = samples;
+				else {
+					if (msSurface) { msSurface->Release(); msSurface = nullptr; }
+					if (msDepth) { msDepth->Release(); msDepth = nullptr; }
+				}
+				Logger::Log("UNOFFICIAL FirstPersonNativeScale: %d x multisampling of the layer %s", samples, msMade ? "in use" : "is not available here: hard edges");
+			}
+		}
+		device->GetViewport(&savedPort);
+		savedTarget = target;
+		if (passDepth) { passDepth->Release(); passDepth = nullptr; }
+		device->GetDepthStencilSurface(&passDepth);
+		// The scene's other render targets (the material and normal records) are in the small frame's layout: not written by this pass.
+		for (int i = 0; i < 3; i++) { heldExtra[i] = nullptr; device->GetRenderTarget(i + 1, &heldExtra[i]); device->SetRenderTarget(i + 1, nullptr); }
+		device->SetRenderTarget(0, msSurface ? msSurface : layerSurface);	// (also sets the viewport to the whole layer)
+		if (msSurface) device->SetDepthStencilSurface(msDepth);
+		device->Clear(0, nullptr, D3DCLEAR_TARGET | (msSurface ? D3DCLEAR_STENCIL : 0), 0x00000000, 1.0f, 0);	// (the hook's own depth clear follows, with the whole layer as its viewport)
+		NvrFirstPersonNativeNow = true;
+		ready = false;
+		Note(1, "the upscale waits for this frame: the first-person pass is drawn into a full-size layer and laid over the picture after the upscale");
+		return true;
+	}
+	// From RenderFirstPersonHook, after the game's pass: coverage into the layer's alpha, the scene target back.
+	void End() {
+		if (!NvrFirstPersonNativeNow) return;
+		NvrFirstPersonNativeNow = false;
+		IDirect3DDevice9* device = TheRenderManager->device;
+		IDirect3DSurface9* drawSurface = msSurface ? msSurface : layerSurface;
+		IDirect3DSurface9* drawDepth = msSurface ? msDepth : passDepth;
+		for (int i = 0; i < 3; i++) device->SetRenderTarget(i + 1, nullptr);	// (a hook inside the pass may have bound one again)
+		IDirect3DStateBlock9* block = nullptr;
+		if (SUCCEEDED(device->CreateStateBlock(D3DSBT_ALL, &block)) && block) {
+			device->SetRenderTarget(0, drawSurface);
+			if (drawDepth) device->SetDepthStencilSurface(drawDepth);
+			const D3DVIEWPORT9 whole = { 0, 0, layerW, layerH, 0.0f, 1.0f };
+			device->SetViewport(&whole);
+			QuadStates(device);
+			device->SetTexture(0, nullptr);
+			device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+			device->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_ALPHA);
+			device->SetRenderState(D3DRS_MULTISAMPLEANTIALIAS, TRUE);
+			device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+			device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TFACTOR);
+			device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+			device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TFACTOR);
+			// alpha 1 everywhere ...
+			device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+			device->SetRenderState(D3DRS_TEXTUREFACTOR, 0xFFFFFFFF);
+			Quad(device, (float)layerW, (float)layerH, 0.0f);
+			// ... and 0 where the depth buffer still holds its clear value (nothing of the pass was drawn there; per sample when
+			// multisampled). The game's depth is REVERSED here (cleared to 0, nearer is greater: found by test 2026-11-13); the other
+			// direction is tested too, so either works.
+			device->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE);
+			device->SetRenderState(D3DRS_TEXTUREFACTOR, 0x00000000);
+			device->SetRenderState(D3DRS_ZFUNC, D3DCMP_GREATEREQUAL);	// 0 >= stored: only where the buffer holds 0
+			Quad(device, (float)layerW, (float)layerH, 0.0f);
+			device->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);		// 1 <= stored: only where the buffer holds 1
+			Quad(device, (float)layerW, (float)layerH, 1.0f);
+			block->Apply();
+			block->Release();
+			ready = true;
+		}
+		// Multisampled: the samples' mean into the layer (colour: uncovered samples are black, so it comes out multiplied by the covered
+		// share, which is what the overlay's blend expects; alpha: the covered share).
+		if (msSurface && ready && FAILED(device->StretchRect(msSurface, nullptr, layerSurface, nullptr, D3DTEXF_NONE))) ready = false;
+		// The scene target and its depth buffer back. The small frame's effects must not find the arms' depth at the wrong size: the
+		// depth buffer is cleared (the renderer's own clear: it knows the depth's direction), so the viewmodel depth texture resolved
+		// after this is empty.
+		device->SetRenderTarget(0, savedTarget);	// (the viewport becomes the whole target)
+		device->SetDepthStencilSurface(passDepth);
+		TheRenderManager->Clear(nullptr, NiRenderer::kClear_ZBUFFER);
+		for (int i = 0; i < 3; i++) { device->SetRenderTarget(i + 1, heldExtra[i]); if (heldExtra[i]) { heldExtra[i]->Release(); heldExtra[i] = nullptr; } }
+		device->SetViewport(&savedPort);
+		if (passDepth) { passDepth->Release(); passDepth = nullptr; }
+		if (savedTarget) { savedTarget->Release(); savedTarget = nullptr; }
+	}
+	// UNOFFICIAL 2026-11-15 fpnative-fix (docs/next/FPNATIVE-SEETHROUGH.md): the small frame's Exposure pass darkens or lifts the picture
+	// before the layer is laid over it, so the arms missed it (a brighter gun than with the switch off). The composite gives the layer's
+	// colour the same exposure (Exposure.fx.hlsl ExposurePS, the classic mode; the layer's colour is un-multiplied by its coverage first and
+	// multiplied again after, so smooth edges get the same curve). Pixels with no coverage (an additive muzzle flash) take it as they are.
+	IDirect3DPixelShader9* exposurePS = nullptr;
+	bool exposureTried = false;
+	IDirect3DPixelShader9* ExposureShader(IDirect3DDevice9* device) {
+		if (exposureTried) return exposurePS;
+		exposureTried = true;
+		static const char* kPS =
+			"sampler2D Layer : register(s0);\n"
+			"sampler2D AvgLuma : register(s1);\n"
+			"float4 Data : register(c0);\n"	// x: TESR_ExposureData.x (pivot), y: .y (strength)
+			"float3 Lin(float3 c) { return (c <= 0.04045) ? c / 12.92 : pow(abs((c + 0.055) / 1.055), 2.4); }\n"
+			"float3 Delin(float3 c) { return (c <= 0.0031308) ? c * 12.92 : pow(abs(c), 1.0 / 2.4) * 1.055 - 0.055; }\n"
+			"float4 main(float2 uv : TEXCOORD0) : COLOR0 {\n"
+			"	float4 c = tex2D(Layer, uv);\n"
+			"	float average = max(tex2D(AvgLuma, float2(0.5, 0.5)).g, 1.0e-6);\n"
+			"	float pivot = max(Data.x, 1.0e-6);\n"
+			"	float factor = (max(log(average / pivot), 0.0) + 1.0) / (max(log(pivot / average), 0.0) + 1.0);\n"
+			"	float cover = c.a > 0.001 ? c.a : 1.0;\n"
+			"	float3 l = Lin(max(c.rgb / cover, 0.0));\n"
+			"	c.rgb = Delin(lerp(l, l / factor, Data.y)) * cover;\n"
+			"	return c;\n"
+			"}\n";
+		ID3DXBuffer* code = nullptr;
+		ID3DXBuffer* errors = nullptr;
+		const bool ok = SUCCEEDED(D3DXCompileShader(kPS, (UINT)strlen(kPS), NULL, NULL, "main", "ps_2_0", 0, &code, &errors, NULL)) && code &&
+			SUCCEEDED(device->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &exposurePS));
+		if (!ok) {
+			Logger::Log("UNOFFICIAL FirstPersonNativeScale: the layer's exposure shader did not compile (%s): the arms keep the picture's exposure out",
+				errors ? (const char*)errors->GetBufferPointer() : "no message");
+			exposurePS = nullptr;
+		}
+		if (code) code->Release();
+		if (errors) errors->Release();
+		return exposurePS;
+	}
+	// UNOFFICIAL 2026-11-15 fpnative-fix: the game's tonemap blends NVR's bloom buffer into every pixel (ISHDRBLENDINSHADERCIN: lerp(image,
+	// bloom, Blending), 0.04 by default), and that buffer was made in the small frame, which has no arms: over the gun it blended in the
+	// blurred world behind it (the sky), the "very slightly see-through" gun. It is made again here from the picture with the arms laid
+	// in, as a frame drawn at full size makes it (only in a frame whose chain made it; the small frame's copy is overwritten).
+	void BloomFromPicture(IDirect3DDevice9* device, IDirect3DSurface9* picture) {
+		BloomEffect* bloom = TheShaderManager->Effects.Bloom;
+		if (!bloom || !bloom->Enabled || bloom->BufferFrame != TheFrameRateManager->FrameNumber || bloom->Constants.ExtraData.x == 0.0f) return;
+		IDirect3DTexture9* pictureTexture = nullptr;
+		if (FAILED(picture->GetContainer(IID_IDirect3DTexture9, (void**)&pictureTexture)) || !pictureTexture) return;
+		IDirect3DStateBlock9* block = nullptr;
+		if (SUCCEEDED(device->CreateStateBlock(D3DSBT_ALL, &block)) && block) {
+			// The states the effect chain draws with (PreStep_FrameQuad and the image-space hook's preTonemapStates).
+			device->SetFVF(FrameFVF);
+			device->SetStreamSource(0, TheShaderManager->FrameVertex, 0, sizeof(FrameVS));
+			device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+			device->SetRenderState(D3DRS_ZWRITEENABLE, FALSE);
+			device->SetRenderState(D3DRS_STENCILENABLE, FALSE);
+			device->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE);
+			device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+			device->SetRenderState(D3DRS_COLORWRITEENABLE, 15);
+			device->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE);
+			device->SetRenderState(D3DRS_SRGBWRITEENABLE, FALSE);
+			// The first downsample reads TESR_RenderedBuffer, which follows TheTextureManager->RenderedTexture (as the frame chain swaps it).
+			IDirect3DTexture9* savedRendered = TheTextureManager->RenderedTexture;
+			TheTextureManager->RenderedTexture = pictureTexture;
+			bloom->RenderBloomBuffer(picture);
+			TheTextureManager->RenderedTexture = savedRendered;
+			block->Apply();
+			block->Release();
+			// The renderer's record of the bound textures follows the device again (the effect noted its own).
+			for (DWORD stage = 0; stage < 16; stage++) {
+				IDirect3DBaseTexture9* bound = nullptr;
+				device->GetTexture(stage, &bound);
+				TheRenderManager->renderState->NoteDeviceTexture(stage, bound);
+				if (bound) bound->Release();
+			}
+		}
+		pictureTexture->Release();
+	}
+	// From FlushRenderScale, right after UpscaleAfterEffects: picture is the surface the upscaled frame is in.
+	void Flush(IDirect3DSurface9* picture) {
+		if (!ready) return;
+		ready = false;
+		D3DSURFACE_DESC desc = {};
+		if (!picture || !layer || FAILED(picture->GetDesc(&desc)) || desc.Width != layerW || desc.Height != layerH) return;
+		// test only: 1 no overlay, 2 the layer's alpha as grey, 3 the layer alone, 4 the overlay without the 2026-11-15 exposure and bloom fixes
+		const int debug = TheSettingManager->GetSettingI("Main.Main.Quality", "FirstPersonNativeDebug");
+		if (debug == 1) return;
+		IDirect3DDevice9* device = TheRenderManager->device;
+		// The layer gets the small frame's exposure when its pass drew this frame (the classic mode; GT7 adaptation, Mode 1: not yet).
+		ExposureEffect* exposure = TheShaderManager->Effects.Exposure;
+		AvgLumaEffect* avgLuma = TheShaderManager->Effects.AvgLuma;
+		IDirect3DPixelShader9* exposed = (debug == 0 && exposure && exposure->DrawnFrame == TheFrameRateManager->FrameNumber && !exposure->GT7Mode() &&
+			avgLuma && avgLuma->Textures.AvgLumaTexture) ? ExposureShader(device) : nullptr;
+		IDirect3DSurface9* targets[4] = {};
+		D3DVIEWPORT9 port = {};
+		device->GetViewport(&port);
+		for (int i = 0; i < 4; i++) device->GetRenderTarget(i, &targets[i]);
+		IDirect3DStateBlock9* block = nullptr;
+		if (SUCCEEDED(device->CreateStateBlock(D3DSBT_ALL, &block)) && block) {
+			device->SetRenderTarget(0, picture);
+			for (int i = 1; i < 4; i++) device->SetRenderTarget(i, nullptr);
+			QuadStates(device);
+			device->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE);
+			device->SetRenderState(D3DRS_COLORWRITEENABLE, D3DCOLORWRITEENABLE_RED | D3DCOLORWRITEENABLE_GREEN | D3DCOLORWRITEENABLE_BLUE);
+			device->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+			device->SetRenderState(D3DRS_BLENDOP, D3DBLENDOP_ADD);
+			// layer colour + (1 - coverage) x picture: the layer's colour is already multiplied by its coverage (black where nothing was
+			// drawn), so smooth edges come out right and additive first-person draws that write no depth (a muzzle flash) still add.
+			device->SetRenderState(D3DRS_SRCBLEND, D3DBLEND_ONE);
+			device->SetRenderState(D3DRS_DESTBLEND, D3DBLEND_INVSRCALPHA);
+			device->SetTexture(0, layer);
+			device->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+			device->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+			device->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+			device->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+			device->SetSamplerState(0, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+			device->SetSamplerState(0, D3DSAMP_SRGBTEXTURE, FALSE);
+			device->SetTextureStageState(0, D3DTSS_COLOROP, D3DTOP_SELECTARG1);
+			device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE);
+			device->SetTextureStageState(0, D3DTSS_ALPHAOP, D3DTOP_SELECTARG1);
+			device->SetTextureStageState(0, D3DTSS_ALPHAARG1, D3DTA_TEXTURE);
+			device->SetTextureStageState(0, D3DTSS_TEXCOORDINDEX, 0);
+			device->SetTextureStageState(0, D3DTSS_TEXTURETRANSFORMFLAGS, D3DTTFF_DISABLE);
+			if (debug == 2) { device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE); device->SetTextureStageState(0, D3DTSS_COLORARG1, D3DTA_TEXTURE | D3DTA_ALPHAREPLICATE); }
+			if (debug == 3) device->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+			if (exposed) {
+				const float data[4] = { exposure->Constants.Data.x, exposure->Constants.Data.y, 0.0f, 0.0f };
+				device->SetPixelShader(exposed);
+				device->SetPixelShaderConstantF(0, data, 1);
+				device->SetTexture(1, avgLuma->Textures.AvgLumaTexture);
+				device->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_POINT);
+				device->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+				device->SetSamplerState(1, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+				device->SetSamplerState(1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+				device->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+				device->SetSamplerState(1, D3DSAMP_SRGBTEXTURE, FALSE);
+			}
+			Quad(device, (float)layerW, (float)layerH, 0.0f);
+			block->Apply();
+			block->Release();
+			if (debug == 0) BloomFromPicture(device, picture);
+		}
+		for (int i = 0; i < 4; i++) { device->SetRenderTarget(i, targets[i]); if (targets[i]) targets[i]->Release(); }
+		device->SetViewport(&port);
+	}
+}
+
 static void ResolveViewModelDepth() {
 	TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
 }
@@ -4006,6 +5067,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 	WorldRenderedThisFrame = true;
 	if (!FrameWorldArgsKnown) { FrameWorldArgsKnown = true; FrameWorldArgs[0] = IsFirstPerson; FrameWorldArgs[1] = WireFrame; FrameWorldArgs[2] = Arg4; }
 	FrameWorldCalls++;
+	if (FrameWorldCalls == 1) FirstPersonNative::Drop();	// UNOFFICIAL 2026-11-13 FirstPersonNativeScale: a held pass nothing flushed
 	// UNOFFICIAL TAA (off by default): the sub-pixel jitter covers the world scene and nothing else -- see
 	// TAAEffect::BeginJitter. A no-op unless TAA resolves this frame.
 	TAAEffect* TAA = TheShaderManager->Effects.TAA;
@@ -4028,6 +5090,7 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 		GpuProfileScope gpu(worldTimer, TheRenderManager->device);
 		ShaderSplit::BeginContext(ShaderSplit::World);
 		HiddenObjectCulling::BeginWorld();
+		Diagnostics::WorldTargetNote(TheRenderManager->device);	// UNOFFICIAL 2026-11-11: SESSION world target line (once, and when it changes)
 		GunFXSwitches::Update();
 		HandBlood::Update();	// UNOFFICIAL: blood on the first-person weapon and gloves (once a frame)
 		BarrelHaze::Reset();
@@ -4036,14 +5099,17 @@ void __fastcall RenderWorldSceneGraphHook(Main* This, UInt32 edx, Sun* SkySun, U
 		// UNOFFICIAL the skin blur: its targets are bound only for skin drawn inside the world scene.
 		if (TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->InWorldScene = true;
 		SandstormGlass::BeginWorld();	// UNOFFICIAL sandport: ThroughBlended (RenderBlendedHook)
+		WaterMaskDraw::BeginWorld(FrameWorldCalls == 1);	// UNOFFICIAL 2026-11-12 PTWaterMask: this scene's water draws into the path tracer's mask (nothing unless it asked)
 		// UNOFFICIAL 2026-10-20 MaterialAware reflections (core/ReflMaterial.h): blended passes keep off the scene's alpha.
 		ReflMaterial::BeginWorld(TheRenderManager->renderState, TheRenderManager->device, ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0);
 		// UNOFFICIAL 2026-11-03 SmoothCutouts (core/AlphaHash.h): alpha-tested objects hashed while TAA / FSR / DLSS jitter this scene.
-		AlphaHash::BeginWorld(TheRenderManager->device, FrameWorldCalls == 1, TAA && TAA->IsJitterActive());
+		UINT ahW = 0, ahH = 0; D3DXVECTOR2 ahJitter(0.0f, 0.0f);	// (2026-11-16 HashStyle auto: an upscaler resolves this scene)
+		AlphaHash::BeginWorld(TheRenderManager->device, FrameWorldCalls == 1, TAA && TAA->IsJitterActive(), TAA ? TAA->WorldMipBias() : 0.0f, TAAEffect::WorldDrawnSmall(ahW, ahH, ahJitter));	// (2026-11-16 FarCoverage: + the mip bias)
 		RenderWorldSceneGraph(This, SkySun, IsFirstPerson, WireFrame, Arg4);
 		AlphaHash::EndWorld(TheRenderManager->device);
 		ReflMaterial::EndWorld(TheRenderManager->renderState, TheRenderManager->device);
 		SandstormGlass::EndWorld();
+		WaterMaskDraw::EndWorld();	// UNOFFICIAL 2026-11-12 PTWaterMask
 		PassSums::EndWorld(TheRenderManager->device);	// UNOFFICIAL ExactPassSums: a run still open at the world's end is folded in here
 		// UNOFFICIAL the skin blur: the SkinShader hooks unbind the targets after every skin draw; this only guarantees
 		// nothing after the world scene ever draws into it.
@@ -4099,6 +5165,8 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	static GpuTimer firstPersonTimer("First person (game)");
 	GpuProfileScope gpu(firstPersonTimer, TheRenderManager->device);
 	FrameFirstPersonCalls++;
+	// UNOFFICIAL 2026-11-13 FirstPersonNativeScale: into its own full-size layer, laid over the picture after the upscale (FirstPersonNative)
+	const bool nativeLayer = FirstPersonNative::Begin();
 	TheRenderManager->Clear(nullptr, NiRenderer::kClear_ZBUFFER);
 	//ThisCall(0x00874C10, Global);
 	ShaderSplit::BeginContext(ShaderSplit::FirstPerson);
@@ -4136,15 +5204,19 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	WeaponMask::Begin(TheRenderManager->device);
 	// UNOFFICIAL 2026-11-07 (ptaaa-firstperson) PTViewModel: the model's colour, normals and material into the G-buffer, for the path
 	// tracer to light it (core/CapturedNormals.h BeginViewModelSpan; nothing unless the path tracer asked for it this frame)
+	// UNOFFICIAL 2026-11-15 DeferredFirstPerson (core/DeferredFirstPerson.h; off: nothing): the same span for the deferred renderer's view model
+	DeferredFirstPerson::Begin(TheRenderManager->device, This->camera, viewModelShadows, nativeLayer);	// (fd-batch8: forward while FirstPersonNativeScale's layer takes the pass)
 	CapturedNormals::BeginViewModelSpan(TheRenderManager->device);
+	DeferredFirstPerson::SpanOpened(TheRenderManager->device);
 	// UNOFFICIAL 2026-11-07 perf-mirrorfix: the arms and gun write their own alpha over the world's materials (core/ReflMaterial.h)
 	ReflMaterial::BeginFirstPerson(TheRenderManager->renderState, TheRenderManager->device, ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0);
 	RenderFirstPerson(This, Renderer, Geo, SkySun, RenderedTexture);
 	ReflMaterial::EndFirstPerson(TheRenderManager->renderState, TheRenderManager->device);
 	CapturedNormals::EndViewModelSpan(TheRenderManager->device, TheFrameRateManager->FrameNumber);
+	DeferredFirstPerson::End(TheRenderManager->device);	// UNOFFICIAL 2026-11-15: the gear's weather and the light passes on the view model (before its sun map's constants go back)
 	PbrPop::ActorPasses::FirstPersonNow = 0;
 	WeaponMask::End(TheRenderManager->device, TheFrameRateManager->FrameNumber);	// UNOFFICIAL 2026-11-09: the stencil's tags into TESR_WeaponMask (core/WeaponMask.h)
-	SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-04: the weapon out of the sky share (core/SkyCoverage.h)
+	if (!nativeLayer) SkyCoverage::DrawViewModel(TheRenderManager->device);	// UNOFFICIAL 2026-11-04: the weapon out of the sky share (core/SkyCoverage.h)	// (2026-11-13: not in the small frame with FirstPersonNativeScale)
 	if (viewModelShadows) {
 		// The map holds the viewmodel now, not what the world's draws read: nothing later this frame reads it (w 0).
 		shadows->Constants.CharacterCameraToLight = savedCharacterCameraToLight;
@@ -4156,6 +5228,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	if (pbr) pbr->EndFirstPerson(TheRenderManager->device);
 	BarrelHeat::EndContext();
 	ShaderSplit::EndContext();
+	FirstPersonNative::End();	// UNOFFICIAL 2026-11-13 FirstPersonNativeScale: coverage into the layer's alpha, the scene target back, depth cleared
 	ResolveViewModelDepth();
 	ViewModelDepthClearedFrames = 0;	// UNOFFICIAL: the next third-person frame resolves the cleared buffer again
 }
@@ -4164,6 +5237,12 @@ using RenderReflectionsMethod = void(__thiscall*)(WaterManager*, NiCamera*, Shad
 RenderReflectionsMethod RenderReflections = reinterpret_cast<RenderReflectionsMethod>(Hooks::RenderReflections);
 void __fastcall RenderReflectionsHook(WaterManager* This, UInt32 edx, NiCamera* Camera, ShadowSceneNode* SceneNode) {
 	SessionLog::StageScope stage("the water reflection");
+	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Water: the game's reflection renders in a frame a scope's picture was drawn for, and
+	// whether any is for the picture's camera (the Scope WATER log line). The picture is drawn just before the frame number advances.
+	if (ScopeCamera::ScenesDrawn && ScopeCamera::FrameNumber() - ScopeCamera::LastSceneFrame == 1) {
+		ScopeCamera::ReflectionCalls++;
+		if ((const void*)Camera == ScopeCamera::LastCamera) ScopeCamera::ReflectionCallsExtra++;
+	}
 	ReflectionProbe::HookCamera = Camera;
 	// UNOFFICIAL 2026-10-31 RT water ([Shaders.Reflections.RT] WaterSkipPlanar): the water shaders read the RT reflection this frame,
 	// not the planar map, so the planar pass is not drawn (ReflectionsEffect::UpdateWaterConstants decides, once a frame).
@@ -4274,7 +5353,9 @@ static void FlushRenderScale(BSRenderedTexture* SourceTarget, IDirect3DSurface9*
 	if (!taa || !taa->UpscalePending()) return;
 	IDirect3DSurface9* own = nullptr;
 	if (!Surface && SourceTarget && SourceTarget->GetD3DTexture(0)) SourceTarget->GetD3DTexture(0)->GetSurfaceLevel(0, &own);
-	taa->UpscaleAfterEffects(Surface ? Surface : own);
+	IDirect3DSurface9* picture = Surface ? Surface : own;
+	taa->UpscaleAfterEffects(picture);
+	FirstPersonNative::Flush(picture);	// UNOFFICIAL 2026-11-13 FirstPersonNativeScale: the held pass, at the screen's size over the upscaled picture
 	if (own) own->Release();
 }
 
@@ -4364,6 +5445,11 @@ void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTex
 #if NVR_TEST_TOOLS
 	EffectSelfTest::BeginFrame();	// UNOFFICIAL, diagnostic: NeonSpillSelfTest (sets its configuration after the settings are read)
 	SettingShots::BeginFrame();		// UNOFFICIAL, test only: the auto-test's A/B shots (SettingShots.h)
+	ParityTest::BeginFrame();		// UNOFFICIAL 2026-11-14, test only: the parity self-test (ParityTest.h; after the shots, which may start it)
+	if (ParityTest::CaptureNow && SourceTarget) {	// its 'world' point: the scene target before any effect (as the 'world' shots below)
+		IDirect3DSurface9* scene = nullptr;
+		if (SUCCEEDED(SourceTarget->GetD3DTexture(0)->GetSurfaceLevel(0, &scene)) && scene) { ParityTest::Capture(ParityTest::World, scene); scene->Release(); }
+	}
 	if (SettingShots::WorldCapture && SourceTarget) {	// UNOFFICIAL, test only: 'world' shots, the game's scene buffer before NVR's effects
 		IDirect3DSurface9* scene = nullptr;
 		if (SUCCEEDED(SourceTarget->GetD3DTexture(0)->GetSurfaceLevel(0, &scene)) && scene) { SettingShots::CaptureWorld(device, scene); scene->Release(); }
@@ -4424,6 +5510,7 @@ void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTex
 #if NVR_TEST_TOOLS
 		EffectSelfTest::Capture(EffectSelfTest::Final, outputSurface);	// UNOFFICIAL, diagnostic
 		SettingShots::Land::OnPicture(device, outputSurface);	// UNOFFICIAL 2026-10-30, test only: 'landflicker' (before Capture, which may end the shot)
+		ParityTest::Capture(ParityTest::Final, outputSurface);	// UNOFFICIAL 2026-11-14, test only: the parity self-test's 'final' point
 		SettingShots::Capture(outputSurface);	// UNOFFICIAL, test only
 #endif
 		ReShadeIntegration::RenderEffects(outputSurface);	// UNOFFICIAL: with ReShade loaded, its effects here (before the HUD) on NVR's depth

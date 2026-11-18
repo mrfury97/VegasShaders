@@ -174,6 +174,10 @@ read by UpdateSettings, live; a missing key takes the default):
 | LampHazeAnisotropy | 0-0.9 | 0.3 | Henyey-Greenstein g of the lamps' light in the haze (x 4 pi, capped at 8): brighter looking toward a lamp. |
 | LampHazeCore | 0.05-1 | 0.25 | The glow's bright core e as a share of the lamp's reach (as [Shaders.PBR.LampFalloff] Falloff). |
 | LampHazeMaxLamps | 0-16 | 8 | At most this many lamps, nearest sphere first. 0 = off. |
+| LampHazeShadows | bool | false | UNOFFICIAL 2026-11-12: each lamp's light in the air times its traced visibility along the view (6, LampHazeShadows). Needs the ray tracing core running for another RT effect; otherwise, and off, the haze is unshadowed as before. |
+| LampHazeShadowCell | 4-32 | 8 | One traced cell per this many screen pixels each way. Read at the RT helper's start. |
+| LampHazeShadowSamples | 1-8 | 4 | Points along each view per lamp, one ray to the lamp each (+ one ray per cell and lamp to find the surface). Live. |
+| LampHazeShadowTemporal | 0-0.95 | 0.8 | Last frame's weight at 60 fps (at most 0.5 while the camera moves). Live. |
 
 ### 4d. Other keys
 
@@ -296,9 +300,34 @@ the centre about a fifth of that. Passes: the estimates (DedicatedFog, Composite
 techniques, and DedicatedFogCombine's per-pixel fallback. NOT in the per-pixel fallback of the CompositeFog and CompositeFogInterior
 reconstructs (both went over the 224 constant registers with it): those rare edge pixels keep the fog without the lamps' light (a lamp's
 own silhouette may show a one-pixel rim with less glow). ClassicLook and LegacyFog never have it (their techniques compile to exactly the
-same bytecode as before). No shadows: a lamp's sphere that reaches through a wall glows on the other side too; the lamp cube maps would need
-a per-point cube read per lamp (two free samplers, s15 left) and are a follow-up. Big invisible fill lights (FillLightRadius) glow like any
+same bytecode as before). No shadows by itself: a lamp's sphere that reaches through a wall glows on the other side too, unless LampHazeShadows
+(below, 2026-11-12, traced) is on; the lamp cube maps would need a march and a cube read per step and lamp, and no sampler is left for them. Big invisible fill lights (FillLightRadius) glow like any
 lamp. Not taken: TESR_ExtraLights (no colour), ManyLamps' game lamp table, spot lights (the flashlight).
+
+**LampHazeShadows (UNOFFICIAL 2026-11-12, indoors, off by default).** The lamp term above has no march, so a shadow cannot be read per step:
+instead the RT core traces ONE number per lamp and screen cell, the share of the lamp's light along that view that reaches the air, weighed
+exactly as J weighs it, and the shader multiplies the lamp's J x P by it. Parts: `core/RtFogVisibility.cpp` (namespace RtFogLamps: a second
+rider of the RT core, registered by RtFogVisibility::Register, Order 3, indoors only, only while another RT effect keeps the helper running),
+`core/RtFogLampGrid.h` (the pass constants, the tile layout, the lamps' slots; plain C++, shared with the RT host), `Compute/Rt/RtFogLamps.comp`
+(the trace). Per frame: SetLampHaze hands the frame's lamps (world position, reach) to RtFogLamps::Submit; at the NEXT frame's RT point the
+rider puts them in slots (a lamp keeps its slot, so its tile's history), traces, and copies the result out into its own R16F texture, 4 x 4
+tiles of ceil(width / Cell) x ceil(height / Cell), tile (slot mod 4, slot / 4); SetLampHaze then writes each lamp's code into the lamp table's
+row 1 alpha (0 = no trace in the last 8 frames: unshadowed, the shader's branch is not taken; tile + 1 + 32 x Cell; -1 = the trace does not
+hold this lamp yet: no light in the air for that frame) and Render binds the tiles on stage 11, read through NVR_FogGrid's sampler (linear,
+clamp; the volumetric light's grid is outdoors only, and stage 15, the last one, is the sky shares'). No new constant register: the cell
+size rides in the code, the half-cell clamp inside a tile uses TESR_ReciprocalResolution.
+The trace, per lamp and cell: the view clipped to the lamp's sphere and to the first solid surface (one camera ray, mask 0x8B: land, objects,
+lamp models, far LOD; people, the hidden first-person body and cut-outs never end it); Samples points spread evenly in phi (the density of
+the glow's main term), each weighing 1 - w (d^2 + e^2) / e^2 (f over that density) and casting one ray to the lamp under the RT lamp
+shadows' rules ([Shaders.ShadowsInteriors.RT] LampStop, SkipLampModels with [Shaders.ShadowsInteriors.Forward] LampModelDistance,
+SkipLampGlass, alpha-tested casters by their texture, decals and glass never block, the hidden body passed over near the eye). History: last
+frame's value of the same texel (a whole view's number, nothing to reproject), weight Temporal standing still, at most 0.5 moving, none for
+a slot that changed its lamp or after a frame without a trace. Cost: lamps x cells their spheres cover x (Samples + 1) short rays a frame
+(1080p, Cell 8: 32 400 cells a tile, so one lamp filling the screen is 162 000 rays, eight of them 1.3 million); in the fog one more point
+read per lamp whose sphere the view passes through. Not measured in game. Limits: the value is one per 8 x 8 pixels and per whole view, so
+a thin foreground object (a pillar in front of a lit room) takes its neighbours' value over a few pixels; the traced lamps are last
+frame's (a lamp new to the list has no light in the air for one frame); the phase and the fog's own extinction are not re-weighed by
+the visibility (they are smooth along the view). The Vulkan and SM6 fog passes still stand down while LampHaze is on.
 
 **PackedFog.** Pass 1 at half size into the target's top-left quarter: (add, luma(mul)). Pass 2: the four half texels' coefficients, their
 depths found again (nearest of their 2 x 2), the same weights and own-fog fallback; the multiply is grey in this path.
@@ -387,6 +416,8 @@ about 120 and two reads for one it passes through (two atan, two sincos, two exp
   the wave-3 SunShadows rewrite); every other shader and variant, the fog's included, compiles and validates.
 - The loader for `[_Shaders.VolumetricFog.Status] Enabled` was not traced (unchanged).
 
+## Idle targets (2026-11-12)
+With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the texture manager keeps 1 x 1 stand-ins in place of this effect's render targets while it is off (not made at start-up when it starts off; released that many seconds after it is switched off; made again, zero filled, before the frame draws when it is switched on). Which targets and why that is safe here: the two fog buffers are used only from Render (RenderDedicated), behind the switch. A new reader or writer of these targets outside the effect's own switch, or a copy of their pointers kept past a frame, breaks this: then answer false in `TargetParkable` (the header). See `core/TextureManager.h`.
 
 ## FoggyWeatherImpact (UNOFFICIAL 2026-11-13, modern lighting)
 

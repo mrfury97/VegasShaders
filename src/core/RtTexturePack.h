@@ -51,16 +51,22 @@ namespace RtTexturePack {
 	// where a 32-bit process cannot read that (DXGI's SIZE_T), the local budget divided by 0.92 (Windows gives a process ~90-95 % of the
 	// card): the tiers' bounds sit half a GB to a GB under the card sizes so a 16 / 12 / 8 GB card lands in its tier either way.
 	struct Caps { uint32_t maxSize; uint32_t budgetMB; const char* tier; };
-	inline Caps AutoCaps(uint64_t memory) {
+	// UNOFFICIAL 2026-11-13 (fork port, RT audit) lower: the lower budget tiers of [Main.Main.RayTracing] VramWatch (2560 / 2048 / 1024 / 512 MB;
+	// the helper's copies share the GPU with the game's own textures: a heavily modded game had 11.6 of 12.1 GB local in use with 3.7 GB of
+	// copies). The max sizes stay. false: the old tiers.
+	inline Caps AutoCaps(uint64_t memory, bool lower = false) {
 		const uint64_t GB = 1ull << 30;
 		if (!memory) return { 1024u, 1536u, "unknown video memory: the 8 GB tier" };
-		// UNOFFICIAL 2026-11-13 (rt-tex-release) the budgets halved-ish: the helper's copies share the GPU with the game's own textures (a heavily
-		// modded game: 11.6 of 12.1 GB local in use with 3.7 GB of copies, 1 % lows of 1-9 fps). With the game-dropped sweep the working set is the
-		// loaded cells' textures (Mojave peaked at 1.4 GB), so 2.5 GB at 16 GB+ still holds it; the old values were 4096 / 3072 / 1536 / 768.
-		if (memory >= 15 * GB) return { 2048u, 2560u, "16 GB+" };
-		if (memory >= 11 * GB) return { 2048u, 2048u, "12 GB+" };
-		if (memory >= 7 * GB) return { 1024u, 1024u, "8 GB+" };
-		return { 512u, 512u, "under 8 GB" };
+		if (lower) {
+			if (memory >= 15 * GB) return { 2048u, 2560u, "16 GB+" };
+			if (memory >= 11 * GB) return { 2048u, 2048u, "12 GB+" };
+			if (memory >= 7 * GB) return { 1024u, 1024u, "8 GB+" };
+			return { 512u, 512u, "under 8 GB" };
+		}
+		if (memory >= 15 * GB) return { 2048u, 4096u, "16 GB+" };
+		if (memory >= 11 * GB) return { 2048u, 3072u, "12 GB+" };
+		if (memory >= 7 * GB) return { 1024u, 1536u, "8 GB+" };
+		return { 512u, 768u, "under 8 GB" };
 	}
 
 	// What goes for one texture
@@ -150,6 +156,10 @@ namespace RtTexturePack {
 		// (merged with rtgap-tessblas) a pinned id is never a victim (the displacement's height textures: the helper's displaced copies
 		// keep their ids); it still counts in the budget. Freeing it unpins it.
 		void Pin(uint32_t id) { if (Live(id)) pinned[id] = 1; }
+		// UNOFFICIAL 2026-11-12 (memleak, DisplaceTextureRelease): the last displaced copy that read it is gone: an ordinary texture again,
+		// used `now` (so it has the usual idle time before the budget or RealTextureKeepFrames may take it)
+		void Unpin(uint32_t id, uint64_t now) { if (Live(id)) { pinned[id] = 0; lastUse[id] = now; } }
+		uint32_t PinnedCount() const { uint32_t n = 0; for (size_t id = 1; id < live.size(); id++) n += live[id] && pinned[id]; return n; }
 		bool Pinned(uint32_t id) const { return Live(id) && pinned[id]; }
 		uint32_t Alloc(uint64_t now) {
 			for (size_t i = 0; i < freed.size(); i++)
@@ -181,6 +191,15 @@ namespace RtTexturePack {
 			}
 			if (alive - freedBytes + need > budget) { victims.clear(); return false; }
 			return true;
+		}
+		// UNOFFICIAL 2026-11-12 (a tester: "the budget only grows"): the ids not used for `stale` exchanges, oldest first, at most `most`:
+		// released by age, whether or not the budget is full (a texture the game dropped long ago should not sit in video memory until
+		// something else needs its room). Pinned ids never.
+		void PickStale(uint64_t now, uint64_t stale, uint32_t most, std::vector<uint32_t>& out) const {
+			out.clear();
+			for (uint32_t id = 1; id < bytes.size(); id++) if (live[id] && !pinned[id] && lastUse[id] + stale <= now) out.push_back(id);
+			std::sort(out.begin(), out.end(), [&](uint32_t a, uint32_t b) { return lastUse[a] != lastUse[b] ? lastUse[a] < lastUse[b] : a < b; });
+			if (out.size() > most) out.resize(most);
 		}
 		uint64_t alive = 0;		// bytes of the live ids
 		uint32_t count = 0;		// live ids

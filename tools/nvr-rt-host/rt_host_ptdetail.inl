@@ -13,7 +13,11 @@ static bool loadFragRaw(Host& h, const char* name, UINT images, UINT push, UINT 
 	fclose(f);
 	NVR_EXT_BINDING_DESC bindings[12] = {};	// (2026-11-07 ptaaa-denoiser: 12, the show pass has 10 images)
 	for (UINT i = 0; i < images; i++) bindings[i] = { 1, i, NVR_EXT_BIND_SAMPLED_IMAGE, i, NVR_EXT_VIEW_2D, FALSE, 0 };
-	bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, push == 48 && targets == 1 ? 4u : push - 16 };
+	// (2026-11-12 ptbump FIX) the sampler index's place in the push block: the show pass's is at byte 4 (RtPathTrace.cpp ShowPipeline), the
+	// a-trous pass's at 32. The show pass was told apart by its 48-byte block; since PTDetailEdge made it 52 (2026-11-10) the index was
+	// written at byte 36, over PTDetailRadius: the taps fell on the pixel itself, no detail came through, and this scene failed ever since
+	// (the game's own pipeline was right all along).
+	bindings[images] = { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, targets == 1 ? 4u : push - 16 };
 	NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 	desc.pFragmentSpirv = spirv.data(); desc.FragmentSpirvSize = UINT(spirv.size());
 	desc.BindingCount = images + 1; desc.pBindings = bindings; desc.PushConstantSize = push;
@@ -74,6 +78,29 @@ static bool scenePtDetail(Ctx& c) {
 			}
 			const bool pass = worst < 0.01;
 			say("  PTDetail %d: the traced light %s the game's fine shading (%d pixels, worst off by %.4f) -> %s\n", on, on ? "takes" : "keeps without", n, worst, pass ? "ok" : "BAD");
+			if (!pass) ok = false;
+		}
+		// (2026-11-12 ptbump, PTBumpNormals) the raw trace's alpha says where the first hit's light already holds its bumps: 2 + the
+		// share of the detail kept there (PTBumpDetail): 2 none, 2.5 half, 3 all of it (the traced light flat here: nothing to divide out).
+		// Step 3: the traced light ALREADY has the same ripple (a bump the denoiser kept): with alpha 3 the game's ripple is not put on
+		// it a second time (the output = the traced ripple, once: 0.5 x (1 + 0.4 sin)).
+		for (int step = 0; step < 4; step++) {
+			const float rawA = step == 0 ? 2.0f : step == 1 ? 2.5f : 3.0f, keep = step == 3 ? 1.0f : rawA - 2.0f;
+			for (UINT q = 0; q < S * S; q++) r[q * 4 + 3] = rawA;
+			if (step == 3) for (UINT j = 0; j < S; j++) for (UINT i = 0; i < S; i++) for (int ch = 0; ch < 3; ch++) t[(size_t(j) * S + i) * 4 + ch] = 1.0f + 0.4f * std::sin(2.0f * pi * (i + 0.5f) / 8.0f);
+			if (!fillTex(raw, r, 4) || (step == 3 && !fillTex(traced, t, 4))) return false;
+			push.detail = 1.0f;
+			if (!drawRaw(h, show, out.s, nullptr, imgs, &push)) return false;
+			std::vector<float> got;
+			if (!readTex(h, out, got, 4)) return false;
+			double worst = 0;
+			for (UINT j = 4; j < S - 4; j++) for (UINT i = 8; i < 88; i++) {
+				const float want = 0.5f * (1.0f + keep * 0.4f * std::sin(2.0f * pi * (i + 0.5f) / 8.0f));
+				worst = std::max(worst, (double)std::fabs(std::pow(std::max(got[(size_t(j) * S + i) * 4], 0.0f), 2.2f) - want));
+			}
+			const bool pass = worst < 0.01;
+			say("  PTDetail on a pixel the trace lit with its bumped normal (the raw trace's alpha %.1f%s): %.0f %% of the game's fine shading%s (worst off by %.4f) -> %s\n", rawA,
+				step == 3 ? ", the traced light holding the ripple itself" : "", 100.0f * keep, step == 3 ? ", counted once" : "", worst, pass ? "ok" : "BAD");
 			if (!pass) ok = false;
 		}
 		for (Tex* x : { &traced, &albedo, &raw, &viewModel, &frame, &depth, &out }) { if (x->sys) x->sys->Release(); x->s->Release(); x->t->Release(); }

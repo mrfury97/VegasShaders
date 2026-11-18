@@ -150,7 +150,8 @@ void TAAEffect::UpdateSettings() {
 		rr.Wanted = rrKey;
 		rr.KeepDenoisers = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRKeepDenoisers") != 0;
 		rr.Preset = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "Preset"), 0, 3);
-		rr.RrPreset = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRPreset"), 0, 2);
+		// UNOFFICIAL 2026-11-15 (docs/next/DLSS-RR-MODEL.md) 3 = the newer model (preset F), 4 = auto by GPU generation (the helper decides)
+		rr.RrPreset = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRPreset"), 0, 4);
 		RRSettings.Normals = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRNormals"), 0, 1);
 		rr.NormalsView = RRSettings.Normals == 1;
 		rr.DepthLinear = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRDepthLinear") != 0;
@@ -158,6 +159,8 @@ void TAAEffect::UpdateSettings() {
 		RRSettings.Albedo = std::clamp(TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRAlbedo"), 0, 2);	// 2: UNOFFICIAL 2026-10-31 the albedo buffer
 		SettingManager::Configuration::ConfigNode node;
 		RRSettings.Roughness = TheSettingManager->Config.FillNode(&node, "Shaders.TAA.DLSS", "RRRoughness") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.6f;
+		// UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md) test only, live: PSR motion at flat path-traced mirrors (a missing key: off)
+		RRSettings.MirrorMotion = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "RRMirrorMotion") && node.BoolValue;
 	}
 }
 

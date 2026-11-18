@@ -12,6 +12,12 @@ layout(set = 1, binding = 3) uniform texture2D t_historyB;   // last frame's out
 layout(set = 1, binding = 4) uniform texture2D t_motion;     // UNOFFICIAL 2026-10-31 DenoiseBackbone: as RtDenoiseTemporal.frag
 layout(set = 1, binding = 5) uniform texture2D t_backbone;
 layout(set = 1, binding = 6) uniform texture2D t_captured;   // (2026-11-07) TESR_CapturedNormalsBuffer (a stand-in when peopleCap is 0)
+// UNOFFICIAL 2026-11-16 (rtgi-review, Settings.Soft bit 1: backbone.w + 2): the albedo buffer (full size; alpha 1 where a template wrote the
+// pixel, 0 on grass and whatever else the game's own shaders draw). A texel half or more of whose pixels have none is SOFT: grass blades sit
+// each at their own depth, sway, and their cut-out is hashed under TAA / DLSS, so the disocclusion mask called them newly seen every frame
+// and the depth test threw their history away: one raw sample a texel, for ever (the sparkles on grass in the shade). A soft texel keeps its
+// history: the mask does not restart it and the depth may differ by 25 % (the blade in front last frame, the ground behind it now).
+layout(set = 1, binding = 7) uniform texture2D t_soft;
 
 layout(push_constant) uniform Push {
     mat4 prevViewProj;
@@ -21,7 +27,7 @@ layout(push_constant) uniform Push {
     vec4 move;           // xyz camera move, w 1: reset
     vec4 params;         // x max history, y depth tolerance
     vec4 backbone;       // x 1: subtract the object motion, y 1: the shared disocclusion mask restarts, z the history cap on moving
-                         // pixels (0 none), w 1: half size (the mask's 2 x 2)
+                         // pixels (0 none), w 1: half size (the mask's 2 x 2), + 2 (2026-11-16): Settings.Soft (t_soft)
     vec4 rect;           // (2026-11-03) RenderScale < 1: xy this frame's RenderRect scale (the signal is in the top-left xy part),
                          // zw last frame's (its history's part); 1 when off
     uint samplerIndex;
@@ -31,7 +37,31 @@ layout(push_constant) uniform Push {
     float fireflyK;      // (2026-11-07 ptaaa-denoiser) AntiFirefly: k (0 off; FireflyClamp below)
     float fastFrames;    // (2026-11-07 perf-history) AntiLag: the fast history in frames (RtHistoryTime.h: 4 at 60 fps, the same seconds at
                          // other frame rates, at least 2); 0: 4 (the value it had when hard-coded)
+#ifdef NVR_CONFIDENCE
+    float confOn, confTile, confW, confH;   // (2026-11-15 rt-denoise-inputs) 1: on, the tile size, the confidence grid's size (tiles); scalars:
+                                           // a vec4 would be aligned to byte 208 (std430), RtDenoise.cpp ConfPush writes them at 200
+#endif
 } pc;
+#ifdef NVR_CONFIDENCE
+// UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md) the -conf variant (variants.txt; Settings.Confidence,
+// PTDenoiseConfidence / GIDenoiseConfidence): RtDenoiseConfidence.frag's history confidence (1/5 resolution, r), bilinear over the tile
+// centres. Where it is low the history is cut to confidence^2 x MaxHistory frames (0: this frame's sample only), before the fast history
+// and the blend, so a light that went out or moved shows at once. The variant only: the plain RtDenoiseTemporalRgb.spv is unchanged.
+layout(set = 1, binding = 8) uniform texture2D t_conf;   // (test-after-110 merge: 8, after the soft mask on 7)
+float ConfidenceAt(vec2 at) {
+    const vec2 grid = vec2(pc.confW, pc.confH);
+    const vec2 f = at * (1.0 / pc.params.zw) / pc.confTile - 0.5;
+    const vec2 t = floor(f), b = f - t;
+    float c = 0.0;
+    for (int k = 0; k < 4; k++) {
+        const vec2 o = vec2(k & 1, k >> 1);
+        const vec2 q = clamp(t + o, vec2(0.0), grid - 1.0);
+        c += textureLod(sampler2D(t_conf, NVR_SAMPLER(pc.samplerIndex)), (q + 0.5) / grid, 0.0).r *
+            (o.x > 0.5 ? b.x : 1.0 - b.x) * (o.y > 0.5 ? b.y : 1.0 - b.y);
+    }
+    return clamp(c, 0.0, 1.0);
+}
+#endif
 // UNOFFICIAL 2026-11-09 (pt playground review) FireflySpread rides in fireflyK: k + 128 x cap (cap a whole number, 0 = no cap, as before).
 // The clamped excess of one firefly is spread over 5 x 5 pixels (RtDenoiseFirefly.frag); a path hundreds of times its neighbours'
 // brightness still left a white 5 x 5 square that the history then carried for seconds (the playground's denoised frames: dozens of
@@ -110,7 +140,14 @@ void main() {
     vec4 b = vec4(luma(c) * luma(c), viewZ, NVR_FIREFLY_K > 0.0 ? luma(c) : l, NVR_FIREFLY_K > 0.0 ? l : l * l);
     // (2026-10-31, rt-ao-sky) at half size (backbone.w 1) the mask over this pixel's 2 x 2 full-size pixels (uv sits on their corner):
     // a thin newly seen edge is not missed by the one tap a point sample takes
-    const bool fresh = pc.backbone.y > 0.5 && (pc.backbone.w > 0.5
+    const bool halfSize = mod(pc.backbone.w, 2.0) > 0.5;
+    bool soft = false;
+    if (pc.backbone.w > 1.5) {   // (Settings.Soft) at half size the texel's 2 x 2 full-size pixels (uv sits on their corner), else its own
+        const vec4 written = halfSize ? textureGather(sampler2D(t_soft, NVR_SAMPLER(pc.samplerIndex)), uv, 3)
+            : vec4(textureLod(sampler2D(t_soft, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a);
+        soft = dot(step(written, vec4(0.5)), vec4(1.0)) >= 2.0;
+    }
+    const bool fresh = !soft && pc.backbone.y > 0.5 && (halfSize
         ? any(greaterThan(textureGather(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 2), vec4(0.5)))
         : textureLod(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).b > 0.5);
     if (pc.move.w < 0.5 && viewZ > 0.0 && !fresh) {
@@ -136,7 +173,10 @@ void main() {
         if (clip.w > 0.0) {
             if (all(greaterThanEqual(prevUv, vec2(0.0))) && all(lessThanEqual(prevUv, vec2(1.0)))) {
                 vec4 ha, hb;
-                if (HistoryAt(prevUv, clip.w, pc.params.y * max(clip.w, 1.0), ha, hb)) {
+                if (HistoryAt(prevUv, clip.w, (soft ? max(pc.params.y, 0.25) : pc.params.y) * max(clip.w, 1.0), ha, hb)) {
+#ifdef NVR_CONFIDENCE
+                    if (pc.confOn > 0.5) { const float k = ConfidenceAt(uv); ha.a = min(ha.a, k * k * pc.params.x); }
+#endif
                     // (2026-11-06) HistoryClamp (PTDenoiseClamp): a moving camera / light leaves the history describing light that is no
                     // longer there (a trailing shadow, a lamp's pool lagging); clamp it to what this frame's 3 x 3 neighbourhood allows,
                     // wide (clampK deviations: one noisy path a pixel has a wide spread) so a still picture keeps accumulating.

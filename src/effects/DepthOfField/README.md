@@ -22,8 +22,9 @@ hard-edged shapes of the lens aperture (a disc or a polygon) instead of soft smu
 **Which view.** Per frame: vanity camera uses `VanityView`; third person (camera not first person) uses `ThirdPersonView`; otherwise
 `FirstPersonView`.
 
-**Per-view switch and mode.** Each view has `Enabled` (autofocus on) and `Mode`: 0 always; 1 off in dialog; 2 only in dialog; 3 always off
-(New Vegas never sets persuasion); 4 (file only) always off in New Vegas. **KEPT** (C++ rule, unchanged).
+**Per-view switch and mode.** Each view has `Enabled` (autofocus on) and `Mode`: 0 always; 1 off in dialog; 2 only in dialog; 3 always off;
+4 (file only) always off. (3 and 4 were Oblivion's persuasion tests; New Vegas has no persuasion menu, and they were removed
+2026-11-05 with the same result.)
 
 **Techniques.** Technique 0 (unnamed, autofocus, six passes) when the view's autofocus is on. Technique 1 (`DistantBlurOnly`, one pass) when
 autofocus is off and `DistantBlur` is on. Otherwise nothing is drawn.

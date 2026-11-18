@@ -325,14 +325,17 @@ static bool sceneVmPrep(Ctx& c) {
 	IDirect3DPixelShader9* ps = nullptr;
 	CHECKHR(h.dev->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &ps), "CreatePixelShader");
 	code->Release();
-	const float k[6][4] = {
+	// (2026-11-11 PTScreenOwn: the pass has three more constants and two more samplers; here its view model's part alone, the marks off:
+	// the result must be what it was. The marks: scene `screenown`)
+	const float k[9][4] = {
 		{ 1.0f / (cam.p00 * s), 1.0f / (cam.p11 * s), nearVm, farZ },
 		{ 1.0f, s, RtViewModel::kMatchShare, RtViewModel::kMatchUnits },
-		{ cam.r.x, cam.u.x, cam.f.x, 0 }, { cam.r.y, cam.u.y, cam.f.y, 0 }, { cam.r.z, cam.u.z, cam.f.z, 0 }, { 0, 0, 0, 1 } };   // world -> view (x right, y up, z forward)
+		{ cam.r.x, cam.u.x, cam.f.x, 0 }, { cam.r.y, cam.u.y, cam.f.y, 0 }, { cam.r.z, cam.u.z, cam.f.z, 0 }, { 0, 0, 0, 1 },   // world -> view (x right, y up, z forward)
+		{ 1.0f, 0.0f, RtViewModel::kFrontShare, RtViewModel::kFrontUnits }, { 1.0f, 1.0f, 0.0f, 0.0f }, { 0.0f, 0.0f, 0.0f, 0.0f } };
 	h.dev->SetVertexShader(nullptr); h.dev->SetPixelShader(ps);
-	h.dev->SetPixelShaderConstantF(0, &k[0][0], 6);
-	h.dev->SetTexture(0, tn.t); h.dev->SetTexture(1, tc.t); h.dev->SetTexture(2, tm.t);
-	for (DWORD st = 0; st < 3; st++) {
+	h.dev->SetPixelShaderConstantF(0, &k[0][0], 9);
+	h.dev->SetTexture(0, tn.t); h.dev->SetTexture(1, tc.t); h.dev->SetTexture(2, tm.t); h.dev->SetTexture(3, tn.t); h.dev->SetTexture(4, tn.t);
+	for (DWORD st = 0; st < 5; st++) {
 		h.dev->SetSamplerState(st, D3DSAMP_MINFILTER, D3DTEXF_POINT); h.dev->SetSamplerState(st, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
 		h.dev->SetSamplerState(st, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
 		h.dev->SetSamplerState(st, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP); h.dev->SetSamplerState(st, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
@@ -348,7 +351,7 @@ static bool sceneVmPrep(Ctx& c) {
 	h.dev->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
 	h.dev->EndScene();
 	h.dev->SetRenderTarget(0, back); if (back) back->Release();
-	h.dev->SetTexture(0, nullptr); h.dev->SetTexture(1, nullptr); h.dev->SetTexture(2, nullptr); h.dev->SetPixelShader(nullptr);
+	h.dev->SetTexture(0, nullptr); h.dev->SetTexture(1, nullptr); h.dev->SetTexture(2, nullptr); h.dev->SetTexture(3, nullptr); h.dev->SetTexture(4, nullptr); h.dev->SetPixelShader(nullptr);
 	ps->Release();
 	std::vector<float> got;
 	if (!readTex(h, out, got, 4)) return false;

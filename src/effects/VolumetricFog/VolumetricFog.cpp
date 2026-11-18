@@ -3,6 +3,16 @@
 #include "../../core/TestTools.h"	// NVR_TEST_TOOLS (FogReferenceTest)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
+#include "../../core/RtFogVisibility.h"	// UNOFFICIAL 2026-11-12 LampHazeShadows (RtFogLamps)
+
+// UNOFFICIAL 2026-11-13 (rtvol2) [Shaders.VolumetricLight.RT] Expanded: while the volumetric light's expanded look is in use, its own grid
+// composite draws the light (its height falloff and sun glow; this .fx has no constant register left for them), so the fog leaves its
+// FogGridLight out (NVR_FogGridFlags.y / push.gridFlags.y 0) and reports the grid not applied. The fog's own sun shading from the grid (x)
+// stays. Off: as before.
+static bool VlOwnComposite() {
+	const VolumetricLightEffect* light = TheShaderManager->Effects.VolumetricLight;
+	return light && light->expandedComposite;
+}
 
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample: x samples, y shares made, z MsaaEdgeFix)
 
@@ -116,15 +126,51 @@ void VolumetricFogEffect::UpdateConstants() {
 	}
 	else Constants.Density.y = weatherImpactSet;
 
-	if (TheShaderManager->GameState.isExterior && gameFogFloor > 0.0f) {
-		const float t = std::clamp((TheShaderManager->ShaderConst.SunAmount.x - 0.4f) / 0.4f, 0.0f, 1.0f);
-		const float night = 1.0f - t * t * (3.0f - 2.0f * t);
-		Constants.Sun.z = gameFogFloor * (1.0f + (gameFogFloorNight - 1.0f) * night);
+	// UNOFFICIAL 2026-11-15 FogWall ([Shaders.VolumetricFog.Interiors] GameFogFloor, read by UpdateSettings; docs/next/FOG-WALL.md):
+	// indoors the camera's far plane is the cell's clip distance (nothing is drawn past it: those pixels keep the cleared background),
+	// and the game's own fog, which the cell's lighting makes full by its fog far (at or before the clip in vanilla cells), hid the cut.
+	// With this effect on the game's fog is off (Render.cpp ShadowSceneNode__GetFogPropertyEx) and the mod's indoor fog is about 0.06 %
+	// at 2000 units, so the cut showed as a flat wall. Indoors the shader fades into the cell's fog colour along the cell's own curve
+	// (ending at min(fog far, clip)) over the outer half of the way from its fog near to there, times this (no night scale indoors).
+	// Not in an interior that behaves like an exterior (a real sky drawn past its walls: the fade would paint that sky the fog colour).
+	const TESObjectCELL* cell = Player ? Player->parentCell : nullptr;
+	const bool skyIndoors = !TheShaderManager->GameState.isExterior && cell && (cell->flags0 & TESObjectCELL::kFlags0_BehaveLikeExterior);
+	if (gameFogFloor > 0.0f && !skyIndoors) {
+		float scale = gameFogFloor;
+		if (TheShaderManager->GameState.isExterior) {
+			const float t = std::clamp((TheShaderManager->ShaderConst.SunAmount.x - 0.4f) / 0.4f, 0.0f, 1.0f);
+			const float night = 1.0f - t * t * (3.0f - 2.0f * t);
+			scale *= 1.0f + (gameFogFloorNight - 1.0f) * night;
+		}
+		Constants.Sun.z = scale;
 		Constants.Sun.w = Tes->sky->fogNearPlane;
 	}
 	else {
 		Constants.Sun.z = 0.0f;
 		Constants.Sun.w = 0.0f;
+	}
+	// Indoors Sun.x (SunGlow outdoors, 0 indoors before) carries 1 / (min(fog far, clip) - fog near): the shader's curve ends at the nearer
+	// of the cell's fog far and its clip, and its fade runs over the outer half of that (a constant expression in the shader would take
+	// a preshader register the composite passes do not have). 0 for a cell without fog distances (no fade, as the game).
+	if (!TheShaderManager->GameState.isExterior) {
+		const float fogEnd = (std::min)(TheShaderManager->ShaderConst.fogData.y, TheRenderManager->CameraData.y);
+		const float range = fogEnd - Constants.Sun.w;
+		Constants.Sun.x = (TheShaderManager->ShaderConst.fogData.y > Constants.Sun.w + 1.0f && range > 1.0f) ? 1.0f / range : 0.0f;
+	}
+
+	// FogWall diagnostic, once per interior cell: what the indoor fade is built from (the clip as the camera's far plane, the sky's fog
+	// values the shaders get, and the world's fog property the game would have drawn with), 120 frames after arriving (settled values).
+	if (cell != fogWallCell) { fogWallCell = cell; fogWallFrames = 0; }
+	if (!TheShaderManager->GameState.isExterior && cell && ++fogWallFrames == 120) {
+		const Sky* sky = Tes->sky;
+		const ShadowSceneNode* worldNode = BSShaderManager::GetShadowSceneNode(0);
+		const BSFogProperty* fog = worldNode ? worldNode->fogProperty : nullptr;
+		const D3DXVECTOR4& data = TheShaderManager->ShaderConst.fogData;
+		Logger::Log("UNOFFICIAL FogWall: interior %08X: far plane (clip) %.0f; the sky's fog near %.0f, far %.0f, power %.2f, colour %.3f %.3f %.3f; "
+			"TESR_FogData near %.0f, far %.0f, power %.2f; the world's fog property start %.0f, end %.0f, power %.2f, colour %.3f %.3f %.3f; GameFogFloor %.2f",
+			cell->refID, TheRenderManager->CameraData.y, sky->fogNearPlane, sky->fogFarPlane, sky->fogPower, sky->fogColor.r, sky->fogColor.g, sky->fogColor.b,
+			data.x, data.y, data.w, fog ? fog->fStartDistance : 0.0f, fog ? fog->fEndDistance : 0.0f, fog ? fog->fPower : 0.0f,
+			fog ? fog->m_kColor.r : 0.0f, fog ? fog->m_kColor.g : 0.0f, fog ? fog->m_kColor.b : 0.0f, Constants.Sun.z);
 	}
 }
 
@@ -248,7 +294,10 @@ void VolumetricFogEffect::UpdateSettings(){
 		Constants.Scatter.y = 0.0f;
 		Constants.Sun.x = 0.0f;
 		Constants.Sun.y = 0.0f;	// (the fog's sky colour indoors is the cell's fog colour already)
-		gameFogFloor = 0.0f;	// UNOFFICIAL 2026-10-30 GameFogFloor: outdoors only
+		// UNOFFICIAL 2026-11-15 FogWall: indoors GameFogFloor is the fade into the cell's fog before its clip distance (UpdateConstants;
+		// missing key, an older toml = 1, on). 0 = as before: the cut at the clip distance shows.
+		SettingManager::Configuration::ConfigNode fogWallNode;
+		gameFogFloor = TheSettingManager->Config.FillNode(&fogWallNode, SettingCategory, "GameFogFloor") ? std::clamp(fogWallNode.FloatValue, 0.0f, 2.0f) : 1.0f;
 		layerOn = 0.0f;	// UNOFFICIAL 2026-11-01 HeightLayer: outdoors only
 
 		Constants.Aerial = D3DXVECTOR4(0, 0, 0, 0);
@@ -270,6 +319,12 @@ void VolumetricFogEffect::UpdateSettings(){
 		lampHazeAnisotropy = lampF("LampHazeAnisotropy", 0.3f, 0.0f, 0.9f);
 		lampHazeCore = lampF("LampHazeCore", 0.1f, 0.05f, 1.0f);
 		lampHazeMaxLamps = (int)lampF("LampHazeMaxLamps", 8.0f, 0.0f, (float)LampHazeMax);
+		// UNOFFICIAL 2026-11-12 LampHazeShadows (off by default, also for a toml without the key): the lamps' light in the air shadowed
+		// by the room (core\RtFogVisibility.h RtFogLamps). Cell is read by the tracer at the RT helper's start, the others every frame.
+		lampHazeShadows = TheSettingManager->Config.FillNode(&lampNode, "Shaders.VolumetricFog.Interiors", "LampHazeShadows") && lampNode.BoolValue;
+		lampHazeShadowCell = (int)lampF("LampHazeShadowCell", 8.0f, 4.0f, 32.0f);
+		lampHazeShadowSamples = (int)lampF("LampHazeShadowSamples", 4.0f, 1.0f, 8.0f);
+		lampHazeShadowTemporal = lampF("LampHazeShadowTemporal", 0.8f, 0.0f, 0.95f);
 	}
 
 	// Own section (not Main/Interiors-switched via SettingCategory), so it gets its own settings-UI
@@ -395,6 +450,7 @@ void VolumetricFogEffect::RegisterConstants(){
 */
 void VolumetricFogEffect::SetLampHaze(IDirect3DDevice9* Device) {
 	Constants.Lamps = D3DXVECTOR4(0.0f, 0.0f, lampHazeAnisotropy, lampHazeCore);
+	lampShadowTexture = nullptr;	// UNOFFICIAL 2026-11-12 LampHazeShadows (set below, only while a lamp carries a tile code)
 	if (!(lampHaze > 0.0f) || lampHazeMaxLamps <= 0 || TheShaderManager->GameState.isExterior || IsLegacy() || IsClassic()) return;
 	ShaderManager* sm = TheShaderManager;
 	const float radiusMult = (std::max)(sm->Effects.ShadowsExteriors->Settings.Interiors.LightRadiusMult, 0.01f);
@@ -421,6 +477,31 @@ void VolumetricFogEffect::SetLampHaze(IDirect3DDevice9* Device) {
 	std::sort(lamps, lamps + found, [](const Lamp& a, const Lamp& b) { return a.distance < b.distance; });
 	const int count = (std::min)(found, (std::min)(lampHazeMaxLamps, (int)LampHazeMax));
 	if (count <= 0) return;
+	// UNOFFICIAL 2026-11-12 LampHazeShadows: the frame's lamps to the RT core's rider (it traces them at the next frame's RT point), and
+	// each lamp's tile in its last trace into the colour's w (row 1 alpha; LampHazeLight reads the lamp's visibility along the view
+	// there). Off, or nothing traced lately (no RT GPU, the RT core not running, native D3D9): w stays 0 and the shader's branch is
+	// not taken, the fog exactly as before. A lamp the trace does not hold yet: -1, no light in the air for that frame.
+	if (lampHazeShadows) {
+		D3DXVECTOR4 world[LampHazeMax];
+		for (int i = 0; i < count; i++) world[i] = D3DXVECTOR4(lamps[i].pos.x + camera.x, lamps[i].pos.y + camera.y, lamps[i].pos.z + camera.z, lamps[i].pos.w);
+		RtFogLamps::Submit(world, count);
+		IDirect3DTexture9* tiles = gridTexture ? nullptr : RtFogLamps::Texture();	// (stage 11 is the grid's while it is bound: outdoors only)
+		if (tiles) {
+			for (int i = 0; i < count; i++) lamps[i].colour.w = RtFogLamps::Code(world[i]);
+			lampShadowTexture = tiles;
+		}
+		static bool shadowsLogged = false;
+		if (!shadowsLogged && tiles) {
+			shadowsLogged = true;
+			Logger::Log("UNOFFICIAL LampHazeShadows: the lamps' light in the indoor fog is shadowed by the traced visibility (%d lamp(s) this frame; stage 11).", count);
+		}
+		static bool waitingLogged = false;
+		if (!waitingLogged && !tiles) {
+			waitingLogged = true;
+			Logger::Log("UNOFFICIAL LampHazeShadows: on, but nothing is traced yet (it needs the ray tracing core running for another RT effect, e.g. the RT lamp shadows): "
+				"the lamps' light in the fog is unshadowed until then.");
+		}
+	}
 	if (!lampTexture && FAILED(Device->CreateTexture(LampHazeMax, 2, 1, D3DUSAGE_DYNAMIC, D3DFMT_A32B32G32R32F, D3DPOOL_DEFAULT, &lampTexture, nullptr))) {
 		lampTexture = nullptr;
 		static bool failLogged = false;
@@ -685,7 +766,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		bool extGrid = false;
 		if (ExtDedicated(Device, RenderTarget, RenderedSurface, scene, composite, extLayout, extGrid)) {
 			compositeApplied = composite;
-			gridApplied = extGrid;
+			gridApplied = extGrid && !VlOwnComposite();	// (UNOFFICIAL 2026-11-13 rtvol2: Expanded, the light's own composite draws it)
 			return true;
 		}
 	}
@@ -732,7 +813,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	const bool grid = gridTexture && gridHandle;
 	IDirect3DBaseTexture9* skyCoverage = grid ? FogSkyCoverage("D3D9") : nullptr;	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (stage 15)
 	if (gridHandle) {
-		D3DXVECTOR4 gridFlags(grid ? 1.0f : 0.0f, grid ? 1.0f : 0.0f, skyCoverage ? 1.0f : 0.0f, 0.0f);
+		D3DXVECTOR4 gridFlags(grid ? 1.0f : 0.0f, grid && !VlOwnComposite() ? 1.0f : 0.0f, skyCoverage ? 1.0f : 0.0f, 0.0f);	// (y: rtvol2 VlOwnComposite)
 		Effect->SetVector(gridHandle, &gridFlags);
 	}
 	if (grid) {
@@ -835,7 +916,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		return false;
 	}
 	compositeApplied = composite;
-	gridApplied = grid;
+	gridApplied = grid && !VlOwnComposite();	// (UNOFFICIAL 2026-11-13 rtvol2)
 	static bool reportedComposite = false;
 	if (composite && !reportedComposite) {
 		Logger::Log("UNOFFICIAL composite apply active: sun shadows %s, AO %s folded into the fog pass.",
@@ -898,6 +979,21 @@ void VolumetricFogEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 		}
 		~LampBinding() { if (bound) { device->SetTexture(14, nullptr); TheRenderManager->renderState->NoteDeviceTexture(14, nullptr); } }
 	} lampBinding(Device, Constants.Lamps.x > 0.0f ? lampTexture : nullptr);
+	// UNOFFICIAL 2026-11-12 LampHazeShadows: the lamps' traced visibility tiles on stage 11 (NVR_FogGrid's sampler, linear, clamp) while
+	// the fog draws. Only indoors with the lamp term on and a recent trace (SetLampHaze), where the volumetric light's grid is never
+	// bound (gridTexture: outdoors only; SetLampHaze checks it all the same); taken off again when this returns.
+	struct LampShadowBinding {
+		IDirect3DDevice9* device; bool bound;
+		LampShadowBinding(IDirect3DDevice9* d, IDirect3DTexture9* t) : device(d), bound(t != nullptr) {
+			if (!bound) return;
+			device->SetTexture(11, t);
+			TheRenderManager->renderState->NoteDeviceTexture(11, t);
+			const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+				{D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+			for (const auto& s : states) TheRenderManager->SetSamplerState(11, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+		}
+		~LampShadowBinding() { if (bound) { device->SetTexture(11, nullptr); TheRenderManager->renderState->NoteDeviceTexture(11, nullptr); } }
+	} lampShadowBinding(Device, Constants.Lamps.x > 0.0f ? lampShadowTexture : nullptr);
 
 	// UNOFFICIAL: the fog's density noise, a 3D texture on stage 9 (NVR_FogNoise in the effect), for every path below;
 	// taken off again when this returns, so nothing drawn later finds it there.
@@ -1207,7 +1303,7 @@ bool VolumetricFogEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSurfac
 	}
 	grid = gridTexture && ParameterHandle(paramGridFlags, "NVR_FogGridFlags");
 	IDirect3DBaseTexture9* skyCoverage = grid ? FogSkyCoverage("Vulkan") : nullptr;	// UNOFFICIAL 2026-11-05 MsaaEdgeFix (binding 13)
-	push.gridFlags = grid ? D3DXVECTOR4(1.0f, 1.0f, skyCoverage ? 1.0f : 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	push.gridFlags = grid ? D3DXVECTOR4(1.0f, VlOwnComposite() ? 0.0f : 1.0f, skyCoverage ? 1.0f : 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// (y: rtvol2)
 	if (grid) inputs[7] = gridTexture;
 	if (skyCoverage) inputs[13] = skyCoverage;
 

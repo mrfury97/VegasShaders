@@ -49,6 +49,9 @@ public:
 
 	void    RenderPass(IDirect3DDevice9* Device, UINT techniqueIndex, bool ClearRenderTarget);
 	void	RenderBloomBuffer(IDirect3DSurface9* RenderTarget);
+	// UNOFFICIAL 2026-11-15 (fpnative-fix, docs/next/FPNATIVE-SEETHROUGH.md): the frame number RenderBloomBuffer last drew the buffer in
+	// (FirstPersonNative::Flush draws it again from the picture with the full-size arms in it, only in a frame the chain drew it).
+	UInt32	BufferFrame = 0xFFFFFFFF;
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the whole chain as Vulkan passes into its own targets (src\hlsl\NewVegas\Compute\Bloom*.frag,
 	// Bloom.glsl). RenderBloomBuffer runs it first; false (or any refused pass) leaves the D3D9 chain to do the frame.
