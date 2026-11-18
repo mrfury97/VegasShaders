@@ -9,7 +9,7 @@ FIXED). Everything else is as described below.
 
 ## 1. Purpose
 
-Cinema gives the picture a film look. It adds black letterbox bars at the top and bottom of the screen for a wide aspect ratio, a faint lens colour split (red and blue pulled slightly apart towards the edges), animated film grain at 24 frames a second, a slight overlay boost of colour and contrast, and a darkening vignette round the edges. The letterbox bars are optional by context: they can show only during conversations or persuasion, or always. With the default settings the player sees the grain, colour split, contrast and vignette all the time, and the bars only during persuasion.
+Cinema gives the picture a film look. It adds black letterbox bars at the top and bottom of the screen for a wide aspect ratio, a faint lens colour split (red and blue pulled slightly apart towards the edges), animated film grain at 24 frames a second, a slight overlay boost of colour and contrast, and a darkening vignette round the edges. The letterbox bars are optional by context: always, only outside conversations, only during conversations, or never. With the default settings (Mode 3) the player sees the grain, colour split, contrast and vignette all the time, and never the bars (Mode 3 was Oblivion's "only during persuasion"; New Vegas has no persuasion menu).
 
 ## 2. When it runs
 

@@ -78,7 +78,10 @@ static bool Retired(const std::string& Name) {
 		"Main.Menu.Style.TextShadowColorNormal", "Main.Menu.Style.TextShadowColorSelected", "Main.Menu.Style.TextSizeStatus",
 		"Main.Menu.Style.TitleColumnSize" };
 	for (const char* k : kKeys) if (Name == k) return true;
-	for (const char* sec : kSections) if (Name.compare(0, strlen(sec), sec) == 0) return true;
+	for (const char* sec : kSections) {	// the section itself or a key / table under it ("Main.SleepingMode.Main.Enabled"), not a longer name
+		const size_t n = strlen(sec);
+		if (Name.compare(0, n, sec) == 0 && (Name.size() == n || Name[n] == '.')) return true;
+	}
 	return false;
 }
 
