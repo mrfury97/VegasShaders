@@ -105,6 +105,29 @@ grooves breaking the reflection up instead of a smooth mirror. Nothing else chan
 - Defaults: `tools/defaults_tool.py` shows the same 58-line fragments-vs-shipped mismatch as the base branch (upstream's own), line for
   line; the new key adds none.
 
+## Puddles (branch `bump-puddles`, 2026-11-18)
+Choice: the wet ground and a puddle's shallow rim keep the surface's bumps, the water inside a puddle is flat (bumps hidden under it),
+and the rain ripples and the puddle's water normal go on top, as before. Where the puddles lie stays on the smooth normal. Deferred path:
+the bumped normal comes from the G-buffer (the shared shading-normal copy); the surface shaders are not changed.
+- **With Wetness Effects + Puddles on** (the owner's settings): puddles are drawn by the surface shaders (`Shaders/Includes/Wetness.hlsl`,
+  in the land and object records). With DeferredBumpedNormals on, Wetness Effects' wet reflections reflect along `wet.normal` (the
+  prototype above: bumps on wet ground, flat in standing water, ripples on top) and the screen-space / RT reflections read the G-buffer's
+  shading normal (FdIndirect ShadingNormals). Nothing new was added for this case.
+- **Open, proven by reading (not changed here):** the land's G-buffer shading normal is the one from BEFORE the standing water flattens
+  it. `TerrainTemplate.hlsl:672` makes `wetWorldNormal`, `:703-705` flattens `combinedNormal` under standing water for the forward
+  lighting, but `:850` writes `wetWorldNormal` into the G-buffer. So under the deferred renderer the deferred sun and lamps light a land
+  puddle with the ground's bumps showing through the water, and the screen-space / RT reflections (with the switch on) see them too.
+  Fix: write the flattened normal there (`mul(combinedNormal, tbnMat)` after the flatten); it is a game-shader change (a full recompile),
+  in the 6-7 layer land shaders that already sit at the temp-register limit, so it was left for its own change.
+- **With Wetness Effects off** (the shipped default): WetWorld's screen pass draws the puddles from the smooth normals buffer only.
+  Now its Wet pass (D3D9 `Effects/WetWorld.fx.hlsl` and Vulkan `Compute/WetWorld.frag`, rebuilt `WetWorld.spv`) reads a second normal,
+  NVR_WetWorldShadingNormals (s15) / binding 13: `baseN = normalize(lerp(shadingNormal, up, puddlemask))`, which also feeds its puddle
+  SSR normal. `WetWorldEffect::BindShadingNormals` / `ShadingNormals` (`effects/WetWorld/WetWorld.cpp`) give it the shading normals
+  while the switch is on, else the normals buffer itself (the same result as before, bit for bit in the maths). Puddle placement, the
+  splashes and the wall streaks keep the smooth normal.
+- Note: the shipped `WetWorld.spv` does not rebuild byte for byte from its unchanged source with the Vulkan SDK 1.3.296.0 used here
+  (84 bytes different; believed: upstream built it with another glslang). The new one is built and validated (spirv-val) with that SDK.
+
 ## Review (lead-architect, 2026-11-18): approve with fixes
 - Fixed: puddles reflected the ground's bumps (now `wet.normal`); the sky taken out did not follow the bumped ray (now the same normal); rays
   tilted into the surface (now mirrored); docs (this file, the Reflections README, FdIndirect's comments).

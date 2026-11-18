@@ -939,8 +939,10 @@ void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 		// place, so WetWorld's screen pass is not drawn. Its rain tracking (UpdateConstants) still runs: the persistent wet cover, PBR's
 		// rain and the heat haze read it.
 		if (!(Shaders.Wetness && Shaders.Wetness->Enabled)) {
+			Effects.WetWorld->BindShadingNormals(Device);	// (2026-11-18 DeferredBumpedNormals: stage 15, cleared after)
 			Effects.WetWorld->Render(Device, RenderTarget, TheTextureManager->RenderedSurface,
 				TheCoverMap ? TheCoverMap->WetTechnique(Effects.WetWorld, Effects.WetWorld->MainTechnique()) : Effects.WetWorld->MainTechnique(), false, SourceSurface);
+			Effects.WetWorld->ClearPassTextures();
 			PixelInspector::AfterFrame(Effects.WetWorld);
 		}
 		// (2026-11-04: the flashlight and its beam shaft were drawn here; the flashlight is the deferred light now, core/FlashlightDeferred.h)
