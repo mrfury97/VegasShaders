@@ -190,3 +190,4 @@ Gaps:
 - Measure DeferredRenderer 0 vs 2 on this PC (frame time alone, the same spots indoors and outdoors) and look at the differences by eye.
 - Ask upstream for `docs/next/` (the FD-* results), or treat every number cited from it as unverified.
 - Fix the stale defaults comments (GBufferV2, DeferredDepth) and the stale `DeferredRenderer.h` / `SettingForce.h:23` comments.
+- Road map for moving the rest to deferred: `docs/deferred-roadmap.md`.
