@@ -510,7 +510,13 @@
 // passes that light the material's own albedo with the sun get the water layer; lamp-only, highlight-only and lamp-first passes do not,
 // nor the interior records (no rain indoors). Its constants are the sun cross-fade's (c146-c159), so not with SUN_CROSSFADE; s12 is free
 // in every outdoor variant, for the rain cover map.
-#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY && WETNESS_EFFECTS >= 2)) && \
+// UNOFFICIAL 2026-11-20 DeferredWetness step 2 ([Main.Main.Quality] DeferredWetness, restart, test only; core/DeferredWetness.h): the lighting-free
+// record made with DEFERRED_WETNESS (core/LightFreeRecords.h) leaves the water layer to that pass, which works it out once per pixel after the
+// G-buffer from this record's G-buffer (OBJ_WET_DEFERRED). Every other record: as before.
+#if defined(DEFERRED_WETNESS) && defined(NVR_LIGHT_DEFERRED)
+    #define OBJ_WET_DEFERRED
+#endif
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && !defined(OBJ_WET_DEFERRED) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY && WETNESS_EFFECTS >= 2)) && \
     !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(OBJ_LAMP_FIRST)
     #define OBJECT_WETNESS
     #if defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY

@@ -180,6 +180,9 @@ float4 TESR_PuddleLook   : register(PR_LOOK);   // x roughness, y depth darkenin
 float4 TESR_PuddleShape  : register(PR_SHAPE);   // x slope start (up), y slope full, z land cavity strength, w wet ring width
 float4 TESR_PuddleStreak : register(PR_STREAK);   // w debug view (x y z: the wall streaks' strength, lane width and speed until 2026-11-18, removed; 0)
 #define PUDDLES_ON (TESR_PuddleData.w > 0.5f)
+#ifndef PUDDLE_LEVEL
+    #define PUDDLE_LEVEL TESR_PuddleData.x	// the water level GetWetness takes (UNOFFICIAL 2026-11-20 DeferredWetness: per pixel there, see its PUDDLE_LEVEL)
+#endif
 #define PUDDLE_QUALITY (TESR_PuddleData.w)
 #define PUDDLE_DEBUG (TESR_PuddleStreak.w)
 #define PUDDLES_NOT_ACTIVE_AND !PUDDLES_ON &&   // (empty without puddles: the land shaders stay byte-identical)
@@ -480,7 +483,7 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
         // the large noise field shapes big irregular puddles there; bumpy ones (mud, dirt, rock) get many small pools: the material
         // tells itself apart through its own height map, no per-texture data needed.
         float open = saturate(occlusion * 2.0f) * nearFactor;
-        float level = TESR_PuddleData.x;
+        float level = PUDDLE_LEVEL;	// (2026-11-20: TESR_PuddleData.x unless the includer overrides it, Shaders/DeferredWetness.hlsl)
         float standing = 0.0f, ring = 0.0f, deep = 0.0f;
         float rain = saturate(rainWetness) * open;
         puddle = rain;

@@ -1,6 +1,6 @@
 #pragma once
 // UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only, off; docs/deferred-wetness-design.md step 1:
-// the land; Shaders/DeferredWetness.hlsl).
+// the land; step 2, 2026-11-20: the objects and parallax too, their lighting-free records with DEFERRED_WETNESS; Shaders/DeferredWetness.hlsl).
 // The land's water layer (Wetness Effects + Puddles: the darker albedo, the flattened puddle normal, the film) worked out once per pixel in a
 // full-screen pass after the G-buffer is resolved, instead of inside every land shader: the near land's lighting-free records (LAMPS_DEFERRED 2)
 // are made with DEFERRED_WETNESS (core/LightFreeRecords.h), which drops their own water layer (TerrainTemplate.hlsl TERRAIN_WET_DEFERRED) and
@@ -67,7 +67,7 @@ namespace DeferredWetness {
 		Pass->ClearSamplers = false;
 		Restore->ClearSamplers = false;
 		LightFreeRecords::WetCompiled = true;
-		Logger::Log("UNOFFICIAL DeferredWetness: the pass loaded; the near land's lighting-free records are made without their water layer (DEFERRED_WETNESS)");
+		Logger::Log("UNOFFICIAL DeferredWetness: the pass loaded; the near land's, objects' and parallax's lighting-free records are made without their water layer (DEFERRED_WETNESS)");
 	}
 
 	// Once a frame (Render.cpp, with DeferredSun::BeginFrame).
@@ -163,7 +163,9 @@ namespace DeferredWetness {
 		const D3DXMATRIX& proj = NiDX9Renderer::GetSingleton()->projMatrix;
 		float fog[4] = {};
 		if (!DeferredFog::Params(fog)) fog[3] = 0.0f;
-		const float own[3][4] = { { linearDepth ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f }, { fog[0], fog[1], fog[2], fog[3] }, { proj._33, proj._43, 0.01f, 2.0f } };
+		// c6.y (2026-11-20 step 2): [Shaders.Puddles.Main] ObjectPuddles, as effects/Puddles/Puddles.cpp SetDrawConstants gives the objects their level
+		const float objectPuddles = TheSettingManager->GetSettingI("Shaders.Puddles.Main", "ObjectPuddles") != 0 ? 1.0f : 0.0f;
+		const float own[3][4] = { { linearDepth ? 1.0f : 0.0f, objectPuddles, 0.0f, 0.0f }, { fog[0], fog[1], fog[2], fog[3] }, { proj._33, proj._43, 0.01f, 2.0f } };
 		d->SetPixelShaderConstantF(6, own[0], 3);
 		// the copies on s0-s2 (point, clamp), through the state cache like SetCT's stages (put back below)
 		IDirect3DBaseTexture9* const copies[3] = { frameCopy, full ? AlbedoCopy : CapturedNormals::AlbedoTexture, MaterialCopy };

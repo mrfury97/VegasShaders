@@ -300,21 +300,23 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     }
     else
 #endif
-    [branch] if (land) {
-        light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
-#if DS_WET_FILM
-        [branch] if (DS_WetFilm.x > 0.5f && FDFarLand(m.r) < 0.5f) {
-            const float4 film = tex2Dlod(DS_WetFilmMap, uv4);
-            const float gloss = saturate((film.r - floor(film.r)) / 0.99f);
-            [branch] if (gloss > 0.001f)
-                light += WetSpecular(ShadowDecodeNormal(film.ba), V, Lland, sunLand * LinScale(TESR_TerrainData.z), film.g) * smoothstep(0.0f, 0.2f, gloss);
-        }
-#endif
-    }
+    [branch] if (land) light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
     else {
         SetDiffuseEnergyKeep(N, V, r);	// (the object shaders' EnergySplit; the land does not take it)
         light = getSunLightingModel(FDSunSpecular(albedo.a, m.r), L, sunLin, V, N, albedo.rgb, r, metal);
     }
+#if DS_WET_FILM
+    // (2026-11-19 / 2026-11-20 step 2) the wet film's sun highlight where DeferredWetness wrote a film this frame (the near land, objects and
+    // parallax; 0 everywhere else): the land with its own sun x its light scale (TerrainTemplate.hlsl), objects with the sun x LIN_SCALE_LIGHT
+    // (ObjectTemplate.hlsl ObjectWetFilm, ParallaxTemplate.hlsl); x the shadow and the recorded share below, as forward's sunAndProj / sunMul
+    [branch] if (DS_WetFilm.x > 0.5f) {
+        const float4 film = tex2Dlod(DS_WetFilmMap, uv4);
+        const float gloss = saturate((film.r - floor(film.r)) / 0.99f);
+        [branch] if (gloss > 0.001f)
+            light += WetSpecular(ShadowDecodeNormal(film.ba), V, land ? Lland : L, land ? sunLand * LinScale(TESR_TerrainData.z) : sunLin * LIN_SCALE_LIGHT,
+                film.g) * smoothstep(0.0f, 0.2f, gloss);
+    }
+#endif
     // the lookup only where the light reaches (UnlitShadowSkip's rule: exactly 0 there whatever the shadow)
     float shadow = 1.0f;
     // (2026-11-15 batch 4, frame replay of og-ground: the land came out shadowed in triangles and blobs where the forward land shader, with
