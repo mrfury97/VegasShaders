@@ -33,8 +33,21 @@ either repo, so anything resting on them is "claimed".
 - **1a. Build the deferred record even when the forward one fails.** Today the lighting-free (deferred) record is only tried after the
   forward record loaded (`core/LightFreeRecords.h:70`, `core/DeferredRenderer.h:174`). At 19:13 the forward land shaders with 5-7 layers
   failed (X4505, out of temp registers, with Terrain Blending + Wetness Effects + Puddles), so the deferred ones were never tried and that
-  ground was the game's shader. The deferred record leaves out the sun shadows and lamps, so it is believed to fit (not tried).
+  ground was the game's shader. The deferred record leaves out the sun shadows and lamps, so it was believed to fit (see 1a status: it is close).
   Frames that fall back to forward (MSAA, lockpick) would then show the game's shader there.
+- **1a status (2026-11-18, branch `deferred-phase1a`):** built behind `[Main.Main.Quality] DeferredStandalone` (bug fix, default on,
+  restart, in the hidden Internal list). Without a forward record the lighting-free record is still made (with the lean puddle path as a
+  second try), paired with the game's own shader, which takes the forward record's place outside the G-buffer span and for blended draws.
+  A failed compile now also leaves `<binary>.failed.defines` next to `.failed.hlsl`, so the deferred variant can be compiled offline.
+  Headroom measured on the cached 17:53 builds (before Terrain Blending), `fxc /dumpbin`: forward land SLS2124 / 2136 / 2146 peak at
+  temp r31 (all 32) with 3,842-4,600 slots; their lighting-free records peak at r29-r30 with 2,738-3,178 slots. So the deferred version
+  is much shorter but only 2-3 temps from the same wall: with Terrain Blending it may still fail. Not run in game; the next start's log
+  says ("DeferredStandalone: ... loaded" or a LIGHT-FREE RECORD warning). If it fails, 1b / 1c are what makes room.
+  Lead-architect review: approve with fixes, all applied (the lean copy goes first once the full one failed, as the forward record's;
+  any forward slot counts as a forward record; the game's handle is AddRef'd for the session; header notes). Proven by reading: the
+  lighting-free record binds only inside the G-buffer span (DeferredRenderer::Choose needs CapturedNormals::InSpan); everything else falls
+  through to the game's shader. Believed: the game-shader swap for blended draws is no worse than today's whole-object fallback.
+  Default on is a player-visible change: it needs the owner's word before it is installed or merged.
 - **1b. The fallback ladder reacts to compile failures too.** ShaderFallback drops one optional feature at a time only when a shader is
   over native D3D9's instruction cap (`core/ShaderRecord.cpp:271` tests `over` only); a shader that does not compile at all (X4505, also
   under DXVK) goes straight to the game's. Count `failed` as a reason to drop the next feature.

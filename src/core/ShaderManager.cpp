@@ -1333,7 +1333,20 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			else Logger::Log("[ERROR] UNOFFICIAL RT lamp shadows: %s (land) with outdoor lamp shadows did not load (ExteriorForward).", pixel->Name);
 		}
 	}
-	LightFreeRecords::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 full deferred renderer phase 0 (test only, off: nothing made)
+	{	// UNOFFICIAL 2026-11-14 full deferred renderer phase 0 (mode 2's lighting-free records)
+		// (2026-11-18 DeferredStandalone) with no forward record and puddles in, the lean copy newer than the full one and the sources says the
+		// full one failed last time (as the forward record's leanFirst above): straight to it, and its copy stamped when it was made again
+		bool lightFreeLeanFirst = false;
+		if (puddlesIn && !HasAnyRecord(pixel)) {
+			const std::string cache = std::string(ShadersPath) + "Cache\\";
+			WIN32_FILE_ATTRIBUTE_DATA lean = {}, full = {};
+			const bool hasLean = GetFileAttributesExA((cache + LightFreeRecords::kLeanCache + pixel->Name).c_str(), GetFileExInfoStandard, &lean) != 0;
+			const bool hasFull = GetFileAttributesExA((cache + LightFreeRecords::kCache + pixel->Name).c_str(), GetFileExInfoStandard, &full) != 0;
+			lightFreeLeanFirst = hasLean && (!hasFull || CompareFileTime(&lean.ftLastWriteTime, &full.ftLastWriteTime) > 0) &&
+				FallbackNewerThanSources(lean.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+		}
+		if (LightFreeRecords::Load(pixel, pixel->Name, tmpl, lightFreeLeanFirst) && !lightFreeLeanFirst) TouchCacheCopy(LightFreeRecords::kLeanCache, pixel->Name);
+	}
 	// (2026-11-15) the lamp pass may be compiled at the first record, before any Interior record handed DeferredLamps its lamp shape: take it here
 	if (DeferredRenderer::On() && !DeferredLamps::LampFalloffOverride) DeferredLamps::LampFalloffOverride = PBRShaders::LampFalloffInteriorDefine();
 	DeferredRenderer::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2 ([Main.Main.Quality] DeferredRenderer; off: nothing)
@@ -1345,6 +1358,10 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 	if (HasAnyRecord(pixel)) {
 		family->PixelShaderList.push_back(pixel);
 		Logger::Log("Loaded %s Pixel Shader %s", family->Name, pixel->Name);
+	}
+	else if (DeferredRenderer::Records.count(pixel)) {	// (2026-11-18 DeferredStandalone: its deferred record only; listed so a reload or a family switch reaches it)
+		family->PixelShaderList.push_back(pixel);
+		Logger::Log("Loaded %s Pixel Shader %s (deferred record only: its forward record did not load)", family->Name, pixel->Name);
 	}
 	ShaderFallbackAfterLoad(this);	// UNOFFICIAL 2026-11-12 ShaderFallback: a feature dropped while this one loaded
 	return familyOn;
