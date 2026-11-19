@@ -5,6 +5,7 @@
 #include "../../core/ManyLamps.h"	// UNOFFICIAL 2026-11-19 DeferredWetLampFilm (the lamp table)
 #include "../../core/DeferredTransparents.h"	// ... (the table's header: EnableHeader)
 #include "../../core/DeferredRenderer.h"
+#include "../../core/DeferredWetness.h"	// UNOFFICIAL 2026-11-19 DeferredWetness (the land's film target)
 
 void WetnessReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_WetnessReflectionData", &Constants.Data);
@@ -56,6 +57,7 @@ bool WetnessReflectionsEffect::ShouldRender() {
 // shader takes exactly its old path). The caller clears the stage after the Render (ClearPassTextures).
 void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
 	Constants.Bump.x = 0.0f;
+	Constants.Bump.y = 0.0f;
 	Constants.LampFilm.x = 0.0f;
 	if (!Enabled || !Effect || !ShouldRender()) return;	// Render draws nothing: no shading-normals pass for it either
 	std::string normalsName = "TESR_NormalsBuffer", depthName = "TESR_DepthBuffer";
@@ -77,8 +79,14 @@ void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
 		CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f;
 	if (film) ManyLamps::FinishTable();	// (the table may still be filled on its worker thread)
 	Constants.LampFilm = D3DXVECTOR4(film ? 1.0f : 0.0f, (float)ManyLamps::ListTexelsNow(), (float)ManyLamps::TableRowsNow(), (float)ManyLamps::TileRow());
-	// (stages 5-7: past the TESR_ samplers, which EffectRecord binds by declaration order, s0-s3)
+	// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h): the near land's film as that pass left it this frame, on s8, read where a
+	// near-land lighting-free record drew the pixel (the G-buffer on s6 / s7 says which) in place of this pass's own wetness there (y 1)
+	const bool gbuffer = CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f;
+	const bool landFilm = DeferredWetness::FilmLive && DeferredWetness::FilmTexture && gbuffer;
+	Constants.Bump.y = landFilm ? 1.0f : 0.0f;
+	// (stages 5-8: past the TESR_ samplers, which EffectRecord binds by declaration order, s0-s3)
 	SetPassTexture(5, film ? (IDirect3DBaseTexture9*)ManyLamps::Table : normals);
-	SetPassTexture(6, film ? (IDirect3DBaseTexture9*)CapturedNormals::MaterialTexture : normals);
-	SetPassTexture(7, film ? (IDirect3DBaseTexture9*)CapturedNormals::AlbedoTexture : normals);
+	SetPassTexture(6, film || landFilm ? (IDirect3DBaseTexture9*)CapturedNormals::MaterialTexture : normals);
+	SetPassTexture(7, film || landFilm ? (IDirect3DBaseTexture9*)CapturedNormals::AlbedoTexture : normals);
+	SetPassTexture(8, landFilm ? (IDirect3DBaseTexture9*)DeferredWetness::FilmTexture : normals);
 }

@@ -19,7 +19,8 @@
 float4 TESR_ReciprocalResolution;
 float4 TESR_WetnessReflectionData;   // x: strength, y: max ray distance (game units), z: thickness, w: steps
 float4 TESR_WetnessReflectionFade;   // x: roughness cutoff, y: screen edge fade (uv), z: debug view, w: camera distance fade end
-float4 TESR_WetnessReflectionBump;   // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: x 1 = s4 holds the shading normals this frame (else 0: as before)
+float4 TESR_WetnessReflectionBump;   // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: x 1 = s4 holds the shading normals this frame (else 0: as before);
+                                     // y (2026-11-19 DeferredWetness) 1 = s8 holds the near land's film this frame, s6 / s7 the G-buffer
 float4 TESR_WetnessLampFilm;         // UNOFFICIAL 2026-11-19 DeferredWetLampFilm: x 1 = on this frame, y the froxel lists' texels, z the lamp table's rows, w its first tile row
 float4 TESR_LinearScales;            // x the lamps' light scale (the objects' forward film takes it, the land's does not: Object.hlsl LIN_SCALE_LIGHT)
 
@@ -36,6 +37,9 @@ sampler2D NVR_WetShadingNormals : register(s4) = sampler_state { ADDRESSU = CLAM
 sampler2D NVR_WetLampTable : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 sampler2D NVR_WetMaterial : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 sampler2D NVR_WetAlbedo : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h, Shaders/DeferredWetness.hlsl): the film that pass worked out for the near land
+// this frame (r round(8 murk) + 0.99 gloss, g roughness, b / a the film normal, octahedral); set with s6 / s7 by BindShadingNormals.
+sampler2D NVR_WetFilm : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 
 #include "Includes/Depth.hlsl"
 // The forward shaders' colour encoding (Shaders/Includes/LinearLight.hlsl, whose own includes do not resolve from this folder) and
@@ -132,6 +136,15 @@ float3 WetLampFilmSum(float3 p, float3 n, float3 V, float roughness, float stret
 	return sum;
 }
 
+// (Shaders/Includes/Shadow.hlsl ShadowDecodeNormal, keep in step) the octahedral code back to a unit vector
+float3 WRDecodeOct(float2 e)
+{
+	float3 n = float3(e, 1.0f - abs(e.x) - abs(e.y));
+	float t = saturate(-n.z);
+	n.xy += float2(n.x >= 0.0f ? -t : t, n.y >= 0.0f ? -t : t);
+	return normalize(n);
+}
+
 float4 WetReflections(VSOUT IN) : COLOR0
 {
 	float2 uv = IN.UVCoord;
@@ -156,6 +169,24 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	float3 worldN = normalize(mul(float4(N, 0.0f), TESR_InvViewTransform).xyz);
 	float3 worldNs = normalize(mul(float4(Ns, 0.0f), TESR_InvViewTransform).xyz);
 	Wetness wet = GetWetness(worldPos, worldN, worldNs);
+	// UNOFFICIAL 2026-11-19 DeferredWetness: where the near land's lighting-free record drew the pixel (albedo alpha 1 + keep, COLOR2.r the land's
+	// code 20 without the far land's 1 / 64 mark), the film that pass drew it with (its puddles, ripples and murk), not this pass's estimate, so
+	// the streaks and the reflection sit on the same water it darkened and lit; its sky reflection is the one taken out below
+	bool landFilm = false;
+	[branch] if (TESR_WetnessReflectionBump.y > 0.5f) {
+		const float a = tex2Dlod(NVR_WetAlbedo, float4(uv, 0.0f, 0.0f)).a;
+		const float r = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f)).r;
+		[branch] if (a > 1.0001f && a < 2.0005f && abs(r - 20.0f) < 0.5f / 64.0f) {
+			const float4 f = tex2Dlod(NVR_WetFilm, float4(uv, 0.0f, 0.0f));
+			wet.gloss = saturate((f.r - floor(f.r)) / 0.99f);
+			wet.roughness = max(f.g, 0.01f);
+			wet.normal = WRDecodeOct(f.ba);
+		#ifdef PUDDLES_COMPILED
+			wet.murk = saturate(floor(f.r) / 8.0f);
+		#endif
+			landFilm = true;
+		}
+	}
 	float gloss = wet.gloss;
 	float rough = wet.roughness;
 	// (2026-11-19 DeferredWetLampFilm, above) the lamps on the wet film where a deferred record drew the pixel (albedo alpha above 1; forward
@@ -183,7 +214,7 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	// The normal the film reflects with. Off: N, exactly as before. On: the film's own normal as the forward shaders reflect with it
 	// (wet.normal: the bumped normal, flattened toward the smooth one under standing water and streaks, with the ripples on top), so a
 	// puddle does not mirror the ground's bumps beneath it. View space: the transpose of the view-to-world rotation.
-	const bool bumped = TESR_WetnessReflectionBump.x > 0.5f;
+	const bool bumped = TESR_WetnessReflectionBump.x > 0.5f || landFilm;	// (2026-11-19: the land film's own normal, as DeferredWetness reflected the sky with)
 	float3 worldNr = worldN;
 	float3 Nr = N;
 	if (bumped) {

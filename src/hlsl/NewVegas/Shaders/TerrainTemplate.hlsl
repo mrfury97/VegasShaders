@@ -340,7 +340,18 @@ float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3
 // there): seven-layer land goes without the cover test (open everywhere). The layers' height maps shape the wetness and the puddles
 // (WETNESS_HEIGHT, c158: [Shaders.WetnessEffects.Main] HeightAwareness, CreviceFill, NormalAwareness), as in Physically-Based-Reloaded.
 // (2026-11-13 fork port) the lamp record's water layer (WETNESS_ALT_REGS) only with Puddles (WETNESS_EFFECTS 2+): Wetness Effects alone as before
-#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS) && WETNESS_EFFECTS < 2)
+// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only; core/DeferredWetness.h, Shaders/DeferredWetness.hlsl,
+// docs/deferred-wetness-design.md step 1): the lighting-free record (LAMPS_DEFERRED 2) with DEFERRED_WETNESS leaves the water layer to that
+// pass, which works it out once per pixel after the G-buffer is resolved, from this record's G-buffer and the layers' height it leaves in
+// COLOR2.r (below, at the outputs). Without DEFERRED_WETNESS (every record but that one) nothing here changes.
+#if defined(PS) && defined(DEFERRED_WETNESS) && defined(NVR_LIGHT_DEFERRED) && defined(WETNESS_EFFECTS) && CAPTURED_NORMALS_ON >= 4
+    #define TERRAIN_WET_DEFERRED
+    #if WETNESS_EFFECTS >= 2
+// (Includes/Wetness.hlsl's TESR_PuddleData on its own register: x the water level, w the puddles' Quality, 0 off)
+float4 TESR_PuddleData : register(c174);
+    #endif
+#endif
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && !defined(TERRAIN_WET_DEFERRED) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS) && WETNESS_EFFECTS < 2)
     #define TERRAIN_WETNESS
     #if TERRAIN_LAMP_RT && defined(NUM_PT_LIGHTS)
         #define WETNESS_ALT_REGS    // 2026-11-09: the lamp slots hold c146-c173 here; the water layer takes c2, c4-c17, c98-c99 (Wetness.hlsl)
@@ -877,6 +888,35 @@ PS_OUTPUT main(PS_INPUT pin) {
     // with tessellation the normal its evaluation shader passes on), before the layers' normal maps. Alpha 1 also with terrain blending's
     // Smooth fade (the land drawn blended over objects): the land's normal replaces what is there, with its depth.
     po.capturedNormal = CapturedNormalOut(pin.nrmO.xyz, camPos);
+    #ifdef TERRAIN_WET_DEFERRED
+    {
+        // UNOFFICIAL 2026-11-19 DeferredWetness: the layers' height where the land is seen, for the pass's GetWetness, exactly as the forward
+        // record's water layer takes it (TERRAIN_WETNESS above: keep the two in step): the blended height maps (0.5 where a layer has none),
+        // and while there is standing water each layer's detail against its own average. Left in COLOR2.r's fraction with the specular bit
+        // taken out (r = 4 + 0.99 height: fp16 holds 1 / 256 steps there, 1 / 64 at 20); DeferredWetness puts r back to 4 + 16 for every such
+        // pixel before any reader of COLOR2 runs (core/DeferredWetness.h; its pass is the only reader of this code).
+        float surfaceHeight = 0.0f;
+        float heightWeight = 0.0f;
+        [unroll] for (int wh = 0; wh < texLayers; wh++) {
+            surfaceHeight += wts[wh] * (hStat[wh] > 0.0f ? tex2Dgrad(BaseMap[wh], offsetUV, odx, ody).a : 0.5f);
+            heightWeight += wts[wh];
+        }
+        surfaceHeight = heightWeight > 0.0f ? surfaceHeight / heightWeight : 0.5f;
+        #if WETNESS_EFFECTS >= 2
+        [branch] if (TESR_PuddleData.x > 0.001f && TESR_PuddleData.w > 0.5f) {
+            float detail = 0.0f;
+            [unroll] for (int wa = 0; wa < texLayers; wa++) {
+                float4 here = tex2Dgrad(BaseMap[wa], offsetUV, odx, ody);
+                float4 mean = tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f));
+                const float3 lumW = float3(0.3f, 0.59f, 0.11f);
+                detail += wts[wa] * (hStat[wa] > 0.0f ? here.a - mean.a : 0.6f * (dot(here.rgb, lumW) - dot(mean.rgb, lumW)));
+            }
+            surfaceHeight = saturate(0.5f + (heightWeight > 0.0f ? detail / heightWeight : 0.0f));
+        }
+        #endif
+        po.capturedPad2.r += 0.99f * saturate(surfaceHeight) - GBV2_SPEC_BIT;
+    }
+    #endif
     #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 4
         // UNOFFICIAL 2026-11-16 fd-sunvis (Includes/DeferredPixel.hlsl FDSunVisCode): the height self-shadow (the crack shadows) this record's sun
         // would have had, for DeferredSun ([Shaders.ShadowsExteriors.Deferred] LandCrackShadow is the pass's); no highlight F0 (none recorded)

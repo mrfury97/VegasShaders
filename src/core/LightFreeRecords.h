@@ -65,6 +65,15 @@ namespace LightFreeRecords {
 		static const D3DXMACRO overrides[4] = { { "LAMPS_DEFERRED", "2" }, { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };
 		return overrides;
 	}
+	// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only; core/DeferredWetness.h): set when its pass
+	// loaded (ShaderManager::Initialize, before the game's shaders load). The near land's records (TerrainTemplate) are then made with
+	// DEFERRED_WETNESS: no water layer of their own (the pass draws it), the layers' height left in COLOR2.r. Own cache folder.
+	inline bool WetCompiled = false;
+	inline const char* kWetCache = "LightFreeWet\\";
+	inline const D3DXMACRO* WetOverrides() {
+		static const D3DXMACRO overrides[3] = { { "LAMPS_DEFERRED", "2" }, { "DEFERRED_WETNESS", "1" }, { NULL, NULL } };
+		return overrides;
+	}
 	inline bool PuddlesIn() {
 		return TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
 	}
@@ -95,8 +104,10 @@ namespace LightFreeRecords {
 			shader->ShaderProg[ShaderRecordType::Interior];
 		// (2026-11-18 DeferredStandalone) without a forward record only with the switch, and only with the game's own shader to fall back on
 		if (!WantedAtStartup() || !Eligible(name, tmpl) || (!forwardLoaded && (!Standalone() || !shader->ShaderHandleBackup))) return false;
-		const bool tryLean = !forwardLoaded && PuddlesIn();
-		ShaderRecordPixel* record = tryLean && leanFirst ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, Overrides());
+		// (2026-11-19 DeferredWetness) the near land without its water layer: no lean puddle path to fall back on (it has no puddles)
+		const bool wet = WetCompiled && !strcmp(tmpl.Name, "TerrainTemplate");
+		const bool tryLean = !forwardLoaded && PuddlesIn() && !wet;
+		ShaderRecordPixel* record = tryLean && leanFirst ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, wet ? kWetCache : kCache, wet ? WetOverrides() : Overrides());
 		bool usedLean = false;
 		if (!record && tryLean) {
 			record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kLeanCache, LeanOverrides());
