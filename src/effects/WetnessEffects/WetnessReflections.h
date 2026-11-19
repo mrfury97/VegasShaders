@@ -20,6 +20,7 @@ public:
 		float	EdgeFade;			// fade near the screen's edges, as a share of the screen
 		float	MaxCameraDistance;	// no reflections on surfaces farther than this
 		bool	DebugView;			// the reflections alone
+		bool	LampFilm = true;	// UNOFFICIAL 2026-11-19 [Main.Main.Quality] DeferredWetLampFilm
 	};
 	WetnessReflectionsSettingsStruct	Settings;
 
@@ -27,6 +28,7 @@ public:
 		D3DXVECTOR4	Data;		// x: strength, y: max distance, z: thickness, w: steps
 		D3DXVECTOR4	Fade;		// x: roughness cutoff, y: edge fade, z: debug view, w: max camera distance
 		D3DXVECTOR4	Bump = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-18 x: 1 = s4 holds the shading normals (BindShadingNormals)
+		D3DXVECTOR4	LampFilm = D3DXVECTOR4(0.0f, 8.0f, 1.0f, 0.0f);	// UNOFFICIAL 2026-11-19 DeferredWetLampFilm: x on, y froxel list texels, z table rows
 	};
 	WetnessReflectionsStruct	Constants;
 
