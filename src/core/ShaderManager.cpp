@@ -2524,6 +2524,10 @@ ShaderCollection* ShaderManager::GetShaderCollectionByName(const char* collectio
 * Also creates or deletes the corresponding Effect Record.
 */
 void ShaderManager::SwitchShaderStatus(const char* shaderName) {
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3 (SettingManager::RainWetnessOneSwitch): Puddles has no switch of its own then (the menu's search
+	// row would still reach here); it follows Wetness Effects' below
+	const bool oneSwitch = TheSettingManager->RainWetnessOneSwitch();
+	if (oneSwitch && !strcmp(shaderName, "Puddles")) return;
 	IsMenuSwitch = true;	// (true only while the switch is made)
 
 	// An effect or a family flips itself (loading what it needs); its new state is stored as the menu's.
@@ -2536,6 +2540,8 @@ void ShaderManager::SwitchShaderStatus(const char* shaderName) {
 	// ShadowManager reads each frame) just flips its setting.
 	// SetMenuShaderEnabled picks the setting (Status, or [Shaders.<Name>.Main] Enabled for Cloth/CloudShadows; none for Foliage).
 	TheSettingManager->SetMenuShaderEnabled(shaderName, nowOn);
+	if (oneSwitch && !strcmp(shaderName, "WetnessEffects"))
+		if (ShaderCollection* puddles = GetShaderCollectionByName("Puddles")) puddles->Enabled = nowOn;	// (its setting: SetMenuShaderEnabled above)
 	IsMenuSwitch = false;
 }
 

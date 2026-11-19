@@ -1,7 +1,8 @@
 # Deferred wetness: design and steps (road map Phase 1c, 2026-11-19, v2)
 
 Owner's choice (2026-11-18/19): the deferred wetness pass is the end state; WetWorld is retired only once it covers everything WetWorld
-does. Room rule: deferred first. Branch `deferred-wetness` (off `wet-lamp-film`). Paths under `src\`. Nothing here is run yet.
+does. Room rule: deferred first. Branch `deferred-wetness` (off `wet-lamp-film`), built on `deferred-wetness-ground`. Paths under `src\`.
+State 2026-11-20: steps 1 and 2 run in game (owner: step 2 "Looks right"); step 3 built and installed, not run in game yet; step 4 open.
 
 ## Why
 - Wetness Effects + Puddles live inside the land and object shaders (`hlsl/NewVegas/Shaders/Includes/Wetness.hlsl`, compiled into
@@ -95,7 +96,8 @@ GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shad
 - Not done in step 1: objects / parallax / far land (steps 2-3); the passes' frame cost (not measured).
 - Owner's look (2026-11-19/20, Goodsprings pond in rain): puddle reflections grainy. PROVEN by live toggles: the grain is the main Reflections effect, and only with `[Main.Main.Quality] DeferredBumpedNormals` on (its test prototype hands Reflections the bumped normal; `effects/Reflections/Reflections.cpp:32-39`). Reflections also decides standing water from its own noise field (`Compute/Reflections.glsl:217-234`), not from DeferredWetness's puddles, so it mirrors sharply (WetRoughness 0.069) off bumpy grass / dirt. With the switch off the reflection is clean. Not caused by DeferredWetness (believed: the forward land wrote the same flattened normal). Fix belongs in step 3 (one system): Reflections takes the film target's standing water and roughness on deferred land; the bumped-normal prototype needs roughness from normal variance (specular anti-aliasing) before it can be on.
 - Installed for testing 2026-11-19 (test-p1a-bump 90fc395 = the earlier test build + this branch; restore
-  `F:\VS-scratch\install-test6-2026-11-19estore.ps1` -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
+  `F:\VS-scratch\install-test6-2026-11-19
+estore.ps1` -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
   the pass loaded", "wet: the land's water layer drawn by the pass", no "[ERROR] ShaderRecord: more than 62", no LIGHT-FREE RECORD
   warnings; in rain, the switch on vs off side by side (same spot, same weather).
 
@@ -114,6 +116,54 @@ rain (forward: only standing water at Quality 3); the forward parallax had no st
 height of ObjectPuddles; light-only (AD) records and terms that do not scale with albedo (the env-map pass, barrel heat, metal's EnvBRDF bias) get the ambient ratio too (review: believed small).
 Lead-architect review: approve with fixes, applied: objects get the water LEVEL only as forward gave it (0 unless ObjectPuddles, never worn gear or hair: `effects/Puddles/Puddles.cpp` SetDrawConstants; Wetness.hlsl's level now goes through a PUDDLE_LEVEL macro, the same bytecode); the forward skin drawn over a record (COLOR3.a 2.02-3.5) is not made wet; the screen pass's ray takes the smooth normal unless DeferredBumpedNormals is on. Known gap: with DeferredFirstPerson (test, off for the owner) the gun and arms lose their rain dampness (their records have no layer and the pass skips the view model), and the screen pass may read the world's film under them (believed).
 Offline (approximate defines): pass A 963 slots, device ok; all 66 eligible object / parallax lighting-free records compile with the switch (594-1,137 slots); sampled records without it and the forward land / object / parallax records byte-identical.
+
+Owner in game 2026-11-20 (install-test9): step 2 "Looks right".
+
+## Step 3 as built (2026-11-20, same branch): one system
+Under the same switch (test only, off). Three parts:
+- **The Reflections effect reads the film** (Vulkan passes only: `Compute/Reflections.glsl` FilmWetness, `effects/Reflections/Reflections.cpp`
+  binding 28 / slot 27 and `cb.film`). In a frame the film covers the whole screen (`DeferredWetness::FilmWhole()`: the fallback below drew, after
+  pass A if it ran; review: with the fallback off the film holds pass A's pixels only and the rest would turn dry), a floor's wet share is the film's gloss x RainWetness (outdoors) and its wet roughness the film's (the water's under standing
+  water, the film's elsewhere), for the floor guess and MaterialAware's floors alike. The rain guess (Data.y) and the puddle field
+  (PuddleStanding, the material buffer's mask) are not used then; a pixel without a film (sky, skin, grass, first person, far land) is dry
+  there. No whole film this frame (dry, indoors, the fallback off): as before. Change in look: wet ground away from puddles mirrors at the film's
+  roughness (Wetness Effects' rain roughness, 0.3-0.6 in the owner's rain, believed from the code) instead of WetRoughness 0.069: softer, as its
+  highlight; puddles at the Puddles Roughness as before. The D3D9 Reflections technique (no NVR DXVK) is unchanged: it keeps its rain guess.
+- **Specular anti-aliasing** (`Reflections.glsl` NormalVarianceRoughness; cb.film.z = the normals are FdIndirect's normal-mapped shading
+  normals, i.e. DeferredBumpedNormals or DeferredReflections on): alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.18) from the right and lower full-
+  resolution neighbours (a depth jump over 2 % is not counted), applied in Reflectivity after Mirror, not to water, the weapon or glass-free
+  paths that return 0. Under standing water the normal is already flat (pass A flattened COLOR2), so puddles keep their roughness. This is
+  tied to the bumped normals, not to DeferredWetness (both are test keys). Believed to remove the grain the owner proved 2026-11-20; not run.
+- **The fallback** (`Shaders/DeferredWetness.hlsl` DW_FALLBACK, `core/DeferredWetness.h` Fallback, called first in
+  `EffectChain.cpp` PreStep_WetFlashlightSpecularUnderwater, before the Wetness Effects screen pass): one full-screen draw, outdoors in wet
+  frames, two targets (the chain's current image in place, read from its own copy; the film target, cleared first when pass A did not run).
+  By COLOR1.a: pass A's pixels and the lighting-free pixels it leaves out (1 < a < 4.5) are skipped; forward records (a 1) and "sun kept"
+  records (5 + keep) get the film only (their colour has their own layer); unwritten pixels (a 0: the game's own shaders, LOD, trees without
+  a record) get the film and the layer on the lit colour: x WetAlbedo(colour) / colour (colour at most 1 stands for the albedo), x 0.4 under
+  standing water, + the film's sky reflection, faded out from 0.7 to 1 x 10,240 units (the film's gloss with it). The water level as the
+  forward records got it: land (model 4) the real level, worn gear and hair 0, other objects and unwritten pixels only with ObjectPuddles
+  (off for the owner). No fog round trip on unwritten pixels (their fog is unknown): believed darker blobs far away in dense rain fog. Skipped: sky, water plane (Reflections' test), first-person
+  view model, past 10,240 units. GetWetness with the records' defines, from TESR_DepthBuffer and TESR_NormalsBuffer (view -> world through the
+  DeferredDepth frame block's camera axes), no height. No sun highlight and no lamp streaks on unwritten pixels (believed minor in rain).
+  Needs the frame and the film at one size and format, no multisampling (one MRT draw): otherwise off for the session, logged. Runs only with
+  this frame's G-buffer (AlbedoData / MaterialData / CapturedNormals::Data.x, the last 0 when the effects run after the upscale) and
+  DeferredDepth's frame block; under RenderScale it draws the render rect only. The Wetness Effects screen pass
+  now takes the film for every pixel with one (was: lighting-free pixels only), so it no longer runs its own lighter wetness (PUDDLES_RUNTIME)
+  there; its ray's bumped normal is read only where a record wrote the G-buffer (a 0 decodes as straight up).
+- **One switch** (`SettingManager` RainWetnessOneSwitch = the saved DeferredWetness): Wetness Effects' row is called "Rain wetness"; Puddles'
+  switch follows it (`Configuration::ApplyRainWetnessSwitch` sets Puddles' saved Enabled when the files are read, SetMenuShaderEnabled sets both,
+  SwitchShaderStatus refuses Puddles alone; saved, Puddles keeps that value if DeferredWetness is turned off again); Puddles' row shows no
+  switch, WetWorld's none while Rain wetness is on (its screen pass already draws only when Wetness Effects is not live: EffectChain.cpp); `[Shaders.Puddles.Main] ReflectionPuddles` and `[Shaders.Reflections.Main] WetRoughness` are hidden
+  (no effect in film frames). No default changed: no settings version. Off: the menu as before.
+Offline (2026-11-20, the owner's toml defines): pass A 963 slots (unchanged), fallback 762, restore 18, all device ok; WetnessReflections.fx both
+variants PASS; the eleven Reflections*.spv rebuilt (an unchanged source rebuilt byte-identical first) and spirv-val clean; DLL built.
+Lead-architect review: approve with fixes, applied: (1) the fallback's G-buffer / depth / upscale guards; (2) the water level per model and
+ObjectPuddles; (3) Reflections only with the whole film (FilmWhole); (4) the film's gloss faded with the colour; (6) WetWorld's switch hidden
+only while Rain wetness is on; (8) no multisampled target; (9) the render rect only. Not changed: (5) fog on unwritten pixels (believed
+minor), (10) ReflectionsTraceHiZCount.spv (debug counting build) not rebuilt and the shader-file log's old hash table (says OLD), (11) a
+fully fogged near-land pixel (albedo alpha exactly 1) gets the fallback's film over pass A's (invisible under full fog).
+Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
+mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).
 
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,

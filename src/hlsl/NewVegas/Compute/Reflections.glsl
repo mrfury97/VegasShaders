@@ -30,6 +30,8 @@ layout(set = 1, binding = 24) uniform texture2D t_matbuf;      // UNOFFICIAL 202
 layout(set = 1, binding = 25) uniform texture2D t_cloudSky;    // UNOFFICIAL 2026-10-30 TESR_CloudSkyProbe (VolumetricClouds RenderSkyProbe; a placeholder when off)
 // (binding 26: the RT passes' Rt.Bounce, declared by them)
 layout(set = 1, binding = 27) uniform texture2D t_weaponMask;  // UNOFFICIAL 2026-11-09 TESR_WeaponMask (core/WeaponMask.h): red 1 on the first-person weapon's own pixels; a placeholder unless weapon.x is 2
+layout(set = 1, binding = 28) uniform texture2D t_film;        // UNOFFICIAL 2026-11-20 DeferredWetness's film (core/DeferredWetness.h FilmTexture: r round(8 murk)
+                                                               // + 0.99 gloss, g roughness: never 0 where the wetness was worked out); a placeholder unless film.x is 1
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;   // TESR_ProjectionTransform
@@ -71,6 +73,10 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 puddle;                // 2026-11-08 Puddles (src/effects/Puddles): TESR_PuddleData: x water level, y Coverage, z 1 / Size,
                                 // w Quality (0: off, or ReflectionPuddles off)
     vec4 puddle2;               // x slope start, y slope full, z the water's roughness, w edge softness
+    vec4 film;                  // UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): x 1 = t_film holds this frame's
+                                // film (the wetness the surfaces were drawn with: the floors' wet look comes from it, not from the rain guess and
+                                // the puddle field below), y its strength (RainWetness outdoors, 0 indoors), z 1 = t_normals holds the
+                                // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing), w unused
 } cb;
 
 layout(push_constant) uniform Push {
@@ -234,6 +240,21 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
     return shore * shore * (3.0 - 2.0 * shore) * smoothstep(cb.puddle2.x, cb.puddle2.y, worldUp) * nearFactor;
 }
 
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md, "one system"): in a frame DeferredWetness drew its film (the
+// lighting-free records' pixels from its pass inside the sun pass, every other pixel from its fallback pass before the wet screen pass), the
+// floors' wet look is the film's: how much water (gloss, which already holds the rain's cover and the puddles' fill) and how rough (the water's
+// roughness under standing water, the film's elsewhere), so the mirror sits on the water the player sees and is as blurred as its highlight.
+// The rain guess (Wetness) and the puddle field (PuddleStanding) are then not used; a pixel without a film (the sky, skin, grass, the first
+// person, the far land) is dry here. The normal under standing water is already flat: DeferredWetness flattened the G-buffer's shading normal,
+// which t_normals holds with DeferredBumpedNormals (the smooth normals otherwise).
+#define FilmOn (cb.film.x > 0.5)
+// The film's water at a pixel (0-1, x the strength) and its roughness; 0 where no film was worked out.
+float FilmWetness(vec2 uv, out float roughness) {
+    vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
+    roughness = max(f.g, 0.01);
+    return f.g > 0.001 ? saturate((f.r - floor(f.r)) / 0.99) * cb.film.y : 0.0;
+}
+
 // UNOFFICIAL 2026-10-30 a reflecting pixel's view-space position: ViewPosition, except on the first-person weapon, which the game draws
 // with its own (narrower) field of view from the same eye: the same depth, the sideways offsets shrunk by the two FOVs' ratio.
 vec3 SurfacePosition(vec2 uv, float depth) {
@@ -285,12 +306,16 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     if (floorShare > 0.0 && abs(worldZ - cb.waterSettings.x) < max(2.0, depth * 0.002)) return WaterReflectivity(depth, roughness);   // water reflects on its own (RT water: rays)
     float maxRough = cb.material.y;
     float dry = cb.material.z * (1.0 - smoothstep(0.6 * maxRough, maxRough, material.r));
-    float wetness = Wetness * floorShare;
-    float standing = floorShare > 0.0 ? PuddleStanding(uv, depth, ViewToWorldDir(ViewNormal(uv)).z) : 0.0;   // 2026-11-08 Puddles
+    float wetness = 0.0, standing = 0.0, wetRoughness = WetRoughness;
+    if (FilmOn) { if (floorShare > 0.0) wetness = FilmWetness(uv, wetRoughness) * floorShare; }   // 2026-11-20 the film (above)
+    else {
+    wetness = Wetness * floorShare;
+    standing = floorShare > 0.0 ? PuddleStanding(uv, depth, ViewToWorldDir(ViewNormal(uv)).z) : 0.0;   // 2026-11-08 Puddles
     if ((wetness > 0.0 || standing > 0.0) && RoofMaskOn > 0.5) { float open = OpenAbove(uv, depth); wetness *= open; standing *= open; }   // the rain wets open ground only
     wetness = max(wetness, standing);
+    }
     float amount = dry + wetness;
-    roughness = mix(roughness, WetRoughness, wetness / max(amount, 1.0e-4));
+    roughness = mix(roughness, wetRoughness, wetness / max(amount, 1.0e-4));
     roughness = mix(roughness, cb.puddle2.z, standing);
     SurfaceMetal = material.g;
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
@@ -348,10 +373,14 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     if (floorShare <= 0.0) return 0.0;
     float worldZ = cb.cameraPosition.z + toWorld(uv).z * depth;
     if (abs(worldZ - cb.waterSettings.x) < max(2.0, depth * 0.002)) return WaterReflectivity(depth, roughness);   // water reflects on its own (RT water: rays)
-    float wetness = Wetness;
-    float standing = PuddleStanding(uv, depth, worldNormal.z);   // 2026-11-08 Puddles: the standing water mirrors after the rain too
+    float wetness = 0.0, standing = 0.0, wetRoughness = WetRoughness;
+    if (FilmOn) wetness = FilmWetness(uv, wetRoughness);   // 2026-11-20 the film (FilmWetness)
+    else {
+    wetness = Wetness;
+    standing = PuddleStanding(uv, depth, worldNormal.z);   // 2026-11-08 Puddles: the standing water mirrors after the rain too
     if ((wetness > 0.0 || standing > 0.0) && RoofMaskOn > 0.5) { float open = OpenAbove(uv, depth); wetness *= open; standing *= open; }   // the rain wets open ground only
     wetness = max(wetness, standing);
+    }
     float amount = DryReflect + wetness;
     // UNOFFICIAL 2026-10-30 MaterialBufferRoughness: where the game's shader wrote the roughness it lit the surface with (TESR_MaterialBuffer:
     // r class > 0, b roughness, -1 none), the dry surface takes it instead of the one DryRoughness (polished floors sharp, carpets blurred).
@@ -362,10 +391,31 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
         vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
         if (written.r > 0.5 && written.b >= 0.0) dryRoughness = saturate(written.b);
     }
-    roughness = mix(dryRoughness, WetRoughness, wetness / max(amount, 1.0e-4));
+    roughness = mix(dryRoughness, wetRoughness, wetness / max(amount, 1.0e-4));
     roughness = mix(roughness, cb.puddle2.z, standing);
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
+}
+
+// UNOFFICIAL 2026-11-20 deferred wetness step 3: specular anti-aliasing for the normal-mapped normals (cb.film.z). A mirror on a normal that
+// changes from pixel to pixel (grass, gravel, a bumpy dirt road under rain) sends every pixel's ray somewhere else: grain that no blur of a
+// sharp reflection hides (proven 2026-11-20 by the owner's toggles: the grainy puddle reflections came with DeferredBumpedNormals on). The
+// roughness is widened by how much the normal varies across the pixel's footprint (Kaplanyan & Hoffman 2016, Tokuyoshi & Kaplanyan 2019:
+// alpha^2 + min(2 sigma^2 |dn|^2, kappa), alpha = roughness^2), from the right and lower neighbours at full resolution; a neighbour on
+// another surface (a depth jump) does not count. A flat normal (standing water, which DeferredWetness flattened) keeps its roughness.
+float NormalVarianceRoughness(vec2 uv, float depth, vec3 n, float roughness) {
+    const float Sigma2 = 0.15915494;   // 1 / (2 pi)
+    const float Kappa = 0.18;          // the most the footprint may add (alpha^2)
+    float sum = 0.0;
+    vec2 px = cb.reciprocalResolution.xy;
+    for (int i = 0; i < 2; i++) {
+        vec2 q = uv + (i == 0 ? vec2(px.x, 0.0) : vec2(0.0, px.y));
+        if (abs(readDepthLod(q) - depth) > depth * 0.02 + 1.0) continue;
+        vec3 d = ViewNormal(q) - n;
+        sum += dot(d, d);
+    }
+    float a = roughness * roughness;
+    return sqrt(sqrt(saturate(a * a + min(2.0 * Sigma2 * sum, Kappa))));
 }
 
 // UNOFFICIAL 2026-11-05 [Shaders.Reflections.Main] Mirror (cb.grid3.w): the roughness the surface's own material gives (the game's
@@ -383,6 +433,8 @@ float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
     if (amount <= 0.0 || SurfaceWater || IsWeapon(uv)) mirror = cb.grid3.w < 0.0 ? 0.0 : mirror;
     SurfaceMirror = mirror;
     if (mirror > 0.0 && amount > 0.0 && !SurfaceWater && !IsWeapon(uv)) roughness = mix(roughness, min(roughness, DryRoughness), mirror);
+    // (2026-11-20) the bumped normals' footprint (NormalVarianceRoughness), after Mirror: it is the pixel's, not the material's
+    if (cb.film.z > 0.5 && amount > 0.0 && !SurfaceWater && !IsWeapon(uv)) roughness = NormalVarianceRoughness(uv, depth, normalize(viewNormal), roughness);
     return amount;
 }
 

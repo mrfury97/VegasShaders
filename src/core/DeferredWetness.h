@@ -19,6 +19,7 @@
 #include "LinearScene.h"
 #include "ShaderRecord.h"
 #include "GpuProfiler.h"
+#include "RenderRect.h"	// (2026-11-20 step 3) the fallback draws the render rect only
 
 namespace DeferredWetness {
 	inline ShaderRecordPixel* Pass = nullptr;		// the wet frames' pass (Shaders/DeferredWetness.hlsl)
@@ -36,6 +37,13 @@ namespace DeferredWetness {
 	inline D3DSURFACE_DESC Made = {};
 	inline bool TargetsFailed = false;
 	inline unsigned long long StatWet = 0, StatDry = 0, StatSkipped = 0;
+	// UNOFFICIAL 2026-11-20 step 3 (docs/deferred-wetness-design.md "Step 3 as built"): the fallback (Shaders/DeferredWetness.hlsl DW_FALLBACK, Fallback
+	// below): the film for every pixel the pass did not work out, and the water layer on the lit colour where no record drew at all
+	inline ShaderRecordPixel* FallbackPass = nullptr;
+	inline bool FallbackDrawn = false;				// this frame's film target holds the fallback's film too (Reflections, WetnessReflections)
+	inline bool FallbackOff = false;				// latched: it cannot draw this session (logged once)
+	inline IDirect3DTexture9* FrameCopy = nullptr;    inline IDirect3DSurface9* FrameCopySurface = nullptr;  inline D3DSURFACE_DESC FrameCopyMade = {};
+	inline constexpr float FallbackRange = 10240.0f;	// game units: about the loaded cells' reach (uGridsToLoad 5); the game's own far shaders stay dry
 
 	inline bool WantedAtStartup() {
 		if (Wanted < 0) Wanted = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetness") != 0 && LightFreeRecords::WantedAtStartup() &&
@@ -68,10 +76,28 @@ namespace DeferredWetness {
 		Restore->ClearSamplers = false;
 		LightFreeRecords::WetCompiled = true;
 		Logger::Log("UNOFFICIAL DeferredWetness: the pass loaded; the near land's, objects' and parallax's lighting-free records are made without their water layer (DEFERRED_WETNESS)");
+		// (2026-11-20 step 3) the fallback: not needed for the pass above to work (without it the other pixels keep their own wetness, and the
+		// Reflections effect its own guess for frames without a film)
+		static const D3DXMACRO fallback[] = { { "DW_FALLBACK", "1" }, { NULL, NULL } };
+		ShaderTemplate fallbackTmpl = {};
+		fallbackTmpl.Name = "DeferredWetness";
+		FallbackPass = (ShaderRecordPixel*)ShaderRecord::LoadShader("DeferredWetness.pso", NULL, fallbackTmpl, "Deferred\\WetnessFallback\\", fallback);
+		if (FallbackPass) FallbackPass->ClearSamplers = false;
+		Logger::Log(FallbackPass ? "UNOFFICIAL DeferredWetness: the fallback loaded (the film for the pixels the pass does not draw; the game's own shaders made wet on the lit colour)" :
+			"[WARNING] UNOFFICIAL DeferredWetness: the fallback (DW_FALLBACK) did not load: the pixels no record drew stay dry, and the Reflections effect keeps its own guess there");
 	}
 
 	// Once a frame (Render.cpp, with DeferredSun::BeginFrame).
-	inline void BeginFrame() { FilmLive = false; LampFilmDrawn = false; }
+	inline void BeginFrame() { FilmLive = false; LampFilmDrawn = false; FallbackDrawn = false; }
+
+	// (2026-11-20 step 3) the film target holds this frame's film: the pass's (inside the sun pass) and / or the fallback's (in the effect chain,
+	// before the Wetness Effects screen pass). The Reflections effect and the screen pass read it from then on.
+	// (review 2026-11-20) not when the G-buffer does not line up with the effects' frame this frame (CapturedNormals::Data.x 0: EffectChain.cpp
+	// step 23 clears it when the effects run after the upscale, where the film holds only the render rect)
+	inline bool FilmReady() { return (FilmLive || FallbackDrawn) && FilmTexture && CapturedNormals::Data.x > 0.0f; }
+	// The film covers the whole screen (the fallback drew too): only then may a reader drop its own wetness for pixels without a film (the
+	// Reflections effect); with the fallback off the film holds only the pass's pixels
+	inline bool FilmWhole() { return FallbackDrawn && FilmReady(); }
 
 	// The copies the pass reads and the film target, at the G-buffer's size and format.
 	inline bool MakeTargets(IDirect3DDevice9* d) {
@@ -224,5 +250,123 @@ namespace DeferredWetness {
 	inline void EnsureRestored(IDirect3DDevice9* d) {
 		if (CompiledIn() && !Done) Apply(d, nullptr, false);
 		Done = false;
+	}
+
+	// UNOFFICIAL 2026-11-20 step 3 (docs/deferred-wetness-design.md "Step 3 as built"): the fallback, in the effect chain right before the Wetness
+	// Effects screen pass (EffectChain.cpp PreStep_WetFlashlightSpecularUnderwater), outdoors in wet frames. One full-screen draw on the lit frame
+	// with two targets: the frame (rgb: the water layer where no record drew) and the film target (the film for every pixel the pass inside the sun
+	// pass did not work out; cleared first in a frame that pass did not run). The frame is drawn in place: the chain's current image (or, off the
+	// chain, the effects' target, copied back to the rendered buffer after), read from a copy. Needs the frame and the film at one size and format
+	// (the targets of one draw); otherwise it is off for the session, logged once.
+	inline void Fallback(IDirect3DDevice9* d, IDirect3DSurface9* renderTarget) {
+		if (!FallbackPass || FallbackOff || !CompiledIn() || !TheShaderManager->GameState.isExterior || TheShaderManager->GameState.isUnderwater || !WetNow()) return;
+		// (review 2026-11-20) the G-buffer and the depth frame block must be this frame's and line up with the effects' frame (Data.x: see FilmReady)
+		if (!CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || CapturedNormals::AlbedoData.x < 0.5f || CapturedNormals::MaterialData.x < 0.5f ||
+			CapturedNormals::Data.x <= 0.0f || !DeferredDepth::Ready() || !MakeTargets(d) || !renderTarget) return;
+		FrameChain& chain = TheShaderManager->Chain;
+		const bool chained = chain.Owns(renderTarget, TheTextureManager->RenderedSurface);	// (puts back an image an earlier effect wrote to the screen)
+		IDirect3DSurface9* const target = chained ? TheTextureManager->RenderedSurface : renderTarget;
+		D3DSURFACE_DESC t = {};
+		if (!target || FAILED(target->GetDesc(&t))) return;
+		if (t.Width != Made.Width || t.Height != Made.Height || t.Format != Made.Format || t.MultiSampleType != D3DMULTISAMPLE_NONE) {
+			FallbackOff = true;
+			Logger::Log("[WARNING] UNOFFICIAL DeferredWetness: the fallback is off this session: the frame (%ux%u, format %u, multisample %u) and the film (%ux%u, format %u) differ",
+				t.Width, t.Height, (unsigned)t.Format, (unsigned)t.MultiSampleType, Made.Width, Made.Height, (unsigned)Made.Format);
+			return;
+		}
+		if (!FrameCopy || FrameCopyMade.Width != t.Width || FrameCopyMade.Height != t.Height || FrameCopyMade.Format != t.Format) {
+			if (FrameCopySurface) { FrameCopySurface->Release(); FrameCopySurface = nullptr; }
+			if (FrameCopy) { FrameCopy->Release(); FrameCopy = nullptr; }
+			if (FAILED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, t.Format, D3DPOOL_DEFAULT, &FrameCopy, NULL)) || !FrameCopy ||
+				FAILED(FrameCopy->GetSurfaceLevel(0, &FrameCopySurface))) {
+				if (FrameCopy) { FrameCopy->Release(); FrameCopy = nullptr; }
+				FallbackOff = true;
+				Logger::Log("[WARNING] UNOFFICIAL DeferredWetness: the fallback is off this session: no copy of the frame could be made");
+				return;
+			}
+			FrameCopyMade = t;
+		}
+		if (FAILED(d->StretchRect(target, NULL, FrameCopySurface, NULL, D3DTEXF_NONE))) return;
+		static GpuTimer timer("Deferred wetness fallback");
+		GpuProfileScope gpu(timer, d);
+
+		auto* rs = TheRenderManager->renderState;
+		D3DVIEWPORT9 vp = {}; d->GetViewport(&vp);
+		IDirect3DSurface9* rt[4] = {};
+		for (DWORD i = 0; i < 4; i++) d->GetRenderTarget(i, &rt[i]);
+		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;
+		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; DWORD fvf = 0;
+		d->GetVertexShader(&vs); d->GetPixelShader(&ps); d->GetVertexDeclaration(&decl); d->GetFVF(&fvf); d->GetStreamSource(0, &vb, &vbOffset, &vbStride);
+		IDirect3DBaseTexture9* tex[16] = {};
+		static const int kSamplerStates = 13;	// D3DSAMP_ADDRESSU (1) .. D3DSAMP_DMAPOFFSET (13)
+		DWORD savedSS[16][kSamplerStates];
+		for (DWORD s = 0; s < 16; s++) {
+			d->GetTexture(s, &tex[s]);
+			for (int k = 0; k < kSamplerStates; k++) savedSS[s][k] = rs->GetSamplerState(s, (D3DSAMPLERSTATETYPE)(k + 1));
+		}
+		static float savedC[224][4];
+		d->GetPixelShaderConstantF(0, &savedC[0][0], 224);
+		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_CULLMODE, D3DRS_STENCILENABLE,
+			D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_COLORWRITEENABLE, D3DRS_COLORWRITEENABLE1, D3DRS_ALPHABLENDENABLE,
+			D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_FOGENABLE };
+		const DWORD want[] = { D3DZB_FALSE, FALSE, FALSE, D3DCULL_NONE, FALSE, FALSE, FALSE, 0x7u, 0xFu, FALSE, FALSE, FALSE };
+		DWORD savedRS[sizeof(kRS) / sizeof(kRS[0])];
+		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) { if (FAILED(d->GetRenderState(kRS[i], &savedRS[i]))) savedRS[i] = want[i]; if (savedRS[i] != want[i]) d->SetRenderState(kRS[i], want[i]); }
+
+		for (UInt32 i = 0; i < FallbackPass->TextureShaderValuesCount; i++) {
+			TextureRecord* rec = FallbackPass->TextureShaderValues[i].Texture;
+			if (rec && rec->TextureRef) rec->Texture = *rec->TextureRef;
+		}
+		FallbackPass->SetCT();
+		// DW_FB (c15): z (review 2026-11-20) [Shaders.Puddles.Main] ObjectPuddles, as Apply's c6.y: only the land gets the water level unless it is on
+		const float objectPuddles = TheSettingManager->GetSettingI("Shaders.Puddles.Main", "ObjectPuddles") != 0 ? 1.0f : 0.0f;
+		const float own[4] = { FilmLive ? 1.0f : 0.0f, FallbackRange, objectPuddles, 0.0f };
+		d->SetPixelShaderConstantF(15, own, 1);
+		IDirect3DBaseTexture9* const inputs[3] = { FrameCopy, CapturedNormals::AlbedoTexture, CapturedNormals::MaterialTexture };
+		for (DWORD s = 0; s < 3; s++) {
+			rs->SetTexture(s, inputs[s]);
+			TheRenderManager->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_POINT); TheRenderManager->SetSamplerState(s, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+			TheRenderManager->SetSamplerState(s, D3DSAMP_MIPFILTER, D3DTEXF_NONE); TheRenderManager->SetSamplerState(s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+			TheRenderManager->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP); TheRenderManager->SetSamplerState(s, D3DSAMP_SRGBTEXTURE, FALSE);
+		}
+		for (DWORD s = 3; s < 16; s++) {	// (no stage may hold the film while it is a target)
+			IDirect3DBaseTexture9* bound = nullptr;
+			if (SUCCEEDED(d->GetTexture(s, &bound)) && bound) { if (bound == FilmTexture) rs->SetTexture(s, nullptr); bound->Release(); }
+		}
+		if (!FilmLive) d->ColorFill(FilmSurface, NULL, 0);	// (the pass did not run this frame: no film anywhere yet)
+		d->SetRenderTarget(0, target);
+		d->SetRenderTarget(1, FilmSurface);
+		for (DWORD i = 2; i < 4; i++) d->SetRenderTarget(i, nullptr);
+		// the drawn part only: the whole target, or under RenderScale its top-left rect (review 2026-11-20: the pixels past it are not shown)
+		const UINT w = RenderRect::Width(t.Width), h = RenderRect::Active() ? (UINT)floorf((float)t.Height * RenderRect::ScaleY + 0.5f) : t.Height;
+		const D3DVIEWPORT9 drawn = { 0, 0, w, h, 0.0f, 1.0f };
+		d->SetViewport(&drawn);
+		d->SetVertexShader(nullptr);
+		d->SetPixelShader(FallbackPass->ShaderHandle);
+		d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
+		const float x1 = (float)w - 0.5f, y1 = (float)h - 0.5f, u1 = (float)w / t.Width, v1 = (float)h / t.Height;
+		const float quad[4][6] = { { -0.5f, -0.5f, 0, 1, 0.0f, 0.0f }, { x1, -0.5f, 0, 1, u1, 0.0f }, { -0.5f, y1, 0, 1, 0.0f, v1 }, { x1, y1, 0, 1, u1, v1 } };
+		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
+		FallbackDrawn = true;
+		static bool told = false;
+		if (!told) { told = true; Logger::Log("UNOFFICIAL DeferredWetness: the fallback drew (%s)", chained ? "on the chain's image" : "on the effects' target"); }
+
+		for (DWORD i = 0; i < 4; i++) { d->SetRenderTarget(i, rt[i]); if (rt[i]) rt[i]->Release(); }
+		d->SetViewport(&vp);
+		for (DWORD s = 0; s < 16; s++) {
+			rs->SetTexture(s, tex[s]);
+			for (int k = 0; k < kSamplerStates; k++)
+				if (rs->GetSamplerState(s, (D3DSAMPLERSTATETYPE)(k + 1)) != savedSS[s][k]) TheRenderManager->SetSamplerState(s, (D3DSAMPLERSTATETYPE)(k + 1), savedSS[s][k]);
+			if (tex[s]) tex[s]->Release();
+		}
+		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) if (savedRS[i] != want[i]) d->SetRenderState(kRS[i], savedRS[i]);
+		d->SetPixelShaderConstantF(0, &savedC[0][0], 224);
+		if (decl) { d->SetVertexDeclaration(decl); decl->Release(); } else d->SetFVF(fvf);
+		d->SetStreamSource(0, vb, vbOffset, vbStride); if (vb) vb->Release();
+		d->SetVertexShader(vs); if (vs) vs->Release();
+		d->SetPixelShader(ps); if (ps) ps->Release();
+		// off the chain the next effect reads the rendered buffer, which the effects keep as a copy of their target
+		if (!chained && TheTextureManager->RenderedSurface && TheTextureManager->RenderedSurface != target)
+			d->StretchRect(target, NULL, TheTextureManager->RenderedSurface, NULL, D3DTEXF_NONE);
 	}
 }

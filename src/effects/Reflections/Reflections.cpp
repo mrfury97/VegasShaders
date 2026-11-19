@@ -24,6 +24,7 @@
 #include "../../core/RtFlashlightCode.h"
 #include "../../core/Paths.h"	// UNOFFICIAL 2026-11-08 (perf-reflfix4) the shader files' check (LogReflShaderFiles)
 #include "../../core/FdIndirect.h"	// UNOFFICIAL 2026-11-15 DeferredReflections (full deferred renderer, phase 6: docs/next/FD-GI-RESULTS.md)
+#include "../../core/DeferredWetness.h"	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the floors' water from the film
 #include <fstream>
 #include <iterator>
 #include <string>
@@ -813,7 +814,8 @@ bool ReflectionsEffect::ShouldRender() {
 	// over it (wet roads, polished floors and metal reflecting twice). On: no Reflections pass while the traced picture replaces the scene.
 	if (RtPathTrace::Replacing() && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTReflectionsOff") != 0) return false;
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
-	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f);
+	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f) ||
+		(DeferredWetness::FilmWhole() && TheShaderManager->GameState.isExterior && Settings.RainWetness > 0.0f);	// (2026-11-20 the film's water: Reflections.glsl FilmWetness)
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
 	// the weapon rays can run (RtTrace's weaponFrame: the helper up, not a rect frame). Weapon 0 or RT off: as before.
@@ -1216,6 +1218,7 @@ namespace {
 		D3DXVECTOR4	flashPos, flashDir, flashColor, flashLook;	// UNOFFICIAL 2026-11-07 (perf-reflfix2) KeepFlashlight (ReflectionsComposite.frag)
 		D3DXVECTOR4	mirrorLamp, sunDirection;	// UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl)
 		D3DXVECTOR4	puddle, puddle2;	// 2026-11-08 Puddles (PuddlesShaders::ReflectionData): the standing water's field (Reflections.glsl PuddleStanding)
+		D3DXVECTOR4	film;	// UNOFFICIAL 2026-11-20 deferred wetness step 3: x 1 = t_film holds this frame's film, y its strength, z 1 = bumped normals (Reflections.glsl FilmWetness, NormalVarianceRoughness)
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1246,6 +1249,7 @@ namespace {
 		{ 1, 24, NVR_EXT_BIND_SAMPLED_IMAGE, 23, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-30 TESR_MaterialBuffer (index 21)
 		{ 1, 25, NVR_EXT_BIND_SAMPLED_IMAGE, 24, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-30 TESR_CloudSkyProbe (index 22)
 		{ 1, 27, NVR_EXT_BIND_SAMPLED_IMAGE, 26, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (index 23; binding 26 / slot 25 are the RT passes' Rt.Bounce)
+		{ 1, 28, NVR_EXT_BIND_SAMPLED_IMAGE, 27, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 DeferredWetness's film (index 24; core/DeferredWetness.h FilmTexture)
 	};
 	const UINT ReflTextureCount = 16;
 	// UNOFFICIAL 2026-10-26 (deep/fork-hiz): ReflectionsTraceHiZ.frag = the same bindings + the Hi-Z pyramid buffer on set 1, binding 16 (buffer slot 1).
@@ -1509,6 +1513,14 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	}
 	// 2026-11-08 Puddles: the puddles' field, so the SSR and RT reflections mirror them (zero: off).
 	if (PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles) puddles->ReflectionData(uniforms.puddle, uniforms.puddle2);
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): in a frame DeferredWetness's film covers the whole screen
+	// (FilmWhole: its fallback drew after its pass; review: with the fallback off the film holds only the pass's pixels, and the rest would turn
+	// dry), the floors' water and its roughness come from the film (Reflections.glsl FilmWetness), not from the rain guess (Data.y) and the puddle
+	// field; z: the normals are the normal-mapped ones (FdReflNormals put them in), so the passes widen the roughness by their variance
+	// (NormalVarianceRoughness: the grain of a mirror on bumpy ground)
+	IDirect3DTexture9* film = DeferredWetness::FilmWhole() ? DeferredWetness::FilmTexture : nullptr;
+	uniforms.film = D3DXVECTOR4(film ? 1.0f : 0.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f,
+		normals != SlotTexture("TESR_NormalsBuffer") ? 1.0f : 0.0f, 0.0f);
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
@@ -1530,6 +1542,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	resources[21].Slot = 23; resources[21].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[21].pResource = matbuf ? (IUnknown*)matbuf : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30
 	resources[22].Slot = 24; resources[22].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[22].pResource = skySlot ? (IUnknown*)skySlot : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30 (2026-10-31: or the panorama)
 	resources[23].Slot = 26; resources[23].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[23].pResource = weaponMask ? (IUnknown*)weaponMask : (IUnknown*)depth;	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (or the depth: never read while weapon.x is not 2)
+	resources[24].Slot = 27; resources[24].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[24].pResource = film ? (IUnknown*)film : (IUnknown*)depth;	// UNOFFICIAL 2026-11-20 the film (or the depth: never read while film.x is 0)
 	UINT resourceCount = _countof(ReflBindings);
 	if (hiz) {
 		resources[resourceCount].Slot = 1; resources[resourceCount].Type = NVR_EXT_BIND_STORAGE_BUFFER; resources[resourceCount].pResource = hiz;

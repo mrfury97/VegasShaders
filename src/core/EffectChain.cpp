@@ -65,7 +65,7 @@
 //                                       when: BounceLight->Enabled
 //  29  BloodFlow                        Blood flow
 //                                       when: always called (nothing with no blood near)
-//  30  WetFlashlightSpecularUnderwater  wetness reflections, the HUD raindrops' wetness, wet world, flashlight beam + flashlight, specular (with the bounce combine), underwater
+//  30  WetFlashlightSpecularUnderwater  the deferred wetness fallback (2026-11-20), wetness reflections, the HUD raindrops' wetness, wet world, flashlight beam + flashlight, specular (with the bounce combine), underwater
 //                                       when: each as its effect decides
 //  31  SpillSelfTest                    NeonSpillSelfTest capture
 //                                       when: NVR_TEST_TOOLS builds
@@ -175,6 +175,7 @@
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
+#include "DeferredWetness.h"	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the fallback before the Wetness Effects screen pass
 #include "EffectChain.h"
 
 // Defined in effects\ShadowsExterior.cpp (declared in ShaderManager.cpp as well).
@@ -927,6 +928,10 @@ void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 		GpuProfileScope gpu(materialEffectsTimer, Device);
 		// UNOFFICIAL 2026-11-04 Wetness Effects' reflections (after the shadows, AO and bounce light, so what wet surfaces reflect is
 		// shaded as it is seen), and the wetness the HUD raindrops read next frame (as Physically-Based-Reloaded).
+		// UNOFFICIAL 2026-11-20 deferred wetness step 3 (core/DeferredWetness.h Fallback; DeferredWetness on, wet, outdoors): the film for every
+		// pixel its pass inside the sun pass did not work out, and the water layer on the lit colour where no record drew at all, so the screen
+		// pass below and the Reflections effect read one film for the whole screen
+		DeferredWetness::Fallback(Device, RenderTarget);
 		{	// (2026-11-18 DeferredBumpedNormals: its normal-mapped normal on stage 4, cleared after)
 			Effects.WetnessReflections->BindShadingNormals(Device);
 			Effects.WetnessReflections->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface);

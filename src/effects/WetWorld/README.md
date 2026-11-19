@@ -228,3 +228,9 @@ Pass outputs:
 - Also handled: a fade restarted half way continues from where it is (it jumped back to its old start), and an animator whose start lies after the game clock (an earlier save loaded during a fade) is set to its target.
 - Log lines (prefix "UNOFFICIAL RainState:", at most 60 a session): the mode at the first frame and when the key changes; "the rain started / stopped"; "WetWorld / Precipitations switched on / off" with the factor before and after (the Enabled flags themselves are compared, so every way of switching is seen); "fully wet" and "dry again".
 - Changed by default against the builds before it: puddles show during the rain again and go when it stops (with Increase / Decrease 0); with this effect off, rainy weather still brings the Rain setting groups, wet skin and the water's rain ripples; with Precipitations off, this effect still shows the rain's wetness, ripples and splashes.
+
+## 12. With DeferredWetness on (2026-11-20, deferred wetness step 3, test only)
+The menu shows no switch for WetWorld (`[Shaders.WetWorld.Status] Enabled` keeps its saved value): rain wetness is one switch, Wetness Effects'
+("Rain wetness"), and this effect's wet pass is only the fallback it already was (EffectChain.cpp draws it only while Wetness Effects is not
+live). The pixels the surface shaders do not wet (the game's own shaders, LOD) get their wet look from DeferredWetness's fallback pass
+(`core/DeferredWetness.h` Fallback), not from this pass.

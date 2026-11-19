@@ -83,7 +83,8 @@ void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
 	// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h): the film as that pass left it this frame, on s8, read where it wrote one (the
 	// near land, and since 2026-11-20 objects and parallax; the G-buffer on s6 / s7 says which) in place of this pass's own wetness there (y 1)
 	const bool gbuffer = CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f;
-	const bool landFilm = DeferredWetness::FilmLive && DeferredWetness::FilmTexture && gbuffer;
+	// (2026-11-20 step 3) or the fallback's (every other pixel's film: DeferredWetness::Fallback ran right before this pass)
+	const bool landFilm = DeferredWetness::FilmReady() && gbuffer;
 	Constants.Bump.y = landFilm ? 1.0f : 0.0f;
 	Constants.Bump.z = landFilm && DeferredWetness::LampFilmDrawn ? 1.0f : 0.0f;	// (2026-11-20) the land pass drew the land's streaks, shadowed
 	// (stages 5-8: past the TESR_ samplers, which EffectRecord binds by declaration order, s0-s3)
