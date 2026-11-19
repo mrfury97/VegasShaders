@@ -1,4 +1,6 @@
-# Puddles (rain puddles, wet ground, wall streaks)
+# Puddles (rain puddles, wet ground)
+
+2026-11-18 (owner's request): the wall streaks (rain running down steep faces) are removed: their code in `Shaders/Includes/Wetness.hlsl` (PuddleStreaks), the settings Streaks, StreakWidth and StreakSpeed (saved values are skipped quietly, `SettingManager.cpp` Retired) and DebugView 4. The result is what Streaks = 0 gave before. The notes below about streaks are history.
 
 ## 1. Purpose
 Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it rains and shrink back from their edges after it stops, at a pace set in game hours. Inside a puddle the surface is a flat, near-mirror water layer (IOR 1.33, F0 0.02) that hides the material's bumps, darkens what is under it with depth and ripples with the rain. Around each puddle a ring of soaked ground. On walls and other steep faces open to the rain, water runs down in streaks. Puddles reflect the sky (forward shaders), the scene on screen (Wetness Effects' reflections) and, with the Vulkan reflection passes, ray-traced reflections.
@@ -29,7 +31,7 @@ The object, parallax and land pixel shaders keep ps_3_0: the new constants fit i
 | c174 | TESR_PuddleData | x water level 0-1 (CPU, section 6), y Coverage, z 1 / Size (game units), w Quality (0 = off: Wetness Effects' old puddles) |
 | c175 | TESR_PuddleLook | x puddle roughness, y depth darkening, z edge softness (field units), w ripple strength in puddles |
 | c165 | TESR_PuddleShape | x slope start (world up of the face), y slope full, z cavity (land height) strength, w wet-ring width |
-| c166 | TESR_PuddleStreak | x streak strength x raining, y 1 / streak lane width, z streak speed, w debug view |
+| c166 | TESR_PuddleStreak | w debug view (x y z were the wall streaks', removed 2026-11-18: 0) |
 
 c165-c166 are the sun cross-fade's (Shadow.hlsl, SUN_CROSSFADE), which never compiles with Wetness Effects. c174-c175: free in all object pixel shaders (VEGAS_SHADERS.md section 3) and in the land's (c172-c173 lamp RT, c176-c179 blending and macro). Also read by `Effects/WetnessReflections.fx.hlsl`.
 
@@ -43,7 +45,7 @@ Two vec4 appended after `renderScale`: `puddle` (= TESR_PuddleData) and `puddle2
 
 | Key | Default | Meaning |
 |---|---|---|
-| Quality | 2 | 0 off (Wetness Effects' puddles), 1 low (mask, water layer, flattening), 2 medium (+ land height cavities, wet ring, wall streaks, land ripples), 3 high (+ ripples on objects, a third noise octave) |
+| Quality | 2 | 0 off (Wetness Effects' puddles), 1 low (mask, water layer, flattening), 2 medium (+ land height cavities, wet ring, land ripples), 3 high (+ ripples on objects, a third noise octave) |
 | Coverage | 0.25 | Share of flat open ground under water at a full water level |
 | Size | 420 | Puddle pattern size, game units |
 | FillHours | 0.5 | Game hours of steady rain to fill the puddles |
@@ -57,13 +59,10 @@ Two vec4 appended after `renderScale`: `puddle` (= TESR_PuddleData) and `puddle2
 | WetRing | 0.12 | Width of the soaked ring round each puddle, field units |
 | Flatten | 1.0 | How much the water hides the material's normal map |
 | Ripples | 1.0 | Rain ripple strength inside puddles |
-| Streaks | 1.0 | Wall streak strength while it rains |
-| StreakWidth | 6.0 | Streak lane width, game units |
-| StreakSpeed | 1.0 | How fast streaks run down |
 | MapMode | true | Restart: the large-scale terms from the puddle map on the NVR DXVK extension (section 6b) |
 | ReflectionPuddles | true | The Vulkan reflection pass (SSR + RT) mirrors the puddles too |
 | `.Debug` LevelOverride | -1 | Force the water level 0-1 (-1 off), for testing in dry weather |
-| `.Debug` DebugView | 0 | 1 mask (red puddle, green wet ring, blue streaks), 2 ripples (normal xy), 3 levels (red rain wetness, green water level, blue raining), 4 the streaks' inputs (red open to the sky, green how steep the face is, blue the raw lanes), 5 the puddle map's terms (map mode) |
+| `.Debug` DebugView | 0 | 1 mask (red puddle, green wet ring), 2 ripples (normal xy), 3 levels (red rain wetness, green water level, blue raining), 4 nothing (was the wall streaks), 5 the puddle map's terms (map mode) |
 
 ## 5. Passes and outputs
 No pass of its own. The puddle model runs inside `GetWetness` (Includes/Wetness.hlsl) in the object, parallax and land pixel shaders, and in the Vulkan reflection passes' `Reflectivity`. The effect's C++ (`Puddles.cpp`) only works out the water level and fills the constants.
@@ -90,7 +89,7 @@ No pass of its own. The puddle model runs inside `GetWetness` (Includes/Wetness.
 ### The water layer
 - Inside: darkening = 1 + Darkening x depth (the porous darkening of Wetness.hlsl taken further: water absorbs), gloss 1, roughness lerp to Roughness, the film normal = the face normal (no bumps) plus ripples. Murk (2026-11-12): `w.murk` = depth x standing tints what the water reflects toward brown-grey (`PuddleMurkTint`, land sky reflection and lamp highlights). The templates also flatten their own tangent-space normal by `wet.flatten`, so the sun, lamps and ambient see a flat surface too.
 - Ripples: Wetness.hlsl's `WetRainDrops` rings (land: Quality 2, objects: Quality 3), at Ripples strength inside puddles.
-- Streaks (Quality 2+): faces steeper than about 55 degrees, open to the sky, while it rains: lanes StreakWidth wide, one in three dry, each with drops running down at its own speed (the bright head at the bottom, the tail fading above it). A streak adds to the wall's own rain wetness (darkening and gloss), hides the material's bumps, and its surface bulges (rounded across the lane, the drop's tail sloping up) so it catches the sky as moving glints; a flat film on a wall reflects almost nothing. A wall under an overhang stays dry (user 2026-11-11): the 40-unit look-out of the cover test is kept.
+- (Removed 2026-11-18) Streaks (Quality 2+): faces steeper than about 55 degrees, open to the sky, while it rains: lanes StreakWidth wide, one in three dry, each with drops running down at its own speed (the bright head at the bottom, the tail fading above it). A streak adds to the wall's own rain wetness (darkening and gloss), hides the material's bumps, and its surface bulges (rounded across the lane, the drop's tail sloping up) so it catches the sky as moving glints; a flat film on a wall reflects almost nothing. A wall under an overhang stays dry (user 2026-11-11): the 40-unit look-out of the cover test is kept.
 
 ### Lamps on wet ground (2026-11-12, the land)
 - Each lamp adds its highlight on the water film (`WetSpecularStretched`: GGX with the half vector's part along the view, projected on the surface, shrunk to 0.3 at full gloss), so the highlight runs long toward the eye: the wet-road streak. x the lamp's RT shadow, x murk.
@@ -143,7 +142,7 @@ dry lamp record, and 7-layer land had no sampler for the cover map.
 - No new images: the RT shared-image count is unchanged.
 
 ## 8. Look and cost
-- Correct: in rain, flat open ground grows irregular puddles from the low spots of the pattern and the land's crevices; puddles are flat mirrors with ripples, darker inside, with a soaked ring; none under roofs or on slopes; walls show running streaks; after the rain the puddles shrink from their edges over DryHours.
+- Correct: in rain, flat open ground grows irregular puddles from the low spots of the pattern and the land's crevices; puddles are flat mirrors with ripples, darker inside, with a soaked ring; none under roofs or on slopes; after the rain the puddles shrink from their edges over DryHours.
 - Wrong: puddles on walls or slopes (slope mask); puddles under cover (ortho map); the whole ground under water (Coverage or the level too high); a hard staircase edge (EdgeSoftness); puddles that pop in or out (level not eased).
 - Cost: inside the surface shaders, only where wet (branches on the level and the wetness). Measured numbers: section 10.
 

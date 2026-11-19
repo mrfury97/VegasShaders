@@ -164,7 +164,7 @@ sampler2D TESR_OrthoMapBuffer : register(WETNESS_ORTHO_REG) = sampler_state { AD
 
 // 2026-11-08 Puddles (src/effects/Puddles/README.md, [Shaders.Puddles]): a water level that fills in the rain and dries from the edges,
 // a world-space puddle field (noise + the land's height crevices + slope + the rain cover), a flat water layer with ripples, a soaked ring
-// and wall streaks. Compiled into the surface shaders with WETNESS_EFFECTS 2 ([Shaders.Puddles.Status] Enabled at startup); the D3D9
+// (the wall streaks were removed 2026-11-18). Compiled into the surface shaders with WETNESS_EFFECTS 2 ([Shaders.Puddles.Status] Enabled at startup); the D3D9
 // wetness reflection effect defines PUDDLES_RUNTIME. c165-c166 are the sun cross-fade's (never with Wetness Effects), c174-c175 free in the
 // object and land pixel shaders (VEGAS_SHADERS.md section 3).
 #if defined(PUDDLES_RUNTIME)
@@ -178,7 +178,7 @@ sampler2D TESR_OrthoMapBuffer : register(WETNESS_ORTHO_REG) = sampler_state { AD
 float4 TESR_PuddleData   : register(PR_DATA);   // x water level 0-1, y Coverage, z 1 / Size, w Quality (0 off: the CS puddles)
 float4 TESR_PuddleLook   : register(PR_LOOK);   // x roughness, y depth darkening, z edge softness (field units), w ripples in puddles
 float4 TESR_PuddleShape  : register(PR_SHAPE);   // x slope start (up), y slope full, z land cavity strength, w wet ring width
-float4 TESR_PuddleStreak : register(PR_STREAK);   // x streak strength x raining, y 1 / lane width, z speed, w debug view
+float4 TESR_PuddleStreak : register(PR_STREAK);   // w debug view (x y z: the wall streaks' strength, lane width and speed until 2026-11-18, removed; 0)
 #define PUDDLES_ON (TESR_PuddleData.w > 0.5f)
 #define PUDDLE_QUALITY (TESR_PuddleData.w)
 #define PUDDLE_DEBUG (TESR_PuddleStreak.w)
@@ -254,9 +254,9 @@ float WetnessOcclusion(float3 position, float3 normal) {
     // occlude itself.
 #ifdef PUDDLES_COMPILED
     // 2026-11-09 Puddles: a steep face looks up from up to 40 units out from it, so the roof edge right above a wall is not counted as cover
-    // (it was: no wall in a town got streaks); only an overhang deeper than that keeps the wall dry.
-    // 2026-11-11 (user): a wall under an overhang stays dry, so 40 stays: the puddle2 shack walls read covered (DebugView 4; their eave plus
-    // this lookup's own spread, the tent filter and the wander, about +-37 units, reach past it; open at 120) and get no streaks, by choice.
+    // (it was: every town wall read as covered); only an overhang deeper than that keeps the wall dry.
+    // 2026-11-11 (user): a wall under an overhang stays dry, so 40 stays: the puddle2 shack walls read covered (their eave plus this lookup's
+    // own spread, the tent filter and the wander, about +-37 units, reach past it; open at 120) and stay dry, by choice.
     float lift = PUDDLES_ON ? lerp(2.0f, 40.0f, saturate(1.0f - abs(normal.z) * 1.5f)) : 2.0f;
     #define WET_COVER_LIFT lift
 #else
@@ -383,34 +383,6 @@ float PuddleField(float2 worldXY, float height) {
     return n;
 }
 
-// Rain running down a steep face: lanes 1 / TESR_PuddleStreak.y wide across the face, one in three dry, each with drops running down at
-// its own speed (a bright head, a fading tail above it). 0-1. tilt: how the water's surface leans (world), for the shading: a rivulet
-// bulges across its lane, a drop's tail slopes up from its head, so both catch the sky as moving glints (a flat film on a wall reflects
-// almost nothing, 2026-11-11: streaks on the dark puddle2 shack walls were there in the mask and invisible in the picture).
-float PuddleStreaks(float3 worldPos, float3 n, float t, out float3 tilt) {
-    float2 across = float2(-n.y, n.x);
-    across /= max(length(across), 1e-4f);
-    float u = dot(worldPos.xy, across) * TESR_PuddleStreak.y;
-    float lane = floor(u);
-    float3 r = WetHash33(float3(lane, 3.1f, 9.7f));
-    float side = frac(u) - 0.5f;
-    float sharp = 2.0f * (1.4f + r.y * 1.6f);
-    float m = saturate(1.0f - abs(side) * sharp);
-    float laneMask = m * m * (3.0f - 2.0f * m);   // a rounded rivulet
-    float wet = r.x > 0.33f ? 1.0f : 0.0f;
-    // The pattern moves down (the phase grows with z and with time); 2026-11-11 the head is now at the BOTTOM of each period (g = 1 just
-    // above the wrap) and the tail fades above it (it was flow^8: the bright part at the top, trailing its tail).
-    float flow = frac(worldPos.z * (0.012f + 0.01f * r.z) + t * TESR_PuddleStreak.z * (0.35f + r.y) + r.x * 13.0f);
-    float g = 1.0f - flow;
-    float g7 = g * g * g;
-    g7 = g7 * g7 * g;
-    float drip = g7 * g;   // g^8: a short bright head
-    float body = wet * (0.6f + 0.4f * drip);   // 2026-11-11: a steadier rivulet body (was 0.4 + 0.6 drip: mostly faint between heads)
-    // the surface's slopes: across the lane d(laneMask)/d(side), up the tail d(drip)/d(-z) (the tail thins upward: the normal leans up)
-    float slopeAcross = (abs(side) * sharp < 1.0f ? 6.0f * m * (1.0f - m) * sharp : 0.0f) * -sign(side);
-    tilt = (float3(across, 0.0f) * slopeAcross * 0.15f + float3(0.0f, 0.0f, 1.0f) * g7 * 0.6f * laneMask) * body;
-    return laneMask * body;
-}
 #endif
 
 // The water layer at a pixel, as CS computes it in Lighting.hlsl.
@@ -509,8 +481,7 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
         // tells itself apart through its own height map, no per-texture data needed.
         float open = saturate(occlusion * 2.0f) * nearFactor;
         float level = TESR_PuddleData.x;
-        float standing = 0.0f, ring = 0.0f, streak = 0.0f, deep = 0.0f;
-        float3 streakTilt = 0.0f;
+        float standing = 0.0f, ring = 0.0f, deep = 0.0f;
         float rain = saturate(rainWetness) * open;
         puddle = rain;
         w.darkening = rain * rain * 0.7f;
@@ -564,22 +535,12 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
             w.darkening = lerp(max(rain * rain * 0.7f, ring * 0.85f), 1.0f + TESR_PuddleLook.y * deep, standing);
             rough = lerp(rough, 0.12f, ring);
         }
-        // Rain streaks down steep faces open to the sky, while it rains.
-        [branch] if (PUDDLE_QUALITY > 1.5f && TESR_PuddleStreak.x > 0.0f && abs(vertexNormal.z) < 0.6f && distance < 3000.0f) {
-            float streakFade = (1.0f - smoothstep(0.35f, 0.6f, abs(vertexNormal.z))) * TESR_PuddleStreak.x * saturate(occlusion * 2.0f)
-                             * (1.0f - smoothstep(2000.0f, 3000.0f, distance));
-            streak = PuddleStreaks(worldPos, vertexNormal, TESR_WetnessData.w, streakTilt) * streakFade;
-            streakTilt *= streakFade;
-            // 2026-11-11 (user: "streaks not working"): a streak is more water on top of the wall's rain wetness, so it adds to it. It was
-            // max(darkening, streak x 0.6) and max(film, streak): a wall's own rain wetness (MinRainWetness 0.65: darkening 0.42, film
-            // 0.65) was as strong as most of a streak, which then hardly showed.
-            w.darkening = lerp(w.darkening, 1.0f, streak * 0.8f);
-        }
-        float film = max(max(puddle, standing), lerp(puddle, 1.0f, streak));
+        // (2026-11-18, owner's request: the wall streaks, rain running down steep faces, are removed: the code, its three settings and its
+        // debug view 4. Every result is what Streaks = 0 gave before.)
+        float film = max(puddle, standing);
 
         // The water's surface: the face's own normal under standing water (no bumps), the material's elsewhere; rain rings on top.
         float3 wetN = normalize(lerp(normal, vertexNormal, standing));
-        wetN = normalize(lerp(wetN, vertexNormal, saturate(streak)) + streakTilt);   // 2026-11-11 a streak's water hides the bumps and bulges
         float3 ripple = float3(0.0f, 0.0f, 1.0f);
     #ifdef WETNESS_RAINDROPS
         #ifdef PUDDLE_OBJECT_RIPPLES
@@ -594,16 +555,14 @@ Wetness GetWetness(float3 position, float3 vertexNormal, float3 normal, float he
 
         w.gloss = saturate(film);
         PuddleStandingOut = standing;
-        rough = lerp(rough, 0.05f, streak);
         w.roughness = lerp(max(rough, 0.05f), max(TESR_PuddleLook.x, 0.01f), standing);
         w.normal = wetN;
 
         [branch] if (PUDDLE_DEBUG > 0.5f) {
-            if (PUDDLE_DEBUG < 1.5f) PuddleDebugColor = float3(standing, ring * (1.0f - standing), streak);
+            if (PUDDLE_DEBUG < 1.5f) PuddleDebugColor = float3(standing, ring * (1.0f - standing), 0.0f);
             else if (PUDDLE_DEBUG < 2.5f) PuddleDebugColor = float3(saturate(ripple.xy * 2.0f + 0.5f), standing * 0.5f);
             else if (PUDDLE_DEBUG < 3.5f) PuddleDebugColor = float3(TESR_WetnessData.x, TESR_PuddleData.x, TESR_WetnessData.z);
-            // 2026-11-11 4: the streaks' inputs: red open to the sky, green how steep the face's normal is (1 vertical), blue the raw lanes
-            else if (PUDDLE_DEBUG < 4.5f) PuddleDebugColor = float3(saturate(occlusion * 2.0f), 1.0f - abs(vertexNormal.z), PuddleStreaks(worldPos, vertexNormal, TESR_WetnessData.w, streakTilt));
+            else if (PUDDLE_DEBUG < 4.5f) PuddleDebugColor = 0.0f;   // (4 was the wall streaks' inputs: removed 2026-11-18)
         #ifdef PUDDLES_MAP
             else { float d5 = (TESR_WetnessCamera.z + position.z) - (PuddleMapSample.g + TESR_PuddleMapNear.w);
                    PuddleDebugColor = float3(PuddleMapSample.r, saturate(0.5f + d5 / 256.0f), TESR_PuddleMapFar.w); }   // 5: red the map's field, green this point against the map's top surface (0.5 = on it, brighter = above), blue the map holds data

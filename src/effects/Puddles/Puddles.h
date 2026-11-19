@@ -13,7 +13,7 @@ public:
 		int		Quality;		// 0 off .. 3 high
 		float	Coverage, Size, FillHours, DryHours, NightDrying;
 		float	Roughness, Darkening, EdgeSoftness, SlopeStart, SlopeFull, Cavity, WetRing;
-		float	Ripples, Streaks, StreakWidth, StreakSpeed;
+		float	Ripples;	// (2026-11-18: Streaks, StreakWidth, StreakSpeed removed with the wall streaks)
 		bool	ReflectionPuddles;
 		bool	ObjectPuddles;	// false: standing water and soaked rims on the land only
 		float	LevelOverride;	// -1 off
@@ -25,7 +25,7 @@ public:
 		D3DXVECTOR4	Data;		// c174 x level, y Coverage, z 1 / Size, w Quality
 		D3DXVECTOR4	Look;		// c175 x roughness, y depth darkening, z edge softness, w ripples
 		D3DXVECTOR4	Shape;		// c165 x slope start, y slope full, z cavity, w wet ring
-		D3DXVECTOR4	Streak;		// c166 x strength x raining, y 1 / lane width, z speed, w debug view
+		D3DXVECTOR4	Streak;		// c166 w debug view (x y z were the wall streaks', removed 2026-11-18: 0)
 	};
 	PuddleConstantsStruct	Constants;
 
