@@ -162,6 +162,9 @@ ObjectPuddles; (3) Reflections only with the whole film (FilmWhole); (4) the fil
 only while Rain wetness is on; (8) no multisampled target; (9) the render rect only. Not changed: (5) fog on unwritten pixels (believed
 minor), (10) ReflectionsTraceHiZCount.spv (debug counting build) not rebuilt and the shader-file log's old hash table (says OLD), (11) a
 fully fogged near-land pixel (albedo alpha exactly 1) gets the fallback's film over pass A's (invisible under full fog).
+Installed for testing 2026-11-20 (install-test10: test-p1a-bump a1307d6 = install-test9 + this step; 16 files: DLL, pdb, defaults,
+DeferredWetness.hlsl, WetnessReflections.fx.hlsl, eleven Reflections*.spv; restore `F:\VS-scratch\install-test10-2026-11-20estore.ps1` -> test9).
+Not run in game. Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback drew", no "the fallback is off this session".
 Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
 mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).
 
