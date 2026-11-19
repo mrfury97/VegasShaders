@@ -115,6 +115,8 @@ height of ObjectPuddles; light-only (AD) records and terms that do not scale wit
 Lead-architect review: approve with fixes, applied: objects get the water LEVEL only as forward gave it (0 unless ObjectPuddles, never worn gear or hair: `effects/Puddles/Puddles.cpp` SetDrawConstants; Wetness.hlsl's level now goes through a PUDDLE_LEVEL macro, the same bytecode); the forward skin drawn over a record (COLOR3.a 2.02-3.5) is not made wet; the screen pass's ray takes the smooth normal unless DeferredBumpedNormals is on. Known gap: with DeferredFirstPerson (test, off for the owner) the gun and arms lose their rain dampness (their records have no layer and the pass skips the view model), and the screen pass may read the world's film under them (believed).
 Offline (approximate defines): pass A 963 slots, device ok; all 66 eligible object / parallax lighting-free records compile with the switch (594-1,137 slots); sampled records without it and the forward land / object / parallax records byte-identical.
 
+Owner in game 2026-11-20 (install-test9): step 2 "Looks right".
+
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,
    behind `[Main.Main.Quality] DeferredWetness` (restart, test only, off); the land's lighting-free records with WETNESS_OFF; the height via
