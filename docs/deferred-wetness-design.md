@@ -1,4 +1,4 @@
-# Deferred wetness: design and steps (road map Phase 1c, 2026-11-19)
+# Deferred wetness: design and steps (road map Phase 1c, 2026-11-19, v2)
 
 Owner's choice (2026-11-18/19): the deferred wetness pass is the end state; WetWorld is retired only once it covers everything WetWorld
 does. Room rule: deferred first. Branch `deferred-wetness` (off `wet-lamp-film`). Paths under `src\`. Nothing here is run yet.
@@ -21,45 +21,55 @@ does. Room rule: deferred first. Branch `deferred-wetness` (off `wet-lamp-film`)
    `WetSkyReflection(reflect) * WetReflectance(...) * horizon^2 * PuddleMurkTint` (:731-736), each lamp's streak `WetLampFilm` (:779).
 Objects (ObjectTemplate.hlsl ObjectWetFilm, :565; OBJ_PUDDLE_HEIGHT for object puddles, off by default) follow the same split.
 
-## The design: two passes, split as the forward shader splits it
-**A. DeferredWetness (new, before the lights: `core/DeferredWetness.h`, `Shaders/DeferredWetness.hlsl`)** at the G-buffer span's end, after
-DeferredDepth's copy and before DeferredSun (`NewVegas/Hooks/Render.cpp` DeferredSpan). For each pixel a deferred record drew (albedo alpha
-code > 1) of the land and objects (models 1-4): `GetWetness` from the position (G-buffer distance / DeferredDepth), the smooth normal (COLOR3),
-the bumped normal (COLOR2 g/a) and the puddle map, as Effects/WetnessReflections.fx.hlsl already does on screen; then writes:
-- COLOR1 rgb: the darkened colour (WetAlbedo, the standing water's 0.4, debris), alpha untouched (its codes);
-- COLOR2 g/a: the shading normal flattened by `wet.flatten` (what the forward lighting uses); r and b untouched (model, metal, DRY roughness).
-Reads copies of COLOR1 / COLOR2 (two StretchRects at scene size, fp16) and writes them back with colour-write masks.
-**B. The film, after the lights: Effects/WetnessReflections.fx.hlsl** (the Wetness Effects screen pass), for the same deferred pixels: the
-sky reflection of the film where the screen-space ray finds nothing, the hit where it does (today it swaps the forward record's sky for the
-hit: for deferred pixels it adds instead), the sun's film highlight (WetSpecular, shadowed by the screen's sun-shadow mask), and the lamp
-streaks (DeferredWetLampFilm, done). All fogged with the pixel's keep (DeferredPixel.hlsl FDAddedLightKeep), murk-tinted.
-**Records:** with the switch on at startup, the lighting-free land and object records are compiled without the water layer
-(`WETNESS_EFFECTS 0` in `core/LightFreeRecords.h` Overrides). The forward records keep it (reflections, other cameras, fading draws).
+## Design v2 (after the lead-architect review, 2026-11-19: "rethink"; v1's two-pass split is kept below only as what not to do)
+**One wetness, worked out once.** A new core pass, DeferredWetness (`core/DeferredWetness.h`, `Shaders/DeferredWetness.hlsl`), right after
+`DeferredDepth::AtSpanEnd` and before `DeferredSun::Apply` (the G-buffer is already resolved there: CapturedNormals::EndSpan runs first,
+`NewVegas/Hooks/Render.cpp:2916/2970`). For each pixel a deferred record drew (albedo alpha code > 1) of the near land and objects (models 1-4,
+NOT the far land: it carries FD_FAR_LAND_MARK, `Includes/DeferredPixel.hlsl:67`, and its forward shader has no wetness), it runs GetWetness
+with the SAME defines the land record uses (`TerrainTemplate.hlsl:365-368`, WETNESS_EFFECTS from BuildDefines: map mode, raindrop ripples,
+WETNESS_HEIGHT), not the screen effect's PUDDLES_RUNTIME set (which turns map mode, ripples, debris and NormalAwareness off,
+`Wetness.hlsl:34,189,548`). It writes:
+- COLOR1 rgb: darkened albedo (WetAlbedo, standing water 0.4, debris);
+- COLOR2 g/a: the shading normal flattened under standing water;
+- COLOR0: the record's ambient made wet: unfog with COLOR1.a's keep and the fog colour, scale by wet / dry albedo, fog again (the
+  lighting-free record keeps its ambient in COLOR0 with the dry colour: `Includes/Terrain.hlsl:194/199`, `core/LightFreeRecords.h:5`; without
+  this, overcast rain barely darkens the ground);
+- a new film target (one A16B16G16R16F at scene size): gloss, roughness, the film normal (octahedral, ripples on), murk.
+**The film is lit where the light is:** DeferredSun adds the film's sun highlight (WetSpecular) with its own full shadow; DeferredLamps adds
+each lamp's streak (WetLampFilm) in its lamp loop (replacing the screen-pass DeferredWetLampFilm); the Wetness Effects screen pass keeps only
+the sky / screen-space reflection of the film, reading the film target (not COLOR2, which A has flattened), for the land only in step 1
+(objects still draw their own sky). Its run conditions must not hide the film: the sky term runs even with its reflection Strength 0 or
+Reflections off.
+**Records:** with the switch on at startup the lighting-free land (later object, parallax) records get `WETNESS_OFF` (the real switch:
+`core/ShaderManager.cpp:1278/1323`; `WETNESS_EFFECTS 0` would not remove it: the templates test `defined(WETNESS_EFFECTS)`), through a second
+Overrides list in `core/LightFreeRecords.h`.
+**The land's height:** GetWetness's `surfaceHeight` (the layers' height maps) drives Cavity and CreviceFill. A has no height unless a record
+stores it: candidate, COLOR2.r's metal fraction on land pixels (believed unused for land; every reader of that fraction to be checked).
+Without it, bumpy ground loses its small pools.
 
-Cost (estimate, not measured): A one pass reading ~5 fp16 targets + depth + the puddle map, writing two, plus two copies: ~0.2-0.3 ms at
-1080p, only while something is wet (Wetness Effects' flag). B adds the sky / sun terms to a pass that already runs. The lighting-free land
-and object shaders get shorter (believed: ~1,000+ slots and several temps on the land).
+Cost (estimate, not measured): A ~0.2-0.4 ms at 1080p while wet (reads ~5 targets + depth + puddle map, writes 4); one more fp16 target
+(~16 MB at 1080p); DeferredSun / DeferredLamps a few instructions more per lit pixel (ps_3_0 size to be checked).
 
-## Steps
-1. **A for the land + B's sky and sun terms**, behind `[Main.Main.Quality] DeferredWetness` (restart, test only, off). Offline: compile the
-   pass and the WETNESS_EFFECTS 0 land records (size and temps before / after); DLL build; review; install; look in the rain with the
-   switch on and off (the forward look is the reference). 2 sessions.
-2. **Objects** (wet film on roads, slabs, walls; object puddles if ObjectPuddles). 1 session.
-3. **Unify with WetWorld:** B also runs for pixels no deferred record drew (the game's shaders, LOD, forward frames), WetWorld-style
-   (darken the lit colour, film on top); then one "Rain wetness" switch, the old puddle keys hidden, WetWorld kept only as the fallback where
-   the G-buffer is missing (native MSAA). 1-2 sessions.
-4. **Retire** WetWorld and the wetness code in the lighting-free records; turn it on by default. Needs the owner's word (player-visible,
-   one full recompile). 0.5 session.
+## Steps (v2)
+1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,
+   behind `[Main.Main.Quality] DeferredWetness` (restart, test only, off); the land's lighting-free records with WETNESS_OFF; the height via
+   COLOR2.r's fraction if the reader audit allows. Offline: compile A, DeferredSun, DeferredLamps, the land records (size, temps); DLL;
+   review; install; rain look against the forward land (switch off). 2-3 sessions.
+2. **Objects and parallax** (their film, their sky moved to the screen pass). 1-2 sessions.
+3. **One system:** the film also for pixels no deferred record drew (game shaders, LOD, forward frames: WetWorld-style on the lit colour), one
+   "Rain wetness" switch, old puddle keys hidden; WetWorld only as the fallback where there is no G-buffer. 1-2 sessions.
+4. **Retire** WetWorld and the records' water layer; on by default (owner's word: player-visible, one full recompile). 0.5 session.
 
-## Risks
-- Matching the forward look exactly: darkening curve, puddle rims, ripples; the A pass and the forward record must give the same wetness
-  where both draw next to each other (a deferred pixel beside a forward one).
-- GetWetness's land height (`surfaceHeight`: the layers' height maps) is not in the G-buffer: A recomputes standing water without it, so
-  crevices fill less sharply than in the forward land (CreviceFill, HeightAwareness, Cavity). Options: store the height in a spare channel
-  (COLOR2.b holds the land's roughness; COLOR3's fraction codes are full) or accept the softer shape.
-- Register room in a core pass that includes Wetness.hlsl (its constants sit at fixed registers in the templates; PUDDLES_RUNTIME's layout
-  for effects).
-- Order: DeferredSun reads COLOR2's normal; A must finish before it, and the skin / foliage passes must not see changed codes.
+## Risks (v2)
+- Matching the forward look: the A wetness must equal what the forward record computes beside it (same defines, same inputs).
+- ps_3_0 room in DeferredSun / DeferredLamps for the film terms and one more sampler.
+- The height channel (see above).
+- Fog round trip in COLOR0 (keep codes 1 / 3 / 5 + keep).
+
+## v1, rejected (for the record)
+A wrote only albedo and normal, B (the screen pass) added sky, sun and lamps. Gaps found by the review: dry ambient in COLOR0; WETNESS_EFFECTS 0
+does not remove the layer; PUDDLES_RUNTIME's different wetness; B reading A's flattened normal; B's run conditions hiding the film; the screen
+sun-shadow mask has no cascade shadows (a highlight inside cast shadows); a double sky on objects; far land made wet; Cavity lost.
 
 ## Not decided (owner)
 - Whether the softer crevice shape (no land height in A) is acceptable, or worth a G-buffer channel.
