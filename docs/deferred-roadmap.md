@@ -190,6 +190,27 @@ person, wetness); everything blended (glass, hair, water, fading objects, partic
 short reflection record; sky and UI unlit. No opaque forward lighting code left except that reflection record. Not "100 % deferred", but
 one lighting model everywhere, and the ps_3_0 size wall gone from the heavy shaders.
 
+### Alternatives for what looked forward-only (2026-11-19, owner: "think about alt methods for stuff that seems like it can't")
+All believed (engine comparisons, efforts); nothing built or run. With these, everything opaque goes deferred and only glass, particles
+(lit from a shared light volume) and sky / UI stay forward.
+| Item | Alternative that keeps it deferred | Done this way in | Effort, risk |
+|---|---|---|---|
+| Fading objects | dithered (screen-door) fade, the stipple averaged by TAA / DLSS; no forward pass while fading | Unreal (Dithered LOD Transition), Unity (LOD cross-fade) | ~1, low |
+| Blended hair | dithered hair into the G-buffer (alpha-tested hair is already deferred) | Unreal | 1, medium (strands may shimmer) |
+| Water reflection camera | drop it: SSR + the RT reflections + a sky / cube-map fallback; no second lit scene draw | most modern engines | 3-4, medium (off-screen, untraced things show the sky) |
+| (if the camera stays) | a half-size G-buffer for it with the sun pass run there | planar reflections in deferred engines | 4-6, high |
+| Water surface | "deferred water": the surface written opaque into the G-buffer (normal, gloss, F0 0.02) so the sun and lamp passes light it; one pass after does refraction / absorption / murk from the scene copy and the depth difference | Frostbite, Unreal | 3-5, medium-high (shore edges, seen from below) |
+| Particles, smoke, fire | a low-res light volume (sun with shadow + lamps) made once a frame from the froxel lamp grid; the particles sample it | Unreal (translucency lighting volume), Frostbite | 2-3 + replacement particle shaders (2+) |
+| Glass | stays forward+ (built); a one-layer transparent G-buffer brings more artefacts than it fixes | - | 0 |
+| Scopes, other cameras | the deferred span opened for any world camera at main-view size; small pictures on a short sun-only "reflection record" | - | 2-3, medium |
+| Fallback frames (lockpick) | open the span for that scene too | - | ~1, low (believed) |
+| MSAA | not needed: TAA / DLSS | - | 0 |
+| Cube-map layer (EnvTemplate) | the reflection pass's "ray missed" fallback | standard | 1-2 |
+| `DeferredRenderer 0` | frozen once the rows above exist, then removed with most forward lighting code | - | 1 |
+Revised order: finish wetness; Phase 0 measure; dithered fade + hair; decals + distant trees; water reflections from SSR / RT (alone first,
+the biggest visible change); deferred water surface; particle light volume; freeze and remove mode 0. About 25-35 sessions. Risks: water
+(look match), the dither stipple without TAA / DLSS, particles need their shaders replaced first.
+
 ### Order and effort (sessions, estimates)
 1. Finish deferred wetness: check the smear fix, lamp streak into DeferredLamps (1), objects + parallax (1-2), one system (1-2), retire
    WetWorld and the records' water layer (0.5).
