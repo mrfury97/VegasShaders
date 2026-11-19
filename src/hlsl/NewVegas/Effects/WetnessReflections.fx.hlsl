@@ -173,9 +173,11 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	// code 20 without the far land's 1 / 64 mark), the film that pass drew it with (its puddles, ripples and murk), not this pass's estimate, so
 	// the streaks and the reflection sit on the same water it darkened and lit; its sky reflection is the one taken out below
 	bool landFilm = false;
+	float3 landRayN = 0.0f;	// the ray's normal there: the surface under the film without the rain rings (below)
 	[branch] if (TESR_WetnessReflectionBump.y > 0.5f) {
 		const float a = tex2Dlod(NVR_WetAlbedo, float4(uv, 0.0f, 0.0f)).a;
-		const float r = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f)).r;
+		const float4 mat = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f));
+		const float r = mat.r;
 		[branch] if (a > 1.0001f && a < 2.0005f && abs(r - 20.0f) < 0.5f / 64.0f) {
 			const float4 f = tex2Dlod(NVR_WetFilm, float4(uv, 0.0f, 0.0f));
 			wet.gloss = saturate((f.r - floor(f.r)) / 0.99f);
@@ -185,6 +187,11 @@ float4 WetReflections(VSOUT IN) : COLOR0
 			wet.murk = saturate(floor(f.r) / 8.0f);
 		#endif
 			landFilm = true;
+			// (2026-11-19, owner's first look: the puddles' reflections of posts and walls came out smeared and speckled) the film's normal
+			// carries the rain rings, which bend every ray of this sharp mirror lookup; the forward sky they shimmer is smooth enough not to
+			// show it. The ray takes the normal under the film instead: DeferredWetness's flattened shading normal (COLOR2.g / a; the smooth
+			// one where none was recorded), what this pass reflected with before.
+			landRayN = abs(mat.g) <= 1.001f ? WRDecodeOct(mat.ga) : worldN;
 		}
 	}
 	float gloss = wet.gloss;
@@ -218,7 +225,7 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	float3 worldNr = worldN;
 	float3 Nr = N;
 	if (bumped) {
-		worldNr = normalize(wet.normal);
+		worldNr = landFilm ? landRayN : normalize(wet.normal);
 		Nr = normalize(mul((float3x3)TESR_InvViewTransform, worldNr));
 		if (dot(Nr, V) > 0.0f) { Nr = N; worldNr = worldN; }	// facing away from the camera: the smooth normal
 	}
