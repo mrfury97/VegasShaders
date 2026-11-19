@@ -172,26 +172,32 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	// UNOFFICIAL 2026-11-19 DeferredWetness: where the near land's lighting-free record drew the pixel (albedo alpha 1 + keep, COLOR2.r the land's
 	// code 20 without the far land's 1 / 64 mark), the film that pass drew it with (its puddles, ripples and murk), not this pass's estimate, so
 	// the streaks and the reflection sit on the same water it darkened and lit; its sky reflection is the one taken out below
-	bool landFilm = false;
-	float3 landRayN = 0.0f;	// the ray's normal there: the surface under the film without the rain rings (below)
+	bool filmHere = false;
+	float3 filmRayN = 0.0f;	// the ray's normal there: the surface under the film without the rain rings (below)
+	bool landPx = false;	// (2026-11-20) the near land's pixel (its lamp streaks may be the land lamp pass's)
 	[branch] if (TESR_WetnessReflectionBump.y > 0.5f) {
 		const float a = tex2Dlod(NVR_WetAlbedo, float4(uv, 0.0f, 0.0f)).a;
 		const float4 mat = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f));
 		const float r = mat.r;
-		[branch] if (a > 1.0001f && a < 2.0005f && abs(r - 20.0f) < 0.5f / 64.0f) {
-			const float4 f = tex2Dlod(NVR_WetFilm, float4(uv, 0.0f, 0.0f));
+		// (2026-11-20 step 2) every pixel DeferredWetness wrote a film for (the near land, objects, parallax: its roughness, g, is never 0 there;
+		// the target is cleared to 0 each wet frame), not only the land's
+		const float4 f = tex2Dlod(NVR_WetFilm, float4(uv, 0.0f, 0.0f));
+		[branch] if (a > 1.0001f && a < 2.0005f && f.g > 0.001f) {
+			landPx = abs(r - 20.0f) < 0.5f / 64.0f;
 			wet.gloss = saturate((f.r - floor(f.r)) / 0.99f);
 			wet.roughness = max(f.g, 0.01f);
 			wet.normal = WRDecodeOct(f.ba);
 		#ifdef PUDDLES_COMPILED
 			wet.murk = saturate(floor(f.r) / 8.0f);
 		#endif
-			landFilm = true;
+			filmHere = true;
 			// (2026-11-19, owner's first look: the puddles' reflections of posts and walls came out smeared and speckled) the film's normal
 			// carries the rain rings, which bend every ray of this sharp mirror lookup; the forward sky they shimmer is smooth enough not to
 			// show it. The ray takes the normal under the film instead: DeferredWetness's flattened shading normal (COLOR2.g / a; the smooth
 			// one where none was recorded), what this pass reflected with before.
-			landRayN = abs(mat.g) <= 1.001f ? WRDecodeOct(mat.ga) : worldN;
+			// (review 2026-11-20) the shading normal only with DeferredBumpedNormals on (x): off, the smooth normal, as this pass took before (the
+			// bumped one makes a sharp mirror grainy, commit edbc43f)
+			filmRayN = TESR_WetnessReflectionBump.x > 0.5f && abs(mat.g) <= 1.001f ? WRDecodeOct(mat.ga) : worldN;
 		}
 	}
 	float gloss = wet.gloss;
@@ -200,7 +206,7 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	// records write 1 and drew their own streak) and only the land and objects (models 1-4: the shaders whose forward records have the film),
 	// added in linear light as the forward records add it, fogged as the deferred passes fog their light (Includes/DeferredPixel.hlsl
 	// FDAddedLightKeep: the keep is the alpha's fraction above its code 1, 3 or 5)
-	[branch] if (TESR_WetnessLampFilm.x > 0.5f && gloss > 0.05f && !(landFilm && TESR_WetnessReflectionBump.z > 0.5f)) {	// (2026-11-20: the land lamp pass drew the land's, shadowed)
+	[branch] if (TESR_WetnessLampFilm.x > 0.5f && gloss > 0.05f && !(landPx && TESR_WetnessReflectionBump.z > 0.5f)) {	// (2026-11-20: the land lamp pass drew the land's, shadowed)
 		const float a = tex2Dlod(NVR_WetAlbedo, float4(uv, 0.0f, 0.0f)).a;
 		const float r = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f)).r;
 		float model = floor(r + 0.01f);
@@ -221,11 +227,11 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	// The normal the film reflects with. Off: N, exactly as before. On: the film's own normal as the forward shaders reflect with it
 	// (wet.normal: the bumped normal, flattened toward the smooth one under standing water and streaks, with the ripples on top), so a
 	// puddle does not mirror the ground's bumps beneath it. View space: the transpose of the view-to-world rotation.
-	const bool bumped = TESR_WetnessReflectionBump.x > 0.5f || landFilm;	// (2026-11-19: the land film's own normal, as DeferredWetness reflected the sky with)
+	const bool bumped = TESR_WetnessReflectionBump.x > 0.5f || filmHere;	// (2026-11-19: the land film's own normal, as DeferredWetness reflected the sky with)
 	float3 worldNr = worldN;
 	float3 Nr = N;
 	if (bumped) {
-		worldNr = landFilm ? landRayN : normalize(wet.normal);
+		worldNr = filmHere ? filmRayN : normalize(wet.normal);
 		Nr = normalize(mul((float3x3)TESR_InvViewTransform, worldNr));
 		if (dot(Nr, V) > 0.0f) { Nr = N; worldNr = worldN; }	// facing away from the camera: the smooth normal
 	}

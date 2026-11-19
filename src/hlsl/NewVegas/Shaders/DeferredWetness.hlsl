@@ -1,4 +1,5 @@
-// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; docs/deferred-wetness-design.md, step 1: the land).
+// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; docs/deferred-wetness-design.md, step 1: the land; step 2, 2026-11-20: the
+// objects and parallax too, DWObject below, with their own forward inputs).
 // The land's water layer (Includes/Wetness.hlsl GetWetness), worked out ONCE per pixel after the G-buffer is resolved, for the pixels the
 // near land's lighting-free records drew (LAMPS_DEFERRED 2 with DEFERRED_WETNESS: TerrainTemplate.hlsl TERRAIN_WET_DEFERRED, which drops its
 // own water layer). It runs inside DeferredSun::Apply, after the frame is in linear light and before the sun is added, and does what the
@@ -48,7 +49,7 @@
 
 // The pass's own (c0-c11).
 float4 TESR_DeferredDepthFrame[6] : register(c0);	// Includes/DeferredDepth.hlsl's frame block
-float4 DW_Ctrl  : register(c6);	// x 1 = the linear view z of this frame (DeferredDepth 2)
+float4 DW_Ctrl  : register(c6);	// x 1 = the linear view z of this frame (DeferredDepth 2), y 1 = [Shaders.Puddles.Main] ObjectPuddles (static objects take standing water)
 float4 DW_Fog   : register(c7);	// rgb the fog colour the records lerped with (stored curve), w 1 = the game's fog is drawn
 float4 TESR_TerrainData      : register(c10);	// (Includes/Terrain.hlsl) w ambient scale
 float4 TESR_TerrainExtraData : register(c11);	// y saturation (the land's ambient takes the graded albedo)
@@ -85,7 +86,22 @@ float4 main(PS_IN IN) : COLOR0 {
 #define WETNESS_ORTHO_REG s7
 #define WETNESS_RAINDROPS
 #define WETNESS_HEIGHT
+// (2026-11-20 step 2, review) the water level per pixel, as the forward records got it: the land the real level; objects 0 unless ObjectPuddles
+// is on, and never worn gear (2) or hair (8): actors and first person are always sent 0 (effects/Puddles/Puddles.cpp SetDrawConstants,
+// NewVegas/Hooks/Render.cpp). Their rain dampness stays.
+static float DWPuddleLevelMul = 1.0f;
+#define PUDDLE_LEVEL (TESR_PuddleData.x * DWPuddleLevelMul)
 #include "includes/Wetness.hlsl"
+
+// UNOFFICIAL 2026-11-20 step 2: an object's or a parallax record's lighting-free pixel (ObjectTemplate.hlsl OBJ_WET_DEFERRED, ParallaxTemplate.hlsl:
+// with the switch every such record leaves its water layer here): albedo alpha 1 + keep (with a sun: the lamp-first records, 3 + keep, never had
+// the layer), a model the forward object templates gave the layer to (1 object, 2 worn gear, 3 cloth, 5 plants, 8 alpha-tested hair; not the
+// land's 4, skin 6, grass 7, eyes 9, unlit 10), and not the land's height code.
+float DWObject(float a, float r) {
+    const float model = FDModel(r);
+    return a > 1.0001f && a < 2.0005f && !(r > 3.999f && r < 4.999f) &&
+        (model > 0.5f && model < 3.5f || abs(model - 5.0f) < 0.5f || abs(model - 8.0f) < 0.5f) ? 1.0f : 0.0f;
+}
 
 struct PS_OUT {
     float4 frame    : COLOR0;
@@ -113,18 +129,28 @@ PS_OUT main(PS_IN IN) {
     const float4 uv4 = float4(IN.uv, 0.0f, 0.0f);
     const float4 albedo = tex2Dlod(DW_Albedo, uv4);
     const float4 m = tex2Dlod(DW_Material, uv4);
-    const float near = DWNearLand(albedo.a, m.r);
+    const float4 normals = tex2Dlod(TESR_CapturedNormalsBuffer, uv4);
+    // (review 2026-11-20) the forward skin drawn over the deferred record (its COLOR3.a 2.05 .. 2.45; DeferredSun.hlsl's guard) is not made wet; the
+    // land's code under it is still put back
+    const bool skinOver = normals.a > 2.02f && normals.a < 3.5f;
+    const float land = DWNearLand(albedo.a, m.r);
+    const float wetPx = skinOver ? 0.0f : max(land, DWObject(albedo.a, m.r));	// (2026-11-20 step 2: the near land or an object / parallax record's pixel)
+    const float near = max(land, wetPx);
     clip(near - 0.5f);
     o.albedo = albedo;
     o.material = m;
-    o.material.r = 4.0f + DW_LAND_SPEC_BIT;	// the land's GBufferV2 code (TerrainTemplate.hlsl: CapturedMaterialOutClass(4 + GBV2_SPEC_BIT, -1))
+    // the land's GBufferV2 code (TerrainTemplate.hlsl: CapturedMaterialOutClass(4 + GBV2_SPEC_BIT, -1)); an object's r is kept (its metal)
+    o.material.r = land > 0.5f ? 4.0f + DW_LAND_SPEC_BIT : m.r;
     o.film = 0.0f;
     o.frame = float4(tex2Dlod(DW_Frame, uv4).rgb, 1.0f);
     // (clip does not end the shader: the wetness only where the pixel stays, so the sky and everything else skip it)
-    [branch] if (near > 0.5f) {
-    const float4 normals = tex2Dlod(TESR_CapturedNormalsBuffer, uv4);
+    [branch] if (wetPx > 0.5f) {
     const float keep = FDLightFreeKeep(albedo.a);
-    const float height = saturate((m.r - 4.0f) / DW_HEIGHT_SCALE);
+    const float model = FDModel(m.r);
+    DWPuddleLevelMul = land > 0.5f || (DW_Ctrl.y > 0.5f && abs(model - 2.0f) > 0.5f && abs(model - 8.0f) > 0.5f) ? 1.0f : 0.0f;
+    // the land's layers' height; objects none (theirs came from the colour texture's detail, ObjectPuddles only: not carried, the noise field
+    // alone shapes their standing water)
+    const float height = land > 0.5f ? saturate((m.r - 4.0f) / DW_HEIGHT_SCALE) : -1.0f;
 
     // The position, as DeferredSun.hlsl (DS_DEPTH_AGREE): the exact linear view z where it agrees with COLOR3's half-float distance; where the
     // depth copy holds something nearer (hair, anything drawn after without a G-buffer) the G-buffer's own distance, and the frame stays as it is.
@@ -139,23 +165,27 @@ PS_OUT main(PS_IN IN) {
     const float3 frame0 = o.frame.rgb;
     float3 frame = frame0;
     // The forward land's normals: geoN the smooth vertex normal faced to the camera (TerrainTemplate.hlsl with CapturedNormals), the shading
-    // normal the layers' normal-mapped one in world axes (COLOR2.g / a; none recorded: the smooth one).
+    // normal the layers' normal-mapped one in world axes (COLOR2.g / a; none recorded: the smooth one). The objects' forward layer takes the
+    // face normal for both (ObjectTemplate.hlsl GetWetness(.., faceNormal, faceNormal)): geoN for both below.
     const float3 smoothN = ShadowDecodeNormal(normals.rg);
     const float3 geoN = ShadowFacingNormal(smoothN, P);
     const bool bumped = abs(m.g) <= 1.001f;
     const float3 Nb = bumped ? ShadowDecodeNormal(m.ga) : smoothN;
 
-    Wetness wet = GetWetness(P, geoN, Nb, height);
-    // the albedo, as the forward land darkens it before any light sees it (porosity 1)
-    float3 wetAlbedo = WetAlbedo(albedo.rgb, wet.darkening, 1.0f);
+    Wetness wet = GetWetness(P, geoN, land > 0.5f ? Nb : geoN, height);
+    // the albedo, as the forward templates darken it before any light sees it: porosity 1 on the land, 1 - sqrt(metal) on objects (metals
+    // darken less: ObjectTemplate.hlsl's METAL path; the others wrote metal 0)
+    const float porosity = land > 0.5f ? 1.0f : 1.0f - sqrt(saturate((m.r - floor(m.r)) / 0.49f));
+    float3 wetAlbedo = WetAlbedo(albedo.rgb, wet.darkening, porosity);
 #ifdef PUDDLES_COMPILED
     // standing water hides the normal map (TerrainTemplate.hlsl: combinedNormal toward the tangent frame's z, the smooth normal)
     const float3 Nf = normalize(lerp(Nb, smoothN, wet.flatten));
     if (bumped) { const float2 e = ShadowEncodeNormal(Nf); o.material.g = e.x; o.material.a = e.y; }
-    wetAlbedo *= lerp(1.0f, 0.4f, wet.flatten);
-    wetAlbedo = lerp(wetAlbedo, wet.debris.rgb, wet.debris.a);
-    const float murk = wet.murk;
-    #define DW_MURK_TINT PuddleMurkTint(wet.murk)
+    wetAlbedo *= lerp(1.0f, 0.4f, wet.flatten);	// (objects as ObjectTemplate.hlsl ObjectWetAlbedo; the forward parallax has no such step: believed minor)
+    // floating debris and the standing water's murk: the land's only (the forward objects have neither)
+    if (land > 0.5f) wetAlbedo = lerp(wetAlbedo, wet.debris.rgb, wet.debris.a);
+    const float murk = land > 0.5f ? wet.murk : 0.0f;
+    #define DW_MURK_TINT PuddleMurkTint(murk)
 #else
     const float murk = 0.0f;
     #define DW_MURK_TINT 1.0f
@@ -165,9 +195,11 @@ PS_OUT main(PS_IN IN) {
     // The record's lit colour (its ambient: the weather's and the sky's, x the graded albedo; Includes/Terrain.hlsl getSunLighting with the
     // sun compiled out) made wet: x the wet graded albedo / the dry one, per channel (0 where there was none). Then the film's sky reflection
     // (TerrainTemplate.hlsl, the same terms), over the land under the same fog.
+    // (objects: their ambient and glow take the albedo itself, Includes/Object.hlsl getAmbientLighting: no grading)
     float3 lit = DWUnfog(frame, keep, DW_Fog.w);
-    const float3 gradedDry = lerp(luma(albedo.rgb), albedo.rgb, TESR_TerrainExtraData.y);
-    const float3 gradedWet = lerp(luma(wetAlbedo), wetAlbedo, TESR_TerrainExtraData.y);
+    const float sat = land > 0.5f ? TESR_TerrainExtraData.y : 1.0f;
+    const float3 gradedDry = lerp(luma(albedo.rgb), albedo.rgb, sat);
+    const float3 gradedWet = lerp(luma(wetAlbedo), wetAlbedo, sat);
     lit *= gradedDry > 1.0e-5f ? min(gradedWet / max(gradedDry, 1.0e-5f), 4.0f) : 1.0f;
     [branch] if (wet.gloss > 0.001f) {
         const float3 wetV = -normalize(P);

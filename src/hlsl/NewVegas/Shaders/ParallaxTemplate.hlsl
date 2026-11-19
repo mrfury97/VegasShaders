@@ -219,7 +219,9 @@
 #endif
 // UNOFFICIAL 2026-11-04 Wetness Effects (Includes/Wetness.hlsl; as ObjectTemplate.hlsl): the sunlit passes of the material get the water
 // layer. c146-c157 (the sun cross-fade's), the cover map on s12 (free outdoors).
-#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY && WETNESS_EFFECTS >= 2)) && \
+// UNOFFICIAL 2026-11-20 DeferredWetness step 2 (as ObjectTemplate.hlsl OBJ_WET_DEFERRED): the lighting-free record with DEFERRED_WETNESS has no
+// water layer of its own; core/DeferredWetness.h's pass draws it. Every other record: as before.
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && !(defined(DEFERRED_WETNESS) && defined(NVR_LIGHT_DEFERRED)) && FORWARD_SHADOWS && !SUN_CROSSFADE && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY && WETNESS_EFFECTS >= 2)) && \
     !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(PAR_LAMP_FIRST)
     #define PARALLAX_WETNESS
     #if defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY

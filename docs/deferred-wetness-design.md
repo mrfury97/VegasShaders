@@ -93,10 +93,27 @@ GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shad
   ratio and sky; with the switch off every land record and DeferredSun still recompile once (the cache compares the preprocessed text,
   line numbers included); under the game's MSAA the late-grass re-resolve can copy the unrestored material back (mode 2 does not run there).
 - Not done in step 1: objects / parallax / far land (steps 2-3); the passes' frame cost (not measured).
+- Owner's look (2026-11-19/20, Goodsprings pond in rain): puddle reflections grainy. PROVEN by live toggles: the grain is the main Reflections effect, and only with `[Main.Main.Quality] DeferredBumpedNormals` on (its test prototype hands Reflections the bumped normal; `effects/Reflections/Reflections.cpp:32-39`). Reflections also decides standing water from its own noise field (`Compute/Reflections.glsl:217-234`), not from DeferredWetness's puddles, so it mirrors sharply (WetRoughness 0.069) off bumpy grass / dirt. With the switch off the reflection is clean. Not caused by DeferredWetness (believed: the forward land wrote the same flattened normal). Fix belongs in step 3 (one system): Reflections takes the film target's standing water and roughness on deferred land; the bumped-normal prototype needs roughness from normal variance (specular anti-aliasing) before it can be on.
 - Installed for testing 2026-11-19 (test-p1a-bump 90fc395 = the earlier test build + this branch; restore
   `F:\VS-scratch\install-test6-2026-11-19estore.ps1` -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
   the pass loaded", "wet: the land's water layer drawn by the pass", no "[ERROR] ShaderRecord: more than 62", no LIGHT-FREE RECORD
   warnings; in rain, the switch on vs off side by side (same spot, same weather).
+
+## Step 2 as built (2026-11-20, same branch)
+Under the same switch. The object and parallax lighting-free records (ObjectTemplate, ParallaxTemplate) get `DEFERRED_WETNESS` too
+(`ObjectTemplate.hlsl` OBJ_WET_DEFERRED, `ParallaxTemplate.hlsl`): no water layer of their own. Pass A takes every lighting-free pixel with a
+sun (albedo alpha 1 + keep) of model 1 object, 2 gear, 3 cloth, 5 plants, 8 hair beside the near land, with the objects' own inputs: the face
+normal for both GetWetness normals (as forward), no height (forward's came from the colour texture's detail, ObjectPuddles only, off for the
+owner: not carried), porosity 1 - sqrt(metal) (the METAL path's), the standing-water darkening, no debris, no murk, the ambient ratio without
+the land's grading (Object.hlsl getAmbientLighting takes the albedo itself), the sky reflection. DeferredSun adds the film's sun highlight for
+every film pixel (objects with the sun x LIN_SCALE_LIGHT, as ObjectWetFilm); the screen pass reads the film for every film pixel (the target's
+g is never 0 where A wrote). Objects' lamp streaks stay in the screen pass (unshadowed): the objects' lamp loop is DeferredLamps' main pass,
+which has no temp register left.
+Differences from the forward objects (believed small): A is compiled with the land's defines, so wet upward faces of objects get rain rings in
+rain (forward: only standing water at Quality 3); the forward parallax had no standing-water darkening (x 0.4); objects lose the colour-texture
+height of ObjectPuddles; light-only (AD) records and terms that do not scale with albedo (the env-map pass, barrel heat, metal's EnvBRDF bias) get the ambient ratio too (review: believed small).
+Lead-architect review: approve with fixes, applied: objects get the water LEVEL only as forward gave it (0 unless ObjectPuddles, never worn gear or hair: `effects/Puddles/Puddles.cpp` SetDrawConstants; Wetness.hlsl's level now goes through a PUDDLE_LEVEL macro, the same bytecode); the forward skin drawn over a record (COLOR3.a 2.02-3.5) is not made wet; the screen pass's ray takes the smooth normal unless DeferredBumpedNormals is on. Known gap: with DeferredFirstPerson (test, off for the owner) the gun and arms lose their rain dampness (their records have no layer and the pass skips the view model), and the screen pass may read the world's film under them (believed).
+Offline (approximate defines): pass A 963 slots, device ok; all 66 eligible object / parallax lighting-free records compile with the switch (594-1,137 slots); sampled records without it and the forward land / object / parallax records byte-identical.
 
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,

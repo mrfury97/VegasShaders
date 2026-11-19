@@ -68,6 +68,7 @@ namespace LightFreeRecords {
 	// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only; core/DeferredWetness.h): set when its pass
 	// loaded (ShaderManager::Initialize, before the game's shaders load). The near land's records (TerrainTemplate) are then made with
 	// DEFERRED_WETNESS: no water layer of their own (the pass draws it), the layers' height left in COLOR2.r. Own cache folder.
+	// (2026-11-20, step 2) the object and parallax records too (no height: theirs came from the colour texture, ObjectPuddles only).
 	inline bool WetCompiled = false;
 	inline const char* kWetCache = "LightFreeWet\\";
 	inline const D3DXMACRO* WetOverrides() {
@@ -104,8 +105,9 @@ namespace LightFreeRecords {
 			shader->ShaderProg[ShaderRecordType::Interior];
 		// (2026-11-18 DeferredStandalone) without a forward record only with the switch, and only with the game's own shader to fall back on
 		if (!WantedAtStartup() || !Eligible(name, tmpl) || (!forwardLoaded && (!Standalone() || !shader->ShaderHandleBackup))) return false;
-		// (2026-11-19 DeferredWetness) the near land without its water layer: no lean puddle path to fall back on (it has no puddles)
-		const bool wet = WetCompiled && !strcmp(tmpl.Name, "TerrainTemplate");
+		// (2026-11-19 DeferredWetness) the near land without its water layer: no lean puddle path to fall back on (it has no puddles);
+		// (2026-11-20, step 2) the objects and parallax too (ObjectTemplate.hlsl OBJ_WET_DEFERRED, ParallaxTemplate.hlsl)
+		const bool wet = WetCompiled && (!strcmp(tmpl.Name, "TerrainTemplate") || !strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate"));
 		const bool tryLean = !forwardLoaded && PuddlesIn() && !wet;
 		ShaderRecordPixel* record = tryLean && leanFirst ? nullptr : (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, wet ? kWetCache : kCache, wet ? WetOverrides() : Overrides());
 		bool usedLean = false;
