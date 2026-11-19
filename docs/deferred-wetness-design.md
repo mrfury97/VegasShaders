@@ -50,6 +50,35 @@ Without it, bumpy ground loses its small pools.
 Cost (estimate, not measured): A ~0.2-0.4 ms at 1080p while wet (reads ~5 targets + depth + puddle map, writes 4); one more fp16 target
 (~16 MB at 1080p); DeferredSun / DeferredLamps a few instructions more per lit pixel (ps_3_0 size to be checked).
 
+## Step 1 as built (2026-11-19, branch `deferred-wetness-ground`)
+Behind `[Main.Main.Quality] DeferredWetness` (restart, test only, off, in the Internal list). Needs DeferredRenderer 2 (lighting-free records),
+GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shaders/DeferredWetness.hlsl`; changes in `TerrainTemplate.hlsl`,
+`core/LightFreeRecords.h`, `core/DeferredSun.h` + `Shaders/DeferredSun.hlsl`, `effects/WetnessEffects/WetnessReflections.*` + its `.fx.hlsl`.
+- **Records:** the near land's lighting-free records get `DEFERRED_WETNESS` (own cache `LightFreeWet\`; no lean puddle retry): the water layer
+  is compiled out (TERRAIN_WET_DEFERRED; `WETNESS_OFF` was not used because the record still needs the height code below). Forward records
+  and every record without the define: byte-identical (checked offline, SLS2092 / 2124 / 2146).
+- **Height (the open item):** reader audit of COLOR2.r's fraction: it is read as metal (`/ 0.49`) by DeferredSun, DeferredLamps, the
+  flashlight, the path tracer and the DLSS guides, and as the far land's mark (1 / 64) by DeferredSun: no free fraction for land. So the
+  height is stored **only between the record and pass A**: the record writes r = 4 + 0.99 height (the spec bit 16 taken out, so fp16
+  keeps 1 / 256 steps; at 20 it would be 1 / 64), and A writes r = 20 back for every such pixel, wet or dry (a restore-only record in dry
+  frames, and a fallback restore on every DeferredSun return that skipped A). The relative-height detail (puddles' water level > 0) is
+  computed by the record exactly as the forward layer does.
+- **Pass A:** inside DeferredSun::Apply after the linear conversion, before the sun. Reads copies of albedo / material / frame, writes by MRT:
+  frame (ambient x wet graded / dry graded albedo, + the film's sky reflection, through the inverse of the stored-curve fog), albedo
+  (WetAlbedo, x 0.4 under standing water, debris), material (normal flattened toward COLOR3's smooth normal, r = 20), film target (fp16:
+  r round(8 murk) + 0.99 gloss, g roughness, b / a film normal). No depth test; where the depth copy is nearer than the G-buffer
+  (hair etc.) the frame is kept. Deviation from v2: the sky reflection is drawn by A, not by the screen pass (A knows the film exactly
+  and has no run conditions; the screen pass's SSR swap then takes that sky out where it finds a hit, as for forward pixels).
+- **Sun:** DeferredSun `DS_WET_FILM` (a test-only part: dropped with DeferredSkin / Hair / RtSunFirst if the pass does not fit): WetSpecular
+  on near land from the film target, x the pass's shadow and the crack share (forward's sunMul). +71 slots (2,375 with skin + hair; 3,323
+  with the sun fade).
+- **Lamps:** NOT moved into DeferredLamps (too big for this session). The existing screen-pass streak (DeferredWetLampFilm) now takes the
+  film from A's target on near land, so the streaks sit on A's puddles; still unshadowed (as before).
+- **Screen pass:** reads A's film (gloss, roughness, normal, murk) for near-land deferred pixels for the streaks and the SSR.
+- Offline (2026-11-19, user's toml + DeferredRenderer 2's forced keys, tests/template_defines.py; not the game's exact list): pass A 901
+  slots (restore 18), device ok; the 28 land lighting-free records 1,267-2,663 slots with the switch (1,984-3,651 without), all device ok.
+- Not done in step 1: lamp streaks with lamp shadows in DeferredLamps; objects / parallax / far land (steps 2-3).
+
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,
    behind `[Main.Main.Quality] DeferredWetness` (restart, test only, off); the land's lighting-free records with WETNESS_OFF; the height via

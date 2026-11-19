@@ -23,6 +23,7 @@
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-16 fd-batchB: the pass's real failures retried after the next cell change
 #include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 901 / 902)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-16 fd-batchB: c169 for this pass (item 22)
+#include "DeferredWetness.h"	// UNOFFICIAL 2026-11-19 DeferredWetness: the land's water layer, drawn inside Apply; the film's sun highlight
 #include <unordered_set>
 
 namespace DeferredSun {
@@ -70,6 +71,7 @@ namespace DeferredSun {
 	inline std::unordered_set<IDirect3DPixelShader9*> FoliageHandles;
 	inline bool FoliageCompiled = false;
 	inline ShaderRecordPixel* PassFade = nullptr;	// UNOFFICIAL 2026-11-15 fd-smoothsun: the pass with the sun steps' fade (SunFadeDeferred), drawn while one runs
+	inline bool WetFilmCompiled = false;	// UNOFFICIAL 2026-11-19 DeferredWetness: the pass has the film's sun highlight (DS_WET_FILM)
 	inline unsigned long long StatFrames = 0, StatPasses = 0, StatSkipped = 0, StatRefusedMixed = 0, StatLinearDepth = 0, StatConverted = 0, StatFogExact = 0;
 	// UNOFFICIAL 2026-11-14 (bench batch 2: outdoors the pass never drew and the lighting-free records' pixels had no sun) the safety rule:
 	// the lighting-free records may be bound only in frames the pass will light. A refusal found in Apply after they drew (nothing else can be
@@ -128,7 +130,7 @@ namespace DeferredSun {
 	inline bool Wanted() {
 		return WantedAtStartup() && Pass && !PassFailed && !Fail.Blocked() && (Forced || TheSettingManager->GetSettingI(kSection, "Enabled") != 0) &&
 			LinearScene::Live && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !CapturedNormals::Failed &&
-			Tes && Tes->directionalLight;
+			Tes && Tes->directionalLight && !DeferredWetness::Broken();	// (2026-11-19 DeferredWetness: the land's code cannot be put back: forward)
 	}
 	// UNOFFICIAL 2026-11-15 (batch 3: DeferredRenderer 2's "[WARNING] the DeferredSun pass cannot run" at frame 1, before anything was
 	// ready) why the pass will NOT run for this session, or null while it only is not ready yet (the first frames: LinearScene not live yet,
@@ -150,8 +152,9 @@ namespace DeferredSun {
 	// define list (the forward shaders' own shadow options) and INTERIOR_SHADOWS 0 (the outdoor sun lookups compiled in; indoors
 	// GetSunShadowMaps returns 1 by its own exterior gate, as for the forward records).
 	inline void LoadShaders() {
+		DeferredWetness::LoadShaders();	// UNOFFICIAL 2026-11-19 (first: DS_WET_FILM below only when its pass loaded)
 		if (!WantedAtStartup() || Pass || PassFailed) return;
-		static D3DXMACRO overrides[] = { { "INTERIOR_SHADOWS", "0" }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL } };	// (room for the five optional defines + the terminator)
+		static D3DXMACRO overrides[] = { { "INTERIOR_SHADOWS", "0" }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL } };	// (room for the six optional defines + the terminator)
 		int n = 1;
 		// UNOFFICIAL 2026-11-14 foliage (DeferredFoliage.h, which needs this pass and GBufferV2): its branch only with the key on at startup
 		FoliageCompiled = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredFoliage") != 0 && GBufferV2();
@@ -166,6 +169,10 @@ namespace DeferredSun {
 		// UNOFFICIAL 2026-11-15 DeferredSkin (core/DeferredSkin.h, DeferredSun.hlsl FD_SKIN): the skin's own sun on the deferred skin's pixels
 		if (DeferredLamps::SkinCompiledIn()) overrides[n++] = { "FD_SKIN", "1" };
 		if (LightFreeRecords::HairDeferred()) overrides[n++] = { "FD_HAIR", "1" };	// UNOFFICIAL 2026-11-15 DeferredHair: model 8 takes the sun here too
+		// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; DeferredSun.hlsl DS_WET_FILM): the wet film's sun highlight on the near land,
+		// from the film target, with the pass's own shadow (test only, so a pass that does not fit with it is compiled again without it, below)
+		WetFilmCompiled = DeferredWetness::CompiledIn();
+		if (WetFilmCompiled) overrides[n++] = { "DS_WET_FILM", "1" };
 		ShaderTemplate tmpl = {};
 		tmpl.Name = "DeferredSun";
 		Pass = (ShaderRecordPixel*)ShaderRecord::LoadShader("DeferredSun.pso", NULL, tmpl, "Deferred\\Sun\\", overrides);
@@ -180,11 +187,12 @@ namespace DeferredSun {
 			Pass = (ShaderRecordPixel*)ShaderRecord::LoadShader("DeferredSun.pso", NULL, tmpl, "Deferred\\Sun\\Lean\\", overrides);
 			if (Pass) {
 				DeferredLamps::SkinWanted = 0;	// (no FD_SKIN in the lamp passes, no skin lamp pass: DeferredSkin stays forward)
+				WetFilmCompiled = false;	// (2026-11-19: no film highlight; DeferredWetness's albedo, normal, ambient and sky stay)
 				LightFreeRecords::HairWanted = 0;	// (the HAIR records stay forward)
 				EffectStatus::Level("DeferredSun.pso", "loaded without its test-only parts (see the DeferredSun line)", false);	// (ShaderRecord's FAILED line for the full one)
-				Logger::Log("[WARNING] UNOFFICIAL DeferredSun: the sun pass did not load with its test-only parts (%s%s%s): compiled without them, they stay off this session "
-					"(the skin and hair draw forward); the deferred renderer stays on", TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRtSunFirst") ? "DeferredRtSunFirst " : "",
-					skin ? "DeferredSkin " : "", hair ? "DeferredHair" : "");
+				Logger::Log("[WARNING] UNOFFICIAL DeferredSun: the sun pass did not load with its test-only parts (%s%s%s%s): compiled without them, they stay off this session "
+					"(the skin and hair draw forward; the wet land has no film highlight); the deferred renderer stays on", TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRtSunFirst") ? "DeferredRtSunFirst " : "",
+					skin ? "DeferredSkin " : "", hair ? "DeferredHair " : "", DeferredWetness::CompiledIn() ? "DeferredWetness's film highlight" : "");
 			}
 		}
 		if (Pass) {
@@ -217,6 +225,7 @@ namespace DeferredSun {
 	// Once a frame (Render.cpp, with DeferredLamps::BeginFrame).
 	inline void BeginFrame() {
 		FdTestFault::BeginFrame();	// (2026-11-16 fd-batchB, test only: DebugVar4)
+		DeferredWetness::BeginFrame();	// (2026-11-19: no film until its pass draws one this frame)
 		Live = Wanted() && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !CapturedNormals::Failed;
 		SunFadeDeferred::PassLive = Live && PassFade;	// (2026-11-15 fd-smoothsun: the sun steps by half a degree while this pass draws it)
 		if (!WantedAtStartup()) return;
@@ -319,6 +328,9 @@ namespace DeferredSun {
 	inline void Apply(IDirect3DDevice9* d) {
 		const unsigned binds = LightFreeBindsThisSpan, older = OlderBindsThisSpan;
 		LightFreeBindsThisSpan = OlderBindsThisSpan = 0;
+		// UNOFFICIAL 2026-11-19 DeferredWetness: on every return below, the land's COLOR2.r code put back if its pass did not run (the world's view,
+		// a span with lighting-free binds, also when the pass is not live)
+		struct WetGuard { IDirect3DDevice9* d; bool on; ~WetGuard() { if (on) DeferredWetness::EnsureRestored(d); } } wetGuard{ d, !Vm.on && binds != 0 };
 		if (!Live || !binds) return;
 		// 2026-11-14 fd-fixes: no mixed-span refusal any more. A span with both a "sun kept" record (LAMPS_DEFERRED 1 / 3) and a lighting-free
 		// one is lit: the pixels are told apart on both layouts (Includes/DeferredPixel.hlsl). Under GBufferV2 the sun-kept records write
@@ -365,6 +377,9 @@ namespace DeferredSun {
 
 
 		const bool linearDepth = DeferredDepth::LinearReady() && !Vm.on;	// (the world's view z: not the view model's)
+		// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h): the land's water layer, now that the frame is linear and before the sun
+		// lights the albedo and normal it makes wet (it saves and puts back every state it changes; the world's view only)
+		if (!Vm.on) DeferredWetness::Apply(d, target, linearDepth);
 		if (!DeferredDepth::Ready() && !linearDepth && !Vm.on) DeferredDepth::FillFrame(d);	// the ray mapping (TESR_DeferredDepthFrame) without the copy
 		if (!Vm.on) LogSources(linearDepth);
 		if (linearDepth) StatLinearDepth++;
@@ -462,6 +477,18 @@ namespace DeferredSun {
 			const bool fade = HighlightFade && end > start + 1.0f;
 			const float vis[4] = { LandCrackShadow ? 1.0f : 0.0f, AuthoredHighlight ? 1.0f : 0.0f, fade ? start : 0.0f, fade ? 1.0f / (end - start) : 0.0f };
 			d->SetPixelShaderConstantF(16, vis, 1);
+		}
+		// (2026-11-19 DeferredWetness, DS_WET_FILM) c17.x 1 = the film target holds this frame's land film, on s12 (point; put back below)
+		if (WetFilmCompiled) {
+			const bool film = DeferredWetness::FilmLive && !Vm.on;
+			const float wetFilm[4] = { film ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+			d->SetPixelShaderConstantF(17, wetFilm, 1);
+			rs->SetTexture(12, film ? DeferredWetness::FilmTexture : nullptr);
+			if (film) {
+				TheRenderManager->SetSamplerState(12, D3DSAMP_MINFILTER, D3DTEXF_POINT); TheRenderManager->SetSamplerState(12, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
+				TheRenderManager->SetSamplerState(12, D3DSAMP_MIPFILTER, D3DTEXF_NONE); TheRenderManager->SetSamplerState(12, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
+				TheRenderManager->SetSamplerState(12, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP); TheRenderManager->SetSamplerState(12, D3DSAMP_SRGBTEXTURE, FALSE);
+			}
 		}
 		LogLight(toSun, sun, landFresh);
 		const float one[4] = { 1.0f, 0.0f, 0.0f, 0.0f };

@@ -14,8 +14,9 @@
 // PROJ_SHADOW and STBB's 0.85, the parallax / land height self-shadow, the _rmaos micro-shadow) and the highlight's non-metal F0
 // (VanillaBridge's authored strength, the _rmaos specular level); this pass multiplies the sun by the one and lights the highlight with the
 // other, and rebuilds SpecularFade's highlight fade (PBR pop) from the pixel's distance (the game fades per object). Each by its key in
-// [Shaders.ShadowsExteriors.Deferred]. Still not carried: metal's bridged tint (metal takes its colour), the wet film's sun highlight, the
-// land's vanilla (UsePBR off) highlight, parallax's vanilla sun (POM shadows off), blended (fading) draws' recorded terms (they write none).
+// [Shaders.ShadowsExteriors.Deferred]. Still not carried: metal's bridged tint (metal takes its colour), the wet film's sun highlight (except on
+// the near land with DeferredWetness: DS_WET_FILM below), the land's vanilla (UsePBR off) highlight, parallax's vanilla sun (POM shadows off),
+// blended (fading) draws' recorded terms (they write none).
 
 #ifndef LINEAR_LIGHTING_ON
     #define LINEAR_LIGHTING_ON 0
@@ -119,6 +120,20 @@ float DSCloudSunAt(float3 P) {
 #endif
 
 struct PS_IN { float2 uv : TEXCOORD0; float2 vpos : VPOS; };
+
+#ifndef DS_WET_FILM
+    #define DS_WET_FILM 0
+#endif
+#if DS_WET_FILM
+// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h, Shaders/DeferredWetness.hlsl; only with [Main.Main.Quality] DeferredWetness at
+// startup): the near land's water film, as that pass left it in its film target this frame (r round(8 murk) + 0.99 gloss, g roughness, b / a
+// the film normal, octahedral). The film's sun highlight is the forward land's (TerrainTemplate.hlsl: WetSpecular x smoothstep(0, 0.2, gloss),
+// the land's sun x its light scale), lit here with this pass's shadow and the recorded crack shadow, as the forward land's sunMul.
+float4 DS_WetFilm : register(c17);	// x 1 = the film target holds this frame's film (core/DeferredSun.h Apply)
+sampler2D DS_WetFilmMap : register(s12);
+    #define PUDDLES_NOMAP	// (no puddle map sampler here: only WetSpecular is used)
+    #include "includes/Wetness.hlsl"	// WetSpecular (its constants are not read here)
+#endif
 
 #ifndef DS_RT_SUN_FIRST
     #define DS_RT_SUN_FIRST 0
@@ -285,7 +300,17 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     }
     else
 #endif
-    [branch] if (land) light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+    [branch] if (land) {
+        light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+#if DS_WET_FILM
+        [branch] if (DS_WetFilm.x > 0.5f && FDFarLand(m.r) < 0.5f) {
+            const float4 film = tex2Dlod(DS_WetFilmMap, uv4);
+            const float gloss = saturate((film.r - floor(film.r)) / 0.99f);
+            [branch] if (gloss > 0.001f)
+                light += WetSpecular(ShadowDecodeNormal(film.ba), V, Lland, sunLand * LinScale(TESR_TerrainData.z), film.g) * smoothstep(0.0f, 0.2f, gloss);
+        }
+#endif
+    }
     else {
         SetDiffuseEnergyKeep(N, V, r);	// (the object shaders' EnergySplit; the land does not take it)
         light = getSunLightingModel(FDSunSpecular(albedo.a, m.r), L, sunLin, V, N, albedo.rgb, r, metal);
