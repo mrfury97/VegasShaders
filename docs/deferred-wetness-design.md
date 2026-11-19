@@ -72,8 +72,15 @@ GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shad
 - **Sun:** DeferredSun `DS_WET_FILM` (a test-only part: dropped with DeferredSkin / Hair / RtSunFirst if the pass does not fit): WetSpecular
   on near land from the film target, x the pass's shadow and the crack share (forward's sunMul). +71 slots (2,375 with skin + hair; 3,323
   with the sun fade).
-- **Lamps:** NOT moved into DeferredLamps (too big for this session). The existing screen-pass streak (DeferredWetLampFilm) now takes the
-  film from A's target on near land, so the streaks sit on A's puddles; still unshadowed (as before).
+- **Lamps (2026-11-20):** each lamp's streak on the near land's film is drawn by a new DeferredLamps record, `DL_LAND_FILM_ONLY`
+  (`Shaders/DeferredLamps.hlsl`, `core/DeferredLamps.h`), right after the land lamp pass with the same state: the forward land's
+  WetLampFilm from A's film target, inside the lamp loop, so each lamp's own shadow covers its streak. In the land pass's own loop it ran
+  out of temp registers (X4505), hence its own record (577 slots offline). It draws only where the add is exact (linear frame or the exact
+  fog's light target), outdoors, not in debug views or first person, with Puddles on and under `DeferredWetLampFilm`; the screen pass
+  then leaves those pixels out (`TESR_WetnessReflectionBump.z`), else it draws the streak as before (unshadowed). Change in behaviour: with
+  DeferredWetness on, the land's streak no longer needs Wetness Effects' reflections switched on (the forward land never did).
+  Lead-architect review: approve with fixes (the exact-add gate, the DeferredWetLampFilm gate, Puddles-only load, these docs).
+  Frame cost of the extra lamp loop over wet land: not measured.
 - **Screen pass:** reads A's film (gloss, roughness, normal, murk) for near-land deferred pixels for the streaks and the SSR.
 - Offline (2026-11-19, user's toml + DeferredRenderer 2's forced keys, tests/template_defines.py; not the game's exact list): pass A 901
   slots (restore 18), device ok; the 28 land lighting-free records 1,267-2,663 slots with the switch (1,984-3,651 without), all device ok.
@@ -85,8 +92,7 @@ GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shad
   DeferredSun's `!Live || !binds` return. Not changed (believed low): blended content over near land (seams, decals) takes the land's
   ratio and sky; with the switch off every land record and DeferredSun still recompile once (the cache compares the preprocessed text,
   line numbers included); under the game's MSAA the late-grass re-resolve can copy the unrestored material back (mode 2 does not run there).
-- Not done in step 1: lamp streaks with lamp shadows in DeferredLamps; objects / parallax / far land (steps 2-3); the pass's frame cost
-  (not measured).
+- Not done in step 1: objects / parallax / far land (steps 2-3); the passes' frame cost (not measured).
 - Installed for testing 2026-11-19 (test-p1a-bump 90fc395 = the earlier test build + this branch; restore
   `F:\VS-scratch\install-test6-2026-11-19estore.ps1` -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
   the pass loaded", "wet: the land's water layer drawn by the pass", no "[ERROR] ShaderRecord: more than 62", no LIGHT-FREE RECORD

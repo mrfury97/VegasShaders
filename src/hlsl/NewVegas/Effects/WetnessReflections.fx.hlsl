@@ -20,7 +20,7 @@ float4 TESR_ReciprocalResolution;
 float4 TESR_WetnessReflectionData;   // x: strength, y: max ray distance (game units), z: thickness, w: steps
 float4 TESR_WetnessReflectionFade;   // x: roughness cutoff, y: screen edge fade (uv), z: debug view, w: camera distance fade end
 float4 TESR_WetnessReflectionBump;   // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: x 1 = s4 holds the shading normals this frame (else 0: as before);
-                                     // y (2026-11-19 DeferredWetness) 1 = s8 holds the near land's film this frame, s6 / s7 the G-buffer
+                                     // y (2026-11-19 DeferredWetness) 1 = s8 holds the near land's film this frame, s6 / s7 the G-buffer; z (2026-11-20) 1 = the land lamp pass drew the land's lamp streaks (with their shadows): left out here
 float4 TESR_WetnessLampFilm;         // UNOFFICIAL 2026-11-19 DeferredWetLampFilm: x 1 = on this frame, y the froxel lists' texels, z the lamp table's rows, w its first tile row
 float4 TESR_LinearScales;            // x the lamps' light scale (the objects' forward film takes it, the land's does not: Object.hlsl LIN_SCALE_LIGHT)
 
@@ -200,7 +200,7 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	// records write 1 and drew their own streak) and only the land and objects (models 1-4: the shaders whose forward records have the film),
 	// added in linear light as the forward records add it, fogged as the deferred passes fog their light (Includes/DeferredPixel.hlsl
 	// FDAddedLightKeep: the keep is the alpha's fraction above its code 1, 3 or 5)
-	[branch] if (TESR_WetnessLampFilm.x > 0.5f && gloss > 0.05f) {
+	[branch] if (TESR_WetnessLampFilm.x > 0.5f && gloss > 0.05f && !(landFilm && TESR_WetnessReflectionBump.z > 0.5f)) {	// (2026-11-20: the land lamp pass drew the land's, shadowed)
 		const float a = tex2Dlod(NVR_WetAlbedo, float4(uv, 0.0f, 0.0f)).a;
 		const float r = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f)).r;
 		float model = floor(r + 0.01f);

@@ -97,6 +97,22 @@ float4 DL_Depth  : register(c11);	// (lighting pass) x, y the projection's _33, 
 #if (defined(DL_LAND_SPLIT) && DL_LAND_SPLIT) || defined(DL_LAND_ONLY)
 float4 DL_Land   : register(c14);	// UNOFFICIAL 2026-11-16 fd-batchA (DLLampLand): x 1 = the land loop on, y UsePBR, z the land's metal, w its light scale (decoded)
 #endif
+#if defined(DL_LAND_FILM_ONLY) && DL_LAND_FILM_ONLY
+// UNOFFICIAL 2026-11-20 DeferredWetness (core/DeferredWetness.h, Shaders/DeferredWetness.hlsl; only while its pass loaded): the land film pass, drawn
+// right after the land lamp pass with the same state (DL_LAND_ONLY's pixels: the near land's): each lamp's streak on the wet film, as the forward
+// land's lamp loop adds it (TerrainTemplate.hlsl WetLampFilm: x LampAttOther x smoothstep(0, 0.2, gloss) x the murk tint, stretched toward the eye
+// by lerp(1, 0.3, gloss)), from the film target that pass wrote this frame (r round(8 murk) + 0.99 gloss, g roughness, b / a the film normal),
+// inside the same lamp loop, so each lamp's own shadow covers its streak. Its own record: in the land pass's loop it ran out of temp registers
+// (X4505, 2026-11-20). Only the film's pixels (gloss > 0.05) stay.
+float4 DL_WetFilmOn : register(c13);	// x 1 = the film target on s6 holds this frame's land film (core/DeferredLamps.h Apply)
+sampler2D DL_WetFilm : register(s6);
+    #define PUDDLES_NOMAP	// (no puddle map sampler here: only WetLampFilm / PuddleMurkTint are used)
+    #include "includes/Wetness.hlsl"
+    #ifndef PUDDLES_COMPILED
+        #error DL_LAND_FILM_ONLY needs Puddles (WETNESS_EFFECTS 2+): the forward land has no lamp streak without it
+    #endif
+static float4 dlLandUV = 0.0f;	// the pixel's uv for the film read in the loop (no temp register held across the loop for it)
+#endif
 
 #define LIGHT_COMMON_ROWS DL_Table.x
 #include "includes/LightCommon.hlsl"
@@ -169,6 +185,15 @@ float3 DLLampLand(float3 toLamp, float att, float3 color, float3 V, float3 N, fl
     [branch] if (DL_Land.y > 0.5f) return max(0.0f, PBR(DL_Land.z, rough < 0.0f ? 1.0f : rough, albedo, N, V, toLamp, radiance * DL_Land.w));
     return albedo * shades(N, normalize(toLamp)) * radiance;
 }
+#if defined(DL_LAND_FILM_ONLY) && DL_LAND_FILM_ONLY
+// (2026-11-20 DeferredWetness) one lamp's streak on the land's wet film (not x the land's light scale: the forward film never took it)
+float3 DLLampLandFilm(float3 toLamp, float att, float3 color, float3 V, float3 N, float3 albedo, float rough, float metal) {
+    const float4 film = tex2Dlod(DL_WetFilm, dlLandUV);
+    const float gloss = saturate((film.r - floor(film.r)) / 0.99f);
+    return color * LampAttOther(att) * (smoothstep(0.0f, 0.2f, gloss) * PuddleMurkTint(saturate(floor(film.r) / 8.0f)))
+         * WetLampFilm(ShadowDecodeNormal(film.ba), V, normalize(toLamp), 1.0f, film.g, lerp(1.0f, 0.3f, gloss));
+}
+#endif
 #endif
 
 #if FD_SKIN
@@ -407,7 +432,17 @@ float4 main(PS_IN IN, out float depth : DEPTH DL_SKIN_SPEC_OUT) : COLOR0 {
     { DL_LAMP_LOOP(DLLampSkinDiffuse) }
     #elif defined(DL_LAND_ONLY)	// UNOFFICIAL 2026-11-16 fd-batchA item 3: the land pass (its own record, as the skin pass: a third loop, X4505)
     PBRDiffuseKeep = 1.0f;	// (the land never took the diffuse energy keep)
+        #if defined(DL_LAND_FILM_ONLY) && DL_LAND_FILM_ONLY
+    // (2026-11-20 DeferredWetness) the land film pass: only where the film has gloss (the forward streak's own threshold)
+    dlLandUV = uv4;
+    {
+        const float filmR = tex2Dlod(DL_WetFilm, uv4).r;
+        clip(DL_WetFilmOn.x > 0.5f && saturate((filmR - floor(filmR)) / 0.99f) > 0.05f ? 1.0f : -1.0f);
+    }
+    { DL_LAMP_LOOP(DLLampLandFilm) }
+        #else
     { DL_LAMP_LOOP(DLLampLand) }
+        #endif
     #else
     [branch] if (floor(material0.r + 0.01f) < 15.5f) { DL_LAMP_LOOP(DLLampDiffuse) }
     else { DL_LAMP_LOOP(getPointLightLightingAtt) }
