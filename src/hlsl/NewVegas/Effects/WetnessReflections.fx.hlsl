@@ -20,6 +20,8 @@ float4 TESR_ReciprocalResolution;
 float4 TESR_WetnessReflectionData;   // x: strength, y: max ray distance (game units), z: thickness, w: steps
 float4 TESR_WetnessReflectionFade;   // x: roughness cutoff, y: screen edge fade (uv), z: debug view, w: camera distance fade end
 float4 TESR_WetnessReflectionBump;   // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: x 1 = s4 holds the shading normals this frame (else 0: as before)
+float4 TESR_WetnessLampFilm;         // UNOFFICIAL 2026-11-19 DeferredWetLampFilm: x 1 = on this frame, y the froxel lists' texels, z the lamp table's rows, w its first tile row
+float4 TESR_LinearScales;            // x the lamps' light scale (the objects' forward film takes it, the land's does not: Object.hlsl LIN_SCALE_LIGHT)
 
 sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 sampler2D TESR_DepthBuffer : register(s1) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
@@ -27,6 +29,13 @@ sampler2D TESR_NormalsBuffer : register(s2) = sampler_state { ADDRESSU = CLAMP; 
 // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: no texture slot of its own; WetnessReflectionsEffect::BindShadingNormals sets it every frame
 // (the shading normals, or TESR_NormalsBuffer while the switch is off). s3 is the wetness include's ortho / puddle map.
 sampler2D NVR_WetShadingNormals : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-19 [Main.Main.Quality] DeferredWetLampFilm (WetnessReflectionsEffect::BindShadingNormals sets all three, no texture
+// slots; stages past the TESR_ samplers, which EffectRecord binds by declaration order, s0-s3): the frame's lamp table (core/ManyLamps.h, the
+// froxel lists the deferred lamp pass reads), the G-buffer's material (TESR_MaterialBuffer: the shading model) and its albedo
+// (TESR_AlbedoBuffer: its alpha says which pixels a deferred record drew, and their fog keep).
+sampler2D NVR_WetLampTable : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D NVR_WetMaterial : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D NVR_WetAlbedo : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 
 #include "Includes/Depth.hlsl"
 // The forward shaders' colour encoding (Shaders/Includes/LinearLight.hlsl, whose own includes do not resolve from this folder) and
@@ -82,6 +91,47 @@ float2 RayUV(float3 q, out bool onScreen)
 	return screenToRect(s);
 }
 
+// UNOFFICIAL 2026-11-19 DeferredWetLampFilm: the lamps' highlight on the wet film, stretched toward the eye (the wet-road streak), for the
+// pixels a deferred record drew. The forward land and object records draw it in their lamp loops (TerrainTemplate.hlsl / ObjectTemplate.hlsl
+// WetLampFilm); the deferred records have every lamp compiled out and the deferred lamp pass has no wet film, so under the deferred renderer
+// a fire or a street lamp left no streak on wet ground. Here, every lamp of the pixel's froxel list (the table read as
+// Shaders/Includes/ForwardPlus.hlsl FPLampSum reads it: keep the two in step), each through Wetness.hlsl's own WetLampFilm with the forward
+// records' inputs (the film's normal, roughness and gloss from GetWetness above, the murk tint, the stretch). Unshadowed, as the forward
+// land's film without RT lamp shadows. The falloff is the table walk's 1 - (d / r)^2.
+#define WL_TEXELS 2048.0f
+float4 WLTexel(float col, float row) { return tex2Dlod(NVR_WetLampTable, float4((col + 0.5f) / WL_TEXELS, (row + 0.5f) / TESR_WetnessLampFilm.z, 0.0f, 0.0f)); }
+float WLTileRow() { return TESR_WetnessLampFilm.w; }	// (core/ManyLamps.h TileRow)
+float4 WLHeader(float k) { return WLTexel(WL_TEXELS - 1.0f - k, WLTileRow() + 1.0f); }	// (core/ForwardPlusHeader.h PutHeader)
+float4 WLList(float t) { const float row = floor(t / WL_TEXELS); return WLTexel(t - row * WL_TEXELS, row + 1.0f); }
+
+// p: the pixel, camera-relative world; n: the film's normal (world, unit); V: toward the eye (world, unit).
+float3 WetLampFilmSum(float3 p, float3 n, float3 V, float roughness, float stretch)
+{
+	const float4 cam = WLHeader(0.0f);
+	[branch] if (!(cam.w > 0.5f)) return 0.0f;	// no froxel lists for this frame's world view
+	const float4 fwd = WLHeader(1.0f), right = WLHeader(2.0f), up = WLHeader(3.0f), grid = WLHeader(4.0f);
+	const float viewZ = dot(p, fwd.xyz);
+	[branch] if (!(viewZ > 0.0f)) return 0.0f;
+	const float2 local = float2(0.5f + 0.5f * dot(p, right.xyz) / (viewZ * fwd.w), 0.5f - 0.5f * dot(p, up.xyz) / (viewZ * right.w));
+	const float2 tile = min(floor(saturate(local) * grid.xy), grid.zw - 1.0f);
+	const float slice = viewZ < 64.0f ? 0.0f : min(7.0f, floor(log2(viewZ)) - 5.0f);
+	const float base = (slice * grid.z * grid.w + tile.y * grid.z + tile.x) * TESR_WetnessLampFilm.y;
+	const int lamps = (int)min(WLList(base).x, TESR_WetnessLampFilm.y * 4.0f - 1.0f);
+	const float3 q = cam.xyz + p;
+	float3 sum = 0.0f;
+	[loop] for (int k = 0; k < lamps; k++) {
+		const float e = (float)k + 1.0f;
+		const float t = floor((e + 0.5f) / 4.0f);
+		const float c = e - t * 4.0f;
+		const float i = dot(WLList(base + t), float4(c < 0.5f, abs(c - 1.0f) < 0.5f, abs(c - 2.0f) < 0.5f, c > 2.5f));
+		const float4 lamp = WLTexel(i * 2.0f, 0.0f);
+		const float3 toLamp = lamp.xyz - q;
+		const float att = lamp.w > 0.0f ? 1.0f - saturate(dot(toLamp, toLamp) / (lamp.w * lamp.w)) : 0.0f;
+		[branch] if (att > 0.0f) sum += att * WetLampFilm(n, V, normalize(toLamp), WLTexel(i * 2.0f + 1.0f, 0.0f).rgb, roughness, stretch);
+	}
+	return sum;
+}
+
 float4 WetReflections(VSOUT IN) : COLOR0
 {
 	float2 uv = IN.UVCoord;
@@ -108,6 +158,25 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	Wetness wet = GetWetness(worldPos, worldN, worldNs);
 	float gloss = wet.gloss;
 	float rough = wet.roughness;
+	// (2026-11-19 DeferredWetLampFilm, above) the lamps on the wet film where a deferred record drew the pixel (albedo alpha above 1; forward
+	// records write 1 and drew their own streak) and only the land and objects (models 1-4: the shaders whose forward records have the film),
+	// added in linear light as the forward records add it, fogged as the deferred passes fog their light (Includes/DeferredPixel.hlsl
+	// FDAddedLightKeep: the keep is the alpha's fraction above its code 1, 3 or 5)
+	[branch] if (TESR_WetnessLampFilm.x > 0.5f && gloss > 0.05f) {
+		const float a = tex2Dlod(NVR_WetAlbedo, float4(uv, 0.0f, 0.0f)).a;
+		const float r = tex2Dlod(NVR_WetMaterial, float4(uv, 0.0f, 0.0f)).r;
+		float model = floor(r + 0.01f);
+		model -= model >= 16.0f ? 16.0f : 0.0f;
+		[branch] if (a > 1.01f && model > 0.5f && model < 4.5f) {
+			const float keep = saturate(a > 4.5f ? a - 5.0f : a > 2.5f ? a - 3.0f : a - 1.0f);
+			float3 film = WetLampFilmSum(worldPos, normalize(wet.normal), -normalize(worldPos), rough, lerp(1.0f, 0.3f, gloss))
+				* (smoothstep(0.0f, 0.2f, gloss) * keep * (model < 3.5f ? TESR_LinearScales.x : 1.0f));
+		#ifdef PUDDLES_COMPILED
+			film *= PuddleMurkTint(wet.murk);
+		#endif
+			if (any(film > 0.0f)) scene.rgb = LinEncode(LinColor(scene.rgb) + film);
+		}
+	}
 	float glossy = gloss * (1.0f - smoothstep(TESR_WetnessReflectionFade.x * 0.5f, TESR_WetnessReflectionFade.x, rough));
 	if (glossy <= 0.01f) return Result(scene, gloss, 0.0f);
 

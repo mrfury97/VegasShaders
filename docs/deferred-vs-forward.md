@@ -167,6 +167,11 @@ Gaps:
 - DeferredSun does not carry: metal's bridged tint, the wet film's sun highlight, the land's highlight with UsePBR off, parallax's
   vanilla sun with POM shadows off, and blended (fading) draws' terms (`Shaders/DeferredSun.hlsl:17-18`).
 - Leaves get no room lamps under the deferred path (above). First person stays forward.
+- (Found 2026-11-19) The lamps' streak on the wet film (Wetness Effects' `WetLampFilm`, the wet-road highlight of a fire or a street lamp) is
+  drawn only in the forward records' lamp loops; the deferred records compile every lamp out and DeferredLamps has no wet film, so it was
+  gone under the deferred renderer. Restored by `[Main.Main.Quality] DeferredWetLampFilm` (branch `wet-lamp-film`): the wet reflection pass
+  (`Effects/WetnessReflections.fx.hlsl` WetLampFilmSum) adds it for the pixels a deferred record drew, from the frame's lamp table. It needs
+  Wetness Effects' reflections on (the pass runs only then). The sun's wet highlight is still missing (DeferredSun, above).
 - Some comments in the shipped defaults are stale against the code: GBufferV2 "test only, nothing on screen changes" (:674), DeferredDepth
   "nothing reads them yet" (:647), `SettingForce.h:23` "no reader on this branch". The renderer now depends on all three.
 
