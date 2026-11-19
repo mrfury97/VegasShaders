@@ -231,6 +231,7 @@ public:
 		static void		MergeTables(tomlValue& Into, const tomlValue& From);	// UNOFFICIAL: From's values over Into's, tables merged
 		tomlValue*		UserSection(const char* section);	// the user's own table for a section, or NULL
 		void			UpdateOldDefaults();	// one-time moves of saved old defaults ([_Unofficial] SettingsVersion)
+		void			ApplyRainWetnessSwitch();	// UNOFFICIAL 2026-11-20: Puddles' switch follows Wetness Effects' while DeferredWetness is on (RainWetnessOneSwitch)
 
 		tomlValue		TomlConfig;		// the user's settings
 		tomlValue		DefaultConfig;	// the defaults (with their comments)
@@ -273,6 +274,9 @@ public:
 	MenuSwitch				GetMenuShaderSwitch(const char* Name);
 	bool					GetMenuShaderEnabled(const char* name);
 	void					SetMenuShaderEnabled(const char* name, bool enabled);
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3: [Main.Main.Quality] DeferredWetness is on (saved; restart): rain wetness is ONE switch, Wetness
+	// Effects' (the menu calls it "Rain wetness"); Puddles follows it and WetWorld's own switch is hidden (its screen pass is the fallback only)
+	bool					RainWetnessOneSwitch();
 	bool					GetMenuMiscEnabled(const char* key);	// [Main.Main.Misc]
 	void					SetMenuMiscEnabled(const char* key, bool enabled);
 	SettingsWaterStruct*	GetSettingsWater(const char* location);	// NULL when there is no such set

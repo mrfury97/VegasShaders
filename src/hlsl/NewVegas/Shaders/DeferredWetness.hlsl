@@ -103,6 +103,89 @@ float DWObject(float a, float r) {
         (model > 0.5f && model < 3.5f || abs(model - 5.0f) < 0.5f || abs(model - 8.0f) < 0.5f) ? 1.0f : 0.0f;
 }
 
+#ifdef DW_FALLBACK
+// UNOFFICIAL 2026-11-20 step 3 (docs/deferred-wetness-design.md "Step 3 as built"): the film for every pixel the pass below did not work out,
+// drawn in the effect chain right before the Wetness Effects screen pass (core/DeferredWetness.h Fallback), on the lit frame, so that pass and
+// the Reflections effect read ONE film for the whole screen. By what the G-buffer says drew the pixel (COLOR1.a, Includes/DeferredPixel.hlsl):
+//   - a lighting-free record the pass below took (DW_FB.x 1: its film stands) or left out on purpose (skin, grass, eyes, unlit, the far land,
+//     the hair over skin: a in (1, 4.5)): nothing;
+//   - a forward record (a 1) or a "sun kept" record (5 + keep): their own water layer is in their colour already: the film only;
+//   - nothing (a 0: the game's own shaders, LOD, trees without a record): the film, and the water layer on the lit colour, WetWorld-style:
+//     the colour darkened as WetAlbedo darkens an albedo (x 0.4 under standing water) and the film's sky reflection added, as the pass below
+//     does for the records' ambient. No sun highlight and no lamp streaks there (believed minor in rain; the Wetness Effects screen pass draws
+//     their screen-space reflection from this film).
+// The sky, the water plane, the first-person view model and anything past DW_FB.y are left alone. The wetness is GetWetness with the
+// records' defines, from the frame's depth and its smooth normals (TESR_NormalsBuffer, view space), without a height.
+sampler2D TESR_DepthBuffer : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D TESR_NormalsBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D TESR_DepthBufferViewModel : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+float4 TESR_CameraData     : register(c12);	// y the far plane (TESR_DepthBuffer holds view z / far)
+float4 TESR_WaterSettings  : register(c13);	// x the water's height (world z)
+float4 TESR_DepthConstants : register(c14);	// z 0: the view model's depth buffer is empty at 1, else at 0 (reversed)
+float4 DW_FB               : register(c15);	// x 1 = the pass below drew its film this frame, y the distance (game units) the fallback ends at,
+                                            // z 1 = [Shaders.Puddles.Main] ObjectPuddles (as DW_Ctrl.y)
+
+struct FB_OUT {
+    float4 frame : COLOR0;	// the chain's frame (its colour encoding: TESR_LinearLighting)
+    float4 film  : COLOR1;	// the film target (as the pass below writes it)
+};
+
+FB_OUT main(PS_IN IN) {
+    FB_OUT o;
+    const float4 uv4 = float4(IN.uv, 0.0f, 0.0f);
+    const float a = tex2Dlod(DW_Albedo, uv4).a;
+    const float r = tex2Dlod(DW_Material, uv4).r;
+    const bool byPass = DW_FB.x > 0.5f && (DWNearLand(a, r) > 0.5f || DWObject(a, r) > 0.5f);
+    const float viewZ = tex2Dlod(TESR_DepthBuffer, uv4).x * TESR_CameraData.y;
+    const float vm = tex2Dlod(TESR_DepthBufferViewModel, uv4).x;
+    const bool viewModel = TESR_DepthConstants.z == 0.0f ? vm < 0.9f : vm > 0.01f;
+    const bool unwritten = a < 0.5f;
+    const bool skip = byPass || (a > 1.0001f && a < 4.5f) || viewModel || viewZ >= TESR_CameraData.y * 0.999f || viewZ > DW_FB.y;
+    clip(skip ? -1.0f : 1.0f);
+    o.frame = float4(tex2Dlod(DW_Frame, uv4).rgb, 1.0f);
+    o.film = 0.0f;
+    // (clip does not end the shader: the work only where the pixel stays)
+    [branch] if (!skip) {
+    const float3 P = DDRay(IN.vpos, DD[0], DD[1], DD[2], DD[3], DD[5]) * viewZ;
+    const float3 nv = tex2Dlod(TESR_NormalsBuffer, uv4).xyz * 2.0f - 1.0f;	// view space (x right, y up, z forward)
+    float3 N = normalize(DD[0].xyz * nv.x + DD[1].xyz * nv.y + DD[2].xyz * nv.z);
+    if (dot(N, P) > 0.0f) N = -N;	// toward the camera
+    // the water plane draws its own (Reflections.glsl's test: facing up, at the water's height)
+    const bool water = N.z > 0.75f && abs(DD[4].z + P.z - TESR_WaterSettings.x) < max(2.0f, viewZ * 0.002f);
+    [branch] if (!water) {
+    // the water level as the forward records got it (review 2026-11-20; effects/Puddles/Puddles.cpp SetDrawConstants): the land the real level;
+    // worn gear and hair 0; other objects, and the game's own shaders (LOD, statics without a record), only with ObjectPuddles
+    const float model = FDModel(r);
+    DWPuddleLevelMul = unwritten ? DW_FB.z : abs(model - 4.0f) < 0.5f ? 1.0f : abs(model - 2.0f) < 0.5f || abs(model - 8.0f) < 0.5f ? 0.0f : DW_FB.z;
+    Wetness wet = GetWetness(P, N, N, -1.0f);
+    // faded out toward DW_FB.y (no fog round trip: the fog the game's own shaders drew is not known here), the film with the colour (review:
+    // the screen pass takes the film's sky back out where the film is)
+    const float fade = 1.0f - smoothstep(0.7f * DW_FB.y, DW_FB.y, viewZ);
+    [branch] if (unwritten) {
+        const float gamma = max(TESR_LinearLighting.x, 1.0f);
+        float3 lit = pow(max(o.frame.rgb, 0.0f), gamma);
+        // the lit colour darkened as the albedo would be (WetAlbedo is a curve of the albedo: the colour, at most 1, stands for it)
+        const float3 c = min(lit, 1.0f);
+        lit *= c > 1.0e-4f ? WetAlbedo(c, wet.darkening, 1.0f) / max(c, 1.0e-4f) : 1.0f;
+    #ifdef PUDDLES_COMPILED
+        lit *= lerp(1.0f, 0.4f, wet.flatten);
+    #endif
+        [branch] if (wet.gloss > 0.001f) {
+            const float3 V = -normalize(P);
+            const float3 R = reflect(-V, wet.normal);
+            const float horizon = saturate(1.0f + 1.2f * dot(R, N));
+            lit += WetSkyReflection(R) * WetReflectance(saturate(dot(wet.normal, V)), wet.roughness, wet.gloss) * horizon * horizon;
+        }
+        o.frame.rgb = lerp(o.frame.rgb, pow(max(lit, 0.0f), 1.0f / gamma), fade);
+    }
+    const float2 fn = ShadowEncodeNormal(normalize(wet.normal));
+    o.film = float4(0.99f * saturate(wet.gloss * fade), wet.roughness, fn.x, fn.y);	// (no murk: the land's only)
+    }
+    }
+    return o;
+}
+#else
+
 struct PS_OUT {
     float4 frame    : COLOR0;
     float4 albedo   : COLOR1;
@@ -221,4 +304,5 @@ PS_OUT main(PS_IN IN) {
     }
     return o;
 }
+#endif	// DW_FALLBACK
 #endif

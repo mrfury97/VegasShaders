@@ -211,6 +211,7 @@ void SettingManager::Configuration::Init() {
 		TomlConfig.at("_Unofficial").contains("SettingsVersion") && TomlConfig.at("_Unofficial").at("SettingsVersion").is_integer())
 		savedVersion = (int)TomlConfig.at("_Unofficial").at("SettingsVersion").as_integer();
 	UpdateOldDefaults();
+	ApplyRainWetnessSwitch();	// UNOFFICIAL 2026-11-20 (before anything reads Puddles' switch)
 	const std::vector<std::string> unknown = WarnUnknownKeys(TomlConfig, DefaultConfig);
 	const char* slash = strrchr(userFile, '\\');
 	InstallCheck::OnSettingsRead(userFileRead, slash ? slash + 1 : userFile, savedVersion, UnofficialSettingsVersion, unknown);
@@ -406,6 +407,26 @@ tomlValue* SettingManager::Configuration::UserSection(const char* section) {
 // (UnofficialSettingsVersion is declared above Configuration::Init, which hands it to the install check)
 extern bool ParallaxLiteDistanceMigrationPending;  // effects/Terrain.cpp (version 65)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample; .z / .w set below)
+
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md "Step 3 as built"): with [Main.Main.Quality] DeferredWetness on,
+// rain wetness has one switch, Wetness Effects' (SettingManager::RainWetnessOneSwitch): Puddles' saved Enabled is set to it here, when the files
+// are read and before anything reads it (the shaders' defines, the lighting-free records and the puddle map read the setting itself); the
+// menu's Save keeps it. No default changes, so no settings version. (review 2026-11-20) Saved, Puddles keeps that value when DeferredWetness is
+// turned off again; and it keys on the saved DeferredWetness alone, so with Wetness Effects off Puddles goes off too (it needs Wetness Effects anyway).
+void SettingManager::Configuration::ApplyRainWetnessSwitch() {
+	ConfigNode node;
+	if (!FillNode(&node, "Main.Main.Quality", "DeferredWetness") || !node.BoolValue) return;
+	const bool wet = FillNode(&node, "Shaders.WetnessEffects.Status", "Enabled") && node.BoolValue;
+	if (FillNode(&node, "Shaders.Puddles.Status", "Enabled") && node.BoolValue == wet) return;
+	tomlValue* saved = UserSection("Shaders.Puddles.Status");
+	if (!saved || !saved->is_table()) {
+		Logger::Log("[WARNING] UNOFFICIAL settings: DeferredWetness: [Shaders.Puddles.Status] is not in your settings file, so Puddles could not be switched %s "
+			"with Wetness Effects this session (save the settings once from the menu)", wet ? "on" : "off");
+		return;
+	}
+	(*saved)["Enabled"] = wet;
+	Logger::Log("UNOFFICIAL settings: DeferredWetness: Puddles switched %s with Wetness Effects (one Rain wetness switch)", wet ? "on" : "off");
+}
 
 void SettingManager::Configuration::UpdateOldDefaults() {
 	if (!TomlConfig.is_table()) return;
@@ -1886,9 +1907,16 @@ SettingManager::MenuSwitch SettingManager::GetMenuShaderSwitch(const char* Name)
 }
 
 
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md "Step 3 as built"; SettingManager.h)
+bool SettingManager::RainWetnessOneSwitch() {
+	return GetSettingI("Main.Main.Quality", "DeferredWetness") != 0;
+}
+
 bool SettingManager::GetMenuShaderEnabled(const char* name) {
 	// UNOFFICIAL 2026-11-04 HudRaindrops has no section of its own: it is switched under Wetness Effects (HudRaindropsEffect::UpdateSettings).
 	if (!strcmp(name, "HudRaindrops")) return GetSettingI("Shaders.WetnessEffects.HudRaindrops", "Enabled") != 0;
+	// UNOFFICIAL 2026-11-20 one Rain wetness switch: Puddles is on exactly when Wetness Effects is (ApplyRainWetnessSwitch keeps the setting so)
+	if (!strcmp(name, "Puddles") && RainWetnessOneSwitch()) return GetMenuShaderEnabled("WetnessEffects");
 	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, the one switch for the exterior sun bounce) implies AmbientLight's
 	// Status Enabled: it is on at load and after a revert (the runtime flag; AmbientLight::UpdateSettings follows a live change). The toml is not written;
 	// AmbientLight::ShouldRender keeps it off indoors while only SunGI has it on, so interiors stay as the user set them.
@@ -1933,6 +1961,11 @@ bool SettingManager::GetMenuShaderEnabled(const char* name) {
 
 void SettingManager::SetMenuShaderEnabled(const char* name, bool enabled) {
 	if (!strcmp(name, "HudRaindrops")) { SetSetting("Shaders.WetnessEffects.HudRaindrops", "Enabled", enabled); return; }	// UNOFFICIAL 2026-11-04 (above)
+	// UNOFFICIAL 2026-11-20 one Rain wetness switch (RainWetnessOneSwitch): Wetness Effects' switch sets Puddles' too; Puddles has none of its own
+	if (RainWetnessOneSwitch()) {
+		if (!strcmp(name, "Puddles")) return;
+		if (!strcmp(name, "WetnessEffects")) SetSetting("Shaders.Puddles.Status", "Enabled", enabled);
+	}
 	const MenuSwitch kind = GetMenuShaderSwitch(name);
 	if (kind == MenuSwitch::None) return;
 	char switchSection[256];

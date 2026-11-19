@@ -176,3 +176,9 @@ dry lamp record, and 7-layer land had no sampler for the cover map.
 
 ## 2026-11-12 Who gets standing water
 Only the land, by default (user): `ObjectPuddles = false` sends object draws TESR_PuddleData with level 0 (Puddles::SetDrawConstants, per pass from Render.cpp SetShadersHook; ShaderRecordPixel::IsLand = TerrainTemplate). Skinned meshes (actors) and the first-person model are always dry. Objects keep the rain dampness and wall streaks.
+
+## 2026-11-20 With DeferredWetness on (deferred wetness step 3, test only)
+- Puddles has no switch of its own: it follows Wetness Effects' (the menu's "Rain wetness"; `SettingManager` RainWetnessOneSwitch /
+  ApplyRainWetnessSwitch keep `[Shaders.Puddles.Status] Enabled` equal to it).
+- `ReflectionPuddles` is hidden: the Vulkan reflection passes take the standing water and its roughness from DeferredWetness's film in frames
+  that have one (`src/effects/Reflections/README.md`, last section), not from the field / mask in section 3.

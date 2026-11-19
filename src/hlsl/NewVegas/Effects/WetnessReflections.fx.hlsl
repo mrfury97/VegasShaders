@@ -181,8 +181,10 @@ float4 WetReflections(VSOUT IN) : COLOR0
 		const float r = mat.r;
 		// (2026-11-20 step 2) every pixel DeferredWetness wrote a film for (the near land, objects, parallax: its roughness, g, is never 0 there;
 		// the target is cleared to 0 each wet frame), not only the land's
+		// (2026-11-20 step 3) and every pixel its fallback wrote one for (core/DeferredWetness.h Fallback, right before this pass: forward records,
+		// the game's own shaders), worked out with the records' wetness, not this pass's lighter one (PUDDLES_RUNTIME)
 		const float4 f = tex2Dlod(NVR_WetFilm, float4(uv, 0.0f, 0.0f));
-		[branch] if (a > 1.0001f && a < 2.0005f && f.g > 0.001f) {
+		[branch] if (f.g > 0.001f) {
 			landPx = abs(r - 20.0f) < 0.5f / 64.0f;
 			wet.gloss = saturate((f.r - floor(f.r)) / 0.99f);
 			wet.roughness = max(f.g, 0.01f);
@@ -197,7 +199,8 @@ float4 WetReflections(VSOUT IN) : COLOR0
 			// one where none was recorded), what this pass reflected with before.
 			// (review 2026-11-20) the shading normal only with DeferredBumpedNormals on (x): off, the smooth normal, as this pass took before (the
 			// bumped one makes a sharp mirror grainy, commit edbc43f)
-			filmRayN = TESR_WetnessReflectionBump.x > 0.5f && abs(mat.g) <= 1.001f ? WRDecodeOct(mat.ga) : worldN;
+			// (2026-11-20 step 3) only where a record wrote the G-buffer (a pixel no record drew holds 0 there, which would decode as straight up)
+			filmRayN = TESR_WetnessReflectionBump.x > 0.5f && a > 0.5f && abs(mat.g) <= 1.001f ? WRDecodeOct(mat.ga) : worldN;
 		}
 	}
 	float gloss = wet.gloss;

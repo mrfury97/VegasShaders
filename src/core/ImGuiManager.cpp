@@ -902,8 +902,20 @@ static bool IsInternalSetting(const std::string& section, const std::string& key
 
 // UNOFFICIAL 2026-11-12: an Internal setting ([Main.Menu.Developer] Internal) while the settings file does not ask for them
 // (ShowInternal): never a row, on its page, in the search or in the simple views, and not counted as a hidden developer setting.
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (SettingManager::RainWetnessOneSwitch): with DeferredWetness on, Puddles and WetWorld have no switch
+// of their own in the menu (Puddles follows "Rain wetness", Wetness Effects' switch; WetWorld's screen pass is only the fallback where the surfaces
+// have no water layer), and the Reflections effect takes the floors' water and roughness from the film, so ReflectionPuddles and WetRoughness do
+// nothing there: hidden. Their saved values stay.
+static bool RainWetnessLinked(const std::string& shader) {
+	if (!TheSettingManager->RainWetnessOneSwitch()) return false;
+	// (review 2026-11-20) WetWorld only while Rain wetness is on: off, its screen pass draws (EffectChain.cpp) and keeps its own switch
+	return shader == "Puddles" || (shader == "WetWorld" && TheSettingManager->GetMenuShaderEnabled("WetnessEffects"));
+}
+
 static bool InternalHidden(const std::string& section, const std::string& key) {
 	if (ShelvedEffects::Section(section)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only), whatever ShowInternal says
+	if (((section == "Shaders.Puddles.Main" && key == "ReflectionPuddles") || (section == "Shaders.Reflections.Main" && key == "WetRoughness")) &&
+		TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
 	return !gMenu.showInternal && IsInternalSetting(section, key);
 }
 
@@ -4018,6 +4030,7 @@ static void RenderShaderHeaderSwitch(const std::string& shaderName) {
 	const char* shader = shaderName.c_str();
 	const SettingManager::MenuSwitch kind = TheSettingManager->GetMenuShaderSwitch(shader);
 	if (kind == SettingManager::MenuSwitch::None) return;	// UNOFFICIAL 2026-10-19: an entry without a switch gets none
+	if (RainWetnessLinked(shaderName)) return;	// UNOFFICIAL 2026-11-20: switched with Rain wetness
 	bool on = TheSettingManager->GetMenuShaderEnabled(shader);
 	const bool forced = TheSettingManager->IsShaderForced(shader);
 
@@ -4398,6 +4411,8 @@ static bool IsMovedShaderEntry(const std::string& name) {
 // settings files) says less than it does (user: "change the taa menu to say taa / fsr / dlss"). The ## part keeps ImGui's ID the name.
 static std::string MenuEntryLabel(const std::string& name) {
 	if (name == "TAA") return "TAA / FSR / DLSS##TAA";
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the one switch for rain wetness (RainWetnessLinked)
+	if (name == "WetnessEffects" && TheSettingManager->RainWetnessOneSwitch()) return "Rain wetness##WetnessEffects";
 	if (name == "SunFar") return "SunFar (mountain and flat-cloud shadow pass)##SunFar";
 	// UNOFFICIAL 2026-11-07 (user: "why is the exterior setting underneath interior"): the two shadow effects are named after the game's
 	// old split, but ShadowsInteriors is the LAMPS' shadows (indoors and, with its RT section, street lamps outdoors at night) and
@@ -5290,6 +5305,14 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 		// UNOFFICIAL 2026-10-19: no on/off setting (Foliage): a name only, not a switch that springs back
 		ImGui::TextUnformatted(label.c_str());
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s has no on/off switch of its own: the settings inside control it.", shader);
+	}
+	else if (RainWetnessLinked(name)) {
+		// UNOFFICIAL 2026-11-20 deferred wetness step 3: switched with Rain wetness (Wetness Effects' row), a name only
+		ImGui::PushStyleColor(ImGuiCol_Text, on ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.5f));
+		ImGui::TextUnformatted(label.c_str());
+		ImGui::PopStyleColor();
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip(name == "Puddles" ? "Switched with Rain wetness: puddles come and go with it." :
+			"Only a fallback with Rain wetness on: it draws the rain on screen when the surfaces' own water layer could not be built.");
 	}
 	else {
 		ImGui::BeginDisabled(forced);
