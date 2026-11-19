@@ -15,6 +15,7 @@
 #include "DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the exact linear view z for the pass (DL_LINEAR_DEPTH)
 #include "DeferredDistant.h"
 #include "DeferredFog.h"	// UNOFFICIAL 2026-11-14 the stored-curve fog (DeferredLamps.hlsl DL_FOG_EXACT)
+#include "DeferredWetness.h"	// UNOFFICIAL 2026-11-20 the land's wet film (the land pass's DL_WET_FILM)
 
 namespace DeferredLamps {
 	inline const char* kSection = "Shaders.ShadowsInteriors.Deferred";
@@ -65,6 +66,9 @@ namespace DeferredLamps {
 	inline ShaderRecordPixel* LandPass = nullptr;	// the land lamp pass (DL_LAND_ONLY), drawn right after the lamp pass with the same state
 	inline bool LandPassFailed = false;
 	inline bool LandCompiled = false;			// the lamp pass has the split (DL_LAND_SPLIT, EnsurePass's level 0) and the land pass loaded
+	// UNOFFICIAL 2026-11-20 DeferredWetness: the land film pass (DL_LAND_FILM_ONLY), drawn right after the land lamp pass while the land's film is live
+	inline ShaderRecordPixel* LandFilmPass = nullptr;
+	inline bool LandFilmPassFailed = false;
 	inline bool Past16Unshadowed = false;		// the lamp pass loaded at a DL_PAST16_LIT level (lamps past a pixel's 16th lit unshadowed)
 	inline bool ShadowedThisFrame = false;		// the world run drew its shadow passes with Shadows on this frame (reset in BeginFrame)
 	// EffectChain.cpp PreStep_ShadowPlan: the deferred lamp pass shadowed its lamps from the atlas this frame, as the forward lamp-shadow shaders
@@ -347,12 +351,24 @@ namespace DeferredLamps {
 			// UNOFFICIAL 2026-11-16 fd-batchA item 3: the land lamp pass, the shared defines + DL_LAND_ONLY, at load with the lamp pass (level 0 only:
 			// the other levels light the land in the lamp pass, as before). If it fails, the lamp pass's split stays off (DL_Land.x 0) and lights the land.
 			if (Pass && level == 0 && !LandPass && !LandPassFailed) {
-				static D3DXMACRO landOverrides[13] = {};
+				static D3DXMACRO landOverrides[14] = {};
 				int m = 0;
 				for (; m < shared && m < 11; m++) landOverrides[m] = o[m];
 				landOverrides[m++] = { "DL_LAND_ONLY", "1" };
 				landOverrides[m] = { NULL, NULL };
 				LandPass = (ShaderRecordPixel*)ShaderRecord::LoadShader("DeferredLampLand.pso", NULL, tmpl, "Deferred\\Land\\Pass\\", landOverrides);
+				// UNOFFICIAL 2026-11-20 DeferredWetness (core/DeferredWetness.h; DeferredLamps.hlsl DL_LAND_FILM_ONLY): each lamp's streak on the land's wet
+				// film (the forward land's WetLampFilm), from the film target, shadowed with the lamp's own shadow, in its own pass (in the land pass's loop
+				// it ran out of temp registers, X4505). Only while DeferredWetness loaded; without it the screen pass draws the streak, unshadowed.
+				if (LandPass && DeferredWetness::CompiledIn() && LightFreeRecords::PuddlesIn() && !LandFilmPass && !LandFilmPassFailed) {	// (the forward streak needs Puddles)
+					static D3DXMACRO filmOverrides[15] = {};
+					for (int f = 0; f <= m; f++) filmOverrides[f] = landOverrides[f];
+					filmOverrides[m] = { "DL_LAND_FILM_ONLY", "1" };
+					filmOverrides[m + 1] = { NULL, NULL };
+					LandFilmPass = (ShaderRecordPixel*)ShaderRecord::LoadShader("DeferredLampLandFilm.pso", NULL, tmpl, "Deferred\\Land\\Film\\", filmOverrides);
+					if (LandFilmPass) Logger::Log("UNOFFICIAL DeferredLamps: the land film pass loaded (DL_LAND_FILM_ONLY: the lamps' streaks on the wet ground, with their shadows)");
+					else { LandFilmPassFailed = true; Logger::Log("[WARNING] UNOFFICIAL DeferredLamps: the land film pass did not load: the Wetness Effects screen pass draws the lamps' streaks on wet ground, unshadowed, as before"); }
+				}
 				if (LandPass) Logger::Log("UNOFFICIAL DeferredLamps: the land lamp pass loaded (DeferredLamps.hlsl DL_LAND_ONLY: the land's lamps with the forward land's model)");
 				else { LandPassFailed = true; Logger::Log("[WARNING] UNOFFICIAL DeferredLamps: the land lamp pass did not load: the land's lamps take the objects' model and falloff, as in 1.1.0"); }
 			}
@@ -496,7 +512,8 @@ namespace DeferredLamps {
 		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; DWORD fvf = 0;
 		d->GetVertexShader(&vs); d->GetPixelShader(&ps); d->GetVertexDeclaration(&decl); d->GetFVF(&fvf); d->GetStreamSource(0, &vb, &vbOffset, &vbStride);
 		// 15: (2026-11-03 rtfwd) the RT lamp trace's result; 7, last: (2026-11-14) DL_LINEAR_DEPTH's view z, saved and touched only with DeferredDistant
-		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 8, 9, 10, 11, 12, 15, 7 };
+		// 6: (2026-11-20) the land pass's wet film (DL_WET_FILM)
+		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 6, 8, 9, 10, 11, 12, 15, 7 };
 		constexpr int kStageCount = sizeof(kStages) / sizeof(kStages[0]);
 		const int stageCount = DeferredDistant::CompiledIn() ? kStageCount : kStageCount - 1;
 		IDirect3DBaseTexture9* tex[kStageCount] = {};
@@ -589,6 +606,7 @@ namespace DeferredLamps {
 		// getPointLightLighting): x 1 = the land loop runs (LandLampModel, and the pass has it), y UsePBR, z its metal saturate(TerrainData.x),
 		// w its light scale LinScale(TerrainData.z), decoded here as PBR.cpp decodes LinearScales (pow(s, gamma) when gamma > 1)
 		bool landLive = false;
+		bool filmLive = false;	// (2026-11-20 DeferredWetness) the land film pass draws this frame
 		{
 			float land[2][4] = {};
 			auto constant = [](const char* name) -> const float* {
@@ -606,6 +624,17 @@ namespace DeferredLamps {
 				land[1][1] = terrainExtra[0] != 0.0f ? 1.0f : 0.0f;
 				land[1][2] = (std::min)((std::max)(terrain[0], 0.0f), 1.0f);
 				land[1][3] = g > 1.0f ? powf(s > 0.0f ? s : 0.0f, g) : s;
+				// (2026-11-20, c13.x, DL_WetFilmOn) the film target holds this frame's land film: the land film pass draws the lamps' streaks, from s6
+				// (review 2026-11-20) only where the add is exact over the land pass's: the linear frame or the exact fog's light target (in the
+				// stored-curve copy path each pass adds against the same copy, which overshoots a second pass); and under the streak's own switch,
+				// [Main.Main.Quality] DeferredWetLampFilm. Else the screen pass draws it, as before.
+				if (LandFilmPass && DeferredWetness::FilmLive && DeferredWetness::FilmTexture && DebugView == 0 && (linear || fogExact) &&
+					TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetLampFilm") != 0) {
+					land[0][0] = 1.0f;
+					filmLive = true;
+					d->SetTexture(6, DeferredWetness::FilmTexture);	// (stage 6 is saved, set point / clamp and put back with the pass's others: kStages)
+					DeferredWetness::LampFilmDrawn = true;
+				}
 			}
 			d->SetPixelShaderConstantF(13, land[0], 2);
 		}
@@ -687,6 +716,14 @@ namespace DeferredLamps {
 		if (landLive) {	// UNOFFICIAL 2026-11-16 fd-batchA item 3: the land lamp pass, the same state (as the skin pass below); its pixels are the ones the lamp
 			d->SetPixelShader(LandPass->ShaderHandle);	// pass clipped (under the exact fog: the light target's clear 0 there, blend off: a write)
 			draw(0);	// (DeferredTiledLight: the lamp tiles, or the full-screen quad)
+			if (filmLive) {	// (2026-11-20 DeferredWetness) the streaks over the land pass's light: ADDED, also under the exact fog (blend on for it)
+				DWORD blendWas = TRUE;
+				d->GetRenderState(D3DRS_ALPHABLENDENABLE, &blendWas);
+				if (!blendWas) d->SetRenderState(D3DRS_ALPHABLENDENABLE, TRUE);
+				d->SetPixelShader(LandFilmPass->ShaderHandle);
+				draw(0);
+				if (!blendWas) d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
+			}
 			d->SetPixelShader(Pass->ShaderHandle);
 			StatLand++;
 		}

@@ -27,7 +27,7 @@ public:
 	struct WetnessReflectionsStruct {
 		D3DXVECTOR4	Data;		// x: strength, y: max distance, z: thickness, w: steps
 		D3DXVECTOR4	Fade;		// x: roughness cutoff, y: edge fade, z: debug view, w: max camera distance
-		D3DXVECTOR4	Bump = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-18 x: 1 = s4 holds the shading normals (BindShadingNormals); y (2026-11-19) 1 = s8 holds DeferredWetness's land film
+		D3DXVECTOR4	Bump = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-18 x: 1 = s4 holds the shading normals (BindShadingNormals); y (2026-11-19) 1 = s8 holds DeferredWetness's land film; z (2026-11-20) 1 = the land lamp pass drew the land's streaks
 		D3DXVECTOR4	LampFilm = D3DXVECTOR4(0.0f, 8.0f, 1.0f, 0.0f);	// UNOFFICIAL 2026-11-19 DeferredWetLampFilm: x on, y froxel list texels, z table rows
 	};
 	WetnessReflectionsStruct	Constants;

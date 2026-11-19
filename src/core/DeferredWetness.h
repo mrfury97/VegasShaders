@@ -27,6 +27,9 @@ namespace DeferredWetness {
 	inline int Wanted = -1;
 	inline bool FilmLive = false;					// this frame's film target holds the land's film (DeferredSun, WetnessReflections)
 	inline bool Done = false;						// Apply drew in this span (EnsureRestored)
+	// (2026-11-20) the land lamp pass drew the lamps' streak on the film this frame (DeferredLamps.hlsl DL_WET_FILM, with the lamps' shadows):
+	// the Wetness Effects screen pass then leaves those pixels out of its own, unshadowed streak
+	inline bool LampFilmDrawn = false;
 	inline IDirect3DTexture9* FilmTexture = nullptr;  inline IDirect3DSurface9* FilmSurface = nullptr;
 	inline IDirect3DTexture9* AlbedoCopy = nullptr;   inline IDirect3DSurface9* AlbedoCopySurface = nullptr;
 	inline IDirect3DTexture9* MaterialCopy = nullptr; inline IDirect3DSurface9* MaterialCopySurface = nullptr;
@@ -68,7 +71,7 @@ namespace DeferredWetness {
 	}
 
 	// Once a frame (Render.cpp, with DeferredSun::BeginFrame).
-	inline void BeginFrame() { FilmLive = false; }
+	inline void BeginFrame() { FilmLive = false; LampFilmDrawn = false; }
 
 	// The copies the pass reads and the film target, at the G-buffer's size and format.
 	inline bool MakeTargets(IDirect3DDevice9* d) {
