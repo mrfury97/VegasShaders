@@ -77,7 +77,20 @@ GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shad
 - **Screen pass:** reads A's film (gloss, roughness, normal, murk) for near-land deferred pixels for the streaks and the SSR.
 - Offline (2026-11-19, user's toml + DeferredRenderer 2's forced keys, tests/template_defines.py; not the game's exact list): pass A 901
   slots (restore 18), device ok; the 28 land lighting-free records 1,267-2,663 slots with the switch (1,984-3,651 without), all device ok.
-- Not done in step 1: lamp streaks with lamp shadows in DeferredLamps; objects / parallax / far land (steps 2-3).
+- Lead-architect review (2026-11-19): approve with fixes. Applied: (1) the full pass only with DeferredDepth 2's exact view z (mode 2
+  forces it); without it restore only, since covered pixels could not be told apart; (2) a failed target or copy latches `Broken()`,
+  DeferredSun::Wanted() then refuses and the renderer draws forward (the forward land keeps its water layer); (3) a fully fogged pixel
+  (albedo alpha 1.0) is restored too; (4) the wetness runs only inside `[branch] if (near)` (clip does not end a shader); the restore pass
+  reads the albedo target itself (one copy less in dry frames); (5) frame write mask 0x7; (9) the restore guard is built before
+  DeferredSun's `!Live || !binds` return. Not changed (believed low): blended content over near land (seams, decals) takes the land's
+  ratio and sky; with the switch off every land record and DeferredSun still recompile once (the cache compares the preprocessed text,
+  line numbers included); under the game's MSAA the late-grass re-resolve can copy the unrestored material back (mode 2 does not run there).
+- Not done in step 1: lamp streaks with lamp shadows in DeferredLamps; objects / parallax / far land (steps 2-3); the pass's frame cost
+  (not measured).
+- Installed for testing 2026-11-19 (test-p1a-bump 90fc395 = the earlier test build + this branch; restore
+  `F:\VS-scratch\install-test6-2026-11-19estore.ps1` -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
+  the pass loaded", "wet: the land's water layer drawn by the pass", no "[ERROR] ShaderRecord: more than 62", no LIGHT-FREE RECORD
+  warnings; in rain, the switch on vs off side by side (same spot, same weather).
 
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,
@@ -101,5 +114,5 @@ does not remove the layer; PUDDLES_RUNTIME's different wetness; B reading A's fl
 sun-shadow mask has no cascade shadows (a highlight inside cast shadows); a double sky on objects; far land made wet; Cavity lost.
 
 ## Not decided (owner)
-- Whether the softer crevice shape (no land height in A) is acceptable, or worth a G-buffer channel.
+- (Answered by the build, not by the owner: the height rides in COLOR2.r only between the record and pass A, so no channel is spent.)
 - When to make it the default and retire WetWorld (step 4).
