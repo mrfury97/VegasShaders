@@ -76,7 +76,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 film;                  // UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): x 1 = t_film holds this frame's
                                 // film (the wetness the surfaces were drawn with: the floors' wet look comes from it, not from the rain guess and
                                 // the puddle field below), y its strength (RainWetness outdoors, 0 indoors), z 1 = t_normals holds the
-                                // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing), w unused
+                                // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing),
+                                // w 1 / MaxRainWetness (Wetness Effects': the film's gloss of open ground in full rain counts 1)
 } cb;
 
 layout(push_constant) uniform Push {
@@ -249,10 +250,15 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
 // which t_normals holds with DeferredBumpedNormals (the smooth normals otherwise).
 #define FilmOn (cb.film.x > 0.5)
 // The film's water at a pixel (0-1, x the strength) and its roughness; 0 where no film was worked out.
+// (2026-11-20, owner's first look at step 3: no reflections at all) The film's own roughness (Wetness Effects' damp ground lerp(1, 0.22,
+// rain), 0.61 at the owner's MaxRainWetness 0.5; the Puddles Roughness, 0.36, under standing water) is past the 0.35 where the trace hands
+// over to the light grid, so nothing on screen showed. The film decides WHERE the water is and how much (its gloss over MaxRainWetness:
+// full rain on open ground counts 1, as the rain guess did); the mirror's blur stays WetRoughness, at most the film's (a smoother puddle keeps
+// its own). The grain of a sharp mirror on bumpy ground is NormalVarianceRoughness's to take out.
 float FilmWetness(vec2 uv, out float roughness) {
     vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
-    roughness = max(f.g, 0.01);
-    return f.g > 0.001 ? saturate((f.r - floor(f.r)) / 0.99) * cb.film.y : 0.0;
+    roughness = min(max(f.g, 0.01), WetRoughness);
+    return f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) * cb.film.y : 0.0;
 }
 
 // UNOFFICIAL 2026-10-30 a reflecting pixel's view-space position: ViewPosition, except on the first-person weapon, which the game draws

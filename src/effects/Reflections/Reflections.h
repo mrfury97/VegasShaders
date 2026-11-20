@@ -22,6 +22,7 @@ public:
 		float	MirrorLampHighlight;	// 2026-11-08 (perf-reflfix3): the point lamps' highlight left on mirror / chrome pixels the reflection covers (0..1)
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
+		float	FilmRainScale = 1.0f;	// UNOFFICIAL 2026-11-20 1 / [Shaders.WetnessEffects.Main] MaxRainWetness (cb.film.w, Reflections.glsl FilmWetness)
 		float	MaxDistance;	// ray length, game units
 		int		Steps;
 		float	Thickness;		// how thick things count as, for a ray passing behind them

@@ -254,14 +254,16 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
 ## The wet floors from DeferredWetness's film; specular anti-aliasing (2026-11-20, deferred wetness step 3; NOT yet run in a game)
 - With `[Main.Main.Quality] DeferredWetness` on (test only, off) and a film over the whole screen this frame (`DeferredWetness::FilmWhole()`: its
   fallback before the Wetness Effects screen pass drew, after its pass in the sun pass), the Vulkan passes take a floor's water from the film (set 1 binding 28 / slot 27
-  `t_film`, `cb.film`): wet share = the film's gloss x RainWetness (outdoors), wet roughness = the film's (the Puddles roughness under standing
-  water, Wetness Effects' rain roughness elsewhere). The rain guess (TESR_ReflectionsData.y), the puddle field and the material buffer's puddle
-  mask are not used then (`Reflections.glsl` FilmWetness). Without a film this frame: as before. The D3D9 technique is unchanged.
+  `t_film`, `cb.film`): wet share = saturate(the film's gloss / MaxRainWetness) x RainWetness (outdoors), the wet
+  mirror's blur = WetRoughness, at most the film's roughness. The film decides where the water is (rain cover, drying, puddles); the rain
+  guess (TESR_ReflectionsData.y), the puddle field and the material buffer's puddle mask are not used then (`Reflections.glsl` FilmWetness).
+  Without a whole film this frame: as before. The D3D9 technique is unchanged. (The first build took the film's own roughness, 0.61 on damp
+  ground and the Puddles Roughness in puddles: past the trace's 0.35 grid hand-over, no reflection showed; owner 2026-11-20.)
 - `NormalVarianceRoughness` (`cb.film.z`: the normals are the normal-mapped shading normals, `[Main.Main.Quality] DeferredBumpedNormals` or
   `DeferredReflections`): the roughness is widened by how much the normal changes to the right and lower full-resolution neighbour
   (alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.18), Kaplanyan / Tokuyoshi; a depth jump over 2 % not counted), after Mirror, not on water or the
   weapon. Why: a sharp mirror on the bumped normal was grainy on grass and dirt (owner's toggles, 2026-11-20).
-- Look: wet ground away from puddles is softer than with WetRoughness (0.069), as its highlight; puddles as before. Wrong: puddles that do not
+- Look: wet ground mirrors at WetRoughness where the film says it is wet; bumpy wet ground (DeferredBumpedNormals on) softer by its bumps. Wrong: puddles that do not
   mirror at all in rain (the film not bound: the log's DeferredWetness lines), or grain back on bumpy ground with DeferredBumpedNormals on.
 - Shader files: all eleven Reflections*.spv that include Reflections.glsl were rebuilt (six use the film: Trace, TraceHiZ, Blur, Temporal,
   RayGen, Composite; the other five only declare it). The "Reflections shader files" log line's hash table is older than these (it says OLD).
