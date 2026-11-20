@@ -134,6 +134,10 @@ void main() {
     reflection /= weights;
 
     vec3 V = normalize(SurfacePosition(uv, depth));   // (2026-10-30: the weapon's own FOV)
+    // (2026-11-21, Reflections.glsl FilmWetness) damp ground's reflection is the cube at the film's own roughness (0.61 at MaxRainWetness 0.5),
+    // but its STRENGTH stays what the traced damp ground had (the Fresnel at most DampMaxRoughness 0.3): at that roughness the split-sum
+    // Fresnel falls to a quarter at 5 degrees, the owner's test10 look ("no reflections"). A blurred sheen at the old strength, not a mirror.
+    float fresnelRough = mix(roughness, min(roughness, DampMaxRoughness), SurfaceDamp);
     vec3 share;
     // UNOFFICIAL 2026-11-05 [Shaders.Reflections.Main] Mirror (cb.grid3.w, 0..1): the non-metal F0, 0.04 (stone, tile, polished floors:
     // ~4 % of the reflection looking down, so only bright lamps show) up to 1 (a true mirror: people and objects show at any angle).
@@ -151,10 +155,10 @@ void main() {
         tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
         }
         f0 = mix(vec3(dielectricF0), ReflMetalF0(tint, roughness), SurfaceMetal);
-        share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), f0)) * saturate(reflection.a);
+        share = saturate(amount * EnvironmentFresnelF0(fresnelRough, saturate(dot(-V, N)), f0)) * saturate(reflection.a);
     }
-    else if (SurfaceMirror > 0.0) { f0 = vec3(dielectricF0); share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), vec3(dielectricF0))) * saturate(reflection.a); }
-    else share = vec3(saturate(amount * EnvironmentFresnel(roughness, saturate(dot(-V, N)))) * saturate(reflection.a));
+    else if (SurfaceMirror > 0.0) { f0 = vec3(dielectricF0); share = saturate(amount * EnvironmentFresnelF0(fresnelRough, saturate(dot(-V, N)), vec3(dielectricF0))) * saturate(reflection.a); }
+    else share = vec3(saturate(amount * EnvironmentFresnel(fresnelRough, saturate(dot(-V, N)))) * saturate(reflection.a));
     vec3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
     if (any(isnan(reflected)) || any(isinf(reflected)) || isnan(reflection.a)) { o_color = color; return; }   // (UNOFFICIAL 2026-10-30)
     // REFL_SPECOCC_ON: SpecularOcclusion.
