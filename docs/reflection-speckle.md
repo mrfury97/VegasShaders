@@ -25,6 +25,23 @@ white speckles at mid distance, most toward the sun. Owner asked for an unreason
 ## Ruled out
 - Sub-pixel aliasing as the main cause: at 5-10 m a dirt bump spans several pixels (footprint about 0.4-0.7 units), so it is drawn, not aliased.
 
+## How Community Shaders (Skyrim) does wet ground (read 2026-11-21, github.com/community-shaders/skyrim-community-shaders 2b05afa)
+GPL-3.0 with a modding exception (`COPYING.txt`, `EXCEPTIONS.md`); ours is GPL-3.0 too, so adapting is allowed with credit; we still write
+our own. Clone: `F:\VS-scratch\ext\cs` (sparse) and `F:\VS-scratch\ext\cs-files`.
+- Wet ground has NO screen-space trace. `Lighting.hlsl` adds `wetnessReflectance x GetDynamicCubemapSpecularIrradiance(wetNormal, V,
+  wetRoughness)`: one lookup in a cube made each frame from the screen (`Dynamic Cubemaps`: screen pixels splatted into a cube round the
+  camera, holes filled from coarser mips, then pre-filtered by roughness), mip = roughness x 8, its brightness normalised to the ambient
+  light's and scaled by Skylighting's sky visibility (smooth spherical harmonics).
+- Damp ground keeps its bumped normal but is rough: roughness = 1 - wetness gloss (`WetnessEffects.hlsli` GetSurfaceWetnessRoughness).
+  Puddles get a flat ripple normal and roughness down to 0.05. Fresnel: split-sum EnvBRDF, F0 0.02.
+- Skyrim's own SSR (`ISReflectionsRayTracing.hlsl`) is the WATER's, with one fixed normal; it never runs on ground.
+- Why theirs cannot speckle: the cube is pre-blurred, so pixels with different bump normals read neighbouring parts of one smooth
+  picture (no sky-or-ground flips), and its brightness is tied to the ambient (no bright sky specks over dark dirt). The price: no exact
+  reflections on damp ground (the cube is seen from the camera, not the surface), a soft sheen rather than a mirror.
+- For us: the same split costs little. Damp ground (film, no standing water) hands over to our live cube / light grid at its own
+  roughness; only standing water (flat in the G-buffer) is traced. Catch: the owner's test10 look ("dont seem to see any reflections")
+  was damp ground handed to the grid, so the cube's sheen must be strong enough to read as wet.
+
 ## Plan (each tier stands alone)
 **Tier 1, about 1 session, deferred Vulkan path only:**
 - Fresnel from the smooth normal (or the 2x2 average), the bump kept in the ray direction only.
