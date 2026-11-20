@@ -257,7 +257,8 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
 - With `[Main.Main.Quality] DeferredWetness` on (test only, off) and a film over the whole screen this frame (`DeferredWetness::FilmWhole()`: its
   fallback before the Wetness Effects screen pass drew, after its pass in the sun pass), the Vulkan passes take a floor's water from the film (set 1 binding 28 / slot 27
   `t_film`, `cb.film`): wet share = saturate(the film's gloss / MaxRainWetness) x RainWetness (outdoors), the wet
-  mirror's blur = WetRoughness, at most the film's roughness. The film decides where the water is (rain cover, drying, puddles); the rain
+  mirror's blur = the film's roughness held between WetRoughness and 0.3 (2026-11-21: was WetRoughness on every wet pixel, which made damp
+  dirt a sharp, speckled mirror through its bumps; standing water stays at WetRoughness, damp ground blurred under the 0.35 hand-over). The film decides where the water is (rain cover, drying, puddles); the rain
   guess (TESR_ReflectionsData.y), the puddle field and the material buffer's puddle mask are not used then (`Reflections.glsl` FilmWetness).
   Without a whole film this frame: as before. The D3D9 technique is unchanged. (The first build took the film's own roughness, 0.61 on damp
   ground and the Puddles Roughness in puddles: past the trace's 0.35 grid hand-over, no reflection showed; owner 2026-11-20.)
@@ -280,7 +281,7 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
 - DebugView 12 (Vulkan passes): red the bend from the smooth normal (full at 20 degrees), green the final roughness, on reflecting pixels.
 - What wrong looks like now: grain back on wet dirt, gravel or cobbles near the camera (raise DampBumpLean again; or the footprint
   numbers), or bumps that still do not show near the camera (DebugView 12: red should follow the tiles' and cobbles' edges up close).
-- Look: wet ground mirrors at WetRoughness where the film says it is wet; bumpy wet ground (DeferredBumpedNormals on) softer by its bumps. Wrong: puddles that do not
+- Look: puddles mirror at WetRoughness, damp ground a soft blurred sheen; bumpy wet ground (DeferredBumpedNormals on) softer by its bumps. Wrong: puddles that do not
   mirror at all in rain (the film not bound: the log's DeferredWetness lines), or grain back on bumpy ground with DeferredBumpedNormals on.
 - Shader files: all eleven Reflections*.spv that include Reflections.glsl were rebuilt (six use the film: Trace, TraceHiZ, Blur, Temporal,
   RayGen, Composite; the other five only declare it). The "Reflections shader files" log line's hash table is older than these (it says OLD).

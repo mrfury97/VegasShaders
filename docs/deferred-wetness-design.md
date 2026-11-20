@@ -147,8 +147,9 @@ Under the same switch (test only, off). Three parts:
   records (5 + keep) get the film only (their colour has their own layer); unwritten pixels (a 0: the game's own shaders, LOD, trees without
   a record) get the film and the layer on the lit colour: x WetAlbedo(colour) / colour (colour at most 1 stands for the albedo), x 0.4 under
   standing water, + the film's sky reflection, faded out from 0.7 to 1 x 10,240 units (the film's gloss with it). The water level as the
-  forward records got it: land (model 4) the real level, worn gear and hair 0, other objects and unwritten pixels only with ObjectPuddles
-  (off for the owner). No fog round trip on unwritten pixels (their fog is unknown): believed darker blobs far away in dense rain fog. Skipped: sky, water plane (Reflections' test), first-person
+  forward records got it: land (model 4) the real level, worn gear, hair and plants 0, other objects and unwritten pixels only with ObjectPuddles
+  (on for the owner). No film at all on skin, grass, eyes and unlit (2026-11-21, slot run: grass with the ObjectPuddles level became a sharp
+  sky mirror in the Reflections effect). No fog round trip on unwritten pixels (their fog is unknown): believed darker blobs far away in dense rain fog. Skipped: sky, water plane (Reflections' test), first-person
   view model, past 10,240 units. GetWetness with the records' defines, from TESR_DepthBuffer and TESR_NormalsBuffer (view -> world through the
   DeferredDepth frame block's camera axes), no height. No sun highlight and no lamp streaks on unwritten pixels (believed minor in rain).
   Needs the frame and the film at one size and format, no multisampling (one MRT draw): otherwise off for the session, logged. Runs only with
