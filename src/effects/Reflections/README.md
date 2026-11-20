@@ -259,6 +259,9 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   guess (TESR_ReflectionsData.y), the puddle field and the material buffer's puddle mask are not used then (`Reflections.glsl` FilmWetness).
   Without a whole film this frame: as before. The D3D9 technique is unchanged. (The first build took the film's own roughness, 0.61 on damp
   ground and the Puddles Roughness in puddles: past the trace's 0.35 grid hand-over, no reflection showed; owner 2026-11-20.)
+- Wet pixels mirror along the smooth normal (`ViewNormal`; set 1 binding 29 / slot 28 `t_smoothNormals` = TESR_NormalsBuffer while t_normals
+  holds the bumped normals): the normal leans to it by the film's wet share. Why: the owner's second look (2026-11-20), wet reflections
+  extremely noisy with DeferredBumpedNormals on. Dry reflections keep the bumps.
 - `NormalVarianceRoughness` (`cb.film.z`: the normals are the normal-mapped shading normals, `[Main.Main.Quality] DeferredBumpedNormals` or
   `DeferredReflections`): the roughness is widened by how much the normal changes to the right and lower full-resolution neighbour
   (alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.18), Kaplanyan / Tokuyoshi; a depth jump over 2 % not counted), after Mirror, not on water or the

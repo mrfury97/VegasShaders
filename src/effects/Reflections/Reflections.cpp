@@ -1254,6 +1254,7 @@ namespace {
 		{ 1, 25, NVR_EXT_BIND_SAMPLED_IMAGE, 24, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-30 TESR_CloudSkyProbe (index 22)
 		{ 1, 27, NVR_EXT_BIND_SAMPLED_IMAGE, 26, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (index 23; binding 26 / slot 25 are the RT passes' Rt.Bounce)
 		{ 1, 28, NVR_EXT_BIND_SAMPLED_IMAGE, 27, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 DeferredWetness's film (index 24; core/DeferredWetness.h FilmTexture)
+		{ 1, 29, NVR_EXT_BIND_SAMPLED_IMAGE, 28, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 the smooth normals under the bumped ones (index 25; Reflections.glsl ViewNormal)
 	};
 	const UINT ReflTextureCount = 16;
 	// UNOFFICIAL 2026-10-26 (deep/fork-hiz): ReflectionsTraceHiZ.frag = the same bindings + the Hi-Z pyramid buffer on set 1, binding 16 (buffer slot 1).
@@ -1548,6 +1549,9 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	resources[22].Slot = 24; resources[22].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[22].pResource = skySlot ? (IUnknown*)skySlot : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30 (2026-10-31: or the panorama)
 	resources[23].Slot = 26; resources[23].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[23].pResource = weaponMask ? (IUnknown*)weaponMask : (IUnknown*)depth;	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (or the depth: never read while weapon.x is not 2)
 	resources[24].Slot = 27; resources[24].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[24].pResource = film ? (IUnknown*)film : (IUnknown*)depth;	// UNOFFICIAL 2026-11-20 the film (or the depth: never read while film.x is 0)
+	// UNOFFICIAL 2026-11-20 the smooth normals (TESR_NormalsBuffer) while t_normals holds the bumped ones: wet pixels mirror along them (ViewNormal)
+	IDirect3DBaseTexture9* smoothNormals = SlotTexture("TESR_NormalsBuffer");
+	resources[25].Slot = 28; resources[25].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[25].pResource = film && smoothNormals && uniforms.film.z > 0.5f ? (IUnknown*)smoothNormals : (IUnknown*)depth;
 	UINT resourceCount = _countof(ReflBindings);
 	if (hiz) {
 		resources[resourceCount].Slot = 1; resources[resourceCount].Type = NVR_EXT_BIND_STORAGE_BUFFER; resources[resourceCount].pResource = hiz;
