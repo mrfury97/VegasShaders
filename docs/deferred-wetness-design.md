@@ -185,6 +185,9 @@ estore.ps1` -> test10), not run yet.
 Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback drew", no "the fallback is off this session".
 Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
 mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).
+After step 3 (2026-11-21): the Reflections effect reads the film's damp ground from its cube, not the trace (only standing water is
+traced; `src/effects/Reflections/README.md` last section, `docs/reflection-speckle.md`). The film's roughness is what tells them apart, so
+the film must keep the Puddles Roughness under standing water and the rougher damp value elsewhere.
 
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,
