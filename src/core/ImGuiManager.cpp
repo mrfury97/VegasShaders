@@ -912,9 +912,32 @@ static bool RainWetnessLinked(const std::string& shader) {
 	return shader == "Puddles" || (shader == "WetWorld" && TheSettingManager->GetMenuShaderEnabled("WetnessEffects"));
 }
 
+// UNOFFICIAL 2026-11-20 (owner: "what can we remove from the menu"): under Rain wetness, settings that no pass reads, hidden (saved values stay).
+// WetWorld: its screen pass is not drawn while Wetness Effects is on (EffectChain.cpp); only its rain tracking runs (Increase, Decrease,
+// RainStateGuard, the Persistent map keep their rows). Wetness Effects: with Puddles on (Quality above 0) GetWetness takes the Puddles branch
+// (Includes/Wetness.hlsl PUDDLES_ON, every record, first person included), which replaces the CS noise puddle these five shaped.
+static bool RainWetnessDeadKey(const std::string& section, const std::string& key) {
+	static const char* const kWetWorld[] = { "FastPaths", "FixedReflectionTrace", "KeepHighlights", "Amount", "PuddleCoeff_R", "PuddleCoeff_G",
+		"PuddleCoeff_B", "PuddleSpecularMultiplier", "PuddlesLandOnly", "PuddlesMinObjectSize", "WeaponRainHandOff", "ReflectionsOwnPuddles" };
+	static const char* const kWetnessPuddle[] = { "MaxPuddleWetness", "PuddleRadius", "PuddleMaxAngle", "HeightAwareness", "CreviceFill" };
+	auto listed = [&key](const char* const* names, size_t count) {
+		for (size_t i = 0; i < count; i++) if (key == names[i]) return true;
+		return false;
+	};
+	if (section == "Shaders.WetWorld.Main")
+		return listed(kWetWorld, _countof(kWetWorld)) && RainWetnessLinked("WetWorld");
+	if (section == "Shaders.WetnessEffects.Main")
+		return listed(kWetnessPuddle, _countof(kWetnessPuddle)) && TheSettingManager->RainWetnessOneSwitch() &&
+			TheSettingManager->GetMenuShaderEnabled("Puddles") && TheSettingManager->GetSettingI("Shaders.Puddles.Main", "Quality") > 0;
+	return false;
+}
+
 static bool InternalHidden(const std::string& section, const std::string& key) {
 	if (ShelvedEffects::Section(section)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only), whatever ShowInternal says
 	if (section == "Shaders.Puddles.Main" && key == "ReflectionPuddles" && TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
+	if (RainWetnessDeadKey(section, key)) return true;	// (2026-11-20)
+	// (2026-11-20, owner: "what can we remove from the menu") Reflections' Hi-Z walk: measured slower, its other keys test only (defaults.toml)
+	if (section == "Shaders.Reflections.Main" && key.compare(0, 3, "HiZ") == 0) return !gMenu.showInternal;
 	return !gMenu.showInternal && IsInternalSetting(section, key);
 }
 

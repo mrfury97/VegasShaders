@@ -234,3 +234,7 @@ The menu shows no switch for WetWorld (`[Shaders.WetWorld.Status] Enabled` keeps
 ("Rain wetness"), and this effect's wet pass is only the fallback it already was (EffectChain.cpp draws it only while Wetness Effects is not
 live). The pixels the surface shaders do not wet (the game's own shaders, LOD) get their wet look from DeferredWetness's fallback pass
 (`core/DeferredWetness.h` Fallback), not from this pass.
+The settings only that pass reads are hidden too while Rain wetness is on (2026-11-20, owner's request; `ImGuiManager.cpp`
+RainWetnessDeadKey): FastPaths, FixedReflectionTrace, KeepHighlights, Amount, PuddleCoeff_R/G/B, PuddleSpecularMultiplier,
+PuddlesLandOnly, PuddlesMinObjectSize, WeaponRainHandOff, ReflectionsOwnPuddles. The rain tracking's keep their rows (Increase, Decrease,
+RainStateGuard, the Persistent map). Saved values stay.

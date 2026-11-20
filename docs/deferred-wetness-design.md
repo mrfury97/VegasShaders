@@ -162,6 +162,9 @@ Under the same switch (test only, off). Three parts:
   SwitchShaderStatus refuses Puddles alone; saved, Puddles keeps that value if DeferredWetness is turned off again); Puddles' row shows no
   switch, WetWorld's none while Rain wetness is on (its screen pass already draws only when Wetness Effects is not live: EffectChain.cpp); `[Shaders.Puddles.Main] ReflectionPuddles` is hidden
   (no effect in film frames; WetRoughness was hidden in the first build, shown again: it is the wet mirror's blur). No default changed: no settings version. Off: the menu as before.
+  Settings no pass reads under Rain wetness are hidden as well (2026-11-20, owner's request, `ImGuiManager.cpp` RainWetnessDeadKey):
+  WetWorld's look keys (its pass does not draw; the rain tracking's keys stay) and Wetness Effects' five noise-puddle keys while Puddles
+  Quality is above 0. The Reflections Hi-Z keys (measured slower, test only) are hidden for everyone unless ShowInternal.
 Offline (2026-11-20, the owner's toml defines): pass A 963 slots (unchanged), fallback 762, restore 18, all device ok; WetnessReflections.fx both
 variants PASS; the eleven Reflections*.spv rebuilt (an unchanged source rebuilt byte-identical first) and spirv-val clean; DLL built.
 Lead-architect review: approve with fixes, applied: (1) the fallback's G-buffer / depth / upscale guards; (2) the water level per model and
