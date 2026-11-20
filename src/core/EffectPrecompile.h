@@ -23,7 +23,7 @@ namespace EffectPrecompile {
 
 	struct Job {
 		std::string Source, Preprocessed, Compiled;
-		D3DXMACRO Macros[8] = {};
+		D3DXMACRO Macros[10] = {};	// (2026-11-20: was 8 while the copy below takes BuildMacros' 10; REFL_GBUFFER_ON made the ninth define real)
 		unsigned long long Size = 0;
 		std::atomic<bool> Done{ false };
 		bool Waited = false;

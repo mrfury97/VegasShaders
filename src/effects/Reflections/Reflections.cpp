@@ -33,9 +33,10 @@ namespace {
 	// UNOFFICIAL 2026-11-15 DeferredReflections ([Main.Main.Quality], live, test only; core/FdIndirect.h): while the deferred renderer runs with
 	// it on, every pass of this effect (D3D9 and Vulkan, the RT RayGen and the RT denoiser) reads the G-buffer's normal-mapped shading normal
 	// where TESR_NormalsBuffer shows the captured surface. Off: normals itself. (2026-11-18: DeferredBumpedNormals gives the same normals;
-	// 2026-11-20: so does UnifiedReflections, always.)
+	// 2026-11-20: so does UnifiedReflections, in the frames it is used: GBufferFrame, so "on but not used" changes nothing.)
 	IDirect3DBaseTexture9* FdReflNormals(IDirect3DDevice9* d, IDirect3DBaseTexture9* normals) {
-		if (!normals || !(FdIndirect::ReflectionsOn() || FdIndirect::BumpedNormalsOn() || FdIndirect::UnifiedReflectionsOn())) return normals;
+		ReflectionsEffect* refl = TheShaderManager->Effects.Reflections;
+		if (!normals || !(FdIndirect::ReflectionsOn() || FdIndirect::BumpedNormalsOn() || (refl && refl->GBufferFrame()))) return normals;
 		std::string depthName = "TESR_DepthBuffer";
 		IDirect3DBaseTexture9** depth = TheTextureManager->GetTextureSlotByName(depthName);
 		return FdIndirect::ShadingNormals(d, normals, depth ? *depth : nullptr);
@@ -583,7 +584,7 @@ void ReflectionsEffect::RtRideBeforeFrame(IDirect3DDevice9* Device, IDirect3DSur
 	else if (rtView != 3) why = "RaysOnly is off or an RT DebugView is set: RayGen's screen march reads the lit picture, which does not exist yet";
 	else if (RtPathTrace::Replacing()) why = "the path tracer replaces the scene this frame";
 	else if (TheShaderManager->GameState.isUnderwater) why = "under water";
-	if (!why && Textures.MaterialSurface && Settings.MaterialAware > 0 && !GBufferFrame()) {	// (2026-11-20 UnifiedReflections: no copy to make)
+	if (!why && Textures.MaterialSurface && Settings.MaterialAware > 0 && !MaterialCopySkipped()) {	// (2026-11-20 UnifiedReflections: no copy to make)
 		// CaptureMaterial reads the scene through TESR_RenderedBuffer; before ChainBegin that slot is not the scene yet, so it points at
 		// the game target's own texture for this one pass (what the frame chain publishes there later), then back.
 		IDirect3DTexture9* gameTexture = nullptr;
@@ -783,7 +784,7 @@ void ReflectionsEffect::CaptureMaterial(IDirect3DDevice9* Device) {
 	materialFilled = false;
 	Constants.Material.x = 0.0f;
 	if (!Enabled || !Effect || !Textures.MaterialSurface || Settings.MaterialAware <= 0 || TheShaderManager->GameState.isUnderwater) return;
-	if (GBufferFrame()) return;	// UNOFFICIAL 2026-11-20 UnifiedReflections: the passes read the G-buffer's material themselves (no copy)
+	if (MaterialCopySkipped()) return;	// UNOFFICIAL 2026-11-20 UnifiedReflections: the passes read the G-buffer's material themselves (no copy)
 	static GpuTimer timer("Reflections material copy");
 	GpuProfileScope gpu(timer, Device);
 	materialOnly = true;
@@ -818,6 +819,8 @@ void ReflectionsEffect::BindMaterial() {
 		const DWORD point[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
 			{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
 		for (const auto& s : point) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+		// (8, 9: each pass's SetCT gives them the cubes' states again, so nothing set here would last; the pass's own sampler_state for
+		// NVR_ReflectionsGNormals / GAlbedo, POINT, is applied by D3DX at BeginPass, after SetCT: believed, as for every NVR_ sampler)
 		return;
 	}
 	if (!materialFilled || !Textures.MaterialTexture) return;

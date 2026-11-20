@@ -171,6 +171,9 @@ public:
 	// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1): this frame's
 	// material is the G-buffer's (core/FdIndirect.h UnifiedReflectionsOn, and the back end that draws can read it). Asked once a frame.
 	bool	GBufferFrame();
+	// MaterialAware's copy is still made in a G-buffer frame while the RT weapon rays run: the first-person weapon's material is the copy's
+	// (MaterialAt), the G-buffer holds no first person.
+	bool	MaterialCopySkipped() { return GBufferFrame() && !(Settings.RtWeapon > 0.0f && RtWanted()); }
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): every technique as src\hlsl\NewVegas\Compute\Reflections*.frag (EffectRecord::ExtRender)
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;

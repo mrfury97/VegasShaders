@@ -359,7 +359,7 @@ vec4 GBufferMaterial(vec2 uv) {
     return vec4(saturate(b), saturate((m.r - floor(m.r)) / 0.49), spec > 0.5 && model < 3.5 ? 1.0 : 0.5, 0.0);
 }
 // The surface's material for Reflectivity: the G-buffer's with UnifiedReflections, else MaterialAware's copy. (The first-person weapon keeps
-// MaterialAt: the G-buffer holds no first person.)
+// MaterialAt: the G-buffer holds no first person; the C++ still makes the copy while the RT weapon rays run, MaterialCopySkipped.)
 vec4 SurfaceMaterialAt(vec2 uv) {
     if (!GBufferOn) return MaterialAt(uv);
     vec4 m = GBufferMaterial(uv);

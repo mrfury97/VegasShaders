@@ -168,8 +168,12 @@ Total about 6-9 sessions (6.5-10.5 with step 5).
   decides which reflecting pixels get rays; both default 0.5); other written materials give the floor rule their roughness and metal; models 5-9
   rough. Metal F0 = COLOR1 albedo through ReflMetalF0; dielectric 0.04.
 - A record counts only where COLOR3's distance matches the depth (the CapturedNormals readers' rule): anything drawn over the G-buffer keeps
-  today's rules. The first-person weapon keeps MaterialAware's lookup.
-- Normals: always the shading normals (as DeferredBumpedNormals), so the Vulkan specular AA and the film's lean run.
+  today's rules. The first-person weapon keeps MaterialAware's lookup (the copy is still made while the RT weapon rays run).
+- Normals: the shading normals in every frame it is used (as DeferredBumpedNormals), so the Vulkan specular AA and the film's lean run.
+- Review (lead-architect, approve with changes, applied): EffectPrecompile's Job::Macros was 8 while BuildMacros fills 10 (latent, now
+  reachable with the ninth define: fixed to 10); the weapon's copy; the normals gated on the frame's decision; the per-technique D3D9
+  fallback documented as a known gap. Metal F0 from COLOR1's raw base colour makes rough coloured metal darker than the old normalised hue
+  (by 1 / its brightest channel): intended, to be judged by eye.
 - MaterialAware's copy (technique 7) and DeferredReflections' / MaterialBufferRoughness's merge are not drawn while it is on. Mode 0 / 1:
   untouched.
 - D3D9: compiled in only when on at startup (one define more: nine at most, the macro arrays hold ten with the terminator); COLOR3 / COLOR1
