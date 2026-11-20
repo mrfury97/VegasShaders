@@ -125,6 +125,7 @@ missing result docs only.
 - **Distant trees** (1-2 sessions): a replacement for the game's DISTTREE shader that writes the G-buffer. Small screen share (Phase 0 will say).
 - **Cube-map layer** (1-2 sessions): fold the EnvTemplate pass into the deferred reflections (cube map as the fallback when a ray misses).
   Risk: double reflections during the change.
+  (2026-11-20) Part of the one-reflection-pass plan: `docs/unified-reflections-design.md` (steps 1-5, 6-9 sessions).
 - **DeferredSun's missing terms** (1 session): metal's tint, the wet film's sun highlight, the land's highlight with UsePBR off, parallax's
   sun with POM shadows off (`Shaders/DeferredSun.hlsl:17-18`).
 

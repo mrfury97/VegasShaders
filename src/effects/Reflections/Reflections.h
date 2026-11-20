@@ -120,6 +120,8 @@ public:
 									// holds the water, y 1 = the planar pass is skipped this frame, z its strength, w (2026-11-03) the
 									// traced frame's RenderScale (x; 1 native): Buffer's drawn part, WaterReproject is pre-scaled into it
 		D3DXMATRIX	WaterReproject;	// TESR_RTWaterReproject: camera-relative world now -> the clip space of the frame that traced it
+		D3DXVECTOR4	GBuffer;	// UNOFFICIAL 2026-11-20 UnifiedReflections (TESR_ReflectionsGBuffer, the D3D9 technique with REFL_GBUFFER_ON; the Vulkan
+								// passes' cb.gbuffer): x 1 = the material is the G-buffer's this frame, y z COLOR3's distance match (share, units)
 	};
 	ConstantsStruct	Constants;
 	IDirect3DBaseTexture9*	GridLightSlot = nullptr;	// AmbientLight's finished grid this frame (TextureManager slots)
@@ -166,6 +168,12 @@ public:
 	bool	CubeReady() const;							// the cube was kept up last frame (what the object shaders read now)
 	void	CaptureMaterial(IDirect3DDevice9* Device);	// UNOFFICIAL 2026-10-20 MaterialAware: the scene's alpha into the material buffer, before any effect draws
 	void	BindMaterial();								// the material buffer on stage 15 for the next passes (ClearPassTextures unbinds it)
+	// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1): this frame's
+	// material is the G-buffer's (core/FdIndirect.h UnifiedReflectionsOn, and the back end that draws can read it). Asked once a frame.
+	bool	GBufferFrame();
+	// MaterialAware's copy is still made in a G-buffer frame while the RT weapon rays run: the first-person weapon's material is the copy's
+	// (MaterialAt), the G-buffer holds no first person.
+	bool	MaterialCopySkipped() { return GBufferFrame() && !(Settings.RtWeapon > 0.0f && RtWanted()); }
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): every technique as src\hlsl\NewVegas\Compute\Reflections*.frag (EffectRecord::ExtRender)
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
@@ -244,6 +252,9 @@ private:
 	// and the trace's noise frame (TESR_ReflectionsData2.w). The same answers at any point of a frame.
 	void				RtFrameMode(bool& rrRaw, bool& temporal);
 	float				RtNoiseFrame(bool temporal, bool rrRaw) const;
+	UINT				gbufferAsked = 0xFFFFFFFF;	// UNOFFICIAL 2026-11-20 UnifiedReflections: the FrameNumber GBufferFrame last decided in
+	bool				gbufferOn = false;
+	int					gbufferLogged = 0;	// the last state logged (0 off: nothing logged while it stays off, 1 on, 2 key on but not used)
 	UINT				materialEarlyFrame = 0xFFFFFFFF;	// the FrameNumber RtRideBeforeFrame ran CaptureMaterial in (the chain's own call then returns at once)
 	UINT				rtRideFrame = 0xFFFFFFFF;	// the FrameNumber RtRideBeforeFrame drew RayGen in
 	float				rtRideNoise = 0.0f, rtRideJitter = 0.0f;	// what that RayGen was drawn with (RtTrace checks them again)

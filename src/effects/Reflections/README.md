@@ -270,3 +270,43 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   mirror at all in rain (the film not bound: the log's DeferredWetness lines), or grain back on bumpy ground with DeferredBumpedNormals on.
 - Shader files: all eleven Reflections*.spv that include Reflections.glsl were rebuilt (six use the film: Trace, TraceHiZ, Blur, Temporal,
   RayGen, Composite; the other five only declare it). The "Reflections shader files" log line's hash table is older than these (it says OLD).
+
+## The material from the G-buffer: UnifiedReflections (2026-11-20, unified reflections step 1; NOT yet run in a game)
+`[Main.Main.Quality] UnifiedReflections` (live, test only, off, hidden in the menu's Internal list; docs/unified-reflections-design.md step 1).
+With `DeferredRenderer = 2` and this frame's G-buffer (COLOR1-3) the passes read each pixel's material from the G-buffer itself
+(`Compute/Reflections.glsl` GBufferMaterial, the .fx the same) instead of MaterialAware's copy, which is not made then (no technique 7, no
+DeferredReflections / MaterialBufferRoughness merge; still made while the RT weapon rays run, `MaterialCopySkipped`: the weapon's material is
+the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the copy step and every pass agree.
+- **Material**: COLOR2 decoded into the copy's old layout, so the rules after it are unchanged: roughness = b (-1 none; the path tracer's
+  -3..-2 code decoded back), metal = r's fraction / 0.49, model and specular bit from r. Objects, worn gear and cloth with the specular bit
+  (models 1-3: what the game lights with a highlight) reflect whatever way they face, by MaterialReflect, fading out from 60 % of
+  MaterialMaxRoughness to it (`MaterialReflectivity`, as an _rmaos surface did); everything else written is a known material for the floor rule
+  (its own roughness in place of the Look's); plants, skin, grass, hair and eyes count as rough. Metal's colour (the composite's F0) is
+  COLOR1's base colour (linear), not the lit colour's hue; `ReflMetalF0`'s silver rule for mirror-smooth metal stays. Dielectrics 0.04 (Mirror
+  as before).
+- **No record**: COLOR1 a < 0.5, COLOR2 r <= 0.5, or COLOR3's camera distance not the depth buffer's (the CapturedNormals readers' rule,
+  kShadingNormalsPS's share and units): something the G-buffer does not hold is in front (the game's own shaders, water, glass, grass, the
+  first person). Those pixels take the floor rule with the Look's roughness, as a pixel without material data always did; the water, the
+  glass mask and the weapon are decided before any of this, as before (the weapon keeps MaterialAware's MaterialAt, the copy made for it).
+- **Normals**: the shading normals in every frame it is used (FdIndirect ShadingNormals, as DeferredBumpedNormals; "on but not used" leaves
+  them as they were), so the Vulkan passes' specular AA
+  (NormalVarianceRoughness) and the wet pixels' lean to the smooth normal (binding 29) run; ray starts and AboveSurface as before.
+- **Coverage**: today's floors plus the specular objects above. Probe-only on every surface is step 3.
+- **Back ends**: the Vulkan passes follow the switch live (bindings 30 `t_gbAlbedo` = COLOR1 and 31 `t_gbNormals` = COLOR3, slots 29 / 30;
+  COLOR2 on t_matbuf; `cb.gbuffer`: x on, yz the distance match). The D3D9 technique only when the switch is on at startup
+  (`REFL_GBUFFER_ON`, core/FdIndirect.h UnifiedCompiledIn): COLOR2 on stage 15 in the copy's place, COLOR3 on 8 and COLOR1 on 9 (the capture
+  cubes' stages: only the Capture and Filter techniques read them, drawn before BindMaterial), `TESR_ReflectionsGBuffer`. Turned on later on
+  native D3D9 it is not used (the log says why) and MaterialAware stays. The D3D9 technique still has no film and no specular AA (step 2).
+  Known gap (failure paths only): with the switch turned on live and the D3D9 technique not compiled with it, a Vulkan pass that fails for
+  one technique (a pipeline refused, a missing texture) falls back to D3D9 with no material at all for that frame (the copy was skipped).
+  Believed, not checked: D3DX applies the aliased samplers' own POINT sampler_state at BeginPass, over the cubes' states SetCT gave 8 / 9.
+- **Off**: the D3D9 effect's disassembly is identical to before (checked offline, plain and MaterialAware builds); the Vulkan passes skip the
+  new code (gbuffer.x 0). All twelve Reflections*.spv were rebuilt (new bindings and uniform).
+- Log: `UNOFFICIAL Reflections UnifiedReflections: on (the Vulkan passes): ...`, `... on but not used now: <why>`, `... off ...` (a line when
+  the answer changes). DebugView 7 shows the G-buffer's material as decoded (dark red rough / blue smooth / green-yellow metal: reflects any
+  way; grey-white + green: the floor rule's known materials; dimmed: no record).
+- What correct looks like: polished metal props, chrome, glossy counters and smooth objects reflect the room by their own roughness (sharp on
+  chrome, blurred on brushed metal), whatever way they face; gold / brass reflect in their own colour, mirror-smooth metal in silver; tiled
+  floors and wet ground as with the switch off. Wrong: a person, plant or post in front of a shiny surface turning into a mirror (the record
+  check failing), matte walls and rocks mirroring (a specular bit on matte records: DebugView 7 shows them blue), metal reflecting in the
+  lamps' colour (COLOR1 not bound), floors that reflected before going dull.

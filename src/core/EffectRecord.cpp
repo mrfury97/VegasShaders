@@ -10,6 +10,7 @@
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the flash detector's self-test (SelfTestSkip)
 #include "ReflMaterial.h"	// UNOFFICIAL 2026-10-20 MaterialAware reflections (REFL_MATERIAL_ON)
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-11-14 GBufferV2 (GBUFFER_V2)
+#include "FdIndirect.h"	// UNOFFICIAL 2026-11-20 UnifiedReflections (REFL_GBUFFER_ON)
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31 register-clash guard (X4500)
 #include "EffectPrecompile.h"	// UNOFFICIAL 2026-10-28 the effects compiled in parallel at startup
 #include "EffectCompiler47.h"	// UNOFFICIAL 2026-10-29 NewEffectCompiler (d3dcompiler_47 for the effects)
@@ -226,6 +227,10 @@ int EffectRecord::BuildMacros(D3DXMACRO* EffectMacros) {
 	// UNOFFICIAL 2026-11-14 GBufferV2 (core/CapturedNormals.h; the MaterialBuffer's layout v2): the effects that read TESR_MaterialBuffer
 	// (WetWorld, BloodFlow's surface) read it the v2 way. Only when on at startup: off, the preprocessed sources are exactly as before.
 	if (CapturedNormals::V2CompiledIn()) define("GBUFFER_V2", "1");
+	// UNOFFICIAL 2026-11-20 UnifiedReflections (Reflections.fx.hlsl, core/FdIndirect.h; test only): the D3D9 technique reads the G-buffer's
+	// material. Only when on at startup with the renderer in mode 2: off, the preprocessed sources are exactly as before. (Nine defines at
+	// most now: with the terminator the ten entries the callers make room for.)
+	if (FdIndirect::UnifiedCompiledIn()) define("REFL_GBUFFER_ON", "1");
 
 	EffectMacros[count] = { nullptr, nullptr };	// terminator, not counted
 	return count;
