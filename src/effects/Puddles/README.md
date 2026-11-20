@@ -182,3 +182,7 @@ Only the land, by default (user): `ObjectPuddles = false` sends object draws TES
   ApplyRainWetnessSwitch keep `[Shaders.Puddles.Status] Enabled` equal to it).
 - `ReflectionPuddles` is hidden: the Vulkan reflection passes take the standing water and its roughness from DeferredWetness's film in frames
   that have one (`src/effects/Reflections/README.md`, last section), not from the field / mask in section 3.
+- Wetness Effects' own puddle settings are hidden while Puddles is on with Quality above 0 (2026-11-20, owner's request;
+  `ImGuiManager.cpp` RainWetnessDeadKey): MaxPuddleWetness, PuddleRadius, PuddleMaxAngle, HeightAwareness, CreviceFill. Every record then
+  takes GetWetness's Puddles branch (`Includes/Wetness.hlsl` PUDDLES_ON), which replaces the CS noise puddle they shaped. PuddleMinWetness
+  stays (it weighs the ripples there).

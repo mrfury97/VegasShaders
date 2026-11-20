@@ -29,6 +29,8 @@ in docs/next/FORK-RT-REFLECTIONS.md).
 `[Shaders.Reflections.Main]` (the look and the SSR trace), `[Shaders.Reflections.RT]` (the RT trace, its fallbacks, and the denoiser:
 `Denoiser`, `DenoiserCore`, `DenoiserHistory`, `DenoiserMirrorHistory`, `DenoiserBlur`, `DenoiserAntiLag`, `DenoiserClip`,
 `DenoiserDebugView`; see defaults.toml for each).
+- (2026-11-20, owner's request) `HiZ`, `HiZSafeCells`, `HiZCheck` and `HiZInteriorsTest` have no menu row (`ImGuiManager.cpp`
+  InternalHidden; shown with ShowInternal): the Hi-Z walk measured slower, the others are its test keys. The file still sets them.
 - (2026-11-07 perf-history, docs/next/RT-PATH-TRACING.md "perf-history") `DenoiserHistory` and `DenoiserMirrorHistory` are frames AT 60
   FPS: with `[Main.Main.RayTracing] DenoiseTimeBased` (default on) the denoiser keeps the same seconds at the game's frame rate (32 -> ~11
   frames at 20 fps, at most 64 above 120 fps). At 60 fps nothing changes.
