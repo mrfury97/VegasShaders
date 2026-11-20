@@ -2,7 +2,7 @@
 
 Owner's choice (2026-11-18/19): the deferred wetness pass is the end state; WetWorld is retired only once it covers everything WetWorld
 does. Room rule: deferred first. Branch `deferred-wetness` (off `wet-lamp-film`), built on `deferred-wetness-ground`. Paths under `src\`.
-State 2026-11-20: steps 1 and 2 run in game (owner: step 2 "Looks right"); step 3 built and installed, not run in game yet; step 4 open.
+State 2026-11-20: steps 1 and 2 run in game (owner: step 2 "Looks right"); step 3 built and installed (second build after the owner's first look), not run in game yet; step 4 open.
 
 ## Why
 - Wetness Effects + Puddles live inside the land and object shaders (`hlsl/NewVegas/Shaders/Includes/Wetness.hlsl`, compiled into
@@ -168,7 +168,9 @@ fully fogged near-land pixel (albedo alpha exactly 1) gets the fallback's film o
 Installed for testing 2026-11-20 (install-test10: test-p1a-bump a1307d6 = install-test9 + this step; 16 files: DLL, pdb, defaults,
 DeferredWetness.hlsl, WetnessReflections.fx.hlsl, eleven Reflections*.spv; restore `F:\VS-scratch\install-test10-2026-11-20
 estore.ps1` -> test9).
-Not run in game. Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback drew", no "the fallback is off this session".
+Owner ran it 2026-11-20 12:37 (log: "wet", "the fallback drew"): no reflections (above). Second build installed as install-test11
+(test-p1a-bump eb572af; DLL, pdb, six Reflections*.spv; restore `F:\VS-scratch\install-test11-2026-11-20estore.ps1` -> test10), not run yet.
+Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback drew", no "the fallback is off this session".
 Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
 mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).
 
