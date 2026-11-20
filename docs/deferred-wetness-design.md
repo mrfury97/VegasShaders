@@ -96,8 +96,7 @@ GBufferV2 and Wetness Effects at startup. Files: `core/DeferredWetness.h`, `Shad
 - Not done in step 1: objects / parallax / far land (steps 2-3); the passes' frame cost (not measured).
 - Owner's look (2026-11-19/20, Goodsprings pond in rain): puddle reflections grainy. PROVEN by live toggles: the grain is the main Reflections effect, and only with `[Main.Main.Quality] DeferredBumpedNormals` on (its test prototype hands Reflections the bumped normal; `effects/Reflections/Reflections.cpp:32-39`). Reflections also decides standing water from its own noise field (`Compute/Reflections.glsl:217-234`), not from DeferredWetness's puddles, so it mirrors sharply (WetRoughness 0.069) off bumpy grass / dirt. With the switch off the reflection is clean. Not caused by DeferredWetness (believed: the forward land wrote the same flattened normal). Fix belongs in step 3 (one system): Reflections takes the film target's standing water and roughness on deferred land; the bumped-normal prototype needs roughness from normal variance (specular anti-aliasing) before it can be on.
 - Installed for testing 2026-11-19 (test-p1a-bump 90fc395 = the earlier test build + this branch; restore
-  `F:\VS-scratch\install-test6-2026-11-19
-estore.ps1` -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
+  `F:\VS-scratch\install-test6-2026-11-19\restore.ps1` (folder merged into `install-original-2026-11-18` on 2026-11-20) -> test5). Not run in game yet. What to check: the log lines "DeferredWetness:
   the pass loaded", "wet: the land's water layer drawn by the pass", no "[ERROR] ShaderRecord: more than 62", no LIGHT-FREE RECORD
   warnings; in rain, the switch on vs off side by side (same spot, same weather).
 

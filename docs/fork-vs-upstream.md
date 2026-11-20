@@ -7,13 +7,14 @@ side branch `vs-1.1.0-plus-fork`, one commit each, and installed into the MO2 mo
 stays reachable as its first parent, nothing force-pushed) and pushed.
 
 ## Where things are
-- Branch `vs-1.1.0-plus-fork` (worktree `F:\Claude Brain\VS-110plus`), on top of d3477de. Not pushed.
+- Branch `vs-1.1.0-plus-fork`, on top of d3477de (now in `main`; its worktree was removed 2026-11-20).
 - Backup of the old fork main: local branch `backup/fork-main-2026-11-18` = 46e575e (also reachable from `main` through c63362a).
 - Upstream 1.1.0, read only: `F:\Claude Brain\VS-upstream` (detached at d3477de).
 - Build: `F:\VS-build\VegasShaders.dll` (release build: untracked marker `src\core\ReleaseBuild.h` in the worktree, as upstream's
   packages; it leaves out BloodFlow, dust motes, capsule shadows and the test tools). Detailed logs `F:\VS-build\build-110plus*.log`.
-- Install: `F:\VS-scratch\install-110plus-2026-11-18\` (manifest, backup, `install.ps1`, `restore.ps1`). Restore:
-  `powershell -ExecutionPolicy Bypass -File "F:\VS-scratch\install-110plus-2026-11-18\restore.ps1"`.
+- Install backups (2026-11-20): every room 02 install before test10 was merged into `F:\VS-scratch\install-original-2026-11-18`, whose
+  restore puts the MO2 mod back as it was before ANY of our installs (oldest backup of each file; files we added removed):
+  `powershell -ExecutionPolicy Bypass -File "F:\VS-scratch\install-original-2026-11-18\restore.ps1"`.
 
 ## The branch
 | Commit | What |

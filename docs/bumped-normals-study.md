@@ -1,6 +1,6 @@
 # Bumped normals for the screen effects: study and plan (2026-11-18)
 
-Branch `bumped-normals-study` (off `vs-1.1.0-plus-fork`), worktree `F:\Claude Brain\VS-bump`. A study and a small prototype behind a test
+Branch `bumped-normals-study` (off `vs-1.1.0-plus-fork`; its worktree was removed 2026-11-20, merged into `test-p1a-bump`). A study and a small prototype behind a test
 switch that is off by default; not a ship, nothing installed. Background: `docs/deferred-vs-forward.md`, section "Surface normals".
 Paths are under `src\` unless noted.
 
@@ -160,5 +160,5 @@ Fold DeferredReflections and DeferredBumpedNormals into one switch before anythi
 3. Want bump detail in shade (step 3, and option D with its one full recompile)?
 
 ## Where things are
-- Branch `bumped-normals-study`, worktree `F:\Claude Brain\VS-bump` (needs `packages\` copied, as every worktree). Not pushed.
-- Build `F:\VS-build-bump\VegasShaders.dll`, log `F:\VS-build-bump\build.log`.
+- Branch `bumped-normals-study` (merged into `test-p1a-bump`; worktree removed 2026-11-20: a new one goes in `F:\Claude Brain\VS-branches\`, needs `packages\` copied).
+- Build: the old `F:\VS-build-bump` was deleted 2026-11-20 (builds now go in `F:\VS-build\<branch>`); the test build's is `F:\VS-build\test-p1a-bump`.
