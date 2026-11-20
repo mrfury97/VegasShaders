@@ -32,6 +32,8 @@ layout(set = 1, binding = 25) uniform texture2D t_cloudSky;    // UNOFFICIAL 202
 layout(set = 1, binding = 27) uniform texture2D t_weaponMask;  // UNOFFICIAL 2026-11-09 TESR_WeaponMask (core/WeaponMask.h): red 1 on the first-person weapon's own pixels; a placeholder unless weapon.x is 2
 layout(set = 1, binding = 28) uniform texture2D t_film;        // UNOFFICIAL 2026-11-20 DeferredWetness's film (core/DeferredWetness.h FilmTexture: r round(8 murk)
                                                                // + 0.99 gloss, g roughness: never 0 where the wetness was worked out); a placeholder unless film.x is 1
+layout(set = 1, binding = 29) uniform texture2D t_smoothNormals; // UNOFFICIAL 2026-11-20 TESR_NormalsBuffer itself while t_normals holds the normal-mapped normals
+                                                               // (film.x and film.z 1: ViewNormal's wet pixels); a placeholder otherwise
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;   // TESR_ProjectionTransform
@@ -186,7 +188,20 @@ bool WeaponAt(vec2 uv) {
     return !WeaponMasked || textureLod(sampler2D(t_weaponMask, POINT_S), uv, 0.0).r > 0.5;
 }
 
-vec3 ViewNormal(vec2 uv) { return normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0); }
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (owner, second look: "reflections are back to being extremely noisy"): with the normal-mapped
+// normals (film.z) a wet floor's mirror direction changed from pixel to pixel with the grass and dirt bumps; the half-resolution trace and
+// its blur cannot average that out, and widening the roughness (NormalVarianceRoughness) only takes the reflection away. Water levels the
+// small bumps: where DeferredWetness's film says the floor is wet, the normal leans to the smooth one (TESR_NormalsBuffer) by the wet share,
+// all the way on open ground in full rain and in puddles. The bumps stay in the film's own highlight and in dry reflections.
+vec3 ViewNormal(vec2 uv) {
+    vec3 n = normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0);
+    if (cb.film.x > 0.5 && cb.film.z > 0.5) {
+        vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
+        float wet = f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) : 0.0;
+        if (wet > 0.0) n = normalize(mix(n, normalize(textureLod(sampler2D(t_smoothNormals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0), wet));
+    }
+    return n;
+}
 
 // View space -> world space direction: mul((float3x3)TESR_ViewTransform, v).
 vec3 ViewToWorldDir(vec3 v) { return v * mat3(cb.viewTransform); }

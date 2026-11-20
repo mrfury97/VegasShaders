@@ -131,7 +131,11 @@ Under the same switch (test only, off). Three parts:
   its own). First build (install-test10) took the film's roughness itself: owner, 2026-11-20, "dont seem to see any reflections" (PROVEN
   cause from the code and the owner's settings: damp ground lerp(1, 0.22, rain) = 0.61 at MaxRainWetness 0.5, puddles 0.36 = their Puddles
   Roughness, both past the 0.35 where ReflectionsTrace.frag hands over to the light grid; the gloss 0.5 also halved the strength). Fixed in
-  the second build (install-test11). The D3D9 Reflections technique (no NVR DXVK) is unchanged: it keeps its rain guess.
+  the second build (install-test11). Owner on install-test11: "reflections are back to being extremely noisy" (DeferredBumpedNormals on;
+  believed: a 0.069 mirror on the bumped normal, whose direction the half-resolution trace cannot average; the variance roughness only
+  blurs it away). Third build: on wet pixels the mirror normal leans to the smooth normal (TESR_NormalsBuffer, binding 29 / slot 28) by
+  the film's wet share (`Reflections.glsl` ViewNormal): water levels small bumps; dry reflections keep them (install-test12).
+  The D3D9 Reflections technique (no NVR DXVK) is unchanged: it keeps its rain guess.
 - **Specular anti-aliasing** (`Reflections.glsl` NormalVarianceRoughness; cb.film.z = the normals are FdIndirect's normal-mapped shading
   normals, i.e. DeferredBumpedNormals or DeferredReflections on): alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.18) from the right and lower full-
   resolution neighbours (a depth jump over 2 % is not counted), applied in Reflectivity after Mirror, not to water, the weapon or glass-free
@@ -169,7 +173,8 @@ Installed for testing 2026-11-20 (install-test10: test-p1a-bump a1307d6 = instal
 DeferredWetness.hlsl, WetnessReflections.fx.hlsl, eleven Reflections*.spv; restore `F:\VS-scratch\install-test10-2026-11-20
 estore.ps1` -> test9).
 Owner ran it 2026-11-20 12:37 (log: "wet", "the fallback drew"): no reflections (above). Second build installed as install-test11
-(test-p1a-bump eb572af; DLL, pdb, six Reflections*.spv; restore `F:\VS-scratch\install-test11-2026-11-20estore.ps1` -> test10), not run yet.
+(test-p1a-bump eb572af; DLL, pdb, six Reflections*.spv; restore `F:\VS-scratch\install-test11-2026-11-20
+estore.ps1` -> test10), not run yet.
 Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback drew", no "the fallback is off this session".
 Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
 mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).
