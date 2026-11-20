@@ -99,6 +99,12 @@ float4 TESR_ReflectionsGBuffer;      // x: 1 = the G-buffer's material this fram
 sampler2D NVR_ReflectionsGNormals : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 sampler2D NVR_ReflectionsGAlbedo : register(s9) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 static bool SurfaceGBuffer = false;  // set by Reflectivity: the material is the G-buffer's (the composite takes a metal's colour from COLOR1)
+// UNOFFICIAL 2026-11-20 unified reflections step 2: DeferredWetness's film (core/DeferredWetness.h FilmTexture: r round(8 murk) + 0.99 gloss,
+// g roughness), on the history's stage 7 (only the Temporal technique reads that one; ReflectionsEffect::RenderBuffers takes it off for that
+// pass). x 1 = bound this frame (a whole film, with TESR_ReflectionsGBuffer.x), y the wet strength (RainWetness outdoors, 0 indoors), w 1 /
+// MaxRainWetness. As the Vulkan passes' cb.film.
+float4 TESR_ReflectionsFilm;
+sampler2D NVR_ReflectionsFilm : register(s7) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 #endif
 texture NoTexture;   // never set: unbinds a technique's own render target from its sampler
 
@@ -160,7 +166,9 @@ bool IsWeapon(float2 uv) {
 	return TESR_DepthConstants.z == 0.0 ? viewmodelDepth < 0.9 : viewmodelDepth > 0.01;
 }
 
+#if !REFL_GBUFFER_ON
 float3 ViewNormal(float2 uv) { return normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0, 0)).xyz * 2.0 - 1.0); }
+#endif
 
 // View space -> world space direction (the view transform's rows are the camera axes in world space, see toWorld).
 float3 ViewToWorldDir(float3 v) { return mul((float3x3)TESR_ViewTransform, v); }
@@ -215,6 +223,61 @@ float4 SurfaceMaterialAt(float2 uv) {
 	return 0.0;
 #endif
 }
+
+// UNOFFICIAL 2026-11-20 unified reflections step 2: the Vulkan passes' normal rules (Compute/Reflections.glsl SmoothViewNormal, BumpKeep,
+// ViewNormal, NormalVarianceRoughness, FilmWetness: keep the numbers in step), so both back ends reflect the same. While
+// TESR_ReflectionsGBuffer.x is 1, stage 2 holds the normal-mapped shading normals (FdIndirect ShadingNormals); the smooth normal under them is
+// COLOR3's (world, octahedral), where the record is the surface on screen; anywhere else stage 2 holds the smooth one itself.
+float3 GBDecodeOct(float2 e) {
+	float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));
+	float t = saturate(-n.z);
+	n.xy += float2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+	return normalize(n);
+}
+float3 SmoothViewNormalAt(float2 uv, float3 n) {
+	[branch] if (TESR_ReflectionsGBuffer.x > 0.5 && GBufferRecordAt(uv))
+		return normalize(mul(float4(GBDecodeOct(tex2Dlod(NVR_ReflectionsGNormals, float4(uv, 0, 0)).rg), 0.0), TESR_ViewTransform).xyz);
+	return n;
+}
+// The film's water at a pixel (0-1, x the strength) and its roughness (at most WetRoughness); 0 where no film was worked out.
+float FilmWetness(float2 uv, out float roughness) {
+	float4 f = tex2Dlod(NVR_ReflectionsFilm, float4(uv, 0, 0));
+	roughness = min(max(f.g, 0.01), WetRoughness);
+	return f.g > 0.001 ? saturate(saturate(frac(f.r) / 0.99) * TESR_ReflectionsFilm.w) * TESR_ReflectionsFilm.y : 0.0;
+}
+// How much of the bump the reflection follows: whole up to 0.5 world units per pixel, none from 2.0; damp ground keeps 20 % at full wet.
+float BumpKeep(float2 uv) {
+	float footprint = readDepthLod(uv) * 2.0 * rectToScreen(TESR_ReciprocalResolution.xy).x / TESR_ProjectionTransform[0][0];
+	float keep = 1.0 - smoothstep(0.5, 2.0, footprint);
+	[branch] if (TESR_ReflectionsFilm.x > 0.5 && keep > 0.0) {
+		float4 f = tex2Dlod(NVR_ReflectionsFilm, float4(uv, 0, 0));
+		float wet = f.g > 0.001 ? saturate(saturate(frac(f.r) / 0.99) * TESR_ReflectionsFilm.w) : 0.0;
+		keep *= 1.0 - 0.8 * wet;
+	}
+	return keep;
+}
+float3 ViewNormal(float2 uv) {
+	float3 n = normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0, 0)).xyz * 2.0 - 1.0);
+	[branch] if (TESR_ReflectionsGBuffer.x > 0.5) {
+		float keep = BumpKeep(uv);
+		[branch] if (keep < 1.0) n = normalize(lerp(SmoothViewNormalAt(uv, n), n, keep));
+	}
+	return n;
+}
+// Specular AA on the geometry's curvature (the smooth normal's change to the right and lower neighbour), at most 0.35^4 added to alpha^2.
+float CurvatureRoughness(float2 uv, float depth, float roughness) {
+	float3 n = SmoothViewNormalAt(uv, normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0, 0)).xyz * 2.0 - 1.0));
+	float sum = 0.0;
+	[unroll] for (int i = 0; i < 2; i++) {
+		float2 q = uv + (i == 0 ? float2(TESR_ReciprocalResolution.x, 0.0) : float2(0.0, TESR_ReciprocalResolution.y));
+		[branch] if (abs(readDepthLod(q) - depth) <= depth * 0.02 + 1.0) {
+			float3 d = SmoothViewNormalAt(q, normalize(tex2Dlod(TESR_NormalsBuffer, float4(q, 0, 0)).xyz * 2.0 - 1.0)) - n;
+			sum += dot(d, d);
+		}
+	}
+	float a = roughness * roughness;
+	return sqrt(sqrt(saturate(a * a + min(2.0 * 0.15915494 * sum, 0.015))));
+}
 #endif
 
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
@@ -229,9 +292,17 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 	float maxRough = TESR_ReflectionsMaterial.y;
 	float dry = TESR_ReflectionsMaterial.z * (1.0 - smoothstep(0.6 * maxRough, maxRough, material.r));
 	float wetness = Wetness * floorShare;
+#if REFL_GBUFFER_ON
+	float wetRoughness = WetRoughness;   // (2026-11-20 step 2: the film's water, as the Vulkan passes)
+	[branch] if (TESR_ReflectionsFilm.x > 0.5) wetness = floorShare > 0.0 ? FilmWetness(uv, wetRoughness) * floorShare : 0.0;
+	else if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);
+	float amount = dry + wetness;
+	roughness = lerp(roughness, wetRoughness, wetness / max(amount, 1.0e-4));
+#else
 	[branch] if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);   // the rain wets open ground only
 	float amount = dry + wetness;
 	roughness = lerp(roughness, WetRoughness, wetness / max(amount, 1.0e-4));
+#endif
 	SurfaceMetal = material.g;
 	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
 	return min(amount, 2.0) * fade;
@@ -239,6 +310,9 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 #endif
 
 // How much a surface reflects (before Fresnel) and how rough it is. 0 where it never reflects.
+#if REFL_GBUFFER_ON
+    #define Reflectivity ReflectivityOwn   // (2026-11-20 step 2: wrapped below with the specular AA)
+#endif
 float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughness) {
 	roughness = DryRoughness;
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
@@ -268,12 +342,28 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 	float worldZ = TESR_CameraPosition.z + toWorld(uv).z * depth;
 	[branch] if (abs(worldZ - TESR_WaterSettings.x) < max(2.0, depth * 0.002)) return 0.0;   // water reflects on its own
 	float wetness = Wetness;
+#if REFL_GBUFFER_ON
+	float wetRoughness = WetRoughness;   // (2026-11-20 step 2: the film's water, as the Vulkan passes)
+	[branch] if (TESR_ReflectionsFilm.x > 0.5) wetness = FilmWetness(uv, wetRoughness);
+	else if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);
+	float amount = DryReflect + wetness;
+	roughness = lerp(dryRoughness, wetRoughness, wetness / max(amount, 1.0e-4));
+#else
 	[branch] if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);   // the rain wets open ground only
 	float amount = DryReflect + wetness;
 	roughness = lerp(dryRoughness, WetRoughness, wetness / max(amount, 1.0e-4));
+#endif
 	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
 	return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
+#if REFL_GBUFFER_ON
+    #undef Reflectivity
+float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughness) {
+	float amount = ReflectivityOwn(uv, depth, viewNormal, roughness);
+	[branch] if (TESR_ReflectionsGBuffer.x > 0.5 && amount > 0.0) roughness = CurvatureRoughness(uv, depth, roughness);
+	return amount;
+}
+#endif
 
 // Split-sum environment BRDF (Karis's fit) for a dielectric (F0 0.04): the share of the surroundings a surface reflects.
 float EnvironmentFresnel(float roughness, float NdotV) {

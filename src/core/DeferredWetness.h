@@ -22,6 +22,9 @@
 #include "RenderRect.h"	// (2026-11-20 step 3) the fallback draws the render rect only
 
 namespace DeferredWetness {
+	// UNOFFICIAL 2026-11-20 unified reflections step 2 (effects/Reflections/Reflections.cpp ReflectionsEffect::WetReach): the distance out to which the
+	// Reflections effect mirrors the wet floors alone this frame (0: it does not). The pass and the fallback take their sky reflection out there.
+	float ReflectionsWetReach();
 	inline ShaderRecordPixel* Pass = nullptr;		// the wet frames' pass (Shaders/DeferredWetness.hlsl)
 	inline ShaderRecordPixel* Restore = nullptr;	// the dry frames' (DW_RESTORE): COLOR2.r back to the land's code
 	inline bool PassFailed = false;
@@ -41,6 +44,7 @@ namespace DeferredWetness {
 	// below): the film for every pixel the pass did not work out, and the water layer on the lit colour where no record drew at all
 	inline ShaderRecordPixel* FallbackPass = nullptr;
 	inline bool FallbackDrawn = false;				// this frame's film target holds the fallback's film too (Reflections, WetnessReflections)
+	inline UInt32 FallbackFrame = 0xFFFFFFFFu;		// (2026-11-20 unified reflections step 2) the FrameNumber the fallback last drew in (ReflectionsEffect::WetReach)
 	inline bool FallbackOff = false;				// latched: it cannot draw this session (logged once)
 	inline IDirect3DTexture9* FrameCopy = nullptr;    inline IDirect3DSurface9* FrameCopySurface = nullptr;  inline D3DSURFACE_DESC FrameCopyMade = {};
 	inline constexpr float FallbackRange = 10240.0f;	// game units: about the loaded cells' reach (uGridsToLoad 5); the game's own far shaders stay dry
@@ -191,7 +195,8 @@ namespace DeferredWetness {
 		if (!DeferredFog::Params(fog)) fog[3] = 0.0f;
 		// c6.y (2026-11-20 step 2): [Shaders.Puddles.Main] ObjectPuddles, as effects/Puddles/Puddles.cpp SetDrawConstants gives the objects their level
 		const float objectPuddles = TheSettingManager->GetSettingI("Shaders.Puddles.Main", "ObjectPuddles") != 0 ? 1.0f : 0.0f;
-		const float own[3][4] = { { linearDepth ? 1.0f : 0.0f, objectPuddles, 0.0f, 0.0f }, { fog[0], fog[1], fog[2], fog[3] }, { proj._33, proj._43, 0.01f, 2.0f } };
+		// c6.z (2026-11-20 unified reflections step 2): the Reflections effect's reach over the wet floors (DWSkyKeep; 0: the sky reflection as before)
+		const float own[3][4] = { { linearDepth ? 1.0f : 0.0f, objectPuddles, full ? ReflectionsWetReach() : 0.0f, 0.0f }, { fog[0], fog[1], fog[2], fog[3] }, { proj._33, proj._43, 0.01f, 2.0f } };
 		d->SetPixelShaderConstantF(6, own[0], 3);
 		// the copies on s0-s2 (point, clamp), through the state cache like SetCT's stages (put back below)
 		IDirect3DBaseTexture9* const copies[3] = { frameCopy, full ? AlbedoCopy : CapturedNormals::AlbedoTexture, MaterialCopy };
@@ -320,7 +325,7 @@ namespace DeferredWetness {
 		FallbackPass->SetCT();
 		// DW_FB (c15): z (review 2026-11-20) [Shaders.Puddles.Main] ObjectPuddles, as Apply's c6.y: only the land gets the water level unless it is on
 		const float objectPuddles = TheSettingManager->GetSettingI("Shaders.Puddles.Main", "ObjectPuddles") != 0 ? 1.0f : 0.0f;
-		const float own[4] = { FilmLive ? 1.0f : 0.0f, FallbackRange, objectPuddles, 0.0f };
+		const float own[4] = { FilmLive ? 1.0f : 0.0f, FallbackRange, objectPuddles, ReflectionsWetReach() };	// w (2026-11-20): as Apply's c6.z
 		d->SetPixelShaderConstantF(15, own, 1);
 		IDirect3DBaseTexture9* const inputs[3] = { FrameCopy, CapturedNormals::AlbedoTexture, CapturedNormals::MaterialTexture };
 		for (DWORD s = 0; s < 3; s++) {
@@ -348,6 +353,7 @@ namespace DeferredWetness {
 		const float quad[4][6] = { { -0.5f, -0.5f, 0, 1, 0.0f, 0.0f }, { x1, -0.5f, 0, 1, u1, 0.0f }, { -0.5f, y1, 0, 1, 0.0f, v1 }, { x1, y1, 0, 1, u1, v1 } };
 		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
 		FallbackDrawn = true;
+		FallbackFrame = TheFrameRateManager->FrameNumber;
 		static bool told = false;
 		if (!told) { told = true; Logger::Log("UNOFFICIAL DeferredWetness: the fallback drew (%s)", chained ? "on the chain's image" : "on the effects' target"); }
 

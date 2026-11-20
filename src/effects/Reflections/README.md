@@ -318,6 +318,9 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
 - Log: `UNOFFICIAL Reflections UnifiedReflections: on (the Vulkan passes): ...`, `... on but not used now: <why>`, `... off ...` (a line when
   the answer changes). DebugView 7 shows the G-buffer's material as decoded (dark red rough / blue smooth / green-yellow metal: reflects any
   way; grey-white + green: the floor rule's known materials; dimmed: no record).
+- (2026-11-20, step 2) In a frame `WetReach` says so, the wet floors' reflection is this effect's alone: DeferredWetness drops its sky term on
+  those floors and Wetness Effects' screen pass its trace (its lamp streaks stay); the D3D9 technique got the film, the bump fade, the damp lean
+  and the curvature AA. docs/unified-reflections-design.md "Step 2 as built".
 - What correct looks like: polished metal props, chrome, glossy counters and smooth objects reflect the room by their own roughness (sharp on
   chrome, blurred on brushed metal), whatever way they face; gold / brass reflect in their own colour, mirror-smooth metal in silver; tiled
   floors and wet ground as with the switch off. Wrong: a person, plant or post in front of a shiny surface turning into a mirror (the record

@@ -200,6 +200,11 @@ A wrote only albedo and normal, B (the screen pass) added sky, sun and lamps. Ga
 does not remove the layer; PUDDLES_RUNTIME's different wetness; B reading A's flattened normal; B's run conditions hiding the film; the screen
 sun-shadow mask has no cascade shadows (a highlight inside cast shadows); a double sky on objects; far land made wet; Cavity lost.
 
+## The film's sky reflection under unified reflections (2026-11-20)
+With `[Main.Main.Quality] UnifiedReflections` used, outdoors, the pass and the fallback leave out the film's sky reflection on the floors the
+Reflections effect mirrors (DWSkyKeep, `docs/unified-reflections-design.md` "Step 2 as built"), and Wetness Effects' screen pass skips its trace
+(its lamp streaks stay). Off: as before.
+
 ## Not decided (owner)
 - (Answered by the build, not by the owner: the height rides in COLOR2.r only between the record and pass A, so no channel is spent.)
 - When to make it the default and retire WetWorld (step 4).

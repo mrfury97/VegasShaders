@@ -654,6 +654,7 @@ void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsGrid3", &Constants.Grid3);
 	TheShaderManager->RegisterConstant("TESR_ReflectionsMaterial", &Constants.Material);
 	TheShaderManager->RegisterConstant("TESR_ReflectionsGBuffer", &Constants.GBuffer);	// UNOFFICIAL 2026-11-20 UnifiedReflections (REFL_GBUFFER_ON)
+	TheShaderManager->RegisterConstant("TESR_ReflectionsFilm", &Constants.Film);	// UNOFFICIAL 2026-11-20 unified reflections step 2 (REFL_GBUFFER_ON)
 	TheShaderManager->RegisterConstant("TESR_RTWaterData", &Constants.WaterData);	// UNOFFICIAL 2026-10-31 RT water (the water shaders)
 	TheShaderManager->RegisterConstant("TESR_RTWaterReproject", (D3DXVECTOR4*)&Constants.WaterReproject);
 	TheShaderManager->RegisterConstant("TESR_ReflReplace", (D3DXVECTOR4*)ReflMaterial::ForwardReplace);	// UNOFFICIAL 2026-11-12 ReplaceForward (EnvTemplate.hlsl; core/ReflMaterial.h keeps it 0 outside the world scene)
@@ -812,10 +813,16 @@ void ReflectionsEffect::BindMaterial() {
 	// frame), COLOR3 on 8 and COLOR1 on 9. Those two are the capture cubes', which only the Capture and Filter techniques read, drawn before
 	// this (CubeStep) or never in this frame (RenderCubeOnly runs without RenderBuffers); every pass after it here declares them as 2D.
 	Constants.GBuffer = D3DXVECTOR4(GBufferFrame() && FdIndirect::UnifiedCompiledIn() ? 1.0f : 0.0f, CapturedNormals::Data.y, CapturedNormals::Data.z, 0.0f);
+	Constants.Film = D3DXVECTOR4(0.0f, 0.0f, 0.0f, Settings.FilmRainScale);
 	if (Constants.GBuffer.x > 0.0f) {
 		SetPassTexture(15, CapturedNormals::MaterialTexture);
 		SetPassTexture(8, CapturedNormals::Texture);
 		SetPassTexture(9, CapturedNormals::AlbedoTexture);
+		// (2026-11-20 step 2) the film on the history's stage 7, as the Vulkan passes read it (RenderBuffers takes it off for the Temporal pass)
+		if (DeferredWetness::FilmWhole()) {
+			SetPassTexture(7, DeferredWetness::FilmTexture);
+			Constants.Film = D3DXVECTOR4(1.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f, 1.0f, Settings.FilmRainScale);
+		}
 		const DWORD point[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
 			{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
 		for (const auto& s : point) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
@@ -845,6 +852,9 @@ bool ReflectionsEffect::GBufferFrame() {
 	if (key) {
 		if (SettingForce::Mode() != 2) why = "the deferred renderer is not in mode 2 (DeferredRenderer 2): MaterialAware stays the material source";
 		else if (!FdIndirect::UnifiedReflectionsOn()) why = "the G-buffer does not hold this frame's records (COLOR1-3)";
+		// (review 2026-11-20) the chain clears CapturedNormals::Data.x later in such a frame (EffectChain.cpp PreStep_SnowAccumulation): COLOR1-3 are
+		// at the drawn size while the effects see the upscaled frame
+		else if (TAAEffect::UpscaledBeforeEffects()) why = "the frame was upscaled before the effects (RenderScale with LowResEffects off): the G-buffer is at the drawn size";
 		else if (!vulkan && !FdIndirect::UnifiedCompiledIn()) why = "the D3D9 technique draws and was not compiled with it (turn it on before starting the game)";
 	}
 	gbufferOn = key && !why;
@@ -857,6 +867,40 @@ bool ReflectionsEffect::GBufferFrame() {
 		else Logger::Log("UNOFFICIAL Reflections UnifiedReflections: off (the material from MaterialAware's copy as before)");
 	}
 	return gbufferOn;
+}
+
+// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/unified-reflections-design.md): with UnifiedReflections used this frame, outdoors in a
+// frame this effect can mirror the wet floors (its rain strength above 0, DeferredWetness's fallback able to give it the whole film, the effect
+// and its targets there), the wet floors' reflection is this effect's alone up to DrawDistance: DeferredWetness takes its sky reflection out there
+// (Shaders/DeferredWetness.hlsl DWSkyKeep) and Wetness Effects' screen pass skips its trace (it still draws the lamps' streaks). Walls, objects
+// that do not face up and anything past DrawDistance keep the sky reflection, since this effect gives them no wet reflection. Decided once a frame,
+// first inside the sun pass, so both passes and the chain agree. (A failure later in the frame, a Vulkan pass refused, leaves those floors
+// without the sky that frame: logged by the passes themselves.)
+float ReflectionsEffect::WetReach() {
+	const UINT now = TheFrameRateManager->FrameNumber;
+	if (wetReachAsked == now) return wetReach;
+	wetReachAsked = now;
+	const bool vulkan = !ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name);
+	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
+	const bool on = Enabled && Effect && normals && normals->Enabled && FdIndirect::UnifiedReflectionsOn() && (vulkan || FdIndirect::UnifiedCompiledIn()) &&
+		TheShaderManager->GameState.isExterior && !TheShaderManager->GameState.isUnderwater && Settings.RainWetness > 0.0f &&
+		// (review 2026-11-20) the fallback drew the whole film last frame: a frame it cannot draw (upscaled before the effects, the G-buffer not
+		// this frame's, the first wet frame) leaves Reflections without the film, and drying floors without any reflection; and its sky fallback on
+		DeferredWetness::FallbackPass && !DeferredWetness::FallbackOff && DeferredWetness::FallbackFrame + 1 == now && Settings.SkyFallback &&
+		Textures.TraceSurface && Textures.BufferSurface && Textures.TempSurface && Textures.HistorySurface &&
+		!(RtPathTrace::Replacing() && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTReflectionsOff") != 0);
+	const float reach = on ? Settings.DrawDistance : 0.0f;
+	if ((reach > 0.0f) != (wetReach > 0.0f))
+		Logger::Log(reach > 0.0f ? "UNOFFICIAL Reflections UnifiedReflections: the wet floors' reflection is this effect's alone out to %.0f units (DeferredWetness's sky "
+			"reflection and Wetness Effects' screen trace left out there)" : "UNOFFICIAL Reflections UnifiedReflections: the wet floors' reflection is back to all three passes (%.0f)", reach);
+	wetReach = reach;
+	return wetReach;
+}
+
+// core/DeferredWetness.h (it cannot include this effect's header: this file includes it)
+float DeferredWetness::ReflectionsWetReach() {
+	ReflectionsEffect* refl = TheShaderManager->Effects.Reflections;
+	return refl ? refl->WetReach() : 0.0f;
 }
 
 bool ReflectionsEffect::ShouldRender() {
@@ -1030,7 +1074,9 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer on stage 11 for Temporal only (the ortho map's stage; the trace above has read it,
 		// and the composite's SetCT binds the ortho map again). TemporalPS reads it while TESR_ObjectMotionData.x is 1.
 		if (ObjectMotion::Data.x > 0.0f && ObjectMotion::Texture) SetPassTexture(11, ObjectMotion::Texture);
+		if (Constants.Film.x > 0.0f) SetPassTexture(7, nullptr);	// (2026-11-20 step 2: the history's own stage for Temporal; the film back after)
 		pass(Textures.TempSurface, 3);
+		if (Constants.Film.x > 0.0f) SetPassTexture(7, DeferredWetness::FilmTexture);
 		Device->StretchRect(Textures.TempSurface, NULL, Textures.HistorySurface, NULL, D3DTEXF_NONE);
 	}
 	if (denoised) {}

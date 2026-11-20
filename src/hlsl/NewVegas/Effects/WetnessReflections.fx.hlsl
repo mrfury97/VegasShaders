@@ -21,6 +21,8 @@ float4 TESR_WetnessReflectionData;   // x: strength, y: max ray distance (game u
 float4 TESR_WetnessReflectionFade;   // x: roughness cutoff, y: screen edge fade (uv), z: debug view, w: camera distance fade end
 float4 TESR_WetnessReflectionBump;   // UNOFFICIAL 2026-11-18 DeferredBumpedNormals: x 1 = s4 holds the shading normals this frame (else 0: as before);
                                      // y (2026-11-19 DeferredWetness) 1 = s8 holds the near land's film this frame, s6 / s7 the G-buffer; z (2026-11-20) 1 = the land lamp pass drew the land's lamp streaks (with their shadows): left out here
+                                     // w (2026-11-20 unified reflections step 2) the Reflections effect's reach over the wet floors this frame (0: none): no trace on
+                                     // the floors it mirrors (Shaders/DeferredWetness.hlsl DWSkyKeep's share, which also took their sky out)
 float4 TESR_WetnessLampFilm;         // UNOFFICIAL 2026-11-19 DeferredWetLampFilm: x 1 = on this frame, y the froxel lists' texels, z the lamp table's rows, w its first tile row
 float4 TESR_LinearScales;            // x the lamps' light scale (the objects' forward film takes it, the land's does not: Object.hlsl LIN_SCALE_LIGHT)
 
@@ -224,6 +226,12 @@ float4 WetReflections(VSOUT IN) : COLOR0
 			if (any(film > 0.0f)) scene.rgb = LinEncode(LinColor(scene.rgb) + film);
 		}
 	}
+	// (2026-11-20 unified reflections step 2) the share of this pass's reflection that is still its own: none on the floors the Reflections effect
+	// mirrors (DWSkyKeep's share and fade, the smooth normal), all of it on walls, steep slopes and past its reach
+	float reflKeep = 1.0f;
+	[branch] if (TESR_WetnessReflectionBump.w > 0.0f)
+		reflKeep = 1.0f - saturate((worldN.z - 0.75f) / 0.2f) * (1.0f - smoothstep(0.7f * TESR_WetnessReflectionBump.w, TESR_WetnessReflectionBump.w, P.z));
+	if (reflKeep <= 0.001f) return Result(scene, gloss, 0.0f);
 	float glossy = gloss * (1.0f - smoothstep(TESR_WetnessReflectionFade.x * 0.5f, TESR_WetnessReflectionFade.x, rough));
 	if (glossy <= 0.01f) return Result(scene, gloss, 0.0f);
 
@@ -303,7 +311,7 @@ float4 WetReflections(VSOUT IN) : COLOR0
 	float3 skySeen = LinEncode(max(WetSkyReflection(worldR), 0.0f));
 
 	float3 hitColor = tex2Dlod(TESR_RenderedBuffer, float4(hitUV, 0.0f, 0.0f)).rgb;
-	float weight = reflectance * confidence * TESR_WetnessReflectionData.x;
+	float weight = reflectance * confidence * TESR_WetnessReflectionData.x * reflKeep;
 
 	if (DEBUG_VIEW) return Result(scene, gloss, hitColor * confidence);
 

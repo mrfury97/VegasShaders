@@ -59,6 +59,7 @@ void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
 	Constants.Bump.x = 0.0f;
 	Constants.Bump.y = 0.0f;
 	Constants.Bump.z = 0.0f;
+	Constants.Bump.w = 0.0f;
 	Constants.LampFilm.x = 0.0f;
 	if (!Enabled || !Effect || !ShouldRender()) return;	// Render draws nothing: no shading-normals pass for it either
 	std::string normalsName = "TESR_NormalsBuffer", depthName = "TESR_DepthBuffer";
@@ -87,6 +88,9 @@ void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
 	const bool landFilm = DeferredWetness::FilmReady() && gbuffer;
 	Constants.Bump.y = landFilm ? 1.0f : 0.0f;
 	Constants.Bump.z = landFilm && DeferredWetness::LampFilmDrawn ? 1.0f : 0.0f;	// (2026-11-20) the land pass drew the land's streaks, shadowed
+	// UNOFFICIAL 2026-11-20 unified reflections step 2 (effects/Reflections/Reflections.cpp WetReach): the Reflections effect mirrors the wet floors
+	// alone this frame, out to w: no trace on those floors (walls, steep slopes and far floors keep it; the lamps' streaks everywhere)
+	Constants.Bump.w = DeferredWetness::ReflectionsWetReach();
 	// (stages 5-8: past the TESR_ samplers, which EffectRecord binds by declaration order, s0-s3)
 	SetPassTexture(5, film ? (IDirect3DBaseTexture9*)ManyLamps::Table : normals);
 	SetPassTexture(6, film || landFilm ? (IDirect3DBaseTexture9*)CapturedNormals::MaterialTexture : normals);
