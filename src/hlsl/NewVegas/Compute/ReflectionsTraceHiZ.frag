@@ -75,7 +75,7 @@ void main() {
     int endRule = 5;   // 5 not started (behind the near plane at once, or the start off the screen)
     float nFacing = 0.0, nPlane = 0.0, nThick = 0.0;
     int cellsWalked = 0;   // (shader counters)
-    if (tEnd > tStart && !dampOnly) {
+    if (tEnd > tStart) {
         vec3 P0 = position + R * tStart, P1 = position + R * tEnd;
         float k0 = 1.0 / P0.z, k1 = 1.0 / P1.z;   // 1/z is linear in screen space
         vec3 Q0 = P0 * k0, Q1 = P1 * k1;
@@ -217,6 +217,8 @@ void main() {
         o_color = vec4(Tame(c * 0.6), 1.0);
         return;
     }
+    vec3 hitColour = colour;
+    float hitConf = confidence;
     confidence *= 1.0 - damp;   // (2026-11-21) the damp share is the fallbacks' below
     // What the ray did not find on screen: the surroundings cube and (GridFallback) the light grid along it, then (outdoors)
     // the sky if it points up into it. Each fills only the share still missing (premultiplied sums).
@@ -244,6 +246,14 @@ void main() {
         confidence += skyShare;
     }
     colour = sum / max(confidence, 1.0e-4);
+    // (2026-11-21, owner: "pointlights isn't reflecting anymore") the cube's blur at damp ground's roughness smears a fire or a lamp away.
+    // Damp ground still marches the screen along its mirror direction (no random spread: stable) and takes a hit only where it is far
+    // brighter than what the fallbacks gave (lamps, fires, neon): a dark hit (the ground) or a miss never replaces the cube, so the
+    // sky / ground flip that speckled stays out.
+    if (damp > 0.0 && hitConf > 0.0) {
+        float ratio = luma(hitColour) / max(luma(colour), 1.0e-4);
+        colour = mix(colour, hitColour, damp * hitConf * smoothstep(3.0, 8.0, ratio));
+    }
     // Diagnostics: 5 what the light grid gives along every reflected ray, 6 where each share came from.
     if (DebugView > 4.5) {
         if (DebugView < 5.5) colour = grid.rgb;
@@ -253,6 +263,7 @@ void main() {
     }
     // Fireflies: a lower cap on rough surfaces; everything after this pass averages in the compressed space (Tame).
     float brightest = max(colour.r, max(colour.g, colour.b));
-    colour *= min(1.0, mix(BrightestReflection, 3.0, saturate(roughness * 2.0)) / max(brightest, 1.0e-4));
+    float capRough = mix(roughness, min(roughness, DampMaxRoughness), damp);   // (2026-11-21: damp ground's glints capped as when traced)
+    colour *= min(1.0, mix(BrightestReflection, 3.0, saturate(capRough * 2.0)) / max(brightest, 1.0e-4));
     o_color = vec4(Tame(colour) * confidence, confidence);
 }

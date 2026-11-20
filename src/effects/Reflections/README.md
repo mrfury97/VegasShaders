@@ -285,6 +285,10 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   roughness is the film's own; standing: as before (WetRoughness .. 0.3). `SurfaceDamp` = the damp share of the pixel's reflection.
   `ReflectionsTrace.frag` / `ReflectionsTraceHiZ.frag`: fully damp pixels skip the march and the random spread (H = N) and take the cube,
   the light grid and the sky; partly damp ones scale the screen share by (1 - damp).
+- Lights (2026-11-21, owner: "pointlights isn't reflecting anymore"): the cube's blur smeared fires and lamps away, so damp ground
+  still marches along its mirror direction (no spread) and takes a hit only where it is 3-8 x brighter than the fallbacks' colour
+  (lamps, fires, neon); dark hits and misses never replace the cube. The firefly cap for that share is the 0.3-rough one, as traced.
+  The blur passes still blur it at the film's roughness: a soft glow rather than a sharp streak (believed). The march costs as before.
 - Strength: at roughness 0.61 the composite's split-sum Fresnel is about a quarter of 0.3's at 5 degrees and a third at 10 (0.086 vs
   0.378 / 0.264): the owner's test10 look ("no reflections"). `ReflectionsComposite.frag` takes the damp share's Fresnel at most at
   DampMaxRoughness 0.3, so damp ground keeps the traced version's strength; its picture is the blurred cube (not a mirror).
