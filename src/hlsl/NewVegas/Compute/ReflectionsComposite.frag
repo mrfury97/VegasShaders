@@ -105,6 +105,14 @@ void main() {
     float amount = Reflectivity(uv, depth, N, roughness);
     if (SurfaceWater) { o_color = color; return; }   // UNOFFICIAL 2026-10-31 RT water: the water shaders lay it on next frame
     if (amount <= 0.0) { o_color = DebugView > 0.0 ? vec4(color.rgb * 0.15, color.a) : color; return; }
+    // UNOFFICIAL 2026-11-20 DebugView 12 (diagnostic): on the reflecting pixels, red how far the normal map bends the reflection away from the
+    // smooth normal (full red at 20 degrees; 0 without the normal-mapped normals), green the roughness the reflection is blurred with (after
+    // Mirror and the specular AA: 1 full green). Dimmed: no reflection.
+    if (abs(DebugView - 12.0) < 0.5) {
+        const float bend = acos(clamp(dot(N, SmoothViewNormal(uv)), -1.0, 1.0));
+        o_color = vec4(saturate(bend / 0.349), saturate(roughness), 0.0, 1.0);
+        return;
+    }
 
     // Depth-aware bilinear upsample (half-resolution texel k stands for its centre; its depth is read again here).
     vec2 position = uv / LowTexel - 0.5;

@@ -21,6 +21,7 @@
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-13: the Ray tracing page's "Light shafts" status line
 #include "PtApplies.h"	// UNOFFICIAL 2026-11-12: what each effect does while the path traced picture replaces the scene (the notes)
 #include "../effects/Reflections/Reflections.h"
+#include "SettingForce.h"	// UNOFFICIAL 2026-11-20 UnifiedReflectionsHides (mode 2)
 #include "../effects/AmbientOcclusion/AmbientOcclusion.h"
 #include <sstream>
 #include <array>
@@ -878,7 +879,10 @@ static const char* InactiveReason(const char* section, const char* key) {
 	// UNOFFICIAL 2026-10-20 MaterialAware (core/ReflMaterial.h): the material comes from the _rmaos maps.
 	if (sec == "Shaders.Reflections.Main" && is({ "MaterialAware", "MaterialReflect", "MaterialMaxRoughness" }) && NumericSetting("Shaders.PBR.Rmaos", "Enabled") == 0.0f)
 		return "Only used with the _rmaos maps on ([Shaders.PBR.Rmaos] Enabled): the materials come from them.";
-	if (sec == "Shaders.Reflections.Main" && is({ "MaterialReflect", "MaterialMaxRoughness" }) && NumericSetting(section, "MaterialAware") != 1.0f)
+	// (2026-11-20: not while UnifiedReflections hides MaterialAware: the G-buffer's materials read both, whatever MaterialAware says)
+	bool UnifiedReflectionsHidesKey(const std::string& section, const std::string& key);
+	if (sec == "Shaders.Reflections.Main" && is({ "MaterialReflect", "MaterialMaxRoughness" }) && NumericSetting(section, "MaterialAware") != 1.0f &&
+		!UnifiedReflectionsHidesKey("Shaders.Reflections.Main", "MaterialAware"))
 		return "Only used with MaterialAware 1.";
 	// UNOFFICIAL 2026-10-21 cloth indoors (core/ClothWind.h BeginFrame): the indoor set is read only while its switch is on; indoors
 	// there is no weather, so the weather's wind is never used there.
@@ -912,8 +916,21 @@ static bool RainWetnessLinked(const std::string& shader) {
 	return shader == "Puddles" || (shader == "WetWorld" && TheSettingManager->GetMenuShaderEnabled("WetnessEffects"));
 }
 
+// UNOFFICIAL 2026-11-20 unified reflections (owner: "can we remove the other reflection settings from menu"): while [Main.Main.Quality]
+// UnifiedReflections is on with the renderer in mode 2 (where it is used), the Reflections effect takes its material and normals from the
+// G-buffer, so the switches that chose them before are hidden (their saved values stay and still work from the file; the RT weapon still uses
+// MaterialAware). DeferredBumpedNormals stays: it also gives Wetness Effects' wet reflections and WetWorld's surface their bumps. Wetness
+// Effects' and WetWorld's reflections, the env-map strengths, metal and Specular stay too: their passes still run (design steps 2-3).
+static bool UnifiedReflectionsHides(const std::string& section, const std::string& key) {
+	const bool listed = (section == "Main.Main.Quality" && key == "DeferredReflections") ||
+		(section == "Shaders.Reflections.Main" && (key == "MaterialAware" || key == "MaterialBufferRoughness"));
+	return listed && SettingForce::Mode() == 2 && TheSettingManager->GetSettingI("Main.Main.Quality", "UnifiedReflections") != 0;
+}
+bool UnifiedReflectionsHidesKey(const std::string& section, const std::string& key) { return UnifiedReflectionsHides(section, key); }	// (the "not used" notes, above it)
+
 static bool InternalHidden(const std::string& section, const std::string& key) {
 	if (ShelvedEffects::Section(section)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only), whatever ShowInternal says
+	if (UnifiedReflectionsHides(section, key)) return true;	// (2026-11-20)
 	if (section == "Shaders.Puddles.Main" && key == "ReflectionPuddles" && TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
 	return !gMenu.showInternal && IsInternalSetting(section, key);
 }
@@ -3179,6 +3196,7 @@ static void NewRenderRun(std::vector<NewEntry>& entries, const NewGroup& group) 
 	for (size_t i = group.Begin; i < group.End; i++) {
 		NewEntry& e = entries[i];
 		if (!e.Valid || drawnKeys.count(e.Key)) continue;
+		if (InternalHidden(e.Section, e.Key)) continue;	// UNOFFICIAL 2026-11-20 (review): the hides that come and go (UnifiedReflectionsHides, ReflectionPuddles); the list is cached
 		if (e.Status) {
 			NewShaderSwitchRow(e);
 			continue;

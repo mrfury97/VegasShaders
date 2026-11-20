@@ -75,7 +75,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.CubeMap = TheSettingManager->GetSettingI(section, "CubeMap") != 0;
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);
-	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 11);	// 11: UNOFFICIAL 2026-11-09 the weapon mask (ReflectionsComposite.frag)	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
+	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 12);	// 12: UNOFFICIAL 2026-11-20 the bend and the roughness (ReflectionsComposite.frag)	// 11: UNOFFICIAL 2026-11-09 the weapon mask (ReflectionsComposite.frag)	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
 	Settings.GridFallback = TheSettingManager->GetSettingI(section, "GridFallback") != 0;
 	Settings.GridBrightness = std::clamp(TheSettingManager->GetSettingF(section, "GridBrightness"), 0.0f, 4.0f);
 	// UNOFFICIAL 2026-10-20 MaterialAware (core/ReflMaterial.h): needs the shaders compiled with it (on at startup, with the _rmaos maps).
@@ -1605,9 +1605,10 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	resources[22].Slot = 24; resources[22].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[22].pResource = skySlot ? (IUnknown*)skySlot : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30 (2026-10-31: or the panorama)
 	resources[23].Slot = 26; resources[23].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[23].pResource = weaponMask ? (IUnknown*)weaponMask : (IUnknown*)depth;	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (or the depth: never read while weapon.x is not 2)
 	resources[24].Slot = 27; resources[24].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[24].pResource = film ? (IUnknown*)film : (IUnknown*)depth;	// UNOFFICIAL 2026-11-20 the film (or the depth: never read while film.x is 0)
-	// UNOFFICIAL 2026-11-20 the smooth normals (TESR_NormalsBuffer) while t_normals holds the bumped ones: wet pixels mirror along them (ViewNormal)
+	// UNOFFICIAL 2026-11-20 the smooth normals (TESR_NormalsBuffer) while t_normals holds the bumped ones (Reflections.glsl SmoothViewNormal: the
+	// bump's fade, the specular AA; with or without the film)
 	IDirect3DBaseTexture9* smoothNormals = SlotTexture("TESR_NormalsBuffer");
-	resources[25].Slot = 28; resources[25].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[25].pResource = film && smoothNormals && uniforms.film.z > 0.5f ? (IUnknown*)smoothNormals : (IUnknown*)depth;
+	resources[25].Slot = 28; resources[25].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[25].pResource = smoothNormals && uniforms.film.z > 0.5f ? (IUnknown*)smoothNormals : (IUnknown*)depth;
 	// UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR1 and COLOR3 (or the depth: never read while gbuffer.x is 0)
 	resources[26].Slot = 29; resources[26].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[26].pResource = gbuffer ? (IUnknown*)CapturedNormals::AlbedoTexture : (IUnknown*)depth;
 	resources[27].Slot = 30; resources[27].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[27].pResource = gbuffer ? (IUnknown*)CapturedNormals::Texture : (IUnknown*)depth;
