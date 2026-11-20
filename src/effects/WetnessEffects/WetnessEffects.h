@@ -41,6 +41,7 @@ public:
 		bool	ShowCover;		// debug view of the cover test (Includes/Wetness.hlsl, WetnessCoverDebug)
 	};
 	WetnessSettingsStruct	Settings;
+	bool	SettingsRead = false;	// UpdateSettings has run once (TickWeather waits for it: Settings holds nothing before)
 
 	struct WetnessStruct {
 		D3DXVECTOR4		Data;		// x: wetness, y: puddle wetness, z: raining, w: time (s)
@@ -60,10 +61,13 @@ public:
 	float	Raining = 0.0f;
 	double	RainTime = 0.0;
 
-	// How wet the weather has made things, 0-1, for the rest of NVR (PBR, skin, terrain and water
-	// shaders, heat haze): the rain, or the wetness it left. Followed whether or not the effect is on.
+	// How wet the weather has made things, 0-1: the rain, or the wetness it left. The rest of NVR reads it
+	// through core/RainState.h (Factor, Rain), which runs TickWeather every frame whether or not the effect is on.
 	float	RainFactor() const { return max(Raining, Wetness); }
 
+	// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h): Wetness, PuddleWetness, Raining and RainTime
+	// follow the weather, and TESR_WetnessData holds them. Once a frame, from RainState::Tick, on or off.
+	void	TickWeather();
 	void	UpdateConstants();
 	void	RegisterConstants();
 	void	UpdateSettings();

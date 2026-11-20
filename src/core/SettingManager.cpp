@@ -58,7 +58,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 90;  // (90, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 91;  // (91, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 90, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -67,7 +67,7 @@ static const int UnofficialSettingsVersion = 90;  // (90, 2026-11-18: Sharpening
 // 2026-11-05: settings this build removed on purpose (the Oblivion-era leftovers: the old text menu's fonts, colours, layout and keys,
 // SleepingMode, TorchesCastShadows). Older settings files still hold them; they are skipped quietly instead of counted as unknown.
 static bool Retired(const std::string& Name) {
-	static const char* const kSections[] = { "Main.SleepingMode" };
+	static const char* const kSections[] = { "Main.SleepingMode", "Shaders.WetWorld" };	// (2026-11-21: WetWorld removed; settings step 91 drops it)
 	static const char* const kKeys[] = { "Shaders.ShadowsInteriors.Main.TorchesCastShadows", "Shaders.ShadowsExteriors.ScreenSpace.LodOnly",	// (2026-11-06: always on now)
 		"Shaders.Puddles.Main.Streaks", "Shaders.Puddles.Main.StreakWidth", "Shaders.Puddles.Main.StreakSpeed",	// (2026-11-18: the wall streaks removed)
 		"Main.Menu.Keys.KeyAdd", "Main.Menu.Keys.KeyDown", "Main.Menu.Keys.KeyEditing", "Main.Menu.Keys.KeyLeft", "Main.Menu.Keys.KeyPageDown",
@@ -893,6 +893,57 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 			saved->as_table().erase("CAS");
 			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.Sharpening.Main.CAS removed (CAS is now the only sharpening filter)";
 		}
+	}
+	// 91 (2026-11-21, owner: "move the 'is it raining / is the ground wet' clock to Wetness Effects and remove WetWorld", then "make the
+	// default mine"): WetWorld is gone; Wetness Effects and Puddles are the rain wetness, on by default with the owner's look
+	// (docs/deferred-wetness-design.md step 4).
+	//  - The cover map's shared keys (PersistentMapSize, PersistentMapResolution, PersistentDebugView) move from [Shaders.WetWorld.Main] to
+	//    [Shaders.SnowAccumulation.Main], a saved value carrying over; then the whole WetWorld section leaves the file.
+	//  - A saved Wetness Effects / Puddles Enabled false moves to true when WetWorld was on (the player had rain wetness, which WetWorld
+	//    alone gave them); one who had switched WetWorld off keeps them as saved. Both are restart keys, read after this step: from this start.
+	//  - The other defaults the owner's settings changed move from the old default once; a value the player chose stays.
+	if (version < 91) {
+		tomlValue* wetWorld = UserSection("Shaders.WetWorld.Main");
+		tomlValue* snow = UserSection("Shaders.SnowAccumulation.Main");
+		if (wetWorld && wetWorld->is_table() && snow && snow->is_table()) {
+			for (const char* key : { "PersistentMapSize", "PersistentMapResolution", "PersistentDebugView" }) {
+				if (!wetWorld->contains(key) || snow->contains(key)) continue;
+				(*snow)[key] = wetWorld->at(key);
+				changed += std::string(changed.empty() ? "" : ", ") + "Shaders.WetWorld.Main." + key + " -> Shaders.SnowAccumulation.Main." + key;
+			}
+		}
+		tomlValue* wetWorldStatus = UserSection("Shaders.WetWorld.Status");
+		const bool wetWorldOff = wetWorldStatus && wetWorldStatus->is_table() && wetWorldStatus->contains("Enabled") &&
+			wetWorldStatus->at("Enabled").is_boolean() && !wetWorldStatus->at("Enabled").as_boolean();
+		auto setBool = [&](const char* section, const char* key, bool from, bool to) {
+			tomlValue* saved = UserSection(section);
+			if (!saved || !saved->is_table() || !saved->contains(key) || !saved->at(key).is_boolean() || saved->at(key).as_boolean() != from) return;
+			(*saved)[key] = to;
+			changed += std::string(changed.empty() ? "" : ", ") + section + "." + key + (to ? " false -> true" : " true -> false");
+		};
+		if (!wetWorldOff) {
+			setBool("Shaders.WetnessEffects.Status", "Enabled", false, true);
+			setBool("Shaders.Puddles.Status", "Enabled", false, true);
+		}
+		tomlValue* shaders = UserSection("Shaders");
+		if (shaders && shaders->is_table() && shaders->contains("WetWorld")) {
+			shaders->as_table().erase("WetWorld");
+			changed += std::string(changed.empty() ? "" : ", ") + "the [Shaders.WetWorld] settings removed (WetWorld is gone: Wetness Effects and Puddles are the rain wetness)";
+		}
+		replace("Shaders.WetnessEffects.Main", "MaxRainWetness", 1.0, 0.5, false);
+		replace("Shaders.WetnessEffects.Raindrops", "RaindropChance", 1.0, 0.5, false);
+		replace("Shaders.WetnessEffects.Reflections", "EdgeFade", 0.1, 0.279, false);
+		replace("Shaders.WetnessEffects.Reflections", "RoughnessCutoff", 0.5, 0.434, false);
+		replace("Shaders.WetnessEffects.Reflections", "Thickness", 30.0, 50.0, false);
+		setBool("Shaders.WetnessEffects.Reflections", "Enabled", true, false);
+		replace("Shaders.Puddles.Main", "Cavity", 1.0, 1.993, false);
+		replace("Shaders.Puddles.Main", "Coverage", 0.25, 0.262, false);
+		replace("Shaders.Puddles.Main", "Darkening", 0.6, 1.0, false);
+		replace("Shaders.Puddles.Main", "EdgeSoftness", 0.05, 0.108, false);
+		replace("Shaders.Puddles.Main", "Ripples", 1.0, 2.0, false);
+		replace("Shaders.Puddles.Main", "Roughness", 0.03, 0.1, false);
+		replace("Shaders.Puddles.Main", "Size", 420.0, 250.0, false);
+		setBool("Shaders.Puddles.Main", "ObjectPuddles", false, true);
 	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "

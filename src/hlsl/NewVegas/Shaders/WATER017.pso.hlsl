@@ -19,7 +19,7 @@ uniform float4 TESR_WaterSettings : register(c16); // x: caustic strength, y:dep
 uniform float4 TESR_GameTime : register(c17);
 uniform float4 TESR_HorizonColor : register(c18);
 uniform float4 TESR_SunDirection : register(c19);
-uniform float4 TESR_WetWorldData : register(c20);
+uniform float4 TESR_WetnessData : register(c20);
 uniform float4 TESR_WaterShorelineParams : register(c21);
 uniform float4 TESR_WaterLODColor : register(c22);
 uniform float4 TESR_DebugVar : register(c23);
@@ -69,7 +69,7 @@ PS_OUTPUT main(PS_INPUT pa) {
     float3 surface_normal = getWaveTexture(pa, flat_dist, TESR_WaveParams).xyz;
     // UNOFFICIAL LOD seam: past the fade the surface must shade exactly like the LOD water (WATER033), which has no rain
     // ripples, no depth-weighted reflection and no depth-weighted distortion; each of those is faded out with LODfade.
-    float3 rippled_normal = getRipples(pa, TESR_RippleSampler, surface_normal, flat_dist, TESR_WetWorldData.x);
+    float3 rippled_normal = getRipples(pa, TESR_RippleSampler, surface_normal, flat_dist, TESR_WetnessData.z);
     surface_normal = normalize(lerp(rippled_normal, surface_normal, lodfade));
     surface_normal = getDisplacement(pa, BlendRadius.w, surface_normal);
 

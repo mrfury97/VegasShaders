@@ -5,7 +5,7 @@
 #include "../../core/SkyCoverage.h"	// UNOFFICIAL 2026-11-04
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-09 the dither follows the shared temporal resolve
 #include "../../core/ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (Terrain Blending left out of the land shaders)
-#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 
 // Set by SettingManager::Configuration::UpdateOldDefaults (settings version 65) when a saved config already had ParallaxLite
 // on, from builds that forced its distance cap every frame; UpdateSettings then writes the suggested distance once.
@@ -244,12 +244,9 @@ void TerrainShaders::UpdateSettings() {
 }
 
 void TerrainShaders::UpdateConstants() {
-	// the stronger of the rain animator and the puddle animator drives the dry-to-wet blend
-	// UNOFFICIAL 2026-11-12 RainStateGuard ([Shaders.WetWorld.Main] RainStateGuard, core/RainState.h): the same max(rain, puddles), from
-	// the one rain state: 0-1, this frame's, and following the weather whether WetWorld and Precipitations are on or off. It was read
-	// from WetWorld's constants, which nothing updates while that effect is off, and whose puddle amount went to 1 for good when a
-	// rain ended (Increase / Decrease 0): every [Shaders.Terrain.Main] value stayed replaced by the Rain group's. With the guard off
-	// this is the old expression.
+	// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h): how wet the ground is (Wetness Effects' clock, 0-1, this frame's,
+	// whatever is switched on or off) drives the dry-to-wet blend, so the Rain group comes and goes with the wet ground the shaders draw.
+	// (2026-11-12 RainStateGuard: it was read from WetWorld's constants, which froze while that effect was off.)
 	const float rainFactor = RainState::Factor();
 
 	// UNOFFICIAL 2026-10-27 (NVR DXVK 1.7-displace, core\DxvkCompute.h): the land's tessellation displacement settings, once a frame.

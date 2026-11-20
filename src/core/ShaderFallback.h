@@ -26,7 +26,7 @@
 //
 // THE ORDER (slots saved on the 6-layer / 7-layer land shader with the tester's settings, runtime count; most saved per visible
 // loss first):
-//   1. Wetness Effects      -1422 / -676   visible only in and after rain, and Wet World's screen pass draws the wetness instead
+//   1. Wetness Effects      -1422 / -676   visible only in and after rain (2026-11-21: nothing draws the wet ground instead since WetWorld went)
 //   2. Terrain Macro         -160 / -162   a subtle tint over hundreds of metres
 //   3. Terrain Variation     -191 / -193   (2 layers; up to -439 at 7) the ground textures repeat again
 //   4. Terrain Blending      -533 / -508   objects meet the ground in a hard line again
@@ -38,10 +38,11 @@
 //
 // CONSISTENCY. A feature is dropped for every template of the family (the land: TerrainTemplate, TerrainLODTemplate and
 // TerrainFadeTemplate, so near and far ground agree), and the members made before the drop are loaded again. Wetness Effects is
-// dropped for EVERY family and for the session: with it on, Wet World's screen pass does not draw (EffectChain.cpp), so land
+// dropped for EVERY family and for the session: land
 // without it next to objects with it would be dry ground under wet rocks. Its collection is switched off instead
 // (WetnessEffectsShaders::UpdateConstants: TESR_WetnessFlags.x 0, so shaders already built with it skip it, and the chain's
-// existing "Shaders.Wetness->Enabled" test lets Wet World draw). Terrain Blending's own switch follows too (Terrain.cpp).
+// wetness reflections read Enabled; until 2026-11-21 WetWorld's screen pass then drew the wetness, it is gone now: no wet ground for
+// that session, and a warning says to use DXVK). Terrain Blending's own switch follows too (Terrain.cpp).
 //
 // MEMORY. The drops are written to <shaders>\Cache\ShaderFallback.txt with a key made of the settings' whole define list, the
 // device caps and this build. The next start reads it before the first shader is built, so nothing is compiled, refused and
@@ -61,7 +62,7 @@ namespace ShaderFallback {
 		const char* Loss;		// what is different without it
 	};
 	inline const FeatureInfo Features[FeatureCount] = {
-		{ "Shaders.WetnessEffects.Status", "Enabled", true, "Wetness Effects", "Wetness Effects", "off on every surface for this session; Wet World's screen pass draws the rain wetness instead" },
+		{ "Shaders.WetnessEffects.Status", "Enabled", true, "Wetness Effects", "Wetness Effects", "off on every surface for this session: no wet ground or puddles in the rain (DXVK has no shader length limit)" },
 		{ "Shaders.Terrain.Macro", "Enabled", false, "Terrain Macro", "Terrain Macro", "no large-scale colour variation on the ground" },
 		{ "Shaders.Terrain.Variation", "Enabled", false, "Terrain Variation", "Terrain Variation", "the ground textures repeat as they do without it" },
 		{ "Shaders.Terrain.Blending", "Enabled", false, "Terrain Blending", "Terrain Blending", "objects meet the ground in a hard line" },

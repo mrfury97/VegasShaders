@@ -1,5 +1,7 @@
 # Puddles (rain puddles, wet ground)
 
+2026-11-21 (owner: "remove WetWorld", "make the default mine"): Puddles and Wetness Effects are the rain wetness and ON by default, with the owner's look (the table in section 4). WetWorld, the old screen-space wet pass, is removed. The water level below keeps its own game-hour clock (FillHours / DryHours): it is the standing water left after the ground's film has dried. The film itself, the Rain setting groups, skin, heat haze, the drops and the water's rings follow Wetness Effects' clock (`src/core/RainState.h`). ForceRain fills the puddles now and ForceSnow stops their rain (before, ForceRain wetted the ground but never filled a puddle).
+
 2026-11-18 (owner's request): the wall streaks (rain running down steep faces) are removed: their code in `Shaders/Includes/Wetness.hlsl` (PuddleStreaks), the settings Streaks, StreakWidth and StreakSpeed (saved values are skipped quietly, `SettingManager.cpp` Retired) and DebugView 4. The result is what Streaks = 0 gave before. The notes below about streaks are history.
 
 ## 1. Purpose
@@ -41,25 +43,26 @@ Plus Wetness Effects' own: TESR_WetnessData (c146: wetness, puddle wetness, rain
 Two vec4 appended after `renderScale`: `puddle` (= TESR_PuddleData) and `puddle2` (x slope start, y slope full, z puddle roughness, w edge softness). Set by `ReflectionsEffect` from `TheShaderManager->Shaders.Puddles`.
 
 ## 4. Settings
-`[Shaders.Puddles.Status] Enabled` (restart: it picks `WETNESS_EFFECTS=2` for the surface shaders). Everything in `[Shaders.Puddles.Main]` and `.Debug` is live.
+`[Shaders.Puddles.Status] Enabled` (default true since 2026-11-21; restart: it picks `WETNESS_EFFECTS=2` for the surface shaders). Everything in `[Shaders.Puddles.Main]` and `.Debug` is live. Defaults marked * changed on 2026-11-21 to the owner's settings (settings step 91 moves a saved old default once).
 
 | Key | Default | Meaning |
 |---|---|---|
 | Quality | 2 | 0 off (Wetness Effects' puddles), 1 low (mask, water layer, flattening), 2 medium (+ land height cavities, wet ring, land ripples), 3 high (+ ripples on objects, a third noise octave) |
-| Coverage | 0.25 | Share of flat open ground under water at a full water level |
-| Size | 420 | Puddle pattern size, game units |
+| Coverage | 0.262* | Share of flat open ground under water at a full water level |
+| Size | 250* | Puddle pattern size, game units |
 | FillHours | 0.5 | Game hours of steady rain to fill the puddles |
 | DryHours | 3.0 | Game hours of daylight to dry them (night and overcast dry at NightDrying of that speed) |
 | NightDrying | 0.35 | Drying speed at night, share of the day's |
-| Roughness | 0.03 | Water surface roughness |
-| Darkening | 0.6 | How much deeper water darkens what is under it |
-| EdgeSoftness | 0.05 | Width of the shore, field units |
+| Roughness | 0.1* | Water surface roughness |
+| Darkening | 1.0* | How much deeper water darkens what is under it |
+| EdgeSoftness | 0.108* | Width of the shore, field units |
 | SlopeStart / SlopeFull | 0.92 / 0.97 | World up of a face where puddles start / reach full |
-| Cavity | 0.6 | Land only: how much the height maps' crevices pull water in |
+| Cavity | 1.993* | How much the ground's relief places the water (land: height maps; objects: the colour texture) |
 | WetRing | 0.12 | Width of the soaked ring round each puddle, field units |
 | Flatten | 1.0 | How much the water hides the material's normal map |
-| Ripples | 1.0 | Rain ripple strength inside puddles |
+| Ripples | 2.0* | Rain ripple strength inside puddles |
 | MapMode | true | Restart: the large-scale terms from the puddle map on the NVR DXVK extension (section 6b) |
+| ObjectPuddles | true* | Standing water and soaked rims on objects too (roads, slabs, rocks); never characters or the first-person model |
 | ReflectionPuddles | true | The Vulkan reflection pass (SSR + RT) mirrors the puddles too |
 | `.Debug` LevelOverride | -1 | Force the water level 0-1 (-1 off), for testing in dry weather |
 | `.Debug` DebugView | 0 | 1 mask (red puddle, green wet ring), 2 ripples (normal xy), 3 levels (red rain wetness, green water level, blue raining), 4 nothing (was the wall streaks), 5 the puddle map's terms (map mode) |
@@ -72,6 +75,7 @@ No pass of its own. The puddle model runs inside `GetWetness` (Includes/Wetness.
 - Rain, as the engine decides it (IDA `Sky::GetIsRaining` 0x59E950): the current weather is rainy (`TESWeather::IsRainy`: data byte 11 flag 4) and the weather percent is past its begin-precipitation byte (6) / 255, or the last weather is rainy and the percent is below its end-precipitation byte (7) / 255. Here as an amount: it ramps from the begin threshold to full, and from full down to the end threshold.
 - Game time from `GameDaysPassed * 24 + GameHour` (so waiting and sleeping count; paused menus do not). Steps over 48 hours are taken as a load and ignored.
 - Rising: level += rain x hours / FillHours. Falling (no rain): level -= hours / DryHours x lerp(NightDrying, 1, daylight x (1 - cloudiness)). Indoors the level is held (no weather there).
+- [Shaders.Precipitations.Main] ForceRain counts as full rain, [Shaders.Snow.Main] ForceSnow as none (2026-11-21, `RainState::ForcedRain` / `ForcedSnow`).
 - `.Debug` LevelOverride wins.
 
 ### The puddle field (Wetness.hlsl `PuddleField`)
@@ -155,7 +159,7 @@ dry lamp record, and 7-layer land had no sampler for the cover map.
 - Wall streaks show on open steep faces (NVRAutoTest2's sign post, the puddle2 metal building) and not on the puddle2 shack walls: confirmed 2026-11-11 with DebugView 4, their eave plus the cover lookup's spread (about +-37 units) reaches past the 40-unit look-out (open at 120). Kept on purpose (user: walls under an overhang stay dry). Slanted rain under short eaves (a dry band under the eave, wet below) is not modelled.
 - `[Shaders.WetnessEffects.Debug] ShowCover` blue ("no map") on the land = 7-layer land quads (2026-11-12, the puddle4 canopy): s13, the cover map's sampler, holds the seventh layer's normal map there, so that land has no cover test and gets puddles under roofs (the gas-station canopy). 6-layer land is fine (puddle2: green open, red under the car). Fix options: a vertex-shader lookup of the cover map passed down (coarse: one value per land vertex, ~128 units), dropping the 7th layer's normal map for the cover map, or the Vulkan side (a wetness pre-pass writing the cover into the material buffer). Not done.
 - Object surfaces have no height map in the shader, so their puddles are noise-shaped only.
-- Splashes (WetWorld had them) are not in the forward path.
+- Splashes (WetWorld had them; WetWorld is removed since 2026-11-21) are not drawn anywhere.
 
 ## 10. Bench (2026-11-08, slim slot C, RTX 4070 Ti SUPER, full RT, rain = Zone weather 0B300012)
 - Runs: `nvr-bench/runs/20261108-220055-capture-NVRAutoTest1` (list `lists\puddles-ab.txt`: dry, rain fill at timescale 240, Quality 2/0/3/1, debug views 1-3, drying at timescale 1200) and `20261108-220936-capture-NVRAutoTest2` (`lists\puddles-perf.txt`).

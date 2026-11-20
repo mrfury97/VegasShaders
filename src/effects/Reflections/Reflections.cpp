@@ -1,4 +1,5 @@
 #include "Reflections.h"
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 #include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-11 PTStandDownRT
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/GpuProfiler.h"
@@ -742,7 +743,7 @@ void ReflectionsEffect::UpdateConstants() {
 	// shadowed areas"): it used to follow Wet World's puddle level too, which dries over minutes, so ALL flat ground kept
 	// mirroring long after the rain (seen most in shade, where the bright surroundings stand out against the dark ground)
 	// while Wet World itself had dried everything but the puddles in hollows. The puddles keep their own wet look (Wet World).
-	const float wet = std::clamp(TheShaderManager->Effects.Rain->Constants.RainAnimator.GetValue(), 0.0f, 1.0f);
+	const float wet = RainState::Rain();	// (2026-11-21 the one rain clock, core/RainState.h: Wetness Effects' Raining)
 
 	const float reflectivity = exterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior;	// UNOFFICIAL 2026-10-25
 	Constants.Data.x = (exterior ? Settings.GroundSheen : Settings.InteriorFloors) * reflectivity;

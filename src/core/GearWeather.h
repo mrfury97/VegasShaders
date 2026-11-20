@@ -139,8 +139,7 @@ namespace GearWeather {
 		in.exterior = gs.isExterior;
 		in.underwater = gs.isUnderwater;
 		const float rainFactor = RainState::Factor();	// (Tick inside: this frame's amounts)
-		const WetWorldEffect* wet = TheShaderManager->Effects.WetWorld;
-		in.rain = wet ? wet->Constants.Data.x : (gs.isRainy ? 1.0f : 0.0f);
+		in.rain = RainState::Rain();	// (2026-11-21 the one rain clock: Wetness Effects' Raining)
 		in.ground = rainFactor;
 		in.snow = gs.isSnow ? 1.0f : 0.0f;
 		SandstormEffect* storm = TheShaderManager->Effects.Sandstorm;

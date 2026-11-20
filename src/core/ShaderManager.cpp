@@ -31,6 +31,7 @@
 #include "../effects/GpuParticles/GpuParticles.h"	// UNOFFICIAL 2026-10-26 (NVR DXVK 1.5-particles)
 #include "SunDepthFit.h"	// UNOFFICIAL 2026-10-27 FitToDepth
 #include "../effects/CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent wetness and snow
+#include "RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (RayReconstructionFrameBegin)
@@ -128,14 +129,13 @@ void ShaderManager::Initialize() {
 	EnrollEffect<SunFarEffect>(sm, sm->Effects.SunFar);	// UNOFFICIAL 2026-10-19
 	EnrollEffect<SpecularEffect>(sm, sm->Effects.Specular);
 	EnrollEffect<SnowEffect>(sm, sm->Effects.Snow);
-	// UNOFFICIAL 2026-10-27 Persistent wetness and snow (CoverMap.h): the cover map WetWorld and SnowAccumulation read when their
-	// Persistent setting is on. No settings section of its own: always on when its file loads, does nothing while both are off.
+	// UNOFFICIAL 2026-10-27 Persistent snow (CoverMap.h): the cover map SnowAccumulation reads when its Persistent setting is on (2026-11-21:
+	// its wet half went with WetWorld). No settings section of its own: always on when its file loads, does nothing while it is off.
 	EnrollEffect<CoverMapEffect>(sm, TheCoverMap);
 	EnrollEffect<SnowAccumulationEffect>(sm, sm->Effects.SnowAccumulation);
 	EnrollEffect<UnderwaterEffect>(sm, sm->Effects.Underwater);
 	EnrollEffect<VolumetricFogEffect>(sm, sm->Effects.VolumetricFog);
 	EnrollEffect<WaterLensEffect>(sm, sm->Effects.WaterLens);
-	EnrollEffect<WetWorldEffect>(sm, sm->Effects.WetWorld);
 	EnrollEffect<BarrelHazeEffect>(sm, sm->Effects.BarrelHaze);
 	EnrollEffect<HeatHazeEffect>(sm, sm->Effects.HeatHaze);
 	EnrollEffect<SandstormEffect>(sm, sm->Effects.Sandstorm);
@@ -839,6 +839,10 @@ void ShaderManager::UpdateConstants() {
 	}
 
 	TheTextureManager->TargetsFrame();	// UNOFFICIAL 2026-11-12 (memleak) idle targets: an effect switched on has its real buffers before it draws
+
+	// UNOFFICIAL 2026-11-21 the one rain clock (RainState.h, Wetness Effects' weather clock): this frame's rain and wetness before anything
+	// reads them, every frame whatever is switched on (the readers call it too; it runs once a frame).
+	RainState::Tick();
 
 	// Constants of what is on: the families, then the effects (each effect's time kept for the menu).
 	for (const auto& entry : ShaderNames) {

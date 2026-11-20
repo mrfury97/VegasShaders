@@ -5,8 +5,7 @@ void SnowEffect::UpdateConstants() {
 	const bool snowing = TheShaderManager->GameState.isSnow;
 
 	if (snowing && !fall.switched) {
-		// snow has just begun: puddles fade out, the flakes ramp up from nothing
-		TheShaderManager->Effects.WetWorld->Constants.PuddlesAnimator.Start(0.3f, 0.f);
+		// snow has just begun: the flakes ramp up from nothing (2026-11-21: the rain's wetness dries by its own clock, core/RainState.h)
 		fall.switched = true;
 		fall.Initialize(0.f);
 		fall.Start(0.5f, 1.f);

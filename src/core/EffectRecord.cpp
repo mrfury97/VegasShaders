@@ -224,7 +224,7 @@ int EffectRecord::BuildMacros(D3DXMACRO* EffectMacros) {
 	// (ShaderRecord::BuildDefines reads the same setting), so that off the effect's preprocessed source is exactly what it was.
 	if (TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMap")) define("CHARACTER_SHADOW_MAP", "1");
 	// UNOFFICIAL 2026-11-14 GBufferV2 (core/CapturedNormals.h; the MaterialBuffer's layout v2): the effects that read TESR_MaterialBuffer
-	// (WetWorld, BloodFlow's surface) read it the v2 way. Only when on at startup: off, the preprocessed sources are exactly as before.
+	// (BloodFlow's surface; WetWorld did too until 2026-11-21) read it the v2 way. Only when on at startup: off, the preprocessed sources are exactly as before.
 	if (CapturedNormals::V2CompiledIn()) define("GBUFFER_V2", "1");
 
 	EffectMacros[count] = { nullptr, nullptr };	// terminator, not counted

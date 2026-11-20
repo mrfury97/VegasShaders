@@ -7,7 +7,7 @@ While it snows outdoors, the picture gets drifting snowflakes laid over the whol
 - Enabled by the settings section Shaders.Snow.Status, key Enabled (default false). The effect is off out of the box.
 - Per frame it renders only when all of these hold: the snow amount (TESR_SnowData x, section 3) is above zero, the player is outdoors (the cell is not an interior), and the camera is not underwater.
 - The snow amount is animated, not a switch. When the game's weather becomes snow, the amount rises to 1 over 0.5 game hours. When snow stops it falls back to 0 over 0.2 game hours. The effect keeps drawing while the amount is above zero, so the fade-out tail is visible.
-- On the frame snowfall starts, Snow tells the WetWorld effect to fade out its puddles over 0.3 game hours. WetWorld owns that animator; Snow only starts it.
+- (Until 2026-11-21, on the frame snowfall started, Snow told WetWorld to fade out its puddles over 0.3 game hours. WetWorld is removed; the rain's wetness dries by the one rain clock, src/core/RainState.h, and ForceSnow stops that clock's rain.)
 - While the amount is above zero, Snow sets the frame's request for the sun's orthographic shadow map (the map Snow reads), so that map is computed on those frames.
 - Weather state: the game's current weather is the snow type. Setting Shaders.Snow.Main ForceSnow (default false) makes the game count as snowing in any weather and clears the rain flag while it does so. It is applied in the per-frame game-state update, before the effects run.
 - Frame order (src/core/ShaderManager.cpp): inside the weather block that runs after the TAA pass. Rain renders first, then Snow, then the GPU particle draw (off by default), then the legacy bloom. Snow therefore sees Rain's result. In the frame chain's final-effect order Snow is listed right after Rain.
@@ -113,7 +113,7 @@ The snow amount is not a setting. It is driven only by weather and the animator.
 - New D3D9 effect: src/hlsl/NewVegas/Effects/Snow.fx.hlsl. One technique, the same sampler order (rendered, depth, ortho), the same constants. Compiles (fx_2_0, all four defines).
 - Fixed: the division by the fractional product (section 6) is now guarded: the divisor is at least 1, so no zero can reach it.
 - Chosen here, not in the spec: the flake cell grid (40 by 24 per layer), the flake hash and its 0.5 presence threshold, the round flake shape (smooth step to half its edge), the sway amplitude (0.6 cells), and the fall rate per layer (1 + 0.15 x index).
-- The snow-start call that fades WetWorld's puddles is C++ (Snow.cpp) and is unchanged.
+- The snow-start call that faded WetWorld's puddles is gone with WetWorld (2026-11-21).
 - Vulkan path (Compute/Snow.frag, .spv): NOT written yet. Without it the C++ falls back to D3D9.
 
 ## 11. World-space snow (2026-11-09, branch claude/snow-worldspace-73a9a9), contributed by macintroll

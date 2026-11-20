@@ -632,7 +632,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	VolumetricFogEffect* Fog = Effects.VolumetricFog;
 	const bool shadowApplies = GameState.isExterior && wouldRender(Effects.ShadowsExteriors);
 	const bool aoApplies = wouldRender(AO);
-	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) || wouldRender(Effects.WetWorld) || wouldRender(Effects.BloodFlow) ||
+	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) || wouldRender(Effects.BloodFlow) ||
 		wouldRender(Effects.Specular) || wouldRender(Effects.Underwater) ||
 		wouldRender(Effects.BounceLight) || wouldRender(Effects.Reflections) || ambientLight; // must see the scene with its shadows and AO applied
 	// UNOFFICIAL 2026-10-18 InteriorShadowFold ([Main.Main.Performance]; evidence\intshadow-LOG.md): indoors with the forward lamp
@@ -745,8 +745,9 @@ void ShaderManager::PreStep_CoverMapUpdate(ChainContext& ctx) {
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
 	// UNOFFICIAL 2026-10-27 Persistent wetness and snow (CoverMap.h): the cover map's update (its own targets), before its readers
-	// SnowAccumulation and WetWorld; then they draw with its technique while it holds data. Both settings off: nothing here runs.
-	if (TheCoverMap && (TheCoverMap->Settings.wet || TheCoverMap->Settings.snow)) {
+	// SnowAccumulation; then it draws with its technique while it holds data. Its setting off: nothing here runs. (2026-11-21: the wet half
+	// went with WetWorld, its only reader.)
+	if (TheCoverMap && TheCoverMap->Settings.snow) {
 		static GpuTimer coverMapTimer("Cover map update");
 		GpuProfileScope gpu(coverMapTimer, Device);
 		TheCoverMap->RenderUpdate(Device, RenderTarget);
@@ -832,10 +833,10 @@ void ShaderManager::PreStep_AmbientOcclusion(ChainContext& ctx) {
 
 void ShaderManager::PreStep_SpecularBouncePlan(ChainContext& ctx) {
 	// UNOFFICIAL: the bounce light's full-resolution combine goes into the specular's, one pass for both, when nothing renders
-	// between them (the wet world and the flashlight read and change the image there).
+	// between them (2026-11-21: WetWorld, which read and changed the image there, is gone).
 	const bool specularRenders = wouldRender(Effects.Specular) && Effects.Specular->Textures.LightSurface;
 	// (Not with the bounce light's NeonSpill on: its own combine has the spill's debug views and street smoothing.)
-	const bool bounceIntoSpecular = specularRenders && wouldRender(Effects.BounceLight) && !wouldRender(Effects.WetWorld) &&
+	const bool bounceIntoSpecular = specularRenders && wouldRender(Effects.BounceLight) &&
 		Effects.Specular->CanTakeBounce() && !Effects.BounceLight->SpillOn() &&
 		!Effects.BounceLight->HardEdgesOn();
 	ctx.specularRenders = specularRenders;
@@ -940,16 +941,8 @@ void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 		}
 		Effects.HudRaindrops->UpdateWetness(Device);
 		Device->SetRenderTarget(0, RenderTarget);
-		// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status], restart): the surface shaders make the world wet in its
-		// place, so WetWorld's screen pass is not drawn. Its rain tracking (UpdateConstants) still runs: the persistent wet cover, PBR's
-		// rain and the heat haze read it.
-		if (!(Shaders.Wetness && Shaders.Wetness->Enabled)) {
-			Effects.WetWorld->BindShadingNormals(Device);	// (2026-11-18 DeferredBumpedNormals: stage 15, cleared after)
-			Effects.WetWorld->Render(Device, RenderTarget, TheTextureManager->RenderedSurface,
-				TheCoverMap ? TheCoverMap->WetTechnique(Effects.WetWorld, Effects.WetWorld->MainTechnique()) : Effects.WetWorld->MainTechnique(), false, SourceSurface);
-			Effects.WetWorld->ClearPassTextures();
-			PixelInspector::AfterFrame(Effects.WetWorld);
-		}
+		// (2026-11-21: WetWorld's screen-space wet pass was drawn here while Wetness Effects was off. Removed, owner's word: Wetness Effects
+		// and Puddles are the rain wetness, drawn by the surface shaders and the deferred wetness pass; its rain clock is core/RainState.h.)
 		// (2026-11-04: the flashlight and its beam shaft were drawn here; the flashlight is the deferred light now, core/FlashlightDeferred.h)
 		// Specular's two quarter-resolution steps (the blocks' normals, then the light they reflect) into its own buffers,
 		// then its main technique adds that to the image in the chain.
