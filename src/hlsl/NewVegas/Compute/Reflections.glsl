@@ -33,7 +33,7 @@ layout(set = 1, binding = 27) uniform texture2D t_weaponMask;  // UNOFFICIAL 202
 layout(set = 1, binding = 28) uniform texture2D t_film;        // UNOFFICIAL 2026-11-20 DeferredWetness's film (core/DeferredWetness.h FilmTexture: r round(8 murk)
                                                                // + 0.99 gloss, g roughness: never 0 where the wetness was worked out); a placeholder unless film.x is 1
 layout(set = 1, binding = 29) uniform texture2D t_smoothNormals; // UNOFFICIAL 2026-11-20 TESR_NormalsBuffer itself while t_normals holds the normal-mapped normals
-                                                               // (film.x and film.z 1: ViewNormal's wet pixels); a placeholder otherwise
+                                                               // (film.z 1: SmoothViewNormal); a placeholder otherwise
 layout(set = 1, binding = 30) uniform texture2D t_gbAlbedo;    // UNOFFICIAL 2026-11-20 UnifiedReflections: G-buffer v2's COLOR1 (TESR_AlbedoBuffer: rgb the linear base
                                                                // colour, a 0 unwritten); a placeholder unless gbuffer.x is 1 (COLOR2 is t_matbuf, bound for it then)
 layout(set = 1, binding = 31) uniform texture2D t_gbNormals;   // UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR3 (TESR_CapturedNormalsBuffer: b the camera distance, a > 0.99
@@ -195,17 +195,40 @@ bool WeaponAt(vec2 uv) {
     return !WeaponMasked || textureLod(sampler2D(t_weaponMask, POINT_S), uv, 0.0).r > 0.5;
 }
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (owner, second look: "reflections are back to being extremely noisy"): with the normal-mapped
-// normals (film.z) a wet floor's mirror direction changed from pixel to pixel with the grass and dirt bumps; the half-resolution trace and
-// its blur cannot average that out, and widening the roughness (NormalVarianceRoughness) only takes the reflection away. Water levels the
-// small bumps: where DeferredWetness's film says the floor is wet, the normal leans to the smooth one (TESR_NormalsBuffer) by the wet share,
-// all the way on open ground in full rain and in puddles. The bumps stay in the film's own highlight and in dry reflections.
-vec3 ViewNormal(vec2 uv) {
-    vec3 n = normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0);
-    if (cb.film.x > 0.5 && cb.film.z > 0.5) {
+// UNOFFICIAL 2026-11-20 the smooth normal (the vertex normal before the normal map): TESR_NormalsBuffer, which is t_smoothNormals while
+// t_normals holds the normal-mapped normals (film.z), else t_normals itself.
+vec3 SmoothViewNormal(vec2 uv) {
+    return cb.film.z > 0.5 ? normalize(textureLod(sampler2D(t_smoothNormals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0) :
+        normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0);
+}
+
+// UNOFFICIAL 2026-11-20 how much of the normal map's bump the reflection follows (film.z: the normal-mapped normals), 0-1.
+// (Unified reflections, the owner's first look at step 1: "reflections dont seem to be using the normal bump at all". Step 3's specular AA turned
+// every bump into roughness: the per-pixel change of the bumped normal IS the bump, so near tiles, cobbles and dents blurred and handed over to
+// the grid instead of bending the ray. Now a bump bends the ray where it is drawn larger than a pixel, and fades to the smooth normal where its
+// detail would fall under a pixel (aliasing, grain):)
+//  - the footprint: whole while a full-resolution pixel covers up to BumpFootNear world units, the smooth normal from BumpFootFar (at 1440p and
+//    the game's FOV about 12 m and 47 m away);
+//  - wet ground (deferred wetness step 3, the owner's second look: "extremely noisy" with the whole bump under the wet mirror): water levels the
+//    small bumps. Standing water is already flat in the G-buffer (DeferredWetness's flatten, with Puddles compiled in), so here damp ground
+//    leans: at the film's full wet share it keeps 1 - DampBumpLean of its bump (was: none; kept small so the grain the owner saw does not return).
+const float BumpFootNear = 0.5, BumpFootFar = 2.0;
+const float DampBumpLean = 0.8;
+float BumpKeep(vec2 uv) {
+    float footprint = readDepthLod(uv) * 2.0 * cb.reciprocalResolution.x * cb.renderScale.z / cb.projectionTransform[0][0];
+    float keep = 1.0 - smoothstep(BumpFootNear, BumpFootFar, footprint);
+    if (cb.film.x > 0.5 && keep > 0.0) {
         vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
         float wet = f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) : 0.0;
-        if (wet > 0.0) n = normalize(mix(n, normalize(textureLod(sampler2D(t_smoothNormals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0), wet));
+        keep *= 1.0 - DampBumpLean * wet;
+    }
+    return keep;
+}
+vec3 ViewNormal(vec2 uv) {
+    vec3 n = normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0);
+    if (cb.film.z > 0.5) {
+        float keep = BumpKeep(uv);
+        if (keep < 1.0) n = normalize(mix(SmoothViewNormal(uv), n, keep));
     }
     return n;
 }
@@ -466,21 +489,23 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3: specular anti-aliasing for the normal-mapped normals (cb.film.z). A mirror on a normal that
-// changes from pixel to pixel (grass, gravel, a bumpy dirt road under rain) sends every pixel's ray somewhere else: grain that no blur of a
-// sharp reflection hides (proven 2026-11-20 by the owner's toggles: the grainy puddle reflections came with DeferredBumpedNormals on). The
-// roughness is widened by how much the normal varies across the pixel's footprint (Kaplanyan & Hoffman 2016, Tokuyoshi & Kaplanyan 2019:
-// alpha^2 + min(2 sigma^2 |dn|^2, kappa), alpha = roughness^2), from the right and lower neighbours at full resolution; a neighbour on
-// another surface (a depth jump) does not count. A flat normal (standing water, which DeferredWetness flattened) keeps its roughness.
-float NormalVarianceRoughness(vec2 uv, float depth, vec3 n, float roughness) {
+// UNOFFICIAL 2026-11-20 specular anti-aliasing (cb.film.z: the normal-mapped normals are in use). The roughness is widened by how much the
+// SMOOTH normal bends across the pixel's footprint (Kaplanyan & Hoffman 2016, Tokuyoshi & Kaplanyan 2019: alpha^2 + min(2 sigma^2 |dn|^2,
+// kappa), alpha = roughness^2), from the right and lower neighbours at full resolution; a neighbour on another surface (a depth jump) does not
+// count. The geometry's own curvature (a small pipe, a sphere's rim far away) is what aliases a sharp mirror there; flat floors and walls add
+// nothing. (Step 3 measured the normal-mapped normal, which made every bump a roughness: the owner saw no bumps; the bump's aliasing is
+// BumpKeep's fade now.)
+float NormalVarianceRoughness(vec2 uv, float depth, float roughness) {
     const float Sigma2 = 0.15915494;   // 1 / (2 pi)
-    const float Kappa = 0.18;          // the most the footprint may add (alpha^2)
+    const float Kappa = 0.015;         // the most the footprint may add (alpha^2; was 0.18 on the bumped normal): 0.35^4, so the AA alone never
+                                       // pushes a mirror past the trace's hand-over to the grid (ReflectionsTrace.frag)
+    vec3 n = SmoothViewNormal(uv);
     float sum = 0.0;
     vec2 px = cb.reciprocalResolution.xy;
     for (int i = 0; i < 2; i++) {
         vec2 q = uv + (i == 0 ? vec2(px.x, 0.0) : vec2(0.0, px.y));
         if (abs(readDepthLod(q) - depth) > depth * 0.02 + 1.0) continue;
-        vec3 d = ViewNormal(q) - n;
+        vec3 d = SmoothViewNormal(q) - n;
         sum += dot(d, d);
     }
     float a = roughness * roughness;
@@ -502,8 +527,8 @@ float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
     if (amount <= 0.0 || SurfaceWater || IsWeapon(uv)) mirror = cb.grid3.w < 0.0 ? 0.0 : mirror;
     SurfaceMirror = mirror;
     if (mirror > 0.0 && amount > 0.0 && !SurfaceWater && !IsWeapon(uv)) roughness = mix(roughness, min(roughness, DryRoughness), mirror);
-    // (2026-11-20) the bumped normals' footprint (NormalVarianceRoughness), after Mirror: it is the pixel's, not the material's
-    if (cb.film.z > 0.5 && amount > 0.0 && !SurfaceWater && !IsWeapon(uv)) roughness = NormalVarianceRoughness(uv, depth, normalize(viewNormal), roughness);
+    // (2026-11-20) the geometry's curvature over the pixel's footprint (NormalVarianceRoughness), after Mirror: it is the pixel's, not the material's
+    if (cb.film.z > 0.5 && amount > 0.0 && !SurfaceWater && !IsWeapon(uv)) roughness = NormalVarianceRoughness(uv, depth, roughness);
     return amount;
 }
 

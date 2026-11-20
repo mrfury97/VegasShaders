@@ -259,13 +259,23 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   guess (TESR_ReflectionsData.y), the puddle field and the material buffer's puddle mask are not used then (`Reflections.glsl` FilmWetness).
   Without a whole film this frame: as before. The D3D9 technique is unchanged. (The first build took the film's own roughness, 0.61 on damp
   ground and the Puddles Roughness in puddles: past the trace's 0.35 grid hand-over, no reflection showed; owner 2026-11-20.)
-- Wet pixels mirror along the smooth normal (`ViewNormal`; set 1 binding 29 / slot 28 `t_smoothNormals` = TESR_NormalsBuffer while t_normals
-  holds the bumped normals): the normal leans to it by the film's wet share. Why: the owner's second look (2026-11-20), wet reflections
-  extremely noisy with DeferredBumpedNormals on. Dry reflections keep the bumps.
-- `NormalVarianceRoughness` (`cb.film.z`: the normals are the normal-mapped shading normals, `[Main.Main.Quality] DeferredBumpedNormals` or
-  `DeferredReflections`): the roughness is widened by how much the normal changes to the right and lower full-resolution neighbour
-  (alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.18), Kaplanyan / Tokuyoshi; a depth jump over 2 % not counted), after Mirror, not on water or the
-  weapon. Why: a sharp mirror on the bumped normal was grainy on grass and dirt (owner's toggles, 2026-11-20).
+- Wet pixels lean to the smooth normal (`ViewNormal` / `BumpKeep`; set 1 binding 29 / slot 28 `t_smoothNormals` = TESR_NormalsBuffer while
+  t_normals holds the bumped normals). Why: the owner's second look (2026-11-20), wet reflections extremely noisy with DeferredBumpedNormals on.
+  (2026-11-20, unified reflections, the owner's first look at step 1: "reflections dont seem to be using the normal bump at all") Standing
+  water is flat in the G-buffer already (DeferredWetness's flatten), so the lean is for damp ground only and partial: at the film's full wet
+  share the bump keeps 20 % (DampBumpLean 0.8; was 0 %; review: more risks the grain the owner saw).
+- The bump's fade (`BumpKeep`, `cb.film.z`: the normals are the normal-mapped shading normals, DeferredBumpedNormals, DeferredReflections or
+  UnifiedReflections): the reflection follows the whole bump while a full-resolution pixel covers up to 0.5 world units, the smooth normal from
+  2.0 (at 1440p about 12 m and 47 m), smoothstep between: bumps bend the ray where they are drawn larger than a pixel and do not alias into
+  grain where they are not.
+- `NormalVarianceRoughness` (`cb.film.z`): the roughness is widened by how much the SMOOTH normal changes to the right and lower full-resolution
+  neighbour (alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.015 = 0.35^4: never past the trace's hand-over by itself), Kaplanyan / Tokuyoshi; a depth jump over 2 % not counted), after Mirror, not on water
+  or the weapon: the geometry's own curvature. (2026-11-20 step 3 measured the bumped normal with kappa 0.18: every visible bump became
+  roughness, about 0.5-0.65, past the trace's 0.35 hand-over and fully blurred: the owner saw no bumps at all. The bump's aliasing is the
+  fade above now.)
+- DebugView 12 (Vulkan passes): red the bend from the smooth normal (full at 20 degrees), green the final roughness, on reflecting pixels.
+- What wrong looks like now: grain back on wet dirt, gravel or cobbles near the camera (lower the 20 %: DampBumpLean; or the footprint
+  numbers), or bumps that still do not show near the camera (DebugView 12: red should follow the tiles' and cobbles' edges up close).
 - Look: wet ground mirrors at WetRoughness where the film says it is wet; bumpy wet ground (DeferredBumpedNormals on) softer by its bumps. Wrong: puddles that do not
   mirror at all in rain (the film not bound: the log's DeferredWetness lines), or grain back on bumpy ground with DeferredBumpedNormals on.
 - Shader files: all eleven Reflections*.spv that include Reflections.glsl were rebuilt (six use the film: Trace, TraceHiZ, Blur, Temporal,
@@ -289,7 +299,7 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
   first person). Those pixels take the floor rule with the Look's roughness, as a pixel without material data always did; the water, the
   glass mask and the weapon are decided before any of this, as before (the weapon keeps MaterialAware's MaterialAt, the copy made for it).
 - **Normals**: the shading normals in every frame it is used (FdIndirect ShadingNormals, as DeferredBumpedNormals; "on but not used" leaves
-  them as they were), so the Vulkan passes' specular AA
+  them as they were), so the Vulkan passes' bump fade and specular AA (2026-11-20: see the film section: bumps bend the ray near the camera)
   (NormalVarianceRoughness) and the wet pixels' lean to the smooth normal (binding 29) run; ray starts and AboveSurface as before.
 - **Coverage**: today's floors plus the specular objects above. Probe-only on every surface is step 3.
 - **Back ends**: the Vulkan passes follow the switch live (bindings 30 `t_gbAlbedo` = COLOR1 and 31 `t_gbNormals` = COLOR3, slots 29 / 30;
@@ -302,6 +312,9 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
   Believed, not checked: D3DX applies the aliased samplers' own POINT sampler_state at BeginPass, over the cubes' states SetCT gave 8 / 9.
 - **Off**: the D3D9 effect's disassembly is identical to before (checked offline, plain and MaterialAware builds); the Vulkan passes skip the
   new code (gbuffer.x 0). All twelve Reflections*.spv were rebuilt (new bindings and uniform).
+- Menu: while the switch is on in mode 2, `[Main.Main.Quality] DeferredReflections` and `[Shaders.Reflections.Main] MaterialAware`,
+  `MaterialBufferRoughness` are hidden (ImGuiManager.cpp UnifiedReflectionsHides; the keys keep working from the file). DeferredBumpedNormals
+  stays: it also bumps Wetness Effects' wet reflections and WetWorld's surface.
 - Log: `UNOFFICIAL Reflections UnifiedReflections: on (the Vulkan passes): ...`, `... on but not used now: <why>`, `... off ...` (a line when
   the answer changes). DebugView 7 shows the G-buffer's material as decoded (dark red rough / blue smooth / green-yellow metal: reflects any
   way; grey-white + green: the floor rule's known materials; dimmed: no record).
