@@ -245,14 +245,15 @@ float FilmWetness(float2 uv, out float roughness) {
 	roughness = min(max(f.g, 0.01), WetRoughness);
 	return f.g > 0.001 ? saturate(saturate(frac(f.r) / 0.99) * TESR_ReflectionsFilm.w) * TESR_ReflectionsFilm.y : 0.0;
 }
-// How much of the bump the reflection follows: whole up to 0.5 world units per pixel, none from 2.0; damp ground keeps 20 % at full wet.
+// How much of the bump the reflection follows: whole up to 0.5 world units per pixel, none from 2.0; damp ground keeps 1 - DampBumpLean of it
+// at full wet (Reflections.glsl: 0 since 2026-11-20, the owner's "keep 100% of its bump").
 float BumpKeep(float2 uv) {
 	float footprint = readDepthLod(uv) * 2.0 * rectToScreen(TESR_ReciprocalResolution.xy).x / TESR_ProjectionTransform[0][0];
 	float keep = 1.0 - smoothstep(0.5, 2.0, footprint);
 	[branch] if (TESR_ReflectionsFilm.x > 0.5 && keep > 0.0) {
 		float4 f = tex2Dlod(NVR_ReflectionsFilm, float4(uv, 0, 0));
 		float wet = f.g > 0.001 ? saturate(saturate(frac(f.r) / 0.99) * TESR_ReflectionsFilm.w) : 0.0;
-		keep *= 1.0 - 0.8 * wet;
+		keep *= 1.0 - 0.0 * wet;
 	}
 	return keep;
 }

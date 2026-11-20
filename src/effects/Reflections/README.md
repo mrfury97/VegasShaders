@@ -263,7 +263,9 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   t_normals holds the bumped normals). Why: the owner's second look (2026-11-20), wet reflections extremely noisy with DeferredBumpedNormals on.
   (2026-11-20, unified reflections, the owner's first look at step 1: "reflections dont seem to be using the normal bump at all") Standing
   water is flat in the G-buffer already (DeferredWetness's flatten), so the lean is for damp ground only and partial: at the film's full wet
-  share the bump keeps 20 % (DampBumpLean 0.8; was 0 %; review: more risks the grain the owner saw).
+  share the bump keeps 100 % (DampBumpLean 0; 2026-11-20 owner: "make Wet ground keep 100% of its bump"; was 20 %, and 0 % before that). The
+  puddles stay flat: that is DeferredWetness's own flatten of the G-buffer's shading normal under standing water (with Puddles compiled in),
+  not this lean.
 - The bump's fade (`BumpKeep`, `cb.film.z`: the normals are the normal-mapped shading normals, DeferredBumpedNormals, DeferredReflections or
   UnifiedReflections): the reflection follows the whole bump while a full-resolution pixel covers up to 0.5 world units, the smooth normal from
   2.0 (at 1440p about 12 m and 47 m), smoothstep between: bumps bend the ray where they are drawn larger than a pixel and do not alias into
@@ -274,7 +276,7 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   roughness, about 0.5-0.65, past the trace's 0.35 hand-over and fully blurred: the owner saw no bumps at all. The bump's aliasing is the
   fade above now.)
 - DebugView 12 (Vulkan passes): red the bend from the smooth normal (full at 20 degrees), green the final roughness, on reflecting pixels.
-- What wrong looks like now: grain back on wet dirt, gravel or cobbles near the camera (lower the 20 %: DampBumpLean; or the footprint
+- What wrong looks like now: grain back on wet dirt, gravel or cobbles near the camera (raise DampBumpLean again; or the footprint
   numbers), or bumps that still do not show near the camera (DebugView 12: red should follow the tiles' and cobbles' edges up close).
 - Look: wet ground mirrors at WetRoughness where the film says it is wet; bumpy wet ground (DeferredBumpedNormals on) softer by its bumps. Wrong: puddles that do not
   mirror at all in rain (the film not bound: the log's DeferredWetness lines), or grain back on bumpy ground with DeferredBumpedNormals on.
