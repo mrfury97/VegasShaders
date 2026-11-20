@@ -123,12 +123,15 @@ Owner in game 2026-11-20 (install-test9): step 2 "Looks right".
 Under the same switch (test only, off). Three parts:
 - **The Reflections effect reads the film** (Vulkan passes only: `Compute/Reflections.glsl` FilmWetness, `effects/Reflections/Reflections.cpp`
   binding 28 / slot 27 and `cb.film`). In a frame the film covers the whole screen (`DeferredWetness::FilmWhole()`: the fallback below drew, after
-  pass A if it ran; review: with the fallback off the film holds pass A's pixels only and the rest would turn dry), a floor's wet share is the film's gloss x RainWetness (outdoors) and its wet roughness the film's (the water's under standing
-  water, the film's elsewhere), for the floor guess and MaterialAware's floors alike. The rain guess (Data.y) and the puddle field
-  (PuddleStanding, the material buffer's mask) are not used then; a pixel without a film (sky, skin, grass, first person, far land) is dry
-  there. No whole film this frame (dry, indoors, the fallback off): as before. Change in look: wet ground away from puddles mirrors at the film's
-  roughness (Wetness Effects' rain roughness, 0.3-0.6 in the owner's rain, believed from the code) instead of WetRoughness 0.069: softer, as its
-  highlight; puddles at the Puddles Roughness as before. The D3D9 Reflections technique (no NVR DXVK) is unchanged: it keeps its rain guess.
+  pass A if it ran; review: with the fallback off the film holds pass A's pixels only and the rest would turn dry), the film decides WHERE the
+  floors are wet and how much: wet share = saturate(gloss / MaxRainWetness) x RainWetness outdoors (open ground in full rain counts 1, as the
+  rain guess did), for the floor guess and MaterialAware's floors alike. The rain guess (Data.y) and the puddle field (PuddleStanding, the
+  material buffer's mask) are not used then; a pixel without a film (sky, skin, grass, first person, far land) is dry there. No whole film this
+  frame (dry, indoors, the fallback off): as before. The mirror's blur is WetRoughness, at most the film's roughness (a smoother puddle keeps
+  its own). First build (install-test10) took the film's roughness itself: owner, 2026-11-20, "dont seem to see any reflections" (PROVEN
+  cause from the code and the owner's settings: damp ground lerp(1, 0.22, rain) = 0.61 at MaxRainWetness 0.5, puddles 0.36 = their Puddles
+  Roughness, both past the 0.35 where ReflectionsTrace.frag hands over to the light grid; the gloss 0.5 also halved the strength). Fixed in
+  the second build (install-test11). The D3D9 Reflections technique (no NVR DXVK) is unchanged: it keeps its rain guess.
 - **Specular anti-aliasing** (`Reflections.glsl` NormalVarianceRoughness; cb.film.z = the normals are FdIndirect's normal-mapped shading
   normals, i.e. DeferredBumpedNormals or DeferredReflections on): alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.18) from the right and lower full-
   resolution neighbours (a depth jump over 2 % is not counted), applied in Reflectivity after Mirror, not to water, the weapon or glass-free
@@ -153,8 +156,8 @@ Under the same switch (test only, off). Three parts:
 - **One switch** (`SettingManager` RainWetnessOneSwitch = the saved DeferredWetness): Wetness Effects' row is called "Rain wetness"; Puddles'
   switch follows it (`Configuration::ApplyRainWetnessSwitch` sets Puddles' saved Enabled when the files are read, SetMenuShaderEnabled sets both,
   SwitchShaderStatus refuses Puddles alone; saved, Puddles keeps that value if DeferredWetness is turned off again); Puddles' row shows no
-  switch, WetWorld's none while Rain wetness is on (its screen pass already draws only when Wetness Effects is not live: EffectChain.cpp); `[Shaders.Puddles.Main] ReflectionPuddles` and `[Shaders.Reflections.Main] WetRoughness` are hidden
-  (no effect in film frames). No default changed: no settings version. Off: the menu as before.
+  switch, WetWorld's none while Rain wetness is on (its screen pass already draws only when Wetness Effects is not live: EffectChain.cpp); `[Shaders.Puddles.Main] ReflectionPuddles` is hidden
+  (no effect in film frames; WetRoughness was hidden in the first build, shown again: it is the wet mirror's blur). No default changed: no settings version. Off: the menu as before.
 Offline (2026-11-20, the owner's toml defines): pass A 963 slots (unchanged), fallback 762, restore 18, all device ok; WetnessReflections.fx both
 variants PASS; the eleven Reflections*.spv rebuilt (an unchanged source rebuilt byte-identical first) and spirv-val clean; DLL built.
 Lead-architect review: approve with fixes, applied: (1) the fallback's G-buffer / depth / upscale guards; (2) the water level per model and
@@ -163,7 +166,8 @@ only while Rain wetness is on; (8) no multisampled target; (9) the render rect o
 minor), (10) ReflectionsTraceHiZCount.spv (debug counting build) not rebuilt and the shader-file log's old hash table (says OLD), (11) a
 fully fogged near-land pixel (albedo alpha exactly 1) gets the fallback's film over pass A's (invisible under full fog).
 Installed for testing 2026-11-20 (install-test10: test-p1a-bump a1307d6 = install-test9 + this step; 16 files: DLL, pdb, defaults,
-DeferredWetness.hlsl, WetnessReflections.fx.hlsl, eleven Reflections*.spv; restore `F:\VS-scratch\install-test10-2026-11-20estore.ps1` -> test9).
+DeferredWetness.hlsl, WetnessReflections.fx.hlsl, eleven Reflections*.spv; restore `F:\VS-scratch\install-test10-2026-11-20
+estore.ps1` -> test9).
 Not run in game. Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback drew", no "the fallback is off this session".
 Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
 mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).

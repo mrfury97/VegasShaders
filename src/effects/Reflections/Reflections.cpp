@@ -57,6 +57,10 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.MirrorLampHighlight = TheSettingManager->GetSettingF(section, "MirrorLampHighlight");
 	Settings.MirrorLampHighlight = Settings.MirrorLampHighlight == Settings.MirrorLampHighlight ? std::clamp(Settings.MirrorLampHighlight, 0.0f, 1.0f) : 1.0f;
 	Settings.WetRoughness = std::clamp(TheSettingManager->GetSettingF(section, "WetRoughness"), 0.02f, 1.0f);
+	{	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the film's gloss of open ground in full rain is MaxRainWetness (Reflections.glsl FilmWetness)
+		const float maxRain = TheSettingManager->GetSettingF("Shaders.WetnessEffects.Main", "MaxRainWetness");
+		Settings.FilmRainScale = 1.0f / (std::max)(maxRain == maxRain ? maxRain : 1.0f, 0.05f);
+	}
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
 	Settings.Thickness = std::clamp(TheSettingManager->GetSettingF(section, "Thickness"), 0.1f, 10.0f);
@@ -1519,8 +1523,9 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// field; z: the normals are the normal-mapped ones (FdReflNormals put them in), so the passes widen the roughness by their variance
 	// (NormalVarianceRoughness: the grain of a mirror on bumpy ground)
 	IDirect3DTexture9* film = DeferredWetness::FilmWhole() ? DeferredWetness::FilmTexture : nullptr;
+	// w (2026-11-20, owner's first look): 1 / MaxRainWetness, so open ground in full rain counts as fully wet, as the rain guess did
 	uniforms.film = D3DXVECTOR4(film ? 1.0f : 0.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f,
-		normals != SlotTexture("TESR_NormalsBuffer") ? 1.0f : 0.0f, 0.0f);
+		normals != SlotTexture("TESR_NormalsBuffer") ? 1.0f : 0.0f, Settings.FilmRainScale);
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));

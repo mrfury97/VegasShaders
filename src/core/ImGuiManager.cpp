@@ -904,8 +904,8 @@ static bool IsInternalSetting(const std::string& section, const std::string& key
 // (ShowInternal): never a row, on its page, in the search or in the simple views, and not counted as a hidden developer setting.
 // UNOFFICIAL 2026-11-20 deferred wetness step 3 (SettingManager::RainWetnessOneSwitch): with DeferredWetness on, Puddles and WetWorld have no switch
 // of their own in the menu (Puddles follows "Rain wetness", Wetness Effects' switch; WetWorld's screen pass is only the fallback where the surfaces
-// have no water layer), and the Reflections effect takes the floors' water and roughness from the film, so ReflectionPuddles and WetRoughness do
-// nothing there: hidden. Their saved values stay.
+// have no water layer), and the Reflections effect takes the floors' water from the film, so ReflectionPuddles does nothing there: hidden (its
+// saved value stays). WetRoughness stays: it is the wet mirror's blur (2026-11-20, Reflections.glsl FilmWetness).
 static bool RainWetnessLinked(const std::string& shader) {
 	if (!TheSettingManager->RainWetnessOneSwitch()) return false;
 	// (review 2026-11-20) WetWorld only while Rain wetness is on: off, its screen pass draws (EffectChain.cpp) and keeps its own switch
@@ -914,8 +914,7 @@ static bool RainWetnessLinked(const std::string& shader) {
 
 static bool InternalHidden(const std::string& section, const std::string& key) {
 	if (ShelvedEffects::Section(section)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only), whatever ShowInternal says
-	if (((section == "Shaders.Puddles.Main" && key == "ReflectionPuddles") || (section == "Shaders.Reflections.Main" && key == "WetRoughness")) &&
-		TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
+	if (section == "Shaders.Puddles.Main" && key == "ReflectionPuddles" && TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
 	return !gMenu.showInternal && IsInternalSetting(section, key);
 }
 
