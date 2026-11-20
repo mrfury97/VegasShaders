@@ -145,12 +145,22 @@ FB_OUT main(PS_IN IN) {
     // film as "water here", so a film on grass blades made a sharp sky mirror of them.
     const float cls = r > 0.5f ? FDModel(r) : 0.0f;
     const bool noLayer = abs(cls - 6.0f) < 0.5f || abs(cls - 7.0f) < 0.5f || cls > 8.5f;
-    const bool skip = byPass || noLayer || (a > 1.0001f && a < 4.5f) || viewModel || viewZ >= TESR_CameraData.y * 0.999f || viewZ > DW_FB.y;
+    // (2026-11-21) a stale record: something drew over the G-buffer after the records (the game's grass, which writes no record outside path
+    // tracing; water, glass), so COLOR3's camera distance is not this pixel's (core/CapturedNormals.h Data y z: 0.4 % + 2 units). The pass in
+    // the sun pass gave the ground under it a film, which the readers would take for the grass blade's own: on grass that was a mirror of the
+    // ground's water on normals rebuilt from depth, different per blade and per frame as the wind moves it. Such pixels, and the noLayer
+    // records, get their film cleared (not clipped: clipping keeps the pass's film), the colour as it is.
+    const float4 cn = tex2Dlod(TESR_CapturedNormalsBuffer, uv4);
+    const float dist = length(DDRay(IN.vpos, DD[0], DD[1], DD[2], DD[3], DD[5]) * viewZ);
+    const bool stale = a > 0.5f && !(cn.a > 0.99f && abs(cn.b - dist) <= dist * 0.004f + 2.0f);
+    const bool clearFilm = stale || noLayer;
+    const bool away = viewModel || viewZ >= TESR_CameraData.y * 0.999f || viewZ > DW_FB.y;
+    const bool skip = away || (!clearFilm && (byPass || (a > 1.0001f && a < 4.5f)));
     clip(skip ? -1.0f : 1.0f);
     o.frame = float4(tex2Dlod(DW_Frame, uv4).rgb, 1.0f);
     o.film = 0.0f;
     // (clip does not end the shader: the work only where the pixel stays)
-    [branch] if (!skip) {
+    [branch] if (!skip && !clearFilm) {
     const float3 P = DDRay(IN.vpos, DD[0], DD[1], DD[2], DD[3], DD[5]) * viewZ;
     const float3 nv = tex2Dlod(TESR_NormalsBuffer, uv4).xyz * 2.0f - 1.0f;	// view space (x right, y up, z forward)
     float3 N = normalize(DD[0].xyz * nv.x + DD[1].xyz * nv.y + DD[2].xyz * nv.z);

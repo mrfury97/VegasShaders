@@ -150,7 +150,10 @@ Under the same switch (test only, off). Three parts:
   standing water, + the film's sky reflection, faded out from 0.7 to 1 x 10,240 units (the film's gloss with it). The water level as the
   forward records got it: land (model 4) the real level, worn gear, hair and plants 0, other objects and unwritten pixels only with ObjectPuddles
   (on for the owner). No film at all on skin, grass, eyes and unlit (2026-11-21, slot run: grass with the ObjectPuddles level became a sharp
-  sky mirror in the Reflections effect). No fog round trip on unwritten pixels (their fog is unknown): believed darker blobs far away in dense rain fog. Skipped: sky, water plane (Reflections' test), first-person
+  sky mirror in the Reflections effect). Film cleared (not skipped) on a stale record: COLOR3's camera distance not this pixel's (0.4 % + 2
+  units), i.e. something drew over the records later. The game's grass writes no record outside path tracing, so its pixels kept the
+  ground's film from the sun-pass pass and Reflections mirrored the blades on depth-rebuilt normals (believed: the owner's grainy,
+  boiling wet grass in motion). No fog round trip on unwritten pixels (their fog is unknown): believed darker blobs far away in dense rain fog. Skipped: sky, water plane (Reflections' test), first-person
   view model, past 10,240 units. GetWetness with the records' defines, from TESR_DepthBuffer and TESR_NormalsBuffer (view -> world through the
   DeferredDepth frame block's camera axes), no height. No sun highlight and no lamp streaks on unwritten pixels (believed minor in rain).
   Needs the frame and the film at one size and format, no multisampling (one MRT draw): otherwise off for the session, logged. Runs only with
