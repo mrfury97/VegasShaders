@@ -61,6 +61,14 @@ void ReflectionsEffect::UpdateSettings() {
 		const float maxRain = TheSettingManager->GetSettingF("Shaders.WetnessEffects.Main", "MaxRainWetness");
 		Settings.FilmRainScale = 1.0f / (std::max)(maxRain == maxRain ? maxRain : 1.0f, 0.05f);
 	}
+	{	// UNOFFICIAL 2026-11-21 damp ground to the cube (Reflections.glsl FilmWetness): DampTrace, an Internal A/B key (missing = false, the cube);
+		// the film's roughness under standing water is the Puddles Roughness with Puddles on, else Wetness Effects' floor for its own puddles (0.05)
+		Settings.DampTrace = TheSettingManager->GetSettingI(section, "DampTrace") != 0;
+		const bool puddlesOn = TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") != 0 &&
+			TheSettingManager->GetSettingI("Shaders.Puddles.Main", "Quality") > 0;
+		const float standing = puddlesOn ? TheSettingManager->GetSettingF("Shaders.Puddles.Main", "Roughness") : 0.05f;
+		Settings.FilmStandingRoughness = standing == standing ? std::clamp(standing, 0.01f, 0.5f) : 0.05f;
+	}
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
 	Settings.Thickness = std::clamp(TheSettingManager->GetSettingF(section, "Thickness"), 0.1f, 10.0f);
@@ -1223,6 +1231,7 @@ namespace {
 		D3DXVECTOR4	mirrorLamp, sunDirection;	// UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl)
 		D3DXVECTOR4	puddle, puddle2;	// 2026-11-08 Puddles (PuddlesShaders::ReflectionData): the standing water's field (Reflections.glsl PuddleStanding)
 		D3DXVECTOR4	film;	// UNOFFICIAL 2026-11-20 deferred wetness step 3: x 1 = t_film holds this frame's film, y its strength, z 1 = bumped normals (Reflections.glsl FilmWetness, NormalVarianceRoughness)
+		D3DXVECTOR4	film2;	// UNOFFICIAL 2026-11-21 x 1 = damp ground to the cube (not DampTrace), y the film's standing-water roughness (Reflections.glsl FilmWetness)
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1527,6 +1536,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// w (2026-11-20, owner's first look): 1 / MaxRainWetness, so open ground in full rain counts as fully wet, as the rain guess did
 	uniforms.film = D3DXVECTOR4(film ? 1.0f : 0.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f,
 		normals != SlotTexture("TESR_NormalsBuffer") ? 1.0f : 0.0f, Settings.FilmRainScale);
+	uniforms.film2 = D3DXVECTOR4(Settings.DampTrace ? 0.0f : 1.0f, Settings.FilmStandingRoughness, 0.0f, 0.0f);	// (2026-11-21)
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));

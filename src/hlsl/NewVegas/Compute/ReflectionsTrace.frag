@@ -13,6 +13,10 @@ void main() {
     float amount = Reflectivity(pixelUV, depth, N, roughness);
     if (amount <= 0.0) { o_color = vec4(0.0); return; }
 
+    // (2026-11-21, Reflections.glsl FilmWetness) damp ground's share of the reflection: no screen trace and no random spread there, the
+    // cube / grid / sky along the plain mirror direction at the film's own roughness. Standing water traces as before.
+    float damp = SurfaceDamp;
+    bool dampOnly = damp > 0.999;
     vec3 position = ViewPosition(pixelUV, depth);
     vec3 V = normalize(position);   // eye -> surface
 
@@ -28,7 +32,7 @@ void main() {
     // (2026-11-06) a mirror (roughness under 0.03) traces the exact mirror ray, the same every frame (no spread, a fixed march offset
     // below): no noise to average, so ReflectionsTemporal keeps no history there (the history smeared what mirrors show)
     const bool mirrorPixel = roughness < 0.03;
-    if (mirrorPixel) H = N;
+    if (mirrorPixel || dampOnly) H = N;
     vec3 R = reflect(V, H);
     if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
     R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
@@ -38,7 +42,7 @@ void main() {
     float lastT = 0.0;
     float lastZ = position.z;
     float hitT = -1.0;
-    bool searching = true;
+    bool searching = !dampOnly;
     for (float i = 1.0; i <= Steps && searching; i += 1.0) {
         float s = (i - 1.0 + jitter) / Steps;
         float t = RayLength * s * s + 2.0;
@@ -72,6 +76,7 @@ void main() {
             confidence = saturate(min(edge.x, edge.y) * 12.0) * (1.0 - smoothstep(0.75, 1.0, hi / RayLength));
         }
     }
+    confidence *= 1.0 - damp;   // (2026-11-21) the damp share is the fallbacks' below
     // What the ray did not find on screen: the surroundings cube and (GridFallback) the light grid along it, then (outdoors)
     // the sky if it points up into it. Each fills only the share still missing (premultiplied sums).
     vec3 sum = colour * confidence;
