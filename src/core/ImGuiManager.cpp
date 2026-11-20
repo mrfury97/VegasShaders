@@ -954,7 +954,7 @@ static bool InternalHidden(const std::string& section, const std::string& key) {
 	if (section == "Shaders.Puddles.Main" && key == "ReflectionPuddles" && TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
 	if (RainWetnessDeadKey(section, key)) return true;	// (2026-11-20)
 	// (2026-11-20, owner: "what can we remove from the menu") Reflections' Hi-Z walk: measured slower, its other keys test only (defaults.toml)
-	if (section == "Shaders.Reflections.Main" && key.compare(0, 3, "HiZ") == 0) return !gMenu.showInternal;
+	if (section == "Shaders.Reflections.Main" && (key.compare(0, 3, "HiZ") == 0 || key == "DampTrace")) return !gMenu.showInternal;	// (2026-11-21: DampTrace, an A/B test key)
 	return !gMenu.showInternal && IsInternalSetting(section, key);
 }
 

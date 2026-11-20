@@ -87,6 +87,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 gbuffer;               // UNOFFICIAL 2026-11-20 UnifiedReflections (docs/unified-reflections-design.md step 1): x 1 = the surfaces' material is the
                                 // G-buffer's (t_matbuf = COLOR2, t_gbAlbedo, t_gbNormals) and MaterialAware's copy was not made this frame; y, z the
                                 // distance match's share and units (TESR_CapturedNormalsData y, z: core/FdIndirectShaders.h kShadingNormalsPS's)
+    vec4 film2;                 // UNOFFICIAL 2026-11-21 damp ground to the cube: x 1 = on ([Shaders.Reflections.Main] DampTrace false),
+                                // y the standing water's roughness in the film ([Shaders.Puddles.Main] Roughness; 0.05 without Puddles), zw 0
 } cb;
 
 layout(push_constant) uniform Push {
@@ -305,9 +307,20 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
 // puddle, through the dirt's bumps: a speckled sky. The blur is now the film's own, held between WetRoughness (standing water: the
 // owner's sharp puddles) and DampMaxRoughness (damp ground: blurred, yet under the 0.35 hand-over, so it still shows).
 const float DampMaxRoughness = 0.3;
+// (2026-11-21, owner's save reflection01: the damp dirt's reflection still broke into white speckles at mid distance; docs/reflection-speckle.md)
+// Damp ground is no longer traced (owner: "Yes, try it"): a ray bent by one pixel's bump at a low angle flips between bright sky and dark
+// ground block by block, which no blur averages. As Community Shaders does wet ground, damp ground reads the surroundings cube (pre-blurred
+// by roughness), then the light grid and the sky, at the film's OWN roughness, along the plain mirror direction; only standing water keeps the
+// trace at the sharp blur above. Which is which: under standing water the film's roughness is the Puddles Roughness (cb.film2.y), damp
+// ground is rougher (Wetness Effects' lerp(1, 0.22, rain)); the soaked rim (0.12) sits between and blends. SurfaceDamp carries the damp share
+// of the pixel's reflection to the trace passes (0 = traced as before, 1 = cube only). DampTrace (cb.film2.x 0) keeps the old way.
+float SurfaceDamp = 0.0;
+float FilmDamp = 0.0;   // FilmWetness's damp share of the film itself (Reflectivity scales it by the wet part of the amount into SurfaceDamp)
 float FilmWetness(vec2 uv, out float roughness) {
     vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
-    roughness = clamp(f.g, min(WetRoughness, DampMaxRoughness), DampMaxRoughness);
+    float sharp = clamp(f.g, min(WetRoughness, DampMaxRoughness), DampMaxRoughness);
+    FilmDamp = cb.film2.x > 0.5 && f.g > 0.001 ? smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, f.g) : 0.0;
+    roughness = mix(sharp, max(f.g, 0.01), FilmDamp);
     return f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) * cb.film.y : 0.0;
 }
 
@@ -402,6 +415,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     float maxRough = cb.material.y;
     float dry = cb.material.z * (1.0 - smoothstep(0.6 * maxRough, maxRough, material.r));
     float wetness = 0.0, standing = 0.0, wetRoughness = WetRoughness;
+    FilmDamp = 0.0;
     if (FilmOn) { if (floorShare > 0.0) wetness = FilmWetness(uv, wetRoughness) * floorShare; }   // 2026-11-20 the film (above)
     else {
     wetness = Wetness * floorShare;
@@ -412,6 +426,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     float amount = dry + wetness;
     roughness = mix(roughness, wetRoughness, wetness / max(amount, 1.0e-4));
     roughness = mix(roughness, cb.puddle2.z, standing);
+    SurfaceDamp = FilmDamp * wetness / max(amount, 1.0e-4);   // (2026-11-21, FilmWetness)
     SurfaceMetal = material.g;
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * fade;
@@ -490,6 +505,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     }
     roughness = mix(dryRoughness, wetRoughness, wetness / max(amount, 1.0e-4));
     roughness = mix(roughness, cb.puddle2.z, standing);
+    SurfaceDamp = FilmDamp * wetness / max(amount, 1.0e-4);   // (2026-11-21, FilmWetness)
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
@@ -526,6 +542,7 @@ float NormalVarianceRoughness(vec2 uv, float depth, float roughness) {
 // RoughnessOverrides) get Mirror; the rest reflect as with Mirror 0. SurfaceMirror carries the surface's share to the composite.
 float SurfaceMirror = 0.0;
 float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
+    SurfaceDamp = 0.0; FilmDamp = 0.0;   // (2026-11-21: set again below only on a filmed floor)
     float amount = ReflectivityOwn(uv, depth, viewNormal, roughness);
     float mirror = saturate(abs(cb.grid3.w));
     if (cb.grid3.w < 0.0 && roughness >= 0.05) mirror = 0.0;

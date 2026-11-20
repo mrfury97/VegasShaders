@@ -43,6 +43,10 @@ void main() {
     float amount = Reflectivity(pixelUV, depth, N, roughness);
     if (amount <= 0.0) { NVR_COUNT(11); o_color = vec4(0.0); return; }
 
+    // (2026-11-21, Reflections.glsl FilmWetness) damp ground's share of the reflection: no screen trace and no random spread there, the
+    // cube / grid / sky along the plain mirror direction at the film's own roughness. Standing water traces as before.
+    float damp = SurfaceDamp;
+    bool dampOnly = damp > 0.999;
     vec3 position = ViewPosition(pixelUV, depth);
     vec3 V = normalize(position);   // eye -> surface
 
@@ -55,6 +59,7 @@ void main() {
     vec3 tangent = normalize(abs(N.z) < 0.999 ? cross(N, vec3(0, 0, 1)) : cross(N, vec3(1, 0, 0)));
     vec3 bitangent = cross(N, tangent);
     vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
+    if (dampOnly) H = N;
     vec3 R = reflect(V, H);
     if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
     R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
@@ -70,7 +75,7 @@ void main() {
     int endRule = 5;   // 5 not started (behind the near plane at once, or the start off the screen)
     float nFacing = 0.0, nPlane = 0.0, nThick = 0.0;
     int cellsWalked = 0;   // (shader counters)
-    if (tEnd > tStart) {
+    if (tEnd > tStart && !dampOnly) {
         vec3 P0 = position + R * tStart, P1 = position + R * tEnd;
         float k0 = 1.0 / P0.z, k1 = 1.0 / P1.z;   // 1/z is linear in screen space
         vec3 Q0 = P0 * k0, Q1 = P1 * k1;
@@ -212,6 +217,7 @@ void main() {
         o_color = vec4(Tame(c * 0.6), 1.0);
         return;
     }
+    confidence *= 1.0 - damp;   // (2026-11-21) the damp share is the fallbacks' below
     // What the ray did not find on screen: the surroundings cube and (GridFallback) the light grid along it, then (outdoors)
     // the sky if it points up into it. Each fills only the share still missing (premultiplied sums).
     vec3 sum = colour * confidence;
