@@ -79,8 +79,11 @@ void main() {
         return;
     }
     // REFL_MATERIAL_ON, DebugView 7: the material buffer (an unbound one reads 0, as in D3D9).
-    if (MaterialOn && abs(DebugView - 7.0) < 0.5) {
-        vec4 m = cb.flags.w > 0.5 ? textureLod(sampler2D(t_material, POINT_S), uv, 0.0) : vec4(0.0);
+    // (2026-11-20 UnifiedReflections: the G-buffer's material as Reflectivity decodes it; the floor rule's known materials in grey (rough) to
+    // white (smooth) + green metal, as the D3D9 view shows MaterialBufferRoughness's)
+    if ((MaterialOn || GBufferOn) && abs(DebugView - 7.0) < 0.5) {
+        vec4 m = GBufferOn ? GBufferMaterial(uv) : cb.flags.w > 0.5 ? textureLod(sampler2D(t_material, POINT_S), uv, 0.0) : vec4(0.0);
+        if (GBufferOn && m.b > 0.25 && m.b <= 0.75) { o_color = vec4(vec2(1.0 - m.r) * vec2(1.0 - m.g, 1.0), 1.0 - m.r, 1.0); return; }
         o_color = m.b > 0.5 ? vec4(m.r, m.g, 0.6 * (1.0 - m.r), 1.0) : vec4(color.rgb * 0.15, color.a);
         return;
     }
@@ -128,12 +131,17 @@ void main() {
     // ~4 % of the reflection looking down, so only bright lamps show) up to 1 (a true mirror: people and objects show at any angle).
     float dielectricF0 = mix(0.04, 1.0, SurfaceMirror);   // (2026-11-06: per surface, MirrorSmoothOnly; Reflections.glsl)
     vec3 f0 = vec3(0.04);   // (2026-11-07 perf-reflfix2: the share's F0, for the flashlight's highlight)
-    if (MaterialOn) {
+    if (MaterialOn || GBufferOn) {
         // MaterialAware: metal reflects in its own colour (F0 = its albedo, guessed from the lit colour's hue), the rest at the F0 above.
         // (2026-11-08 perf-reflfix4) a mirror-smooth metal in neutral silver, not its lit colour's hue (that is the lamps': the mirror
         // turned the reflected room orange under warm lamps): ReflMetalF0.glsl
+        // (2026-11-20 UnifiedReflections) a material from the G-buffer has its own base colour (COLOR1, linear): that, not a guess
+        vec3 tint;
+        if (SurfaceGBuffer) tint = saturate(textureLod(sampler2D(t_gbAlbedo, POINT_S), uv, 0.0).rgb);
+        else {
         vec3 litColour = linearize(color.rgb);
-        vec3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
+        tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
+        }
         f0 = mix(vec3(dielectricF0), ReflMetalF0(tint, roughness), SurfaceMetal);
         share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), f0)) * saturate(reflection.a);
     }

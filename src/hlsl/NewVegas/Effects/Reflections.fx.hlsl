@@ -77,11 +77,28 @@ sampler2D NVR_ReflectionsSkyVis : register(s14) = sampler_state { ADDRESSU = CLA
 #ifndef REFL_MATERIAL_ON
     #define REFL_MATERIAL_ON 0
 #endif
-#if REFL_MATERIAL_ON
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1; core/FdIndirect.h):
+// with the renderer in mode 2 the surfaces' material is the G-buffer's own record, read per pixel (GBufferMaterial below; the Vulkan passes'
+// Reflections.glsl has the same) instead of MaterialAware's copy, which is not made then. Compiled in only when the switch is on at startup
+// (REFL_GBUFFER_ON), so that otherwise this effect is exactly what it was. While TESR_ReflectionsGBuffer.x is 1 (ReflectionsEffect::
+// BindMaterial): stage 15 holds COLOR2 in place of the copy, stage 8 COLOR3 and stage 9 COLOR1, the capture cubes' stages, which only the
+// Capture and Filter techniques read (drawn before; their shaders never touch the two names below).
+#ifndef REFL_GBUFFER_ON
+    #define REFL_GBUFFER_ON 0
+#endif
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 float4 TESR_ReflectionsMaterial;     // x: 1 = the buffer is read (filled this frame), y: MaxRoughness, z: MaterialReflect
 sampler2D NVR_ReflectionsMaterial : register(s15) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 static float SurfaceMetal = 0.0;     // set by Reflectivity: the surface's metal (0 without material data)
+#endif
+#if REFL_MATERIAL_ON
 float4 MaterialAt(float2 uv) { return TESR_ReflectionsMaterial.x > 0.5 ? tex2Dlod(NVR_ReflectionsMaterial, float4(uv, 0, 0)) : 0.0; }
+#endif
+#if REFL_GBUFFER_ON
+float4 TESR_ReflectionsGBuffer;      // x: 1 = the G-buffer's material this frame, y z: COLOR3's distance match (share, units: TESR_CapturedNormalsData y z)
+sampler2D NVR_ReflectionsGNormals : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D NVR_ReflectionsGAlbedo : register(s9) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+static bool SurfaceGBuffer = false;  // set by Reflectivity: the material is the G-buffer's (the composite takes a metal's colour from COLOR1)
 #endif
 texture NoTexture;   // never set: unbinds a technique's own render target from its sampler
 
@@ -165,7 +182,42 @@ float OpenAbove(float2 uv, float depth) {
 	return top > p.z - max(RoofMargin * perUnit, 0.0001) ? 1.0 : 0.0;
 }
 
+#if REFL_GBUFFER_ON
+// UNOFFICIAL 2026-11-20 UnifiedReflections: the G-buffer's record decoded into the copy's layout (r roughness, g metal, b 1 = reflects by its
+// smoothness whatever way it faces: COLOR2's specular bit on models 1-3; b 0.5 = a known material for the floor rule; plants, skin, grass,
+// hair and eyes rough; 0 = none). None also where the record is not the surface on screen: COLOR1 unwritten, or COLOR3's camera distance not
+// the depth's (the game's own shaders, water, glass, grass, the first person drawn over it). As Compute/Reflections.glsl GBufferMaterial.
+bool GBufferRecordAt(float2 uv) {
+	[branch] if (tex2Dlod(NVR_ReflectionsGAlbedo, float4(uv, 0, 0)).a < 0.5) return false;
+	float4 c = tex2Dlod(NVR_ReflectionsGNormals, float4(uv, 0, 0));
+	float z = readDepthLod(uv);
+	[branch] if (c.a <= 0.99 || z >= farZ * 0.99) return false;
+	float d = length(ViewPosition(uv, z));
+	return abs(c.b - d) <= d * TESR_ReflectionsGBuffer.y + TESR_ReflectionsGBuffer.z;
+}
+float4 GBufferMaterial(float2 uv) {
+	float4 m = tex2Dlod(NVR_ReflectionsMaterial, float4(uv, 0, 0));
+	[branch] if (m.r <= 0.5 || !GBufferRecordAt(uv)) return 0.0;
+	float c = floor(m.r + 0.01);
+	float spec = c >= 15.5 ? 1.0 : 0.0;
+	float model = c - 16.0 * spec;
+	[branch] if (model > 4.5 && model < 9.5) return float4(1.0, 0.0, 0.5, 0.0);
+	float b = m.b < -1.99 && m.b > -3.01 ? -2.0 - m.b : m.b;   // (the path tracer's matte code back to the roughness)
+	[branch] if (b < 0.0) return 0.0;                         // no roughness recorded
+	return float4(saturate(b), saturate(frac(m.r) / 0.49), spec > 0.5 && model < 3.5 ? 1.0 : 0.5, 0.0);
+}
+// The surface's material: the G-buffer's while TESR_ReflectionsGBuffer.x is 1, else MaterialAware's copy (or none).
+float4 SurfaceMaterialAt(float2 uv) {
+	[branch] if (TESR_ReflectionsGBuffer.x > 0.5) { float4 m = GBufferMaterial(uv); SurfaceGBuffer = m.b > 0.25; return m; }
 #if REFL_MATERIAL_ON
+	return MaterialAt(uv);
+#else
+	return 0.0;
+#endif
+}
+#endif
+
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 // UNOFFICIAL 2026-10-20 MaterialAware: a surface whose material is known (its _rmaos map). Whatever way it faces, it reflects by how
 // smooth it is: MaterialReflect where its roughness is well under MaxRoughness, fading to nothing at MaxRoughness (rough concrete,
 // dirt and carpet stop sheening; tiles, glass, polished counters and car paint get it, walls too). The rain still wets floors that
@@ -189,14 +241,21 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 // How much a surface reflects (before Fresnel) and how rough it is. 0 where it never reflects.
 float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughness) {
 	roughness = DryRoughness;
-#if REFL_MATERIAL_ON
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 	SurfaceMetal = 0.0;
+#endif
+#if REFL_GBUFFER_ON
+	SurfaceGBuffer = false;
 #endif
 	[branch] if (depth >= DrawDistance || depth >= farZ * 0.98 || IsWeapon(uv)) return 0.0;
 	float3 worldNormal = ViewToWorldDir(viewNormal);
 	float floorShare = saturate((worldNormal.z - 0.75) / 0.2);
-#if REFL_MATERIAL_ON
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
+#if REFL_GBUFFER_ON
+	float4 material = SurfaceMaterialAt(uv);
+#else
 	float4 material = MaterialAt(uv);
+#endif
 	[branch] if (material.b > 0.75) return MaterialReflectivity(uv, depth, floorShare, material, roughness);
 	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (b 0.5, core/CapturedNormals.h MergeIntoReflMaterial): no map, but the roughness and
 	// metal the game's shader lit this floor with: the floor guess below with those instead of DryRoughness and no metal
@@ -226,7 +285,7 @@ float EnvironmentFresnel(float roughness, float NdotV) {
 	return 0.04 * ab.x + ab.y;
 }
 
-#if REFL_MATERIAL_ON
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 // The same with any F0 (MaterialAware: metal).
 float3 EnvironmentFresnelF0(float roughness, float NdotV, float3 F0) {
 	const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
@@ -602,11 +661,17 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 		float4 env = EnvAlong(normalize(toWorld(uv)), 0.0);
 		return float4(delinearize(env.rgb * env.a), 1.0);
 	}
-#if REFL_MATERIAL_ON
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 	// UNOFFICIAL 2026-10-20 DebugView 7: the material buffer (MaterialAware): red the roughness, green the metal, blue the smoothness,
 	// where a material is known (dark red: rough; blue: smooth; green/yellow: metal); the rest of the picture dimmed (the floor guess).
 	[branch] if (abs(DebugView - 7.0) < 0.5) {
+#if REFL_GBUFFER_ON
+		float4 m = 0.0;   // (2026-11-20 UnifiedReflections: the G-buffer's material as Reflectivity decodes it)
+		[branch] if (TESR_ReflectionsGBuffer.x > 0.5) m = GBufferMaterial(uv);
+		else m = tex2Dlod(NVR_ReflectionsMaterial, float4(uv, 0, 0));
+#else
 		float4 m = tex2Dlod(NVR_ReflectionsMaterial, float4(uv, 0, 0));
+#endif
 		// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (b 0.5): the game shader's roughness and metal, in grey (rough) to white (smooth) + green metal
 		[branch] if (m.b > 0.25 && m.b <= 0.75) return float4((1.0 - m.r).xx * float2(1.0 - m.g, 1.0), 1.0 - m.r, 1.0);
 		return m.b > 0.5 ? float4(m.r, m.g, 0.6 * (1.0 - m.r), 1.0) : float4(color.rgb * 0.15, color.a);
@@ -637,11 +702,14 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	reflection /= weights;
 
 	float3 V = normalize(ViewPosition(uv, depth));
-#if REFL_MATERIAL_ON
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 	// UNOFFICIAL 2026-10-20 MaterialAware: metal reflects in its own colour (F0 = its albedo, guessed from the lit colour's hue), the
 	// rest at F0 0.04 as before (with no metal this is EnvironmentFresnel exactly).
 	float3 litColour = linearize(color.rgb);
 	float3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
+#if REFL_GBUFFER_ON
+	[branch] if (SurfaceGBuffer) tint = saturate(tex2Dlod(NVR_ReflectionsGAlbedo, float4(uv, 0, 0)).rgb);   // (2026-11-20 UnifiedReflections: its own base colour, linear)
+#endif
 	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), lerp(0.04, ReflMetalF0(tint, roughness), SurfaceMetal))) * saturate(reflection.a);	// (2026-11-08 perf-reflfix4)
 #else
 	float share = saturate(amount * EnvironmentFresnel(roughness, saturate(dot(-V, N)))) * saturate(reflection.a);

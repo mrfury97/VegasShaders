@@ -157,6 +157,29 @@ this design ends: screen trace first, a live cube as the probe, sky visibility o
 | 5 | Optional: water and glass read the result; pass moved before the blended list | near water shows SSR detail; glass reflects the room | 1-2 |
 Total about 6-9 sessions (6.5-10.5 with step 5).
 
+
+## Step 1 as built (2026-11-20, branch `claude/unified-refl-step1-009a94`; NOT yet run in a game)
+- Switch: `[Main.Main.Quality] UnifiedReflections` (live, test only, off, in the hidden Internal list). To be folded into one Reflections
+  Quality setting in step 4 (owner's word).
+- In mode 2 with this frame's COLOR1-3, the Reflections passes decode the material per pixel from the G-buffer (`Compute/Reflections.glsl`
+  GBufferMaterial; `Effects/Reflections.fx.hlsl` the same under `REFL_GBUFFER_ON`) into the old copy's layout, so MaterialReflectivity and the
+  floor rule are unchanged: specular-bit objects / gear / cloth (models 1-3) reflect any way they face by MaterialReflect, up to
+  MaterialMaxRoughness (chosen over RT MaxRoughness: it is the existing "which materials reflect" knob, MaterialAware's; RT MaxRoughness only
+  decides which reflecting pixels get rays; both default 0.5); other written materials give the floor rule their roughness and metal; models 5-9
+  rough. Metal F0 = COLOR1 albedo through ReflMetalF0; dielectric 0.04.
+- A record counts only where COLOR3's distance matches the depth (the CapturedNormals readers' rule): anything drawn over the G-buffer keeps
+  today's rules. The first-person weapon keeps MaterialAware's lookup.
+- Normals: always the shading normals (as DeferredBumpedNormals), so the Vulkan specular AA and the film's lean run.
+- MaterialAware's copy (technique 7) and DeferredReflections' / MaterialBufferRoughness's merge are not drawn while it is on. Mode 0 / 1:
+  untouched.
+- D3D9: compiled in only when on at startup (one define more: nine at most, the macro arrays hold ten with the terminator); COLOR3 / COLOR1
+  ride on the capture cubes' stages 8 / 9 (only Capture / Filter read those). Offline: off, the disassembly is identical to before
+  (plain and MaterialAware builds); all four on/off x MaterialAware variants compile. Instruction slots with it on: Composite 555 -> 719,
+  Trace 816 -> 889, Blur 535 -> 609 (MaterialAware builds).
+- Vulkan: bindings 30 / 31, `cb.gbuffer`; all twelve Reflections*.spv rebuilt and validated.
+- Not done here: the D3D9 film and specular AA (step 2), coverage of every surface / probe-only (step 3), the env-map pass and metal sheen
+  (step 3), the one switch (step 4).
+
 ## Proven / believed / not run
 - **Proven from the code** (file:line above): every path in section 1, the G-buffer layout and COLOR2 b readers, that the Vulkan trace already
   has the source ladder and Fresnel mix, that WetnessReflections and the env pass add their own reflection on top.

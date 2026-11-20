@@ -34,6 +34,10 @@ layout(set = 1, binding = 28) uniform texture2D t_film;        // UNOFFICIAL 202
                                                                // + 0.99 gloss, g roughness: never 0 where the wetness was worked out); a placeholder unless film.x is 1
 layout(set = 1, binding = 29) uniform texture2D t_smoothNormals; // UNOFFICIAL 2026-11-20 TESR_NormalsBuffer itself while t_normals holds the normal-mapped normals
                                                                // (film.x and film.z 1: ViewNormal's wet pixels); a placeholder otherwise
+layout(set = 1, binding = 30) uniform texture2D t_gbAlbedo;    // UNOFFICIAL 2026-11-20 UnifiedReflections: G-buffer v2's COLOR1 (TESR_AlbedoBuffer: rgb the linear base
+                                                               // colour, a 0 unwritten); a placeholder unless gbuffer.x is 1 (COLOR2 is t_matbuf, bound for it then)
+layout(set = 1, binding = 31) uniform texture2D t_gbNormals;   // UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR3 (TESR_CapturedNormalsBuffer: b the camera distance, a > 0.99
+                                                               // written), for GBufferRecordAt; a placeholder unless gbuffer.x is 1
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;   // TESR_ProjectionTransform
@@ -80,6 +84,9 @@ layout(set = 2, binding = 0, std140) uniform Constants {
                                 // the puddle field below), y its strength (RainWetness outdoors, 0 indoors), z 1 = t_normals holds the
                                 // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing),
                                 // w 1 / MaxRainWetness (Wetness Effects': the film's gloss of open ground in full rain counts 1)
+    vec4 gbuffer;               // UNOFFICIAL 2026-11-20 UnifiedReflections (docs/unified-reflections-design.md step 1): x 1 = the surfaces' material is the
+                                // G-buffer's (t_matbuf = COLOR2, t_gbAlbedo, t_gbNormals) and MaterialAware's copy was not made this frame; y, z the
+                                // distance match's share and units (TESR_CapturedNormalsData y, z: core/FdIndirectShaders.h kShadingNormalsPS's)
 } cb;
 
 layout(push_constant) uniform Push {
@@ -321,6 +328,45 @@ float WaterReflectivity(float depth, out float roughness) {
 float SurfaceMetal = 0.0;     // set by Reflectivity: the surface's metal (0 without material data)
 vec4 MaterialAt(vec2 uv) { return cb.material.x > 0.5 ? textureLod(sampler2D(t_material, POINT_S), uv, 0.0) : vec4(0.0); }
 
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1): with the renderer in
+// mode 2 the surface's material is the G-buffer's own record, read here per pixel (no copy pass, no scene-alpha rule), decoded into the layout
+// of MaterialAware's copy so the rules below stay one: r roughness, g metal, b 1 = reflects by its smoothness whatever way it faces (objects,
+// worn gear and cloth the game lights with a highlight: COLOR2's specular bit, models 1-3), b 0.5 = a known material for the floor rule (the
+// rest written; plants, skin, grass, hair and eyes as rough, roughness 1, metal 0: their b is not a roughness for every record), 0 = none.
+// None also where the G-buffer does not hold the surface on screen: COLOR1 unwritten, or COLOR3's camera distance not the depth buffer's
+// (the game's own shaders, water, glass, grass and the first person drawn over it: core/CapturedNormals.h's readers' rule). Those pixels keep
+// the floor rule with the Look's roughness, as a pixel without material data always did. (The decode is core/FdIndirectShaders.h
+// kReflMaterialPS's, DeferredReflections' copy pass.)
+#define GBufferOn (cb.gbuffer.x > 0.5)
+bool SurfaceGBuffer = false;   // set by Reflectivity: this pixel's material is the G-buffer's (the composite takes a metal's colour from COLOR1)
+bool GBufferRecordAt(vec2 uv) {
+    if (textureLod(sampler2D(t_gbAlbedo, POINT_S), uv, 0.0).a < 0.5) return false;
+    vec4 c = textureLod(sampler2D(t_gbNormals, POINT_S), uv, 0.0);
+    float z = readDepthLod(uv);
+    if (!(c.a > 0.99) || z >= farZ * 0.99) return false;
+    float d = length(ViewPosition(uv, z));
+    return abs(c.b - d) <= d * cb.gbuffer.y + cb.gbuffer.z;
+}
+vec4 GBufferMaterial(vec2 uv) {
+    vec4 m = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
+    if (!(m.r > 0.5) || !GBufferRecordAt(uv)) return vec4(0.0);
+    float c = floor(m.r + 0.01);
+    float spec = c >= 15.5 ? 1.0 : 0.0;
+    float model = c - 16.0 * spec;
+    if (model > 4.5 && model < 9.5) return vec4(1.0, 0.0, 0.5, 0.0);
+    float b = m.b < -1.99 && m.b > -3.01 ? -2.0 - m.b : m.b;   // (the path tracer's matte code back to the roughness)
+    if (b < 0.0) return vec4(0.0);                              // no roughness recorded
+    return vec4(saturate(b), saturate((m.r - floor(m.r)) / 0.49), spec > 0.5 && model < 3.5 ? 1.0 : 0.5, 0.0);
+}
+// The surface's material for Reflectivity: the G-buffer's with UnifiedReflections, else MaterialAware's copy. (The first-person weapon keeps
+// MaterialAt: the G-buffer holds no first person.)
+vec4 SurfaceMaterialAt(vec2 uv) {
+    if (!GBufferOn) return MaterialAt(uv);
+    vec4 m = GBufferMaterial(uv);
+    SurfaceGBuffer = m.b > 0.25;
+    return m;
+}
+
 float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material, out float roughness) {
     float worldZ = cb.cameraPosition.z + toWorld(uv).z * depth;
     roughness = max(material.r, 0.02);
@@ -350,7 +396,8 @@ const float GlassRoughness = 0.03;
 // How much a surface reflects (before Fresnel) and how rough it is. 0 where it never reflects.
 float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
     roughness = DryRoughness;
-    if (MaterialOn) SurfaceMetal = 0.0;
+    if (MaterialOn || GBufferOn) SurfaceMetal = 0.0;
+    SurfaceGBuffer = false;
     // UNOFFICIAL 2026-10-31 RT water: the water (flat, at the water height) at any distance, before DrawDistance's cut.
     if (WaterRtOn && depth < farZ * 0.98 && !IsWeapon(uv) && ViewToWorldDir(viewNormal).z > 0.75 &&
         abs(cb.cameraPosition.z + toWorld(uv).z * depth - cb.waterSettings.x) < max(2.0, depth * 0.002)) return WaterReflectivity(depth, roughness);
@@ -387,8 +434,9 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     }
     vec3 worldNormal = ViewToWorldDir(viewNormal);
     float floorShare = saturate((worldNormal.z - 0.75) / 0.2);
-    if (MaterialOn) {
-        vec4 material = MaterialAt(uv);
+    vec4 material = vec4(0.0);   // (2026-11-20 UnifiedReflections: read once, the floor rule below takes it too)
+    if (MaterialOn || GBufferOn) {
+        material = SurfaceMaterialAt(uv);
         if (material.b > 0.75) return MaterialReflectivity(uv, depth, floorShare, material, roughness);
     }
     if (floorShare <= 0.0) return 0.0;
@@ -407,7 +455,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     // r class > 0, b roughness, -1 none), the dry surface takes it instead of the one DryRoughness (polished floors sharp, carpets blurred).
     float dryRoughness = DryRoughness;
     // UNOFFICIAL 2026-10-31: the copy with MaterialAware on carries it already (b 0.5, core/CapturedNormals.h MergeIntoReflMaterial)
-    if (MaterialOn) { vec4 merged = MaterialAt(uv); if (merged.b > 0.25 && merged.b <= 0.75) { dryRoughness = max(merged.r, 0.02); SurfaceMetal = merged.g; } }
+    if (MaterialOn || GBufferOn) { vec4 merged = material; if (merged.b > 0.25 && merged.b <= 0.75) { dryRoughness = max(merged.r, 0.02); SurfaceMetal = merged.g; } }
     if (mod(cb.material2.x, 2.0) > 0.5) {
         vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
         if (written.r > 0.5 && written.b >= 0.0) dryRoughness = saturate(written.b);

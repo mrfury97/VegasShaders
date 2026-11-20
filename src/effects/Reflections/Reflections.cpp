@@ -32,9 +32,10 @@
 namespace {
 	// UNOFFICIAL 2026-11-15 DeferredReflections ([Main.Main.Quality], live, test only; core/FdIndirect.h): while the deferred renderer runs with
 	// it on, every pass of this effect (D3D9 and Vulkan, the RT RayGen and the RT denoiser) reads the G-buffer's normal-mapped shading normal
-	// where TESR_NormalsBuffer shows the captured surface. Off: normals itself. (2026-11-18: DeferredBumpedNormals gives the same normals.)
+	// where TESR_NormalsBuffer shows the captured surface. Off: normals itself. (2026-11-18: DeferredBumpedNormals gives the same normals;
+	// 2026-11-20: so does UnifiedReflections, always.)
 	IDirect3DBaseTexture9* FdReflNormals(IDirect3DDevice9* d, IDirect3DBaseTexture9* normals) {
-		if (!normals || !(FdIndirect::ReflectionsOn() || FdIndirect::BumpedNormalsOn())) return normals;
+		if (!normals || !(FdIndirect::ReflectionsOn() || FdIndirect::BumpedNormalsOn() || FdIndirect::UnifiedReflectionsOn())) return normals;
 		std::string depthName = "TESR_DepthBuffer";
 		IDirect3DBaseTexture9** depth = TheTextureManager->GetTextureSlotByName(depthName);
 		return FdIndirect::ShadingNormals(d, normals, depth ? *depth : nullptr);
@@ -582,7 +583,7 @@ void ReflectionsEffect::RtRideBeforeFrame(IDirect3DDevice9* Device, IDirect3DSur
 	else if (rtView != 3) why = "RaysOnly is off or an RT DebugView is set: RayGen's screen march reads the lit picture, which does not exist yet";
 	else if (RtPathTrace::Replacing()) why = "the path tracer replaces the scene this frame";
 	else if (TheShaderManager->GameState.isUnderwater) why = "under water";
-	if (!why && Textures.MaterialSurface && Settings.MaterialAware > 0) {
+	if (!why && Textures.MaterialSurface && Settings.MaterialAware > 0 && !GBufferFrame()) {	// (2026-11-20 UnifiedReflections: no copy to make)
 		// CaptureMaterial reads the scene through TESR_RenderedBuffer; before ChainBegin that slot is not the scene yet, so it points at
 		// the game target's own texture for this one pass (what the frame chain publishes there later), then back.
 		IDirect3DTexture9* gameTexture = nullptr;
@@ -651,6 +652,7 @@ void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsGrid2", &Constants.Grid2);
 	TheShaderManager->RegisterConstant("TESR_ReflectionsGrid3", &Constants.Grid3);
 	TheShaderManager->RegisterConstant("TESR_ReflectionsMaterial", &Constants.Material);
+	TheShaderManager->RegisterConstant("TESR_ReflectionsGBuffer", &Constants.GBuffer);	// UNOFFICIAL 2026-11-20 UnifiedReflections (REFL_GBUFFER_ON)
 	TheShaderManager->RegisterConstant("TESR_RTWaterData", &Constants.WaterData);	// UNOFFICIAL 2026-10-31 RT water (the water shaders)
 	TheShaderManager->RegisterConstant("TESR_RTWaterReproject", (D3DXVECTOR4*)&Constants.WaterReproject);
 	TheShaderManager->RegisterConstant("TESR_ReflReplace", (D3DXVECTOR4*)ReflMaterial::ForwardReplace);	// UNOFFICIAL 2026-11-12 ReplaceForward (EnvTemplate.hlsl; core/ReflMaterial.h keeps it 0 outside the world scene)
@@ -781,6 +783,7 @@ void ReflectionsEffect::CaptureMaterial(IDirect3DDevice9* Device) {
 	materialFilled = false;
 	Constants.Material.x = 0.0f;
 	if (!Enabled || !Effect || !Textures.MaterialSurface || Settings.MaterialAware <= 0 || TheShaderManager->GameState.isUnderwater) return;
+	if (GBufferFrame()) return;	// UNOFFICIAL 2026-11-20 UnifiedReflections: the passes read the G-buffer's material themselves (no copy)
 	static GpuTimer timer("Reflections material copy");
 	GpuProfileScope gpu(timer, Device);
 	materialOnly = true;
@@ -804,11 +807,53 @@ void ReflectionsEffect::BindMaterial() {
 		IDirect3DBaseTexture9* shading = FdReflNormals(TheRenderManager->device, normals);
 		if (shading != normals) SetPassTexture(2, shading);	// set after each pass begins (EffectRecord::PassTextures)
 	}
+	// UNOFFICIAL 2026-11-20 UnifiedReflections, the D3D9 technique (REFL_GBUFFER_ON): COLOR2 on the material buffer's stage (15: no copy this
+	// frame), COLOR3 on 8 and COLOR1 on 9. Those two are the capture cubes', which only the Capture and Filter techniques read, drawn before
+	// this (CubeStep) or never in this frame (RenderCubeOnly runs without RenderBuffers); every pass after it here declares them as 2D.
+	Constants.GBuffer = D3DXVECTOR4(GBufferFrame() && FdIndirect::UnifiedCompiledIn() ? 1.0f : 0.0f, CapturedNormals::Data.y, CapturedNormals::Data.z, 0.0f);
+	if (Constants.GBuffer.x > 0.0f) {
+		SetPassTexture(15, CapturedNormals::MaterialTexture);
+		SetPassTexture(8, CapturedNormals::Texture);
+		SetPassTexture(9, CapturedNormals::AlbedoTexture);
+		const DWORD point[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+			{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+		for (const auto& s : point) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+		return;
+	}
 	if (!materialFilled || !Textures.MaterialTexture) return;
 	SetPassTexture(15, Textures.MaterialTexture);	// set after each pass begins (EffectRecord::PassTextures)
 	const DWORD point[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
 		{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
 	for (const auto& s : point) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+}
+
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], live, test only, off; docs/unified-reflections-design.md step 1): in mode 2
+// the passes read the surfaces' material from the G-buffer (Reflections.glsl GBufferMaterial, Reflections.fx.hlsl the same) and MaterialAware's
+// copy is not made. On when the switch is (FdIndirect::UnifiedReflectionsOn: mode 2, this frame's COLOR1-3) and the back end that will draw
+// reads them: the Vulkan passes always, the D3D9 technique only when compiled with it (on at startup). Decided once a frame, so every pass of
+// the frame and the copy step agree; a line in the log whenever the answer changes.
+bool ReflectionsEffect::GBufferFrame() {
+	const UINT now = TheFrameRateManager->FrameNumber;
+	if (gbufferAsked == now) return gbufferOn;
+	gbufferAsked = now;
+	const bool key = FdIndirect::Key("UnifiedReflections");
+	const bool vulkan = !ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name);
+	const char* why = nullptr;
+	if (key) {
+		if (SettingForce::Mode() != 2) why = "the deferred renderer is not in mode 2 (DeferredRenderer 2): MaterialAware stays the material source";
+		else if (!FdIndirect::UnifiedReflectionsOn()) why = "the G-buffer does not hold this frame's records (COLOR1-3)";
+		else if (!vulkan && !FdIndirect::UnifiedCompiledIn()) why = "the D3D9 technique draws and was not compiled with it (turn it on before starting the game)";
+	}
+	gbufferOn = key && !why;
+	const int state = !key ? 0 : gbufferOn ? 1 : 2;
+	if (state != gbufferLogged) {
+		gbufferLogged = state;
+		if (state == 1) Logger::Log("UNOFFICIAL Reflections UnifiedReflections: on (%s): the material from the G-buffer (COLOR2 roughness, metal, model and specular bit; "
+			"COLOR1 the metal's colour; COLOR3 whether the record is the surface on screen), the shading normals; MaterialAware's copy not made", vulkan ? "the Vulkan passes" : "the D3D9 technique");
+		else if (state == 2) Logger::Log("UNOFFICIAL Reflections UnifiedReflections: on but not used now: %s", why);
+		else Logger::Log("UNOFFICIAL Reflections UnifiedReflections: off (the material from MaterialAware's copy as before)");
+	}
+	return gbufferOn;
 }
 
 bool ReflectionsEffect::ShouldRender() {
@@ -819,6 +864,7 @@ bool ReflectionsEffect::ShouldRender() {
 	if (RtPathTrace::Replacing() && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTReflectionsOff") != 0) return false;
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
 	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f) ||
+		(Constants.Material.z > 0.0f && GBufferFrame()) ||	// (2026-11-20 UnifiedReflections: the G-buffer's shiny objects)
 		(DeferredWetness::FilmWhole() && TheShaderManager->GameState.isExterior && Settings.RainWetness > 0.0f);	// (2026-11-20 the film's water: Reflections.glsl FilmWetness)
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
@@ -1223,6 +1269,7 @@ namespace {
 		D3DXVECTOR4	mirrorLamp, sunDirection;	// UNOFFICIAL 2026-11-08 (perf-reflfix3) MirrorLampHighlight (ReflLampHighlight.glsl)
 		D3DXVECTOR4	puddle, puddle2;	// 2026-11-08 Puddles (PuddlesShaders::ReflectionData): the standing water's field (Reflections.glsl PuddleStanding)
 		D3DXVECTOR4	film;	// UNOFFICIAL 2026-11-20 deferred wetness step 3: x 1 = t_film holds this frame's film, y its strength, z 1 = bumped normals (Reflections.glsl FilmWetness, NormalVarianceRoughness)
+		D3DXVECTOR4	gbuffer;	// UNOFFICIAL 2026-11-20 UnifiedReflections: x 1 = the material is the G-buffer's, y z COLOR3's distance match (Reflections.glsl GBufferMaterial)
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1255,6 +1302,8 @@ namespace {
 		{ 1, 27, NVR_EXT_BIND_SAMPLED_IMAGE, 26, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (index 23; binding 26 / slot 25 are the RT passes' Rt.Bounce)
 		{ 1, 28, NVR_EXT_BIND_SAMPLED_IMAGE, 27, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 DeferredWetness's film (index 24; core/DeferredWetness.h FilmTexture)
 		{ 1, 29, NVR_EXT_BIND_SAMPLED_IMAGE, 28, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 the smooth normals under the bumped ones (index 25; Reflections.glsl ViewNormal)
+		{ 1, 30, NVR_EXT_BIND_SAMPLED_IMAGE, 29, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 UnifiedReflections: G-buffer COLOR1 (index 26)
+		{ 1, 31, NVR_EXT_BIND_SAMPLED_IMAGE, 30, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 UnifiedReflections: G-buffer COLOR3 (index 27)
 	};
 	const UINT ReflTextureCount = 16;
 	// UNOFFICIAL 2026-10-26 (deep/fork-hiz): ReflectionsTraceHiZ.frag = the same bindings + the Hi-Z pyramid buffer on set 1, binding 16 (buffer slot 1).
@@ -1468,6 +1517,8 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		Logger::Log("UNOFFICIAL Reflections MaterialBufferRoughness: %s", materialBuffer ? "TESR_MaterialBuffer found" : "no TESR_MaterialBuffer in this build: off");
 	}
 	IDirect3DBaseTexture9* matbuf = (Settings.MaterialBufferRoughness || puddleMask) && materialBuffer ? *materialBuffer : nullptr;
+	// UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR2 on t_matbuf (the same texture: TESR_MaterialBuffer), COLOR1 and COLOR3 beside it
+	const bool gbuffer = GBufferFrame();
 	// UNOFFICIAL 2026-10-30 CloudSky: the cloud sky probe (VolumetricClouds RenderSkyProbe), outdoors, while it is fresh.
 	VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds;
 	IDirect3DTexture9* cloudSky = Settings.CloudSky && clouds && clouds->Enabled && clouds->SkyProbeReady() && TheShaderManager->GameState.isExterior ?
@@ -1527,6 +1578,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// w (2026-11-20, owner's first look): 1 / MaxRainWetness, so open ground in full rain counts as fully wet, as the rain guess did
 	uniforms.film = D3DXVECTOR4(film ? 1.0f : 0.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f,
 		normals != SlotTexture("TESR_NormalsBuffer") ? 1.0f : 0.0f, Settings.FilmRainScale);
+	uniforms.gbuffer = D3DXVECTOR4(gbuffer ? 1.0f : 0.0f, CapturedNormals::Data.y, CapturedNormals::Data.z, 0.0f);
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
@@ -1545,13 +1597,17 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// UNOFFICIAL 2026-10-29 glass reflections: the glass mask (core/GlassMask.h), or the depth as a placeholder (never read: material.w 0).
 	IDirect3DTexture9* glass = GlassMask::ThisFrame();
 	resources[20].Slot = 22; resources[20].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[20].pResource = glass ? (IUnknown*)glass : (IUnknown*)depth;
-	resources[21].Slot = 23; resources[21].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[21].pResource = matbuf ? (IUnknown*)matbuf : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30
+	resources[21].Slot = 23; resources[21].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[21].pResource = matbuf ? (IUnknown*)matbuf :
+		gbuffer ? (IUnknown*)CapturedNormals::MaterialTexture : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30 (2026-11-20: or COLOR2 for UnifiedReflections)
 	resources[22].Slot = 24; resources[22].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[22].pResource = skySlot ? (IUnknown*)skySlot : (IUnknown*)depth;	// UNOFFICIAL 2026-10-30 (2026-10-31: or the panorama)
 	resources[23].Slot = 26; resources[23].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[23].pResource = weaponMask ? (IUnknown*)weaponMask : (IUnknown*)depth;	// UNOFFICIAL 2026-11-09 TESR_WeaponMask (or the depth: never read while weapon.x is not 2)
 	resources[24].Slot = 27; resources[24].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[24].pResource = film ? (IUnknown*)film : (IUnknown*)depth;	// UNOFFICIAL 2026-11-20 the film (or the depth: never read while film.x is 0)
 	// UNOFFICIAL 2026-11-20 the smooth normals (TESR_NormalsBuffer) while t_normals holds the bumped ones: wet pixels mirror along them (ViewNormal)
 	IDirect3DBaseTexture9* smoothNormals = SlotTexture("TESR_NormalsBuffer");
 	resources[25].Slot = 28; resources[25].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[25].pResource = film && smoothNormals && uniforms.film.z > 0.5f ? (IUnknown*)smoothNormals : (IUnknown*)depth;
+	// UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR1 and COLOR3 (or the depth: never read while gbuffer.x is 0)
+	resources[26].Slot = 29; resources[26].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[26].pResource = gbuffer ? (IUnknown*)CapturedNormals::AlbedoTexture : (IUnknown*)depth;
+	resources[27].Slot = 30; resources[27].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[27].pResource = gbuffer ? (IUnknown*)CapturedNormals::Texture : (IUnknown*)depth;
 	UINT resourceCount = _countof(ReflBindings);
 	if (hiz) {
 		resources[resourceCount].Slot = 1; resources[resourceCount].Type = NVR_EXT_BIND_STORAGE_BUFFER; resources[resourceCount].pResource = hiz;

@@ -35,6 +35,21 @@ namespace FdIndirect {
 	// WetWorld's wet surface and puddle reflection. Every other reader keeps the smooth normals buffer: AO, bounce light and shadows would
 	// shimmer and self-shadow on a normal map's detail.
 	inline bool BumpedNormalsOn() { return Base() && MaterialNow() && Key("DeferredBumpedNormals"); }
+	// UNOFFICIAL 2026-11-20 UnifiedReflections (live, test only, off; docs/unified-reflections-design.md step 1): with the renderer in mode 2
+	// the Reflections effect reads its material (COLOR2: roughness, metal, model, specular bit; COLOR1: the metal's colour; COLOR3: is the
+	// record the visible surface) straight from the G-buffer instead of MaterialAware's copy, and always the shading normals below. True only
+	// in a frame whose three targets hold this frame's records. Mode 0 / 1: false (MaterialAware stays the material source).
+	inline bool UnifiedReflectionsOn() {
+		return Base() && SettingForce::Mode() == 2 && MaterialNow() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f &&
+			CapturedNormals::Texture && CapturedNormals::Data.x > 0.0f && Key("UnifiedReflections");
+	}
+	// The D3D9 technique's half (Effects/Reflections.fx.hlsl REFL_GBUFFER_ON): compiled in only when the switch is on at startup with the
+	// renderer in mode 2, so that off the effect's preprocessed source is exactly what it was. The Vulkan passes follow the switch live.
+	inline int UnifiedStartup = -1;
+	inline bool UnifiedCompiledIn() {
+		if (UnifiedStartup < 0) UnifiedStartup = SettingForce::Mode() == 2 && CapturedNormals::V2CompiledIn() && Key("UnifiedReflections") ? 1 : 0;
+		return UnifiedStartup == 1;
+	}
 
 	// One render target, remade when the size or format it must have changes.
 	struct Target {
