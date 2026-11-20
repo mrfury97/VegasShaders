@@ -122,6 +122,8 @@ public:
 		D3DXMATRIX	WaterReproject;	// TESR_RTWaterReproject: camera-relative world now -> the clip space of the frame that traced it
 		D3DXVECTOR4	GBuffer;	// UNOFFICIAL 2026-11-20 UnifiedReflections (TESR_ReflectionsGBuffer, the D3D9 technique with REFL_GBUFFER_ON; the Vulkan
 								// passes' cb.gbuffer): x 1 = the material is the G-buffer's this frame, y z COLOR3's distance match (share, units)
+		D3DXVECTOR4	Film;		// UNOFFICIAL 2026-11-20 unified reflections step 2 (TESR_ReflectionsFilm, the D3D9 technique with REFL_GBUFFER_ON): x 1 =
+								// the film on stage 7, y the wet strength, w 1 / MaxRainWetness (as the Vulkan passes' cb.film)
 	};
 	ConstantsStruct	Constants;
 	IDirect3DBaseTexture9*	GridLightSlot = nullptr;	// AmbientLight's finished grid this frame (TextureManager slots)
@@ -174,6 +176,10 @@ public:
 	// MaterialAware's copy is still made in a G-buffer frame while the RT weapon rays run: the first-person weapon's material is the copy's
 	// (MaterialAt), the G-buffer holds no first person.
 	bool	MaterialCopySkipped() { return GBufferFrame() && !(Settings.RtWeapon > 0.0f && RtWanted()); }
+	// UNOFFICIAL 2026-11-20 unified reflections step 2: this frame the wet floors' reflection is this effect's alone, out to the distance returned
+	// (DrawDistance; 0: not), so DeferredWetness leaves out its sky reflection there and Wetness Effects' screen pass its trace. Asked first inside
+	// the sun pass (DeferredWetness::Apply), once a frame.
+	float	WetReach();
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): every technique as src\hlsl\NewVegas\Compute\Reflections*.frag (EffectRecord::ExtRender)
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
@@ -252,6 +258,8 @@ private:
 	// and the trace's noise frame (TESR_ReflectionsData2.w). The same answers at any point of a frame.
 	void				RtFrameMode(bool& rrRaw, bool& temporal);
 	float				RtNoiseFrame(bool temporal, bool rrRaw) const;
+	UINT				wetReachAsked = 0xFFFFFFFF;	// UNOFFICIAL 2026-11-20 step 2: WetReach's frame and answer
+	float				wetReach = 0.0f;
 	UINT				gbufferAsked = 0xFFFFFFFF;	// UNOFFICIAL 2026-11-20 UnifiedReflections: the FrameNumber GBufferFrame last decided in
 	bool				gbufferOn = false;
 	int					gbufferLogged = 0;	// the last state logged (0 off: nothing logged while it stays off, 1 on, 2 key on but not used)

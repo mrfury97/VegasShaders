@@ -190,6 +190,34 @@ Total about 6-9 sessions (6.5-10.5 with step 5).
 - Not done here: the D3D9 film and specular AA (step 2), coverage of every surface / probe-only (step 3), the env-map pass and metal sheen
   (step 3), the one switch (step 4).
 
+## Step 2 as built (2026-11-20, same branch; NOT yet run in a game)
+Under the same switch (`UnifiedReflections`; no new key). One wet reflection on the floors:
+- `ReflectionsEffect::WetReach` decides once a frame, first inside the sun pass (DeferredWetness::Apply runs after the G-buffer's flags are set):
+  UnifiedReflections used (mode 2, this frame's G-buffer, a back end that reads it), outdoors, above water, Reflections on with its targets,
+  `RainWetness` above 0 and SkyFallback on, DeferredWetness's fallback loaded and drawn LAST frame (review: a frame it cannot draw, e.g.
+  upscaled before the effects, would leave Reflections without the film and drying floors without any reflection), all four of its targets,
+  not the path tracer with PTReflectionsOff. Then it returns DrawDistance, else 0. Log: a line when it changes. (The first wet frame keeps
+  the old three reflections; from the second, one.)
+- **DeferredWetness** (`Shaders/DeferredWetness.hlsl` DWSkyKeep; c6.z in the pass, c15.w in the fallback): the film's sky reflection is taken
+  out by Reflections' own floor share (smooth normal 0.75 .. 0.95 up) and its fade to DrawDistance. Walls, steep slopes and far floors keep it
+  (Reflections gives them no wet reflection). The darker albedo, flat puddles, the film and its sun highlight stay. Offline: the pass and the
+  fallback compile with the game's cached defines (963 -> 977 and 762 -> 774 slots).
+- **Wetness Effects' screen pass** (`TESR_WetnessReflectionBump.w` = the reach): its trace is weighted by the same keep as DWSkyKeep (review:
+  skipping it everywhere left wet walls and steep slopes with only the sky), so it reflects nothing on the floors Reflections mirrors and as
+  before elsewhere; the lamps' streaks on wet ground still drawn.
+- **The D3D9 technique** (`REFL_GBUFFER_ON`) now has the Vulkan passes' wet and normal rules: the film (stage 7, the history's: only Temporal
+  reads it, RenderBuffers takes it off for that pass; `TESR_ReflectionsFilm`), FilmWetness on floors and in MaterialReflectivity, the bump's
+  footprint fade and the damp lean (the smooth normal decoded from COLOR3 on s8: no new stage), the curvature AA. No DebugView 12 there.
+- Step 1's GBufferFrame is now off in a frame upscaled before the effects (RenderScale with LowResEffects off: COLOR1-3 at the drawn size).
+- Known small gap (review, believed): DeferredWetness's main pass has no water-height test, so a thin shoreline strip of land at the water level
+  loses the sky sheen that Reflections treats as water and does not give back.
+- Still doubled, by design for later steps: the forward records' own wet film (the records that stay forward draw their sky term into their
+  colour), the env-map pass and the metal sheen (step 3).
+- What correct looks like: wet ground in rain shows one reflection (screen hits, else the cube / grid / sky by roughness), no brighter than
+  before at a grazing view and a little darker looking straight down (only the Fresnel share now, no added sky on top); the lamps' streaks on
+  wet roads as before; walls and steep wet slopes keep the sky sheen. Wrong: wet ground going dull or black where Reflections finds nothing
+  (the sky fallback missing: SkyFallback), a hard line where floors meet steeper ground (the share's edge), or no lamp streaks.
+
 ## Proven / believed / not run
 - **Proven from the code** (file:line above): every path in section 1, the G-buffer layout and COLOR2 b readers, that the Vulkan trace already
   has the source ladder and Fresnel mix, that WetnessReflections and the env pass add their own reflection on top.

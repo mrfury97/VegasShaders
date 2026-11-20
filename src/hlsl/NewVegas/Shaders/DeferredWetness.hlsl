@@ -49,7 +49,8 @@
 
 // The pass's own (c0-c11).
 float4 TESR_DeferredDepthFrame[6] : register(c0);	// Includes/DeferredDepth.hlsl's frame block
-float4 DW_Ctrl  : register(c6);	// x 1 = the linear view z of this frame (DeferredDepth 2), y 1 = [Shaders.Puddles.Main] ObjectPuddles (static objects take standing water)
+float4 DW_Ctrl  : register(c6);	// x 1 = the linear view z of this frame (DeferredDepth 2), y 1 = [Shaders.Puddles.Main] ObjectPuddles (static objects take standing water),
+                                // z (2026-11-20) the Reflections effect's reach over the wet floors (DWSkyKeep; 0: none)
 float4 DW_Fog   : register(c7);	// rgb the fog colour the records lerped with (stored curve), w 1 = the game's fog is drawn
 float4 TESR_TerrainData      : register(c10);	// (Includes/Terrain.hlsl) w ambient scale
 float4 TESR_TerrainExtraData : register(c11);	// y saturation (the land's ambient takes the graded albedo)
@@ -65,6 +66,16 @@ sampler2D TESR_DeferredDepthLinear : register(s6) = sampler_state { ADDRESSU = C
 
 #define DW_LAND_SPEC_BIT 16.0f	// Includes/CapturedNormals.hlsl GBV2_SPEC_BIT: the land's lamps lit with a highlight
 #define DW_HEIGHT_SCALE 0.99f	// TerrainTemplate.hlsl TERRAIN_WET_DEFERRED: r = 4 + DW_HEIGHT_SCALE x height
+
+// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/unified-reflections-design.md; effects/Reflections/Reflections.cpp WetReach): how much of
+// the film's sky reflection this pass still adds. While the Reflections effect mirrors the wet floors this frame (reach > 0: its DrawDistance)
+// it is THE wet reflection there (the screen, its cube and grid, the sky where they find nothing), so a floor's sky term goes, by the effect's
+// own floor share (the normal 0.75 .. 0.95 up) and its fade toward the reach; walls, steep slopes and the far floors keep it, the effect gives
+// them no wet reflection. upZ: the smooth normal's world z.
+float DWSkyKeep(float upZ, float viewZ, float reach) {
+    if (!(reach > 0.0f)) return 1.0f;
+    return 1.0f - saturate((upZ - 0.75f) / 0.2f) * (1.0f - smoothstep(0.7f * reach, reach, viewZ));
+}
 
 // A near-land lighting-free pixel that carries the height: albedo alpha 1 + keep (GBufferV2's lighting-free code with a sun; 1.0 itself where
 // the game's fog covers it fully, keep 0), r in [4, 5) (no other writer puts r there: every land record writes 20, the far land 20 + 1 / 64).
@@ -123,7 +134,8 @@ float4 TESR_CameraData     : register(c12);	// y the far plane (TESR_DepthBuffer
 float4 TESR_WaterSettings  : register(c13);	// x the water's height (world z)
 float4 TESR_DepthConstants : register(c14);	// z 0: the view model's depth buffer is empty at 1, else at 0 (reversed)
 float4 DW_FB               : register(c15);	// x 1 = the pass below drew its film this frame, y the distance (game units) the fallback ends at,
-                                            // z 1 = [Shaders.Puddles.Main] ObjectPuddles (as DW_Ctrl.y)
+                                            // z 1 = [Shaders.Puddles.Main] ObjectPuddles (as DW_Ctrl.y), w (2026-11-20) the Reflections effect's
+                                            // reach over the wet floors (as DW_Ctrl.z)
 
 struct FB_OUT {
     float4 frame : COLOR0;	// the chain's frame (its colour encoding: TESR_LinearLighting)
@@ -174,7 +186,7 @@ FB_OUT main(PS_IN IN) {
             const float3 V = -normalize(P);
             const float3 R = reflect(-V, wet.normal);
             const float horizon = saturate(1.0f + 1.2f * dot(R, N));
-            lit += WetSkyReflection(R) * WetReflectance(saturate(dot(wet.normal, V)), wet.roughness, wet.gloss) * horizon * horizon;
+            lit += WetSkyReflection(R) * WetReflectance(saturate(dot(wet.normal, V)), wet.roughness, wet.gloss) * horizon * horizon * DWSkyKeep(N.z, viewZ, DW_FB.w);
         }
         o.frame.rgb = lerp(o.frame.rgb, pow(max(lit, 0.0f), 1.0f / gamma), fade);
     }
@@ -288,7 +300,8 @@ PS_OUT main(PS_IN IN) {
         const float3 wetV = -normalize(P);
         const float3 wetR = reflect(-wetV, wet.normal);
         const float wetHorizon = saturate(1.0f + 1.2f * dot(wetR, geoN));
-        lit += WetSkyReflection(wetR) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * wetHorizon * wetHorizon * DW_MURK_TINT;
+        lit += WetSkyReflection(wetR) * WetReflectance(saturate(dot(wet.normal, wetV)), wet.roughness, wet.gloss) * wetHorizon * wetHorizon * DW_MURK_TINT *
+            DWSkyKeep(geoN.z, viewZ, DW_Ctrl.z);
     }
     frame = DWFog(lit, keep, DW_Fog.w);
     // the forward land's debug views (they replace its fogged colour, which LinearSceneOut then decodes)
