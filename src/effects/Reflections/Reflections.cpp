@@ -63,14 +63,8 @@ void ReflectionsEffect::UpdateSettings() {
 		const float maxRain = TheSettingManager->GetSettingF("Shaders.WetnessEffects.Main", "MaxRainWetness");
 		Settings.FilmRainScale = 1.0f / (std::max)(maxRain == maxRain ? maxRain : 1.0f, 0.05f);
 	}
-	{	// UNOFFICIAL 2026-11-21 damp ground to the cube (Reflections.glsl FilmWetness): DampTrace, an Internal A/B key (missing = false, the cube);
-		// the film's roughness under standing water is the Puddles Roughness with Puddles on, else Wetness Effects' floor for its own puddles (0.05)
-		Settings.DampTrace = TheSettingManager->GetSettingI(section, "DampTrace") != 0;
-		const bool puddlesOn = TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") != 0 &&
-			TheSettingManager->GetSettingI("Shaders.Puddles.Main", "Quality") > 0;
-		const float standing = puddlesOn ? TheSettingManager->GetSettingF("Shaders.Puddles.Main", "Roughness") : 0.05f;
-		Settings.FilmStandingRoughness = standing == standing ? std::clamp(standing, 0.01f, 0.5f) : 0.05f;
-	}
+	// UNOFFICIAL 2026-11-21 damp ground to the cube (Reflections.glsl FilmWetness): DampTrace, an Internal A/B key (missing = false, the cube)
+	Settings.DampTrace = TheSettingManager->GetSettingI(section, "DampTrace") != 0;
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
 	Settings.Thickness = std::clamp(TheSettingManager->GetSettingF(section, "Thickness"), 0.1f, 10.0f);
@@ -1637,7 +1631,14 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	uniforms.film = D3DXVECTOR4(film ? 1.0f : 0.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f,
 		normals != SlotTexture("TESR_NormalsBuffer") ? 1.0f : 0.0f, Settings.FilmRainScale);
 	uniforms.gbuffer = D3DXVECTOR4(gbuffer ? 1.0f : 0.0f, CapturedNormals::Data.y, CapturedNormals::Data.z, 0.0f);
-	uniforms.film2 = D3DXVECTOR4(Settings.DampTrace ? 0.0f : 1.0f, Settings.FilmStandingRoughness, 0.0f, 0.0f);	// (2026-11-21)
+	// (2026-11-21) film2: x damp ground to the cube, not with DampTrace and not without the cube (CubeMap off, underwater: damp ground would have
+	// only the sky then; review); y the film's roughness under standing water, from the running Puddles (TESR_PuddleData.w on, TESR_PuddleLook.x:
+	// what the surfaces were drawn with), else Wetness Effects' floor for its own puddles (0.05)
+	{
+		const PuddlesShaders* pud = TheShaderManager->Shaders.Puddles;
+		const float standing = pud && pud->Constants.Data.w > 0.5f ? std::clamp(pud->Constants.Look.x, 0.01f, 0.5f) : 0.05f;
+		uniforms.film2 = D3DXVECTOR4(Settings.DampTrace || !CubeWanted() ? 0.0f : 1.0f, standing, 0.0f, 0.0f);
+	}
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));

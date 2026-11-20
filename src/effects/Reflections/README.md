@@ -331,3 +331,28 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
   floors and wet ground as with the switch off. Wrong: a person, plant or post in front of a shiny surface turning into a mirror (the record
   check failing), matte walls and rocks mirroring (a specular bit on matte records: DebugView 7 shows them blue), metal reflecting in the
   lamps' colour (COLOR1 not bound), floors that reflected before going dull.
+
+## Damp ground reads the cube; only standing water is traced (2026-11-21; owner: "Yes, try it"; NOT yet looked at in game)
+- Why: the owner's save `reflection01` (sunny after rain, install-test18): damp dirt's reflection broke into white speckles at mid distance.
+  A ray bent by one pixel's bump at a low angle flips between bright sky and dark ground block by block; no blur averages that
+  (`docs/reflection-speckle.md`, on test-p1a-bump). Community Shaders never traces wet ground: damp ground reads a cube pre-blurred by roughness.
+- What (Vulkan passes only; the D3D9 technique and the RT passes are unchanged): `Reflections.glsl` FilmWetness splits the film into standing
+  water and damp ground by its roughness: standing water's is the running Puddles Roughness (`cb.film2.y`: TESR_PuddleLook.x while
+  TESR_PuddleData.w is on, else 0.05 for Wetness Effects' own puddles), damp ground's is rougher (lerp(1, 0.22, rain): 0.61 at
+  MaxRainWetness 0.5); FilmDamp = smoothstep(standing + 0.02, standing + 0.12, film roughness) (the soaked rim, 0.12, blends). Damp: the
+  roughness is the film's own; standing: as before (WetRoughness .. 0.3). `SurfaceDamp` = the damp share of the pixel's reflection.
+  `ReflectionsTrace.frag` / `ReflectionsTraceHiZ.frag`: fully damp pixels skip the march and the random spread (H = N) and take the cube,
+  the light grid and the sky; partly damp ones scale the screen share by (1 - damp).
+- Strength: at roughness 0.61 the composite's split-sum Fresnel is about a quarter of 0.3's at 5 degrees and a third at 10 (0.086 vs
+  0.378 / 0.264): the owner's test10 look ("no reflections"). `ReflectionsComposite.frag` takes the damp share's Fresnel at most at
+  DampMaxRoughness 0.3, so damp ground keeps the traced version's strength; its picture is the blurred cube (not a mirror).
+- Off: `[Shaders.Reflections.Main] DampTrace = true` (live, hidden unless ShowInternal) traces damp ground as before; the cube path is also
+  off without the cube (CubeMap off, underwater), where damp ground would have only the sky.
+- Known gaps (review 2026-11-21): RT on: RayGen / RTResolve do not know the damp share; damp ground's roughness 0.61 is past RT MaxRoughness
+  0.5, so it gets no RT rays and is screen-marched with the wider spread (noisier than before). Partly damp pixels (a dry share from
+  GroundSheen or MaterialAware) still march. A Puddles Roughness of 0.2 or more counts heavy-rain damp ground as standing (traced as
+  before); Puddles Quality 1 (no rim) puts the shore band on the cube. The first seconds after a load or a cell change the cube is still
+  filling: damp ground shows mostly the sky then. The flashlight highlight on damp ground is wider (GGX at 0.61), the firefly cap lower (3).
+- Look: damp ground a soft, steady sheen of the surroundings and sky (no speckles); puddles still sharp mirrors. Wrong: damp ground that no
+  longer reads wet (compare `DampTrace = true`), or a milky wash at low angles in bright weather (believed possible; SpecularOcclusion dims it).
+- Cost: believed cheaper (fewer pixels marched); not measured.

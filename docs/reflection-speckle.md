@@ -68,3 +68,15 @@ our own. Clone: `F:\VS-scratch\ext\cs` (sparse) and `F:\VS-scratch\ext\cs-files`
 - Owner's toggle at `reflection01`: Reflections off -> do the speckles stay (then 5)? DebugView 12 screenshot (red = bend, green =
   roughness).
 - Owner's word for tier 3 (new dependency, player-visible, frame cost).
+
+## What was tried
+- 2026-11-21 test18 (7231832): damp ground's blur raised to the film's roughness, at most 0.3. Owner at `reflection01`: still speckled at
+  mid distance.
+- 2026-11-21 test19 (deferred-wetness-ground 197d49f, 9a89f67, 8573bb0; owner: "Yes, try it"): the Community Shaders split. Damp ground (the
+  film rougher than the standing water's Puddles Roughness, soft blend over 0.1) is no longer traced: no march, no random spread, the cube /
+  light grid / sky along the mirror direction at the film's own roughness (0.61 for the owner). Standing water keeps the trace. The
+  composite takes the damp share's Fresnel at most at 0.3 rough (at 0.61 it is a quarter of 0.3's at 5 degrees: the test10 "no
+  reflections" look). `[Shaders.Reflections.Main] DampTrace = true` (hidden) brings the trace back for an A/B. Vulkan passes only; RT
+  passes unaware (known gap). Details: `src/effects/Reflections/README.md`, last section. Not yet looked at in game; frame cost not measured
+  (believed cheaper). What to look at: `reflection01`: speckles gone? damp ground still reads wet? puddles still sharp?
+- Not tried yet: Fresnel from the smooth normal (tier 1), the bump's variance in the roughness (tier 2): left for if the cube is not enough.
