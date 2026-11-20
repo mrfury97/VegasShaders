@@ -140,7 +140,12 @@ FB_OUT main(PS_IN IN) {
     const float vm = tex2Dlod(TESR_DepthBufferViewModel, uv4).x;
     const bool viewModel = TESR_DepthConstants.z == 0.0f ? vm < 0.9f : vm > 0.01f;
     const bool unwritten = a < 0.5f;
-    const bool skip = byPass || (a > 1.0001f && a < 4.5f) || viewModel || viewZ >= TESR_CameraData.y * 0.999f || viewZ > DW_FB.y;
+    // (2026-11-21, slot run: wet grass turned into a white-blue mirror) no film on the records the forward shaders never gave a water layer:
+    // skin 6, grass 7, eyes 9, unlit 10 (COLOR2's class, read whenever COLOR2 was written: r above 0.5). The Reflections effect reads this
+    // film as "water here", so a film on grass blades made a sharp sky mirror of them.
+    const float cls = r > 0.5f ? FDModel(r) : 0.0f;
+    const bool noLayer = abs(cls - 6.0f) < 0.5f || abs(cls - 7.0f) < 0.5f || cls > 8.5f;
+    const bool skip = byPass || noLayer || (a > 1.0001f && a < 4.5f) || viewModel || viewZ >= TESR_CameraData.y * 0.999f || viewZ > DW_FB.y;
     clip(skip ? -1.0f : 1.0f);
     o.frame = float4(tex2Dlod(DW_Frame, uv4).rgb, 1.0f);
     o.film = 0.0f;
@@ -155,8 +160,10 @@ FB_OUT main(PS_IN IN) {
     [branch] if (!water) {
     // the water level as the forward records got it (review 2026-11-20; effects/Puddles/Puddles.cpp SetDrawConstants): the land the real level;
     // worn gear and hair 0; other objects, and the game's own shaders (LOD, statics without a record), only with ObjectPuddles
+    // (2026-11-21) plants 5 also 0: damp leaves, no standing water on them
     const float model = FDModel(r);
-    DWPuddleLevelMul = unwritten ? DW_FB.z : abs(model - 4.0f) < 0.5f ? 1.0f : abs(model - 2.0f) < 0.5f || abs(model - 8.0f) < 0.5f ? 0.0f : DW_FB.z;
+    DWPuddleLevelMul = unwritten ? DW_FB.z : abs(model - 4.0f) < 0.5f ? 1.0f :
+        abs(model - 2.0f) < 0.5f || abs(model - 8.0f) < 0.5f || abs(model - 5.0f) < 0.5f ? 0.0f : DW_FB.z;
     Wetness wet = GetWetness(P, N, N, -1.0f);
     // faded out toward DW_FB.y (no fog round trip: the fog the game's own shaders drew is not known here), the film with the colour (review:
     // the screen pass takes the film's sky back out where the film is)

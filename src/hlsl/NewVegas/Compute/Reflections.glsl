@@ -270,9 +270,13 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
 // over to the light grid, so nothing on screen showed. The film decides WHERE the water is and how much (its gloss over MaxRainWetness:
 // full rain on open ground counts 1, as the rain guess did); the mirror's blur stays WetRoughness, at most the film's (a smoother puddle keeps
 // its own). The grain of a sharp mirror on bumpy ground is NormalVarianceRoughness's to take out.
+// (2026-11-21, slot run + owner: "it looks grainy" on damp dirt) WetRoughness on every wet pixel made damp ground as sharp a mirror as a
+// puddle, through the dirt's bumps: a speckled sky. The blur is now the film's own, held between WetRoughness (standing water: the
+// owner's sharp puddles) and DampMaxRoughness (damp ground: blurred, yet under the 0.35 hand-over, so it still shows).
+const float DampMaxRoughness = 0.3;
 float FilmWetness(vec2 uv, out float roughness) {
     vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
-    roughness = min(max(f.g, 0.01), WetRoughness);
+    roughness = clamp(f.g, min(WetRoughness, DampMaxRoughness), DampMaxRoughness);
     return f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) * cb.film.y : 0.0;
 }
 
