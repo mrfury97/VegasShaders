@@ -184,7 +184,7 @@ Total about 6-9 sessions (6.5-10.5 with step 5).
 - Owner's first look (2026-11-20, install-test13): "reflections dont seem to be using the normal bump at all". Cause (from the code, believed):
   step 3's specular AA measured the bumped normal, so every bump became roughness past the trace's hand-over. Fix (install-test14): AA on the
   smooth normal's curvature (kappa 0.015), bumps kept whole near the camera and faded to the smooth normal by pixel footprint (0.5 -> 2.0
-  units / pixel), damp ground keeps 20 % of its bump (puddles are flat in the G-buffer); DebugView 12; DeferredReflections, MaterialAware and
+  units / pixel), damp ground keeps 20 % of its bump (puddles are flat in the G-buffer; 2026-11-20 owner: 100 %, DampBumpLean 0, install-test16); DebugView 12; DeferredReflections, MaterialAware and
   MaterialBufferRoughness hidden in the menu while UnifiedReflections is on in mode 2 (DeferredBumpedNormals stays: Wetness Effects and
   WetWorld still use it). Reviewed (approve with changes, applied). README "The wet floors from DeferredWetness's film" has the numbers.
 - Not done here: the D3D9 film and specular AA (step 2), coverage of every surface / probe-only (step 3), the env-map pass and metal sheen

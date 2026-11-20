@@ -211,9 +211,10 @@ vec3 SmoothViewNormal(vec2 uv) {
 //    the game's FOV about 12 m and 47 m away);
 //  - wet ground (deferred wetness step 3, the owner's second look: "extremely noisy" with the whole bump under the wet mirror): water levels the
 //    small bumps. Standing water is already flat in the G-buffer (DeferredWetness's flatten, with Puddles compiled in), so here damp ground
-//    leans: at the film's full wet share it keeps 1 - DampBumpLean of its bump (was: none; kept small so the grain the owner saw does not return).
+//    leans: at the film's full wet share it keeps 1 - DampBumpLean of its bump. (Was 0.8, then 1 before it; 2026-11-20 owner: "make Wet ground
+//    keep 100% of its bump": 0, the whole bump; the grain the owner saw on wet grass and dirt may come back, DebugView 12 shows the bend.)
 const float BumpFootNear = 0.5, BumpFootFar = 2.0;
-const float DampBumpLean = 0.8;
+const float DampBumpLean = 0.0;
 float BumpKeep(vec2 uv) {
     float footprint = readDepthLod(uv) * 2.0 * cb.reciprocalResolution.x * cb.renderScale.z / cb.projectionTransform[0][0];
     float keep = 1.0 - smoothstep(BumpFootNear, BumpFootFar, footprint);
