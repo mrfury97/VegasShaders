@@ -144,7 +144,7 @@ namespace DeferredSun {
 	// nothing is counted). target / t: the scene target (RT0) and its size; vp: the device viewport; zFunc: the D3D9 draw's depth test;
 	// fogCopyBound: s0 holds the frame's copy this draw (otherwise whatever was bound last: a stand-in goes there).
 	// probe (TEST ONLY, NvrDxvkDeferredResolve 14's ParityProbe): the Draw's one target instead of the scene (and the skin highlight), with
-	// the overwrite pipeline; nothing counted or latched, a reason for not drawing left in ProbeWhy.
+	// the overwrite pipeline; nothing counted (a failed prepare or scratch target still latches, as at 1), a reason for not drawing left in ProbeWhy.
 	inline bool VkDraw(IDirect3DDevice9* d, ShaderRecordPixel* pass, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, const D3DVIEWPORT9& vp,
 		const D3DXMATRIX& proj, DWORD zFunc, bool fogCopyBound, IDirect3DSurface9* probe = nullptr) {
 		if (VkMode < 1) return false;
@@ -255,7 +255,7 @@ namespace DeferredSun {
 	// the D3D9 quad into A and the Vulkan Draw (overwrite pipeline, the depth attachment as value 1) into B, both float scratch targets cleared
 	// to -1 first (pixels a side discarded or did not draw stay -1), blend off, every channel written, with the current DebugView. Then A, B and
 	// the draw's stages 4 / 5 / 1 are read back and written to VegasShaders-Logs\parity_<frame>_{A,B,m,n,alb}.bin, and one line gives |A - B|.
-	// The frame itself draws the D3D9 quad as at 0. Setting the switch off 14 and back shoots again. Nothing latches, nothing calls
+	// The frame itself draws the D3D9 quad as at 0. Setting the switch off 14 and back shoots again. Only off the fork (no PassesOn) it does nothing. Nothing calls
 	// DxvkCompute::Fail; the scratch targets are freed after the shot.
 	constexpr unsigned kProbeAfter = 300;
 	inline unsigned ProbeFrames = 0;	// frames with the switch at 14 (BeginFrame); reset when it leaves 14
@@ -885,7 +885,7 @@ namespace DeferredSun {
 		// COLOR1, FD_SKIN), added like the light (ONE / ONE); taken off after. Null unless DeferredSkinSSS 2 runs this frame.
 		DWORD mask1 = 0xF;
 		// TEST ONLY (2026-11-22) NvrDxvkDeferredResolve 14: the parity probe, once, before this frame's own D3D9 quad (ParityProbe)
-		if (VkMode == 14 && !Vm.on && !ProbeDone && ProbeFrames >= kProbeAfter) ParityProbe(d, pass, target, t, vp, proj, zFunc, fogCopyBound, quad);
+		if (VkMode == 14 && !Vm.on && !ProbeDone && ProbeFrames >= kProbeAfter && DxvkCompute::PassesOn()) ParityProbe(d, pass, target, t, vp, proj, zFunc, fogCopyBound, quad);
 		// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve 1 (VkDraw above): the same draw on the DXVK fork; the switch 0, a gate that does not
 		// hold, a refusal or a failure: this D3D9 quad, as before
 		if (!VkDraw(d, pass, target, t, vp, proj, zFunc, fogCopyBound)) {

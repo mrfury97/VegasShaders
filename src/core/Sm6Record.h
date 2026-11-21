@@ -317,7 +317,7 @@ private:
 		auto extraBad = [this](UINT offset) { return (offset & 15) || offset < 16 * Registers || offset + 16 > UboBytes; };
 		if (first) bad = "its layout is empty";
 		else if (Registers > 224) bad = "its layout's register count is over 224";
-		else if (!uboSeen || (UboBytes & 15) || UboBytes < 16 * Registers + 16 || UboBytes > 16 * MaxUboRegisters) bad = "its layout's uniform buffer is not the register file and uvmap / ztest";
+		else if (!uboSeen || !UboUsed || (UboBytes & 15) || UboBytes < 16 * Registers + 16 || UboBytes > 16 * MaxUboRegisters) bad = "its layout's uniform buffer is not the register file and uvmap / ztest";
 		else if (!Samplers.empty() && (!heapSeen || HeapSet != 0 || HeapBinding != 0)) bad = "its layout's sampler heap is not set 0 binding 0";
 		else if (!PushBytes || (PushBytes & 3) || PushBytes > MaxPushBytes || PushBytes > DxvkCompute::Info().MaxPushBytes) bad = "its layout's push block is over 48 bytes (DXVK's fragment push budget) or does not fit";
 		else if (!uvSeen || extraBad(UvMapOffset)) bad = "its layout has no uvmap register in the uniform buffer";
