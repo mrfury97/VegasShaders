@@ -284,7 +284,9 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   MaxRainWetness 0.5); the film's roughness is lerp(damp, standing, the standing share), so the share is read back with open flat
   ground's damp roughness now (`cb.film2.z` = lerp(1, 0.22, saturate(wetness x MaxRainWetness)), C++ from Wetness Effects' constants)
   and FilmDamp = 1 - smoothstep(0.25, 0.6, share): a puddle's soft edge stays traced (the first build split by roughness alone and put
-  every puddle edge on the cube: slot A/B 2026-11-21, the bush's reflection lost). Without Puddles: by roughness as before. Damp: the
+  every puddle edge on the cube: slot A/B 2026-11-21, the bush's reflection lost). Without Puddles: by roughness as before. Only BUMPY
+  damp ground goes to the cube (the same A/B: the Strip's wet asphalt lost its mirror): the bumped normal's mean bend from the smooth one
+  over five taps two pixels apart, smoothstep(0.01, 0.04) on 1 - cos (about 8 to 16 degrees); without bumped normals none. Damp: the
   roughness is the film's own; standing: as before (WetRoughness .. 0.3). `SurfaceDamp` = the damp share of the pixel's reflection.
   `ReflectionsTrace.frag` / `ReflectionsTraceHiZ.frag`: fully damp pixels skip the march and the random spread (H = N) and take the cube,
   the light grid and the sky; partly damp ones scale the screen share by (1 - damp).
