@@ -173,6 +173,9 @@ most change the look a little, so each needs the owner's word before it is built
   - 1 for the ladder.
 
 ### B4. One lighting resolve for everything that reads the G-buffer (Vulkan path)
+- **Superseded 2026-11-21 by the workshop, `docs/deferred-single-pass.md`:** the scope is narrowed to sun and lamps (wetness, AO,
+  ambient and reflections stay outside); the pass is a fragment Draw compiled from the same HLSL; 12-17 sessions in switchable steps;
+  the value is removing the ps_3_0 limits more than frame time.
 - **What:** today a deferred pixel is read by many separate full-screen passes:
   - DeferredSun;
   - up to four DeferredLamps class passes;
