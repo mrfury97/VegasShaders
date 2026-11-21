@@ -64,7 +64,7 @@ load path has `source` (D3DX preprocess, or `ShaderPrecompile::Take`), so the re
   - `ztest` (only with `depth 1`): the D3D9 pass's depth test done in the shader against texture `zref`. `x`: 0 off, 1 `zref` holds
     view z (R32F, `DeferredDepth::LinearTexture`; reference depth = `y + z / zref`, with `y` = projection `_33`, `z` = `_43`), 2 `zref`
     holds device depth (the INTZ copy); `w`: 1 pass where the pass's depth `>=` the reference (D3D9 GREATEREQUAL, reversed depth),
-    2 `<=` (LESSEQUAL). With x = 0 the pass writes `SV_Depth` for a `DrawDepthStencil` attachment instead.
+    2 `<=` (LESSEQUAL). With x = 0 the pass writes `SV_Depth` and the C++ attaches the device's depth-stencil surface through `DrawGeometryScene` (the fork's 1.7-grass; not `DrawDepthStencil`, whose viewport range is squashed to its single `Depth` value, patch 0010).
 - **Outputs**: `targets` colour targets (`COLORn` -> location n), `depth 1` = also `SV_Depth`. Every channel of every target is written
   (the extension has one blend and no per-target mask); a pass whose D3D9 draw masks alpha must return alpha 0 under an ADD blend.
 - **Viewport**: the Draw's viewport (and so its scissor) is the device viewport; the shader's uv and VPOS do not depend on it.

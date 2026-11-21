@@ -260,7 +260,7 @@ there. That is fine: mode 1 keeps D3D9.
   - `VPOS` = `FragCoord.xy - 0.5`; `TEXCOORD0` = `FragCoord.xy * uvmap.xy + uvmap.zw` (push): the D3D9 quad's uv whatever the Draw's
     viewport, so the built-in triangle's uv is not read and RenderScale 0.67 cannot stretch it;
   - the depth test in the shader (push `ztest`, texture `zref`: view z or device depth, GREATEREQUAL / LESSEQUAL), or `SV_Depth` for a
-    `DrawDepthStencil` attachment: the C++ chooses per Draw.
+    depth attachment through `DrawGeometryScene` (not `DrawDepthStencil`: its viewport range is one value): the C++ chooses per Draw.
 - **Variant key:** FNV-1a 64 of the cache bytes without the trailing NUL = `PortableSource(source)` in `ShaderRecord::LoadShader`
   (rule in the README). File `Compute/Deferred/<Name>-<key>.spv` + `.layout`.
 - **PROVEN** (`tests/sm6_record_check.py --lamps`, PASS): 13 texts convert and pass spirv-val; spirv-cross reflection puts every member at

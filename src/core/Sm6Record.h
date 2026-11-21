@@ -233,6 +233,7 @@ private:
 	State Bad(const char* why) {
 		_snprintf_s(WhyText, sizeof(WhyText), _TRUNCATE, "%s (%s)", why, File.c_str());
 		for (auto*& p : Pipelines) DxvkCompute::Drop(p);
+		for (auto*& p : WritePipelines) DxvkCompute::Drop(p);
 		DxvkCompute::Drop(Ubo.Buffer);
 		return Status = State::Failed;
 	}
