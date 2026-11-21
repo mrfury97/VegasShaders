@@ -325,6 +325,24 @@ float FilmWetness(vec2 uv, out float roughness) {
     // roughness alone, as the first build.
     float share = cb.film2.z > cb.film2.y + 0.05 ? saturate((cb.film2.z - f.g) / (cb.film2.z - cb.film2.y)) : 1.0 - smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, f.g);
     FilmDamp = cb.film2.x > 0.5 && f.g > 0.001 ? 1.0 - smoothstep(0.25, 0.6, share) : 0.0;
+    // (2026-11-21, slot A/B: the Strip's wet asphalt lost its mirror of the robots, benches and lamp posts) only BUMPY damp ground goes to
+    // the cube: the speckle needs a bump to bend the ray. How bumpy: the bumped normal's mean bend from the smooth one over five taps two
+    // pixels apart (1 - cos: 0.01 is about 8 degrees, 0.04 about 16). Smooth damp ground (asphalt, concrete, packed earth) keeps the trace
+    // as before; without the bumped normals (film.z 0) the trace never speckled, so nothing goes to the cube.
+    if (FilmDamp > 0.0) {
+        float bend = 0.0;
+        if (cb.film.z > 0.5) {
+            vec2 px = 2.0 * cb.reciprocalResolution.xy;
+            for (int k = 0; k < 5; k++) {
+                vec2 q = uv + (k == 0 ? vec2(0.0) : k == 1 ? vec2(px.x, 0.0) : k == 2 ? vec2(-px.x, 0.0) : k == 3 ? vec2(0.0, px.y) : vec2(0.0, -px.y));
+                vec3 nb = normalize(textureLod(sampler2D(t_normals, POINT_S), q, 0.0).xyz * 2.0 - 1.0);
+                vec3 ns = normalize(textureLod(sampler2D(t_smoothNormals, POINT_S), q, 0.0).xyz * 2.0 - 1.0);
+                bend += 1.0 - dot(nb, ns);
+            }
+            bend *= 0.2;
+        }
+        FilmDamp *= smoothstep(0.01, 0.04, bend);
+    }
     roughness = mix(sharp, max(f.g, 0.01), FilmDamp);
     return f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) * cb.film.y : 0.0;
 }
