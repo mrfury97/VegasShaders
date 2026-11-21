@@ -61,12 +61,21 @@ Three extra `D3DFMT_A16B16G16R16F` targets at scene size, MRT slots 1-3, beside 
 
 ### Where lighting is resolved
 At the end of the main list, after the G-buffer is resolved and before LinearScene encodes the frame, in this order
-(`Render.cpp:2913-2917`): depth copy, DeferredRenderer bookkeeping, skin prep, **DeferredSun** (one full-screen pass: the templates' own
+(`Render.cpp:2916-2922`): depth copy, DeferredRenderer bookkeeping, skin prep, **DeferredSun** (one full-screen pass: the templates' own
 sun term x their own shadow lookup: cascades, contact hardening, character map, cloud shadows, RT sun shadow where it applies; x (1 - fog);
 added ONE/ONE in linear light), **DeferredLamps** (one full-screen pass over the lamp table's froxel lists, the objects' own lamp maths,
 atlas shadows; a separate skin lamp pass), **FlashlightDeferred** (the beam on the G-buffer), skin scattering (`DeferredSkinSSS 2`, a
 screen-space Burley-profile blur). Fog is rebuilt in the passes (`DeferredFog.h`); with VolumetricFog on (default) the game draws no fog
 and no frame copy is needed.
+
+What the lamp pass needs to run (`DeferredLamps.h` Apply, the skip at :501-502): this span's G-buffer, the lamp table, the pass compiled
+and a texture on s8. The shadow atlas is made only in the interior branch (`ShadowManager.cpp:3465`, `ShadowAtlas::Update` -> `Ensure`), so
+in a game started outdoors there is none until the first interior and the pass was skipped: no lamp light on deferred pixels outdoors
+until then. `[Shaders.ShadowsInteriors.Deferred] AtlasStandIn` (2026-11-21, live, test only, off) binds a 1x1 stand-in instead (never
+published as `PointShadowForward::AtlasTexture`); with it the lamps are unshadowed or RT-traced outdoors and the 4 shadow passes are
+skipped while no lamp shadow runs (`docs/deferred-single-pass.md` step 0). F10 timers for the whole span end: "Deferred span (all)"
+(`Render.cpp:2914`, from the G-buffer resolved to LinearScene's encode back), and "LinearScene to linear" / "LinearScene encode"
+(each conversion, `LinearScene.h:104`).
 
 ### Family by family, with shipped defaults (mode 2)
 | Family | Path | Switch | Notes |

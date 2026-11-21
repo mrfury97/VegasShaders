@@ -70,6 +70,31 @@ namespace DeferredLamps {
 	inline ShaderRecordPixel* LandFilmPass = nullptr;
 	inline bool LandFilmPassFailed = false;
 	inline bool Past16Unshadowed = false;		// the lamp pass loaded at a DL_PAST16_LIT level (lamps past a pixel's 16th lit unshadowed)
+	// UNOFFICIAL 2026-11-21 AtlasStandIn ([Shaders.ShadowsInteriors.Deferred], live, test only, off; docs/deferred-single-pass.md step 0): the
+	// shadow atlas is made only in the interior branch (ShadowManager.cpp, ShadowAtlas::Update), and the pass below skipped every frame without
+	// it, so in a game started outdoors the deferred pixels got no lamp light until the first interior. On: without the atlas the pass binds a
+	// 1x1 R16F texture holding 1 (lit; never PointShadowForward::AtlasTexture, which other code reads) on s8 and runs. No atlas tile is written
+	// then (ManyLamps::PutTiles), so each lamp is unshadowed (UnshadowedLamps) or RT-traced; the 4 shadow passes are skipped while
+	// PointShadowForward::Active is off (outdoors without the RT lamp trace nothing has a shadow). With the atlas: exactly as before.
+	inline bool AtlasStandIn = false;			// this frame: the switch (read once a frame)
+	inline IDirect3DTexture9* StandInTexture = nullptr;
+	inline bool StandInFailed = false;
+	inline unsigned long long StatStandIn = 0, StatStandInNoShadowPasses = 0;
+	inline IDirect3DTexture9* StandIn(IDirect3DDevice9* d) {	// MANAGED (as PointShadowForward::NeutralCube): no device-reset handling needed
+		if (StandInTexture || StandInFailed) return StandInTexture;
+		if (FAILED(d->CreateTexture(1, 1, 1, 0, D3DFMT_R16F, D3DPOOL_MANAGED, &StandInTexture, NULL)) || !StandInTexture) {
+			StandInTexture = nullptr; StandInFailed = true;
+			Logger::Log("[ERROR] UNOFFICIAL DeferredLamps: could not make the atlas stand-in (1x1 R16F): without the atlas the lamp pass is skipped, as before");
+			return nullptr;
+		}
+		D3DLOCKED_RECT lock;
+		if (SUCCEEDED(StandInTexture->LockRect(0, &lock, NULL, 0))) {
+			*(UInt16*)lock.pBits = 0x3C00;	// 1.0 as a half float: "nothing recorded" (lit), as ShadowAtlas::Ensure clears the atlas
+			StandInTexture->UnlockRect(0);
+		}
+		Logger::Log("UNOFFICIAL DeferredLamps: atlas stand-in made (AtlasStandIn: the lamp pass runs before the shadow atlas exists)");
+		return StandInTexture;
+	}
 	inline bool ShadowedThisFrame = false;		// the world run drew its shadow passes with Shadows on this frame (reset in BeginFrame)
 	// EffectChain.cpp PreStep_ShadowPlan: the deferred lamp pass shadowed its lamps from the atlas this frame, as the forward lamp-shadow shaders
 	// do (PointShadowForward::BoundThisFrame), so the screen-space lamp shadows are left out the same way
@@ -246,13 +271,19 @@ namespace DeferredLamps {
 		LandLampModel = TheSettingManager->GetSettingI(kSection, "LandLampModel") != 0;
 		ReplaceScreenShadows = TheSettingManager->GetSettingI(kSection, "ReplaceScreenShadows") != 0;
 		Tiles::Live = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredTiledLight") != 0;	// UNOFFICIAL 2026-11-15 DeferredTiledLight (live)
+		AtlasStandIn = TheSettingManager->GetSettingI(kSection, "AtlasStandIn") != 0;	// UNOFFICIAL 2026-11-21 AtlasStandIn (above)
+		ManyLamps::TilesWithoutAtlas = AtlasStandIn;	// (the tile rows' RT trace ids without the atlas, as with it: ManyLamps::PutTiles)
 		if (!GpuTimer::Enabled) { StatFrames = 0; return; }
 		if (++StatFrames < 240) return;
 		const double f = (double)StatFrames;
 		Logger::Log("DEFERRED LAMPS %u frames: deferred binds %.1f a frame, the pass %.2f a frame (copy path %.2f), land pass %.2f a frame (%s), skipped (no G-buffer / not linear-capable) %.2f, deferred shaders left bound at the span's end and restored %.2f%s",
 			(unsigned)StatFrames, StatBinds / f, StatPasses / f, StatCopies / f, StatLand / f, LandCompiled ? (LandLampModel ? "the land's own lamp model" : "LandLampModel off") : "not loaded", StatSkipped / f, StatRestored / f,
 			DeferredDistant::CompiledIn() ? (StatLinearZ ? ", positions from the exact linear view z (DeferredDistant)" : ", positions from the half-float distance (DeferredDepth 2 made no linear view z)") : "");
+		if (AtlasStandIn || StatStandIn)	// UNOFFICIAL 2026-11-21 AtlasStandIn
+			Logger::Log("DEFERRED LAMPS atlas stand-in %s: the pass ran without the shadow atlas %.2f a frame, its shadow passes skipped (no lamp shadow live) %.2f a frame",
+				AtlasStandIn ? "on" : "off", StatStandIn / f, StatStandInNoShadowPasses / f);
 		StatFrames = 0; StatBinds = StatPasses = StatCopies = StatRestored = StatSkipped = StatLinearZ = StatLand = 0;
+		StatStandIn = StatStandInNoShadowPasses = 0;
 		if (StatIntFrames) {	// (fd-batchA item 2 diagnostic)
 			Logger::Log("DEFERRED LAMPS screen shadows %llu interior frames: forward lamp-shadow shaders bound in %llu (%s), the pass's own atlas shadows in %llu, the screen-space lamp shadows ran in %llu",
 				StatIntFrames, StatFwdBound, ForwardBinderWindow.empty() ? "none" : ForwardBinderWindow.c_str(), StatOwnShadows, StatScreenRan);
@@ -464,8 +495,11 @@ namespace DeferredLamps {
 			if (f != ForwardOf.end()) { d->SetPixelShader(f->second); StatRestored++; }
 			bound->Release();
 		}
+		// UNOFFICIAL 2026-11-21 AtlasStandIn (above): without the atlas, its stand-in on s8 (only while the switch is on; never published)
+		IDirect3DTexture9* atlas = PointShadowForward::AtlasTexture;
+		const bool standIn = !atlas && AtlasStandIn && (atlas = StandIn(d)) != nullptr;
 		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture ||
-			!ManyLamps::Table || !PointShadowForward::AtlasTexture || !EnsurePass() || skipDraw) { StatSkipped++; return; }
+			!ManyLamps::Table || !atlas || !EnsurePass() || skipDraw) { StatSkipped++; return; }
 		IDirect3DSurface9* target = nullptr;
 		d->GetRenderTarget(0, &target);
 		if (!target) { StatSkipped++; return; }
@@ -649,7 +683,7 @@ namespace DeferredLamps {
 		d->SetTexture(3, ManyLamps::Table);
 		d->SetTexture(4, CapturedNormals::MaterialTexture);
 		d->SetTexture(5, CapturedNormals::Texture);
-		d->SetTexture(8, PointShadowForward::AtlasTexture);
+		d->SetTexture(8, atlas);	// (the atlas, or with AtlasStandIn its 1x1 stand-in: no tile is written without the atlas, so it is never sampled)
 		// UNOFFICIAL 2026-11-14 DeferredDistant (DL_LINEAR_DEPTH, DeferredLamps.hlsl DLViewZ): this frame's exact linear view z (DeferredDepth 2,
 		// made by DeferredDepth::AtSpanEnd just before), c10.w 1 below; else nothing on s7 and the half-float distance as before
 		const bool linearZ = DeferredDistant::CompiledIn() && DeferredDepth::LinearReady() && !Vm.on;	// (the world's view z: not the view model's)
@@ -669,7 +703,13 @@ namespace DeferredLamps {
 		bool vis = false;
 		// UNOFFICIAL 2026-11-01 PrecisionBias (DeferredLamps.hlsl DLShadow): the shadow lookup's push off the surface per unit of distance
 		const float bias = (std::max)(TheSettingManager->GetSettingF(kSection, "PrecisionBias"), 0.0f) * 0.001f;
-		if ((DebugView < 2 || DebugView == 7 || DebugView == 8) && EnsureShadowPass(t.Width, t.Height)) {	// (8, 2026-11-06: the shadow passes write its codes)
+		// UNOFFICIAL 2026-11-21 AtlasStandIn: on the stand-in with no lamp shadow live (PointShadowForward::Active off: outdoors without the RT
+		// lamp trace) the shadow passes would only write "lit" (no tile row is written, ManyLamps::PutTiles): skipped, the lighting pass then
+		// takes every lamp as a lamp past the 16th (c10.y 0: DL_Vis0-3 are not read) with no tile: UnshadowedLamps. DebugView 8 reads s9
+		// whatever c10.y says, so it keeps them.
+		const bool noShadowPasses = standIn && !PointShadowForward::Active && DebugView != 8;
+		if (standIn) { StatStandIn++; if (noShadowPasses) StatStandInNoShadowPasses++; }
+		if ((DebugView < 2 || DebugView == 7 || DebugView == 8) && !noShadowPasses && EnsureShadowPass(t.Width, t.Height)) {	// (8, 2026-11-06: the shadow passes write its codes)
 			static GpuTimer shadowTimer("Deferred lamp shadows"), vmShadowTimer("Deferred lamp shadows (first person)");
 			GpuProfileScope shadowGpu(Vm.on ? vmShadowTimer : shadowTimer, d);
 			d->SetPixelShader(ShadowPass->ShaderHandle);
@@ -712,7 +752,8 @@ namespace DeferredLamps {
 		draw(0);
 		// UNOFFICIAL 2026-11-16 fd-batchA item 2 (LampShadowsDrawn): the world's lamps were shadowed from the atlas in this pass (the shadow passes'
 		// full filter, or the lighting pass's own lookup; not at the DL_PAST16_LIT level without the shadow passes, which lit them unshadowed)
-		if (Shadows && !Vm.on && (vis || !Past16Unshadowed)) ShadowedThisFrame = true;
+		// (2026-11-21 AtlasStandIn: not on the stand-in: no atlas shadow was drawn, the screen-space lamp shadows stay as without this pass)
+		if (Shadows && !Vm.on && (vis || !Past16Unshadowed) && !standIn) ShadowedThisFrame = true;
 		if (landLive) {	// UNOFFICIAL 2026-11-16 fd-batchA item 3: the land lamp pass, the same state (as the skin pass below); its pixels are the ones the lamp
 			d->SetPixelShader(LandPass->ShaderHandle);	// pass clipped (under the exact fog: the light target's clear 0 there, blend off: a write)
 			draw(0);	// (DeferredTiledLight: the lamp tiles, or the full-screen quad)

@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <deque>
 #include <thread>
+#include <optional>	// UNOFFICIAL 2026-11-21 the "Deferred span (all)" timer (MainListHook)
 #include "../../core/FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
 #include "../../core/GpuProfiler.h"
 #include "../../core/GpuTimeline.h"
@@ -2907,14 +2908,18 @@ namespace GrassFirst {
 #if NVR_TEST_TOOLS
 		struct CensusMain { bool was; CensusMain() : was(LinearSceneCensus::InMain) { LinearSceneCensus::InMain = true; } ~CensusMain() { LinearSceneCensus::InMain = was; } } censusMain;	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
+		// UNOFFICIAL 2026-11-21 (docs/deferred-single-pass.md step 0, F10 profile only) "Deferred span (all)": the whole span end in one GPU timer,
+		// from the G-buffer resolved (DeferredSpan's end starts it) to LinearScene's encode back done (this object's end, after LinearSpan's).
+		// Declared before LinearSpan so it ends after it, and after ReactiveSpan so the reactive mask's note stays outside. Measures only.
+		std::optional<GpuProfileScope> spanEndAll;
 		// UNOFFICIAL 2026-10-28 LinearScene: the world's main list in linear light, left encoded at its end (core/LinearScene.h).
 		struct LinearSpan { bool on; LinearSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) LinearScene::BeginSpan(TheRenderManager->device); }
 			~LinearSpan() { if (on) LinearScene::EndSpan(TheRenderManager->device); } } linearSpan;
 		// (UNOFFICIAL 2026-11-14 DeferredDepth, core/DeferredDepth.h: the world depth copied for the deferred passes first, off by default)
 		// UNOFFICIAL 2026-10-31 DeferredLamps (core/DeferredLamps.h): declared between LinearSpan and the CaptureSpans, so its end runs after
 		// CapturedNormals::EndSpan (the G-buffer resolved) and before LinearScene::EndSpan (the encode): the lamps of the deferred pixels.
-		struct DeferredSpan { bool on; DeferredSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) {}
-			~DeferredSpan() { if (on) { DeferredDepth::AtSpanEnd(TheRenderManager->device); DeferredRenderer::AtSpanEnd(TheRenderManager->device); DeferredSkin::BeforePasses(TheRenderManager->device); DeferredSun::Apply(TheRenderManager->device); DeferredLamps::Apply(TheRenderManager->device); FlashlightDeferred::Apply(TheRenderManager->device); DeferredSkin::AfterPasses(TheRenderManager->device); } } } deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight
+		struct DeferredSpan { bool on; std::optional<GpuProfileScope>& all; DeferredSpan(std::optional<GpuProfileScope>& a) : on(ShaderSplit::CurrentContext == ShaderSplit::World), all(a) {}
+			~DeferredSpan() { if (on) { static GpuTimer allTimer("Deferred span (all)"); all.emplace(allTimer, TheRenderManager->device); DeferredDepth::AtSpanEnd(TheRenderManager->device); DeferredRenderer::AtSpanEnd(TheRenderManager->device); DeferredSkin::BeforePasses(TheRenderManager->device); DeferredSun::Apply(TheRenderManager->device); DeferredLamps::Apply(TheRenderManager->device); FlashlightDeferred::Apply(TheRenderManager->device); DeferredSkin::AfterPasses(TheRenderManager->device); } } } deferredSpan(spanEndAll);	// UNOFFICIAL 2026-11-04 + the deferred flashlight (2026-11-21 + the span timer)
 		ActiveAccumulator = nullptr;
 		// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the normal target bound around the game's own call only (the early
 		// grass part above it draws grass and the grass shadows, which write none).

@@ -14,6 +14,10 @@
 //   - PointShadowForward::SetForPass writes each matched light's tile (u, v of its first texel centre, its span in atlas uv) into the
 //     light's tint register, and binds the atlas on s8.
 // Off: nothing is made, the shaders are as before (no define).
+// The atlas is made (Ensure) only from Update, which runs in the interior branch (ShadowManager.cpp, after PointShadowForward::Publish):
+// in a game started outdoors there is none until the first interior, and PointShadowForward::AtlasTexture stays null until then (then it
+// is kept for the session). The deferred lamp pass needs a texture on s8: with [Shaders.ShadowsInteriors.Deferred] AtlasStandIn
+// (2026-11-21, test only, off) it binds its own 1x1 stand-in meanwhile (DeferredLamps.h); off, it is skipped until the atlas exists.
 #include "GpuProfiler.h"
 #include "ShadowPool.h"
 #include "PointShadowForward.h"

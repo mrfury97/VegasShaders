@@ -420,11 +420,15 @@ namespace ManyLamps {
 	// UNOFFICIAL 2026-10-31 TableLamps: each table lamp's shadow-atlas tile (rows TileRow(), TileRow() + 1; zeros = no tile, unshadowed), from
 	// the slots ShadowAtlas::Update filled this frame (live slots and pool lamps alike), as PointShadowForward::SetForPass reads them for a
 	// draw's first six lamps: position and reach of the shadow map, camera-relative (GetShadowWorldPos's origin), its fade, its RT id.
+	// UNOFFICIAL 2026-11-21 AtlasStandIn ([Shaders.ShadowsInteriors.Deferred], core/DeferredLamps.h; set by DeferredLamps::BeginFrame): the rows
+	// also while the atlas is not made yet (a game started outdoors). Slots then have no tile (span 0: Publish / PublishExterior make them so,
+	// only ShadowAtlas::Update gives one), so only the RT-traced lamps are listed: their trace ids, as outdoors after an interior. Off: as before.
+	inline bool TilesWithoutAtlas = false;
 	inline void PutTiles(float* t, int pitch, const std::vector<const ShadowSceneLight*>& order) {
 		float* a = t + pitch * TileRow();
 		float* b = a + pitch;
 		TileCopy.assign(order.size() * 9, 0.0f);	// (TableLampsParity)
-		if (!PointShadowForward::Active || !PointShadowForward::AtlasTexture) return;
+		if (!PointShadowForward::Active || (!PointShadowForward::AtlasTexture && !TilesWithoutAtlas)) return;
 		if (!DeferredAtStartup() && TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Atlas", "TableLampsLive") == 0) return;	// live A/B: no tiles, unshadowed
 		static std::unordered_map<const ShadowSceneLight*, int> slotOf;
 		slotOf.clear();

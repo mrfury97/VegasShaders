@@ -24,6 +24,7 @@
 #include "MergeCopies.h"	// UNOFFICIAL 2026-11-14 MergeCopies (test only): its merged draw / checks in the innermost draw hook
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-16 fd-batchB: a failure retried after the next cell change
 #include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 903)
+#include "GpuProfiler.h"	// UNOFFICIAL 2026-11-21 the conversions' F10 timers (Convert)
 
 namespace LinearScene {
 
@@ -98,6 +99,10 @@ namespace LinearScene {
 		// (2026-11-16 fd-batchB) a refused copy: the latch (FdTestFault 903 forces one, test only)
 		if (FdTestFault::Take(903) || FAILED(d->StretchRect(target, NULL, Copy, NULL, D3DTEXF_NONE))) { Logger::Log("UNOFFICIAL LinearScene: frame copy failed"); Fail.Set("its frame copy failed"); return false; }
 		const bool msaa = t.MultiSampleType != D3DMULTISAMPLE_NONE;
+		// UNOFFICIAL 2026-11-21 (docs/deferred-single-pass.md step 0, F10 profile only): each conversion's GPU time, to linear and the encode
+		// back apart (the span's last encode is inside "Deferred span (all)", Render.cpp MainListHook). The frame copy above is not in it.
+		static GpuTimer toLinearTimer("LinearScene to linear"), encodeTimer("LinearScene encode");
+		GpuProfileScope gpu(toLinear ? toLinearTimer : encodeTimer, d);
 
 		// Save what the draw needs.
 		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;

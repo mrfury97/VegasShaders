@@ -23,6 +23,9 @@
 //    (AD) base stay: the AD pass's vertex shader carries no fog, so the record cannot fog itself (FD-INTERIORS-RESULTS.md "decided").
 //  - Native D3D9: the lamp table and the atlas are made for the pass (ManyLamps::DeferredAtStartup, PointShadowForward::AtlasRuns), and the
 //    game draws shiny objects with up to 23 + f lamps in one pass while the renderer is live indoors (LampsInOnePass, OnePassWanted).
+//  - The atlas itself is made at the first interior only (ShadowAtlas.h); before it the lamp pass is skipped (no lamp light on the deferred
+//    pixels in a game started outdoors), unless [Shaders.ShadowsInteriors.Deferred] AtlasStandIn (2026-11-21, test only) gives it a 1x1
+//    stand-in (DeferredLamps.h).
 // [Main.Main.Quality] DeferredRendererLive (live, test only): the A/B for ParityTest (`parity Main.Main.Quality DeferredRendererLive`): false =
 // every draw forward as before (the prerequisites stay on).
 // Off (0): nothing is loaded, chosen, skipped or patched; every template and record as before.

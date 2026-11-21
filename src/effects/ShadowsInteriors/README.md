@@ -108,6 +108,11 @@ start; `RtLampShadows::EnabledNow`), and on again resumes it in a session that s
 with `SameFrame` and RenderScale below 1 the trace before the world, its camera rays and its denoiser run at the world's render size
 (`TAAEffect::WorldDrawnSmall`), not the screen's; the readers find the result through the same scaled reprojection the after-the-world
 trace of a rect frame always used. Not run in the game yet. Nothing here changes.
+Since 2026-11-21 `[_Shaders.ShadowsInteriors.Deferred] AtlasStandIn` (bool, live, test only, default false, on the Internal list) is read by
+`src/core/DeferredLamps.h` (the deferred lamp pass), not by this effect: the shadow atlas is made only at the first interior, and the lamp
+pass skipped without it, so a game started outdoors had no lamp light on deferred pixels until then. On, the pass binds a 1x1 stand-in on
+s8 (never `PointShadowForward::AtlasTexture`) and skips its 4 shadow passes while no lamp shadow runs; `ManyLamps::PutTiles` then writes the
+RT trace ids without the atlas too (docs/deferred-single-pass.md step 0). With the atlas made, nothing changes. Nothing here changes.
 
 ## 5. Passes and outputs
 
