@@ -39,10 +39,11 @@ load path has `source` (D3DX preprocess, or `ShaderPrecompile::Take`), so the re
 
 ### What the SPIR-V expects
 
-- **Uniform buffer** set 2, binding 0 (`ubo` line): the D3D9 pixel-shader float register file, `cN` at byte `16 N`. Upload
-  `GetPixelShaderConstantF(0, data, registers)` as `16 x registers` bytes, as is. Names that share registers in the D3D9 shader read the
-  same bytes here (`alias=` / `group=` in the `const` lines), so the device's last write wins in both paths. `unused` (no constant read):
-  declare and bind no buffer.
+- **Uniform buffer** set 2, binding 0 (`ubo` line, `bytes` long): the D3D9 pixel-shader float register file, `cN` at byte `16 N`, then
+  `float4 uvmap` and (with depth) `float4 ztest` in the registers after it, at the `uvmap` / `ztest` byte offsets (as built:
+  `c<registers>` and `c<registers + 1>`). Fill `GetPixelShaderConstantF(0, data, registers)` as is, write uvmap / ztest at their
+  offsets, upload `bytes`. Names that share registers in the D3D9 shader read the same bytes here (`alias=` / `group=` in the `const`
+  lines), so the device's last write wins in both paths. `unused` (nothing read): declare and bind no buffer.
 - **Textures** set 1, binding = D3D9 stage `N` = extension slot `N`, the stage's view type. Bind the device's texture on stage `N`, or a
   1x1 dummy when the stage is empty, holds a Draw target or a texture of another kind, or the pass did not set it for this draw (the
   caller says so: DeferredSun's s0 without the fog copy). `unused` stages: no binding. Only a 2D dummy exists: a cube or 3D stage
@@ -54,8 +55,20 @@ load path has `source` (D3DX preprocess, or `ShaderPrecompile::Take`), so the re
   ANISOTROPIC; else LINEAR (or above) on min or mag -> LINEAR, or LINEAR_MIPMAPS with a MIPFILTER (both LINEAR before extension 1.3);
   else NEAREST. ADDRESSU must equal ADDRESSV, BORDER needs a zero border colour, MIRRORONCE has no match: those keep that frame on
   D3D9. Samplers are made through `DxvkCompute::CreateSamplerNoFail` (never `Fail`).
-- **Push block** (`push` bytes, offset 0): `uint s[16]` (the heap indices, written by the extension), `float4 uvmap` at `uvmap`, and
-  `float4 ztest` at `ztest`.
+- **Push block** (`push` bytes, offset 0): `uint s[n]`, the used stages' sampler heap indices only (written by the extension), one
+  dword per used stage in stage order (each `sampler` line's `pushOffset`); `n` = 1 when no sampler is used. At most **48 bytes**:
+  `tpl2spv.py` refuses a longer one and `Sm6Record.h` refuses to load it.
+  - Why (2026-11-22, proven by the parity probe and DXVK v3.0.1's source): DXVK keeps push data in a 256-byte array and puts a fragment
+    shader's at byte 192 (`DxvkPushDataBlock::computeBlockOffsetForStage`), so a fragment push block has 64 bytes before it runs past
+    that array into the next one, where DXVK writes each sampler binding's uint16 heap index at its push offset. Layout 1 pushed 96
+    bytes (`uint s[16]; float4 uvmap; float4 ztest`): stages 0-7's heap indices replaced the low 16 bits of uvmap.xy and ztest.xyz,
+    and the sun pass read the G-buffer up to 7 x 3 pixels off its own pixel.
+  - 48 vs 64: 64 is where the overflow starts in the fork's merged ("packed") layouts; 48 (`256 - 16 reserved - 192`) is what DXVK
+    gives the fragment stage in an "Independent" (pipeline-library) layout, which truncates the block there. The fork's full-screen
+    pipelines are believed not to use Independent layouts (patch 0004), but every pass built so far fits 48 (most: DeferredLampLandFilm,
+    12 used samplers), so 48 is the limit. A future pass using 13 or more samplers needs either 64 (and proof the layout is merged)
+    or its samplers merged.
+- **uvmap / ztest** (uniform buffer, above):
   - `uvmap`: the pass's `TEXCOORD0` is `FragCoord.xy * uvmap.xy + uvmap.zw`; the built-in triangle's uv is not read. For a D3D9
     `XYZRHW` quad with corners `(x0, y0, u0, v0)` and `(x1, y1, u1, v1)`: `uvmap.x = (u1 - u0) / (x1 - x0)`,
     `uvmap.z = u0 - (x0 + 0.5) * uvmap.x` (y / w the same). DeferredSun's quad (`DeferredSun.h:518-519`): `(1/W, 1/H, 0, 0)`, W x H
@@ -69,21 +82,21 @@ load path has `source` (D3DX preprocess, or `ShaderPrecompile::Take`), so the re
   (the extension has one blend and no per-target mask); a pass whose D3D9 draw masks alpha must return alpha 0 under an ADD blend.
 - **Viewport**: the Draw's viewport (and so its scissor) is the device viewport; the shader's uv and VPOS do not depend on it.
 
-### The .layout format (`nvr-sm6-record 1`)
+### The .layout format (`nvr-sm6-record 2`)
 
 Text, one record per line, whitespace-separated tokens, the tag first; `#` starts a comment line; unknown tags are to be ignored.
 
 | Line | Meaning |
 |---|---|
-| `nvr-sm6-record 1` | format and version (first line) |
+| `nvr-sm6-record 2` | format and version (first line; 1 had uvmap / ztest in the push block, refused now) |
 | `pass <Name>` / `key <16 hex>` / `from <cache path>` | what it was built from (the key also in the file name) |
 | `registers <N>` | float registers the pass declares: c0..c(N-1) |
-| `ubo <set> <binding> <slot> <bytes> <used\|unused>` | the register-file buffer (`bytes` = 16 N) |
+| `ubo <set> <binding> <slot> <bytes> <used\|unused>` | the register-file buffer (`bytes` = 16 x (N + 1, or + 2 with depth): the registers, uvmap, ztest) |
 | `heap <set> <binding>` | the sampler heap |
-| `push <bytes>` | push block size |
-| `uvmap <offset>` / `ztest <offset>` | push offsets of those float4s (`ztest` only with depth) |
+| `push <bytes>` | push block size: 4 x the used samplers (at least 4), at most 48 |
+| `uvmap <offset>` / `ztest <offset>` | uniform-buffer byte offsets of those float4s, after the registers (`ztest` only with depth) |
 | `texture <stage> <set> <binding> <slot> <2D\|3D\|CUBE> <used\|unused> <name>[,<name>...]` | one per D3D9 sampler stage the text declares |
-| `sampler <stage> <slot> <pushOffset>` | one per used texture stage: its device sampler state's heap index |
+| `sampler <stage> <slot> <pushOffset>` | one per used texture stage: its device sampler state's heap index, at push dword 0, 1, ... in stage order |
 | `zref <set> <binding> <slot> 2D <used\|unused>` | the depth-test reference texture (only with depth) |
 | `const <name> <register> <count> <type> <row_major\|column_major\|-> <member\|alias=<name>\|group=<array>>` | every float constant: first register, registers taken |
 | `group <array> <register> <count>` | a float4 array standing for names whose registers overlap |

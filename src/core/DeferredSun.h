@@ -176,6 +176,8 @@ namespace DeferredSun {
 			return onD3D9(kVkLatched);
 		}
 		// uvmap: the D3D9 quad's TEXCOORD0 (Apply: u = (x + 0.5) / W over the viewport) is FragCoord / size, whatever the viewport.
+		// (uvmap and ztest reach the shader as two registers of its uniform buffer, Sm6Record layout v2: as push data at bytes 64-95 DXVK's
+		// sampler heap indices replaced their low 16 bits, and the G-buffer was read up to 7 x 3 pixels off)
 		// (bench diagnosis, test only) 13: the G-buffer uv half a texel right and down (u = (x + 1) / W), as if the D3D9 quad read on texel edges
 		const float uvHalf = VkMode == 13 ? 0.5f : 0.0f;
 		const float uvmap[4] = { 1.0f / (float)t.Width, 1.0f / (float)t.Height, uvHalf / (float)t.Width, uvHalf / (float)t.Height };

@@ -10,9 +10,11 @@ DeferredLamps family) into a scratch folder, then checks each result with tools 
   - the file name's key = FNV-1a 64 of the cache bytes without the trailing NUL (computed here again);
   - spirv-cross --reflect: every uniform-buffer member sits at 16 x the register the CACHE TEXT pins it to (read here with its own
     regex), arrays at a 16-byte stride, matrices at a 16-byte stride with each 16 bytes one D3D9 register (HLSL row_major = SPIR-V
-    column-major and the reverse); members shared by several names (a group) cover each name's registers; the push block's sampler
-    indices at 4 x stage, uvmap and ztest at the offsets the layout gives; textures at set 1 binding = stage; the sampler heap at
-    set 0 binding 0; colour outputs at locations 0..targets-1;
+    column-major and the reverse); members shared by several names (a group) cover each name's registers; uvmap and ztest in the uniform buffer at
+    the offsets the layout gives, after every register the text pins; the push block ONLY the used stages' sampler indices (uint
+    s[n], one dword per used stage in stage order), at most 48 bytes (tpl2spv.PUSH_LIMIT: DXVK's fragment push budget; past 64 the
+    push data overflows into DXVK's sampler indices); textures at set 1 binding = stage; the sampler heap at set 0 binding 0;
+    colour outputs at locations 0..targets-1;
   - the layout's used textures are exactly the images the SPIR-V declares.
 --built DIR also checks the .spv / .layout pairs already in DIR (src\hlsl\NewVegas\Compute\Deferred), keys excepted (no source).
 Exit code 0 = all passed.
@@ -82,6 +84,7 @@ def read_layout(path):
 
 
 FORMAT_TAG = "nvr-sm6-record"
+PUSH_LIMIT = tpl2spv.PUSH_LIMIT
 
 
 def check_pair(spv, layout, cache_text=None, cache_raw=None):
@@ -92,7 +95,7 @@ def check_pair(spv, layout, cache_text=None, cache_raw=None):
     print("   spirv-val: %s" % ("ok" if v.returncode == 0 and not out else out or "exit %d" % v.returncode))
     check(v.returncode == 0, "%s: spirv-val" % name)
     lay = read_layout(layout)
-    check(lay.get("format") == 1, "%s: layout format" % name)
+    check(lay.get("format") == 2, "%s: layout format" % name)
     key = lay["key"][0]
     check(name == "%s-%s.spv" % (lay["pass"][0], key), "%s: file name vs layout pass/key" % name)
     if cache_raw is not None:
@@ -113,9 +116,21 @@ def check_pair(spv, layout, cache_text=None, cache_raw=None):
     if ubos:
         u = ubos[0]
         check((u["set"], u["binding"]) == (int(ubo_line[0]), int(ubo_line[1])), "%s: ubo set/binding" % name)
-        check(u["block_size"] <= int(ubo_line[3]) == 16 * registers, "%s: ubo size %d > %s" % (name, u["block_size"], ubo_line[3]))
+        extras = {"nvr_uvmap": int(lay["uvmap"][0])}
+        if "ztest" in lay:
+            extras["nvr_ztest"] = int(lay["ztest"][0])
+        check(u["block_size"] <= int(ubo_line[3]) == 16 * registers + 16 * len(extras), "%s: ubo size %d, layout %s, registers %d + %d" % (
+            name, u["block_size"], ubo_line[3], registers, len(extras)))
+        for xn, xoff in extras.items():     # after the D3D9 registers, inside the buffer, a register each
+            check(xoff % 16 == 0 and 16 * registers <= xoff and xoff + 16 <= int(ubo_line[3]), "%s: %s at %d (registers %d, ubo %s)" % (
+                name, xn, xoff, registers, ubo_line[3]))
+        seen = set()
         for m in types[u["type"]]["members"]:
             mn, off = m["name"], m["offset"]
+            if mn in extras:
+                check(off == extras[mn] and m["type"] == "vec4", "%s: %s at %d (%s), layout %d" % (name, mn, off, m["type"], extras[mn]))
+                seen.add(mn)
+                continue
             if mn in lay["group"]:
                 reg, n = lay["group"][mn]
                 check(off == 16 * reg, "%s: group %s at %d, register c%d" % (name, mn, off, reg))
@@ -148,19 +163,21 @@ def check_pair(spv, layout, cache_text=None, cache_raw=None):
                 check(tgt is not None and tgt[0] == c[0] and tgt[2] == c[2], "%s: alias %s -> %s" % (name, k, c[4]))
                 if pinned is not None:
                     check(pinned.get(k, (None,))[0] == c[0], "%s: alias %s register" % (name, k))
+        check(seen == set(extras), "%s: uniform buffer has %s of %s" % (name, sorted(seen), sorted(extras)))
     if pinned is not None:
         check(set(pinned) == set(lay["const"]), "%s: constants in the text %s vs layout %s" % (name, sorted(set(pinned) ^ set(lay["const"])), ""))
-    # push block
+    # push block: the sampler heap indices only, compacted, within DXVK's fragment budget
+    push = int(lay["push"][0])
+    check(0 < push <= PUSH_LIMIT and push % 4 == 0, "%s: push %d bytes (limit %d)" % (name, push, PUSH_LIMIT))
+    check(push == 4 * max(1, len(lay["sampler"])), "%s: push %d bytes for %d samplers" % (name, push, len(lay["sampler"])))
     pcs = ref.get("push_constants", [])
-    if check(len(pcs) == 1, "%s: one push block" % name):
-        pm = {m["name"]: m for m in types[pcs[0]["type"]]["members"]}
-        check(pm["s"]["offset"] == 0 and pm["s"].get("array_stride") == 4 and pm["s"].get("array") == [16], "%s: push s[16] at 0 stride 4" % name)
-        check(pm["uvmap"]["offset"] == int(lay["uvmap"][0]), "%s: push uvmap at %d" % (name, pm["uvmap"]["offset"]))
-        if "ztest" in lay:
-            check(pm["ztest"]["offset"] == int(lay["ztest"][0]), "%s: push ztest" % name)
-        check(int(lay["push"][0]) >= max(m["offset"] + 16 for m in pm.values() if m["name"] != "s"), "%s: push size" % name)
-        for st, (slot, off) in lay["sampler"].items():
-            check(off == 4 * st and slot == st, "%s: sampler stage %d at push %d" % (name, st, off))
+    if lay["sampler"] and check(len(pcs) == 1, "%s: one push block" % name):
+        pm = types[pcs[0]["type"]]["members"]
+        check([m["name"] for m in pm] == ["s"], "%s: push members %s, only s[] expected" % (name, [m["name"] for m in pm]))
+        check(pm[0]["offset"] == 0 and pm[0].get("array_stride") == 4 and pm[0].get("array") == [push // 4], "%s: push s[%d] at 0 stride 4" % (name, push // 4))
+        check(types[pcs[0]["type"]].get("size", push) <= push, "%s: push block size %s > %d" % (name, types[pcs[0]["type"]].get("size"), push))
+    for k, (st, (slot, off)) in enumerate(sorted(lay["sampler"].items())):
+        check(off == 4 * k and slot == st, "%s: sampler stage %d slot %d at push %d, expected %d" % (name, st, slot, off, 4 * k))
     # images and the sampler heap
     imgs = {i["name"]: i for i in ref.get("separate_images", [])}
     want = {"nvr_t%d" % st: t for st, t in lay["texture"].items() if t["used"]}

@@ -1,14 +1,14 @@
-nvr-sm6-record 1
+nvr-sm6-record 2
 # tools/nvr-sm6/tpl2spv.py; format: tools/nvr-sm6/README.md
 pass DeferredSun
 key d7b765f21cb2b456
 from Deferred/Sun/DeferredSun.pso.hlsl
 registers 224
-ubo 2 0 0 3584 used
+ubo 2 0 0 3616 used
 heap 0 0
-push 96
-uvmap 64
-ztest 80
+push 32
+uvmap 3584
+ztest 3600
 texture 0 1 0 0 2D used DS_Frame
 texture 1 1 1 1 2D used TESR_AlbedoBuffer
 texture 4 1 4 4 2D used TESR_MaterialBuffer
@@ -19,12 +19,12 @@ texture 11 1 11 11 2D used TESR_CharShadowMap
 texture 12 1 12 12 2D used DS_WetFilmMap
 sampler 0 0 0
 sampler 1 1 4
-sampler 4 4 16
-sampler 5 5 20
-sampler 6 6 24
-sampler 9 9 36
-sampler 11 11 44
-sampler 12 12 48
+sampler 4 4 8
+sampler 5 5 12
+sampler 6 6 16
+sampler 9 9 20
+sampler 11 11 24
+sampler 12 12 28
 zref 1 16 16 2D used
 const TESR_PBRMath 223 1 float4 - member
 const NVR_SpecFade 211 1 float4 - member

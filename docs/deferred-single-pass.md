@@ -471,6 +471,17 @@ Runs are slot A run ids. "R0" is D3D9, "R1" Vulkan, "R9"-"R13" test values of `N
   - The difference is black inside shadows.
   - R0 vs R1 mean 13.5 / 5.3 / 6.6 (puddle1 / SunGI2 / SunGI4), against a same-switch noise of 0.4-0.7.
   - Brightness after a 16x16 blur differs by only 0.6-1.8 %.
+- **That pattern is a uv misread (2026-11-22, the same-frame parity probe, value 14, and the DXVK v3.0.1 source).**
+  - What: B (Vulkan) read the G-buffer up to 7 x 3 pixels away from its own pixel, in a 255/256 staircase across the screen; A (D3D9)
+    read its own texel. The offsets fit `uv = FragCoord * uvmap` with the low 16 bits of `uvmap.xy` replaced (scratchpad analysis
+    `dsp/uv/py/a1-a5.py`).
+  - Why: the record pass pushed 96 bytes (`uint s[16]; float4 uvmap; float4 ztest`). DXVK puts fragment push data at byte 192 of its
+    256-byte push array, so bytes 64-95 (uvmap, ztest) land in the next array, where DXVK writes each sampler's uint16 heap index at
+    its push offset: stages 0-7's indices replaced the low halves of uvmap.xy / ztest.xyz.
+  - Fix (built, NOT RUN in game): layout `nvr-sm6-record 2`. The push block holds only the used samplers' heap indices, compacted
+    (sun 28-36 bytes, lamps up to 48); uvmap and ztest are two registers of the uniform buffer after the device's
+    (`tools/nvr-sm6/tpl2spv.py`, `Sm6Record.h`); the tool and the C++ refuse a push block over 48 bytes. The four sun keys rebuilt
+    (keys unchanged), `tests/sm6_record_check.py --lamps --built` passes.
 
 **Ruled out**
 - Char shadow map: CharacterShadowMap off changes nothing (20261121-161245).
@@ -484,9 +495,10 @@ Runs are slot A run ids. "R0" is D3D9, "R1" Vulkan, "R9"-"R13" test values of `N
   with the same detail amplitude.
 
 **Open**
-- Which term carries the pattern. Running now: TAA off, R9 debug views 1/5/6/8 against D3D9 on puddle1.
+- Whether the layout-2 build removes the per-pixel pattern in game: re-run the parity probe (value 14, DebugView 5 and 0) and the
+  puddle1 / SunGI2 / SunGI4 R0-R1 shots with it.
 - The earlier desert-only shadow differences have not been re-shot since the hardware depth test.
-- **Tool built, NOT RUN (2026-11-22): the same-frame parity probe, `NvrDxvkDeferredResolve 14`** (`DeferredSun.h` `ParityProbe`, test only).
+- **The same-frame parity probe, `NvrDxvkDeferredResolve 14`** (`DeferredSun.h` `ParityProbe`, test only; it found the uv misread above).
   - Every frame draws the D3D9 pass, as at 0. About 300 frames after the switch becomes 14, one frame also draws the pass both ways, inside
     Apply's own setup: D3D9 into A, Vulkan (the overwrite pipeline, the depth attachment as value 1) into B. Both are float scratch targets
     (A32B32G32R32F, else A16B16G16R16F, logged), cleared to -1, blend off, all channels, with the current DebugView (0 the light, 5 N).

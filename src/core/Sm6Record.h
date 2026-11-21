@@ -1,11 +1,15 @@
 #pragma once
 
 // UNOFFICIAL 2026-11-21 Sm6Record: the record mode of tools\nvr-sm6 (docs/deferred-single-pass.md step 1; the contract and the .layout format
-// `nvr-sm6-record 1`: tools/nvr-sm6/README.md "Template mode"). A C++-driven ps_3_0 pass loaded as a ShaderRecord (DeferredSun, later the
+// `nvr-sm6-record 2`: tools/nvr-sm6/README.md "Template mode"). A C++-driven ps_3_0 pass loaded as a ShaderRecord (DeferredSun, later the
 // lamp passes) draws through the fork's full-screen Draw instead of its DrawPrimitiveUP, from the SPIR-V tpl2spv.py built from that record's
 // own preprocessed cache text (Compute\Deferred\<Name>-<key>.spv + .layout, key = ShaderRecord::SourceKey). It is fed exactly what the D3D9
 // draw would read at that moment:
-//   constants: the device's pixel float registers c0..c(N-1), as they are, into one uniform buffer (the register file: cN at 16 N);
+//   constants: the device's pixel float registers c0..c(N-1), as they are, into one uniform buffer (the register file: cN at 16 N), and the
+//              Draw's uvmap / ztest in the registers after them (layout v2, 2026-11-22: they were push data at bytes 64-95, which DXVK puts
+//              past its 256-byte push array, where it writes the sampler heap indices over their low 16 bits: the G-buffer was read up to
+//              7 x 3 pixels off, the parity probe's mismatch);
+//   push data: the used samplers' heap indices only (the extension writes them), at most MaxPushBytes (48, DXVK's fragment budget);
 //   textures:  the device's texture on each stage the layout names, or a 1x1 stand-in where the stage is empty, holds the wrong kind, is one
 //              of the Draw's targets, or the caller says it holds nothing this pass set (StaleStages);
 //   samplers:  the extension sampler matching the device's sampler states on that stage (filter, address; sRGB on the texture binding).
@@ -40,6 +44,11 @@ public:
 	bool WritesDepth = false;
 	bool Overwrite = false;	// (bench diagnosis) this Draw writes instead of blending (debug views)
 	unsigned long long Frames = 0;		// Draws made
+
+	// DXVK v3's fragment push data starts at byte 192 of its 256-byte push array; 48 is the stage's budget (256 - 16 reserved - 192), and
+	// past 64 bytes it overflows into the sampler heap indices. A layout asking for more is refused (tools/nvr-sm6/README.md "Push block").
+	static constexpr UINT MaxPushBytes = 48;
+	static constexpr UINT MaxUboRegisters = 224 + 2;	// ps_3_0's c0..c223, then uvmap and ztest
 
 	// Looks for Compute\Deferred\<Name>-<RecordKey>.spv and .layout once; later calls return the state found. Missing: no build of this
 	// text (quiet: the caller logs it once). Failed: Why says what (the layout, a pipeline, the uniform buffer). Ready: a pipeline for the
@@ -82,9 +91,9 @@ public:
 		return Status = State::Ready;
 	}
 
-	// One Draw into Targets (Count = the layout's target count, or 1 for the first target alone), viewport Viewport, push uvmap and ztest
-	// (README "What the SPIR-V expects"), ZRef the depth-test reference texture. StaleStages: bit N = stage N holds nothing the pass set for
-	// this draw (a stand-in is bound there). Depth: null = no depth attachment (ZTest's in-shader test, or none); else the depth-stencil
+	// One Draw into Targets (Count = the layout's target count, or 1 for the first target alone), viewport Viewport, uvmap and ztest
+	// (README "What the SPIR-V expects": two registers of the uniform buffer, after the device's), ZRef the depth-test reference texture.
+	// StaleStages: bit N = stage N holds nothing the pass set for this draw (a stand-in is bound there). Depth: null = no depth attachment (ZTest's in-shader test, or none); else the depth-stencil
 	// attachment and its tests (pResource an IDirect3DSurface9, single-sample, at least the targets' size; the header's "depth attachment":
 	// drawn through DrawGeometryScene, the range 0-1). Refused: this frame keeps D3D9 (Why: a stage state the extension cannot match, or no
 	// DrawGeometryScene in this d3d9.dll for a Depth draw). Failed: Why says what; the caller latches.
@@ -152,7 +161,9 @@ public:
 			resources.push_back(r);
 		}
 		if (UboUsed) {
-			if (FAILED(d->GetPixelShaderConstantF(0, &Constants[0][0], Registers))) return Fail("the pixel constants could not be read");
+			if (Registers && FAILED(d->GetPixelShaderConstantF(0, &Constants[0][0], Registers))) return Fail("the pixel constants could not be read");
+			memcpy((char*)Constants + UvMapOffset, UvMap, 16);
+			if (WritesDepth) memcpy((char*)Constants + ZTestOffset, ZTest, 16);
 			const HRESULT updated = DxvkCompute::Extension()->UpdateBuffer(Ubo.Buffer, 0, UboBytes, &Constants[0][0]);
 			if (FAILED(updated)) return Fail("its uniform buffer could not be written");
 			NVR_EXT_RESOURCE_BINDING r = {};
@@ -180,9 +191,7 @@ public:
 			}
 			Logger::Log("UNOFFICIAL Sm6Record %s first Draw: %s", File.c_str(), line.c_str());
 		}
-		UInt32 push[NVR_EXT_MAX_PUSH_BYTES / 4] = {};	// the sampler heap indices: the extension writes them
-		memcpy((char*)push + UvMapOffset, UvMap, 16);
-		if (WritesDepth) memcpy((char*)push + ZTestOffset, ZTest, 16);
+		UInt32 push[MaxPushBytes / 4] = {};	// the sampler heap indices only: the extension writes them
 
 		NVR_EXT_DRAW_DESC draw = {};
 		draw.pPipeline = Overwrite && WritePipelines[Count] ? WritePipelines[Count] : Pipelines[Count];
@@ -227,7 +236,7 @@ private:
 	UINT UboBytes = 0, HeapSet = 0, HeapBinding = 0;
 	ID3D9NvrExtPipeline* Pipelines[NVR_EXT_MAX_TARGETS + 1] = {};
 	ID3D9NvrExtPipeline* WritePipelines[NVR_EXT_MAX_TARGETS + 1] = {};	// (bench diagnosis) no blend
-	float Constants[224][4] = {};
+	float Constants[MaxUboRegisters][4] = {};	// the device's registers, then uvmap and ztest (the layout's offsets)
 	char WhyText[192] = "";
 
 	State Bad(const char* why) {
@@ -265,7 +274,7 @@ private:
 			if (first) {
 				first = false;
 				int version = 0;
-				if (tag != "nvr-sm6-record" || !(in >> version) || version != 1) { Bad("its layout is not 'nvr-sm6-record 1'"); return false; }
+				if (tag != "nvr-sm6-record" || !(in >> version) || version != 2) { Bad("its layout is not 'nvr-sm6-record 2' (rebuild it with tools/nvr-sm6)"); return false; }
 				continue;
 			}
 			bool ok = true;
@@ -304,14 +313,16 @@ private:
 			}
 		}
 		const char* bad = nullptr;
+		// uvmap / ztest: a register each in the uniform buffer, after the device's c0..c(Registers-1) (written after the readback)
+		auto extraBad = [this](UINT offset) { return (offset & 15) || offset < 16 * Registers || offset + 16 > UboBytes; };
 		if (first) bad = "its layout is empty";
-		else if (!Registers || Registers > 224) bad = "its layout's register count is not 1-224";
-		else if (!uboSeen || (UboUsed && UboBytes != 16 * Registers)) bad = "its layout's uniform buffer is not the register file (16 x registers bytes)";
+		else if (Registers > 224) bad = "its layout's register count is over 224";
+		else if (!uboSeen || (UboBytes & 15) || UboBytes < 16 * Registers + 16 || UboBytes > 16 * MaxUboRegisters) bad = "its layout's uniform buffer is not the register file and uvmap / ztest";
 		else if (!Samplers.empty() && (!heapSeen || HeapSet != 0 || HeapBinding != 0)) bad = "its layout's sampler heap is not set 0 binding 0";
-		else if (!PushBytes || (PushBytes & 3) || PushBytes > DxvkCompute::Info().MaxPushBytes || PushBytes > NVR_EXT_MAX_PUSH_BYTES) bad = "its layout's push size does not fit";
-		else if (!uvSeen || UvMapOffset + 16 > PushBytes) bad = "its layout has no uvmap in the push block";
+		else if (!PushBytes || (PushBytes & 3) || PushBytes > MaxPushBytes || PushBytes > DxvkCompute::Info().MaxPushBytes) bad = "its layout's push block is over 48 bytes (DXVK's fragment push budget) or does not fit";
+		else if (!uvSeen || extraBad(UvMapOffset)) bad = "its layout has no uvmap register in the uniform buffer";
 		else if (!depthSeen || !targetsSeen || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS) bad = "its layout has no or a bad targets / depth line";
-		else if (WritesDepth && (!ztestSeen || ZTestOffset + 16 > PushBytes || !zrefSeen)) bad = "its layout writes depth without a ztest push / zref texture";
+		else if (WritesDepth && (!ztestSeen || extraBad(ZTestOffset) || ZTestOffset == UvMapOffset || !zrefSeen)) bad = "its layout writes depth without a ztest register / zref texture";
 		for (const Sampler& s : Samplers) if (!bad && s.PushOffset + 4 > PushBytes) bad = "a sampler's heap index lies outside the push block";
 		if (bad) { Bad(bad); return false; }
 		return true;
