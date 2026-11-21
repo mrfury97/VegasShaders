@@ -147,7 +147,8 @@ namespace DeferredSun {
 		if (!DxvkCompute::PassesOn()) return onD3D9(kVkPassesOff);	// (false in RenderRect frames; native D3D9 and stock DXVK: no extension)
 		if (DxvkCompute::KeptOnD3D9("DeferredSun")) return onD3D9(kVkKept);
 		if (Vm.on) return onD3D9(kVkFirstPerson);	// (DeferredFirstPerson's re-run: its stencil, step 5)
-		if (DebugView != 0) return onD3D9(kVkDebugView);	// (the debug views return alpha 1 and write over the frame)
+		// (the debug views return alpha 1 and write over the frame; NvrDxvkDeferredResolve 9, test only: drawn on Vulkan too, to compare a term at a time)
+		if (DebugView != 0 && VkMode < 9) return onD3D9(kVkDebugView);
 		if (!DeferredDepth::LinearReady()) return onD3D9(kVkNoLinearZ);	// (the in-shader depth test's reference)
 		Sm6Record* vk = pass == Pass ? &VkSun : pass == PassFade ? &VkSunFade : nullptr;
 		if (!vk || !VkPrepare(*vk, pass, pass == Pass ? "sun" : "sun-fade")) return onD3D9(VkLatched ? kVkLatched : kVkNoSpirv);
@@ -169,7 +170,10 @@ namespace DeferredSun {
 		// own compare (Apply: GREATEREQUAL with the game's reversed depth, else LESSEQUAL) against the shader's DEPTH (DS_Depth = c9, the same
 		// _33 / _43): 1 passes where DEPTH >= reference, 2 where <=.
 		const float uvmap[4] = { 1.0f / (float)t.Width, 1.0f / (float)t.Height, 0.0f, 0.0f };
-		const float ztest[4] = { 1.0f, proj._33, proj._43, zFunc == D3DCMP_GREATEREQUAL ? 1.0f : 2.0f };
+		// (bench diagnosis, test only) NvrDxvkDeferredResolve 10: no in-shader depth test; 11: the test against the INTZ device-depth copy
+		// (zref = TESR_DeferredDepth, read with texelFetch) instead of the view z rebuilt to device depth
+		const float ztestMode = VkMode == 10 ? 0.0f : VkMode == 11 ? 2.0f : 1.0f;
+		const float ztest[4] = { ztestMode, proj._33, proj._43, zFunc == D3DCMP_GREATEREQUAL ? 1.0f : 2.0f };
 		// RT0 swapped to the scratch around the Draw (the Draw leaves the device's state as it was), then put back before Apply's own viewport
 		// restore: setting RT0 resets the viewport and the scissor rectangle, both put back here
 		RECT scissor = {};
@@ -180,7 +184,8 @@ namespace DeferredSun {
 		{
 			static GpuTimer timer("Deferred sun (Vulkan)");
 			GpuProfileScope gpu(timer, d);
-			result = vk->Draw(d, targets, count, vp, uvmap, ztest, DeferredDepth::LinearTexture, fogCopyBound ? 0u : 1u, why);
+			vk->Overwrite = DebugView != 0;	// (bench diagnosis, NvrDxvkDeferredResolve 9-11) the debug views write, as the D3D9 draw does
+			result = vk->Draw(d, targets, count, vp, uvmap, ztest, VkMode == 11 ? DeferredDepth::Texture : DeferredDepth::LinearTexture, fogCopyBound ? 0u : 1u, why);
 		}
 		d->SetRenderTarget(0, target);
 		if (hadScissor) d->SetScissorRect(&scissor);

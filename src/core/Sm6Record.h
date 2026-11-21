@@ -32,6 +32,7 @@ public:
 	std::string File;					// Deferred\<Name>-<key> (under Compute\; logs, the pipelines' names)
 	UINT Registers = 0, TargetCount = 1, PushBytes = 0, UvMapOffset = 0, ZTestOffset = 0;
 	bool WritesDepth = false;
+	bool Overwrite = false;	// (bench diagnosis) this Draw writes instead of blending (debug views)
 	unsigned long long Frames = 0;		// Draws made
 
 	// Looks for Compute\Deferred\<Name>-<RecordKey>.spv and .layout once; later calls return the state found. Missing: no build of this
@@ -64,6 +65,8 @@ public:
 			if (count != 1 && count != TargetCount) continue;
 			Pipelines[count] = DxvkCompute::CreateGraphicsPipeline(File.c_str(), bindings.data(), (UINT)bindings.size(), PushBytes, !Samplers.empty(), count, Blend, false);
 			if (!Pipelines[count]) return Bad("a pipeline was refused (DXVK's log says why)");
+			// (bench diagnosis) the same pass writing over the target, for debug views compared with D3D9's (which write); compiled at first use only
+			if (Blend != NVR_EXT_BLEND_NONE) WritePipelines[count] = DxvkCompute::CreateGraphicsPipeline(File.c_str(), bindings.data(), (UINT)bindings.size(), PushBytes, !Samplers.empty(), count, NVR_EXT_BLEND_NONE, false);
 		}
 		if (UboUsed) {
 			Ubo.Buffer = DxvkCompute::CreateBufferNoFail(UboBytes, NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, File.c_str());
@@ -136,12 +139,32 @@ public:
 			resources.push_back(r);
 		}
 
+		// (2026-11-21 bench diagnosis) the first Draw: what each texture stage got and the sampler it maps to, once per record
+		if (Frames == 0) {
+			std::string line;
+			for (const Texture& t : Textures) {
+				IDirect3DBaseTexture9* tex = nullptr; D3DFORMAT fmt = D3DFMT_UNKNOWN; DWORD levels = 0, srgb = 0;
+				if (SUCCEEDED(d->GetTexture(t.Stage, &tex)) && tex) {
+					levels = tex->GetLevelCount();
+					if (tex->GetType() == D3DRTYPE_TEXTURE) { D3DSURFACE_DESC desc = {}; if (SUCCEEDED(((IDirect3DTexture9*)tex)->GetLevelDesc(0, &desc))) fmt = desc.Format; }
+					tex->Release();
+				}
+				d->GetSamplerState(t.Stage, D3DSAMP_SRGBTEXTURE, &srgb);
+				NVR_EXT_FILTER f = NVR_EXT_FILTER_NEAREST; NVR_EXT_ADDRESS a = NVR_EXT_ADDRESS_CLAMP;
+				const char* refused = DeviceSampler(d, t.Stage, f, a);
+				char one[160];
+				_snprintf_s(one, sizeof(one), _TRUNCATE, "%ss%u %s fmt %d levels %lu srgb %lu filter %d address %d%s%s", line.empty() ? "" : "; ", t.Stage,
+					(standIns & (1u << t.Stage)) ? "STAND-IN" : "bound", (int)fmt, levels, srgb, (int)f, (int)a, refused ? " refused: " : "", refused ? refused : "");
+				line += one;
+			}
+			Logger::Log("UNOFFICIAL Sm6Record %s first Draw: %s", File.c_str(), line.c_str());
+		}
 		UInt32 push[NVR_EXT_MAX_PUSH_BYTES / 4] = {};	// the sampler heap indices: the extension writes them
 		memcpy((char*)push + UvMapOffset, UvMap, 16);
 		if (WritesDepth) memcpy((char*)push + ZTestOffset, ZTest, 16);
 
 		NVR_EXT_DRAW_DESC draw = {};
-		draw.pPipeline = Pipelines[Count];
+		draw.pPipeline = Overwrite && WritePipelines[Count] ? WritePipelines[Count] : Pipelines[Count];
 		draw.TargetCount = Count;
 		for (UINT i = 0; i < Count; i++) draw.Targets[i].pResource = Targets[i];
 		draw.ViewportX = (INT)Viewport.X; draw.ViewportY = (INT)Viewport.Y; draw.ViewportWidth = Viewport.Width; draw.ViewportHeight = Viewport.Height;
@@ -169,6 +192,7 @@ private:
 	bool UboUsed = false, ZRefUsed = false;
 	UINT UboBytes = 0, HeapSet = 0, HeapBinding = 0;
 	ID3D9NvrExtPipeline* Pipelines[NVR_EXT_MAX_TARGETS + 1] = {};
+	ID3D9NvrExtPipeline* WritePipelines[NVR_EXT_MAX_TARGETS + 1] = {};	// (bench diagnosis) no blend
 	float Constants[224][4] = {};
 	char WhyText[192] = "";
 
