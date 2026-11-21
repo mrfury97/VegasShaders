@@ -102,8 +102,9 @@ namespace DeferredSun {
 	// Vulkan; 2 and 3 are the later steps' (docs/deferred-single-pass.md step plan). With 1, on the DXVK fork, Apply's draw is one Vulkan
 	// full-screen Draw (core/Sm6Record.h) from the SPIR-V tools\nvr-sm6 built from the record's own cache text (Compute\Deferred\
 	// DeferredSun-<key>.spv + .layout; key = ShaderRecord::SourceKey), after all of Apply's setup: the same pixel constants (read back from the
-	// device), the textures on their stages, samplers matching their states, the depth test in the shader against DeferredDepth's linear view
-	// z, the device viewport, the scene and the skin highlight as the Draw's targets. Same picture by construction. Every gate below that does
+	// device), the textures on their stages, samplers matching their states, the D3D9 draw's depth test done by the hardware on the device's
+	// depth-stencil surface against the shader's SV_Depth (VkDraw; 2026-11-21, the in-shader test discarded ground the D3D9 draw lights), the
+	// device viewport, the scene and the skin highlight as the Draw's targets. Same picture by construction. Every gate below that does
 	// not hold, and every refusal or failure, draws today's D3D9 quad in the same frame; a failure (a bad layout, a refused pipeline or Draw)
 	// also latches this path off for the session (never DxvkCompute::Fail, which would turn every Vulkan pass off).
 	inline int VkMode = 0;					// the switch this frame (BeginFrame)
@@ -111,10 +112,10 @@ namespace DeferredSun {
 	inline bool VkLatched = false;
 	inline char VkLatchWhy[192] = "";
 	inline IDirect3DSurface9* VkScratch = nullptr;	// RT0 during the Draw (a Draw's target must not be the device's render target)
-	enum VkReason { kVkLatched, kVkPassesOff, kVkKept, kVkFirstPerson, kVkDebugView, kVkNoLinearZ, kVkNoSpirv, kVkTargets, kVkSizes, kVkRefused, kVkReasons };
+	enum VkReason { kVkLatched, kVkPassesOff, kVkKept, kVkFirstPerson, kVkDebugView, kVkNoLinearZ, kVkNoSpirv, kVkTargets, kVkSizes, kVkRefused, kVkDepthRange, kVkReasons };
 	inline const char* const kVkReasonNames[kVkReasons] = { "latched off", "Vulkan passes off (NvrDxvkPasses, a RenderRect frame or no fork)",
 		"NvrDxvkKeepD3D9", "first person", "debug view", "no linear view z", "no SPIR-V for the variant", "skin target without a 2-target build",
-		"target / depth sizes differ", "a stage state refused" };
+		"target / depth sizes differ", "a stage state refused", "viewport depth range not 0-1" };
 	inline unsigned long long VkStatVulkan = 0, VkStatD3D9 = 0, VkStatWhy[kVkReasons] = {};
 	inline unsigned VkRefusalLogs = 0;
 	inline void VkLatch(const char* why) {
@@ -131,8 +132,9 @@ namespace DeferredSun {
 			const Sm6Record::State state = vk.Prepare("DeferredSun", record->SourceKey, NVR_EXT_BLEND_ADD, why);
 			if (state == Sm6Record::State::Missing) Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve has no SPIR-V for key %016llx (D3D9 kept), the %s record", record->SourceKey, which);
 			else if (state == Sm6Record::State::Failed) VkLatch(why);
-			else Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve ready for the %s record (Compute\\%s.spv: %u registers, %u target%s, %u push bytes, depth test %s)",
-				which, vk.File.c_str(), vk.Registers, vk.TargetCount, vk.TargetCount == 1 ? "" : "s", vk.PushBytes, vk.WritesDepth ? "in the shader" : "none");
+			else Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve ready for the %s record (Compute\\%s.spv: %u registers, %u target%s, %u push bytes, depth %s)",
+				which, vk.File.c_str(), vk.Registers, vk.TargetCount, vk.TargetCount == 1 ? "" : "s", vk.PushBytes,
+				vk.WritesDepth ? "written (tested on the device's depth-stencil surface; NvrDxvkDeferredResolve 11 / 12 test it in the shader)" : "none");
 		}
 		return vk.Status == Sm6Record::State::Ready;
 	}
@@ -166,14 +168,37 @@ namespace DeferredSun {
 			return onD3D9(kVkLatched);
 		}
 		// uvmap: the D3D9 quad's TEXCOORD0 (Apply: u = (x + 0.5) / W over the viewport) is FragCoord / size, whatever the viewport.
-		// ztest: x 1 = zref holds view z, reference = _33 + _43 / z (the device depth the projection gives that view z); w = the D3D9 draw's
-		// own compare (Apply: GREATEREQUAL with the game's reversed depth, else LESSEQUAL) against the shader's DEPTH (DS_Depth = c9, the same
-		// _33 / _43): 1 passes where DEPTH >= reference, 2 where <=.
 		const float uvmap[4] = { 1.0f / (float)t.Width, 1.0f / (float)t.Height, 0.0f, 0.0f };
-		// (bench diagnosis, test only) NvrDxvkDeferredResolve 10: no in-shader depth test; 11: the test against the INTZ device-depth copy
-		// (zref = TESR_DeferredDepth, read with texelFetch) instead of the view z rebuilt to device depth
-		const float ztestMode = VkMode == 10 ? 0.0f : VkMode == 11 ? 2.0f : 1.0f;
+		// The depth test (2026-11-21 bench: the in-shader test, against either reference, discarded a band of mid-distance ground the D3D9
+		// draw lights): the D3D9 draw's own, by the hardware. The device's current depth-stencil surface (the one the D3D9 draw is tested on)
+		// attached, Apply's zFunc, no depth writes, no stencil (want[] has STENCILENABLE FALSE outside first person, which stays on D3D9), the
+		// shader's SV_Depth tested: ztest.x 0. No surface bound: the D3D9 draw has no depth test either, and neither has this one.
+		// Test values (bench A/B, test only): 10 no test at all; 11 the in-shader test against the INTZ copy (zref = TESR_DeferredDepth, read
+		// with texelFetch); 12 the in-shader test against the view z rebuilt to device depth (the first build's: zref = the linear view z,
+		// reference = _33 + _43 / z). ztest.w = Apply's compare against the shader's DEPTH (DS_Depth = c9, the same _33 / _43): 1 passes where
+		// DEPTH >= reference (GREATEREQUAL, the game's reversed depth), 2 where <= (LESSEQUAL).
+		const float ztestMode = VkMode == 11 ? 2.0f : VkMode == 12 ? 1.0f : 0.0f;
 		const float ztest[4] = { ztestMode, proj._33, proj._43, zFunc == D3DCMP_GREATEREQUAL ? 1.0f : 2.0f };
+		struct HeldSurface { IDirect3DSurface9* s = nullptr; ~HeldSurface() { if (s) s->Release(); } } ds;
+		if (VkMode != 10 && ztestMode == 0.0f && (FAILED(d->GetDepthStencilSurface(&ds.s)) || !ds.s)) ds.s = nullptr;
+		NVR_EXT_DEPTH_STENCIL depth = {};
+		if (ds.s) {
+			// The scene pass's depth range is 0-1 (the fork's DrawGeometryScene); the D3D9 draw's oDepth is clamped to the viewport's
+			// MinZ-MaxZ (DXVK passes them as the Vulkan range). Only equal for 0-1: otherwise this frame keeps D3D9 (logged with the values).
+			if (vp.MinZ != 0.0f || vp.MaxZ != 1.0f) {
+				static unsigned rangeLogs = 0;
+				if (rangeLogs++ < 5) Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve kept on D3D9 this frame: the viewport's depth range is %.6f-%.6f, the depth-attached draw's 0-1", vp.MinZ, vp.MaxZ);
+				return onD3D9(kVkDepthRange);
+			}
+			depth.pResource = ds.s;
+			depth.Depth = 0.0f;	// (ignored by a scene pass: the shader's SV_Depth)
+			depth.DepthTest = TRUE;
+			depth.DepthWrite = FALSE;
+			depth.DepthCompare = (NVR_EXT_COMPARE)(zFunc - 1);	// (D3DCMPFUNC minus 1)
+			depth.StencilTest = FALSE;
+			depth.StencilCompare = NVR_EXT_COMPARE_ALWAYS;
+			depth.StencilReadMask = depth.StencilWriteMask = 0xFF;
+		}
 		// RT0 swapped to the scratch around the Draw (the Draw leaves the device's state as it was), then put back before Apply's own viewport
 		// restore: setting RT0 resets the viewport and the scissor rectangle, both put back here
 		RECT scissor = {};
@@ -184,15 +209,24 @@ namespace DeferredSun {
 		{
 			static GpuTimer timer("Deferred sun (Vulkan)");
 			GpuProfileScope gpu(timer, d);
-			vk->Overwrite = DebugView != 0;	// (bench diagnosis, NvrDxvkDeferredResolve 9-11) the debug views write, as the D3D9 draw does
-			result = vk->Draw(d, targets, count, vp, uvmap, ztest, VkMode == 11 ? DeferredDepth::Texture : DeferredDepth::LinearTexture, fogCopyBound ? 0u : 1u, why);
+			vk->Overwrite = DebugView != 0;	// (bench diagnosis, NvrDxvkDeferredResolve 9-12) the debug views write, as the D3D9 draw does
+			result = vk->Draw(d, targets, count, vp, uvmap, ztest, VkMode == 11 ? DeferredDepth::Texture : DeferredDepth::LinearTexture, ds.s ? &depth : nullptr,
+				fogCopyBound ? 0u : 1u, why);
 		}
 		d->SetRenderTarget(0, target);
 		if (hadScissor) d->SetScissorRect(&scissor);
 		d->SetViewport(&vp);
 		if (result == Sm6Record::Result::Drawn) {
 			VkStatVulkan++;
-			if (vk->Frames == 1) Logger::Log("UNOFFICIAL DeferredSun: drawn on Vulkan (Compute\\%s.spv, %u target%s)", vk->File.c_str(), count, count == 1 ? "" : "s");
+			if (vk->Frames == 1) {
+				D3DSURFACE_DESC dsDesc = {};
+				if (ds.s) ds.s->GetDesc(&dsDesc);
+				Logger::Log("UNOFFICIAL DeferredSun: drawn on Vulkan (Compute\\%s.spv, %u target%s %ux%u); depth test: %s (depth-stencil %ux%u format %u, compare %lu, viewport depth %.3f-%.3f)",
+					vk->File.c_str(), count, count == 1 ? "" : "s", t.Width, t.Height,
+					ds.s ? "the hardware's, on the device's depth-stencil surface" : VkMode == 10 ? "none (test value 10)" : VkMode == 11 ? "in the shader against the INTZ copy (test value 11)" :
+					VkMode == 12 ? "in the shader against the view z (test value 12)" : "none (no depth-stencil surface bound, as the D3D9 draw)",
+					dsDesc.Width, dsDesc.Height, (unsigned)dsDesc.Format, zFunc, vp.MinZ, vp.MaxZ);
+			}
 			return true;
 		}
 		if (result == Sm6Record::Result::Failed) { VkLatch(why); return onD3D9(kVkLatched); }

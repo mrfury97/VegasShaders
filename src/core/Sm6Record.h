@@ -12,6 +12,12 @@
 // The caller keeps every check and setup it has; this replaces only its draw call, and the caller swaps RT0 (a Draw's target must not be the
 // device's current render target). Nothing here calls DxvkCompute::Fail (which turns every Vulkan pass off): a Failed result is the caller's
 // to latch, a Refused one is this frame only; either way the caller draws its D3D9 quad instead.
+// (2026-11-21 depth attachment) A pass that writes depth may be drawn with a depth-stencil attachment and the D3D9 draw's tests: the
+// hardware then tests the shader's SV_Depth as it tests the D3D9 draw's oDepth. That goes through the fork's DrawGeometryScene (1.7-grass)
+// with this pipeline's own (built-in) full-screen triangle, NOT DrawDepthStencil (1.6): DrawDepthStencil sets the viewport's depth range to
+// its one Depth value (patch 0010, depthMin = depthMax = Depth), and with DXVK's depth clamp a written FragDepth is clamped into that range,
+// so every pixel would be tested at the same depth. DrawGeometryScene keeps the range 0-1 (patch 0024) and allows the device's own
+// depth-stencil surface as the attachment.
 
 #include <fstream>
 #include <sstream>
@@ -78,15 +84,28 @@ public:
 
 	// One Draw into Targets (Count = the layout's target count, or 1 for the first target alone), viewport Viewport, push uvmap and ztest
 	// (README "What the SPIR-V expects"), ZRef the depth-test reference texture. StaleStages: bit N = stage N holds nothing the pass set for
-	// this draw (a stand-in is bound there). Refused: this frame keeps D3D9 (Why: a stage state the extension cannot match). Failed: Why says
-	// what; the caller latches.
+	// this draw (a stand-in is bound there). Depth: null = no depth attachment (ZTest's in-shader test, or none); else the depth-stencil
+	// attachment and its tests (pResource an IDirect3DSurface9, single-sample, at least the targets' size; the header's "depth attachment":
+	// drawn through DrawGeometryScene, the range 0-1). Refused: this frame keeps D3D9 (Why: a stage state the extension cannot match, or no
+	// DrawGeometryScene in this d3d9.dll for a Depth draw). Failed: Why says what; the caller latches.
 	Result Draw(IDirect3DDevice9* d, IDirect3DSurface9* const* Targets, UINT Count, const D3DVIEWPORT9& Viewport, const float UvMap[4], const float ZTest[4],
-		IDirect3DBaseTexture9* ZRefTexture, UINT StaleStages, const char*& Why) {
+		IDirect3DBaseTexture9* ZRefTexture, const NVR_EXT_DEPTH_STENCIL* Depth, UINT StaleStages, const char*& Why) {
 		struct Held { std::vector<IDirect3DBaseTexture9*> t; ~Held() { for (auto* x : t) if (x) x->Release(); } } held;
 		Why = WhyText;
 		if (Status != State::Ready || !d || !Targets || !Targets[0]) return Fail("called while not ready");
 		if (Count > NVR_EXT_MAX_TARGETS || !Pipelines[Count] || (Count != 1 && Count != TargetCount)) return Refuse("asked for a target count it has no pipeline for");
 		for (UINT i = 0; i < Count; i++) if (!Targets[i]) return Refuse("a target is missing");
+		// the depth attachment: checked here so the extension never refuses it (a refused Draw latches the caller off for the session)
+		IDirect3DSurface9* const depthSurface = Depth ? static_cast<IDirect3DSurface9*>(Depth->pResource) : nullptr;
+		if (Depth) {
+			if (!WritesDepth) return Refuse("a depth attachment for a pass that writes no depth");
+			if (!depthSurface) return Refuse("a depth attachment without a surface");
+			if (!SceneExt()) return Refuse("this d3d9.dll has no DrawGeometryScene (the fork's 1.7-grass) for a depth-attached pass");
+			D3DSURFACE_DESC t0 = {}, ds = {};
+			if (FAILED(Targets[0]->GetDesc(&t0)) || FAILED(depthSurface->GetDesc(&ds))) return Refuse("the target or depth-stencil surface could not be described");
+			if (ds.MultiSampleType != D3DMULTISAMPLE_NONE) return Refuse("the depth-stencil surface is multisampled");
+			if (ds.Width < t0.Width || ds.Height < t0.Height) return Refuse("the depth-stencil surface is smaller than the target");
+		}
 		if (!Dummy(d)) return Fail("its 1x1 stand-in texture could not be made");
 
 		std::vector<NVR_EXT_RESOURCE_BINDING> resources;
@@ -101,6 +120,7 @@ public:
 				const bool fits = (type == D3DRTYPE_TEXTURE && t.View == NVR_EXT_VIEW_2D) || (type == D3DRTYPE_CUBETEXTURE && t.View == NVR_EXT_VIEW_CUBE) ||
 					(type == D3DRTYPE_VOLUMETEXTURE && t.View == NVR_EXT_VIEW_3D);
 				if (!fits || IsTarget(use, Targets, Count)) use = nullptr;
+				else if (depthSurface && IsTarget(use, &depthSurface, 1)) return Refuse("a stage holds the depth-stencil surface the Draw attaches");
 			}
 			DWORD srgb = FALSE;
 			if (!use) {
@@ -116,6 +136,7 @@ public:
 		if (WritesDepth && ZRefUsed) {
 			if (!ZRefTexture) return Refuse("no depth reference texture");
 			if (IsTarget(ZRefTexture, Targets, Count)) return Refuse("the depth reference is a target");
+			if (depthSurface && IsTarget(ZRefTexture, &depthSurface, 1)) return Refuse("the depth reference is the attached depth-stencil surface");
 			NVR_EXT_RESOURCE_BINDING r = {};
 			r.Slot = ZRef.Slot; r.Type = NVR_EXT_BIND_SAMPLED_IMAGE; r.pResource = ZRefTexture;
 			resources.push_back(r);
@@ -173,9 +194,22 @@ public:
 		draw.pPushData = push;
 		draw.PushDataSize = PushBytes;
 		DxvkCompute::PreLoad(resources.data(), (UINT)resources.size());	// (the managed stand-in on the GPU; MixCheck's reads)
-		const HRESULT result = DxvkCompute::Extension()->Draw(&draw);
+		HRESULT result;
+		if (Depth) {
+			// the same pipeline (its built-in full-screen triangle: 3 vertices, depth 0, replaced by the shader's SV_Depth) as a scene pass:
+			// the attachment's tests, viewport depth range 0-1, no depth bias, depth bounds 0-1, single-sample, no culling
+			NVR_EXT_GEOMETRY_SCENE_DESC scene = {};
+			scene.Geometry.Draw = draw;
+			scene.Geometry.VertexCount = 3;
+			scene.Geometry.InstanceCount = 1;
+			scene.pDepthStencil = Depth;
+			scene.CullMode = NVR_EXT_CULL_NONE;
+			scene.Multisample = FALSE;
+			result = SceneExt()->DrawGeometryScene(&scene);
+		}
+		else result = DxvkCompute::Extension()->Draw(&draw);
 		if (FAILED(result)) {
-			_snprintf_s(WhyText, sizeof(WhyText), _TRUNCATE, "the Draw was refused (%08lX; DXVK's log says why)", result);
+			_snprintf_s(WhyText, sizeof(WhyText), _TRUNCATE, "the %s was refused (%08lX; DXVK's log says why)", Depth ? "depth-attached Draw (DrawGeometryScene)" : "Draw", result);
 			return Result::Failed;
 		}
 		Frames++;
@@ -321,6 +355,19 @@ private:
 		ID3D9NvrExtSampler*& s = samplers[filter][address];
 		if (!s) s = DxvkCompute::CreateSamplerNoFail(filter, address);
 		return s;
+	}
+
+	// The fork's scene passes (1.7-grass DrawGeometryScene), queried once; null on a d3d9.dll without them. Kept for the session (the
+	// extension's reference count is the device's, as GpuGrass keeps its own).
+	static inline ID3D9NvrExtGeometryScene* Scene = nullptr;
+	static inline bool SceneTried = false;
+	static ID3D9NvrExtGeometryScene* SceneExt() {
+		if (!SceneTried) {
+			SceneTried = true;
+			ID3D9NvrExt* ext = DxvkCompute::Extension();
+			if (!ext || FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtGeometryScene), (void**)&Scene))) Scene = nullptr;
+		}
+		return Scene;
 	}
 
 	// The 1x1 stand-in (zero) for a stage with nothing usable: MANAGED, so a device reset leaves it (DxvkCompute::PreLoad uploads it).
