@@ -137,6 +137,98 @@ state for see-through things). The path tracer replaces the picture and keeps fo
 Phase 0: 1. Phase 1: 1. Phase 1c (deferred wetness): 3-4. Phase 2: 3-4 (looks). Phase 3: 5-6. Phase 4: 5-8. About 18-24 sessions for
 everything; Phases 0-1c (5-6 sessions) fix what breaks today and lift the shader-size limit.
 
+## Gaps today and "can it be fully unhooked from forward?" (2026-11-19)
+Asked by the owner. Read from the code on the installed test build (`test-p1a-bump` 90fc395 + deferred wetness step 1) and the docs
+`deferred-vs-forward.md`, `bumped-normals-study.md`, `deferred-wetness-design.md`. Nothing measured; ranks are by what a player sees (believed).
+
+### The gaps, most visible first
+| # | Gap | What the player sees | Fixed by |
+|---|---|---|---|
+| 1 | Screen effects read the smooth normal (AO, bounce light, SSR, wetness, snow, RT AO / GI input; `core/CapturedNormals.h:645-683`) | no normal-map detail in shade or in reflections: flat-looking walls and ground out of the sun | DeferredBumpedNormals (reflections; prototype, the owner has it on), then a bounce-light receiver opt-in (bumped-normals-study) |
+| 2 | Shaders too big for ps_3_0 (X4505) fall back to the game's | pale, unlit patches; since DeferredStandalone (proven in the 2026-11-18 log) only outside the main view: reflections, fading draws, forward frames | 1b (fallback ladder on compile failure), deferred wetness steps 2-4 (shorter records) |
+| 3 | Water: the game's few lamps, no flashlight | lamps and torches don't light or glint on water at night | Phase 3 water forward+ |
+| 4 | Wetness on objects, parallax and far land still inside their records (step 1 did the near land) | wet rocks, walls and road objects get no sun glint under the deferred renderer; heavier shaders | deferred wetness steps 2-3 |
+| 5 | Decals (blood GDECAL, bullet holes SM300x) forward | holes and blood lit by the game's few lamps, flat at night beside correctly lit walls | Phase 4 deferred decals |
+| 6 | Particles and smoke: the game's shaders | smoke, fire and dust ignore Vegas Shaders' lamps and sun shadows | Phase 3 (needs replacement shaders first; vanilla lighting not checked) |
+| 7 | Reflections and other cameras use the forward records or the game's shader | water and scope reflections lit differently from the main view; the game's shader where the forward record failed | "Lighting" below |
+| 8 | Fading objects and faces, late grass forward | a short lighting pop while things fade in | Phase 3 fading forward+ |
+| 9 | First person forward (DeferredFirstPerson off) | the gun and arms lit by the game's few lamps, not the room's | Phase 2 switch (exists) |
+| 10 | The lamp streak on wet ground has no lamp shadows (screen pass) | a streak through a wall or under an object at night | deferred wetness: WetLampFilm into DeferredLamps' loop (1 session) |
+| 11 | DeferredSun's missing terms (metal tint, land highlight with UsePBR off, parallax sun with POM shadows off) | slightly different highlights than forward | Phase 4 |
+| 12 | Distant trees (DISTTREE), cube-map layer (EnvTemplate) | small; far trees keep the game's light | Phase 4 |
+| 13 | The game's MSAA is off while the renderer is on (`NewVegas/Hooks/Settings.cpp:16,67`) | jagged edges only without TAA / FSR / DLSS (the owner uses DLSS: none) | not needed (deferred + MSAA would need per-sample passes) |
+
+### Can the deferred path be fully unhooked from forward?
+**Partly.** Proven by reading: the deferred records are chosen only inside the main list's G-buffer span (`core/DeferredRenderer.h:204`,
+`CapturedNormals::InSpan`), so every other draw of an opaque object still needs a lit forward record (or the game's shader):
+- the water's reflection camera, scopes and other cameras, the cube maps the game renders (shadow cameras are not lit: they draw with
+  depth-only shaders, so they are not part of this);
+- blended / fading draws of opaque objects (`core/DeferredRenderer.h:250-277`);
+- whole frames that fall back (lockpick, the game's MSAA with ForceMSAA, a refused sun pass);
+- `DeferredRenderer 0`.
+
+**Lighting (believed doable, big).** Taking the forward lighting code off opaque geometry means giving the other cameras their own path:
+- a "reflection record": the lighting-free record + the sun only, no lamps, no shadow filter (water reflections are blurred and small). Still
+  a forward shader, but a far shorter one that never hits the size wall. 2-3 sessions. Recommended.
+- a second, small G-buffer for the reflection camera with the sun and lamp passes run on it: the "real" answer, but the game draws
+  reflections through its own pass lists (believed at awkward points), every pass needs a second set of targets, and the cost about doubles
+  in water scenes. 4-6 sessions, high risk.
+Blended / fading opaque draws go forward+ (Phase 3): still a forward shader, but with the deferred lamp model and lamp table.
+
+**Drawing (stays forward by nature).** Transparency, particles, water (it blends and refracts), sky, UI. Every deferred engine keeps these
+forward; the standard answer is forward+ / clustered lighting: the same lamp table and shadow atlas the deferred passes use, read per pixel
+by the blended shader. Vegas Shaders already does this for glass and blended hair (`core/DeferredTransparents.h`,
+`Includes/ForwardPlus.hlsl`). Order-independent transparency (weighted blended OIT) fixes sorting, not lighting; FNV sorts its alpha list
+itself, so OIT is not needed first (believed).
+
+**`DeferredRenderer 0`.** Keep it for now. The cost of two paths: every shading feature exists twice (the template's forward code and the
+pass's), each change needs a check in both modes, and the forward records keep the ps_3_0 size wall alive. The forward records are needed
+anyway for the items above, so dropping mode 0 saves little until the reflection record and forward+ exist. After that mode 0 can be frozen
+("deferred first" is already the room rule) and later removed: 1 session.
+
+**Realistic end state for FNV on D3D9 / DXVK.** All opaque world geometry in the main view deferred (today's plus decals, distant trees, first
+person, wetness); everything blended (glass, hair, water, fading objects, particles) forward+ from the same lamp table; other cameras on a
+short reflection record; sky and UI unlit. No opaque forward lighting code left except that reflection record. Not "100 % deferred", but
+one lighting model everywhere, and the ps_3_0 size wall gone from the heavy shaders.
+
+### Alternatives for what looked forward-only (2026-11-19, owner: "think about alt methods for stuff that seems like it can't")
+All believed (engine comparisons, efforts); nothing built or run. With these, everything opaque goes deferred and only glass, particles
+(lit from a shared light volume) and sky / UI stay forward.
+| Item | Alternative that keeps it deferred | Done this way in | Effort, risk |
+|---|---|---|---|
+| Fading objects | dithered (screen-door) fade, the stipple averaged by TAA / DLSS; no forward pass while fading | Unreal (Dithered LOD Transition), Unity (LOD cross-fade) | ~1, low |
+| Blended hair | dithered hair into the G-buffer (alpha-tested hair is already deferred) | Unreal | 1, medium (strands may shimmer) |
+| Water reflection camera | drop it: SSR + the RT reflections + a sky / cube-map fallback; no second lit scene draw | most modern engines | 3-4, medium (off-screen, untraced things show the sky) |
+| (if the camera stays) | a half-size G-buffer for it with the sun pass run there | planar reflections in deferred engines | 4-6, high |
+| Water surface | "deferred water": the surface written opaque into the G-buffer (normal, gloss, F0 0.02) so the sun and lamp passes light it; one pass after does refraction / absorption / murk from the scene copy and the depth difference | Frostbite, Unreal | 3-5, medium-high (shore edges, seen from below) |
+| Particles, smoke, fire | a low-res light volume (sun with shadow + lamps) made once a frame from the froxel lamp grid; the particles sample it | Unreal (translucency lighting volume), Frostbite | 2-3 + replacement particle shaders (2+) |
+| Glass | stays forward+ (built); a one-layer transparent G-buffer brings more artefacts than it fixes | - | 0 |
+| Scopes, other cameras | the deferred span opened for any world camera at main-view size; small pictures on a short sun-only "reflection record" | - | 2-3, medium |
+| Fallback frames (lockpick) | open the span for that scene too | - | ~1, low (believed) |
+| MSAA | not needed: TAA / DLSS | - | 0 |
+| Cube-map layer (EnvTemplate) | the reflection pass's "ray missed" fallback | standard | 1-2 |
+| `DeferredRenderer 0` | frozen once the rows above exist, then removed with most forward lighting code | - | 1 |
+Revised order: finish wetness; Phase 0 measure; dithered fade + hair; decals + distant trees; water reflections from SSR / RT (alone first,
+the biggest visible change); deferred water surface; particle light volume; freeze and remove mode 0. About 25-35 sessions. Risks: water
+(look match), the dither stipple without TAA / DLSS, particles need their shaders replaced first.
+
+### Order and effort (sessions, estimates)
+1. Finish deferred wetness: check the smear fix, lamp streak into DeferredLamps (1), objects + parallax (1-2), one system (1-2), retire
+   WetWorld and the records' water layer (0.5).
+2. Phase 0 measure (1), so the rest is ranked by real screen share.
+3. Bumped normals for reflections on by default (0.5, your look), bounce-light receiver (1-2).
+4. Phase 2 switches as one batch look (1), first person included.
+5. Water forward+ (1-2), fading objects forward+ (1).
+6. Reflection record for other cameras (2-3).
+7. Decals (2-3), distant trees (1-2), cube-map layer (1-2), DeferredSun's missing terms (1).
+8. Particles (2+, needs their shaders first).
+9. Mode 0 frozen, then removed (1).
+About 20-28 sessions in all. Main risks: matching the forward look per group (each needs a side-by-side), the game's draw order for decals
+and reflections, and the frame cost of extra passes in water scenes (not measured).
+Existing mods: none of xNVSE, JIP LN, NVTF, Engine Optimizations or johnnyguitar does this kind of rendering; Vegas Shaders is the only
+deferred renderer for FNV. Community Shaders (Skyrim) is the reference for clustered lighting (Light Limit Fix), wetness and terrain
+blending, and several of its ideas are already ported here.
+
 ## Questions for you
 1. Start with Phase 0 (measure) or Phase 1 (the fallback fixes) first?
 2. Phase 2 switches change the picture once on by default: look at them one at a time, or as a batch in one session?
