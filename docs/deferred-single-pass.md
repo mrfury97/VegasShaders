@@ -507,3 +507,19 @@ Runs are slot A run ids. "R0" is D3D9, "R1" Vulkan, "R9"-"R13" test values of `N
   - `py -3.10 -I tests/parity_probe.py <VegasShaders-Logs> [frame]` prints the stats; at DebugView 5 it also says whether A or B matches
     the normal decoded from m.ga, and which texel offset fits each side. It writes a |A - B| x16 PNG.
   - Set the switch to 0 and back to 14 for another shot.
+
+### Step 1 verified (2026-11-22, slot A, TAA off)
+- **PROVEN: exact parity.** The same-frame probe (value 14) on puddle1 gives mean and max |D3D9 - Vulkan| = 0.000000 for the shading
+  normal (DebugView 5), and max 0.006 for the lit result (DebugView 0). Neither side has any sentinel pixels (run 20261122-112221;
+  files in `F:\VS-scratch\parity\probe2`).
+- **PROVEN: final pictures at noise level.** R0 vs R1 against the same-switch control:
+  - puddle1: 2.04 vs 1.00;
+  - SunGI2: 0.48 vs 0.36;
+  - SunGI4: 0.27 vs 0.19.
+
+  By eye, the shadows and ground match, and only a few edge pixels sparkle (runs 20261122-112221, -112553, -112920).
+- **Installed for the owner:** install-test25-2026-11-22 (DLL, pdb, defaults, 8 `Compute\Deferred` files). Both switches stay off by
+  default.
+- **Not run:** timing, the fault test, the desert noon scene and interiors with the final DLL.
+- **Found by the push audit, not fixed** (BELIEVED, not checked in game): the existing Vulkan VolumetricFogApply / VolumetricFogEstimate
+  passes push 112 bytes with samplers at push offsets 0/4/8. That would overwrite the low 16 bits of `compositeAOTexel.xyz`.
