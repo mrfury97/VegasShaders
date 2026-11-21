@@ -78,7 +78,9 @@ New code that touches a runtime file or folder goes through `Paths::` (or `VS_LO
 ## Build/deploy workflow
 Don't use `build.bat` (it wipes and mirrors a deploy folder). Build with msbuild into `F:\VS-build` (proven 2026-11-18, about 2 minutes, warnings only; PowerShell, `$r` = repo root):
 `& "F:\Tools\VS2022BT\MSBuild\Current\Bin\MSBuild.exe" "$r\NewVegasReloaded\NewVegasReloaded.vcxproj" /p:Configuration=Release /p:Platform=Win32 "/p:SolutionDir=$r\\" /p:OutDir=F:\VS-build\ /p:IntDir=F:\VS-build\obj\ /m /nologo /v:minimal`
-(end the quoted SolutionDir with `\\`: a single `\` escapes the quote, MSB4184). Offline checks, built under `build\`:
+(end the quoted SolutionDir with `\\`: a single `\` escapes the quote, MSB4184). Branch worktrees go in
+`F:\Claude Brain\VS-branches\<branch>`, builds in `F:\VS-build\<branch>` (main's own output stays in `F:\VS-build`); remove a
+worktree once its branch is merged into the test build or main. Offline checks, built under `build\`:
 `effect-test\effect_compile.exe <file.fx.hlsl>` (D3DX only; Exposure and VolumetricFog fail there but load in game) and
 `template-compile\template_compile.exe <template> <profile> NAME[=VALUE]...`. Then install by copying only
 the changed files into the MO2 mod folder `E:\Mod Organizer 2 (Archive)-6194-2-1-5 (1)\mods\VegasShaders-1.1.0\` (its
