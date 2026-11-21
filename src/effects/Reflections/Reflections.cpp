@@ -13,6 +13,7 @@
 #include "../../core/RtCoreClient.h"	// UNOFFICIAL 2026-10-28 (RT reflections)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (the D3D9 effect's material copy)
 #include "../../core/RtCore.h"
+#include "../WetnessEffects/WetnessEffects.h"	// UNOFFICIAL 2026-11-21 the wetness now (cb.film2.z)
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections
 #include "../../core/WeaponMask.h"	// UNOFFICIAL 2026-11-09 the weapon's own pixels of the first-person model (RT weapon reflections, not the hands)
 #include "../../core/RtReflDenoise.h"	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
@@ -1637,7 +1638,13 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	{
 		const PuddlesShaders* pud = TheShaderManager->Shaders.Puddles;
 		const float standing = pud && pud->Constants.Data.w > 0.5f ? std::clamp(pud->Constants.Look.x, 0.01f, 0.5f) : 0.05f;
-		uniforms.film2 = D3DXVECTOR4(Settings.DampTrace || !CubeWanted() ? 0.0f : 1.0f, standing, 0.0f, 0.0f);
+		// z (2026-11-21, slot A/B: the puddles' soft edges went to the cube and lost their mirror) open flat ground's damp roughness now, as
+		// Includes/Wetness.hlsl GetWetness's Puddles branch makes it: lerp(1, 0.22, saturate(wetness x MaxRainWetness)); the film's roughness
+		// lies between it and the standing water's by the standing share, so the shader can read that share back. 0: not known (no Puddles).
+		const WetnessEffectsShaders* wet = TheShaderManager->Shaders.Wetness;
+		const float rain = wet ? std::clamp(wet->Constants.Data.x * wet->Constants.Params.x, 0.0f, 1.0f) : 0.0f;
+		const float dampRough = pud && pud->Constants.Data.w > 0.5f ? 1.0f + (0.22f - 1.0f) * rain : 0.0f;
+		uniforms.film2 = D3DXVECTOR4(Settings.DampTrace || !CubeWanted() ? 0.0f : 1.0f, standing, dampRough, 0.0f);
 	}
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {

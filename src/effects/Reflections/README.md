@@ -339,7 +339,10 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
 - What (Vulkan passes only; the D3D9 technique and the RT passes are unchanged): `Reflections.glsl` FilmWetness splits the film into standing
   water and damp ground by its roughness: standing water's is the running Puddles Roughness (`cb.film2.y`: TESR_PuddleLook.x while
   TESR_PuddleData.w is on, else 0.05 for Wetness Effects' own puddles), damp ground's is rougher (lerp(1, 0.22, rain): 0.61 at
-  MaxRainWetness 0.5); FilmDamp = smoothstep(standing + 0.02, standing + 0.12, film roughness) (the soaked rim, 0.12, blends). Damp: the
+  MaxRainWetness 0.5); the film's roughness is lerp(damp, standing, the standing share), so the share is read back with open flat
+  ground's damp roughness now (`cb.film2.z` = lerp(1, 0.22, saturate(wetness x MaxRainWetness)), C++ from Wetness Effects' constants)
+  and FilmDamp = 1 - smoothstep(0.25, 0.6, share): a puddle's soft edge stays traced (the first build split by roughness alone and put
+  every puddle edge on the cube: slot A/B 2026-11-21, the bush's reflection lost). Without Puddles: by roughness as before. Damp: the
   roughness is the film's own; standing: as before (WetRoughness .. 0.3). `SurfaceDamp` = the damp share of the pixel's reflection.
   `ReflectionsTrace.frag` / `ReflectionsTraceHiZ.frag`: fully damp pixels skip the march and the random spread (H = N) and take the cube,
   the light grid and the sky; partly damp ones scale the screen share by (1 - damp).
