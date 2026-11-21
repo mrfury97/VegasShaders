@@ -53,7 +53,7 @@ committed or installed.
   that read them. Change the forward templates only for geometry that stays forward (water, sky, particles, decals,
   first person, distant trees, glass, menus), and so that `DeferredRenderer = 0` still renders correctly; it need not gain
   the feature. Every plan says which path each change uses, and why when it's forward. Background:
-  `docs\deferred-vs-forward.md` (on `vs-1.1.0-plus-fork`).
+  `docs\deferred-vs-forward.md`.
 
 ---
 
