@@ -430,3 +430,19 @@ rewrite forward pixels too. Open.
 6. Register counts of the merged shader (no vendor compiler offline).
 7. Whether `RenderRect::Active()` stays false through the whole span.
 8. Reading constants back under DXVK without a stall (BELIEVED fine; the sun does it today).
+
+## Bench results (2026-11-21, slot A, install-test23)
+- **Step 0 PROVEN:** with `AtlasStandIn` on, street lamps and fires light deferred ground and objects outdoors before any interior.
+  Seen on the Strip at night and in Goodsprings. Sheets: `F:\NVR-bench\shots\dsp-sheets\ext1\`.
+- **Step 1 drew on Vulkan:** PROVEN by the log lines.
+  - Interiors match D3D9: Gomorrah, Lucky 38, Vault 21, Vault 34 (`dsp-sheets\int1\`).
+  - Exteriors in daylight do NOT match: dark ground, a soft shadow blob and rectangular seams (`dsp-sheets\ext1`, `ext2`, `diag`,
+    `diag2`).
+- **What the diagnosis found:**
+  - PROVEN: the char map, the stand-ins and sRGB are not the cause (the first-Draw stage log; CharacterShadowMap off changes nothing).
+  - PROVEN: the in-shader depth test discards a band of mid-distance ground. Test value 10 (no test) restores the cascade view. Test
+    value 11 (testing against the INTZ device depth) fails the same way, so the shader's own depth output, or the D3D9 test's real
+    reference, differs from what was assumed.
+  - PROVEN: even without the test, the sun shadow term differs.
+  - NOT RUN: like-for-like debug views with the Vulkan debug draw writing over the frame (commit c317eda), which would pin the term.
+- **Owner's choice (2026-11-21):** they check in game themselves. `NvrDxvkDeferredResolve` stays 0 until the shadow term is fixed.
