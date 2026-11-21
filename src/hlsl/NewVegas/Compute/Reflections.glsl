@@ -213,8 +213,12 @@ vec3 SmoothViewNormal(vec2 uv) {
 //    small bumps. Standing water is already flat in the G-buffer (DeferredWetness's flatten, with Puddles compiled in), so here damp ground
 //    leans: at the film's full wet share it keeps 1 - DampBumpLean of its bump. (Was 0.8, then 1 before it; 2026-11-20 owner: "make Wet ground
 //    keep 100% of its bump": 0, the whole bump; the grain the owner saw on wet grass and dirt may come back, DebugView 12 shows the bend.)
+//    (2026-11-21, owner's choice "Smooth-normal ray" after the speckle hunt, docs/reflection-speckle.md: 1. A bump-bent ray at a low angle
+//    flipped between bright sky and dark ground pixel block by pixel block on damp dirt in low sun (save reflection01); the cube instead
+//    cost the wet streets their crisp mirror. At the film's full wet share the ray, the blur and the Fresnel follow the smooth ground:
+//    crisp, steady wet reflections; the bumps stay in the ground's own shading, on dry shiny surfaces and on partly wet ground.)
 const float BumpFootNear = 0.5, BumpFootFar = 2.0;
-const float DampBumpLean = 0.0;
+const float DampBumpLean = 1.0;
 float BumpKeep(vec2 uv) {
     float footprint = readDepthLod(uv) * 2.0 * cb.reciprocalResolution.x * cb.renderScale.z / cb.projectionTransform[0][0];
     float keep = 1.0 - smoothstep(BumpFootNear, BumpFootFar, footprint);

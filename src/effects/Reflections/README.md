@@ -263,7 +263,8 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   t_normals holds the bumped normals). Why: the owner's second look (2026-11-20), wet reflections extremely noisy with DeferredBumpedNormals on.
   (2026-11-20, unified reflections, the owner's first look at step 1: "reflections dont seem to be using the normal bump at all") Standing
   water is flat in the G-buffer already (DeferredWetness's flatten), so the lean is for damp ground only and partial: at the film's full wet
-  share the bump keeps 100 % (DampBumpLean 0; 2026-11-20 owner: "make Wet ground keep 100% of its bump"; was 20 %, and 0 % before that). The
+  share the bump keeps 0 % (DampBumpLean 1; 2026-11-21 owner's choice "Smooth-normal ray": bump-bent rays speckled damp dirt in low sun
+  and the cube alternative lost the streets' crisp mirror, docs/reflection-speckle.md; before: 100 % on 2026-11-20, 20 %, 0 %). The
   puddles stay flat: that is DeferredWetness's own flatten of the G-buffer's shading normal under standing water (with Puddles compiled in),
   not this lean.
 - The bump's fade (`BumpKeep`, `cb.film.z`: the normals are the normal-mapped shading normals, DeferredBumpedNormals, DeferredReflections or
