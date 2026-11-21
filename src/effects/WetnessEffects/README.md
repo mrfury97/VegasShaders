@@ -13,8 +13,9 @@ reflections on wet surfaces; off by default since 2026-11-21, the owner's settin
 
 ## 2. The one rain clock (2026-11-21)
 `WetnessEffectsShaders::TickWeather` follows the weather as Community Shaders does (the current rainy weather fading in over the
-transition, the last one fading out) and eases three amounts at WeatherTransitionSpeed / 60 a second: Wetness (the film; about 20 s at
-3), PuddleWetness (three times slower to dry), Raining (four times faster). Interiors hold the state they were entered with.
+transition, the last one fading out) and eases three amounts at WeatherTransitionSpeed / 60 x 2 a second (TunedClockRate: the speeds were
+tuned while it ran twice a frame, and keep that): Wetness (the film; about 10 s at 3), PuddleWetness (three times slower to dry), Raining
+(four times faster, about 2.5 s). The drops' time (TESR_WetnessData.w) runs at the same doubled rate, as before. Interiors hold the state they were entered with.
 ForceRain counts as full rain, ForceSnow as none. The Debug overrides force the amounts.
 
 It runs every rendered frame whether or not the collection is on (`core/RainState.h` calls it once a frame, by FrameNumber), and the
@@ -44,5 +45,5 @@ None of its own: the film is in the D3D9 surface shaders; the Vulkan reflection 
 
 ## 7. What correct and wrong look like
 Correct: when rain starts, the ground, roads, rocks, skin and gear darken and gloss together, ripples start on puddles and water, the heat
-haze goes; when it stops, all of them dry within about 20 s except the puddles, which shrink over game hours. Wrong: skin or the land's
+haze goes; when it stops, all of them dry within about 10 s except the puddles, which shrink over game hours. Wrong: skin or the land's
 Rain look staying wet while the ground is dry (two clocks), or wet ground under roofs.

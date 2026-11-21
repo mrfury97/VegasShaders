@@ -218,9 +218,12 @@ What changed (C++ only, no path: a CPU clock; the shaders are unchanged except t
   place now (a [WARNING] says to use DXVK). The clock still drives the drops, the water's rings and the Rain groups.
 
 Believed, not run in game
-- Ground, skin, heat haze, the Rain groups and the drops start and stop together; the film dries in about 20 s at WeatherTransitionSpeed 3
-  (the documented figure; with the double easing it was about 10 s). Puddles' standing water keeps its game-hour DryHours.
-- The drops now fade in and out with Raining (about 5 s) and the weather's transition instead of 0.05 / 0.07 game hours.
+- Ground, skin, heat haze, the Rain groups and the drops start and stop together; the film dries in about 10 s at WeatherTransitionSpeed 3,
+  as before (the clock now runs once a frame at TunedClockRate 2, the speed it had running twice a frame; review fix). Puddles' standing
+  water keeps its game-hour DryHours.
+- The drops now fade in and out with Raining (about 2.5 s) and the weather's transition instead of 0.05 / 0.07 game hours.
+- Review fix: the wet passes of the material step (Wetness Effects' reflections, the deferred wetness fallback) now hold off the fog fold
+  (effectsBetween) and the bounce-into-specular merge, as WetWorld's wet frames did.
 
 Not done in step 4
 - The records' water layer (forward Wetness.hlsl in the land and object records) is not retired: the forward path and DeferredWetness off

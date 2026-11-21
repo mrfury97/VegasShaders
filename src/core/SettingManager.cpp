@@ -905,6 +905,14 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	if (version < 91) {
 		tomlValue* wetWorld = UserSection("Shaders.WetWorld.Main");
 		tomlValue* snow = UserSection("Shaders.SnowAccumulation.Main");
+		if (wetWorld && wetWorld->is_table() && !snow) {	// (review) no snow section saved: made, so the keys are not lost
+			tomlValue* parentTable = UserSection("Shaders.SnowAccumulation");
+			if (!parentTable) {
+				tomlValue* shadersTable = UserSection("Shaders");
+				if (shadersTable && shadersTable->is_table()) { (*shadersTable)["SnowAccumulation"] = toml::table(); parentTable = UserSection("Shaders.SnowAccumulation"); }
+			}
+			if (parentTable && parentTable->is_table()) { (*parentTable)["Main"] = toml::table(); snow = UserSection("Shaders.SnowAccumulation.Main"); }
+		}
 		if (wetWorld && wetWorld->is_table() && snow && snow->is_table()) {
 			for (const char* key : { "PersistentMapSize", "PersistentMapResolution", "PersistentDebugView" }) {
 				if (!wetWorld->contains(key) || snow->contains(key)) continue;

@@ -632,7 +632,10 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	VolumetricFogEffect* Fog = Effects.VolumetricFog;
 	const bool shadowApplies = GameState.isExterior && wouldRender(Effects.ShadowsExteriors);
 	const bool aoApplies = wouldRender(AO);
+	// (2026-11-21: WetWorld, which held this off in wet frames, is gone; the wet passes of the material step read and change the picture there
+	// too, so they count: Wetness Effects' reflections and the deferred wetness fallback.)
 	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) || wouldRender(Effects.BloodFlow) ||
+		wouldRender(Effects.WetnessReflections) || DeferredWetness::FallbackMayDraw() ||
 		wouldRender(Effects.Specular) || wouldRender(Effects.Underwater) ||
 		wouldRender(Effects.BounceLight) || wouldRender(Effects.Reflections) || ambientLight; // must see the scene with its shadows and AO applied
 	// UNOFFICIAL 2026-10-18 InteriorShadowFold ([Main.Main.Performance]; evidence\intshadow-LOG.md): indoors with the forward lamp
@@ -833,10 +836,12 @@ void ShaderManager::PreStep_AmbientOcclusion(ChainContext& ctx) {
 
 void ShaderManager::PreStep_SpecularBouncePlan(ChainContext& ctx) {
 	// UNOFFICIAL: the bounce light's full-resolution combine goes into the specular's, one pass for both, when nothing renders
-	// between them (2026-11-21: WetWorld, which read and changed the image there, is gone).
+	// between them (the wet passes read and change the image there: Wetness Effects' reflections and the deferred wetness fallback; WetWorld
+	// until 2026-11-21).
 	const bool specularRenders = wouldRender(Effects.Specular) && Effects.Specular->Textures.LightSurface;
 	// (Not with the bounce light's NeonSpill on: its own combine has the spill's debug views and street smoothing.)
 	const bool bounceIntoSpecular = specularRenders && wouldRender(Effects.BounceLight) &&
+		!wouldRender(Effects.WetnessReflections) && !DeferredWetness::FallbackMayDraw() &&
 		Effects.Specular->CanTakeBounce() && !Effects.BounceLight->SpillOn() &&
 		!Effects.BounceLight->HardEdgesOn();
 	ctx.specularRenders = specularRenders;

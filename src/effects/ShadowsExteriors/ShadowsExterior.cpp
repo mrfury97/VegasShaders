@@ -778,7 +778,7 @@ bool ShadowsExteriorEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 * or times 1 - fade = 0 (Specular). Their green channel, the lamps' light (PointShadows.fx), which the passes also blur and
 * raise to the Intensity power, counts only with lamp shadows on outdoors (ShadowFade.z): without them the apply's
 * 1 + green comes out at 1 whatever green is (Darkness 0 or more). Effects that read the buffer without the fade: blood
-* flow, wet world, underwater, the debug view.
+* flow, underwater, the debug view (and WetWorld until 2026-11-21).
 */
 bool ShadowsExteriorEffect::FadedContactUnread() {
 #if NVR_TEST_TOOLS

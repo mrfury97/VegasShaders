@@ -258,8 +258,13 @@ namespace DeferredWetness {
 	// pass did not work out; cleared first in a frame that pass did not run). The frame is drawn in place: the chain's current image (or, off the
 	// chain, the effects' target, copied back to the rendered buffer after), read from a copy. Needs the frame and the film at one size and format
 	// (the targets of one draw); otherwise it is off for the session, logged once.
+	// (2026-11-21, review of the WetWorld removal) Fallback may draw this frame: its own cheap tests, for the frame-order decisions made before it
+	// (EffectChain.cpp effectsBetween, bounceIntoSpecular), which WetWorld's wet frames used to hold off.
+	inline bool FallbackMayDraw() {
+		return FallbackPass && !FallbackOff && CompiledIn() && TheShaderManager->GameState.isExterior && !TheShaderManager->GameState.isUnderwater && WetNow();
+	}
 	inline void Fallback(IDirect3DDevice9* d, IDirect3DSurface9* renderTarget) {
-		if (!FallbackPass || FallbackOff || !CompiledIn() || !TheShaderManager->GameState.isExterior || TheShaderManager->GameState.isUnderwater || !WetNow()) return;
+		if (!FallbackMayDraw()) return;
 		// (review 2026-11-20) the G-buffer and the depth frame block must be this frame's and line up with the effects' frame (Data.x: see FilmReady)
 		if (!CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || CapturedNormals::AlbedoData.x < 0.5f || CapturedNormals::MaterialData.x < 0.5f ||
 			CapturedNormals::Data.x <= 0.0f || !DeferredDepth::Ready() || !MakeTargets(d) || !renderTarget) return;

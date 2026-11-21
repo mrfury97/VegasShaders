@@ -3,6 +3,7 @@
 #include "WetnessEffects.h"
 #include "../../core/ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (Wetness Effects left out of the shaders)
 #include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
+#include "../../core/FrameClock.h"	// TunedClockRate
 
 void WetnessEffectsShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_WetnessData", &Constants.Data);
@@ -60,10 +61,12 @@ static bool IsRainy(TESWeather* weather) {
 
 // UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h, which calls this once a rendered frame whether or not the collection is
 // on: the Rain setting groups, skin, the heat haze, the drops and the water's rings follow it). Before, WetWorld kept a second clock with
-// its own timing; this one was eased here only while the collection was on (and twice a frame: UpdateConstants runs twice).
+// its own timing; this one was eased here only while the collection was on (twice a frame: UpdateConstants runs twice; kept at that speed).
 void WetnessEffectsShaders::TickWeather() {
 	if (!SettingsRead) return;	// (the first frame's settings pass comes first in ShaderManager::UpdateConstants)
-	float elapsed = std::clamp((float)TheFrameRateManager->ElapsedTime, 0.0f, 0.25f);
+	// (review 2026-11-21) Once a frame now, so at TunedClockRate (core/FrameClock.h): the drying, the drops' interval and the ripples were tuned
+	// by eye (the owner's RaindropChance, Ripples) while this ran twice a frame; this keeps exactly that speed.
+	float elapsed = std::clamp((float)TheFrameRateManager->ElapsedTime, 0.0f, 0.25f) * (float)TunedClockRate;
 	bool exterior = TheShaderManager->GameState.isExterior;
 	Sky* WorldSky = Tes ? Tes->sky : nullptr;
 
