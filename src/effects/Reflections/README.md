@@ -297,6 +297,9 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
 - Strength: at roughness 0.61 the composite's split-sum Fresnel is about a quarter of 0.3's at 5 degrees and a third at 10 (0.086 vs
   0.378 / 0.264): the owner's test10 look ("no reflections"). `ReflectionsComposite.frag` takes the damp share's Fresnel at most at
   DampMaxRoughness 0.3, so damp ground keeps the traced version's strength; its picture is the blurred cube (not a mirror).
+- 2026-11-21, after the slot A/B (cube: puddle edges and the Strip's crisp road mirror lost; "only bumpy" rule: Strip asphalt bends more
+  than Goodsprings dirt, so it put almost nothing on the cube), owner's choice "Smooth-normal ray": `DampTrace` now defaults to TRUE and
+  wet ground's reflection follows the smooth normal (DampBumpLean 1, unified branch). The cube path below stays for `DampTrace = false`.
 - Off: `[Shaders.Reflections.Main] DampTrace = true` (live, hidden unless ShowInternal) traces damp ground as before; the cube path is also
   off without the cube (CubeMap off, underwater), where damp ground would have only the sky.
 - Known gaps (review 2026-11-21): RT on: RayGen / RTResolve do not know the damp share; damp ground's roughness 0.61 is past RT MaxRoughness
