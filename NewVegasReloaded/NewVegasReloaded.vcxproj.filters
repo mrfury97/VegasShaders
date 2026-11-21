@@ -223,9 +223,6 @@
     <ClInclude Include="..\src\effects\WaterLens\WaterLens.h">
       <Filter>Effects</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\effects\WetWorld\WetWorld.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\effects\CoverMap\CoverMap.h">
       <Filter>Effects</Filter>
     </ClInclude>
@@ -580,9 +577,6 @@
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\WaterLens\WaterLens.cpp">
-      <Filter>Effects</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\effects\WetWorld\WetWorld.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\CoverMap\CoverMap.cpp">

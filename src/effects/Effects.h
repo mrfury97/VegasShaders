@@ -37,7 +37,6 @@
 #include "Underwater/Underwater.h"
 #include "VolumetricFog/VolumetricFog.h"
 #include "WaterLens/WaterLens.h"
-#include "WetWorld/WetWorld.h"
 #include "HeatHaze/HeatHaze.h"
 #include "Sandstorm/Sandstorm.h"
 #include "VolumetricLight/VolumetricLight.h"
@@ -62,7 +61,7 @@
 #include "POM/POM.h"
 #include "PBR/PBR.h"
 #include "Terrain/Terrain.h"
-#include "WetnessEffects/WetnessEffects.h"	// UNOFFICIAL 2026-11-04 Wetness Effects (from Physically-Based-Reloaded), in place of WetWorld's screen pass
+#include "WetnessEffects/WetnessEffects.h"	// UNOFFICIAL 2026-11-04 Wetness Effects (from Physically-Based-Reloaded); 2026-11-21 the rain wetness (WetWorld removed)
 #include "Puddles/Puddles.h"	// 2026-11-08 Puddles (on top of Wetness Effects)
 #include "WetnessEffects/WetnessReflections.h"	// UNOFFICIAL 2026-11-04 Wetness Effects' reflections and HUD raindrops (from Physically-Based-Reloaded)
 #include "WetnessEffects/HudRaindrops.h"

@@ -1,7 +1,8 @@
 #pragma once
 
-// UNOFFICIAL 2026-10-27 Persistent wetness and snow cover (deep/fork2-wetsnow). [Shaders.WetWorld.Main] Persistent and
-// [Shaders.SnowAccumulation.Main] Persistent, both off by default (off = exactly the old behaviour: the old techniques, the old
+// UNOFFICIAL 2026-10-27 Persistent wetness and snow cover (deep/fork2-wetsnow). [Shaders.SnowAccumulation.Main] Persistent, off by
+// default. (2026-11-21: the wet half, [Shaders.WetWorld.Main] Persistent, went with WetWorld, its only reader: Settings.wet is always
+// false and its model is dormant; the map's size, resolution and debug view are SnowAccumulation's keys now.) Both off by default (off = exactly the old behaviour: the old techniques, the old
 // constants, nothing of this runs or is allocated).
 //
 // The cover map (Effects\CoverMap.fx.hlsl): a top-down map round the camera that keeps, per spot, how wet the top surface is, how
@@ -12,7 +13,7 @@
 // texels whose spot left the window start again, from the open-ground values kept here on the CPU (which follow the same rules for
 // an open, sunlit spot). Rain and snow build up on every spot's top surface; spots dry and melt over game time, faster in the sun,
 // slower in shade (a short march towards the sun over the map's own heights) and at night; snow gathers in hollows and against
-// walls; the player's feet tread a trail into the snow. WetWorld (techniques 5/6) and SnowAccumulation (technique 1) read the map
+// walls; the player's feet tread a trail into the snow. SnowAccumulation (technique 1; WetWorld's 5/6 until 2026-11-21) reads the map
 // instead of their single amount; outside the window they use the open-ground values. Their own top-surface tests (the ortho map)
 // still decide which pixels are the top surface, so ground under a roof stays dry.
 // Plain D3D9 render-target ping-pong (two pairs of A16B16G16R16 maps, two render targets at once), so it works on native D3D9 and
@@ -34,12 +35,10 @@ public:
 
 	// The readers. *Active: the effect must keep drawing (something may still be wet / snowy in the map, or it rains / snows) even
 	// when its own single amount is 0. *Technique: the technique to draw with (the persistent one once the map holds data).
-	bool	WetActive() const;
 	bool	SnowActive() const;
-	UINT	WetTechnique(WetWorldEffect* wetWorld, UINT normal) const;
 	UINT	SnowTechnique(SnowAccumulationEffect* snow) const;
 
-	// RenderEffectsPreTonemapping, before SnowAccumulation and WetWorld: updates the map when needed and sets the readers' constants.
+	// RenderEffectsPreTonemapping, before SnowAccumulation: updates the map when needed and sets the readers' constants.
 	void	RenderUpdate(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);
 	// RenderEffects, last: the debug view (PersistentDebugView), through the frame chain.
 	void	RenderDebug(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* SourceSurface);
@@ -103,7 +102,7 @@ private:
 	double				lastCommit = 0.0;
 	bool				clockSet = false;
 	bool				lastRaining = false, lastSnowing = false;
-	float				rainNow = 0.0f;		// WetWorld's rain amount (0 .. 1) last frame
+	float				rainNow = 0.0f;		// the wet half's rain amount (always 0 since 2026-11-21: the wet half is off)
 	bool				snowNow = false;
 	bool				resyncWet = true, resyncSnow = true;
 	unsigned int		tickFrame = ~0u;

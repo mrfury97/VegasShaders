@@ -2,6 +2,8 @@
 
 #include "WetnessEffects.h"
 #include "../../core/ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (Wetness Effects left out of the shaders)
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
+#include "../../core/FrameClock.h"	// TunedClockRate
 
 void WetnessEffectsShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_WetnessData", &Constants.Data);
@@ -46,6 +48,7 @@ void WetnessEffectsShaders::UpdateSettings() {
 	Settings.PuddleOverride = TheSettingManager->GetSettingF(debug, "PuddleOverride");
 	Settings.RainOverride = TheSettingManager->GetSettingF(debug, "RainOverride");
 	Settings.ShowCover = TheSettingManager->GetSettingI(debug, "ShowCover") != 0;
+	SettingsRead = true;
 }
 
 static float LinearStep(float edge0, float edge1, float x) {
@@ -56,30 +59,20 @@ static bool IsRainy(TESWeather* weather) {
 	return weather && weather->GetWeatherType() == TESWeather::WeatherType::kType_Rainy;
 }
 
-void WetnessEffectsShaders::UpdateConstants() {
-	// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h): the ground shaders had to be built without Wetness Effects (with it
-	// they are too long for the driver on native Direct3D 9). Ground without it next to objects with it would be dry land under wet
-	// rocks, and with this collection on Wet World's screen pass does not draw (EffectChain.cpp reads Enabled). So it is off for the
-	// session on every surface: the flag the shaders test goes to 0 (the ones still built with it skip it), the wetness reflections stand
-	// down (they read Enabled) and Wet World draws the rain wetness. Held every time the menu switches it back on. This function is
-	// only called while Enabled, so the constants are zeroed here, once per switch.
-	if (ShaderFallback::Dropped(ShaderFallback::Wetness, ShaderFallback::Land)) {
-		static bool said = false;
-		if (!said) { said = true; Logger::Log("ShaderFallback: Wetness Effects is off for this session (left out of the shaders so the ground shaders load): Wet World's screen pass draws the rain wetness"); }
-		Enabled = false;
-		Constants.Flags = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
-		Constants.Sun.w = 0.0f;	// (the ShowCover debug view)
-		return;
-	}
-	float elapsed = std::clamp((float)TheFrameRateManager->ElapsedTime, 0.0f, 0.25f);
+// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h, which calls this once a rendered frame whether or not the collection is
+// on: the Rain setting groups, skin, the heat haze, the drops and the water's rings follow it). Before, WetWorld kept a second clock with
+// its own timing; this one was eased here only while the collection was on (twice a frame: UpdateConstants runs twice; kept at that speed).
+void WetnessEffectsShaders::TickWeather() {
+	if (!SettingsRead) return;	// (the first frame's settings pass comes first in ShaderManager::UpdateConstants)
+	// (review 2026-11-21) Once a frame now, so at TunedClockRate (core/FrameClock.h): the drying, the drops' interval and the ripples were tuned
+	// by eye (the owner's RaindropChance, Ripples) while this ran twice a frame; this keeps exactly that speed.
+	float elapsed = std::clamp((float)TheFrameRateManager->ElapsedTime, 0.0f, 0.25f) * (float)TunedClockRate;
 	bool exterior = TheShaderManager->GameState.isExterior;
 	Sky* WorldSky = Tes ? Tes->sky : nullptr;
-	bool on = Enabled && exterior && WorldSky;
 
 	// How rainy the weather is, as CS reads it: the current weather fading in over the transition, the
 	// last one fading out. Wetness follows the rain in; puddles grow as its square and outlast it,
 	// holding while the old rainy weather fades. Interiors keep the state they were entered with.
-	// Followed with the effect off too: the rest of NVR reads it (RainFactor).
 	if (exterior && WorldSky) {
 		TESWeather* current = WorldSky->firstWeather;
 		TESWeather* last = WorldSky->secondWeather;
@@ -101,6 +94,10 @@ void WetnessEffectsShaders::UpdateConstants() {
 		raining = min(raining, 1.0f);
 		wetness = min(wetness, 1.0f);
 		puddles = min(puddles, 1.0f);
+		// The test aids act on this clock too, as they did on WetWorld's (ShaderManager::UpdateConstants sets the game state):
+		// [Shaders.Snow.Main] ForceSnow, no rain; [Shaders.Precipitations.Main] ForceRain, full rain.
+		if (RainState::ForcedSnow()) raining = wetness = puddles = 0.0f;
+		else if (RainState::ForcedRain()) raining = wetness = puddles = 1.0f;
 
 		if (Settings.WetnessOverride >= 0.0f) wetness = Settings.WetnessOverride;
 		if (Settings.PuddleOverride >= 0.0f) puddles = Settings.PuddleOverride;
@@ -122,13 +119,40 @@ void WetnessEffectsShaders::UpdateConstants() {
 	RainTime += elapsed;
 	if (RainTime > 3600.0) RainTime -= 3600.0;   // keeps the drop hashes precise; one jump an hour
 
+	// (also what the water shaders' rain rings read, z, whether or not the collection is on)
+	Constants.Data = D3DXVECTOR4(Wetness, PuddleWetness, Raining, (float)RainTime);
+}
+
+void WetnessEffectsShaders::UpdateConstants() {
+	RainState::Tick();	// this frame's clock (it may have run already this frame)
+	// UNOFFICIAL 2026-11-12 ShaderFallback (core/ShaderFallback.h): the ground shaders had to be built without Wetness Effects (with it
+	// they are too long for the driver on native Direct3D 9). Ground without it next to objects with it would be dry land under wet
+	// rocks, so it is off for the session on every surface: the flag the shaders test goes to 0 (the ones still built with it skip it)
+	// and the wetness reflections stand down (they read Enabled). 2026-11-21 (WetWorld removed, owner's choice): nothing draws the wet
+	// ground in its place; the clock (TickWeather) still drives the drops, the water's rings and the Rain setting groups. Held every
+	// time the menu switches it back on. This function is only called while Enabled, so the constants are zeroed here, once per switch.
+	if (ShaderFallback::Dropped(ShaderFallback::Wetness, ShaderFallback::Land)) {
+		static bool said = false;
+		if (!said) {
+			said = true;
+			Logger::Log("[WARNING] ShaderFallback: Wetness Effects is off for this session (left out of the shaders so the ground shaders load on native Direct3D 9): "
+				"no wet ground or puddles in the rain. Run the game with DXVK for rain wetness (it has no shader length limit).");
+		}
+		Enabled = false;
+		Constants.Flags = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		Constants.Sun.w = 0.0f;	// (the ShowCover debug view)
+		return;
+	}
+	bool exterior = TheShaderManager->GameState.isExterior;
+	Sky* WorldSky = Tes ? Tes->sky : nullptr;
+	bool on = Enabled && exterior && WorldSky;
+
 	// No shore wetness (removed): the game lists water planes only some of the time, and its heights are no
 	// guide to where the water is, so the ground near it went wet and dark, on and off with the view.
 	// 2026-11-08 Puddles: standing water (or its debug view) keeps the layer on after the rain (effects/Puddles; last frame's level).
 	PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles;
 	bool active = on && (Wetness > 0.0f || PuddleWetness > 0.0f || Raining > 0.0f || (puddles && puddles->Active()));
 
-	Constants.Data = D3DXVECTOR4(Wetness, PuddleWetness, Raining, (float)RainTime);
 	Constants.Params = D3DXVECTOR4(Settings.MaxRainWetness, Settings.MaxPuddleWetness, Settings.MinRainWetness, Settings.PuddleRadius);
 	Constants.Params2 = D3DXVECTOR4(Settings.PuddleMaxAngle, Settings.PuddleMinWetness, 0.0f, 0.0f);
 	Constants.Drops = D3DXVECTOR4(1.0f / Settings.RaindropGridSize, 1.0f / Settings.RaindropInterval,

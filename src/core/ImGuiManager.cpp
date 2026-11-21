@@ -906,14 +906,13 @@ static bool IsInternalSetting(const std::string& section, const std::string& key
 
 // UNOFFICIAL 2026-11-12: an Internal setting ([Main.Menu.Developer] Internal) while the settings file does not ask for them
 // (ShowInternal): never a row, on its page, in the search or in the simple views, and not counted as a hidden developer setting.
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (SettingManager::RainWetnessOneSwitch): with DeferredWetness on, Puddles and WetWorld have no switch
-// of their own in the menu (Puddles follows "Rain wetness", Wetness Effects' switch; WetWorld's screen pass is only the fallback where the surfaces
-// have no water layer), and the Reflections effect takes the floors' water from the film, so ReflectionPuddles does nothing there: hidden (its
-// saved value stays). WetRoughness stays: it is the wet mirror's blur (2026-11-20, Reflections.glsl FilmWetness).
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (SettingManager::RainWetnessOneSwitch): with DeferredWetness on, Puddles has no switch of its own
+// in the menu (it follows "Rain wetness", Wetness Effects' switch), and the Reflections effect takes the floors' water from the film, so
+// ReflectionPuddles does nothing there: hidden (its saved value stays). WetRoughness stays: it is the wet mirror's blur (2026-11-20,
+// Reflections.glsl FilmWetness). (2026-11-21: WetWorld, whose switch was hidden here too, is removed.)
 static bool RainWetnessLinked(const std::string& shader) {
 	if (!TheSettingManager->RainWetnessOneSwitch()) return false;
-	// (review 2026-11-20) WetWorld only while Rain wetness is on: off, its screen pass draws (EffectChain.cpp) and keeps its own switch
-	return shader == "Puddles" || (shader == "WetWorld" && TheSettingManager->GetMenuShaderEnabled("WetnessEffects"));
+	return shader == "Puddles";
 }
 
 // UNOFFICIAL 2026-11-20 unified reflections (owner: "can we remove the other reflection settings from menu"): while [Main.Main.Quality]
@@ -929,19 +928,14 @@ static bool UnifiedReflectionsHides(const std::string& section, const std::strin
 bool UnifiedReflectionsHidesKey(const std::string& section, const std::string& key) { return UnifiedReflectionsHides(section, key); }	// (the "not used" notes, above it)
 
 // UNOFFICIAL 2026-11-20 (owner: "what can we remove from the menu"): under Rain wetness, settings that no pass reads, hidden (saved values stay).
-// WetWorld: its screen pass is not drawn while Wetness Effects is on (EffectChain.cpp); only its rain tracking runs (Increase, Decrease,
-// RainStateGuard, the Persistent map keep their rows). Wetness Effects: with Puddles on (Quality above 0) GetWetness takes the Puddles branch
-// (Includes/Wetness.hlsl PUDDLES_ON, every record, first person included), which replaces the CS noise puddle these five shaped.
+// Wetness Effects: with Puddles on (Quality above 0) GetWetness takes the Puddles branch (Includes/Wetness.hlsl PUDDLES_ON, every record, first
+// person included), which replaces the CS noise puddle these five shaped. (2026-11-21: WetWorld's dead keys went with WetWorld.)
 static bool RainWetnessDeadKey(const std::string& section, const std::string& key) {
-	static const char* const kWetWorld[] = { "FastPaths", "FixedReflectionTrace", "KeepHighlights", "Amount", "PuddleCoeff_R", "PuddleCoeff_G",
-		"PuddleCoeff_B", "PuddleSpecularMultiplier", "PuddlesLandOnly", "PuddlesMinObjectSize", "WeaponRainHandOff", "ReflectionsOwnPuddles" };
 	static const char* const kWetnessPuddle[] = { "MaxPuddleWetness", "PuddleRadius", "PuddleMaxAngle", "HeightAwareness", "CreviceFill" };
 	auto listed = [&key](const char* const* names, size_t count) {
 		for (size_t i = 0; i < count; i++) if (key == names[i]) return true;
 		return false;
 	};
-	if (section == "Shaders.WetWorld.Main")
-		return listed(kWetWorld, _countof(kWetWorld)) && RainWetnessLinked("WetWorld");
 	if (section == "Shaders.WetnessEffects.Main")
 		return listed(kWetnessPuddle, _countof(kWetnessPuddle)) && TheSettingManager->RainWetnessOneSwitch() &&
 			TheSettingManager->GetMenuShaderEnabled("Puddles") && TheSettingManager->GetSettingI("Shaders.Puddles.Main", "Quality") > 0;
@@ -978,7 +972,7 @@ static bool IsOnOffInteger(const SettingManager::Configuration::ConfigNode& node
 		{ "Shaders.DitherBuster.Main", "DebugView" }, { "Shaders.PBR.Metal", "DebugView" },
 		{ "Shaders.ShadowsExteriors.SunSmoothing", "SmoothSun" }, { "Shaders.ShadowsExteriors.SunSmoothing", "QuantizeSun" },
 		{ "Shaders.CloudShadows.Main", "HazardLog" }, { "Shaders.CloudShadows.Main", "FlickerWatch" },
-		{ "Shaders.HandBlood.Main", "DebugView" }, { "Shaders.WetWorld.Main", "HudDebug" },
+		{ "Shaders.HandBlood.Main", "DebugView" },
 	};
 	for (const auto& o : onOff) if (!strcmp(o[0], node.Section) && !strcmp(o[1], node.Key)) return true;
 	return node.Description.compare(0, 5, "[0-1]") == 0;
@@ -2014,10 +2008,6 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.SnowAccumulation.Main", "Persistent", "Snow stays where it fell (spot by spot)", nullptr, "Snow builds up and melts spot by spot, so sheltered ground stays clear. Needs snowfall." },
 	{ "Shaders.SnowAccumulation.Main", "PersistentFootprints", "Footprints in snow", nullptr, "Your steps leave footprints in the snow." },
 	{ "Shaders.SnowAccumulation.Main", "PersistentDrifts", "Snow drifts in hollows", nullptr, "More snow gathers in hollows and against walls, less on ridges." },
-	// WetWorld (Main)
-	{ "Shaders.WetWorld.Main", "Persistent", "Ground stays wet where rain fell", nullptr, "Rain wets only the ground it reaches, so covered spots stay dry and puddles form in the open." },
-	{ "Shaders.WetWorld.Main", "PersistentWetTime", "Hours of rain to wet the ground", nullptr, "Game hours of rain before open ground is fully wet." },
-	{ "Shaders.WetWorld.Main", "PersistentDryTime", "Hours for wet ground to dry", nullptr, "Game hours for wet ground to dry in full sun. Shade takes longer." },
 	// Water (Default)
 	{ "Shaders.Water.Default", "reflectivity", "Reflections", nullptr, "How strongly the water mirrors its surroundings." },
 	{ "Shaders.Water.Default", "choppiness", "Wave sharpness", nullptr, "Higher gives sharper, more defined wave crests." },
@@ -3905,14 +3895,6 @@ static const MenuGroup kMenuGroups[] = {
 		"ComputeGI, ComputeGIStrength, ComputeGIThickness, ComputeGIThinOcclusion, ComputeGIQuality, ComputeGITest",
 		FogType::None, false, "Light bounced from what is on screen (needs the DXVK fork).", nullptr },
 
-	// Shaders.WetWorld.Main
-	{ "Shaders.WetWorld.Main", "Wet ground that lasts",
-		"Persistent, PersistentWetTime, PersistentDryTime, PersistentPuddleFill, PersistentPuddleDry, PersistentShade, PersistentMapSize, "
-		"PersistentMapResolution, PersistentDebugView",
-		FogType::None, false, "Wet ground and puddles are kept spot by spot round you and dry slowly, faster in the sun.", nullptr },
-	{ "Shaders.WetWorld.Main", "Not used", "PuddleCoeff_R, PuddleCoeff_G, PuddleCoeff_B, PuddleSpecularMultiplier",
-		FogType::None, false, "These settings do nothing.", nullptr },
-
 	// Shaders.Grass.GPUGrass
 	{ "Shaders.Grass.GPUGrass", "Distance and detail",
 		"BladeDistance, Blades, BladesFar, LodNear, LodFar, DetailDistance, MinPixelWidth, MaxBlades",
@@ -5137,7 +5119,7 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Shaders.Terrain.Blending", "DebugView", "Terrain blending" },
 	{ "Shaders.Terrain.Blending", "Debug", "Terrain blending (debug)" },
 	{ "Shaders.Terrain.Displacement", "DebugView", "Terrain displacement" },
-	{ "Shaders.WetWorld.Main", "PersistentDebugView", "Wet world" },
+	{ "Shaders.SnowAccumulation.Main", "PersistentDebugView", "Snow cover map" },
 	{ "Shaders.WetnessEffects.HudRaindrops", "DebugView", "Raindrops on screen" },
 	{ "Shaders.WetnessEffects.Reflections", "DebugView", "Wet reflections" },
 	{ "Main.Main.Quality", "MsaaEdgeDebugView", "MSAA edge fix" },
@@ -5459,7 +5441,7 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Shadows", "ShadowsExteriors, ShadowsInteriors, ContactHardening" },
 	{ "Ray tracing", nullptr },
 	{ "Sky and atmosphere", "Sky, VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, SunGlare, Sandstorm, HeatHaze" },
-	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, HudRaindrops, WetWorld, Water, Underwater, WaterLens" },
+	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, Puddles, HudRaindrops, Water, Underwater, WaterLens" },
 	{ "Ground and plants", "Terrain, POM, Grass, Plants" },
 	{ "Characters", "Skin, Cloth, PipboyFit, BloodFlow, HandBlood, Blood" },
 	{ "Camera and colour", "Tonemapping, Exposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF" },

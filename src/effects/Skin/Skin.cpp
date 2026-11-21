@@ -1,7 +1,7 @@
 #include <algorithm>
 
 #include "Skin.h"
-#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 #include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 DeferredSkinBlur (TESR_SkinDebug.w)
 #include "../SkinScattering/SkinScattering.h"
 
@@ -20,8 +20,8 @@ void SkinShaders::UpdateConstants() {
 
 	// Rain wets skin: smoother and shinier. The same rain / puddle factor the object and terrain shaders use.
 	float wetness = 0.0f;
-	if (isExterior && TheShaderManager->Effects.WetWorld) {
-		wetness = std::clamp(RainState::Factor() * RainWetness, 0.0f, 1.0f);	// UNOFFICIAL 2026-11-12 RainStateGuard (core/RainState.h; off: the old max of WetWorld's Data.x and z)
+	if (isExterior) {
+		wetness = std::clamp(RainState::Factor() * RainWetness, 0.0f, 1.0f);	// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h: as the ground)
 	}
 	// Nothing occludes the sky the reflection samples, so indoors it would light skin from a sky it cannot see.
 	Constants.Look = D3DXVECTOR4(isExterior ? SkyReflection : 0.0f, wetness, Material.ShadowScatter, VanillaMatchedHighlights);

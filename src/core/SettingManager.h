@@ -275,7 +275,7 @@ public:
 	bool					GetMenuShaderEnabled(const char* name);
 	void					SetMenuShaderEnabled(const char* name, bool enabled);
 	// UNOFFICIAL 2026-11-20 deferred wetness step 3: [Main.Main.Quality] DeferredWetness is on (saved; restart): rain wetness is ONE switch, Wetness
-	// Effects' (the menu calls it "Rain wetness"); Puddles follows it and WetWorld's own switch is hidden (its screen pass is the fallback only)
+	// Effects' (the menu calls it "Rain wetness"); Puddles follows it
 	bool					RainWetnessOneSwitch();
 	bool					GetMenuMiscEnabled(const char* key);	// [Main.Main.Misc]
 	void					SetMenuMiscEnabled(const char* key, bool enabled);

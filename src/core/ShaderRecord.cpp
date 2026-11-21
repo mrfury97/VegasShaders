@@ -581,7 +581,7 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status] Enabled at startup; Includes/Wetness.hlsl): the water layer in the
 	// object, parallax and land pixel shaders. Defined only when on, and last, as above.
 	// (2026-11-12 ShaderFallback: left out of every family when the land cannot carry it; WetnessEffectsShaders::UpdateConstants then
-	// switches the collection off for the session, so Wet World's screen pass draws the wetness.)
+	// switches the collection off for the session: no wet ground then, since WetWorld's screen pass went on 2026-11-21.)
 	if (TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled") && !ShaderFallback::Dropped(ShaderFallback::Wetness, fallbackFamily)) AppendDefine("WETNESS_EFFECTS", TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") ? (PuddleMap::ModeAtStart() ? "3" : "2") : "1");	// (2026-11-13 fork port: 2 = Puddles compiled in, Includes/Wetness.hlsl PUDDLES_COMPILED; 3 = its map mode, effects/Puddles/PuddleMap.h)
 	// UNOFFICIAL 2026-10-24 SmoothObjectNormals ([Shaders.PBR.Main], restart): the object and skin shaders' shadow lookups and sky ambient take
 	// the vertex normal instead of the per-triangle one (Includes/Shadow.hlsl ShadowFacingNormal). 0: the shaders exactly as before.

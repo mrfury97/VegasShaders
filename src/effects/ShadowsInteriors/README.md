@@ -24,7 +24,7 @@ and saturation of the surface rather than turning it grey. Outdoors this effect 
   relative to the ambient occlusion apply is set by the comments in the shadow-apply block of src/core/ShaderManager.cpp
   (the block that begins with the InteriorShadowFold comment); the exact order of the AO apply was not re-traced. It is skipped and its work is taken over by the fog composite
   only when the InteriorShadowFold setting is on and every fold condition holds (default: the setting is off, so this pass
-  runs as its own pass). Several effects that read the scene (SnowAccumulation, WetWorld, BloodFlow, Flashlight, Specular,
+  runs as its own pass). Several effects that read the scene (SnowAccumulation, BloodFlow, Flashlight, Specular,
   Underwater, BounceLight, Reflections, and AmbientLight when it runs) must see the scene with the darkening already applied,
   so when any of them is going to render this frame the fold is not used.
 - Darkening mode depends on the per-object forward lamp shadows (`[Shaders.ShadowsInteriors.Forward]`):

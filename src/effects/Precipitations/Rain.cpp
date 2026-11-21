@@ -1,27 +1,12 @@
 #include "Rain.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
-#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-12 RainStateGuard
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 
 void RainEffect::UpdateConstants() {
-	// UNOFFICIAL 2026-11-12 RainStateGuard ([Shaders.WetWorld.Main] RainStateGuard, core/RainState.h): on, the one rain state drives
-	// RainAnimator and fills Data.x every frame, whether this effect is on or off (WetWorld, the Reflections effect's wetness,
-	// Specular's Rain look and the volumetric light read the animator too). Off: animated here as before, so only while this effect is on.
-	if (RainState::Tick()) return;
-	Animator& fall = Constants.RainAnimator;
-	const bool raining = TheShaderManager->GameState.isRainy;
-
-	if (raining && !fall.switched) {
-		// rain has just begun: fade the drops in
-		fall.switched = true;
-		fall.Start(0.05f, 1);
-	}
-	else if (!raining && fall.switched) {
-		// rain has just ended: fade them out
-		fall.switched = false;
-		fall.Start(0.07f, 0);
-	}
-
-	Constants.Data.x = fall.GetValue();
+	// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h): the drops follow Wetness Effects' Raining, as the wet ground does.
+	// RainState::Tick fills Data.x every frame whether this effect is on or off. (Before: this effect's own animator, 0.05 game hours
+	// in and 0.07 out, driven by WetWorld's RainStateGuard.)
+	Constants.Data.x = RainState::Rain();
 }
 
 void RainEffect::UpdateSettings() {

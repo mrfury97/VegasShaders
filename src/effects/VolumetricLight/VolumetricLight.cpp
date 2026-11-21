@@ -1,4 +1,5 @@
 #include "VolumetricLight.h"
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
@@ -107,7 +108,7 @@ void VolumetricLightEffect::UpdateConstants() {
 	// Fade: the sun shadows' own fade (ShadowFade.x, 1 = no shadows: sunrise, sunset, a dim moon), less in rain, as set.
 	const ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 	float fade = 1.0f - std::clamp(shadows->Constants.ShadowFade.x, 0.0f, 1.0f);
-	fade *= std::lerp(1.0f, Settings.RainStrength, std::clamp(TheShaderManager->Effects.Rain->Constants.RainAnimator.GetValue(), 0.0f, 1.0f));
+	fade *= std::lerp(1.0f, Settings.RainStrength, RainState::Rain());	// (2026-11-21 the one rain clock, core/RainState.h)
 
 	Constants.Data.x = std::lerp(n.Strength, d.Strength, day);
 	Constants.Data.y = std::lerp(n.Darken, d.Darken, day);

@@ -1,11 +1,12 @@
 #include "Specular.h"
+#include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 #include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-03 PTReplace (Replacing)
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 
 void SpecularEffect::UpdateConstants() {
 	// Dry and rain settings, blended by how much it rains.
-	const float rain = TheShaderManager->Effects.Rain->Constants.RainAnimator.GetValue();
+	const float rain = RainState::Rain();	// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h; was Precipitations' animator)
 	const LookStruct& dry = Settings.Exterior;
 	const LookStruct& wet = Settings.Rain;
 	Constants.Data.x = std::lerp(dry.SunStrength, wet.SunStrength, rain);

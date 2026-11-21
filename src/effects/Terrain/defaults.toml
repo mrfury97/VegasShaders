@@ -14,7 +14,7 @@ Metallicness = 0.0                  # Add metallicness.
 AmbientScale = 0.5                  # Scale ambient lighting.
 SkylightingScale = 0.5              # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
-LightingScale = 1.15               # Scale non-ambient lighting (sun or spotlights). UNOFFICIAL (2026-11-12), was 1.0: the dry value ([Shaders.Terrain.Main]) had gone to 0.725 and this one had not, so rain lit the land brighter than dry weather. Now the same as dry; the wet look itself comes from Roughness and the WetWorld effect. UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 0.725.
+LightingScale = 1.15               # Scale non-ambient lighting (sun or spotlights). UNOFFICIAL (2026-11-12), was 1.0: the dry value ([Shaders.Terrain.Main]) had gone to 0.725 and this one had not, so rain lit the land brighter than dry weather. Now the same as dry; the wet look itself comes from Roughness and Wetness Effects. UNOFFICIAL (2026-11-12) the daylight look tuned against photos of the Mojave: the default was 0.725.
 TerrainSaturation = 1.0             # Control terrain saturation.
 
 [_Shaders.Terrain.Night]

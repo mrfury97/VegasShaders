@@ -8,7 +8,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [AmbientOcclusion](AmbientOcclusion/) | true | yes | 18 | 7 | AmbientOcclusion.cpp, AmbientOcclusion.h | Ambient occlusion darkens the parts of the picture that a real surface would receive less skylight and bounce light on: inside corners and creases, the undersid |
 | [AvgLuma](AvgLuma/) | - | yes | 5 | 0 | AvgLuma.cpp, AvgLuma.h | AvgLuma measures how bright the picture is, and where the focus of the depth of field should sit, and keeps both smoothed over time. Its result is a single 1 x  |
 | [BarrelHaze](BarrelHaze/) | - | - | 3 | 0 | BarrelHaze.cpp, BarrelHaze.h |  |
-| [BloodFlow](BloodFlow/) | false | - | 1 | 3 | BloodFlow.cpp, BloodFlow.h, BloodFlowBoxes.h, BloodFluid.cpp, BloodFluid.h |  |
+| [BloodFlow](BloodFlow/) | false | - | 2 | 4 | BloodFlow.cpp, BloodFlow.h, BloodFlowBoxes.h, BloodFluid.cpp, BloodFluid.h, BloodSurface.h |  |
 | [BloodLens](BloodLens/) | false | yes | 3 | 2 | BloodLens.cpp, BloodLens.h | When the player is hit, a red, wet, blood-like film appears over the screen. The picture is pushed and warped by a blotchy noise pattern, the blotches take on t |
 | [Bloom](Bloom/) | true | yes | 17 | 5 | Bloom.cpp, Bloom.h | Bloom is the soft glow that spreads out from bright light sources (lamps, neon, fire, the sun, bright sky) so they look like they are shining into the lens. It  |
 | [BloomLegacy](BloomLegacy/) | false | yes | 7 | 3 | BloomLegacy.cpp, BloomLegacy.h | An older, alternative bloom that works on the finished (tonemapped) picture rather than the HDR scene. Bright areas are pulled out, blurred in two directions, a |
@@ -20,12 +20,12 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [CoverMap](CoverMap/) | - | - | 1 | 0 | CoverMap.cpp, CoverMap.h |  |
 | [Debug](Debug/) | false | yes | 1 | 2 | Debug.cpp, Debug.h | Debug is a developer and fault-finding tool. With the overlay on, the player (or tester) sees a row of small panels across the top and a column of colour swatch |
 | [DepthOfField](DepthOfField/) | true | yes | 18 | 5 | DepthOfField.cpp, DepthOfField.h | The effect blurs parts of the picture that are out of focus, the way a camera lens does. Near objects that are closer than the focus range blur into the foregro |
-| [DitherBuster](DitherBuster/) | true | yes | 5 | 2 | DitherBuster.cpp, DitherBuster.h | DitherBuster removes the "dither" artefact that alpha-tested geometry (grass, foliage, fences and similar) produces under DXVK: single pixels that flicker betwe |
+| [DitherBuster](DitherBuster/) | false | yes | 5 | 2 | DitherBuster.cpp, DitherBuster.h | DitherBuster removes the "dither" artefact that alpha-tested geometry (grass, foliage, fences and similar) produces under DXVK: single pixels that flicker betwe |
 | [Dream](Dream/) | false | yes | 1 | 2 | Dream.cpp, Dream.h | The picture drifts into a trip. One dream level (0-1) drives everything: the middle of the picture twists slowly and the whole image wobbles, red and blue split |
 | [DustMotes](DustMotes/) | false | yes | 1 | 2 | DustMotes.cpp, DustMotes.h | Sparse, tiny specks of dust drifting in the air, visible only where light falls on them: round lamps, and (optionally) in the sun's shafts. A speck between you  |
 | [Exposure](Exposure/) | true | yes | 3 | 4 | Exposure.cpp, Exposure.h | Exposure is Vegas Shaders' automatic brightness correction. It measures how bright the frame is (through the AvgLuma result) and darkens or brightens the whole  |
 | [FXAA](FXAA/) | - | - | 3 | 0 | FXAA.cpp, FXAA.h |  |
-| [Flashlight](Flashlight/) | true | yes | 3 | 3 | Flashlight.cpp, Flashlight.h |  |
+| [Flashlight](Flashlight/) | true | yes | 3 | 4 | Flashlight.cpp, Flashlight.h |  |
 | [GodRays](GodRays/) | true | yes | 1 | 3 | GodRays.cpp, GodRays.h | When the sun is up in an exterior and bright sky (or the sun's own disc and glare) sits near or beside the view, soft shafts of light fan out from the sun's scr |
 | [GpuParticles](GpuParticles/) | - | - | 6 | 1 | GpuParticles.cpp, GpuParticles.h |  |
 | [Grass](Grass/) | true | - | 0 | 8 | GpuGrass.cpp, GpuGrass.h, Grass.cpp, Grass.h |  |
@@ -43,14 +43,14 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [PointShadows](PointShadows/) | - | yes | 15 | 0 | PointShadows.cpp, PointShadows.h | This pass builds one grey mask for the whole screen that says how much of the nearby point lights (lamps) and the one spot light reach each visible surface. A l |
 | [PointShadows2](PointShadows2/) | - | yes | 3 | 0 | PointShadows2.cpp, PointShadows2.h | PointShadows2 darkens or lights the scene for point lamps that PointShadows does not handle. It is a screen-space pass over the point-shadow buffer: for every p |
 | [Precipitations](Precipitations/) | true | yes | 3 | 2 | Rain.cpp, Rain.h | While it rains outdoors, the picture gets falling rain streaks laid over the view. Drops are drawn in layers at increasing distance from the camera, so near str |
-| [Puddles](Puddles/) | false | yes | 6 | 3 | PuddleMap.h, Puddles.cpp, Puddles.h | Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it ra |
+| [Puddles](Puddles/) | true | yes | 6 | 3 | PuddleMap.h, Puddles.cpp, Puddles.h | Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it ra |
 | [Reflections](Reflections/) | false | yes | 44 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
-| [SMAA](SMAA/) | true | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
+| [SMAA](SMAA/) | false | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
-| [ShadowsExteriors](ShadowsExteriors/) | true | yes | 3 | 10 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
+| [ShadowsExteriors](ShadowsExteriors/) | true | yes | 3 | 11 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
 | [ShadowsInteriors](ShadowsInteriors/) | true | yes | 10 | 7 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
-| [Sharpening](Sharpening/) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening adds local edge contrast to the whole picture so that near surfaces look crisper. It compares each pixel with the average of a small neighbourhood an |
-| [Skin](Skin/) | true | - | 3 | 5 | Skin.cpp, Skin.h |  |
+| [Sharpening](Sharpening/) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening makes near surfaces look crisper. CAS adapts per pixel: it measures how much headroom the pixel has before its 3x3 neighbourhood would clip, and shar |
+| [Skin](Skin/) | true | - | 3 | 6 | Skin.cpp, Skin.h |  |
 | [SkinScattering](SkinScattering/) | - | - | 3 | 0 | SkinScattering.cpp, SkinScattering.h |  |
 | [Sky](Sky/) | true | - | 16 | 4 | PhysSkyModel.h, Sky.cpp, Sky.h |  |
 | [SkyDither](SkyDither/) | true | - | 3 | 2 | SkyDither.cpp, SkyDither.h |  |
@@ -61,7 +61,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [SunFar](SunFar/) | true | - | 3 | 1 | SunFar.cpp, SunFar.h |  |
 | [SunGlare](SunGlare/) | false | yes | 1 | 2 | SunGlare.cpp, SunGlare.h | The sun's lens glare: what a camera lens (or the eye, through its lashes) makes of a small, very bright source. Round the sun's place on screen it adds - a tigh |
 | [SunShadows](SunShadows/) | - | yes | 13 | 0 | SunShadows.cpp, SunShadows.h | SunShadows writes the outdoor sun's shadow term into the two-channel buffer `TESR_PointShadowBuffer` (G16R16, 0..1). - Red: sun visibility, 1 = lit. It always h |
-| [TAA](TAA/) | false | - | 8 | 5 | TAA.cpp, TAA.h, TAAFSR.cpp, TAAUpscale.cpp |  |
+| [TAA](TAA/) | true | - | 8 | 5 | TAA.cpp, TAA.h, TAAFSR.cpp, TAAUpscale.cpp |  |
 | [Terrain](Terrain/) | true | - | 0 | 13 | LandHeights.cpp, LandHeights.h, Terrain.cpp, Terrain.h |  |
 | [TerrainShadows](TerrainShadows/) | - | - | 0 | 0 | TerrainShadows.cpp, TerrainShadows.h |  |
 | [Tonemapping](Tonemapping/) | true | - | 0 | 4 | Tonemapping.cpp, Tonemapping.h |  |
@@ -72,5 +72,4 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [VolumetricSmoke](VolumetricSmoke/) | - | - | 8 | 0 | VolumetricSmoke.cpp, VolumetricSmoke.h, VolumetricSmokeQuads.h |  |
 | [Water](Water/) | true | - | 3 | 4 | Water.cpp, Water.h |  |
 | [WaterLens](WaterLens/) | true | yes | 3 | 2 | WaterLens.cpp, WaterLens.h | When the player leaves water, the screen briefly looks as if seen through the surface of a lens: the whole picture wobbles and is refracted by a drifting ripple |
-| [WetWorld](WetWorld/) | true | yes | 6 | 2 | WetWorld.cpp, WetWorld.h | While it rains outdoors, the ground, roads and rock go wet and darker where the rain reaches them, with glossy highlights. Puddles form in hollows and on flat g |
-| [WetnessEffects](WetnessEffects/) | false | - | 0 | 6 | HudRaindrops.cpp, HudRaindrops.h, WetnessEffects.cpp, WetnessEffects.h, WetnessReflections.cpp, WetnessReflections.h |  |
+| [WetnessEffects](WetnessEffects/) | true | yes | 0 | 6 | HudRaindrops.cpp, HudRaindrops.h, WetnessEffects.cpp, WetnessEffects.h, WetnessReflections.cpp, WetnessReflections.h |  |

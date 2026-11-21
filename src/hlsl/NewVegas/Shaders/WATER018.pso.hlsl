@@ -21,7 +21,7 @@ uniform float4 TESR_PlacedWaterSettings : register(c16); // x: caustic strength,
 uniform float4 TESR_GameTime : register(c17);
 uniform float4 TESR_HorizonColor : register(c18);
 uniform float4 TESR_SunDirection : register(c19);
-uniform float4 TESR_WetWorldData : register(c20);
+uniform float4 TESR_WetnessData : register(c20);
 uniform float4 TESR_PlacedWaterShorelineParams : register(c21);
 uniform float4 TESR_DebugVar : register(c22);
 uniform float4 TESR_SunAmount : register(c23);
@@ -70,7 +70,7 @@ PS_OUTPUT main(PS_INPUT pa, float2 pixel_pos : VPOS) {
     float2 faded_depth = saturate(lerp(water_depth, 1, invlerp(0, 4096, flat_dist)));
 
     float3 surface_normal = getWaveTexture(pa, flat_dist, TESR_PlacedWaveParams).xyz;
-    surface_normal = getRipples(pa, TESR_RippleSampler, surface_normal, flat_dist, TESR_WetWorldData.x);
+    surface_normal = getRipples(pa, TESR_RippleSampler, surface_normal, flat_dist, TESR_WetnessData.z);
     surface_normal = getDisplacement(pa, BlendRadius.w, surface_normal);
     
     float refraction_coeff = (water_depth.y * depth_fog) * ((saturate(flat_dist * 0.002) * (-4 + VarAmounts.w)) + 4);

@@ -83,8 +83,12 @@ The Vulkan pass (section 7) binds the Look 0 textures in set 1 at binding 0 (ren
 | Shaders.SnowAccumulation.Main | PersistentFootprintShape | int | 0 (0 or 1) | 0 = one soft oval per print, 1 = a boot print (sole and heel). Used by the cover map. |
 | Shaders.SnowAccumulation.Main | PersistentFootprintSize | float | 10 (2 to 200) | Half the length of one print, in game units. Used by the cover map. |
 | Shaders.Snow.Main | ForceSnow | bool | false | Not this effect's setting: makes the game count as snowing (section 2). |
+| Shaders.SnowAccumulation.Main | PersistentMapSize | float | 8192 (1024 to 65536) | Width of the map round the player, game units. Used by the cover map. |
+| Shaders.SnowAccumulation.Main | PersistentMapResolution | int | 1024 (128 to 4096) | Texels across the map. Used by the cover map. |
+| Shaders.SnowAccumulation.Main | PersistentDebugView | int | 0 (0 to 2) | The cover map's test view (1 top-down inset, 2 painted over the world). |
 
-The persistent map's size and resolution are read from the wet-world section ([Shaders.WetWorld.Main] PersistentMapSize and PersistentMapResolution), not from this section.
+
+The persistent map's size, resolution and debug view were in the wet-world section ([Shaders.WetWorld.Main]) until 2026-11-21; WetWorld is removed, the keys moved here and settings step 91 carries a saved value over. The cover map's wet half (WetWorld's Persistent) went with it: this effect is the map's only reader.
 
 ## 5. Passes and outputs
 Each technique below is requested by index. The C++ chooses it (section 7).

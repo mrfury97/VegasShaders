@@ -8,7 +8,6 @@ CoverMapEffect* TheCoverMap = nullptr;
 unsigned int CoverMapOrthoFrame = ~0u;
 
 namespace {
-	const char* const WetSection = "Shaders.WetWorld.Main";
 	const char* const SnowSection = "Shaders.SnowAccumulation.Main";
 	const float InsetShare = 0.42f;			// the debug view's corner map: its side as a share of the screen height
 	const float WindowFade = 0.06f;			// the window's faded border, share of its size (the open-ground values take over outside)
@@ -28,15 +27,12 @@ namespace {
 
 void CoverMapEffect::UpdateSettings() {
 	SettingsStruct s;
-	s.wet = TheSettingManager->GetSettingI(WetSection, "Persistent") != 0;
+	// 2026-11-21 (WetWorld removed, owner's word): the wet half had no other reader (WetWorld.fx techniques 5 / 6), so it stays off; its
+	// model below is dormant. The map's size, resolution and debug view moved to [Shaders.SnowAccumulation.Main] (settings step 91).
+	s.wet = false;
 	s.snow = TheSettingManager->GetSettingI(SnowSection, "Persistent") != 0;
-	s.size = std::clamp(TheSettingManager->GetSettingF(WetSection, "PersistentMapSize"), 1024.0f, 65536.0f);
-	s.resolution = std::clamp(TheSettingManager->GetSettingI(WetSection, "PersistentMapResolution"), 128, 4096);
-	s.wetTime = Larger(TheSettingManager->GetSettingF(WetSection, "PersistentWetTime"), 0.0f);
-	s.dryTime = Larger(TheSettingManager->GetSettingF(WetSection, "PersistentDryTime"), 0.0f);
-	s.puddleFill = Larger(TheSettingManager->GetSettingF(WetSection, "PersistentPuddleFill"), 0.0f);
-	s.puddleDry = Larger(TheSettingManager->GetSettingF(WetSection, "PersistentPuddleDry"), 0.0f);
-	s.wetShade = std::clamp(TheSettingManager->GetSettingF(WetSection, "PersistentShade"), 0.02f, 1.0f);
+	s.size = std::clamp(TheSettingManager->GetSettingF(SnowSection, "PersistentMapSize"), 1024.0f, 65536.0f);
+	s.resolution = std::clamp(TheSettingManager->GetSettingI(SnowSection, "PersistentMapResolution"), 128, 4096);
 	s.snowIncrease = Larger(TheSettingManager->GetSettingF(SnowSection, "Increase"), 0.0f);
 	s.snowDecrease = Larger(TheSettingManager->GetSettingF(SnowSection, "Decrease"), 0.0f);
 	s.snowShade = std::clamp(TheSettingManager->GetSettingF(SnowSection, "PersistentShade"), 0.02f, 1.0f);
@@ -44,7 +40,7 @@ void CoverMapEffect::UpdateSettings() {
 	s.footprints = std::clamp(TheSettingManager->GetSettingF(SnowSection, "PersistentFootprints"), 0.0f, 1.0f);
 	s.footSize = std::clamp(TheSettingManager->GetSettingF(SnowSection, "PersistentFootprintSize"), 2.0f, 200.0f);
 	s.footShape = std::clamp(TheSettingManager->GetSettingI(SnowSection, "PersistentFootprintShape"), 0, 1);	// UNOFFICIAL 2026-10-28 (missing = blob)
-	s.debug = std::clamp(TheSettingManager->GetSettingI(WetSection, "PersistentDebugView"), 0, 2);
+	s.debug = std::clamp(TheSettingManager->GetSettingI(SnowSection, "PersistentDebugView"), 0, 2);
 
 	// A switch turned on, or another map size: the map starts again (from the old single amounts). Both off or another texel
 	// count: the maps are freed (made again when needed).
@@ -83,20 +79,9 @@ void CoverMapEffect::RegisterTextures() {
 	TheTextureManager->RegisterTexture("TESR_CoverMapAux", (IDirect3DBaseTexture9**)&currentAux);
 }
 
-bool CoverMapEffect::WetActive() const {
-	const WetWorldEffect* wetWorld = TheShaderManager->Effects.WetWorld;
-	return Settings.wet && Effect && Enabled && !mapFailed && !mapMakeFailed.Blocked() && wetWorld && wetWorld->Enabled && wetWorld->Effect && (wetBound > 0.0f || rainNow > 0.0f);
-}
-
 bool CoverMapEffect::SnowActive() const {
 	const SnowAccumulationEffect* snow = TheShaderManager->Effects.SnowAccumulation;
 	return Settings.snow && Effect && Enabled && !mapFailed && !mapMakeFailed.Blocked() && snow && snow->Enabled && snow->Effect && (snowBound > 0.0f || snowNow);
-}
-
-UINT CoverMapEffect::WetTechnique(WetWorldEffect* wetWorld, UINT normal) const {
-	if (!Settings.wet || !mapValid || !currentTexture || Constants.Global.w < 0.5f || !wetWorld || !wetWorld->Effect) return normal;
-	const UINT technique = wetWorld->fixedTrace ? 6 : 5;	// WetWorld.fx.hlsl PersistentFixedTraceTechnique / PersistentTechnique
-	return wetWorld->Effect->GetTechnique(technique) ? technique : normal;
 }
 
 UINT CoverMapEffect::SnowTechnique(SnowAccumulationEffect* snow) const {
@@ -131,16 +116,14 @@ void CoverMapEffect::UpdateConstants() {
 	tickFrame = frame;
 
 	ShaderManager* sm = TheShaderManager;
-	WetWorldEffect* wetWorld = sm->Effects.WetWorld;
 	SnowAccumulationEffect* snowAccumulation = sm->Effects.SnowAccumulation;
-	rainNow = wetWorld ? Saturate(wetWorld->Constants.Data.x) : 0.0f;
+	rainNow = 0.0f;	// (2026-11-21: the wet half is off for good; it read WetWorld's rain amount)
 	snowNow = sm->GameState.isSnow;
 
-	// The old single amounts (what the two effects draw with Persistent off): the flat ground's wetness (WetWorld.fx rainFade), the
-	// puddles (TESR_WetWorldData.z) and the snow (TESR_SnowAccumulationParams.w).
-	const float rainAmount = wetWorld ? Saturate(wetWorld->Constants.Data.x / Larger(wetWorld->Constants.Data.y, 0.0001f)) : 0.0f;
-	const float oldWet = Smooth(0.05f, 0.35f, rainAmount);
-	const float oldPuddles = wetWorld ? Saturate(wetWorld->Constants.Data.z) : 0.0f;
+	// The old single amount (what SnowAccumulation draws with Persistent off): the snow (TESR_SnowAccumulationParams.w). The wet half's
+	// (WetWorld's ground and puddles) are 0 since WetWorld went (2026-11-21).
+	const float oldWet = 0.0f;
+	const float oldPuddles = 0.0f;
 	const float oldSnow = snowAccumulation ? Saturate(snowAccumulation->Constants.Data.w) : 0.0f;
 	auto syncWet = [&]() { Constants.Global.x = oldWet; Constants.Global.y = oldPuddles; wetBound = Larger(oldWet, oldPuddles); };
 	auto syncSnow = [&]() { Constants.Global.z = oldSnow; snowBound = oldSnow; };
@@ -213,7 +196,7 @@ bool CoverMapEffect::EnsureMap(IDirect3DDevice9* Device) {
 	D3DCAPS9 caps = {};
 	if (FAILED(Device->GetDeviceCaps(&caps)) || caps.NumSimultaneousRTs < 2) {
 		mapFailed = true;
-		Logger::Log("[ERROR] UNOFFICIAL Persistent wetness/snow: the card draws into %lu target(s) at once, the cover map needs 2; WetWorld and SnowAccumulation keep their single amount", caps.NumSimultaneousRTs);
+		Logger::Log("[ERROR] UNOFFICIAL Persistent wetness/snow: the card draws into %lu target(s) at once, the cover map needs 2; SnowAccumulation keeps its single amount", caps.NumSimultaneousRTs);
 		return false;
 	}
 	const D3DFORMAT formats[2] = { D3DFMT_A16B16G16R16, D3DFMT_A16B16G16R16F };
@@ -238,8 +221,8 @@ bool CoverMapEffect::EnsureMap(IDirect3DDevice9* Device) {
 		}
 		ReleaseMap();
 	}
-	mapMakeFailed.Set("its textures could not be made: WetWorld and SnowAccumulation keep their single amount");
-	Logger::Log("[ERROR] UNOFFICIAL Persistent wetness/snow: the cover map (%ux%u) could not be made; WetWorld and SnowAccumulation keep their single amount", n, n);
+	mapMakeFailed.Set("its textures could not be made: SnowAccumulation keeps its single amount");
+	Logger::Log("[ERROR] UNOFFICIAL Persistent wetness/snow: the cover map (%ux%u) could not be made; SnowAccumulation keeps its single amount", n, n);
 	return false;
 }
 
@@ -319,7 +302,7 @@ void CoverMapEffect::RenderUpdate(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		mapValid = false;
 		ClearPrints();	// 2026-10-28 footprints: they belong to the old worldspace
 	}
-	const bool wanted = WetActive() || SnowActive();
+	const bool wanted = SnowActive();	// (2026-11-21: the wet half is off for good)
 	if (wanted && !EnsureMap(Device)) return;
 	if (!mapTexture[0]) return;
 

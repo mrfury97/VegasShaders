@@ -2,7 +2,8 @@
 
 Owner's choice (2026-11-18/19): the deferred wetness pass is the end state; WetWorld is retired only once it covers everything WetWorld
 does. Room rule: deferred first. Branch `deferred-wetness` (off `wet-lamp-film`), built on `deferred-wetness-ground`. Paths under `src\`.
-State 2026-11-20: steps 1 and 2 run in game (owner: step 2 "Looks right"); step 3 built and installed (second build after the owner's first look), not run in game yet; step 4 open.
+State 2026-11-21: steps 1-3 run in game; step 4 (retire WetWorld, one rain clock, Wetness Effects + Puddles on by default) built on branch
+`retire-wetworld`, see "Step 4 as built". DeferredWetness itself stays a test switch (off by default): its frame cost is not measured.
 
 ## Why
 - Wetness Effects + Puddles live inside the land and object shaders (`hlsl/NewVegas/Shaders/Includes/Wetness.hlsl`, compiled into
@@ -188,6 +189,46 @@ After step 3 (2026-11-21): the Reflections effect reads the film's damp ground f
 traced; `src/effects/Reflections/README.md` last section, `docs/reflection-speckle.md`). The film's roughness is what tells them apart, so
 the film must keep the Puddles Roughness under standing water and the rougher damp value elsewhere.
 
+## Step 4 as built (2026-11-21, branch `retire-wetworld` off `deferred-wetness-ground`)
+Owner's words: "move the 'is it raining / is the ground wet' clock to Wetness Effects and remove WetWorld"; on the defaults, "make the default
+mine" (the shipped wetness defaults = the owner's settings); on players whose shaders cannot carry Wetness Effects, the recommended option
+(no replacement) was taken without an answer.
+
+Proven by reading the code before the change
+- Two clocks: WetWorld hosted RainStateGuard (`core/RainState.h`: WetWorld's PuddlesAnimator by `[Shaders.WetWorld.Main] Increase / Decrease`
+  game hours, Precipitations' RainAnimator 0.05 / 0.07 h), read by the Rain setting groups (Terrain.cpp, PBR.cpp), skin, heat haze, the gear,
+  the drops, the water's rain rings (WATER000/001/016/017/018 `TESR_WetWorldData.x`), Reflections, Specular and the volumetric light; Wetness
+  Effects' own clock (Wetness / PuddleWetness / Raining by WeatherTransitionSpeed) drew the ground. So the Rain groups, skin and heat haze
+  dried on WetWorld's schedule while the ground dried on Wetness Effects'.
+- Wetness Effects' clock ran only while the collection was on (ShaderManager::UpdateConstants calls a family's UpdateConstants only when
+  Enabled) and twice a frame (UpdateConstants runs twice per rendered frame; it eased by the frame's ElapsedTime each time).
+- The cover map's wet half had one reader, WetWorld.fx techniques 5 / 6 (grep of src/hlsl); snow reads its own half.
+
+What changed (C++ only, no path: a CPU clock; the shaders are unchanged except the water's register name)
+- `RainState::Tick` runs `WetnessEffectsShaders::TickWeather` once a rendered frame (FrameNumber) from ShaderManager::UpdateConstants and
+  from every reader, on or off. `Rain()` = Raining (drops, water rings, Reflections, Specular, volumetric light, the gear's wet), `Factor()`
+  = max(Raining, Wetness) (the Rain groups, skin, heat haze, the gear's mud). TESR_WetnessData is filled every frame. RainState also asks for
+  the ortho map while it rains outdoors (WetWorld used to). ForceRain / ForceSnow act on this clock and on Puddles' level.
+- WetWorld is gone: its screen pass (EffectChain), effect, settings, menu rows, shaders (WetWorld.fx, Compute WetWorld*.frag/.spv/.glsl).
+  The cover map's wet half is always off (dormant code); its size, resolution and debug view are SnowAccumulation's keys now.
+- Defaults: Wetness Effects and Puddles on, with the owner's values; settings step 91 (UpdateOldDefaults) carries the map keys over, turns a
+  saved Wetness Effects / Puddles off on when WetWorld had been on, drops the [Shaders.WetWorld] section, moves the other old defaults once.
+- ShaderFallback (native Direct3D 9, land shaders over 4096 slots): Wetness Effects is still dropped first; nothing draws wet ground in its
+  place now (a [WARNING] says to use DXVK). The clock still drives the drops, the water's rings and the Rain groups.
+
+Believed, not run in game
+- Ground, skin, heat haze, the Rain groups and the drops start and stop together; the film dries in about 10 s at WeatherTransitionSpeed 3,
+  as before (the clock now runs once a frame at TunedClockRate 2, the speed it had running twice a frame; review fix). Puddles' standing
+  water keeps its game-hour DryHours.
+- The drops now fade in and out with Raining (about 2.5 s) and the weather's transition instead of 0.05 / 0.07 game hours.
+- Review fix: the wet passes of the material step (Wetness Effects' reflections, the deferred wetness fallback) now hold off the fog fold
+  (effectsBetween) and the bounce-into-specular merge, as WetWorld's wet frames did.
+
+Not done in step 4
+- The records' water layer (forward Wetness.hlsl in the land and object records) is not retired: the forward path and DeferredWetness off
+  still need it. DeferredWetness stays off by default (frame cost not measured).
+- Frame cost: not measured.
+
 ## Steps (v2)
 1. **Land:** A (albedo, normal, ambient, film target) + DeferredSun's film highlight + DeferredLamps' streaks + the screen pass's sky for land,
    behind `[Main.Main.Quality] DeferredWetness` (restart, test only, off); the land's lighting-free records with WETNESS_OFF; the height via
@@ -216,4 +257,4 @@ Reflections effect mirrors (DWSkyKeep, `docs/unified-reflections-design.md` "Ste
 
 ## Not decided (owner)
 - (Answered by the build, not by the owner: the height rides in COLOR2.r only between the record and pass A, so no channel is spent.)
-- When to make it the default and retire WetWorld (step 4).
+- When to make DeferredWetness the default (WetWorld is retired: step 4 as built). Needs its frame cost first.

@@ -2,6 +2,7 @@
 
 #include "Puddles.h"
 #include "PuddleMap.h"
+#include "../../core/RainState.h"	// 2026-11-21 ForcedRain / ForcedSnow
 
 // 2026-11-08 Puddles: see README.md here.
 
@@ -73,6 +74,10 @@ void PuddlesShaders::UpdateConstants() {
 	// The water level: fills in the rain, dries after it (faster in daylight under a clear sky). Held indoors (no weather there).
 	if (exterior && sky) {
 		Rain = RainNow(sky);
+		// 2026-11-21 the one rain clock (core/RainState.h): the test aids act here too, as on Wetness Effects' clock (ForceRain fills the
+		// puddles, ForceSnow stops the rain); before, ForceRain wetted the ground but never filled a puddle.
+		if (RainState::ForcedSnow()) Rain = 0.0f;
+		else if (RainState::ForcedRain()) Rain = 1.0f;
 		if (Rain > 0.0f) Level += (float)(Rain * hours / Settings.FillHours);
 		else {
 			const TESWeather* cur = sky->firstWeather;

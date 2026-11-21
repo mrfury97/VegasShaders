@@ -778,7 +778,7 @@ bool ShadowsExteriorEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 * or times 1 - fade = 0 (Specular). Their green channel, the lamps' light (PointShadows.fx), which the passes also blur and
 * raise to the Intensity power, counts only with lamp shadows on outdoors (ShadowFade.z): without them the apply's
 * 1 + green comes out at 1 whatever green is (Darkness 0 or more). Effects that read the buffer without the fade: blood
-* flow, wet world, underwater, the debug view.
+* flow, underwater, the debug view (and WetWorld until 2026-11-21).
 */
 bool ShadowsExteriorEffect::FadedContactUnread() {
 #if NVR_TEST_TOOLS
@@ -786,7 +786,7 @@ bool ShadowsExteriorEffect::FadedContactUnread() {
 #endif
 	auto draws = [](EffectRecord* effect) { return effect && effect->Enabled && effect->Effect && effect->ShouldRender(); };
 	return SunFaded && Constants.ShadowFade.z == 0.0f && Settings.Exteriors.Darkness >= 0.0f &&
-		!draws(TheShaderManager->Effects.BloodFlow) && !draws(TheShaderManager->Effects.WetWorld) &&
+		!draws(TheShaderManager->Effects.BloodFlow) &&
 		!draws(TheShaderManager->Effects.Underwater) && !draws(TheShaderManager->Effects.Debug);
 }
 
@@ -1225,11 +1225,10 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 		TheShaderManager->Effects.Rain->ClearSampler("TESR_OrthoMapBuffer", 19);
 		TheShaderManager->Effects.Snow->ClearSampler("TESR_OrthoMapBuffer", 19);
 		TheShaderManager->Effects.SnowAccumulation->ClearSampler("TESR_OrthoMapBuffer", 19);
-		TheShaderManager->Effects.WetWorld->ClearSampler("TESR_OrthoMapBuffer", 19);
 
 		// UNOFFICIAL 2026-11-09 (crash log 2026-11-08 14:07, Ortho.Resolution 2 -> 3, access violation on the dxvk-cs thread 12 s later):
 		// the game's own shaders (SLS*, PAR*, SKIN* ...) sample the ortho map too, and each holds its own cached pointer to the texture
-		// just released above (ShaderRecord::SetCT re-resolves only a null one). Only the four effects above were cleared, so the first
+		// just released above (ShaderRecord::SetCT re-resolves only a null one). Only the effects above were cleared, so the first
 		// ortho resize of a run left every game shader binding a freed texture: DXVK's SetTexture touched freed memory, fine until the
 		// memory was reused, then a wild pointer on the command-stream thread. The atlas path above has always done this.
 		TheShaderManager->ClearShaderSamplers("TESR_OrthoMapBuffer", 19);
