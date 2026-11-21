@@ -81,7 +81,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
                                 // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing),
                                 // w 1 / MaxRainWetness (Wetness Effects': the film's gloss of open ground in full rain counts 1)
     vec4 film2;                 // UNOFFICIAL 2026-11-21 damp ground to the cube: x 1 = on ([Shaders.Reflections.Main] DampTrace false),
-                                // y the standing water's roughness in the film ([Shaders.Puddles.Main] Roughness; 0.05 without Puddles), zw 0
+                                // y the standing water's roughness in the film ([Shaders.Puddles.Main] Roughness; 0.05 without Puddles),
+                                // z open flat ground's damp roughness now (0 = not known: no Puddles), w 0
 } cb;
 
 layout(push_constant) uniform Push {
@@ -288,7 +289,11 @@ float FilmDamp = 0.0;   // FilmWetness's damp share of the film itself (Reflecti
 float FilmWetness(vec2 uv, out float roughness) {
     vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
     float sharp = clamp(f.g, min(WetRoughness, DampMaxRoughness), DampMaxRoughness);
-    FilmDamp = cb.film2.x > 0.5 && f.g > 0.001 ? smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, f.g) : 0.0;
+    // (2026-11-21, slot A/B) the standing share read back from the film's roughness, which Puddles makes lerp(damp, standing, share):
+    // a puddle's soft edge (share 0.3-0.6 and more) stays traced, as its core; below that it is damp ground. Without Puddles (z 0): the
+    // roughness alone, as the first build.
+    float share = cb.film2.z > cb.film2.y + 0.05 ? saturate((cb.film2.z - f.g) / (cb.film2.z - cb.film2.y)) : 1.0 - smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, f.g);
+    FilmDamp = cb.film2.x > 0.5 && f.g > 0.001 ? 1.0 - smoothstep(0.25, 0.6, share) : 0.0;
     roughness = mix(sharp, max(f.g, 0.01), FilmDamp);
     return f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) * cb.film.y : 0.0;
 }
