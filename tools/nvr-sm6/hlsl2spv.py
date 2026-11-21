@@ -75,8 +75,20 @@ def include_files(path, seen=None):
 
 
 def tool(name):
+    r"""A Vulkan SDK tool: ~/vktools (Linux/WSL), else on Windows %VULKAN_SDK%\Bin or the SDK under F:\Tools (glslang is
+    glslangValidator.exe there), else the bare name (PATH)."""
     local = os.path.expanduser("~/vktools/root/usr/bin/" + name)
-    return local if os.path.exists(local) else name
+    if os.path.exists(local):
+        return local
+    if os.name == "nt":
+        import shutil
+        exe = name if name.lower().endswith(".exe") else name + ".exe"
+        for d in (os.path.join(os.environ.get("VULKAN_SDK", ""), "Bin"), r"F:\Tools\VulkanSDK\1.3.296.0\Bin"):
+            for n in ((exe, "glslangValidator.exe") if name == "glslang" else (exe,)):
+                if d and os.path.exists(os.path.join(d, n)):
+                    return os.path.join(d, n)
+        return shutil.which(exe) or name
+    return name
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -495,7 +507,7 @@ def main():
     # 6. compile
     os.makedirs(a.out, exist_ok=True)
     base = "%s.%s.%d%s" % (effect_name, a.technique if a.technique not in ("-", "") else "default", pidx, ("." + a.variant) if a.variant else "")
-    hlsl_path = os.path.join(a.out, base + ".sm6.hlsl") if a.keep else "/tmp/nvr-sm6-%d.hlsl" % os.getpid()
+    hlsl_path = os.path.join(a.out, base + ".sm6.hlsl") if a.keep else os.path.join(a.out, "tmp-%d.hlsl" % os.getpid())
     open(hlsl_path, "w").write(source)
     spv_path = os.path.join(a.out, base + ".spv")
     r = subprocess.run([tool("glslang"), "-D", "-V", "-S", "frag", "-e", "main", "--source-entrypoint", "nvr_main", "--target-env", "vulkan1.1",

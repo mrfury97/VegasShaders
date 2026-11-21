@@ -241,22 +241,34 @@ there. That is fine: mode 1 keeps D3D9.
   returns early in mode 0.
 - RT timing is unchanged: the RT sun is a frame late (`TESR_RtSunForward`), and RT lamps trace earlier in the same frame.
 
-## Toolchain status (PROVEN by the shader engineer's scratch run)
-- `tools/nvr-sm6/hlsl2spv.py` uses glslang's HLSL front end. Both glslang and the Vulkan SDK's dxc 1.8 (`-HV 2018`) run on Windows.
-  The script's header assumes Linux/WSL; it needs a Windows path.
-- With six fixes, all 9 installed deferred variants convert and pass spirv-val: Sun, SunFade, Lamps, LampShadows, LampSkin, LampLand,
-  LampLandFilm, LampFog and Wetness.
-- **The six fixes**, plus a 7th (constant offsets, under "The design") and the VPOS offset, still to make:
-  1. A template mode: entry `main`, no technique, input = the preprocessed cache text.
-  2. Rename the template's own `main`. Otherwise the SPIR-V is invalid ("Load must appear in a block").
-  3. Map `out DEPTH` / `out COLOR1` to `SV_Depth` / `SV_Target1`.
-  4. Strip `register()` before the uniform check at `hlsl2spv.py:318`.
-     - Today pinned uniforms never reach the uniform buffer ("0 uniforms").
-     - D3D9 register aliases overlap: SunFade c146, LandFilm c174.
-  5. Rewrite forward declarations that take sampler parameters.
-  6. Drop the cache files' trailing NUL.
+## Toolchain status (step 1's shader half built 2026-11-21)
+- **Built** (branch `deferred-single-pass`): `tools/nvr-sm6/tpl2spv.py` (template mode), `build_deferred.py`, the check
+  `tests/sm6_record_check.py`; contract and `.layout` format in `tools/nvr-sm6/README.md`. glslang's HLSL front end (as the effect mode;
+  dxc 1.8 `-HV 2018` also runs but would be a second back end). Windows: `py -3.10 -I`, the Vulkan SDK's tools (`hlsl2spv.tool`).
+- **What template mode does** (the scratch run's six fixes, the 7th and the VPOS fix):
+  - input = the cache text; the trailing NUL dropped; `main` renamed (else "Load must appear in a block"); `out DEPTH` / `out COLORn`
+    -> `SV_Depth` / `SV_Targetn`; prototypes taking samplers rewritten;
+  - constants by their `register(cN)` at `packoffset(cN)`: the buffer IS the register file (16 x N). Names sharing registers read the same
+    bytes: same register and type -> one member plus `#define`; otherwise one float4 array over their registers with accessors (SunFade
+    c146-c157: the old cascades' matrices under the wetness rows; LandFilm c174-c179: `NVR_PointShadowLight[6]` under the puddle rows).
+    Unpinned constants or samplers, `b` / `i` registers and int / bool in `c` registers are refused;
+  - stage sN -> set 1 binding N slot N; sampler heap indices in push dwords 0-15 (the states come from the device at runtime);
+  - `VPOS` = `FragCoord.xy - 0.5`; `TEXCOORD0` = `FragCoord.xy * uvmap.xy + uvmap.zw` (push): the D3D9 quad's uv whatever the Draw's
+    viewport, so the built-in triangle's uv is not read and RenderScale 0.67 cannot stretch it;
+  - the depth test in the shader (push `ztest`, texture `zref`: view z or device depth, GREATEREQUAL / LESSEQUAL), or `SV_Depth` for a
+    `DrawDepthStencil` attachment: the C++ chooses per Draw.
+- **Variant key:** FNV-1a 64 of the cache bytes without the trailing NUL = `PortableSource(source)` in `ShaderRecord::LoadShader`
+  (rule in the README). File `Compute/Deferred/<Name>-<key>.spv` + `.layout`.
+- **PROVEN** (`tests/sm6_record_check.py --lamps`, PASS): 13 texts convert and pass spirv-val; spirv-cross reflection puts every member at
+  16 x the register the cache text pins (matrices 16-byte stride, HLSL row_major = SPIR-V column-major), push offsets, bindings and
+  outputs as the layout says; a tampered layout fails it (8 failures). In the repo: `DeferredSun` x 4 (live Sun d7b765f21cb2b456 and
+  SunFade 28b60d3e24263566, 2 targets; shipped-cache Sun b147790faf0a1aa5 and SunFade 72eb3aeff1077824, 1 target). Other settings have
+  no file and stay on D3D9.
+- **Lamps dry run (step 2's input):** every lamp text in both caches converts and validates: DeferredLamps (Fit3/Land; Fit3 shipped),
+  LampFog, LampShadows, LampSkin (2 targets), LampLand, LampLandFilm. The base `Deferred\DeferredLamps` text is in neither cache on this
+  PC: NOT RUN. Wetness, WetnessFallback and WetnessRestore (no constants read: `ubo ... unused`) convert too.
 - **Sampler states** come from the device, not the layout (POINT/CLAMP at `DeferredSun.h:505-507`).
-- **No change needed:** `tex2Dlod`, `VPOS`, `clip`, `[loop]` and 4 targets.
+- **No change needed:** `tex2Dlod`, `clip`, `[loop]` and 4 targets.
 - **ps_3_0 slot counts for scale** (D3DX):
   - sun 2,344;
   - SunFade 3,291;

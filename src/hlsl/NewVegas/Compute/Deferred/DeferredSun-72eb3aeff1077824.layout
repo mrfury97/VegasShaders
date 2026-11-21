@@ -1,0 +1,82 @@
+nvr-sm6-record 1
+# tools/nvr-sm6/tpl2spv.py; format: tools/nvr-sm6/README.md
+pass DeferredSun
+key 72eb3aeff1077824
+from Deferred/SunFade/DeferredSun.pso.hlsl
+registers 224
+ubo 2 0 0 3584 used
+heap 0 0
+push 96
+uvmap 64
+ztest 80
+texture 0 1 0 0 2D used DS_Frame
+texture 1 1 1 1 2D used TESR_AlbedoBuffer
+texture 4 1 4 4 2D used TESR_MaterialBuffer
+texture 5 1 5 5 2D used TESR_CapturedNormalsBuffer
+texture 6 1 6 6 2D used TESR_DeferredDepthLinear
+texture 9 1 9 9 2D used TESR_ShadowAtlas
+texture 10 1 10 10 2D used TESR_ShadowAtlasOld
+texture 11 1 11 11 2D used TESR_CharShadowMap
+sampler 0 0 0
+sampler 1 1 4
+sampler 4 4 16
+sampler 5 5 20
+sampler 6 6 24
+sampler 9 9 36
+sampler 10 10 40
+sampler 11 11 44
+zref 1 16 16 2D used
+const TESR_PBRMath 223 1 float4 - member
+const NVR_SpecFade 211 1 float4 - member
+const TESR_SharpSky 136 1 float4 - member
+const TESR_SkyIrradianceObjects 137 9 float4[9] - member
+const TESR_LinearLighting 191 1 float4 - member
+const TESR_PBRData 32 1 float4 - member
+const TESR_PassRedirect 210 1 float4 - member
+const TESR_PBRExtraData 33 1 float4 - member
+const TESR_LinearScales 168 1 float4 - member
+const TESR_DebugVar 135 1 float4 - member
+const TESR_PBRMetal 34 1 float4 - member
+const TESR_PBRMetalLook 36 1 float4 - member
+const TESR_InvProjectionTransform 100 4 float4x4 row_major member
+const TESR_InvViewTransform 104 4 float4x4 row_major member
+const TESR_ShadowCameraToLightTransformNear 108 4 float4x4 row_major member
+const TESR_ShadowCameraToLightTransformMiddle 112 4 float4x4 row_major member
+const TESR_ShadowCameraToLightTransformFar 116 4 float4x4 row_major member
+const TESR_ShadowCameraToLightTransformLod 120 4 float4x4 row_major member
+const TESR_ShadowNearCenter 124 1 float4 - member
+const TESR_ShadowMiddleCenter 125 1 float4 - member
+const TESR_ShadowFarCenter 126 1 float4 - member
+const TESR_ShadowLodCenter 127 1 float4 - member
+const TESR_ShadowData 128 1 float4 - member
+const TESR_ShadowFormatData 129 1 float4 - member
+const TESR_ShadowFade 130 1 float4 - member
+const TESR_SmoothedSunDir 131 1 float4 - member
+const TESR_ShadowBlur 132 1 float4 - member
+const TESR_ShadowForwardData 133 1 float4 - member
+const TESR_ShadowOldCameraToLightTransformNear 146 4 float4x4 row_major member
+const TESR_ShadowOldCameraToLightTransformMiddle 150 4 float4x4 row_major member
+const TESR_ShadowOldCameraToLightTransformFar 154 4 float4x4 row_major member
+const TESR_ShadowOldCameraToLightTransformLod 158 4 float4x4 row_major member
+const TESR_ShadowOldNearCenter 162 1 float4 - member
+const TESR_ShadowOldMiddleCenter 163 1 float4 - member
+const TESR_ShadowOldFarCenter 164 1 float4 - member
+const TESR_ShadowOldLodCenter 165 1 float4 - member
+const TESR_ShadowCrossFade 166 1 float4 - member
+const TESR_CharShadowCameraToLight 206 4 float4x4 row_major member
+const TESR_CharShadowCenter 213 1 float4 - member
+const TESR_CharShadowData 214 1 float4 - member
+const TESR_ContactHardeningData 167 1 float4 - member
+const TESR_DeferredDepthFrame 0 6 float4[6] - member
+const DS_Sun 6 1 float4 - member
+const DS_SunColor 7 1 float4 - member
+const DS_Ctrl 8 1 float4 - member
+const DS_Depth 9 1 float4 - member
+const TESR_TerrainData 10 1 float4 - member
+const TESR_TerrainExtraData 11 1 float4 - member
+const TESR_TerrainParallaxIso 12 1 float4 - member
+const DS_LandSun 14 1 float4 - member
+const DS_LandColor 15 1 float4 - member
+const DS_Fog 13 1 float4 - member
+targets 1
+depth 1
