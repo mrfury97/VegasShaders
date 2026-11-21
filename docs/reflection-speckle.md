@@ -79,4 +79,14 @@ our own. Clone: `F:\VS-scratch\ext\cs` (sparse) and `F:\VS-scratch\ext\cs-files`
   reflections" look). `[Shaders.Reflections.Main] DampTrace = true` (hidden) brings the trace back for an A/B. Vulkan passes only; RT
   passes unaware (known gap). Details: `src/effects/Reflections/README.md`, last section. Not yet looked at in game; frame cost not measured
   (believed cheaper). What to look at: `reflection01`: speckles gone? damp ground still reads wet? puddles still sharp?
-- Not tried yet: Fresnel from the smooth normal (tier 1), the bump's variance in the roughness (tier 2): left for if the cube is not enough.
+- 2026-11-21 test20 (144544a): lamps and fires on damp ground came back (bright screen hits kept over the cube).
+- 2026-11-21 slot A/B (owner's word; sheets `F:\NVR-bench\shots\refl-ab-sheets`, `refl-ab2-sheets`): PROVEN the cube cost the puddle edges
+  (fixed: ff12370) and the Strip's crisp wet-road mirror (robots, benches, lamp posts); PROVEN an "only bumpy damp ground" rule (378b306)
+  does nothing useful: DebugView 12 shows the Strip's asphalt bends more than Goodsprings dirt, so almost nothing reached the cube. NOT
+  REPRODUCED: reflection01's white specks, with either version (the slot's weather and sun differ). No flicker in any case (pairs 2 frames
+  apart: about 0.2 of 255).
+- 2026-11-21 test22, owner's choice "Smooth-normal ray": damp ground traced again (DampTrace defaults to true), and at the film's full wet
+  share the reflection's normal is the smooth one (DampBumpLean 1, unified branch e86485b): the ray, the blur and the Fresnel follow the
+  smooth ground, so the sky/ground flips (cause 1), the per-pixel Fresnel swings (cause 2) and rays under the bump (cause 3) are gone on wet
+  ground (believed, from the code). Price: bumps no longer bend the wet reflection. The cube path stays for DampTrace = false.
+- Not tried: the bump's variance in the roughness (tier 2), tier 3.
