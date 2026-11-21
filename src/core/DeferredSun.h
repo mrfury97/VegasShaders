@@ -112,10 +112,12 @@ namespace DeferredSun {
 	inline bool VkLatched = false;
 	inline char VkLatchWhy[192] = "";
 	inline IDirect3DSurface9* VkScratch = nullptr;	// RT0 during the Draw (a Draw's target must not be the device's render target)
-	enum VkReason { kVkLatched, kVkPassesOff, kVkKept, kVkFirstPerson, kVkDebugView, kVkNoLinearZ, kVkNoSpirv, kVkTargets, kVkSizes, kVkRefused, kVkDepthRange, kVkReasons };
+	enum VkReason { kVkLatched, kVkPassesOff, kVkKept, kVkFirstPerson, kVkDebugView, kVkNoLinearZ, kVkNoSpirv, kVkTargets, kVkSizes, kVkRefused, kVkDepthRange, kVkProbe, kVkReasons };
 	inline const char* const kVkReasonNames[kVkReasons] = { "latched off", "Vulkan passes off (NvrDxvkPasses, a RenderRect frame or no fork)",
 		"NvrDxvkKeepD3D9", "first person", "debug view", "no linear view z", "no SPIR-V for the variant", "skin target without a 2-target build",
-		"target / depth sizes differ", "a stage state refused", "viewport depth range not 0-1" };
+		"target / depth sizes differ", "a stage state refused", "viewport depth range not 0-1", "parity probe (14: the frame keeps D3D9)" };
+	// TEST ONLY (2026-11-22, NvrDxvkDeferredResolve 14, the parity probe: ParityProbe below) the Vulkan side's reason when it did not draw
+	inline char ProbeWhy[192] = "";
 	inline unsigned long long VkStatVulkan = 0, VkStatD3D9 = 0, VkStatWhy[kVkReasons] = {};
 	inline unsigned VkRefusalLogs = 0;
 	inline void VkLatch(const char* why) {
@@ -141,10 +143,16 @@ namespace DeferredSun {
 	// Apply's draw on the fork (above). True = drawn there; false = draw the D3D9 quad (the reason counted; with the switch 0 nothing runs and
 	// nothing is counted). target / t: the scene target (RT0) and its size; vp: the device viewport; zFunc: the D3D9 draw's depth test;
 	// fogCopyBound: s0 holds the frame's copy this draw (otherwise whatever was bound last: a stand-in goes there).
+	// probe (TEST ONLY, NvrDxvkDeferredResolve 14's ParityProbe): the Draw's one target instead of the scene (and the skin highlight), with
+	// the overwrite pipeline; nothing counted or latched, a reason for not drawing left in ProbeWhy.
 	inline bool VkDraw(IDirect3DDevice9* d, ShaderRecordPixel* pass, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, const D3DVIEWPORT9& vp,
-		const D3DXMATRIX& proj, DWORD zFunc, bool fogCopyBound) {
+		const D3DXMATRIX& proj, DWORD zFunc, bool fogCopyBound, IDirect3DSurface9* probe = nullptr) {
 		if (VkMode < 1) return false;
-		auto onD3D9 = [](VkReason why) { VkStatD3D9++; VkStatWhy[why]++; return false; };
+		auto onD3D9 = [probe](VkReason why) {
+			if (probe) { strncpy_s(ProbeWhy, kVkReasonNames[why], _TRUNCATE); return false; }
+			VkStatD3D9++; VkStatWhy[why]++; return false;
+		};
+		if (VkMode == 14 && !probe) return onD3D9(kVkProbe);	// (the probe's frames: the D3D9 quad, as at 0)
 		if (VkLatched) return onD3D9(kVkLatched);
 		if (!DxvkCompute::PassesOn()) return onD3D9(kVkPassesOff);	// (false in RenderRect frames; native D3D9 and stock DXVK: no extension)
 		if (DxvkCompute::KeptOnD3D9("DeferredSun")) return onD3D9(kVkKept);
@@ -156,9 +164,9 @@ namespace DeferredSun {
 		if (!vk || !VkPrepare(*vk, pass, pass == Pass ? "sun" : "sun-fade")) return onD3D9(VkLatched ? kVkLatched : kVkNoSpirv);
 		// the targets: the scene, and SSS v2's skin highlight while it is bound for this pass (DeferredSun.hlsl COLOR1, FD_SKIN). The shader's
 		// main returns alpha 0 into the scene, so writing every channel under the ADD blend equals the D3D9 draw's RGB mask.
-		IDirect3DSurface9* const skin = DeferredLamps::SkinSpecSurface;
+		IDirect3DSurface9* const skin = probe ? nullptr : DeferredLamps::SkinSpecSurface;
 		if (skin && vk->TargetCount < 2) return onD3D9(kVkTargets);
-		IDirect3DSurface9* const targets[2] = { target, skin };
+		IDirect3DSurface9* const targets[2] = { probe ? probe : target, skin };
 		const UINT count = skin ? 2 : 1;
 		if (skin) { D3DSURFACE_DESC s = {}; if (FAILED(skin->GetDesc(&s)) || s.Width != t.Width || s.Height != t.Height) return onD3D9(kVkSizes); }
 		if (DeferredDepth::Width != t.Width || DeferredDepth::Height != t.Height) return onD3D9(kVkSizes);	// (zref is read at the target's pixel)
@@ -211,13 +219,17 @@ namespace DeferredSun {
 		{
 			static GpuTimer timer("Deferred sun (Vulkan)");
 			GpuProfileScope gpu(timer, d);
-			vk->Overwrite = DebugView != 0;	// (bench diagnosis, NvrDxvkDeferredResolve 9-12) the debug views write, as the D3D9 draw does
+			vk->Overwrite = probe || DebugView != 0;	// (bench diagnosis, NvrDxvkDeferredResolve 9-12) the debug views write, as the D3D9 draw does
 			result = vk->Draw(d, targets, count, vp, uvmap, ztest, VkMode == 11 ? DeferredDepth::Texture : DeferredDepth::LinearTexture, ds.s ? &depth : nullptr,
 				fogCopyBound ? 0u : 1u, why);
 		}
 		d->SetRenderTarget(0, target);
 		if (hadScissor) d->SetScissorRect(&scissor);
 		d->SetViewport(&vp);
+		if (probe) {	// (TEST ONLY: no stats, no latch)
+			if (result != Sm6Record::Result::Drawn) _snprintf_s(ProbeWhy, sizeof(ProbeWhy), _TRUNCATE, "%s: %s", result == Sm6Record::Result::Failed ? "failed" : "refused", why ? why : "");
+			return result == Sm6Record::Result::Drawn;
+		}
 		if (result == Sm6Record::Result::Drawn) {
 			VkStatVulkan++;
 			if (vk->Frames == 1) {
@@ -234,6 +246,183 @@ namespace DeferredSun {
 		if (result == Sm6Record::Result::Failed) { VkLatch(why); return onD3D9(kVkLatched); }
 		if (VkRefusalLogs++ < 10) Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve refused this frame (%s): the D3D9 draw (%u refusals so far)", why ? why : "", VkRefusalLogs);
 		return onD3D9(kVkRefused);
+	}
+
+	// ---- TEST ONLY (2026-11-22): NvrDxvkDeferredResolve 14, the same-frame parity probe (docs/deferred-single-pass.md fact list; tests/parity_probe.py
+	// reads its files). kProbeAfter frames after the switch becomes 14, ONE world-view Apply draws the pass twice more, inside Apply's own setup:
+	// the D3D9 quad into A and the Vulkan Draw (overwrite pipeline, the depth attachment as value 1) into B, both float scratch targets cleared
+	// to -1 first (pixels a side discarded or did not draw stay -1), blend off, every channel written, with the current DebugView. Then A, B and
+	// the draw's stages 4 / 5 / 1 are read back and written to VegasShaders-Logs\parity_<frame>_{A,B,m,n,alb}.bin, and one line gives |A - B|.
+	// The frame itself draws the D3D9 quad as at 0. Setting the switch off 14 and back shoots again. Nothing latches, nothing calls
+	// DxvkCompute::Fail; the scratch targets are freed after the shot.
+	constexpr unsigned kProbeAfter = 300;
+	inline unsigned ProbeFrames = 0;	// frames with the switch at 14 (BeginFrame); reset when it leaves 14
+	inline bool ProbeDone = false;
+	// bytes a pixel for the formats the probe writes (0 = not written)
+	inline UINT ProbeBpp(D3DFORMAT f) {
+		switch (f) {
+		case D3DFMT_A32B32G32R32F: return 16;
+		case D3DFMT_A16B16G16R16F: case D3DFMT_G32R32F: return 8;
+		case D3DFMT_R32F: case D3DFMT_G16R16F: case D3DFMT_A8R8G8B8: case D3DFMT_X8R8G8B8: case D3DFMT_A2R10G10B10: case D3DFMT_A2B10G10R10: return 4;
+		case D3DFMT_R16F: return 2;
+		default: return 0;
+		}
+	}
+	// A render target's SYSTEMMEM copy (GetRenderTargetData), or null with why
+	inline IDirect3DSurface9* ProbeRead(IDirect3DDevice9* d, IDirect3DSurface9* rt, D3DSURFACE_DESC& desc, const char*& why) {
+		IDirect3DSurface9* sys = nullptr;
+		why = nullptr;
+		if (!rt) { why = "nothing bound"; return nullptr; }
+		if (FAILED(rt->GetDesc(&desc))) { why = "no description"; return nullptr; }
+		if (FAILED(d->CreateOffscreenPlainSurface(desc.Width, desc.Height, desc.Format, D3DPOOL_SYSTEMMEM, &sys, NULL)) || !sys) { why = "no SYSTEMMEM surface"; return nullptr; }
+		if (FAILED(d->GetRenderTargetData(rt, sys))) { sys->Release(); why = "GetRenderTargetData failed (not a render target?)"; return nullptr; }
+		return sys;
+	}
+	// <logs>\parity_<frame>_<tag>.bin: a 28-byte header (char[4] "NVRP", uint32 version 1, width, height, D3DFORMAT, bytes a pixel, DebugView) then the rows,
+	// tightly packed, in the surface's own format (A16B16G16R16F: half floats r g b a)
+	inline bool ProbeWrite(IDirect3DSurface9* sys, const D3DSURFACE_DESC& desc, UInt32 frame, const char* tag) {
+		const UINT bpp = ProbeBpp(desc.Format);
+		if (!sys || !bpp) return false;
+		CreateDirectoryA(".\\" VS_LOGS_FOLDER, NULL);
+		char path[MAX_PATH];
+		sprintf_s(path, ".\\" VS_LOGS_FOLDER "\\parity_%u_%s.bin", frame, tag);
+		D3DLOCKED_RECT lock = {};
+		if (FAILED(sys->LockRect(&lock, NULL, D3DLOCK_READONLY))) return false;
+		FILE* f = nullptr;
+		bool ok = fopen_s(&f, path, "wb") == 0 && f;
+		if (ok) {
+			const UInt32 header[6] = { 1, desc.Width, desc.Height, (UInt32)desc.Format, bpp, (UInt32)DebugView };
+			ok = fwrite("NVRP", 1, 4, f) == 4 && fwrite(header, sizeof(header), 1, f) == 1;
+			for (UINT y = 0; ok && y < desc.Height; y++) ok = fwrite((const char*)lock.pBits + y * lock.Pitch, bpp, desc.Width, f) == desc.Width;
+			fclose(f);
+		}
+		sys->UnlockRect();
+		return ok;
+	}
+	inline void ParityProbe(IDirect3DDevice9* d, ShaderRecordPixel* pass, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, const D3DVIEWPORT9& vp,
+		const D3DXMATRIX& proj, DWORD zFunc, bool fogCopyBound, const float (*quad)[6]) {
+		ProbeDone = true;
+		const UInt32 frame = TheFrameRateManager ? (UInt32)TheFrameRateManager->FrameNumber : 0;
+		// the draw's inputs as bound now, and the states asked about
+		static const DWORD kStages[3] = { 4, 5, 1 };
+		IDirect3DBaseTexture9* st[3] = {};
+		for (int i = 0; i < 3; i++) d->GetTexture(kStages[i], &st[i]);
+		DWORD maxMip = 0, lodBias = 0, srgb4 = 0, srgbWrite = 0, colorWrite = 0;
+		d->GetSamplerState(4, D3DSAMP_MAXMIPLEVEL, &maxMip); d->GetSamplerState(4, D3DSAMP_MIPMAPLODBIAS, &lodBias); d->GetSamplerState(4, D3DSAMP_SRGBTEXTURE, &srgb4);
+		d->GetRenderState(D3DRS_SRGBWRITEENABLE, &srgbWrite); d->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWrite);
+		float bias = 0.0f; memcpy(&bias, &lodBias, 4);
+		Logger::Log("TEST ONLY DeferredSun parity probe (NvrDxvkDeferredResolve 14) frame %u, DebugView %d: s4 %p (%s CapturedNormals::MaterialTexture %p), s5 %p (%s CapturedNormals::Texture %p), "
+			"s1 %p (%s CapturedNormals::AlbedoTexture %p); s4 MAXMIPLEVEL %lu MIPMAPLODBIAS %.4f SRGBTEXTURE %lu; scene target format %d %ux%u, viewport %lu,%lu %lux%lu; "
+			"device SRGBWRITEENABLE %lu COLORWRITEENABLE 0x%lX (Apply's; the probe draws write 0xF), zFunc %lu, fog copy on s0 %d",
+			frame, DebugView, st[0], st[0] == CapturedNormals::MaterialTexture ? "==" : "!=", CapturedNormals::MaterialTexture, st[1], st[1] == CapturedNormals::Texture ? "==" : "!=",
+			CapturedNormals::Texture, st[2], st[2] == CapturedNormals::AlbedoTexture ? "==" : "!=", CapturedNormals::AlbedoTexture, maxMip, bias, srgb4,
+			(int)t.Format, t.Width, t.Height, vp.X, vp.Y, vp.Width, vp.Height, srgbWrite, colorWrite, zFunc, fogCopyBound ? 1 : 0);
+		// the sentinel: a pixel shader writing -1 to every channel (no Clear can write a negative)
+		IDirect3DPixelShader9* sentinel = nullptr;
+		{
+			static const char kSrc[] = "ps_2_0\ndef c0, -1, -1, -1, -1\nmov oC0, c0\n";
+			ID3DXBuffer* code = nullptr;
+			if (SUCCEEDED(D3DXAssembleShader(kSrc, sizeof(kSrc) - 1, NULL, NULL, 0, &code, NULL)) && code) {
+				if (FAILED(d->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &sentinel))) sentinel = nullptr;
+				code->Release();
+			}
+		}
+		const float w = (float)t.Width - 0.5f, h = (float)t.Height - 0.5f;
+		const float full[4][6] = { { -0.5f, -0.5f, 0, 1, 0, 0 }, { w, -0.5f, 0, 1, 1, 0 }, { -0.5f, h, 0, 1, 0, 1 }, { w, h, 0, 1, 1, 1 } };
+		RECT scissor = {};
+		const bool hadScissor = SUCCEEDED(d->GetScissorRect(&scissor));
+		DWORD zEnable = D3DZB_TRUE, blend = FALSE;
+		d->GetRenderState(D3DRS_ZENABLE, &zEnable); d->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+		// A32B32G32R32F first; A16B16G16R16F if that cannot be made or the fork's Draw does not take it
+		static const D3DFORMAT kFormats[2] = { D3DFMT_A32B32G32R32F, D3DFMT_A16B16G16R16F };
+		IDirect3DTexture9* tex[2] = {}; IDirect3DSurface9* ab[2] = {};
+		auto freeAB = [&]() { for (int i = 0; i < 2; i++) { if (ab[i]) ab[i]->Release(); if (tex[i]) tex[i]->Release(); ab[i] = nullptr; tex[i] = nullptr; } };
+		bool vkDrawn = false;
+		std::string tries;
+		for (D3DFORMAT f : kFormats) {
+			freeAB();
+			char one[256];
+			bool made = true;
+			for (int i = 0; i < 2 && made; i++)
+				made = SUCCEEDED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, f, D3DPOOL_DEFAULT, &tex[i], NULL)) && tex[i] && SUCCEEDED(tex[i]->GetSurfaceLevel(0, &ab[i])) && ab[i];
+			if (!made) { freeAB(); _snprintf_s(one, sizeof(one), _TRUNCATE, "%sformat %d: targets not made", tries.empty() ? "" : "; ", (int)f); tries += one; continue; }
+			d->SetRenderState(D3DRS_ZENABLE, D3DZB_FALSE); d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE); d->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
+			for (int i = 0; i < 2; i++) {
+				d->SetRenderTarget(0, ab[i]);
+				if (sentinel) { d->SetPixelShader(sentinel); d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, full, sizeof(full[0])); }
+				else d->Clear(0, NULL, D3DCLEAR_TARGET, 0, 1.0f, 0);
+			}
+			// A: the D3D9 quad with Apply's depth test, blend off, every channel
+			d->SetRenderState(D3DRS_ZENABLE, zEnable);
+			d->SetPixelShader(pass->ShaderHandle);
+			d->SetRenderTarget(0, ab[0]);
+			d->SetViewport(&vp);
+			d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
+			// Apply's states and the scene as RT0 again, then B: the Vulkan Draw as value 1 draws it, into B through the overwrite pipeline
+			d->SetRenderState(D3DRS_ALPHABLENDENABLE, blend); d->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
+			d->SetRenderTarget(0, target);
+			if (hadScissor) d->SetScissorRect(&scissor);
+			d->SetViewport(&vp);
+			ProbeWhy[0] = 0;
+			vkDrawn = VkDraw(d, pass, target, t, vp, proj, zFunc, fogCopyBound, ab[1]);
+			_snprintf_s(one, sizeof(one), _TRUNCATE, "%sformat %d: Vulkan %s%s", tries.empty() ? "" : "; ", (int)f, vkDrawn ? "drawn" : "not drawn: ", vkDrawn ? "" : ProbeWhy);
+			tries += one;
+			if (vkDrawn) break;
+		}
+		const bool hadSentinel = sentinel != nullptr;
+		if (sentinel) sentinel->Release();
+		// read back and write: A, B, then the inputs
+		IDirect3DSurface9* level[3] = {};
+		for (int i = 0; i < 3; i++) if (st[i] && st[i]->GetType() == D3DRTYPE_TEXTURE) static_cast<IDirect3DTexture9*>(st[i])->GetSurfaceLevel(0, &level[i]);
+		IDirect3DSurface9* const sources[5] = { ab[0], ab[1], level[0], level[1], level[2] };
+		static const char* const kTags[5] = { "A", "B", "m", "n", "alb" };
+		IDirect3DSurface9* sys[5] = {};
+		D3DSURFACE_DESC desc[5] = {};
+		std::string files;
+		for (int i = 0; i < 5; i++) {
+			const char* why = nullptr;
+			sys[i] = ProbeRead(d, sources[i], desc[i], why);
+			const bool written = sys[i] && ProbeWrite(sys[i], desc[i], frame, kTags[i]);
+			char one[160];
+			_snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s %s (format %d)", files.empty() ? "" : ", ", kTags[i], written ? "written" : why ? why : "not written (format)", (int)desc[i].Format);
+			files += one;
+		}
+		// |A - B| where neither side holds the sentinel
+		double sum[4] = {}; float maxd[4] = {};
+		unsigned long long sentA = 0, sentB = 0, onlyA = 0, onlyB = 0, compared = 0, nonFinite = 0;
+		D3DLOCKED_RECT la = {}, lb = {};
+		const bool sameFormat = sys[0] && sys[1] && desc[0].Format == desc[1].Format && (desc[0].Format == D3DFMT_A32B32G32R32F || desc[0].Format == D3DFMT_A16B16G16R16F);
+		if (sameFormat && SUCCEEDED(sys[0]->LockRect(&la, NULL, D3DLOCK_READONLY))) {
+			if (SUCCEEDED(sys[1]->LockRect(&lb, NULL, D3DLOCK_READONLY))) {
+				const bool half = desc[0].Format == D3DFMT_A16B16G16R16F;
+				for (UINT y = 0; y < desc[0].Height; y++) {
+					const char* ra = (const char*)la.pBits + y * la.Pitch; const char* rb = (const char*)lb.pBits + y * lb.Pitch;
+					for (UINT x = 0; x < desc[0].Width; x++) {
+						float a[4], b[4];
+						if (half) { D3DXFloat16To32Array(a, (const D3DXFLOAT16*)ra + x * 4, 4); D3DXFloat16To32Array(b, (const D3DXFLOAT16*)rb + x * 4, 4); }
+						else { memcpy(a, (const float*)ra + x * 4, 16); memcpy(b, (const float*)rb + x * 4, 16); }
+						const bool sa = a[0] == -1.0f && a[1] == -1.0f && a[2] == -1.0f && a[3] == -1.0f, sb = b[0] == -1.0f && b[1] == -1.0f && b[2] == -1.0f && b[3] == -1.0f;
+						sentA += sa; sentB += sb; onlyA += sa && !sb; onlyB += sb && !sa;
+						if (sa || sb) continue;
+						bool finite = true;
+						for (int c = 0; c < 4; c++) finite = finite && _finite(a[c]) && _finite(b[c]);
+						if (!finite) { nonFinite++; continue; }
+						compared++;
+						for (int c = 0; c < 4; c++) { const float e = fabsf(a[c] - b[c]); sum[c] += e; if (e > maxd[c]) maxd[c] = e; }
+					}
+				}
+				sys[1]->UnlockRect();
+			}
+			sys[0]->UnlockRect();
+		}
+		const double n = compared ? (double)compared : 1.0;
+		Logger::Log("TEST ONLY DeferredSun parity probe frame %u, DebugView %d (%s; sentinel %s): mean |A-B| r %.6f g %.6f b %.6f a %.6f, max r %.6f g %.6f b %.6f a %.6f over %llu pixels; "
+			"sentinel pixels A %llu, B %llu (only A %llu, only B %llu), non-finite %llu; files (VegasShaders-Logs\\parity_%u_*.bin): %s",
+			frame, DebugView, tries.c_str(), hadSentinel ? "-1 (pixel shader)" : "0 (Clear: the -1 shader did not assemble)", sum[0] / n, sum[1] / n, sum[2] / n, sum[3] / n,
+			maxd[0], maxd[1], maxd[2], maxd[3], compared, sentA, sentB, onlyA, onlyB, nonFinite, frame, files.c_str());
+		for (int i = 0; i < 5; i++) if (sys[i]) sys[i]->Release();
+		for (int i = 0; i < 3; i++) { if (level[i]) level[i]->Release(); if (st[i]) st[i]->Release(); }
+		freeAB();
 	}
 	// A real failure: off for the rest of the cell (the latch logs it and lists it in the status bar). why: a literal.
 	inline void Latch(const char* why) {
@@ -376,6 +565,7 @@ namespace DeferredSun {
 		// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve (above): the switch, and the builds looked for (and their pipelines made) the first frame
 		// it is on, so no frame waits for the file reads; nothing while it is 0 or without the fork
 		VkMode = TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferredResolve");
+		if (VkMode == 14) ProbeFrames++; else { ProbeFrames = 0; ProbeDone = false; }	// (TEST ONLY: the parity probe, ParityProbe)
 		if (VkMode >= 1 && !VkLatched && DxvkCompute::Available()) {
 			static bool told = false;
 			if (!told) { told = true; Logger::Log("UNOFFICIAL DeferredSun: NvrDxvkDeferredResolve %d: the sun pass draws on Vulkan where its build exists (test switch)", VkMode); }
@@ -692,6 +882,8 @@ namespace DeferredSun {
 		// UNOFFICIAL 2026-11-15 SSS v2 (core/DeferredSkin.h BeforePasses): the skin's highlight target on stage 1 for this draw (DeferredSun.hlsl's
 		// COLOR1, FD_SKIN), added like the light (ONE / ONE); taken off after. Null unless DeferredSkinSSS 2 runs this frame.
 		DWORD mask1 = 0xF;
+		// TEST ONLY (2026-11-22) NvrDxvkDeferredResolve 14: the parity probe, once, before this frame's own D3D9 quad (ParityProbe)
+		if (VkMode == 14 && !Vm.on && !ProbeDone && ProbeFrames >= kProbeAfter) ParityProbe(d, pass, target, t, vp, proj, zFunc, fogCopyBound, quad);
 		// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve 1 (VkDraw above): the same draw on the DXVK fork; the switch 0, a gate that does not
 		// hold, a refusal or a failure: this D3D9 quad, as before
 		if (!VkDraw(d, pass, target, t, vp, proj, zFunc, fogCopyBound)) {

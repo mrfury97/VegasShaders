@@ -486,3 +486,12 @@ Runs are slot A run ids. "R0" is D3D9, "R1" Vulkan, "R9"-"R13" test values of `N
 **Open**
 - Which term carries the pattern. Running now: TAA off, R9 debug views 1/5/6/8 against D3D9 on puddle1.
 - The earlier desert-only shadow differences have not been re-shot since the hardware depth test.
+- **Tool built, NOT RUN (2026-11-22): the same-frame parity probe, `NvrDxvkDeferredResolve 14`** (`DeferredSun.h` `ParityProbe`, test only).
+  - Every frame draws the D3D9 pass, as at 0. About 300 frames after the switch becomes 14, one frame also draws the pass both ways, inside
+    Apply's own setup: D3D9 into A, Vulkan (the overwrite pipeline, the depth attachment as value 1) into B. Both are float scratch targets
+    (A32B32G32R32F, else A16B16G16R16F, logged), cleared to -1, blend off, all channels, with the current DebugView (0 the light, 5 N).
+  - It writes `VegasShaders-Logs\parity_<frame>_{A,B,m,n,alb}.bin` (A, B, and the draw's stages 4 / 5 / 1) and two log lines: the inputs
+    (stage pointers against `CapturedNormals`, s4 MAXMIPLEVEL / LOD bias / sRGB, target format, sRGB write, colour mask) and |A - B|.
+  - `py -3.10 -I tests/parity_probe.py <VegasShaders-Logs> [frame]` prints the stats; at DebugView 5 it also says whether A or B matches
+    the normal decoded from m.ga, and which texel offset fits each side. It writes a |A - B| x16 PNG.
+  - Set the switch to 0 and back to 14 for another shot.
