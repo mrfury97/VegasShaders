@@ -65,9 +65,10 @@ our own. Clone: `F:\VS-scratch\ext\cs` (sparse) and `F:\VS-scratch\ext\cs-files`
 - Risk: the 64-bit helper and DXVK fork already carry RT; adding NRD or RR is a large new dependency; AMD cards would keep tier 2.
 
 ## Open
-- Owner's toggle at `reflection01`: Reflections off -> do the speckles stay (then 5)? DebugView 12 screenshot (red = bend, green =
-  roughness).
-- Owner's word for tier 3 (new dependency, player-visible, frame cost).
+- (2026-11-21, state at install-test22) Owner's look at `reflection01` with the smooth-normal ray: are the specks gone? The slot never
+  reproduced them, and the owner's test19 look (rainy field) showed none. If they remain: Reflections off -> do they stay (then cause 5, the
+  sun's film highlight)? DebugView 12 screenshot (red = bend, green = roughness).
+- Tier 2 only if specks remain; tier 3 needs the owner's word (new dependency, player-visible, frame cost).
 
 ## What was tried
 - 2026-11-21 test18 (7231832): damp ground's blur raised to the film's roughness, at most 0.3. Owner at `reflection01`: still speckled at
