@@ -5,7 +5,7 @@ Two modes, one SPIR-V back end (glslang's HLSL front end, `--target-env vulkan1.
 | Mode | Script | Input | Output | Read by |
 |---|---|---|---|---|
 | Effect | `hlsl2spv.py`, `build.py` (+ `passes.txt`) | an effect's `.fx.hlsl`, technique and pass | `Compute/Sm6/<Effect>.<Technique>.<Pass>.<key>.spv` + `.txt` | `src/core/Sm6Pass.cpp` |
-| Template ("record mode") | `tpl2spv.py`, `build_deferred.py` | a game-shader record's preprocessed cache text, `Shaders\Cache\<sub>\<Name>.pso.hlsl` | `Compute/Deferred/<Name>-<key>.spv` + `.layout` | the deferred light passes' record mode (`docs/deferred-single-pass.md` step 1) |
+| Template ("record mode") | `tpl2spv.py`, `build_deferred.py` | a game-shader record's preprocessed cache text, `Shaders\Cache\<sub>\<Name>.pso.hlsl` | `Compute/Deferred/<Name>-<key>.spv` + `.layout` | `src/core/Sm6Record.h` (record mode; `DeferredSun.h` VkDraw, switch `NvrDxvkDeferredResolve`; `docs/deferred-single-pass.md` step 1) |
 
 Tools on Windows: Python 3.10 (`py -3.10 -I`) and the Vulkan SDK's `glslangValidator.exe`, `spirv-val.exe`, `spirv-cross.exe`,
 `spirv-dis.exe`, found on PATH, in `%VULKAN_SDK%\Bin` or in `F:\Tools\VulkanSDK\1.3.296.0\Bin` (`hlsl2spv.tool`). On Linux/WSL as before.
@@ -44,11 +44,16 @@ load path has `source` (D3DX preprocess, or `ShaderPrecompile::Take`), so the re
   same bytes here (`alias=` / `group=` in the `const` lines), so the device's last write wins in both paths. `unused` (no constant read):
   declare and bind no buffer.
 - **Textures** set 1, binding = D3D9 stage `N` = extension slot `N`, the stage's view type. Bind the device's texture on stage `N`, or a
-  1x1 dummy when the stage is empty or holds a Draw target. `unused` stages: no binding.
+  1x1 dummy when the stage is empty, holds a Draw target or a texture of another kind, or the pass did not set it for this draw (the
+  caller says so: DeferredSun's s0 without the fog copy). `unused` stages: no binding. Only a 2D dummy exists: a cube or 3D stage
+  that needs one keeps that frame on D3D9 (`Sm6Record.h`).
 - **Samplers**: DXVK's sampler heap, set 0 binding 0 (`heap`). For every `sampler <stage> <slot> <pushOffset>` line, declare an
   `NVR_EXT_BIND_SAMPLER` binding (Slot = slot, PushOffset = pushOffset) and bind the extension sampler matching the device's sampler
   states on that stage (MIN/MAG/MIPFILTER -> `NVR_EXT_FILTER`, ADDRESSU -> `NVR_EXT_ADDRESS`; SRGBTEXTURE -> the texture binding's
-  `Srgb`). The shader masks the heap index with `0xFFFF`.
+  `Srgb`). The shader masks the heap index with `0xFFFF`. As built (`Sm6Record.h` DeviceSampler): ANISOTROPIC on min or mag ->
+  ANISOTROPIC; else LINEAR (or above) on min or mag -> LINEAR, or LINEAR_MIPMAPS with a MIPFILTER (both LINEAR before extension 1.3);
+  else NEAREST. ADDRESSU must equal ADDRESSV, BORDER needs a zero border colour, MIRRORONCE has no match: those keep that frame on
+  D3D9. Samplers are made through `DxvkCompute::CreateSamplerNoFail` (never `Fail`).
 - **Push block** (`push` bytes, offset 0): `uint s[16]` (the heap indices, written by the extension), `float4 uvmap` at `uvmap`, and
   `float4 ztest` at `ztest`.
   - `uvmap`: the pass's `TEXCOORD0` is `FragCoord.xy * uvmap.xy + uvmap.zw`; the built-in triangle's uv is not read. For a D3D9

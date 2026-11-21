@@ -24,6 +24,7 @@
 #include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 901 / 902)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-16 fd-batchB: c169 for this pass (item 22)
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-19 DeferredWetness: the land's water layer, drawn inside Apply; the film's sun highlight
+#include "Sm6Record.h"	// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve (the draw on the DXVK fork, below)
 #include <unordered_set>
 
 namespace DeferredSun {
@@ -96,6 +97,103 @@ namespace DeferredSun {
 	// projection, for the true camera-relative point; charData.w 0 = no map this frame). Off (always without the switch): Apply as before.
 	struct ViewModelPass { bool on = false; float frame[6][4] = {}; float depth[2] = {}; float charM[4][4] = {}; float charCenter[4] = {}; float charData[4] = {}; };
 	inline ViewModelPass Vm;
+
+	// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve ([Main.Main.Performance], live, test only; 0 = off, the shipped default; 1 = this pass on
+	// Vulkan; 2 and 3 are the later steps' (docs/deferred-single-pass.md step plan). With 1, on the DXVK fork, Apply's draw is one Vulkan
+	// full-screen Draw (core/Sm6Record.h) from the SPIR-V tools\nvr-sm6 built from the record's own cache text (Compute\Deferred\
+	// DeferredSun-<key>.spv + .layout; key = ShaderRecord::SourceKey), after all of Apply's setup: the same pixel constants (read back from the
+	// device), the textures on their stages, samplers matching their states, the depth test in the shader against DeferredDepth's linear view
+	// z, the device viewport, the scene and the skin highlight as the Draw's targets. Same picture by construction. Every gate below that does
+	// not hold, and every refusal or failure, draws today's D3D9 quad in the same frame; a failure (a bad layout, a refused pipeline or Draw)
+	// also latches this path off for the session (never DxvkCompute::Fail, which would turn every Vulkan pass off).
+	inline int VkMode = 0;					// the switch this frame (BeginFrame)
+	inline Sm6Record VkSun, VkSunFade;		// Pass's and PassFade's builds
+	inline bool VkLatched = false;
+	inline char VkLatchWhy[192] = "";
+	inline IDirect3DSurface9* VkScratch = nullptr;	// RT0 during the Draw (a Draw's target must not be the device's render target)
+	enum VkReason { kVkLatched, kVkPassesOff, kVkKept, kVkFirstPerson, kVkDebugView, kVkNoLinearZ, kVkNoSpirv, kVkTargets, kVkSizes, kVkRefused, kVkReasons };
+	inline const char* const kVkReasonNames[kVkReasons] = { "latched off", "Vulkan passes off (NvrDxvkPasses, a RenderRect frame or no fork)",
+		"NvrDxvkKeepD3D9", "first person", "debug view", "no linear view z", "no SPIR-V for the variant", "skin target without a 2-target build",
+		"target / depth sizes differ", "a stage state refused" };
+	inline unsigned long long VkStatVulkan = 0, VkStatD3D9 = 0, VkStatWhy[kVkReasons] = {};
+	inline unsigned VkRefusalLogs = 0;
+	inline void VkLatch(const char* why) {
+		if (VkLatched) return;
+		VkLatched = true;
+		strncpy_s(VkLatchWhy, why ? why : "unknown", _TRUNCATE);
+		Logger::Log("[WARNING] UNOFFICIAL DeferredSun: Vulkan resolve off for the session (%s): the D3D9 draw from now on; the other Vulkan passes stay on", VkLatchWhy);
+	}
+	// The record's build, looked for once (BeginFrame, the first frame the switch is on; or the first draw). A missing build is logged once and
+	// kept on D3D9; a bad one latches.
+	inline bool VkPrepare(Sm6Record& vk, ShaderRecordPixel* record, const char* which) {
+		if (vk.Status == Sm6Record::State::NotTried && record) {
+			const char* why = nullptr;
+			const Sm6Record::State state = vk.Prepare("DeferredSun", record->SourceKey, NVR_EXT_BLEND_ADD, why);
+			if (state == Sm6Record::State::Missing) Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve has no SPIR-V for key %016llx (D3D9 kept), the %s record", record->SourceKey, which);
+			else if (state == Sm6Record::State::Failed) VkLatch(why);
+			else Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve ready for the %s record (Compute\\%s.spv: %u registers, %u target%s, %u push bytes, depth test %s)",
+				which, vk.File.c_str(), vk.Registers, vk.TargetCount, vk.TargetCount == 1 ? "" : "s", vk.PushBytes, vk.WritesDepth ? "in the shader" : "none");
+		}
+		return vk.Status == Sm6Record::State::Ready;
+	}
+	// Apply's draw on the fork (above). True = drawn there; false = draw the D3D9 quad (the reason counted; with the switch 0 nothing runs and
+	// nothing is counted). target / t: the scene target (RT0) and its size; vp: the device viewport; zFunc: the D3D9 draw's depth test;
+	// fogCopyBound: s0 holds the frame's copy this draw (otherwise whatever was bound last: a stand-in goes there).
+	inline bool VkDraw(IDirect3DDevice9* d, ShaderRecordPixel* pass, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, const D3DVIEWPORT9& vp,
+		const D3DXMATRIX& proj, DWORD zFunc, bool fogCopyBound) {
+		if (VkMode < 1) return false;
+		auto onD3D9 = [](VkReason why) { VkStatD3D9++; VkStatWhy[why]++; return false; };
+		if (VkLatched) return onD3D9(kVkLatched);
+		if (!DxvkCompute::PassesOn()) return onD3D9(kVkPassesOff);	// (false in RenderRect frames; native D3D9 and stock DXVK: no extension)
+		if (DxvkCompute::KeptOnD3D9("DeferredSun")) return onD3D9(kVkKept);
+		if (Vm.on) return onD3D9(kVkFirstPerson);	// (DeferredFirstPerson's re-run: its stencil, step 5)
+		if (DebugView != 0) return onD3D9(kVkDebugView);	// (the debug views return alpha 1 and write over the frame)
+		if (!DeferredDepth::LinearReady()) return onD3D9(kVkNoLinearZ);	// (the in-shader depth test's reference)
+		Sm6Record* vk = pass == Pass ? &VkSun : pass == PassFade ? &VkSunFade : nullptr;
+		if (!vk || !VkPrepare(*vk, pass, pass == Pass ? "sun" : "sun-fade")) return onD3D9(VkLatched ? kVkLatched : kVkNoSpirv);
+		// the targets: the scene, and SSS v2's skin highlight while it is bound for this pass (DeferredSun.hlsl COLOR1, FD_SKIN). The shader's
+		// main returns alpha 0 into the scene, so writing every channel under the ADD blend equals the D3D9 draw's RGB mask.
+		IDirect3DSurface9* const skin = DeferredLamps::SkinSpecSurface;
+		if (skin && vk->TargetCount < 2) return onD3D9(kVkTargets);
+		IDirect3DSurface9* const targets[2] = { target, skin };
+		const UINT count = skin ? 2 : 1;
+		if (skin) { D3DSURFACE_DESC s = {}; if (FAILED(skin->GetDesc(&s)) || s.Width != t.Width || s.Height != t.Height) return onD3D9(kVkSizes); }
+		if (DeferredDepth::Width != t.Width || DeferredDepth::Height != t.Height) return onD3D9(kVkSizes);	// (zref is read at the target's pixel)
+		if (!VkScratch && FAILED(d->CreateRenderTarget(16, 16, D3DFMT_A8R8G8B8, D3DMULTISAMPLE_NONE, 0, FALSE, &VkScratch, NULL))) {
+			VkScratch = nullptr;
+			VkLatch("the 16 x 16 scratch render target could not be made");
+			return onD3D9(kVkLatched);
+		}
+		// uvmap: the D3D9 quad's TEXCOORD0 (Apply: u = (x + 0.5) / W over the viewport) is FragCoord / size, whatever the viewport.
+		// ztest: x 1 = zref holds view z, reference = _33 + _43 / z (the device depth the projection gives that view z); w = the D3D9 draw's
+		// own compare (Apply: GREATEREQUAL with the game's reversed depth, else LESSEQUAL) against the shader's DEPTH (DS_Depth = c9, the same
+		// _33 / _43): 1 passes where DEPTH >= reference, 2 where <=.
+		const float uvmap[4] = { 1.0f / (float)t.Width, 1.0f / (float)t.Height, 0.0f, 0.0f };
+		const float ztest[4] = { 1.0f, proj._33, proj._43, zFunc == D3DCMP_GREATEREQUAL ? 1.0f : 2.0f };
+		// RT0 swapped to the scratch around the Draw (the Draw leaves the device's state as it was), then put back before Apply's own viewport
+		// restore: setting RT0 resets the viewport and the scissor rectangle, both put back here
+		RECT scissor = {};
+		const bool hadScissor = SUCCEEDED(d->GetScissorRect(&scissor));
+		d->SetRenderTarget(0, VkScratch);
+		const char* why = nullptr;
+		Sm6Record::Result result;
+		{
+			static GpuTimer timer("Deferred sun (Vulkan)");
+			GpuProfileScope gpu(timer, d);
+			result = vk->Draw(d, targets, count, vp, uvmap, ztest, DeferredDepth::LinearTexture, fogCopyBound ? 0u : 1u, why);
+		}
+		d->SetRenderTarget(0, target);
+		if (hadScissor) d->SetScissorRect(&scissor);
+		d->SetViewport(&vp);
+		if (result == Sm6Record::Result::Drawn) {
+			VkStatVulkan++;
+			if (vk->Frames == 1) Logger::Log("UNOFFICIAL DeferredSun: drawn on Vulkan (Compute\\%s.spv, %u target%s)", vk->File.c_str(), count, count == 1 ? "" : "s");
+			return true;
+		}
+		if (result == Sm6Record::Result::Failed) { VkLatch(why); return onD3D9(kVkLatched); }
+		if (VkRefusalLogs++ < 10) Logger::Log("UNOFFICIAL DeferredSun: Vulkan resolve refused this frame (%s): the D3D9 draw (%u refusals so far)", why ? why : "", VkRefusalLogs);
+		return onD3D9(kVkRefused);
+	}
 	// A real failure: off for the rest of the cell (the latch logs it and lists it in the status bar). why: a literal.
 	inline void Latch(const char* why) {
 		if (Fail.failed) return;
@@ -154,6 +252,9 @@ namespace DeferredSun {
 	inline void LoadShaders() {
 		DeferredWetness::LoadShaders();	// UNOFFICIAL 2026-11-19 (first: DS_WET_FILM below only when its pass loaded)
 		if (!WantedAtStartup() || Pass || PassFailed) return;
+		// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve: the records below keep the key of their cache text (ShaderRecord::SourceKey), which
+		// names their SPIR-V build; on for this function's loads only
+		struct KeyGuard { KeyGuard() { ShaderRecord::KeepSourceKey = true; } ~KeyGuard() { ShaderRecord::KeepSourceKey = false; } } keyGuard;
 		static D3DXMACRO overrides[] = { { "INTERIOR_SHADOWS", "0" }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL } };	// (room for the six optional defines + the terminator)
 		int n = 1;
 		// UNOFFICIAL 2026-11-14 foliage (DeferredFoliage.h, which needs this pass and GBufferV2): its branch only with the key on at startup
@@ -220,6 +321,8 @@ namespace DeferredSun {
 			Logger::Log(PassFade ? "UNOFFICIAL DeferredSun: the sun pass with the sun steps' fade loaded (SUN_CROSSFADE_PASS)" :
 				"[WARNING] UNOFFICIAL DeferredSun: the sun pass with the sun steps' fade did not load: the sun shadows step as before (the 15-degree glide)");
 		}
+		// (2026-11-21) the keys, so a log says which Compute\Deferred\DeferredSun-<key>.spv the Vulkan resolve looks for
+		Logger::Log("UNOFFICIAL DeferredSun: record keys (NvrDxvkDeferredResolve's SPIR-V names): sun %016llx, sun-fade %016llx", Pass->SourceKey, PassFade ? PassFade->SourceKey : 0ull);
 	}
 
 	// Once a frame (Render.cpp, with DeferredLamps::BeginFrame).
@@ -229,6 +332,15 @@ namespace DeferredSun {
 		Live = Wanted() && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !CapturedNormals::Failed;
 		SunFadeDeferred::PassLive = Live && PassFade;	// (2026-11-15 fd-smoothsun: the sun steps by half a degree while this pass draws it)
 		if (!WantedAtStartup()) return;
+		// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve (above): the switch, and the builds looked for (and their pipelines made) the first frame
+		// it is on, so no frame waits for the file reads; nothing while it is 0 or without the fork
+		VkMode = TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferredResolve");
+		if (VkMode >= 1 && !VkLatched && DxvkCompute::Available()) {
+			static bool told = false;
+			if (!told) { told = true; Logger::Log("UNOFFICIAL DeferredSun: NvrDxvkDeferredResolve %d: the sun pass draws on Vulkan where its build exists (test switch)", VkMode); }
+			if (Pass) VkPrepare(VkSun, Pass, "sun");
+			if (PassFade) VkPrepare(VkSunFade, PassFade, "sun-fade");
+		}
 		if (HandlesFrom != LightFreeRecords::Records.size()) {	// records are made as the game's shaders load
 			Handles.clear();
 			LandHandles.clear();
@@ -262,12 +374,28 @@ namespace DeferredSun {
 				Fail.failed ? Refused : !LinearScene::Live ? "needs LinearScene live" : "needs CapturedNormals + MaterialBuffer + AlbedoBuffer";
 			EffectStatus::Note(statusSlot, "DeferredSun", Live ? EffectStatus::Drawn : EffectStatus::Skipped, why);
 		}
-		if (!GpuTimer::Enabled) { StatFrames = 0; return; }
+		// (2026-11-21 NvrDxvkDeferredResolve) where the draws went: Vulkan, or D3D9 and why (counted per draw; the first-person re-run counts too).
+		// Logged every 240 frames while the switch is on, with or without the F10 profiler (the bench reads it to prove the Vulkan draw).
+		auto logVk = [](unsigned frames) {
+			std::string why;
+			for (int i = 0; i < kVkReasons; i++) if (VkStatWhy[i]) { char one[128]; _snprintf_s(one, sizeof(one), _TRUNCATE, "%s%s %llu", why.empty() ? "" : ", ", kVkReasonNames[i], VkStatWhy[i]); why += one; }
+			Logger::Log("DEFERRED SUN VULKAN %u frames: NvrDxvkDeferredResolve %d; draws on Vulkan %llu, on D3D9 %llu%s%s%s%s%s", frames, VkMode, VkStatVulkan, VkStatD3D9,
+				why.empty() ? "" : " (", why.c_str(), why.empty() ? "" : ")", VkLatched ? "; latched off: " : "", VkLatched ? VkLatchWhy : "");
+			VkStatVulkan = VkStatD3D9 = 0;
+			for (auto& n : VkStatWhy) n = 0;
+		};
+		if (!GpuTimer::Enabled) {
+			StatFrames = 0;
+			if (VkMode >= 1) { static unsigned vkFrames = 0; if (++vkFrames >= 240) { logVk(vkFrames); vkFrames = 0; } }
+			else { VkStatVulkan = VkStatD3D9 = 0; for (auto& n : VkStatWhy) n = 0; }
+			return;
+		}
 		if (++StatFrames < 240) return;
 		const double f = (double)StatFrames;
 		Logger::Log("DEFERRED SUN %u frames: the pass %.2f a frame (the exact linear depth %.2f; the frame converted to linear light first %.2f; the exact stored-curve fog %.2f), skipped %.2f, mixed spans lit (sun-keeping records in the same span, told apart by their code) %.2f%s%s",
 			(unsigned)StatFrames, StatPasses / f, StatLinearDepth / f, StatConverted / f, StatFogExact / f, StatSkipped / f, StatRefusedMixed / f,
 			Fail.failed ? (LatchFinal() ? "; off for the session: " : "; off until the next cell change: ") : "", Fail.failed && Refused ? Refused : "");
+		if (VkMode >= 1 || VkStatVulkan || VkStatD3D9) logVk((unsigned)StatFrames);
 		StatFrames = 0; StatPasses = StatSkipped = StatRefusedMixed = StatLinearDepth = StatConverted = StatFogExact = 0;
 	}
 
@@ -498,9 +626,11 @@ namespace DeferredSun {
 		// (2026-11-14) the stored-curve fog (core/DeferredFog.h, Includes/DeferredPixel.hlsl FDAddFogged): with the game's fog drawn, the fog
 		// colour in c13 and the frame's copy (linear now) on s0, through the state cache like SetCT's stages (put back below)
 		float fog[4] = {};	// (2026-11-15: zero for the first-person call, which uploads it unread)
+		bool fogCopyBound = false;	// (2026-11-21 NvrDxvkDeferredResolve: s0 holds this draw's frame copy; else a stand-in for the Vulkan draw)
 		if (!Vm.on && DeferredFog::Params(fog) && DebugView == 0) {
 			IDirect3DTexture9* frameCopy = DeferredFog::FrameCopy(d, target);
 			if (frameCopy) {
+				fogCopyBound = true;
 				rs->SetTexture(0, frameCopy);
 				TheRenderManager->SetSamplerState(0, D3DSAMP_MINFILTER, D3DTEXF_POINT); TheRenderManager->SetSamplerState(0, D3DSAMP_MAGFILTER, D3DTEXF_POINT);
 				TheRenderManager->SetSamplerState(0, D3DSAMP_MIPFILTER, D3DTEXF_NONE); TheRenderManager->SetSamplerState(0, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
@@ -521,9 +651,13 @@ namespace DeferredSun {
 		// UNOFFICIAL 2026-11-15 SSS v2 (core/DeferredSkin.h BeforePasses): the skin's highlight target on stage 1 for this draw (DeferredSun.hlsl's
 		// COLOR1, FD_SKIN), added like the light (ONE / ONE); taken off after. Null unless DeferredSkinSSS 2 runs this frame.
 		DWORD mask1 = 0xF;
-		if (DeferredLamps::SkinSpecSurface) { d->SetRenderTarget(1, DeferredLamps::SkinSpecSurface); d->SetViewport(&vp); d->GetRenderState(D3DRS_COLORWRITEENABLE1, &mask1); d->SetRenderState(D3DRS_COLORWRITEENABLE1, 0xF); }
-		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
-		if (DeferredLamps::SkinSpecSurface) { d->SetRenderTarget(1, nullptr); d->SetViewport(&vp); d->SetRenderState(D3DRS_COLORWRITEENABLE1, mask1); }
+		// UNOFFICIAL 2026-11-21 NvrDxvkDeferredResolve 1 (VkDraw above): the same draw on the DXVK fork; the switch 0, a gate that does not
+		// hold, a refusal or a failure: this D3D9 quad, as before
+		if (!VkDraw(d, pass, target, t, vp, proj, zFunc, fogCopyBound)) {
+			if (DeferredLamps::SkinSpecSurface) { d->SetRenderTarget(1, DeferredLamps::SkinSpecSurface); d->SetViewport(&vp); d->GetRenderState(D3DRS_COLORWRITEENABLE1, &mask1); d->SetRenderState(D3DRS_COLORWRITEENABLE1, 0xF); }
+			d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
+			if (DeferredLamps::SkinSpecSurface) { d->SetRenderTarget(1, nullptr); d->SetViewport(&vp); d->SetRenderState(D3DRS_COLORWRITEENABLE1, mask1); }
+		}
 		StatPasses++;
 		if (!Vm.on) {	// (2026-11-16 fd-batchB) a drawn pass ends a streak of refused frames; one line when it follows one, or a latch's retry
 			if (SkipStreak && SkipLogs <= 21) Logger::Log("UNOFFICIAL DeferredSun: the sun pass drew again after %u skipped frame%s", SkipStreak, SkipStreak == 1 ? "" : "s");

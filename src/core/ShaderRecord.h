@@ -98,6 +98,12 @@ public:
 	bool					IsLandLight = false;			// UNOFFICIAL 2026-10-25: a land pixel shader reading the game's SunDir in c18 (LandLight.h)
 	bool					CloudSunReg = false;			// UNOFFICIAL 2026-11-04 ForwardCloudShadows: declares NVR_CloudSun (c169, pixel) or NVR_CloudSunVS (c240-c241, vertex)
 	unsigned char			DisplaceFamily = 0;			// UNOFFICIAL 2026-10-28: registered for tessellation under this family (DxvkCompute::DisplaceBind)
+	// UNOFFICIAL 2026-11-21 (docs/deferred-single-pass.md step 1, tools/nvr-sm6/README.md "The variant key"): FNV-1a 64 of the record's
+	// preprocessed cache text without its trailing NUL, the key of its SPIR-V build (Compute\Deferred\<Name>-<key>.spv). Set only for the
+	// records loaded while KeepSourceKey is on (the deferred passes that have a Vulkan build); 0 otherwise.
+	unsigned long long		SourceKey = 0;
+	static inline bool		KeepSourceKey = false;
+	static unsigned long long SourceKeyOf(ID3DXBuffer* Source);
 };
 
 class ShaderRecordVertex : public ShaderRecord {

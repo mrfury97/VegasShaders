@@ -77,6 +77,15 @@ skipped while no lamp shadow runs (`docs/deferred-single-pass.md` step 0). F10 t
 (`Render.cpp:2914`, from the G-buffer resolved to LinearScene's encode back), and "LinearScene to linear" / "LinearScene encode"
 (each conversion, `LinearScene.h:104`).
 
+### The sun pass on Vulkan (test switch, 2026-11-21; built, not run in game)
+`[Main.Main.Performance] NvrDxvkDeferredResolve` (live, 0 = off by default, Internal). At 1, on the DXVK fork, DeferredSun's draw is one
+Vulkan full-screen Draw instead of its D3D9 quad (`DeferredSun.h` VkDraw; `Sm6Record.h`). Same path (deferred), same place in the frame,
+same setup: the SPIR-V is built from the pass record's own preprocessed cache text (`tools/nvr-sm6` template mode), keyed by that text's
+hash, so it is the same HLSL; constants are the device's registers read back, textures and samplers are the device's stages. It runs only
+with NvrDxvkPasses on, outside RenderRect frames, not in first person, with DeferredSun's DebugView 0 and with DeferredDepth's linear view z
+this frame; otherwise, where no `.spv` exists for the player's settings, or on any failure, the D3D9 quad draws in the same frame. Native
+D3D9, stock DXVK and DeferredRenderer 0 never reach it. Step 1 of `docs/deferred-single-pass.md`; the lamps are step 2.
+
 ### Family by family, with shipped defaults (mode 2)
 | Family | Path | Switch | Notes |
 |---|---|---|---|

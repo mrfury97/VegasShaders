@@ -605,6 +605,17 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 
 void ShaderRecord::LogCompileTimes() { ShaderPrecompile::LogCompileTimes(); }	// UNOFFICIAL 2026-11-11 (ImGuiManager::Initialize)
 
+// UNOFFICIAL 2026-11-21 (ShaderRecord.h SourceKey): the bytes the cache file holds (PortableSource, as written at the compile below) minus
+// D3DX's trailing NUL, hashed as tools\nvr-sm6\tpl2spv.py hashes the cache file.
+unsigned long long ShaderRecord::SourceKeyOf(ID3DXBuffer* Source) {
+	const std::string text = PortableSource(Source);
+	size_t length = text.size();
+	if (length && text[length - 1] == '\0') length--;
+	unsigned long long h = 0xcbf29ce484222325ull;
+	for (size_t i = 0; i < length; i++) h = (h ^ (unsigned char)text[i]) * 0x100000001b3ull;
+	return h;
+}
+
 /*
 Loads a game shader by name from a subfolder (when given). It is compiled when no usable cache exists.
 @returns the new record, or null when the shader is not used.
@@ -811,6 +822,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 				if (SUCCEEDED(created)) {
 					record->CreateCT(source, table);
+					if (KeepSourceKey && source) record->SourceKey = SourceKeyOf(source);	// UNOFFICIAL 2026-11-21 (ShaderRecord.h SourceKey)
 					// UNOFFICIAL 2026-10-27 displacement shadows (core/DisplaceShadows.h): the land pixel shaders and their layer counts, so the
 					// land's own draws can be told apart (their per-layer height flags are taken there for the land's shadow draws).
 					if (pixelProfile && Template.Name && !strcmp(Template.Name, "TerrainTemplate")) static_cast<ShaderRecordPixel*>(record)->IsLand = true;	// 2026-11-12 Puddles ObjectPuddles

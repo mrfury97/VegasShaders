@@ -3620,7 +3620,7 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::None, false, "Indoors, with eye adaptation on.", nullptr, &kGT7ExposureSwitch },
 
 	{ "Main.Main.Performance", "DXVK (Vulkan fork)",
-		"NvrDxvkPasses, NvrDxvkVariants, NvrDxvkStencil, NvrDxvkAmbientLight, NvrDxvkClouds, NvrDxvkKeepD3D9, NvrDxvkTestSuffix, NvrDxvkMixCheck, "
+		"NvrDxvkPasses, NvrDxvkVariants, NvrDxvkStencil, NvrDxvkAmbientLight, NvrDxvkClouds, NvrDxvkKeepD3D9, NvrDxvkTestSuffix, NvrDxvkDeferredResolve, NvrDxvkMixCheck, "
 		"NvrDxvkReplacements, NvrSm6Shaders, NvrDxvkDisplacement, AvgLumaCompute, AmbientLightSmoothCompute, AmbientLightBlurCompute",
 		FogType::None, false, "Settings for the DXVK fork's d3d9.dll (the fork this build ships): the mod's effects as Vulkan passes, tessellation and the like. "
 		"Native D3D9 and stock DXVK ignore them.", DxvkStatus },

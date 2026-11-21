@@ -82,6 +82,9 @@ public:
 	// (NVR_NO_SM3_LIMITS) of exactly that variant. Template/Defines may be null (nothing extra written).
 	static bool					RegisterReplacement(const char* Name, const void* Bytecode, UINT Size, const char* Template = nullptr, const D3DXMACRO* Defines = nullptr);
 	static ID3D9NvrExtSampler*	CreateSampler(NVR_EXT_FILTER Filter, NVR_EXT_ADDRESS Address);
+	// UNOFFICIAL 2026-11-21 (Sm6Record, docs/deferred-single-pass.md "Failure"): as CreateSampler, but a failure is only logged (the
+	// other compute paths stay on). Equal descriptions share one sampler-heap entry in the extension.
+	static ID3D9NvrExtSampler*	CreateSamplerNoFail(NVR_EXT_FILTER Filter, NVR_EXT_ADDRESS Address);
 
 	// UNOFFICIAL 2026-10-27 tessellation displacement (fork patch 0021, extension "1.7-displace": the separate ID3D9NvrExtTess
 	// interface; docs/next/FORK2-DISPLACE.md): [Main.Main.Performance] NvrDxvkDisplacement + [Shaders.Terrain.Displacement].

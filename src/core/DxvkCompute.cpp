@@ -158,6 +158,18 @@ ID3D9NvrExtSampler* DxvkCompute::CreateSampler(NVR_EXT_FILTER Filter, NVR_EXT_AD
 	return sampler;
 }
 
+ID3D9NvrExtSampler* DxvkCompute::CreateSamplerNoFail(NVR_EXT_FILTER Filter, NVR_EXT_ADDRESS Address) {
+	if (!Available()) return nullptr;
+	NVR_EXT_SAMPLER_DESC desc = { Filter, Address };
+	ID3D9NvrExtSampler* sampler = nullptr;
+	HRESULT result = Ext->CreateSampler(&desc, &sampler);
+	if (FAILED(result) || !sampler) {
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:CreateSampler(filter %u, address %u) failed (%08lX)", (UINT)Filter, (UINT)Address, result);
+		return nullptr;
+	}
+	return sampler;
+}
+
 ID3D9NvrExtPipeline* DxvkCompute::CreateGraphicsPipeline(const char* Name, const NVR_EXT_BINDING_DESC* Bindings, UINT Count, UINT PushSize, bool UsesSamplers, UINT TargetCount, NVR_EXT_BLEND Blend, bool FailAll) {
 	if (!Available()) return nullptr;
 	if (ExtInfo.ExtVersionMinor < 1) {
