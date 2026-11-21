@@ -452,3 +452,37 @@ rewrite forward pixels too. Open.
   - PROVEN: even without the test, the sun shadow term differs.
   - NOT RUN: like-for-like debug views with the Vulkan debug draw writing over the frame (commit c317eda), which would pin the term.
 - **Owner's choice (2026-11-21):** they check in game themselves. `NvrDxvkDeferredResolve` stays 0 until the shadow term is fixed.
+
+## Fact list: the Vulkan sun pass mismatch (step 1), kept per the shared rule
+Runs are slot A run ids. "R0" is D3D9, "R1" Vulkan, "R9"-"R13" test values of `NvrDxvkDeferredResolve`.
+
+**Proven**
+- The Vulkan draw really runs: log lines `drawn on Vulkan`, `DEFERRED SUN VULKAN ... on D3D9 0` (first person only).
+- Interiors match. Gomorrah, Lucky 38, Vault 21 and Vault 34 (20261121-155757) differ only at edges.
+- The stage bindings are right. The first-Draw log shows s1/s4/s5 A16B16G16R16F POINT, s6 R32F, s9 atlas R32F LINEAR 1 level, s11
+  char map R32F POINT, sRGB 0 everywhere, and s0/s12 as stand-ins (no fog copy, no film).
+- **The in-shader depth test caused the dark band.**
+  - Value 10 (no test) restores the cascade view (20261121-162538).
+  - Value 11 (the INTZ reference) fails like value 9.
+- **Fixed by the hardware depth test** (25f8bd7): the device D24S8 is attached through DrawGeometryScene, with viewport depth 0-1.
+  - With it there is no stripe, no dark ground and no blocks.
+  - Shadows sit in the same places on puddle1, SunGI2 and SunGI4 (20261122-101356, -101827, -102259).
+- **What is left:** a fine, zero-mean, per-pixel pattern on sunlit pixels only, following the ground texture.
+  - The difference is black inside shadows.
+  - R0 vs R1 mean 13.5 / 5.3 / 6.6 (puddle1 / SunGI2 / SunGI4), against a same-switch noise of 0.4-0.7.
+  - Brightness after a 16x16 blur differs by only 0.6-1.8 %.
+
+**Ruled out**
+- Char shadow map: CharacterShadowMap off changes nothing (20261121-161245).
+- Stand-in or sRGB on s9/s11: the stage log (20261121-161245).
+- Sampler-state refusals: no `refused` lines in any run.
+- A whole-image integer shift: offline shift search on puddle1 R0/R1 gives the best mean 10.0 at a shift against 10.4 unshifted.
+- A sub-pixel shift on reflection01 dv5: the best is no shift.
+- A half-texel G-buffer uv offset: value 13 (uv + 0.5 texel) gives R0-R13 12.2 against R0-R1 13.7, and R1-R13 5.2. It moves the
+  pattern but does not reduce it (20261122-103120).
+- A flipped normal component: in reflection01 dv5 the per-channel correlation of the difference with A's detail is -0.03 to -0.14,
+  with the same detail amplitude.
+
+**Open**
+- Which term carries the pattern. Running now: TAA off, R9 debug views 1/5/6/8 against D3D9 on puddle1.
+- The earlier desert-only shadow differences have not been re-shot since the hardware depth test.

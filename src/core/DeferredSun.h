@@ -168,7 +168,9 @@ namespace DeferredSun {
 			return onD3D9(kVkLatched);
 		}
 		// uvmap: the D3D9 quad's TEXCOORD0 (Apply: u = (x + 0.5) / W over the viewport) is FragCoord / size, whatever the viewport.
-		const float uvmap[4] = { 1.0f / (float)t.Width, 1.0f / (float)t.Height, 0.0f, 0.0f };
+		// (bench diagnosis, test only) 13: the G-buffer uv half a texel right and down (u = (x + 1) / W), as if the D3D9 quad read on texel edges
+		const float uvHalf = VkMode == 13 ? 0.5f : 0.0f;
+		const float uvmap[4] = { 1.0f / (float)t.Width, 1.0f / (float)t.Height, uvHalf / (float)t.Width, uvHalf / (float)t.Height };
 		// The depth test (2026-11-21 bench: the in-shader test, against either reference, discarded a band of mid-distance ground the D3D9
 		// draw lights): the D3D9 draw's own, by the hardware. The device's current depth-stencil surface (the one the D3D9 draw is tested on)
 		// attached, Apply's zFunc, no depth writes, no stencil (want[] has STENCILENABLE FALSE outside first person, which stays on D3D9), the
