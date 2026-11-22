@@ -358,15 +358,22 @@ void VolumetricFogEffect::UpdateSettings(){
 * old presets that set HeightFog*, SimpleFog*, MinimumBaseFog, SunPower, FogNight... look as they were made to look.
 */
 void VolumetricFogEffect::UpdateLegacySettings(const char* SettingCategory) {
+	// UNOFFICIAL 2026-11-18 [Shaders.VolumetricFog.Main] LegacyAs441: the height fog as stock NVR 4.4.1 (86ce118a) drew it. 25189928's
+	// parent, which this legacy fog copies, has two later upstream commits in it: 2dc131de3 (2026-05-30, the height fog's density factor
+	// 1e-8 -> 1e-5, "1000x too weak") and e4571517d (its own HeightFogSaturation / HeightFogInscattering in place of FogSaturation /
+	// Inscattering). 4.4.1 was built on 2026-05-29, so its presets were tuned on the weak one: Riven (Amount 1.7) turned the sky white
+	// here and matched 4.4.1 again with the old factor (bench 2026-11-18, docs: memory vs-old-preset-look-caffeine). The shader's factor
+	// stays; the density reaches it 1000 times smaller, and the two colour keys are 4.4.1's.
+	const bool as441 = TheSettingManager->GetSettingI("Shaders.VolumetricFog.Main", "LegacyAs441") != 0;
 	Constants.LegacyData.x = TheSettingManager->GetSettingF(SettingCategory, "MinimumBaseFog");
-	Constants.LegacyData.y = TheSettingManager->GetSettingF(SettingCategory, "HeightFogSaturation");
+	Constants.LegacyData.y = TheSettingManager->GetSettingF(SettingCategory, as441 ? "FogSaturation" : "HeightFogSaturation");
 	Constants.LegacyData.z = TheSettingManager->GetSettingF(SettingCategory, "Amount");
-	Constants.LegacyData.w = TheSettingManager->GetSettingF(SettingCategory, "HeightFogInscattering");
+	Constants.LegacyData.w = TheSettingManager->GetSettingF(SettingCategory, as441 ? "Inscattering" : "HeightFogInscattering");
 
 	Constants.LegacyLow.x = TheSettingManager->GetSettingF(SettingCategory, "FogSaturation");
 	Constants.LegacyLow.y = TheSettingManager->GetSettingF(SettingCategory, "WeatherImpact");
 
-	Constants.LegacyHigh.x = TheSettingManager->GetSettingF(SettingCategory, "HeightFogDensity");
+	Constants.LegacyHigh.x = TheSettingManager->GetSettingF(SettingCategory, "HeightFogDensity") * (as441 ? 0.001f : 1.0f);
 	Constants.LegacyHigh.y = TheSettingManager->GetSettingF(SettingCategory, "HeightFogFalloff");
 	Constants.LegacyHigh.z = TheSettingManager->GetSettingF(SettingCategory, "HeightFogDist");
 
@@ -1246,9 +1253,12 @@ bool VolumetricFogEffect::ExtSetup(IDirect3DBaseTexture9* (&inputs)[ExtInputCoun
 	inputs[0] = nullptr;
 	inputs[1] = depth; inputs[2] = atlas; inputs[3] = normals; inputs[4] = pointShadow; inputs[5] = noiseTexture;
 	inputs[6] = skyView ? skyView : depth;
-	for (UINT i = 7; i < ExtInputCount; i++) inputs[i] = depth;	// the grid, the fog buffers, AO, sky factor, SunFar
+	for (UINT i = 7; i < ExtInputCount; i++) inputs[i] = depth;	// the grid, the fog buffers, AO, sky factor, SunFar, viewmodel depth
+	IDirect3DBaseTexture9* vmDepth = ExtTextureOf("TESR_DepthBufferViewModel");
+	if (vmDepth) inputs[14] = vmDepth;
 	push = {};
 	push.physicalSky = physical ? 1 : 0;
+	push.sunFarFlags.y = !vmDepth ? 0.0f : (TheRenderManager && TheRenderManager->IsReversedDepth() ? 2.0f : 1.0f);
 	return true;
 }
 
@@ -1293,7 +1303,7 @@ bool VolumetricFogEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSurfac
 		push.compositeFlags = D3DXVECTOR4(compositeShadow ? 1.0f : 0.0f, ao ? 1.0f : 0.0f, (ao && compositeSkyTexture) ? 1.0f : 0.0f,
 			compositeInteriorShadow ? compositeRound : 0.0f);
 		IDirect3DTexture9* sunFar = compositeShadow && !compositeInteriorShadow ? SunFarFor(true) : SunFarFor(false);
-		push.sunFarFlags = D3DXVECTOR4(sunFar ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+		push.sunFarFlags.x = sunFar ? 1.0f : 0.0f;
 		if (sunFar) inputs[12] = sunFar;
 		D3DSURFACE_DESC aoDesc = {};
 		if (ao && SUCCEEDED(compositeAOTexture->GetLevelDesc(0, &aoDesc)))
@@ -1339,7 +1349,7 @@ bool VolumetricFogEffect::ExtShadowAO(IDirect3DDevice9* Device, IDirect3DSurface
 	push.mode = 3;
 	push.compositeFlags = D3DXVECTOR4(shadow ? 1.0f : 0.0f, aoTexture ? 1.0f : 0.0f, sky ? 1.0f : 0.0f, 0.0f);
 	IDirect3DTexture9* sunFar = SunFarFor(shadow);
-	push.sunFarFlags = D3DXVECTOR4(sunFar ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+	push.sunFarFlags.x = sunFar ? 1.0f : 0.0f;
 	if (sunFar) inputs[12] = sunFar;
 	D3DSURFACE_DESC aoDesc = {};
 	if (aoTexture && SUCCEEDED(aoTexture->GetLevelDesc(0, &aoDesc)))

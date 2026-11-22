@@ -27,6 +27,7 @@ public:
 	CachedHandle		paramSunFarFlags;	// UNOFFICIAL 2026-10-19 SunFar (NVR_SunFarFlags)
 	CachedHandle		paramGI;			// UNOFFICIAL 2026-11-03 NVR_ALGI: the RT bounce light in the D3D9 passes (Render)
 	CachedHandle		paramRT;			// UNOFFICIAL 2026-11-13 NVR_ALRT: the RT occlusion in the D3D9 Estimate (Render)
+	CachedHandle		paramBump;			// NVR_ALBump: DeferredBumpedNormals shading normals bound for GI Apply
 	CachedHandle		paramScene;					// UNOFFICIAL 2026-10-18 (ambfix): NVR_ALScene, the scene's own light
 	CachedHandle		techSky;					// UNOFFICIAL 2026-10-20 (skyamb) Skylighting: technique AmbientLightSky
 	D3DXVECTOR4			sceneLight = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 1.0f);	// the light every surface gets (linear; Render)
@@ -123,13 +124,6 @@ public:
 	// where a character's triangles are 100-300 pixels across and the pixel reach covered only a band at each edge). NVR_ALEdges.z, 0 off.
 	float				normalSmoothingWorld = 0.0f;
 	float				horizonBias = 0.0f;
-	// UNOFFICIAL 2026-10-26 (NVR DXVK, deep/fork-hiz; core/HiZ.h) HiZ: 0 off; N > 0: Estimate's horizon taps at least 2^(N+1) prep texels
-	// away read a coarse level of the Hi-Z pyramid (Compute\AmbientLightEstimateHiZ.frag). Vulkan passes only.
-	int					hizLogQ = 0;
-	bool				hizEstimateFailed = false;	// its shader file is missing: the normal Estimate for the session
-	bool				hizEstimateChecked = false;
-	UINT				hizEstimateFrames = 0;
-	bool	HiZWanted() const { return false; }	// retired 2026-10-26 (measured no win; see AmbientLight.cpp Estimate)
 	CachedHandle		paramEdges, techSmooth;
 	bool				prepared = false;			// RenderPrepare drew Prepare + the smoothing this frame (Render skips its Prepare)
 	bool	RenderPrepare(IDirect3DDevice9* Device);	// ShaderManager, before the AO's sky pass: Prepare, then technique AmbientLightSmooth
@@ -227,12 +221,12 @@ public:
 	// drawn where Render / RenderGrid / RenderPrepare draw the D3D9 pass, into the same targets with the same textures; the constants are
 	// the effect's own parameter values, read back right before each draw. ExtDraw false (off, no extension, a texture missing, a failure:
 	// ExtFailed, logged once) = that pass's D3D9 draw. AmbientLightBlurCompute / AmbientLightSmoothCompute keep their passes when on.
-	enum ExtShader { ExtPrepare, ExtSmooth, ExtEstimate, ExtBlur, ExtAccumulate, ExtStats, ExtReduce, ExtApply, ExtScreen, ExtInject, ExtPropagate, ExtEstimateHiZ,
+	enum ExtShader { ExtPrepare, ExtSmooth, ExtEstimate, ExtBlur, ExtAccumulate, ExtStats, ExtReduce, ExtApply, ExtScreen, ExtInject, ExtPropagate,
 		ExtGILight, ExtGIEstimate0, ExtGIEstimate1, ExtGIEstimate2, ExtGIAccumulate, ExtGIApply,
 		ExtEstimateRT, ExtShaderCount };	// ExtGI*: ComputeGI (below); ExtEstimateRT: UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]
 	ExtPass				extPasses[ExtShaderCount][NVR_EXT_MAX_TARGETS];	// per target count
 	ExtUniformBuffer	extUniforms;
-	CachedHandle		extHandles[38];
+	CachedHandle		extHandles[41];
 	bool	ExtOn() const;
 	bool	ExtOnRect() const;	// UNOFFICIAL 2026-11-03: ExtOn's rule in a RenderScale rect frame (the RT estimate only)
 	bool	ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Targets, UINT TargetCount, IDirect3DBaseTexture9* const* Textures, UINT Variant, const D3DVIEWPORT9& Viewport);

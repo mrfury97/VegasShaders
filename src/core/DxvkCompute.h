@@ -42,6 +42,8 @@ public:
 	static ID3D9NvrExtSampler*	MipSampler(bool Anisotropic, NVR_EXT_ADDRESS Address);
 	// [Main.Main.Performance] NvrDxvkPasses: the ported full-screen effects run as Vulkan passes (false, or no extension: their D3D9 passes).
 	static bool					PassesOn();
+	// UNOFFICIAL 2026-11-19: rect-aware pre-upscale Vulkan effects (Reflections, AmbientLight, ...) run as Vulkan passes under RenderScale < 1.0 too.
+	static bool					PassesOnRect();
 	// [Main.Main.Performance] NvrDxvkVariants (UNOFFICIAL 2026-10-26): Vulkan passes use their compile-time variants
 	// (Compute\variants.txt, the D3D9 techniques' fixed switches) where the .spv exists; off: the run-time switched shaders (A/B).
 	static bool					VariantsOn();

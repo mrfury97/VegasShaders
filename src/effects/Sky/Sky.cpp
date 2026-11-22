@@ -23,6 +23,7 @@ void SkyShaders::RegisterConstants() {
 		{ "TESR_SkyIrradiance", &Constants.Irradiance[0] },
 		{ "TESR_SkyIrradianceGame", &Constants.IrradianceGame[0] },			// UNOFFICIAL 2026-10-18 ClassicLook
 		{ "TESR_SkyIrradianceObjects", &Constants.IrradianceObjects[0] },	// UNOFFICIAL 2026-10-25 LightsObjects
+		{ "TESR_SkyIrradianceTerrain", &Constants.IrradianceTerrain[0] },	// UNOFFICIAL 2026-11-21 Terrain SkylightingSaturation
 		{ "TESR_PhysSky", &Constants.PhysSky },
 		{ "TESR_PhysSkySun", &Constants.PhysSkySun },
 		{ "TESR_SkyTint", &Constants.SkyTint },								// UNOFFICIAL 2026-10-25
@@ -36,9 +37,11 @@ void SkyShaders::RegisterConstants() {
 		{ "TESR_FogWeatherColor", &Constants.FogWeatherColor },				// UNOFFICIAL 2026-10-30 (UpdateFogSky)
 	};
 	for (const Binding& binding : bindings) TheShaderManager->RegisterConstant(binding.name, binding.value);
-	// UNOFFICIAL 2026-11-03 SkyOnWorker: what the worker's projection writes, Irradiance up to IrradianceObjects (PhysSky between them)
-	static_assert(offsetof(SkyStruct, PhysSky) > offsetof(SkyStruct, Irradiance) && offsetof(SkyStruct, IrradianceObjects) > offsetof(SkyStruct, PhysSky) &&
-		offsetof(SkyStruct, SkyTint) == offsetof(SkyStruct, IrradianceObjects) + sizeof(SkyStruct::IrradianceObjects), "SkyOnWorker: the results' range");
+	// UNOFFICIAL 2026-11-03 SkyOnWorker: what the worker's projection writes, Irradiance up to IrradianceTerrain (PhysSky between them)
+	static_assert(offsetof(SkyStruct, PhysSky) > offsetof(SkyStruct, Irradiance) &&
+		offsetof(SkyStruct, IrradianceObjects) > offsetof(SkyStruct, PhysSky) &&
+		offsetof(SkyStruct, IrradianceTerrain) > offsetof(SkyStruct, IrradianceObjects) &&
+		offsetof(SkyStruct, SkyTint) == offsetof(SkyStruct, IrradianceTerrain) + sizeof(SkyStruct::IrradianceTerrain), "SkyOnWorker: the results' range");
 	SkyProjection::Begin = (const char*)&Constants.Irradiance[0];
 	SkyProjection::End = (const char*)&Constants.SkyTint;
 }
@@ -276,6 +279,9 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 	// below changes (PhysAtmosphere, the closed form, as before).
 	const bool physMs = PhysicalSettings.Enabled && PhysicalSettings.MultipleScattering;
 	const bool physExact = PhysicalSettings.Enabled && (PhysicalSettings.ExactSunlight || PhysicalSettings.MultipleScattering);
+	TerrainShaders* terrainForKey = TheShaderManager->Shaders.Terrain;
+	const float rawTerrainSat = terrainForKey ? terrainForKey->CurrentSkylightSaturation() : 1.0f;
+	const float terrainSat = rawTerrainSat > 0.0f ? rawTerrainSat : 0.0f;
 	{
 		PBRShaders* pbrForKey = TheShaderManager->Shaders.PBR;
 		ProjectionInputs inputs = { TheShaderManager->ShaderConst.SunPosition, TheShaderManager->ShaderConst.skyColor,
@@ -283,7 +289,7 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 			TheShaderManager->ShaderConst.sunDiskColor, Constants.SunsetColor,
 			D3DXVECTOR4(PhysicalSettings.Enabled ? 1.0f : 0.0f, PhysicalSettings.Brightness, PhysicalSettings.WeatherTint, PhysicalSettings.Haze),
 			TheShaderManager->ShaderConst.SunAmount.x,
-			pbrForKey ? max(pbrForKey->SkylightSaturation, 0.0f) : 1.0f, TheShaderManager->GameState.isExterior ? 1.0f : 0.0f,
+			pbrForKey ? max(pbrForKey->SkylightSaturation, 0.0f) : 1.0f, terrainSat, TheShaderManager->GameState.isExterior ? 1.0f : 0.0f,
 			D3DXVECTOR4(physExact ? 1.0f : 0.0f, physMs ? 1.0f : 0.0f, PhysicalSettings.GroundAlbedo, 0.0f), Constants.SkyTint,
 			Constants.SkyTintHorizon, Constants.SkyLook };
 		inputs.sunsetColor.w = 0.0f;	// only rgb is read below
@@ -353,6 +359,7 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 	job.settings = { PhysicalSettings.Haze, PhysicalSettings.Brightness, PhysicalSettings.LightsObjects };
 	PBRShaders* pbr = TheShaderManager->Shaders.PBR;
 	job.saturation = pbr ? (pbr->SkylightSaturation > 0.0f ? pbr->SkylightSaturation : 0.0f) : 1.0f;	// (the max of the Windows macro)
+	job.terrainSaturation = terrainSat;
 	ProjectionJob::Values& values = job.values;
 	values.SkyData = Constants.SkyData; values.PhysSky = Constants.PhysSky; values.PhysSkySun = Constants.PhysSkySun;
 	values.SkyTint = Constants.SkyTint; values.SkyTintHorizon = Constants.SkyTintHorizon; values.SkyLook = Constants.SkyLook;
@@ -370,6 +377,7 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 static void ConvolveProjection(SkyShaders::ProjectionJob& j, const D3DXVECTOR3 (&sh)[9], const D3DXVECTOR3 (&shGame)[9]) {
 	const bool physical = j.physical;
 	const float saturation = j.saturation;
+	const float terrainSaturation = j.terrainSaturation;
 	const SkyShaders::ProjectionJob::Settings& PhysicalSettings = j.settings;
 	SkyShaders::ProjectionJob::Values& Constants = j.values;
 	// Convolve, and fold in each basis function's constant plus the 1/pi that converts
@@ -380,16 +388,17 @@ static void ConvolveProjection(SkyShaders::ProjectionJob& j, const D3DXVECTOR3 (
 	const float basisNorm[9] = { 0.282095f, 0.488603f, 0.488603f, 0.488603f,
 		1.092548f, 1.092548f, 0.315392f, 1.092548f, 0.546274f };
 
-	// UNOFFICIAL [Shaders.PBR.*] SkylightingSaturation: saturation is linear in the colour (a blend with its own
-	// luminance), so applying it to each coefficient equals applying it to the reconstructed irradiance, at no GPU
+	// UNOFFICIAL [Shaders.PBR.*] / [Shaders.Terrain.*] SkylightingSaturation: saturation is linear in the colour (a blend with
+	// its own luminance), so applying it to each coefficient equals applying it to the reconstructed irradiance, at no GPU
 	// cost. 1 leaves the coefficients untouched.
 	// (the sky tint, horizon tint and saturation are already in the samples: SkyLook above)
 	for (int k = 0; k < 9; k++) {
 		const float scale = bandWeight[k] * basisNorm[k];
-		D3DXVECTOR3 coefficient = sh[k] * scale;
+		const D3DXVECTOR3 rawCoefficient = sh[k] * scale;
+		D3DXVECTOR3 coefficient = rawCoefficient;
 		// UNOFFICIAL 2026-10-18 ClassicLook: the original NVR's coefficients (the game's sky, unsaturated); without the physical sky
 		// blending in, the same projection as below.
-		const D3DXVECTOR3 gameCoefficient = physical ? shGame[k] * scale : coefficient;
+		const D3DXVECTOR3 gameCoefficient = physical ? shGame[k] * scale : rawCoefficient;
 		Constants.IrradianceGame[k] = D3DXVECTOR4(gameCoefficient.x, gameCoefficient.y, gameCoefficient.z, 0.0f);
 		if (saturation != 1.0f) {
 			const float luma = 0.2126f * coefficient.x + 0.7152f * coefficient.y + 0.0722f * coefficient.z;
@@ -407,6 +416,14 @@ static void ConvolveProjection(SkyShaders::ProjectionJob& j, const D3DXVECTOR3 (
 		}
 		Constants.IrradianceObjects[k] = PhysicalSettings.LightsObjects || !physical ? Constants.Irradiance[k]
 			: D3DXVECTOR4(objectCoefficient.x, objectCoefficient.y, objectCoefficient.z, 0.0f);
+		// UNOFFICIAL 2026-11-21 [Shaders.Terrain.*] SkylightingSaturation: same raw base before PBR's saturation, saturated with Terrain's own setting.
+		D3DXVECTOR3 terrainCoefficient = (PhysicalSettings.LightsObjects || !physical) ? rawCoefficient : gameCoefficient;
+		if (terrainSaturation != 1.0f) {
+			const float luma = 0.2126f * terrainCoefficient.x + 0.7152f * terrainCoefficient.y + 0.0722f * terrainCoefficient.z;
+			const D3DXVECTOR3 gray(luma, luma, luma);
+			terrainCoefficient = gray + (terrainCoefficient - gray) * terrainSaturation;
+		}
+		Constants.IrradianceTerrain[k] = D3DXVECTOR4(terrainCoefficient.x, terrainCoefficient.y, terrainCoefficient.z, 0.0f);
 	}
 }
 
@@ -574,6 +591,7 @@ void SkyShaders::CopyProjection() {
 	memcpy(Constants.Irradiance, values.Irradiance, sizeof(Constants.Irradiance));
 	memcpy(Constants.IrradianceGame, values.IrradianceGame, sizeof(Constants.IrradianceGame));
 	memcpy(Constants.IrradianceObjects, values.IrradianceObjects, sizeof(Constants.IrradianceObjects));
+	memcpy(Constants.IrradianceTerrain, values.IrradianceTerrain, sizeof(Constants.IrradianceTerrain));
 }
 
 void SkyShaders::JoinProjection() {

@@ -17,6 +17,7 @@
 #include "DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant (DISTANT_GBUFFER for the far land)
 #include "LandLamps.h"	// UNOFFICIAL 2026-10-30 LandAllLamps
 #include "ShaderPrecompile.h"
+#include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart (a freed shader leaves the late list)
 #include "TestTools.h"	// NVR_TEST_TOOLS (FailShaders)
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31 register-clash guard (X4500)
 #include <unordered_set>	// SetCT's once-only "not bound" notes
@@ -43,7 +44,7 @@ void freeArray(Element*& array) {
 // The Definition of the last of the template's defines named Name (null when there is none, or the last has none).
 const char* lastDefinition(const ShaderTemplate& Template, const char* Name) {
 	const char* found = nullptr;
-	for (int d = 0; d < 63 && Template.Defines[d].Name; d++)
+	for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && Template.Defines[d].Name; d++)
 		if (!strcmp(Template.Defines[d].Name, Name)) found = Template.Defines[d].Definition;
 	return found;
 }
@@ -53,15 +54,30 @@ bool isOne(const char* definition) {
 }
 
 bool hasDefine(const ShaderTemplate& Template, const char* Name) {
-	for (int d = 0; d < 63 && Template.Defines[d].Name; d++)
+	for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && Template.Defines[d].Name; d++)
 		if (!strcmp(Template.Defines[d].Name, Name)) return true;
+	return false;
+}
+
+// UNOFFICIAL 2026-11-16 fast-restart (core/ForwardCloudShadows.h): the preprocessed source holds the clouds' lookup (Includes/Shadow.hlsl
+// NVR_CloudSun, the land's NvrCloudSun, TerrainTemplate's vertex NVR_CloudSunVS, DeferredSun's): compiled into every outdoor record now.
+bool cloudCodeIn(ID3DXBuffer* source) {
+	if (!source) return false;
+	const char* text = (const char*)source->GetBufferPointer();
+	const char* end = text + source->GetBufferSize();
+	static const char key[] = "NVR_CloudSun";
+	static const char land[] = "NvrCloudSun";
+	return std::search(text, end, key, key + sizeof(key) - 1) != end || std::search(text, end, land, land + sizeof(land) - 1) != end;
+}
+bool overridesName(const D3DXMACRO* overrides, const char* name) {
+	for (const D3DXMACRO* o = overrides; o && o->Name; o++) if (!strcmp(o->Name, name)) return true;
 	return false;
 }
 
 // Logs the compiler's messages and gives them to RegisterClash (null: nothing).
 void logCompilerMessages(ID3DXBuffer* messages, const char* shaderName) {
 	if (!messages) return;
-	Logger::Log((char*)messages->GetBufferPointer());
+	Logger::Log("%s", (char*)messages->GetBufferPointer());	// (2026-11-17: as text, not as the format: the messages quote the shader file)
 	RegisterClash::Check(shaderName, (const char*)messages->GetBufferPointer());
 }
 }
@@ -113,6 +129,21 @@ bool ShaderProgram::FileExists(const char* FilePath) {
 /*
 * True when the cached preprocessed source is present and equal to this build's.
 */
+// UNOFFICIAL 2026-11-17 fast-restart (the bench, heavy settings: Wetness Effects, Puddles, MicroShadow and Terrain Blending): a record that runs
+// out of temp registers with the clouds' lookup compiled in (X4505) was compiled twice (default flags, PREFER_FLOW_CONTROL) and failed again
+// at EVERY start, about 5 s each on the main thread, before its build without the lookup loaded from the cache (NoCloud): a minute and more
+// per start with those settings. The failing text is written next to the cache entry; while the record's text is exactly that, LoadShader
+// and the compile workers go straight to the build without the lookup. Any change to the text (a setting, a new build) compiles it again.
+bool ShaderProgram::KnownCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
+	return cloudCodeIn(Source) && CheckPreprocessResult((PreprocessedPath + ".nocloud").c_str(), Source);
+}
+void ShaderProgram::NoteCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
+	if (!cloudCodeIn(Source)) return;
+	std::ofstream file(PreprocessedPath + ".nocloud", std::ios::out | std::ios::binary);
+	const std::string portable = PortableSource(Source);
+	file.write(portable.data(), portable.size());
+}
+
 bool ShaderProgram::CheckPreprocessResult(const char* CachedPath, ID3DXBuffer* Source) {
 	std::ifstream File(CachedPath, std::ios::in | std::ios::binary);
 	if (!File.is_open()) return false;
@@ -199,7 +230,7 @@ static void FallbackInit() {
 		for (; text && *text; text++) hash = (hash ^ (unsigned char)*text) * 16777619u;
 		hash = (hash ^ 0xFFu) * 16777619u;
 	};
-	for (int d = 0; d < 63 && probe.Defines[d].Name; d++) { mix(probe.Defines[d].Name); mix(probe.Defines[d].Definition); }
+	for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && probe.Defines[d].Name; d++) { mix(probe.Defines[d].Name); mix(probe.Defines[d].Definition); }
 	mix(__DATE__ " " __TIME__);
 	ShaderFallback::Init(hash, std::string(ShadersPath) + "Cache\\");
 }
@@ -280,11 +311,12 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	auto AppendDefine = [&Template](const char* DefineName, const char* Value) {
 		D3DXMACRO* list = Template.Defines;
 		int used = 0;
-		for (; used < 62 && list[used].Name; used++)
+		constexpr int kMaxEntries = ShaderTemplate::kMaxDefines - 2;	// room for entries + null terminator
+		for (; used < kMaxEntries && list[used].Name; used++)
 			if (!strcmp(list[used].Name, DefineName)) return;	// an override already set it
-		if (used >= 62) {  // out of room (Defines[64]: 62 entries and the terminator); skip rather than overrun
+		if (used >= kMaxEntries) {  // out of room; skip rather than overrun
 			static bool warned = false;	// fixes-a #12: say so once (a dropped define = the shader compiled without that option)
-			if (!warned) { warned = true; Logger::Log("[ERROR] ShaderRecord: more than 62 shader defines, '%s' and any after it are dropped", DefineName); }
+			if (!warned) { warned = true; Logger::Log("[ERROR] ShaderRecord: more than %d shader defines, '%s' and any after it are dropped", kMaxEntries, DefineName); }
 			return;
 		}
 		list[used] = { DefineName, Value };
@@ -576,8 +608,8 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	if (TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMap"))
 		AppendDefine("CHARACTER_SHADOW_MAP", "1");
 	// UNOFFICIAL 2026-11-04 ForwardCloudShadows ([Shaders.VolumetricClouds.Main] ForwardShadows; Includes/Shadow.hlsl, core/ForwardCloudShadows.h): the
-	// volumetric clouds' shadow in the surface shaders. Defined only when on, and last, as above.
-	if (ForwardCloudShadows::CompiledIn()) AppendDefine("FORWARD_CLOUD_SHADOWS", "1");
+	// volumetric clouds' shadow in the surface shaders. (2026-11-16 fast-restart, docs/next/FAST-RESTART.md) No define any more: Shadow.hlsl
+	// compiles it into every outdoor record and the setting switches it live, so neither it nor the clouds' own switch changes a shader's text.
 	// UNOFFICIAL 2026-11-04 Wetness Effects ([Shaders.WetnessEffects.Status] Enabled at startup; Includes/Wetness.hlsl): the water layer in the
 	// object, parallax and land pixel shaders. Defined only when on, and last, as above.
 	// (2026-11-12 ShaderFallback: left out of every family when the land cannot carry it; WetnessEffectsShaders::UpdateConstants then
@@ -609,12 +641,22 @@ void ShaderRecord::LogCompileTimes() { ShaderPrecompile::LogCompileTimes(); }	//
 Loads a game shader by name from a subfolder (when given). It is compiled when no usable cache exists.
 @returns the new record, or null when the shader is not used.
 */
+// UNOFFICIAL 2026-11-18: the last compile in LoadShader failed for want of temp registers (X4505), for the caller of the NoCloud retry
+static bool CompileOutOfRegisters = false;
+
 ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, ShaderTemplate Template, const char* CacheSubPath,
 	const D3DXMACRO* Overrides) {
+	CompileOutOfRegisters = false;
 	TimeLogger loadClock;
 	// UNOFFICIAL 2026-11-12 ShaderFallback: the template as given, for the retry without an optional feature (BuildDefines fills Template)
 	const ShaderTemplate fallbackTemplate = Template;
 	bool retryFallback = false;
+	bool cloudRetry = false;	// UNOFFICIAL 2026-11-16 fast-restart: did not compile / was refused with the clouds' lookup: made again without it
+	// UNOFFICIAL 2026-11-18 ShaderFallback for compile failures: it did not compile (here, on a worker, or known from an earlier start), and
+	// whether that was X4505 (out of temp registers: the only failure a shorter shader cures; a typo in an edited include is not one). A
+	// record with levels of its own (a cache sub-folder or overrides: lamp shadows, light-free, NoCloud ...) is its caller's to shorten.
+	bool compileFailed = false, outOfRegisters = false;
+	const bool callerLevels = CacheSubPath != nullptr || Overrides != nullptr;
 	ShaderPrecompile::StartOnce();	// UNOFFICIAL: the first shader starts the parallel compile (once)
 
 	ShaderRecord* record = nullptr;
@@ -673,7 +715,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 	BuildDefines(Template, Overrides);	// UNOFFICIAL 2026-10-14: in its own function, shared with ShaderPrecompile
 
 	// UNOFFICIAL 2026-10-14 ParallelShaderCompile (ShaderPrecompile.h): the result a worker thread already made for this shader.
-	const bool precompiled = ShaderPrecompile::Take(binaryPath.c_str(), &source, &binary);
+	const bool precompiled = ShaderPrecompile::Take(binaryPath.c_str(), &source, &binary, macros);	// (2026-11-16: only with the same defines)
 	const HRESULT preprocess = precompiled ? D3D_OK : D3DXPreprocessShaderFromFileA(sourcePath.c_str(), macros, NULL, &source, &messages);
 	if (preprocess != D3D_OK) {
 		logCompilerMessages(messages, Name);
@@ -688,6 +730,8 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 		if (precompiled) {
 			function = binary ? binary->GetBufferPointer() : NULL;
+			compileFailed = !binary;	// (2026-11-18) the worker's compile failed
+			CompileOutOfRegisters = outOfRegisters = compileFailed && ShaderPrecompile::TakenOutOfRegisters;
 			EffectStatus::ShaderLoaded(EffectStatus::Precompiled);	// UNOFFICIAL 2026-11-01 counters
 		}
 		else if (!recompile) {
@@ -702,6 +746,9 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 					function = binary->GetBufferPointer();
 					cached.read((char*)function, size);
 					cached.close();
+					// 2026-11-17: not a whole compiled shader (cut short, or not one at all): compiled again below
+					if (!ShaderPrecompile::BinaryShape(function, (size_t)size)) { binary->Release(); binary = NULL; function = NULL; }
+					else
 					EffectStatus::ShaderLoaded(EffectStatus::CacheHit);	// UNOFFICIAL 2026-11-01
 				}
 				else {
@@ -711,9 +758,12 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			}
 		}
 
-		if (!precompiled && (recompile || !function)) {
+		// (2026-11-17 fast-restart) this exact text did not compile with the clouds' lookup before: straight to the build without it (below)
+		const bool knownCloudFailure = !precompiled && (recompile || !function) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS") && KnownCloudFailure(preprocessedPath, source);
+		if (knownCloudFailure) cloudRetry = compileFailed = true;
+		if (!precompiled && (recompile || !function) && !knownCloudFailure) {
 			// compile if option was enabled or compiled version not found
-			CompileProgress::Begin();	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window (nothing once the first frame came)
+			CompileProgress::Begin();
 			CompileProgress::NoteCurrent(Name);
 			const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (ShaderPrecompile::LogCompileTimes)
 			D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile, NULL, &binary, &messages, &table);
@@ -736,7 +786,13 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 				binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
 			logCompilerMessages(messages, Name);
 			EffectStatus::ShaderLoaded(binary ? EffectStatus::Compiled : EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
-			if (!binary) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
+			if (!binary) {	// (2026-11-18)
+				compileFailed = true;
+				CompileOutOfRegisters = outOfRegisters = messages && strstr((const char*)messages->GetBufferPointer(), "X4505") != nullptr;
+			}
+			if (!binary) cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");	// (2026-11-16 fast-restart)
+			if (cloudRetry) NoteCloudFailure(preprocessedPath, source);	// (2026-11-17: not compiled again at the next start)
+			if (!binary && !cloudRetry) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
 			if (binary) {
 				function = binary->GetBufferPointer();
 				std::ofstream binaryFile(binaryPath, std::ios::out | std::ios::binary);
@@ -826,7 +882,8 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the pixel shaders that write the normal target (COLOR3).
 						const char* capturedOn = lastDefinition(Template, "CAPTURED_NORMALS_ON");
 						const bool writes = capturedOn && (!strcmp(capturedOn, "1") || !strcmp(capturedOn, "2") || !strcmp(capturedOn, "3") || !strcmp(capturedOn, "4"));	// (3: 2026-10-31 AlbedoBuffer; 4: 2026-11-14 GBufferV2)
-						if (writes) CapturedNormals::NoteWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+						const bool writesNormal = writes && !hasDefine(Template, "DIFFUSE") && !hasDefine(Template, "ONLY_SPECULAR") && !hasDefine(Template, "NVR_SLOT_TIGHT");
+						if (writesNormal) CapturedNormals::NoteWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						if (writes) CapturedNormals::ViewEnsure(TheRenderManager->device);	// UNOFFICIAL 2026-11-14 GBufferView: compiled here, at record load (GBufferV2 only)
 						// UNOFFICIAL 2026-10-29 MaterialBuffer: Object / Parallax / Terrain write it on COLOR2 (the skin templates' COLOR2 is the skin blur's)
 						if (writes && Template.Name && (!strcmp(Template.Name, "ObjectTemplate") || !strcmp(Template.Name, "ParallaxTemplate") || !strcmp(Template.Name, "TerrainTemplate"))) {
@@ -909,13 +966,17 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 					// draws as a result: the line was "ERROR:", which no tool and no HEARTBEAT count picked up. D3DFail counts every one.
 					const bool ownLevels = CacheSubPath != nullptr || Overrides != nullptr;
 					EffectStatus::D3DFail(pixelProfile ? "CreatePixelShader refused a shader (too long for the driver)" : "CreateVertexShader refused a shader (too long for the driver)", (long)created);
-					if (!ownLevels) retryFallback = ShaderFallback::OnRefused(Template.Name, runtimeSlots);
+					// (2026-11-16 fast-restart) the clouds' lookup goes first, before any feature or level of the caller's: without it the record is
+					// exactly what it was before it was compiled in always (ForwardShadows off), and nothing visible is lost while it is off
+					cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");
+					if (!ownLevels && !cloudRetry) retryFallback = ShaderFallback::OnRefused(Template.Name, runtimeSlots);
 					Logger::Log("%s Failed to create DirectX shader for %s (%s): the device refused it (hr 0x%08X), %u instruction slots (%u as the runtime counts them, cap %u%s)%s",
-						retryFallback || ownLevels ? "[WARNING]" : "[ERROR]", Name, binaryPath.c_str(), (unsigned)created, slots, runtimeSlots,
+						retryFallback || ownLevels || cloudRetry ? "[WARNING]" : "[ERROR]", Name, binaryPath.c_str(), (unsigned)created, slots, runtimeSlots,
 						ShaderFallback::Cap(!pixelProfile), overForcedCap ? ", forced by ShaderSlotCapOverride: the device was not asked" : "",
+						cloudRetry ? "; made again without the clouds' lookup (ForwardCloudShadows)" :
 						retryFallback ? "; its family is built again without an optional feature (ShaderFallback)" :
 						ownLevels ? "; a record with levels of its own: its caller decides" : ": the game's own shader draws instead");
-					if (!retryFallback && !ownLevels) EffectStatus::Level(Name, "REFUSED by the device (too long): the game's own shader draws instead", false);
+					if (!retryFallback && !ownLevels && !cloudRetry) EffectStatus::Level(Name, "REFUSED by the device (too long): the game's own shader draws instead", false);
 					ReportError(created);
 					delete record;
 					record = nullptr;
@@ -926,8 +987,42 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 	loadClock.LogTime("ShaderRecord::LoadShader");
 
+	// (2026-11-16 fast-restart) a worker's compile that failed comes here with no bytecode and no record: the same test
+	if (!record && !retryFallback && !cloudRetry && !binary && source) {
+		cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");
+		if (cloudRetry && !KnownCloudFailure(preprocessedPath, source)) NoteCloudFailure(preprocessedPath, source);	// (2026-11-17)
+	}
 	for (ID3DXBuffer* buffer : { source, binary, messages })
 		if (buffer) buffer->Release();
+	// UNOFFICIAL 2026-11-16 fast-restart (core/ForwardCloudShadows.h): with the clouds' lookup it did not compile or the device refused it: the
+	// same record without it (FORWARD_CLOUD_SHADOWS 0: exactly as it was built before the lookup was compiled in always), in its own cache
+	// folder (Cache\NoCloud\...). If that loads, ForwardShadows works as off this session (so no surface goes without the clouds' shadow).
+	if (cloudRetry) {
+		std::vector<D3DXMACRO> cloudOff;
+		for (const D3DXMACRO* o = Overrides; o && o->Name; o++) cloudOff.push_back(*o);
+		cloudOff.push_back({ "FORWARD_CLOUD_SHADOWS", "0" });
+		cloudOff.push_back({ NULL, NULL });
+		const std::string sub = std::string("NoCloud\\") + (CacheSubPath ? CacheSubPath : SubPath ? SubPath : "");
+		Logger::Log("[WARNING] UNOFFICIAL ForwardCloudShadows: %s%s did not %s with the clouds' lookup compiled in: made again without it", SubPath ? SubPath : "",
+			Name, binary ? "load" : "compile (known from an earlier start, or now)");
+		ShaderRecord* plain = LoadShader(Name, SubPath, fallbackTemplate, sub.c_str(), cloudOff.data());
+		if (plain) ForwardCloudShadows::NoteMissing(Name);
+		// UNOFFICIAL 2026-11-18 (a co-developer: terrain blending + Puddles on DXVK, X4505): it did not compile without the lookup either.
+		// As a refused shader: its family loses the next optional feature (ShaderFallback order) and this one is made again; only when
+		// nothing is left does the game's own shader draw it. (Before, the land with those settings was the game's: no feature was dropped
+		// for a compile failure, and the deferred land record, made only after this one, was never tried.)
+		else if (compileFailed && !callerLevels && CompileOutOfRegisters && ShaderFallback::OnCompileFailed(fallbackTemplate.Name)) {	// (the NoCloud build's own X4505)
+			Logger::Log("[WARNING] %s did not compile with the clouds' lookup or without it (X4505 above: out of temp registers): its family is built again without an optional feature (ShaderFallback)", Name);
+			FallbackPrepareFamily(fallbackTemplate.Name);
+			return LoadShader(Name, SubPath, fallbackTemplate, CacheSubPath, Overrides);
+		}
+		return plain;
+	}
+	// (2026-11-18) the same for a record without the clouds' lookup in its source
+	if (!record && !retryFallback && compileFailed && outOfRegisters && !callerLevels && ShaderFallback::OnCompileFailed(fallbackTemplate.Name)) {
+		Logger::Log("[WARNING] %s did not compile (X4505 above: out of temp registers): its family is built again without an optional feature (ShaderFallback)", Name);
+		retryFallback = true;
+	}
 	// UNOFFICIAL 2026-11-12 ShaderFallback: the device refused it and its family lost an optional feature: the family's shaders are
 	// compiled again (worker threads, counted against the cap), then this one is loaded again, from the cache.
 	if (retryFallback) {
@@ -973,6 +1068,7 @@ void ShaderRecord::CreateCT(ID3DXBuffer* ShaderSource, ID3DXConstantTable* Const
 	TextureShaderValuesCount += newSamplers;
 
 	IsLandLight = sunDir18 && terrainSky && Name && strstr(Name, ".pso");
+	CloudSunFoliage = CloudSunReg && Name && (!_strnicmp(Name, "GRASS", 5) || !_strnicmp(Name, "STLEAF", 6));	// UNOFFICIAL 2026-11-16 fast-restart
 
 	TimeLogger tableClock;
 	// Arrays only for the kinds the shader has (a shader without TESR_ samplers keeps a null table).
@@ -1014,7 +1110,7 @@ void ShaderRecord::CreateCT(ID3DXBuffer* ShaderSource, ID3DXConstantTable* Const
 			break;
 		}
 		default:
-			Logger::Log("Found unsupported constant type in shader constant table: %s : %s", constDesc.Name, constDesc.RegisterSet);
+			Logger::Log("Found unsupported constant type in shader constant table: %s : %d", constDesc.Name, (int)constDesc.RegisterSet);	// (2026-11-17: %d, was %s on the enum: a crash)
 			break;
 		}
 	}
@@ -1045,7 +1141,15 @@ void ShaderTextureValue::GetSamplerStateString(ID3DXBuffer* Source, UINT32 Sampl
 			const size_t quoteOpen = annotation.find("\"");
 			const size_t quoteClose = annotation.rfind("\"");
 			std::string path = annotation.substr(quoteOpen + 1, quoteClose - 1 - quoteOpen);
-			path.insert(0, "Data\\Textures\\");
+			// 2026-11-17: a file under Data\Textures\, not a path out of it ("..\..\x" opened any file on the drive as a picture)
+			bool inside = !path.empty() && path[0] != '\\' && path[0] != '/' && path.find(':') == std::string::npos;
+			for (size_t at = path.find(".."); inside && at != std::string::npos; at = path.find("..", at + 2)) {
+				const bool before = at == 0 || path[at - 1] == '\\' || path[at - 1] == '/';
+				const bool after = at + 2 == path.size() || path[at + 2] == '\\' || path[at + 2] == '/';
+				if (before && after) inside = false;
+			}
+			if (!inside) { Logger::Log("[ERROR] Sampler %s: ResourceName \"%s\" is not a file under Data\\Textures, not used", Name, path.c_str()); path.clear(); }
+			else path.insert(0, "Data\\Textures\\");
 			TexturePath = path;
 		}
 	}
@@ -1125,7 +1229,10 @@ void ShaderRecord::SetCT() {
 		IDirect3DSurface9* current = TheRenderManager->currentRTGroup->RenderTargets[0]->data->Surface;
 		TheRenderManager->device->StretchRect(current, NULL, TheTextureManager->RenderedSurface, NULL, D3DTEXF_NONE);
 	}
-	if (HasDepthBuffer) TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
+	if (HasDepthBuffer) {
+		TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
+		if (SharedDrawState::WatchingDepth) SharedDrawState::DepthWrittenSinceCopy = true;
+	}
 	// UNOFFICIAL terrain blending: before the constants below are uploaded (it sets whether this draw blends), and the
 	// first land bind of the world scene copies the depth drawn so far.
 	if (HasTerrainBlendDepth && TheShaderManager->Shaders.Terrain) TheShaderManager->Shaders.Terrain->PrepareBlending();
@@ -1140,7 +1247,7 @@ void ShaderRecord::SetCT() {
 	if (IsLandLight) LandLight::Pending = true;
 	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' constants with the shader, not only in the object pass hook: draws that do not
 	// come through RenderPassStandardHook (and the land's lamp-shadow constants, c168-c172, PointShadowForward::BindTerrain) left c169 stale.
-	if (CloudSunReg) ForwardCloudShadows::ForShader(TheRenderManager->device);
+	if (CloudSunReg) ForwardCloudShadows::ForShader(TheRenderManager->device, CloudSunFoliage);
 
 	// Pixel records start from empty stages (vertex records leave them alone).
 	for (int stage = 0; ClearSamplers && stage < 16; stage++) TheRenderManager->renderState->SetTexture(stage, nullptr);
@@ -1149,6 +1256,9 @@ void ShaderRecord::SetCT() {
 	for (UInt32 i = 0; i < TextureShaderValuesCount; i++) {
 		ShaderTextureValue& slot = TextureShaderValues[i];
 		TextureRecord* tex = slot.Texture;
+		// 2026-11-17: a sampler without a record (no valid type), or a register past the 16 stages (only a hand-made cached binary
+		// can carry one): not bound. The game's own state arrays have 16 entries.
+		if (!tex || slot.RegisterIndex >= 16) continue;
 		if (tex->Texture == nullptr) {
 			// UNOFFICIAL 2026-10-17: a texture that is registered but empty for now (TESR_ReflectionsEnv while the Reflections
 			// cube is off -- the shader never reads it then) is re-read from its slot, not looked up by name on every draw.
@@ -1370,12 +1480,44 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 			return;
 		}
 	}
-	if (ShaderRecordPixel* record = PickRecord(this, Player->GetWorldSpace() != nullptr)) {
+	const bool inWorldspace = Player->GetWorldSpace() != nullptr;
+	if (ShaderRecordPixel* record = PickRecord(this, inWorldspace)) {
 		ShaderHandle = record->ShaderHandle;
 		ShaderRecordPixel::Current = record;
 		if (BoundHandle != ShaderHandle) record->SetCT();
+		if (GpuTimer::Enabled && !inWorldspace && record->PointShadowForward) InteriorRecordCensus::Count(Name, CapturedNormals::InSpan);	// (2026-11-16 fast-restart, log only)
 	}
 	else useGameShader();
+}
+
+// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h): the Interior-record census, log only (F10 on).
+namespace InteriorRecordCensus {
+	static std::unordered_map<std::string, unsigned long long> ByName;
+	static unsigned long long Binds = 0, InSpan = 0, Swaps = 0;
+	static unsigned Frames = 0, LiveFrames = 0;
+	void Count(const char* shaderName, bool inSpan) {
+		Binds++;
+		if (inSpan) InSpan++;
+		if (shaderName) ByName[shaderName]++;
+	}
+	void Swap() { Swaps++; }
+	void Frame(bool interior, bool rendererLive) {
+		if (!GpuTimer::Enabled || !interior) { Frames = LiveFrames = 0; Binds = InSpan = Swaps = 0; ByName.clear(); return; }
+		if (rendererLive) LiveFrames++;
+		if (++Frames < 240) return;
+		std::vector<std::pair<unsigned long long, std::string>> top;
+		for (const auto& [name, n] : ByName) top.emplace_back(n, name);
+		std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
+		std::string names;
+		for (size_t i = 0; i < top.size() && i < 16; i++) {
+			char item[64]; sprintf_s(item, "%s%s %.1f", i ? ", " : "", top[i].second.c_str(), top[i].first / (double)Frames);
+			names += item;
+		}
+		Logger::Log("INTERIOR RECORDS %u frames indoors (the deferred renderer live in %u), per frame: Interior-record binds %.1f (inside the G-buffer span %.1f, "
+			"outside it %.1f), blended draws swapped to an Interior record %.2f; %u shaders bound one: %s", Frames, LiveFrames, Binds / (double)Frames,
+			InSpan / (double)Frames, (Binds - InSpan) / (double)Frames, Swaps / (double)Frames, (unsigned)top.size(), names.empty() ? "none" : names.c_str());
+		Frames = LiveFrames = 0; Binds = InSpan = Swaps = 0; ByName.clear();
+	}
 }
 
 
@@ -1394,6 +1536,7 @@ ShaderRecordPixel* NiD3DPixelShaderEx::GetShaderRecord(ShaderRecordType Variant)
 void __fastcall NiD3DPixelShaderEx::Free(NiD3DPixelShaderEx* Shader) {
 	if (!ShaderOwnership::Ours(Shader)) { ThisCall(0xE89970, Shader); return; }	// (2026-11-03) as the vertex version
 	ShaderOwnership::Forget(Shader);
+	LateInteriors::Forget(Shader);	// UNOFFICIAL 2026-11-16 fast-restart (its lamp-shadow records are not made later)
 	GameShaderPairs::Forget(Shader->ShaderHandleBackup);	// UNOFFICIAL 2026-11-13 (its handle goes with it)
 	Shader->DisposeShader();
 	if (ShaderCollection* family = TheShaderManager->GetShaderCollection(Shader->Name)) {

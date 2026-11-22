@@ -40,7 +40,10 @@ public:
 	// inputs are bound by the caller; TESR_RenderedBuffer is TheTextureManager->RenderedTexture at that moment.
 	// ExtFailed: a failed pass turns the effect's ported path off for the session (logged once); Render then uses D3D9.
 	virtual bool			ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) { return false; }
+	// UNOFFICIAL 2026-11-19: opt-in for Vulkan effects whose shaders & viewports are verified RenderRect-aware (RenderScale < 1.0).
+	virtual bool			ExtSupportsRenderRect() const { return false; }
 	// last: false for a pass that is not the effect's last (a multi-pass port): it never writes straight into the game target.
+	// RenderRect::Active(): clips the Vulkan viewport and StretchRect copies to [0, rw) x [0, rh) on screen-shaped targets (uv 0..1 across active rect).
 	bool					ExtFullScreen(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, IDirect3DSurface9* SourceBuffer,
 								ID3D9NvrExtPipeline* Pipeline, const NVR_EXT_RESOURCE_BINDING* Bindings, UINT BindingCount, const void* Push, UINT PushSize, bool last = true);
 	bool					ExtFailed = false;

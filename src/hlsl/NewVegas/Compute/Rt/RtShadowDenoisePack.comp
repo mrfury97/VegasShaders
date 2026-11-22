@@ -24,12 +24,11 @@ layout(set = 0, binding = 14, rgba16f) uniform readonly image2D blurImage;   // 
 layout(set = 0, binding = 17, rg16f) uniform readonly image2D stabImage;     // stage 4's output (this frame)
 layout(set = 0, binding = 18, r32f) uniform writeonly image2D prevDepth;
 
-float valueOf(ivec2 pixel, int layer, Surface s, float raw) {
+float valueOf(ivec2 pixel, int layer, float viewZ, int debug, float raw) {
 	ivec2 g = pixel + ivec2(0, layer * TILE_H);
-	int debug = int(p.params2.w + 0.5);
 	if (debug == 1) return raw;
 	if (debug == 2) return imageLoad(histImage, g).x;
-	if (debug == 3) return clamp(imageLoad(histImage, g).z / pixelWorld(s.viewZ) / max(p.params.y, 1.0), 0.0, 1.0);
+	if (debug == 3) return clamp(imageLoad(histImage, g).z / pixelWorld(viewZ) / max(p.params.y, 1.0), 0.0, 1.0);
 	if (debug == 4) return clamp(imageLoad(histImage, g).w / max(p.params.x, 1.0), 0.0, 1.0);
 	if (debug == 5) return imageLoad(blurImage, g).x;
 	return imageLoad(stabImage, g).x;
@@ -39,12 +38,16 @@ void main() {
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= TILE_W || pixel.y >= TILE_H) return;
 	ivec2 src = sourceOf(pixel);
-	Surface s = surfaceAt(pixel, src, imageLoad(depthImage, src).r, imageLoad(normalImage, src).xyz);
-	imageStore(prevDepth, pixel, vec4(s.valid ? s.viewZ : 0.0, 0.0, 0.0, 0.0));
-	if (!s.valid) return;
+	// UNOFFICIAL 2026-11-19: Pack never uses s.position or s.normal; skip the RGBA16F normalImage load and world-space reconstruction.
+	float linear01 = imageLoad(depthImage, src).r;
+	float viewZ = linear01 * p.forward.w;
+	bool valid = linear01 > 0.0 && linear01 < 0.9999 && viewZ >= 1.0;
+	imageStore(prevDepth, pixel, vec4(valid ? viewZ : 0.0, 0.0, 0.0, 0.0));
+	if (!valid) return;
+	int debug = int(p.params2.w + 0.5);
 #ifdef SUN
-	float raw = imageLoad(visImage, pixel).r;
-	imageStore(visImage, pixel, vec4(clamp(valueOf(pixel, 0, s, raw), 0.0, 1.0), 0.0, 0.0, 0.0));
+	float raw = debug == 1 ? imageLoad(visImage, pixel).r : 0.0;
+	imageStore(visImage, pixel, vec4(clamp(valueOf(pixel, 0, viewZ, debug, raw), 0.0, 1.0), 0.0, 0.0, 0.0));
 #else
 	vec2 packed = imageLoad(resultImage, pixel).xy;
 	float hi = floor(packed.x / 1024.0), code = floor(packed.y / 1024.0);
@@ -56,8 +59,8 @@ void main() {
 		if (slots[k] > 62.5) continue;
 		for (int j = 0; j < count; j++) {
 			if (abs(layerSlotOf(j) - slots[k]) > 0.5) continue;
-			float raw = imageLoad(signalImage, pixel + ivec2(0, j * TILE_H)).x;
-			vis[k] = clamp(floor(15.0 * clamp(valueOf(pixel, j, s, raw), 0.0, 1.0) + 0.5), 0.0, 15.0);
+			float raw = debug == 1 ? imageLoad(signalImage, pixel + ivec2(0, j * TILE_H)).x : 0.0;
+			vis[k] = clamp(floor(15.0 * clamp(valueOf(pixel, j, viewZ, debug, raw), 0.0, 1.0) + 0.5), 0.0, 15.0);
 			break;
 		}
 	}

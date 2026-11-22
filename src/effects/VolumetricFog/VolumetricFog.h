@@ -193,7 +193,7 @@ public:
 	IDirect3DBaseTexture9* noiseTexture = nullptr;	// NVR_FogNoise (Render loads it)
 	CachedHandle paramPhysSky;	// TESR_PhysSky: declared only when the effect was compiled with PHYSICAL_SKY_ON
 	IDirect3DBaseTexture9* ExtTextureOf(const char* name);
-	static const UINT ExtInputCount = 14;	// the Apply shader's textures (the Estimate shader declares the first 8; 13: the sky shares, UNOFFICIAL 2026-11-05)
+	static const UINT ExtInputCount = 15;	// the Apply shader's textures (the Estimate shader declares the first 8; 13: the sky shares, UNOFFICIAL 2026-11-05; 14: TESR_DepthBufferViewModel)
 	bool	ExtSetup(IDirect3DBaseTexture9* (&inputs)[ExtInputCount], ExtFogPush& push);
 	bool	ExtApplyPass(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, IDirect3DSurface9* SourceBuffer,
 		IDirect3DBaseTexture9* const (&inputs)[ExtInputCount], const ExtFogPush& push, bool last);

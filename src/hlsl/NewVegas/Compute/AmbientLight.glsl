@@ -46,6 +46,9 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 gridLampInfo;           // NVR_GridLampInfo
     vec4 gridLamps[32];          // NVR_GridLamps
     vec4 gridLampColors[32];     // NVR_GridLampColors
+    vec4 renderScale;            // TESR_RenderScale (xy active RenderRect scale; 0 -> 1.0)
+    vec4 alReach;                // NVR_ALReach (z AlbedoFallbackCap, w RtFarFade)
+    vec4 alBump;                 // NVR_ALBump (x 1 = DeferredBumpedNormals shading normals bound)
 } cb;
 
 layout(push_constant) uniform Push {
@@ -132,7 +135,7 @@ vec3 SkyTake(vec3 linearColor, float factor, float visibility, float cap, float 
 // ---- AmbientLight.fx.hlsl ----
 bool IsViewModel(texture2D viewModelTex, vec2 uv) {
     float d = pointLod(viewModelTex, uv).x;
-    return (cb.depthConstants.z == 0.0 && d < 0.9) || (cb.depthConstants.z > 0.0 && d > 0.01);
+    return (cb.depthConstants.z == 0.0 && d < 0.99999) || (cb.depthConstants.z > 0.0 && d > 0.0);
 }
 
 vec3 PositionFromLinear(vec2 uv, float linear01) {
@@ -232,11 +235,24 @@ vec3 GridBounce(texture2D accumTex, texture2D accumColorTex, vec3 cameraRelative
 }
 
 const float MaxReflectance = 0.6;
-vec3 SurfaceColour(vec3 lin) {
+vec3 SurfaceColourCap(vec3 lin, float cap) {
     vec3 ambient = max(cb.alScene.rgb, vec3(0.25 * luma(cb.alScene.rgb) + 1.0e-4));
     vec3 raw = max(lin, vec3(0.0)) / ambient;
     float level = luma(raw);
     vec3 hue = raw / max(level, 1.0e-4);
-    float trust = saturate(MaxReflectance / max(level, 1.0e-4));
-    return min(level, MaxReflectance) * min(mix(vec3(1.0), hue, trust), vec3(3.0));
+    float trust = saturate(cap / max(level, 1.0e-4));
+    return min(level, cap) * min(mix(vec3(1.0), hue, trust), vec3(3.0));
+}
+vec3 SurfaceColour(vec3 lin) { return SurfaceColourCap(lin, MaxReflectance); }
+float FallbackCap() { return cb.alFlags.z > 0.5 && cb.alReach.z > 0.0 ? cb.alReach.z : MaxReflectance; }
+vec3 SurfaceAlbedo(texture2D albedoTex, vec2 uv, vec3 lin) {
+    vec4 a = pointLod(albedoTex, uv);
+    float take = step(0.5, cb.alFlags.z) * step(0.5, a.a);
+    return mix(SurfaceColourCap(lin, FallbackCap()), max(a.rgb, vec3(0.0)), take);
+}
+vec3 MultiBounceAO(float v, vec3 albedo) {
+    vec3 a =  2.0404 * albedo - 0.3324;
+    vec3 b = -4.7951 * albedo + 0.6417;
+    vec3 c =  2.7552 * albedo + 0.6903;
+    return max(vec3(v), ((v * a + b) * v + c) * v);
 }

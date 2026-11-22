@@ -23,6 +23,12 @@ Only d3d9.dll is built and shipped; NVR's own DLL, menu, settings and presets st
                             (`tools/nvr-sm6`, docs/next/FORK-1026-SM6.md; NVR reads MaxSlots from GetInfo)
                  0015       "1.5-debug": dxvk.conf `nvr.debugEnv = "NAME=value|..."` sets environment variables (DXVK_DEBUG,
                             Vulkan loader/layer settings) before DXVK and the loader read them
+                 0036       (2026-11-17, security review) "1.5-debug": from dxvk.conf alone nvr.debugEnv sets only DXVK_DEBUG,
+                            DXVK_LOG_LEVEL, DXVK_HUD, DXVK_FILTER_DEVICE_NAME (the bench's GPU pick), VK_KHRONOS_VALIDATION_VALIDATE_*,
+                            VK_LAYER_ENABLES, VK_LOADER_LAYERS_DISABLE and ENABLE_VULKAN_RENDERDOC_CAPTURE; any other
+                            name (VK_ADD_LAYER_PATH, PATH, ...) needs NVR_DXVK_DEV set in the game's environment. Applies
+                            on the full stack (git am on v3.0.1). Built 2026-11-17 in WSL ~/fork-secfix (the fork-rtgap-tex tree + 0036), d3d9.dll
+                            sha256 e9ad7814; RT test host PASS on it and its log shows the refusals. In no release yet.
                  0016       "1.5-debug": ID3D9NvrExtReadback (readback that never waits), storage buffers in the pass stages
                  0017       (deep/fork-async) "1.5-warm": dxvk.conf `nvr.pipelineLog = True` logs every pipeline compiled or
                             linked at first use on the recording thread (a wait the frame cannot hide), with time and shader

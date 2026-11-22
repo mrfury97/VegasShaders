@@ -8,8 +8,14 @@
 #include "includes/Shadow.hlsl"
 #include "includes/GrassWind.hlsl"   // UNOFFICIAL 2026-10-20 grass field wind ([Shaders.Grass.Wind]; reads the lanes after Shadow.hlsl's matrix)
 
+#ifndef GRASS_SHADOW_CASTER
 uniform float3 DiffuseDir   : register(c0);
 uniform float3 DiffuseColor : register(c1);
+#else
+// UNOFFICIAL 2026-11-21: shadow casters (sun & flashlight) read world-space grass collision bend from c0-c1 (free in caster builds).
+uniform float4 GrassCasterBend       : register(c0); // xyz = world BendCentre, w = 1 / Radius
+uniform float4 GrassCasterBendParams : register(c1); // x = BendPush
+#endif
 uniform float3 ScaleMask    : register(c2);
 uniform float4 WindData     : register(c4);
 uniform float4 AlphaParam   : register(c5);
@@ -131,8 +137,10 @@ VtxVaryings main(VtxAttrs va) {
     float3 local_p = scl * va.f_position.xyz;
     float3 pos_w = bin_vec * local_p.x + tan_vec * local_p.y + loc_orient * local_p.z;
 
+#ifndef GRASS_SHADOW_CASTER
     // Sun off the card orientation.
     float n_dot_l = saturate(dot(DiffuseDir, loc_orient));
+#endif
 
     // Per-instance phase from inst.xy, stiffness from vertex alpha squared.
     float ph = (inst_id.x + inst_id.y) * 0.0078125f + WindData.w;
@@ -171,6 +179,8 @@ VtxVaryings main(VtxAttrs va) {
     float bend_reach = 0.0f;
 #ifndef GRASS_SHADOW_CASTER
     pos_w += GrassBend(GrassCameraRelative(inst_clip), pos_w, TESR_GrassBend, TESR_Translucency.w, bend_reach) * (1.0f - GrassBatch.z);
+#else
+    pos_w += GrassBend(inst_id.xyz, pos_w, GrassCasterBend, GrassCasterBendParams.x, bend_reach) * (1.0f - GrassBatch.z);
 #endif
 
     float4 world_pos = float4(pos_w + inst_id.xyz, 1.0f);
@@ -181,7 +191,7 @@ VtxVaryings main(VtxAttrs va) {
     // shadows as they should", the grass tufts threw none): this file compiled a second time as the caster that draws the tufts into
     // the near sun shadow map. For those draws GrassShadows puts the camera's view -> the cascade's shadow map space into the xyz of
     // c252-c255 (the grass wind lanes in their w are kept), so the shadow-position transform below lands on the tuft's place in the
-    // map, the same transform the shadow lookups use. No lighting, fog or collision push here (the push reads those registers too).
+    // map, the same transform the shadow lookups use. Collision push reads world-space BendCentre / Push from c0-c1.
     float caster_fade = vr.f_sun.w;
 #if GRASS_SHADOW_CASTER == 2
     // the flashlight's map: the tuft through its perspective, writing the distance to the light over its reach (as the spot map holds it);
@@ -190,7 +200,14 @@ VtxVaryings main(VtxAttrs va) {
     float4 caster_clip = mul(float4(caster_rel, 1.0f), GrassSpotCaster);
     float3 caster_light = float3(0.0f, 0.0f, length(caster_rel - GrassSpotCasterLight.xyz) / GrassSpotCasterLight.w);
 #else
-    float3 caster_light = GetShadowWorldPos(vr.f_position);
+    // Division-free view-space reconstruction (eliminates viewZ=0 singularity & 1-frame stretched shadow rays on offscreen culling)
+    float4 caster_view = float4(
+        vr.f_position.x * TESR_InvProjectionTransform._11 + vr.f_position.w * TESR_InvProjectionTransform._41,
+        vr.f_position.y * TESR_InvProjectionTransform._22 + vr.f_position.w * TESR_InvProjectionTransform._42,
+        vr.f_position.w,
+        1.0f);
+    float3 caster_light = mul(caster_view, TESR_InvViewTransform).xyz;
+    caster_light.z = max(caster_light.z, 0.0f);
 #endif
     vr = (VtxVaryings)0;
     vr.f_position = float4(caster_light, 1.0f);

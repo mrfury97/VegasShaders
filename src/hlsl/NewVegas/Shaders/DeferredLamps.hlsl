@@ -18,6 +18,7 @@
     #endif
 #endif
 #define SPECULAR
+#define PBR_ROUGH_F90 1	// UNOFFICIAL 2026-11-19 (Finding 4.2): roughness-damped grazing F90 parity with RtPathTrace.comp
 
 // UNOFFICIAL 2026-11-15 fd-lampfit (docs/next/FD-LAMPFIT.md): POINT_SHADOW_RT (RT lamp shadows on the fork, or CapsuleShadows on any runtime)
 // is read by the shadow passes only (DLShadow's traced read, a pixel's first 16 lamps). Every other pass of this file looks lamps past the 16th
@@ -30,9 +31,26 @@
     #define POINT_SHADOW_RT 0
 #endif
 
+// UNOFFICIAL 2026-11-21: per-pixel dielectric F0 from FDSunVisCode in TESR_CapturedNormalsBuffer.a
+// (material rules, _rmaos SpecularFromMap, VanillaBridgeDielectricMax). Placed before Includes/Object.hlsl
+// so PBR.hlsl uses DLSpecF0 instead of hardcoded 0.04.
+#if CAPTURED_NORMALS_ON >= 4 && !defined(DL_SKIN_ONLY) && !defined(DL_LAND_ONLY) && !defined(DL_SHADOW_PASS) && !defined(DL_FOG_RESOLVE)
+static float DLSpecF0 = 0.04f;
+#define PBR_SPEC_F0(baseColor, metal) lerp(DLSpecF0.xxx, (baseColor), (metal))
+#define PBR_DIELECTRIC_F0 min(DLSpecF0, 0.04f)
+#endif
+
 #include "includes/Helpers.hlsl"
 #include "includes/Object.hlsl"
 #include "includes/LampFalloff.hlsl"
+// UNOFFICIAL 2026-11-18 next-111: DebugView 1 (the lamps' colour x falloff) under the physical lamp shape (LAMP_FALLOFF_ON 2: [Shaders.PBR.LampFalloff]
+// Interior or Exterior on) shows the game's att unshaped: a second LampShape + pow in the loop pushed the land, skin and fallback lamp passes
+// past ps_3_0's temp registers (X4505, offline on both runtimes). Without the shape the view is as before (the same bytecode).
+#if LAMP_FALLOFF_ON >= 2
+    #define DL_DEBUG_ATT(att) (att)
+#else
+    #define DL_DEBUG_ATT(att) LampAtt(att)
+#endif
 #include "includes/Shadow.hlsl"
 #include "includes/PointShadowForward.hlsl"
 // UNOFFICIAL 2026-11-14 DeferredSun: with the lighting-free records made (FD_LIGHT_FREE from DeferredLamps.h) COLOR1.a may carry their code
@@ -202,13 +220,15 @@ float3 DLLampLandFilm(float3 toLamp, float att, float3 color, float3 V, float3 N
 // The skin's numbers from COLOR3 (its code and the vertex normal), read here: no temp register is held across the loop for them. Two halves,
 // two loops (the diffuse, then the highlight: Includes/SkinDeferred.hlsl FDSkinLampDiffuse / FDSkinLampSpecular; whole, X4505).
 float3 DLLampSkinDiffuse(float3 toLamp, float att, float3 color, float3 V, float3 N, float3 albedo, float rough, float metal) {
+    const float3 radiance = color * (LIN_SCALE_LIGHT * LampAttOther(att));
     const float4 normals = tex2Dlod(DL_Normals, dlSkinUV);
     FDSkinSetup(normals.a, rough);
-    return FDSkinLampDiffuse(albedo, N, ShadowDecodeNormal(normals.rg), V, toLamp, color * LIN_SCALE_LIGHT * LampAttOther(att));
+    return FDSkinLampDiffuse(albedo, N, ShadowDecodeNormal(normals.rg), V, toLamp, radiance);
 }
 float3 DLLampSkinSpecular(float3 toLamp, float att, float3 color, float3 V, float3 N, float3 albedo, float rough, float metal) {
+    const float3 radiance = color * (LIN_SCALE_LIGHT * LampAttOther(att));
     FDSkinSetup(tex2Dlod(DL_Normals, dlSkinUV).a, rough);
-    return FDSkinLampSpecular(N, V, toLamp, color * LIN_SCALE_LIGHT * LampAttOther(att));
+    return FDSkinLampSpecular(N, V, toLamp, radiance);
 }
 #endif
 
@@ -242,6 +262,18 @@ void DLPixel(PS_IN IN, float4 uv4, out float3 ray, out float3 position, out floa
     const float slice = viewZ < 64.0f ? 0.0f : min(7.0f, floor(log2(viewZ)) - 5.0f);
     base = (slice * DL_Grid.x * DL_Grid.y + tile.y * DL_Grid.x + tile.x) * LIGHT_COMMON_LIST_TEXELS;
     count = DL_Grid.z > 0.5f ? LightCommonListTexel(base).x : 0.0f;
+}
+
+// Lamp k of the pixel's list: its table index and distance falloff (2026-11-19: keeps toLamp + color out of temp registers across DLShadow).
+void DLLampAtt(float k, float base, float3 position, out float i, out float att) {
+    const float e = k + 1.0f;
+    const float t = floor((e + 0.5f) / 4.0f);
+    const float c = e - t * 4.0f;
+    const float4 v = LightCommonListTexel(base + t);
+    i = dot(v, float4(c < 0.5f, abs(c - 1.0f) < 0.5f, abs(c - 2.0f) < 0.5f, c > 2.5f));
+    float4 lamp; float3 unusedColor;
+    LightCommonLamp(i, float4(0.0f, 0.0f, 0.0f, 0.0f), DL_Rows[0], DL_Rows[1], DL_Rows[2], 1.0f, lamp, unusedColor);
+    att = lamp.w > 0.0f ? vanillaAtt(lamp.xyz - position, max(lamp.w, 1.0e-3f)) : 0.0f;
 }
 
 // Lamp k of the pixel's list: its table index, the vector to it, its falloff and colour.
@@ -380,12 +412,19 @@ float4 main(PS_IN IN, out float depth : DEPTH DL_SKIN_SPEC_OUT) : COLOR0 {
     #endif
     }
 #endif
-    const float keep = DL_KEEP(uv4);	// 1 - fog: the share of added light the draw's fog lets through
-    clip(keep - 1.0e-4f);
+    clip(DL_KEEP(uv4) - 1.0e-4f);	// 1 - fog: clip early; recomputed after the loop so no temp register stays live across it
+#if CAPTURED_NORMALS_ON >= 4 && !defined(DL_SKIN_ONLY) && !defined(DL_LAND_ONLY)
+    const bool dlDiffuseOnly = floor(material0.r + 0.01f) < 15.5f;
+#endif
 
     float3 ray, position; float base, count;
     DLPixel(IN, uv4, ray, position, base, count);
-    SetDiffuseEnergyKeep(DL_NORMAL(material0, uv4), -ray, GBufferRoughness(material0.b));	// (2026-11-16 fd-sunvis: the deferred passes' one roughness decode, Includes/Object.hlsl)
+#if !defined(DL_SKIN_ONLY) && !defined(DL_LAND_ONLY)
+    {
+        const float4 mKeep = tex2Dlod(DL_Material, uv4);
+        SetDiffuseEnergyKeep(DL_NORMAL(mKeep, uv4), -ray, GBufferRoughness(mKeep.b));	// (2026-11-16 fd-sunvis: the deferred passes' one roughness decode, Includes/Object.hlsl)
+    }
+#endif
 
     float3 light = 0.0f;
     // UNOFFICIAL 2026-11-17 fd-directlight (docs/next/FD-DIRECTLIGHT.md item 3): DLPixel's position is pushed off the surface for the shadow
@@ -397,25 +436,32 @@ float4 main(PS_IN IN, out float depth : DEPTH DL_SKIN_SPEC_OUT) : COLOR0 {
     // (its change is the push's share of the lamp's distance, along the normal: small for the grazing lamps the direction mattered for).
     // Exact (the smooth normal decoded again per lamp, or the unpushed position kept through the loop) does not fit the pass's temp registers:
     // X4505 in every variant tried offline (2026-11-17, template_compile, fork and native); this form adds 9 slots and compiles as before.
+    // UNOFFICIAL 2026-11-19 (Handoff 2a): uvk's .w is identically 0 at runtime (DL_Grid.x >= 0, k + 1 >= 1 -> saturate(-DL_Grid.x * (k + 1)) == 0)
+    // and keeps FXC / D3DX from hoisting all four DL_Vis0..3 fetches into 4 permanent float4 temp registers across the 63-lamp loop (saves 2-3
+    // vector temps, fixing ps_3_0 X4505 in DeferredLampLand / DeferredLampSkin / DeferredLamps under LAMP_FALLOFF_ON 2).
     #define DL_LIT_VECTOR(toLamp, N) ((toLamp) + (N) * ((dot((N), ray) > 0.0f ? -DL_Shadow.z : DL_Shadow.z) * dot(position, ray)))
     #define DL_LAMP_LOOP(LIGHT_FN) \
     [loop] for (int k = 0; k < 63; k++) { \
         [branch] if ((float)k >= count) break; \
-        float i, att; float3 toLamp, color; \
-        DLLamp((float)k, base, position, i, toLamp, att, color); \
+        float i, att; \
+        DLLampAtt((float)k, base, position, i, att); \
         [branch] if (att > 0.0f) { \
             float shadow; \
             [branch] if (k < 16 && DL_Shadow.y > 0.5f) { \
                 const float q = floor(((float)k + 0.5f) / 4.0f); \
                 const float r = (float)k - q * 4.0f; \
-                const float4 vis = q < 0.5f ? tex2Dlod(DL_Vis0, uv4) : q < 1.5f ? tex2Dlod(DL_Vis1, uv4) : q < 2.5f ? tex2Dlod(DL_Vis2, uv4) : tex2Dlod(DL_Vis3, uv4); \
+                const float4 uvk = float4(IN.uv, 0.0f, saturate(-DL_Grid.x * (float)(k + 1))); \
+                const float4 vis = q < 0.5f ? tex2Dlod(DL_Vis0, uvk) : q < 1.5f ? tex2Dlod(DL_Vis1, uvk) : q < 2.5f ? tex2Dlod(DL_Vis2, uvk) : tex2Dlod(DL_Vis3, uvk); \
                 shadow = dot(vis, float4(r < 0.5f, abs(r - 1.0f) < 0.5f, abs(r - 2.0f) < 0.5f, r > 2.5f)); \
             } \
             else shadow = DL_SHADOW_PAST16(i, position, att, uv4); \
             [branch] if (shadow > 0.0f) { \
+                float4 lamp; float3 color; \
+                LightCommonLamp(i, float4(0.0f, 0.0f, 0.0f, 0.0f), DL_Rows[0], DL_Rows[1], DL_Rows[2], 1.0f, lamp, color); \
+                const float3 toLamp = lamp.xyz - position; \
                 const float4 m = tex2Dlod(DL_Material, uv4); \
                 const float3 N = DL_NORMAL(m, uv4); \
-                const float3 lit = DL_Debug.x > 0.5f && DL_Debug.x < 1.5f ? color * LampAtt(att) : LIGHT_FN(DL_LIT_VECTOR(toLamp, N), att, color, -ray, N, \
+                const float3 lit = DL_Debug.x > 0.5f && DL_Debug.x < 1.5f ? color * DL_DEBUG_ATT(att) : LIGHT_FN(DL_LIT_VECTOR(toLamp, N), att, color, -ray, N, \
                     tex2Dlod(DL_Albedo, uv4).rgb, GBufferRoughness(m.b), saturate((m.r - floor(m.r)) / 0.49f)); \
                 light += lit * shadow; \
             } \
@@ -444,14 +490,15 @@ float4 main(PS_IN IN, out float depth : DEPTH DL_SKIN_SPEC_OUT) : COLOR0 {
     { DL_LAMP_LOOP(DLLampLand) }
         #endif
     #else
-    [branch] if (floor(material0.r + 0.01f) < 15.5f) { DL_LAMP_LOOP(DLLampDiffuse) }
-    else { DL_LAMP_LOOP(getPointLightLightingAtt) }
+    [branch] if (dlDiffuseOnly) { DL_LAMP_LOOP(DLLampDiffuse) }
+    else { DLSpecF0 = FDSpecF0Decode(tex2Dlod(DL_Normals, uv4).a); DL_LAMP_LOOP(getPointLightLightingAtt) }
     #endif
 #else
     DL_LAMP_LOOP(getPointLightLightingAtt)
 #endif
     #undef DL_LAMP_LOOP
     #undef DL_LIT_VECTOR
+    const float keep = DL_KEEP(uv4);
     // the inputs as the pass sees them (written over the frame, blend off: DeferredLamps::Apply)
     // (2026-11-03 rtspec) DebugView 7: the lamps' light ALONE over the frame (the game's ambient, emittance and other light left out), in the
     // frame's encoding: the direct lamp light to set beside the reference path tracer's PTDebugView 3 (with PTReplace: the same post chain)
@@ -460,7 +507,7 @@ float4 main(PS_IN IN, out float depth : DEPTH DL_SKIN_SPEC_OUT) : COLOR0 {
     [branch] if (DL_Debug.x > 6.5f) return float4(DL_Fwd.w > 0.5f ? light * keep : pow(max(light * keep, 0.0f), DL_Table.w), 1.0f);
     [branch] if (DL_Debug.x > 1.5f) {
         const float3 cell = floor(position / 64.0f);
-        const float3 N = DL_NORMAL(material0, uv4);
+        const float3 N = DL_NORMAL(tex2Dlod(DL_Material, uv4), uv4);
         const float3 dbg = DL_Debug.x < 2.5f ? float3(frac((cell.x + cell.y + cell.z) * 0.5f) * 0.6f + 0.2f, saturate(length(position) / 4096.0f), 0.0f) :
             DL_Debug.x < 3.5f ? N * 0.5f + 0.5f : DL_Debug.x < 4.5f ? keep.xxx : (count / 31.0f).xxx;
         return float4(dbg, 1.0f);

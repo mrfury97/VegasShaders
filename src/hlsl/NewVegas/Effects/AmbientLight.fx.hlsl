@@ -96,6 +96,9 @@ sampler2D NVR_ALGIHistory : register(s5) = sampler_state { ADDRESSU = CLAMP; ADD
 // search. 0 (never set, the key off, nothing traced): Estimate exactly as before.
 float4 NVR_ALRT;
 sampler2D NVR_ALRTAO : register(s6) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
+// DeferredBumpedNormals shading normals bound on s3 for Apply (Estimate's blue-noise stage, unused in Apply; NVR_ALBump.x 1 = bound).
+float4 NVR_ALBump;
+sampler2D NVR_ALShadingNormals : register(s3) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 
 static const float Radius = max(TESR_AmbientLightData.x, 1.0f);
 static const float OcclusionStrength = TESR_AmbientLightData.y;
@@ -136,7 +139,7 @@ static const int endFade = 8000;	// (as AmbientOcclusion.fx.hlsl's: no sky facto
 sampler2D NVR_ALViewModel : register(s15) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 bool IsViewModel(float2 uv) {
 	float d = tex2Dlod(NVR_ALViewModel, float4(uv, 0.0f, 0.0f)).x;
-	return (TESR_DepthConstants.z == 0 && d < 0.9f) || (TESR_DepthConstants.z > 0 && d > 0.01f);
+	return (TESR_DepthConstants.z == 0.0f && d < 0.99999f) || (TESR_DepthConstants.z > 0.0f && d > 0.0f);
 }
 
 // ShadowsExteriors.fx.hlsl Shadow() on a gamma-encoded colour (the same maths as VolumetricFog.fx.hlsl CompositeSunShadow).
@@ -276,7 +279,10 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 	float4 center = tex2Dlod(NVR_ALPrep, float4(uv, 0.0f, 0.0f));
 	float3 origin = PositionFromViewZ(uv, center.x);
 	float fade = smoothstep(NearFade, NearFade * 2.0f, origin.z) * (1.0f - smoothstep(DrawDistance * 0.7f, DrawDistance, origin.z));
-	[branch] if (fade <= 0.0f) return float4(0.0f, 0.0f, 0.0f, 1.0f);
+	[branch] if (fade <= 0.0f) {
+		float3 vmBounce = (origin.z >= 9.0e5f && NVR_ALGI.x > 0.5f) ? tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb : 0.0f;
+		return float4(vmBounce, 1.0f);
+	}
 
 	float3 normal = OctDecode(Unpack2(center.y));
 	float3 viewVec = normalize(-origin);
@@ -457,7 +463,7 @@ AccumulateOut Accumulate(VSOUT IN) {
 	float viewZ = tex2Dlod(NVR_ALPrep, float4(uv, 0.0f, 0.0f)).x;
 	OUT.bounce = float4(current.rgb, viewZ);
 	OUT.occlusion = float4(current.a, viewZ, 0.0f, 1.0f);
-	[branch] if (!(NVR_ALTemporal.x > 0.0f) || viewZ < NearFade) return OUT;
+	[branch] if (!(NVR_ALTemporal.x > 0.0f) || viewZ < NearFade || viewZ >= 9.0e5f) return OUT;
 	float3 origin = PositionFromViewZ(uv, viewZ);
 	// UNOFFICIAL 2026-10-29 ObjectMotion: a surface that moved itself (a grabbed teapot, a walking NPC) was that far back along its path
 	// (the world move, into view space)
@@ -901,6 +907,12 @@ float3 SurfaceAlbedo(float2 uv, float3 lin) {
 	float take = step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a);
 	return lerp(SurfaceColourCap(lin, FallbackCap()), max(a.rgb, 0.0f), take);
 }
+float3 MultiBounceAO(float v, float3 albedo) {
+	float3 a =  2.0404f * albedo - 0.3324f;
+	float3 b = -4.7951f * albedo + 0.6417f;
+	float3 c =  2.7552f * albedo + 0.6903f;
+	return max(v.xxx, ((v * a + b) * v + c) * v);
+}
 
 // UNOFFICIAL 2026-10-18 (ambfix2, user: "indoors it's too powerful ... it diverges from the original mood of each vanilla room"):
 // indoors the room keeps its own brightness. The game's interior ambient already stands in for all the light bouncing round the
@@ -981,12 +993,13 @@ float2 SkyFactorAt(float2 uv, float depth) {
 // the occlusion; the bounce light is not sky light and keeps its strength. The debug views stay this effect's own.
 float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	float4 color = tex2D(TESR_SourceBuffer, IN.UVCoord);
-	[branch] if (NVR_ALFlags.x > 0.5f) color = float4(SunShadowApply(color.rgb, IN.UVCoord), 1.0f);
+	bool viewModel = IsViewModel(IN.UVCoord);
+	[branch] if (!viewModel && NVR_ALFlags.x > 0.5f) color = float4(SunShadowApply(color.rgb, IN.UVCoord), 1.0f);
 	float depth = readDepth(IN.UVCoord);
 	float2 skyFactor = 1.0f;	// (the factor, the visibility; Includes/SkyTake.hlsl. 'if (sky)': compiled out of the technique without the sky)
-	if (sky) skyFactor = SkyFactorAt(IN.UVCoord, depth);
-	[branch] if (depth < NearFade || depth > DrawDistance || IsViewModel(IN.UVCoord)) {
-		if (sky) color.rgb = pows(SkyTake(pows(color.rgb, 2.2f), skyFactor.x, skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w), 1.0f / 2.2f);	// (on gamma 2.2 linear, as the AO's combine)
+	if (sky && !viewModel) skyFactor = SkyFactorAt(IN.UVCoord, depth);
+	[branch] if (!viewModel && (depth < NearFade || depth > DrawDistance)) {
+		if (sky) color.rgb = pows(SkyTake(pows(color.rgb, 2.2f), max(skyFactor.x, DarkestAO), skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w), 1.0f / 2.2f);	// (on gamma 2.2 linear, as the AO's combine)
 		return DebugView > 0.5f ? float4(0.0f, 0.0f, 0.0f, 1.0f) : color;
 	}
 
@@ -1032,8 +1045,10 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	ambient.a = edgeReject > 0.5f && weights < 0.01f ? nearestValue : ambient.a;	// (EdgeReject: no tap at this depth, the nearest)
 
 	float3 lin = linearize(color.rgb);
+	float shadedLuma = luma(lin);
 	float ao = lerp(DarkestAO, 1.0f, ambient.a);
-	ao = lerp(ao, 1.0f, saturate((luma(lin) - BrightFade) * 3.0f));   // bright surfaces keep their light, as the old AO
+	bool balanced = (NVR_ALInterior.x > 0.5f) || (NVR_ALInterior.w > 0.0f);
+	if (!balanced) ao = lerp(ao, 1.0f, smoothstep(BrightFade * 0.5f, BrightFade * 1.5f + 0.15f, shadedLuma));   // bright surfaces keep their light without flickering fires
 	// UNOFFICIAL 2026-10-14 (user: the occlusion still shimmers on grass): where the depth is busy (grass, bushes: neighbouring
 	// pixels on different blades, a bend in the depth no flat surface has, even seen edge on), the occlusion is mostly chance
 	// (which blade covers the pixel this frame, swaying), and the blur and the frame history cannot settle it (they keep
@@ -1071,12 +1086,12 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		return giApply && DebugView > 12.5f ? delinearize(float4(giLight, 1.0f)) : float4(saturate(m.xyz * NVR_GridStep.y), 1.0f);	// (13 with NVR_ALGI.z: the RT bounce light, above)
 	}
 	[branch] if (DebugView > 10.5f) return float4(busy.xxx, 1.0f);	// 11 (diagnostic): where the busy-depth rule lifts the occlusion
-	ao = lerp(ao, lerp(1.0f, ao, 0.25f), busy);
+	ao = viewModel ? 1.0f : lerp(ao, lerp(1.0f, ao, 0.25f), busy);
 	float3 albedo = SurfaceAlbedo(IN.UVCoord, lin);                      // UNOFFICIAL 2026-10-18 (ambfix): was lin / max channel * 0.6; 2026-10-31 AlbedoBuffer: the buffer where written
 	// UNOFFICIAL 2026-10-14: the light grid's bounce (GridBounce), darkened by the occlusion as light from round about is.
 	float3 gridBounce = 0.0f;
 	[branch] if (NVR_GridData.x > 0.0f) {
-		float3 cameraRelative = toWorld(IN.UVCoord) * depth;
+		float3 cameraRelative = viewModel ? 0.0f : toWorld(IN.UVCoord) * depth;
 		float3 normal = normalize(GetWorldNormalLod(IN.UVCoord));
 		gridBounce = GridBounce(cameraRelative, normal) * (NVR_GridData.x * ao);
 	}
@@ -1104,7 +1119,9 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	// = lin - ((1 - ao) + ao q) A, so the occlusion darkens only the ambient that stays and the RT bounce (giLight, below) fills the rest. With q = 0 and
 	// NVR_ALRoom.x = 0 (the key off) (1 - ao) + ao * 0 and A * (1 - 0) are the old values exactly. The balance passes (StatsAt) are unchanged: the grid's
 	// bounce still gives back at most what the occlusion alone took.
-	[branch] if (NVR_ALInterior.x > 0.5f) lin = lin - ((1.0f - ao) + ao * max(NVR_ALInterior.x - 1.0f, 0.0f)) * min(lin, albedo * NVR_ALScene.rgb * (1.0f - NVR_ALRoom.x)) + gridBounce * albedo;
+	if (viewModel) {
+		lin = lin + gridBounce * albedo;
+	} else [branch] if (NVR_ALInterior.x > 0.5f) lin = lin - ((1.0f - ao) + ao * max(NVR_ALInterior.x - 1.0f, 0.0f)) * min(lin, albedo * NVR_ALScene.rgb * (1.0f - NVR_ALRoom.x)) + gridBounce * albedo;
 	else {
 		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (NVR_ALInterior.w > 0 outdoors = the ambient scale): the occlusion darkens only the
 		// ambient share of the pixel (as indoors), not the direct sun: lit = lin * ao took the sun's light out of every crease.
@@ -1114,7 +1131,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		float3 ambShare = min(lin, albedo * NVR_ALScene.rgb * NVR_ALInterior.w);
 		float keepShare = 1.0f - NVR_ALInterior.y * (1.0f - NVR_ALInterior.z);
 		float3 lit = NVR_ALInterior.w > 0.0f ? lin - ambShare + keepShare * ambShare * ao : lin * ao;
-		if (sky) lit = SkyTake(lit, skyFactor.x, skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w);	// (UNOFFICIAL 2026-10-20 skyamb)
+		if (sky) lit = SkyTake(lit, max(skyFactor.x, DarkestAO), skyFactor.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w);	// (UNOFFICIAL 2026-10-20 skyamb)
 		lin = lit + gridBounce * albedo;	// (the screen bounce removed 2026-10-14: the light grid is the bounce)
 	}
 	// UNOFFICIAL 2026-11-03 RT GI on the D3D9 passes (NVR_ALGI.z): the bounce light x the surface colour, after the occlusion, as
@@ -1128,14 +1145,15 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		float3 c0 = linearize(tex2Dlod(TESR_SourceBuffer, float4(IN.UVCoord, 0.0f, 0.0f)).rgb);
 		float3 localSum = c0;
 		float localWeight = 1.0f;
-		for (int t = 0; t < 4; t++) {
+		[unroll] for (int t = 0; t < 4; t++) {
 			float2 o = float2((t == 1 || t == 3) ? 4.0f : -4.0f, t >= 2 ? 4.0f : -4.0f) * px;
-			float w = step(abs(readDepthLod(IN.UVCoord + o) - depth), max(depth * 0.02f, 1.0f));
-			localSum += linearize(tex2Dlod(TESR_SourceBuffer, float4(IN.UVCoord + o, 0.0f, 0.0f)).rgb) * w;
+			float2 tap = clampToRectIfOn(IN.UVCoord + o, px);
+			float w = step(abs(readDepthLod(tap) - depth), max(depth * 0.02f, 1.0f));
+			localSum += linearize(tex2Dlod(TESR_SourceBuffer, float4(tap, 0.0f, 0.0f)).rgb) * w;
 			localWeight += w;
 		}
 		float3 localLin = localSum / localWeight;
-		float shade = luma(linearize(color.rgb)) / max(luma(c0), 1.0e-4f);	// the sun shadow on this pixel
+		float shade = shadedLuma / max(luma(c0), 1.0e-4f);	// the sun shadow on this pixel
 		float detail = clamp(luma(c0) / max(luma(localLin), 1.0e-4f), 0.0f, 2.0f);
 		float3 guess = SurfaceColourCap(localLin * shade, FallbackCap()) * detail;	// (2026-11-10 AlbedoFallbackCap)
 		float4 a = tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord, 0.0f, 0.0f));

@@ -65,7 +65,7 @@ namespace RtViewModel {
 		"  float4 nb = tex2D(N, uv); float4 c = tex2D(C, uv); float raw = tex2D(M, uv).x; float dw = tex2D(D, uv).x; float ka = tex2D(K, uv).a;"
 		"  float wm = tex2D(W, uv * U.yz).x;"
 		"  bool rev = Q.x > 0.5;"
-		"  bool vm = S.x > 0.5 && (rev ? raw > 0.01 : raw < 0.9);"
+		"  bool vm = S.x > 0.5 && (rev ? raw > 0.0 : raw < 0.99999);"
 		"  if (!vm) {"
 		"    if (U.x > 0.5 && wm > (U.w > 0.0 ? U.w : 0.45)) return float4(nb.rgb, -1.0);"
 		"    float a = c.a > 1.5 ? 2.0 : 1.0;"

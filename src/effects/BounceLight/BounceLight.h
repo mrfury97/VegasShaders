@@ -135,6 +135,7 @@ public:
 		const D3DXVECTOR4& ambientData, const D3DXMATRIX& reproject, class GpuTimer* passTimers);
 	ExtPass				extPrepare, extGather, extBlur, extCombine;
 	ExtUniformBuffer	extUniforms;
+	bool	ShouldRender() override;
 	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 		IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 		IDirect3DSurface9* SourceBuffer) override;

@@ -143,6 +143,9 @@ float4 TESR_PBREnv : register(c35);      // x: Lighting (0 the game's fixed brig
 // per-object fade F (already in AmbientColor.a), z the sun's luminance, w the lamp's; [1] the lamp, camera-relative, w its reach;
 // [2] the flashlight's beam axis, w cos of its outer edge; [3] x cos of its full-strength edge, y 1 = the lamp is the flashlight's
 float4 EnvLightFade[4] : register(c28);
+// UNOFFICIAL 2026-11-20: up to 2 additional active point lights for smooth multi-lamp crossblending at night (core/EnvLightFade.h):
+// [0]/[1] xyz camera-relative lamp pos, w reach; [2] x/y luminance of extra lamp 0/1 (0 = unused).
+float4 EnvLightFadeExtra[3] : register(c37);
 // UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (effects/Reflections/README.md "Replace, not add"): where the Reflections
 // effect answered this pixel's reflection last frame (TESR_ReflectionsBuffer's alpha: the screen, the rays, its cube / grid / sky), this
 // pass leaves that share of its cube map out, so the surface shows ONE reflection; where it had no answer (alpha 0: nothing reflects
@@ -213,6 +216,16 @@ float4 main(PS_INPUT pin) : COLOR0 {
         [flatten] if (EnvLightFade[3].y > 0.5f) {
             const float cone = smoothstep(EnvLightFade[2].w, EnvLightFade[3].x, dot(toPixel, EnvLightFade[2].xyz) * rsqrt(max(dot(toPixel, toPixel), 1.0f)));
             lampFade *= cone * cone;
+        }
+        [flatten] if (EnvLightFadeExtra[2].x > 0.0f && EnvLightFadeExtra[0].w > 1.0f) {
+            const float3 tp1 = pin.rel - EnvLightFadeExtra[0].xyz;
+            const float w1 = saturate(1.0f - dot(tp1, tp1) / (EnvLightFadeExtra[0].w * EnvLightFadeExtra[0].w));
+            lampFade += EnvLightFadeExtra[2].x * w1 * w1;
+        }
+        [flatten] if (EnvLightFadeExtra[2].y > 0.0f && EnvLightFadeExtra[1].w > 1.0f) {
+            const float3 tp2 = pin.rel - EnvLightFadeExtra[1].xyz;
+            const float w2 = saturate(1.0f - dot(tp2, tp2) / (EnvLightFadeExtra[1].w * EnvLightFadeExtra[1].w));
+            lampFade += EnvLightFadeExtra[2].y * w2 * w2;
         }
         refl *= min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 8.0f);
     }

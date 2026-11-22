@@ -66,6 +66,7 @@ sampler2D TESR_DepthBufferViewModel : register(s3) = sampler_state { ADDRESSU = 
 // UNOFFICIAL 2026-10-29 ObjectMotion (core/ObjectMotion.h): how far the surface at each pixel moved in the world since last frame (game
 // units), 0 where it moved with the world; TESR_ObjectMotionData.x 0 = not made this frame (the reprojection is then exactly as before).
 sampler2D TESR_ObjectMotionBuffer : register(s4) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+sampler2D TESR_ViewModelMotionBuffer : register(s5) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 float4 TESR_ObjectMotionData;
 
 #include "Includes/Depth.hlsl"
@@ -236,10 +237,21 @@ TAAResult ResolveCore(float2 uv)
 	float inFront;
 	float2 prevUV = Reproject(uv, inFront);
 
-	// The weapon is fixed to the camera, so it was at this same pixel last frame.
+	// The weapon gets real 1st-person motion vectors when WeaponAA is active; otherwise fixed to camera (same pixel).
 	float isViewModel = tex2D(TESR_DepthBufferViewModel, uv).x > 0.0f ? 1.0f : 0.0f;
-	prevUV = lerp(prevUV, uv, isViewModel);
-	inFront = max(inFront, isViewModel);
+	[branch] if (isViewModel > 0.5f && TESR_TAAWeapon.y > 0.5f) {
+		float4 vm = tex2Dlod(TESR_ViewModelMotionBuffer, float4(uv, 0.0f, 0.0f));
+		if (vm.z > 0.5f) {
+			prevUV = uv + vm.xy;
+			inFront = 1.0f;
+		} else {
+			prevUV = uv;
+			inFront = 0.0f;
+		}
+	} else {
+		prevUV = lerp(prevUV, uv, isViewModel);
+		inFront = max(inFront, isViewModel);
+	}
 
 	float2 inside = step(0.0f, prevUV) * step(prevUV, 1.0f);
 	float onScreen = inside.x * inside.y;

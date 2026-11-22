@@ -135,6 +135,7 @@ void BloomEffect::RenderPass(IDirect3DDevice9* Device, UINT techniqueIndex, bool
 }
 
 // UNOFFICIAL 2026-10-25 (NVR DXVK): the push block of every Bloom*.frag (Bloom.glsl), the same layout.
+// UNOFFICIAL 2026-11-19 RenderRect: renderScale (.xy src0 active scale, .zw src1 active scale) & clampBounds (.xy src0 max UV, .zw src1 max UV).
 struct BloomExtPush {
 	D3DXVECTOR4	data;			// TESR_BloomData
 	D3DXVECTOR4	resolution;		// TESR_BloomResolution
@@ -142,6 +143,8 @@ struct BloomExtPush {
 	D3DXVECTOR4	glowExtra;		// TESR_BloomGlowExtra
 	UInt32		samplerIndex;	// LINEAR, CLAMP: the extension writes the sampler heap index here (PushOffset)
 	UInt32		pad[3];
+	D3DXVECTOR4	renderScale;	// 80: (src0ScaleX, src0ScaleY, src1ScaleX, src1ScaleY)
+	D3DXVECTOR4	clampBounds;	// 96: (src0MaxU, src0MaxV, src1MaxU, src1MaxV)
 };
 
 /*
@@ -188,19 +191,51 @@ bool BloomEffect::RenderBloomExt(IDirect3DDevice9* Device, int passes) {
 	auto levelTexture = [&](int i) -> IDirect3DBaseTexture9* { return i < passes - 1 ? extLevels.Texture[i] : Textures.BloomTexture[i]; };
 	auto levelSurface = [&](int i) -> IDirect3DSurface9* { return i < passes - 1 ? extLevels.Surface[i] : Textures.BloomSurface[i]; };
 
+	const bool rectOn = RenderRect::Active();
+	auto levelActiveW = [&](int lvl) -> UINT {
+		const UINT w = (UINT)Settings.Resolution[lvl].x;
+		return rectOn ? (std::max)(1u, RenderRect::Width(w)) : w;
+	};
+	auto levelActiveH = [&](int lvl) -> UINT {
+		const UINT h = (UINT)Settings.Resolution[lvl].y;
+		return rectOn ? (std::max)(1u, RenderRect::Height(h)) : h;
+	};
+	auto srcBounds = [&](int srcLvl, float& sx, float& sy, float& hiX, float& hiY) {
+		if (!rectOn) { sx = 1.0f; sy = 1.0f; hiX = 1.0f; hiY = 1.0f; return; }
+		if (srcLvl < 0) {
+			const UINT w = (UINT)TheRenderManager->width, h = (UINT)TheRenderManager->height;
+			sx = (float)RenderRect::Width(w) / (float)w;
+			sy = (float)RenderRect::Height(h) / (float)h;
+			hiX = sx - 0.5f / (float)w;
+			hiY = sy - 0.5f / (float)h;
+		} else {
+			const float w = Settings.Resolution[srcLvl].x, h = Settings.Resolution[srcLvl].y;
+			sx = (float)levelActiveW(srcLvl) / w;
+			sy = (float)levelActiveH(srcLvl) / h;
+			hiX = sx - 0.5f / w;
+			hiY = sy - 0.5f / h;
+		}
+	};
+
 	// One pass into one target: the textures in binding order, then the LINEAR/CLAMP sampler.
-	auto draw = [&](ExtPass& pass, IDirect3DBaseTexture9* const* textures, UINT textureCount, IDirect3DSurface9* target, const BloomExtPush& push) {
+	auto draw = [&](ExtPass& pass, IDirect3DBaseTexture9* const* textures, UINT textureCount, IDirect3DSurface9* target, int dstLvl, const BloomExtPush& push) {
 		NVR_EXT_RESOURCE_BINDING resources[3] = {};
 		for (UINT i = 0; i < textureCount; i++) { resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = textures[i]; }
 		resources[textureCount].Slot = 0; resources[textureCount].Type = NVR_EXT_BIND_SAMPLER; resources[textureCount].pResource = sampler;
-		return ExtDrawTo(pass.Pipeline, &target, 1, resources, textureCount + 1, &push, sizeof(push), nullptr, ExtUv::TexelCentre);	// D3D9: a quad per level (BloomVertexBuffer)
+		const RECT vp = { 0, 0, (LONG)levelActiveW(dstLvl), (LONG)levelActiveH(dstLvl) };
+		return ExtDrawTo(pass.Pipeline, &target, 1, resources, textureCount + 1, &push, sizeof(push), rectOn ? &vp : nullptr, ExtUv::TexelCentre);	// D3D9: a quad per level (BloomVertexBuffer)
 	};
-	auto pushConstants = [this]() {
+	auto pushConstants = [&](int src0Lvl, int src1Lvl) {
 		BloomExtPush push = {};
 		push.data = Constants.Data;
 		push.resolution = Constants.Resolution;
 		push.glow = Constants.Glow;
 		push.glowExtra = Constants.GlowExtra;
+		float sx0, sy0, hiX0, hiY0, sx1, sy1, hiX1, hiY1;
+		srcBounds(src0Lvl, sx0, sy0, hiX0, hiY0);
+		srcBounds(src1Lvl, sx1, sy1, hiX1, hiY1);
+		push.renderScale = D3DXVECTOR4(sx0, sy0, sx1, sy1);
+		push.clampBounds = D3DXVECTOR4(hiX0, hiY0, hiX1, hiY1);
 		return push;
 	};
 
@@ -208,7 +243,7 @@ bool BloomEffect::RenderBloomExt(IDirect3DDevice9* Device, int passes) {
 	for (int i = 0; i < passes; i++) {
 		Constants.Resolution = Settings.Resolution[i];
 		IDirect3DBaseTexture9* textures[1] = { i == 0 ? TheTextureManager->RenderedTexture : levelTexture(i - 1) };
-		if (!draw(i == 0 ? extDownFirst : extDown, textures, 1, levelSurface(i), pushConstants())) return false;
+		if (!draw(i == 0 ? extDownFirst : extDown, textures, 1, levelSurface(i), i, pushConstants(i - 1, i - 1))) return false;
 	}
 
 	// Upsample from the top down: level i gets the level above it (the chain's BloomTexture[i + 1]) with its own downsample added.
@@ -220,7 +255,7 @@ bool BloomEffect::RenderBloomExt(IDirect3DDevice9* Device, int passes) {
 		}
 		Constants.Resolution = Settings.Resolution[i];
 		IDirect3DBaseTexture9* textures[2] = { Textures.BloomTexture[i + 1], levelTexture(i) };
-		if (!draw(i == 0 ? extUpLast : extUp, textures, 2, Textures.BloomSurface[i], pushConstants())) return false;
+		if (!draw(i == 0 ? extUpLast : extUp, textures, 2, Textures.BloomSurface[i], i, pushConstants(i + 1, i))) return false;
 	}
 	return true;
 }
@@ -258,11 +293,11 @@ void BloomEffect::RenderBloomBuffer(IDirect3DSurface9* RenderTarget) {
 
 	const int passes = std::clamp((int) TheShaderManager->GetTransitionValue(Settings.Main.Passes, Settings.Night.Passes, Settings.Interiors.Passes), 2, 8);
 
-	// UNOFFICIAL 2026-10-25 (NVR DXVK): [Main.Main.Performance] NvrDxvkPasses runs the chain as Vulkan passes (RenderBloomExt); otherwise,
-	// or when a pass is refused, the D3D9 chain below does the frame.
-	if (!ExtFailed && DxvkCompute::PassesOn() && RenderBloomExt(Device, passes)) {
+	// UNOFFICIAL 2026-10-25 (NVR DXVK) / 2026-11-19 RenderRect: Vulkan bloom runs under RenderScale < 1.0 too.
+	if (!ExtFailed && DxvkCompute::PassesOnRect() && RenderBloomExt(Device, passes)) {
 		Device->SetStreamSource(0, TheShaderManager->FrameVertex, 0, sizeof(FrameVS)); // as the D3D9 chain leaves it
 		Device->SetRenderTarget(0, RenderTarget);
+		RenderRect::RescaleAfterUpscale(Textures.BloomSurface[0]);
 		renderTime = timer.LogTime("EffectRecord::ExtRender Bloom");
 		return;
 	}

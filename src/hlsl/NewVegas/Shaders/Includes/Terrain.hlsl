@@ -39,6 +39,8 @@ float4 TESR_LODBlendData : register(c97);
     #endif
 #endif
 
+// UNOFFICIAL 2026-11-21 [Shaders.Terrain.*] SkylightingSaturation: terrain reads TESR_SkyIrradianceTerrain[9] at c137.
+#define SKY_AMBIENT_TERRAIN
 #ifdef __INTELLISENSE__
     #include "SkyAmbient.hlsl"
 #else

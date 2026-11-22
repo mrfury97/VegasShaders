@@ -1,6 +1,7 @@
 #include "CombineDepth.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
+#include "../../core/CapturedNormals.h"
 
 // The constant's registered memory: the same one SetCT uploads from (a matrix is the D3DXMATRIX as stored).
 static const D3DXVECTOR4* Registered(const char* name) {
@@ -60,7 +61,8 @@ static bool ReadCentreTexel(IDirect3DDevice9* Device, IDirect3DSurface9* surface
 	bool read = false;
 	if (SUCCEEDED(Device->CreateRenderTarget(1, 1, desc.Format, D3DMULTISAMPLE_NONE, 0, FALSE, &probe, NULL)) &&
 		SUCCEEDED(Device->CreateOffscreenPlainSurface(1, 1, desc.Format, D3DPOOL_SYSTEMMEM, &readable, NULL))) {
-		const RECT centre = { (LONG)desc.Width / 2, (LONG)desc.Height / 2, (LONG)desc.Width / 2 + 1, (LONG)desc.Height / 2 + 1 };
+		const LONG cx = (LONG)RenderRect::Width(desc.Width) / 2, cy = (LONG)RenderRect::Height(desc.Height) / 2;
+		const RECT centre = { cx, cy, cx + 1, cy + 1 };
 		D3DLOCKED_RECT locked = {};
 		if (SUCCEEDED(Device->StretchRect(surface, &centre, probe, NULL, D3DTEXF_NONE)) &&
 			SUCCEEDED(Device->GetRenderTargetData(probe, readable)) &&
@@ -105,13 +107,16 @@ static void LogMergedState(IDirect3DDevice9* Device, const D3DCAPS9& caps, const
 		viewport.X, viewport.Y, viewport.Width, viewport.Height);
 }
 
-bool CombineDepthEffect::RenderWithNormals(IDirect3DDevice9* Device, IDirect3DSurface9* NormalsSurface) {
+bool CombineDepthEffect::RenderWithNormals(IDirect3DDevice9* Device, IDirect3DSurface9* NormalsSurface, bool allowInlineMerge, bool* outInlineMerged) {
+	if (outInlineMerged) *outInlineMerged = false;
 	if (ReShadeIntegration::KeepDepthBound()) return false;	// UNOFFICIAL ReShadeDepthCompat: the two-target pass unbinds the depth-stencil; separate passes instead
-	if (mergedNormalsFailed || TheSettingManager->SettingsMain.Main.DisableMergedNormals ||
-		!Enabled || !Effect || !ShouldRender() || !NormalsSurface || !Textures.CombinedDepthSurface)
+	if (!Enabled || !Effect || !ShouldRender() || !NormalsSurface || !Textures.CombinedDepthSurface)
 		return false;
-	// UNOFFICIAL 2026-10-25 (NVR DXVK): the same two targets in one Vulkan pass; the D3D9 draw below when that is off or fails.
-	if (DxvkCompute::PassesOn() && !ExtFailed && ExtDepthNormals(Device, NormalsSurface)) return true;
+	// UNOFFICIAL 2026-10-25 (NVR DXVK) / 2026-11-19 RenderRect: the same two targets in one Vulkan pass (also at RenderScale < 1.0).
+	// Safe even while [Main.Main.Performance] MergedDepthNormals is false (that switch avoids a native D3D9 GTX 1070 MRT bug).
+	if (DxvkCompute::PassesOnRect() && !ExtFailed && ExtDepthNormals(Device, NormalsSurface, allowInlineMerge, outInlineMerged)) return true;
+	if (mergedNormalsFailed || TheSettingManager->SettingsMain.Main.DisableMergedNormals)
+		return false;
 	D3DXHANDLE technique = TechniqueHandle(techDepthNormals, "DepthNormals");
 	D3DSURFACE_DESC depthDesc = {}, normalsDesc = {};
 	const D3DCAPS9* caps = TheRenderManager->DeviceCaps();	// UNOFFICIAL: fetched once, not per frame
@@ -207,16 +212,41 @@ bool CombineDepthEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* 
 	const D3DXVECTOR4* cameraData = Registered("TESR_CameraData");
 	if (!depthConstants || !cameraData || !TheTextureManager->DepthTexture || !TheTextureManager->DepthTextureViewModel) return false;
 
-	struct Push { D3DXVECTOR4 depthConstants; D3DXVECTOR4 cameraData; UInt32 samplerIndex; UInt32 pad[3]; } push = {};
+	struct Push { D3DXVECTOR4 depthConstants; D3DXVECTOR4 cameraData; UInt32 samplerIndex; UInt32 pad[3]; D3DXVECTOR4 upscaleRect; D3DXVECTOR4 upscaleVm; } push = {};
+	static_assert(sizeof(Push) == 80, "CombineDepth.frag push block");
 	push.depthConstants = *depthConstants;
+	push.depthConstants.w = 0.0f;
 	push.cameraData = *cameraData;
 	IDirect3DBaseTexture9* textures[] = { TheTextureManager->DepthTexture, TheTextureManager->DepthTextureViewModel };
 	return ExtTexturePass(Device, RenderTarget, RenderedSurface, SourceBuffer, extPass, "CombineDepth", textures, _countof(textures), &push, sizeof(push), 32, true);
 }
 
+bool CombineDepthEffect::RenderUpscaled(IDirect3DDevice9* Device, UINT renderWidth, UINT renderHeight, float worldJx, float worldJy, float vmJx, float vmJy) {
+	if (!DxvkCompute::PassesOn() || ExtFailed || !Enabled || !Effect || !ShouldRender() ||
+		!Textures.CombinedDepthSurface || !TheTextureManager->DepthTexture || !TheTextureManager->DepthTextureViewModel)
+		return false;
+	if (RenderRect::Active()) return false;
+	const D3DXVECTOR4* depthConstants = Registered("TESR_DepthConstants");
+	const D3DXVECTOR4* cameraData = Registered("TESR_CameraData");
+	if (!depthConstants || !cameraData) return false;
+
+	static GpuTimer timer("Depth combine (upscaled)");
+	GpuProfileScope gpu(timer, Device);
+	struct Push { D3DXVECTOR4 depthConstants; D3DXVECTOR4 cameraData; UInt32 samplerIndex; UInt32 pad[3]; D3DXVECTOR4 upscaleRect; D3DXVECTOR4 upscaleVm; } push = {};
+	static_assert(sizeof(Push) == 80, "CombineDepth.frag push block");
+	push.depthConstants = *depthConstants;
+	push.depthConstants.w = 1.0f;
+	push.cameraData = *cameraData;
+	push.upscaleRect = D3DXVECTOR4((float)renderWidth, (float)renderHeight, worldJx, worldJy);
+	push.upscaleVm = D3DXVECTOR4(vmJx, vmJy, 0.0f, 0.0f);
+	IDirect3DBaseTexture9* textures[] = { TheTextureManager->DepthTexture, TheTextureManager->DepthTextureViewModel };
+	return ExtTexturePass(Device, Textures.CombinedDepthSurface, nullptr, nullptr, extPass, "CombineDepth", textures, _countof(textures), &push, sizeof(push), 32, true);
+}
+
 // UNOFFICIAL 2026-10-25 (NVR DXVK): DepthNormals.frag, the merged pass: the combined depth (target 0) and the normals (target 1) in one
 // draw. Both targets are the caller's and of one size, so the same check as the D3D9 merged pass; false (the D3D9 merged pass then) otherwise.
-bool CombineDepthEffect::ExtDepthNormals(IDirect3DDevice9* Device, IDirect3DSurface9* NormalsSurface) {
+bool CombineDepthEffect::ExtDepthNormals(IDirect3DDevice9* Device, IDirect3DSurface9* NormalsSurface, bool allowInlineMerge, bool* outInlineMerged) {
+	if (outInlineMerged) *outInlineMerged = false;
 	auto timer = TimeLogger();
 	D3DSURFACE_DESC depthDesc = {}, normalsDesc = {};
 	if (FAILED(Textures.CombinedDepthSurface->GetDesc(&depthDesc)) || FAILED(NormalsSurface->GetDesc(&normalsDesc)) ||
@@ -228,17 +258,46 @@ bool CombineDepthEffect::ExtDepthNormals(IDirect3DDevice9* Device, IDirect3DSurf
 	const D3DXVECTOR4* invProjection = Registered("TESR_InvProjectionTransform");
 	if (!depthConstants || !cameraData || !reciprocal || !invProjection || !TheTextureManager->DepthTexture || !TheTextureManager->DepthTextureViewModel) return false;
 
-	struct Push { D3DXVECTOR4 reciprocalResolution; D3DXVECTOR4 cameraData; D3DXVECTOR4 depthConstants; D3DXMATRIX invProjection; UInt32 samplerIndex; UInt32 pad[3]; } push = {};
+	CapturedNormals::MergeParams mp;
+	const bool hasMerge = CapturedNormals::FillMergeParams(mp, allowInlineMerge);
+	struct Push {
+		D3DXVECTOR4 reciprocalResolution;
+		D3DXVECTOR4 cameraData;
+		D3DXVECTOR4 depthConstants;
+		D3DXMATRIX invProjection;
+		UInt32 samplerIndex;
+		UInt32 pad[3];
+		D3DXVECTOR4 renderScale;
+		D3DXVECTOR4 mergeTol;
+		D3DXVECTOR4 mergeView;
+		D3DXVECTOR4 mergeRow0;
+		D3DXVECTOR4 mergeRow1;
+		D3DXVECTOR4 mergeRow2;
+	} push = {};
+	static_assert(sizeof(Push) == 224, "DepthNormals.frag push block");
 	push.reciprocalResolution = *reciprocal;
 	push.cameraData = *cameraData;
 	push.depthConstants = *depthConstants;
 	memcpy(&push.invProjection, invProjection, sizeof(D3DXMATRIX));
+	const bool rectOn = RenderRect::Active();
+	const int rw = rectOn ? RenderRect::Width((int)depthDesc.Width) : (int)depthDesc.Width;
+	const int rh = rectOn ? RenderRect::Height((int)depthDesc.Height) : (int)depthDesc.Height;
+	const float sx = (float)rw / (float)depthDesc.Width;
+	const float sy = (float)rh / (float)depthDesc.Height;
+	push.renderScale = D3DXVECTOR4(sx, sy, 1.0f / sx, 1.0f / sy);
+	push.mergeTol = mp.tol;
+	push.mergeView = mp.view;
+	push.mergeRow0 = mp.row0;
+	push.mergeRow1 = mp.row1;
+	push.mergeRow2 = mp.row2;
 
 	if (!extPassDepthNormals.Tried) {
 		extPassDepthNormals.Tried = true;
 		const NVR_EXT_BINDING_DESC bindings[] = {
 			{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE, 0, NVR_EXT_VIEW_2D, FALSE, 0 },		// TESR_DepthBufferWorld
 			{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE, 1, NVR_EXT_VIEW_2D, FALSE, 0 },		// TESR_DepthBufferViewModel
+			{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE, 2, NVR_EXT_VIEW_2D, FALSE, 0 },		// TESR_CapturedNormalsBuffer
+			{ 1, 3, NVR_EXT_BIND_SAMPLED_IMAGE, 3, NVR_EXT_VIEW_2D, FALSE, 0 },		// MaterialBuffer
 			{ 0, 0, NVR_EXT_BIND_SAMPLER,       0, NVR_EXT_VIEW_2D, FALSE, 112 },	// POINT, CLAMP
 		};
 		extPassDepthNormals.Pipeline = DxvkCompute::CreateGraphicsPipeline("DepthNormals", bindings, _countof(bindings), sizeof(push), true, 2);
@@ -246,12 +305,20 @@ bool CombineDepthEffect::ExtDepthNormals(IDirect3DDevice9* Device, IDirect3DSurf
 	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 	if (!extPassDepthNormals.Pipeline || !point) return false;
 
-	NVR_EXT_RESOURCE_BINDING resources[3] = {};
+	IDirect3DBaseTexture9* fallbackTex = TheTextureManager->DepthTexture;
+	NVR_EXT_RESOURCE_BINDING resources[5] = {};
 	resources[0].Slot = 0; resources[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[0].pResource = TheTextureManager->DepthTexture;
 	resources[1].Slot = 1; resources[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[1].pResource = TheTextureManager->DepthTextureViewModel;
-	resources[2].Slot = 0; resources[2].Type = NVR_EXT_BIND_SAMPLER; resources[2].pResource = point;
+	resources[2].Slot = 2; resources[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[2].pResource = mp.captured ? mp.captured : fallbackTex;
+	resources[3].Slot = 3; resources[3].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[3].pResource = mp.material ? mp.material : fallbackTex;
+	resources[4].Slot = 0; resources[4].Type = NVR_EXT_BIND_SAMPLER; resources[4].pResource = point;
 	IDirect3DSurface9* targets[2] = { Textures.CombinedDepthSurface, NormalsSurface };
-	if (!ExtDrawTo(extPassDepthNormals.Pipeline, targets, 2, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
+	const RECT vp = { 0, 0, rw, rh };
+	if (!ExtDrawTo(extPassDepthNormals.Pipeline, targets, 2, resources, _countof(resources), &push, sizeof(push), rectOn ? &vp : nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
+	if (hasMerge) {
+		if (outInlineMerged) *outInlineMerged = true;
+		CapturedNormals::NoteExternalMerge((UInt32)rw, (UInt32)rh);
+	}
 	renderTime = timer.LogTime("CombineDepth::RenderWithNormals (NVR DXVK)");
 	return true;
 }

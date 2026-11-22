@@ -8,7 +8,7 @@
 #ifndef SHADOW_NORMAL_BIAS_TEXELS
     #define SHADOW_NORMAL_BIAS_TEXELS 2.5f
 #endif
-#define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
+#define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (always compiled in; its strength switches it live)
 #include "includes/Shadow.hlsl"
 #include "includes/Helpers.hlsl"
 #include "includes/PBR.hlsl"
@@ -254,7 +254,7 @@ PixOut main(PixIn src_c) {
 
 #if HAIR_FP
     diff_sum += fp_diff;
-    if (TESR_HairData.y > 0.5f) spec_sum_game += fp_spec; else spec_sum += fp_spec;
+    if (TESR_HairData.y <= 0.5f) spec_sum += fp_spec;
 #endif
 
     // UNOFFICIAL 2026-11-12 HairAndEyes (Includes/FlashBeam.hlsl): the flashlight's beam as one more lamp, with the terms a lamp has
@@ -284,9 +284,15 @@ PixOut main(PixIn src_c) {
     // UNOFFICIAL linear lighting: decoded albedo, encoded result (PBRScale.hlsl decodes the light). HairHighlight: the game's look adds the
     // highlight after the encode, from the game's light colours, as the game's own shader does; either way times HairHighlight.
     float hi_scale = 1.0f + TESR_HairData.x;
+#if HAIR_FP
+    float3 col_v = TESR_HairData.y > 0.5f
+        ? LinEncode((diff_sum + amb_v) * LinColor(albedo_tinted) + fp_spec * (spec_gain * hi_scale)) + spec_sum_game * (spec_gain * hi_scale)
+        : LinEncode((diff_sum + amb_v) * LinColor(albedo_tinted) + spec_sum * (spec_gain * hi_scale));
+#else
     float3 col_v = TESR_HairData.y > 0.5f
         ? LinEncode((diff_sum + amb_v) * LinColor(albedo_tinted)) + spec_sum_game * (spec_gain * hi_scale)
         : LinEncode((diff_sum + amb_v) * LinColor(albedo_tinted) + spec_sum * (spec_gain * hi_scale));
+#endif
 
     // Blend mode from MatAlpha.z and .w: fogged, premultiplied or additive.
     float3 fog_l = lerp(col_v, src_c.f_fog_in.rgb, src_c.f_fog_in.w);

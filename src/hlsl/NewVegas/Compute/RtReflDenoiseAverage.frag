@@ -16,7 +16,7 @@ void main() {
     for (int j = 0; j < 8; j++)
         for (int i = 0; i < 8; i++) {
             ivec2 q = base + ivec2(i, j);
-            if (any(greaterThanEqual(q, GRID)) || Fetch(t_ray, q).x <= 0.0) continue;
+            if (any(greaterThanEqual(q, ACTIVE_GRID)) || Fetch(t_ray, q).x <= 0.0) continue;
             vec4 radiance = Fetch(t_in0, q);
             float weight = max(exp(-FFX_Luminance(radiance.rgb) * FFX_DNSR_REFLECTIONS_AVG_RADIANCE_LUMINANCE_WEIGHT), 1.0e-2);
             if (!Finite(radiance) || weight > 1.0e3) continue;

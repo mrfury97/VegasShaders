@@ -66,11 +66,11 @@ void main() {
 
     // 1. blocker search: the average distance of the blocked samples within the largest penumbra
     float blockers = 0.0, found = 0.0;
-    const float own = textureLod(sampler2D(t_blocker, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
+    const float own = abs(textureLod(sampler2D(t_blocker, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r);
     if (own > 0.0) { blockers += own; found += 1.0; }
     for (int i = 0; i < kTaps; i++) {
         const vec2 tapUv = inRect(uv + vogel(i, turn) * pc.params.z * pc.size.xy);
-        const float b = textureLod(sampler2D(t_blocker, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).r;
+        const float b = abs(textureLod(sampler2D(t_blocker, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).r);
         if (b > 0.0) { blockers += b; found += 1.0; }
     }
     if (found <= 0.0) { o_color = vec4(pc.params.w > 0.5 ? 0.0 : center, 0.0, 0.0, 0.0); return; }   // nothing blocks near here: lit

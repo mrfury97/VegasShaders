@@ -235,13 +235,6 @@ Fixed in this rewrite:
 7. The apply's map term is gated like `GetSunShadow` (FormatData.x = 3, FormatData.z outdoors, ShadowFade.y).
 8. Divide-by-zero guards (texels, radii, bands, projection), texel-snapped depth reads, ramps in the ray test, plane-weighted blur.
 9. Vulkan: rewritten for every pass; the rect clamp is present (full-texture clamp, see 7).
-10. (upstream 1.1.2, ported 2026-11-22) Exploded casters: weapon animation mods (MMP TOZ-34 / TOZ-66) hide a sub-mesh by
-   scaling its bone by 1e-9 and the child by 1e+9; on an NPC not playing that animation the child keeps a ~1e9 world scale and a
-   bound billions of units wide, and drew a ~24 m dark circle into the near cascades (Forms.Actors on). `ShadowManager.cpp`
-   `IsExplodedShadowCaster` now drops any caster other than land / LOD land whose world scale is non-finite or above 1000, or
-   whose world bound is non-finite or wider than 1e6 units (`AccumObject`, `WalkSunObject`; the lamp cube maps too).
-   CachedDistantShadows' mover spheres (`CollectMovers`) take only finite bounds of radius <= 2000 and otherwise a 128-unit
-   sphere 64 units above the actor's position.
 
 Open / decided, for review:
 1. Sharp finish raises green to Intensity too (the old file raised only red). Chosen for one behaviour across techniques, per the

@@ -183,8 +183,8 @@ void RenderPass::RenderAccum() {
 		if (stats) t2 = SunShadowStats::Now();
 #endif
 		if (!lean || !WindLeavesStill(caster)) {
-			ClothWind::ForGeometry(TheRenderManager->device, caster, true);	// UNOFFICIAL cloth wind: the cloth's shadow moves with it
-			PlantWind::ForGeometry(TheRenderManager->device, caster, true);	// UNOFFICIAL 2026-10-20 plant wind: so does a static plant's
+			ClothWind::ForGeometry(TheRenderManager->device, caster, true, FirstPerson);	// UNOFFICIAL cloth wind: the cloth's shadow moves with it
+			PlantWind::ForGeometry(TheRenderManager->device, caster, true, FirstPerson);	// UNOFFICIAL 2026-10-20 plant wind: so does a static plant's
 			if (lean) LearnWindVerdict(caster);
 		}
 		if (LayerMode == 1 && (caster->skinInstance || this == LayerTreePass || WindMoves(caster))) {	// UNOFFICIAL 2026-10-31 SunLayers

@@ -139,7 +139,7 @@ namespace DeferredFoliage {
 		auto found = Records.find(shader);
 		if (found == Records.end()) return nullptr;
 		const bool leaf = IsLeaf(name);
-		if (!CapturedNormals::InSpan || !(leaf ? CapturedNormals::LeafNow : CapturedNormals::GrassNow)) { StatOutside++; return nullptr; }
+		if (!CapturedNormals::InSpan || (CapturedNormals::VmSpan && !CapturedNormals::VmDeferred) || !(leaf ? CapturedNormals::LeafNow : CapturedNormals::GrassNow)) { StatOutside++; return nullptr; }
 		StatBinds++;
 		if (leaf) StatLeafBinds++; else StatGrassBinds++;
 		// (2026-11-16) the twin with the froxel's lamps, only with this frame's table and lists finished (else the plain record)

@@ -48,7 +48,7 @@ struct GGBlade {        // one visible strand (std430, 48 bytes)
     vec4 spot[3];      /* 624: UNOFFICIAL 2026-11-04 the deferred flashlight (GrassShaders::Spot, as the card shaders' TESR_GrassSpot): [0] the light, w reach (0: off); [1] axis, w cos outer; [2] rgb linear light times Brightness, w cos inner */ \
     vec4 spotShadowRows[4]; /* 672: its shadow map's matrix (camera-relative to the renderer's camera -> its clip space, rows: clip = x r0 + y r1 + z r2 + r3) */ \
     vec4 spotShadowShift;   /* 736: xyz this frame's camera minus the renderer's (added to a strand point for the matrix), w 1 = the map is there */ \
-    vec4 spotShadowParams;  /* 752: x the depth bias (share of the reach), y PCF radius (texels), z the map's size (texels), w the beam's Falloff (0: the lamps') */
+    vec4 spotShadowParams;  /* 752: x the depth bias (share of the reach), y PCF radius (texels), z the map's size (texels), w the beam's Falloff (0: the lamps') */     vec4 cloud;             /* 768: UNOFFICIAL 2026-11-17 the volumetric clouds' shadow on the strands' sun with ForwardShadows on (GpuGrassCull.comp; core/ForwardCloudShadows.h): xy the map's uv under the strands' eye along the light, z map uv per unit, w strength (0: none) */     vec4 cloudLight;        /* 784: xy the map's light, x / z and y / z (as the land's NVR_CloudSunVS) */
 
 // UNOFFICIAL 2026-11-04 the grass lamps' light on a strand point (GRASS23x000TMS.pso GrassLamps, line for line): vanilla's falloff
 // (1 - d^2 / r^2) and a wrapped diffuse, as a thin blade lets light through to its back face. position: camera-relative.

@@ -89,7 +89,7 @@ namespace LightFreeRecords {
 		// (2026-11-14 DeferredDistant: the far land too, with its G-buffer compiled in: TerrainLODTemplate.hlsl DISTANT_GBUFFER)
 		const bool farLand = (!strcmp(tmpl.Name, "TerrainLODTemplate") || !strcmp(tmpl.Name, "TerrainFadeTemplate")) && DeferredDistant::CompiledIn() && CapturedNormals::AlbedoCompiledIn();	// (the code needs the albedo target; 2026-11-15 + the near / far hand-over band: TerrainFadeTemplate.hlsl)
 		if (strcmp(tmpl.Name, "ObjectTemplate") && strcmp(tmpl.Name, "ParallaxTemplate") && strcmp(tmpl.Name, "TerrainTemplate") && !farLand) return false;
-		for (int d = 0; d < 63 && tmpl.Defines[d].Name; d++) {
+		for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++) {
 			const char* define = tmpl.Defines[d].Name;
 			if (!strcmp(define, "DIFFUSE") || !strcmp(define, "ONLY_SPECULAR") || !strcmp(define, "NO_LIGHT")) return false;
 		}
@@ -132,7 +132,7 @@ namespace LightFreeRecords {
 		else if (!strcmp(tmpl.Name, "TerrainFadeTemplate")) FadeBand.insert(shader);
 		else if (!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate")) {
 			bool lampFirst = false;
-			for (int d = 0; d < 63 && tmpl.Defines[d].Name; d++)
+			for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++)
 				if (!strcmp(tmpl.Defines[d].Name, "OPT") || !strcmp(tmpl.Defines[d].Name, "POINT")) lampFirst = true;
 			if (!lampFirst) SunObjects.insert(shader);
 		}

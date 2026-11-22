@@ -51,6 +51,7 @@ public:
 		D3DXMATRIX		OldCameraToLight[4];
 		D3DXVECTOR4		OldCenter[4];
 		D3DXVECTOR4		CrossFade;
+		D3DXVECTOR4		DynamicData;	// UNOFFICIAL 2026-11-21: x = 1 / dynamic atlas size when dynamic overlay was drawn this frame (0 = inactive)
 		// UNOFFICIAL TESR_PointShadowNear (PointShadows.fx): x = [Shaders.ShadowsInteriors.Main] NearFade, world units; y = EdgeFade, fraction of a lamp's radius.
 		D3DXVECTOR4		PointShadowNear;
 		// UNOFFICIAL 2026-10-23 CharacterShadowMap (Includes/Shadow.hlsl, SunShadows.fx.hlsl): the map's camera-relative world -> light clip
@@ -358,6 +359,9 @@ public:
 	bool		SunCrossFadeReady = false, SunCrossFading = false; // the current step fades instead of gliding
 	IDirect3DTexture9* ShadowAtlasOldTexture = nullptr;
 	IDirect3DSurface9* ShadowAtlasOldSurface = nullptr;
+	IDirect3DTexture9* ShadowDynamicTexture = nullptr;
+	IDirect3DSurface9* ShadowDynamicSurface = nullptr;
+	UINT		ShadowDynamicSize = 0;
 	D3DXMATRIX	SunFadeMatrix[4];
 	D3DXVECTOR4	SunFadeCenter[4];
 	D3DXVECTOR3	SunFadeCamera[4];
@@ -366,11 +370,13 @@ public:
 	// UNOFFICIAL 2026-11-15 fd-smoothsun (core/SunFadeDeferred.h): under the deferred renderer the maps' sun stands still and steps by
 	// SunFadeDeferred::StepDegrees, each step faded by the deferred sun pass. DeferredSunHeld: the direction the maps are drawn for;
 	// DeferredHolding: the step's fade waits for every cascade to be redrawn (at most MaxHoldFrames frames); the copy of the atlas is made
-	// at the first fading step (ShadowAtlasOldTexture, registered empty at startup).
+	// at the first fading step (ShadowAtlasOldTexture + ShadowDynamicTexture, registered empty at startup).
 	D3DXVECTOR3	CalculateDeferredSunDir(D3DXVECTOR3 sunDir);
-	bool		StartDeferredFade(const D3DXVECTOR3& oldSun);
+	bool		EnsureDeferredFadeTargets();
+	bool		CaptureDeferredOldAtlas();
 	D3DXVECTOR3	DeferredSunHeld = D3DXVECTOR3(0.0f, 0.0f, 1.0f), DeferredLastCamera = D3DXVECTOR3(0.0f, 0.0f, 0.0f);
-	bool		DeferredSunValid = false, DeferredFading = false, DeferredHolding = false, DeferredFadeFailed = false;
+	bool		DeferredSunValid = false, DeferredFading = false, DeferredHolding = false, DeferredFadeFailed = false, DeferredDynamicFailed = false;
+	bool		DeferredCapturePending = false, DeferredCaptureReady = false;
 	ULONGLONG	DeferredFadeStart = 0;
 	int			DeferredHoldFrames = 0;
 	unsigned	DeferredSteps = 0, DeferredJumps = 0, DeferredHoldSum = 0;

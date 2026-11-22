@@ -14,8 +14,11 @@
 #include "DxvkCompute.h"
 #include "GpuProfiler.h"
 #include "RtDenoise.h"
+#include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: helper SIGMA shadow denoiser for decoupled PT direct sun
+#include "RtSunShadows.h"		// UNOFFICIAL 2026-11-20: avoid mode-0 RtShadowDenoise collision if PTStandDownRT is off
 #include "ManyLamps.h"
 #include "../effects/PBR/PBR.h"	// (2026-11-04 rtgap) the game's light scale	// (2026-11-03 rtspec) PTGameLamps 4: the game's lamp table
+#include "RtLightUnits.h"	// UNOFFICIAL 2026-11-19 (Finding 4.1) shared PBR decode gamma + light / ambient / sky scales
 #include "FlashlightDeferred.h"	// (2026-11-07) the flashlight as its own pass draws it (LightParams)
 #include "RenderRect.h"	// (2026-11-03) RenderScale < 1: the trace over the frame's top-left rect (docs/next/RT-RENDERSCALE.md)
 #include "RtViewModel.h"	// (2026-11-07 ptaaa-firstperson) PTViewModel's prep pass (shared with tools/nvr-rt-host)
@@ -129,6 +132,7 @@ namespace {
 		// ghost) with PTDenoiseMovingHistory frames on moving surfaces. PTDenoiseUnderRr 0: while DLSS Ray Reconstruction runs, it gets the
 		// raw paths and the path tracer's own albedos (its denoiser steps aside); 1: the path tracer keeps its own denoiser under RR.
 		bool	denoiseSplit = true;
+		bool	denoiseSplitSun = true;	// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: denoise primary direct sun visibility via RtShadowDenoise (SIGMA + actor anti-lag) separately from 32-frame GI
 		bool	denoiseObjectMotion = true;
 		int		denoiseMovingHistory = 8;
 		float	denoiseMirrorHistory = 12.0f;
@@ -206,6 +210,17 @@ namespace {
 
 	int			imageA = -1, imageB = -1, imageDisplay = -1, shader = -1;
 	int			shaderGrid = -1;
+	int			shaderPrimary = -1, shaderPrimaryGrid = -1, shaderSpatial = -1, shaderBounce = -1, shaderBounceGrid = -1;	// UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass PT split
+	bool		splitScratchReady = false;
+	// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: decoupled primary direct sun shadow denoising (helper RtPathTraceSunUnpack + RtShadowDenoise mode 0)
+	int			shaderSunUnpack = -1, shaderSunDenoise = -1;
+	int			imageSunVis = -1, imageSunHit = -1, imageSunDirect = -1, imageSunMotion = -1;
+	bool		sunSplitScratchReady = false;
+	IDirect3DTexture9*	sunVisTexture = nullptr;	IDirect3DSurface9*	sunVisSurface = nullptr;
+	IDirect3DTexture9*	sunDirectTexture = nullptr;	IDirect3DSurface9*	sunDirectSurface = nullptr;
+	bool		sunSplitThisFrame = false;
+	RtShadowDenoise::View sunDenoiseView;
+	UInt32		sunDenoiseFrames = 0;
 	int			shaderCache = -1;	// (2026-11-07) PTRadianceCache's resolve pass (RtPathTraceCache.spv)
 	int			cacheLog2Setup = 0;	// (2026-11-07) the cache's entries (log2) the scratch store was sized for at this helper start (0: none)	// (2026-11-04) PTLightGrid's variant (RtPathTraceGrid.spv: RtPathTrace.comp with PT_LIGHT_GRID)
 	// UNOFFICIAL 2026-11-04 d PTRestirGI (RT-PATH-TRACING.md section 29): the trace's variant (the first bounce written out), the reuse pass,
@@ -266,13 +281,20 @@ namespace {
 	constexpr int kFlashOwnTexel = 305, kFlashRasterTexel = 306, kFlashRasterTexel2 = 298;
 	// UNOFFICIAL 2026-11-15 (rt-reuse) PTRestirCGNS's candidates for ReSTIR DI: texel 299.x (RtPathTrace.comp kCgnsTexel: keep them equal), y 0
 	constexpr int kCgnsTexel = 299;
-	static_assert(kCgnsTexel > kFlashRasterTexel2 && kCgnsTexel < kFlashOwnTexel && kCgnsTexel < kLightTexels, "PTRestirCGNS's frame row texel");
+	constexpr int kSplitBaseTexel = 300;	// UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass PT split scratch base (4096-word pages; RtPathTrace.comp kSplitBaseTexel)
+	static_assert(kCgnsTexel > kFlashRasterTexel2 && kSplitBaseTexel < kFlashOwnTexel && kSplitBaseTexel < kLightTexels, "PTRestirCGNS / 3-pass split frame row texel");
 	RtRestirRow::State restirState;
 	// (2026-11-07) the scratch store's layout: the ReSTIR DI reservoirs (two sets of w x h x 4 words) at word 0, the radiance cache from here
 	// (2026-11-07 ptaaa-emissive: two sets of w x h x 6 words, was x 4: an emissive sample's triangle and barycentrics)
 	unsigned long long CacheBaseWords(UINT w, UINT h) { return ((12ull * w * h + 4095ull) / 4096ull) * 4096ull; }
 	// (2026-11-07 ptaaa-emissive) PTEmissive's blocks + triangle list after the radiance cache's table (RtEmissiveRow.h kScratchWords)
 	unsigned long long EmissiveBaseWords(UINT w, UINT h, int cacheLog2) { return CacheBaseWords(w, h) + (16ull << cacheLog2); }
+	// UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass PT split region (6 words/px intermediate temporal reservoirs + 16 words/px primary payload)
+	unsigned long long SplitBaseWords(UINT w, UINT h, int cacheLog2) { return ((EmissiveBaseWords(w, h, cacheLog2) + (unsigned long long)RtEmissiveRow::kScratchWords + 4095ull) / 4096ull) * 4096ull; }
+	unsigned long long SplitNeedWords(UINT w, UINT h) { return 22ull * w * h; }
+	// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: 3 words/px (vis+signedHitT, sunDiffDemod.rgb) right after the 3-pass split region
+	unsigned long long SunSplitBaseWords(UINT w, UINT h, int cacheLog2) { return ((SplitBaseWords(w, h, cacheLog2) + (splitScratchReady ? SplitNeedWords(w, h) : 0ull) + 4095ull) / 4096ull) * 4096ull; }
+	unsigned long long SunSplitNeedWords(UINT w, UINT h) { return 3ull * w * h; }
 	RtEmissiveRow::State emissiveState;
 	int			shaderEmissive = -1;	// RtEmissiveBuild.spv
 	int			emissiveCount = 0;	// this frame's
@@ -392,6 +414,7 @@ namespace {
 		S.denoiseGuide = f("PTDenoiseGuide", 0.0f, 4.0f);
 		// (2026-11-07 ptaaa-denoiser; a missing key reads 0: the toml defaults carry the ON values)
 		S.denoiseSplit = TheSettingManager->GetSettingI(kSection, "PTDenoiseSplit") != 0;
+		{ SettingManager::Configuration::ConfigNode sn; S.denoiseSplitSun = TheSettingManager->Config.FillNode(&sn, kSection, "PTDenoiseSplitSun") ? (sn.IntValue != 0) : true; }
 		S.denoiseObjectMotion = TheSettingManager->GetSettingI(kSection, "PTDenoiseObjectMotion") != 0;
 		S.denoiseMovingHistory = i("PTDenoiseMovingHistory", 0, 256);
 		S.denoiseMirrorHistory = f("PTDenoiseMirrorHistory", 1.0f, 256.0f);
@@ -451,7 +474,7 @@ namespace {
 		S.earlyLook = i("PTEarlyLook", 0, 3);	// UNOFFICIAL 2026-11-11 (a missing key: 0, off)
 		{ SettingManager::Configuration::ConfigNode cn; S.denoiseCeiling = TheSettingManager->Config.FillNode(&cn, kSection, "PTDenoiseCeiling") ? (std::min)((std::max)(cn.FloatValue, 0.0f), 60000.0f) : 200.0f; }	// UNOFFICIAL 2026-11-11 (a missing key: the documented 200; 0 = the old 60000)
 		{ SettingManager::Configuration::ConfigNode ln; S.restirDILampMatch = TheSettingManager->Config.FillNode(&ln, kSection, "PTRestirDILampMatch") ? (std::min)((std::max)(ln.FloatValue, 0.0f), 256.0f) : 32.0f; }	// UNOFFICIAL 2026-11-10 (BUG FIX: a missing key reads the documented 32; 0 = the old exact match)
-		S.restirDIRays = i("PTRestirDIRays", 0, 3);	// (2026-11-07 perf-ptcost)
+		S.restirDIRays = i("PTRestirDIRays", 0, 4);	// (2026-11-07 perf-ptcost; 2026-11-19 mode 4 = RTXDI 2-ray visibility)
 		S.restirCGNS = i("PTRestirCGNS", 0, 31);	// UNOFFICIAL 2026-11-15 (rt-reuse; a missing key: 0, off)
 		S.restirDupMap = i("PTRestirDupMap", 0, 1) != 0;
 		S.bounceLights = i("PTBounceLights", 0, 1);
@@ -520,7 +543,7 @@ namespace {
 	// UNOFFICIAL 2026-11-04 (rtgap) the game's light scale: its lit shaders multiply the sun and the lamps by [Shaders.PBR.*] / [Shaders.Terrain.*]
 	// LightingScale, decoded to linear (LIN_SCALE_LIGHT, TESR_LinearScales.x): 0.725 by day outdoors = 0.49 linear, 1 indoors and at night.
 	// Without it the reference's sunlit surfaces were 2.06x the game's at Goodsprings noon (rtgap-gs); with the game's own lights only.
-	inline float GameLightScale() { PBRShaders* pbr = TheShaderManager->Shaders.PBR; return pbr ? pbr->Constants.LinearScales.x : 1.0f; }
+	inline float GameLightScale() { return RtLightUnits::LightScale(); }
 
 	// The lamps that light the hits: the shadow slots' lamps and the tracked ones as ShaderManager listed them this frame, nearest
 	// first, at most 8; scene space (world minus CameraPosition), colour linear x dimmer (as AmbientOcclusion.cpp RtGILamps).
@@ -540,13 +563,15 @@ namespace {
 			const D3DXVECTOR3 rel(p.x - eye.x, p.y - eye.y, p.z - eye.z);
 			for (int i = 0; i < found; i++)	// the same lamp in both lists
 				if (fabsf(lamps[i].pos.x - rel.x) < 1.0f && fabsf(lamps[i].pos.y - rel.y) < 1.0f && fabsf(lamps[i].pos.z - rel.z) < 1.0f) return;
-			// (2026-11-03 rtspec) PTGameLamps: the colour as the game's lamp table makes it (ManyLamps.h: diffuse x dimmer, the dimmer at most 1
-			// without HDR, then decoded to linear together; the light's LOD dimmer is not in these lists); off: diffuse decoded x dimmer, as RT GI
+			// (2026-11-03 rtspec / 2026-11-19 Finding 4.1) PTGameLamps: the colour as the game's lamp table makes it (ManyLamps.h / Object.hlsl:
+			// diffuse x dimmer, the dimmer at most 1 without HDR, then decoded to linear together with RtLightUnits::Gamma(), x LightScale in mode 4);
+			// off (0 / 1): diffuse decoded x dimmer, as RT GI
 			float dim = col.w;
-			const bool gameColour = (S.gameLamps & 2) != 0;
+			const bool gameColour = (S.gameLamps & 2) != 0 || S.gameLamps == 4;
 			if (gameColour && !*(const bool*)0x011F941E && dim > 1.0f) dim = 1.0f;	// BSShaderManager::bHDR
-			const D3DXVECTOR4 colour = gameColour ? D3DXVECTOR4(Lin(col.x * dim), Lin(col.y * dim), Lin(col.z * dim), 0.0f) :
-				D3DXVECTOR4(Lin(col.x) * col.w, Lin(col.y) * col.w, Lin(col.z) * col.w, 0.0f);
+			const D3DXVECTOR3 dec = gameColour ? RtLightUnits::DecodeLamp(D3DXVECTOR4(col.x, col.y, col.z, dim), S.gameLamps == 4 ? RtLightUnits::LightScale() : 1.0f) :
+				D3DXVECTOR3(Lin(col.x) * col.w, Lin(col.y) * col.w, Lin(col.z) * col.w);
+			const D3DXVECTOR4 colour(dec.x, dec.y, dec.z, 0.0f);
 			lamps[found++] = { D3DXVECTOR4(rel.x, rel.y, rel.z, p.w), colour,
 				(std::max)(D3DXVec3Length(&rel) - p.w, 0.0f) };
 		};
@@ -577,7 +602,11 @@ namespace {
 				const D3DXVECTOR4& fc = sm->SpotLightColor[0];
 				pos = D3DXVECTOR3(fp.x - eye.x, fp.y - eye.y, fp.z - eye.z); reach = fp.w;
 				axis = D3DXVECTOR3(fd.x, fd.y, fd.z); cosOuter = cosf(D3DXToRadian((std::min)((std::max)(fd.w, 1.0f), 89.0f)));
-				colour = D3DXVECTOR3(Lin(fc.x) * fc.w, Lin(fc.y) * fc.w, Lin(fc.z) * fc.w);
+				float fdim = fc.w;
+				const bool gameFlash = (S.gameLamps & 2) != 0 || S.gameLamps == 4;
+				if (gameFlash && !*(const bool*)0x011F941E && fdim > 1.0f) fdim = 1.0f;
+				colour = gameFlash ? RtLightUnits::DecodeLamp(D3DXVECTOR4(fc.x, fc.y, fc.z, fdim), S.gameLamps == 4 ? RtLightUnits::LightScale() : 1.0f) :
+					D3DXVECTOR3(Lin(fc.x) * fc.w, Lin(fc.y) * fc.w, Lin(fc.z) * fc.w);
 			}
 			const float len = D3DXVec3Length(&axis);
 			if (reach > 10.0f && len > 1.0e-3f && (colour.x + colour.y + colour.z) > 0.0f) {
@@ -601,11 +630,15 @@ namespace {
 		if (S.gameLamps == 4 && ManyLamps::TableFrame + 1 >= ManyLamps::FrameId && !source.empty()) {
 			static std::vector<Lamp> table;
 			table.clear();
+			const float ls = RtLightUnits::LightScale();	// (2026-11-04 rtgap) as the game's lamps: x LIN_SCALE_LIGHT
 			for (const ManyLamps::ActiveLamp& a : source) {
 				if (a.reach <= 0.0f) continue;
+				// (2026-11-17, as the test for the game's lamps above) a NaN / Inf lamp would break std::sort's ordering below
+				if (!(fabsf(a.pos[0]) + fabsf(a.pos[1]) + fabsf(a.pos[2]) + fabsf(a.reach) < 1.0e30f)) continue;
 				const D3DXVECTOR3 rel(a.pos[0] - eye.x, a.pos[1] - eye.y, a.pos[2] - eye.z);
-				const float ls = GameLightScale();	// (2026-11-04 rtgap) as the game's lamps: x LIN_SCALE_LIGHT
-				table.push_back({ D3DXVECTOR4(rel.x, rel.y, rel.z, a.reach), D3DXVECTOR4(a.colour[0] * ls, a.colour[1] * ls, a.colour[2] * ls, 0.0f),
+				const D3DXVECTOR3 tc = ManyLamps::LinearCompiled ? D3DXVECTOR3(a.colour[0] * ls, a.colour[1] * ls, a.colour[2] * ls) :
+					RtLightUnits::DecodeColor(a.colour[0], a.colour[1], a.colour[2], ls);
+				table.push_back({ D3DXVECTOR4(rel.x, rel.y, rel.z, a.reach), D3DXVECTOR4(tc.x, tc.y, tc.z, 0.0f),
 					(std::max)(D3DXVec3Length(&rel) - a.reach, 0.0f) });
 			}
 			for (Lamp& l : table) physical(l);
@@ -646,6 +679,7 @@ namespace {
 		std::vector<Pick> picks;
 		for (const RtCore::GlowLight& g : RtCore::GlowLights()) {
 			if (!(g.radius > 0.0f) || g.radius > 512.0f) continue;
+			if (!(fabsf(g.center[0]) + fabsf(g.center[1]) + fabsf(g.center[2]) + fabsf(g.rgb[0]) + fabsf(g.rgb[1]) + fabsf(g.rgb[2]) < 1.0e30f)) continue;	// (2026-11-17: a NaN weight in the sort below)
 			const float luma = 0.2126f * g.rgb[0] + 0.7152f * g.rgb[1] + 0.0722f * g.rgb[2] + 0.05f;
 			const float d2 = g.center[0] * g.center[0] + g.center[1] * g.center[1] + g.center[2] * g.center[2];
 			picks.push_back({ &g, luma * g.radius * g.radius / (std::max)(d2, g.radius * g.radius) });
@@ -756,8 +790,47 @@ namespace {
 	}
 	// (2026-11-11 PTScreenOwn) viewModel: the view model's part (as before); own: the marks (RtViewModel.h; tw, th the render rect, jitter the
 	// depth's, as the trace's ScreenHit). At least one of the two.
+	// UNOFFICIAL 2026-11-19 (Finding 4.2) RtViewModel::kPrepPS + FD_SV_F0 bridge: when c8.z > 0.5, decodes the lighting-free G-buffer's
+	// dielectric highlight F0 slot s (1..9 -> F0 0.00..0.08, Includes/DeferredPixel.hlsl FDSunVisCode) from TESR_CapturedNormalsBuffer.a
+	// and carries +s/128 in the clean / ownMaybe sub-band of gNormals.a (exact in fp16; preserves every existing nv.a predicate).
+	const char* const kVmPrepF0PS =
+		"sampler2D N : register(s0); sampler2D C : register(s1); sampler2D M : register(s2); sampler2D D : register(s3); sampler2D K : register(s4);"
+		"sampler2D W : register(s5);"
+		"float4 P : register(c0); float4 Q : register(c1); row_major float4x4 V : register(c2);"
+		"float4 S : register(c6); float4 R : register(c7); float4 T : register(c8); float4 U : register(c9);"
+		"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
+		"  float4 nb = tex2D(N, uv); float4 c = tex2D(C, uv); float raw = tex2D(M, uv).x; float dw = tex2D(D, uv).x; float ka = tex2D(K, uv).a;"
+		"  float wm = tex2D(W, uv * U.yz).x;"
+		"  bool rev = Q.x > 0.5;"
+		"  bool vm = S.x > 0.5 && (rev ? raw > 0.01 : raw < 0.9);"
+		"  if (!vm) {"
+		"    if (U.x > 0.5 && wm > (U.w > 0.0 ? U.w : 0.45)) return float4(nb.rgb, -1.0);"
+		"    float a = c.a > 1.5 ? 2.0 : 1.0;"
+		"    if (S.y > 0.5 && dw > 0.0 && dw < 0.9999 && c.a > 0.99) {"
+		"      float2 r = uv * R.xy + R.zw;"
+		"      float dist = length(float3((r.x * 2.0 - 1.0) * P.x * Q.y, (1.0 - r.y * 2.0) * P.y * Q.y, 1.0)) * dw * P.w;"
+		"      float gap = c.b - dist; float tol = c.b * S.z + S.w;"
+		"      bool bare = c.a > 1.5 && (T.x > 1.5 ? ka <= 0.0 : T.x > 0.5);"
+		"      if (bare || gap > tol + T.y) a += 0.5;"
+		"      else if (gap > tol) a += 0.25;"
+		"    }"
+		"    if (T.z > 0.5 && frac(a) < 0.375 && c.a > 0.99 && c.a < 2.005) {"
+		"      float qf = floor(abs(c.a - (c.a > 1.5 ? 2.0 : 1.0)) * 1024.0 + 0.5);"
+		"      a += floor((qf + 0.5) / 48.0) * (1.0 / 128.0);"
+		"    }"
+		"    return float4(nb.rgb, a);"
+		"  }"
+		"  float z = rev ? P.z * P.w / (P.z + raw * (P.w - P.z)) : P.z * P.w / (P.w - raw * (P.w - P.z));"
+		"  float3 vp = float3((uv.x * 2.0 - 1.0) * P.x, (1.0 - uv.y * 2.0) * P.y, 1.0) * z;"
+		"  float d = length(vp);"
+		"  if (!(c.a > 0.99 && abs(c.b - d) <= d * Q.z + Q.w)) return float4(nb.rgb, -1.0);"
+		"  float3 n = float3(c.rg, 1.0 - abs(c.r) - abs(c.g)); float t = saturate(-n.z);"
+		"  n.xy += float2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t); n = normalize(n);"
+		"  float3 nv = normalize(mul(n, (float3x3)V));"
+		"  return float4(nv * 0.5 + 0.5, 4.0 + Q.y); }";
+
 	UInt32		ownFrames = 0;
-	bool ViewModelPrep(IDirect3DDevice9* Device, IDirect3DBaseTexture9* normals, UINT w, UINT h, bool viewModel = true, bool own = false, UINT tw = 0, UINT th = 0, float jitterX = 0.0f, float jitterY = 0.0f) {
+	bool ViewModelPrep(IDirect3DDevice9* Device, IDirect3DBaseTexture9* normals, UINT w, UINT h, bool viewModel = true, bool own = false, UINT tw = 0, UINT th = 0, float jitterX = 0.0f, float jitterY = 0.0f, bool f0 = false) {
 		auto constant = [](const char* name) { auto f = TheShaderManager->ConstantsTable.find(name); return f == TheShaderManager->ConstantsTable.end() ? nullptr : f->second; };
 		auto texture = [](const char* name) -> IDirect3DBaseTexture9* { auto f = TheTextureManager->TextureNames.find(name); return f == TheTextureManager->TextureNames.end() || !f->second ? nullptr : *f->second; };
 		IDirect3DBaseTexture9* captured = texture("TESR_CapturedNormalsBuffer");
@@ -770,12 +843,12 @@ namespace {
 		// UNOFFICIAL 2026-11-12 PTWaterMask (core/WaterMask.h; RtViewModel.h c9 / s5): the pixels this frame's world scene drew water on (null: no
 		// water in view, the key off, or the mask not made): coded -1, the game's own pixel. The pass also runs for the mask alone.
 		IDirect3DTexture9* water = WaterMask::ThisFrame(Device, TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0);
-		if (vmPrepFailed || !normals || !captured || (!viewModel && !own && !water) || !view || !camera || camera->y <= 0.0f) return false;
+		if (vmPrepFailed || !normals || !captured || (!viewModel && !own && !water && !f0) || !view || !camera || camera->y <= 0.0f) return false;
 		// the skin blur's albedo target, where this span's skin draws bound it (CapturedNormals::SkinAlbedoFill copied it into the AlbedoBuffer)
 		IDirect3DBaseTexture9* skinAlbedo = own && CapturedNormals::SkinAlbedoTex && !CapturedNormals::SkinAlbedoFillFailed ? (IDirect3DBaseTexture9*)CapturedNormals::SkinAlbedoTex : nullptr;
 		if (!vmPrepPS) {
-			// the source and its constants: core/RtViewModel.h (also run by tools/nvr-rt-host scene `vmprep`)
-			vmPrepPS = CapturedNormals::FullScreenShader(Device, RtViewModel::kPrepPS, "RT path trace view model", vmPrepFailed);
+			// the source and its constants: core/RtViewModel.h (+ Finding 4.2 FD_SV_F0 bridge when c8.z > 0.5)
+			vmPrepPS = CapturedNormals::FullScreenShader(Device, kVmPrepF0PS, "RT path trace view model", vmPrepFailed);
 			if (!vmPrepPS) return false;
 		}
 		if (vmNormals) { D3DSURFACE_DESC d = {}; vmNormals->GetLevelDesc(0, &d); if (d.Width != w || d.Height != h) { DxvkCompute::Drop(vmNormalsSurface); DxvkCompute::Drop(vmNormals); } }
@@ -795,7 +868,7 @@ namespace {
 			{ view->_31, view->_32, view->_33, view->_34 }, { view->_41, view->_42, view->_43, view->_44 },
 			{ viewModel ? 1.0f : 0.0f, own ? 1.0f : 0.0f, RtViewModel::kFrontShare, RtViewModel::kFrontUnits },
 			{ tw ? (float)w / (float)tw : 1.0f, th ? (float)h / (float)th : 1.0f, jitterX, jitterY },
-			{ !own ? 0.0f : skinAlbedo ? 2.0f : 1.0f, reach, 0.0f, 0.0f },
+			{ !own ? 0.0f : skinAlbedo ? 2.0f : 1.0f, reach, f0 ? 1.0f : 0.0f, 0.0f },
 			// (PTWaterMask) c9: the mask on; its uv scale: this target's uv -> the share of the render rect (c7) -> the mask's own rect (the
 			// viewport its water draws had, top-left) of its own size. 1, 1 whenever the mask and the depth buffer share one layout
 			{ water ? 1.0f : 0.0f, water && WaterMask::Made.Width ? (tw ? (float)w / (float)tw : 1.0f) * (float)WaterMask::Rect.Width / (float)WaterMask::Made.Width : 0.0f,
@@ -914,11 +987,26 @@ namespace {
 		imageAlbedoOut = RtCore::AddImage("NVR RT path trace first albedo", w, h, NVR_EXT_SHARED_RGBA16F);	// (2026-11-03) PTDenoise's demodulation
 		// (2026-11-07 ptaaa-denoiser) PTDenoiseSplit's specular signal: only when it is on at the helper start (one more full-size image)
 		imageSpec = TheSettingManager->GetSettingI(kSection, "PTDenoiseSplit") != 0 ? RtCore::AddImage("NVR RT path trace specular", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
+		// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: decoupled primary direct sun shadow images (R16F vis, R16F signed hit, RGBA16F unshadowed sun, RGBA16F motion)
+		{
+			SettingManager::Configuration::ConfigNode sn;
+			const bool wantSun = TheSettingManager->Config.FillNode(&sn, kSection, "PTDenoiseSplitSun") ? (sn.IntValue != 0) : true;
+			imageSunVis = wantSun ? RtCore::AddImage("NVR RT path trace sun vis", w, h, NVR_EXT_SHARED_R16F) : -1;
+			imageSunHit = wantSun ? RtCore::AddImage("NVR RT path trace sun hit", w, h, NVR_EXT_SHARED_R16F) : -1;
+			imageSunDirect = wantSun ? RtCore::AddImage("NVR RT path trace sun direct", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
+			imageSunMotion = wantSun ? RtCore::AddImage("NVR RT path trace sun motion", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
+		}
 		imageLamps = RtCore::AddImage("NVR RT path trace lamps", kLightTexels, kLampRows, NVR_EXT_SHARED_RG32F);
 		// (2026-11-07) the scratch store (binding 20): PTRestirDI's reservoirs, two sets of 16 bytes a pixel at the screen's size
 		// + (2026-11-07) PTRadianceCache's table after them (64 bytes an entry; its size is fixed at the helper start: PTCacheEntriesLog2 needs a restart)
 		cacheLog2Setup = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "PTCacheEntriesLog2"), 12), 22);
-		RtCore::AskScratch((UINT)((EmissiveBaseWords(w, h, cacheLog2Setup) * 4ull + 4ull * RtEmissiveRow::kScratchWords + (1ull << 20) - 1) >> 20) + 1u);	// (+ PTEmissive)
+		const UINT baseScratchMB = (UINT)((EmissiveBaseWords(w, h, cacheLog2Setup) * 4ull + 4ull * RtEmissiveRow::kScratchWords + (1ull << 20) - 1) >> 20) + 1u;
+		const UINT splitScratchMB = (UINT)(((SplitBaseWords(w, h, cacheLog2Setup) + SplitNeedWords(w, h)) * 4ull + (1ull << 20) - 1) >> 20) + 1u;
+		splitScratchReady = splitScratchMB <= 1024u;
+		const UINT sunSplitScratchMB = (UINT)(((SunSplitBaseWords(w, h, cacheLog2Setup) + SunSplitNeedWords(w, h)) * 4ull + (1ull << 20) - 1) >> 20) + 1u;
+		sunSplitScratchReady = sunSplitScratchMB <= 1024u;
+		RtCore::AskScratch(sunSplitScratchReady ? sunSplitScratchMB : (splitScratchReady ? splitScratchMB : baseScratchMB));
+		sunDenoiseView = RtShadowDenoise::View();
 		emissiveState = RtEmissiveRow::State();
 		restirState.valid = false;
 		// (2026-11-04 d) PTRestirGI's images (9). (2026-11-05) Only when PTRestirGI is on at the helper start (off by default; turning it on
@@ -946,8 +1034,9 @@ namespace {
 		const D3DXMATRIX& view = TheRenderManager->viewMatrix;
 		const D3DXMATRIX& proj = TheRenderManager->projMatrix;
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
+		const float uKey = S.gameLamps == 4 ? (RtLightUnits::Gamma() * 17.0f + RtLightUnits::LightScale() * 257.0f + RtLightUnits::SkyScale() * 4099.0f + RtLightUnits::AmbientScale() * 65537.0f) : 0.0f;
 		const float key[8] = { (float)S.bounces + 100.0f * (float)S.bounceHalf + 1000.0f * (float)S.lastSky + 10000.0f * (float)S.lastBounce + 100000.0f * (float)S.lampFalloff + 1000000.0f * S.lampGain,
-			S.sky + 100.0f * (float)S.restirDIRays + 1000.0f * (float)S.bounceLights, S.ambient,	// (perf-ptcost: + the ray budget keys)
+			S.sky + 100.0f * (float)S.restirDIRays + 1000.0f * (float)S.bounceLights, S.ambient + uKey,	// (perf-ptcost: + the ray budget keys; 2026-11-19: + live PBR unit scales)
 			S.glow + (S.emissive > 0 ? 1000.0f : 0.0f) + 16.0f * S.materials.glass + 64.0f * S.materials.glassTint + 256.0f * S.materials.foliage + 1024.0f * S.materials.skin + 4096.0f * S.materials.sheen, S.clamp + 1000.0f * S.indirectClamp, (float)S.debugView + (S.primary ? 16.0f : 0.0f) + (S.specular ? 32.0f : 0.0f) + (S.glowLights ? 64.0f : 0.0f) + 128.0f * (float)S.gameLamps + (S.lightGrid ? 1024.0f : 0.0f) + 2048.0f * (float)S.bounceAlpha + 8192.0f * floorf(S.bounceDistance), proj._11, proj._22 };	// (2026-11-04: PTLightGrid too, so an A/B starts each mean fresh)
 		bool moved = !lastValid;
 		for (int i = 0; i < 16 && !moved; i++) moved = fabsf(((const float*)&view)[i] - ((const float*)&lastView)[i]) > 1.0e-4f;
@@ -1060,13 +1149,17 @@ namespace {
 		if (waterWant) WaterMask::Request(TheFrameRateManager->FrameNumber);
 		bool prepped = false;
 		const bool maskWant = primary && (WaterMask::Enabled || WaterMask::GrassOn);	// (2026-11-12 PTGrassOwnPixel: the mask may hold grass alone)
-		if ((vmWant || ownWant || (maskWant && WaterMask::WrittenFrame == TheFrameRateManager->FrameNumber)) && gNormals && albedoData && albedoData->x > 0.5f) {
-			prepped = ViewModelPrep(Device, gNormals, w, h, vmWant, ownWant, tw, th, c.rect[0], c.rect[1]);
+		const bool f0Want = primary && S.specular && !CapturedNormals::MsaaSurface && !CapturedNormals::AlbedoMsaa && capturedData && capturedData->x > 0.5f;
+		if ((vmWant || ownWant || f0Want || (maskWant && WaterMask::WrittenFrame == TheFrameRateManager->FrameNumber)) && gNormals && albedoData && albedoData->x > 0.5f) {
+			prepped = ViewModelPrep(Device, gNormals, w, h, vmWant, ownWant, tw, th, c.rect[0], c.rect[1], f0Want);
 			vmThisFrame = prepped && vmWant;
 		}
+		// (2026-11-19) RenderRect::On (tw < w || th < h): copy only the active top-left render rect of the screen-shaped G-buffer / frame textures
+		const RECT subRect = { 0, 0, (LONG)tw, (LONG)th };
+		const RECT* const inRect = (!fullRect && tw > 0 && th > 0) ? &subRect : nullptr;
 		IDirect3DBaseTexture9* normalsIn = prepped ? (IDirect3DBaseTexture9*)vmNormals : gNormals;
 		if (primary && imageDepth >= 0 && imageNormals >= 0 && imageAlbedo >= 0 && c.forward[3] > 0.0f && albedoData && albedoData->x > 0.5f &&
-			gDepth && normalsIn && gAlbedo && RtCore::CopyIn(imageDepth, gDepth) && RtCore::CopyIn(imageNormals, normalsIn) && RtCore::CopyIn(imageAlbedo, gAlbedo))
+			gDepth && normalsIn && gAlbedo && RtCore::CopyIn(imageDepth, gDepth, inRect) && RtCore::CopyIn(imageNormals, normalsIn, inRect) && RtCore::CopyIn(imageAlbedo, gAlbedo, inRect))
 			flags |= 8u;
 		else vmThisFrame = false;
 		// the next frame's first-person render captures the model while the path tracer can light it (the screen's G-buffer, the full rect)
@@ -1075,7 +1168,7 @@ namespace {
 		// (2026-11-02 e) the screen's roughness / metal (CapturedNormals' MaterialBuffer) with the first hit's G-buffer
 		const D3DXVECTOR4* materialData = constant("TESR_MaterialBufferData");
 		IDirect3DBaseTexture9* gMaterial = texture("TESR_MaterialBuffer");
-		if ((flags & 8u) && S.specular && imageMaterial >= 0 && materialData && materialData->x > 0.5f && gMaterial && RtCore::CopyIn(imageMaterial, gMaterial))
+		if ((flags & 8u) && S.specular && imageMaterial >= 0 && materialData && materialData->x > 0.5f && gMaterial && RtCore::CopyIn(imageMaterial, gMaterial, inRect))
 			flags |= 256u;
 		if (S.specular) flags |= 128u;
 		if ((S.gameLamps & 1) || S.gameLamps == 4) flags |= 2048u;	// (2026-11-03 rtspec) PTGameLamps: the game's falloff
@@ -1110,7 +1203,9 @@ namespace {
 		// (2026-11-02 c) the frame as drawn so far (the world, the sky; NVR's effects not yet): camera rays that leave the RT scene show it
 		IDirect3DSurface9* frame = nullptr;
 		if (primary && imageFrame >= 0 && SUCCEEDED(Device->GetRenderTarget(0, &frame)) && frame) {
-			if (RtCore::CopyIn(imageFrame, frame)) flags |= 32u;
+			D3DSURFACE_DESC fd = {};
+			const RECT* const frameRect = (inRect && SUCCEEDED(frame->GetDesc(&fd)) && fd.Width >= tw && fd.Height >= th) ? inRect : nullptr;
+			if (RtCore::CopyIn(imageFrame, frame, frameRect)) flags |= 32u;
 			frame->Release();
 		}
 		const int normalAtlas = RtCore::NormalAtlasImage();	// (2026-11-02 d) NormalTextures
@@ -1120,14 +1215,21 @@ namespace {
 		c.accum[0] = (float)samples; c.accum[1] = (float)S.bounces; c.accum[2] = (float)S.samples; c.accum[3] = (float)flags;
 		const ShaderConstants& k = TheShaderManager->ShaderConst;
 		memcpy(c.sunDir, &sunKey, 16);
-		const float lightScale = S.gameLamps == 4 ? GameLightScale() : 1.0f;	// (2026-11-04 rtgap)
-		c.sunColor[0] = Lin(k.sunColor.x) * lightScale; c.sunColor[1] = Lin(k.sunColor.y) * lightScale; c.sunColor[2] = Lin(k.sunColor.z) * lightScale;
+		if (S.gameLamps == 4) {	// UNOFFICIAL 2026-11-19 (Finding 4.1) match forward / deferred PBR decode gamma + light / sky / ambient scales
+			RtLightUnits::DecodeColor(c.sunColor, k.sunColor.x, k.sunColor.y, k.sunColor.z, RtLightUnits::LightScale());
+			RtLightUnits::DecodeColor(c.skyZenith, k.skyColor.x, k.skyColor.y, k.skyColor.z, RtLightUnits::SkyScale() * S.sky);
+			RtLightUnits::DecodeColor(c.skyHorizon, k.horizonColor.x, k.horizonColor.y, k.horizonColor.z, RtLightUnits::SkyScale() * S.sky);
+			RtLightUnits::DecodeColor(c.ambient, k.sunAmbient.x, k.sunAmbient.y, k.sunAmbient.z, RtLightUnits::AmbientScale() * S.ambient);
+		}
+		else {
+			c.sunColor[0] = Lin(k.sunColor.x); c.sunColor[1] = Lin(k.sunColor.y); c.sunColor[2] = Lin(k.sunColor.z);
+			c.skyZenith[0] = Lin(k.skyColor.x) * S.sky; c.skyZenith[1] = Lin(k.skyColor.y) * S.sky; c.skyZenith[2] = Lin(k.skyColor.z) * S.sky;
+			c.skyHorizon[0] = Lin(k.horizonColor.x) * S.sky; c.skyHorizon[1] = Lin(k.horizonColor.y) * S.sky; c.skyHorizon[2] = Lin(k.horizonColor.z) * S.sky;
+			c.ambient[0] = Lin(k.sunAmbient.x) * S.ambient; c.ambient[1] = Lin(k.sunAmbient.y) * S.ambient; c.ambient[2] = Lin(k.sunAmbient.z) * S.ambient;
+		}
 		c.sunColor[3] = tanf(0.5f * 0.53f * 0.0174532925f);	// the sun's disc
-		c.skyZenith[0] = Lin(k.skyColor.x) * S.sky; c.skyZenith[1] = Lin(k.skyColor.y) * S.sky; c.skyZenith[2] = Lin(k.skyColor.z) * S.sky;
 		c.skyZenith[3] = exterior ? 1.0f : 0.0f;
-		c.skyHorizon[0] = Lin(k.horizonColor.x) * S.sky; c.skyHorizon[1] = Lin(k.horizonColor.y) * S.sky; c.skyHorizon[2] = Lin(k.horizonColor.z) * S.sky;
 		c.skyHorizon[3] = S.glow;
-		c.ambient[0] = Lin(k.sunAmbient.x) * S.ambient; c.ambient[1] = Lin(k.sunAmbient.y) * S.ambient; c.ambient[2] = Lin(k.sunAmbient.z) * S.ambient;
 		c.ambient[3] = S.sky;	// the panorama's scale
 		c.misc[0] = (float)Lamps(c);
 		// (2026-11-03) all the lamps through the lamp image (G32R32F, 4 texels a lamp), when it can be filled and copied this frame
@@ -1343,12 +1445,23 @@ namespace {
 					}
 					row[2 * RtEmissiveRow::kFrameTexel] = (float)emissiveCount;
 					row[2 * RtEmissiveRow::kFrameTexel + 1] = (float)(EmissiveBaseWords(w, h, cacheLog2Setup) / 4096ull);
+					row[2 * kSplitBaseTexel] = splitScratchReady ? (float)(SplitBaseWords(w, h, cacheLog2Setup) / 4096ull) : 0.0f;
+					// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: decouple primary direct sun diffuse for SIGMA shadow denoising when room permits
+					const bool sunSplitRoom = RtCore::PassesLeft() >= (emissiveCount > 0 ? 1 : 0) + 1 + (cache ? 1 : 0) + 2;
+					const bool sunSplitWant = sunSplitScratchReady && sunSplitRoom && S.denoise && S.denoiseSplitSun && (flags & 512u) != 0u && !giReady &&
+						S.debugView == 0 && S.samples == 1 && sunUp && !earlyRecording &&
+						imageSunVis >= 0 && imageSunHit >= 0 && imageSunDirect >= 0 && shaderSunUnpack >= 0 && shaderSunDenoise >= 0 &&
+						!(S.denoiseUnderRr == 0 && Upscaler::RayReconstructionWantsRaw()) && !RtSunShadows::HelperDenoisedThisFrame();
+					row[2 * kSplitBaseTexel + 1] = sunSplitWant ? (float)(SunSplitBaseWords(w, h, cacheLog2Setup) / 4096ull) : 0.0f;
+					sunSplitThisFrame = sunSplitWant;
 				}
 				lampTexture->UnlockRect(0);
 				if (RtCore::CopyIn(imageLamps, lampTexture)) { flags |= 1024u | (gridOn ? 4096u : 0u) | (restir ? 262144u : 0u) | (cache ? 524288u : 0u) | (restir || cache || energy ? 1048576u : 0u); c.misc[0] = (float)lampCount; c.rect[2] = (float)glowCount; }
-				else restirState.valid = false;
+				else { restirState.valid = false; sunSplitThisFrame = false; }
 			}
 		}
+		else sunSplitThisFrame = false;
+		if (!(flags & 1024u)) sunSplitThisFrame = false;
 		if (!(flags & 262144u)) restirState.valid = false;
 		c.accum[3] = (float)flags;	// (the lamp image's flag 1024 comes after the reset check: a lamp list change does not restart the mean)
 		// (2026-11-03 b) FIX: these three were inside the comment above since 940b1ef2 (the lamp image), so the ray length was 0: no
@@ -1412,7 +1525,85 @@ namespace {
 			int images16[16];
 			memcpy(images16, images, sizeof(images));
 			images16[15] = split ? imageSpec : imageDisplay;
-			if (!RtCore::AddPass(flags & 4096u ? shaderGrid : shader, images16, split ? 16 : 15, 0x7u | (flags & 512u ? 1u << 13 : 0u) | (split ? 1u << 15 : 0u), &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
+			const UINT imgCount = split ? 16u : 15u;
+			const UINT writeMask = 0x7u | (flags & 512u ? 1u << 13 : 0u) | (split ? 1u << 15 : 0u);
+			const UINT gx = (tw + 7) / 8, gy = (th + 7) / 8;
+			// UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass split (Primary+Temporal -> Spatial+Boiling -> Secondary Bounces) for realtime 1-SPP ReSTIR DI.
+			const bool useGrid = (flags & 4096u) != 0u;
+			const int p1Shader = useGrid ? shaderPrimaryGrid : shaderPrimary;
+			const int p3Shader = useGrid ? shaderBounceGrid : shaderBounce;
+			const bool sunSplitActive = sunSplitThisFrame;
+			const bool want3Pass = splitScratchReady && (flags & 512u) != 0u && (flags & 262144u) != 0u && S.debugView == 0 && S.samples == 1 &&
+				p1Shader >= 0 && shaderSpatial >= 0 && p3Shader >= 0 && RtCore::PassesLeft() >= (3 + ((flags & 524288u) ? 1 : 0) + (sunSplitActive ? 2 : 0));
+			bool dispatched = false;
+			if (want3Pass && RtCore::AddPass(p1Shader, images16, imgCount, 0u, &c, sizeof(c), gx, gy)) {
+				if (RtCore::AddPass(shaderSpatial, images16, imgCount, 0u, &c, sizeof(c), gx, gy) &&
+					RtCore::AddPass(p3Shader, images16, imgCount, writeMask, &c, sizeof(c), gx, gy)) {
+					dispatched = true;
+					static bool splitLogged = false;
+					if (!splitLogged) { splitLogged = true; Logger::Log("UNOFFICIAL RT path trace: 3-pass split active (Primary+Temporal -> Spatial+Boiling -> Secondary Bounces)"); }
+				} else return;
+			}
+			if (!dispatched && !RtCore::AddPass(useGrid ? shaderGrid : shader, images16, imgCount, writeMask, &c, sizeof(c), gx, gy)) return;
+			// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun: unpack decoupled primary direct sun and denoise sun visibility via helper RtShadowDenoise (SIGMA + actor anti-lag)
+			if (sunSplitActive) {
+				const float unpackParams[4] = { (float)tw, (float)th, (float)(SunSplitBaseWords(w, h, cacheLog2Setup) / 4096ull), 0.0f };
+				const int unpackImages[3] = { imageSunVis, imageSunHit, imageSunDirect };
+				bool sunOk = RtCore::AddPass(shaderSunUnpack, unpackImages, 3, 0x7u, unpackParams, sizeof(unpackParams), gx, gy);
+				if (sunOk && RtCore::PassesLeft() >= 1) {
+					RtShadowDenoise::View now;
+					for (int i = 0; i < 3; i++) { now.forward[i] = c.forward[i]; now.right[i] = c.right[i]; now.up[i] = c.up[i]; }
+					const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+					now.eye[0] = (double)cam.x + eye.x; now.eye[1] = (double)cam.y + eye.y; now.eye[2] = (double)cam.z + eye.z;
+					now.jitter[0] = c.rect[0]; now.jitter[1] = c.rect[1]; now.farZ = c.forward[3]; now.valid = true;
+					static UINT lastSunW = 0, lastSunH = 0;
+					static UInt32 lastSunFrame = 0;
+					const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+					RtShadowDenoise::View before = sunDenoiseView;
+					before.valid = sunDenoiseView.valid && lastSunW == tw && lastSunH == th && frameNow - lastSunFrame <= 2 && !TheShaderManager->GameState.isCameraCut;
+					static D3DXVECTOR3 lastPtSun(0.0f, 0.0f, 0.0f);
+					const D3DXVECTOR3 sunNow(c.sunDir[0], c.sunDir[1], c.sunDir[2]);
+					if (D3DXVec3Dot(&sunNow, &lastPtSun) < 0.99985f) before.valid = false;
+					lastPtSun = sunNow;
+					lastSunW = tw; lastSunH = th; lastSunFrame = frameNow;
+					IDirect3DBaseTexture9* motion = texture("TESR_ObjectMotionBuffer");
+					const D3DXVECTOR4* motionData = constant("TESR_ObjectMotionData");
+					const bool moved = imageSunMotion >= 0 && tw == w && th == h && motion && motionData && motionData->x > 0.0f && RtCore::CopyIn(imageSunMotion, motion);
+					RtShadowDenoise::Settings ds;
+					ds.maxHistory = 16.0f; ds.maxRadius = 24.0f; ds.stabilize = 4.0f;
+					RtShadowDenoise::TimeScale(ds, RtDenoise::HistoryClock());
+					RtShadowDenoise::DenoiseConstants d;
+					RtShadowDenoise::Fill(d, now, before, tw, th, tw, th, 0, 1, sunDenoiseFrames, ds, moved, c.sunColor[3]);
+					d.history[3] = 1.0f;	// motion-adaptive history so shadows stay crisp under camera movement
+					d.layerReset[0][0] = before.valid ? 0.0f : 1.0f;
+					const int denoiseImages[5] = { imageDepth, imageNormals, moved ? imageSunMotion : imageNormals, imageSunVis, imageSunHit };
+					if (RtCore::AddPass(shaderSunDenoise, denoiseImages, 5, 0x8u, &d, sizeof(d), 1, 1)) {
+						sunDenoiseView = now;
+						sunDenoiseView.valid = true;
+						if (sunDenoiseFrames++ == 0)
+							Logger::Log("UNOFFICIAL RT path trace: PTDenoiseSplitSun active (%ux%u, SIGMA sun shadow denoiser + actor anti-lag, ObjectMotion %s)", tw, th, moved ? "yes" : "no");
+					} else {
+						sunDenoiseView.valid = false;
+					}
+				} else {
+					sunDenoiseView.valid = false;
+				}
+				if (sunOk) {
+					auto makeSun = [&](IDirect3DTexture9*& t, IDirect3DSurface9*& s, D3DFORMAT format) {
+						if (t) { D3DSURFACE_DESC d = {}; t->GetLevelDesc(0, &d); if (d.Width != w || d.Height != h) { DxvkCompute::Drop(s); DxvkCompute::Drop(t); } }
+						if (!t && SUCCEEDED(TheRenderManager->device->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, format, D3DPOOL_DEFAULT, &t, nullptr)) && t) t->GetSurfaceLevel(0, &s);
+						return s != nullptr;
+					};
+					sunSplitThisFrame = makeSun(sunVisTexture, sunVisSurface, D3DFMT_R16F) &&
+						makeSun(sunDirectTexture, sunDirectSurface, D3DFMT_A16B16G16R16F) &&
+						RtCore::CopyOut(imageSunVis, sunVisSurface, tw, th) &&
+						RtCore::CopyOut(imageSunDirect, sunDirectSurface, tw, th);
+				} else {
+					sunSplitThisFrame = false;
+				}
+			} else {
+				sunDenoiseView.valid = false;
+			}
 			if (flags & 524288u) {	// (2026-11-07) PTRadianceCache: fold this frame's samples into the cells (RtPathTraceCache.comp)
 				const UINT entries = 1u << cacheLog2Setup;
 				// (2026-11-07 perf-history) PTCacheMaxFrames is frames at 60 fps (the lag behind a change of light): the same seconds here.
@@ -1475,7 +1666,7 @@ namespace {
 		std::vector<char> spirv;
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (!ext || !DxvkCompute::LoadSpirv("RtPathTraceShow", spirv)) return nullptr;
-		NVR_EXT_BINDING_DESC bindings[11] = {
+		NVR_EXT_BINDING_DESC bindings[13] = {
 			{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
 			{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE, 1, NVR_EXT_VIEW_2D, FALSE, 0 },
 			{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE, 2, NVR_EXT_VIEW_2D, FALSE, 0 },
@@ -1486,12 +1677,14 @@ namespace {
 			{ 1, 7, NVR_EXT_BIND_SAMPLED_IMAGE, 7, NVR_EXT_VIEW_2D, FALSE, 0 },	// its raw trace
 			{ 1, 8, NVR_EXT_BIND_SAMPLED_IMAGE, 8, NVR_EXT_VIEW_2D, FALSE, 0 },	// its albedo r, g
 			{ 1, 9, NVR_EXT_BIND_SAMPLED_IMAGE, 9, NVR_EXT_VIEW_2D, FALSE, 0 },	// its albedo b, roughness
+			{ 1, 10, NVR_EXT_BIND_SAMPLED_IMAGE, 10, NVR_EXT_VIEW_2D, FALSE, 0 },	// (2026-11-20 PTDenoiseSplitSun) denoised sun visibility
+			{ 1, 11, NVR_EXT_BIND_SAMPLED_IMAGE, 11, NVR_EXT_VIEW_2D, FALSE, 0 },	// (2026-11-20 PTDenoiseSplitSun) unshadowed demodulated diffuse sun
 			{ 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 4 },
 		};
 		NVR_EXT_GRAPHICS_PIPELINE_DESC desc = {};
 		desc.pFragmentSpirv = spirv.data();
 		desc.FragmentSpirvSize = (UINT)spirv.size();
-		desc.BindingCount = 11;
+		desc.BindingCount = 13;
 		desc.pBindings = bindings;
 		desc.PushConstantSize = 52;	// RtPathTraceShow.frag's Push block (2026-11-10: + detailEdge; at 48 the draw with the 52-byte block was dropped: the game's own picture stayed)
 		desc.UsesSamplerHeap = TRUE;
@@ -1700,11 +1893,12 @@ namespace {
 		// light (PTDenoise), also when the denoiser did not run (it failed, or DLSS RR takes the raw paths): it showed the light / colour then
 		const bool modulate = S.denoise && (shown == denoisedTexture || shown == displayTexture) && albedoThisFrame && albedoTexture;
 		const bool splitShow = modulate && specShown && splitThisFrame;	// (ptaaa-denoiser) + the specular light x its albedo
+		const bool sunSplitShow = modulate && sunSplitThisFrame && sunVisTexture && sunDirectTexture;	// (2026-11-20 PTDenoiseSplitSun)
 		// UNOFFICIAL 2026-11-11 PTEarlyLook: the merged first surface (bit 8: its a < -0.5 keeps the game's pixel); else the trace's own, as before
 		IDirect3DTexture9* const firstSurface = modulate ? FirstSurface() : nullptr;
 		const bool earlyLook = modulate && firstSurface != albedoTexture;
 		struct { float exposure; UInt32 samplerIndex; float split, gamma; UInt32 modulate, pad[3]; float detail, detailRadius, texel[2], detailEdge; } push = { S.exposure, 0, S.split,
-			S.debugView == 1 || S.debugView == 2 || S.debugView == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | (hdr ? 2u : 0u) | (splitShow ? 4u : 0u) | (earlyLook ? 8u : 0u), { 0, 0, 0 }, 0.0f, 4.0f, { 0.0f, 0.0f }, S.detailEdge };	// (the last: 2026-11-10 PTDetailEdge)
+			S.debugView == 1 || S.debugView == 2 || S.debugView == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | (hdr ? 2u : 0u) | (splitShow ? 4u : 0u) | (earlyLook ? 8u : 0u) | (sunSplitShow ? 16u : 0u), { 0, 0, 0 }, 0.0f, 4.0f, { 0.0f, 0.0f }, S.detailEdge };	// (the last: 2026-11-10 PTDetailEdge)
 		static_assert(sizeof(push) == 52, "RtPathTraceShow's push block: keep desc.PushConstantSize (the pipeline, above) the same");
 		IDirect3DBaseTexture9* depthBuffer = nullptr;
 		{ auto found = TheTextureManager->TextureNames.find("TESR_DepthBuffer"); if (found != TheTextureManager->TextureNames.end() && found->second) depthBuffer = *found->second; }
@@ -1727,7 +1921,7 @@ namespace {
 		IDirect3DTexture9* viewModel = TheTextureManager->DepthTextureViewModel;
 		push.pad[2] = viewModel && !(vmThisFrame && hdr) ? (TheRenderManager->DepthConstants.z == 0.0f ? 1u : 2u) : 0u;
 		shownKeepViewModel = push.pad[2] != 0u;	// (2026-11-12 the far hand-over leaves those pixels alone too)
-		NVR_EXT_RESOURCE_BINDING bindings[11] = {};
+		NVR_EXT_RESOURCE_BINDING bindings[13] = {};
 		bindings[0].Slot = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].pResource = shown;
 		bindings[1].Slot = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].pResource = modulate ? firstSurface : shown;
 		bindings[2].Slot = 2; bindings[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[2].pResource = displayTexture;	// (the raw trace: sky / frame pixels)
@@ -1738,12 +1932,14 @@ namespace {
 		IDirect3DBaseTexture9* const specImages[4] = { splitShow ? specShown : displayTexture, splitShow ? specTexture : displayTexture,
 			splitShow ? specAlbedoA : displayTexture, splitShow ? specAlbedoB : displayTexture };
 		for (UINT k = 0; k < 4; k++) { bindings[6 + k].Slot = 6 + k; bindings[6 + k].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[6 + k].pResource = specImages[k]; }
-		bindings[10].Slot = 0; bindings[10].Type = NVR_EXT_BIND_SAMPLER; bindings[10].pResource = point;
+		bindings[10].Slot = 10; bindings[10].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[10].pResource = sunSplitShow ? sunVisTexture : displayTexture;
+		bindings[11].Slot = 11; bindings[11].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[11].pResource = sunSplitShow ? sunDirectTexture : displayTexture;
+		bindings[12].Slot = 0; bindings[12].Type = NVR_EXT_BIND_SAMPLER; bindings[12].pResource = point;
 		NVR_EXT_DRAW_DESC draw = {};
 		draw.pPipeline = pipeline;
 		draw.TargetCount = 1;
 		draw.Targets[0].pResource = RenderTarget;
-		draw.BindingCount = 11;
+		draw.BindingCount = 13;
 		draw.pBindings = bindings;
 		draw.pPushData = &push;
 		draw.PushDataSize = sizeof(push);
@@ -1986,6 +2182,13 @@ namespace RtPathTrace {
 	void Register() {
 		shader = RtCore::AddShader("RtPathTrace");
 		shaderGrid = RtCore::AddShader("RtPathTraceGrid");	// (2026-11-04) PTLightGrid
+		shaderPrimary = RtCore::AddShader("RtPathTracePrimary");	// UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass PT split
+		shaderPrimaryGrid = RtCore::AddShader("RtPathTracePrimaryGrid");
+		shaderSpatial = RtCore::AddShader("RtPathTraceSpatial");
+		shaderBounce = RtCore::AddShader("RtPathTraceBounce");
+		shaderBounceGrid = RtCore::AddShader("RtPathTraceBounceGrid");
+		shaderSunUnpack = RtCore::AddShader("RtPathTraceSunUnpack");	// UNOFFICIAL 2026-11-20 PTDenoiseSplitSun
+		shaderSunDenoise = RtCore::AddShader("RtShadowDenoise");
 		shaderCache = RtCore::AddShader("RtPathTraceCache");	// (2026-11-07) PTRadianceCache's resolve pass
 		shaderEmissive = RtCore::AddShader("RtEmissiveBuild");	// (2026-11-07 ptaaa-emissive) PTEmissive's light list
 		shaderGI = RtCore::AddShader("RtPathTraceGI");		// (2026-11-04 d) PTRestirGI

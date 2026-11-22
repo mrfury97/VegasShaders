@@ -31,6 +31,7 @@ namespace SettingForce {
 		{ "Shaders.ShadowsInteriors.Deferred", "Enabled", 1, 1 },
 		{ "Shaders.ShadowsInteriors.Deferred", "UnshadowedLamps", 1, 1 },
 		{ "Shaders.ShadowsInteriors.Deferred", "LightFreeRecords", 1, 2 },
+		{ "Shaders.ShadowsExteriors.Deferred", "Enabled", 1, 2 },
 		{ "Main.Main.Quality", "DeferredFoliage", 1, 2 },	// UNOFFICIAL 2026-11-14 phase 3 foliage (core/DeferredFoliage.h)
 		{ "Main.Main.Quality", "DeferredDistant", 1, 2 },	// UNOFFICIAL 2026-11-14 (core/DeferredDistant.h): the far world writes the G-buffer and takes the deferred sun
 		// UNOFFICIAL 2026-11-14 (the orchestrator's call, FD-LOD-RESULTS.md "not decided"): mode 2 lights outdoors, where fp16 distance is too
@@ -85,5 +86,18 @@ namespace SettingForce {
 	inline int Mode() {
 		if (State < 0 && TheSettingManager) TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
 		return State == 1 ? RendererMode : 0;
+	}
+
+	// UNOFFICIAL 2026-11-20: features that require the Vegas Shaders DXVK fork (ID3D9NvrExt). Set by DxvkCompute::Initialize
+	// when the fork is absent (native D3D9 or stock DXVK) so FSR/DLSS (default on) cannot trigger RenderScale / ScopeOverlay /
+	// AmbientLight / ReactiveMask bugs, and HDR output cannot pretend to toggle on DX9. Nothing is written to VegasShaders.toml.
+	inline bool NoDxvkFork = false;
+	inline bool DxvkRequiredOff(const char* section, const char* key) {
+		if (!NoDxvkFork || !section || !key) return false;
+		if (key[0] == 'E' && !strcmp(key, "Enabled"))
+			return !strcmp(section, "Shaders.TAA.FSR") || !strcmp(section, "Shaders.TAA.DLSS") || !strcmp(section, "Shaders.HDR.Main");
+		if (key[0] == 'R' && !strcmp(key, "RayReconstruction") && !strcmp(section, "Shaders.TAA.DLSS"))
+			return true;
+		return false;
 	}
 }

@@ -300,9 +300,9 @@ bool ShadowsExteriorEffect::UpdateSettingsFromQuality(int quality) {
 		maps.Prefilter = 0;	// (PCF: below)
 
 		// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded): one [Shaders.ShadowsExteriors.Forms] for the four sun cascades, with the
-		// per-cascade differences built in (it was FormsNear / FormsMiddle / FormsFar / FormsLod): distant LOD objects only in the Far and
-		// Lod cascades (hidden up close anyway), ten times MinRadius there, and the Lod cascade without actors, activators, furniture and
-		// misc objects (too small to show that far out).
+		// per-cascade differences built in (it was FormsNear / FormsMiddle / FormsFar / FormsLod): ten times MinRadius in the Far and Lod
+		// cascades, and the Lod cascade without actors, activators, furniture and misc objects (too small to show that far out). LOD casters
+		// are enabled in all four cascades (matching PresetShadowForms), because distant mountain Terrain LOD still casts across Near/Middle at low sun.
 		const char* forms = "Shaders.ShadowsExteriors.Forms";
 		for (int type = 0; type <= MapLod; type++) {
 			FormsStruct& f = ShadowMaps[type].Forms;
@@ -320,7 +320,7 @@ bool ShadowsExteriorEffect::UpdateSettingsFromQuality(int quality) {
 			f.Statics = ShadowSettingI(forms, "Statics");
 			f.Terrain = ShadowSettingI(forms, "Terrain");
 			f.Trees = ShadowSettingI(forms, "Trees");
-			f.Lod = farCascade && ShadowSettingI(forms, "Lod");
+			f.Lod = ShadowSettingI(forms, "Lod");
 			f.MinRadius = ShadowSettingF(forms, "MinRadius") * (farCascade ? 10.0f : 1.0f);
 			f.OrigMinRadius = f.MinRadius;
 		}
@@ -466,7 +466,9 @@ void ShadowsExteriorEffect::UpdateSettings() {
 		maps.CharacterMapOthers = ShadowSettingI(shadowMapsSection, "CharacterShadowMapOthers") != 0;
 		maps.CharacterMapLog = ShadowSettingI(shadowMapsSection, "CharacterShadowMapLog") != 0;
 		maps.CharacterMapDebug = std::clamp(ShadowSettingI(shadowMapsSection, "CharacterShadowMapDebug"), 0, 3);
-		if (maps.CharacterMap && !CharacterMapCompiled) {
+		// UNOFFICIAL 2026-11-19: only warn after RegisterTextures() has captured startup CharacterMapCompiled
+		// (UpdateSettings runs before RegisterTextures at startup, so checking earlier falsely fired on pure defaults).
+		if (texturesInitialized && maps.CharacterMap && !CharacterMapCompiled) {
 			static bool hinted = false;
 			if (!hinted) {
 				hinted = true;
@@ -870,6 +872,8 @@ void ShadowsExteriorEffect::RegisterConstants() {
 		bind(cascade.oldCentre, &Constants.OldCenter[cascade.type]);
 	bind("TESR_ShadowCrossFade", &Constants.CrossFade);
 	Constants.CrossFade = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+	bind("TESR_ShadowDynamicData", &Constants.DynamicData);
+	Constants.DynamicData = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	bind("TESR_ShadowCubeMapLightPosition", &Constants.ShadowCubeMapLightPosition);
 	TheShaderManager->RegisterConstant("TESR_ShadowLightPosition", (D3DXVECTOR4*)&Constants.ShadowLightPosition);
 	bind("TESR_ShadowSunLight", &SunLight);	// UNOFFICIAL 2026-10-19 (SunFar)
@@ -939,6 +943,7 @@ void ShadowsExteriorEffect::RegisterTextures() {
 	}
 	else if (SunFadeDeferred::CompiledIn()) {
 		TheTextureManager->RegisterTexture("TESR_ShadowAtlasOld", (IDirect3DBaseTexture9**)&ShadowAtlasOldTexture);
+		TheTextureManager->RegisterTexture("TESR_ShadowDynamic", (IDirect3DBaseTexture9**)&ShadowDynamicTexture);
 		Logger::Log("UNOFFICIAL deferred sun steps: %.1f degrees, each faded over %.1f s by the deferred sun pass (the %lux%lu copy of the shadow atlas is made at the first step)",
 			SunFadeDeferred::StepDegrees, SunFadeDeferred::FadeSeconds, atlasSize, atlasSize);
 	}
@@ -1193,11 +1198,16 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 		}
 		// (2026-11-15 fd-smoothsun) the deferred steps' copy: released, made again at the next step at the new size (DeferredSun::Apply
 		// re-reads the slot at every pass); a fade in progress ends
-		else if (ShadowAtlasOldTexture) {
+		else {
 			ReleaseAndClear(ShadowAtlasOldSurface);
 			ReleaseAndClear(ShadowAtlasOldTexture);
-			DeferredFading = DeferredHolding = false;
+			ReleaseAndClear(ShadowDynamicSurface);
+			ReleaseAndClear(ShadowDynamicTexture);
+			ShadowDynamicSize = 0;
+			DeferredDynamicFailed = false;
+			DeferredFading = DeferredHolding = DeferredCapturePending = DeferredCaptureReady = false;
 			Constants.CrossFade.x = 0.0f;
+			Constants.DynamicData = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 		}
 
 		MakeCascadeSurfaces(*this, cascadeSize, atlasSize);
@@ -1518,6 +1528,8 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateSmoothedSunDir() {
 		else eased = sunNow;
 		SunGlideValid = false;
 		SunCrossFading = false;
+		DeferredSunValid = DeferredFading = DeferredHolding = DeferredCapturePending = DeferredCaptureReady = false;
+		SunFadeDeferred::Fading = false;
 		Constants.CrossFade.x = 0.0f;
 		Constants.SmoothedSunDir = D3DXVECTOR4(eased, 0.0f);
 		return eased;
@@ -1532,8 +1544,8 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateSmoothedSunDir() {
 	if (Settings.SunSmoothing.SmoothSun && SunFadeDeferred::Live() && TheShaderManager->GameState.isExterior)
 		return CalculateDeferredSunDir(sunDir);
 	SunFadeDeferred::Fading = false;
-	if (DeferredSunValid) {
-		DeferredSunValid = DeferredFading = DeferredHolding = false;
+	if (DeferredSunValid || DeferredCapturePending) {
+		DeferredSunValid = DeferredFading = DeferredHolding = DeferredCapturePending = DeferredCaptureReady = false;
 		Constants.CrossFade = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	}
 
@@ -1696,11 +1708,12 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateDeferredSunDir(D3DXVECTOR3 sunDir) {
 		}
 		DeferredSunHeld = sunDir;
 		DeferredSunValid = true;
-		DeferredFading = DeferredHolding = false;
+		DeferredFading = DeferredHolding = DeferredCapturePending = DeferredCaptureReady = false;
 	}
-	else if (angle >= stepAngle && !DeferredFading) {
-		const D3DXVECTOR3 oldSun = DeferredSunHeld;
-		DeferredFading = !noMaps && StartDeferredFade(oldSun);
+	else if (DeferredCapturePending) {
+		const bool captured = DeferredCaptureReady && !noMaps;
+		DeferredCapturePending = DeferredCaptureReady = false;
+		DeferredFading = captured;
 		DeferredHolding = DeferredFading;
 		DeferredHoldFrames = 0;
 		DeferredFadeStart = now;
@@ -1712,6 +1725,17 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateDeferredSunDir(D3DXVECTOR3 sunDir) {
 				D3DXToDegree(angle), TheShaderManager->ShaderConst.GameTime.y, sunDir.x, sunDir.y, sunDir.z,
 				DeferredFading ? "cross-fades" : "jumps (the copy of the shadow atlas failed)", DeferredSteps, DeferredJumps,
 				DeferredSteps > 1 ? DeferredHoldSum / (float)(DeferredSteps - 1) : 0.0f);
+		}
+	}
+	else if (angle >= stepAngle && !DeferredFading) {
+		if (!noMaps && !DeferredFadeFailed && !ShadowAtlasSurfaceMSAA && EnsureDeferredFadeTargets()) {
+			DeferredCapturePending = true;
+			DeferredCaptureReady = false;
+		}
+		else {
+			DeferredFading = DeferredHolding = DeferredCapturePending = DeferredCaptureReady = false;
+			DeferredSunHeld = sunDir;
+			DeferredSteps++;
 		}
 	}
 
@@ -1739,15 +1763,15 @@ D3DXVECTOR3 ShadowsExteriorEffect::CalculateDeferredSunDir(D3DXVECTOR3 sunDir) {
 }
 
 /*
-* fd-smoothsun: a deferred step. The copy of the atlas is made here at the first step (registered empty at startup: nothing spent before),
-* at the live atlas' size and format; then the atlas as the last frame left it is copied with its cascades (StartSunCrossFade, without
-* forcing a redraw) and the sun it was drawn for goes to TESR_ShadowCrossFade.yzw.
+* fd-smoothsun: allocate the old atlas and half-resolution dynamic shadow overlay lazily at the first step.
 */
-bool ShadowsExteriorEffect::StartDeferredFade(const D3DXVECTOR3& oldSun) {
+bool ShadowsExteriorEffect::EnsureDeferredFadeTargets() {
 	if (DeferredFadeFailed || !ShadowAtlasTexture || !ShadowAtlasSurface) return false;
+	D3DSURFACE_DESC desc = {};
+	if (!ShadowAtlasOldTexture || (!ShadowDynamicTexture && !DeferredDynamicFailed)) {
+		if (FAILED(ShadowAtlasTexture->GetLevelDesc(0, &desc)) || !desc.Width) return false;
+	}
 	if (!ShadowAtlasOldTexture) {
-		D3DSURFACE_DESC desc = {};
-		ShadowAtlasTexture->GetLevelDesc(0, &desc);
 		TheTextureManager->InitTexture("TESR_ShadowAtlasOld", &ShadowAtlasOldTexture, &ShadowAtlasOldSurface, desc.Width, desc.Height, desc.Format, false);
 		D3DSURFACE_DESC made = {};
 		if (ShadowAtlasOldTexture) ShadowAtlasOldTexture->GetLevelDesc(0, &made);
@@ -1760,13 +1784,40 @@ bool ShadowsExteriorEffect::StartDeferredFade(const D3DXVECTOR3& oldSun) {
 		Logger::Log("UNOFFICIAL deferred sun steps: the %ux%u copy of the shadow atlas made (%.0f MB)", desc.Width, desc.Height,
 			TextureManager::TargetBytes((int)desc.Width, (int)desc.Height, desc.Format, false) / 1048576.0);
 	}
+	if (!ShadowDynamicTexture && !DeferredDynamicFailed) {
+		const UINT dynSize = (std::max)(512u, desc.Width / 2);
+		TheTextureManager->InitTexture("TESR_ShadowDynamic", &ShadowDynamicTexture, &ShadowDynamicSurface, dynSize, dynSize, D3DFMT_R32F, false);
+		D3DSURFACE_DESC made = {};
+		if (ShadowDynamicTexture) ShadowDynamicTexture->GetLevelDesc(0, &made);
+		if (ShadowDynamicTexture && ShadowDynamicSurface && made.Width == dynSize && made.Height == dynSize) {
+			ShadowDynamicSize = dynSize;
+			Logger::Log("UNOFFICIAL deferred sun steps: %ux%u dynamic shadow overlay created (%.1f MB)", dynSize, dynSize,
+				TextureManager::TargetBytes((int)dynSize, (int)dynSize, D3DFMT_R32F, false) / 1048576.0);
+		}
+		else {
+			ReleaseAndClear(ShadowDynamicSurface);
+			ReleaseAndClear(ShadowDynamicTexture);
+			ShadowDynamicSize = 0;
+			DeferredDynamicFailed = true;
+			Logger::Log("UNOFFICIAL deferred sun steps: %ux%u dynamic shadow overlay could not be made; fading without live dynamic separation", dynSize, dynSize);
+		}
+	}
+	return ShadowAtlasOldTexture && ShadowAtlasOldSurface;
+}
+
+/*
+* Capture the static-only shadow atlas right before dynamic casters are overlaid onto ShadowAtlasSurface.
+*/
+bool ShadowsExteriorEffect::CaptureDeferredOldAtlas() {
+	if (DeferredFadeFailed || !ShadowAtlasSurface || !ShadowAtlasOldSurface) return false;
 	if (!StartSunCrossFade(false)) {
 		DeferredFadeFailed = true;
 		return false;
 	}
-	Constants.CrossFade.y = oldSun.x;
-	Constants.CrossFade.z = oldSun.y;
-	Constants.CrossFade.w = oldSun.z;
+	Constants.CrossFade.y = DeferredSunHeld.x;
+	Constants.CrossFade.z = DeferredSunHeld.y;
+	Constants.CrossFade.w = DeferredSunHeld.z;
+	DeferredCaptureReady = true;
 	return true;
 }
 

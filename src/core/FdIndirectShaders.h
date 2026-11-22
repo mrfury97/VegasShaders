@@ -18,11 +18,13 @@ namespace FdIndirectShaders {
 	//    cosine c0.z of COLOR3's smooth normal. Water, glass, grass and anything drawn over the G-buffer later keep the buffer's own normal,
 	//  - the shading normal faces the camera (a normal map bent past the silhouette keeps the smooth one).
 	// s0 the normals buffer, s1 COLOR3, s2 COLOR2, s3 TESR_DepthBuffer (linear: x far = view z). c0: 1 / proj _11, 1 / proj _22, least
-	// cosine, far; c1: TESR_RenderScale (zw the reciprocal of the drawn share); c2-c5: TESR_ViewTransform's rows; c6: share, units. Alpha:
+	// cosine, far; c1: TESR_RenderScale (zw the reciprocal of the drawn share); c2-c5: TESR_ViewTransform's rows; c6: share, units,
+	// bump-fade start distance, bump-fade end distance (when c6.w > c6.z: smoothly relaxes bumped -> smooth over distance to kill
+	// distant normal-map shimmer/aliasing, and over grazing angles -0.12..-0.02 so curved silhouettes never pop hard). Alpha:
 	// the normals buffer's own.
 	inline const char* kShadingNormalsPS =
-		"sampler2D N : register(s0); sampler2D C : register(s1); sampler2D M : register(s2); sampler2D D : register(s3);"
-		"float4 P : register(c0); float4 R : register(c1); row_major float4x4 V : register(c2); float4 G : register(c6);"
+		"sampler2D N : register(s0); sampler2D C : register(s1); sampler2D M : register(s2); sampler2D D : register(s3); sampler2D VM : register(s4);"
+		"float4 P : register(c0); float4 R : register(c1); row_major float4x4 V : register(c2); float4 G : register(c6); float4 Q : register(c7);"
 		"float3 Oct(float2 e) { float3 n = float3(e, 1.0f - abs(e.x) - abs(e.y)); float t = saturate(-n.z);"
 		"  n.xy += float2(n.x >= 0.0f ? -t : t, n.y >= 0.0f ? -t : t); return normalize(n); }"
 		"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
@@ -30,11 +32,20 @@ namespace FdIndirectShaders {
 		"  float3 vb = normalize(nb.xyz * 2.0f - 1.0f);"
 		"  float3 vs = normalize(mul(Oct(c.rg), (float3x3)V));"
 		"  float3 vn = normalize(mul(Oct(float2(m.g, m.a)), (float3x3)V));"
+		"  float vmRaw = Q.x > 0.0f ? tex2Dlod(VM, float4(uv, 0.0f, 0.0f)).x : (Q.y > 0.5f ? 0.0f : 1.0f);"
+		"  bool vm = Q.x > 0.0f && (Q.y > 0.5f ? vmRaw > 0.0f : vmRaw < 0.99999f);"
 		"  float2 s = uv * R.zw;"
-		"  float3 vp = float3((s.x * 2.0f - 1.0f) * P.x, (1.0f - s.y * 2.0f) * P.y, 1.0f) * z; float d = length(vp);"
-		"  bool take = m.r > 0.5f && abs(m.g) <= 1.001f && c.a > 0.99f && abs(c.b - d) <= d * G.x + G.y && z < P.w * 0.99f &&"
-		"    dot(vb, vs) > P.z && dot(vn, vp) < -0.02f * d;"
-		"  return take ? float4(vn * 0.5f + 0.5f, nb.a) : nb; }";
+		"  float3 vp = float3((s.x * 2.0f - 1.0f) * P.x, (1.0f - s.y * 2.0f) * P.y, 1.0f) * z;"
+		"  if (vm) vp.xy *= Q.x;"
+		"  float d = length(vp);"
+		"  float ndv = dot(vn, vp);"
+		"  float distTol = vm ? (d * max(G.x, 0.12f) + max(G.y, 4.0f)) : (d * G.x + G.y);"
+		"  bool take = m.r > 0.5f && abs(m.g) <= 1.001f && c.a > 0.99f && abs(c.b - d) <= distTol && z < P.w * 0.99f &&"
+		"    dot(vb, vs) > P.z && ndv < -0.02f * d;"
+		"  float fade = G.w > G.z ? max(smoothstep(G.z, G.w, d), smoothstep(-0.12f, -0.02f, ndv / max(d, 1e-4f))) : 0.0f;"
+		"  float3 bl = fade > 0.0f ? lerp(vn, vb, fade) : vn;"
+		"  float3 outN = fade > 0.0f ? (dot(bl, bl) > 1e-5f ? normalize(bl) : vb) : vn;"
+		"  return take ? float4(outN * 0.5f + 0.5f, nb.a) : nb; }";
 
 	// The reflections' own material copy (Reflections' 8-bit target: r roughness, g metal, b 1 = reflects by its smoothness whatever way it
 	// faces (MaterialAware's rule), b 0.5 = the floor guess with this roughness and metal; alpha 0) from G-buffer v2, blended
@@ -44,10 +55,11 @@ namespace FdIndirectShaders {
 	//  - plants, skin, grass, hair, eyes (models 5-9): rough (roughness 1, metal 0, b 0.5): their b is not a roughness for every record
 	//    (the foliage records keep their sun weight there) and none of them is a mirror;
 	//  - everything else written (the land, matte objects, unlit): b 0.5 with its roughness and metal, as the old merge (none: clipped).
-	// s0 COLOR2.
+	// s0 COLOR2; s1 TESR_DepthBufferViewModel (read only when c0.x > 0.5: viewmodel not captured this frame -> clip viewmodel pixels).
 	inline const char* kReflMaterialPS =
-		"sampler2D M : register(s0);"
+		"sampler2D M : register(s0); sampler2D VM : register(s1); float4 Q : register(c0);"
 		"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
+		"  if (Q.x > 0.5f) { float r = tex2Dlod(VM, float4(uv, 0.0f, 0.0f)).x; if (Q.y > 0.5f ? r > 0.0f : r < 0.99999f) clip(-1.0f); }"
 		"  float4 m = tex2D(M, uv); clip(m.r - 0.5f);"
 		"  float c = floor(m.r + 0.01f); float spec = c >= 16.0f ? 1.0f : 0.0f; float model = c - 16.0f * spec;"
 		"  float metal = saturate(frac(m.r) / 0.49f);"

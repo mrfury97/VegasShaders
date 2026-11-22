@@ -69,6 +69,13 @@ namespace {
 	HANDLE				g_statusEvent = nullptr;
 	bool				g_console = false;
 	std::wstring		g_exeDir;
+	// 2026-11-17 (security review 2): the files that switch developer tools on when dropped next to the exe (NvrRtHelper.capture,
+	// NvrRtHelper.capture-at, NvrRtHelper.validate) count only when the helper was started with --dev, which the game DLL passes
+	// only from a development build (NVR_TEST_TOOLS; RtCore.cpp). The helper's folder is one a mod archive can put files in, and a
+	// capture file there wrote hundreds of MB per frame at every start of a player's game. (Not an environment variable: the
+	// fork's dxvk.conf option nvr.debugEnv can set those from a file.)
+	bool g_dev = false;
+	bool DevSwitches() { return g_dev; }
 	// UNOFFICIAL 2026-11-09 (players: "shader compiling takes up to 5 minutes" since 1.0.6; docs/next/RT-PT-REVIEW-2026-11-09.md 9.2) the trace
 	// pipelines' cache on disk. Every pipeline was built from its SPIR-V at every start (44 .spv now, 22 in 1.0.5; 55 s measured on an
 	// integrated GPU, and the game waits up to 300 s for "ready"): ray tracing was simply absent for that long after every launch. The
@@ -247,7 +254,7 @@ namespace {
 		// layer for this process only (the loader's VK_LOADER_LAYERS_ENABLE also hit the 32-bit game's DXVK, which crashed in it). Its
 		// settings (log file, GPU-assisted / sync checks) come from vk_layer_settings.txt as usual (VK_LAYER_SETTINGS_PATH or the cwd).
 		const char* validationLayer = "VK_LAYER_KHRONOS_validation";
-		if (GetFileAttributesW((g_exeDir + L"\\NvrRtHelper.validate").c_str()) != INVALID_FILE_ATTRIBUTES) {
+		if (DevSwitches() && GetFileAttributesW((g_exeDir + L"\\NvrRtHelper.validate").c_str()) != INVALID_FILE_ATTRIBUTES) {
 			instanceInfo.enabledLayerCount = 1;
 			instanceInfo.ppEnabledLayerNames = &validationLayer;
 			Log("validation: the Khronos validation layer is asked for (NvrRtHelper.validate)");
@@ -1043,7 +1050,7 @@ namespace {
 		const VkPipeline pipeline = BuildPipeline(h, index, failure);
 		if (!failure.empty()) {
 			Status("%s", failure.c_str());
-			InterlockedOr((volatile LONG*)&g_shared->shaderFailures, (LONG)(1u << index));
+			InterlockedOr64((volatile LONG64*)&g_shared->shaderFailures, (LONG64)(1ull << index));
 			return VK_NULL_HANDLE;
 		}
 		if (g_pipelineCacheLive) PipelineCacheSave(h.vk.device, "a shader registered after the start");
@@ -1171,6 +1178,7 @@ namespace {
 
 	// A capture spec from a file (false: no such file)
 	bool ReadCaptureSpec(const std::wstring& path, CaptureSpec& spec) {
+		if (!DevSwitches()) return false;
 		FILE* f = nullptr;
 		if (_wfopen_s(&f, path.c_str(), L"rb") != 0 || !f) return false;
 		spec = CaptureSpec();
@@ -1189,11 +1197,16 @@ namespace {
 			if (!_stricmp(key, "frame")) spec.minFrame = _strtoui64(value, nullptr, 10);
 			else if (!_stricmp(key, "shader")) { spec.shader = value; std::transform(spec.shader.begin(), spec.shader.end(), spec.shader.begin(), ::tolower); }
 			else if (!_stricmp(key, "skip")) spec.skip = (uint32_t)strtoul(value, nullptr, 10);
-			else if (!_stricmp(key, "count")) spec.count = std::max(1u, (uint32_t)strtoul(value, nullptr, 10));
+			else if (!_stricmp(key, "count")) spec.count = std::min(64u, std::max(1u, (uint32_t)strtoul(value, nullptr, 10)));	// (2026-11-17: at most 64 frames; each is hundreds of MB)
 			else if (!_stricmp(key, "out") && n) {
+				// 2026-11-17: a folder on this PC only. The trigger file can come with a download, and a network path
+				// (\\host\share) sent the captured frames to someone's server; a path too long for the buffer left it unterminated.
 				wchar_t wide[MAX_PATH] = {};
-				MultiByteToWideChar(CP_ACP, 0, value, -1, wide, MAX_PATH);
-				spec.out = wide;
+				const bool fits = MultiByteToWideChar(CP_ACP, 0, value, -1, wide, MAX_PATH) > 0;
+				wide[MAX_PATH - 1] = 0;
+				const bool network = wide[0] == L'\\' || wide[0] == L'/';	// (\\host, and \??\UNC\host: any path that starts with a slash)
+				if (fits && !network) spec.out = wide;
+				else Log("capture: out %s is not used (a network path, or too long): the capture goes next to the helper", value);
 			}
 		}
 		fclose(f);
@@ -1982,7 +1995,7 @@ namespace {
 			vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, h.queries, slot * kQueriesPerSlot);
 		}
 		// UNOFFICIAL 2026-11-03 (claude/rt-replay): a capture asked for by a file dropped next to the exe (looked for every 60 frames)
-		if (!h.capture.spec.armed && (frameNumber % 60) == 0) {
+		if (DevSwitches() && !h.capture.spec.armed && (frameNumber % 60) == 0) {
 			const std::wstring trigger = g_exeDir + L"\\NvrRtHelper.capture";
 			if (GetFileAttributesW(trigger.c_str()) != INVALID_FILE_ATTRIBUTES && ReadCaptureSpec(trigger, h.capture.spec)) DeleteFileW(trigger.c_str());
 		}
@@ -2486,7 +2499,7 @@ namespace {
 					h.pipelineTried[i] = true;
 					if (!built[i].failure.empty()) {
 						Status("%s", built[i].failure.c_str());
-						InterlockedOr((volatile LONG*)&shared->shaderFailures, (LONG)(1u << i));
+						InterlockedOr64((volatile LONG64*)&shared->shaderFailures, (LONG64)(1ull << i));
 					} else h.pipelines[i] = built[i].pipeline;
 				}
 			}
@@ -2515,7 +2528,7 @@ namespace {
 		}
 
 		h.dataWords.Init(kDataWords);
-		ReadCaptureSpec(g_exeDir + L"\\NvrRtHelper.capture-at", h.capture.spec);	// UNOFFICIAL 2026-11-03: a capture at a given frame (CaptureSpec)
+		if (DevSwitches()) ReadCaptureSpec(g_exeDir + L"\\NvrRtHelper.capture-at", h.capture.spec);	// UNOFFICIAL 2026-11-03: a capture at a given frame (CaptureSpec)
 		// The first structure block and a build scratch now, not in the first frame (on the iGPU with the game running, the first
 		// allocations took seconds: the game's GPU would have waited for them)
 		{
@@ -2630,6 +2643,7 @@ int wmain(int argc, wchar_t** argv) {
 	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--wait")) g_cpuWait = !wcscmp(argv[i + 1], L"cpu");	// UNOFFICIAL 2026-11-10
 	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--gpu-priority")) g_highPriority = !wcscmp(argv[i + 1], L"high");
 	for (int i = 1; i < argc; i++) if (!wcscmp(argv[i], L"--measure")) g_measure = true;
+	for (int i = 1; i < argc; i++) if (!wcscmp(argv[i], L"--dev")) g_dev = true;	// (2026-11-17) the developer files next to the exe count (DevSwitches)
 	for (int i = 1; i + 1 < argc; i++) if (!wcscmp(argv[i], L"--signal")) g_cpuSignal = !wcscmp(argv[i + 1], L"cpu");	// (needs --wait cpu)
 	for (int i = 1; i < argc; i++) if (!wcscmp(argv[i], L"--timer-1ms")) {	// UNOFFICIAL 2026-11-10 (bench): this process's timer resolution 1 ms (per process since Windows 10 2004)
 		typedef UINT(WINAPI* TimeBegin)(UINT);

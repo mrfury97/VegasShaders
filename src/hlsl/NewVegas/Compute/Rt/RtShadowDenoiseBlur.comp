@@ -47,11 +47,17 @@ void main() {
 			vec2 o = discTap(2 * i + 1, rotation) * maxRadius * 0.5;
 			ivec2 q = pixel + ivec2(round(o));
 			if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(TILE_W, TILE_H)))) continue;
-			Surface t = tapSurface(q);
-			if (!t.valid || abs(dot(s.normal, t.position - s.position)) > 4.0 * plane) continue;
+			// UNOFFICIAL 2026-11-19: blocker search never uses t.normal; skip the RGBA16F normalImage load
+			ivec2 qs = sourceOf(q);
+			float z = imageLoad(depthImage, qs).r;
+			float vz = z * p.forward.w;
+			if (!(z > 0.0 && z < 0.9999 && vz >= 1.0)) continue;
+			vec2 quv = (vec2(q) + 0.5) * p.size.zw + p.jitter.xy;
+			vec3 qpos = (p.forward.xyz + p.right.xyz * (2.0 * quv.x - 1.0) - p.up.xyz * (2.0 * quv.y - 1.0)) * vz;
+			if (abs(dot(s.normal, qpos - s.position)) > 4.0 * plane) continue;
 			float tw = imageLoad(inImage, q + offset).z;
 			// (+ the short-history allowance: a new surface's lit samples next to blocked ones are still noise, not light)
-			if (tw > 0.0 && length(vec2(q - pixel)) <= tw / pixelWorld(t.viewZ) + 1.0 + p.light.y * newness(c.w, historyCap(tw, t.viewZ))) width = max(width, tw);
+			if (tw > 0.0 && length(vec2(q - pixel)) <= tw / pixelWorld(vz) + 1.0 + p.light.y * newness(c.w, historyCap(tw, vz))) width = max(width, tw);
 		}
 	}
 #endif
@@ -67,18 +73,22 @@ void main() {
 	if (width > 0.0 || mixed) radius = max(radius, p.light.x + p.light.y * newness(c.w, historyCap(width, s.viewZ)));
 	if (radius < 0.5) { imageStore(outImage, g, vec4(c.x, c.y, width, c.w)); return; }
 
+	// UNOFFICIAL 2026-11-19: compile-time constant exp(-2 * (i + 0.5) / 16) weights for the 16 Vogel disc taps (exact same math)
+	const float kDiscKernel[16] = float[16](
+		0.93941306, 0.82902912, 0.73161563, 0.64564853, 0.56978282, 0.50283158, 0.44374731, 0.39160563,
+		0.34559075, 0.30498277, 0.26914635, 0.23752082, 0.20961139, 0.18498140, 0.16324551, 0.14406366);
 	float sum = c.x, weights = 1.0;
 	float normalPower = max(p.light.z, 0.0);
 	for (int i = 0; i < 16; i++) {
-		vec2 o = discTap(i, rotation) * radius;
+		vec2 dt = discTap(i, rotation);
+		vec2 o = dt * radius;
 		ivec2 q = pixel + ivec2(round(o));
 		if (q == pixel || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(TILE_W, TILE_H)))) continue;
 		Surface t = tapSurface(q);
 		if (!t.valid) continue;
 		float geometry = clamp(1.0 - abs(dot(s.normal, t.position - s.position)) / plane, 0.0, 1.0);
 		float facing = pow(max(dot(s.normal, t.normal), 0.0), normalPower);
-		float kernel = exp(-2.0 * dot(o, o) / (radius * radius));
-		float w = geometry * facing * kernel;
+		float w = geometry * facing * kDiscKernel[i];
 		if (!(w > 1.0e-4)) continue;
 		sum += w * imageLoad(inImage, q + offset).x;
 		weights += w;

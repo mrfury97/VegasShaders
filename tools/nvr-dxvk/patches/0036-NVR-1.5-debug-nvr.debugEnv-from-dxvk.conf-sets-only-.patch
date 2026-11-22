@@ -1,0 +1,71 @@
+From 4fb811b6508582f587af51033a46680565de6910 Mon Sep 17 00:00:00 2001
+From: adeesababa <263047020+adeesababa@users.noreply.github.com>
+Date: Tue, 17 Nov 2026 22:15:10 -0500
+Subject: [PATCH] NVR 1.5-debug: nvr.debugEnv from dxvk.conf sets only names
+ that load no code and write no file (DXVK_DEBUG, DXVK_LOG_LEVEL, DXVK_HUD,
+ DXVK_FILTER_DEVICE_NAME, VK_KHRONOS_VALIDATION_VALIDATE_*, VK_LAYER_ENABLES,
+ VK_LOADER_LAYERS_DISABLE, ENABLE_VULKAN_RENDERDOC_CAPTURE); the rest needs
+ NVR_DXVK_DEV in the process environment
+
+---
+ src/dxvk/dxvk_instance.cpp | 36 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 36 insertions(+)
+
+diff --git a/src/dxvk/dxvk_instance.cpp b/src/dxvk/dxvk_instance.cpp
+index 87df91a..a130785 100644
+--- a/src/dxvk/dxvk_instance.cpp
++++ b/src/dxvk/dxvk_instance.cpp
+@@ -31,7 +31,36 @@ namespace dxvk {
+    * VK_KHRONOS_VALIDATION_VALIDATE_SYNC) or with D3DPERF labels as Vulkan
+    * debug labels (DXVK_DEBUG=markers) without a launcher that passes them on.
+    * Separator '|' (Windows paths use ';'). Empty or absent: nothing happens.
++   *
++   * 2026-11-17 (security review): a dxvk.conf is a text file players pass
++   * around, and a variable such as VK_ADD_LAYER_PATH, VK_DRIVER_FILES or PATH
++   * makes the Vulkan loader (or Windows) load a DLL of the file's choosing.
++   * From dxvk.conf alone only the names that load no code are set: DXVK_DEBUG,
++   * DXVK_LOG_LEVEL, DXVK_HUD, DXVK_FILTER_DEVICE_NAME (which GPU),
++   * VK_KHRONOS_VALIDATION_VALIDATE_*, VK_LAYER_ENABLES,
++   * VK_LOADER_LAYERS_DISABLE and ENABLE_VULKAN_RENDERDOC_CAPTURE (switches of
++   * layers that are already installed). Every other name is refused (and logged)
++   * unless the process was started with NVR_DXVK_DEV set in its environment,
++   * which a file cannot do.
+    */
++  static bool nvrDebugEnvAllowed(const std::string& name) {
++    static const bool dev = !env::getEnvVar("NVR_DXVK_DEV").empty();
++
++    if (dev)
++      return true;
++
++    std::string upper = name;
++    for (char& c : upper)
++      c = (c >= 'a' && c <= 'z') ? char(c - 'a' + 'A') : c;
++
++    return upper == "DXVK_DEBUG" || upper == "DXVK_LOG_LEVEL" || upper == "DXVK_HUD"
++        || upper == "DXVK_FILTER_DEVICE_NAME"
++        || upper == "VK_LAYER_ENABLES" || upper == "VK_LOADER_LAYERS_DISABLE"
++        || upper == "ENABLE_VULKAN_RENDERDOC_CAPTURE"
++        || upper.compare(0, 31, "VK_KHRONOS_VALIDATION_VALIDATE_") == 0;
++  }
++
++
+   static void applyNvrDebugEnv(const Config& config) {
+     std::string list = config.getOption<std::string>("nvr.debugEnv", std::string());
+     size_t start = 0;
+@@ -47,6 +76,13 @@ namespace dxvk {
+       if (eq != std::string::npos && eq > 0) {
+         std::string name = item.substr(0, eq);
+         std::string value = item.substr(eq + 1);
++
++        if (!nvrDebugEnvAllowed(name)) {
++          Logger::warn(str::format("NVR debugEnv: ", name, " is not set (from dxvk.conf only DXVK_DEBUG, DXVK_LOG_LEVEL, DXVK_HUD, DXVK_FILTER_DEVICE_NAME, VK_KHRONOS_VALIDATION_VALIDATE_*, VK_LAYER_ENABLES, VK_LOADER_LAYERS_DISABLE and ENABLE_VULKAN_RENDERDOC_CAPTURE; for the rest start the game with NVR_DXVK_DEV=1 in its environment)"));
++          start = end + 1;
++          continue;
++        }
++
+ #ifdef _WIN32
+         SetEnvironmentVariableA(name.c_str(), value.c_str());
+ #else
+-- 
+2.40.0.windows.1
+

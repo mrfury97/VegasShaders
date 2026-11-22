@@ -14,23 +14,24 @@ layout(set = 0, binding = 20, std430) buffer Scratch { uint words[]; } scratch;
 void main() {
 	const uint i = gl_GlobalInvocationID.x;
 	if (i >= uint(p.params.x + 0.5)) return;
-	const uint e = uint(p.params.y + 0.5) * 4096u + i * 16u;
+	// UNOFFICIAL 2026-11-19: 8-word (32 B) packed layout matching RtPathTrace.comp CacheEntry/CacheRead/CacheAdd.
+	const uint e = uint(p.params.y + 0.5) * 4096u + i * 8u;
 	if (scratch.words[e] == 0u) return;
 	const uint count = scratch.words[e + 4u];
+	const uint w6 = scratch.words[e + 6u];
 	if (count == 0u) {
-		const uint age = scratch.words[e + 5u] + 1u;
-		if (float(age) > p.params.w) for (uint k = 0u; k < 16u; k++) scratch.words[e + k] = 0u;
-		else scratch.words[e + 5u] = age;
+		const uint age = min((w6 >> 16u) + 1u, 65535u);
+		if (float(age) > p.params.w) for (uint k = 0u; k < 8u; k++) scratch.words[e + k] = 0u;
+		else scratch.words[e + 6u] = (age << 16u) | (w6 & 0xFFFFu);
 		return;
 	}
 	const vec3 sum = vec3(scratch.words[e + 1u], scratch.words[e + 2u], scratch.words[e + 3u]) * (1.0 / 256.0);
-	// the history's weight: at most PTCacheMaxSamples samples, and at most PTCacheMaxFrames frames of this frame's count (the cache feeds
-	// itself, each frame one more round of bounces: a sample cap alone left it 7-17 % behind a change of light in the host scene `cache`)
-	const float n = min(uintBitsToFloat(scratch.words[e + 6u]), min(p.params.z, float(count) * max(p.params2.x - 1.0, 0.0)));
-	const vec3 old = vec3(uintBitsToFloat(scratch.words[e + 8u]), uintBitsToFloat(scratch.words[e + 9u]), uintBitsToFloat(scratch.words[e + 10u]));
-	const vec3 mean = (old * n + sum) / (n + float(count));
-	scratch.words[e + 8u] = floatBitsToUint(mean.x); scratch.words[e + 9u] = floatBitsToUint(mean.y); scratch.words[e + 10u] = floatBitsToUint(mean.z);
-	scratch.words[e + 6u] = floatBitsToUint(n + float(count));
+	// the history's weight: at most PTCacheMaxSamples samples, and at most PTCacheMaxFrames frames of this frame's count
+	const float n = min(uintBitsToFloat(scratch.words[e + 7u]), min(p.params.z, float(count) * max(p.params2.x - 1.0, 0.0)));
+	const vec3 old = vec3(unpackHalf2x16(scratch.words[e + 5u]), unpackHalf2x16(w6 & 0xFFFFu).x);
+	const vec3 mean = clamp((old * n + sum) / (n + float(count)), vec3(0.0), vec3(65000.0));
+	scratch.words[e + 5u] = packHalf2x16(mean.rg);
+	scratch.words[e + 6u] = packHalf2x16(vec2(mean.b, 0.0)) & 0xFFFFu;   // age reset to 0 in upper 16 bits
+	scratch.words[e + 7u] = floatBitsToUint(n + float(count));
 	scratch.words[e + 1u] = 0u; scratch.words[e + 2u] = 0u; scratch.words[e + 3u] = 0u; scratch.words[e + 4u] = 0u;
-	scratch.words[e + 5u] = 0u;
 }

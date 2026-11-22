@@ -9,7 +9,9 @@
 #include <unordered_set>
 #include <vector>
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31 register-clash guard
-#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window
+#include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart (the Interior records' jobs after the start's)
+#include "LightFreeRecords.h"	// UNOFFICIAL 2026-11-16 fast-restart (the lighting-free records on the workers)
+#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: startup shader-compile progress overlay
 
 // UNOFFICIAL 2026-10-14 (user: "can u make the nvr shader compiler run in parallel threads"). The game asks for its shaders
 // one at a time while it starts, and NVR compiled each replacement right there: preprocess, compare with the cache, compile
@@ -31,7 +33,15 @@ namespace ShaderPrecompile {
 		bool CompileFailed = false;
 		std::atomic<bool> Done{ false };
 		bool Taken = false;
+		std::string DefineKey;	// UNOFFICIAL 2026-11-16 fast-restart: the define list the job was built with (Take compares the load's)
 	};
+
+	// UNOFFICIAL 2026-11-16 fast-restart: a define list as one string (names and values in order), for Take's check.
+	inline std::string KeyOf(const D3DXMACRO* defines) {
+		std::string key;
+		for (int d = 0; d < 64 && defines && defines[d].Name; d++) { key += defines[d].Name; key += '='; key += defines[d].Definition ? defines[d].Definition : ""; key += ';'; }
+		return key;
+	}
 
 	inline std::vector<Job*> Jobs;
 	inline std::unordered_map<std::string, Job*> ByCompiledPath;
@@ -50,6 +60,17 @@ namespace ShaderPrecompile {
 		job->Compiled = cache + Name;
 	}
 
+	// 2026-11-17: a cached binary has the outline of a compiled shader: whole 32-bit tokens, a vertex or pixel shader version
+	// first and the end token last (every file D3DX writes has; D3DX and the device read the bytes without a length, so a cut
+	// or made-up file was read past its end). The cache is not signed: this catches a damaged file, not a careful forgery.
+	inline bool BinaryShape(const void* bytes, size_t size) {
+		if (!bytes || size < 8 || (size & 3)) return false;
+		DWORD first, last;
+		memcpy(&first, bytes, 4);
+		memcpy(&last, (const char*)bytes + size - 4, 4);
+		return ((first >> 16) == 0xFFFF || (first >> 16) == 0xFFFE) && last == 0x0000FFFF;
+	}
+
 	// One shader on a worker thread: as LoadShader's preprocess, cache check and compile.
 	inline void Run(Job* job) {
 		ID3DXBuffer* errors = nullptr;
@@ -62,6 +83,9 @@ namespace ShaderPrecompile {
 		job->Preprocessed_ok = true;
 		bool fresh = ShaderProgram::CheckPreprocessResult(job->Preprocessed.c_str(), job->SourceBuffer);
 		if (!fresh) fresh = ShaderProgram::SeedFromShipped(job->Preprocessed.c_str(), job->Compiled.c_str(), ShaderProgram::PortableSource(job->SourceBuffer));	// UNOFFICIAL 2026-11-10 shipped cache
+		// UNOFFICIAL 2026-11-17 fast-restart (ShaderRecord.cpp KnownCloudFailure): this exact text did not compile with the clouds' lookup at an
+		// earlier start: not compiled again (LoadShader makes the build without the lookup)
+		if (!fresh && ShaderProgram::KnownCloudFailure(job->Preprocessed, job->SourceBuffer)) { job->CompileFailed = true; return; }
 		if (fresh) {
 			FILE* f = nullptr;
 			if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {
@@ -71,6 +95,9 @@ namespace ShaderPrecompile {
 				if (size > 0 && SUCCEEDED(D3DXCreateBuffer(size, &job->ShaderBuffer)))
 					if (fread(job->ShaderBuffer->GetBufferPointer(), 1, size, f) != (size_t)size) { job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr; }
 				fclose(f);
+			}
+			if (job->ShaderBuffer && !BinaryShape(job->ShaderBuffer->GetBufferPointer(), job->ShaderBuffer->GetBufferSize())) {
+				job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr;	// (2026-11-17: compiled again below)
 			}
 			if (job->ShaderBuffer) return;
 		}
@@ -108,6 +135,13 @@ namespace ShaderPrecompile {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors): jobs not finished yet.
+	inline unsigned Running() {
+		unsigned n = 0;
+		for (Job* job : Jobs) if (!job->Done) n++;
+		return n;
+	}
+
 	inline void Worker() {
 		for (;;) {
 			const size_t i = NextJob.fetch_add(1);
@@ -125,6 +159,7 @@ namespace ShaderPrecompile {
 		if (!ShaderProgram::FileExists(job->Source.c_str()) || ByCompiledPath.count(job->Compiled)) { delete job; return; }
 		job->Template = Template;
 		ShaderRecord::BuildDefines(job->Template, Overrides);
+		job->DefineKey = KeyOf(&job->Template.Defines[0]);
 		Jobs.push_back(job);
 		ByCompiledPath[job->Compiled] = job;
 	}
@@ -172,6 +207,39 @@ namespace ShaderPrecompile {
 			for (const D3DXMACRO& d : tmpl.Defines) if (d.Name && !strcmp(d.Name, "NUM_PT_LIGHTS")) lamps = true;
 			if (lamps) Add(name, NULL, "ExteriorLamps\\", tmpl, terrainLamps);
 		};
+		// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h): the lamp-shadow records' jobs (Interior, RT ExteriorLamps) go after every job
+		// the start waits for: those records are made after the start (LateInteriors::Tick), so the workers do the start's own shaders first.
+		const bool late = interiorShadows && LateInteriors::Wanted();
+		std::vector<std::pair<std::string, ShaderTemplate>> lateJobs;
+		// UNOFFICIAL 2026-11-16 fast-restart: the forward+ glass records DeferredTransparents::Load makes with each Interior record (the outdoor one from
+		// the default overrides, the indoor one from the Interior record's), [Main.Main.Quality] DeferredTransparents (on by default since migration
+		// 88): 57 records that compiled one after another on the main thread (80 s of a cold start on the bench, 11-16)
+		const bool glass = interiorShadows && DeferredTransparents::WantedAtStartup();
+		static D3DXMACRO glassOut[2] = { { "LAMPS_DEFERRED", "4" }, { NULL, NULL } };
+		static D3DXMACRO glassIn[8] = {};
+		{ int n = 0; for (const D3DXMACRO* o = interior; o->Name && n < 6; o++) glassIn[n++] = *o; glassIn[n++] = { "LAMPS_DEFERRED", "4" }; glassIn[n] = { NULL, NULL }; }
+		auto addLampRecords = [&](const std::string& name, const ShaderTemplate& tmpl) {	// (the order ShaderManager.cpp LoadLampShadowRecords takes them in)
+			Add(name.c_str(), NULL, "Interiors\\", tmpl, interior);
+			if (glass && DeferredTransparents::Eligible(name.c_str(), tmpl)) {
+				if (DeferredRenderer::Mode() >= 2) Add(name.c_str(), NULL, "Deferred\\GlassExterior\\", tmpl, glassOut);
+				Add(name.c_str(), NULL, DeferredTransparents::kCache, tmpl, glassIn);
+			}
+			if (exteriorLampRecords) addExteriorLamps(name.c_str(), tmpl);
+		};
+		auto addInterior = [&](const std::string& name, const ShaderTemplate& tmpl) {
+			if (late) { lateJobs.emplace_back(name, tmpl); return; }
+			addLampRecords(name, tmpl);
+		};
+		// (2026-11-16 fast-restart) the other deferred records LoadShader made one after another on the main thread at load: the skin's
+		// (DeferredSkin::Load), the grass's and leaves' (DeferredFoliage::Load), the hair's forward+ (DeferredTransparents::Hair::Load)
+		static D3DXMACRO skinDeferred[2] = { { "LAMPS_DEFERRED", "2" }, { NULL, NULL } };
+		static D3DXMACRO skinDeferred1[2] = { { "LAMPS_DEFERRED", "3" }, { NULL, NULL } };
+		static D3DXMACRO foliageDeferred[2] = { { "FOLIAGE_DEFERRED", "1" }, { NULL, NULL } };
+		static D3DXMACRO hairForwardPlus[2] = { { "HAIR_FORWARD_PLUS", "1" }, { NULL, NULL } };
+		// UNOFFICIAL 2026-11-16 fast-restart: the lighting-free records (LightFreeRecords::Load, [Shaders.ShadowsInteriors.Deferred] LightFreeRecords:
+		// the deferred renderer's default) compiled one after another on the main thread at load: 96 of them, 50 s of the owner's 11-16 cold
+		// start. Queued here with the same folder, cache folder and defines as that load, so LoadShader takes the workers' results.
+		const bool lightFree = LightFreeRecords::WantedAtStartup();
 		std::unordered_set<std::string> templated;
 		for (const auto& [CollectionName, Pointer] : TheShaderManager->ShaderNames) {
 			ShaderCollection* Collection = Pointer ? *Pointer : nullptr;
@@ -182,10 +250,10 @@ namespace ShaderPrecompile {
 				Add(name.c_str(), NULL, NULL, Template, NULL);
 				if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
 				if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
-				{
-					Add(name.c_str(), NULL, "Interiors\\", Template, interior);
-					if (exteriorLampRecords) addExteriorLamps(name.c_str(), Template);
-				}
+					addInterior(name, Template);
+				if (lightFree && LightFreeRecords::Eligible(name.c_str(), Template)) Add(name.c_str(), NULL, LightFreeRecords::kCache, Template, LightFreeRecords::Overrides());
+				if (DeferredSkin::WantedAtStartup() && DeferredSkin::Eligible(name.c_str(), Template))
+					Add(name.c_str(), NULL, DeferredSkin::kCache, Template, DeferredRenderer::Mode() >= 2 ? skinDeferred : skinDeferred1);
 			}
 		}
 		// The hand-written ones (no template): every Name.hlsl the game's shader names map to a collection.
@@ -198,10 +266,11 @@ namespace ShaderPrecompile {
 				if (templated.count(name) || !TheShaderManager->GetShaderCollection(name.c_str())) continue;
 				Add(name.c_str(), NULL, NULL, ShaderTemplate{}, NULL);
 				if (interiorShadows && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), ShaderTemplate{}))
-				{
-					Add(name.c_str(), NULL, "Interiors\\", ShaderTemplate{}, interior);
-					if (exteriorLampRecords) addExteriorLamps(name.c_str(), ShaderTemplate{});
-				}
+					addInterior(name, ShaderTemplate{});
+				if (DeferredFoliage::WantedAtStartup() && (DeferredFoliage::IsLeaf(name.c_str()) || DeferredFoliage::IsGrass(name.c_str())))
+					Add(name.c_str(), NULL, DeferredFoliage::kCache, ShaderTemplate{}, foliageDeferred);
+				if (DeferredTransparents::Hair::WantedAtStartup() && DeferredTransparents::Hair::IsHair(name.c_str()))
+					Add(name.c_str(), NULL, "Deferred\\Hair\\", ShaderTemplate{}, hairForwardPlus);
 			} while (FindNextFileA(h, &find));
 			FindClose(h);
 		}
@@ -215,25 +284,46 @@ namespace ShaderPrecompile {
 			} while (FindNextFileA(h, &find));
 			FindClose(h);
 		}
+		// (2026-11-16 fast-restart) the lamp-shadow records' jobs last, the biggest first (the six-lamp ones are 10-12 s each: started first, they
+		// end with the rest)
+		const size_t lateFrom = Jobs.size();
+		for (const auto& [name, tmpl] : lateJobs) addLampRecords(name, tmpl);
+		std::stable_sort(Jobs.begin() + lateFrom, Jobs.end(), [](const Job* a, const Job* b) {
+			auto weight = [](const Job* j) { const char* n = j->Name.c_str(); return !strncmp(n, "SLS203", 6) && n[6] >= '4' && n[6] <= '6' ? 2 : !strncmp(n, "SLS20", 5) || !strncmp(n, "SKIN", 4) ? 1 : 0; };
+			return weight(a) > weight(b);
+		});
 		const unsigned cores = std::thread::hardware_concurrency();
 		const unsigned threads = (std::max)(1u, (std::min)(cores > 1 ? cores - 1 : 1u, 12u));
-		CompileProgress::ShadersTotal.store((int)Jobs.size());
+		CompileProgress::ShadersTotal.store((int)(late ? lateFrom : Jobs.size()));
 		CompileProgress::Begin();
 		for (unsigned i = 0; i < threads; i++) std::thread(Worker).detach();	// (detached: shaders the game never asks for are compiled and left)
-		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u shaders on %u threads.", (unsigned)Jobs.size(), threads);
+		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u shaders on %u threads%s.", (unsigned)Jobs.size(), threads,
+			late ? " (the lamp-shadow records' last: made after the start, core/LateInteriors.h)" : "");
 	}
 
 	// From ShaderRecord::LoadShader: this shader's finished result, if a worker made it (waits for it if still running).
 	// The caller owns the buffers then. False: not one of ours, do it as before.
-	inline bool Take(const char* CompiledPath, ID3DXBuffer** Source, ID3DXBuffer** Shader) {
+	// (2026-11-16 fast-restart) Defines: the load's own list. A job built with another one (a ShaderFallback drop since the start: the
+	// lighting-free and lamp-shadow records are taken later than the default ones) is not used: the load compiles its own, as before.
+	inline bool TakenOutOfRegisters = false;	// (2026-11-18) the last Take's job did not compile for want of temp registers (X4505)
+	inline bool Take(const char* CompiledPath, ID3DXBuffer** Source, ID3DXBuffer** Shader, const D3DXMACRO* Defines = nullptr) {
+		TakenOutOfRegisters = false;
 		if (!Started || Jobs.empty()) return false;
 		auto it = ByCompiledPath.find(CompiledPath);
 		if (it == ByCompiledPath.end() || it->second->Taken) return false;
 		Job* job = it->second;
 		while (!job->Done) Sleep(1);
 		job->Taken = true;
+		if (Defines && KeyOf(Defines) != job->DefineKey) {
+			Logger::Log("UNOFFICIAL ParallelShaderCompile: %s was queued with other defines than its load has now (a feature dropped since the start): made at its load instead", CompiledPath);
+			if (job->SourceBuffer) job->SourceBuffer->Release();
+			if (job->ShaderBuffer) job->ShaderBuffer->Release();
+			job->SourceBuffer = job->ShaderBuffer = nullptr;
+			return false;
+		}
 		if (!job->Log.empty()) { Logger::Log("%s", job->Log.c_str()); RegisterClash::Check(job->Name.c_str(), job->Log.c_str()); }	// UNOFFICIAL 2026-10-31 (X4500)
 		if (!job->Preprocessed_ok) { if (job->SourceBuffer) job->SourceBuffer->Release(); return false; }
+		TakenOutOfRegisters = job->CompileFailed && job->Log.find("X4505") != std::string::npos;
 		*Source = job->SourceBuffer;
 		*Shader = job->ShaderBuffer;
 		job->SourceBuffer = job->ShaderBuffer = nullptr;

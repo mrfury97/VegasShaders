@@ -36,7 +36,7 @@
 //
 // On top of the picked skin, [Main.Menu.Style] Custom<Part> replaces one part by hand: CustomBackground ... CustomSelection as
 // "R,G,B" (empty = the skin's), CustomRounding (-1 = the skin's), CustomOpacity (0 = the skin's), CustomImage (a picture in the
-// Skins folder or a full path, "none" = no picture, empty = the skin's), CustomImageOpacity (-1 = the skin's) and CustomImageFit
+// Skins folder or below it, never a full path (2026-11-17), "none" = no picture, empty = the skin's), CustomImageOpacity (-1 = the skin's) and CustomImageFit
 // (empty = the skin's). Export writes the result (skin plus own parts) as a new skin file.
 
 namespace MenuSkin {
@@ -183,9 +183,21 @@ namespace {
 		}
 	}
 
+	// 2026-11-17: a picture is a file in the Skins folder or below it, nothing else. A skin file or a settings file from a
+	// download could name a full path, and a network one (\\host\share\x.png) made the game open a file on someone's server.
+	bool PictureInSkinFolder(const std::string& image) {
+		if (image.empty() || image[0] == '\\' || image[0] == '/' || image.find(':') != std::string::npos) return false;
+		for (const auto& part : std::filesystem::path(image)) if (part == "..") return false;
+		return true;
+	}
+
 	void LoadPicture(const Skin& s) {
-		const std::string path = s.image.empty() || s.file.empty() ? std::string()
-			: (std::filesystem::path(s.file).parent_path() / s.image).string();	// a full path in Image replaces the folder
+		if (!s.image.empty() && !s.file.empty() && !PictureInSkinFolder(s.image)) {
+			static std::string logged;
+			if (logged != s.image) { logged = s.image; Logger::Log("MenuSkin: the background picture %s is not used: only files in the Skins folder are (put it in %s)", s.image.c_str(), SkinDir().c_str()); }
+		}
+		const std::string path = s.image.empty() || s.file.empty() || !PictureInSkinFolder(s.image) ? std::string()
+			: (std::filesystem::path(s.file).parent_path() / s.image).string();
 		if (path == PicturePath && (Picture || path.empty())) return;	// already loaded, or none either way
 		if (Picture) { Picture->Release(); Picture = nullptr; }
 		PicturePath = path;
@@ -315,7 +327,7 @@ namespace {
 		if (rounding >= 0.0f) Active.rounding = ImClamp(rounding, 0.0f, 16.0f);
 		const float opacity = TheSettingManager->GetSettingF(Section, "CustomOpacity");
 		if (opacity > 0.0f) Active.opacity = ImClamp(opacity, 0.5f, 1.0f);
-		char imageText[1024];	// may be a full path
+		char imageText[1024];
 		const std::string image = TheSettingManager->GetSettingS(Section, "CustomImage", imageText);
 		if (_stricmp(image.c_str(), "none") == 0) Active.image.clear();
 		else if (!image.empty()) { Active.image = image; Active.file = SkinDir() + "(own picture)"; }	// relative to the Skins folder
@@ -550,14 +562,10 @@ namespace {
 		FILE* f = nullptr;
 		if (fopen_s(&f, path.c_str(), "w") || !f) return "";
 		auto col = [](const ImVec4& v) { return "\"" + ColourText(v) + "\""; };
-		// The picture: its name when it is in the Skins folder, else its full path (forward slashes: TOML strings take no backslashes)
-		std::string image = s.image;
-		if (!image.empty() && !s.file.empty()) {
-			const std::filesystem::path full = std::filesystem::path(s.file).parent_path() / image;
-			const bool here = _stricmp(full.parent_path().string().c_str(), std::filesystem::path(SkinDir()).parent_path().string().c_str()) == 0;
-			image = here ? full.filename().string() : full.string();
-			std::replace(image.begin(), image.end(), '\\', '/');
-		}
+		// The picture as the skin names it, relative to the Skins folder (forward slashes: TOML strings take no backslashes).
+		// (2026-11-17: was the path from the game folder for a picture in Backgrounds\, which the exported skin then did not find.)
+		std::string image = PictureInSkinFolder(s.image) ? s.image : std::string();
+		std::replace(image.begin(), image.end(), '\\', '/');
 		fprintf(f, "# Menu skin: edit the values, then pick it from the Skin dropdown (it re-reads this folder when opened).\n");
 		fprintf(f, "Name = \"%s (copy)\"\n", s.name.c_str());
 		fprintf(f, "Background = %s     # the window, R,G,B 0-255\n", col(s.background).c_str());

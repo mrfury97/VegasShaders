@@ -118,7 +118,10 @@ public:
 	ShaderCollection*		GetShaderCollectionByName(const char* collectionName);
 	void					ClearShaderSamplers(const char* textureName, size_t byteCount);
 	void					RegisterConstant(const char* constantName, D3DXVECTOR4* value);
-	void					RenderDepthAndNormals(IDirect3DSurface9* renderTarget);	// UNOFFICIAL 2026-10-27: TESR_DepthBuffer + TESR_NormalsBuffer (chain start; RenderScale v2 again after its upscale)
+	void					RenderDepthAndNormals(IDirect3DSurface9* renderTarget, bool needNormals = true);	// UNOFFICIAL 2026-10-27: TESR_DepthBuffer + TESR_NormalsBuffer (chain start; RenderScale v2 again after its upscale)
+	bool					PostTonemapNeedsNormals();
+	bool					PostTonemapNeedsViewModelDepth();
+	bool					PostUpscaleNeedsDepth(bool beforeLuma);
 	void					CreateFrameVertex(UInt32 width, UInt32 height, IDirect3DVertexBuffer9** vertexBuffer, float scaleX = 1.0f, float scaleY = 1.0f);
 	void					InitializeConstants();	// the screen-size constants, no weather yet
 	void					UpdateConstants();		// the per-frame game state and constants
@@ -160,7 +163,6 @@ public:
 	void					PreStep_SkyViewTable(ChainContext& ctx);
 	void					PreStep_VolumetricClouds(ChainContext& ctx);
 	void					PreStep_AmbientLightTakeover(ChainContext& ctx);
-	void					PreStep_HiZ(ChainContext& ctx);
 	void					PreStep_CompositePlan(ChainContext& ctx);
 	void					PreStep_ShadowApply(ChainContext& ctx);
 	void					PreStep_CoverMapUpdate(ChainContext& ctx);
@@ -278,7 +280,6 @@ public:
 		TonemappingShaders*		Tonemapping;
 		POMShaders*				POM;
 		PBRShaders*				PBR;
-		ShaderCollection*		Blood;
 		SkyShaders*				Sky;
 		SkinShaders*			Skin;
 		GrassShaders*			Grass;

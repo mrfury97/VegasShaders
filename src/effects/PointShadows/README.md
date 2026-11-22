@@ -155,10 +155,6 @@ Spot light (merged technique only, not in batches): radius from TESR_SpotLightPo
 
 Extra lamps (merged technique only): the loop stops early once the running sum is 1 or more, or at the first empty entry. Each extra lamp's radius and weight are the packed values from TESR_ExtraLights w.
 
-Cube-map casters (C++, `ShadowManager::RenderShadowCubeMap`): since upstream 1.1.2 a caster whose world scale is non-finite or
-above 1000, or whose world bound is non-finite or wider than 1e6 units, is skipped (`IsExplodedShadowCaster`: weapon animation
-mods counter-scale a hidden child by 1e9; see SunShadows README section 9, fixed item 10).
-
 Sky and far pixels: the pass has no sky test. Sky or far depth lies beyond every lamp's radius, so it gets 0 from lamps. Anything the consumers do about sky happens in those effects.
 
 First-person weapon: the mask pass has no weapon test. The contact pass fades in only past 25 game units from the camera, so the weapon and hands get no contact shadow.

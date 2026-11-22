@@ -326,8 +326,9 @@ namespace PointShadowForward {
 	// objects had. Here the game's test runs as before, with its own previous result put back first so its fade and update
 	// bookkeeping sees no change that was ours; a lamp it calls out of view whose sphere does reach the render camera's view
 	// (LampReachesView, with a margin for a frame of turning) stays active for the frame.
-	inline bool KeepLampsWanted = false;		// KeepLampsInView with forward shadows on (Publish)
-	inline bool KeepLampsNow = false;			// ... and indoors this frame (Begin)
+	inline bool KeepLampsWanted = false;		// KeepLampsInView with forward shadows on (UpdateKeepLamps / Publish)
+	inline bool KeepLampsNow = false;			// ... this frame (indoors and outdoors; UpdateKeepLamps / Begin)
+	inline unsigned KeepLampsFrame = 0;			// per-frame counter for GameCullMask cleanup when RenderShadowMaps is skipped
 	inline std::unordered_map<const ShadowSceneLight*, UInt16> GameCullMask;	// the game's own last TestFrustumCull result
 	inline unsigned StatCullCalls = 0, StatCullOut = 0, StatCullKept = 0;
 	inline const UInt32 kTestFrustumCallSite = 0x00B5E915, kTestFrustumCull = 0x00B9E970;
@@ -368,6 +369,18 @@ namespace PointShadowForward {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-19: updated once per frame in Render.cpp (and Begin()) so KeepLampsInView works indoors AND outdoors,
+	// and even when ShadowsInteriors/ShadowsExteriors is off (RenderShadowMaps skipped), preventing 180-degree camera-turn lamp popping.
+	inline void UpdateKeepLamps() {
+		KeepLampsFrame++;
+		if ((KeepLampsFrame & 4095) == 0) GameCullMask.clear();	// freed lamps (a lamp new at a freed address gets one stale restore, harmless)
+		const auto* fx = (TheShaderManager && TheShaderManager->Effects.ShadowsExteriors) ? TheShaderManager->Effects.ShadowsExteriors : nullptr;
+		if (!fx) { KeepLampsWanted = false; KeepLampsNow = false; return; }
+		const auto& forward = fx->Settings.Interiors.Forward;
+		KeepLampsWanted = forward.Enabled && forward.KeepLampsInView;
+		KeepLampsNow = KeepLampsWanted;
+	}
+
 	inline void Begin() {
 		Frame++;
 		Cameras[Frame & 7] = { Frame, D3DXVECTOR3(TheRenderManager->CameraForward.x, TheRenderManager->CameraForward.y, TheRenderManager->CameraForward.z),
@@ -375,8 +388,7 @@ namespace PointShadowForward {
 			Player ? D3DXVECTOR3(Player->pos.x, Player->pos.y, Player->pos.z) : D3DXVECTOR3(0.0f, 0.0f, 0.0f) };
 		if ((Frame & 1023) == 0)
 			for (auto it = ObjectLamps.begin(); it != ObjectLamps.end();) it = Frame - it->second.frame > 1024 ? ObjectLamps.erase(it) : std::next(it);
-		if ((Frame & 4095) == 0) GameCullMask.clear();	// freed lamps (a lamp new at a freed address gets one stale restore, harmless)
-		KeepLampsNow = KeepLampsWanted && !TheShaderManager->GameState.isExterior;
+		UpdateKeepLamps();
 		Active = false; SlotCount = 0; BoundThisFrame = false; UseIndex = false; ExteriorActive = false;
 		ScopeFix = TheShaderManager->Effects.ShadowsExteriors->Settings.Interiors.Forward.ScopeFix;
 	}

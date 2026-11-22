@@ -375,7 +375,8 @@ namespace RtDenoise {
 		const D3DXVECTOR3 move = camera - d->prevCamera;
 		if (d->rawSeen != rawGeneration) { d->rawSeen = rawGeneration; d->hasHistory = false; }	// UNOFFICIAL 2026-10-30 DLSS RR (above)
 		// (2026-11-03) RenderScale < 1: the signal is in the top-left RenderRect part; a scale change (or a rect <-> native frame) restarts
-		const float scaleX = RenderRect::On ? RenderRect::ScaleX : 1.0f, scaleY = RenderRect::On ? RenderRect::ScaleY : 1.0f;
+		const float scaleX = S.RectScaleX > 0.0f && S.RectScaleX < 1.0f ? S.RectScaleX : (RenderRect::On ? RenderRect::ScaleX : 1.0f);
+		const float scaleY = S.RectScaleY > 0.0f && S.RectScaleY < 1.0f ? S.RectScaleY : (RenderRect::On ? RenderRect::ScaleY : 1.0f);
 		const bool rescaled = scaleX != d->lastScale[0] || scaleY != d->lastScale[1];
 		// (2026-11-09 sweep: + the game's camera cut, as the backbone and GIMotion below test it: a door into a room under 512 units away kept the old room's history)
 		const bool cameraCut = TheShaderManager->GameState.isCameraCut;
@@ -540,6 +541,11 @@ namespace RtDenoise {
 				if (mirrorSurface) a.specular |= 4u;
 				if (guide && (S.Soft & 2)) a.specular |= 16u;	// UNOFFICIAL 2026-11-16 (rtgi-review) bit 4: Settings.Soft, texels without an albedo texel are one soft surface
 				if (guide && S.GuideOnce && i > 0) a.specular |= 8u;	// UNOFFICIAL 2026-11-13 (rtgi-review B2) bit 3: the guide's value is in B's blue (the pass before wrote it)
+				if (scaleX < 0.9999f || scaleY < 0.9999f) {	// bits 6..18 / 19..31: active RenderRect scale (13-bit ceil unorm; 0 = full 1.0)
+					const UInt32 rx = (UInt32)ceilf(std::clamp(scaleX, 0.0f, 1.0f) * 8191.0f);
+					const UInt32 ry = (UInt32)ceilf(std::clamp(scaleY, 0.0f, 1.0f) * 8191.0f);
+					a.specular |= (rx << 6) | (ry << 19);
+				}
 				a.historyFix = RtHistoryTime::Frames((std::max)(S.HistoryFix, 0.0f), clock);	// (2026-11-07 ptaaa-denoiser; perf-history: frames at 60 fps)
 				IUnknown* images[5] = { sourceA, normals, sourceB, spec ? (IUnknown*)S.Roughness : guide ? (IUnknown*)S.Guide : (IUnknown*)sourceA,
 					guide ? (IUnknown*)S.GuideAlbedo : mirrorSurface ? (IUnknown*)Noisy : (IUnknown*)sourceA };

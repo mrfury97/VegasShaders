@@ -248,7 +248,7 @@ on the sky) by 1 - exp(-6 S), saturation, night tint.
 > 0, outdoors, maps on, faded by ShadowFade.x, by day): modern with the grid: lerp(1, a / g, grid share); otherwise one cascade lookup
 at the surface (not for the sky) with the include's normal offset and bias (FogSunVisibility: the first cascade holding the point, lit
 past the last one with a 10 % fade); lerp(1, vis, ShadowStrength). 35 % x dayFade of the fog colour counts as direct sun and is shaded;
-the glow (4a SunGlow) is added on top and shaded. inscatter = (shaded colour + sunLight x glow x vis) x albedo.
+the glow (4a SunGlow) is added on top and shaded; in the modern look it is gated off the sky dome (1 - isSkyDome), attenuated to 0.25 in overcast weather (WeatherFilterBlend), and scaled by SkyMultiplier (TESR_SunsetColor.w). Distant horizon fog (DistantFogBlend) is likewise gated off sky-dome pixels in the modern look. inscatter = (shaded colour + sunLight x glow x vis) x albedo.
 (2026-11-07, ptaaa-fog) While the ray tracing core runs for another RT effect, the grid's a channel holds the TRACED sun visibility
 (`[Shaders.VolumetricLight.RT]`, src/effects/VolumetricLight/README.md "RT fog visibility"): with FogVolume + Froxels the fog's sun
 shading inside MaxDistance follows the RT sun shadows' casters with no change here. The surface lookup past the grid (and the ClassicLook /

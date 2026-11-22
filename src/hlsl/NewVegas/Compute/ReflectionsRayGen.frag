@@ -84,7 +84,7 @@ void main() {
     if (mirrorPixel) H = N;
     vec3 R = reflect(V, H);
     if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
-    if (!weapon) R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
+    if (!weapon) R = AboveSurface(pixelUV, position, R);   // (2026-11-05/21) never under world surfaces; skip on weapons (depth finite differences scatter across curved folds)
 
     // March: steps that grow along the ray (fine near the surface, coarse far off), the first one shifted by the noise.
     float jitter = mirrorPixel ? 0.5 : GradientNoise(vpos + vec2(11.0, 71.0));
@@ -137,10 +137,10 @@ void main() {
     // The helper rebuilds the surface from its view z as ViewPosition does, and begins the ray a little way along it (Rt/ReflectionsRT.comp).
     // (RT DebugView 5, the scene alignment check: a ray for every reflecting pixel; the helper then traces from the camera to it.)
     bool wantRay = RtOn && ((RtFade(roughness) > 0.0 && (confidence < 0.999 || abs(RtDebugView - 3.0) < 0.5)) || abs(RtDebugView - 5.0) < 0.5);
-    if (weapon) {   // +6: a weapon pixel's own ray (the helper widens its origin by the FOVs and leaves the player out); no budget
+    if (weapon) {   // +6: a weapon pixel's own ray (the helper widens its origin by the FOVs and leaves the player out); exempt from world MaxRoughness
         o_color = vec4(0.0);
         o_dir = vec4(OctEncode(ViewToWorldDir(R)), 0.0, 0.0);
-        o_ray = vec4(depth, RtOn && RtFade(roughness) > 0.0 ? roughness + 6.0 : roughness, 0.0, 0.0);
+        o_ray = vec4(depth, RtOn ? roughness + 6.0 : roughness, 0.0, 0.0);
         return;
     }
     o_color = vec4(colour, confidence);

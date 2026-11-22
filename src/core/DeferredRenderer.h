@@ -36,6 +36,7 @@
 // whether it runs (DeferredSun::Wanted); its Apply is called in Render.cpp's DeferredSpan, after this file's AtSpanEnd.
 #include "DeferredSun.h"
 #include "DeferredFoliage.h"	// UNOFFICIAL 2026-11-14 phase 3 foliage: its live state follows mode 2's (BeginFrame)
+#include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart (InteriorRecordCensus, log only)
 
 namespace DeferredRenderer {
 	inline const char* kSection = "Main.Main.Quality";
@@ -58,7 +59,17 @@ namespace DeferredRenderer {
 	inline unsigned Loaded = 0, Refused = 0;
 	// 2026-11-14 fd-fixes (blended draws): every deferred handle -> its record and its forward record (the per-draw swap below), and the
 	// land's (TerrainTemplate, mode 2) handles: the land's fade over objects is a SRCALPHA blend with alpha 1, a plain replace, so it stays deferred
-	struct Pair { ShaderRecordPixel* deferred; ShaderRecordPixel* forward; };
+	// UNOFFICIAL 2026-11-19: outdoor partner (Exterior, else Default — FORWARD_SHADOWS = 1). Swapping an alpha-blended outdoor object
+	// (cracked asphalt road slabs, rubble skirts, decals) to the Interior record (FORWARD_SHADOWS = 0) stripped all sun shadows from it.
+	struct Pair { ShaderRecordPixel* deferred; ShaderRecordPixel* forward; ShaderRecordPixel* outdoor = nullptr; };
+	inline ShaderRecordPixel* OutdoorRecord(const NiD3DPixelShaderEx* shader) {
+		ShaderRecordPixel* r = shader ? (ShaderRecordPixel*)shader->ShaderProg[ShaderRecordType::Exterior] : nullptr;
+		if (!r && shader) r = (ShaderRecordPixel*)shader->ShaderProg[ShaderRecordType::Default];
+		return r && r->ShaderHandle ? r : nullptr;
+	}
+	inline ShaderRecordPixel* PartnerOf(const Pair& pair) {
+		return pair.outdoor && TheShaderManager && TheShaderManager->GameState.isExterior ? pair.outdoor : pair.forward;
+	}
 	inline std::unordered_map<IDirect3DPixelShader9*, Pair> Pairs;
 	inline std::unordered_set<IDirect3DPixelShader9*> LandHandles;
 
@@ -124,7 +135,7 @@ namespace DeferredRenderer {
 		// record: LightFreeRecords::Eligible); it binds inside the main list's span, where DeferredDistant draws the game's geometry group 0
 		const bool farLand = (!strcmp(tmpl.Name, "TerrainLODTemplate") || !strcmp(tmpl.Name, "TerrainFadeTemplate")) && DeferredDistant::CompiledIn();	// (2026-11-15 DeferredSun: + the hand-over band, its sun taken out with the land's under it)
 		if (!object && !parallax && !(land && mode >= 2) && !(farLand && mode >= 2)) return false;
-		for (int d = 0; d < 63 && tmpl.Defines[d].Name; d++) {
+		for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++) {
 			const char* define = tmpl.Defines[d].Name;
 			if (!strcmp(define, "DIFFUSE") || !strcmp(define, "ONLY_SPECULAR") || !strcmp(define, "NO_LIGHT") || (!strcmp(define, "HAIR") && !LightFreeRecords::HairDeferred())) return false;	// (2026-11-15 DeferredHair)
 		}
@@ -132,7 +143,7 @@ namespace DeferredRenderer {
 	}
 
 	inline bool HasDefine(const ShaderTemplate& tmpl, const char* define) {
-		for (int d = 0; d < 63 && tmpl.Defines[d].Name; d++) if (!strcmp(tmpl.Defines[d].Name, define)) return true;
+		for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++) if (!strcmp(tmpl.Defines[d].Name, define)) return true;
 		return false;
 	}
 	// gameHandle (2026-11-18 DeferredStandalone): with no forward record, the game's own shader takes the forward record's place in the span-end
@@ -146,7 +157,9 @@ namespace DeferredRenderer {
 			gameHandle->AddRef();	// held for the session: the swaps bind it after load, and the game may let go of its own reference
 			DeferredLamps::ForwardOf[record->ShaderHandle] = gameHandle;
 		}
-		Pairs[record->ShaderHandle] = { record, forward && forward->ShaderHandle ? forward : nullptr };
+		ShaderRecordPixel* outdoor = OutdoorRecord((const NiD3DPixelShaderEx*)shader);
+		if (outdoor && outdoor->ShaderHandle) DeferredLamps::ForwardOfOutdoor[record->ShaderHandle] = outdoor->ShaderHandle;
+		Pairs[record->ShaderHandle] = { record, forward && forward->ShaderHandle ? forward : nullptr, outdoor };
 		if (tmpl.Name && !strcmp(tmpl.Name, "TerrainTemplate")) LandHandles.insert(record->ShaderHandle);
 		Missing.erase(shader);
 		Loaded++;
@@ -201,7 +214,7 @@ namespace DeferredRenderer {
 	// NiD3DPixelShaderEx::SetupShader: the deferred record while the main list's G-buffer is bound (mode 1 indoors; mode 2 also outdoors once
 	// DeferredSun is ready). Counts the binds and the forward fallbacks (an eligible shader without a record).
 	inline ShaderRecordPixel* Choose(const void* shader, bool exterior) {
-		if (!Live || !CapturedNormals::InSpan) return nullptr;
+		if (!Live || !CapturedNormals::InSpan || (CapturedNormals::VmSpan && !CapturedNormals::VmDeferred)) return nullptr;
 		if (exterior && (Mode() < 2 || !SunRuns())) return nullptr;
 		SpanSeen = true;
 		auto found = Records.find(shader);
@@ -282,9 +295,11 @@ namespace DeferredRenderer {
 		if (!bound) return;
 		auto p = Pairs.find(bound);
 		if (p == Pairs.end()) return;
-		if (p->second.forward) {
-			p->second.forward->SetCT();
-			d->SetPixelShader(p->second.forward->ShaderHandle);
+		ShaderRecordPixel* partner = PartnerOf(p->second);
+		if (partner) {
+			partner->SetCT();
+			d->SetPixelShader(partner->ShaderHandle);
+			if (GpuTimer::Enabled && partner->PointShadowForward) InteriorRecordCensus::Swap();	// (2026-11-16 fast-restart, log only)
 		}
 		else {	// (2026-11-18 DeferredStandalone) no forward record: the game's own shader, which takes the game's constants as they are
 			auto g = DeferredLamps::ForwardOf.find(bound);
@@ -351,8 +366,17 @@ namespace DeferredRenderer {
 		d->GetPixelShader(&bound);
 		if (bound) {
 			if (Handles.count(bound)) {
-				auto f = DeferredLamps::ForwardOf.find(bound);
-				if (f != DeferredLamps::ForwardOf.end()) { d->SetPixelShader(f->second); StatSwaps++; }
+				auto p = Pairs.find(bound);
+				ShaderRecordPixel* partner = p != Pairs.end() ? PartnerOf(p->second) : nullptr;
+				if (partner && partner->ShaderHandle) {
+					partner->SetCT();
+					d->SetPixelShader(partner->ShaderHandle);
+					StatSwaps++;
+				}
+				else {
+					auto f = DeferredLamps::ForwardOf.find(bound);
+					if (f != DeferredLamps::ForwardOf.end()) { d->SetPixelShader(f->second); StatSwaps++; }
+				}
 			}
 			bound->Release();
 		}
@@ -380,7 +404,8 @@ namespace DeferredRenderer {
 		const char* why = nullptr;
 		if (live && Native && CapturedNormals::MsaaWarned) { live = false; why = "the game's MSAA on native D3D9 (no G-buffer there): forward"; }
 		if (live && exterior && (mode < 2 || !SunRuns())) { live = false; why = mode < 2 ? nullptr : "outdoors: mode 2 needs the DeferredSun pass (claude/fd-sun): forward"; }
-		if (live && LockPickMenu::GetSingleton() && InterfaceManager->IsActive(Menu::kMenuType_LockPick)) live = false;	// (as DeferredLamps: the lock's own scene)
+		// Fallback when Menu3DGuard could not be installed: keep overlay 3D menus / lockpick forward.
+		if (live && !Menu3DGuardInstalled && (TheShaderManager->GameState.OverlayIsOn || (LockPickMenu::GetSingleton() && InterfaceManager->IsOpen(Menu::kMenuType_LockPick)))) live = false;
 		if (why) { static const char* lastWhy = nullptr; if (why != lastWhy) { lastWhy = why; Logger::Log("UNOFFICIAL DeferredRenderer: refused, %s (logged once a reason)", why); } }
 		if (mode >= 2 && !SunRuns() && DeferredSun::Failure()) { static bool sunTold = false; if (!sunTold) { sunTold = true; Logger::Log("[WARNING] UNOFFICIAL DeferredRenderer 2: the DeferredSun pass cannot run (%s): mode 2 draws forward", DeferredSun::Failure()); } }	// (2026-11-15: not while it is only not ready yet, frame 1)
 		{	// UNOFFICIAL 2026-11-15 (FD-RELEASE-PREP.md) the linear gamma floor (SettingForce::FloorF): one line whenever the overridden value changes

@@ -15,36 +15,47 @@ layout(location = 0) out vec4 o_blurred;
 layout(location = 1) out vec4 o_radius;
 
 void main() {
-    ivec2 p = ivec2(gl_FragCoord.xy);
-    vec2 uv = (vec2(p) + 0.5) * pc.size.zw;
-    vec4 centre = Fetch(t_in1, p);
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    if (any(greaterThanEqual(px, ACTIVE_GRID))) {
+        o_blurred = vec4(0.0); o_radius = vec4(0.0);
+        return;
+    }
+    vec2 rectUv = (vec2(px) + 0.5) * pc.size.zw;
+    vec4 centre = Fetch(t_in1, px);
     o_blurred = centre;
     o_radius = vec4(0.0);
-    vec4 g = Fetch(t_in2, p);
+    vec4 g = Fetch(t_in2, px);
     if (g.x <= 0.0 || IsMirror(g.y)) return;
-    vec4 m = Fetch(t_in0, p);
+    vec4 m = Fetch(t_in0, px);
     float z = g.x, r = g.y, hit = max(m.x, 0.0), n = max(m.y, 1.0);
+    bool centerWeapon;
+    StripRoughness(Fetch(t_ray, px).y, centerWeapon);
     vec3 normal = OctDecodeN(g.zw);
-    vec3 point = PointAt(uv, z);
+    vec3 point = PointAtSurface(rectUv, z, centerWeapon);
     float a = r * r;
-    float pixelAngle = 2.0 * length(pc.right.xyz) * pc.size.z;
+    float pixelAngle = 2.0 * length(pc.right.xyz) * (pc.size.z / max(pc.rect.x, 1.0e-4));
+    if (centerWeapon && pc.activeSize.w > 1.0e-3) pixelAngle /= pc.activeSize.w;
     float lobe = hit / (z + hit) * 2.0 * a / pixelAngle;
     float radius = min(lobe, pc.params2.z) * clamp(sqrt(4.0 / n), 0.25, 1.0);
     o_radius = vec4(radius, lobe, 0.0, 0.0);
     if (radius < 0.5) return;
-    float rotation = 6.2831853 * fract(52.9829189 * fract(dot(vec2(p) + pc.params3.w * 5.588238, vec2(0.06711056, 0.00583715))));
+    float rotation = 6.2831853 * fract(52.9829189 * fract(dot(vec2(px) + pc.params3.w * 5.588238, vec2(0.06711056, 0.00583715))));
     vec4 sum = centre;
     float weights = 1.0;
     float planeTolerance = 0.01 * z + 2.0;
+    if (centerWeapon) planeTolerance = max(planeTolerance, max(z * 0.04, 0.5));
     for (int k = 0; k < 12; k++) {
         float t = sqrt((float(k) + 0.5) / 12.0);
         float ang = rotation + float(k) * 2.39996323;
         vec2 o = vec2(cos(ang), sin(ang)) * t * radius;
-        ivec2 q = p + ivec2(round(o));
-        if (q == p || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, GRID))) continue;
+        ivec2 q = px + ivec2(round(o));
+        if (q == px || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ACTIVE_GRID))) continue;
         vec4 gq = Fetch(t_in2, q);
         if (gq.x <= 0.0) continue;
-        vec3 pq = PointAt((vec2(q) + 0.5) * pc.size.zw, gq.x);
+        bool tapWeapon;
+        StripRoughness(Fetch(t_ray, q).y, tapWeapon);
+        if (tapWeapon != centerWeapon) continue;
+        vec3 pq = PointAtSurface((vec2(q) + 0.5) * pc.size.zw, gq.x, tapWeapon);
         float plane = abs(dot(pq - point, normal)) / planeTolerance;
         float w = exp(-2.0 * t * t) * max(0.0, 1.0 - plane)
                 * pow(max(dot(OctDecodeN(gq.zw), normal), 0.0), 64.0)

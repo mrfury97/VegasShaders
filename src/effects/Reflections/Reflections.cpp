@@ -7,10 +7,8 @@
 #include "../../core/FlashlightLamp.h"	// UNOFFICIAL 2026-11-04
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
-#include "../../core/HiZ.h"	// UNOFFICIAL 2026-10-26 (NVR DXVK, deep/fork-hiz)
-#include "../../core/ShaderCounters.h"	// UNOFFICIAL 2026-10-26 debugging tools (the Hi-Z trace's counters)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (Temporal's motion input)
-#include "../../core/PixelInspector.h"
+#include "../../core/ViewModelMotion.h"	// UNOFFICIAL 2026-11-21 ViewModelMotion (RtDenoiser weapon reprojection)
 #include "../../core/RtCoreClient.h"	// UNOFFICIAL 2026-10-28 (RT reflections)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (the D3D9 effect's material copy)
 #include "../../core/RtCore.h"
@@ -21,6 +19,7 @@
 #include "../../core/RtDenoise.h"	// UNOFFICIAL 2026-11-07 (perf-history) HistoryClock
 #include "../../core/Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS RR (RayReconstructionWantsRaw: the RT resolve unblurred, no history)
 #include "../PBR/PBR.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2) the game's light scale and LampFalloff's shape for the RT lamps
+#include "../CoverMap/CoverMap.h"	// 2026-11-19 WetWorld persistent puddles handoff
 #include "RtReflLamps.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2)
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-07 (perf-reflfix2) the flashlight lights RT hits and keeps its highlight in the composite
 #include "../../core/RtFlashlightCode.h"
@@ -91,7 +90,6 @@ void ReflectionsEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-10-21 SpecularOcclusion: live, compiled into the effect only when above 0 at startup (ReflMaterial::OccCompiledIn).
 	Settings.SpecularOcclusion = ReflMaterial::OccCompiledIn() ? std::clamp(TheSettingManager->GetSettingF(section, "SpecularOcclusion"), 0.0f, 1.0f) : 0.0f;
 	Settings.SpecularOcclusionLevel = std::clamp(TheSettingManager->GetSettingF(section, "SpecularOcclusionLevel"), 0.05f, 4.0f);
-	Settings.HiZ = TheSettingManager->GetSettingI(section, "HiZ") != 0;	// UNOFFICIAL 2026-10-26 (NVR DXVK, core/HiZ.h)
 	Settings.GlassReflect = std::clamp(TheSettingManager->GetSettingF(section, "GlassReflect"), 0.0f, 2.0f);	// UNOFFICIAL 2026-10-29 (core/GlassMask.h)
 	Settings.MaterialBufferRoughness = TheSettingManager->GetSettingI(section, "MaterialBufferRoughness") != 0;	// UNOFFICIAL 2026-10-30
 	Settings.CloudSky = TheSettingManager->GetSettingI(section, "CloudSky") != 0;	// UNOFFICIAL 2026-10-30
@@ -100,9 +98,6 @@ void ReflectionsEffect::UpdateSettings() {
 	SettingManager::Configuration::ConfigNode node;
 	Settings.ReflectivityExterior = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "ReflectivityExterior") ? std::clamp(node.FloatValue, 0.0f, 3.0f) : 1.0f;
 	Settings.ReflectivityInterior = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "ReflectivityInterior") ? std::clamp(node.FloatValue, 0.0f, 3.0f) : 1.0f;
-	Settings.HiZInteriorsTest = TheSettingManager->GetSettingI(section, "HiZInteriorsTest") != 0;	// test only: HiZ indoors too
-	Settings.HiZSafeCells = TheSettingManager->GetSettingI(section, "HiZSafeCells") != 0;	// test only: the pyramid-channel fix
-	HiZ::CheckEvery = std::clamp(TheSettingManager->GetSettingI(section, "HiZCheck"), 0, 100000);	// test only: pyramid readback check
 	// UNOFFICIAL 2026-10-28 RT reflections (docs/next/FORK-RT-REFLECTIONS.md); a missing key reads 0 / false (off).
 	const char* rt = "Shaders.Reflections.RT";
 	Settings.RtEnabled = TheSettingManager->GetSettingI(rt, "Enabled") != 0;
@@ -140,9 +135,12 @@ void ReflectionsEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-11-09 WeaponHands (a key missing from an older settings file reads 0: the weapon's own pixels only)
 	Settings.RtWeaponHands = TheSettingManager->GetSettingI(rt, "WeaponHands") != 0;
 	WeaponMask::Wanted = TheSettingManager->GetSettingI(rt, "Enabled") != 0 && Settings.RtWeapon > 0.0f && !Settings.RtWeaponHands;
-	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (docs/next/RT-REFLECTION-DENOISER.md)
+	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (docs/next/RT-REFLECTION-DENOISER.md; 2026-11-19: FFX core 1 pruned, mapped to ours = 2)
 	Settings.RtDenoiser = TheSettingManager->GetSettingI(rt, "Denoiser") != 0;
-	Settings.RtDenoiserCore = std::clamp(TheSettingManager->GetSettingI(rt, "DenoiserCore"), 0, 1);
+	{
+		const int rawCore = TheSettingManager->GetSettingI(rt, "DenoiserCore");
+		Settings.RtDenoiserCore = rawCore == 1 ? 2 : std::clamp(rawCore, 0, 2);
+	}
 	Settings.RtDenoiserHistory = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserHistory"), 1.0f, 128.0f);
 	Settings.RtDenoiserMirrorHistory = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserMirrorHistory"), 1.0f, 128.0f);
 	Settings.RtDenoiserBlur = std::clamp(TheSettingManager->GetSettingF(rt, "DenoiserBlur"), 0.0f, 32.0f);
@@ -206,6 +204,8 @@ namespace {
 		frame.hdr = *(const bool*)0x011F941E;	// BSShaderManager::bHDR (as ManyLamps.h BuildTable)
 		if (PBRShaders* pbr = TheShaderManager->Shaders.PBR) {
 			frame.lightScale = pbr->Constants.Data.z;
+			frame.gamma = (std::max)(pbr->Constants.Linear.x, 1.0f);
+			frame.linearLightScale = pbr->Constants.LinearScales.x;
 			frame.shaped = pbr->Constants.LampFalloff.x > 0.0f;
 			frame.shapeY = pbr->Constants.LampFalloff.y;
 			frame.shapeStrength = pbr->Constants.LampFalloff.z;
@@ -340,11 +340,7 @@ namespace {
 // the same eye with its own (narrower) FOV, so a weapon pixel's sideways view offset is the world projection's divided by this. 1 if
 // either is unknown.
 float ReflectionsEffect::WeaponFovScale() const {
-	if (!Player) return 1.0f;
-	const float world = Player->worldFoV, first = Player->firstPersonFoV;
-	if (world <= 1.0f || world >= 179.0f || first <= 1.0f || first >= 179.0f) return 1.0f;
-	const float toRad = 3.14159265f / 360.0f;
-	return tanf(world * toRad) / tanf(first * toRad);
+	return CapturedNormals::ViewModelFovScale();
 }
 
 // UNOFFICIAL 2026-11-08 (perf-reflfix4) one log line that says whether the installed shader files are this build's: the fixes of test 12's
@@ -366,12 +362,11 @@ static UInt32 ReflFileHash(const char* path, bool& found) {
 }
 static void LogReflShaderFiles() {
 	struct Want { const char* name; UInt32 hash; };
-	static const Want wants[] = {	// (perf-reflfix4: tools\nvr-dxvk\compile-compute.sh output, committed)
-		// (2026-11-09 WeaponMask: these four are the rebuilt ones that matter: t_weaponMask in Reflections.glsl, WeaponAt / ViewModelAt, DebugView 11; the rest of the twelve rebuilt shaders only gained the unused binding)
-		{ "ReflectionsComposite", 0x243490C0u }, { "ReflectionsRTResolve", 0x77301D9Eu }, { "ReflectionsRayGen", 0x6E28901Du }, { "ReflectionsTemporal", 0x7069F19Bu },	// (+ MirrorJitter: RayGen, the denoiser's reproject)
-		{ "RtReflDenoiseOursReproject", 0x78BCC94Du }, { "Rt\\ReflectionsRT", 0x3641D1CCu },
-		{ "Rt\\ReflectionsRTAlpha", 0x05B1BA2Cu }, { "Rt\\ReflectionsRTTex", 0x2D3057FCu }, { "Rt\\ReflectionsRTTexGlow", 0x336E2B80u },
-		{ "Rt\\ReflectionsRTAlphaTex", 0x4C556DF2u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x61957805u },
+	static const Want wants[] = {	// (perf-reflfix4 + 2026-11-20 1st-person viewmodel fixes: tools\nvr-dxvk\compile-compute.sh output)
+		{ "ReflectionsComposite", 0x01C60B00u }, { "ReflectionsRTResolve", 0xA93AF357u }, { "ReflectionsRayGen", 0x68A79B97u }, { "ReflectionsTemporal", 0x3CA35521u },
+		{ "RtReflDenoiseOursReproject", 0xF119DEBBu }, { "Rt\\ReflectionsRT", 0xA746E089u },
+		{ "Rt\\ReflectionsRTAlpha", 0x84E26AE6u }, { "Rt\\ReflectionsRTTex", 0xB3E8D775u }, { "Rt\\ReflectionsRTTexGlow", 0xFFB3D4DAu },
+		{ "Rt\\ReflectionsRTAlphaTex", 0x8ECA2AD7u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0xFEF64466u },
 	};
 	char line[1024];
 	int n = sprintf_s(line, "UNOFFICIAL Reflections shader files (perf-reflfix4: silver mirror F0, rough metal's 5 x 5 tent, MirrorJitter; 2026-11-09: weapon mask):");
@@ -454,10 +449,7 @@ bool ReflectionsEffect::RtRayGen(IDirect3DDevice9* Device) {
 	if (!RtWanted() || !RtImages()) return false;
 	// SplitTest (no helper): RayGen casts no ray, so Resolve must give the normal trace's picture exactly (the split checked on any GPU).
 	rtRays = RtCoreClient::Ready();
-	weaponFrame = rtRays && Settings.RtWeapon > 0.0f;	// UNOFFICIAL 2026-10-30 (dropped again below if this frame falls back to the normal trace)
-	// UNOFFICIAL 2026-11-03 RenderScale < 1: no weapon rays in a rect frame: the composite there is the D3D9 one, which never shades the
-	// weapon (its reflection would only be traced and blurred into its surroundings).
-	if (RenderRect::Active()) weaponFrame = false;
+	weaponFrame = rtRays && Settings.RtWeapon > 0.0f;	// UNOFFICIAL 2026-10-30 (2026-11-19: supported in RenderRect sub-rect frames too)
 	waterFrame = rtRays && Settings.RtWater && !TheShaderManager->GameState.isUnderwater;	// UNOFFICIAL 2026-10-31 (the same)
 	if (rtRays && Settings.RtHitLamps) RtGatherLamps(Settings.RtDistance); else { RtLampCount = 0; RtFlashIndex = -1; RtFlashCode = 0.0f; }	// UNOFFICIAL 2026-10-29 (before RayGen: both passes read them)
 	if (!ExtRender(Device, Rt.MarchSurface, Rt.MarchSurface, 8, false, Rt.MarchSurface)) return false;
@@ -506,7 +498,7 @@ bool ReflectionsEffect::RtRayGen(IDirect3DDevice9* Device) {
 			static bool logged = false;
 			if (!logged) {
 				logged = true;
-				Logger::Log("UNOFFICIAL Reflections: RT traced in the RenderScale rect: %ux%u of %ux%u (RayGen, the helper, Resolve and the sky panorama as Vulkan passes, the rest D3D9).",
+				Logger::Log("UNOFFICIAL Reflections: RT traced in the RenderScale rect: %ux%u of %ux%u (RayGen, the helper, Resolve, the denoiser, the sky panorama and the composite as Vulkan passes).",
 					RtTraceWidth, RtTraceHeight, RtWidth(), RtHeight());
 			}
 		}
@@ -638,12 +630,6 @@ void ReflectionsEffect::RtRideBeforeFrame(IDirect3DDevice9* Device, IDirect3DSur
 	}
 }
 
-// UNOFFICIAL 2026-10-26 (deep/fork-hiz): outdoors only for now. Indoors (Lucky 38, a 3rd-person view looking down) the walk found no
-// hits on the near floor where the fixed-step trace finds the rail and the counter (bulk runs 2026-10-26); the old trace stays there.
-bool ReflectionsEffect::HiZWanted() const {
-	return Settings.HiZ && !ExtFailed && !hizTraceFailed && (TheShaderManager->GameState.isExterior || Settings.HiZInteriorsTest);
-}
-
 void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsData", &Constants.Data);
 	TheShaderManager->RegisterConstant("TESR_ReflectionsData2", &Constants.Data2);
@@ -659,6 +645,8 @@ void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsMaterial", &Constants.Material);
 	TheShaderManager->RegisterConstant("TESR_ReflectionsGBuffer", &Constants.GBuffer);	// UNOFFICIAL 2026-11-20 UnifiedReflections (REFL_GBUFFER_ON)
 	TheShaderManager->RegisterConstant("TESR_ReflectionsFilm", &Constants.Film);	// UNOFFICIAL 2026-11-20 unified reflections step 2 (REFL_GBUFFER_ON)
+	TheShaderManager->RegisterConstant("TESR_ReflectionsWetFx", &Constants.WetFx);
+	TheShaderManager->RegisterConstant("TESR_ReflectionsWetFx2", &Constants.WetFx2);
 	TheShaderManager->RegisterConstant("TESR_RTWaterData", &Constants.WaterData);	// UNOFFICIAL 2026-10-31 RT water (the water shaders)
 	TheShaderManager->RegisterConstant("TESR_RTWaterReproject", (D3DXVECTOR4*)&Constants.WaterReproject);
 	TheShaderManager->RegisterConstant("TESR_ReflReplace", (D3DXVECTOR4*)ReflMaterial::ForwardReplace);	// UNOFFICIAL 2026-11-12 ReplaceForward (EnvTemplate.hlsl; core/ReflMaterial.h keeps it 0 outside the world scene)
@@ -753,11 +741,22 @@ void ReflectionsEffect::UpdateConstants() {
 	const float reflectivity = exterior ? Settings.ReflectivityExterior : Settings.ReflectivityInterior;	// UNOFFICIAL 2026-10-25
 	Constants.Data.x = (exterior ? Settings.GroundSheen : Settings.InteriorFloors) * reflectivity;
 	Constants.Data.y = exterior ? wet * Settings.RainWetness : 0.0f;
-	// UNOFFICIAL 2026-10-19: the rain wets only open ground (the ortho map's roof test, as Wet World): kept up while it rains here.
-	// 2026-11-08 Puddles: and while standing water is left (the passes mirror it after the rain, Reflections.glsl PuddleStanding).
 	PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles;
 	PuddlesActive = exterior && puddles && puddles->ReflectionsWanted();
-	Constants.Data4.y = Constants.Data.y > 0.0f || PuddlesActive ? 1.0f : 0.0f;
+	WetnessEffectsShaders* wetFx = TheShaderManager->Shaders.Wetness;
+	const bool wetFxActive = exterior && wetFx && wetFx->Enabled && wetFx->Constants.Flags.x > 0.5f;
+	const int skyMode = TheSettingManager->GetSettingI("Shaders.PBR.Main", "SkylightingMode");
+	if (wetFxActive) {
+		Constants.WetFx = D3DXVECTOR4(1.0f + (skyMode == 1 ? 2.0f : 0.0f),
+			wetFx->Constants.Data.x * wetFx->Constants.Params.x, wetFx->Constants.Data.y, wetFx->Constants.Params.z);
+		Constants.WetFx2 = D3DXVECTOR4(wetFx->Constants.Params.y, puddles ? puddles->Constants.Look.x : Settings.WetRoughness,
+			Constants.WetFx2.z, PuddlesActive ? 1.0f : 0.0f);
+	}
+	else {
+		Constants.WetFx = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
+		Constants.WetFx2 = D3DXVECTOR4(0.0f, puddles ? puddles->Constants.Look.x : Settings.WetRoughness, Constants.WetFx2.z, PuddlesActive ? 1.0f : 0.0f);
+	}
+	Constants.Data4.y = Constants.Data.y > 0.0f || PuddlesActive || wetFxActive ? 1.0f : 0.0f;
 	if (Constants.Data4.y > 0.0f) TheShaderManager->orthoRequired = true;
 	Constants.Data.z = Settings.Roughness;
 	Constants.Data.w = Settings.WetRoughness;
@@ -773,9 +772,7 @@ void ReflectionsEffect::UpdateConstants() {
 	Constants.Data4.z = Settings.ReflectAdd;
 	Constants.Data4.w = Settings.SpecularOcclusion;
 	Constants.Layout.z = Settings.SpecularOcclusionLevel;
-	// UNOFFICIAL 2026-10-26 (deep/fork-hiz): HiZSafeCells (test): the Hi-Z walk reads the coarse cells' two channels as min/max and does its
-	// "behind" skip on the finest level only (ReflectionsTraceHiZ.frag). Indoors HiZ itself still needs HiZInteriorsTest.
-	Constants.Layout.w = Settings.HiZSafeCells ? 1.0f : 0.0f;
+	Constants.Layout.w = 0.0f;
 	// UNOFFICIAL 2026-10-20 MaterialAware: x is set again by CaptureMaterial (1 only when the buffer was filled this frame).
 	Constants.Material = D3DXVECTOR4(Settings.MaterialAware == 1 && materialFilled ? 1.0f : 0.0f, Settings.MaterialMaxRoughness, Settings.MaterialReflect * reflectivity, 0.0f);
 }
@@ -813,6 +810,16 @@ void ReflectionsEffect::BindMaterial() {
 		IDirect3DBaseTexture9* shading = FdReflNormals(TheRenderManager->device, normals);
 		if (shading != normals) SetPassTexture(2, shading);	// set after each pass begins (EffectRecord::PassTextures)
 	}
+	// 2026-11-19: stage 14 (NVR_ReflectionsSkyVis, unused by CompositePS) carries TESR_AlbedoBuffer for the D3D9 composite's true metal F0;
+	// RenderBuffers overwrites stage 14 with skyVis right after BindMaterial when skyVis is bound.
+	Constants.WetFx2.z = 0.0f;
+	if (CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f) {
+		SetPassTexture(14, CapturedNormals::AlbedoTexture);
+		const DWORD point14[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+			{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+		for (const auto& s : point14) TheRenderManager->SetSamplerState(14, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+		Constants.WetFx2.z = 1.0f;
+	}
 	// UNOFFICIAL 2026-11-20 UnifiedReflections, the D3D9 technique (REFL_GBUFFER_ON): COLOR2 on the material buffer's stage (15: no copy this
 	// frame), COLOR3 on 8 and COLOR1 on 9. Those two are the capture cubes', which only the Capture and Filter techniques read, drawn before
 	// this (CubeStep) or never in this frame (RenderCubeOnly runs without RenderBuffers); every pass after it here declares them as 2D.
@@ -826,6 +833,7 @@ void ReflectionsEffect::BindMaterial() {
 		if (DeferredWetness::FilmWhole()) {
 			SetPassTexture(7, DeferredWetness::FilmTexture);
 			Constants.Film = D3DXVECTOR4(1.0f, TheShaderManager->GameState.isExterior ? Settings.RainWetness : 0.0f, 1.0f, Settings.FilmRainScale);
+			Constants.WetFx.x = 0.0f;	// (2026-11-22 upstream 1.1.3 merge) the G-buffer film is the wetness: not upstream's forward film too
 		}
 		const DWORD point[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
 			{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
@@ -914,13 +922,14 @@ bool ReflectionsEffect::ShouldRender() {
 	// over it (wet roads, polished floors and metal reflecting twice). On: no Reflections pass while the traced picture replaces the scene.
 	if (RtPathTrace::Replacing() && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTReflectionsOff") != 0) return false;
 	const NormalsEffect* normals = TheShaderManager->Effects.Normals;
-	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || (Constants.Material.x > 0.0f && Constants.Material.z > 0.0f) ||
+	const bool surfaces = Constants.Data.x > 0.0f || Constants.Data.y > 0.0f || PuddlesActive || Constants.WetFx.x > 0.5f ||
+		(Constants.Material.x > 0.0f && Constants.Material.z > 0.0f) ||
 		(Constants.Material.z > 0.0f && GBufferFrame()) ||	// (2026-11-20 UnifiedReflections: the G-buffer's shiny objects)
 		(DeferredWetness::FilmWhole() && TheShaderManager->GameState.isExterior && Settings.RainWetness > 0.0f);	// (2026-11-20 the film's water: Reflections.glsl FilmWetness)
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
-	// the weapon rays can run (RtTrace's weaponFrame: the helper up, not a rect frame). Weapon 0 or RT off: as before.
-	const bool weapon = Settings.RtWeapon > 0.0f && RtWanted() && RtCoreClient::Ready() && !RenderRect::Active();
+	// the weapon rays can run (2026-11-19: supported in RenderRect sub-rect frames too).
+	const bool weapon = Settings.RtWeapon > 0.0f && RtWanted() && RtCoreClient::Ready();
 	nothingReflects = !surfaces;
 	if (!surfaces && Settings.RtEnabled) {
 		static bool told = false;
@@ -946,12 +955,12 @@ void ReflectionsEffect::RtFrameMode(bool& rrRaw, bool& temporal) {
 	// (below). A frame the helper traced nothing draws the normal trace, which still gets the blurs.
 	rrRaw = Upscaler::RayReconstructionWantsRaw() && RtWanted();
 	temporal = Settings.Temporal > 0.0f && !rrRaw;
-	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h): on frames the RT trace runs, native (rect frames keep the
-	// old chain: their passes are D3D9), not under DLSS RR (it wants the raw signal). Decided before RayGen (it changes RayGen's noise).
-	rtDenoiseFrame = Settings.RtDenoiser && RtWanted() && RtCoreClient::Ready() && !rrRaw && !RenderRect::Active() && !Settings.RtSplitTest;
+	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (core/RtReflDenoise.h): on frames the RT trace runs (native and RenderScale sub-rect
+	// frames alike), not under DLSS RR (it wants the raw signal). Decided before RayGen (it changes RayGen's noise).
+	rtDenoiseFrame = Settings.RtDenoiser && RtWanted() && RtCoreClient::Ready() && !rrRaw && !Settings.RtSplitTest;
 	// UNOFFICIAL 2026-11-08 (perf-reflfix4, "fix blocky mirrors") MirrorJitter: this frame's point of the texel for mirror pixels' rays
-	// (Compute/RtMirrorJitter.glsl): 8 Halton (2, 3) points, only while the denoiser keeps a history for them (1), or also under DLSS RR (2,
-	// RR averages the raw rays itself). Elsewhere (no denoiser, rect frames, RR with 1) the old fixed centre ray.
+	// (Compute/RtMirrorJitter.glsl): 8 Halton (2, 3) points, while the denoiser keeps a history for them (1; native and sub-rect frames),
+	// or also under DLSS RR (2, RR averages the raw rays itself). Elsewhere (no denoiser, RR with 1) the old fixed centre ray.
 	{
 		const bool on = Settings.RtMirrorJitter > 0 && RtWanted() && RtCoreClient::Ready() && (rtDenoiseFrame || (Settings.RtMirrorJitter > 1 && rrRaw));
 		mirrorJitterCode = 0.0f;
@@ -961,13 +970,13 @@ void ReflectionsEffect::RtFrameMode(bool& rrRaw, bool& temporal) {
 			const int qx = std::clamp((int)(halton(k, 2) * 64.0f), 0, 63), qy = std::clamp((int)(halton(k, 3) * 64.0f), 0, 63);
 			mirrorJitterCode = (float)(1 + qx + 64 * qy);
 		}
-		const int state = !Settings.RtMirrorJitter ? 0 : on ? (rrRaw ? 2 : 1) : rrRaw ? 3 : RenderRect::Active() ? 4 : !Settings.RtDenoiser ? 5 : 6;
+		const int state = !Settings.RtMirrorJitter ? 0 : on ? (rrRaw ? 2 : 1) : rrRaw ? 3 : !Settings.RtDenoiser ? 5 : 6;
 		static int toldState = -1, toldCount = 0;
 		if (RtWanted() && RtCoreClient::Ready() && state != toldState && toldCount < 16) {
 			toldCount++;
 			toldState = state;
 			static const char* const why[7] = { "off (the setting)", "on: mirror rays jittered over 8 points of their texel, the reflection denoiser keeps a short history on mirrors",
-				"on under DLSS RR (RR averages the jittered rays)", "off this frame: DLSS RR (MirrorJitter 2 jitters under RR)", "off this frame: RenderScale < 1 (no denoiser history there)",
+				"on under DLSS RR (RR averages the jittered rays)", "off this frame: DLSS RR (MirrorJitter 2 jitters under RR)", "",
 				"off: the reflection denoiser is off ([Shaders.Reflections.RT] Denoiser)", "off this frame (the denoiser does not run)" };
 			Logger::Log("UNOFFICIAL RT reflections MirrorJitter (perf-reflfix4): %s (history %.0f frames)", why[state], Settings.RtMirrorJitterHistory);
 		}
@@ -1011,7 +1020,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	stats.Note(temporal, haveHistory, drewLastFrame, usable);
 	EffectStatus::History(StatusSlot, Name, EffectStatus::HistoryWhy(temporal, haveHistory, drewLastFrame, usable));	// UNOFFICIAL 2026-11-01
 	if (GpuTimer::Enabled && stats.drawn >= 240) ReportHistory("240 frames");
-	D3DXMATRIX reprojectNow;
+	D3DXMATRIX reprojectNow, reprojectDenoise;
 	if (usable || denoiseHistory) {
 		// Camera-relative world -> last frame's view, in double round the two camera positions (see VolumetricLight.cpp).
 		D3DXMATRIX toLastView;
@@ -1023,10 +1032,12 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 			toLastView.m[3][j] = (float)(move[0] * lastView.m[0][j] + move[1] * lastView.m[1][j] + move[2] * lastView.m[2][j]);
 		toLastView.m[3][3] = 1.0f;
 		D3DXMatrixMultiply(&reprojectNow, &toLastView, &lastProj);
+		reprojectDenoise = reprojectNow;
+		if (Settings.JitterFix) TemporalBackbone::ShiftReprojection(reprojectDenoise, D3DXVECTOR2(-lastJitter.x, -lastJitter.y));
 		if (usable) {
 			Constants.Reproject = reprojectNow;
 			// UNOFFICIAL 2026-11-09 TemporalJitterFix: the Temporal pass (D3D9 and Compute/ReflectionsTemporal.frag) reads the history where
-			// the TAA jitter's change since last frame puts it (the RT denoiser's own reprojection, reprojectNow, is left as it was)
+			// the TAA jitter's change since last frame puts it
 			if (Settings.JitterFix) TemporalBackbone::ShiftReprojection(Constants.Reproject, TemporalBackbone::DepthJitter() - lastJitter);
 		}
 	}
@@ -1072,7 +1083,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	}
 	// UNOFFICIAL 2026-11-07 the RT reflection denoiser in place of Temporal + Blur X / Y (its result into Buffer); not run: the old chain
 	const bool denoised = rtDenoiseFrame && rtResolved &&
-		RunRtDenoiser(Device, temporal ? Textures.TraceTexture : Textures.TempTexture, denoiseHistory ? &reprojectNow : nullptr);
+		RunRtDenoiser(Device, temporal ? Textures.TraceTexture : Textures.TempTexture, denoiseHistory ? &reprojectDenoise : nullptr);
 	if (!denoised) RtDenoiseIdle();
 	if (!denoised && temporal) {
 		// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer on stage 11 for Temporal only (the ortho map's stage; the trace above has read it,
@@ -1113,6 +1124,8 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastInvView = invView;
 	lastProj = TheRenderManager->projMatrix;
 	lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
+	lastDenoiseScaleX = RenderRect::Active() ? RenderRect::ScaleX : 1.0f;
+	lastDenoiseScaleY = RenderRect::Active() ? RenderRect::ScaleY : 1.0f;
 }
 
 // UNOFFICIAL 2026-10-31 RT water reflections ([Shaders.Reflections.RT] Water, docs/next/FORK-RT-REFLECTIONS.md "Water"): the water
@@ -1199,9 +1212,7 @@ void ReflectionsEffect::UpdateWaterConstants() {
 // after it this frame read it on t_cloudSky (material2.y 2).
 void ReflectionsEffect::RenderSkyPano(IDirect3DDevice9* Device) {
 	panoReady = false;
-	// (2026-11-03 RenderScale < 1: also in rect frames while the RT trace runs, its only reader there; ToScreen keeps to the rect)
-	if (!Settings.RtSkyPanorama || panoFailed || !TheShaderManager->GameState.isExterior || ExtFailed ||
-		!(DxvkCompute::PassesOn() || (RenderRect::Active() && RtWanted()))) return;
+	if (!Settings.RtSkyPanorama || panoFailed || !TheShaderManager->GameState.isExterior || ExtFailed || !RtPassesWanted()) return;
 	if (!pano[0]) {
 		for (int i = 0; i < 2; i++)
 			if (FAILED(Device->CreateTexture(128, 128, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &pano[i], NULL)) ||
@@ -1324,6 +1335,9 @@ namespace {
 		D3DXVECTOR4	film;	// UNOFFICIAL 2026-11-20 deferred wetness step 3: x 1 = t_film holds this frame's film, y its strength, z 1 = bumped normals (Reflections.glsl FilmWetness, NormalVarianceRoughness)
 		D3DXVECTOR4	gbuffer;	// UNOFFICIAL 2026-11-20 UnifiedReflections: x 1 = the material is the G-buffer's, y z COLOR3's distance match (Reflections.glsl GBufferMaterial)
 		D3DXVECTOR4	film2;	// UNOFFICIAL 2026-11-21 x 1 = damp ground to the cube (not DampTrace), y the film's standing-water roughness (Reflections.glsl FilmWetness)
+		D3DXVECTOR4	wetFx, wetFx2;		// 2026-11-19 WetnessEffects consolidation + AlbedoBuffer/GBufferV2 flags
+		D3DXVECTOR4	skySh[9];			// TESR_SkyIrradianceObjects[0..8]
+		D3DXVECTOR4	skyLowColor, sunPosition, skyData, sunAmount, sunDiskColor, sunsetColor;	// SkylightingMode 1 WetSkyReflection
 	};
 	ReflUniforms ReflUploaded;	// what the uniform buffer holds (one effect instance)
 	struct ReflPush { D3DXVECTOR4 cube; UInt32 linearIndex, pointIndex, mipIndex, pass; };
@@ -1360,23 +1374,12 @@ namespace {
 		{ 1, 31, NVR_EXT_BIND_SAMPLED_IMAGE, 30, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-20 UnifiedReflections: G-buffer COLOR3 (index 27)
 	};
 	const UINT ReflTextureCount = 16;
-	// UNOFFICIAL 2026-10-26 (deep/fork-hiz): ReflectionsTraceHiZ.frag = the same bindings + the Hi-Z pyramid buffer on set 1, binding 16 (buffer slot 1).
-	const NVR_EXT_BINDING_DESC ReflHiZBinding = { 1, 16, NVR_EXT_BIND_STORAGE_BUFFER, 1, NVR_EXT_VIEW_2D, FALSE, 0 };	// buffer slot 1: read-only storage and uniform buffers share one slot range (the Constants block is slot 0)
-	// UNOFFICIAL 2026-10-26 debugging tool: the counting build (-DNVR_COUNTERS=1) adds Counters.glsl's block (set 3, binding 0) as a
-	// written storage buffer on slot 7. Counter and probe names as ReflectionsTraceHiZ.frag uses them.
-	const UINT ReflCounterSlot = 7;
-	ShaderCounters HiZCounters("Reflections Hi-Z trace",
-		{ "rays", "walked to the end / off screen", "walk hit", "hit thrown away", "hit by the fixed-step rest", "out of cells, rest found nothing",
-		  "not started", "cells walked", "skipped facing", "skipped own plane", "skipped behind (thickness)", "no reflection" },
-		{ "endRule/cells/hitT/confidence", "facing/plane/thick/roughness", "hit.xy/depth/amount" });
-
-	// UNOFFICIAL 2026-10-28 RT reflections: ReflectionsTraceRT.frag = the same bindings + its RtConstants block (set 2, binding 1, uniform
-	// buffer slot 2: slot 1 is the Hi-Z storage buffer, and a uniform and a storage buffer on one slot number are one resource) + RayGen's
-	// three outputs and the helper's hits (set 1, bindings 17-20, image slots 16-19).
 	const UINT RtUniformSlot = 2;
 	const UINT RtBounceSlot = 25;	// UNOFFICIAL 2026-11-07 (perf-reflfix) Rt.Bounce (set 1, binding 26; slots 22-24 are taken)
+	// (2026-11-22 upstream 1.1.3 merge: upstream's composite-only TESR_AlbedoBuffer / COLOR3 bindings 28 / 29 collided with ours above; the
+	// composite reads ours, bindings 30 / 31, the same textures: ReflectionsComposite.frag)
 	const NVR_EXT_BINDING_DESC ReflRtUniformBinding = { 2, 1, NVR_EXT_BIND_UNIFORM_BUFFER, RtUniformSlot, NVR_EXT_VIEW_2D, FALSE, 0 };
-	struct ReflRtUniforms { D3DXVECTOR4 rt, rt2, sunDir, sunColor, rt3, rt4, lamps[24], rt5; };	// ReflectionsRT.glsl RtConstants (std140; rt5 2026-11-07)
+	struct ReflRtUniforms { D3DXVECTOR4 rt, rt2, sunDir, sunColor, rt3, rt4, lamps[24], rt5, sunAmbient; };	// ReflectionsRT.glsl RtConstants (std140)
 	ReflRtUniforms RtUploaded;
 
 	IDirect3DBaseTexture9* SlotTexture(const char* name) {
@@ -1391,6 +1394,19 @@ namespace {
 	}
 }
 
+void ReflectionsEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) {
+	// 2026-11-19 RenderScale < 1: allow Vulkan composite (technique 0) when NvrDxvkPasses is on even in sub-rect frames
+	// (EffectRecord::ExtFullScreen sets the sub-rect viewport, and ReflectionsComposite.frag maps uv via screenToRect).
+	if (techniqueIndex == 0 && RenderRect::Active()) {
+		if (!Enabled || !Effect || !ShouldRender()) { NoteSkip(); return; }
+		if (!ExtFailed && RtPassesWanted() && !Sm6Covers(0) && ExtRender(Device, Target, Rendered, 0, ClearTarget, Source)) {
+			ClearPassTextures();
+			return;
+		}
+	}
+	EffectRecord::Render(Device, Target, Rendered, techniqueIndex, ClearTarget, Source);
+}
+
 bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
 	// (8, 9: UNOFFICIAL 2026-10-28 RT reflections, RayGen and Resolve, drawn only from RtTrace: no D3D9 technique behind them.)
 	// (10: UNOFFICIAL 2026-10-31 the sky panorama, drawn only from RenderSkyPano.)
@@ -1398,45 +1414,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	const bool rtPass = techniqueIndex == 8 || techniqueIndex == 9;
 	static const char* const spvNames[8] = { "ReflectionsComposite", "ReflectionsTrace", "ReflectionsBlur", "ReflectionsTemporal", "ReflectionsBlur",
 		"ReflectionsCapture", "ReflectionsFilter", "ReflectionsMaterial" };
-	// UNOFFICIAL 2026-10-26 (deep/fork-hiz) HiZ: the trace as the hierarchical march when this frame's pyramid is there (core/HiZ.h).
-	ID3D9NvrExtBuffer* hiz = techniqueIndex == 1 && HiZWanted() ? HiZ::Current() : nullptr;	// (the RT passes use the fixed-step march)
-	if (hiz && !extTraceHiZ.Tried) {
-		extTraceHiZ.Tried = true;
-		NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 1];
-		memcpy(bindings, ReflBindings, sizeof(ReflBindings));
-		bindings[_countof(ReflBindings)] = ReflHiZBinding;
-		std::vector<char> words;	// checked first: a missing file must not turn the other Vulkan passes off
-		if (DxvkCompute::LoadSpirv("ReflectionsTraceHiZ", words))
-			extTraceHiZ.Pipeline = DxvkCompute::CreateGraphicsPipeline("ReflectionsTraceHiZ", bindings, _countof(bindings), sizeof(ReflPush), true);
-		if (!extTraceHiZ.Pipeline) {
-			hizTraceFailed = true;
-			Logger::Log("UNOFFICIAL Reflections: the Hi-Z trace could not be set up; the normal trace is used.");
-		}
-	}
-	if (!extTraceHiZ.Pipeline) hiz = nullptr;
-	// UNOFFICIAL 2026-10-26 debugging tool ([Main.Develop.ShaderCounters] ReflectionsHiZ, needs NVR DXVK 1.5-debug): the Hi-Z trace's
-	// counting build, with the counter block bound; its probe pixel is the pixel inspector's, in this half-resolution target. Any
-	// problem (file missing, pipeline refused, no 1.5-debug readback): the normal Hi-Z trace, as with the setting off.
-	ID3D9NvrExtBuffer* counters = nullptr;
-	if (hiz && TheSettingManager->GetSettingI("Main.Develop.ShaderCounters", "ReflectionsHiZ") != 0) {
-		if (!extTraceHiZCount.Tried) {
-			extTraceHiZCount.Tried = true;
-			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 2];
-			memcpy(bindings, ReflBindings, sizeof(ReflBindings));
-			bindings[_countof(ReflBindings)] = ReflHiZBinding;
-			bindings[_countof(ReflBindings) + 1] = ShaderCounters::Binding(ReflCounterSlot);
-			if (DebugReadback::Interface() && DxvkCompute::HasSpirv("ReflectionsTraceHiZCount"))
-				extTraceHiZCount.Pipeline = DxvkCompute::CreateGraphicsPipeline("ReflectionsTraceHiZCount", bindings, _countof(bindings), sizeof(ReflPush), true, 1, NVR_EXT_BLEND_NONE, false);
-			if (!extTraceHiZCount.Pipeline) Logger::Log("UNOFFICIAL Reflections: the Hi-Z trace's counting build is not available (needs the Vegas Shaders DXVK fork 1.5-debug and the shader file ReflectionsTraceHiZCount.spv); the normal trace runs.");
-		}
-		if (extTraceHiZCount.Pipeline) {
-			D3DSURFACE_DESC target = {};
-			int px = -1, py = -1;
-			if (RenderTarget && SUCCEEDED(RenderTarget->GetDesc(&target))) PixelInspector::PixelFor(target.Width, target.Height, px, py);
-			counters = HiZCounters.Begin(px, py);
-		}
-	}
-	ExtPass& pass = techniqueIndex == 10 ? extPanoPass : rtPass ? extRtPasses[techniqueIndex - 8] : counters ? extTraceHiZCount : hiz ? extTraceHiZ :
+	ExtPass& pass = techniqueIndex == 10 ? extPanoPass : rtPass ? extRtPasses[techniqueIndex - 8] :
 		extPasses[techniqueIndex == 4 ? 2 : techniqueIndex];
 	if (!pass.Tried) {
 		pass.Tried = true;
@@ -1451,8 +1429,6 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		else if (rtPass) {
 			// UNOFFICIAL 2026-10-28: the same bindings + RtConstants + RayGen's outputs and the helper's hits (both passes declare all).
 			static const char* const rtNames[2] = { "ReflectionsRayGen", "ReflectionsRTResolve" };
-			// (2026-11-07 perf-reflfix: + t_rtBounce, set 1 binding 26, image slot 25: bindings 23-25 / slots 22-24 are the glass mask, the
-			// material buffer and the cloud probe)
 			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 8];
 			memcpy(bindings, ReflBindings, sizeof(ReflBindings));
 			bindings[_countof(ReflBindings)] = ReflRtUniformBinding;
@@ -1460,7 +1436,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 			bindings[_countof(ReflBindings) + 7] = { 1, 26, NVR_EXT_BIND_SAMPLED_IMAGE, RtBounceSlot, NVR_EXT_VIEW_2D, FALSE, 0 };
 			if (DxvkCompute::HasSpirv(rtNames[techniqueIndex - 8]))
 				pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(rtNames[techniqueIndex - 8], bindings, _countof(bindings), sizeof(ReflPush), true,
-					techniqueIndex == 8 ? 4 : 2, NVR_EXT_BLEND_NONE, false);	// (2026-11-07: RayGen + Rt.MarchHit)	// a refusal must not turn the other Vulkan passes off (Resolve: + Rt.Spread)
+					techniqueIndex == 8 ? 4 : 2, NVR_EXT_BLEND_NONE, false);
 			if (!pass.Pipeline) {
 				rtTraceFailed = true;
 				Logger::Log("UNOFFICIAL Reflections: the RT pass %s could not be set up; the normal trace is used.", rtNames[techniqueIndex - 8]);
@@ -1561,16 +1537,17 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// this build registers it and it is made; looked up once, by name, so a build without it simply leaves this off.
 	static IDirect3DBaseTexture9** materialBuffer = nullptr;
 	static bool materialLooked = false;
-	// 2026-11-12 Puddles: the reflection pass also reads the surfaces' standing-water mask from it (Reflections.glsl PuddleStanding)
+	// 2026-11-12 Puddles & 2026-11-19 WetnessEffects / GBufferV2: look up TESR_MaterialBuffer when needed
 	PuddlesShaders* puddlesMask = TheShaderManager->Shaders.Puddles;
-	const bool puddleMask = puddlesMask && puddlesMask->ReflectionsWanted() && !CapturedNormals::AlbedoCompiledIn();	// (test-after-110 merge: the mask is written only with the first layout; 3 / 4 keep the normal in a, so the field is used)
-	if ((Settings.MaterialBufferRoughness || puddleMask) && !materialLooked) {
+	const bool puddleMask = puddlesMask && puddlesMask->ReflectionsWanted() && !CapturedNormals::AlbedoCompiledIn();
+	const bool wantMatBuf = Settings.MaterialBufferRoughness || puddleMask || Constants.WetFx.x > 0.5f || CapturedNormals::V2Compiled;
+	if (wantMatBuf && !materialLooked) {
 		materialLooked = true;
 		std::string name = "TESR_MaterialBuffer";
 		materialBuffer = TheTextureManager->GetTextureSlotByName(name);
 		Logger::Log("UNOFFICIAL Reflections MaterialBufferRoughness: %s", materialBuffer ? "TESR_MaterialBuffer found" : "no TESR_MaterialBuffer in this build: off");
 	}
-	IDirect3DBaseTexture9* matbuf = (Settings.MaterialBufferRoughness || puddleMask) && materialBuffer ? *materialBuffer : nullptr;
+	IDirect3DBaseTexture9* matbuf = wantMatBuf && materialBuffer ? *materialBuffer : nullptr;
 	// UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR2 on t_matbuf (the same texture: TESR_MaterialBuffer), COLOR1 and COLOR3 beside it
 	const bool gbuffer = GBufferFrame();
 	// UNOFFICIAL 2026-10-30 CloudSky: the cloud sky probe (VolumetricClouds RenderSkyProbe), outdoors, while it is fresh.
@@ -1582,8 +1559,11 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		auto found = TheShaderManager->ConstantsTable.find("TESR_CloudsLayout");
 		if (found != TheShaderManager->ConstantsTable.end() && found->second) cloudBrightness = found->second->w;
 	}
-	// x: bit 1 the roughness the shaders lit with (MaterialBufferRoughness), bit 2 the puddle mask (2026-11-12)
-	uniforms.material2 = D3DXVECTOR4((matbuf && Settings.MaterialBufferRoughness ? 1.0f : 0.0f) + (matbuf && puddleMask ? 2.0f : 0.0f), cloudSky ? 1.0f : 0.0f, cloudBrightness, Settings.RtWeaponMetal);	// w: WeaponMetal (2026-10-30)
+	// x: bit 1 the roughness the shaders lit with (MaterialBufferRoughness / WetFx / GBufferV2), bit 2 the puddle mask (2026-11-12),
+	// bit 4 (2026-11-20) the 1st-person viewmodel was captured into the G-buffer this frame (so weapon pixels hold own material/albedo, not stale background)
+	const bool vmCaptured = CapturedNormals::VmCapturedThisFrame(TheFrameRateManager->FrameNumber);
+	uniforms.material2 = D3DXVECTOR4((matbuf && (Settings.MaterialBufferRoughness || Constants.WetFx.x > 0.5f || CapturedNormals::V2Compiled) ? 1.0f : 0.0f) +
+		(matbuf && puddleMask ? 2.0f : 0.0f) + (vmCaptured ? 4.0f : 0.0f), cloudSky ? 1.0f : 0.0f, cloudBrightness, Settings.RtWeaponMetal);	// w: WeaponMetal (2026-10-30)
 	// UNOFFICIAL 2026-10-31 SkyPanorama: the passes after it this frame read the panorama on t_cloudSky (y 2); its own pass reads the probe.
 	IDirect3DBaseTexture9* skySlot = cloudSky;
 	if (panoReady && techniqueIndex != 10) { skySlot = pano[panoIndex]; uniforms.material2.y = 2.0f; }
@@ -1647,6 +1627,23 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		const float dampRough = pud && pud->Constants.Data.w > 0.5f ? 1.0f + (0.22f - 1.0f) * rain : 0.0f;
 		uniforms.film2 = D3DXVECTOR4(Settings.DampTrace || !CubeWanted() ? 0.0f : 1.0f, standing, dampRough, 0.0f);
 	}
+	// 2026-11-19 WetnessEffects consolidation + AlbedoBuffer/GBufferV2 F0 parity
+	IDirect3DBaseTexture9* albedoTex = CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f ?
+		(IDirect3DBaseTexture9*)CapturedNormals::AlbedoTexture : nullptr;
+	IDirect3DBaseTexture9* capNormTex = CapturedNormals::V2Compiled && CapturedNormals::Texture && CapturedNormals::Data.x > 0.5f ?
+		(IDirect3DBaseTexture9*)CapturedNormals::Texture : nullptr;
+	uniforms.wetFx = Constants.WetFx;
+	if (film) uniforms.wetFx.x = 0.0f;	// (2026-11-22 upstream 1.1.3 merge) the G-buffer film is the wetness (FilmWetness): not upstream's forward film too
+	uniforms.wetFx2 = D3DXVECTOR4(Constants.WetFx2.x, Constants.WetFx2.y, albedoTex ? 1.0f : 0.0f, capNormTex ? 1.0f : 0.0f);
+	if (SkyShaders* skySh = TheShaderManager->Shaders.Sky) {
+		memcpy(uniforms.skySh, skySh->Constants.IrradianceObjects, sizeof(uniforms.skySh));
+	}
+	if (const D3DXVECTOR4* p = Registered("TESR_SkyLowColor")) uniforms.skyLowColor = *p; else uniforms.skyLowColor = *horizonColor;
+	if (const D3DXVECTOR4* p = Registered("TESR_SunPosition")) uniforms.sunPosition = *p;
+	if (const D3DXVECTOR4* p = Registered("TESR_SkyData")) uniforms.skyData = *p; else uniforms.skyData = D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f);
+	if (const D3DXVECTOR4* p = Registered("TESR_SunAmount")) uniforms.sunAmount = *p;
+	if (const D3DXVECTOR4* p = Registered("TESR_SunDiskColor")) uniforms.sunDiskColor = *p;
+	if (const D3DXVECTOR4* p = Registered("TESR_SunsetColor")) uniforms.sunsetColor = *p;
 	ID3D9NvrExtBuffer* buffer = extUniforms.Buffer;
 	if (!buffer || memcmp(&uniforms, &ReflUploaded, sizeof(uniforms))) {
 		buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
@@ -1654,7 +1651,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		ReflUploaded = uniforms;
 	}
 
-	NVR_EXT_RESOURCE_BINDING resources[_countof(ReflBindings) + 8] = {};	// (2026-11-07 perf-reflfix: + Rt.Bounce)
+	NVR_EXT_RESOURCE_BINDING resources[_countof(ReflBindings) + 8] = {};	// (2026-11-07 perf-reflfix: + Rt.Bounce / Composite Albedo + CapNorm)
 	for (UINT i = 0; i < ReflTextureCount; i++) {
 		resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = textures[i];
 	}
@@ -1674,32 +1671,40 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// bump's fade, the specular AA; with or without the film)
 	IDirect3DBaseTexture9* smoothNormals = SlotTexture("TESR_NormalsBuffer");
 	resources[25].Slot = 28; resources[25].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[25].pResource = smoothNormals && uniforms.film.z > 0.5f ? (IUnknown*)smoothNormals : (IUnknown*)depth;
-	// UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR1 and COLOR3 (or the depth: never read while gbuffer.x is 0)
-	resources[26].Slot = 29; resources[26].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[26].pResource = gbuffer ? (IUnknown*)CapturedNormals::AlbedoTexture : (IUnknown*)depth;
-	resources[27].Slot = 30; resources[27].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[27].pResource = gbuffer ? (IUnknown*)CapturedNormals::Texture : (IUnknown*)depth;
+	// UNOFFICIAL 2026-11-20 UnifiedReflections: COLOR1 and COLOR3 (or the depth: never read while gbuffer.x is 0). (2026-11-22 upstream 1.1.3 merge)
+	// the same two textures are upstream's composite t_albedo (wetFx2.z) and t_capNormals (wetFx2.w), aliased to these bindings in
+	// ReflectionsComposite.frag: bound whenever either reader wants them
+	resources[26].Slot = 29; resources[26].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[26].pResource = gbuffer || albedoTex ? (IUnknown*)CapturedNormals::AlbedoTexture : (IUnknown*)depth;
+	resources[27].Slot = 30; resources[27].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[27].pResource = gbuffer || capNormTex ? (IUnknown*)CapturedNormals::Texture : (IUnknown*)depth;
 	UINT resourceCount = _countof(ReflBindings);
-	if (hiz) {
-		resources[resourceCount].Slot = 1; resources[resourceCount].Type = NVR_EXT_BIND_STORAGE_BUFFER; resources[resourceCount].pResource = hiz;
-		resourceCount++;
-		if (++hizTraceFrames == 1) Logger::Log("UNOFFICIAL Reflections: the trace runs as the Hi-Z march (HiZ).");
-	}
-	if (counters) resources[resourceCount++] = ShaderCounters::Bind(ReflCounterSlot, counters);	// UNOFFICIAL 2026-10-26 debugging tool
 	if (rtPass) {
 		// UNOFFICIAL 2026-10-28 RT reflections: the RtConstants block (ReflectionsRT.glsl) and the RT images (RayGen: placeholders).
 		const ShaderConstants& sc = TheShaderManager->ShaderConst;
+		PBRShaders* pbr = TheShaderManager->Shaders.PBR;
+		const float G = pbr ? (std::max)(pbr->Constants.Linear.x, 1.0f) : 2.2f;
+		const float linLight = pbr ? pbr->Constants.LinearScales.x : 1.0f;
+		const float linAmb = pbr ? pbr->Constants.LinearScales.y : 1.0f;
+		const float linSky = TheShaderManager->GameState.isExterior ? (pbr ? pbr->Constants.LinearScales.z : 1.0f) : 0.0f;
 		ReflRtUniforms rtu = {};
-		// (2026-11-07) RaysOnly (default on): what RT DebugView 3 did, as the normal mode: every reflecting pixel smooth enough for RT
-		// (MaxRoughness) takes a ray and the screen march's answer is dropped (the screen showed the backs of things in mirrors, smeared)
 		const int rtView = (Settings.RtDebugView == 0 && Settings.RtRaysOnly) ? 3 : Settings.RtDebugView;
 		rtu.rt = D3DXVECTOR4(rtRays ? 1.0f : 0.0f, Settings.RtMaxRoughness, Settings.RtDistance, (float)rtView);
 		rtu.rt2 = D3DXVECTOR4(Settings.RtScreenTolerance, Settings.RtEstimate, RtSunAmount(), 0.0f);
 		rtu.sunDir = sc.SunDir;
-		rtu.sunColor = sc.sunColor;	// as the game gives it (gamma); ReflectionsRT.glsl linearizes
+		rtu.sunColor = D3DXVECTOR4(powf((std::max)(sc.sunColor.x, 0.0f), G) * linLight,
+			powf((std::max)(sc.sunColor.y, 0.0f), G) * linLight,
+			powf((std::max)(sc.sunColor.z, 0.0f), G) * linLight, sc.sunColor.w);
 		rtu.rt2.w = (float)RtLampCount;	// UNOFFICIAL 2026-10-29: the lamps at the hits
 		rtu.rt3 = D3DXVECTOR4(Settings.RtVndf ? 1.0f : 0.0f, Settings.RtRoughShare, Settings.RtContactSpread, Settings.RtGlowBrightness);
-		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, Settings.RtShadeOffscreen ? 1.0f : 0.0f);	// UNOFFICIAL 2026-10-30 / 31; w 2026-11-05 ShadeOffscreen
+		rtu.rt4 = D3DXVECTOR4(Settings.RtHitAmbientGrid ? 1.0f : 0.0f, Settings.RtRayReuse ? 1.0f : 0.0f, Settings.RtReuseRoughness, Settings.RtShadeOffscreen ? 1.0f : 0.0f);
 		memcpy(rtu.lamps, RtLampData, sizeof(RtLampData));
-		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode, mirrorJitterCode);	// (2026-11-08 perf-reflfix4) w MirrorJitter	// (perf-reflfix2: yz the flashlight)	// UNOFFICIAL 2026-11-07 the RT reflection denoiser
+		rtu.rt5 = D3DXVECTOR4(rtDenoiseFrame ? 1.0f : 0.0f, (float)(RtFlashIndex + 1), RtFlashCode, mirrorJitterCode);
+		const D3DXVECTOR4* amb = Registered("TESR_SunAmbient");
+		if (amb) {
+			rtu.sunAmbient = D3DXVECTOR4(powf((std::max)(amb->x, 0.0f), G) * linAmb,
+				powf((std::max)(amb->y, 0.0f), G) * linAmb,
+				powf((std::max)(amb->z, 0.0f), G) * linAmb, linSky);
+		}
+		else rtu.sunAmbient = D3DXVECTOR4(0.0f, 0.0f, 0.0f, linSky);
 		ID3D9NvrExtBuffer* rtBuffer = extRtUniforms.Buffer;
 		if (!rtBuffer || memcmp(&rtu, &RtUploaded, sizeof(rtu))) {
 			rtBuffer = ExtUniforms(extRtUniforms, &rtu, sizeof(rtu));
@@ -1738,7 +1743,6 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 4, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
 		techniqueIndex == 9 ? ExtDrawTo(pass.Pipeline, resolveTargets, 2, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
 		ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad);	// FrameVS into a smaller target
-	if (counters) HiZCounters.End();	// UNOFFICIAL 2026-10-26: queued for the non-waiting readback
 	return drawn;
 }
 
@@ -1774,6 +1778,8 @@ bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture
 	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 	if (!ext || !normals || !signal || !Rt.Ray || !Rt.Spread || !Textures.BufferSurface || !linear || !point) return false;
 	const UINT w = RtWidth(), h = RtHeight();
+	const UINT activeW = RenderRect::Active() ? (RtTraceWidth ? RtTraceWidth : RenderRect::Width(w)) : w;
+	const UINT activeH = RenderRect::Active() ? (RtTraceHeight ? RtTraceHeight : RenderRect::Height(h)) : h;
 	auto loader = [](const char* name, std::vector<char>& words) { return DxvkCompute::LoadSpirv(name, words); };
 	if (!RtDenoiser.Init(Device, ext, w, h, linear, point, loader)) {
 		RtDenoiserFailed = true;
@@ -1787,11 +1793,27 @@ bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture
 	const float fw[3] = { view._13, view._23, view._33 }, rt[3] = { view._11 / proj._11, view._21 / proj._11, view._31 / proj._11 },
 		up[3] = { view._12 / proj._22, view._22 / proj._22, view._32 / proj._22 };
 	memcpy(f.forward, fw, sizeof(fw)); memcpy(f.right, rt, sizeof(rt)); memcpy(f.up, up, sizeof(up));
-	f.farZ = 0.0f;	// (unused by the passes)
+	f.farZ = 0.0f;
 	// RayGen's pixel: the grid pixel's uv - 0.5 x (one grid texel - one full-size pixel)
 	f.fullUvX = -0.5f * (Constants.Layout.x - 1.0f / TheRenderManager->width);
 	f.fullUvY = -0.5f * (Constants.Layout.y - 1.0f / TheRenderManager->height);
 	f.historyUsable = reproject != nullptr;
+	f.activeW = activeW;
+	f.activeH = activeH;
+	f.curScaleX = RenderRect::Active() ? RenderRect::ScaleX : 1.0f;
+	f.curScaleY = RenderRect::Active() ? RenderRect::ScaleY : 1.0f;
+	f.lastScaleX = lastDenoiseScaleX;
+	f.lastScaleY = lastDenoiseScaleY;
+	if (Settings.JitterFix) {
+		if (TAAEffect* taa = TheShaderManager->Effects.TAA) {
+			const D3DXVECTOR2 j = taa->DepthJitterUV();
+			f.jitterX = j.x;
+			f.jitterY = j.y;
+		}
+	}
+	f.mirrorJitterCode = mirrorJitterCode;
+	f.mirrorJitterRoughness = 0.03f;
+	f.weaponFovScale = WeaponFovScale();
 	RtReflDenoise::Settings s;
 	s.Core = Settings.RtDenoiserCore;
 	// (2026-11-07 perf-history) DenoiserHistory / DenoiserMirrorHistory are frames at 60 fps: the same seconds at this frame rate
@@ -1806,18 +1828,21 @@ bool ReflectionsEffect::RunRtDenoiser(IDirect3DDevice9* Device, IDirect3DTexture
 	s.ClipWeight = Settings.RtDenoiserClip;
 	s.DebugView = Settings.RtDenoiserDebugView;
 	IDirect3DBaseTexture9* motion = ObjectMotion::Ready() && ObjectMotion::Data.x > 0.0f && ObjectMotion::Texture ? (IDirect3DBaseTexture9*)ObjectMotion::Texture : nullptr;
+	IDirect3DBaseTexture9* vmMotion = ViewModelMotion::Ready() && ViewModelMotion::Texture ? (IDirect3DBaseTexture9*)ViewModelMotion::Texture : nullptr;
 	{
 		static GpuTimer timer("  Reflections RT denoiser");
 		GpuProfileScope gpu(timer, Device);
-		if (!RtDenoiser.Run(signal, Rt.Ray, Rt.Spread, normals, motion, f, s)) {
+		if (!RtDenoiser.Run(signal, Rt.Ray, Rt.Spread, normals, motion, f, s, vmMotion)) {
 			RtDenoiserFailed = true;
 			Logger::Log("UNOFFICIAL Reflections: the RT reflection denoiser's passes could not run (a shader file RtReflDenoise*.spv missing or refused); Temporal + Blur are used.");
 			return false;
 		}
-		Device->StretchRect(RtDenoiser.ResultSurface(), NULL, Textures.BufferSurface, NULL, D3DTEXF_NONE);
+		const bool rectCopy = Settings.RtFollowRenderScale && (activeW < w || activeH < h);
+		const RECT copyRect = { 0, 0, (LONG)activeW, (LONG)activeH };
+		Device->StretchRect(RtDenoiser.ResultSurface(), rectCopy ? &copyRect : NULL, Textures.BufferSurface, rectCopy ? &copyRect : NULL, D3DTEXF_NONE);
 	}
 	if (++RtDenoiserFrames == 1)
-		Logger::Log("UNOFFICIAL Reflections: the RT reflection denoiser runs (core %s, %ux%u, history %.0f / %.0f near mirrors, blur %.1f, ObjectMotion %s).",
-			s.Core == 1 ? "1 = AMD FidelityFX Reflections (port)" : "0 = ours", w, h, s.MaxSamples, s.MirrorHistory, s.BlurRadius, motion ? "yes" : "no");
+		Logger::Log("UNOFFICIAL Reflections: the RT reflection denoiser runs (ours, %ux%u active of %ux%u, history %.0f / %.0f near mirrors, blur %.1f, ObjectMotion %s).",
+			activeW, activeH, w, h, s.MaxSamples, s.MirrorHistory, s.BlurRadius, motion ? "yes" : "no");
 	return true;
 }

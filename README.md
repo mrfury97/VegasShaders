@@ -85,14 +85,12 @@ noonemusteverknow, Mathieu U and others, see [License.md](License.md)). It is an
 endorsed or supported by the New Vegas Reloaded authors, so please don't ask for help with it in their channels.
 
 With work from:
-- [macrimmon12-tech](https://github.com/macrimmon12-tech/TESReloaded10): the fork this grew from (volumetric fog v2,
-  skin and lighting fixes, the first ImGui menu).
 - [Conor (mrfury97)](https://github.com/mrfury97): terrain shadow sweep, terrain variation, many lamps, skin work, Pip-Boy
   fit, the game MSAA block.
 - [PixelsSquared](https://github.com/PixelsSquared): the Perceptual tone mapper, eye adaptation, cloud moonlight and sky light.
 - macintroll: snow accumulation and the snow look, captured normals, lens and underwater shaders.
 - Balebandro (Physically-Based-Reloaded): PBR weather scales, the grass size fade.
-- Sal, and VHeyes (mirjomi): fixes including SMAA and the material pass
+- VHeyes (mirjomi): fixes including SMAA and the material pass
   ([docs/upstream-cherry-picks.md](docs/upstream-cherry-picks.md)).
 - The [Community Shaders](https://github.com/community-shaders/skyrim-community-shaders) team (GPL-3.0): terrain and
   cloud shadows, grass collision, skylighting, LOD blending, terrain variation and the True PBR layout

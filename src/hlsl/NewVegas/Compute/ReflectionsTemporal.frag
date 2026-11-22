@@ -8,15 +8,28 @@ void main() {
     vec2 uv = (vpos + 0.5) * LowTexel;
     vec4 current = textureLod(sampler2D(t_trace, POINT_S), uv, 0.0);
     if (any(isnan(current)) || any(isinf(current))) current = vec4(0.0);   // (UNOFFICIAL 2026-10-30: no non-finite value into the history)
-    float depth = readDepthLod(uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy));
+    vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
+    float depth = readDepthLod(pixelUV);
+    bool centerWeapon = IsWeapon(pixelUV);
 
-    vec4 low = current, high = current;
+    bool hasValid = current.a > 1.0e-4;
+    vec3 curC = hasValid ? max(current.rgb / current.a, vec3(0.0)) : vec3(0.0);
+    vec3 lowC = curC, highC = curC;
+    float lowA = current.a, highA = current.a;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) continue;
-            vec4 tap = textureLod(sampler2D(t_trace, POINT_S), uv + vec2(x, y) * LowTexel, 0.0);
+            vec2 tapUV = uv + vec2(x, y) * LowTexel;
+            vec2 tapPixelUV = tapUV - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
+            if (IsWeapon(tapPixelUV) != centerWeapon) continue;
+            vec4 tap = textureLod(sampler2D(t_trace, POINT_S), tapUV, 0.0);
             if (any(isnan(tap)) || any(isinf(tap))) continue;   // (2026-10-30)
-            low = min(low, tap); high = max(high, tap);
+            lowA = min(lowA, tap.a); highA = max(highA, tap.a);
+            if (tap.a > 1.0e-4) {
+                vec3 tc = max(tap.rgb / tap.a, vec3(0.0));
+                if (!hasValid) { lowC = tc; highC = tc; hasValid = true; }
+                else { lowC = min(lowC, tc); highC = max(highC, tc); }
+            }
         }
     }
 
@@ -28,14 +41,22 @@ void main() {
     vec2 last = vec2(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5);
     // UNOFFICIAL 2026-10-30 RT weapon reflections: the weapon moves with the camera: its history is where it is on the screen.
     if (ViewModelAt(uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy))) last = uv;   // (2026-11-09: ViewModelAt: the hands move with the camera too)
-    float inside = float(all(greaterThan(last, vec2(0.0))) && all(lessThan(last, vec2(1.0))) && current.a + high.a > 0.0);
+    float inside = float(all(greaterThan(last, vec2(0.0))) && all(lessThan(last, vec2(1.0))) && highA > 0.0);
     vec4 history = textureLod(sampler2D(t_history, POINT_S), last, 0.0);
     if (any(isnan(history)) || any(isinf(history))) history = current;   // (2026-10-30: a bad texel never survives)
-    history = clamp(history, low, high);
+    if (hasValid && history.a > 1.0e-4) {
+        vec3 hc = clamp(max(history.rgb / history.a, vec3(0.0)), lowC, highC);
+        float hl = dot(hc, vec3(0.2126, 0.7152, 0.0722));
+        float maxTameL = BrightestReflection / (1.0 + BrightestReflection);
+        if (hl > maxTameL) hc *= maxTameL / hl;
+        float ha = clamp(history.a, lowA, highA);
+        history = vec4(hc * ha, ha);
+    } else {
+        history = vec4(0.0);
+    }
     // (2026-11-06) mirrors (roughness under 0.03) take no history: RayGen / Trace trace them the same every frame (no noise), and the
     // history is re-found where the MIRROR's surface was, not where the reflected thing was, so it smeared what a mirror shows.
     // Rough surfaces keep it all (their rays scatter). Vulkan pass only.
-    vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
     float roughness;
     float amount = Reflectivity(pixelUV, depth, ViewNormal(pixelUV), roughness);
     float keep = amount > 0.0 && roughness < 0.03 ? 0.0 : 1.0;

@@ -190,8 +190,8 @@ static const float SHADOW_FORMAT = TESR_ShadowFormatData.y;
 #endif
 
 // ---------------------------------------------------------------------------
-// UNOFFICIAL 2026-11-04 ForwardCloudShadows ([Shaders.VolumetricClouds.Main] ForwardShadows, restart: FORWARD_CLOUD_SHADOWS from
-// ShaderRecord::BuildDefines; core/ForwardCloudShadows.h). The volumetric clouds' shadow taken off the SUN term inside the surface
+// UNOFFICIAL 2026-11-04 ForwardCloudShadows ([Shaders.VolumetricClouds.Main] ForwardShadows, live since 2026-11-16: FORWARD_CLOUD_SHADOWS
+// below; core/ForwardCloudShadows.h). The volumetric clouds' shadow taken off the SUN term inside the surface
 // shaders, per MSAA sample, instead of SunFar's factor over the finished picture (that factor is one per pixel: with the game's MSAA it
 // darkened a whole edge pixel by its nearest sample's sun share, and it darkened grass and plants, which nothing could tell apart).
 // Grass and the speedtree leaves do not include it: they keep their sunlight under a cloud. The object passes of plants get strength 0
@@ -200,8 +200,11 @@ static const float SHADOW_FORMAT = TESR_ShadowFormatData.y;
 //     record; the Interior records' s8 is a lamp's) looked up here, on NVR_CloudSun (c169, set per draw).
 //   SHADOW_CLOUD_VALUE (the land: every sampler is taken): its vertex shader looks the map up (CloudSunVertex, the vertex sampler s1)
 //     and the pixel shader puts the interpolated value in NvrCloudSun before GetSunShadow.
+// UNOFFICIAL 2026-11-16 fast-restart (docs/next/FAST-RESTART.md): compiled into every outdoor record always and switched live by the
+// strength the DLL sends (NVR_CloudSun.w / NVR_CloudSunVS.w: 0 = off: the lookup is skipped and the land's value is 1). Before, it was
+// compiled in only with the setting and the clouds on at startup, so flipping either recompiled nearly every shader at the next start.
 #ifndef FORWARD_CLOUD_SHADOWS
-    #define FORWARD_CLOUD_SHADOWS 0
+    #define FORWARD_CLOUD_SHADOWS 1
 #endif
 #if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && defined(SHADOW_CLOUD_IN) && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
     #define SHADOW_CLOUD_SAMPLE 1
@@ -1090,6 +1093,71 @@ float GetOldSunShadowPass(float3 P, float3 Nw, out float covered) {
 #endif
     return saturate(sh);
 }
+
+// UNOFFICIAL 2026-11-21: half-res dynamic-caster overlay sampled only where live shadow is occluded and static old atlas is lit.
+float4 TESR_ShadowDynamicData : register(c174); // x: 1 / dynamic atlas size (0 = inactive)
+#ifndef SHADOW_DYNAMIC_SAMPLER_REG
+    #define SHADOW_DYNAMIC_SAMPLER_REG s12
+#endif
+#ifdef POINT
+    #undef POINT
+    #define NVR_DYNMAP_POINT_WAS_DEFINED
+#endif
+sampler2D TESR_ShadowDynamic : register(SHADOW_DYNAMIC_SAMPLER_REG) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+#ifdef NVR_DYNMAP_POINT_WAS_DEFINED
+    #define POINT
+    #undef NVR_DYNMAP_POINT_WAS_DEFINED
+#endif
+
+float GetDynamicSunShadowPass(float3 P, float3 Nw) {
+    float d0 = length(P - TESR_ShadowNearCenter.xyz);
+    float d1 = length(P - TESR_ShadowMiddleCenter.xyz);
+    float d2 = length(P - TESR_ShadowFarCenter.xyz);
+    float radC;
+    float4x4 lightTransform;
+    float2 quad;
+    [flatten] if (d0 < TESR_ShadowNearCenter.w) {
+        radC = TESR_ShadowNearCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformNear;
+        quad = float2(0.0f, 0.0f);
+    }
+    else if (d1 < TESR_ShadowMiddleCenter.w) {
+        radC = TESR_ShadowMiddleCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformMiddle;
+        quad = float2(0.5f, 0.0f);
+    }
+    else if (d2 < TESR_ShadowFarCenter.w) {
+        radC = TESR_ShadowFarCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformFar;
+        quad = float2(0.0f, 0.5f);
+    }
+    else {
+        return 1.0f;
+    }
+    float dynTexW = TESR_ShadowDynamicData.x;
+    float tw = 4.0f * radC * dynTexW;
+    float nDL = dot(Nw, TESR_SmoothedSunDir.xyz);
+    float offS = saturate(1.0f - nDL);
+    float offset = offS * max(SHADOW_NORMAL_BIAS_TEXELS, 1.5f) * tw;
+    float bi = 0.0002f * (1.0f + SHADOW_SLOPE_BIAS * offS);
+    float3 at = ShadowAtlasPoint(mul(float4(P + offset * Nw, 1.0f), lightTransform), quad);
+    float depth = at.z - bi - SHADOW_SLACK(3.0f);
+    float2 uvLo = quad + dynTexW * 0.5f;
+    float2 uvHi = quad + 0.5f - dynTexW * 0.5f;
+    float2 p = at.xy / dynTexW - 0.5f;
+    float2 c = floor(p + 0.5f);
+    float2 f = p - c;
+    float3 wx = float3(0.5f * (0.5f - f.x) * (0.5f - f.x), 0.75f - f.x * f.x, 0.5f * (0.5f + f.x) * (0.5f + f.x));
+    float3 wy = float3(0.5f * (0.5f - f.y) * (0.5f - f.y), 0.75f - f.y * f.y, 0.5f * (0.5f + f.y) * (0.5f + f.y));
+    float lit = 0.0f;
+    [unroll] for (int y = 0; y < 3; y++) {
+        [unroll] for (int x = 0; x < 3; x++) {
+            float2 tapUV = clamp((c + float2(x - 1, y - 1) + 0.5f) * dynTexW, uvLo, uvHi);
+            lit += (depth <= tex2Dlod(TESR_ShadowDynamic, float4(tapUV, 0.0f, 0.0f)).x ? 1.0f : 0.0f) * wx[x] * wy[y];
+        }
+    }
+    return saturate(lit);
+}
 #endif
 
 // ---------------------------------------------------------------------------
@@ -1395,10 +1463,17 @@ float GetSunShadowMaps(float3 P, float3 Nw) {
         float covered;
 #if SUN_CROSSFADE_PASS && SHADOW_FIXED_MODE == 3
         float oldShadow = GetOldSunShadowPass(P, Nw, covered);	// (2026-11-15 fd-smoothsun: a deferred sun pass, above)
+        float blended = lerp(sh, oldShadow, TESR_ShadowCrossFade.x * covered);
+        // UNOFFICIAL 2026-11-21: old atlas holds static casters only; restore live dynamic shadows where live is shadowed and old-static is lit.
+        [branch] if (sh < 0.999f && oldShadow > sh + 0.001f && TESR_ShadowDynamicData.x > 0.0f) {
+            float dynShadow = GetDynamicSunShadowPass(P, Nw);
+            blended = min(blended, max(sh, dynShadow));
+        }
+        sh = blended;
 #else
         float oldShadow = GetOldSunShadow(P, Nw, offS, bi, covered);
-#endif
         sh = lerp(sh, oldShadow, TESR_ShadowCrossFade.x * covered);
+#endif
     }
 #endif
 

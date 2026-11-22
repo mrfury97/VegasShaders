@@ -3,6 +3,8 @@
 #include "Skin.h"
 #include "../../core/RainState.h"	// UNOFFICIAL 2026-11-21 the one rain clock
 #include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 DeferredSkinBlur (TESR_SkinDebug.w)
+#include "../../core/RenderRect.h"
+#include "../TAA/TAA.h"
 #include "../SkinScattering/SkinScattering.h"
 
 void SkinShaders::RegisterConstants() {
@@ -32,7 +34,8 @@ void SkinShaders::UpdateConstants() {
 	// passes leave the curvature diffusion out (Includes/SkinDeferred.hlsl FDSkinSetup), as the forward skin does under NVR_SkinDraw.x. The forward
 	// skin shaders do not read w (0 otherwise, as before).
 	const SkinScatteringEffect* Blur = TheShaderManager->Effects.SkinScattering;
-	const bool deferredBlur = (DeferredSkin::BlurWanted() && Blur && Blur->Enabled && Blur->ScreenSpace && Blur->Supported) || DeferredSkin::BurleyWanted();	// (2026-11-15 + SSS v2's disc)
+	const bool blurRuns = DeferredSkin::BlurWanted() && Blur && Blur->Enabled && Blur->ScreenSpace && Blur->Supported && !(TAAEffect::UpscaledThisFrame() && !RenderRect::Active());
+	const bool deferredBlur = blurRuns || DeferredSkin::BurleyWanted();	// (2026-11-15 + SSS v2's disc)
 	Constants.Debug = D3DXVECTOR4(DebugView < FirstScatteringDebugView ? (float)DebugView : 0.0f, isExterior ? 0.0f : 1.0f, LegacyFaceShadows ? 1.0f : 0.0f, deferredBlur ? 1.0f : 0.0f);
 	// UNOFFICIAL 2026-11-15 SSS v2 (TESR_SkinSSS, Includes/SkinDeferred.hlsl): the Burley scatter distances in world units (mm x Radius / 14.29 mm
 	// a unit) and the Transmission switch (the deferred skin only: DeferredSun's sun through thin parts)

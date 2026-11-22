@@ -44,6 +44,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 terrainData;               // TESR_TerrainData
     vec4 terrainSkyData;            // TESR_TerrainSkyData
     vec4 skyIrradiance[9];          // TESR_SkyIrradianceObjects (2026-10-25 name)
+    vec4 skyIrradianceTerrain[9];   // TESR_SkyIrradianceTerrain
     vec4 terrainShadowData;         // TESR_TerrainShadowData
     vec4 terrainShadowRange;        // TESR_TerrainShadowRange
     vec4 terrainShadowParams;       // TESR_TerrainShadowParams
@@ -234,6 +235,19 @@ vec3 SkyIrradiance(vec3 n) {
     return sqrt(max(irradiance, vec3(0.0)));
 }
 
+vec3 SkyIrradianceTerrain(vec3 n) {
+    vec3 irradiance = cb.skyIrradianceTerrain[0].rgb
+        + cb.skyIrradianceTerrain[1].rgb * n.y
+        + cb.skyIrradianceTerrain[2].rgb * n.z
+        + cb.skyIrradianceTerrain[3].rgb * n.x
+        + cb.skyIrradianceTerrain[4].rgb * (n.x * n.y)
+        + cb.skyIrradianceTerrain[5].rgb * (n.y * n.z)
+        + cb.skyIrradianceTerrain[6].rgb * (3.0 * n.z * n.z - 1.0)
+        + cb.skyIrradianceTerrain[7].rgb * (n.x * n.z)
+        + cb.skyIrradianceTerrain[8].rgb * (n.x * n.x - n.y * n.y);
+    return sqrt(max(irradiance, vec3(0.0)));
+}
+
 // Where the height map covers (DebugView 2): 1 inside, 0 outside or off.
 float TerrainShadowCoverage(vec3 worldPos) {
     if (cb.terrainShadowData.w <= 0.0) return 0.0;
@@ -359,7 +373,8 @@ vec4 SunFarPS(vec2 uvc) {
     vec3 landDir = cb.sunFarLand.w > 0.5 && cb.sunFarWater.w < 0.5 ? cb.sunFarLand.xyz : lightDir;
     float NdotL = mix(saturate(dot(normal, lightDir)), saturate(dot(normal, landDir)), terrainWeight);
     vec3 sunLight = LightColor(cb.shadowSunLight.rgb) * (NdotL * LightScale(scales.x));
-    vec3 ambientLight = LightColor(cb.shadowAmbientLight.rgb) * LightScale(scales.y) + LightColor(SkyIrradiance(normal)) * LightScale(scales.z);
+    vec3 skyIrr = mix(SkyIrradiance(normal), SkyIrradianceTerrain(normal), terrainWeight);
+    vec3 ambientLight = LightColor(cb.shadowAmbientLight.rgb) * LightScale(scales.y) + LightColor(skyIrr) * LightScale(scales.z);
     vec3 litNow = ambientLight + sunLight * cascade;
     vec3 factor = saturate((ambientLight * (1.0 - shade) + sunLight * (cascade * blocked)) / max(litNow, vec3(0.0001)));
     factor = keep < 1.0 ? mix(vec3(1.0), factor, keep) : factor;

@@ -39,6 +39,7 @@ namespace DeferredDepth {
 	inline const char* kSection = "Main.Main.Quality";
 	inline int Mode = 0;						// startup: 0 off, 1 the INTZ copy, 2 + the linear view z
 	inline bool ProbeWanted = false;			// startup: the probe on (its shader loaded)
+	inline bool SharedWithWorld = false;		// shares TESR_DepthBufferWorld instead of a separate INTZ copy
 	inline IDirect3DTexture9* Texture = nullptr;	// TESR_DeferredDepth (INTZ)
 	inline IDirect3DTexture9* LinearTexture = nullptr;	// TESR_DeferredDepthLinear (R32F view z; mode 2)
 	inline IDirect3DSurface9* LinearSurface = nullptr;
@@ -226,6 +227,11 @@ namespace DeferredDepth {
 			draw.pBindings = &resource;
 			draw.pPushData = push;
 			draw.PushDataSize = sizeof(push);
+			// UNOFFICIAL 2026-11-19: limit Vulkan depth linearize to the active RenderRect (saves ~55% pixel work at RenderScale = 0.67).
+			if (RenderRect::Active()) {
+				draw.ViewportWidth = (UINT)RenderRect::Width(Width);
+				draw.ViewportHeight = (UINT)RenderRect::Height(Height);
+			}
 			const HRESULT result = DxvkCompute::Extension()->Draw(&draw);
 			if (SUCCEEDED(result)) { LinearPath = "fork Vulkan pass"; return true; }
 			LinearExtFailed = true;
@@ -249,7 +255,17 @@ namespace DeferredDepth {
 
 	inline void Probe(IDirect3DDevice9* d);
 
-	// GrassFirst::MainListHook's DeferredSpan, before DeferredLamps::Apply: the copy, the frame block, the linear view z (mode 2), and the
+	// Ensure linear view z is computed if needed (called lazily by D3D9 consumers).
+	inline bool EnsureLinear(IDirect3DDevice9* d) {
+		if (LinearReady()) return true;
+		if (Mode < 2 || !Ready() || !LinearSurface || LinearFailed) return false;
+		if (!Linearize(d)) return false;
+		LinearFrame = FrameNumber();
+		StatLinear++;
+		return true;
+	}
+
+	// GrassFirst::MainListHook's DeferredSpan, before DeferredLamps::Apply: the copy, the frame block, the linear view z (mode 2, only when probe active), and the
 	// probe on its frames. Every world main list is copied (the passes after it run per list); the log line says how many a frame.
 	inline void AtSpanEnd(IDirect3DDevice9* d) {
 		if (!Texture) return;
@@ -264,7 +280,7 @@ namespace DeferredDepth {
 		CopiedFrame = f;
 		CopiesThisFrame++;
 		StatCopies++;
-		if (Mode >= 2 && Linearize(d)) { LinearFrame = f; StatLinear++; }
+		if (ProbeWanted && Mode >= 2 && Linearize(d)) { LinearFrame = f; StatLinear++; }
 		const int every = TheSettingManager->GetSettingI(kSection, "DeferredDepthProbe");
 		if (every > 0 && ProbePass && CopiesThisFrame == 1 && f - ProbeLastFrame >= (UInt32)every) { ProbeLastFrame = f; Probe(d); }
 		if (StatFrames >= 3600 && GpuTimer::Enabled) {

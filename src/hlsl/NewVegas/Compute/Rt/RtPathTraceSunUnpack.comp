@@ -1,0 +1,37 @@
+#version 460
+// UNOFFICIAL 2026-11-20: unpack decoupled PT direct sun visibility, signed blocker distance (negative = NVR_RT_CUSTOM_ACTOR),
+// and unshadowed demodulated diffuse sun irradiance from the RT helper scratch buffer into shared/denoiser images so
+// RtShadowDenoise (SIGMA penumbra-aware + actor-blocker anti-lag) can denoise PT sun shadows independently of 32-frame GI.
+// Compile: glslangValidator -V --target-env vulkan1.2 -o RtPathTraceSunUnpack.spv RtPathTraceSunUnpack.comp
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 1, std140) uniform Pass {
+	vec4 params;   // x width, y height, z sunBasePages (x 4096 words), w unused
+} p;
+
+layout(set = 0, binding = 2, r16f) uniform writeonly image2D sunVisImage;
+layout(set = 0, binding = 3, r16f) uniform writeonly image2D sunHitImage;
+layout(set = 0, binding = 4, rgba16f) uniform writeonly image2D sunDirectImage;
+layout(set = 0, binding = 20, std430) readonly buffer Scratch { uint words[]; } scratch;
+
+void main() {
+	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+	const int w = int(p.params.x + 0.5), h = int(p.params.y + 0.5);
+	if (pixel.x >= w || pixel.y >= h) return;
+
+	const uint base = uint(p.params.z + 0.5) * 4096u;
+	const uint at = base + 3u * (uint(pixel.y) * uint(w) + uint(pixel.x));
+	if (at + 2u >= uint(scratch.words.length())) {
+		imageStore(sunVisImage, pixel, vec4(1.0, 0.0, 0.0, 0.0));
+		imageStore(sunHitImage, pixel, vec4(0.0, 0.0, 0.0, 0.0));
+		imageStore(sunDirectImage, pixel, vec4(0.0));
+		return;
+	}
+
+	const vec2 vh = unpackHalf2x16(scratch.words[at + 0u]);
+	const vec2 rg = unpackHalf2x16(scratch.words[at + 1u]);
+	const vec2 b0 = unpackHalf2x16(scratch.words[at + 2u]);
+	imageStore(sunVisImage, pixel, vec4(clamp(vh.x, 0.0, 1.0), 0.0, 0.0, 0.0));
+	imageStore(sunHitImage, pixel, vec4(clamp(vh.y, -60000.0, 60000.0), 0.0, 0.0, 0.0));
+	imageStore(sunDirectImage, pixel, vec4(max(vec3(rg, b0.x), vec3(0.0)), 0.0));
+}

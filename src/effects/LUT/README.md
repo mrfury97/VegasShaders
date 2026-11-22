@@ -142,3 +142,5 @@ Still open:
    the drawn part; this one reads one texel per pixel, so it has no neighbour reads that could leave the drawn part.)
 5. The interaction with Coloring's combined technique depends on the LUT's constants being set before Coloring's pass; the update order
    is in src/core/ShaderManager.cpp and was not traced again here (see the Coloring spec).
+6. (2026-11-17) A table name from a setting, a preset or the NVRSetSettingS command is a file in the LUT folder or below it: a name
+   with "..", a drive letter or a leading slash is not loaded (`LUTEffect::SafeName`). Before, such a name opened any file on the drive.

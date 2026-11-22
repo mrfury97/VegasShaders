@@ -31,7 +31,14 @@
 
 float4 TESR_ReciprocalResolution;
 float4 TESR_SkyColor;
+float4 TESR_SkyLowColor;
 float4 TESR_HorizonColor;
+float4 TESR_SunPosition;
+float4 TESR_SkyData;
+float4 TESR_SunAmount;
+float4 TESR_SunDiskColor;
+float4 TESR_SunsetColor;
+float4 TESR_SkyIrradianceObjects[9];
 float4 TESR_WaterSettings;           // x: height of the water in view
 float4 TESR_ReflectionsData;         // x: dry reflectivity of floors now, y: wetness now (0-1), z: dry roughness, w: wet roughness
 float4 TESR_ReflectionsData2;        // x: ray length (game units), y: steps, z: thickness scale, w: noise frame offset
@@ -46,6 +53,11 @@ float4 TESR_ReflectionsCube2;        // x: capture blend, y: fade per frame, z: 
 float4 TESR_ReflectionsGrid;         // UNOFFICIAL 2026-10-19 GridFallback: xyz the light grid's corner relative to the camera, w: cell size
 float4 TESR_ReflectionsGrid2;        // x: 1 = the grid is in use, y: brightness (GridBrightness), z: 1 = the grid carries colours
 float4 TESR_ReflectionsGrid3;        // rgb: the light every surface gets here (linear: the sky's or the cell's ambient, AmbientLight's)
+float4 TESR_ReflectionsWetFx;        // 2026-11-19 WetnessEffects consolidation: x 1 = active (+2 = SkylightingMode 1), y rainWetness, z puddleWetness, w MinRainWetness
+float4 TESR_ReflectionsWetFx2;       // x MaxPuddleWetness, y PuddleRoughness, z AlbedoBuffer bound on stage 14 for CompositePS, w PuddlesOn
+float4 TESR_PuddleData;              // x water level, y Coverage, z 1 / Size, w Quality
+float4 TESR_PuddleShape;             // x slope start, y slope full, z cavity, w wet ring
+float4 TESR_PuddleLook;              // x roughness, y darkening, z edge softness, w ripples
 
 // Declared in register order: the effect binds TESR_ samplers by declaration order (a mismatch silently swaps them).
 sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
@@ -161,9 +173,9 @@ float2 ToScreen(float3 view) {
 }
 
 bool IsWeapon(float2 uv) {
-	// The weapon's depth buffer is empty where there is no weapon: 1, or 0 with reversed depth (as WetWorld tests it).
+	// The weapon's depth buffer is empty where there is no weapon: 1, or 0 with reversed depth (matching CombineDepth > 0.0).
 	float viewmodelDepth = tex2Dlod(TESR_DepthBufferViewModel, float4(uv, 0, 0)).x;
-	return TESR_DepthConstants.z == 0.0 ? viewmodelDepth < 0.9 : viewmodelDepth > 0.01;
+	return TESR_DepthConstants.z == 0.0 ? viewmodelDepth < 0.99999 : viewmodelDepth > 0.0;
 }
 
 #if !REFL_GBUFFER_ON
@@ -188,6 +200,54 @@ float OpenAbove(float2 uv, float depth) {
 	float3 depthAxis = float3(TESR_ShadowCameraToLightTransformOrtho[0][2], TESR_ShadowCameraToLightTransformOrtho[1][2], TESR_ShadowCameraToLightTransformOrtho[2][2]);
 	float perUnit = length(depthAxis) / max(abs(TESR_ShadowCameraToLightTransformOrtho[3][3]), 1.0e-6);
 	return top > p.z - max(RoofMargin * perUnit, 0.0001) ? 1.0 : 0.0;
+}
+
+static float SurfaceWetGloss = 0.0;
+static float SurfaceWetRough = 1.0;
+
+float3 WetHash33Fx(float3 p3) {
+	p3 = frac(p3 * float3(0.1031, 0.1030, 0.0973));
+	p3 += dot(p3, p3.yxz + 33.33);
+	return frac((p3.xxy + p3.yxx) * p3.zyx);
+}
+float PuddleHashFx(float2 p) { return WetHash33Fx(float3(p, 7.13)).x; }
+float PuddleValueNoiseFx(float2 p) {
+	float2 i = floor(p);
+	float2 f = p - i;
+	float2 u = f * f * (3.0 - 2.0 * f);
+	return lerp(lerp(PuddleHashFx(i), PuddleHashFx(i + float2(1.0, 0.0)), u.x),
+		lerp(PuddleHashFx(i + float2(0.0, 1.0)), PuddleHashFx(i + float2(1.0, 1.0)), u.x), u.y);
+}
+float PuddleStandingFx(float2 uv, float depth, float worldUp) {
+	[branch] if (TESR_ReflectionsWetFx2.w < 0.5 || TESR_PuddleData.x <= 0.001 || depth > 10240.0) return 0.0;
+	float3 worldPos = TESR_CameraPosition.xyz + toWorld(uv) * depth;
+	float2 p = worldPos.xy * TESR_PuddleData.z;
+	float n = PuddleValueNoiseFx(p) * 0.62 + PuddleValueNoiseFx(p * 2.31 + 17.7) * 0.38;
+	if (TESR_PuddleData.w > 2.5) n = n * 0.85 + PuddleValueNoiseFx(p * 5.7 + 41.3) * 0.15;
+	n = smoothstep(0.2, 0.8, n);
+	float t = 1.0 - TESR_PuddleData.x * TESR_PuddleData.y;
+	float shore = saturate((n - t) / max(TESR_PuddleLook.z, 1.0e-3));
+	float nearFactor = 1.0 - smoothstep(0.0, 10240.0, depth);
+	return shore * shore * (3.0 - 2.0 * shore) * smoothstep(TESR_PuddleShape.x, TESR_PuddleShape.y, worldUp) * nearFactor;
+}
+void ComputeWetFxFilmFx(float2 uv, float depth, float3 worldNormal) {
+	SurfaceWetGloss = 0.0;
+	SurfaceWetRough = 1.0;
+	[branch] if (TESR_ReflectionsWetFx.x < 0.5 || depth >= DrawDistance || depth >= farZ * 0.98 || depth > 10240.0 || IsWeapon(uv)) return;
+	float open = RoofMaskOn > 0.5 ? OpenAbove(uv, depth) : 1.0;
+	[branch] if (open <= 0.0) return;
+	float nearFactor = 1.0 - smoothstep(0.0, 10240.0, depth);
+	float minAngle = saturate(max(TESR_ReflectionsWetFx.w, worldNormal.z));
+	float rain = saturate(TESR_ReflectionsWetFx.y * minAngle) * open * nearFactor;
+	float standing = PuddleStandingFx(uv, depth, worldNormal.z) * open;
+	if (TESR_ReflectionsWetFx2.w > 0.5) {
+		SurfaceWetGloss = saturate(max(rain, standing));
+		SurfaceWetRough = lerp(max(lerp(1.0, 0.22, rain), 0.05), max(TESR_ReflectionsWetFx2.y, 0.01), standing);
+	} else {
+		float puddle = max(rain, saturate(TESR_ReflectionsWetFx.z * minAngle * TESR_ReflectionsWetFx2.x * 0.5) * open * nearFactor);
+		SurfaceWetGloss = saturate(puddle);
+		SurfaceWetRough = max(1.0 - SurfaceWetGloss, 0.05);
+	}
 }
 
 #if REFL_GBUFFER_ON
@@ -300,9 +360,14 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 	float amount = dry + wetness;
 	roughness = lerp(roughness, wetRoughness, wetness / max(amount, 1.0e-4));
 #else
-	[branch] if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);   // the rain wets open ground only
+	// (2026-11-22 upstream 1.1.3 merge: upstream's forward film, ComputeWetFxFilmFx; this variant is the one without UnifiedReflections)
+	float standing = floorShare > 0.0 ? PuddleStandingFx(uv, depth, ViewToWorldDir(ViewNormal(uv)).z) : 0.0;
+	[branch] if ((wetness > 0.0 || standing > 0.0) && RoofMaskOn > 0.5) { float open = OpenAbove(uv, depth); wetness *= open; standing *= open; }
+	wetness = max(max(wetness, standing), SurfaceWetGloss);
 	float amount = dry + wetness;
-	roughness = lerp(roughness, WetRoughness, wetness / max(amount, 1.0e-4));
+	float wetTargetRough = TESR_ReflectionsWetFx.x > 0.5 && SurfaceWetGloss > 0.0 ? SurfaceWetRough : WetRoughness;
+	roughness = lerp(roughness, wetTargetRough, wetness / max(amount, 1.0e-4));
+	roughness = lerp(roughness, max(TESR_ReflectionsWetFx2.y, 0.01), standing);
 #endif
 	SurfaceMetal = material.g;
 	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
@@ -316,6 +381,8 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 #endif
 float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughness) {
 	roughness = DryRoughness;
+	SurfaceWetGloss = 0.0;
+	SurfaceWetRough = 1.0;
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 	SurfaceMetal = 0.0;
 #endif
@@ -324,6 +391,7 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 #endif
 	[branch] if (depth >= DrawDistance || depth >= farZ * 0.98 || IsWeapon(uv)) return 0.0;
 	float3 worldNormal = ViewToWorldDir(viewNormal);
+	ComputeWetFxFilmFx(uv, depth, worldNormal);
 	float floorShare = saturate((worldNormal.z - 0.75) / 0.2);
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 #if REFL_GBUFFER_ON
@@ -332,14 +400,19 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 	float4 material = MaterialAt(uv);
 #endif
 	[branch] if (material.b > 0.75) return MaterialReflectivity(uv, depth, floorShare, material, roughness);
-	// UNOFFICIAL 2026-10-31 MaterialBufferRoughness (b 0.5, core/CapturedNormals.h MergeIntoReflMaterial): no map, but the roughness and
-	// metal the game's shader lit this floor with: the floor guess below with those instead of DryRoughness and no metal
 	float dryRoughness = material.b > 0.25 ? max(material.r, 0.02) : DryRoughness;
 	SurfaceMetal = material.b > 0.25 ? material.g : 0.0;
 #else
 	float dryRoughness = DryRoughness;
 #endif
-	[branch] if (floorShare <= 0.0) return 0.0;
+	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
+	[branch] if (floorShare <= 0.0) {
+		[branch] if (SurfaceWetGloss > 0.01) {
+			roughness = SurfaceWetRough;
+			return SurfaceWetGloss * (1.0 - smoothstep(0.35, 0.75, SurfaceWetRough)) * fade;
+		}
+		return 0.0;
+	}
 	float worldZ = TESR_CameraPosition.z + toWorld(uv).z * depth;
 	[branch] if (abs(worldZ - TESR_WaterSettings.x) < max(2.0, depth * 0.002)) return 0.0;   // water reflects on its own
 	float wetness = Wetness;
@@ -350,11 +423,15 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 	float amount = DryReflect + wetness;
 	roughness = lerp(dryRoughness, wetRoughness, wetness / max(amount, 1.0e-4));
 #else
-	[branch] if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);   // the rain wets open ground only
+	// (2026-11-22 upstream 1.1.3 merge: upstream's forward film, ComputeWetFxFilmFx; this variant is the one without UnifiedReflections)
+	float standing = PuddleStandingFx(uv, depth, worldNormal.z);
+	[branch] if ((wetness > 0.0 || standing > 0.0) && RoofMaskOn > 0.5) { float open = OpenAbove(uv, depth); wetness *= open; standing *= open; }
+	wetness = max(max(wetness, standing), SurfaceWetGloss);
 	float amount = DryReflect + wetness;
-	roughness = lerp(dryRoughness, WetRoughness, wetness / max(amount, 1.0e-4));
+	float wetTargetRough = TESR_ReflectionsWetFx.x > 0.5 && SurfaceWetGloss > 0.0 ? SurfaceWetRough : WetRoughness;
+	roughness = lerp(dryRoughness, wetTargetRough, wetness / max(amount, 1.0e-4));
+	roughness = lerp(roughness, max(TESR_ReflectionsWetFx2.y, 0.01), standing);
 #endif
-	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
 	return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
 #if REFL_GBUFFER_ON
@@ -366,34 +443,69 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 }
 #endif
 
-// Split-sum environment BRDF (Karis's fit) for a dielectric (F0 0.04): the share of the surroundings a surface reflects.
-float EnvironmentFresnel(float roughness, float NdotV) {
-	const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
-	const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
-	float4 r = roughness * c0 + c1;
-	float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
-	float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
-	return 0.04 * ab.x + ab.y;
-}
-
-#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
-// The same with any F0 (MaterialAware: metal).
+// Split-sum environment BRDF (Karis's fit) with roughness-damped grazing F90 (eliminates chalky white horizon rims on rough dirt/rock).
 float3 EnvironmentFresnelF0(float roughness, float NdotV, float3 F0) {
 	const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
 	const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
 	float4 r = roughness * c0 + c1;
 	float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
 	float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
-	return F0 * ab.x + ab.y;
+	float f90 = saturate(50.0 * dot(F0, float3(0.3333, 0.3333, 0.3333))) * saturate(1.0 - roughness);
+	float3 F90 = max(f90.xxx, F0);
+	return F0 * ab.x + F90 * ab.y;
 }
 
-// UNOFFICIAL 2026-11-08 (perf-reflfix4, test 12: the mirror reflected the room orange under warm lamps) metal's F0: a mirror-smooth metal
-// in neutral silver, not its lit colour's hue (that is the lamps'), blending into the hue from roughness 0.06 to 0.15 (rough gold keeps its
-// colour). The Vulkan composite's ReflMetalF0 (Compute/ReflMetalF0.glsl), the same numbers.
+float EnvironmentFresnel(float roughness, float NdotV) {
+	return EnvironmentFresnelF0(roughness, NdotV, float3(0.04, 0.04, 0.04)).x;
+}
+
+#if REFL_MATERIAL_ON || REFL_GBUFFER_ON
+// UNOFFICIAL 2026-11-08 (perf-reflfix4) fallback metal F0 when AlbedoBuffer is unavailable.
 float3 ReflMetalF0(float3 colour, float roughness) {
 	return lerp(float3(0.95, 0.95, 0.95), saturate(colour), smoothstep(0.06, 0.15, roughness));
 }
 #endif
+
+float WetFilmReflectanceFx(float NdotV, float rough, float gloss) {
+	const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+	const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+	float4 r = rough * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+	float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+	return saturate((0.02 * ab.x + ab.y) * gloss);
+}
+
+float3 WetSkyReflectionLinearFx(float3 r) {
+	float3 encoded;
+	[branch] if (TESR_ReflectionsWetFx.x > 1.5) {
+		float height = pow(saturate(r.z * 0.5 + 0.5), 3.0);
+		float sunUp = max(TESR_SunPosition.z, 0.0);
+		float haze = (1.0 - height) * (1.0 - height) * TESR_SkyData.x;
+		float towardSun = pow(saturate(dot(r, TESR_SunPosition.xyz) * 0.5 + 0.5), 1.0 / max(TESR_SkyData.y, 1.0e-4));
+		float3 sunLin = linearize(TESR_SunDiskColor.rgb);
+		float3 sunsetLin = linearize(TESR_SunsetColor.rgb);
+		float lowSun = saturate(pow(1.0 - sunUp, 8.0)) * TESR_SunAmount.x;
+		float3 disc = (1.0 + sunUp) * sunLin + sunsetLin * lowSun * haze;
+		float byDay = smoothstep(0.0, 0.5, TESR_SunAmount.x);
+		float3 skyRad = lerp(linearize(TESR_SkyLowColor.rgb), linearize(TESR_SkyColor.rgb), height);
+		skyRad = lerp(skyRad, linearize(TESR_HorizonColor.rgb), saturate(haze * (0.5 + towardSun * 0.5)));
+		skyRad += lerp(0.0.xxx, disc * towardSun * (1.0 - sunUp) * haze * TESR_SkyData.z, byDay);
+		float seen = 0.5 * r.z + 0.5;
+		encoded = sqrt(max(skyRad, 0.0.xxx)) * seen;
+	} else {
+		float3 E = TESR_SkyIrradianceObjects[0].rgb
+			+ TESR_SkyIrradianceObjects[1].rgb * r.y
+			+ TESR_SkyIrradianceObjects[2].rgb * r.z
+			+ TESR_SkyIrradianceObjects[3].rgb * r.x
+			+ TESR_SkyIrradianceObjects[4].rgb * (r.x * r.y)
+			+ TESR_SkyIrradianceObjects[5].rgb * (r.y * r.z)
+			+ TESR_SkyIrradianceObjects[6].rgb * (3.0 * r.z * r.z - 1.0)
+			+ TESR_SkyIrradianceObjects[7].rgb * (r.x * r.z)
+			+ TESR_SkyIrradianceObjects[8].rgb * (r.x * r.x - r.y * r.y);
+		encoded = sqrt(max(E, 0.0.xxx));
+	}
+	return linearize(encoded);
+}
 
 // The sky along a world direction: the weather's horizon and zenith colours (as Specular reads it). Below the horizon,
 // nothing (the ground there is not on screen, and the sky would light it up).
@@ -404,7 +516,10 @@ float3 SkyAlong(float3 worldDir) {
 
 // Karis's reversible compression for averaging HDR samples: c / (1 + luminance), and back.
 float3 Tame(float3 c) { return c / (1.0 + dot(c, float3(0.2126, 0.7152, 0.0722))); }
-float3 Untame(float3 t) { return t / max(1.0 - dot(t, float3(0.2126, 0.7152, 0.0722)), 1.0e-3); }
+float3 Untame(float3 t) {
+	t = max(t, 0.0);
+	return t / max(1.0 - dot(t, float3(0.2126, 0.7152, 0.0722)), 1.0 / (1.0 + BrightestReflection));
+}
 
 // ---- The surroundings cube ----
 // World direction through texel st (-1..1, s right, t down) of a cube face, in Direct3D's face order and layout (the same
@@ -678,12 +793,20 @@ float4 TemporalPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float4 current = tex2Dlod(TESR_ReflectionsTrace, float4(uv, 0, 0));
 	float depth = readDepthLod(uv - 0.5 * (LowTexel - TESR_ReciprocalResolution.xy));
 
-	float4 low = current, high = current;
+	bool hasValid = current.a > 1.0e-4;
+	float3 curC = hasValid ? max(current.rgb / current.a, 0.0) : 0.0;
+	float3 lowC = curC, highC = curC;
+	float lowA = current.a, highA = current.a;
 	[unroll] for (int y = -1; y <= 1; y++) {
 		[unroll] for (int x = -1; x <= 1; x++) {
 			if (x == 0 && y == 0) continue;
 			float4 tap = tex2Dlod(TESR_ReflectionsTrace, float4(uv + float2(x, y) * LowTexel, 0, 0));
-			low = min(low, tap); high = max(high, tap);
+			lowA = min(lowA, tap.a); highA = max(highA, tap.a);
+			if (tap.a > 1.0e-4) {
+				float3 tc = max(tap.rgb / tap.a, 0.0);
+				if (!hasValid) { lowC = tc; highC = tc; hasValid = true; }
+				else { lowC = min(lowC, tc); highC = max(highC, tc); }
+			}
 		}
 	}
 
@@ -694,9 +817,18 @@ float4 TemporalPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float4 clip = mul(float4(world, 1.0), TESR_ReflectionsReproject);
 	float w = max(clip.w, 0.001);
 	float2 last = screenToRect(float2(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5));	// UNOFFICIAL 2026-10-27 RenderScale v2: the history is in the rect too
-	float inside = all(last > 0.0) && all(last < TESR_RenderScale.xy) && current.a + high.a > 0.0;
+	float inside = all(last > 0.0) && all(last < TESR_RenderScale.xy) && highA > 0.0;
 	float4 history = tex2Dlod(TESR_ReflectionsHistory, float4(last, 0, 0));
-	history = clamp(history, low, high);
+	if (hasValid && history.a > 1.0e-4) {
+		float3 hc = clamp(max(history.rgb / history.a, 0.0), lowC, highC);
+		float hl = dot(hc, float3(0.2126, 0.7152, 0.0722));
+		float maxTameL = BrightestReflection / (1.0 + BrightestReflection);
+		if (hl > maxTameL) hc *= maxTameL / hl;
+		float ha = clamp(history.a, lowA, highA);
+		history = float4(hc * ha, ha);
+	} else {
+		history = 0.0;
+	}
 	return lerp(current, history, HistoryWeight * inside);
 }
 
@@ -778,14 +910,17 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	float2 base = floor(position);
 	float2 fraction = position - base;
 	float tolerance = depth * 0.03 + 4.0;
+	bool pixelWeapon = IsWeapon(uv);
 	float4 reflection = 0.0;
 	float weights = 1.0e-5;
 	[unroll] for (int y = 0; y < 2; y++) {
 		[unroll] for (int x = 0; x < 2; x++) {
 			float2 at = clampToRectIfOn((base + float2(x, y) + 0.5) * LowTexel, LowTexel);	// UNOFFICIAL 2026-10-27 RenderScale v2
-			float tapDepth = readDepthLod(at - 0.5 * (LowTexel - TESR_ReciprocalResolution.xy));
+			float2 tapPixelUV = at - 0.5 * (LowTexel - TESR_ReciprocalResolution.xy);
+			float tapDepth = readDepthLod(tapPixelUV);
 			float weight = (x ? fraction.x : 1 - fraction.x) * (y ? fraction.y : 1 - fraction.y);
 			weight /= 1.0 + abs(tapDepth - depth) / tolerance;
+			if (IsWeapon(tapPixelUV) != pixelWeapon) weight *= 1.0e-4;
 			reflection += tex2Dlod(TESR_ReflectionsBuffer, float4(at, 0, 0)) * weight;
 			weights += weight;
 		}
@@ -793,34 +928,38 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	reflection /= weights;
 
 	float3 V = normalize(ViewPosition(uv, depth));
+	float NdotV = saturate(dot(-V, N));
+	// Stage 14 (NVR_ReflectionsSkyVis, unused by CompositePS) carries TESR_AlbedoBuffer when bound by BindMaterial (TESR_ReflectionsWetFx2.z > 0.5).
+	float4 albedoSample = TESR_ReflectionsWetFx2.z > 0.5 ? tex2Dlod(NVR_ReflectionsSkyVis, float4(uv, 0, 0)) : 0.0.xxxx;
+	bool albedoKnown = albedoSample.a > 0.5;
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
-	// UNOFFICIAL 2026-10-20 MaterialAware: metal reflects in its own colour (F0 = its albedo, guessed from the lit colour's hue), the
-	// rest at F0 0.04 as before (with no metal this is EnvironmentFresnel exactly).
-	float3 litColour = linearize(color.rgb);
-	float3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
+	float3 metalF0;
+	if (albedoKnown) {
+		metalF0 = max(albedoSample.rgb, 0.02.xxx);
+	} else {
+		float3 litColour = linearize(color.rgb);
+		float3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
 #if REFL_GBUFFER_ON
-	[branch] if (SurfaceGBuffer) tint = saturate(tex2Dlod(NVR_ReflectionsGAlbedo, float4(uv, 0, 0)).rgb);   // (2026-11-20 UnifiedReflections: its own base colour, linear)
+		[branch] if (SurfaceGBuffer) tint = saturate(tex2Dlod(NVR_ReflectionsGAlbedo, float4(uv, 0, 0)).rgb);   // (2026-11-20 UnifiedReflections: its own base colour, linear)
 #endif
-	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, saturate(dot(-V, N)), lerp(0.04, ReflMetalF0(tint, roughness), SurfaceMetal))) * saturate(reflection.a);	// (2026-11-08 perf-reflfix4)
+		metalF0 = ReflMetalF0(tint, roughness);   // (perf-reflfix4)
+	}
+	float3 f0 = lerp(0.04.xxx, metalF0, SurfaceMetal);
+	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, NdotV, f0)) * saturate(reflection.a);
+	float nonMetal = saturate(1.0 - SurfaceMetal);
 #else
-	float share = saturate(amount * EnvironmentFresnel(roughness, saturate(dot(-V, N)))) * saturate(reflection.a);
+	float3 share = saturate(amount * EnvironmentFresnel(roughness, NdotV)).xxx * saturate(reflection.a);
+	float nonMetal = 1.0;
 #endif
 	float3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
 #ifndef REFL_SPECOCC_ON
     #define REFL_SPECOCC_ON 0
 #endif
 #if REFL_SPECOCC_ON
-	// UNOFFICIAL 2026-10-21 SpecularOcclusion ([Shaders.Reflections.Main], compiled in only when above 0 at startup: REFL_SPECOCC_ON). A
-	// blurred reflection is about the room's average light, the same over the whole floor, while the floor's own light varies with the
-	// lamps: in shadow it stood out (Ultra-Luxe carpet: +31 % in shadow, +7 % lit). Here the reflection is scaled down where the surface
-	// itself is much darker than what it reflects: by (its lit brightness / (the reflection's x Level)), capped at 1, so a floor at least
-	// Level times as bright as its reflection keeps all of it. Sharp reflections too (2026-10-21: the user's dry Roughness is 0.02, near a
-	// mirror, and those were the ones standing out in shadow): not what a real mirror does, a taste setting (SpecularOcclusion 0..1).
 	[branch] if (TESR_ReflectionsData4.w > 0.0) {
 		float surfaceLight = luma(linearize(color.rgb));
 		float reflectedLight = max(luma(reflected) * TESR_ReflectionsLayout.z, 1.0e-6);
 		float occlusion = lerp(1.0, saturate(surfaceLight / reflectedLight), TESR_ReflectionsData4.w);
-		// DebugView 8 (diagnostic): red the surface's own light, green the reflection's (x Level), both x 8; blue the factor.
 		[branch] if (abs(DebugView - 8.0) < 0.5) return float4(saturate(surfaceLight * 8.0), saturate(reflectedLight * 8.0), occlusion, 1.0);
 		share *= occlusion;
 	}
@@ -831,20 +970,28 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	[branch] if (DebugView > 0.5) return float4(delinearize(reflected * share), color.a);
 
 	float3 lin = linearize(color.rgb);
+	// 1. Subtract forward WetSkyReflection on wet surfaces under both SkylightingMode 0 and 1.
+	[branch] if (TESR_ReflectionsWetFx.x > 0.5 && SurfaceWetGloss > 0.0) {
+		float3 worldN = ViewToWorldDir(N);
+		float3 worldV = -normalize(toWorld(uv));
+		float3 worldR = reflect(-worldV, worldN);
+		float horizon = saturate(1.0 + 1.2 * dot(worldR, worldN));
+		float wetRefl = WetFilmReflectanceFx(saturate(dot(worldN, worldV)), SurfaceWetRough, SurfaceWetGloss) * horizon * horizon;
+		lin = max(lin - WetSkyReflectionLinearFx(worldR) * (wetRefl * saturate(reflection.a)), 0.0.xxx);
+	}
 #ifndef REFL_ADD_ON
     #define REFL_ADD_ON 0
 #endif
 #if REFL_ADD_ON
-	// UNOFFICIAL 2026-10-21 ReflectAdd ([Shaders.Reflections.Main], compiled in only when above 0 at startup: REFL_ADD_ON): the reflection
-	// is ADDED to the surface's own lighting instead of replacing that share of it. Replacing (the lerp below) swaps part of the floor's
-	// lit colour for the reflection; indoors the reflection is rough, about the room's average, so where a lamp lights the floor little
-	// changed (and the lamp's own highlight was dulled), while in shadow the gap was large: the user saw floor reflections "way more
-	// visible in shadow". Adding is what a highlight does (the surface's diffuse light stays, the specular reflection comes on top).
-	// ReflectAdd 1: lin + reflected x share; 0..1: only (1 - ReflectAdd) of the share is taken out of the surface's colour.
-	[branch] if (TESR_ReflectionsData4.z > 0.0) lin = lin * (1.0 - share * (1.0 - TESR_ReflectionsData4.z)) + reflected * share;
-	else
+	float reflectAdd = saturate(TESR_ReflectionsData4.z);
+#else
+	float reflectAdd = 0.0;
 #endif
-	lin = lerp(lin, reflected, share);
+	// 2. Physically energy-conserving additive indirect reflection: metals keep 100% of lin (preserving direct sun & lamp GGX highlights);
+	//    dielectrics attenuate only the diffuse body up to diffuseCeiling while keeping direct specular highlights un-dimmed.
+	float3 diffuseCeiling = albedoKnown ? max(albedoSample.rgb * 2.0, 0.25.xxx) : 1.0.xxx;
+	float3 bodyToDim = min(lin, diffuseCeiling);
+	lin = (lin - bodyToDim * (share * (nonMetal * (1.0 - reflectAdd)))) + reflected * share;
 	return float4(delinearize(lin), color.a);
 }
 

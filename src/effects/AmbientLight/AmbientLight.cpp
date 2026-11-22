@@ -4,7 +4,6 @@
 #include "../BounceLight/BounceLightMath.h"
 #include "../../core/FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 AmbientLightBlurCompute
-#include "../../core/HiZ.h"	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (Accumulate's motion input)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/RtAmbient.h"	// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]
@@ -134,7 +133,6 @@ void AmbientLightEffect::UpdateSettings() {
 	normalSmoothing = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "NormalSmoothing"), 0, 64);	// UNOFFICIAL 2026-10-21 (alrocks)
 	normalSmoothingWorld = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "NormalSmoothingWorld"), 0.0f, 64.0f);	// UNOFFICIAL 2026-10-24 (charfacets)
 	horizonBias = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "HorizonBias"), 0.0f, 45.0f);
-	hizLogQ = std::clamp(TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "HiZ"), 0, 6);	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 	// UNOFFICIAL 2026-10-27 (NVR DXVK, deep/fork2-ssgi) ComputeGI (AmbientLight.h).
 	computeGI = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "ComputeGI") != 0;
 	giStrength = std::clamp(TheSettingManager->GetSettingF("Shaders.AmbientLight.Main", "ComputeGIStrength"), 0.0f, 20.0f);	// UNOFFICIAL 2026-11-09: 20 (was 4), as RT GIStrength
@@ -145,10 +143,12 @@ void AmbientLightEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT] (core/RtAmbient.h): its DebugView 1 (the raw RT visibility) and 3 (rays
 	// that began inside something) come out through Estimate's occlusion, so they show through this effect's view 1 (the occlusion alone).
 	RtAmbient::UpdateSettings();
+	CapturedNormals::SunGIWantsAlbedo = (sunGi && settingsOutdoors) || (roomGi && roomGiOn && !settingsOutdoors) || (Enabled && albedoBuffer && RtAmbient::Current.GI);
 	const float ownDebugView = Constants.Data2.w;	// UNOFFICIAL 2026-11-12: this effect's own key, before the RT views below replace it
-	if (RtAmbient::Current.Enabled && RtAmbient::Current.DebugView != 0 && RtAmbient::Current.DebugView != 2) Constants.Data2.w = 1.0f;
+	const int rtView = RtAmbient::Current.DebugView;
+	if (RtAmbient::Current.Enabled && (rtView == 1 || rtView == 3 || rtView == 4 || rtView == 5 || rtView == 8)) Constants.Data2.w = 1.0f;
 	// (rt-ao-gi) RT DebugView 6: the RT bounce light alone, through this effect's view 13 (the GI light as it arrives).
-	if (RtAmbient::Current.Enabled && RtAmbient::Current.GI && (RtAmbient::Current.DebugView == 6 || RtAmbient::Current.DebugView == 7 || RtAmbient::Current.DebugView == 9))
+	if (RtAmbient::Current.GI && (rtView == 6 || rtView == 7 || rtView == 9))
 		Constants.Data2.w = ownDebugView > 12.5f ? ownDebugView : 13.0f;	// (7: 2026-10-31; UNOFFICIAL 2026-11-12: 9 too (the light at the pixel, in the bounce's place), and this effect's own 13 / 14 / 15 kept)
 }
 
@@ -592,7 +592,7 @@ void AmbientLightEffect::RenderGrid(IDirect3DDevice9* Device, bool sun, bool scr
 // RT GI), ExteriorBalance on, and the light grid supplies the sun bounce: GridBounce = the key if above 0, else 1.0. One log line per change of state.
 void AmbientLightEffect::SunGIFrame() {
 	const bool outdoors = TheShaderManager->GameState.isExterior;
-	if ((sunGi || roomGi) && (RtAmbient::InteriorNow == outdoors || settingsOutdoors != outdoors)) {	// (2026-11-12: RoomGI follows the player the same way)
+	if (RtAmbient::InteriorNow == outdoors || settingsOutdoors != outdoors) {
 		RtAmbient::InteriorNow = !outdoors;
 		UpdateSettings();
 	}
@@ -603,12 +603,13 @@ void AmbientLightEffect::SunGIFrame() {
 		ambientReplace = on ? (rt ? ambientReplaceSunGI : 0.0f) : ambientReplaceKey;
 	}
 	RoomGIFrame(outdoors, rt);	// UNOFFICIAL 2026-11-12 RoomGI (returns at once while the key is off)
+	CapturedNormals::SunGIWantsAlbedo = on || (roomGiOn && !outdoors) || (Enabled && albedoBuffer && RtAmbient::Current.GI);
 	const int state = !sunGi ? 0 : !outdoors ? 1 : rt ? 2 : 3;
 	if (state == sunGiState) return;
 	sunGiState = state;
 	if (state == 0) Logger::Log("UNOFFICIAL SunGI: off (the settings are the toml's own).");
 	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced ? "; AmbientLight does not render there, its Status is off" : "");
-	else if (state == 2) Logger::Log("UNOFFICIAL SunGI: on, outdoors, ray-traced path running. Forced in memory: RT AO + GI + Sky + RadianceCache + CacheExteriors on, ExteriorBalance on, "
+	else if (state == 2) Logger::Log("UNOFFICIAL SunGI: on, outdoors, ray-traced path running. Forced in memory: RT GI + RadianceCache + CacheExteriors on (RT AO / RT Sky left to own switches), ExteriorBalance on, "
 		"AmbientReplace %.2f, AlbedoBuffer (AmbientLight key) on%s; GridBounce stays %.2f (the RT bounce is the sun bounce); GI denoiser %s.", ambientReplace,
 		sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce, RtAmbient::Current.GIDenoiseSunGI ? "SunGI settings (GIDenoiseSunGI)" : "as before (GIDenoiseSunGI off)");
 	else Logger::Log("UNOFFICIAL SunGI: on, outdoors, FALLBACK: the RT core is not running (native D3D9, stock DXVK, no ray-tracing GPU, NvrDxvkPasses off, or ray tracing switched off for this kind of space: RTInteriors / RTExteriors). Forced in memory: "
@@ -628,7 +629,7 @@ void AmbientLightEffect::RoomGIApply(bool room) {
 	interiorBalance = room ? true : interiorBalanceKey;
 	albedoBuffer = room ? true : albedoBufferKey;
 	ambientReplaceInterior = room ? (ambientReplaceInteriorKey > 0.0f ? ambientReplaceInteriorKey : 0.6f) : ambientReplaceInteriorKey;
-	CapturedNormals::SunGIWantsAlbedo = room || (sunGi && settingsOutdoors);	// (the capture is wanted while either switch asks for it)
+	CapturedNormals::SunGIWantsAlbedo = room || (sunGi && settingsOutdoors) || (Enabled && albedoBuffer && RtAmbient::Current.GI);
 }
 
 // UNOFFICIAL 2026-11-12 RoomGI, once a frame (from SunGIFrame, after it followed the player in or out). The RT side (RtAmbient::UpdateSettings: Enabled / GI /
@@ -645,7 +646,7 @@ void AmbientLightEffect::RoomGIFrame(bool outdoors, bool rt) {
 	roomGiState = state;
 	if (state == 0) Logger::Log("UNOFFICIAL RoomGI: off (the settings are the toml's own).");
 	else if (state == 1) Logger::Log("UNOFFICIAL RoomGI: on, outdoors: nothing forced (exteriors keep the toml's settings, or SunGI's).");
-	else if (state == 2) Logger::Log("UNOFFICIAL RoomGI: on, indoors, ray-traced path running. Forced in memory: RT AO + GI + RadianceCache on, GIAmbient 0, GlowGI %.2f, "
+	else if (state == 2) Logger::Log("UNOFFICIAL RoomGI: on, indoors, ray-traced path running. Forced in memory: RT GI + RadianceCache on (RT AO left to own switch), GIAmbient 0, GlowGI %.2f, "
 		"InteriorBalance on, AlbedoBuffer (AmbientLight key) on, AmbientReplaceInterior %.2f with AmbientFloorInterior %.2f%s; GI denoiser %s.", RtAmbient::Current.GlowGI,
 		ambientReplaceInterior, ambientFloorInterior, roomGiForced ? ", AmbientLight Status on (it was off)" : "",
 		RtAmbient::Current.GIDenoiseRoomGI ? "SunGI's settings (GIDenoiseRoomGI)" : "as before (GIDenoiseRoomGI off)");
@@ -655,7 +656,7 @@ void AmbientLightEffect::RoomGIFrame(bool outdoors, bool rt) {
 
 bool AmbientLightEffect::ShouldRender() {
 	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
-	if ((sunGiForced || roomGiForced) && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi && RtAmbient::SunGIRtRunning())) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them. (RoomGI: the same indoors only, and only while the RT core runs: its fallback is the room as the user set it. With RoomGI off this is the old test exactly.)
+	if ((sunGiForced || roomGiForced) && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi && RtAmbient::SunGIRtRunning())) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them.
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
 
@@ -664,8 +665,6 @@ bool AmbientLightEffect::ShouldRender() {
 // floats as NVR_AmbientLight1 holds it). The dispatch reads the prep across its tiles' borders, so it writes a buffer, which is then
 // copied into the prep (both recorded in order, no wait). Called by RenderPrepare right after Prepare, inside its F10 timer, so
 // "Ambient light prepare + smooth (half)" covers Prepare + the smoothing on either path. False = not done: the D3D9 passes run.
-#include "../../core/DxvkCompute.h"
-
 namespace {
 	const NVR_EXT_BINDING_DESC SmoothBindings[] = {
 		{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE,  0, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_prep: NVR_AmbientLightPrep
@@ -935,28 +934,28 @@ namespace {
 	const ALExtShader ALExtShaders[AmbientLightEffect::ExtShaderCount] = {
 		{ "AmbientLightPrepare",    3,  0 },		// depth, normals, view model
 		{ "AmbientLightSmoothPass", 1,  0 },		// prep (X) / buffer 1 (Y)
-		{ "AmbientLightEstimate",   2,  0 },		// prep, blue noise
+		{ "AmbientLightEstimate",   3,  1u << 2 },	// prep, blue noise, optional RT GI (NVR_RTGIRaw / NVR_RTGIDenoised)
 		{ "AmbientLightBlurPass",   2,  0 },		// depth, buffer
 		{ "AmbientLightAccumulate", 4,  1u << 3 },	// buffer, prep, last occlusion history, (UNOFFICIAL 2026-10-29) ObjectMotion's buffer
 		{ "AmbientLightStats",      7,  1u << 6 },	// source, depth, view model, occlusion history, normals, grid, grid colour
 		{ "AmbientLightReduce",     2,  0 },		// stats, last balance
-		// source, SunFar, depth, normals, point shadows, sky, view model, occlusion history, grid wave stage, grid, grid colour, balance, buffer
-		{ "AmbientLightApply",      13, (1u << 1) | (1u << 5) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) },
+		// source, SunFar, depth, normals, point shadows, sky, view model, occlusion history, grid wave stage, grid, grid colour, balance, buffer, albedo
+		{ "AmbientLightApply",      14, (1u << 1) | (1u << 5) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 13) },
 		{ "AmbientLightScreen",     6,  1u << 2 },	// screen memory, its colour, its walls, depth, normals, source
 		{ "AmbientLightInject",     5,  0x1F },		// sun depth, sun colour, screen memory, its colour, wall memory
 		{ "AmbientLightPropagate",  5,  (1u << 3) | (1u << 4) },	// geometry, wave, accum, wave colour, accum colour
-		{ "AmbientLightEstimateHiZ", 3, 0 },		// UNOFFICIAL 2026-10-26 (HiZ): prep, blue noise, NVR_HiZ
 		// UNOFFICIAL 2026-10-27 (deep/fork2-ssgi) ComputeGI: the light pass (the frame), the GI pass per ComputeGIQuality (Estimate's prep and
 		// blue noise + the light), its accumulate (buffer, prep, last occlusion history, last bounce history) and Apply with the bounce light
-		// (Apply's 13 + this frame's bounce history).
+		// (Apply's 14 + this frame's bounce history + optional DeferredBumpedNormals shading normals).
 		{ "AmbientLightGILight",      1,  0, 0 },
 		{ "AmbientLightEstimate-gi0", 3,  0, 1 },
 		{ "AmbientLightEstimate-gi1", 3,  0, 1 },
 		{ "AmbientLightEstimate-gi2", 3,  0, 1 },
 		{ "AmbientLightGIAccumulate", 4,  0, 0 },
-		{ "AmbientLightApply-gi",     14, (1u << 1) | (1u << 5) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11), 0 },
+		{ "AmbientLightApply-gi",     16, (1u << 1) | (1u << 5) | (1u << 8) | (1u << 9) | (1u << 10) | (1u << 11) | (1u << 13) | (1u << 15), 0 },
 		{ "AmbientLightEstimateRT",   3,  0, 0 },	// UNOFFICIAL 2026-10-28 (fork RT): prep, the traced values (AmbientOcclusionEffect::RtRaw), the bounce light (RtGI; 2026-10-29)
 	};
+	static_assert(_countof(ALExtShaders) == AmbientLightEffect::ExtShaderCount, "ALExtShaders matches ExtShader enum");
 	struct ALExtPush {	// AmbientLight.glsl's push block, 32 bytes
 		D3DXVECTOR4	frame;
 		UINT32		pointClamp, linearClamp, pointWrap, variant;
@@ -976,19 +975,22 @@ namespace {
 		"TESR_DepthConstants", "TESR_CameraData", "TESR_CameraPosition", "NVR_SunFarFlags", "NVR_GridOrigin", "NVR_GridOrigin1", "NVR_GridData",
 		"NVR_GridLight", "NVR_GridStep", "NVR_GridShift", "NVR_GridScreen", "NVR_GridWalls", "NVR_GridLampInfo" };
 	const char* const ALExtArrays[] = { "NVR_GridLamps", "NVR_GridLampColors" };
+	const char* const ALExtTailVectors[] = { "TESR_RenderScale", "NVR_ALReach", "NVR_ALBump" };
 	struct ALExtConstants {
 		D3DXMATRIX	matrices[_countof(ALExtMatrices)];
 		D3DXVECTOR4	vectors[_countof(ALExtVectors)];
 		D3DXVECTOR4	arrays[_countof(ALExtArrays)][AmbientLightEffect::GridLampsMax];
+		D3DXVECTOR4	tailVectors[_countof(ALExtTailVectors)];
 	};
-	static_assert(_countof(ALExtMatrices) + _countof(ALExtVectors) + _countof(ALExtArrays) == 38, "AmbientLightEffect::extHandles");
+	static_assert(_countof(ALExtMatrices) + _countof(ALExtVectors) + _countof(ALExtArrays) + _countof(ALExtTailVectors) == 41, "AmbientLightEffect::extHandles");
 }
 
 bool AmbientLightEffect::ExtOn() const {
 	// UNOFFICIAL 2026-11-01 (tester: rapid flicker with AmbientLight + NvrDxvkPasses, steady with the passes off; not reproduced here):
-	// AmbientLight keeps its D3D9 passes unless [Main.Main.Performance] NvrDxvkAmbientLight is on. NvrDxvkKeepD3D9 "AmbientLight" now
-	// keeps every pass too (before, ExtDraw matched only the pass names, e.g. AmbientLightApply, so that workaround left most on Vulkan).
-	return !ExtFailed && DxvkCompute::PassesOn() && TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight && !DxvkCompute::KeptOnD3D9(Name);
+	// AmbientLight keeps its D3D9 passes unless [Main.Main.Performance] NvrDxvkAmbientLight is on — or ComputeGI (SSGI) is explicitly
+	// enabled, since ComputeGI only exists as Vulkan passes (2026-11-19: previously ComputeGI silently did nothing while NvrDxvkAmbientLight
+	// stayed at its hidden DevOnly default of false).
+	return !ExtFailed && DxvkCompute::PassesOn() && (TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight || computeGI) && !DxvkCompute::KeptOnD3D9(Name);
 }
 
 // UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 1): ExtOn's rule in a rect frame, where PassesOn is
@@ -1000,7 +1002,7 @@ bool AmbientLightEffect::ExtOnRect() const {
 // One pass as a Vulkan pass into Targets (1-4 of one size, as the D3D9 pass's render targets 0..n-1) over Viewport (at 0, 0: the D3D9
 // pass's), Textures in the shader's binding order (what the D3D9 pass has on those stages). False: not drawn (the D3D9 pass runs).
 bool AmbientLightEffect::ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Targets, UINT TargetCount, IDirect3DBaseTexture9* const* Textures, UINT Variant, const D3DVIEWPORT9& Viewport) {
-	if (!(ExtOn() || (Shader == ExtEstimateRT && ExtOnRect())) || Shader >= ExtShaderCount || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS || Viewport.X || Viewport.Y || !Viewport.Width || !Viewport.Height) return false;
+	if (!(ExtOn() || ((Shader == ExtEstimateRT || Shader == ExtApply || Shader == ExtGIApply) && ExtOnRect())) || Shader >= ExtShaderCount || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS || Viewport.X || Viewport.Y || !Viewport.Width || !Viewport.Height) return false;
 	const ALExtShader& info = ALExtShaders[Shader];
 	if (DxvkCompute::KeptOnD3D9(info.Spv)) return false;	// UNOFFICIAL 2026-10-26 test: NvrDxvkKeepD3D9 can name one pass (e.g. AmbientLightAccumulate)
 	ExtPass& pass = extPasses[Shader][TargetCount - 1];
@@ -1032,6 +1034,10 @@ bool AmbientLightEffect::ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Tar
 		if (D3DXHANDLE handle = ParameterHandle(extHandles[h], ALExtVectors[v])) Effect->GetVector(handle, &constants.vectors[v]);
 	for (UINT a = 0; a < _countof(ALExtArrays); a++, h++)
 		if (D3DXHANDLE handle = ParameterHandle(extHandles[h], ALExtArrays[a])) Effect->GetVectorArray(handle, constants.arrays[a], GridLampsMax);
+	for (UINT tv = 0; tv < _countof(ALExtTailVectors); tv++, h++)
+		if (D3DXHANDLE handle = ParameterHandle(extHandles[h], ALExtTailVectors[tv])) Effect->GetVector(handle, &constants.tailVectors[tv]);
+	if (constants.tailVectors[0].x <= 0.0f || constants.tailVectors[0].y <= 0.0f)
+		constants.tailVectors[0] = D3DXVECTOR4(RenderRect::On ? RenderRect::ScaleX : 1.0f, RenderRect::On ? RenderRect::ScaleY : 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* uniforms = ExtUniforms(extUniforms, &constants, sizeof(constants));
 	if (!uniforms) return false;
 	UINT count = info.Textures;
@@ -1227,7 +1233,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// frame (AmbientOcclusionEffect::RtGI), takes ComputeGI's place: written by the RT estimate into the bounce channel, then ComputeGI's
 	// accumulate (temporal) and apply (x the surface colour x GIStrength). ComputeGI itself, when on, keeps its screen search instead.
 	AmbientOcclusionEffect* rtAO = TheShaderManager->Effects.AmbientOcclusion;
-	IDirect3DTexture9* rtGI = !giOn && rtAO && RtAmbient::Ready() ? rtAO->RtGI() : nullptr;
+	IDirect3DTexture9* rtGI = !giOn && rtAO && RtAmbient::GIReady() ? rtAO->RtGI() : nullptr;
 	// UNOFFICIAL 2026-11-10 GIStrengthNight: outdoors the RT bounce strength blends to the night's own value (below 0: none set)
 	const RtAmbient::Settings& rtS = RtAmbient::Current;
 	const float rtGIStrength = TheShaderManager->GameState.isExterior && rtS.GIStrengthNight >= 0.0f ? std::lerp(rtS.GIStrengthNight, rtS.GIStrength, TheShaderManager->GameState.transitionCurve) : rtS.GIStrength;
@@ -1275,7 +1281,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			if (giView != 0) giViewLines++;
 			if (giView > 0) Logger::Log("UNOFFICIAL AmbientLight: DebugView %d: the RT bounce light %s, x DebugGIExposure %.2f (GIStrength left out).", giView,
 				giView == 14 ? "as traced this frame (NVR_RTGIRaw: before the RT denoiser, the blurs and the history)" : "from the RT denoiser (before this effect's blurs and history)", debugGIExposure);
-			else if (giView < 0) Logger::Log("UNOFFICIAL AmbientLight: DebugView 14 / 15 cannot run: no ray-traced bounce light this frame (it needs Shaders.AmbientOcclusion.RT Enabled + GI, the RT core running and ComputeGI off); the picture is what view 13 gives without it.");
+			else if (giView < 0) Logger::Log("UNOFFICIAL AmbientLight: DebugView 14 / 15 cannot run: no ray-traced bounce light this frame (it needs Shaders.AmbientOcclusion.RT GI, the RT core running and ComputeGI off); the picture is what view 13 gives without it.");
 		}
 	}
 	D3DXHANDLE giHandle = ParameterHandle(paramGI, "NVR_ALGI");
@@ -1289,7 +1295,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	// the fades) and skips its screen search; the blurs, Accumulate and Apply after it are unchanged. Not with ComputeGI (it keeps its screen search)
 	// or the Vulkan passes (their own RT estimate). Off, or an older .fx file: NVR_ALRT is 0 and the Estimate is exactly as before.
 	IDirect3DTexture9* aoD3D9Texture = nullptr;
-	if (!giOn && !ExtOn() && rtS.OcclusionOnD3D9 && rtAO && RtAmbient::Ready()) {
+	if (!giOn && !ExtOn() && rtS.OcclusionOnD3D9 && rtAO && RtAmbient::AOReady()) {
 		if (IDirect3DTexture9* raw = rtAO->RtRaw()) {
 			IDirect3DTexture9* clean = rtAO->RtDenoised(Device);
 			aoD3D9Texture = clean ? clean : raw;
@@ -1303,7 +1309,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	}
 	{
 		// 1 the traced occlusion is used; 0 traced this frame but not used here (the key off, an older .fx); -1 nothing traced / not this path
-		const int aoState = aoD3D9Texture ? 1 : (!giOn && !ExtOn() && rtAO && RtAmbient::Ready() && rtAO->RtRaw()) ? 0 : -1;
+		const int aoState = aoD3D9Texture ? 1 : (!giOn && !ExtOn() && rtAO && RtAmbient::AOReady() && rtAO->RtRaw()) ? 0 : -1;
 		if (aoState != aoD3D9Logged && aoState >= 0) {
 			Logger::Log(aoState ? "UNOFFICIAL RT AO: AmbientLight's D3D9 Estimate takes the traced occlusion (OcclusionOnD3D9)." :
 				"UNOFFICIAL RT AO: traced, but AmbientLight keeps its own screen occlusion (OcclusionOnD3D9 off, or an older AmbientLight.fx.hlsl): only the bounce light and the sky visibility use the rays.");
@@ -1349,6 +1355,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	const bool balanceRuns = interiorMode && gridOn && gridValid;
 	if (!balanceRuns || TheShaderManager->GameState.isCellChanged) balanceValid = false;
 	const int balanceRead = balanceIndex, balanceWrite = balanceIndex ^ 1;
+	float roomShareScaleOffset = 0.0f;	// 1 - roomShare: mirrors NVR_ALRoom.x in NVR_ALBump.y for Vulkan AmbientLightApply.frag
 	if (D3DXHANDLE h = ParameterHandle(paramInterior, "NVR_ALInterior")) {
 		// UNOFFICIAL 2026-11-11 (sungi) ExteriorBalance (STUDY F4): outdoors .x is 0 and .y / .z / .w are not read (the balance passes run
 		// only indoors), so .w carries the exterior mode: > 0 = the occlusion darkens only the ambient share, and the value is the scale the
@@ -1363,12 +1370,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		}
 		// UNOFFICIAL 2026-11-12 AmbientReplaceInterior / AmbientFloorInterior (RoomGI's replace mode; each key works alone): indoors, with the RT bounce traced
 		// this frame, Apply takes the share q = replace x (1 - floor) of the room's ambient out of the pixel and the occlusion darkens only what stays:
-		// lit = lin - A + (1 - q) A ao = lin - ((1 - ao) + ao q) A, A = InteriorBalance's ambient share min(lin, albedo x the cell's light). So the occlusion
-		// and the missing bounce no longer darken the same corner twice, and the traced bounce (added after, x GIStrength) is what fills it. q rides in .x as
-		// 1 + q (every reader tests .x > 0.5 only; all four fields are taken indoors): q = 0 gives .x = 1 and the old arithmetic bit for bit. Needs
-		// InteriorBalance (interiorMode) and the RT GI (rtGI): without either q = 0. NVR_ALRoom.x (= 1 - the scale below): with the real albedo (AlbedoBuffer) the game's ambient on
-		// a surface is albedo x ambient x LIN_SCALE_AMBIENT (0.5 ^ gamma indoors by default), so A takes that scale, as ExteriorBalance's share does; with the
-		// guessed colour (lit / unscaled ambient) 1 matches. Set only while the replace mode is on (and once after): a parameter never set is 0 = scale 1.
+		// lit = lin - A + (1 - q) A ao = lin - ((1 - ao) + ao q) A, A = InteriorBalance's ambient share min(lin, albedo x the cell's light).
 		const bool replaceRoom = interiorMode && ambientReplaceInterior > 0.0f && rtGI != nullptr;
 		const float roomTake = replaceRoom ? ambientReplaceInterior * (1.0f - ambientFloorInterior) : 0.0f;
 		if (replaceRoom || roomShareSet) {
@@ -1376,7 +1378,8 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			const PBRShaders* pbrRoom = TheShaderManager->Shaders.PBR;
 			const bool realAlbedoRoom = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
 			if (replaceRoom && realAlbedoRoom && pbrRoom && pbrRoom->Constants.LinearScales.y > 0.0f) roomShare = (std::min)(pbrRoom->Constants.LinearScales.y, 4.0f);
-			if (D3DXHANDLE roomHandle = ParameterHandle(paramRoom, "NVR_ALRoom")) { D3DXVECTOR4 room(1.0f - roomShare, 0.0f, 0.0f, 0.0f); Effect->SetVector(roomHandle, &room); }
+			roomShareScaleOffset = 1.0f - roomShare;
+			if (D3DXHANDLE roomHandle = ParameterHandle(paramRoom, "NVR_ALRoom")) { D3DXVECTOR4 room(roomShareScaleOffset, 0.0f, 0.0f, 0.0f); Effect->SetVector(roomHandle, &room); }
 			static int roomLines = 0;	// (a start or a stop; at most 40 lines a session)
 			if (replaceRoom != roomShareSet && roomLines < 40 && ++roomLines) Logger::Log(replaceRoom ? "UNOFFICIAL AmbientLight: AmbientReplaceInterior running: %.2f of the room's ambient share is taken out (floor %.2f), "
 				"the occlusion darkens what stays, the RT bounce puts light back (ambient scale %.3f, %s)." : "UNOFFICIAL AmbientLight: AmbientReplaceInterior stopped "
@@ -1411,11 +1414,21 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	const bool albedoOn = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
 	// UNOFFICIAL 2026-11-15 DeferredALAlbedo (core/FdIndirect.h): made here, before any pass begins; AlbedoTexture itself while off
 	IDirect3DBaseTexture9* const albedoTexture = albedoOn ? FdIndirect::ALAlbedo(Device) : nullptr;
+	// DeferredBumpedNormals shading normals (core/FdIndirect.h): prepared before Effect->Begin when GI Apply is active
+	IDirect3DBaseTexture9* const depthTexForBump = ExtFileTexture("TESR_DepthBuffer");
+	IDirect3DBaseTexture9* const normalsTexForBump = ExtFileTexture("TESR_NormalsBuffer");
+	IDirect3DBaseTexture9* const shadingNormals = (giOn || rtGI != nullptr) && FdIndirect::BumpedNormalsOn() && normalsTexForBump && depthTexForBump
+		? FdIndirect::ShadingNormals(Device, normalsTexForBump, depthTexForBump) : nullptr;
+	const bool bumpOn = shadingNormals != nullptr && shadingNormals != normalsTexForBump;
+	if (D3DXHANDLE h = ParameterHandle(paramBump, "NVR_ALBump")) {
+		D3DXVECTOR4 bump(bumpOn ? 1.0f : 0.0f, roomShareScaleOffset, 0.0f, 0.0f);
+		Effect->SetVector(h, &bump);
+	}
 	// UNOFFICIAL 2026-11-15 GIGrassBlur's mask (the blur passes read only its alpha): alpha 0 where there is no albedo record (the fork's test) OR the
 	// MaterialBuffer carries the grass mark (our CapturedGrass writes grass records whenever RT GI runs; core/GrassMaskedAlbedo.h). Made here, before
 	// any pass begins, and only while GIGrassBlur can use it.
-	IDirect3DBaseTexture9* const grassMaskTexture = albedoOn && giGrassBlur && giD3D9Texture && giD3D9Texture != rtGI ? GrassMaskedAlbedo::Get(Device) : nullptr;	// (test-after-110: only while the blur passes read the mask, the denoised RT GI's + 4 flag below; was every frame with AlbedoBuffer on, RT GI or not: a full-screen copy for nothing)
-	if (albedoOn && !albedoLogged) { albedoLogged = true; Logger::Log("UNOFFICIAL AmbientLight: AlbedoBuffer on: the bounce takes the surfaces' own colour from TESR_AlbedoBuffer where written (elsewhere, grass for one, the guessed colour capped at %.2f: AlbedoFallbackCap); the balance and Apply passes run as D3D9 passes", albedoFallbackCap > 0.0f ? albedoFallbackCap : 0.6f); }
+	IDirect3DBaseTexture9* const grassMaskTexture = albedoOn && giGrassBlur && giD3D9Texture && giD3D9Texture != rtGI ? GrassMaskedAlbedo::Get(Device) : nullptr;
+	if (albedoOn && !albedoLogged) { albedoLogged = true; Logger::Log("UNOFFICIAL AmbientLight: AlbedoBuffer on: the bounce takes the surfaces' own colour from TESR_AlbedoBuffer where written (elsewhere, grass for one, the guessed colour capped at %.2f: AlbedoFallbackCap)", albedoFallbackCap > 0.0f ? albedoFallbackCap : 0.6f); }
 	if (flagsHandle) {
 		D3DXVECTOR4 flags(shadow ? 1.0f : 0.0f, noEdgeOutline ? 1.0f : 0.0f, albedoOn ? 1.0f : 0.0f, edgeReject ? 1.0f : 0.0f);
 		Effect->SetVector(flagsHandle, &flags);
@@ -1494,7 +1507,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		static bool rtChecked = false, rtFile = false;
 		if (!rtChecked) { rtChecked = true; rtFile = DxvkCompute::HasSpirv("AmbientLightEstimateRT"); }
 		AmbientOcclusionEffect* ao = TheShaderManager->Effects.AmbientOcclusion;
-		IDirect3DTexture9* rtRaw = !giLightReady && rtFile && ao && RtAmbient::Ready() ? ao->RtRaw() : nullptr;
+		IDirect3DTexture9* rtRaw = !giLightReady && rtFile && ao && RtAmbient::AOReady() ? ao->RtRaw() : nullptr;
 		if (rtRaw) {
 			static GpuTimer rtTimer("  Ambient light RT estimate (half)");
 			GpuProfileScope rtGpu(rtTimer, Device);
@@ -1576,7 +1589,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				if (drawn && !logged) { logged = true; Logger::Log("UNOFFICIAL RT AO: AmbientLight's RT estimate runs inside its D3D9 passes (RenderScale rect frame)."); }
 				if (drawn) continue;
 			}
-			if (ExtOn()) {
+			if (ExtOn() || (apply && ExtOnRect())) {
 				IDirect3DBaseTexture9* depth = ExtFileTexture("TESR_DepthBuffer");
 				IDirect3DBaseTexture9* normals = ExtFileTexture("TESR_NormalsBuffer");
 				IDirect3DBaseTexture9* viewModel = TheTextureManager->DepthTextureViewModel;
@@ -1590,30 +1603,19 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 					drawn = ExtDraw(ExtPrepare, targets, 1, textures, 0, reduced);
 				}
 				else if (p == 1) {
-					// UNOFFICIAL 2026-10-26 (deep/fork-hiz) HiZ: the far taps on the Hi-Z pyramid when this frame's is there (core/HiZ.h).
-					// (2026-10-26: retired with the pyramid's move to a storage buffer: measured no win, and its shader reads the old texture.)
-					IDirect3DTexture9* hiz = nullptr;
-					if (hiz && !hizEstimateChecked) {
-						hizEstimateChecked = true;
-						std::vector<char> words;	// a missing file must not turn the other Vulkan passes off
-						if (!DxvkCompute::LoadSpirv("AmbientLightEstimateHiZ", words)) {
-							hizEstimateFailed = true;
-							Logger::Log("UNOFFICIAL AmbientLight: Compute\\AmbientLightEstimateHiZ.spv is missing; HiZ does nothing.");
+					IDirect3DBaseTexture9* textures[] = { prepTexture, ExtFileTexture("TESR_BlueNoiseSampler"), giLightTexture };	// (the 3rd: ComputeGI's / optional RT GI's)
+					drawn = estimateRT(targets);
+					if (!drawn && giLightReady) drawn = giDrawn = ExtDraw((ExtShader)(ExtGIEstimate0 + giQuality), targets, 1, textures, 0, reduced);	// (ComputeGI)
+					if (!drawn) {
+						IDirect3DTexture9* rtGIClean = rtGI && rtAO ? rtAO->RtDenoisedGI(Device) : nullptr;
+						IDirect3DTexture9* rtGIUsed = rtGIClean ? rtGIClean : rtGI;
+						textures[2] = rtGIUsed;
+						drawn = ExtDraw(ExtEstimate, targets, 1, textures, rtGIUsed ? 0x100u : 0u, reduced);	// the first 2 (+ optional RT GI)
+						if (drawn && rtGIUsed) {
+							giDrawn = true;
+							giDenoised = rtGIClean && giSingleHistory;
+							giNoBlur = rtGIClean != nullptr;
 						}
-					}
-					if (hiz && !hizEstimateFailed) {
-						IDirect3DBaseTexture9* textures[] = { prepTexture, ExtFileTexture("TESR_BlueNoiseSampler"), hiz };
-						drawn = ExtDraw(ExtEstimateHiZ, targets, 1, textures, (UINT)hizLogQ, reduced);
-						if (drawn && ++hizEstimateFrames == 1) Logger::Log("UNOFFICIAL AmbientLight: Estimate reads its far taps from the Hi-Z pyramid (HiZ %d).", hizLogQ);
-					}
-					else {
-						IDirect3DBaseTexture9* textures[] = { prepTexture, ExtFileTexture("TESR_BlueNoiseSampler"), giLightTexture };	// (the 3rd: ComputeGI's)
-						// UNOFFICIAL 2026-10-28 (fork RT) [Shaders.AmbientOcclusion.RT]: the occlusion from the RT helper's rays
-						// (AmbientLightEstimateRT.frag; core/RtAmbient.h), the blurs and Accumulate after it as after Estimate (the denoiser).
-						// ComputeGI keeps the screen search (its light needs it). Variant = the RT DebugView.
-						drawn = estimateRT(targets);
-						if (!drawn && giLightReady) drawn = giDrawn = ExtDraw((ExtShader)(ExtGIEstimate0 + giQuality), targets, 1, textures, 0, reduced);	// (ComputeGI)
-						if (!drawn) drawn = ExtDraw(ExtEstimate, targets, 1, textures, 0, reduced);	// the first 2
 					}
 				}
 				else if (p == 2 || p == 3) {
@@ -1644,12 +1646,16 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 					IDirect3DBaseTexture9* waveStage = Constants.Data2.w > 11.5f && gridValid ? gridGeometry : gridScreenValid ? gridScreen[gridScreenIndex] : nullptr;
 					IDirect3DBaseTexture9* balance = interiorMode ? balanceTexture[balanceRuns ? balanceWrite : balanceRead] : nullptr;
 					IDirect3DBaseTexture9* textures[] = { scene, sunFar, depth, normals, ExtFileTexture("TESR_PointShadowBuffer"), skyTexture, viewModel,
-						occlusionHistory[writeIndex], waveStage, grid, gridColour, balance, bufferTexture[blurred], giDebugTexture ? giDebugTexture : historyTexture[writeIndex] };	// (UNOFFICIAL 2026-11-12: DebugView 14 / 15, above)
+						occlusionHistory[writeIndex], waveStage, grid, gridColour, balance, bufferTexture[blurred], albedoTexture,
+						giDebugTexture ? giDebugTexture : historyTexture[writeIndex], bumpOn ? shadingNormals : nullptr };
 					const UINT variant = (skyTexture ? 1u : 0u) | (waveStage ? 2u : 0u);
-					if (!albedoOn) {	// (AlbedoBuffer: the D3D9 pass reads NVR_ALAlbedo)
-						if (giDrawn && giTest == 0) drawn = ExtDraw(ExtGIApply, targets, 1, textures, variant, original);	// (ComputeGI) + this frame's bounce light (14th)
-						if (!drawn) drawn = ExtDraw(ExtApply, targets, 1, textures, variant, original);	// the first 13
+					D3DVIEWPORT9 applyViewport = original;
+					if (RenderRect::Active()) {
+						applyViewport.Width = RenderRect::Width(original.Width);
+						applyViewport.Height = RenderRect::Height(original.Height);
 					}
+					if ((giDrawn || giD3D9Texture) && giTest == 0) drawn = ExtDraw(ExtGIApply, targets, 1, textures, variant, applyViewport);
+					if (!drawn) drawn = ExtDraw(ExtApply, targets, 1, textures, variant, applyViewport);
 					if (giDrawn && giTest == 0 && drawn && giFrames == 1) Logger::Log("UNOFFICIAL AmbientLight: ComputeGI's bounce light applied (GI pass, accumulate, apply as Vulkan passes).");
 				}
 				if (drawn) continue;
@@ -1679,6 +1685,13 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			if (FAILED(result)) break;
 			if (p > 0) Device->SetTexture(5, prepTexture);
 			if (giApply) Device->SetTexture(5, giDebugTexture ? giDebugTexture : historyTexture[writeIndex]);	// UNOFFICIAL 2026-11-03 NVR_ALGIHistory (Apply does not read the prep; 2026-11-12: DebugView 14 / 15, giDebugTexture)
+			if (giApply && bumpOn) {
+				Device->SetTexture(3, shadingNormals);
+				TheRenderManager->renderState->NoteDeviceTexture(3, shadingNormals);
+				const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
+					{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
+				for (const auto& s : states) TheRenderManager->SetSamplerState(3, (D3DSAMPLERSTATETYPE)s[0], s[1]);
+			}
 			if (p == 1 && giD3D9Texture) Device->SetTexture(7, giD3D9Texture);	// UNOFFICIAL 2026-11-03 NVR_ALRTGI (Estimate does not read s7 otherwise)
 			if (p == 1 && aoD3D9Texture) Device->SetTexture(6, aoD3D9Texture);	// UNOFFICIAL 2026-11-13 NVR_ALRTAO (Estimate does not read s6 otherwise: its own target's stage)
 			Device->SetTexture(15, TheTextureManager->DepthTextureViewModel);	// NVR_ALViewModel (Prepare, Apply)
@@ -1744,6 +1757,10 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	Device->SetTexture(14, nullptr);
 	Device->SetTexture(15, nullptr);
 	Device->SetTexture(8, nullptr);
+	if (bumpOn) {
+		Device->SetTexture(3, nullptr);
+		TheRenderManager->renderState->NoteDeviceTexture(3, nullptr);
+	}
 	if (sunFar) Device->SetTexture(13, nullptr);
 	if (skyTexture) {	// UNOFFICIAL 2026-10-20 (skyamb)
 		Device->SetTexture(10, nullptr);

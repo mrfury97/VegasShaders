@@ -17,7 +17,7 @@
 #endif
 #include "includes/Terrain.hlsl"	// shared code
 #ifdef PS
-    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
+    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (always compiled in; its strength switches it live)
     #define SHADOW_SUN_CONTACT_ALWAYS 1
     #define SHADOW_SUN_CONTACT_IN 1     // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl; only with Bend on at start), land registers s13 / c183-c187
     #define SHADOW_SUN_CONTACT_LAND 1

@@ -27,6 +27,23 @@ bool RtScreenShows(vec3 hitW, vec3 facing, bool facingKnown, out vec2 at) {
     if (facingKnown && dot(facing, -normalize(hitW)) < -0.15) return false;   // (a normal map may tilt the front a little away)
     return inView && abs(readDepthLod(at) - hitV.z) < max(hitV.z * RtTolerance, 8.0) && !IsWeapon(at);
 }
+void UnpackBounceNormalVis(float packedA, vec3 fallbackN, out vec3 n, out bool normalKnown, out float visible) {
+    visible = packedA >= 0.0 ? 1.0 : 0.0;
+    float mag = abs(packedA);
+    if (mag < 1.0) { n = fallbackN; normalKnown = false; return; }
+    uint bits = floatBitsToUint(mag);
+    uint expField = (bits >> 23u) & 255u;
+    if (expField < 127u || expField > 142u) { n = fallbackN; normalKnown = false; return; }
+    uint hi = expField - 127u;
+    uint lo = (bits >> 13u) & 1023u;
+    uint idx = (hi << 10u) | lo;
+    normalKnown = (idx & 8192u) != 0u;
+    uint q = idx & 8191u;
+    if (q >= 89u * 89u) { n = fallbackN; normalKnown = false; return; }
+    vec2 octN = vec2(float(q % 89u), float(q / 89u)) * (2.0 / 88.0) - 1.0;
+    n = normalKnown ? OctDecode(octN) : fallbackN;
+}
+
 vec3 RtBounceColour(vec3 hitW, vec4 hitData, vec4 shade, vec4 bounce, float roughness, out vec2 source) {
     uint hitFlags = uint(hitData.y + 0.5);
     vec3 d2 = OctDecode(hitData.zw);
@@ -36,13 +53,17 @@ vec3 RtBounceColour(vec3 hitW, vec4 hitData, vec4 shade, vec4 bounce, float roug
         return bounce.rgb * sky;
     }
     vec3 p2 = hitW + d2 * bounce.a;
+    vec3 h2Normal;
+    bool h2NormalKnown;
+    float h2Visible;
+    UnpackBounceNormalVis(shade.a, -d2, h2Normal, h2NormalKnown, h2Visible);
     vec2 at;
-    if (RtScreenShows(p2, vec3(0.0), false, at)) {
+    if (RtScreenShows(p2, h2Normal, h2NormalKnown, at)) {
         source = vec2(1.0, 0.0);
         return bounce.rgb * linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
     }
     int keyLamp = int((hitFlags >> 4u) & 15u) - 1;
-    vec3 shaded = RtShadeHit(p2, -d2, (hitFlags & 2u) != 0u ? shade.rgb : vec3(0.4), shade.a, keyLamp);
+    vec3 shaded = RtShadeHit(p2, h2Normal, -d2, (hitFlags & 2u) != 0u ? shade.rgb : vec3(0.4), h2Visible, keyLamp);
     if ((hitFlags & 8u) != 0u) shaded += shade.rgb * rtc.rt3.w;
     return bounce.rgb * shaded;
 }
@@ -63,7 +84,7 @@ vec3 RtHitColour(vec3 hitW, vec4 hitData, vec4 shade, vec4 bounce, vec3 worldR, 
     if (rtc.rt4.w > 0.5 && (hitFlags & 2u) != 0u) env.a = 0.0;
     vec3 hitNormal = (hitFlags & 4u) != 0u ? OctDecode(hitData.zw) : -worldR;
     int keyLamp = int((hitFlags >> 4u) & 15u) - 1;   // -1: none (outdoors by day shade.a is the sun's)
-    vec3 shaded = RtShadeHit(hitW, hitNormal, shade.rgb, shade.a, keyLamp);
+    vec3 shaded = RtShadeHit(hitW, hitNormal, -worldR, shade.rgb, shade.a, keyLamp);
     // 2026-10-29: a glowing draw (the core's record flag: emissive material) gives its own light too (neon, lit glass).
     if ((hitFlags & 8u) != 0u) shaded += shade.rgb * rtc.rt3.w;
     source = vec2(0.0, env.a);
@@ -127,7 +148,7 @@ void main() {
     float rtInstance = -1.0;
     bool rtOpen = false;   // a ray went the whole Distance without a hit
     if (abs(RtDebugView - 3.0) < 0.5) { sum = vec3(0.0); confidence = 0.0; }   // RT DebugView 3: the screen march's answer dropped
-    float rtFade = RtFade(roughness);
+    float rtFade = weaponRay ? 1.0 : RtFade(roughness);
     if (rayCast && hitData.x >= 0.0 && RtDebugView < 4.5) {
         float missing = (1.0 - confidence) * rtFade;
         if (hitData.x > 0.0) {

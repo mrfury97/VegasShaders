@@ -2,6 +2,12 @@
 // ps_2_x -> ps_3_0: Shadow.hlsl needs tex2Dlod, and D3D9 requires a matching vs_3_0.
 //
 // Vanilla: as STLEAF2000, alpha doubled (add r1.w, r0.w, r0.w -- unsaturated)
+// UNOFFICIAL 2026-11-16 fast-restart (testers: grass and leaves glowing under a cloud's shadow; docs/next/FAST-RESTART.md): the clouds' shadow
+// on the sun term with ForwardShadows on, as every object (Includes/Shadow.hlsl SHADOW_CLOUD_IN; strength 0 with PlantShadows off). Not in
+// the deferred record (FOLIAGE_DEFERRED): DeferredSun shades its sun.
+#if !(defined(FOLIAGE_DEFERRED) && FOLIAGE_DEFERRED)
+    #define SHADOW_CLOUD_IN 1
+#endif
 #include "includes/Shadow.hlsl"
 #include "includes/Leaf.hlsl"
 

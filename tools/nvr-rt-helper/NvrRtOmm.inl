@@ -86,9 +86,8 @@ namespace Omm {
 		return ((uint64_t)(geometryId & 0xFFFFFFu) << 19) | ((uint64_t)(slot & 0x3FFu) << 9) | ((uint64_t)(ref & 0xFFu) << 1) | (cls & 1u);
 	}
 
-	// The shaders known to leave rtConeWidth at 0 (src/hlsl/NewVegas/Compute/Rt: only RtPathTrace.comp and ReflectionsRTBody.glsl set it, and
-	// their variants: RtPathTraceGrid / GI, ReflectionsRT*), so their alpha tests read the real textures at lod 0 exactly. Any other shader
-	// name (a new pass) counts as "any mip": class B, always right. Keep this list in step with the shaders (RtTextures.glsl says so too).
+	// UNOFFICIAL 2026-11-19: RtPathTrace* and ReflectionsRT* now reset rtConeWidth = 0.0 before every ray query (setting it only
+	// after a hit commits for shading), so every alpha test during traversal reads lod 0 and qualifies for hardware Class-A OMMs.
 	bool FinestMipShader(const char* path) {
 		const char* name = strrchr(path, '\\');
 		const char* slash = strrchr(path, '/');
@@ -98,9 +97,9 @@ namespace Omm {
 		for (size_t i = 0; i + 1 < sizeof(base) && name[i] && name[i] != '.'; i++) base[i] = (char)tolower((unsigned char)name[i]);
 		static const char* kFinestMip[] = { "rtsunshadow", "rtlamptrace", "rtlamptraceexterior", "rtlamptracesigma", "rtlamptracesplit",
 			"rtlamptracemany", "rtlamptracerestir", "rtlampeye", "rtlampprimary", "rtflashtrace", "rtaotrace", "rtgitrace", "rtradiancecache",
-			"rtrestirgi", "rthitdebug", "rtlampfilter", "rtpathtracecache" };
+			"rtrestirgi", "rthitdebug", "rtlampfilter", "rtemissivebuild", "rtfoglamps" };
 		for (const char* k : kFinestMip) if (!strcmp(base, k)) return true;
-		return !strncmp(base, "rtshadowdenoise", 15);	// the RT shadow denoiser's passes trace nothing
+		return !strncmp(base, "rtshadowdenoise", 15) || !strncmp(base, "reflectionsrt", 13) || !strncmp(base, "rtpathtrace", 11);
 	}
 
 	bool FrameFinest(Helper& h) {

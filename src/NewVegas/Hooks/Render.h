@@ -70,6 +70,7 @@ BSRenderedTexture* __cdecl CreateSaveTextureHook(BSString* Name, const UInt32 Wi
 // The HUD / menus pass.
 extern CallDetour kRenderInterfaceDetour;
 void __fastcall RenderInterfaceHook(void* Interface, void*, void* Culler, bool PipboyVisible);
+void InstallMenu3DGuardHook();
 
 // Naked mid-function patches (bodies in Render.cpp).
 void SetTileShaderConstantsHook();

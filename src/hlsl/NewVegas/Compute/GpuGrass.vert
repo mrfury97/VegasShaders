@@ -7,6 +7,9 @@
 //
 // Build: glslangValidator -V --target-env vulkan1.1 -DGG_FAR=0 -o GpuGrassNearVS.spv GpuGrass.vert
 //        glslangValidator -V --target-env vulkan1.1 -DGG_FAR=1 -o GpuGrassFarVS.spv GpuGrass.vert
+//        (2026-11-17, the strands' records for SunFar) -DGG_FAR=0 -DGG_RECORDS=1 -o GpuGrassNearRecordsVS.spv, -DGG_FAR=1 -DGG_RECORDS=1 -o
+//        GpuGrassFarRecordsVS.spv (Vulkan SDK 1.3.296.0). GpuGrassNearVS / FarVS / the casters were NOT rebuilt then: the frame block grew by
+//        two vec4 at its end (cloud, cloudLight), which they do not read; a rebuild with this glslang changes their ids, not their code.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
 #include "GpuGrass.glsl"
@@ -18,6 +21,12 @@
 // GpuGrassCaster.frag): through its matrix, the distance to the light over its reach in o_spot.a
 #ifndef GG_CASTER
 #define GG_CASTER 0
+#endif
+// UNOFFICIAL 2026-11-17 fast-restart GG_RECORDS 1: the same strands' records for SunFar (GpuGrassNearRecordsVS / GpuGrassFarRecordsVS with
+// GpuGrassRecords.frag): the tuft's normal (world up, bent toward the eye just enough to face it, as GRASS23x000TMS.pso's grass_n) and the
+// camera-relative point
+#ifndef GG_RECORDS
+#define GG_RECORDS 0
 #endif
 
 layout(set = 0, binding = 0, std140) uniform Frame { GG_FRAME_BLOCK } f;
@@ -86,6 +95,17 @@ void main() {
     const vec4 clip = vec4(dot(f.rows[0].xyz, pos) + f.rows[0].w, dot(f.rows[1].xyz, pos) + f.rows[1].w,
                            dot(f.rows[2].xyz, pos) + f.rows[2].w, dot(f.rows[3].xyz, pos) + f.rows[3].w);
     gl_Position = vec4(clip.x, -clip.y, clip.z, clip.w);   // D3D9 clip space has y up, Vulkan's viewport y down
+#if GG_RECORDS
+    {
+        vec3 n = vec3(0.0, 0.0, 1.0);
+        const vec3 v = -pos * inversesqrt(max(dot(pos, pos), 1.0e-12));
+        n += v * max(0.15 - dot(n, v), 0.0);
+        o_color = vec4(n, f.cloudLight.z);   // (location 0: GpuGrassRecords.frag i_normal; w the grass mark)
+        o_spot = vec4(pos, f.cloudLight.w);  // (location 1: i_pos; w the class)
+        o_spotClip = vec4(0.0); o_spotParams = vec4(0.0);
+        return;
+    }
+#endif
 
     const GGDraw d = draws[di];
     // the card's colour at this height on the plant (a short strand's top shows the plant's middle colour)

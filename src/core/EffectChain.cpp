@@ -158,7 +158,6 @@
 #include "LampVisibility.h"	// UNOFFICIAL 2026-10-30 VisibleRanking
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "GpuProfiler.h"
-#include "HiZ.h"	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 #include "PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "PointShadowSlots.h"
 #include "PointShadowForward.h"
@@ -609,15 +608,6 @@ void ShaderManager::PreStep_AmbientLightTakeover(ChainContext& ctx) {
 	ctx.ambientLight = ambientLight;
 }
 
-void ShaderManager::PreStep_HiZ(ChainContext& ctx) {
-	IDirect3DDevice9* Device = ctx.Device;
-	const bool ambientLight = ctx.ambientLight;
-	// UNOFFICIAL 2026-10-26 (NVR DXVK, deep/fork-hiz; core/HiZ.h): the Hi-Z pyramid, one compute dispatch after the depth and normals,
-	// only for the readers that want it this frame ([Shaders.Reflections.Main] HiZ, [Shaders.AmbientLight.Main] HiZ, both Vulkan passes).
-	// (Reflections alone builds it right before its own passes, below: built here, the dispatch slowed AmbientLight's prepare by ~0.015 ms.)
-	HiZ::Build(Device, DxvkCompute::PassesOn() && ambientLight && Effects.AmbientLight->HiZWanted());
-}
-
 void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
@@ -996,8 +986,6 @@ void ShaderManager::PreStep_Reflections(ChainContext& ctx) {
 		static GpuTimer reflectionsTimer("Reflections (SSR)");
 		GpuProfileScope gpu(reflectionsTimer, Device);
 		if (wouldRender(Effects.Reflections)) {
-			// UNOFFICIAL 2026-10-26 (deep/fork-hiz): the Hi-Z pyramid for the trace, once a frame (nothing new if AmbientLight's HiZ built it).
-			if (DxvkCompute::PassesOn() && Effects.Reflections->HiZWanted()) HiZ::Build(Device, true);
 			Effects.Reflections->RenderBuffers(Device);
 			Device->SetRenderTarget(0, RenderTarget);
 			Effects.Reflections->BindMaterial();	// UNOFFICIAL 2026-10-20 MaterialAware (stage 15; nothing without it)
@@ -1175,7 +1163,12 @@ void ShaderManager::PreStep_RayReconstruction(ChainContext& ctx) {
 	// rays (drawn with this frame's jittered depth: RR resolves them with the rest); nothing of exposure, bloom, lens and LUT yet. DLSS-D
 	// denoises and anti-aliases it here, and TAA's resolve after the tonemap skips the frame. Off, or whenever it cannot run this frame
 	// (logged once): nothing happens.
-	if (Effects.TAA) Effects.TAA->RayReconstruct(Device, RenderTarget);
+	if (Effects.TAA) {
+		if (!Effects.TAA->RayReconstruct(Device, RenderTarget)) {
+			if (Effects.TAA->PreTonemapNativeAA(Device, RenderTarget))
+				PixelInspector::AfterFrame(Effects.TAA);
+		}
+	}
 }
 
 void ShaderManager::PreStep_LumaExposureBloom(ChainContext& ctx) {
@@ -1608,7 +1601,6 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "SkyViewTable", EffectChain::PreTonemap, &ShaderManager::PreStep_SkyViewTable },
 	{ "VolumetricClouds", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricClouds },
 	{ "AmbientLightTakeover", EffectChain::PreTonemap, &ShaderManager::PreStep_AmbientLightTakeover },
-	{ "HiZ", EffectChain::PreTonemap, &ShaderManager::PreStep_HiZ },
 	{ "CompositePlan", EffectChain::PreTonemap, &ShaderManager::PreStep_CompositePlan },
 	{ "ShadowApply", EffectChain::PreTonemap, &ShaderManager::PreStep_ShadowApply },
 	{ "CoverMapUpdate", EffectChain::PreTonemap, &ShaderManager::PreStep_CoverMapUpdate },

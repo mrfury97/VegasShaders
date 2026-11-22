@@ -18,7 +18,8 @@ layout(push_constant) uniform Push {
     mat4 projection;			// 48: TESR_ProjectionTransform
     uint samplerIndex;			// 112: POINT, CLAMP
     uint alongY;				// 116: 0 along x, 1 along y
-    uint pad[2];
+    uint pad[2];				// 120
+    vec4 renderScale;			// 128: (scaleX, scaleY, 1/scaleX, 1/scaleY) (UNOFFICIAL 2026-11-19 RenderRect)
 } pc;
 
 float viewZAt(vec2 uv) {
@@ -31,6 +32,8 @@ vec4 sourceAt(vec2 uv) {
 
 void main() {
     vec2 t = pc.reciprocalResolution.xy;
+    vec2 scale = pc.renderScale.x > 0.0 ? pc.renderScale.xy : vec2(1.0);
+    vec2 invScale = pc.renderScale.z > 0.0 ? pc.renderScale.zw : vec2(1.0);
     vec2 uv = gl_FragCoord.xy * t;
     vec2 axis = pc.alongY != 0u ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
 
@@ -42,7 +45,7 @@ void main() {
     }
 
     vec3 nC = normalize(centreSample.xyz * 2.0 - 1.0);
-    vec3 pC = nvrViewPositionFromProjection(uv, zC, pc.projection);
+    vec3 pC = nvrViewPositionFromProjection(uv * invScale, zC, pc.projection);
     float reach = pc.smoothData.x;
 
     vec3 sum = nC;
@@ -50,12 +53,12 @@ void main() {
         int k = i < 3 ? i - 3 : i - 2;	// -3 -2 -1 1 2 3
         float distTexels = abs(float(k)) * reach / 3.0;
         vec2 uvRaw = uv + axis * (float(k) * reach / 3.0) * t;
-        float onScreen = (any(lessThan(uvRaw, vec2(0.0))) || any(greaterThan(uvRaw, vec2(1.0)))) ? 0.0 : 1.0;
-        vec2 uvT = clamp(uvRaw, 0.5 * t, vec2(1.0) - 0.5 * t);
+        float onScreen = (any(lessThan(uvRaw, vec2(0.0))) || any(greaterThan(uvRaw, scale))) ? 0.0 : 1.0;
+        vec2 uvT = clamp(uvRaw, 0.5 * t, scale - 0.5 * t);
 
         float zT = viewZAt(uvT);
         vec3 nT = normalize(sourceAt(uvT).xyz * 2.0 - 1.0);
-        vec3 pT = nvrViewPositionFromProjection(uvT, zT, pc.projection);
+        vec3 pT = nvrViewPositionFromProjection(uvT * invScale, zT, pc.projection);
 
         float tolerance = max(zC * 0.0005 * distTexels, 0.5);
         float planeDist = abs(dot(pT - pC, nC));

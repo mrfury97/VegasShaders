@@ -6,6 +6,7 @@
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 SharedNoise
 #include "../../core/PassSums.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/RenderRect.h"	// UNOFFICIAL 2026-11-18 next-111: the blur in the rect frame (ShouldRender)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo target is its skin source (NoteSkinAlbedo)
 #include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 DeferredSkin: its records write the G-buffer, not these targets; DeferredSkinBlur fills them
 
@@ -494,7 +495,11 @@ bool SkinScatteringEffect::ShouldRender() {
 	if (SkinShaderDebug) return false;
 	// UNOFFICIAL 2026-10-27 RenderScale (TAAUpscale.cpp): the skin targets were drawn with the world at the lower internal resolution
 	// (their top-left corner) while the scene is now upscaled: their test would compare the wrong pixels. Not blurred this frame.
-	if (TAAEffect::UpscaledThisFrame()) return false;
+	// UNOFFICIAL 2026-11-18 next-111: that holds only where the world was upscaled BEFORE the effects ([Shaders.TAA.FSR] EffectsAfterUpscale,
+	// not the default). In the default order (RenderRect: the effects run in the same top-left rect as the world, upscaled after them) the
+	// targets and the scene share the rect's layout, and the blur runs there (SkinScattering.fx.hlsl: steps in rect coordinates, taps kept
+	// inside the rect). Before, every FSR / DLSS player below RenderScale 1 (0.67 by default with FSR) had no skin scattering at all.
+	if (TAAEffect::UpscaledThisFrame() && !RenderRect::Active()) return false;
 	if (MSAASurface) TheRenderManager->device->StretchRect(MSAASurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);
 	if (AlbedoMSAASurface) TheRenderManager->device->StretchRect(AlbedoMSAASurface, NULL, AlbedoTextureSurface, NULL, D3DTEXF_NONE);
 	return true;

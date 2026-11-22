@@ -43,6 +43,7 @@ namespace GrassMaskedAlbedo {
 				Logger::Log("[ERROR] UNOFFICIAL GrassMaskedAlbedo: its %ux%u target could not be made: the grass masks fall back to the albedo buffer (no record = soft) for this session", desc.Width, desc.Height);
 				return plain;
 			}
+			d->ColorFill(Surface, NULL, D3DCOLOR_ARGB(0, 0, 0, 0));	// clean border outside active RenderRect on first make
 			Width = desc.Width; Height = desc.Height;
 		}
 		if (!PS && !(PS = CapturedNormals::FullScreenShader(d, kPS, "UNOFFICIAL GrassMaskedAlbedo", PSFailed))) return plain;

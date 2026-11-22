@@ -8,7 +8,7 @@
 #include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-10-27 [Shaders.Grass.Main] CastShadows
 #include "../../core/FrameClock.h"
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-04 the deferred flashlight on the grass (UpdateLights)
-#include "../../core/FlashlightLamp.h"		// upstream 1.1.2 (6e85afb): the flashlight's game lamp is left out of the grass lamps (UpdateLights)
+#include "../../core/FlashlightLamp.h"		// UNOFFICIAL 2026-11-20 skip the flashlight's game lamp when walking ShadowSceneNode::lights
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 grass records (SetForDraw: GrassBind)
 
 void GrassShaders::RegisterConstants() {
@@ -114,9 +114,9 @@ void GrassShaders::UpdateSettings() {
 	Specular.Glossiness = std::clamp(TheSettingManager->GetSettingF(normals, "Glossiness"), 1.0f, 512.0f);
 }
 
-// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the lamps nearest the camera that reach anything near it. (2026-11-22, upstream 1.1.2
-// port) taken from the world's ShadowSceneNode point lights with ManyLamps' filters (active, not hidden, not the flashlight's lamp;
-// reach Spec.r, colour Diff x Dimmer capped without HDR x the LOD dimmer), no longer from NVR's light lists. A light's sphere edge counts, not its centre: a big lamp farther off can light more of the
+// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the lamps nearest the camera that reach anything near it, from both of NVR's
+// light lists (the shadow-casting ones, ShadowsExteriors' ShadowLightPosition with colours in LightColor[0..], and the rest,
+// LightPosition with colours after them). A light's sphere edge counts, not its centre: a big lamp farther off can light more of the
 // grass in view.
 void GrassShaders::UpdateLights() {
 	Constants.LightData = D3DXVECTOR4(0.0f, Lights.Strength, 0.0f, 0.0f);
@@ -141,11 +141,9 @@ void GrassShaders::UpdateLights() {
 	// UNOFFICIAL 2026-11-12 CapturedGrass: while the grass lights itself by this beam, its records are not written for the raster frame's
 	// RT GI (core/CapturedNormals.h BeginFrame: the light pass lights everything the records hold, the grass would get the beam twice)
 	CapturedNormals::GrassOwnBeam = Spot[0].w > 0.0f;
-	// Upstream 1.1.2 (6e85afb) grass lamp blowout fix. Every slot is cleared first, so a frame with fewer lamps leaves no stale ones
-	// behind (GPU grass copies them too). The lamps come from the world ShadowSceneNode's point lights, as ManyLamps' table takes them,
-	// instead of ShadowLightPosition / LightPosition: those carry the shadow radius (Spec.r x LightRadiusMult, 1.5 by default, a shadow
-	// margin) and the raw Dimmer, without the LOD dimmer, the !bHDR clamp or the active / hidden flags, so the grass got every lamp
-	// half again as far and brighter than the game lights anything else, and lamps the game had switched off.
+	// UNOFFICIAL 2026-11-20 grass lamp blowout fix: clear every slot first so shrinking counts never leave stale lamps behind,
+	// and walk the world ShadowSceneNode's active point lights directly instead of ShadowLightPosition / LightPosition (which carry
+	// LightRadiusMult = 1.5x inflated radii and raw Dimmer without fLODDimmer, !bHDR clamp, or active/hidden flags).
 	memset(LightPosition, 0, sizeof(LightPosition));
 	memset(LightColor, 0, sizeof(LightColor));
 	if (!Lights.Enabled || Lights.MaxLights <= 0 || Lights.Strength <= 0.0f) return;
@@ -154,20 +152,20 @@ void GrassShaders::UpdateLights() {
 	if (!worldNode) return;
 
 	struct Candidate { float key; D3DXVECTOR4 pos; D3DXVECTOR4 color; };
-	static std::vector<Candidate> found;	// (kept between frames: no allocation once it has grown)
+	static std::vector<Candidate> found;
 	found.clear();
 	const D3DXVECTOR4 cam = TheRenderManager->CameraPosition;
-	const bool hdr = *(const bool*)0x011F941E;	// BSShaderManager::bHDR (as ManyLamps / LampTableCore::LampRaw)
+	const bool hdr = *(const bool*)0x011F941E;	// BSShaderManager::bHDR (matches ManyLamps / LampTableCore::LampRaw)
 	for (NiTList<ShadowSceneLight>::Entry* e = worldNode->lights.start; e; e = e->next) {
 		const ShadowSceneLight* light = e->data;
 		const NiPointLight* source = light ? light->sourceLight : nullptr;
 		if (!source || !light->bPointLight) continue;
-		if (FlashlightLamp::Is(source)) continue;	// (the deferred flashlight's lamp: the grass has its own beam, Spot above)
-		// as ManyLamps::BuildTable: not switched off for the view (+0x110), not hidden (NiAVObject flags +0x30 bit 0), not flagged (+0xEC)
+		if (FlashlightLamp::Is(source)) continue;
 		const UInt8* raw8 = (const UInt8*)light;
 		const bool hidden = (((const UInt8*)source)[0x30] & 1) != 0;
-		if (*(const UInt16*)(raw8 + 0x110) == 0xFF || hidden || raw8[0xEC]) continue;
-		const float radius = source->Spec.r;	// the lamp's own reach (no shadow margin)
+		const bool active = *(const UInt16*)(raw8 + 0x110) != 0xFF && !hidden && !raw8[0xEC];
+		if (!active) continue;
+		const float radius = source->Spec.r;	// true game light reach (no LightRadiusMult shadow-margin inflation)
 		float dimmer = source->Dimmer;
 		if (!hdr && dimmer > 1.0f) dimmer = 1.0f;
 		const float scale = dimmer * light->fLODDimmer;
@@ -402,18 +400,55 @@ namespace GrassNormalMaps {
 // GrassCameraRelative), so the chain runs first and, for NVR's VS, the two rows are put back after it.
 typedef int(__thiscall* GrassSetupFn)(void*, NiGeometry*, int, int, int, int, int, float*, int);
 static GrassSetupFn sGrassSetup = nullptr;
+typedef HRESULT(STDMETHODCALLTYPE* TstgDIPFn)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
+static TstgDIPFn sTstgNextDIP = nullptr;
+static bool sTstgHooked = false;
+
+static HRESULT STDMETHODCALLTYPE TstgDIPHook(IDirect3DDevice9* device, D3DPRIMITIVETYPE type, INT base, UINT minIndex, UINT numVertices, UINT start, UINT count) {
+	if (GrassShaders::PendingTstgRestore && !NewGrass::InDraw && TheRenderManager) {
+		GrassShaders::PendingTstgRestore = false;
+		device->SetVertexShaderConstantF(248, (const float*)&TheRenderManager->InvProjMatrix, 2);
+	}
+	return sTstgNextDIP(device, type, base, minIndex, numVertices, start, count);
+}
+
+void GrassShaders::CheckTstg(IDirect3DDevice9* device) {
+	if (!TstgChecked) {
+		TstgChecked = true;
+		TstgDetected = GetModuleHandleA("ThereStandsTheGrass.dll") != nullptr;
+		if (TstgDetected)
+			Logger::Log("UNOFFICIAL Grass: ThereStandsTheGrass.dll detected - enabling per-draw c248-c249 InvProj restore guard (recommend disabling TSTG when using Vegas Shaders grass interaction).");
+	}
+	if (TstgDetected && !sTstgHooked && device) {
+		void** table = *(void***)device;
+		DWORD old = 0;
+		if (VirtualProtect(&table[82], sizeof(void*), PAGE_EXECUTE_READWRITE, &old)) {
+			sTstgNextDIP = (TstgDIPFn)table[82];
+			table[82] = (void*)&TstgDIPHook;
+			VirtualProtect(&table[82], sizeof(void*), old, &old);
+			sTstgHooked = true;
+		}
+	}
+}
 
 static int __fastcall GrassSetupHook(void* Shader, void*, NiGeometry* Geometry, int a3, int a4, int a5, int a6, int a7, float* Transform, int a9) {
 	const int result = sGrassSetup(Shader, Geometry, a3, a4, a5, a6, a7, Transform, a9);
 	if (GrassShaders* grass = TheShaderManager ? TheShaderManager->Shaders.Grass : nullptr) {
 		grass->OnGrassShape(Geometry);
-		if (grass->Enabled && GrassShaders::LastBindNVR)
+		if (grass->Enabled && GrassShaders::LastBindNVR) {
 			TheRenderManager->device->SetVertexShaderConstantF(248, (const float*)&TheRenderManager->InvProjMatrix, 2);
+			if (GrassShaders::TstgDetected) GrassShaders::PendingTstgRestore = true;
+		}
 	}
 	return result;
 }
 
 void GrassShaders::InstallHooks() {
+	if (!TstgChecked && GetModuleHandleA("ThereStandsTheGrass.dll")) {
+		TstgChecked = true;
+		TstgDetected = true;
+		Logger::Log("UNOFFICIAL Grass: ThereStandsTheGrass.dll detected - enabling per-draw c248-c249 InvProj restore guard (recommend disabling TSTG when using Vegas Shaders grass interaction).");
+	}
 	if (sGrassSetup) return;
 	void** slot = (void**)(0x10B8980 + 24 * 4);
 	DWORD old;
@@ -424,15 +459,24 @@ void GrassShaders::InstallHooks() {
 	Logger::Log("Grass: per-shape setup hooked (was %p)", sGrassSetup);
 }
 
+static const NiSourceTexture* GrassDiffuseTexture(NiGeometry* Geometry) {
+	if (!Geometry) return nullptr;
+	if (NiShadeProperty* shade = (NiShadeProperty*)Geometry->GetProperty(NiProperty::kType_Shade))
+		if (shade->m_eShaderType == NiShadeProperty::kProp_TallGrass)
+			return *(NiSourceTexture**)((UInt8*)shade + 0x84);
+	return nullptr;
+}
+
+bool GrassShaders::IsStaticGeometry(NiGeometry* Geometry) {
+	return IsStaticGrass(GrassDiffuseTexture(Geometry));
+}
+
 void GrassShaders::OnGrassShape(NiGeometry* Geometry) {
 	if (!Geometry) return;
 
 	// The shape's diffuse texture: TallGrassShaderProperty (shade type 4) keeps it (an NiSourceTexture) at +0x84 (its getter 0xBB36C0,
 	// which TallGrassShader's texture setup 0xBAC950 binds to s0).
-	const NiSourceTexture* diffuse = nullptr;
-	if (NiShadeProperty* shade = (NiShadeProperty*)Geometry->GetProperty(NiProperty::kType_Shade))
-		if (shade->m_eShaderType == NiShadeProperty::kProp_TallGrass)
-			diffuse = *(NiSourceTexture**)((UInt8*)shade + 0x84);
+	const NiSourceTexture* diffuse = GrassDiffuseTexture(Geometry);
 	SetBatchConstants(Geometry, IsStaticGrass(diffuse));
 
 	// Its normal map, from the diffuse texture's name. s1 goes through the render state cache, so the next shader using s1 gets its

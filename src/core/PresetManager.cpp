@@ -117,9 +117,21 @@ namespace {
 	// Regular *.ini files directly inside an existing folder, in directory order.
 	std::vector<fs::path> IniFilesIn(const fs::path& folder) {
 		std::vector<fs::path> found;
-		for (const auto& entry : fs::directory_iterator(folder)) {
-			if (entry.is_regular_file() && entry.path().extension() == ".ini")
-				found.push_back(entry.path());
+		// 2026-11-17 (security review 2): a file whose name has a character outside the Windows code page (a pack made on another
+		// language's PC) made path::string() throw, at load and on every frame the Presets window was open. Such a file is left out
+		// (its name cannot be a preset name here); a folder that cannot be listed gives an empty list.
+		std::error_code ec;
+		for (fs::directory_iterator it(folder, ec), end; !ec && it != end; it.increment(ec)) {
+			try {
+				if (it->is_regular_file() && it->path().extension() == ".ini") {
+					(void)it->path().string();
+					found.push_back(it->path());
+				}
+			}
+			catch (const std::exception&) {
+				static int told = 0;
+				if (told++ < 8) Logger::Log("PresetManager: [Preset] a preset, Variant or keyword file has a name this Windows language setting cannot show: left out");
+			}
 		}
 		return found;
 	}
@@ -128,11 +140,31 @@ namespace {
 		return fs::exists(folder) && fs::is_directory(folder);
 	}
 
+	// 2026-11-17 (security review 2): a preset or Variant name becomes a file name, and it can come from a downloaded keyword file's
+	// [header], from EnabledVariants.ini or from a plugin's cell / worldspace EditorID. A name with a path in it made Save write an
+	// .ini anywhere on the drive. Only a plain file name is one: no path or stream characters, no control bytes, no leading or
+	// trailing space or dot, not a DOS device, at most 100 characters.
+	bool SafeFileName(const std::string& name) {
+		if (name.empty() || name.size() > 100) return false;
+		if (name.front() == ' ' || name.front() == '.' || name.back() == ' ' || name.back() == '.') return false;
+		for (const char c : name)
+			if ((unsigned char)c < 32 || std::string_view("\\/:*?\"<>|").find(c) != std::string_view::npos) return false;
+		std::string stem = name.substr(0, name.find('.'));
+		while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+		for (char& c : stem) c = (c >= 'a' && c <= 'z') ? (char)(c - 'a' + 'A') : c;
+		if (stem == "CON" || stem == "PRN" || stem == "AUX" || stem == "NUL") return false;
+		if (stem.size() == 4 && (stem.compare(0, 3, "COM") == 0 || stem.compare(0, 3, "LPT") == 0) && stem[3] >= '0' && stem[3] <= '9') return false;
+		return true;
+	}
+
+	// "" for a name that is not a plain file name (above): nothing exists there, and nothing can be opened or written.
 	std::string PresetFile(const std::string& name) {
+		if (!SafeFileName(name)) return std::string();
 		return UnderGameRoot(PresetManager::kPresetsDir()) + name + ".ini";
 	}
 
 	std::string VariantFile(const std::string& name) {
+		if (!SafeFileName(name)) return std::string();
 		return UnderGameRoot(PresetManager::kVariantsDir()) + name + ".ini";
 	}
 
@@ -145,6 +177,10 @@ namespace {
 
 		for (const auto& [name, node] : table.as_table()) {
 			if (node.is_table()) {
+				// 2026-11-17 (security review 2): a table named with a dot in it (["Main.Develop.Main."]) or with no name is not one
+				// of ours: its dotted path differed from the blacklisted name as text, yet the settings lookup (which splits on
+				// dots and drops empty pieces) landed on the blacklisted section. Left out, with everything under it.
+				if (name.empty() || name.find('.') != std::string::npos) continue;
 				// The defaults keep the '_' of their [_Main...] headers (SettingManager adds it back on lookup): drop it at
 				// the root so the paths come out in the public form. Preset files never have it.
 				const bool stripUnderscore = dotted.empty() && !name.empty() && name[0] == '_';
@@ -176,7 +212,7 @@ namespace {
 	// Reads one preset or Variant file (same format).
 	bool ReadPresetFile(const std::string& path, const std::string& label, PresetData& into) {
 		into.clear();
-		if (!fs::exists(path)) return false;
+		if (path.empty() || !fs::exists(path)) return false;
 		try {
 			const tomlValue parsed = toml::parse<toml::preserve_comments, std::map>(std::string_view(path));
 			FlattenToml(parsed, "", into);
@@ -190,7 +226,12 @@ namespace {
 
 	// Writes one preset or Variant file (same format); the folder is created when missing.
 	bool WritePresetFile(const std::string& path, const std::string& folder, const std::string& label, const PresetData& contents) {
+		if (path.empty()) {	// 2026-11-17: not a plain file name (PresetFile / VariantFile)
+			Logger::Log("PresetManager: [Preset] '%s' is not a usable file name (a path, a reserved name or too long): nothing written", label.c_str());
+			return false;
+		}
 		tomlValue root = toml::table();
+		try {	// 2026-11-17: two sections where one is a value inside the other ("A" holding B, and "A.B") threw out of the menu's click
 
 		for (const auto& [dotted, values] : contents) {
 			if (PresetManager::IsBlacklistedSection(dotted)) continue;
@@ -213,6 +254,11 @@ namespace {
 		}
 
 		fs::create_directories(fs::path(folder));
+		}
+		catch (const std::exception& failure) {
+			Logger::Log("PresetManager: [Preset] '%s' not written: %s", label.c_str(), failure.what());
+			return false;
+		}
 
 		if (std::ofstream file(path, std::ios::trunc | std::ios::binary); file.is_open()) {
 			file << root << std::endl;	// closed as it goes out of scope
@@ -382,7 +428,8 @@ namespace {
 	}
 
 	// Pushes a preset into the live settings. Only values that differ are written (each SetSetting reloads all settings).
-	void PushPreset(const PresetData& preset) {
+	// playerOwn: the player's own settings put back on leaving a preset's place: an old default there is their choice, never passed over.
+	void PushPreset(const PresetData& preset, bool playerOwn = false) {
 		if (TheSettingManager == nullptr) return;
 
 		gBaseline = preset;	// the reference for CaptureVariantDiff, previews included
@@ -394,9 +441,18 @@ namespace {
 			const char* section = dotted.c_str();
 			for (const auto& [key, value] : values) {
 				if (value.Type != ValueKind::String) {
-					if (StalePresetValues::Blocked(section, key.c_str(), value.FloatValue, "a preset")) continue;	// UNOFFICIAL 2026-11-10
-					if (TheSettingManager->GetSettingF(section, key.c_str()) != value.FloatValue) {
-						TheSettingManager->SetSettingF(section, key.c_str(), value.FloatValue);
+					// UNOFFICIAL 2026-11-10 / 11-18: an old default of a fixed setting, saved into the preset by an older build, is passed
+					// over; a renamed key goes to its new name (StalePresetValues.h). The baseline takes what was really pushed, so the
+					// variant diff does not count the player's own value as a change.
+					const StalePresetValues::Result stale = playerOwn ? StalePresetValues::Result{ StalePresetValues::Verdict::Set, section, key.c_str(), 0 }
+						: StalePresetValues::Check(section, key.c_str(), value.FloatValue, "a preset");
+					if (stale.verdict == StalePresetValues::Verdict::PassOver) {
+						gBaseline[dotted][key].FloatValue = TheSettingManager->GetSettingF(section, key.c_str());
+						continue;
+					}
+					if (stale.verdict == StalePresetValues::Verdict::Rename) gBaseline[stale.section][stale.key] = value;
+					if (TheSettingManager->GetSettingF(stale.section, stale.key) != value.FloatValue) {
+						TheSettingManager->SetSettingF(stale.section, stale.key, value.FloatValue);
 						++changed;
 					}
 					continue;
@@ -457,6 +513,12 @@ bool PresetManager::IsReservedName(const std::string& name) {
 // sections and keys kept their names) were never seen. At boot every file there that ours lacks, or that is newer than our copy
 // (a preset pack copied in later), is copied over; EnabledVariants.ini only when ours is missing (it is the user's own list). The
 // old folder is never changed. The count goes to the menu's notice (OldFilesNotice).
+// (2026-11-17) a path as text for the log; a name outside the Windows code page makes path::string() throw
+static std::string Shown(const fs::path& path) {
+	try { return path.string(); }
+	catch (const std::exception&) { return "(a name this Windows language setting cannot show)"; }
+}
+
 static void ImportOldData()
 {
 	if (std::string(Paths::DataRoot()) != Paths::NewDataRoot) return;	// the old folder is the one in use, or neither exists
@@ -474,10 +536,10 @@ static void ImportOldData()
 			if (fs::exists(to, ec) && fs::last_write_time(to, ec) >= fs::last_write_time(it->path(), ec)) continue;
 			fs::create_directories(to.parent_path(), ec);
 			if (fs::copy_file(it->path(), to, fs::copy_options::overwrite_existing, ec)) {
-				Logger::Log("PresetManager: [Preset] %s taken over from %s", relative.string().c_str(), Paths::OldDataRoot);
+				Logger::Log("PresetManager: [Preset] %s taken over from %s", Shown(relative).c_str(), Paths::OldDataRoot);
 				copied++;
 			}
-			else { Logger::Log("PresetManager: [Preset] could not copy %s: %s", it->path().string().c_str(), ec.message().c_str()); failed++; ec.clear(); }
+			else { Logger::Log("PresetManager: [Preset] could not copy %s: %s", Shown(it->path()).c_str(), ec.message().c_str()); failed++; ec.clear(); }
 		}
 		ec.clear();
 	}
@@ -616,7 +678,7 @@ void PresetManager::ResolveAndApply(TESObjectCELL* Cell, bool Automatic) {
 		chosen = gActive.ownSettings; // instead of the shipped defaults ChoosePreset read
 
 	OverlayVariants(chosen);
-	PushPreset(chosen);
+	PushPreset(chosen, ownSettings);
 	gActive.key = identity;
 	gActive.isOwn = ownSettings;
 	gLastResult = outcome;

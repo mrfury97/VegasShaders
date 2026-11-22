@@ -23,7 +23,11 @@ vec4 EstimateRT(vec2 uv) {
     // open with no bounce), but this fade went on to DrawDistance, so past 8000 units the traced occlusion and bounce light stopped dead.
     // On: both fade out over the last quarter before endFade, whatever DrawDistance is. Off: as before.
     if (cb.sunFarFlags.w > 0.5) fade *= 1.0 - smoothstep(0.75 * endFade, endFade, origin.z);
-    if (fade <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+    if (fade <= 0.0) {
+        // 1st-person viewmodel (Prepare wrote 1.0e6): pass RTGI bounce light through with AO = 1.0 (real sky has t_gi = 0).
+        vec3 vmBounce = (origin.z >= 9.0e5 && (pc.variant & 0x100u) != 0u) ? pointLod(t_gi, uv).rgb : vec3(0.0);
+        return vec4(vmBounce, 1.0);
+    }
     vec4 rt = linearLod(t_rt, uv);
     // (rt-ao-gi) variant bit 8: the RT bounce light into rgb, as ComputeGI's GI pass writes it (linear, x the fade); AmbientLight's GI
     // accumulate and apply take it from there. Point read: each texel's own ray (the blurs and the history average them).

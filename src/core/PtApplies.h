@@ -44,7 +44,7 @@ namespace PtApplies {
 		{ "AmbientLight", nullptr, Replaced, "Replaced by the path tracer's own sky and bounce light. See Ray tracing > PTSky, PTAmbient, PTBounces." },
 		{ "AmbientOcclusion", nullptr, Replaced, "Replaced: the path tracer shades corners and creases itself." },
 		{ "Specular", nullptr, Replaced, "Replaced by the path tracer's own highlights. See Ray tracing > PTSpecular." },
-		{ "BounceLight", nullptr, Twice, "Still drawn on top of the path traced picture, which has its own bounce light: light may count twice. Best left off." },
+		{ "BounceLight", nullptr, Replaced, "Replaced by the path tracer's own bounce light." },
 		{ "PBR", nullptr, Feeds, "Keep it on: objects drawn without it stay the game's own picture. Roughness, metal, LightingScale and Gamma feed the "
 			"path tracer. Its other lighting settings do nothing on traced surfaces. Bumps show as fine detail only (Ray tracing > PTDetail)." },
 		{ "Reflections", nullptr, Off, "Not drawn while path tracing: the path tracer has its own reflections (settings file key PTReflectionsOff).",
@@ -65,8 +65,7 @@ namespace PtApplies {
 		{ "Shaders.ShadowsInteriors.RT", "RT lamp shadows", Off, "Not traced while path tracing: the path tracer has its own lamp shadows "
 			"(Ray tracing > PTStandDownRT).", kRT, "PTStandDownRT", Partly, "Still traced beside the path tracer's own lamp shadows, and it "
 			"costs time (Ray tracing > PTStandDownRT is off)." },
-		{ "Shaders.AmbientOcclusion.RT", "RT occlusion and bounce light", Replaced, "Not shown: Ambient occlusion and Ambient light step aside for "
-			"the path tracer. It may still trace and cost time: turn it off for speed." },
+		{ "Shaders.AmbientOcclusion.RT", "RT occlusion and bounce light", Off, "Paused while path tracing: the path tracer traces its own occlusion, sky and bounce light." },
 		{ "Shaders.Reflections.RT", "RT reflections", Off, "Not traced while path tracing: the path tracer has its own reflections "
 			"(Ray tracing > PTStandDownRT).", kRT, "PTStandDownRT", Partly, "Still traced (Ray tracing > PTStandDownRT is off), and shown "
 			"only if the Reflections effect is still drawn." },
@@ -108,7 +107,7 @@ namespace PtApplies {
 	inline const char* const kOnTop = "VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, Sandstorm, HeatHaze, DustMotes, CloudShadows, SunFar, "
 		"Precipitations, Snow, SnowAccumulation, HudRaindrops, Underwater, WaterLens, Plants, Cloth, PipboyFit, BloodFlow, Tonemapping, "
 		"Exposure, LocalExposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF, "
-		"BloodLens, TAA, SMAA, Sharpening, DitherBuster, SkyDither, GPUParticles, Dream, Debug";
+		"TAA, SMAA, Sharpening, DitherBuster, SkyDither, GPUParticles, Dream, Debug";
 	inline const Row kOnTopRow = { "", nullptr, Applies, "Still applies: it is drawn on top of the path traced picture." };
 
 	inline const char* const kTags[StateCount] = { "", "PT: partly", "PT: replaced", "PT: off", "PT: feeds", "PT: missing", "PT: twice" };

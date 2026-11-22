@@ -47,13 +47,15 @@ static float BridgeTMap = 0.0f;	// VanillaBridgeOverMaps: BridgeT where an _rmao
 // rock, concrete, wood and plaster, near a metal's, spread over a broad sheen. Non-metal surfaces reflect 2-8 % head-on, so the non-metal
 // share of the bridged strength is capped there; metal keeps the full authored strength (power armour's glints are its metal share).
 // Sharp authored glints (high n) are under the cap anyway (n 100, mask 0.5: 0.04), so they are unchanged.
+// UNOFFICIAL 2026-11-20: keep conductor F0 physically tied to baseColor (matching deferred passes) instead of dividing out luminance
+// via hue = baseColor / max(baseColor) * BridgeF0, which made dark/blued weapon metals 5x-20x brighter than physical F0 and blew out
+// viewmodel specular to desaturated gray/white when turning toward a light source.
 float3 BridgeSpecF0(float3 baseColor, float metal) {
     const float3 plain = lerp(PBR_DIELECTRIC_F0, baseColor, metal);
-    const float3 hue = baseColor / max(max(baseColor.r, max(baseColor.g, baseColor.b)), 1e-4f);
     #ifdef VANILLA_BRIDGE_DIELECTRIC_MAX
-        return lerp(plain, lerp(min(BridgeF0, VANILLA_BRIDGE_DIELECTRIC_MAX).xxx, BridgeF0 * hue, metal), BridgeT);
+        return lerp(plain, lerp(min(BridgeF0, VANILLA_BRIDGE_DIELECTRIC_MAX).xxx, baseColor, metal), BridgeT);
     #else
-        return lerp(plain, BridgeF0 * lerp(1.0f, hue, metal), BridgeT);
+        return lerp(plain, lerp(BridgeF0.xxx, baseColor, metal), BridgeT);
     #endif
 }
 #define PBR_SPEC_F0(baseColor, metal) BridgeSpecF0((baseColor), (metal))

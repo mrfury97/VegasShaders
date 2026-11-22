@@ -169,11 +169,14 @@ float4 SkinBlur(float2 uv, float2 dir, bool first_pass) {
     // One kernel unit on screen: the projection of TESR_SkinScatterData.x game units at this depth
     // (the same number of pixels across and down, so the turned kernel stays round).
     float2 step_uv = dir * float2(TESR_ProjectionTransform[0][0], TESR_ProjectionTransform[1][1]) * (0.5f * TESR_SkinScatterData.x / max(depth_m, 1.0f));
+    // UNOFFICIAL 2026-11-18 next-111 (RenderScale below 1, effects in the rect: Includes/RenderRect.hlsl): the step above is a share of the
+    // screen; in rect coordinates it is that share of the drawn part. 1 at RenderScale 1.
+    step_uv *= TESR_RenderScale.xy;
 
     float3 blurred_v = light_m * TESR_SkinScatterKernel[0].rgb;
     [unroll]
     for (int i = 1; i < SAMPLES; i++) {
-        float4 sample_uv = float4(uv + TESR_SkinScatterKernel[i].a * step_uv, 0.0f, 0.0f);
+        float4 sample_uv = float4(clampToRectIfOn(uv + TESR_SkinScatterKernel[i].a * step_uv, TESR_ReciprocalResolution.xy), 0.0f, 0.0f);	// (next-111: never past the drawn part)
         float4 color = tex2Dlod(TESR_RenderedBuffer, sample_uv);
         float4 scatter_v = tex2Dlod(TESR_SkinScatterBuffer, sample_uv);
         float4 base_rgb = tex2Dlod(TESR_SkinAlbedoBuffer, sample_uv);

@@ -1318,7 +1318,6 @@ static void AboutWindow() {
 		AboutCredit("PixelsSquared", "the Perceptual tone mapper, eye adaptation, cloud moonlight and sky light");
 		AboutCredit("macintroll", "snow accumulation, the snow look, captured normals, lens and underwater shaders");
 		AboutCredit("Balebandro", "Physically-Based-Reloaded: PBR weather scales, grass size fade");
-		AboutCredit("Sal", "work shared for this project");
 		AboutCredit("VHeyes (mirjomi)", "fixes: SMAA edges and tuning, the material pass depth, and more");
 		AboutCredit("Community Shaders team", "terrain/cloud shadows, grass collision, skylighting, LOD blending, True PBR layout (GPL-3.0)");
 		AboutCredit("Polyphony Digital", "the Perceptual tone mapper (their MIT sample code) and the eye adaptation design, from their SIGGRAPH 2025 paper for Gran Turismo 7");

@@ -37,13 +37,20 @@ float rtContactShadow(vec3 from, vec3 n, vec3 toLight, float lightDist, float vi
 	const vec3 rel0 = from - eye;
 	const float plane = dot(rel0, n);   // the start's own plane: the same flat surface seen at another pixel never blocks
 	const float bias = max(0.5, 0.0005 * viewZ);
+	// UNOFFICIAL 2026-11-19: hoist linear camera-space projection out of the 16-step march (exact same math)
+	const vec3 stepVec = toLight * len;
+	const float z0 = dot(rel0, forward.xyz), dz = dot(stepVec, forward.xyz);
+	const float invRR = 0.5 / rr, invUU = -0.5 / uu;
+	const float rx0 = dot(rel0, right) * invRR, drx = dot(stepVec, right) * invRR;
+	const float ry0 = dot(rel0, up) * invUU, dry = dot(stepVec, up) * invUU;
+	const vec2 uvBase = vec2(0.5) - jitter;
 	const int kSteps = 16;
 	for (int i = 1; i <= kSteps; i++) {
 		const float f = (float(i) - noise) / float(kSteps);
-		const vec3 q = rel0 + toLight * (len * f);
-		const float z = dot(q, forward.xyz);
+		const float z = z0 + dz * f;
 		if (!(z > 1.0)) break;
-		const vec2 uv = vec2(dot(q, right) / (rr * z), -dot(q, up) / (uu * z)) * 0.5 + 0.5 - jitter;
+		const float invZ = 1.0 / z;
+		const vec2 uv = vec2((rx0 + drx * f) * invZ, (ry0 + dry * f) * invZ) + uvBase;
 		const ivec2 px = ivec2(floor(uv * size));
 		if (any(lessThan(px, ivec2(0))) || any(greaterThanEqual(px, ivec2(size)))) break;
 		const float d = imageLoad(RT_CONTACT_DEPTH, px).r;

@@ -28,6 +28,8 @@ void main() {
 	// 3 x 3 range holds both 0 and 1, so the clamp cannot stop the stabilized edge lagging behind a moving camera)
 	float frames = p.params.w;
 	if (p.history.y > 0.0) frames *= cur.z > 0.0 ? clamp(cur.z / pixelWorld(s.viewZ) / p.history.y, 0.0, 1.0) : 1.0;
+	// UNOFFICIAL 2026-11-20: SUN stores moving-actor recent countdown in cur.y (2..9 > 1.5; LAMPS stores m2 <= 1.0): skip stabilization lag on moving actor shadows
+	if (cur.y > 1.5) frames = 0.0;
 	if (!s.valid || frames < 0.5) { imageStore(stabNext, g, vec4(current, 0.0, 0.0, 0.0)); return; }
 
 	float lo = current, hi = current;

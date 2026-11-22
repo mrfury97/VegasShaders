@@ -100,13 +100,14 @@ void TextureRecord::GetSamplerStates(std::string stateBlock) {
 		case D3DSAMP_SRGBTEXTURE:
 			slot = LookUpWord(kSrgbModes, word);
 			break;
+		// (2026-11-17: strtof / strtol, were stof / stoi, which throw on text that is not a number: nothing caught it)
 		case D3DSAMP_BORDERCOLOR: {
-			const float color = std::stof(word);
+			const float color = strtof(word.c_str(), nullptr);
 			slot = *reinterpret_cast<const DWORD*>(&color);
 			break;
 		}
 		case D3DSAMP_MAXANISOTROPY:
-			slot = std::stoi(word);
+			slot = (DWORD)std::clamp(strtol(word.c_str(), nullptr, 10), 1L, 16L);
 			break;
 		default:
 			break;	// other states keep their default

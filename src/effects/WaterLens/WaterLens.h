@@ -11,8 +11,13 @@ public:
 	};
 	WaterLensStruct	Constants;
 
-	float	amount;
+	float	amount = 0.0f;
+	float	fadeValue = 0.0f;
+	bool	wasUnderwater = false;
+	bool	needsSync = true;
+	double	lastUpdateTime = -1.0;
 
+	void	Reset();
 	void	UpdateConstants();
 	void	RegisterConstants();
 	void	UpdateSettings();

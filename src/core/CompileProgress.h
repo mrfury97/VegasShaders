@@ -1,13 +1,10 @@
 #pragma once
 
-// UNOFFICIAL 2026-11-20 (upstream Vegas Shaders 1.1.2, ported 2026-11-22): delayed-show Win32 progress indicator during startup
-// shader/effect compilation. On a cold cache (first launch or after an update), startup compilation runs before D3D9/ImGui presents
-// any frames, so the game window sits black and looks frozen. This spawns a lightweight Win32 GDI overlay on its own thread,
-// stays responsive to Windows messages, and closes automatically as soon as ImGuiManager::Initialize runs (the first frame).
-// Started by EffectPrecompile::Start, ShaderPrecompile::Start and ShaderRecord::LoadShader's own compiles; counted by their workers.
-// (port) Shown only once at least one shader or effect was really compiled and 0.8 s have passed: upstream also showed it after
-// 1.5 s with nothing compiled, i.e. on every cached start whose first frame takes longer than that (most modded starts).
-// No settings, no files; one log line (Finish, main thread) when it was shown.
+// UNOFFICIAL 2026-11-20: delayed-show Win32 progress indicator during startup shader/effect compilation.
+// On a cold cache (first launch or after an update), startup compilation runs before D3D9/ImGui presents
+// any frames, so the game window sits black and looks frozen. This spawns a lightweight Win32 GDI overlay
+// on its own thread ONLY if compilation takes longer than ~1.5 s (fast cached launches never show a window),
+// stays responsive to Windows messages, and closes automatically as soon as ImGuiManager::Initialize runs.
 
 #include <windows.h>
 #include <atomic>
@@ -262,12 +259,9 @@ namespace CompileProgress {
 		}
 	}
 
-	inline std::atomic<bool> Shown{ false };
-
 	inline void UiThread() {
-		// Delay showing the window: only once something really compiles (a cold cache), and not in the first 0.8 s, so a cached start
-		// never shows it and a short compile never flashes it.
-		for (int i = 0; ; i++) {
+		// Delay showing the window so fast cached launches (< 1.5 s) never flash anything.
+		for (int i = 0; i < 30; i++) {
 			if (StopRequested.load()) return;
 			if (i >= 16 && (EffectsCompiled.load() + ShadersCompiled.load()) > 0) break;
 			Sleep(50);
@@ -294,7 +288,6 @@ namespace CompileProgress {
 			nullptr, nullptr, wc.hInstance, nullptr);
 		if (!hwnd) return;
 		Window.store(hwnd);
-		Shown.store(true);
 		SyncToGameWindow(hwnd);
 		SetTimer(hwnd, 1, 100, nullptr);
 		UpdateWindow(hwnd);
@@ -315,11 +308,8 @@ namespace CompileProgress {
 	}
 
 	inline void Finish() {
-		if (StopRequested.exchange(true)) return;
+		StopRequested.store(true);
 		HWND hwnd = Window.load();
 		if (hwnd) PostMessageA(hwnd, WM_CLOSE, 0, 0);
-		if (Shown.load())
-			Logger::Log("UNOFFICIAL CompileProgress: the startup compile window was shown; closed at the first frame after %u s (%d effects, %d shaders compiled)",
-				StartTick ? (unsigned)((GetTickCount64() - StartTick) / 1000ULL) : 0u, EffectsCompiled.load(), ShadersCompiled.load());
 	}
 }

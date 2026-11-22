@@ -5,7 +5,6 @@ class AmbientOcclusionEffect : public EffectRecord
 public:
 	AmbientOcclusionEffect() : EffectRecord("AmbientOcclusion") {};
 
-	bool bNVAOLoaded = false;
 	bool packedAOFailed = false;
 	// Composite apply (set by ShaderManager around one Render call):
 	// deferCombine -- run estimate and blurs only, leaving the result in ResultTexture() for the
@@ -58,6 +57,7 @@ public:
 	// returned, what the denoisers made of it), so one capture says at which stage a wrong picture begins. EffectChain, after AmbientLight.
 	void RtInspect();
 	IDirect3DTexture9* RtRaw();
+	IDirect3DTexture9* RtSkyRaw();	// (rt-sky) this frame's traced AO/sky raw buffer when SkyReady(), or null
 	IDirect3DTexture9* RtGI();	// (rt-ao-gi) this frame's traced bounce light, or null
 	IDirect3DTexture9* RtDenoised(IDirect3DDevice9* Device);
 	IDirect3DTexture9* RtDenoisedGI(IDirect3DDevice9* Device);	// (2026-10-29) the bounce light through RtDenoise's RGB mode (half), or null	// (2026-10-29) this frame's AO visibility through RtDenoise (.r, screen size), or null

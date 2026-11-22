@@ -388,6 +388,7 @@ namespace {
 		}
 		// UNOFFICIAL 2026-11-01 [Shaders.TAA.DLSS] WeaponMask (per frame; the mask's image is made at every start its pass can run)
 		void	SetWeaponMask(float value) { weaponMask = (std::min)((std::max)(value, 0.0f), 1.0f); }
+		float	WeaponMaskValue() const { return weaponMask; }
 		const Upscaler::RrOptions&	RrSettings() const { return rr; }
 		bool				RrReady();
 		bool				EvaluateRr(IDirect3DDevice9* Device, const Upscaler::RrInputs& In);
@@ -1169,6 +1170,7 @@ namespace Upscaler {
 		TheDlss.SetOptions(PassThroughTest, JitterFlip, HelperCpuWait, HelperHighPriority, HelperExactInputs, HelperFailTest);
 	}
 	void DlssWeaponMask(float Value) { TheDlss.SetWeaponMask(Value); }	// UNOFFICIAL 2026-11-01
+	float DlssWeaponMaskValue() { return TheDlss.WeaponMaskValue(); }
 
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (Upscaler.h): the same helper, semaphores and frame counter as Dlss().
 	void DlssRrOptions(const RrOptions& Options) { TheDlss.SetRrOptions(Options); }

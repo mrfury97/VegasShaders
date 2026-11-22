@@ -154,14 +154,14 @@
             // with the map's z along the vertex normal instead of the camera-side one. Near Jacobstown pines: needle cards seen from their back
             // were lit as their front forward and lit as a surface facing the camera (away from the sun) by the deferred passes. Everywhere
             // else (a front, a smooth-shaded ridge seen from below, an edge-on triangle) exactly CapturedDerivNormal's normal.
-            float3 CapturedDerivNormalFront(float3 p, float2 uv, float3 nVertex, float3 tn) {
+            float3 CapturedDerivNormalFront(float3 p, float2 uv, float3 nVertex, float3 tn, bool allowBack) {
                 const float3 dp1 = ddx(p), dp2 = ddy(p);
                 const float3 face = cross(dp1, dp2);
                 const float side = dot(face, p);	// (CapturedTriangleFlip's test written out: its "usable" is needed here too)
                 const bool usable = side * side > 1.0e-8f * dot(face, face) * dot(p, p);
                 const float behind = dot(nVertex, face) * side;	// > 0: the vertex normal lies behind the triangle as the camera sees it
                 const float3 n0 = nVertex * (rsqrt(max(dot(nVertex, nVertex), 1.0e-20f)) * ((usable ? behind : dot(nVertex, p)) > 0.0f ? -1.0f : 1.0f));
-                return CapturedDerivFrame(dp1, dp2, uv, n0, usable && behind > 0.0f ? -n0 : n0, tn);
+                return CapturedDerivFrame(dp1, dp2, uv, n0, (allowBack && usable && behind > 0.0f) ? -n0 : n0, tn);
             }
         #else
         #define CapturedMaterialOut(roughness) float4(NVR_MATERIAL_CLASS, NVR_MATERIAL_RADIUS, (roughness), 1.0f)

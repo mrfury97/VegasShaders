@@ -18,6 +18,13 @@
 #endif
 #define SPECULAR
 
+// UNOFFICIAL 2026-11-21: per-pixel dielectric F0 from FDSunVisCode in TESR_CapturedNormalsBuffer.a.
+#if CAPTURED_NORMALS_ON >= 4
+static float FLSpecF0 = 0.04f;
+#define PBR_SPEC_F0(baseColor, metal) lerp(FLSpecF0.xxx, (baseColor), (metal))
+#define PBR_DIELECTRIC_F0 min(FLSpecF0, 0.04f)
+#endif
+
 #include "includes/Helpers.hlsl"
 #include "includes/Object.hlsl"
 #include "includes/LampFalloff.hlsl"
@@ -169,6 +176,9 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     const float metal = saturate((m.r - floor(m.r)) / 0.49f);
     SetDiffuseEnergyKeep(N, -ray, roughness);
     const float3 albedo = tex2Dlod(FL_Albedo, uv4).rgb;
+#if CAPTURED_NORMALS_ON >= 4
+    FLSpecF0 = abs(FDModel(m.r) - 4.0f) < 0.5f ? 0.04f : FDSpecF0Decode(stored.a);
+#endif
     float3 lit = getPointLightLightingAtt(toLight, att, FL_Color.rgb, -ray, N, albedo, roughness, metal);
 #if CAPTURED_NORMALS_ON >= 4
     // UNOFFICIAL 2026-11-16 fd-batchA item 6 (docs/next/FD-BATCH-A.md): the record's specular bit (COLOR2.r + 16, the SPECULAR variants) picks the

@@ -268,12 +268,14 @@ vec4 ScreenLight(vec3 hit) {
 }
 #endif
 
-// (2026-10-29) One bounce sample's light, its luminance capped at GIClamp (keeps the hue): a ray that lands on a lamp's glow or a
+// (2026-10-29) One bounce sample's light, its luminance capped at m (keeps the hue): a ray that lands on a lamp's glow or a
 // lit sign gives one pixel a value hundreds of times its neighbours', which the blurs and the history cannot average away (fireflies).
-vec3 Clamped(vec3 c) {
-    float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
-    return l > cb.gi2.z ? c * (cb.gi2.z / l) : c;
+float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+vec3 Clamped(vec3 c, float m) {
+    float l = Luma(c);
+    return m > 0.0 && l > m ? c * (m / l) : c;
 }
+vec3 Clamped(vec3 c) { return Clamped(c, cb.gi2.z); }
 
 // The committed hit's normal: its triangle's (the geometry data, to the scene by the instance's transform), turned toward the ray;
 // the ray's reverse when the helper had no room for the data.
@@ -466,32 +468,43 @@ vec3 DirectLight(vec3 hit, vec3 lift, vec3 n, float xi) {
         const float leafT = SunW() - 1.0;
         if (leafT > 0.001) {
             float leafHit;
-            e += cb.sunColor.rgb * (sunCos * rtSunFoliageTrace(lift + cb.origin.xyz, cb.sunDir.xyz, 30000.0, RT_CULL, rtHiddenNear(lift, vec3(0.0)), leafT, false, cb.origin.w, leafHit));
+            e += cb.sunColor.rgb * (sunCos * rtSunFoliageTrace(lift + cb.origin.xyz, cb.sunDir.xyz, 30000.0, RT_CULL, rtHiddenNear(lift, vec3(0.0)), leafT, false, false, cb.origin.w, leafHit));
         }
         else if (Visible(lift, cb.sunDir.xyz, 30000.0)) e += cb.sunColor.rgb * sunCos;
     }
     // UNOFFICIAL 2026-11-03 (rtgi-lamps) gi.z < 0: ALL the frame's lamps (-gi.z of them) from the lamp image, ONE picked in proportion to
     // its unshadowed light here by a one-pass weighted reservoir (RtPathTrace.comp Direct; scalars only, each candidate's own random
     // number hashed from xi), the same light formula and shadow ray as the 8-lamp pick below (which stays as it was for gi.z >= 0).
-    if (cb.gi.z < -0.5) {
-        int count = min(int(min(-cb.gi.z, 256.0) + 0.5), 256);   // (ptaaa-hangfix: at most the lamp image's 256 lamps)
+    // UNOFFICIAL 2026-11-19: unified 1-pass WRS for both lampImage (gi.z < -0.5) and constant lamps (gi.z >= 0).
+    // Eliminates the 8-lamp scratch arrays (32 floats) and duplicate Visible() call site (-3 inlined ray queries).
+    {
+        const bool fromImage = cb.gi.z < -0.5;
+        const int count = fromImage ? min(int(min(-cb.gi.z, 256.0) + 0.5), 256) : min(int(cb.gi.z + 0.5), 8);
         float total = 0.0, chosenWeight = 0.0;
         vec3 chosenLight = vec3(0.0), chosenPos = vec3(0.0);
         uint seed = floatBitsToUint(xi);
         for (int k = 0; k < count; k++) {
-            vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
-            vec3 l = vec3(a, b.x) - hit;
-            float dist = length(l), reach = abs(b.y);
+            vec3 lPos, colour;
+            float rawW;
+            if (fromImage) {
+                vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
+                lPos = vec3(a, b.x); rawW = b.y;
+                colour = vec3(imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, imageLoad(lampImage, ivec2(4 * k + 3, 0)).r);
+            }
+            else {
+                lPos = cb.lampPos[k].xyz; rawW = cb.lampPos[k].w; colour = cb.lampColor[k].rgb;
+            }
+            vec3 l = lPos - hit;
+            float dist = length(l), reach = abs(rawW);
             if (dist >= reach || dist < 1.0e-3) continue;
-            vec3 colour = vec3(imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, imageLoad(lampImage, ivec2(4 * k + 3, 0)).r);
-            vec3 light = colour * (LampFall(dist / reach, b.y < 0.0) * max(dot(n, l / dist), 0.0));
+            vec3 light = colour * (LampFall(dist / reach, rawW < 0.0) * max(dot(n, l / dist), 0.0));
             float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
             if (!(w > 0.0)) continue;
             total += w;
             uint h = (seed ^ uint(k) * 0x9E3779B9u) * 747796405u + 2891336453u;
             h = ((h >> ((h >> 28u) + 4u)) ^ h) * 277803737u;
             h = (h >> 22u) ^ h;
-            if (float(h >> 8u) * (1.0 / 16777216.0) * total < w) { chosenWeight = w; chosenLight = light; chosenPos = vec3(a, b.x); }
+            if (float(h >> 8u) * (1.0 / 16777216.0) * total < w) { chosenWeight = w; chosenLight = light; chosenPos = lPos; }
         }
         if (total > 0.0 && chosenWeight > 0.0) {
             vec3 l = chosenPos - lift;
@@ -499,50 +512,17 @@ vec3 DirectLight(vec3 hit, vec3 lift, vec3 n, float xi) {
             if (Visible(lift, l / dist, max(dist - 16.0, 0.0))) e += chosenLight * (total / chosenWeight);   // (short of its fixture)
         }
     }
-    else {
-    // The lamps: each one's unshadowed light here, a pick in proportion to its luminance, a shadow ray to the picked one.
-    int lamps = int(cb.gi.z + 0.5);
-    vec3 lampLight[8];
-    float weights[8];
-    float total = 0.0;
-    for (int k = 0; k < 8; k++) {
-        lampLight[k] = vec3(0.0);
-        weights[k] = 0.0;
-        if (k >= lamps) continue;
-        vec3 l = cb.lampPos[k].xyz - hit;
-        float dist = length(l);
-        float reach = abs(cb.lampPos[k].w);
-        if (dist >= reach || dist < 1.0e-3) continue;
-        lampLight[k] = cb.lampColor[k].rgb * (LampFall(dist / reach, cb.lampPos[k].w < 0.0) * max(dot(n, l / dist), 0.0));
-        weights[k] = dot(lampLight[k], vec3(0.2126, 0.7152, 0.0722));
-        total += weights[k];
-    }
-    if (total > 0.0) {
-        float pick = xi * total;
-        int chosen = 0;
-        for (int k = 0; k < 8; k++) {
-            chosen = k;
-            if (pick < weights[k]) break;
-            pick -= weights[k];
-        }
-        if (weights[chosen] > 0.0) {
-            vec3 l = cb.lampPos[chosen].xyz - lift;
-            float dist = length(l);
-            // Stops a little short of the lamp: its own fixture (glass, shade) must not block it.
-            if (Visible(lift, l / dist, max(dist - 16.0, 0.0))) e += lampLight[chosen] * (total / weights[chosen]);
-        }
-    }
-    }   // (2026-11-03 rtgi-lamps: the constants' lamps)
     return e;
 }
-vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 ng, vec3 n, float t, float xi) {
-    Record r = records[instance];
-    vec3 albedo = clamp(rtHitAlbedo(instance, prim, bary), 0.0, 1.0);
-    // UNOFFICIAL 2026-11-13 (rtgi-review R19, mrfury97) GIHitMips: the caller set the hit's texture footprint (HitCone); the shadow rays below test alpha at lod 0
-    // as before (the helper's opacity micromaps count on it: NvrRtOmm.inl FinestMipShader), so it is 0 from here on except round the glow map's read
+vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 ng, vec3 n, float t, float xi, bool directTest, vec3 testLift) {
     const float hitCone = rtConeWidth;
     rtConeWidth = 0.0;
-    const vec3 e = DirectLight(hit, hit + ng * (1.0 + 0.002 * t), n, xi);
+    const vec3 e = DirectLight(hit, directTest ? testLift : hit + ng * (1.0 + 0.002 * t), n, xi);
+    if (directTest) return e * cb.gi2.x;
+    Record r = records[instance];
+    rtConeWidth = hitCone;
+    vec3 albedo = clamp(rtHitAlbedo(instance, prim, bary), 0.0, 1.0);
+    rtConeWidth = 0.0;
     // (2026-10-30) GlowGI (ambient.w, 0 = off): a hit on a draw with a glow map (record flag 0x04: neon, lit windows, lamp globes,
     // screens) also sends its own light, its colour (the hit texture's) x GlowGI. The flag covers the whole mesh while the glow map
     // marks only parts of it (a facade's windows), so only the bright parts of the colour count (its strongest channel from 0.35 up to
@@ -560,12 +540,8 @@ vec3 Shade(uint instance, uint prim, vec2 bary, vec3 hit, vec3 ng, vec3 n, float
 }
 
 // One bounce (rt-ao-gi): a cosine-weighted ray from the pixel; at its closest hit the light that surface sends back toward the pixel:
-// the game's lit frame where the screen saw it (ScreenLight, GI v2), else Shade. Misses return 0: what the sky gives is the game's own
-// ambient already (unless GISky, below).
-// UNOFFICIAL 2026-11-12 (sungi p3, F6) SkyMissSH: gi.y + 10 = the directional sky is on. The sky's radiance as an order-2 SH, 9 coefficients
-// x rgb, already weighted per band (radiance = the irradiance harmonics x 1, 1.5, 4 and the C++'s linear scale; SkyAmbientSharp's maths), in
-// 14 RG32F texels of the lamp image's row 1 (float f = 3 i + channel at texel f / 2, component f & 1). The basis is the lit shaders' order:
-// 1, y, z, x, xy, yz, 3zz - 1, xz, xx - yy.
+// the game's lit frame where the screen saw it (ScreenLight, GI v2), else Shade. Misses return 0 unless GISky / AmbientReplace is active.
+// UNOFFICIAL 2026-11-12 (sungi p3, F6) SkyMissSH: gi.y + 10 = the directional sky is on (order-2 SH radiance in lampImage row 1).
 vec3 SkyRadianceSH(vec3 d) {
     float c[28];
     for (int k = 0; k < 14; k++) { vec2 v = imageLoad(lampImage, ivec2(k, 1)).rg; c[2 * k] = v.x; c[2 * k + 1] = v.y; }
@@ -574,13 +550,6 @@ vec3 SkyRadianceSH(vec3 d) {
     for (int i = 0; i < 9; i++) r += vec3(c[3 * i], c[3 * i + 1], c[3 * i + 2]) * basis[i];
     return max(r, vec3(0.0));
 }
-// UNOFFICIAL 2026-11-10 (gisky; tester: AL occlusion and GIStrength change plants and objects, never the terrain) [Shaders.AmbientOcclusion.RT]
-// GISky (gi.y - 1, outdoors only; 0 = off, exactly as before): a ray that finds nothing brings back the ambient (sky) light, full above the
-// horizon and none below it (a smooth band of +-0.25 in d.z), capped as a hit's sample. Open upward ground sent nearly every ray to the
-// sky, so its bounce was ~0 and GIStrength had nothing to scale (log 2026-11-10 00:58:31: soil 0.0007 against a wall's 0.05). It adds
-// to the game's own ambient (a second copy of the sky's light), hence off by default.
-// (2026-11-12 sungi p3, F6) with SkyMissSH (gi.y > 5) the miss brings the sky's radiance in ITS direction (SkyRadianceSH) instead of the
-// flat ambient, fading to 0 over d.z in [-0.1, 0]; the GI pass, the AO pass's own bounce and the radiance cache pass all use it.
 vec3 SkyMiss(vec3 d) {
     const bool directional = cb.gi.y > 5.0;
     float s = (directional ? cb.gi.y - 10.0 : cb.gi.y) - 1.0;
@@ -588,10 +557,6 @@ vec3 SkyMiss(vec3 d) {
     if (directional) return Clamped(SkyRadianceSH(d) * (s * clamp(1.0 + 10.0 * d.z, 0.0, 1.0)));
     return Clamped(cb.ambient.rgb * (s * clamp(0.5 + 2.0 * d.z, 0.0, 1.0)));
 }
-// UNOFFICIAL 2026-11-13 (rtgi-review R19, mrfury97) GIHitMips (Vegas Shaders: sunDir.w + 4; SunW() is w without it): the footprint of a bounce ray at its hit, for the
-// hit's texture reads (albedo, glow map, normal map): 0.5 x the ray's length, the path tracer's rule for its bounces (RtPathTrace.comp). A diffuse
-// bounce stands for a wide lobe: mip 0 of a 2048 texture gave each sample one texel's colour (noise for the reuse and the denoiser, and random reads
-// of the largest mip). 0 = off: the finest mip, as before.
 float HitCone(float t) { return cb.sunDir.w > 3.5 ? 0.5 * t : 0.0; }
 #ifndef RT_CACHE_PASS
 // (2026-11-07 ptaaa-firstperson) a committed hit into Bounce's locals (a rayQueryEXT cannot be copied)
@@ -603,56 +568,58 @@ float HitCone(float t) { return cb.sunDir.w > 3.5 ? 0.5 * t : 0.0; }
 // triangle's normal, turned toward the ray
 float gBounceT = 0.0;
 vec3 gBounceN = vec3(0.0, 0.0, 1.0);
-vec4 Bounce(vec3 start, vec3 d, float tMin, float xi) {
-    rayQueryEXT q;
-    bool found = false;
-    gBounceT = 0.0;
-    float t = 0.0;
+vec4 Bounce(vec3 origP, vec3 origN, vec3 start, vec3 d, float tMin, float xi, bool directTest) {
+    // UNOFFICIAL 2026-11-19: route DebugView 9 (directTest) through Shade's single DirectLight call site (-10 inlined ray queries)
     uint instance = 0u, prim = 0u;
     vec2 bary = vec2(0.0);
-    mat4x3 toWorld = mat4x3(1.0);
-    // (2026-11-07 ptaaa-firstperson) from near the eye (the view model's pixels): the hidden first-person body passed over (as TraceHidden)
-    if (rtHiddenNear(start, vec3(0.0))) {
-        rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, RT_CULL & 0x8Fu, start + cb.origin.xyz, tMin, d, cb.gi.x);
-        for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
-        AO_TAKE_HIT(q);
-        rayQueryEXT qp;
-        rayQueryInitializeEXT(qp, scene, gl_RayFlagsNoOpaqueEXT, RT_CULL & 0x70u, start + cb.origin.xyz, tMin, d, found ? t : cb.gi.x);
-        for (uint rtCap_ = 0u; rayQueryProceedEXT(qp); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(qp); break; } else {
-            if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-            if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-            if (rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)), rayQueryGetIntersectionBarycentricsEXT(qp, false)))
-                rayQueryConfirmIntersectionEXT(qp);
+    float t = 0.0;
+    vec3 hit = origP, ng = origN, sn = origN;
+    if (!directTest) {
+        rayQueryEXT q;
+        bool found = false;
+        gBounceT = 0.0;
+        mat4x3 toWorld = mat4x3(1.0);
+        // (2026-11-07 ptaaa-firstperson) from near the eye (the view model's pixels): the hidden first-person body passed over (as TraceHidden)
+        if (rtHiddenNear(start, vec3(0.0))) {
+            rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, RT_CULL & 0x8Fu, start + cb.origin.xyz, tMin, d, cb.gi.x);
+            for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
+            AO_TAKE_HIT(q);
+            rayQueryEXT qp;
+            rayQueryInitializeEXT(qp, scene, gl_RayFlagsNoOpaqueEXT, RT_CULL & 0x70u, start + cb.origin.xyz, tMin, d, found ? t : cb.gi.x);
+            for (uint rtCap_ = 0u; rayQueryProceedEXT(qp); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(qp); break; } else {
+                if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+                if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
+                if (rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)), rayQueryGetIntersectionBarycentricsEXT(qp, false)))
+                    rayQueryConfirmIntersectionEXT(qp);
+            }
+            if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) AO_TAKE_HIT(qp);
         }
-        if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) AO_TAKE_HIT(qp);
-    }
-    else {
-        rayQueryInitializeEXT(q, scene, 0u, RT_CULL, start + cb.origin.xyz, tMin, d, cb.gi.x);
-        Proceed(q);
-        AO_TAKE_HIT(q);
-    }
-    if (!found) return vec4(SkyMiss(d), 1.0);   // (2026-11-10 gisky: was 0)
-    vec3 n = HitNormal(instance, prim, toWorld, d);
-    vec3 hit = start + d * t;
-    gBounceT = t;
-    gBounceN = n;
-    vec4 seen = ScreenLight(hit);
-    if (seen.a > 0.5 && CacheW() < 16.0) {   // (DebugView 7: Shade everywhere)
-        // UNOFFICIAL 2026-11-13 (rtgi-review B6, R5) GIScreenAmbientOut (+ 64 on the slot's w here, flag 2 in the fork; NVR sets it only while AmbientReplace takes the game's ambient out of the
-        // picture): the lit frame holds the game's flat ambient on this surface, unoccluded; an off-screen hit has none of it and the radiance cache's
-        // irradiance instead. The same here: minus the hit's colour x that ambient, plus its colour x the cache's irradiance. The sun, the lamps, their
-        // real shadows and the highlights stay the frame's.
-        if (GiScreenAmbientOut()) {
-            rtConeWidth = HitCone(t);
-            const vec3 albedo = clamp(rtHitAlbedo(instance, prim, bary), 0.0, 1.0);
-            rtConeWidth = 0.0;
-            const vec3 cached = CACHE_STRENGTH > 0.0 ? CacheIrradiance(hit, n) * CACHE_STRENGTH : vec3(0.0);
-            seen.rgb = max(seen.rgb - albedo * cb.ambient.rgb, vec3(0.0)) + albedo * cached;
+        else {
+            rayQueryInitializeEXT(q, scene, 0u, RT_CULL, start + cb.origin.xyz, tMin, d, cb.gi.x);
+            Proceed(q);
+            AO_TAKE_HIT(q);
         }
-        return vec4(Clamped(seen.rgb), t / cb.gi.x);
+        if (!found) return vec4(SkyMiss(d), 1.0);
+        ng = HitNormal(instance, prim, toWorld, d);
+        hit = start + d * t;
+        gBounceT = t;
+        gBounceN = ng;
+        vec4 seen = ScreenLight(hit);
+        if (seen.a > 0.5 && CacheW() < 16.0) {   // (DebugView 7: Shade everywhere)
+            // UNOFFICIAL 2026-11-13 (rtgi-review B6, R5) GIScreenAmbientOut (+ 64 on slot 7 w, only while AmbientReplace is on)
+            if (GiScreenAmbientOut()) {
+                rtConeWidth = HitCone(t);
+                const vec3 hitAlbedo = clamp(rtHitAlbedo(instance, prim, bary), 0.0, 1.0);
+                rtConeWidth = 0.0;
+                const vec3 cached = CACHE_STRENGTH > 0.0 ? CacheIrradiance(hit, ng) * CACHE_STRENGTH : vec3(0.0);
+                seen.rgb = max(seen.rgb - hitAlbedo * cb.ambient.rgb, vec3(0.0)) + hitAlbedo * cached;
+            }
+            return vec4(Clamped(seen.rgb), t / cb.gi.x);
+        }
+        rtConeWidth = HitCone(t);   // (2026-11-13 R19: for ShadingNormal's and Shade's texture reads; Shade puts it back to 0)
+        sn = ShadingNormal(instance, prim, bary, ng, toWorld, d);
     }
-    rtConeWidth = HitCone(t);   // (2026-11-13 R19: for ShadingNormal's and Shade's texture reads; Shade puts it back to 0)
-    return vec4(Shade(instance, prim, bary, hit, n, ShadingNormal(instance, prim, bary, n, toWorld, d), t, xi), t / cb.gi.x);
+    return vec4(Shade(instance, prim, bary, hit, ng, sn, t, xi, directTest, start), directTest ? 0.0 : t / cb.gi.x);
 }
 #endif
 
@@ -665,7 +632,6 @@ vec2 OctEncode(vec3 n) {
     vec2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
     return e * 0.5 + 0.5;
 }
-float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
 // UNOFFICIAL 2026-11-09 (rtgi-lock; docs/next/HANDOFF-RTGI-WEDGE-2026-11-08.md) the sample numbers of the AO and GI rays. The old pair,
 // fract(vec2(Ign(texel + a), Ign(texel + b)) + frame x vec2(0.618034, 0.754878)), was LOCKED: Ign's inner phase for b differs from a's by a
@@ -712,8 +678,7 @@ vec4 GIBounce(ivec2 texel, vec3 p, vec3 n, float bias, float frame, bool decorre
     vec2 u = SampleU(texel, frame, 41.0, 73.0, vec2(0.381966, 0.5), decorrelate);   // (2026-11-09 rtgi-lock; was the locked pair)
     d = CosineDirection(n, u);
     const float xi = decorrelate ? Decide(texel, 97u, frame, 0.5497005) : fract(Ign(vec2(texel) + 97.0) + frame * 0.569840);
-    if (test && GiTest() == 1) return vec4(DirectLight(p, p + n * bias, n, xi) * cb.gi2.x, 0.0);
-    return Bounce(p + n * bias, d, 0.05 * bias, xi);
+    return Bounce(p, n, p + n * bias, d, 0.05 * bias, xi, test && GiTest() == 1);
 }
 // the M cap of a reuse code (ReuseGI's and ReuseGIPoints' own arithmetic): a main draws the bounce where they use it (giTile || cap < 0.5)
 float ReuseCap(float reuse) {
@@ -753,10 +718,12 @@ vec3 GlowDirect(ivec2 texel, vec3 p, vec3 n, float bias, bool decorrelate) {
         vec3 l = s.xyz - start;
         float dist = length(l), d2 = max(dist * dist, s.w * s.w), c = dot(n, l) / max(dist, 1.0e-2);
         if (!(c > 0.0)) continue;
-        vec3 e = col * (head.y * s.w * s.w / d2 * c);
-        float w = Luma(e);
+        // UNOFFICIAL 2026-11-19: match total's unscaled weight (without head.y) so pick probabilities are valid and head.y does not cancel out.
+        float geom = s.w * s.w / d2 * c;
+        float w = Luma(col) * geom;
         if (pick >= w && k < count - 1) { pick -= w; continue; }
         if (!(w > 0.0)) return vec3(0.0);
+        vec3 e = col * (head.y * geom);
         // a point on the sphere's inner half (soft shadows), the ray stopping at its surface
         vec2 u = decorrelate ? fract(vec2(Ign(vec2(texel) + 331.0), HashTexel(texel, 359u)) + frame * vec2(0.7548777, 0.5698403))   // (2026-11-09 rtgi-lock)
                              : fract(vec2(Ign(vec2(texel) + 331.0), Ign(vec2(texel) + 359.0)) + frame * vec2(0.754878, 0.569840));
@@ -908,14 +875,16 @@ float GIPackNormal(vec3 n) { vec2 q = floor(clamp(OctEncode(n), 0.0, 1.0) * 31.0
 vec3 GIUnpackNormal(float f) { float h = floor(f / 32.0); return OctDecode(vec2(h, f - h * 32.0) / 31.0); }
 float GITarget(GISample s, vec3 x1, vec3 n1) {
     vec3 d = s.x2 - x1;
-    return Luma(s.S) * max(dot(n1, d) * inversesqrt(max(dot(d, d), 1.0e-8)), 0.0);
+    float c = dot(n1, d) * inversesqrt(max(dot(d, d), 1.0e-8));
+    return c > 0.0 ? Luma(s.S) * max(c, 0.05) : 0.0;
 }
 float GIJacobian(GISample s, vec3 xFrom, vec3 xTo) {
     if (s.sky > 0.5) return 1.0;
     vec3 a = xFrom - s.x2, b = xTo - s.x2;
-    float la = dot(a, a), lb = dot(b, b);
-    float ca = abs(dot(s.n2, a)) * inversesqrt(max(la, 1.0e-8)), cb_ = abs(dot(s.n2, b)) * inversesqrt(max(lb, 1.0e-8));
-    return ca > 1.0e-4 ? (cb_ / ca) * (la / max(lb, 1.0e-8)) : 0.0;
+    float distOtherSq = dot(a, a), distHereSq = dot(b, b);
+    float cosOther = max(dot(s.n2, a) * inversesqrt(max(distOtherSq, 1.0e-8)), 0.0);
+    float cosHere = max(dot(s.n2, b) * inversesqrt(max(distHereSq, 1.0e-8)), 0.0);
+    return clamp((cosHere * distOtherSq) / max(cosOther * distHereSq, 1.0e-4), 0.0, 4.0);
 }
 // Last frame's reservoir at texel `at` (b: its B texel): its surface point xq and its sample, both in THIS frame's camera-relative space (prevToWorld:
 // last frame's view -> scene directions, move: this frame's camera minus last frame's). False: nothing usable.
@@ -946,7 +915,6 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
     GISample sel;
     sel.x2 = p + n * kGISky; sel.n2 = -n; sel.S = vec3(0.0); sel.sky = 1.0;
     float wSum = 0.0, m = 0.0;
-    bool fromNeighbour = false;
     ivec2 qt = ivec2(-1);
     // temporal: last frame's reservoir of this surface (the lookup as ReuseGI's: the shuffled texel first, then the plain one, then neighbours)
     if (cap > 0.5 && v.z > 1.0) {
@@ -980,14 +948,32 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
                 if (!same) hm = 0.0;
             }
             if (hm > 0.0) {
-                float w = GITarget(s, p, n) * W * hm;
+                float w = GITarget(s, p, n) * min(W, 10.0) * hm;
                 wSum += w;
                 m += hm;
                 if (w > 0.0) sel = s;
             }
         }
     }
-    // spatial: neighbours of last frame's reservoirs round the reprojected point, each weighed by its Jacobian
+    // this frame's own canonical candidate (cosine-sampled, cos floored at 0.05 to match GITarget so 1/cos never explodes)
+    if (giTile || cap < 0.5) {
+        const vec3 d = bounceDir;   // (2026-11-16 rt-ao-compile: GIBounce, drawn by the main as it was here; gBounceT / gBounceN are its hit)
+        GISample s;
+        s.S = bounce.rgb;
+        s.sky = gBounceT > 0.0 ? 0.0 : 1.0;
+        s.x2 = start + d * (gBounceT > 0.0 ? gBounceT : kGISky);
+        s.n2 = gBounceT > 0.0 ? gBounceN : -d;
+        float cosPdf = max(dot(n, d), 0.05);
+        float w = GITarget(s, p, n) / cosPdf;
+        wSum += w;
+        m += 1.0;
+        if (w > 0.0 && Decide(texel, 131u, frame, 0.3247180) * wSum < w) sel = s;
+    }
+    // Save post-temporal/canonical reservoir before spatial neighbor reuse so an occluded spatial pick restores it instead of black-holing W = 0.
+    const GISample savedSel = sel;
+    const float savedWSum = wSum, savedM = m;
+    bool fromSpatial = false;
+    // spatial: neighbours of last frame's reservoirs round the reprojected point, each weighed by its clamped shift Jacobian [0, 4]
     if (spatial > 0 && qt.x >= 0 && v.z > 1.0) {
         float spin = 6.2831853 * Decide(texel, 211u, frame, 0.1415927);
         for (int k = 0; k < spatial; k++) {
@@ -1002,40 +988,34 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
             vec3 xq;
             if (!GILoadPrev(at, b, prevToWorld, move, s, W, xq)) continue;
             float J = GIJacobian(s, xq, p);
-            if (!(J > 0.1 && J < 10.0)) continue;
+            if (!(J > 0.05)) continue;
             float mk = min(b.x, max(cap * 0.5, 1.0)) * spread;
-            float w = GITarget(s, p, n) * W * mk * J;
+            float w = GITarget(s, p, n) * min(W, 10.0) * mk * J;
             wSum += w;
             m += mk;
-            if (w > 0.0 && Decide(texel, 257u + 31u * uint(k), frame, 0.4142136) * wSum < w) { sel = s; fromNeighbour = true; }
+            if (w > 0.0 && Decide(texel, 257u + 31u * uint(k), frame, 0.4142136) * wSum < w) { sel = s; fromSpatial = true; }
         }
     }
-    // this frame's own candidate (cosine-sampled: weight = luminance)
-    if (giTile || cap < 0.5) {
-        const vec3 d = bounceDir;   // (2026-11-16 rt-ao-compile: GIBounce, drawn by the main as it was here; gBounceT / gBounceN are its hit)
-        GISample s;
-        s.S = bounce.rgb;
-        s.sky = gBounceT > 0.0 ? 0.0 : 1.0;
-        s.x2 = start + d * (gBounceT > 0.0 ? gBounceT : kGISky);
-        s.n2 = gBounceT > 0.0 ? gBounceN : -d;
-        float w = Luma(s.S);
-        wSum += w;
-        m += 1.0;
-        if (w > 0.0 && Decide(texel, 131u, frame, 0.3247180) * wSum < w) { sel = s; fromNeighbour = false; }
-    }
     float target = GITarget(sel, p, n);
-    float W = m > 0.0 && target > 0.0 ? wSum / (m * target) : 0.0;
+    float W = m > 0.0 && target > 0.0 ? min(wSum / (m * target), 10.0) : 0.0;
     vec3 toSample = sel.x2 - start;
     float len = length(toSample);
-    if (fromNeighbour && W > 0.0 && !Visible(start, toSample / max(len, 1.0e-3), sel.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) W = 0.0;
+    if (fromSpatial && W > 0.0 && !Visible(start, toSample / max(len, 1.0e-3), sel.sky > 0.5 ? cb.gi.x : max(len - max(2.0, 0.02 * len), 0.0))) {
+        sel = savedSel;
+        wSum = savedWSum;
+        m = savedM;
+        fromSpatial = false;
+        target = GITarget(sel, p, n);
+        W = m > 0.0 && target > 0.0 ? min(wSum / (m * target), 10.0) : 0.0;
+    }
     if (isnan(W) || isinf(W)) W = 0.0;
+    W = min(W, 10.0);
     vec3 dsel = sel.x2 - p;
     float dl = length(dsel);
     vec3 dirSel = dsel / max(dl, 1.0e-3);
-    // the estimate, its luminance capped at 2 x GIClamp (a dim own sample chosen among bright blocked neighbours carries the whole weight sum)
-    vec3 estimate = sel.S * (max(dot(n, dirSel), 0.0) * W);
-    float le = Luma(estimate);
-    if (le > 2.0 * cb.gi2.z) estimate *= 2.0 * cb.gi2.z / le;
+    float cosSel = dot(n, dirSel);
+    cosSel = cosSel > 0.0 ? max(cosSel, 0.05) : 0.0;
+    vec3 estimate = Clamped(sel.S * (cosSel * W), 2.0 * cb.gi2.z);
     imageStore(curA, texel, vec4(sel.S, W));
     imageStore(curB, texel, vec4(m, viewZ, OctEncode(n)));
     imageStore(curB, texel + ivec2(0, imageSize(curB).y / 2), vec4(OctEncode(dirSel), sel.sky > 0.5 ? 0.0 : dl, GIPackNormal(sel.n2)));
@@ -1054,13 +1034,19 @@ void ReuseGIPoints(ivec2 texel, vec3 p, vec3 n, float viewZ, float bias, bool gi
 // road's own hard edges. 2 SkySoftEdges: a hit counts in full to half the reach and nothing at its end, as the AO rays: no hard edge at
 // SkyDistance from walls, cliffs and banks.
 // (2026-11-16 rt-ao-compile) flags 0's any-hit ray and the others' closest-hit ray from one Trace call: the driver inlines each call
+// UNOFFICIAL 2026-11-19: single Trace() call site in a 2-step loop (-3 inlined ray queries)
 float SkyBlocked(vec3 start, vec3 d, float reach, int alpha, int flags, float insideReach) {
-    vec2 hit = Trace(start, d, 0.0, reach, flags == 0, alpha);
-    if (flags == 0) return hit.x >= 0.0 ? 1.0 : 0.0;
-    if ((flags & 1) != 0 && hit.x >= 0.0 && hit.y > 0.5 && hit.x < insideReach) {
-        float skip = hit.x + 1.0;
-        hit = Trace(start + d * skip, d, 0.0, max(reach - skip, 1.0), false, alpha);
+    float skip = 0.0;
+    vec2 hit = vec2(-1.0, 0.0);
+    for (int step = 0; step < 2; step++) {
+        hit = Trace(start + d * skip, d, 0.0, max(reach - skip, 1.0), step == 0 && flags == 0, alpha);
+        if (step == 0 && flags == 0) return hit.x >= 0.0 ? 1.0 : 0.0;
+        if (step == 0 && (flags & 1) != 0 && hit.x >= 0.0 && hit.y > 0.5 && hit.x < insideReach) {
+            skip = hit.x + 1.0;
+            continue;
+        }
         if (hit.x >= 0.0) hit.x += skip;
+        break;
     }
     if (hit.x < 0.0) return 0.0;
     return (flags & 2) != 0 ? 1.0 - smoothstep(0.5 * reach, reach, hit.x) : 1.0;
@@ -1153,7 +1139,8 @@ void main() {
                 if (w <= 0.0) continue;
                 total += w;
             }
-            const float blocked = SkyBlocked(start, d, reach, j < 0 ? int(cb.gi3.y + 0.5) : 2, skyFlags, insideReach);
+            // UNOFFICIAL 2026-11-19: respect AOAlpha (cb.gi3.y) across all sky ring rays too (previously hardcoded alpha=2 for j >= 0).
+            const float blocked = SkyBlocked(start, d, reach, int(cb.gi3.y + 0.5), skyFlags, insideReach);
             if (j < 0) { covered = blocked; open = total * (1.0 - covered); }
             else open += w * (1.0 - blocked);   // (flags 0: open += w on a miss, as before)
         }
@@ -1343,7 +1330,7 @@ void main() {
         const vec2 bary = rayQueryGetIntersectionBarycentricsEXT(q, true);
         rtConeWidth = HitCone(th);   // (2026-11-13 R19; Shade puts it back to 0 before its shadow rays and the next ray)
         vec3 light = Shade(instance, prim, bary, centre + d * th, n, ShadingNormal(instance, prim, bary, n, rayQueryGetIntersectionObjectToWorldEXT(q, true), d), th,
-                           fract(Ign(vec2(index & 255, index >> 8) + 97.0 + float(i)) + frame * 0.569840));
+                           fract(Ign(vec2(index & 255, index >> 8) + 97.0 + float(i)) + frame * 0.569840), false, vec3(0.0));
         r += light.r * vec4(1.0, d);
         g += light.g * vec4(1.0, d);
         b += light.b * vec4(1.0, d);

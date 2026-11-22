@@ -175,12 +175,13 @@ float16_t2 FFX_DNSR_Shadows_ReadInput(int2 p) { return inImage[clamp(p, int2(0, 
 void main(uint3 gid : SV_GroupID, uint3 gtid : SV_GroupThreadID, uint3 did : SV_DispatchThreadID) {
 	g_layer = gid.z;
 	const uint stepsize = 1u << PASS;
-	if (history.z > 1.5) g_step = (uint)round(stepsize * saturate(PenumbraPixels(int2(did.xy)) / 7.0));
+	// UNOFFICIAL 2026-11-19: check tile metadata first so cleared tiles (~70-85% of screen) skip 9-tap PenumbraPixels (19 global loads/px)
+	bool cleared = false, light = false;
+	FFX_DNSR_Shadows_ReadTileMetaData(gid.xy, cleared, light);
+	if (!cleared && history.z > 1.5) g_step = (uint)round(stepsize * saturate(PenumbraPixels(int2(did.xy)) / 7.0));
 	bool write = false;
 	float2 results = FFX_DNSR_Shadows_FilterSoftShadowsPass(gid.xy, gtid.xy, did.xy, write, PASS, stepsize);
 	if (!write) {	// (NVR) pass 1 skips cleared tiles in AMD's code; write their known answer so pass 2 never reads a stale texel
-		bool cleared, light;
-		FFX_DNSR_Shadows_ReadTileMetaData(gid.xy, cleared, light);
 		results = float2(light ? 1.0 : 0.0, 0.0);
 	}
 	int2 p = int2(did.xy);

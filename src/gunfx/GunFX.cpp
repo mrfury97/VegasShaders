@@ -1274,7 +1274,10 @@ static bool SkippedGunKey(const char* key) {   // test switches, not meant per g
 static void WriteGunIni(const char* path, const char* name, UInt32 formId) {
 	FILE* f = nullptr;
 	if (fopen_s(&f, path, "w") || !f) { LogLine("could not create %s", path); return; }
-	fprintf(f, "; GunFX settings for %s (form %08X).\n", name, formId);
+	char shown[96];	// 2026-11-17: the weapon's name comes from a plugin; a line break in it wrote real settings lines after this comment
+	strncpy_s(shown, name, _TRUNCATE);
+	for (char* c = shown; *c; c++) if ((unsigned char)*c < 32) *c = ' ';
+	fprintf(f, "; GunFX settings for %s (form %08X).\n", shown, formId);
 	fprintf(f, "; Every line starting with ; uses the main value (Vegas Shaders' menu, Gun effects; shown here as it was when this\n");
 	fprintf(f, "; file was made). To give this gun its own value, delete the ; at the start of the line and change the value.\n");
 	fprintf(f, "; Put the ; back to return to the main setting. Changes apply while the game runs. Delete this file to start over.\n");
@@ -3606,10 +3609,14 @@ static std::string SettingsPrint() {
 static float IniFloat(const char* section, const char* key, const char* fallback) {
 	char buffer[64];
 	LayerStr(section, key, fallback, buffer, sizeof(buffer), IniPath);
-	return (float)atof(buffer);
+	const float value = (float)atof(buffer);	// (2026-11-17: atof reads "nan" and "inf"; a NaN smoke point became a wild index in the gun's shape map)
+	return std::isfinite(value) ? value : (float)atof(fallback);
 }
 static void IniModel(const char* section, const char* key, const char* fallback, char* out) {
 	LayerStr(section, key, fallback, out, MAX_PATH, IniPath);
+	// 2026-11-17 (security review 2): a model path of 120+ characters (a per-gun file can hold 259) did not fit BakeLook's MAX_PATH
+	// buffers behind the Data folder's own path, and sprintf_s ends the game there. The default model instead.
+	if (strlen(out) > 120) { LogLine("[%s] %s is longer than 120 characters: the default model is used", section, key); strcpy_s(out, MAX_PATH, fallback); }
 	for (char* c = out; *c; c++) if (*c == '/') *c = 0x5C; // the game's archives expect backslashes
 	if (!_strnicmp(out, "BarrelSmoke\\", 12)) {      // older setting: the effects now live in Meshes\GunFX
 		char renamed[MAX_PATH];
@@ -3665,7 +3672,7 @@ static bool NifBlocks(const std::vector<UInt8>& d, std::vector<std::string>& typ
 	size_t p = 0;
 	while (p < d.size() && d[p] != '\n') p++;
 	p++;
-	auto need = [&](size_t n) { return p + n <= d.size(); };
+	auto need = [&](size_t n) { return p <= d.size() && n <= d.size() - p; };   // (2026-11-17: no wrap with a huge n from the file)
 	if (!need(4 + 1 + 4 + 4 + 4)) return false;
 	p += 4 + 1;
 	p += 4;                                   // user version
@@ -3690,13 +3697,17 @@ static bool NifBlocks(const std::vector<UInt8>& d, std::vector<std::string>& typ
 	const UInt32 strings = *(const UInt32*)&d[p]; p += 8;
 	for (UInt32 i = 0; i < strings; i++) {
 		if (!need(4)) return false;
-		const UInt32 n = *(const UInt32*)&d[p]; p += 4 + n;
+		const UInt32 n = *(const UInt32*)&d[p]; p += 4;
+		if (!need(n)) return false;               // (2026-11-17: a string longer than the file left p outside it)
+		p += n;
 	}
 	if (!need(4)) return false;
-	const UInt32 groups = *(const UInt32*)&d[p]; p += 4 + 4 * groups;
+	const UInt32 groups = *(const UInt32*)&d[p]; p += 4;
+	if (groups > (d.size() - p) / 4) return false;   // (2026-11-17: as above; p <= d.size() here)
+	p += 4 * (size_t)groups;
 	types.clear(); at.clear();
 	for (UInt32 i = 0; i < blocks; i++) {
-		if (index[i] >= names.size() || p + sizes[i] > d.size()) return false;
+		if (index[i] >= names.size() || sizes[i] > d.size() - p) return false;   // (2026-11-17: was p + size, which wraps; every block now lies inside the file)
 		types.push_back(names[index[i]]);
 		at.push_back(p);
 		p += sizes[i];
@@ -3745,6 +3756,9 @@ static void BakeLook(const char* section, char* model) {
 	char data[MAX_PATH];                                       // ...\Data\ from ...\Data\NVSE\Plugins\GunFX.ini
 	strcpy_s(data, IniPath);
 	for (int up = 0; up < 3; up++) { char* cut = strrchr(data, 0x5C); if (cut) *cut = 0; }
+	// 2026-11-17 (security review 2): every path below fits its MAX_PATH buffer, or the model's own look is used (sprintf_s ends
+	// the game on a path that does not fit: a deep install folder with a long model name).
+	if (strlen(data) + strlen(model) + 48 >= MAX_PATH) { LogLine("%s look: the path of %s is too long, its own look is used", section, model); return; }
 	char source[MAX_PATH];
 	sprintf_s(source, "%s\\Meshes\\%s", data, model);
 	std::vector<UInt8> file;

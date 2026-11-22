@@ -18,7 +18,7 @@ namespace EnvLightFade {
 
 	inline float Luminance(const NiColor& c) { return c.g * 0.36f + c.r * 0.31f + c.b * 0.32f; }	// NiColor::Luminance 0xB719E0
 
-	inline void ForPass(const void* pass) {
+	inline void ForPass(const void* pass, bool firstPerson = false) {
 		if (!pass) return;
 		const UInt8* p = (const UInt8*)pass;
 		const UInt16 type = *(const UInt16*)(p + 4);
@@ -37,10 +37,20 @@ namespace EnvLightFade {
 		if (!(radius > 1.0f)) return;
 
 		float sunLum = 0.0f;
-		if (ShadowSceneNode* node = BSShaderManager::GetShadowSceneNode(0))
+		NiPoint3 fpOffset = { 0.0f, 0.0f, 0.0f };
+		if (ShadowSceneNode* node = BSShaderManager::GetShadowSceneNode(0)) {
 			if (node->directionalLight && node->directionalLight->sourceLight) sunLum = Luminance(node->directionalLight->sourceLight->Diff);
+			// UNOFFICIAL 2026-11-20: in 1st-person, bound->Center is in 1st-person space (shifted by kLightingOffset at +0x1E4);
+			// without adding fpOffset, d was ~20,000 units so gameF evaluated to 0 at night and EnvLightFade skipped the weapon completely.
+			if (firstPerson) {
+				const NiPoint3& o = *(const NiPoint3*)((const char*)node + 0x1E4);
+				if (_finite(o.x) && _finite(o.y) && _finite(o.z)) fpOffset = o;
+			}
+		}
 		const NiBound* bound = geometry->GetWorldBound();
-		const float dx = light->m_worldTransform.pos.x - bound->Center.x, dy = light->m_worldTransform.pos.y - bound->Center.y, dz = light->m_worldTransform.pos.z - bound->Center.z;
+		const float dx = (light->m_worldTransform.pos.x + fpOffset.x) - bound->Center.x;
+		const float dy = (light->m_worldTransform.pos.y + fpOffset.y) - bound->Center.y;
+		const float dz = (light->m_worldTransform.pos.z + fpOffset.z) - bound->Center.z;
 		const float lampLum = Luminance(light->Diff) * light->Dimmer;
 		const float gameF = (std::max)(sunLum, lampLum * (1.0f - (std::min)((std::max)(sqrtf(dx * dx + dy * dy + dz * dz) / radius, 0.0f), 1.0f)));
 
@@ -53,7 +63,48 @@ namespace EnvLightFade {
 			{ light->m_worldTransform.pos.x - cam.x, light->m_worldTransform.pos.y - cam.y, light->m_worldTransform.pos.z - cam.z, radius },
 			{ FlashlightLamp::Axis.x, FlashlightLamp::Axis.y, FlashlightLamp::Axis.z, FlashlightLamp::CosOuter },
 			{ FlashlightLamp::CosInner, flash ? 1.0f : 0.0f, 0.0f, 0.0f } };
+
+		// UNOFFICIAL 2026-11-20: gather up to 2 additional strongest active point lights on this property (c37-c39 in EnvTemplate.hlsl)
+		// so walking between lights at night smoothly crossblends instead of snapping when FNV swaps lamp 0.
+		float extra[3][4] = {};
+		float bestScore[2] = { 0.0f, 0.0f };
+		const UInt8* propBytes = (const UInt8*)property;
+		for (const UInt32* node = *(const UInt32* const*)(propBytes + 0x60); node; node = (const UInt32*)node[0]) {
+			const UInt8* sl = (const UInt8*)node[2];
+			if (!sl || sl == (const UInt8*)lamp || *(const UInt16*)(sl + 0x110) == 0xFF) continue;
+			const UInt8* niL = *(const UInt8* const*)(sl + 0xF8);
+			if (!niL || (niL[0x30] & 1) || sl[0xEC]) continue;
+			const ShadowSceneLight* ssl = (const ShadowSceneLight*)sl;
+			if (!ssl->sourceLight || !ssl->bPointLight) continue;
+			const NiPointLight* l = ssl->sourceLight;
+			if (FlashlightLamp::Is(l)) continue;
+			const float r = l->Spec.r;
+			if (!(r > 1.0f)) continue;
+			const float ldx = (l->m_worldTransform.pos.x + fpOffset.x) - bound->Center.x;
+			const float ldy = (l->m_worldTransform.pos.y + fpOffset.y) - bound->Center.y;
+			const float ldz = (l->m_worldTransform.pos.z + fpOffset.z) - bound->Center.z;
+			const float dist = sqrtf(ldx * ldx + ldy * ldy + ldz * ldz);
+			if (dist >= r) continue;
+			const float lum = Luminance(l->Diff) * l->Dimmer;
+			const float att = 1.0f - (dist / r);
+			const float score = lum * att * att;
+			if (score <= bestScore[1]) continue;
+			const int slot = score > bestScore[0] ? 0 : 1;
+			if (slot == 0) {
+				bestScore[1] = bestScore[0];
+				memcpy(extra[1], extra[0], sizeof(extra[0]));
+				extra[2][1] = extra[2][0];
+			}
+			bestScore[slot] = score;
+			extra[slot][0] = l->m_worldTransform.pos.x - cam.x;
+			extra[slot][1] = l->m_worldTransform.pos.y - cam.y;
+			extra[slot][2] = l->m_worldTransform.pos.z - cam.z;
+			extra[slot][3] = r;
+			extra[2][slot] = lum;
+		}
+
 		TheRenderManager->device->SetPixelShaderConstantF(28, &c[0][0], 4);
+		TheRenderManager->device->SetPixelShaderConstantF(37, &extra[0][0], 3);
 		Set = true;
 		StatPasses++;
 		if (StatPasses <= 3 || StatPasses % 50000 == 0)
@@ -64,6 +115,7 @@ namespace EnvLightFade {
 		if (!Set) return;
 		static const float none[4] = {};
 		TheRenderManager->device->SetPixelShaderConstantF(28, none, 1);
+		TheRenderManager->device->SetPixelShaderConstantF(39, none, 1);
 		Set = false;
 	}
 }

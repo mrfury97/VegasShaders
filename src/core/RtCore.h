@@ -55,6 +55,10 @@ public:
 
 	// Record only:
 	static bool			CopyIn(int Image, IUnknown* Source, const RECT* Rect = nullptr);
+	// UNOFFICIAL 2026-11-19: explicit active RenderRect sub-rect copy into a shared image (CopyIn with null Rect also auto-crops when
+	// RenderRect::Active() and Source + Image match screen or half-screen dimensions; atlases, sky panoramas and tables are never cropped).
+	static bool			CopyInActiveRect(int Image, IDirect3DBaseTexture9* Source);
+	static bool			CopyInActiveRect(int Image, IDirect3DSurface9* Source);
 	// Up to 12 images (2026-10-30): Images[0..7] at bindings 2..9, Images[8..11] at 12..15 (records 10, geometry 11 unchanged;
 	// a helper older than 2026-10-30 skips a pass with more than 8)
 	static bool			AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteMask, const void* Constants, UINT ConstantsSize,
@@ -93,12 +97,15 @@ public:
 	// RtCore::Frame does not record it again
 	static bool			SubmittedEarlyThisFrame(const User* user);
 	// UNOFFICIAL 2026-11-16 (fd-batchH, docs/next/FD-BATCH-H.md) [Main.Main.RayTracing] OverlapExchange (0 off, the default; 1 collect at the
-	// next frame's RT point; 2 collect at the next frame's start): Frame's exchange signals the helper without the game's GPU waiting for it;
-	// it is collected (the wait + the copies out) before the next exchange records anything. True from Frame until that collect when this
-	// frame's exchange was left open: the Point-0 users' targets then hold the PREVIOUS exchange's results (traced with the camera, jitter
-	// and constants their previous Record used). Only while the camera is still (< 0.1 deg, < 2 units since the last Frame exchange) and every copy was made by one of the last 4 Frame exchanges; otherwise it waits as before (false).
-	// No user reads this yet: a user that reprojects its result (stamps a camera in Record) needs it to keep last frame's stamp.
+	// next frame's RT point; 2 collect at the next frame's start; 3 motion-capable overlap up to 5.0 deg/frame turn): Frame's exchange signals the
+	// helper without the game's GPU waiting for it; it is collected (the wait + the copies out) before the next exchange records anything. True
+	// from Frame until that collect when this frame's exchange was left open: the Point-0 users' targets then hold the PREVIOUS exchange's results
+	// (traced with the camera, jitter and constants their previous Record used). Modes 1-2 overlap while the camera is still (< 0.1 deg, < 2 units);
+	// mode 3 stays overlapped up to 5.0 deg/frame and falls back to synchronous wait on first frame, cell/scale change, camera cut, or > 5.0 deg whip-pan.
 	static bool			OutputsLate();
+	// UNOFFICIAL 2026-11-19: while OutputsLate() is true, fills the camera state (view, projection, world camera position) that the Point-0
+	// trace currently sitting in the output targets was rendered with, and returns true (false otherwise).
+	static bool			LateCamera(D3DXMATRIX& outView, D3DXMATRIX& outProj, D3DXVECTOR4& outCamPos);
 	// The eye in scene space. The scene is world minus TheRenderManager->CameraPosition, the NiCamera's world translation (the eye), so
 	// this is (0, 0, 0). Use it for every ray origin from the camera: Pointers::Generic::CameraLocation is NOT the eye (it read ~0
 	// in the game while the eye was 71000 units away: every ray started outside the scene, FORK-RT-SUN.md rtsun-4).

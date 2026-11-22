@@ -37,9 +37,11 @@
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the history watch (HistoryProbe)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion
+#include "../../core/ViewModelMotion.h"	// UNOFFICIAL 2026-11-21 ViewModelMotion
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask
 #include "../../core/ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
 #include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) the render size's maths, shared with RR's plan
+#include "../../core/ReShadeIntegration.h"
 
 D3DXVECTOR4 TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 
@@ -72,7 +74,7 @@ namespace {
 #define UAV(b)      { 1, b, NVR_EXT_BIND_STORAGE_IMAGE, b, NVR_EXT_VIEW_2D, TRUE, 0 }
 #define CB(s, b)    { s, b, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }
 #define POINTS      { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }
-	const NVR_EXT_BINDING_DESC UpPrepBindings[] = { IMG(0), IMG(1), UAV(2), UAV(3), CB(2, 0), POINTS, IMG(4), IMG(5) };	// IMG(1): v2's viewmodel depth; IMG(5): UNOFFICIAL 2026-10-30 ReactiveMask
+	const NVR_EXT_BINDING_DESC UpPrepBindings[] = { IMG(0), IMG(1), UAV(2), UAV(3), CB(2, 0), POINTS, IMG(4), IMG(5), IMG(6) };	// IMG(1): v2's viewmodel depth; IMG(5): ReactiveMask; IMG(6): ViewModelMotion
 #undef IMG
 #undef UAV
 #undef CB
@@ -216,9 +218,12 @@ void TAAEffect::NoteWorldDraw(bool firstPerson) {
 		// size, so its whole viewport looked like a reset one, and the copy was put into the render viewport: the whole target squeezed
 		// into RenderScale of the copy, the world's picture into RenderScale squared. The water shaders, which read the copy at the
 		// projected position x TESR_RenderScale (the world target's own layout), then showed the room magnified and, past RenderScale of
-		// the frame in x or y, flat blue (indoors) or white (the Strip fountain). A world-scene pass into another target keeps the viewport
-		// it has. First-person passes (the weapon, v2) are put into the render rect as before, without this test.
-		if (!firstPerson) {
+		// the frame in x or y, flat blue (indoors) or white (the Strip fountain).
+		// UNOFFICIAL 2026-11-19 (owner: Stealth Boy first-person hands disappear and a smaller copy appears in the top-left RenderScale corner):
+		// the same rule applies to first-person passes — a Stealth Boy draws refracting arms/weapon into the game's separate full-screen
+		// refraction target (target != up.Target), which ImageSpaceEffectRefraction composites 1:1 AFTER FlushRenderScale upscales the world.
+		// Shrinking its viewport to RenderRect put the Stealth Boy hands at RenderScale x RenderScale in the top-left corner.
+		{
 			IDirect3DSurface9* target = nullptr;
 			TheRenderManager->device->GetRenderTarget(0, &target);
 			if (target) target->Release();	// (compared only: the device holds it)
@@ -562,10 +567,12 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 	// the effects runs before it, and keeps camera motion only)
 	const bool objectMotion = ObjectMotion::Ready();
 	prep.cameraDelta = D3DXVECTOR4(delta.x, delta.y, delta.z, objectMotion ? 1.0f : 0.0f);
+	const bool vmMotion = !resolveDepth && ViewModelMotion::Ready();
+	const float weaponFallback = (FSRSettings.Upscaler == 1 && vmMotion) ? Upscaler::DlssWeaponMaskValue() : FSRSettings.WeaponReactive;
 	// w: v2 (the weapon is drawn by now) = its reactive value and FSRPrep.comp's weapon rule; v1 = -1, no weapon test.
-	prep.size = D3DXVECTOR4((float)renderWidth, (float)renderHeight, reset ? 1.0f : 0.0f, resolveDepth ? -1.0f : FSRSettings.WeaponReactive);
+	prep.size = D3DXVECTOR4((float)renderWidth, (float)renderHeight, reset ? 1.0f : 0.0f, resolveDepth ? -1.0f : weaponFallback);
 	const bool reactive = ReactiveMask::Ready();	// UNOFFICIAL 2026-10-30
-	prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), 0.0f, 0.0f);
+	prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), vmMotion ? 1.0f : 0.0f, 0.0f);
 	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(Up.PrepUniforms, &prep, sizeof(prep));
 	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 	if (!prepBuffer || !point) { fail("its constant buffer or sampler could not be made"); return false; }
@@ -573,7 +580,8 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, TheTextureManager->DepthTexture), Image(1, TheTextureManager->DepthTextureViewModel),
 			Image(2, Up.Motion.Texture, true), Image(3, Up.Depth.Texture, true), {}, {},
 			Image(4, objectMotion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)TheTextureManager->DepthTexture),
-			Image(5, reactive ? (IUnknown*)ReactiveMask::Texture : (IUnknown*)TheTextureManager->DepthTexture) };
+			Image(5, reactive ? (IUnknown*)ReactiveMask::Texture : (IUnknown*)TheTextureManager->DepthTexture),
+			Image(6, vmMotion ? (IUnknown*)ViewModelMotion::Texture : (IUnknown*)TheTextureManager->DepthTexture) };
 		b[4].Slot = 0; b[4].Type = NVR_EXT_BIND_UNIFORM_BUFFER; b[4].pResource = prepBuffer;
 		b[5].Slot = 0; b[5].Type = NVR_EXT_BIND_SAMPLER; b[5].pResource = point;
 		NVR_EXT_DISPATCH_DESC dispatch = {};
@@ -599,7 +607,7 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 	in.Motion = Up.Motion.Texture;
 	// UNOFFICIAL 2026-11-01 v2: the weapon is in this picture (FSRUpPrep's weapon rule above): DLSS's bias current colour mask on it
 	// ([Shaders.TAA.DLSS] WeaponMask). v1: none (the weapon is drawn after the upscale, at full resolution).
-	in.ViewModel = resolveDepth ? nullptr : TheTextureManager->DepthTextureViewModel;
+	in.ViewModel = (resolveDepth || vmMotion) ? nullptr : TheTextureManager->DepthTextureViewModel;
 	in.RenderWidth = renderWidth;
 	in.RenderHeight = renderHeight;
 	in.InputWidth = in.DisplayWidth = Up.Width;
@@ -714,6 +722,22 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 	IDirect3DDevice9* device = TheRenderManager->device;
 	RenderRect::RescaleRegistered(device);	// Bloom's top level, read by the game's tonemap and the rain at full size
 	bool ok = false;
+	const bool reshade = ReShadeIntegration::KeepDepthBound();
+	const bool needNormals = TheShaderManager->PostTonemapNeedsNormals();
+	const bool needVmDirect = TheShaderManager->PostTonemapNeedsViewModelDepth();
+	const bool needDepth = TheShaderManager->PostUpscaleNeedsDepth(false);
+	const bool needAnyDepth = needDepth || needNormals || needVmDirect || reshade;
+	const bool onlyCombinedDepth = needDepth && !needNormals && !needVmDirect && !reshade;
+
+	bool upscaledDepthDone = !needAnyDepth;
+	if (!upscaledDepthDone && onlyCombinedDepth && TheShaderManager->Effects.CombineDepth) {
+		const float worldJx = Up.Jittered ? -Up.JitterX : 0.0f;
+		const float worldJy = Up.Jittered ? Up.JitterY : 0.0f;
+		const bool vmJit = Up.Jittered && ViewModelMotion::JitteredThisFrame();
+		upscaledDepthDone = TheShaderManager->Effects.CombineDepth->RenderUpscaled(
+			device, Up.RenderWidth, Up.RenderHeight, worldJx, worldJy, vmJit ? -Up.JitterX : 0.0f, vmJit ? Up.JitterY : 0.0f);
+	}
+
 	{
 		static GpuTimer timer("FSR upscale (RenderScale v2)");
 		GpuProfileScope gpu(timer, device);
@@ -734,14 +758,15 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 			const RECT region = { 0, 0, (LONG)Up.RenderWidth, (LONG)Up.RenderHeight };
 			if (SUCCEEDED(device->StretchRect(Up.Target, &region, Up.Input.Surface, &region, D3DTEXF_NONE))) UpscaleComposite(device, nullptr);
 		}
-		// Every depth NVR's later effects read, full size again: the world's (the composite wrote it into the depth-stencil) and the
-		// weapon's (upsampled at its own, unjittered pixels), each resolved; then TESR_DepthBuffer and TESR_NormalsBuffer redrawn.
-		if (Up.DepthStencil && Up.CompositePS && Up.CompositeStates) {
+		// Every depth NVR's later effects read, full size again: skipped when nothing after the upscale reads depth/normals
+		// or when CombineDepth::RenderUpscaled already produced full-res TESR_DepthBuffer in one pass.
+		if (!upscaledDepthDone && Up.DepthStencil && Up.CompositePS && Up.CompositeStates) {
 			IDirect3DSurface9* oldDepth = nullptr;
 			if (FAILED(device->GetDepthStencilSurface(&oldDepth))) oldDepth = nullptr;
 			device->SetDepthStencilSurface(Up.DepthStencil);
 			TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
-			if (UpscaleComposite(device, nullptr, TheTextureManager->DepthTextureViewModel, false, false)) {
+			if ((needVmDirect || needDepth || needNormals) &&
+				UpscaleComposite(device, nullptr, TheTextureManager->DepthTextureViewModel, false, ViewModelMotion::JitteredThisFrame())) {
 				device->SetDepthStencilSurface(Up.DepthStencil);
 				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
 			}
@@ -750,7 +775,7 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 		}
 	}
 	RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
-	TheShaderManager->RenderDepthAndNormals(GameSurface ? GameSurface : Up.Target);
+	if (!upscaledDepthDone) TheShaderManager->RenderDepthAndNormals(GameSurface ? GameSurface : Up.Target, needNormals);
 	if (ok && !Up.V2Logged) {
 		Up.V2Logged = true;
 		Logger::Log("UNOFFICIAL RenderScale v2: Vegas Shaders' effects ran at %ux%u, upscaled after them (to %ux%u by %s).", Up.RenderWidth, Up.RenderHeight,
@@ -771,7 +796,22 @@ void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3
 	DroppedInARow = 0;	// (this frame's upscale ran: RR's)
 	RenderRect::End();
 	RenderRect::RescaleRegistered(Device);
-	{
+	const bool reshade = ReShadeIntegration::KeepDepthBound();
+	const bool needNormals = TheShaderManager->PostTonemapNeedsNormals();
+	const bool needVmDirect = TheShaderManager->PostTonemapNeedsViewModelDepth();
+	const bool needDepth = TheShaderManager->PostUpscaleNeedsDepth(true);
+	const bool needAnyDepth = needDepth || needNormals || needVmDirect || reshade;
+	const bool onlyCombinedDepth = needDepth && !needNormals && !needVmDirect && !reshade;
+
+	bool upscaledDepthDone = !needAnyDepth;
+	if (!upscaledDepthDone && onlyCombinedDepth && TheShaderManager->Effects.CombineDepth) {
+		const float worldJx = Up.Jittered ? -Up.JitterX : 0.0f;
+		const float worldJy = Up.Jittered ? Up.JitterY : 0.0f;
+		const bool vmJit = Up.Jittered && ViewModelMotion::JitteredThisFrame();
+		upscaledDepthDone = TheShaderManager->Effects.CombineDepth->RenderUpscaled(
+			Device, Up.RenderWidth, Up.RenderHeight, worldJx, worldJy, vmJit ? -Up.JitterX : 0.0f, vmJit ? Up.JitterY : 0.0f);
+	}
+	if (!upscaledDepthDone) {
 		static GpuTimer timer("  RR: RenderScale depths to full size");
 		GpuProfileScope gpu(timer, Device);
 		if (Up.DepthStencil && Up.CompositePS && Up.CompositeStates) {
@@ -782,7 +822,8 @@ void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3
 			if (UpscaleComposite(Device, nullptr, nullptr, false, true)) {
 				Device->SetDepthStencilSurface(Up.DepthStencil);
 				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
-				if (UpscaleComposite(Device, nullptr, TheTextureManager->DepthTextureViewModel, false, false)) {
+				if ((needVmDirect || needDepth || needNormals) &&
+					UpscaleComposite(Device, nullptr, TheTextureManager->DepthTextureViewModel, false, ViewModelMotion::JitteredThisFrame())) {
 					Device->SetDepthStencilSurface(Up.DepthStencil);
 					TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
 				}
@@ -798,7 +839,7 @@ void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3
 	Up.AfterEffects = true;
 	Up.HistoryValid = false;	// DLSS SR / FSR's RenderScale history did not see this frame
 	Up.JitterIndex = (Up.JitterIndex + 1) % (std::max)(1, (int)Up.JitterPhases);
-	TheShaderManager->RenderDepthAndNormals(ChainTarget ? ChainTarget : Up.Target);
+	if (!upscaledDepthDone) TheShaderManager->RenderDepthAndNormals(ChainTarget ? ChainTarget : Up.Target, needNormals);
 	UpscaleFinish(true, true);
 }
 

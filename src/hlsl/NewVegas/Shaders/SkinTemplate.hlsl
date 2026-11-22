@@ -91,7 +91,7 @@
     #endif
 #endif
 #ifdef PS
-    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
+    #define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (always compiled in; its strength switches it live)
 #endif
 #include "includes/Shadow.hlsl"	// shared code
 #define CAPTURED_ACTOR	// UNOFFICIAL 2026-10-28: every skin draw is an actor's (CapturedNormals alpha 2)

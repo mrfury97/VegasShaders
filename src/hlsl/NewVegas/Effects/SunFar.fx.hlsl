@@ -28,6 +28,7 @@ float4 TESR_PBRExtraData;         // y: SkylightingScale
 float4 TESR_TerrainData;          // z: LightingScale, w: AmbientScale -- terrain has its own
 float4 TESR_TerrainSkyData;       // x: SkylightingScale
 float4 TESR_SkyIrradianceObjects[9];     // the sky light the object shaders add (Shaders/Includes/SkyAmbient.hlsl, mode 0)
+float4 TESR_SkyIrradianceTerrain[9];     // the sky light the terrain shaders add (Shaders/Includes/SkyAmbient.hlsl, mode 0)
 float4 TESR_TerrainShadowData;    // x west edge, y north edge, z 1 / width, w strength (0 off)
 float4 TESR_TerrainShadowRange;   // x lowest encoded height, y encoded range, z bias, w blur
 float4 TESR_TerrainShadowParams;  // x 1 / height, y DebugView, z Darkness, w Contrast
@@ -116,6 +117,19 @@ float3 SkyIrradiance(float3 n) {
 		+ TESR_SkyIrradianceObjects[6].rgb * (3.0f * n.z * n.z - 1.0f)
 		+ TESR_SkyIrradianceObjects[7].rgb * (n.x * n.z)
 		+ TESR_SkyIrradianceObjects[8].rgb * (n.x * n.x - n.y * n.y);
+	return sqrt(max(irradiance, 0.0f));
+}
+
+float3 SkyIrradianceTerrain(float3 n) {
+	float3 irradiance = TESR_SkyIrradianceTerrain[0].rgb
+		+ TESR_SkyIrradianceTerrain[1].rgb * n.y
+		+ TESR_SkyIrradianceTerrain[2].rgb * n.z
+		+ TESR_SkyIrradianceTerrain[3].rgb * n.x
+		+ TESR_SkyIrradianceTerrain[4].rgb * (n.x * n.y)
+		+ TESR_SkyIrradianceTerrain[5].rgb * (n.y * n.z)
+		+ TESR_SkyIrradianceTerrain[6].rgb * (3.0f * n.z * n.z - 1.0f)
+		+ TESR_SkyIrradianceTerrain[7].rgb * (n.x * n.z)
+		+ TESR_SkyIrradianceTerrain[8].rgb * (n.x * n.x - n.y * n.y);
 	return sqrt(max(irradiance, 0.0f));
 }
 
@@ -282,7 +296,8 @@ float4 SunFarPS(VSOUT IN) : COLOR0 {
 	float3 landDir = TESR_SunFarLand.w > 0.5f && TESR_SunFarWater.w < 0.5f ? TESR_SunFarLand.xyz : lightDir;
 	float NdotL = lerp(saturate(dot(normal, lightDir)), saturate(dot(normal, landDir)), terrainWeight);
 	float3 sunLight = LightColor(TESR_ShadowSunLight.rgb) * (NdotL * LightScale(scales.x));
-	float3 ambientLight = LightColor(TESR_ShadowAmbientLight.rgb) * LightScale(scales.y) + LightColor(SkyIrradiance(normal)) * LightScale(scales.z);
+	float3 skyIrr = lerp(SkyIrradiance(normal), SkyIrradianceTerrain(normal), terrainWeight);
+	float3 ambientLight = LightColor(TESR_ShadowAmbientLight.rgb) * LightScale(scales.y) + LightColor(skyIrr) * LightScale(scales.z);
 	float3 litNow = ambientLight + sunLight * cascade;
 	float3 factor = saturate((ambientLight * (1.0f - shade) + sunLight * (cascade * blocked)) / max(litNow, 0.0001f));
 	factor = keep < 1.0f ? lerp(1.0f, factor, keep) : factor;   // (a select: off the water exactly as before)

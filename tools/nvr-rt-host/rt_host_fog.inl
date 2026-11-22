@@ -266,11 +266,11 @@ static bool sceneFogVis(Ctx& c) {
 
 struct FogLampCtx { int visA = -1, visB = -1, shader = -1; };
 static FogLampCtx gFogLamp;
-static const unsigned kLampCols = 48, kLampRows = 32;
+static const unsigned kFogLampCols = 48, kFogLampRows = 32;
 
 static bool registerFogLamps(Host& h, const std::string& spv) {
-	gFogLamp.visA = h.AddImage("fog lamps 0", kLampCols * RtFogLampGrid::kTilesAcross, kLampRows * RtFogLampGrid::kTilesAcross, NVR_EXT_SHARED_R16F);
-	gFogLamp.visB = h.AddImage("fog lamps 1", kLampCols * RtFogLampGrid::kTilesAcross, kLampRows * RtFogLampGrid::kTilesAcross, NVR_EXT_SHARED_R16F);
+	gFogLamp.visA = h.AddImage("fog lamps 0", kFogLampCols * RtFogLampGrid::kTilesAcross, kFogLampRows * RtFogLampGrid::kTilesAcross, NVR_EXT_SHARED_R16F);
+	gFogLamp.visB = h.AddImage("fog lamps 1", kFogLampCols * RtFogLampGrid::kTilesAcross, kFogLampRows * RtFogLampGrid::kTilesAcross, NVR_EXT_SHARED_R16F);
 	gFogLamp.shader = h.AddShader(spv + "\\RtFogLamps.spv");
 	return gFogLamp.visA > 0 && gFogLamp.visB > 0;
 }
@@ -341,7 +341,7 @@ static float fogLampCpu(const World& w, V3 eye, const RtFogLampGrid::PassConstan
 
 static float fogLampValue(const std::vector<float>& img, int cx, int cy, int slot) {
 	const int across = int(RtFogLampGrid::kTilesAcross);
-	return img[size_t((slot / across) * kLampRows + cy) * (kLampCols * across) + size_t((slot % across) * kLampCols + cx)];
+	return img[size_t((slot / across) * kFogLampRows + cy) * (kFogLampCols * across) + size_t((slot % across) * kFogLampCols + cx)];
 }
 
 static bool sceneFogLamps(Ctx& c) {
@@ -361,7 +361,8 @@ static bool sceneFogLamps(Ctx& c) {
 	const unsigned across = RtFogLampGrid::kTilesAcross;
 	auto run = [&](const RtFogLampGrid::PassConstants& k, int out, int hist, std::vector<float>& img) -> bool {
 		const std::vector<int> imgs = { out, hist, c.alphaAtlas };
-		h.AddPass(gFogLamp.shader, imgs, 0x1u, &k, sizeof(k), (kLampCols * across + 7) / 8, (kLampRows * RtFogLampGrid::TileRows(k) + 7) / 8);
+		// UNOFFICIAL 2026-11-19: 1 thread per screen cell (shares 1 primary camera ray across all lamp slots).
+		h.AddPass(gFogLamp.shader, imgs, 0x1u, &k, sizeof(k), (kFogLampCols + 7) / 8, (kFogLampRows + 7) / 8);
 		if (!h.Exchange(w, ids, cam.eye)) return false;
 		if (!h.Read(out, img)) return false;
 		h.EndFrame();
@@ -373,13 +374,13 @@ static bool sceneFogLamps(Ctx& c) {
 	for (int n : { 1, 4 }) {
 		s.samples = n; s.weight = 0.0f; s.jitter = false;
 		RtFogLampGrid::PassConstants k;
-		RtFogLampGrid::Fill(k, fwd, rgt, upv, cam.p00, cam.p11, eye, kLampCols, kLampRows, slots, 0u, s, 0);
+		RtFogLampGrid::Fill(k, fwd, rgt, upv, cam.p00, cam.p11, eye, kFogLampCols, kFogLampRows, slots, 0u, s, 0);
 		std::vector<float> img;
 		if (!run(k, gFogLamp.visA, gFogLamp.visB, img)) return false;
 		int checked = 0, bad = 0, unstable = 0, shown = 0, dark[2] = { 0, 0 }, lit[2] = { 0, 0 }, part[2] = { 0, 0 };
 		for (int li = 0; li < 2; li++) {
 			const int slot = li == 0 ? 0 : 5;
-			for (int cy = 0; cy < int(kLampRows); cy++) for (int cx = 0; cx < int(kLampCols); cx++) {
+			for (int cy = 0; cy < int(kFogLampRows); cy++) for (int cx = 0; cx < int(kFogLampCols); cx++) {
 				bool traced = false;
 				const float want = fogLampCpu(w, cam.eye, k, cx, cy, slot, 0.5f, 0.5f, 0.5f, &traced);
 				// a cell is stable when the view a hundredth of a cell to each side gives the same number within 0.002
@@ -393,34 +394,34 @@ static bool sceneFogLamps(Ctx& c) {
 				if (std::fabs(got - want) > 4e-3f) { bad++; if (shown++ < 5) say("    lamp %c cell (%d, %d): got %.3f, the CPU's rays %.3f\n", li ? 'B' : 'A', cx, cy, got, want); }
 			}
 		}
-		const int cells = int(kLampCols * kLampRows * 2);
+		const int cells = int(kFogLampCols * kFogLampRows * 2);
 		bool pass = bad == 0 && checked > cells * 8 / 10;
 		if (n == 4) pass = pass && dark[0] > 100 && lit[0] > 20 && lit[1] > 200 && dark[1] < lit[1] / 4;
 		say("  fixed points, %d a cell: %d of %d cells checked (%d on an edge skipped), %d mismatches; lamp A (behind the wall): %d dark, %d lit, %d part lit; "
 			"lamp B (this side): %d dark, %d lit, %d part lit -> %s\n", n, checked, cells, unstable, bad, dark[0], lit[0], part[0], dark[1], lit[1], part[1], pass ? "ok" : "BAD");
-		if (!pass) { ok = false; dumpPfm(n == 1 ? "foglamps_fixed1" : "foglamps_fixed4", img, kLampCols * across, kLampRows * across, 1); }
+		if (!pass) { ok = false; dumpPfm(n == 1 ? "foglamps_fixed1" : "foglamps_fixed4", img, kFogLampCols * across, kFogLampRows * across, 1); }
 	}
 
 	// ---- 2: moving points + the history against a 4 x 4 views x 8 points reference (lamp A's tile, its partly lit cells)
 	{
 		s.samples = 2; s.jitter = true;
-		std::vector<float> ref(size_t(kLampCols) * kLampRows, -1.0f);
+		std::vector<float> ref(size_t(kFogLampCols) * kFogLampRows, -1.0f);
 		RtFogLampGrid::PassConstants kr;
 		RtFogLampGrid::Settings sr = s; sr.samples = 8; sr.weight = 0.0f; sr.jitter = false;
-		RtFogLampGrid::Fill(kr, fwd, rgt, upv, cam.p00, cam.p11, eye, kLampCols, kLampRows, slots, 0u, sr, 0);
-		for (int cy = 0; cy < int(kLampRows); cy++) for (int cx = 0; cx < int(kLampCols); cx++) {
+		RtFogLampGrid::Fill(kr, fwd, rgt, upv, cam.p00, cam.p11, eye, kFogLampCols, kFogLampRows, slots, 0u, sr, 0);
+		for (int cy = 0; cy < int(kFogLampRows); cy++) for (int cx = 0; cx < int(kFogLampCols); cx++) {
 			float sum = 0; int count = 0;
 			for (int a = 0; a < 4; a++) for (int b = 0; b < 4; b++) {
 				bool traced = false;
 				const float v = fogLampCpu(w, cam.eye, kr, cx, cy, 0, (a + 0.5f) / 4, (b + 0.5f) / 4, 0.5f, &traced);
 				if (traced) { sum += v; count++; }
 			}
-			if (count == 16) ref[size_t(cy) * kLampCols + cx] = sum / 16.0f;
+			if (count == 16) ref[size_t(cy) * kFogLampCols + cx] = sum / 16.0f;
 		}
 		auto rms = [&](const std::vector<float>& img) {
 			double sq = 0; int n = 0;
-			for (int cy = 0; cy < int(kLampRows); cy++) for (int cx = 0; cx < int(kLampCols); cx++) {
-				const float r = ref[size_t(cy) * kLampCols + cx];
+			for (int cy = 0; cy < int(kFogLampRows); cy++) for (int cx = 0; cx < int(kFogLampCols); cx++) {
+				const float r = ref[size_t(cy) * kFogLampCols + cx];
 				if (r < 0.02f || r > 0.98f) continue;	// the partly lit cells
 				const double d = double(fogLampValue(img, cx, cy, 0)) - r; sq += d * d; n++;
 			}
@@ -432,7 +433,7 @@ static bool sceneFogLamps(Ctx& c) {
 		for (int i = 0; i < 16; i++) {
 			s.weight = RtFogGrid::HistoryWeight(unsigned(i), 0.9f);
 			RtFogLampGrid::PassConstants k;
-			RtFogLampGrid::Fill(k, fwd, rgt, upv, cam.p00, cam.p11, eye, kLampCols, kLampRows, slots, i ? 0xFFFFu : 0u, s, 200u + unsigned(i));
+			RtFogLampGrid::Fill(k, fwd, rgt, upv, cam.p00, cam.p11, eye, kFogLampCols, kFogLampRows, slots, i ? 0xFFFFu : 0u, s, 200u + unsigned(i));
 			if (i == 0) k.params2[3] = 1.0f;	// the first frame's points move too (no history yet: Fill leaves them fixed)
 			if (!run(k, out, hist, img)) return false;
 			if (i == 0) single = rms(img);
@@ -440,7 +441,8 @@ static bool sceneFogLamps(Ctx& c) {
 		}
 		converged = rms(img);
 		const bool pass = converged < 0.6 * single;
-		say("  two moving points a cell, 16 frames with the history: RMS of lamp A's partly lit cells %.4f vs one frame's %.4f -> %s\n", converged, single, pass ? "ok" : "BAD");
+		const double gpuMs = h.Finish() ? h.shared->traceUsAvg / 1000.0 : 0.0;
+		say("  two moving points a cell, 16 frames with the history: RMS of lamp A's partly lit cells %.4f vs one frame's %.4f, GPU %.3f ms -> %s\n", converged, single, gpuMs, pass ? "ok" : "BAD");
 		if (!pass) ok = false;
 	}
 	releaseWorld(h, ids);

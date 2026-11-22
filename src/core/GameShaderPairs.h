@@ -45,6 +45,7 @@ namespace GameShaderPairs {
 	inline const char* BoundNote = "";	// for the FLASHLAMP look (core/FlashlightLamp.h): the pair of the last bind
 	// the handles the repair put on the shader objects for the game's bind (AfterBind takes them off again)
 	inline IDirect3DVertexShader9* HeldVertex = nullptr; inline IDirect3DPixelShader9* HeldPixel = nullptr;
+	inline IDirect3DVertexShader9* BoundVertex = nullptr; inline IDirect3DPixelShader9* BoundPixel = nullptr;	// actual handles bound during SetShaders (non-null only when repaired)
 	inline bool Holding = false;
 
 	// The shader package: every entry's place in the file's bytes, by upper-case name.
@@ -190,14 +191,37 @@ namespace GameShaderPairs {
 		const bool modVertex = (void*)vs->ShaderHandle != (void*)vs->ShaderHandleBackup, modPixel = (void*)ps->ShaderHandle != (void*)ps->ShaderHandleBackup;
 		char missing[64] = "";
 		for (unsigned i = 0; i < 16; i++) if ((pmask & ~vmask) & (1u << i)) { char one[8]; sprintf_s(one, "%s%u", missing[0] ? ", " : "", i); strcat_s(missing, one); }
-		// One half is this mod's (its pixel shader behind a vertex shader it does not replace: SLS2000.pso behind the tree branches'
-		// STB2004.vso, seen 2026-11-13; or its vertex shader left with a game pixel shader the driver refused): named once, as a note for
-		// this mod's own upkeep. No repair, and the shader package is not read for it.
+		// One half is this mod's (e.g. our SLS2000.pso / SLS2011.pso behind the game's unreplaced SpeedTree branch vertex shaders
+		// STB2004.vso / STB2006.vso, or our vertex shader paired with a game pixel shader whose mod record failed to compile).
+		// UNOFFICIAL 2026-11-19: fall back to the mod half's original game shader (ShaderHandleBackup) when that restores a matching
+		// VS/PS TEXCOORD signature, so the pixel shader never reads unwritten inputs and DXVK can fast-link the pipeline.
 		if (modVertex || modPixel) {
+			IDirect3DVertexShader9* backupV = (IDirect3DVertexShader9*)vs->ShaderHandleBackup;
+			IDirect3DPixelShader9* backupP = (IDirect3DPixelShader9*)ps->ShaderHandleBackup;
+			std::vector<DWORD> bvcode, bpcode;
+			unsigned bvmask = 0, bpmask = 0;
+			const bool hasBackupP = modPixel && backupP && Bytes(backupP, bpcode) && Coords(bpcode.data(), true, bpmask);
+			const bool hasBackupV = modVertex && backupV && Bytes(backupV, bvcode) && Coords(bvcode.data(), false, bvmask);
+			if (hasBackupP && !(bpmask & ~vmask)) {
+				backupP->AddRef();
+				verdict.pixel = backupP;
+				verdict.how = "the game's own pixel shader";
+			}
+			else if (hasBackupV && !(pmask & ~bvmask)) {
+				backupV->AddRef();
+				verdict.vertex = backupV;
+				verdict.how = "the game's own vertex shader";
+			}
+			else if (hasBackupP && hasBackupV && !(bpmask & ~bvmask)) {
+				backupV->AddRef(); backupP->AddRef();
+				verdict.vertex = backupV; verdict.pixel = backupP;
+				verdict.how = "the game's own shader pair";
+			}
 			if (Logged < 24) {
 				Logged++;
-				Logger::Log("UNOFFICIAL GameShaderPairs (a note for this mod's upkeep, nothing to do for the player): the pixel shader %s (%s) reads TEXCOORD %s, which the vertex shader %s (%s) it is drawn with does not write.",
-					ps->Name ? ps->Name : "?", modPixel ? "this mod's" : "the game's or another mod's", missing, vs->Name ? vs->Name : "?", modVertex ? "this mod's" : "the game's or another mod's");
+				Logger::Log("UNOFFICIAL GameShaderPairs: the pixel shader %s (%s) reads TEXCOORD %s, which the vertex shader %s (%s) does not write%s%s.",
+					ps->Name ? ps->Name : "?", modPixel ? "this mod's" : "the game's or another mod's", missing, vs->Name ? vs->Name : "?", modVertex ? "this mod's" : "the game's or another mod's",
+					verdict.how[0] ? ": drawing this pair with " : " (no matching backup found)", verdict.how);
 			}
 			return verdict;
 		}
@@ -238,6 +262,7 @@ namespace GameShaderPairs {
 	// SetShadersHook, right before the game binds the pass's shaders.
 	inline void BeforeBind(NiD3DVertexShaderEx* vs, NiD3DPixelShaderEx* ps) {
 		BoundNote = "";
+		BoundVertex = nullptr; BoundPixel = nullptr;
 		if (!Check || !vs || !ps || !vs->ShaderHandle || !ps->ShaderHandle || !vs->ShaderHandleBackup || !ps->ShaderHandleBackup) return;
 		if ((void*)vs->ShaderHandle != (void*)vs->ShaderHandleBackup && (void*)ps->ShaderHandle != (void*)ps->ShaderHandleBackup) return;	// both this mod's
 		const unsigned long long key = ((unsigned long long)(UInt32)(uintptr_t)vs->ShaderHandle << 32) | (UInt32)(uintptr_t)ps->ShaderHandle;
@@ -255,8 +280,8 @@ namespace GameShaderPairs {
 		BoundNote = " [this pair does NOT fit]";
 		if (!Repair || (!Last->vertex && !Last->pixel)) return;
 		HeldVertex = vs->ShaderHandle; HeldPixel = ps->ShaderHandle; Holding = true;
-		if (Last->vertex) vs->ShaderHandle = Last->vertex;
-		if (Last->pixel) ps->ShaderHandle = Last->pixel;
+		if (Last->vertex) { vs->ShaderHandle = Last->vertex; BoundVertex = Last->vertex; }
+		if (Last->pixel) { ps->ShaderHandle = Last->pixel; BoundPixel = Last->pixel; }
 		BoundNote = " [this pair did not fit: REPAIRED]";
 		RepairedBinds++;
 	}

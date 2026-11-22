@@ -76,8 +76,15 @@ static bool RunGetLocationName(CommandArgs args) {
 	return true;
 }
 
+// 2026-11-17: the game's ExtractArgs copies a script's string without knowing the buffer's size, and a compiled script stores a
+// string's length in 16 bits: each buffer takes the longest such string (static: scripts run on the main thread, and 64 KB
+// each is too much for the stack). A section or key too long to be a setting's is refused before use (FillNode keeps them in
+// 40 bytes each).
+constexpr size_t ScriptText = 0x10000;
+static bool SettingName(const char* text) { return strlen(text) < 40; }
+
 static bool RunSetExtraEffectEnabled(CommandArgs args) {
-	char effect[80];
+	static char effect[ScriptText];
 	int flag;
 	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &effect, &flag))
 		TheCommandManager->Commands.SetExtraEffectEnabled(args.result, effect, flag);
@@ -85,7 +92,7 @@ static bool RunSetExtraEffectEnabled(CommandArgs args) {
 }
 
 static bool RunSetCustomConstant(CommandArgs args) {
-	char name[80];
+	static char name[ScriptText];
 	D3DXVECTOR4 vec;
 	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &name, &vec.x, &vec.y, &vec.z, &vec.w))
 		TheCommandManager->Commands.SetCustomConstant(args.result, name, &vec);
@@ -98,27 +105,30 @@ static bool RunGetWeatherName(CommandArgs args) {
 }
 
 static bool RunGetSetting(CommandArgs args) {
-	char section[40];
-	char key[40];
-	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &section, &key))
+	static char section[ScriptText];
+	static char key[ScriptText];
+	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &section, &key)
+		&& SettingName(section) && SettingName(key))
 		TheCommandManager->Commands.GetSetting(args.result, section, key);
 	return true;
 }
 
 static bool RunSetSetting(CommandArgs args) {
-	char section[40];
-	char key[40];
+	static char section[ScriptText];
+	static char key[ScriptText];
 	float value;
-	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &section, &key, &value))
+	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &section, &key, &value)
+		&& SettingName(section) && SettingName(key))
 		TheCommandManager->Commands.SetSetting(args.result, section, key, value);
 	return true;
 }
 
 static bool RunSetSettingS(CommandArgs args) {
-	char section[40];
-	char key[40];
-	char text[80];
-	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &section, &key, &text))
+	static char section[ScriptText];
+	static char key[ScriptText];
+	static char text[ScriptText];
+	if (Pointers::Functions::ExtractArgs(args.paramInfo, args.arg1, args.opcodeOffset, args.thisObj, args.Obj, args.scriptObj, args.eventList, &section, &key, &text)
+		&& SettingName(section) && SettingName(key))
 		TheCommandManager->Commands.SetSettingS(args.result, section, key, text);
 	return true;
 }
@@ -257,7 +267,7 @@ void CommandManager::PluginCommands::GetLocationName(double* out) {
 
 	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_Console)) {
 		// Same lookups and the same order as before: cell, worldspace, region.
-		const char* cell = Player->parentCell->GetEditorName();
+		const char* cell = Player->parentCell ? Player->parentCell->GetEditorName() : NULL;	// (2026-11-17: no cell at the main menu)
 		const char* world = NULL;
 		const char* region = NULL;
 		if (TESWorldSpace* ws = Player->GetWorldSpace()) world = ws->GetEditorName();
@@ -268,8 +278,8 @@ void CommandManager::PluginCommands::GetLocationName(double* out) {
 		line += ", Region: ";
 		line += region ? region : "(no region)";
 		line += ", Cell: ";
-		line += cell;
-		Pointers::Functions::PrintToConsole(line.c_str());
+		line += cell ? cell : "(no cell)";
+		Pointers::Functions::PrintToConsole("%s", line.c_str());	// (2026-11-17: as text, not as the format: the names come from plugins)
 	}
 	*out = 1;
 
@@ -297,7 +307,7 @@ void CommandManager::PluginCommands::GetWeatherName(double* out) {
 
 		std::string line = "Weather: ";
 		line += label ? label : "(no weather)";
-		Pointers::Functions::PrintToConsole(line.c_str());
+		Pointers::Functions::PrintToConsole("%s", line.c_str());	// (2026-11-17, as above)
 	}
 	*out = 1;
 
@@ -311,8 +321,11 @@ void CommandManager::PluginCommands::GetSetting(double* out, const char* section
 
 void CommandManager::PluginCommands::SetSetting(double* out, const char* section, const char* key, float value) {
 
-	if (StalePresetValues::Blocked(section, key, value, "a script (NVRSetSetting)")) { *out = 1; return; }	// UNOFFICIAL 2026-11-10
-	TheSettingManager->SetSettingF(section, key, value);
+	// UNOFFICIAL 2026-11-10 / 11-18: an old default of a fixed setting (Cartographer, Atlas and other scripts made for older builds) is
+	// passed over, a renamed key goes to its new name (StalePresetValues.h).
+	const StalePresetValues::Result stale = StalePresetValues::Check(section, key, value, "a script (NVRSetSetting)");
+	if (stale.verdict == StalePresetValues::Verdict::PassOver) { *out = 1; return; }
+	TheSettingManager->SetSettingF(stale.section, stale.key, value);
 	*out = 1;
 
 }
@@ -331,6 +344,7 @@ void CommandManager::PluginCommands::SetSettingS(double* out, const char* sectio
 		else slot = -1;
 		if (slot >= 0) {
 			LUTEffect* lut = TheShaderManager->Effects.LUT;
+			if (!LUTEffect::SafeName(value)) { *out = 1; return; }	// (2026-11-17: a file in the LUT folder, not a path out of it)
 			std::string texturePath = std::string(LUTEffect::LUTFolder()) + value;
 			IDirect3DBaseTexture9* texture = TheTextureManager->GetFileTexture(texturePath, TextureRecord::PlanarBuffer);
 			if (texture) lut->AssignLUTSlot(slot, texture, value);

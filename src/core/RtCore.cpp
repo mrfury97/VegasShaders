@@ -10,10 +10,12 @@
 #include <vector>
 
 #include "RtCore.h"
+#include "TestTools.h"	// NVR_TEST_TOOLS (the helper's --dev)
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-11: ReferenceOn (ReferencePT as honoured)
 bool RtMaterialRuleOf(NiGeometry* geometry, float* roughness, float* metal);	// UNOFFICIAL 2026-11-03 (NewVegas/Hooks/Render.cpp)
 const char* RtMaterialClassOf(NiGeometry* geometry);	// UNOFFICIAL 2026-11-07 ptaaa-materials (NewVegas/Hooks/Render.cpp)
 #include "DxvkCompute.h"
+#include "RenderRect.h"	// UNOFFICIAL 2026-11-19: RenderRect sub-rect shared image copies & overlap scale tracking
 #include "GpuProfiler.h"
 #include "PlantWind.h"	// (2026-10-30) PlantSway: a wind-bent plant's traced instance leans with it
 #include "../../tools/nvr-rt-helper/NvrRtProtocol.h"
@@ -451,8 +453,17 @@ namespace {
 		bool		overlapCamKnown = false;
 		D3DXMATRIX	overlapCamView;
 		D3DXVECTOR4	overlapCamPos;
+		const void*	overlapCell = nullptr;
+		UINT		overlapActiveW = 0, overlapActiveH = 0;
+		D3DXMATRIX	lateView, lateProj;			// camera of the Point-0 trace currently sitting in the output targets while OutputsLate()
+		D3DXVECTOR4	lateCameraPos = { 0.0f, 0.0f, 0.0f, 0.0f };
+		bool		hasLateCamera = false;
+		D3DXMATRIX	pendingView, pendingProj;	// camera of the in-flight async helper batch, promoted to late* upon CollectEarly
+		D3DXVECTOR4	pendingCameraPos = { 0.0f, 0.0f, 0.0f, 0.0f };
+		bool		hasPendingCamera = false;
 		UInt32		overlapMoving = 0;			// Frame exchanges that waited because the camera moved (since the last log line)
 		static constexpr float kStillDegrees = 0.1f, kStillUnits = 2.0f;
+		static constexpr float kMotionDegrees = 5.0f, kMotionUnits = 256.0f;	// OverlapExchange 3: smooth motion up to 5 deg/frame, sync on whip-pan / teleport
 		bool		overlapToldWait = false;	// the "30 frames in a row waited" line was written for this key value
 		UInt32		overlapWaitRun = 0;
 		bool		overlapToldOpen = false;	// the "first frame left open" line was written for this key value
@@ -1587,6 +1598,9 @@ namespace {
 		shared->shaderCount = (uint32_t)(std::min<size_t>)(shaders.size(), NVR_RT_MAX_SHADERS);
 
 		std::wstring cmdLine = L"\"" + exe + L"\" --shm " + base;
+#if NVR_TEST_TOOLS	// 2026-11-17 (security review 2): only a development build lets the helper act on the files dropped next to it
+		cmdLine += L" --dev";	// (NvrRtHelper.capture, .capture-at, .validate; NvrRtHelper.cpp DevSwitches)
+#endif
 		{	// UNOFFICIAL 2026-11-10 [Main.Main.RayTracing] HelperWait (read at each helper start; a missing key: 0): 1 = the helper waits for the
 			// game's inputs on the CPU and submits with no GPU wait (NvrRtHelper.cpp --wait cpu), 0 = its submission waits on the GPU (as before)
 			SettingManager::Configuration::ConfigNode node;
@@ -1687,6 +1701,12 @@ namespace {
 		pendingN = 0;
 		pendingOverlap = false;
 		overlapLast.clear();	// (fd-batchH) the next Frame exchange after a start waits (its targets were never filled by this helper)
+		overlapCamKnown = false;
+		overlapCell = nullptr;
+		overlapActiveW = overlapActiveH = 0;
+		overlapLateFrame = 0;
+		hasLateCamera = false;
+		hasPendingCamera = false;
 		earlyName = nullptr;
 		earlyRiders.clear();	// (2026-11-11 Q1) their copies went with pendingOut
 		submitOnly = false;
@@ -2085,7 +2105,7 @@ namespace {
 		if (told < 16) {	// the first skinned geometries, once: what their partitions look like
 			told++;
 			char line[512];
-			int n = sprintf_s(line, "RT CORE: skinned '%s': %u partitions, own buffer data %p:", geo->m_pcName ? geo->m_pcName : "", parts->PartitionsCount,
+			int n = sprintf_s(line, "RT CORE: skinned '%.200s': %u partitions, own buffer data %p:", geo->m_pcName ? geo->m_pcName : "", parts->PartitionsCount,
 				geo->geomData ? geo->geomData->m_pkBuffData : nullptr);
 			for (UInt32 p = 0; p < parts->PartitionsCount && p < 8 && n > 0 && n < 440; p++) {
 				const NiSkinPartition::Partition& part = parts->Partitions[p];
@@ -2275,7 +2295,7 @@ namespace {
 			instance.transform[1][3] = entry.poseCamera[1] - cy;
 			instance.transform[2][3] = entry.poseCamera[2] - cz;
 			instance.geometryId = entry.id;
-			instance.customIndex = walkingPlayer && playerHidden ? NVR_RT_CUSTOM_HIDDEN : 0u;	// (2026-11-07) the first-person body: not drawn
+			instance.customIndex = NVR_RT_CUSTOM_ACTOR | (walkingPlayer && playerHidden ? NVR_RT_CUSTOM_HIDDEN : 0u);	// (2026-11-07 hidden; 2026-11-19 actor tag)
 			instance.mask = NVR_RT_MASK_ACTOR;
 			instance.flags = 0x1u;
 			skip[kTaken]++;
@@ -3203,6 +3223,12 @@ namespace {
 			return;
 		}
 		const float camera[3] = { TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z };
+		GrassShaders* grass = TheShaderManager ? TheShaderManager->Shaders.Grass : nullptr;
+		const bool hasBend = grass && grass->Have && grass->BendPush > 0.0f;
+		const float bendX = hasBend ? grass->BendCentre.x : 0.0f;
+		const float bendY = hasBend ? grass->BendCentre.y : 0.0f;
+		const float bendInvRad = hasBend ? grass->Constants.Bend.w : 0.0f;
+		const float bendPush = hasBend ? grass->BendPush : 0.0f;
 		UInt32 fate[12] = {};
 		for (const GrassDraw& d : grassDraws) {
 			if (record->instanceCount >= NVR_RT_MAX_INSTANCES) break;
@@ -3284,6 +3310,7 @@ namespace {
 			auto found = albedoCache.find(d.texture);
 			if (found == albedoCache.end()) found = albedoCache.emplace(d.texture, ReadAlbedo(d.texture)).first;
 			const Albedo& albedo = found->second;
+			const bool staticGrass = hasBend && GrassShaders::IsStaticGeometry(d.geometry);
 			for (UInt32 i = 0; i < d.count && record->instanceCount < NVR_RT_MAX_INSTANCES; i++) {
 				const float* t = &grassTufts[4 * (d.first + i)];
 				NvrRtInstanceRecord& extra = record->records[record->instanceCount];
@@ -3298,6 +3325,16 @@ namespace {
 				for (int r = 0; r < 3; r++) {
 					instance.transform[r][r] = 1.0f + step * d.scale[r];
 					instance.transform[r][3] = t[r] - camera[r];
+				}
+				if (hasBend && !staticGrass) {
+					const float ax = t[0] - bendX, ay = t[1] - bendY;
+					const float inv = 1.0f / sqrtf(ax * ax + ay * ay + 1.0f);
+					const float falloff = 1.0f - bendInvRad / inv;
+					if (falloff > 0.0f) {
+						const float k = inv * falloff * falloff * bendPush * instance.transform[2][2];
+						instance.transform[0][2] = ax * k;
+						instance.transform[1][2] = ay * k;
+					}
 				}
 				instance.geometryId = entry.id;
 				instance.customIndex = 0;
@@ -3575,6 +3612,17 @@ namespace {
 		arenaUsed = 0;
 		waiting = 0;
 		atlasThisFrame = 0;
+		// UNOFFICIAL 2026-11-20: walk the player's own body FIRST (before exterior cells and LODs) so streaming static geometry
+		// on cell crossings can never fill arenaCapacity / NVR_RT_MAX_OPS first and leave the player's previous-frame posed BLAS
+		// frozen behind them (which cast a black self-shadow onto the player's back/weapon while running away from the sun).
+		if (actorsOn && rtSkin && Player && Player->GetNode()) {
+			walkingPlayer = true;
+			playerHidden = !Player->isThirdPerson;	// (2026-11-07) first person: the body is traced (FirstPersonBody) but not drawn
+			const UInt32 before = record->instanceCount;
+			Walk(Player->GetNode(), false);
+			playerInstances += record->instanceCount - before;	// (2026-10-30) the scene log: is the body traced in first person?
+			walkingPlayer = false;
+		}
 		if (Player && Player->GetWorldSpace() && Tes && Tes->gridCellArray) {
 			GridCellArray* cells = Tes->gridCellArray;
 			const UInt32 count = cells->size * cells->size;
@@ -3607,16 +3655,6 @@ namespace {
 			}
 		}
 		else if (Player) WalkCell(Player->parentCell);
-		// the player's third-person body (not in the cells' lists). (2026-11-05: indoors too: it was walked only in the exterior branch above,
-		// so indoors the player was never in the RT scene, first or third person: rtfull-body2 at Lucky 38, 0.0 body instances)
-		if (actorsOn && rtSkin && Player && Player->GetNode()) {
-			walkingPlayer = true;
-			playerHidden = !Player->isThirdPerson;	// (2026-11-07) first person: the body is traced (FirstPersonBody) but not drawn
-			const UInt32 before = record->instanceCount;
-			Walk(Player->GetNode(), false);
-			playerInstances += record->instanceCount - before;	// (2026-10-30) the scene log: is the body traced in first person?
-			walkingPlayer = false;
-		}
 		treeProbe = false;
 		if (grassOn) AddGrass();	// UNOFFICIAL 2026-10-30: the grass drawn this frame (RtCore::NoteGrass)
 		instances = record->instanceCount;
@@ -3671,9 +3709,126 @@ int RtCore::AddShader(const char* Name) {
 	return index;
 }
 
+namespace {
+	bool ResourceDimensions(IUnknown* resource, UINT& outW, UINT& outH) {
+		if (!resource) return false;
+		D3DSURFACE_DESC desc = {};
+		IDirect3DTexture9* tex = nullptr;
+		if (SUCCEEDED(resource->QueryInterface(__uuidof(IDirect3DTexture9), (void**)&tex)) && tex) {
+			const bool ok = SUCCEEDED(tex->GetLevelDesc(0, &desc));
+			tex->Release();
+			if (!ok) return false;
+			outW = desc.Width;
+			outH = desc.Height;
+			return true;
+		}
+		IDirect3DSurface9* surf = nullptr;
+		if (SUCCEEDED(resource->QueryInterface(__uuidof(IDirect3DSurface9), (void**)&surf)) && surf) {
+			const bool ok = SUCCEEDED(surf->GetDesc(&desc));
+			surf->Release();
+			if (!ok) return false;
+			outW = desc.Width;
+			outH = desc.Height;
+			return true;
+		}
+		return false;
+	}
+
+	bool IsNonScreenLookupName(const std::string& name) {
+		auto has = [&](const char* sub) {
+			const size_t len = strlen(sub);
+			for (size_t i = 0; i + len <= name.size(); i++)
+				if (!_strnicmp(name.c_str() + i, sub, len)) return true;
+			return false;
+		};
+		return has("atlas") || has("sky") || has("pano") || has("lamp") || has("table") || has("lut") || has("transfer") || has("arena");
+	}
+
+	bool ResolveActiveSubRect(int Image, UINT resW, UINT resH, bool explicitActive, UINT& outW, UINT& outH) {
+		if (!RenderRect::Active() || Image <= 0 || Image >= (int)TheCore.imageSizes.size() || !resW || !resH) return false;
+		const UINT imgW = TheCore.imageSizes[Image].first, imgH = TheCore.imageSizes[Image].second;
+		if (explicitActive ? (imgW < resW || imgH < resH) : (imgW != resW || imgH != resH)) return false;
+		const UINT screenW = TheCore.width ? TheCore.width : TheRenderManager->width;
+		const UINT screenH = TheCore.height ? TheCore.height : TheRenderManager->height;
+		if (!screenW || !screenH) return false;
+		const UINT rw = RenderRect::Width(screenW), rh = RenderRect::Height(screenH);
+		if (!rw || !rh || (rw >= screenW && rh >= screenH)) return false;
+
+		if (resW == screenW && resH == screenH) {
+			if (!explicitActive && Image < (int)TheCore.imageNames.size() && IsNonScreenLookupName(TheCore.imageNames[Image])) return false;
+			outW = (std::min)(resW, rw);
+			outH = (std::min)(resH, rh);
+			return outW < resW || outH < resH;
+		}
+		const bool halfMatch = screenW >= 320 && screenH >= 180 &&
+			(resW == screenW / 2 || resW == (screenW + 1) / 2) &&
+			(resH == screenH / 2 || resH == (screenH + 1) / 2);
+		if (halfMatch) {
+			if (!explicitActive && Image < (int)TheCore.imageNames.size() && IsNonScreenLookupName(TheCore.imageNames[Image])) return false;
+			outW = (std::min)(resW, (rw + 1u) / 2u + 1u);
+			outH = (std::min)(resH, (rh + 1u) / 2u + 1u);
+			return outW < resW || outH < resH;
+		}
+		if (explicitActive) {
+			outW = (std::min)(resW, (UINT)(((unsigned long long)rw * resW + screenW - 1) / screenW));
+			outH = (std::min)(resH, (UINT)(((unsigned long long)rh * resH + screenH - 1) / screenH));
+			return outW > 0 && outH > 0 && (outW < resW || outH < resH);
+		}
+		return false;
+	}
+
+	void ReadCurrentCamera(D3DXMATRIX& outView, D3DXMATRIX& outProj, D3DXVECTOR4& outCamPos) {
+		auto findMat = [](const char* name) -> const D3DXMATRIX* {
+			auto it = TheShaderManager->ConstantsTable.find(name);
+			return it == TheShaderManager->ConstantsTable.end() ? nullptr : reinterpret_cast<const D3DXMATRIX*>(it->second);
+		};
+		const D3DXMATRIX* vt = findMat("TESR_ViewTransform");
+		const D3DXMATRIX* pt = findMat("TESR_ProjectionTransform");
+		outView = vt ? *vt : TheRenderManager->ViewMatrix;
+		if (pt) outProj = *pt;
+		else D3DXMatrixIdentity(&outProj);
+		outCamPos = TheRenderManager->CameraPosition;
+	}
+}
+
 bool RtCore::CopyIn(int Image, IUnknown* Source, const RECT* Rect) {
 	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Source) return false;
+	RECT active = {};
+	if (!Rect && RenderRect::Active()) {
+		UINT srcW = 0, srcH = 0, cw = 0, ch = 0;
+		if (ResourceDimensions(Source, srcW, srcH) && ResolveActiveSubRect(Image, srcW, srcH, false, cw, ch)) {
+			active = { 0, 0, (LONG)cw, (LONG)ch };
+			Rect = &active;
+		}
+	}
 	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, Rect));
+}
+
+bool RtCore::CopyInActiveRect(int Image, IDirect3DBaseTexture9* Source) {
+	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Source) return false;
+	if (RenderRect::Active() && Source->GetType() == D3DRTYPE_TEXTURE) {
+		D3DSURFACE_DESC desc = {};
+		UINT cw = 0, ch = 0;
+		if (SUCCEEDED(static_cast<IDirect3DTexture9*>(Source)->GetLevelDesc(0, &desc)) &&
+			ResolveActiveSubRect(Image, desc.Width, desc.Height, true, cw, ch)) {
+			const RECT active = { 0, 0, (LONG)cw, (LONG)ch };
+			return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, &active));
+		}
+	}
+	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, nullptr));
+}
+
+bool RtCore::CopyInActiveRect(int Image, IDirect3DSurface9* Source) {
+	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Source) return false;
+	if (RenderRect::Active()) {
+		D3DSURFACE_DESC desc = {};
+		UINT cw = 0, ch = 0;
+		if (SUCCEEDED(Source->GetDesc(&desc)) && ResolveActiveSubRect(Image, desc.Width, desc.Height, true, cw, ch)) {
+			const RECT active = { 0, 0, (LONG)cw, (LONG)ch };
+			return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, &active));
+		}
+	}
+	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, nullptr));
 }
 
 UINT RtCore::PassesLeft() {	// UNOFFICIAL 2026-11-07
@@ -3689,7 +3844,7 @@ bool RtCore::AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteM
 	// shaderFailures bit: a missing .spv, a driver that refuses the pipeline). The helper skips such a pass without a word to the game,
 	// which went on to copy out and use an image nothing had written (all shadow, or last frame's). Refused here instead, so the effect
 	// takes the path it takes for any failed AddPass (its own passes); logged once per shader.
-	if (TheCore.shared && Shader < (int)NVR_RT_MAX_SHADERS && (TheCore.shared->shaderFailures & (1u << Shader))) {
+	if (TheCore.shared && Shader < (int)NVR_RT_MAX_SHADERS && (TheCore.shared->shaderFailures & (1ull << Shader))) {
 		static uint32_t logged = 0;
 		if (!(logged & (1u << Shader))) {
 			logged |= 1u << Shader;
@@ -3720,6 +3875,11 @@ bool RtCore::AddPass(int Shader, const int* Images, UINT ImageCount, UINT WriteM
 
 bool RtCore::CopyOut(int Image, IUnknown* Target) {
 	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Target) return false;
+	UINT dstW = 0, dstH = 0, cw = 0, ch = 0;
+	if (RenderRect::Active() && ResourceDimensions(Target, dstW, dstH) && ResolveActiveSubRect(Image, dstW, dstH, false, cw, ch)) {
+		TheCore.copiesOut.push_back({ Image, Target, cw, ch });
+		return true;
+	}
 	TheCore.copiesOut.push_back({ Image, Target, 0, 0 });
 	return true;
 }
@@ -3926,6 +4086,14 @@ namespace {
 		if (overlapNow) {
 			// (fd-batchH) no wait here: the next exchange (or the next frame's start with OverlapExchange 2) collects it first, before any
 			// of its own staging or copies in (the arena rule); Stop drops it
+			ReadCurrentCamera(c.pendingView, c.pendingProj, c.pendingCameraPos);
+			c.hasPendingCamera = true;
+			if (!c.hasLateCamera) {
+				c.lateView = c.pendingView;
+				c.lateProj = c.pendingProj;
+				c.lateCameraPos = c.pendingCameraPos;
+				c.hasLateCamera = true;
+			}
 			c.pendingOut.swap(c.copiesOut);
 			c.pendingN = n;
 			c.pendingOverlap = true;
@@ -3964,6 +4132,11 @@ namespace {
 				c.share->CopyFromShared(copy.target, 0, 0, c.images[copy.image], &used);
 			}
 			if (timedOut) timerOut.End();
+			if (!only && recorded) {
+				ReadCurrentCamera(c.lateView, c.lateProj, c.lateCameraPos);
+				c.hasLateCamera = true;
+				c.hasPendingCamera = false;
+			}
 		}
 		c.copiesOut.clear();
 		c.recording = false;
@@ -4128,24 +4301,35 @@ void RtCore::Frame(IDirect3DDevice9* Device) {
 	// UNOFFICIAL 2026-11-16 (fd-batchH) [Main.Main.RayTracing] OverlapExchange: off (0, the default) = exactly the exchange above as before
 	c.ReadOverlap();
 	c.overlapTrack = c.overlapMode > 0 && !c.OverlapStandsDown();
-	bool still = false;
-	{	// (fd-batchH) the camera since the last Frame exchange: the view's axes and the eye
+	bool canOverlap = false;
+	{	// (fd-batchH + 2026-11-19 OverlapExchange 3) camera, cell and RenderRect scale since the last Frame exchange
 		const D3DXMATRIX& v = TheRenderManager->ViewMatrix;
 		const D3DXVECTOR4& p = TheRenderManager->CameraPosition;
-		if (c.overlapCamKnown && !TheShaderManager->GameState.isCameraCut) {
+		const void* cell = Player ? (const void*)Player->parentCell : nullptr;
+		const UINT activeW = RenderRect::Active() ? RenderRect::Width(TheRenderManager->width) : TheRenderManager->width;
+		const UINT activeH = RenderRect::Active() ? RenderRect::Height(TheRenderManager->height) : TheRenderManager->height;
+		const bool cellChanged = cell != c.overlapCell;
+		const bool scaleChanged = activeW != c.overlapActiveW || activeH != c.overlapActiveH;
+		if (cellChanged || scaleChanged) c.overlapLast.clear();
+		if (c.overlapCamKnown && !TheShaderManager->GameState.isCameraCut && !cellChanged && !scaleChanged) {
 			const D3DXMATRIX& o = c.overlapCamView;
-			const float cosLimit = cosf(D3DXToRadian(Core::kStillDegrees));
+			const float maxDeg = c.overlapMode == 3 ? Core::kMotionDegrees : Core::kStillDegrees;
+			const float maxUnits = c.overlapMode == 3 ? Core::kMotionUnits : Core::kStillUnits;
+			const float cosLimit = cosf(D3DXToRadian(maxDeg));
 			float minDot = 1.0f;
 			for (int k = 0; k < 3; k++)
 				minDot = (std::min)(minDot, v.m[0][k] * o.m[0][k] + v.m[1][k] * o.m[1][k] + v.m[2][k] * o.m[2][k]);	// column k: right / up / forward
 			const float dx = p.x - c.overlapCamPos.x, dy = p.y - c.overlapCamPos.y, dz = p.z - c.overlapCamPos.z;
-			still = minDot >= cosLimit && dx * dx + dy * dy + dz * dz <= Core::kStillUnits * Core::kStillUnits;
+			canOverlap = minDot >= cosLimit && dx * dx + dy * dy + dz * dz <= maxUnits * maxUnits;
 		}
 		c.overlapCamView = v;
 		c.overlapCamPos = p;
+		c.overlapCell = cell;
+		c.overlapActiveW = activeW;
+		c.overlapActiveH = activeH;
 		c.overlapCamKnown = true;
 	}
-	c.overlapCall = c.overlapTrack && still;
+	c.overlapCall = c.overlapTrack && canOverlap;
 	c.Exchange(Device, nullptr);
 	c.overlapCall = false;
 	c.overlapTrack = false;
@@ -4192,6 +4376,14 @@ bool RtCore::EarlyPtWanted() {
 // UNOFFICIAL 2026-11-16 (fd-batchH; RtCore.h)
 bool RtCore::OutputsLate() { return TheCore.overlapLateFrame == TheFrameRateManager->FrameNumber + 1 && TheCore.pendingOverlap; }
 
+bool RtCore::LateCamera(D3DXMATRIX& outView, D3DXMATRIX& outProj, D3DXVECTOR4& outCamPos) {
+	if (!OutputsLate() || !TheCore.hasLateCamera) return false;
+	outView = TheCore.lateView;
+	outProj = TheCore.lateProj;
+	outCamPos = TheCore.lateCameraPos;
+	return true;
+}
+
 namespace {
 	// (fd-batchH) the two bench envs own what OverlapExchange would change: NVR_RT_EARLY_PT the pending slot, NVR_RT_WAIT_PREV the wait
 	bool Core::OverlapStandsDown() const {
@@ -4206,12 +4398,13 @@ namespace {
 		SettingManager::Configuration::ConfigNode node;
 		int mode = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "OverlapExchange") ?
 			TheSettingManager->GetSettingI("Main.Main.RayTracing", "OverlapExchange") : 0;	// (a missing key: off)
-		if (mode < 0 || mode > 2) mode = mode > 2 ? 2 : 0;
+		if (mode < 0 || mode > 3) mode = mode > 3 ? 3 : 0;
 		if (mode != overlapMode) {
 			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT OverlapExchange %d (was %d): %s%s", mode, overlapMode,
 				mode == 0 ? "the game's GPU waits for this frame's trace at the RT point, as before" :
-				mode == 1 ? "the frame's exchange is left open and collected at the next frame's RT point; the RT effects show the PREVIOUS frame's trace (unproven)" :
-				"the frame's exchange is left open and collected at the next frame's start; the RT effects show the PREVIOUS frame's trace (unproven)",
+				mode == 1 ? "the frame's exchange is left open and collected at the next frame's RT point; the RT effects show the PREVIOUS frame's trace (still camera)" :
+				mode == 2 ? "the frame's exchange is left open and collected at the next frame's start; the RT effects show the PREVIOUS frame's trace (still camera)" :
+				"motion-capable overlap: left open up to 5.0 deg/frame turn (collected at the next frame's RT point; LateCamera exposed for reprojection)",
 				mode && OverlapStandsDown() ? " (stands down: NVR_RT_EARLY_PT or NVR_RT_WAIT_PREV is set)" : "");
 			overlapMode = mode;
 			overlapToldOpen = false;
@@ -4249,7 +4442,7 @@ namespace {
 			earlyOverlapMs += 1000.0 * (double)(now.QuadPart - earlySignalQpc) / (double)freq.QuadPart;	// signal -> collect: the overlap window
 			earlyCollected++;
 		}
-		if (state != Running || !share || !outputReady) { pendingOut.clear(); return; }	// (Stop clears it first; belt and braces)
+		if (state != Running || !share || !outputReady) { if (overlapped) hasPendingCamera = false; pendingOut.clear(); return; }	// (Stop clears it first; belt and braces)
 		static GpuTimer timerCollect("  RT early: collect wait");
 		static GpuTimer timerOverlap("  RT overlap: collect wait");	// (fd-batchH) the game's queue waiting for the previous frame's trace
 		GpuTimer& collectTimer = overlapped ? timerOverlap : timerCollect;
@@ -4268,6 +4461,13 @@ namespace {
 			const RECT used = { 0, 0, (LONG)(copy.width ? copy.width : imageSizes[copy.image].first),
 				(LONG)(copy.height ? copy.height : imageSizes[copy.image].second) };
 			share->CopyFromShared(copy.target, 0, 0, images[copy.image], &used);
+		}
+		if (overlapped && hasPendingCamera) {
+			lateView = pendingView;
+			lateProj = pendingProj;
+			lateCameraPos = pendingCameraPos;
+			hasLateCamera = true;
+			hasPendingCamera = false;
 		}
 		pendingOut.clear();
 	}

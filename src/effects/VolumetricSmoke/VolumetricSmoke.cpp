@@ -23,6 +23,11 @@ void VolumetricSmokeEffect::RegisterTextures() {
 	MakeBuffers();
 }
 
+void VolumetricSmoke::SyncFrame() {
+	const UInt32 gf = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+	if (!TheFrameRateManager || gf != LastGameFrame) { LastGameFrame = gf; FrameNumber++; }
+}
+
 void VolumetricSmoke::MakeBuffers() {
 	BuffersTried = true;
 	// The surfaces made below are new, so whatever the clear flags knew about the old ones does not apply (VolumetricSmoke.h).

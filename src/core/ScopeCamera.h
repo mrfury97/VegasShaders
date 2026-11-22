@@ -50,6 +50,7 @@ namespace ScopeCamera {
 	// ---- state ----
 	inline bool HooksIn = false;				// both game functions are detoured (Detect was on at startup)
 	inline bool InScene = false;				// an extra camera's scene is being drawn now (ShaderSplit::ExtraCamera)
+	inline bool NonScope = false;				// ... a non-scope extra camera (e.g. DynamicReflections cubemap): cheap game-shader path, not counted as a scope
 	inline bool Own = false;					// ... with that camera's constants in place (OwnCamera took effect)
 	inline bool Shadows = false;				// ... so the sun and lamp shadow lookups are right in it
 	inline bool GameShaders = false;			// ... every draw of it takes the game's own shaders (Shaders 2)

@@ -38,7 +38,7 @@ float3 HairFPLamp(float3 toLamp, float att, float3 color) {
     const float la = tex2Dlod(AnisoMap, float4(dot(r, lv), dot(r, hv), 0.0f, 0.0f)).a;
     const float lb = tex2Dlod(AnisoMap, float4(dot(trt, lv), dot(trt, hv), 0.0f, 0.0f)).a;
     const float3 lobes = (hairFpTint * la + lb * 0.7f) * (saturate(dot(hairFpN, lv)) * a);
-    hairFpSpec += lobes * (TESR_HairData.y > 0.5f ? LinEncode(color) : lc);
+    hairFpSpec += lobes * (TESR_HairData.y > 0.5f ? color : lc);
     return PBRDiffuse(0.0f, HAIR_ROUGHNESS, 1.0f, hairFpN, hairFpEye, lv, lc) * a;
 #else
     return PBRDiffuse(0.0f, HAIR_ROUGHNESS, 1.0f, hairFpN, hairFpN, lv, lc) * a;

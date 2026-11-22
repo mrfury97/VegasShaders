@@ -7,6 +7,7 @@
 #include "../../core/GrassWind.h"	// [Shaders.Grass.Wind]: the field wind's lanes and clock (the card shaders get the same)
 #include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-11-04 Enabled ([Shaders.Grass.Main] CastShadows) for the flashlight casters
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 grass records (EndEarly: BeforeForeignDraw)
+#include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-17 fast-restart: the volumetric clouds' shadow on the strands (ForwardShadows on)
 
 // UNOFFICIAL 2026-10-27 GPU grass: see GpuGrass.h. Shaders: src\hlsl\NewVegas\Compute\GpuGrass* (.glsl, Cull.comp, .vert, .frag).
 
@@ -46,23 +47,38 @@ namespace {
 		float lampData[4], lampPos[8][4], lampColor[8][4];	// UNOFFICIAL 2026-11-04 the grass lamps (GrassShaders::UpdateLights)
 		float spot[3][4];			// UNOFFICIAL 2026-11-04 the deferred flashlight (GrassShaders::Spot)
 		float spotShadowRows[4][4], spotShadowShift[4], spotShadowParams[4];	// and its shadow map (GpuGrass.frag)
+		float cloud[4], cloudLight[4];	// UNOFFICIAL 2026-11-17 the volumetric clouds' shadow with ForwardShadows on (GpuGrassCull.comp)
 	};
-	static_assert(sizeof(FrameBlock) == 768, "GG_FRAME_BLOCK layout");
+	static_assert(sizeof(FrameBlock) == 800, "GG_FRAME_BLOCK layout");
 
 	const unsigned kMaxDraws = 1024;		// grass draws a frame (the draw index has 12 bits; d30 noon has ~210 early draws)
 	const unsigned kMaxTufts = 524288;		// tufts a frame (d30 noon ~48k)
-	const unsigned kStatsBytes = 64;		// the indirect arguments (2 x 16) and the cull pass's counters
+	const unsigned kStatsBytes = 80;		// the indirect arguments (2 x 16), the cull pass's counters (32) and (2026-11-16) the count pass's sums (16)
 	// Buffer slots: ONE number per buffer, never shared between a uniform and a storage buffer (they meet in the same DXVK slot).
-	enum : UINT { SlotFrame = 0, SlotTufts = 1, SlotTuftDraw = 2, SlotDraws = 3, SlotBlades = 4, SlotArgs = 5, SlotSpotShadow = 6 };	// (6: 2026-11-04, the fragment's image)
+	enum : UINT { SlotFrame = 0, SlotTufts = 1, SlotTuftDraw = 2, SlotDraws = 3, SlotBlades = 4, SlotArgs = 5, SlotSpotShadow = 6, SlotCloud = 7 };	// (6: 2026-11-04, the fragment's image; 7: 2026-11-17, the cull pass's cloud map)
+
+	// UNOFFICIAL 2026-11-17 the cull pass's cloud map (GpuGrassCull.comp t_cloud): the volumetric clouds' shadow map while it is made; otherwise
+	// the depth buffer stands in (bound, never read: the frame block's strength is 0 then), as the strands' flashlight map does
+	IDirect3DBaseTexture9* CloudMap() {
+		VolumetricCloudsEffect* clouds = TheShaderManager->Effects.VolumetricClouds;
+		if (clouds && clouds->rtMapValid && clouds->Textures.ShadowTexture) return clouds->Textures.ShadowTexture;
+		std::string depthName = "TESR_DepthBuffer";
+		IDirect3DBaseTexture9** slot = TheTextureManager->GetTextureSlotByName(depthName);
+		return slot ? *slot : nullptr;
+	}
 
 	ID3D9NvrExtGeometry*		Geometry = nullptr;
 	ID3D9NvrExtGeometryScene*	Scene = nullptr;
 	ID3D9NvrExtReadback*		Readback = nullptr;
 	ID3D9NvrExtPipeline*		CullPipeline = nullptr;
+	ID3D9NvrExtPipeline*		CountPipeline = nullptr;	// UNOFFICIAL 2026-11-16 grass-cull: GpuGrassCount.spv, what each list is asked for (nullptr: no budget, as before)
 	ID3D9NvrExtPipeline*		NearPipeline = nullptr;
 	ID3D9NvrExtPipeline*		FarPipeline = nullptr;
 	ID3D9NvrExtPipeline*		NearCasterPipeline = nullptr;	// UNOFFICIAL 2026-11-04 the strands into the flashlight's shadow map (nullptr: none)
 	ID3D9NvrExtPipeline*		FarCasterPipeline = nullptr;
+	ID3D9NvrExtPipeline*		NearRecordsPipeline = nullptr;	// UNOFFICIAL 2026-11-17 the strands' records for SunFar (GpuGrassRecords.frag; nullptr: none)
+	ID3D9NvrExtPipeline*		FarRecordsPipeline = nullptr;
+	unsigned					RecordFrames = 0;
 	FrameBlock					LastBlock = {};		// the last strand frame's block and eye (DrawFlashlightCasters)
 	double						LastEye[3] = {};
 	UInt32						LastBlockFrame = 0;
@@ -74,6 +90,12 @@ namespace {
 	ID3D9NvrExtBuffer*			ArgsBuf = nullptr;
 	ID3D9NvrExtBuffer*			ReadbackBuf = nullptr;
 	UINT						TuftCapacity = 0, BladeCapacity = 0;
+	// UNOFFICIAL 2026-11-16 grass-cull: the strand lists grow past MaxBlades when the grass needs it (never shrink in a session): to every
+	// clump uploaded this frame (so each can keep a strand: nothing is dropped) and to the most strands a list was asked for (read back a
+	// few frames late; until then the budget thins the clumps). At most kMaxBladesCap per list.
+	UINT						BladeFloor = 0;
+	bool						BladeGrowFailed = false;	// a growth was refused (memory): no more tries this session
+	const UINT					kMaxBladesCap = 2097152;
 	bool						Tried = false, Off = false;
 
 	// One early grass call.
@@ -95,10 +117,17 @@ namespace {
 
 	unsigned	StatCaught = 0, StatLetThrough = 0, StatFar = 0, StatNotCard = 0, StatNormals = 0, StatMoved = 0, StatFull = 0, StatSwallowed = 0;
 	UInt32		Frames = 0;
+	// UNOFFICIAL 2026-11-16 grass-cull (docs/next/GRASS-CULL.md), Log 2 (test only): a line every frame with the CPU side of the strand pass
+	// (what was caught, what the cull pass is handed, whether the strands were drawn and what stopped them) and the GPU's counts read back
+	// every frame, for a camera pan.
+	const char*	StrandFail = nullptr;		// why this frame's RenderStrands drew nothing (nullptr: drawn)
+	bool		CardsLost = false;			// this frame's caught cards were skipped and no strands were drawn for them (StrandsFailed)
+	unsigned	DiagLines = 0;
 	bool		ReadbackPending = false;
 	UInt32		ReadbackFrame = 0;
 	UInt32		ReadbackTufts = 0;		// tufts uploaded in the frame whose counts are being read back
 	UInt32		ReadbackCount = 0, BadCounts = 0;
+	unsigned	ReadbackWarned = 0;
 
 	void TurnOff(const char* why) {
 		Off = true;
@@ -123,6 +152,8 @@ namespace {
 		}
 		return true;
 	}
+
+	bool EnsureBladeCapacity();	// (below: the strand lists, MaxBlades or what the grass asks for)
 
 	bool Ready() {
 		if (Off) return false;
@@ -153,6 +184,7 @@ namespace {
 				{ 0, 3, NVR_EXT_BIND_STORAGE_BUFFER, SlotDraws,    NVR_EXT_VIEW_2D, FALSE, 0 },
 				{ 0, 4, NVR_EXT_BIND_STORAGE_BUFFER, SlotBlades,   NVR_EXT_VIEW_2D, TRUE,  0 },
 				{ 0, 5, NVR_EXT_BIND_STORAGE_BUFFER, SlotArgs,     NVR_EXT_VIEW_2D, TRUE,  0 },
+				{ 0, 7, NVR_EXT_BIND_SAMPLED_IMAGE,  SlotCloud,    NVR_EXT_VIEW_2D, FALSE, 0 },	// (2026-11-17 the clouds' shadow map)
 			};
 			std::vector<char> words;
 			if (!DxvkCompute::LoadSpirv("GpuGrassCull", words)) { TurnOff("Compute\\GpuGrassCull.spv missing"); return false; }
@@ -163,6 +195,18 @@ namespace {
 			cull.pBindings = cullBindings;
 			cull.pDebugName = "GpuGrassCull";
 			if (FAILED(ext->CreateComputePipeline(&cull, &CullPipeline)) || !CullPipeline) { TurnOff("the cull pipeline was refused (DXVK's log says why)"); return false; }
+			// UNOFFICIAL 2026-11-16 grass-cull (docs/next/GRASS-CULL.md): the count pass (GpuGrassCull.comp with GG_COUNT 1), the same bindings.
+			// Without it a list that overflows drops the clumps that come last (their cards already skipped): grass types gone with the view.
+			std::vector<char> countWords;
+			if (DxvkCompute::LoadSpirv("GpuGrassCount", countWords)) {
+				NVR_EXT_COMPUTE_PIPELINE_DESC count = cull;
+				count.pSpirv = countWords.data();
+				count.SpirvSize = (UINT)countWords.size();
+				count.pDebugName = "GpuGrassCount";
+				if (FAILED(ext->CreateComputePipeline(&count, &CountPipeline))) CountPipeline = nullptr;
+			}
+			Logger::Log("UNOFFICIAL GPU grass: strand budget %s", CountPipeline ? "ready (a full strand list thins its clumps instead of dropping them)" :
+				"NOT made (Compute\\GpuGrassCount.spv missing or refused): a full strand list drops the clumps that come last, as before");
 
 			// the strands: the vertex shader reads the frame block, the draws and the strands; the fragment shader writes the colour it got
 			std::vector<char> fs, nearVs, farVs;
@@ -219,6 +263,27 @@ namespace {
 				}
 			}
 			Logger::Log("UNOFFICIAL GPU grass: flashlight shadow casters %s", NearCasterPipeline && FarCasterPipeline ? "ready" : "not made (no GpuGrass*Caster*.spv, or refused): the strands cast no flashlight shadow");
+			// UNOFFICIAL 2026-11-17 fast-restart: the strands' records for SunFar (the captured normal and the MaterialBuffer; RenderStrands, while
+			// CapturedNormals::GrassForSunFar). Missing or refused: SunFar shades the strands by the normal rebuilt from depth, as before.
+			std::vector<char> recordsFs, nearRecordsVs, farRecordsVs;
+			if (DxvkCompute::LoadSpirv("GpuGrassRecords", recordsFs) && DxvkCompute::LoadSpirv("GpuGrassNearRecordsVS", nearRecordsVs) && DxvkCompute::LoadSpirv("GpuGrassFarRecordsVS", farRecordsVs)) {
+				for (int isFar = 0; isFar < 2; isFar++) {
+					const std::vector<char>& vs = isFar ? farRecordsVs : nearRecordsVs;
+					NVR_EXT_GEOMETRY_PIPELINE_DESC draw = {};
+					draw.Graphics.pVertexSpirv = vs.data();
+					draw.Graphics.VertexSpirvSize = (UINT)vs.size();
+					draw.Graphics.pFragmentSpirv = recordsFs.data();
+					draw.Graphics.FragmentSpirvSize = (UINT)recordsFs.size();
+					draw.Graphics.ColorTargetCount = 2;
+					draw.Graphics.Blend = NVR_EXT_BLEND_NONE;
+					draw.Graphics.ColorWriteMask = 0;	// all four channels of both
+					draw.Graphics.pDebugName = isFar ? "GpuGrassFarRecords" : "GpuGrassNearRecords";
+					draw.VertexBindingCount = _countof(vsBindings);
+					draw.pVertexBindings = vsBindings;
+					if (FAILED(Geometry->CreateGeometryPipeline(&draw, isFar ? &FarRecordsPipeline : &NearRecordsPipeline))) (isFar ? FarRecordsPipeline : NearRecordsPipeline) = nullptr;
+				}
+			}
+			Logger::Log("UNOFFICIAL GPU grass: records for SunFar %s", NearRecordsPipeline && FarRecordsPipeline ? "ready" : "not made (no GpuGrass*Records*.spv, or refused)");
 
 			if (!MakeBuffer(sizeof(FrameBlock), NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, "GpuGrass frame", FrameBuf) ||
 				!MakeBuffer(kMaxDraws * sizeof(DrawRec), NVR_EXT_BUFFER_STORAGE | NVR_EXT_BUFFER_TRANSFER_DST, "GpuGrass draws", DrawBuf) ||
@@ -230,14 +295,34 @@ namespace {
 			Logger::Log("UNOFFICIAL GPU grass: ready (Vegas Shaders DXVK scene geometry passes)%s", ReadbackBuf ? "" : "; no readback (no counts in the log)");
 		}
 
-		const UINT blades = (UINT)(std::min)((std::max)(S.MaxBlades, 4096), 2097152);
+		return EnsureBladeCapacity();
+	}
+
+	// The strand lists: MaxBlades, or more when the grass asks for it (BladeFloor).
+	bool EnsureBladeCapacity() {
+		const UINT blades = (std::max)((UINT)(std::min)((std::max)(S.MaxBlades, 4096), 2097152), (std::min)(BladeFloor, kMaxBladesCap));
 		if (blades != BladeCapacity) {
-			if (!MakeBuffer(blades * 2 * 48, NVR_EXT_BUFFER_STORAGE, "GpuGrass strands", BladeBuf)) { TurnOff("the strand buffer could not be made"); return false; }
+			ID3D9NvrExtBuffer* made = nullptr;
+			if (!MakeBuffer(blades * 2 * 48, NVR_EXT_BUFFER_STORAGE, "GpuGrass strands", made)) {
+				if (BladeBuf && blades > BladeCapacity) {	// growing failed (memory): keep the lists there are, the budget thins to fit them
+					Logger::Log("UNOFFICIAL GPU grass: the strand lists could not grow to %u (memory?): they stay at %u, crowded clumps get fewer strands", blades, BladeCapacity);
+					BladeFloor = BladeCapacity;
+					BladeGrowFailed = true;
+					return true;
+				}
+				TurnOff("the strand buffer could not be made");
+				return false;
+			}
+			DxvkCompute::Drop(BladeBuf);
+			BladeBuf = made;
+			Logger::Log("UNOFFICIAL GPU grass: room for %u near + %u far strands (%u MB)%s", blades, blades, blades * 2 * 48 / (1024 * 1024),
+				BladeCapacity && blades > BladeCapacity ? " (grown: the grass in view asked for more than [Shaders.Grass.GPUGrass] MaxBlades)" : "");
 			BladeCapacity = blades;
-			Logger::Log("UNOFFICIAL GPU grass: room for %u near + %u far strands (%u MB)", blades, blades, blades * 2 * 48 / (1024 * 1024));
 		}
 		return true;
 	}
+	// A power of two at least n (n <= 2^31).
+	UINT RoundUpPow2(UINT n) { UINT p = 4096; while (p < n && p < 0x80000000u) p <<= 1; return p; }
 
 	bool EnsureTuftCapacity(UINT tufts) {
 		if (tufts <= TuftCapacity) return true;
@@ -288,6 +373,9 @@ namespace {
 			HaveGlobals = true;
 		}
 		else if (memcmp(Globals[9], c[9], 4 * 4 * sizeof(float))) { StatMoved++; return false; }	// another transform than the first draw's
+		// UNOFFICIAL 2026-11-16 grass-cull: the cull pass splits a mixed draw at the FIRST caught draw's fade start (c5.z, f.fade.x) and the
+		// card shader draws the rest at its own: a draw with another fade start would leave a band of tufts with neither. Left to the game.
+		else if (Globals[5][2] != c[5][2] || Globals[5][3] != c[5][3]) { StatMoved++; return false; }
 
 		DrawRec r = {};
 		r.shape[0] = model.Height * ramp.Top; r.shape[1] = model.Width; r.shape[2] = model.SwayA; r.shape[3] = model.SwayB;
@@ -361,10 +449,19 @@ namespace {
 		ReadbackPending = false;
 		ReadbackCount++;
 		const UInt32 seen = counts[8] + counts[9] + counts[12];
+		{	// UNOFFICIAL 2026-11-16 grass-cull: a list asked for more than it holds: grow both to that (from the next frame on)
+			const UInt32 asked = (std::max)(counts[16], counts[17]);
+			if (asked > BladeCapacity && BladeFloor < kMaxBladesCap && !BladeGrowFailed) BladeFloor = (std::min)((std::max)(BladeFloor, RoundUpPow2(asked)), kMaxBladesCap);
+		}
+		if (counts[11] > 0 && ReadbackWarned < 10) {	// UNOFFICIAL 2026-11-16 grass-cull: strands lost although the budget ran (more clumps than room)
+			ReadbackWarned++;
+			Logger::Log("[WARNING] UNOFFICIAL GPU grass: frame %u: %u strands did not fit their list (%u near clumps, %u far clumps for room for %u each: more clumps than the lists can hold, %u at most, or growing them failed); those clumps showed nothing",
+				ReadbackFrame, counts[11], counts[18], counts[19], BladeCapacity, kMaxBladesCap);
+		}
 		const bool bad = ReadbackTufts > 0 && seen < ReadbackTufts;
-		if (ReadbackCount <= 3 || ReadbackCount % 60 == 0 || (S.Log && ReadbackCount % 5 == 0) || bad)
-			Logger::Log("UNOFFICIAL GPU grass: frame %u counts (GPU): %u tufts uploaded, %u clumps drawn, %u outside the view, %u tufts past the fade start (cards); strands near %u, far %u, %u did not fit (MaxBlades)%s",
-				ReadbackFrame, ReadbackTufts, counts[8], counts[9], counts[12], counts[1], counts[5], counts[11], bad ? " -- THE CULL PASS DID NOT SEE EVERY TUFT" : "");
+		if (ReadbackCount <= 3 || ReadbackCount % 60 == 0 || (S.Log && ReadbackCount % 5 == 0) || (S.Log >= 2 && DiagLines < 40000) || bad)
+			Logger::Log("UNOFFICIAL GPU grass: frame %u counts (GPU): %u tufts uploaded, %u clumps drawn, %u outside the view, %u tufts past the fade start (cards); strands near %u, far %u, %u did not fit (MaxBlades); asked near %u, far %u (%u / %u clumps), %u clumps thinned to fit%s",
+				ReadbackFrame, ReadbackTufts, counts[8], counts[9], counts[12], counts[1], counts[5], counts[11], counts[16], counts[17], counts[18], counts[19], counts[13], bad ? " -- THE CULL PASS DID NOT SEE EVERY TUFT" : "");
 		BadCounts = bad ? BadCounts + 1 : 0;
 		if (BadCounts >= 2) TurnOff("the cull pass saw fewer tufts than were uploaded (twice); the cards are kept");
 	}
@@ -373,13 +470,20 @@ namespace {
 	bool RenderStrands(IDirect3DDevice9* device) {
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		const UINT tufts = (UINT)Tufts.size();
-		if (!EnsureTuftCapacity(tufts)) { TurnOff("the tuft buffers could not be made"); return false; }
+		if (!EnsureTuftCapacity(tufts)) { TurnOff("the tuft buffers could not be made"); StrandFail = "the tuft buffers could not be made"; return false; }
+		// UNOFFICIAL 2026-11-16 grass-cull: room for one strand of every clump this frame can make (the budget gives each clump its first)
+		{
+			const UINT clumpsMax = tufts * (UINT)ceilf((std::min)((std::max)(S.Density, 1.0f), 6.0f));
+			if (clumpsMax > BladeCapacity && BladeFloor < kMaxBladesCap && !BladeGrowFailed) BladeFloor = (std::min)((std::max)(BladeFloor, RoundUpPow2(clumpsMax)), kMaxBladesCap);
+			if (!EnsureBladeCapacity()) { StrandFail = "the strand buffer could not be made"; return false; }
+		}
 
 		IDirect3DSurface9* rt = nullptr;
 		IDirect3DSurface9* ds = nullptr;
 		device->GetRenderTarget(0, &rt);
 		device->GetDepthStencilSurface(&ds);
 		bool ok = rt && ds;
+		StrandFail = ok ? nullptr : "no render target or depth buffer bound";
 		D3DSURFACE_DESC rtDesc = {};
 		if (ok) ok = SUCCEEDED(rt->GetDesc(&rtDesc));
 		D3DVIEWPORT9 vp = {};
@@ -387,7 +491,7 @@ namespace {
 
 		FrameBlock f = {};
 		double eye[3] = {};
-		if (ok) ok = EyeFromRows(&Globals[9], eye);
+		if (ok && !(ok = EyeFromRows(&Globals[9], eye))) StrandFail = "no eye from the grass matrix";
 		if (ok) {
 			for (int i = 0; i < 4; i++) {
 				const float* r = Globals[9 + i];
@@ -410,6 +514,19 @@ namespace {
 			f.shape3[2] = p11 > 0.0f ? 2.0f / (p11 * (float)rtDesc.Width) : 0.0f; f.shape3[3] = (std::max)(S.DetailDistance, 0.0f);
 			if (GrassWind::On) memcpy(f.lanes, GrassWind::Lanes, 16);
 			f.misc[0] = GrassWind::ClockNow; f.misc[1] = (float)BladeCapacity; f.misc[2] = (float)S.DebugView;
+			// UNOFFICIAL 2026-11-17 fast-restart: the volumetric clouds' shadow on the strands' sun with ForwardShadows on (ForwardCloudShadows::Active:
+			// the surface shaders take it and SunFar leaves it out), PlantShadows on. The map's uv was worked out at the renderer's camera: moved to
+			// the strands' eye here. Off: strength 0, SunFar shades the strands with the rest of the picture, as before.
+			if (ForwardCloudShadows::Active && ForwardCloudShadows::PlantShadows && ForwardCloudShadows::Data[3] > 0.0f) {
+				const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
+				const float sx = (float)(eye[0] - camera.x), sy = (float)(eye[1] - camera.y), sz = (float)(eye[2] - camera.z);
+				f.cloud[0] = ForwardCloudShadows::Data[0] + (sx - ForwardCloudShadows::Light[0] * sz) * ForwardCloudShadows::Data[2];
+				f.cloud[1] = ForwardCloudShadows::Data[1] + (sy - ForwardCloudShadows::Light[1] * sz) * ForwardCloudShadows::Data[2];
+				f.cloud[2] = ForwardCloudShadows::Data[2]; f.cloud[3] = ForwardCloudShadows::Data[3];
+				f.cloudLight[0] = ForwardCloudShadows::Light[0]; f.cloudLight[1] = ForwardCloudShadows::Light[1];
+			}
+			f.cloudLight[2] = CapturedNormals::V2Compiled ? 4.5f : 0.5f;	// (2026-11-17) the records' grass mark (GRASS23x000TMS.pso capturedPad2.g)
+			f.cloudLight[3] = 7.0f;	// and class (ground cover, the card grass's default)
 			f.look[0] = S.Variation; f.look[1] = S.TipLift; f.look[2] = S.Saturation;
 			// UNOFFICIAL 2026-11-04 the player's bend ([Shaders.Grass.Interaction], effects/Grass/Grass.cpp), as the card grass bends: the origin
 			// relative to this frame's camera (eye, from the grass matrix), 1 / reach, the push per unit of height (0 while nothing bends).
@@ -471,10 +588,11 @@ namespace {
 			}
 		}
 
-		const UInt32 init[kStatsBytes / 4] = { 15, 0, 0, 0, 3, 0, 0, 0 };
+		const UInt32 init[kStatsBytes / 4] = { 15, 0, 0, 0, 3, 0, 0, 0 };	// (the rest 0: the counters and the count pass's sums)
 		if (ok) ok = SUCCEEDED(ext->UpdateBuffer(FrameBuf, 0, sizeof(f), &f)) && Upload(DrawBuf, Draws.data(), (UINT)(Draws.size() * sizeof(DrawRec))) &&
 			Upload(TuftBuf, Tufts.data(), tufts * 16) && Upload(TuftDrawBuf, TuftDraw.data(), tufts * 4) &&
 			SUCCEEDED(ext->UpdateBuffer(ArgsBuf, 0, kStatsBytes, init));
+		if (!ok && !StrandFail) StrandFail = "an upload failed";
 		// UNOFFICIAL 2026-11-04 kept for the next frame's flashlight casters (DrawFlashlightCasters): its strands are where this frame put them
 		if (ok) { LastBlock = f; memcpy(LastEye, eye, sizeof(LastEye)); LastBlockFrame = TheFrameRateManager->FrameNumber; }
 
@@ -488,14 +606,21 @@ namespace {
 				{ SlotDraws,    NVR_EXT_BIND_STORAGE_BUFFER, DrawBuf, 0, 0, 0, FALSE },
 				{ SlotBlades,   NVR_EXT_BIND_STORAGE_BUFFER, BladeBuf, 0, 0, 0, FALSE },
 				{ SlotArgs,     NVR_EXT_BIND_STORAGE_BUFFER, ArgsBuf, 0, 0, 0, FALSE },
+				{ SlotCloud,    NVR_EXT_BIND_SAMPLED_IMAGE,  CloudMap(), 0, 0, 0, FALSE },	// (2026-11-17; read only while f.cloud.w > 0)
 			};
 			NVR_EXT_DISPATCH_DESC dispatch = {};
-			dispatch.pPipeline = CullPipeline;
 			dispatch.BindingCount = _countof(cullRes);
 			dispatch.pBindings = cullRes;
 			dispatch.GroupsX = groups;
 			dispatch.GroupsY = dispatch.GroupsZ = 1;
-			if (FAILED(ext->Dispatch(&dispatch))) { TurnOff("the cull dispatch failed (DXVK's log says why)"); ok = false; }
+			// UNOFFICIAL 2026-11-16 grass-cull: first what every visible clump asks of its list (the cull pass reads the sums: a list that
+			// would overflow thins its clumps instead of dropping the last ones). A refused count dispatch only loses the budget.
+			if (CountPipeline) {
+				dispatch.pPipeline = CountPipeline;
+				if (FAILED(ext->Dispatch(&dispatch))) { CountPipeline = nullptr; Logger::Log("UNOFFICIAL GPU grass: the count dispatch failed: no strand budget from now on"); }
+			}
+			dispatch.pPipeline = CullPipeline;
+			if (FAILED(ext->Dispatch(&dispatch))) { TurnOff("the cull dispatch failed (DXVK's log says why)"); ok = false; StrandFail = "the cull dispatch failed"; }
 		}
 
 		if (ok) {
@@ -515,7 +640,7 @@ namespace {
 			const bool deviceLess = ZFuncDevice == D3DCMP_LESS || ZFuncDevice == D3DCMP_LESSEQUAL;
 			const bool agree = reversed ? deviceGreater : deviceLess;
 			const NVR_EXT_COMPARE compare = agree ? (NVR_EXT_COMPARE)(ZFuncDevice - 1) : (reversed ? NVR_EXT_COMPARE_GREATER_EQUAL : NVR_EXT_COMPARE_LESS_EQUAL);
-			if (Frames <= 3) {
+			if (Frames <= 3 || (S.Log >= 2 && Frames % 30 == 0)) {
 				D3DSURFACE_DESC dsDesc = {};
 				ds->GetDesc(&dsDesc);
 				Logger::Log("UNOFFICIAL GPU grass: frame %u: drawn into target %ux%u format %u samples %u, depth %ux%u format %u samples %u, viewport %u %u %ux%u z %.2f-%.2f; "
@@ -557,12 +682,56 @@ namespace {
 				draw.Multisample = TRUE;	// the game's MSAA: the strands are rasterized at the scene's own sample count
 				draw.pIndirectArgs = ArgsBuf;
 				draw.IndirectOffset = isFar ? 16 : 0;
-				if (FAILED(Scene->DrawGeometryScene(&draw))) { TurnOff("a strand draw failed (DXVK's log says why)"); ok = false; }
+				if (FAILED(Scene->DrawGeometryScene(&draw))) { TurnOff("a strand draw failed (DXVK's log says why)"); ok = false; StrandFail = "a strand draw failed"; }
+			}
+			// UNOFFICIAL 2026-11-17 fast-restart (docs/next/FAST-RESTART.md section 3): the strands' records for SunFar, while the grass writes its
+			// records for it (CapturedNormals::GrassForSunFar): the same strands once more into the captured normal and the MaterialBuffer
+			// (GpuGrassRecords.frag), only where they are what the depth buffer shows (the strands' own compare, no depth write), in the main
+			// list's span (the capture's targets are this frame's), when both are the scene target's size and sample count.
+			IDirect3DSurface9* recordTargets[2] = { CapturedNormals::DrawSurface(), CapturedNormals::MaterialDrawSurface() };
+			D3DSURFACE_DESC n0 = {}, n1 = {};
+			const bool records = ok && NearRecordsPipeline && FarRecordsPipeline && CapturedNormals::GrassForSunFar && CapturedNormals::InSpan &&
+				recordTargets[0] && recordTargets[1] && SUCCEEDED(recordTargets[0]->GetDesc(&n0)) && SUCCEEDED(recordTargets[1]->GetDesc(&n1)) &&
+				n0.Width == rtDesc.Width && n0.Height == rtDesc.Height && n0.MultiSampleType == rtDesc.MultiSampleType &&
+				n1.Width == rtDesc.Width && n1.Height == rtDesc.Height && n1.MultiSampleType == rtDesc.MultiSampleType;
+			if (records) {
+				NVR_EXT_DEPTH_STENCIL test = depth;
+				test.DepthWrite = FALSE;
+				const NVR_EXT_RESOURCE_BINDING recordRes[] = {	// (the vertex stage's only: the records' fragment shader binds nothing)
+					{ SlotFrame,  NVR_EXT_BIND_UNIFORM_BUFFER, FrameBuf, 0, 0, 0, FALSE },
+					{ SlotDraws,  NVR_EXT_BIND_STORAGE_BUFFER, DrawBuf, 0, 0, 0, FALSE },
+					{ SlotBlades, NVR_EXT_BIND_STORAGE_BUFFER, BladeBuf, 0, 0, 0, FALSE },
+				};
+				for (int isFar = 0; isFar < 2 && ok; isFar++) {
+					NVR_EXT_GEOMETRY_SCENE_DESC draw = {};
+					draw.Geometry.Draw.pPipeline = isFar ? FarRecordsPipeline : NearRecordsPipeline;
+					draw.Geometry.Draw.TargetCount = 2;
+					draw.Geometry.Draw.Targets[0].pResource = recordTargets[0];
+					draw.Geometry.Draw.Targets[1].pResource = recordTargets[1];
+					if (vpInside) {
+						draw.Geometry.Draw.ViewportX = (INT)vp.X; draw.Geometry.Draw.ViewportY = (INT)vp.Y;
+						draw.Geometry.Draw.ViewportWidth = vp.Width; draw.Geometry.Draw.ViewportHeight = vp.Height;
+					}
+					draw.Geometry.Draw.BindingCount = _countof(recordRes);
+					draw.Geometry.Draw.pBindings = recordRes;
+					draw.pDepthStencil = &test;
+					draw.CullMode = NVR_EXT_CULL_NONE;
+					draw.Multisample = TRUE;
+					draw.pIndirectArgs = ArgsBuf;
+					draw.IndirectOffset = isFar ? 16 : 0;
+					if (FAILED(Scene->DrawGeometryScene(&draw))) {
+						Logger::Log("UNOFFICIAL GPU grass: a records draw failed (DXVK's log says why): SunFar shades the strands by the normal rebuilt from depth from now on");
+						NearRecordsPipeline = FarRecordsPipeline = nullptr;
+						break;
+					}
+				}
+				if (NearRecordsPipeline && (++RecordFrames <= 2 || RecordFrames % 3600 == 0))
+					Logger::Log("UNOFFICIAL GPU grass: frame %u: the strands' records written for SunFar (their tuft normal into the normals buffer)", Frames);
 			}
 		}
 
 		// the counts, now and then (the readback never waits: it is read a few frames later)
-		if (ok && ReadbackBuf && !ReadbackPending && (Frames <= 3 || Frames % 60 == 0)) {
+		if (ok && ReadbackBuf && !ReadbackPending && (Frames <= 3 || Frames % 60 == 0 || S.Log >= 2)) {
 			if (SUCCEEDED(Readback->CopyToReadback(ReadbackBuf, 0, ArgsBuf, 0, kStatsBytes))) { ReadbackPending = true; ReadbackFrame = TheFrameRateManager->FrameNumber; ReadbackTufts = tufts; }
 		}
 		if (rt) rt->Release();
@@ -599,6 +768,14 @@ void ReadSettings() {
 	S.MaxBlades = TheSettingManager->GetSettingI(s, "MaxBlades");
 	S.DebugView = TheSettingManager->GetSettingI(s, "DebugView");
 	S.Log = TheSettingManager->GetSettingI(s, "Log");
+	// UNOFFICIAL 2026-11-16 grass-cull (docs/next/GRASS-CULL.md): the strands are made from GrassFirst's early grass call, so with
+	// [Shaders.Grass.Main] DrawFirst off they are never drawn (the cards stay, a tester read it as "the new grass is gone"). Said in the
+	// log whenever that state begins (the menu warns too, ImGuiManager.cpp's conflict rules).
+	static bool saidNoDrawFirst = false;
+	const bool noDrawFirst = S.Enabled && TheSettingManager->GetSettingI("Shaders.Grass.Main", "DrawFirst") == 0;
+	if (noDrawFirst && !saidNoDrawFirst)
+		Logger::Log("UNOFFICIAL GPU grass: on, but [Shaders.Grass.Main] DrawFirst is off: the strands are made from the grass drawn before the ground, so none are drawn (the game's grass cards as before) until DrawFirst is on again");
+	saidNoDrawFirst = noDrawFirst;
 }
 
 bool BeginEarly(IDirect3DDevice9* Device, bool GrassEnabled) {
@@ -641,6 +818,8 @@ void Disarm() { Armed = Replaced = false; ArmPass = nullptr; }
 // UNOFFICIAL 2026-11-04 (terrain blending: GrassFirst's late replay, Render.cpp GrassListHook) whether the armed pass's card draw was taken,
 // and whether its cards are kept anyway.
 bool Took() { return Armed && Replaced; }
+bool DiagEveryFrame() { return S.Enabled && S.Log >= 2 && DiagLines < 40000; }
+bool StrandsFailed() { return CardsLost; }
 bool KeepsCards() { return S.KeepCards; }
 float FlashlightCasterReach() {
 	const bool strands = !Off && S.Enabled && !S.KeepCards && Frames > 0 && NearCasterPipeline && FarCasterPipeline && TheShaderManager->GameState.isExterior;
@@ -710,16 +889,31 @@ void DrawFlashlightCasters(IDirect3DDevice9* Device) {
 }
 
 void EndEarly(IDirect3DDevice9* Device) {
+	CardsLost = false;
 	Armed = Replaced = false;
 	Unhook(Device);
 	if (!Active) return;
 	Active = false;
 	Frames++;
+	StrandFail = Tufts.empty() ? "nothing caught" : HaveGlobals ? nullptr : "no constants";
 	if (!Tufts.empty() && HaveGlobals) {
 		static GpuTimer timer("GPU grass (cull + draw)");
 		GpuProfileScope gpu(timer, Device);
 		CapturedNormals::BeforeForeignDraw(Device);	// UNOFFICIAL 2026-11-12 grass records: the strands' draws pass the capture's draw hook by; its targets go off first
-		RenderStrands(Device);
+		// UNOFFICIAL 2026-11-16 grass-cull: no strands drawn after the cards were skipped = those cards are drawn after all (Render.cpp
+		// GrassFirst, StrandsFailed: the caught passes again, before the land)
+		CardsLost = !RenderStrands(Device) && !S.KeepCards;
+	}
+	if (S.Log >= 2 && DiagLines < 40000) {	// UNOFFICIAL 2026-11-16 grass-cull: every frame (test only)
+		DiagLines++;
+		unsigned mixed = 0;
+		for (const DrawRec& r : Draws) if (((unsigned)(r.scaleMask[3] + 0.5f) & 1u) != 0) mixed++;
+		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+		double eye[3] = {};
+		const bool haveEye = HaveGlobals && EyeFromRows(&Globals[9], eye);
+		Logger::Log("UNOFFICIAL GPU grass diag: frame %u: caught %u draws (%u mixed: part 1), %u tufts; left to the game %u (far %u, not card %u, normals %u, moved %u, full %u); swallowed %u; fade start %.1f; eye - camera %.1f %.1f %.1f; strands %s",
+			TheFrameRateManager->FrameNumber, (unsigned)Draws.size(), mixed, (unsigned)Tufts.size(), StatLetThrough + StatFar, StatFar, StatNotCard, StatNormals, StatMoved, StatFull, StatSwallowed,
+			HaveGlobals ? Globals[5][2] : 0.0f, haveEye ? eye[0] - cam.x : 0.0, haveEye ? eye[1] - cam.y : 0.0, haveEye ? eye[2] - cam.z : 0.0, StrandFail ? StrandFail : "drawn");
 	}
 	if (Frames <= 3 || Frames % 3600 == 0)
 		Logger::Log("UNOFFICIAL GPU grass: frame %u: %u early grass draws caught (%u tufts, density %.2f), their cards %s; left to the game: %u (%u beyond BladeDistance, %u not a cut-out card, %u lit by real normals, %u not at the world origin / other transform, %u over the buffers); %u extra card draws swallowed",

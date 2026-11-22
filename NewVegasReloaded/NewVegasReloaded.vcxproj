@@ -158,7 +158,6 @@
     <ClCompile Include="..\src\core\Paths.cpp" />
     <ClCompile Include="..\src\core\InstallCheck.cpp" />
     <ClCompile Include="..\src\core\Diagnostics.cpp" />
-    <ClCompile Include="..\src\core\HiZ.cpp" />
     <ClCompile Include="..\src\core\PixelInspector.cpp" />
     <ClCompile Include="..\src\core\MenuSkin.cpp" />
     <ClCompile Include="..\src\core\MenuWidgets.cpp" />
@@ -321,7 +320,7 @@
     <ClInclude Include="..\src\core\RtHistoryTime.h" />
     <ClInclude Include="..\src\core\RtFlashlightCode.h" />
     <ClInclude Include="..\src\effects\Reflections\RtReflLamps.h" />
-    <ClInclude Include="..\src\core\HiZ.h" />
+    <ClInclude Include="..\src\core\RtLightUnits.h" />
     <ClInclude Include="..\src\core\Upscaler.h" />
     <ClInclude Include="..\src\core\PixelInspector.h" />
     <ClInclude Include="..\src\core\MenuSkin.h" />

@@ -17,13 +17,14 @@ in docs/next/FORK-RT-REFLECTIONS.md).
    bricks and panels off screen keep their bumps in mirrors. The shadow rays still leave from the flat triangle normal.
 3. Smoothing, one of:
    - **the RT reflection denoiser** (`[Shaders.Reflections.RT] Denoiser`, default on with RT; core/RtReflDenoise.h,
-     docs/next/RT-REFLECTION-DENOISER.md): 4 fork passes on frames the RT trace ran (native frames, not under DLSS RR), result copied
-     into Buffer. Core 0 ours (ReBLUR-style: hit-point reprojection, long history, lobe-sized blur), core 1 AMD FidelityFX
-     Reflections (ported, A/B). With it on, RayGen's glossy rays use decorrelated noise (the old pair sampled one line of each lobe).
+     docs/next/RT-REFLECTION-DENOISER.md): 4 fork passes (`RtReflDenoiseOursReproject`, `RtReflDenoiseAverage`, `RtReflDenoiseOursBlur`,
+     `RtReflDenoiseOursTemporal`) on frames the RT trace ran (both native and `RenderScale < 1` sub-rect frames; not under DLSS RR),
+     result copied into Buffer. The FFX denoiser core (`DenoiserCore == 1`) was pruned on 2026-11-19 and maps to `ours` (`Core 2`).
+     With it on, RayGen's glossy rays use decorrelated noise.
    - **the old chain**: Temporal (technique 3: surface reprojection, 3 x 3 clamp, `Temporal` 0.85) -> Blur X / Y (2 / 4: depth-aware
-     Gaussian, `BlurRadius` x roughness, narrower at RT contact). Always used without RT, in RenderScale rect frames, under DLSS RR
-     (raw: no blur), and with `Denoiser false`.
-4. The composite (technique 0) reads Buffer (water shaders read it next frame with RT Water).
+     Gaussian, `BlurRadius` x roughness, narrower at RT contact). Used without RT, under DLSS RR (raw: no blur), and with `Denoiser false`.
+4. The composite (technique 0, `Compute/ReflectionsComposite.frag` / `Effects/Reflections.fx.hlsl`) reads Buffer (water shaders read it
+   next frame with RT Water) and runs on Vulkan in both native and `RenderScale < 1` sub-rect frames.
 
 ## Settings
 `[Shaders.Reflections.Main]` (the look and the SSR trace), `[Shaders.Reflections.RT]` (the RT trace, its fallbacks, and the denoiser:
@@ -63,12 +64,37 @@ every frame ("Reflections RT (exchange)" 0.7-1.1 ms, beside the main "RT exchang
   line every 600 armed frames. Correct: the same picture as off, the "Reflections RT (exchange)" profiler line gone (no samples),
   the helper log's "runs" per pass equal for ReflectionsRT* and the other passes. Wrong would look like: reflections on surfaces that
   should not reflect / missing on mirrors (the early material capture read something else), or reflections lagging a frame.
-- **`FollowRenderScale`**: the trace, RayGen, Resolve, Temporal, the blurs and the composite have kept to the RenderScale rect since
-  2026-11-03 (the bench's own log: "RT traced in the RenderScale rect: 428x240 of 640x360"); what did not shrink is the round trip.
-  The key only makes the five image copies (Dir, Ray in; Hit, Shade, Bounce out) take the rect too. Log: `Reflections:
-  FollowRenderScale: the RT images are copied ... in the RenderScale rect only`. Still not in rect frames: the RT reflection denoiser
-  (its passes have no rect rules: reprojection, taps and history would need rectToScreen / screenToRect and a rect clamp in all seven
-  RtReflDenoise*.frag), MirrorJitter, weapon rays.
+- **`FollowRenderScale` & Full `RenderScale < 1.0` Sub-Rect Support (2026-11-19)**: `RtReflDenoise`, `MirrorJitter`, `RtWeapon`, and
+  `ReflectionsComposite.frag` all run natively inside the `RenderScale` sub-rect (`[0, activeW) x [0, activeH)`), clamping upsample and
+  denoiser neighbour taps to active rect bounds, applying `DepthJitterUV` and `MirrorJitter` sub-texel offsets to `PointAt` / `pVirt`,
+  and keeping `ToLast(pVirt)` camera-only while applying `ObjectMotion` only to surface reprojection `uvSurf`.
+
+## Pipeline consolidation & physical shading parity (2026-11-19)
+- **Wet surfaces & puddles (upstream 1.1.1, as merged into this fork 2026-11-22; branch `upstream-rt-merge`)**: two sources of the
+  wet film, one at a time:
+  - **This fork's G-buffer film** (`DeferredWetness`, test switch; `FilmWhole`): `Reflections.glsl FilmWetness` /
+    `Reflections.fx.hlsl` (`REFL_GBUFFER_ON`) read it, with `DampTrace`, `DampBumpLean`, the Fresnel cap (`DampMaxRoughness`,
+    `ReflectionsComposite.frag fresnelRough`) and `WetReach`. In such a frame the C++ zeroes `wetFx.x` / `TESR_ReflectionsWetFx.x`,
+    so upstream's forward film below does not add a second wetness.
+  - **Upstream's forward film** (every other frame): `Reflections` drives wet-film gloss/roughness from `WetnessEffects`' constants
+    (`ComputeWetFxFilm` / `ComputeWetFxFilmFx`: rain, `PuddleStanding`, `OpenAbove`), wet walls included, and subtracts the forward
+    `WetSkyReflection` under both `SkylightingMode = 0` (SH) and `1` (directional sky). In the D3D9 technique only the variant without
+    `REFL_GBUFFER_ON` has it.
+  - Not taken from upstream: `WetnessReflections` standing down whenever `Reflections` renders, its `SkylightingMode = 1` sky and its
+    first-person exclusion (this fork keeps its own `WetnessReflections`, off by default since settings step 96, which splits the floors
+    with `Reflections` by `WetReach`); `WetWorld::ReflectionsOwnPuddles` (WetWorld was removed 2026-11-21).
+  - Bindings: upstream's composite-only `t_albedo` / `t_capNormals` (bindings 28 / 29) collided with this fork's film and smooth
+    normals; the composite reads the same textures through `t_gbAlbedo` / `t_gbNormals` (30 / 31), bound when either reader wants them.
+- **`RtShadeHit` & `MetalBounce` parity**: `RtShadeHit` uses pure analytic ambient (`sunAmbient * LinearScales.y` + `SkyElevationLerp *
+  LinearScales.z`) plus bounce-only light-grid irradiance (`GridBounceIrradianceAt`, without `EnvAlong` double-counting sun/lamps), CPU
+  gamma-decoded `sunColor * LinearScales.x`, and `RtReflLamps` gamma/scale matching `ManyLamps`. `MetalBounce` packs `h2.normal` +
+  `h2.visible` losslessly into `shadeImage.a` while preserving `OctEncode(d2)` in `hitImage.zw`, so `RtBounceColour` shades secondary hits
+  with their true surface normal `h2Normal` and `-d2` view direction.
+- **True `AlbedoBuffer` metal `F0`, `GBufferV2` dielectric `F0`, roughness-damped `F90`, & additive composite**: `ReflectionsComposite`
+  and `Reflections.fx.hlsl` read linear metal `F0` from `TESR_AlbedoBuffer` (`albedo.a > 0.5`, fallback `ReflMetalF0`), decode dielectric
+  `F0` from `GBufferV2` (`FDSunVisDecode` / `CapturedNoHighlight`), damp grazing `F90` by `1 - roughness`, and replace `mix(lin, reflected,
+  share)` with energy-conserving additive reflection — keeping 100 % of `lin` on metals (preserving direct sun & lamp GGX highlights) and
+  attenuating only the diffuse body on dielectrics. Dead `HiZ` and FFX denoiser paths were removed.
 
 ## MaterialAware: what owns the scene's alpha (2026-11-07, perf-mirrorfix)
 The per-pixel material (MaterialAware, core/ReflMaterial.h) lives in the world target's alpha: 2 + 0.25 x metal + 0.24 x roughness,

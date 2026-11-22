@@ -997,8 +997,11 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 		sunScat *= pow(1 - sunH, 2) * isDayF * TESR_FogData.z;
 		// UNOFFICIAL 2026-10-15 SunGlow: this glow (inherited from NVR, up to 100 times the sun's colour where the fog lies
 		// toward a low sun) blew the sun out with the fog on; SunGlow scales it (1 = as it was).
-		// (ClassicLook: 1, as master.)
-		sunV = sunColV * sunScat * shVis * TESR_PBRData.z * 100 * (classic ? 1.0 : TESR_VolumetricFogSun.x);
+		// UNOFFICIAL 2026-11-19: gate sunV off the sky dome (the sky/clouds draw the sun there); where the constant budget allows
+		// (lamps: Estimate, Combine, Full, Packed — everything except DedicatedFogComposite's 224-const edge fallback), also
+		// attenuate in overcast weather (vfWeatherFilterBlend) and scale by SkyMultiplier (TESR_SunsetColor.w). (ClassicLook: unchanged.)
+		sunV = sunColV * sunScat * shVis * TESR_PBRData.z * 100 * (classic ? 1.0 : TESR_VolumetricFogSun.x * (1.0 - isDome));
+		if (lamps && !classic) sunV *= lerp(0.25, 1.0, vfWeatherFilterBlend) * TESR_SunsetColor.w;
 
 		distFog = pows(smoothstep(vfDistantFogRange, 1.0, nrmDepth), 0.5);
 		distHFade = (vfDistantFogHeight == 0) ? (1.0 - isSk) : saturate(exp(-worldP.z / (80000 * vfDistantFogHeight)));	// UNOFFICIAL 2026-10-30: at most 1 (below z 0 the exp passed 1 and the sky lerp ran past the sky colour: white, then inf in the TAA history)
@@ -1118,7 +1121,8 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	fogAdd *= aerialScale;
 
 	// ---- distant fog: horizon Z-fighting/sky-seam matte ----
-	float distantBlend = distFog * saturate(vfDistantFogBlend) * distHFade * vfIsExterior;
+	// UNOFFICIAL 2026-11-19: keep distantBlend off sky-dome pixels (classic unchanged) so overcast horizon clouds are not painted over with unclouded skyC.
+	float distantBlend = distFog * saturate(vfDistantFogBlend) * distHFade * vfIsExterior * (classic ? 1.0 : (1.0 - isDome));
 	fogMul *= 1 - distantBlend;
 	fogAdd = lerp(fogAdd, skyC.rgb, distantBlend);
 
@@ -1437,9 +1441,9 @@ float3 CompositeAO(float3 linearColor, float2 uvV)
 		}
 	}
 	float ao = lerp(TESR_AmbientOcclusionAOData.z, 1, sum / max(weights, 1.0e-6));
-	ao = lerp(ao, 1, saturate((luma(linearColor) - TESR_AmbientOcclusionData.y) * 3));
+	ao = lerp(ao, 1, saturate(luma(linearColor) - TESR_AmbientOcclusionData.y));
 	// the sky factor (its own share; not part of the AO's clamp/fade), at most what LightCap allows (UNOFFICIAL 2026-10-20 skyamb)
-	if (sky) { float2 skyAt = saturate(skySum / max(weights, 1.0e-6)); return SkyTake(linearColor * ao, skyAt.x, skyAt.y, NVR_CompositeAOTexel.z, NVR_CompositeAOTexel.w); }
+	if (sky) { float2 skyAt = saturate(skySum / max(weights, 1.0e-6)); return SkyTake(linearColor * ao, max(skyAt.x, TESR_AmbientOcclusionAOData.z), skyAt.y, NVR_CompositeAOTexel.z, NVR_CompositeAOTexel.w); }
 	return linearColor * ao;
 }
 

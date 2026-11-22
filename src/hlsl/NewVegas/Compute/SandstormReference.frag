@@ -33,16 +33,20 @@ void main() {
 
     // How far the dust runs before the pixel's surface (the 3 x 3 tent with SoftEdges). (HLSL's local 'distance' is 'dist' here.)
     float fullDensity = max(TESR_SandstormData.y, 1e-6);
-    vec2 texel = TESR_ReciprocalResolution.xy * 2.0;
-    float dist;
-    if (TESR_SandstormQuality.z > 0.5) {
+    float centerDist = ViewDistance(uv, visibility);
+    float dist = centerDist;
+    if (TESR_SandstormQuality.z > 0.5 && centerDist < visibility * 5.99) {
+        vec2 texel = TESR_ReciprocalResolution.xy * 2.0;
+        float centerShown = exp(-centerDist * fullDensity);
         float shown = 0.0;
         for (int y = -1; y <= 1; y++)
-            for (int x = -1; x <= 1; x++)
-                shown += float((2 - abs(x)) * (2 - abs(y))) * exp(-ViewDistance(uv + vec2(float(x), float(y)) * texel, visibility) * fullDensity);
+            for (int x = -1; x <= 1; x++) {
+                float w = float((2 - abs(x)) * (2 - abs(y)));
+                float tapShown = (x == 0 && y == 0) ? centerShown : min(exp(-ViewDistance(uv + vec2(float(x), float(y)) * texel, visibility) * fullDensity), centerShown);
+                shown += w * tapShown;
+            }
         dist = min(-log(max(shown / 16.0, 1e-9)) / fullDensity, visibility * 6.0);
     }
-    else dist = ViewDistance(uv, visibility);   // UNOFFICIAL (SoftEdges off): the pixel's own depth only
 
     vec3 camera = TESR_CameraPosition.xyz;
 

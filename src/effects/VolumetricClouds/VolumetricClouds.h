@@ -139,6 +139,7 @@ public:
 	// and 4 (shadow map) as Vulkan passes (Compute/VolumetricClouds*.frag), line for line. The reflection (3, drawn by hand into the
 	// game's reflection with its depth test) and the layer probe (5, a game texture bound by hand) stay D3D9.
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	bool	ExtSupportsRenderRect() const override { return true; }
 	int		ExtMarchSteps = 48;	// UNOFFICIAL 2026-10-26: the march's step count without the D3D9 shader's 64 cap (UpdateConstants), for ExtRender
 
 private:

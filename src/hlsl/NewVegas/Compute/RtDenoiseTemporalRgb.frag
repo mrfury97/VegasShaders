@@ -82,11 +82,17 @@ vec3 FireflyExcess(vec3 excess, vec3 kept) {
 // excess is not thrown away: o_d carries it (x this frame's blend weight) and RtDenoiseFirefly.frag spreads it over the 5 x 5 round,
 // into the history. So the light of rare bright paths (a glow panel only bounces find) is kept as a soft spread instead of white dots.
 // The anti-lag's fast history then takes the clamped sample (fed the raw one, a firefly pulled the long history up to it: a dot).
-float FireflyLimit(vec2 at) {
+float FireflyLimit(vec2 at, out bool actorNear) {
     float m = 0.0;
+    actorNear = false;
+    const vec2 lo = 0.5 * pc.params.zw, hi = max(pc.rect.xy - 0.5 * pc.params.zw, lo);
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++)
-            if (dx != 0 || dy != 0) m = max(m, luma(textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), at + vec2(dx, dy) * pc.params.zw, 0.0).rgb));
+            if (dx != 0 || dy != 0) {
+                const vec4 q = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), clamp(at + vec2(dx, dy) * pc.params.zw, lo, hi), 0.0);
+                m = max(m, luma(q.rgb));
+                if (q.a < 0.0) actorNear = true;
+            }
     return m;
 }
 
@@ -127,11 +133,25 @@ void main() {
     // (2026-11-03) the screen point of this texel (the rect's uv / its scale); past the rect nothing (the a-trous passes skip it)
     const vec2 s = uv / pc.rect.xy;
     if (s.x > 1.0 || s.y > 1.0) { o_a = vec4(0.0); o_b = vec4(0.0); o_d = vec4(0.0); return; }
-    const vec3 value = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).rgb;
+    const vec4 noisySample = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
+    const vec3 value = noisySample.rgb;
     const float l = luma(value);
     const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
     // (ptaaa-denoiser) AntiFirefly: the neighbours' support (a newly seen pixel has only that); c the sample used, its excess to o_d
-    const float spatialLimit = NVR_FIREFLY_K > 0.0 ? FireflyLimit(uv) : 1.0e30;
+    // UNOFFICIAL 2026-11-20: also detect moving-actor shadow blockers (t_noisy.a < 0) in the 3x3 neighbourhood with zero extra fetches when AntiFirefly is on
+    bool actorShadowNear = noisySample.a < 0.0;
+    float spatialLimit = 1.0e30;
+    if (NVR_FIREFLY_K > 0.0) {
+        bool neighActor = false;
+        spatialLimit = FireflyLimit(uv, neighActor);
+        actorShadowNear = actorShadowNear || neighActor;
+    } else if (!actorShadowNear) {
+        const vec2 lo = 0.5 * pc.params.zw, hi = max(pc.rect.xy - 0.5 * pc.params.zw, lo);
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++)
+                if ((dx != 0 || dy != 0) && textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), clamp(uv + vec2(dx, dy) * pc.params.zw, lo, hi), 0.0).a < 0.0)
+                    actorShadowNear = true;
+    }
     vec3 c = l > spatialLimit ? value * (spatialLimit / l) : value;
     float excessWeight = 1.0, fastWeight = 1.0;
     vec4 a = vec4(c, 1.0);
@@ -165,6 +185,8 @@ void main() {
         // shadow do not trail behind (the path tracer's dialogue ghosting; PTDenoisePeopleHistory)
         const float people = pc.peopleCap > 0.5 ? textureLod(sampler2D(t_captured, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a : 0.0;
         if (people > 1.5) cap = min(cap, pc.peopleCap);
+        // UNOFFICIAL 2026-11-20: ground/wall pixels where a moving actor blocks a direct shadow ray (t_noisy.a < 0 in 3x3) keep short history
+        if (actorShadowNear) cap = min(cap, 2.0);
         vec4 clip = pc.prevViewProj * vec4(p, 1.0);
         // (2026-11-07 ptaaa-firstperson) the first-person view model (the mask > 3.5: RtPathTrace.cpp ViewModelPrep, Settings.People) moves
         // with the camera: its history is at the same screen point and depth, not where the camera's motion would carry a world point
@@ -182,9 +204,10 @@ void main() {
                     // wide (clampK deviations: one noisy path a pixel has a wide spread) so a still picture keeps accumulating.
                     if (pc.clampK > 0.0) {
                         vec3 m1 = vec3(0.0), m2 = vec3(0.0);
+                        const vec2 lo = 0.5 * pc.params.zw, hi = max(pc.rect.xy - 0.5 * pc.params.zw, lo);
                         for (int dy = -1; dy <= 1; dy++)
                             for (int dx = -1; dx <= 1; dx++) {
-                                const vec3 q3 = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv + vec2(dx, dy) * pc.params.zw, 0.0).rgb;
+                                const vec3 q3 = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), clamp(uv + vec2(dx, dy) * pc.params.zw, lo, hi), 0.0).rgb;
                                 m1 += q3; m2 += q3 * q3;
                             }
                         m1 /= 9.0; m2 /= 9.0;
@@ -195,9 +218,7 @@ void main() {
                     // history's luminance leaves the fast mean's window (k standard errors of that mean: the LONG history's per-sample
                     // spread / sqrt(kFast), + 2 %), the light really changed there (a shadow moved, a lamp went on, something walked off):
                     // the long history is pulled to the window's edge and restarts at kFast frames, so a trail lasts a few frames, not
-                    // PTDenoiseHistory. (Simulated 2026-11-07, 20000 pixels: a 0 -> 1 step reaches 0.70 after 6 frames, 0.17 without; a still
-                    // Bernoulli 0.3 pixel keeps mean 0.3000 and the same noise. The fast history's OWN spread was 3x slower: a step inflates it.
-                    // The old 3 x 3 clamp of the raw sample darkened the picture 5 %.)
+                    // PTDenoiseHistory.
                     const float kFast = pc.fastFrames > 0.0 ? pc.fastFrames : 4.0;   // (perf-history: was 4.0)
                     // (ptaaa-denoiser) AntiFirefly with a history: the limit is also k x this pixel's recent raw mean
                     if (NVR_FIREFLY_K > 0.0) {

@@ -79,8 +79,10 @@ float lampRay(vec3 point, vec3 lamp) {
 	if (len2 <= stop * stop) return 1.0;                                        // at the lamp
 	const float invLen = inversesqrt(len2);
 	const float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
+	const uint farMask = uint(p.params.z), nearMask = uint(p.params.w);
+	if (farMask == nearMask) return blocked(point, segment, 0.0, tEnd, farMask) ? 0.0 : 1.0;
 	const float tSplit = clamp(1.0 - p.params2.x * invLen, 0.0, tEnd);
-	return (blocked(point, segment, 0.0, tSplit, uint(p.params.z)) || blocked(point, segment, tSplit, tEnd, uint(p.params.w))) ? 0.0 : 1.0;
+	return (blocked(point, segment, 0.0, tSplit, farMask) || blocked(point, segment, tSplit, tEnd, nearMask)) ? 0.0 : 1.0;
 }
 
 // The first solid surface along a unit view direction from the eye, at most tMax away (the fog's own clip is the depth buffer's surface:
@@ -92,47 +94,77 @@ float surfaceT(vec3 dir, float tMax) {
 	return rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT ? rayQueryGetIntersectionTEXT(q, true) : tMax;
 }
 
+// UNOFFICIAL 2026-11-19: dispatch 1 thread per screen cell instead of 1 per (cell, slot). All intersecting lamp spheres
+// share at most ONE primary camera ray surfaceT(dir, maxTb) per cell (up to -93.75% primary rays), while per-slot
+// sample-depth jitter o.z and history blending stay identical per tile.
 void main() {
-	const ivec2 texel = ivec2(gl_GlobalInvocationID.xy);
+	const ivec2 cell = ivec2(gl_GlobalInvocationID.xy);
 	const ivec2 size = ivec2(p.grid.xy);
 	const int across = clamp(int(p.grid.z + 0.5), 1, 4);
-	if (size.x <= 0 || size.y <= 0 || texel.x >= size.x * across || texel.y >= size.y * across)
+	const int slots = min(int(p.grid.w + 0.5), 16);
+	if (size.x <= 0 || size.y <= 0 || cell.x >= size.x || cell.y >= size.y || slots <= 0)
 		return;
-	const ivec2 tile = texel / size;
-	const int slot = tile.y * across + tile.x;
-	if (slot >= min(int(p.grid.w + 0.5), 16))
-		return;
-	const ivec2 cell = texel - tile * size;
-	const vec4 lamp = p.lamps[slot];
 
-	float result = 1.0;
-	bool traced = false;
-	if (lamp.w > 0.0 && finite3(lamp.xyz) && lamp.w < 1.0e30) {
-		// the view inside the cell and the points' shift along it: fixed (the centre), or moved per cell, lamp and frame
-		vec3 o = vec3(0.5);
-		if (p.params2.w > 0.5) {
-			const float h = fract(52.9829189 * fract(0.06711056 * float(cell.x + 13 * slot) + 0.00583715 * float(cell.y + 29 * slot)));
-			o = fract(vec3(h, fract(h * 1.618034), fract(h * 2.236068)) + p.up.w * vec3(0.7548777, 0.5698403, 0.6180340));
-		}
-		const vec3 dir = normalize(viewRay((vec2(cell) + o.xy) / p.grid.xy));
-		const float t0 = dot(lamp.xyz, dir);                    // along the view to the point nearest the lamp (LampHazeLight's names)
+	// One cell-jittered primary view direction shared across all lamp slots in this cell.
+	vec2 oXY = vec2(0.5);
+	if (p.params2.w > 0.5) {
+		const float hc = fract(52.9829189 * fract(0.06711056 * float(cell.x) + 0.00583715 * float(cell.y)));
+		oXY = fract(vec2(hc, fract(hc * 1.618034)) + p.up.w * vec2(0.7548777, 0.5698403));
+	}
+	const vec3 dir = normalize(viewRay((vec2(cell) + oXY) / p.grid.xy));
+
+	// Analytical sphere intersection pre-pass in registers: find active slots and maximum sphere exit distance.
+	uint hitMask = 0u;
+	float maxTb = 0.0;
+	for (int slot = 0; slot < slots; slot++) {
+		const vec4 lamp = p.lamps[slot];
+		if (!(lamp.w > 0.0) || !finite3(lamp.xyz) || !(lamp.w < 1.0e30)) continue;
+		const float t0 = dot(lamp.xyz, dir);
 		const float h2 = max(dot(lamp.xyz, lamp.xyz) - t0 * t0, 0.0);
 		const float r2 = lamp.w * lamp.w;
 		if (h2 < r2) {
 			const float chord = sqrt(r2 - h2);
 			const float ta = max(t0 - chord, 0.0);
-			float tb = t0 + chord;
-			if (tb > ta) tb = surfaceT(dir, tb);
+			const float tb = t0 + chord;
 			if (tb > ta) {
-				const float core = clamp(p.params.x, 0.05, 1.0);
+				hitMask |= (1u << uint(slot));
+				maxTb = max(maxTb, tb);
+			}
+		}
+	}
+
+	// Trace at most ONE primary camera ray per cell across all intersecting lamp spheres.
+	const float hitT = hitMask != 0u ? surfaceT(dir, maxTb) : 0.0;
+	const float core = clamp(p.params.x, 0.05, 1.0);
+	const int n = clamp(int(p.forward.w + 0.5), 1, 8);
+	const uint keptBits = uint(p.params2.z + 0.5);
+
+	for (int slot = 0; slot < slots; slot++) {
+		const ivec2 tile = ivec2(slot % across, slot / across);
+		const ivec2 texel = tile * size + cell;
+		float result = 1.0;
+		bool traced = false;
+		if ((hitMask & (1u << uint(slot))) != 0u) {
+			const vec4 lamp = p.lamps[slot];
+			const float t0 = dot(lamp.xyz, dir);
+			const float h2 = max(dot(lamp.xyz, lamp.xyz) - t0 * t0, 0.0);
+			const float r2 = lamp.w * lamp.w;
+			const float chord = sqrt(max(r2 - h2, 0.0));
+			const float ta = max(t0 - chord, 0.0);
+			const float tb = min(t0 + chord, hitT);
+			if (tb > ta) {
+				float oz = 0.5;
+				if (p.params2.w > 0.5) {
+					const float h = fract(52.9829189 * fract(0.06711056 * float(cell.x + 13 * slot) + 0.00583715 * float(cell.y + 29 * slot)));
+					oz = fract(fract(h * 2.236068) + p.up.w * 0.6180340);
+				}
 				const float e2 = core * core * r2;
 				const float hp = sqrt(h2 + e2);
 				const float pa = atan((ta - t0) / hp), pb = atan((tb - t0) / hp);
 				const float w = e2 / (r2 + e2);
-				const int n = clamp(int(p.forward.w + 0.5), 1, 8);
 				float lit = 0.0, total = 0.0;
 				for (int k = 0; k < n; k++) {
-					const float s = hp * tan(mix(pa, pb, (float(k) + o.z) / float(n)));
+					const float s = hp * tan(mix(pa, pb, (float(k) + oz) / float(n)));
 					const float weight = max(1.0 - w * (h2 + s * s + e2) / e2, 0.0);
 					if (weight > 0.0) {
 						lit += weight * lampRay(dir * clamp(t0 + s, ta, tb), lamp.xyz);
@@ -142,11 +174,10 @@ void main() {
 				if (total > 1.0e-6) { result = lit / total; traced = true; }
 			}
 		}
+		if (traced && p.right.w > 0.0 && ((keptBits >> uint(slot)) & 1u) != 0u) {
+			const float last = imageLoad(historyImage, texel).r;
+			if (last >= 0.0 && last <= 1.0) result = mix(result, last, min(p.right.w, 0.97));
+		}
+		imageStore(visibilityImage, texel, vec4(result, 0.0, 0.0, 0.0));
 	}
-	// last frame's value of this texel: only for a view that was traced now, in a slot that kept its lamp
-	if (traced && p.right.w > 0.0 && ((uint(p.params2.z + 0.5) >> uint(slot)) & 1u) != 0u) {
-		const float last = imageLoad(historyImage, texel).r;
-		if (last >= 0.0 && last <= 1.0) result = mix(result, last, min(p.right.w, 0.97));
-	}
-	imageStore(visibilityImage, texel, vec4(result, 0.0, 0.0, 0.0));
 }
