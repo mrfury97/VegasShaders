@@ -68,7 +68,7 @@ static const int UnofficialSettingsVersion = 97;  // (2026-11-22 upstream 1.1.3 
 // 2026-11-05: settings this build removed on purpose (the Oblivion-era leftovers: the old text menu's fonts, colours, layout and keys,
 // SleepingMode, TorchesCastShadows). Older settings files still hold them; they are skipped quietly instead of counted as unknown.
 static bool Retired(const std::string& Name) {
-	static const char* const kSections[] = { "Main.SleepingMode", "Shaders.WetWorld" };	// (2026-11-21: WetWorld removed; settings step 91 drops it)
+	static const char* const kSections[] = { "Main.SleepingMode", "Shaders.WetWorld", "Shaders.Blood" };	// (Shaders.Blood: upstream 1.1.1's dead stub; exact or dot: BloodFlow / BloodLens stay)	// (2026-11-21: WetWorld removed; settings step 91 drops it)
 	static const char* const kKeys[] = { "Shaders.ShadowsInteriors.Main.TorchesCastShadows", "Shaders.ShadowsExteriors.ScreenSpace.LodOnly",	// (2026-11-06: always on now)
 		"Shaders.Puddles.Main.Streaks", "Shaders.Puddles.Main.StreakWidth", "Shaders.Puddles.Main.StreakSpeed",	// (2026-11-18: the wall streaks removed)
 		"Main.Menu.Keys.KeyAdd", "Main.Menu.Keys.KeyDown", "Main.Menu.Keys.KeyEditing", "Main.Menu.Keys.KeyLeft", "Main.Menu.Keys.KeyPageDown",

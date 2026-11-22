@@ -66,6 +66,9 @@ void ReflectionsEffect::UpdateSettings() {
 	}
 	// UNOFFICIAL 2026-11-21 damp ground to the cube (Reflections.glsl FilmWetness): DampTrace, an Internal A/B key (missing = false, the cube)
 	Settings.DampTrace = TheSettingManager->GetSettingI(section, "DampTrace") != 0;
+	// UNOFFICIAL 2026-11-22 (upstream 1.1.3 merge) upstream 1.1.1's forward wet film, parked until the owner decides (review: with this fork's
+	// MaxRainWetness 0.5 its damp roughness, 0.5-0.61, is past the trace's 0.35 hand-over, so wet open ground loses its mirror)
+	Settings.ForwardWetFilm = TheSettingManager->GetSettingI(section, "ForwardWetFilm") != 0;
 	Settings.MaxDistance = std::clamp(TheSettingManager->GetSettingF(section, "MaxDistance"), 200.0f, 20000.0f);
 	Settings.Steps = std::clamp(TheSettingManager->GetSettingI(section, "Steps"), 8, 64);
 	Settings.Thickness = std::clamp(TheSettingManager->GetSettingF(section, "Thickness"), 0.1f, 10.0f);
@@ -744,7 +747,7 @@ void ReflectionsEffect::UpdateConstants() {
 	PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles;
 	PuddlesActive = exterior && puddles && puddles->ReflectionsWanted();
 	WetnessEffectsShaders* wetFx = TheShaderManager->Shaders.Wetness;
-	const bool wetFxActive = exterior && wetFx && wetFx->Enabled && wetFx->Constants.Flags.x > 0.5f;
+	const bool wetFxActive = Settings.ForwardWetFilm && exterior && wetFx && wetFx->Enabled && wetFx->Constants.Flags.x > 0.5f;
 	const int skyMode = TheSettingManager->GetSettingI("Shaders.PBR.Main", "SkylightingMode");
 	if (wetFxActive) {
 		Constants.WetFx = D3DXVECTOR4(1.0f + (skyMode == 1 ? 2.0f : 0.0f),

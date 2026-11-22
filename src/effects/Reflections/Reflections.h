@@ -23,6 +23,7 @@ public:
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	FilmRainScale = 1.0f;	// UNOFFICIAL 2026-11-20 1 / [Shaders.WetnessEffects.Main] MaxRainWetness (cb.film.w, Reflections.glsl FilmWetness)
+		bool	ForwardWetFilm = false;	// UNOFFICIAL 2026-11-22 upstream 1.1.3 merge: upstream's forward wet film (ComputeWetFxFilm) in frames without the G-buffer film
 		bool	DampTrace = false;	// UNOFFICIAL 2026-11-21 test key (Internal): damp ground traced as before instead of the cube (cb.film2.x 0)
 		float	MaxDistance;	// ray length, game units
 		int		Steps;

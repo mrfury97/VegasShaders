@@ -583,7 +583,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     // (upstream 1.1.1) walls and steep faces: only Wetness Effects' forward film (no G-buffer film this frame: the C++ leaves wetFx.x 0 then)
     if (floorShare <= 0.0) {
         if (!FilmOn && SurfaceWetGloss > 0.01) {
-            if (MaterialOn) { vec4 merged = MaterialAt(uv); if (merged.b > 0.25 && merged.b <= 0.75) SurfaceMetal = merged.g; }
+            if (MaterialOn || GBufferOn) { vec4 merged = material; if (merged.b > 0.25 && merged.b <= 0.75) SurfaceMetal = merged.g; }
             roughness = SurfaceWetRough;
             return SurfaceWetGloss * (1.0 - smoothstep(0.35, 0.75, SurfaceWetRough)) * fade;
         }
