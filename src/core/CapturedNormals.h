@@ -1226,6 +1226,7 @@ namespace CapturedNormals {
 			LastBeamMarker = ps && BeamMarkers.count(ps) != 0;	// UNOFFICIAL 2026-11-12 HairAndEyes: a hair shader with the mark output
 			if (LastGrassWriter || LastLeafWriter) LastWriter = LastMaterialWriter = LastAlbedoWriter = true; }
 		bool write = LastWriter;
+		bool opaqueHair = false;	// (upstream 1.1.2, Character Kit Remake 4844 one-bit alpha-test hair) a hair shader's draw without blend, below
 		if (EyeDrawNow && BeamNow) { BeamEyes++; if (write) BeamEyesRecorded++; }	// UNOFFICIAL 2026-11-12 HairAndEyes (the log's counts)
 		bool contrast = false;	// UNOFFICIAL ShadowContrast: an added lamp pass that gives its lost light to MaterialBuffer's alpha
 		if (write) {
@@ -1262,20 +1263,25 @@ namespace CapturedNormals {
 			if (!VmSpan && ((!LastGrassWriter && !LastLeafWriter) || LastFoliageDeferred)) FlashlightLamp::NoteWrite();
 			if (LastGrassWriter) GrassWrites++; else if (LastLeafWriter) LeafWrites++;
 		}
-		else if (LastBeamMarker && BeamNow && !VmSpan) {
+		else if (LastBeamMarker && !VmSpan) {
 			// UNOFFICIAL 2026-11-12 HairAndEyes: hair that takes the flashlight's beam itself, drawn in the main list (before the light
-			// pass). Its mark: the distance alone (blue), under no blend or the hair's own (see BeamMarkers); the other two records stay
-			// masked below (the hair is no writer of theirs).
+			// pass). Its mark: the distance alone (blue), under no blend or the hair's own (see BeamMarkers).
+			// (upstream 1.1.2, Character Kit Remake 4844 one-bit alpha-test hair) hair WITHOUT alpha blend draws in the main opaque list
+			// after the deferred head skin and before DeferredSun / DeferredLamps / the skin SSS, so the scalp's skin record behind it was lit
+			// over the hair. Such a draw now also clears the albedo record (its COLOR1 is 0: a = 0, unwritten) and the material record
+			// (COLOR2 0: model 0) and writes the far distance into COLOR3.b, with the beam on or off; D3D9's alpha test still discards the
+			// cut-out pixels before COLOR1..3 are written. The beam mark of blended hair is unchanged (only while the beam is on).
 			const DWORD mask = StateNow(d, D3DRS_COLORWRITEENABLE, 0xF), blend = StateNow(d, D3DRS_ALPHABLENDENABLE, FALSE);
 			const DWORD src = blend ? StateNow(d, D3DRS_SRCBLEND, D3DBLEND_ONE) : D3DBLEND_ONE, dst = blend ? StateNow(d, D3DRS_DESTBLEND, D3DBLEND_ZERO) : D3DBLEND_ZERO;
-			if ((mask & 7) && (!blend || (src == D3DBLEND_SRCALPHA && dst == D3DBLEND_INVSRCALPHA))) {
+			opaqueHair = (mask & 7) && !blend;
+			if (opaqueHair || (BeamNow && (mask & 7) && src == D3DBLEND_SRCALPHA && dst == D3DBLEND_INVSRCALPHA)) {
 				if (!Bound) Bind(d);
 				SetMask(d, D3DRS_COLORWRITEENABLE3, D3DCOLORWRITEENABLE_BLUE);
-				BeamMarks++;
+				if (BeamNow) BeamMarks++;
 			}
 			else {
 				if (Bound) SetMask(d, D3DRS_COLORWRITEENABLE3, 0);
-				BeamUnmarked++;
+				if (BeamNow) BeamUnmarked++;
 			}
 		}
 		else if (Bound) {
@@ -1302,9 +1308,9 @@ namespace CapturedNormals {
 		if (MaterialTexture && MaterialCompiled) {
 			IDirect3DSurface9* rt2 = TargetNow(d, 2);
 			const bool ours = rt2 && rt2 == MaterialDrawSurface();
-			if (write && LastMaterialWriter) {
+			if ((write && LastMaterialWriter) || opaqueHair) {	// (upstream 1.1.2) opaque hair clears it (see above)
 				if (!rt2) { D3DVIEWPORT9 vp; d->GetViewport(&vp); d->SetRenderTarget(2, MaterialDrawSurface()); d->SetViewport(&vp); }
-				if (!rt2 || ours) { SetMask(d, D3DRS_COLORWRITEENABLE2, 0xF); MaterialBound = true; MaterialDrawn = true; MaterialWrites++; }
+				if (!rt2 || ours) { SetMask(d, D3DRS_COLORWRITEENABLE2, 0xF); MaterialBound = true; if (!opaqueHair) { MaterialDrawn = true; MaterialWrites++; } }
 				else MaterialBusy++;
 			}
 			else if (contrast) {	// UNOFFICIAL ShadowContrast: alpha only (the opaque draws' rgb stays)
@@ -1319,9 +1325,9 @@ namespace CapturedNormals {
 		if (AlbedoTexture && AlbedoCompiled) {
 			IDirect3DSurface9* rt1 = TargetNow(d, 1);
 			const bool ours = rt1 && rt1 == AlbedoDrawSurface();
-			if (write && LastAlbedoWriter) {
+			if ((write && LastAlbedoWriter) || opaqueHair) {	// (upstream 1.1.2) opaque hair clears it (see above)
 				if (!rt1) { D3DVIEWPORT9 vp; d->GetViewport(&vp); d->SetRenderTarget(1, AlbedoDrawSurface()); d->SetViewport(&vp); }
-				if (!rt1 || ours) { SetMask(d, D3DRS_COLORWRITEENABLE1, 0xF); AlbedoBound = true; AlbedoDrawn = true; AlbedoWrites++; if (LastAlbedoLightOnly) AlbedoLightOnlyDraws++; }
+				if (!rt1 || ours) { SetMask(d, D3DRS_COLORWRITEENABLE1, 0xF); AlbedoBound = true; if (!opaqueHair) { AlbedoDrawn = true; AlbedoWrites++; if (LastAlbedoLightOnly) AlbedoLightOnlyDraws++; } }
 				else AlbedoBusy++;
 			}
 			else if (ours) SetMask(d, D3DRS_COLORWRITEENABLE1, 0);

@@ -12,14 +12,17 @@
 // computed here from the scene before tonemapping and the tonemapper's SDR result): 1 for shadows and mid-tones (the SDR look,
 // unchanged), rising towards PeakNits / PaperWhiteNits for what the SDR tonemapper squeezed into white (sun, sky near the sun,
 // lamps, fire, specular glints). HUD and menus therefore stay at paper white, never blinding.
+// Gamma22 (default on since upstream 1.1.2; settings step 92 moves a saved old default false to true): the fork decodes the SDR
+// picture with a pure 2.2 gamma instead of the sRGB curve (NVR_EXT_HDR_FLAG_GAMMA22): slightly darker, deeper shadows, as on most SDR
+// monitors, instead of the lifted blacks of the piecewise sRGB decode.
 //
 // Display check: the output must be in HDR mode in Windows (DXGI colour space ST.2084), else the output stays SDR automatically
 // (logged); IgnoreDisplayCheck forces it (tests on an SDR desktop: Windows then maps the HDR signal down itself).
 // UNOFFICIAL 2026-10-29: the colour space DXGI reports is the monitor's CURRENT mode, and the game's own fullscreen SDR picture
 // switches an HDR desktop's monitor to SDR (and back on alt-tab). The check alone therefore locked itself out: SDR at the first
 // frame although Windows HDR was on, or SDR again after a short mode change while HDR10 was being set up (user's log 10-29 15:11).
-// Now a monitor seen in HDR mode once in this run (at plugin load, before the game opens its window: NoteDesktop, or at any later
-// check) counts as "Windows HDR on" for the rest of the run; a later SDR reading for it is logged once and ignored.
+// Now a monitor seen in HDR mode once in this run (at any check; since upstream 1.1.2 no longer at plugin load, see NoteDesktop)
+// counts as "Windows HDR on" for the rest of the run; a later SDR reading for it is logged once and ignored.
 // UNOFFICIAL 2026-10-29 (user's run 16:04, "still nothing"): the latch can miss it altogether. Windows HDR was switched on at
 // 16:03:55, the game started at 16:04:01: SDR at load (the monitor was still switching) and at every check after (the game's
 // picture had switched it to SDR), so the fork was never asked. The Windows SETTING ("Use HDR", which the game's picture does not
@@ -285,15 +288,16 @@ namespace HdrOutput {
 
 	inline const char* OnOff(int value) { return value > 0 ? "on" : value == 0 ? "off" : "not found"; }
 
-	// At plugin load, before the game makes its window and swap chain: which monitors Windows has in HDR mode (Render.cpp's
-	// HdrOutputNoteDesktop, called from NVSEPlugin_Load). Only with HDR output enabled.
+	// At plugin load, before the game makes its window and swap chain (Render.cpp's HdrOutputNoteDesktop, called from
+	// NVSEPlugin_Load): the Windows HDR setting only. Only with HDR output enabled.
+	// (upstream 1.1.2) No DXGI monitor enumeration here any more: LoadLibraryEx("dxgi.dll") / CreateDXGIFactory1 inside
+	// NVSEPlugin_Load risks loader-lock / DXGI-lock deadlocks with overlays that hook dxgi. The monitors are read by the
+	// background display check (CheckWorker) once rendering starts, which also fills S.SeenHdr.
 	inline void NoteDesktop() {
 		if (!TheSettingManager->GetSettingI("Shaders.HDR.Main", "Enabled")) return;
-		int hdr; float maxNits;
-		ReadMonitors(nullptr, hdr, maxNits, S.SeenHdr);
 		const WindowsHdr windows = ReadWindowsSetting(nullptr);
-		Logger::Log("UNOFFICIAL HDR output: at load, before the game's window, %u monitor(s) in HDR mode; Windows HDR setting %s (%s), advanced colour %s",
-			(unsigned)S.SeenHdr.size(), OnOff(windows.Setting), windows.From, OnOff(windows.Active));
+		Logger::Log("UNOFFICIAL HDR output: at load, before the game's window, Windows HDR setting %s (%s), advanced colour %s",
+			OnOff(windows.Setting), windows.From, OnOff(windows.Active));
 	}
 
 	// UNOFFICIAL 2026-11-03 (tester log: a 49 s frame 13 s after HDR came on, RTX 4070 Ti SUPER with two virtual display adapters
@@ -408,6 +412,7 @@ namespace HdrOutput {
 	inline HRESULT Send(const NVR_EXT_HDR_OUTPUT& out, bool rebuild) {
 		const bool switching = rebuild || out.Mode != S.ForkMode;
 		if (switching) Logger::Log("UNOFFICIAL HDR output: asking the fork for %s (was %s%s): its swap chain is rebuilt at the next present", ModeName(out.Mode), ModeName(S.ForkMode), rebuild ? ", asked again" : "");
+		else Logger::Log("UNOFFICIAL HDR output: updating %s parameters (paper white %.0f, peak %.0f, flags 0x%X)", ModeName(out.Mode), out.PaperWhiteNits, out.PeakNits, (unsigned)out.Flags);
 		const DWORD start = GetTickCount();
 		const HRESULT hr = S.Hdr->SetHdrOutput(&out);
 		if (switching) {
@@ -415,6 +420,7 @@ namespace HdrOutput {
 			S.SwitchFrame = S.Frame;
 			S.SwitchTime = GetTickCount();
 		}
+		else Logger::Log("UNOFFICIAL HDR output: parameter update answered %08lX in %lu ms", (unsigned long)hr, GetTickCount() - start);
 		return hr;
 	}
 
@@ -458,7 +464,7 @@ namespace HdrOutput {
 			S.Hdr->GetHdrInfo(&S.Info);
 			Logger::Log("UNOFFICIAL HDR output: the fork's surface offers HDR10 %s, scRGB %s; EDID peak %.0f nits", S.Info.SupportsHdr10 ? "yes" : "no", S.Info.SupportsScRgb ? "yes" : "no", S.Info.DisplayMaxNits);
 		}
-		if (S.DisplayHdr < 0 || S.Frame % 600 == 0) StartCheck(Device);	// UNOFFICIAL 2026-11-03: on its own thread
+		if (!S.SwitchFrame && (S.DisplayHdr < 0 || S.Frame % 600 == 0)) StartCheck(Device);	// UNOFFICIAL 2026-11-03: on its own thread (upstream 1.1.2: never while a swap chain switch waits for its frame)
 		const bool check = FinishCheck();	// a new answer this frame (what the old every-600-frames check did, a few frames later)
 		if (S.DisplayHdr < 0 && !Setting("IgnoreDisplayCheck")) { Reason("Enabled: checking the display"); return; }
 		if (!S.DisplayHdr && !Setting("IgnoreDisplayCheck")) {
@@ -594,7 +600,12 @@ namespace HdrOutput {
 	// After NVR's last effect (and ReShade's, which draws before the HUD), before the HUD: the fork copies the picture and the gain.
 	inline void MarkScene(IDirect3DSurface9* Finished) {
 		if (!S.Active || !S.GainReady || !Finished) return;
-		if (FAILED(S.Hdr->MarkHdrScene(Finished, S.GainSurface))) Reason("MarkHdrScene failed (DXVK's log says why): HUD-free pixels shown without highlight gain");
+		const HRESULT hr = S.Hdr->MarkHdrScene(Finished, S.GainSurface);
+		if (FAILED(hr)) {
+			char text[160];
+			sprintf_s(text, "MarkHdrScene failed (%08lX; DXVK's log says why): HUD-free pixels shown without highlight gain", (unsigned long)hr);
+			Reason(text);
+		}
 	}
 
 	// Test tool, once a frame (Render.cpp, after MarkScene): CaptureFrame changed -> ask the fork; the frame after -> read and save.

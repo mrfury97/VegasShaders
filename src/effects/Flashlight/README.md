@@ -33,6 +33,11 @@ What it does (`core/FlashlightDeferred.h` BeamBegin / BeamShow, constants `TESR_
 - the hair shader leaves the flashlight's game lamp out of its lamps while the beam is on (the lamp in the beam's own direction);
 - the eye marks its record's distance as "far" (60000), which the pass skips by its reach test; hair drawn in the main list
   (alpha-tested hair of a hair mod) writes the same mark over the record under it (`core/CapturedNormals.h` BeamMarkers);
+- (upstream 1.1.2, Character Kit Remake 4844 one-bit alpha-test hair) hair drawn WITHOUT blend in the main list also clears the
+  albedo record (a = 0, unwritten) and the material record (model 0) under it and writes the "far" mark, with the beam on or off, so
+  DeferredSun, the lamp pass and the skin passes no longer light the scalp's skin record over the hair; the deferred skin's blur and
+  highlight-share fills (`core/DeferredSkin.h` FillBlurTargets) skip pixels whose albedo a is below 0.5. The SM3002/SM3003 hair
+  shaders already write 0 to COLOR1/COLOR2; no shader change;
 - the beam is there from the main list's start to the end of the world's pass; never in reflections, the first-person pass, a
   scope's camera, with the light or the key off, without the G-buffer, or while path tracing replaces the picture.
 Not done: the eye has no lens pattern; SoftEdges (the pass's wrap) is not applied to hair or eyes; under the game's MSAA (DXVK) a

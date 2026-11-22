@@ -34,6 +34,7 @@
 #include "SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (the SunSmoothing notes)
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: BloodFlow and DustMotes have no page, row or search entry in a release build
 #include "SettingForce.h"	// UNOFFICIAL 2026-11-16: keys the deferred renderer sets (on or off) show greyed, at the value in effect
+#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window closes at the first frame
 
 // The settings overlay (ImGui on the game's D3D9 device). Layout, top to bottom: a menu bar (File / View / Tools and the
 // global switches), the sidebar of sections next to the page of the selected section, and a one-line status bar. Input
@@ -336,10 +337,12 @@ void ImGuiManager::Initialize() {
 
 	gOverlay.ready = true;
 	Logger::Log("ImGuiManager: Initialized");
+	CompileProgress::Finish();	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compiles are over; the progress window (if shown) closes
 	ShaderRecord::LogCompileTimes();	// UNOFFICIAL 2026-11-11: the start's slowest shader compiles (log only; docs/next/SHADER-COMPILE-TIMES-2026-11-11.md)
 }
 
 void ImGuiManager::Shutdown() {
+	CompileProgress::Finish();
 	if (!gOverlay.ready) return;
 	SetOverlayVisible(false);
 	MenuSkin::Release();

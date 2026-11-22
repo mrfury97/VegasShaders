@@ -8,6 +8,7 @@
 #include "../../core/GrassShadows.h"	// UNOFFICIAL 2026-10-27 [Shaders.Grass.Main] CastShadows
 #include "../../core/FrameClock.h"
 #include "../../core/FlashlightDeferred.h"	// UNOFFICIAL 2026-11-04 the deferred flashlight on the grass (UpdateLights)
+#include "../../core/FlashlightLamp.h"		// upstream 1.1.2 (6e85afb): the flashlight's game lamp is left out of the grass lamps (UpdateLights)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-12 grass records (SetForDraw: GrassBind)
 
 void GrassShaders::RegisterConstants() {
@@ -113,9 +114,9 @@ void GrassShaders::UpdateSettings() {
 	Specular.Glossiness = std::clamp(TheSettingManager->GetSettingF(normals, "Glossiness"), 1.0f, 512.0f);
 }
 
-// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the lamps nearest the camera that reach anything near it, from both of NVR's
-// light lists (the shadow-casting ones, ShadowsExteriors' ShadowLightPosition with colours in LightColor[0..], and the rest,
-// LightPosition with colours after them). A light's sphere edge counts, not its centre: a big lamp farther off can light more of the
+// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the lamps nearest the camera that reach anything near it. (2026-11-22, upstream 1.1.2
+// port) taken from the world's ShadowSceneNode point lights with ManyLamps' filters (active, not hidden, not the flashlight's lamp;
+// reach Spec.r, colour Diff x Dimmer capped without HDR x the LOD dimmer), no longer from NVR's light lists. A light's sphere edge counts, not its centre: a big lamp farther off can light more of the
 // grass in view.
 void GrassShaders::UpdateLights() {
 	Constants.LightData = D3DXVECTOR4(0.0f, Lights.Strength, 0.0f, 0.0f);
@@ -140,26 +141,46 @@ void GrassShaders::UpdateLights() {
 	// UNOFFICIAL 2026-11-12 CapturedGrass: while the grass lights itself by this beam, its records are not written for the raster frame's
 	// RT GI (core/CapturedNormals.h BeginFrame: the light pass lights everything the records hold, the grass would get the beam twice)
 	CapturedNormals::GrassOwnBeam = Spot[0].w > 0.0f;
+	// Upstream 1.1.2 (6e85afb) grass lamp blowout fix. Every slot is cleared first, so a frame with fewer lamps leaves no stale ones
+	// behind (GPU grass copies them too). The lamps come from the world ShadowSceneNode's point lights, as ManyLamps' table takes them,
+	// instead of ShadowLightPosition / LightPosition: those carry the shadow radius (Spec.r x LightRadiusMult, 1.5 by default, a shadow
+	// margin) and the raw Dimmer, without the LOD dimmer, the !bHDR clamp or the active / hidden flags, so the grass got every lamp
+	// half again as far and brighter than the game lights anything else, and lamps the game had switched off.
+	memset(LightPosition, 0, sizeof(LightPosition));
+	memset(LightColor, 0, sizeof(LightColor));
 	if (!Lights.Enabled || Lights.MaxLights <= 0 || Lights.Strength <= 0.0f) return;
 
-	struct Candidate { float key; D3DXVECTOR4 pos; D3DXVECTOR4 color; };
-	Candidate found[ShadowCubeMapsScreen + TrackedLightsMax];
-	int count = 0;
-	const D3DXVECTOR4 cam = TheRenderManager->CameraPosition;
-	auto add = [&](const D3DXVECTOR4& pos, const D3DXVECTOR4& color) {
-		const float radius = pos.w;
-		const float brightness = (color.x + color.y + color.z) * color.w;
-		if (radius <= 1.0f || brightness <= 0.01f) return;
-		const float dx = pos.x - cam.x, dy = pos.y - cam.y, dz = pos.z - cam.z;
-		found[count++] = { sqrtf(dx * dx + dy * dy + dz * dz) - radius, D3DXVECTOR4(dx, dy, dz, radius),
-			D3DXVECTOR4(color.x * color.w, color.y * color.w, color.z * color.w, 0.0f) };
-	};
-	const D3DXVECTOR4* shadowLights = TheShaderManager->Effects.ShadowsExteriors->Constants.ShadowLightPosition;
-	for (int i = 0; i < ShadowCubeMapsScreen; i++) add(shadowLights[i], TheShaderManager->LightColor[i]);
-	for (int i = 0; i < TrackedLightsMax; i++) add(TheShaderManager->LightPosition[i], TheShaderManager->LightColor[ShadowCubeMapsScreen + i]);
+	ShadowSceneNode* worldNode = BSShaderManager::GetShadowSceneNode(0);
+	if (!worldNode) return;
 
-	std::sort(found, found + count, [](const Candidate& a, const Candidate& b) { return a.key < b.key; });
-	const int used = min(count, Lights.MaxLights);
+	struct Candidate { float key; D3DXVECTOR4 pos; D3DXVECTOR4 color; };
+	static std::vector<Candidate> found;	// (kept between frames: no allocation once it has grown)
+	found.clear();
+	const D3DXVECTOR4 cam = TheRenderManager->CameraPosition;
+	const bool hdr = *(const bool*)0x011F941E;	// BSShaderManager::bHDR (as ManyLamps / LampTableCore::LampRaw)
+	for (NiTList<ShadowSceneLight>::Entry* e = worldNode->lights.start; e; e = e->next) {
+		const ShadowSceneLight* light = e->data;
+		const NiPointLight* source = light ? light->sourceLight : nullptr;
+		if (!source || !light->bPointLight) continue;
+		if (FlashlightLamp::Is(source)) continue;	// (the deferred flashlight's lamp: the grass has its own beam, Spot above)
+		// as ManyLamps::BuildTable: not switched off for the view (+0x110), not hidden (NiAVObject flags +0x30 bit 0), not flagged (+0xEC)
+		const UInt8* raw8 = (const UInt8*)light;
+		const bool hidden = (((const UInt8*)source)[0x30] & 1) != 0;
+		if (*(const UInt16*)(raw8 + 0x110) == 0xFF || hidden || raw8[0xEC]) continue;
+		const float radius = source->Spec.r;	// the lamp's own reach (no shadow margin)
+		float dimmer = source->Dimmer;
+		if (!hdr && dimmer > 1.0f) dimmer = 1.0f;
+		const float scale = dimmer * light->fLODDimmer;
+		const float r = source->Diff.r * scale, g = source->Diff.g * scale, b = source->Diff.b * scale;
+		if (radius <= 1.0f || scale <= 0.0f || (r + g + b) <= 0.01f) continue;
+		const float dx = source->m_worldTransform.pos.x - cam.x;
+		const float dy = source->m_worldTransform.pos.y - cam.y;
+		const float dz = source->m_worldTransform.pos.z - cam.z;
+		found.push_back({ sqrtf(dx * dx + dy * dy + dz * dz) - radius, D3DXVECTOR4(dx, dy, dz, radius), D3DXVECTOR4(r, g, b, 0.0f) });
+	}
+
+	std::sort(found.begin(), found.end(), [](const Candidate& a, const Candidate& b) { return a.key < b.key; });
+	const int used = min((int)found.size(), Lights.MaxLights);
 	for (int i = 0; i < used; i++) {
 		LightPosition[i] = found[i].pos;
 		LightColor[i] = found[i].color;

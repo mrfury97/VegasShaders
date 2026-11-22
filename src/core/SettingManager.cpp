@@ -58,7 +58,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 91;  // (91, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 90, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 92;  // (92, 2026-11-22: HDR Gamma22 on (upstream 1.1.2); 91, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 90, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -952,6 +952,16 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		replace("Shaders.Puddles.Main", "Roughness", 0.03, 0.1, false);
 		replace("Shaders.Puddles.Main", "Size", 420.0, 250.0, false);
 		setBool("Shaders.Puddles.Main", "ObjectPuddles", false, true);
+	}
+	// 92 (2026-11-22, upstream 1.1.2, owner: "Take upstream's"): [Shaders.HDR.Main] Gamma22 false -> true, HDR output decodes the SDR picture
+	// with a pure 2.2 gamma by default (HdrOutput.h). A menu save holds the old false, which moves to true once; a saved true stays. It only
+	// changes the picture while HDR output is on (Enabled, off by default, with the DXVK fork and Windows HDR) and applies immediately.
+	if (version < 92) {
+		tomlValue* saved = UserSection("Shaders.HDR.Main");
+		if (saved && saved->is_table() && saved->contains("Gamma22") && saved->at("Gamma22").is_boolean() && !saved->at("Gamma22").as_boolean()) {
+			(*saved)["Gamma22"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.HDR.Main.Gamma22 false -> true (HDR output: pure 2.2 gamma decode)";
+		}
 	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "

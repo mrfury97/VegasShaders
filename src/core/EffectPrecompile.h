@@ -8,6 +8,7 @@
 #include <vector>
 #include "EffectCompiler47.h"	// UNOFFICIAL 2026-10-29 NewEffectCompiler
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release build compiles no shelved effect, even from an older install's files
+#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window
 
 // UNOFFICIAL 2026-10-28 (user: "we should port it"): NVR's effects compiled in parallel at startup, after Conor (mrfury97)'s fork
 // (github.com/mrfury97/Conor-sClaudeHell-NVR-SAL-Fork, commit ee3ac888, GPL-3.0-or-later: its ShaderPrecompile also does the effects;
@@ -58,6 +59,8 @@ namespace EffectPrecompile {
 		bool fresh = EffectCompiler47::CacheFresh(job->Preprocessed.c_str(), source) && ShaderProgram::FileExists(job->Compiled.c_str());
 		if (!fresh) fresh = ShaderProgram::SeedFromShipped(job->Preprocessed.c_str(), job->Compiled.c_str(), EffectCompiler47::CacheText(source));	// UNOFFICIAL 2026-11-10 shipped cache
 		if (!fresh) {
+			const size_t slash = job->Source.find_last_of("\\/");
+			CompileProgress::NoteCurrent(slash != std::string::npos ? job->Source.c_str() + slash + 1 : job->Source.c_str());
 			ID3DXEffectCompiler* compiler = nullptr;
 			ID3DXBuffer* binary = nullptr;
 			// UNOFFICIAL 2026-10-29 NewEffectCompiler: d3dcompiler_47 first (seconds instead of minutes on the big effects)
@@ -67,6 +70,7 @@ namespace EffectPrecompile {
 				if (WriteFile(job->Compiled, binary->GetBufferPointer(), binary->GetBufferSize()))
 					WriteFile(job->Preprocessed, portable.data(), portable.size());
 				CompiledCount++;
+				CompileProgress::EffectsCompiled.fetch_add(1);
 				binary->Release();
 				binary = nullptr;
 			}
@@ -77,6 +81,7 @@ namespace EffectPrecompile {
 					if (WriteFile(job->Compiled, binary->GetBufferPointer(), binary->GetBufferSize()))
 						WriteFile(job->Preprocessed, portable.data(), portable.size());
 					CompiledCount++;
+					CompileProgress::EffectsCompiled.fetch_add(1);
 				}
 				compiler->Release();
 			}
@@ -93,6 +98,7 @@ namespace EffectPrecompile {
 			if (i >= Jobs.size()) return;
 			Run(Jobs[i]);
 			Jobs[i]->Done = true;
+			CompileProgress::EffectsDone.fetch_add(1);
 		}
 	}
 
@@ -128,6 +134,8 @@ namespace EffectPrecompile {
 		std::stable_sort(Jobs.begin(), Jobs.end(), [](const Job* a, const Job* b) { return a->Size > b->Size; });
 		const unsigned cores = std::thread::hardware_concurrency();
 		const unsigned threads = (std::max)(1u, (std::min)(cores > 1 ? cores - 1 : 1u, 12u));
+		CompileProgress::EffectsTotal.store((int)Jobs.size());
+		CompileProgress::Begin();
 		for (unsigned i = 0; i < threads; i++) std::thread(Worker).detach();	// (detached: effects never loaded are compiled and left)
 		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u effects on %u threads (biggest first).", (unsigned)Jobs.size(), threads);
 	}

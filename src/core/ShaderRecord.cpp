@@ -713,6 +713,8 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 		if (!precompiled && (recompile || !function)) {
 			// compile if option was enabled or compiled version not found
+			CompileProgress::Begin();	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window (nothing once the first frame came)
+			CompileProgress::NoteCurrent(Name);
 			const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (ShaderPrecompile::LogCompileTimes)
 			D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile, NULL, &binary, &messages, &table);
 			// UNOFFICIAL 2026-10-29: D3DX ran out of ps_3_0 temp registers (X4505). Measured: the 6-layer land shaders SLS2132-2138 with terrain
@@ -729,6 +731,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 				D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile,
 					D3DXSHADER_PREFER_FLOW_CONTROL, &binary, &messages, &table);
 			}
+			if (binary) CompileProgress::ShadersCompiled.fetch_add(1);
 			ShaderPrecompile::MainCompiles.emplace_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count(),
 				binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
 			logCompilerMessages(messages, Name);

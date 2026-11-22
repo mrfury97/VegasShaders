@@ -9,6 +9,7 @@
 #include <unordered_set>
 #include <vector>
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31 register-clash guard
+#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window
 
 // UNOFFICIAL 2026-10-14 (user: "can u make the nvr shader compiler run in parallel threads"). The game asks for its shaders
 // one at a time while it starts, and NVR compiled each replacement right there: preprocess, compare with the cache, compile
@@ -73,6 +74,7 @@ namespace ShaderPrecompile {
 			}
 			if (job->ShaderBuffer) return;
 		}
+		CompileProgress::NoteCurrent(job->Name.c_str());
 		const char* profile = strstr(job->Name.c_str(), ".vso") ? "vs_3_0" : "ps_3_0";
 		ID3DXConstantTable* table = nullptr;
 		const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (LogCompileTimes)
@@ -102,6 +104,7 @@ namespace ShaderPrecompile {
 				fclose(f);
 			}
 			job->Log += "Shader compiled (parallel): " + job->Compiled;
+			CompileProgress::ShadersCompiled.fetch_add(1);
 		}
 	}
 
@@ -111,6 +114,7 @@ namespace ShaderPrecompile {
 			if (i >= Jobs.size()) return;
 			Run(Jobs[i]);
 			Jobs[i]->Done = true;
+			CompileProgress::ShadersDone.fetch_add(1);
 		}
 	}
 
@@ -213,6 +217,8 @@ namespace ShaderPrecompile {
 		}
 		const unsigned cores = std::thread::hardware_concurrency();
 		const unsigned threads = (std::max)(1u, (std::min)(cores > 1 ? cores - 1 : 1u, 12u));
+		CompileProgress::ShadersTotal.store((int)Jobs.size());
+		CompileProgress::Begin();
 		for (unsigned i = 0; i < threads; i++) std::thread(Worker).detach();	// (detached: shaders the game never asks for are compiled and left)
 		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u shaders on %u threads.", (unsigned)Jobs.size(), threads);
 	}

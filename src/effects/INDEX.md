@@ -28,7 +28,7 @@ One folder per effect: its C++, `README.md` (what it does, inputs, settings, pas
 | [Flashlight](Flashlight/) | true | yes | 3 | 4 | Flashlight.cpp, Flashlight.h |  |
 | [GodRays](GodRays/) | true | yes | 1 | 3 | GodRays.cpp, GodRays.h | When the sun is up in an exterior and bright sky (or the sun's own disc and glare) sits near or beside the view, soft shafts of light fan out from the sun's scr |
 | [GpuParticles](GpuParticles/) | - | - | 6 | 1 | GpuParticles.cpp, GpuParticles.h |  |
-| [Grass](Grass/) | true | - | 0 | 8 | GpuGrass.cpp, GpuGrass.h, Grass.cpp, Grass.h |  |
+| [Grass](Grass/) | true | yes | 0 | 8 | GpuGrass.cpp, GpuGrass.h, Grass.cpp, Grass.h |  |
 | [HeatHaze](HeatHaze/) | false | - | 3 | 2 | HeatHaze.cpp, HeatHaze.h |  |
 | [ImageAdjust](ImageAdjust/) | true | yes | 3 | 4 | ImageAdjust.cpp, ImageAdjust.h | ImageAdjust is a set of global picture controls: brightness, contrast, saturation, a strength blend, and separate tints for the darker and lighter tones. Each c |
 | [LUT](LUT/) | true | yes | 3 | 2 | LUT.cpp, LUT.h, LUTFile.h, LUTIdentity.h | LUT (look-up table) colour grading. Each colour of the picture is replaced by the colour stored for it in a table image or a 3D .cube file, so a whole colour lo |
