@@ -655,7 +655,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 	// UNOFFICIAL 2026-11-18 ShaderFallback for compile failures: it did not compile (here, on a worker, or known from an earlier start), and
 	// whether that was X4505 (out of temp registers: the only failure a shorter shader cures; a typo in an edited include is not one). A
 	// record with levels of its own (a cache sub-folder or overrides: lamp shadows, light-free, NoCloud ...) is its caller's to shorten.
-	bool compileFailed = false, outOfRegisters = false;
+	bool compileFailed = false, outOfRegisters = false, registerClash = false;
 	const bool callerLevels = CacheSubPath != nullptr || Overrides != nullptr;
 	ShaderPrecompile::StartOnce();	// UNOFFICIAL: the first shader starts the parallel compile (once)
 
@@ -789,8 +789,9 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			if (!binary) {	// (2026-11-18)
 				compileFailed = true;
 				CompileOutOfRegisters = outOfRegisters = messages && strstr((const char*)messages->GetBufferPointer(), "X4505") != nullptr;
+				registerClash = messages && strstr((const char*)messages->GetBufferPointer(), "X4500") != nullptr;
 			}
-			if (!binary) cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");	// (2026-11-16 fast-restart)
+			if (!binary && !registerClash) cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");	// (2026-11-16 fast-restart)
 			if (cloudRetry) NoteCloudFailure(preprocessedPath, source);	// (2026-11-17: not compiled again at the next start)
 			if (!binary && !cloudRetry) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
 			if (binary) {
@@ -829,11 +830,11 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 		}
 		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); }
 
-		const HRESULT tableResult = D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table);
-		if (FAILED(tableResult)) {
+		const HRESULT tableResult = function ? D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table) : E_FAIL;
+		if (function && FAILED(tableResult)) {
 			Logger::Log("Encountered an issue getting constant table for %s", Name); ReportError(tableResult);	// no record
 		}
-		else {
+		else if (function) {
 			D3DXCONSTANTTABLE_DESC tableDesc;
 			HRESULT descResult = table->GetDesc(&tableDesc);
 			ReportError(descResult);
@@ -907,6 +908,8 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 						// gear: the normals' 2; the DeferredLamps records: the material's and the albedo's) take no part in it
 						if (writes && (hasDefine(Template, "SKIN") || hasDefine(Template, "LAMPS_DEFERRED")))
 							CapturedNormals::NoteCodeWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
+						if (writes && hasDefine(Template, "SKIN") && !hasDefine(Template, "LAMPS_DEFERRED"))
+							CapturedNormals::NoteSkinCodeWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
 						// UNOFFICIAL 2026-10-29 ShadowContrast: the object shader's added lamp passes (DIFFUSE) give their shadows' light to it
 						if (writes && PBRShaders::ShadowContrastCompiledIn() && !strcmp(Template.Name, "ObjectTemplate")) {
 							if (hasDefine(Template, "DIFFUSE")) CapturedNormals::NoteContrastWriter(static_cast<ShaderRecordPixel*>(record)->ShaderHandle);
@@ -988,7 +991,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 	loadClock.LogTime("ShaderRecord::LoadShader");
 
 	// (2026-11-16 fast-restart) a worker's compile that failed comes here with no bytecode and no record: the same test
-	if (!record && !retryFallback && !cloudRetry && !binary && source) {
+	if (!record && !retryFallback && !cloudRetry && !binary && source && !registerClash) {
 		cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");
 		if (cloudRetry && !KnownCloudFailure(preprocessedPath, source)) NoteCloudFailure(preprocessedPath, source);	// (2026-11-17)
 	}
@@ -1330,7 +1333,9 @@ void NiD3DVertexShaderEx::SetupShader(IDirect3DVertexShader9* BoundHandle) {
 			static unsigned told = 0;
 			if (told++ < 40) Logger::Log("UNOFFICIAL vertex shader %s: the game's D3D shader was replaced (%p -> %p): the new one is kept as the game's", Name ? Name : "?",
 				(void*)ShaderHandleBackup, (void*)ShaderHandle);
+			GameShaderPairs::Forget(ShaderHandleBackup);
 			ShaderHandleBackup = ShaderHandle;
+			GameShaderPairs::NoteMade(Name, (IUnknown*)ShaderHandle, false);
 		}
 	}
 
@@ -1449,18 +1454,21 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 	// bound (indoors; mode 2 outdoors too once DeferredSun is ready). Off: nothing.
 	if (ShaderRecordPixel* deferred = DeferredRenderer::Live ? DeferredRenderer::Choose(this, Player->GetWorldSpace() != nullptr) : nullptr) {
 		ShaderHandle = deferred->ShaderHandle;
+		ShaderRecordPixel::Current = deferred;
 		if (BoundHandle != ShaderHandle) deferred->SetCT();
 		return;
 	}
 	// UNOFFICIAL 2026-11-15 phase 4 skin (core/DeferredSkin.h): the skin's deferred record inside the G-buffer span. Off: nothing.
 	if (ShaderRecordPixel* skin = DeferredSkin::Records.empty() ? nullptr : DeferredSkin::Choose(this, Player->GetWorldSpace() != nullptr)) {
 		ShaderHandle = skin->ShaderHandle;
+		ShaderRecordPixel::Current = skin;
 		if (BoundHandle != ShaderHandle) skin->SetCT();
 		return;
 	}
 	// UNOFFICIAL 2026-11-14 phase 3 foliage (core/DeferredFoliage.h): the leaf / grass deferred record inside the G-buffer span. Off: nothing.
 	if (ShaderRecordPixel* foliage = DeferredFoliage::Live ? DeferredFoliage::Choose(this, Name) : nullptr) {
 		ShaderHandle = foliage->ShaderHandle;
+		ShaderRecordPixel::Current = foliage;
 		if (BoundHandle != ShaderHandle) foliage->SetCT();
 		return;
 	}
@@ -1468,6 +1476,7 @@ void NiD3DPixelShaderEx::SetupShader(IDirect3DPixelShader9* BoundHandle) {
 	// the pixel's froxel from the frame's table) while this frame's table and lists are there. Off: nothing.
 	if (ShaderRecordPixel* forwardPlus = DeferredTransparents::Live ? DeferredTransparents::Choose(this) : nullptr) {
 		ShaderHandle = forwardPlus->ShaderHandle;
+		ShaderRecordPixel::Current = forwardPlus;
 		if (BoundHandle != ShaderHandle) forwardPlus->SetCT();
 		return;
 	}

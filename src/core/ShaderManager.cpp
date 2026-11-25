@@ -261,9 +261,20 @@ void ShaderManager::CreateFrameVertex(UInt32 Width, UInt32 Height, IDirect3DVert
 		{  1.0f,  1.0f, 1.0f, ScaleX + halfTexelU, halfTexelV },
 		{  1.0f, -1.0f, 1.0f, ScaleX + halfTexelU, ScaleY + halfTexelV }
 	};
-	TheRenderManager->device->CreateVertexBuffer(sizeof(quad), D3DUSAGE_WRITEONLY, FrameFVF, D3DPOOL_DEFAULT, FrameVertex, NULL);
+	const HRESULT createHr = TheRenderManager->device->CreateVertexBuffer(sizeof(quad), D3DUSAGE_WRITEONLY, FrameFVF, D3DPOOL_DEFAULT, FrameVertex, NULL);
+	if (FAILED(createHr) || !*FrameVertex) {
+		*FrameVertex = nullptr;
+		Logger::Log("[ERROR] ShaderManager::CreateFrameVertex: CreateVertexBuffer failed (%08lx)", (long)createHr);
+		return;
+	}
 	IDirect3DVertexBuffer9* const made = *FrameVertex;
-	made->Lock(0, 0, &data, NULL);
+	const HRESULT lockHr = made->Lock(0, 0, &data, NULL);
+	if (FAILED(lockHr) || !data) {
+		Logger::Log("[ERROR] ShaderManager::CreateFrameVertex: Lock failed (%08lx)", (long)lockHr);
+		made->Release();
+		*FrameVertex = nullptr;
+		return;
+	}
 	memcpy(data, quad, sizeof(quad));
 	made->Unlock();
 
@@ -321,11 +332,30 @@ namespace {
 	std::vector<IDirect3DSurface9*> RescaleList;	// this rect frame's buffers read after the upscale (RenderRect::RescaleAfterUpscale)
 	struct RescaleTemp { IDirect3DTexture9* Texture = nullptr; IDirect3DSurface9* Surface = nullptr; D3DSURFACE_DESC Desc = {}; };
 	std::unordered_map<IDirect3DSurface9*, RescaleTemp> RescaleTemps;	// one spare of the same size and format per buffer
+	struct GameRescaleEntry { IDirect3DSurface9* Surface = nullptr; float ScaleX = 1.0f, ScaleY = 1.0f; bool Point = false; };
+	std::vector<GameRescaleEntry> GameRescaleList;
+	std::vector<RescaleTemp> GameRescaleTemps;	// keyed by (Width, Height, Format), never raw transient game surface pointers
 }
 
 void RenderRect::RescaleAfterUpscale(IDirect3DSurface9* Surface) {
 	if (!On || !Surface || std::find(RescaleList.begin(), RescaleList.end(), Surface) != RescaleList.end()) return;
 	RescaleList.push_back(Surface);
+}
+
+void RenderRect::RescaleGameSurfaceAfterUpscale(IDirect3DSurface9* Surface, float scaleX, float scaleY, bool pointFilter) {
+	if (!Surface || (scaleX >= 0.999f && scaleY >= 0.999f)) return;
+	for (const GameRescaleEntry& entry : GameRescaleList) {
+		if (entry.Surface == Surface) return;
+	}
+	Surface->AddRef();
+	GameRescaleList.push_back({ Surface, scaleX, scaleY, pointFilter });
+}
+
+void RenderRect::ClearGameRescales() {
+	for (GameRescaleEntry& entry : GameRescaleList) {
+		if (entry.Surface) entry.Surface->Release();
+	}
+	GameRescaleList.clear();
 }
 
 // UNOFFICIAL 2026-11-12 (memleak): the buffer is released (TextureManager's idle targets): its spare goes with it (it was kept for the
@@ -364,6 +394,47 @@ void RenderRect::RescaleRegistered(IDirect3DDevice9* Device) {
 			Device->StretchRect(spare.Surface, nullptr, buffer, nullptr, D3DTEXF_NONE);
 	}
 	RescaleList.clear();
+	RescaleGameSurfaces(Device);
+}
+
+void RenderRect::RescaleGameSurfaces(IDirect3DDevice9* Device) {
+	for (GameRescaleEntry& entry : GameRescaleList) {
+		IDirect3DSurface9* buffer = entry.Surface;
+		if (!buffer) continue;
+		D3DSURFACE_DESC desc = {};
+		if (Device && SUCCEEDED(buffer->GetDesc(&desc)) && desc.MultiSampleType == D3DMULTISAMPLE_NONE && ScreenShaped(desc.Width, desc.Height)) {
+			RescaleTemp* spare = nullptr;
+			for (RescaleTemp& candidate : GameRescaleTemps) {
+				if (candidate.Surface && candidate.Desc.Width == desc.Width && candidate.Desc.Height == desc.Height && candidate.Desc.Format == desc.Format) {
+					spare = &candidate;
+					break;
+				}
+			}
+			if (!spare) {
+				RescaleTemp created = {};
+				if (SUCCEEDED(Device->CreateTexture(desc.Width, desc.Height, 1, D3DUSAGE_RENDERTARGET, desc.Format, D3DPOOL_DEFAULT, &created.Texture, nullptr)) &&
+					SUCCEEDED(created.Texture->GetSurfaceLevel(0, &created.Surface))) {
+					created.Desc = desc;
+					GameRescaleTemps.push_back(created);
+					spare = &GameRescaleTemps.back();
+				}
+				else {
+					if (created.Surface) created.Surface->Release();
+					if (created.Texture) created.Texture->Release();
+					static bool logged = false;
+					if (!logged) Logger::Log("[ERROR] UNOFFICIAL RenderScale: no spare to rescale game surface %ux%u (fmt %u).", desc.Width, desc.Height, (UInt32)desc.Format);
+					logged = true;
+				}
+			}
+			if (spare && spare->Surface) {
+				const RECT drawn = { 0, 0, (LONG)(std::max)(1.0f, floorf((float)desc.Width * entry.ScaleX + 0.5f)), (LONG)(std::max)(1.0f, floorf((float)desc.Height * entry.ScaleY + 0.5f)) };
+				if (SUCCEEDED(Device->StretchRect(buffer, &drawn, spare->Surface, nullptr, entry.Point ? D3DTEXF_POINT : D3DTEXF_LINEAR)))
+					Device->StretchRect(spare->Surface, nullptr, buffer, nullptr, D3DTEXF_NONE);
+			}
+		}
+		buffer->Release();
+	}
+	GameRescaleList.clear();
 }
 
 
@@ -2427,6 +2498,7 @@ bool ShaderManager::PostUpscaleNeedsDepth(bool beforeLuma) {
 
 void ShaderManager::RenderDepthAndNormals(IDirect3DSurface9* RenderTarget, bool needNormals) {
 	IDirect3DDevice9* const Device = TheRenderManager->device;
+	ReShadeIntegration::MsaaDepthGuard msaaGuard(Device);	// D3D9 forbids pairing single-sampled depth/normals RTs with an MSAA depth-stencil
 	static GpuTimer depthTimer("Depth combine");
 	static GpuTimer normalsTimer("Normal reconstruction");
 	auto bindFrameQuad = [&] { Device->SetStreamSource(0, FrameVertex, 0, sizeof(FrameVS)); };

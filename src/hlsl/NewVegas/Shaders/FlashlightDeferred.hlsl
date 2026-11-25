@@ -165,8 +165,12 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
         cookie = lerp(1.0f, tex2Dlod(FL_Cookie, float4(cookieUV, 0.0f, 0.0f)).r * 2.0f, saturate(FL_Look.x));
     }
 
-    const float3 N = ShadowDecodeNormal(stored.rg);
     const float4 m = tex2Dlod(FL_Material, uv4);
+#if CAPTURED_NORMALS_ON >= 4
+    const float3 N = abs(m.g) <= 1.001f ? ShadowDecodeNormal(m.ga) : ShadowDecodeNormal(stored.rg);
+#else
+    const float3 N = ShadowDecodeNormal(stored.rg);
+#endif
     // (2026-11-12 ptbump) b in -3 .. -2: a record coded "the game draws no highlight on this mesh" for the path tracer (Includes/
     // CapturedNormals.hlsl CapturedNoHighlight): the roughness this pass always lit it with is -2 - b. The land's b (-8 .. -6 with its
     // bump recorded, else -1): no roughness, as before.

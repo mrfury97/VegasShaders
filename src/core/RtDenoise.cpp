@@ -413,7 +413,7 @@ namespace RtDenoise {
 		t.backbone[0] = motion ? 1.0f : 0.0f;
 		t.backbone[1] = shared ? 1.0f : 0.0f;
 		t.backbone[2] = motion && rgb ? RtHistoryTime::Frames((float)(std::max)(S.MovingHistory, 0), clock) : 0.0f;	// 2026-10-31 (rt-ao-sky) RT GI: GIMovingHistory
-		t.backbone[3] = shared && scale == 2 ? 1.0f : 0.0f;	// 2026-10-31 (rt-ao-sky) half size: the mask over the pixel's 2 x 2 full-size ones
+		t.backbone[3] = scale == 2 ? 1.0f : 0.0f;	// 2026-10-31 (rt-ao-sky) half size: the mask over the pixel's 2 x 2 full-size ones
 		IUnknown* motionImage = motion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth;
 		IUnknown* sharedImage = shared ? (IUnknown*)shared : (IUnknown*)depth;
 		AtrousPush a = {};

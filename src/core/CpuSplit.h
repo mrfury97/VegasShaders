@@ -322,6 +322,8 @@ namespace CpuSplit {
 
 	static UInt8 BucketOf(UInt32 id) { return id < kSiteCount ? Sites[id].bucket : MarkBucket(id); }
 
+	inline void (*OnFrameBuckets)(const double* ms, UInt32 count) = nullptr;
+
 	// The frame that just ended: Lists[kMain] starts with the previous frame start; the AI lists hold this frame's AI work
 	// (the AI threads are parked now).
 	static void Sum(LONGLONG frameEnd) {
@@ -350,15 +352,18 @@ namespace CpuSplit {
 			const double total = (double)(a.items[count - 1].t - a.items[0].t) * toMs - waits;
 			ms[list == kAI2 ? bAI2Busy : bAI1Busy] += total > 0.0 ? total : 0.0;
 		}
-		for (UInt32 b = 0; b < kBucketCount; b++) if (Timers[b]) Timers[b]->Add(ms[b]);
-		FramesSummed++;
+		if (OnFrameBuckets) OnFrameBuckets(ms, kBucketCount);
+		if (GpuTimer::Enabled) {
+			for (UInt32 b = 0; b < kBucketCount; b++) if (Timers[b]) Timers[b]->Add(ms[b]);
+			FramesSummed++;
+		}
 	}
 
 	static void InstallAI();
 
 	static void FrameStart(LONGLONG t) {
 		if (!AIInstalled) InstallAI();
-		if (GpuTimer::Enabled) Sum(t);
+		if (GpuTimer::Enabled || OnFrameBuckets) Sum(t);
 		for (UInt32 list = 0; list < kListCount; list++) Lists[list].count = 0;
 		const LONGLONG start = Now();
 		LastOverhead = start - t;

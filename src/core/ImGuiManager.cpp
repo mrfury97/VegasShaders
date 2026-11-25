@@ -13,6 +13,7 @@
 #include "Branding.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
 #include "InstallCheck.h"	// 2026-11-03: the install self-check (main-menu notice, Help > Install check, Copy bug report)
+#include "DeepProbe.h"		// UNOFFICIAL 2026-11-21: Help > Performance probe... (full DLL/script/draw census)
 #include "RtCore.h"			// 2026-11-05: the Ray tracing page's status lines
 #include "RtSunShadows.h"
 #include "RtLampShadows.h"
@@ -36,6 +37,7 @@
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: shelved effects have no page, row or search entry in a release build
 #include "SettingForce.h"	// UNOFFICIAL 2026-11-16: keys the deferred renderer sets (on or off) show greyed, at the value in effect
 #include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: close startup shader-compile overlay once the first frame arrives
+#include "DxvkLoader.h"
 
 // The settings overlay (ImGui on the game's D3D9 device). Layout, top to bottom: a menu bar (File / View / Tools and the
 // global switches), the sidebar of sections next to the page of the selected section, and a one-line status bar. Input
@@ -78,6 +80,10 @@ namespace {
 		bool diskConfirm = false;		// File > Reload from disk was picked: open its confirmation next to the main window
 		bool installCheckOpen = false;	// 2026-11-03: Help > Install check
 		double reportCopiedAt = -1.0;	// 2026-11-03: when Copy bug report was last pressed (ImGui time), for the "Copied" line
+		bool deepProbeOpen = false;		// UNOFFICIAL 2026-11-21: Help > Performance probe...
+		int deepProbeDuration = 10;
+		bool deepProbeAutoClose = true;
+		double probeCopiedAt = -1.0;
 		// The value each setting had when it was first drawn since the menu opened: section -> key -> text (the ~ buttons)
 		std::unordered_map<std::string, std::unordered_map<std::string, std::string>> sessionValues;
 	};
@@ -534,20 +540,20 @@ static void FeedMouseAndStepKeys() {
 
 // ---- Frame ------------------------------------------------------------------------------------------------------------------
 
-// A lost device drops ImGui's D3D objects (once); when it can be reset they are made again. Returns false while it is lost.
+// A lost device drops ImGui's D3D objects (once); when reset succeeds they are made again. Returns false while lost or un-reset.
 static bool FollowDeviceState() {
 	const HRESULT state = TheRenderManager->device->TestCooperativeLevel();
-	if (state == D3DERR_DEVICELOST) {
+	if (state == D3DERR_DEVICELOST || state == D3DERR_DEVICENOTRESET) {
 		if (!gOverlay.deviceLost) ImGui_ImplDX9_InvalidateDeviceObjects();
 		gOverlay.deviceLost = true;
 		return false;
 	}
-	if (gOverlay.deviceLost && state == D3DERR_DEVICENOTRESET) {
+	if (gOverlay.deviceLost && state == D3D_OK) {
 		ImGui_ImplDX9_CreateDeviceObjects();
 		gOverlay.deviceLost = false;
 		HookMouseOnce();
 	}
-	return true;
+	return state == D3D_OK;
 }
 
 void ImGuiManager::NewFrame() {
@@ -1034,6 +1040,10 @@ static const char* InactiveReason(const char* section, const char* key) {
 	if (sec == "Shaders.CloudShadows.Main" && TheSettingManager->GetMenuShaderEnabled("VolumetricClouds") &&
 		NumericSetting("Shaders.VolumetricClouds.Main", "Shadows") > 0.0f)
 		return "Replaced while VolumetricClouds is on with Shadows above 0: volumetric clouds cast their own shadows.";
+
+	// VolumetricClouds PhysicalShadows overrides Shadows darkness/strength (thick clouds block all direct sunlight)
+	if (sec == "Shaders.VolumetricClouds.Main" && is({ "Shadows" }) && NumericSetting(section, "PhysicalShadows") != 0.0f)
+		return "Not used while PhysicalShadows is on: thick clouds block all direct sunlight physically instead of using a fixed shadow darkness.";
 
 	return nullptr;
 }
@@ -2880,6 +2890,9 @@ static bool DrawBoolSetting(SettingRow& row) {
 	if (MenuWidgets::Toggle("##v", &on) && (!on || ConfirmChange(node.Section, node.Key, "true"))) {	// (2026-11-05: conflicts ask first)
 		TheSettingManager->SetSetting(node.Section, node.Key, on);
 		if (on && !strcmp(node.Key, "Enabled")) SwitchOffOtherUpscaler(node);
+		if (on && !strcmp(node.Section, "Shaders.VolumetricClouds.Main") && !strcmp(node.Key, "PhysicalShadows") &&
+			TheSettingManager->GetSettingF("Shaders.VolumetricClouds.Main", "Shadows") <= 0.0f)
+			TheSettingManager->SetSetting("Shaders.VolumetricClouds.Main", "Shadows", 0.6f);
 		TheSettingManager->LoadSettings();
 	}
 	return ImGui::IsItemHovered();
@@ -3062,8 +3075,9 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& stored, boo
 	}
 
 	row.controlW = MenuWidgets::RowBegin(labelOverride ? labelOverride : MenuKeyLabel(node.Section, node.Key), TrailingWidth(row, isShader));
-	// A forced row is disabled after its name, so hovering the name still shows the note (ImGui does not hover disabled items)
-	if (row.forced) ImGui::BeginDisabled();
+	const bool controlDisabled = row.forced || (!strcmp(node.Section, "Shaders.VolumetricClouds.Main") && !strcmp(node.Key, "Shadows") && row.why != nullptr);
+	// A forced / overridden row is disabled after its name, so hovering the name still shows the note (ImGui does not hover disabled items)
+	if (controlDisabled) ImGui::BeginDisabled();
 	bool overControl;
 	switch (node.Type) {
 	case NodeType::Boolean:
@@ -3083,7 +3097,7 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& stored, boo
 			overControl = DrawTextSetting(row);
 		break;
 	}
-	if (row.forced) overControl = overControl || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
+	if (controlDisabled) overControl = overControl || ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled);
 	if (tints) ImGui::PopStyleColor(tints);
 
 	if (row.restart.text) {
@@ -3094,7 +3108,7 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& stored, boo
 		TheSettingManager->SetSettingS(node.Section, node.Key, row.atOpen.c_str());
 		TheSettingManager->LoadSettings();
 	}
-	if (row.forced) ImGui::EndDisabled();
+	if (controlDisabled) ImGui::EndDisabled();
 	if (row.inert) ImGui::EndDisabled();
 
 	if (overControl || MenuWidgets::RowLabelHovered()) {
@@ -7544,6 +7558,63 @@ static void RenderTwinDllWarning(bool mainMenu) {
 	front->AddText(font, bodySize, text, IM_COL32(255, 255, 255, 255), body, nullptr, wrap);
 }
 
+static void RenderDxvkConflictWarning(bool mainMenu) {
+	const bool blocked = !DxvkLoader::OverridingWrapper.empty();
+	const bool nonFork = !DxvkLoader::ActiveNonForkDxvk.empty();
+	if (!blocked && !nonFork) return;
+	(void)mainMenu;
+
+	const ImVec2 display = ImGui::GetIO().DisplaySize;
+	if (display.x <= 0.0f || display.y <= 0.0f) return;
+	ImFont* font = ImGui::GetFont();
+	if (!font) return;
+
+	std::string title, body;
+	if (blocked) {
+		title = "VEGAS SHADERS: ROOT d3d9.dll OVERRIDE DETECTED";
+		body = "The d3d9.dll in your Fallout New Vegas game folder (" + DxvkLoader::OverridingWrapper +
+			") loaded before Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll and blocked Vegas Shaders' DXVK build.\n"
+			"Remove or rename d3d9.dll in the game folder so Vegas Shaders can run correctly.";
+	}
+	else {
+		title = "VEGAS SHADERS: NON-FORK DXVK ACTIVE";
+		body = "Running under stock/non-fork DXVK (" + DxvkLoader::ActiveNonForkDxvk +
+			") without Vegas Shaders' DXVK extension (ray tracing & descriptor-heap features disabled).\n"
+			"Ensure Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll is installed and delete any leftover d3d9.dll or dxvk.conf in the game folder.";
+	}
+
+	const float rawBase = display.y / 58.0f;
+	const float base = rawBase > 14.0f ? rawBase : 14.0f;
+	const float titleSize = base * 1.15f;
+	const float bodySize = base * 0.92f;
+	const float pad = base * 0.9f;
+	float width = display.x * 0.56f;
+	if (width > base * 48.0f) width = base * 48.0f;
+	if (width > display.x - base * 2.0f) width = display.x - base * 2.0f;
+	const float wrap = width - pad * 2.0f;
+	if (wrap <= 1.0f) return;
+
+	const ImVec2 titleDim = font->CalcTextSizeA(titleSize, 1e6f, wrap, title.c_str());
+	const ImVec2 bodyDim = font->CalcTextSizeA(bodySize, 1e6f, wrap, body.c_str());
+	const float height = pad * 2.0f + titleDim.y + base * 0.5f + bodyDim.y;
+	// Avoid overlapping RenderTwinDllWarning at top when both are active.
+	const float yPos = !Paths::TwinDll.empty() ? (display.y - height - base * 2.5f) : (base * 2.2f);
+	const ImVec2 at((display.x - width) * 0.5f, yPos > base ? yPos : base);
+
+	ImDrawList* front = ImGui::GetForegroundDrawList();
+	const float pulse = 0.5f + 0.5f * sinf((float)ImGui::GetTime() * 3.0f);
+	const ImU32 bgCol = blocked ? IM_COL32(70, 8, 8, 235) : IM_COL32(68, 42, 6, 235);
+	const ImU32 borderCol = blocked ? IM_COL32(255, 60 + (int)(80 * pulse), 60, 255) : IM_COL32(255, 175 + (int)(60 * pulse), 40, 255);
+	front->AddRectFilled(at, ImVec2(at.x + width, at.y + height), bgCol, base * 0.4f);
+	front->AddRect(at, ImVec2(at.x + width, at.y + height), borderCol, base * 0.4f, 0, 3.0f);
+	ImVec2 text(at.x + pad, at.y + pad);
+	front->AddText(font, titleSize, ImVec2(text.x + 2, text.y + 2), IM_COL32(0, 0, 0, 220), title.c_str(), nullptr, wrap);
+	front->AddText(font, titleSize, text, IM_COL32(255, 225, 90, 255), title.c_str(), nullptr, wrap);
+	text.y += titleDim.y + base * 0.5f;
+	front->AddText(font, bodySize, ImVec2(text.x + 1, text.y + 1), IM_COL32(0, 0, 0, 220), body.c_str(), nullptr, wrap);
+	front->AddText(font, bodySize, text, IM_COL32(255, 255, 255, 255), body.c_str(), nullptr, wrap);
+}
+
 // ---- Install check (2026-11-03, InstallCheck.h) -----------------------------------------------------------------------------
 // What the start-up check found, on screen: a panel at the top of the game's main menu (first 45 s), the same at the top in game
 // when the main menu was skipped (first 20 s), a status-bar item, and Help > Install check with every result and the bug report.
@@ -7693,22 +7764,290 @@ static void DrawInstallCheckWindow() {
 	ImGui::End();
 }
 
-// A small dim marker in the top-right corner while the F10 GPU/CPU profiler is running, so it is not
-// left on by accident. Drawn on the foreground list, so it needs no window and shows with the menu closed.
+// A small dim marker in the top-right corner while the F10 GPU/CPU profiler or Deep Probe is running.
+// Drawn on the foreground list, so it needs no window and shows with the menu closed.
 static void RenderProfilerIndicator() {
-	if (!GpuTimer::Enabled) return;
+	const bool prof = GpuTimer::Enabled;
+	const bool probe = DeepProbe::Active();
+	if (!prof && !probe) return;
 
-	const char* label = "PROF";
 	const ImVec2 display = ImGui::GetIO().DisplaySize;
-	const ImVec2 textSize = ImGui::CalcTextSize(label);
 	const float radius = 3.0f, margin = 8.0f, gap = 5.0f;
-	const ImVec2 textPos(display.x - margin - textSize.x, margin);
-	const ImVec2 center(textPos.x - gap - radius, margin + textSize.y * 0.5f);
-
 	ImDrawList* draw = ImGui::GetForegroundDrawList();
-	draw->AddText(ImVec2(textPos.x + 1, textPos.y + 1), IM_COL32(0, 0, 0, 110), label);
-	draw->AddText(textPos, IM_COL32(210, 210, 210, 120), label);
-	draw->AddCircleFilled(center, radius, IM_COL32(230, 60, 60, 170));
+	float y = margin;
+
+	auto drawBadge = [&](const char* label, ImU32 dotCol) {
+		const ImVec2 textSize = ImGui::CalcTextSize(label);
+		const ImVec2 textPos(display.x - margin - textSize.x, y);
+		const ImVec2 center(textPos.x - gap - radius, y + textSize.y * 0.5f);
+		draw->AddText(ImVec2(textPos.x + 1, textPos.y + 1), IM_COL32(0, 0, 0, 140), label);
+		draw->AddText(textPos, IM_COL32(225, 225, 225, 190), label);
+		draw->AddCircleFilled(center, radius, dotCol);
+		y += textSize.y + 3.0f;
+	};
+
+	if (prof) drawBadge("PROF", IM_COL32(230, 60, 60, 190));
+	if (probe) {
+		char buf[32];
+		sprintf_s(buf, "PROBE %.1fs", DeepProbe::RemainingSeconds());
+		drawBadge(buf, IM_COL32(245, 175, 45, 220));
+	}
+}
+
+static void DrawDeepProbeWindow() {
+	if (!gMenu.deepProbeOpen) return;
+	ImGui::SetNextWindowSize(ImVec2(820.0f, 560.0f), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Performance probe###DeepProbe", &gMenu.deepProbeOpen)) { ImGui::End(); return; }
+
+	const bool running = DeepProbe::Active();
+	ImGui::TextWrapped("Profiles everything happening in a slow area: engine stages, every loaded DLL / xNVSE plugin, "
+		"every running script and ESP/ESM mod, Vegas Shaders GPU passes, and a 1-frame draw-call / light / actor census.");
+	ImGui::Spacing();
+
+	if (running) {
+		if (ImGui::Button("Stop Now")) DeepProbe::RequestStop();
+		ImGui::SameLine();
+		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "Capturing... %.1f s left (play normally in the slow spot)", DeepProbe::RemainingSeconds());
+	}
+	else {
+		if (ImGui::Button("Start Probe")) {
+			DeepProbe::RequestStart((double)gMenu.deepProbeDuration, gMenu.deepProbeAutoClose);
+			if (gMenu.deepProbeAutoClose) SetOverlayVisible(false);
+		}
+		ImGui::SameLine();
+		if (ImGui::RadioButton("5s", gMenu.deepProbeDuration == 5)) gMenu.deepProbeDuration = 5;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("10s", gMenu.deepProbeDuration == 10)) gMenu.deepProbeDuration = 10;
+		ImGui::SameLine();
+		if (ImGui::RadioButton("20s", gMenu.deepProbeDuration == 20)) gMenu.deepProbeDuration = 20;
+		ImGui::SameLine();
+		ImGui::Checkbox("Auto-close menu", &gMenu.deepProbeAutoClose);
+	}
+
+	const DeepProbe::Summary& s = DeepProbe::LastSummary();
+	if (s.valid) {
+		ImGui::SameLine();
+		if (ImGui::Button("Copy Full Report")) {
+			ImGui::SetClipboardText(DeepProbe::LastReportText().c_str());
+			gMenu.probeCopiedAt = ImGui::GetTime();
+		}
+		if (gMenu.probeCopiedAt >= 0.0 && ImGui::GetTime() - gMenu.probeCopiedAt < 4.0) {
+			ImGui::SameLine();
+			ImGui::TextColored(MenuSkin::Heading(0.25f), "Copied!");
+		}
+		ImGui::TextDisabled("Saved: %s", DeepProbe::LastReportPath().c_str());
+		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.35f, 1.0f));
+		ImGui::TextWrapped("Verdict: %s", s.verdict.c_str());
+		ImGui::PopStyleColor();
+		ImGui::Separator();
+
+		const ImGuiTableFlags tblFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
+		if (ImGui::BeginTabBar("##deep_probe_tabs")) {
+			if (ImGui::BeginTabItem("Overview")) {
+				ImGui::Text("FPS: avg %.1f (%.2f ms) | p50 %.2f | p95 %.2f | p99 %.2f | 1%% low %.1f fps | 0.1%% low %.1f fps | %u frames (%.1fs)",
+					s.avgFps, s.avgMs, s.p50Ms, s.p95Ms, s.p99Ms, s.low1Fps, s.low01Fps, s.frames, s.durationSec);
+				ImGui::Text("CPU Split: Game Update %.2f ms/f | Game Render CPU %.2f ms/f | Present/Wait %.2f ms/f | AI1 %.2f ms | AI2 %.2f ms",
+					s.updateMs, s.renderCpuMs, s.presentMs, s.ai1BusyMs, s.ai2BusyMs);
+				ImGui::Text("Vegas Shaders GPU ~%.2f ms/f | Scripts: %.2f ms/f (%llu calls) | Draws (1f): %u (%u skinned, %u shader binds)",
+					s.gpuVegasMs, s.totalScriptSelfMs, s.totalScriptCalls, s.censusTotalDraws, s.censusSkinnedDraws, s.censusShaderBinds);
+				ImGui::Text("Scene: %s | Lights: %u active / %u | Actors H/MH/ML/L: %u/%u/%u/%u | VAS: %.0f/%.0f MB | ESPs %u, DLLs %u",
+					s.cellDesc.c_str(), s.activeLights, s.totalLights, s.actorsHigh, s.actorsMidHigh, s.actorsMidLow, s.actorsLow,
+					s.vasUsedMB, s.vasTotalMB, s.loadedPlugins, s.loadedDlls);
+				ImGui::Spacing();
+				ImGui::TextColored(MenuSkin::Heading(0.25f), "Top DLLs (Main Thread Exclusive)");
+				if (ImGui::BeginTable("##ov_dlls", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+					ImGui::TableSetupColumn("Module"); ImGui::TableSetupColumn("Role");
+					ImGui::TableSetupColumn("Excl ms/f"); ImGui::TableSetupColumn("Incl ms/f"); ImGui::TableSetupColumn("Top Stage");
+					ImGui::TableHeadersRow();
+					for (size_t i = 0; i < s.dlls.size() && i < 8; i++) {
+						const auto& d = s.dlls[i];
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.name.c_str());
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.role.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.2f (%.1f%%)", d.exclMs, d.exclPct);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f (%.1f%%)", d.inclMs, d.inclPct);
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.topStage.c_str());
+					}
+					ImGui::EndTable();
+				}
+				ImGui::Spacing();
+				ImGui::TextColored(MenuSkin::Heading(0.25f), "Top Script Mods (.esp/.esm)");
+				if (ImGui::BeginTable("##ov_smods", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+					ImGui::TableSetupColumn("Mod"); ImGui::TableSetupColumn("Self ms/f");
+					ImGui::TableSetupColumn("Calls/f"); ImGui::TableSetupColumn("Max Call");
+					ImGui::TableHeadersRow();
+					for (size_t i = 0; i < s.scriptMods.size() && i < 8; i++) {
+						const auto& m = s.scriptMods[i];
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(m.modName.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.3f ms", m.selfMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.1f", m.callsPerFrame);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f ms", m.maxCallMs);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("DLLs / Plugins")) {
+				ImGui::Text("Main thread 1 kHz samples: %u (AI1: %u, AI2: %u)", s.samplerMainSamples, s.samplerAi1Samples, s.samplerAi2Samples);
+				if (ImGui::BeginTable("##dlls_tbl", 7, tblFlags, ImVec2(0.0f, 260.0f))) {
+					ImGui::TableSetupColumn("Module"); ImGui::TableSetupColumn("Role");
+					ImGui::TableSetupColumn("Excl ms/f"); ImGui::TableSetupColumn("Excl %");
+					ImGui::TableSetupColumn("Incl ms/f"); ImGui::TableSetupColumn("Wait %");
+					ImGui::TableSetupColumn("Top Stage");
+					ImGui::TableHeadersRow();
+					for (const auto& d : s.dlls) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.name.c_str());
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.role.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", d.exclMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.1f%%", d.exclPct);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f (%.1f%%)", d.inclMs, d.inclPct);
+						ImGui::TableNextColumn(); ImGui::Text("%.0f%%", d.waitPct);
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.topStage.c_str());
+					}
+					ImGui::EndTable();
+				}
+				if (!s.driverCallers.empty()) {
+					ImGui::Spacing();
+					ImGui::TextColored(MenuSkin::Heading(0.25f), "Driver / DXVK CPU Time by Calling Module");
+					if (ImGui::BeginTable("##drv_tbl", 4, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
+						ImGui::TableSetupColumn("Caller"); ImGui::TableSetupColumn("Role");
+						ImGui::TableSetupColumn("ms/frame"); ImGui::TableSetupColumn("% Main CPU");
+						ImGui::TableHeadersRow();
+						for (const auto& dc : s.driverCallers) {
+							ImGui::TableNextRow();
+							ImGui::TableNextColumn(); ImGui::TextUnformatted(dc.callerName.c_str());
+							ImGui::TableNextColumn(); ImGui::TextUnformatted(dc.callerRole.c_str());
+							ImGui::TableNextColumn(); ImGui::Text("%.2f", dc.ms);
+							ImGui::TableNextColumn(); ImGui::Text("%.1f%%", dc.pct);
+						}
+						ImGui::EndTable();
+					}
+				}
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Scripts & Mods")) {
+				ImGui::Text("Total Script Self Time: %.3f ms/frame across %llu calls (%s)",
+					s.totalScriptSelfMs, s.totalScriptCalls, s.scriptHookOk ? "ScriptRunner hook active" : "hook unavailable");
+				if (ImGui::BeginTable("##smods_tbl", 5, tblFlags, ImVec2(0.0f, 165.0f))) {
+					ImGui::TableSetupColumn("Mod (.esp/.esm)"); ImGui::TableSetupColumn("Self ms/f");
+					ImGui::TableSetupColumn("Calls/f"); ImGui::TableSetupColumn("Scripts"); ImGui::TableSetupColumn("Max Call ms");
+					ImGui::TableHeadersRow();
+					for (const auto& m : s.scriptMods) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(m.modName.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.3f", m.selfMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.1f", m.callsPerFrame);
+						ImGui::TableNextColumn(); ImGui::Text("%u", m.uniqueScripts);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", m.maxCallMs);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::Spacing();
+				ImGui::TextColored(MenuSkin::Heading(0.25f), "Top Individual Scripts");
+				if (ImGui::BeginTable("##scripts_tbl", 7, tblFlags, ImVec2(0.0f, 0.0f))) {
+					ImGui::TableSetupColumn("Script"); ImGui::TableSetupColumn("Mod");
+					ImGui::TableSetupColumn("Self ms/f"); ImGui::TableSetupColumn("Incl ms/f");
+					ImGui::TableSetupColumn("Calls/f"); ImGui::TableSetupColumn("Max ms"); ImGui::TableSetupColumn("FormID");
+					ImGui::TableHeadersRow();
+					for (const auto& sc : s.scripts) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(sc.label.c_str());
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(sc.modName.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.3f", sc.selfMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.3f", sc.inclMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.1f", sc.callsPerFrame);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", sc.maxCallMs);
+						ImGui::TableNextColumn(); ImGui::Text("%08X", sc.formID);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Stages & GPU")) {
+				ImGui::TextColored(MenuSkin::Heading(0.25f), "Engine CPU Stages (CpuSplit)");
+				if (ImGui::BeginTable("##stages_tbl", 6, tblFlags, ImVec2(0.0f, 200.0f))) {
+					ImGui::TableSetupColumn("Stage"); ImGui::TableSetupColumn("Avg ms");
+					ImGui::TableSetupColumn("p95 ms"); ImGui::TableSetupColumn("Max ms");
+					ImGui::TableSetupColumn("Frame %"); ImGui::TableSetupColumn("CPU Busy");
+					ImGui::TableHeadersRow();
+					for (const auto& stg : s.stages) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(stg.name.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", stg.avgMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", stg.p95Ms);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", stg.maxMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.1f%%", stg.pct);
+						ImGui::TableNextColumn();
+						if (stg.busyPct >= 0.0) ImGui::Text("%.1f%%", stg.busyPct); else ImGui::TextUnformatted("-");
+					}
+					ImGui::EndTable();
+				}
+				ImGui::Spacing();
+				ImGui::TextColored(MenuSkin::Heading(0.25f), "GPU Timers (Vegas Shaders & Scene Passes)");
+				if (ImGui::BeginTable("##gpu_tbl", 4, tblFlags, ImVec2(0.0f, 0.0f))) {
+					ImGui::TableSetupColumn("Pass"); ImGui::TableSetupColumn("Avg ms");
+					ImGui::TableSetupColumn("Max ms"); ImGui::TableSetupColumn("Samples");
+					ImGui::TableHeadersRow();
+					for (const auto& gp : s.gpuPasses) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(gp.name.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%.3f", gp.avgMs);
+						ImGui::TableNextColumn(); ImGui::Text("%.3f", gp.maxMs);
+						ImGui::TableNextColumn(); ImGui::Text("%u", gp.samples);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Scene Census")) {
+				ImGui::Text("Draws (1 frame): %u total (World %u | 1st-P %u | Refl %u | Other %u) | Skinned: %u | Binds: %u",
+					s.censusTotalDraws, s.censusWorldDraws, s.censusFirstPersonDraws, s.censusReflDraws, s.censusOtherDraws, s.censusSkinnedDraws, s.censusShaderBinds);
+				ImGui::Text("Active Point Lights: %u / %u | Actors (H/MH/ML/L): %u / %u / %u / %u",
+					s.activeLights, s.totalLights, s.actorsHigh, s.actorsMidHigh, s.actorsMidLow, s.actorsLow);
+				if (s.censusTotalDraws == 0 && s.censusShaderBinds > 0)
+					ImGui::TextDisabled("Note: per-draw mesh hook inactive (enable MaterialRules / LampScissor / HiddenObjectCulling to capture per-mesh counts).");
+				if (ImGui::BeginTable("##dmods_tbl", 3, tblFlags, ImVec2(0.0f, 165.0f))) {
+					ImGui::TableSetupColumn("Mod (.esp/.esm)"); ImGui::TableSetupColumn("Draws"); ImGui::TableSetupColumn("Skinned");
+					ImGui::TableHeadersRow();
+					for (const auto& dm : s.drawMods) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(dm.modName.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%u", dm.draws);
+						ImGui::TableNextColumn(); ImGui::Text("%u", dm.skinned);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::Spacing();
+				if (ImGui::BeginTable("##dmesh_tbl", 3, tblFlags, ImVec2(0.0f, 0.0f))) {
+					ImGui::TableSetupColumn("Mesh / Node"); ImGui::TableSetupColumn("Owner Mod"); ImGui::TableSetupColumn("Draws");
+					ImGui::TableHeadersRow();
+					for (const auto& msh : s.drawMeshes) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(msh.meshName.c_str());
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(msh.modName.c_str());
+						ImGui::TableNextColumn(); ImGui::Text("%u", msh.draws);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("Full Report")) {
+				ImGui::BeginChild("##probe_full_txt", ImVec2(0.0f, 0.0f), true);
+				const std::string& full = DeepProbe::LastReportText();
+				ImGui::TextUnformatted(full.c_str(), full.c_str() + full.size());
+				ImGui::EndChild();
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
+		}
+	}
+	else if (!running) {
+		ImGui::Separator();
+		ImGui::TextDisabled("Click 'Start Probe' while standing in a laggy spot. Results open automatically when finished and save to %s\\DeepProbe_<time>.txt.", Paths::LogsFolder);
+	}
+	ImGui::End();
 }
 
 // Escape (not while typing: there it only leaves the text box) or Alt closes the menu, once the key is let go, so the game never
@@ -7974,6 +8313,9 @@ static void DrawHelpMenu() {
 	if (!ImGui::BeginMenu("Help")) return;
 	ImGui::MenuItem("Install check", nullptr, &gMenu.installCheckOpen);
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("What the start-up check found: old or missing files, the settings file, DXVK.");
+	ImGui::MenuItem("Performance probe...", nullptr, &gMenu.deepProbeOpen);
+	if (ImGui::IsItemHovered())
+		ImGui::SetTooltip("Run a timed full-game performance probe: breaks down CPU stages, every loaded DLL / NVSE plugin,\nevery running script & ESP/ESM mod, Vegas Shaders GPU passes, and a draw-call / light / actor census.");
 	if (ImGui::MenuItem("Copy bug report")) CopyBugReport();
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Copies the version, GPU, DXVK, the install check, every setting you changed and this session's whole log.\nPaste it into your report.");
@@ -8242,12 +8584,19 @@ static void DrawMenuFrame() {
 	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_Main)) {	// the game's main menu: only the hint
 		RenderMainMenuToast();
 		RenderTwinDllWarning(true);
+		RenderDxvkConflictWarning(true);
 		RenderInstallNotice(true);
 		return;
 	}
 	RenderProfilerIndicator();
 	RenderTwinDllWarning(false);
+	RenderDxvkConflictWarning(false);
 	RenderInstallNotice(false);
+	bool reopenProbe = false;
+	if (!InterfaceManager->IsActive(Menu::MenuType::kMenuType_Loading) && DeepProbe::ConsumeJustFinished(reopenProbe)) {
+		gMenu.deepProbeOpen = true;
+		if (reopenProbe) SetOverlayVisible(true);
+	}
 	if (!gOverlay.open) return;
 
 	gMenu.devOptions = TheSettingManager->GetSettingI("Main.Menu.Developer", "DeveloperOptions") != 0;	// UNOFFICIAL 2026-10-25
@@ -8283,4 +8632,5 @@ static void DrawMenuFrame() {
 	if (!drawn) return;
 	MenuTools::DrawWindows(gMenu.step);
 	DrawInstallCheckWindow();
+	DrawDeepProbeWindow();
 }

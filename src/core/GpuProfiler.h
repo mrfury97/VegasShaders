@@ -32,7 +32,7 @@ public:
 #ifndef NVR_GPU_PROFILER_TEST
 		// The diagnostic is armed explicitly after loading. F10 toggles it from
 		// ShaderManager; no query objects are created during initial loading.
-		if (!Enabled || InterfaceManager->IsActive(Menu::kMenuType_Loading)) return false;
+		if (!Enabled && !ProbeActive || InterfaceManager->IsActive(Menu::kMenuType_Loading)) return false;
 #endif
 		if (Active) return false;
 		if (device != Device) {
@@ -82,6 +82,8 @@ public:
 	bool DisjointTrusted() const { return !DisjointBroken; }
 #endif
 	inline static bool Enabled = false;
+	inline static bool ProbeActive = false;
+	inline static void (*OnSample)(const char* name, double ms) = nullptr;
 	// UNOFFICIAL 2026-10-17, test only: told about every GpuProfileScope begin and end while set (the frame recorder's markers,
 	// FrameRecorder.h). Null in normal play.
 	inline static void (*MarkerHook)(const char* name, bool begin) = nullptr;
@@ -239,12 +241,14 @@ private:
 			}
 
 			const double ms = (double)(end - start) * 1000.0 / (double)frequency;
+			TotalSamples++;
+			if (OnSample) OnSample(Name, ms);
+			if (!Enabled) continue;
 			SumMs += ms;
 			MinMs = MinMs < ms ? MinMs : ms;
 			MaxMs = MaxMs > ms ? MaxMs : ms;
 			WindowMs.push_back((float)ms);
 			WindowSamples++;
-			TotalSamples++;
 			if (end == start) ZeroTickSamples++;
 
 			if (WindowSamples >= ReportSamples) {

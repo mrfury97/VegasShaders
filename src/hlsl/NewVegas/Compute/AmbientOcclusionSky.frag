@@ -21,8 +21,9 @@ float readDepth(vec2 coord) {
 }
 
 vec3 reconstructPosition(vec2 uv) {
-    float x = uv.x * 2.0 - 1.0;
-    float y = (1.0 - uv.y) * 2.0 - 1.0;
+    vec2 s = uv * aoInvRectScale();
+    float x = s.x * 2.0 - 1.0;
+    float y = (1.0 - s.y) * 2.0 - 1.0;
     float z = projectedDepthFromLinear(LINEAR_LOD(t_depth, uv).x);
     vec4 clipSpace = vec4(x, y, z, 1.0);
 
@@ -73,19 +74,21 @@ float SkyOpenV2(vec3 o, float softScale) {
 
 void main() {
     // FrameVS's uv in this viewport: texel i at i / size + the quad's 0.5 / full resolution.
-    vec2 inUV = uv + 0.5 * (cb.reciprocalResolution.xy - cb.skyLayout.xy);
-    vec2 uv = (floor(inUV / cb.reciprocalResolution.xy) + 0.5) * cb.reciprocalResolution.xy;
+    vec2 ruv = uv * aoRectScale();
+    vec2 texel = cb.reciprocalResolution.xy;
+    vec2 inUV = ruv + 0.5 * (texel - cb.skyLayout.xy);
+    vec2 uv = aoClampToRect((floor(inUV / texel) + 0.5) * texel, texel);
     float depth = readDepth(uv);
     vec3 viewPosition = reconstructPosition(uv);
     vec3 viewNormal = GetNormal(uv);
-    vec3 px0 = reconstructPosition(uv - vec2(cb.reciprocalResolution.x, 0.0)), px1 = reconstructPosition(uv + vec2(cb.reciprocalResolution.x, 0.0));
-    vec3 py0 = reconstructPosition(uv - vec2(0.0, cb.reciprocalResolution.y)), py1 = reconstructPosition(uv + vec2(0.0, cb.reciprocalResolution.y));
+    vec3 px0 = reconstructPosition(aoClampToRect(uv - vec2(texel.x, 0.0), texel)), px1 = reconstructPosition(aoClampToRect(uv + vec2(texel.x, 0.0), texel));
+    vec3 py0 = reconstructPosition(aoClampToRect(uv - vec2(0.0, texel.y), texel)), py1 = reconstructPosition(aoClampToRect(uv + vec2(0.0, texel.y), texel));
     vec3 ddxP = abs(px1.z - viewPosition.z) < abs(viewPosition.z - px0.z) ? px1 - viewPosition : viewPosition - px0;
     vec3 ddyP = abs(py1.z - viewPosition.z) < abs(viewPosition.z - py0.z) ? py1 - viewPosition : viewPosition - py0;
     vec3 depthNormal = normalize(cross(ddxP, ddyP));
     depthNormal = dot(depthNormal, viewPosition) > 0.0 ? -depthNormal : depthNormal;
     viewNormal = cb.sky3.x > 0.5 ? depthNormal : viewNormal;
-    if (cb.skyLayout.z > 0.5) viewNormal = SkyOctDecode(SkyUnpack2(POINT_LOD(t_skyPrep, inUV).y));
+    if (cb.skyLayout.z > 0.5) viewNormal = SkyOctDecode(SkyUnpack2(POINT_LOD(t_skyPrep, aoClampToRect(inUV, texel)).y));
     float result = 1.0;
     float skyVisibility = 1.0;
     float sunMask = cb.sky4.z > 0.5 ? mix(cb.shadowFade.x, 1.0, POINT_LOD(t_sunMask, uv).r) : 1.0;

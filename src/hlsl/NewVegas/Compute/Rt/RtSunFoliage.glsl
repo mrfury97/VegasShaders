@@ -73,25 +73,23 @@ float rtSunFoliageTrace(vec3 origin, vec3 dir, float tMax, uint mask, bool passH
 	tHit = 0.0;
 	hitCustom = 0u;
 	const uint termFlag = nearest ? 0u : gl_RayFlagsTerminateOnFirstHitEXT;
-	// UNOFFICIAL 2026-11-19: two-phase opaque-first traversal when !passHidden. Every decal, glass pane, and alpha-tested plant lives
-	// under mask 0x10; testing opaque geometry (mask & ~0x10) with gl_RayFlagsOpaqueEXT runs 100% in fixed-function RT hardware with
+	// UNOFFICIAL 2026-11-19: two-phase opaque-first traversal (always active: hidden near-eye parts use dedicated mask 0x01u).
+	// Testing opaque geometry (rayMask & ~0x10u) with gl_RayFlagsOpaqueEXT runs 100% in fixed-function RT hardware with
 	// zero shader candidate round-trips on walls/terrain, and exits immediately on solid hits before touching foliage.
-	uint alphaMask = mask;
-	if (!passHidden) {
-		const uint opaqueMask = mask & ~0x10u;
-		if (opaqueMask != 0u) {
-			rayQueryEXT qO;
-			rayQueryInitializeEXT(qO, scene, gl_RayFlagsOpaqueEXT | termFlag, opaqueMask, origin, 0.0, dir, tMax);
-			while (rayQueryProceedEXT(qO)) {}
-			if (rayQueryGetIntersectionTypeEXT(qO, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
-				tHit = rayQueryGetIntersectionTEXT(qO, true);
-				hitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(qO, true);
-				return 0.0;
-			}
+	const uint rayMask = passHidden ? (mask & ~0x01u) : mask;
+	const uint opaqueMask = rayMask & ~0x10u;
+	if (opaqueMask != 0u) {
+		rayQueryEXT qO;
+		rayQueryInitializeEXT(qO, scene, gl_RayFlagsOpaqueEXT | termFlag, opaqueMask, origin, 0.0, dir, tMax);
+		while (rayQueryProceedEXT(qO)) {}
+		if (rayQueryGetIntersectionTypeEXT(qO, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+			tHit = rayQueryGetIntersectionTEXT(qO, true);
+			hitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(qO, true);
+			return 0.0;
 		}
-		alphaMask = mask & 0x10u;
-		if (alphaMask == 0u) return 1.0;
 	}
+	const uint alphaMask = rayMask & 0x10u;
+	if (alphaMask == 0u) return 1.0;
 	float through = 1.0, nearLeaf = 1.0e30;
 	bool dense = false;
 	rayQueryEXT q;

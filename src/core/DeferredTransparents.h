@@ -50,7 +50,7 @@ namespace DeferredTransparents {
 
 	inline std::unordered_map<const void*, ShaderRecordPixel*> Records;	// NiD3DPixelShaderEx* -> its forward+ record
 	inline std::unordered_map<const void*, ShaderRecordPixel*> RecordsExterior;	// (2026-11-16) -> its outdoor forward+ record (default overrides)
-	inline std::unordered_set<IDirect3DPixelShader9*> Handles, SpecularHandles;
+	inline std::unordered_set<IDirect3DPixelShader9*> Handles, SpecularHandles, ExteriorHandles;
 	inline unsigned Loaded = 0, Unshadowed = 0, Refused = 0, LoadedExterior = 0, RefusedExterior = 0;
 	inline bool GlassLive = false;		// this frame: the glass records may be chosen (Live: glass or the hair's)
 
@@ -105,6 +105,7 @@ namespace DeferredTransparents {
 			if (outdoor) {
 				RecordsExterior[shader] = outdoor;
 				Handles.insert(outdoor->ShaderHandle);
+				ExteriorHandles.insert(outdoor->ShaderHandle);
 				if (DeferredRenderer::HasDefine(tmpl, "SPECULAR")) SpecularHandles.insert(outdoor->ShaderHandle);
 				LoadedExterior++;
 			}
@@ -247,13 +248,18 @@ namespace DeferredTransparents {
 		const bool own = handle && ((Hair::Live && Hair::Handles.count(handle) != 0) || (DeferredFoliage::LampsLive && DeferredFoliage::LampHandles.count(handle) != 0));
 		if (!BoundOurs && !own) return;
 		PointShadowForward::Bind(3, ManyLamps::Table, true, true);
-		PointShadowForward::Bind(own ? 12 : 8, PointShadowForward::AtlasTexture ? (IDirect3DBaseTexture9*)PointShadowForward::AtlasTexture : (IDirect3DBaseTexture9*)ManyLamps::Table, true, false);
-		float k[2][4] = {};
-		if (PointShadowForward::Active && PointShadowForward::AtlasTexture) memcpy(k[0], PointShadowForward::Params, sizeof(k[0]));	// x 0: TableLampShadow lights every lamp
-		k[1][1] = PointShadowForward::NearFade;
-		k[1][3] = PointShadowForward::Quality;
-		TheRenderManager->device->SetPixelShaderConstantF(180, &k[0][0], 2);
-		memcpy(PointShadowForward::Uploaded[6], k, sizeof(k));	// (its cache of c174-c189 in step: c180, c181)
+		// Outdoor forward+ records (RecordsExterior) compile SHADOW_CLOUD_SAMPLE with TESR_CloudShadow on s8 and have no lamp shadow
+		// atlas (TABLE_LAMP_SHADOWS_ON is unset without INTERIOR_SHADOWS); overwriting s8 with ManyLamps::Table or atlas blew out
+		// CloudSunAt() on outdoor alpha-blended meshes (Issue 2, ForwardShadows ON).
+		if (!(BoundOurs && ExteriorHandles.count(handle) != 0)) {
+			PointShadowForward::Bind(own ? 12 : 8, PointShadowForward::AtlasTexture ? (IDirect3DBaseTexture9*)PointShadowForward::AtlasTexture : (IDirect3DBaseTexture9*)ManyLamps::Table, true, false);
+			float k[2][4] = {};
+			if (PointShadowForward::Active && PointShadowForward::AtlasTexture) memcpy(k[0], PointShadowForward::Params, sizeof(k[0]));	// x 0: TableLampShadow lights every lamp
+			k[1][1] = PointShadowForward::NearFade;
+			k[1][3] = PointShadowForward::Quality;
+			TheRenderManager->device->SetPixelShaderConstantF(180, &k[0][0], 2);
+			memcpy(PointShadowForward::Uploaded[6], k, sizeof(k));	// (its cache of c174-c189 in step: c180, c181)
+		}
 	}
 
 	// Objects whose base pass drew with a forward+ record this frame (open addressing tagged with the frame, as DeferredRenderer's).

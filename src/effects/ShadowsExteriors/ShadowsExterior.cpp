@@ -1172,6 +1172,21 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 		// runs, without remaking anything, on every settings change.)
 		TheShadowManager->SunAtlasDrawn = false;
 
+		if (TheTextureManager) {
+			TheTextureManager->ForgetTarget("TESR_ShadowAtlas", ShadowAtlasTexture, ShadowAtlasSurface);
+			TheTextureManager->ForgetTarget("", nullptr, ShadowAtlasSurfaceMSAA);
+			TheTextureManager->ForgetTarget("TESR_ShadowAtlasBlur", ShadowAtlasBlurTexture, ShadowAtlasBlurSurface);
+			TheTextureManager->ForgetTarget("", nullptr, ShadowAtlasDepthSurface);
+		}
+		if (ShadowAtlasVertexBuffer && TheRenderManager && TheRenderManager->device) {
+			IDirect3DVertexBuffer9* vb = nullptr;
+			UINT offset = 0, stride = 0;
+			if (SUCCEEDED(TheRenderManager->device->GetStreamSource(0, &vb, &offset, &stride)) && vb) {
+				if (vb == ShadowAtlasVertexBuffer) TheRenderManager->device->SetStreamSource(0, nullptr, 0, 0);
+				vb->Release();
+			}
+		}
+
 		ReleaseAndClear(ShadowAtlasSurface);
 		ReleaseAndClear(ShadowAtlasSurfaceMSAA);
 		ReleaseAndClear(ShadowAtlasTexture);
@@ -1187,19 +1202,27 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 
 		// The cross-fade copy follows the atlas' size and format; a fade in progress ends (its copy is gone).
 		if (SunCrossFadeReady) {
+			if (TheTextureManager)
+				TheTextureManager->ForgetTarget("TESR_ShadowAtlasOld", ShadowAtlasOldTexture, ShadowAtlasOldSurface);
 			ReleaseAndClear(ShadowAtlasOldSurface);
 			ReleaseAndClear(ShadowAtlasOldTexture);
 			TheTextureManager->InitTexture("TESR_ShadowAtlasOld", &ShadowAtlasOldTexture, &ShadowAtlasOldSurface, atlasSize, atlasSize, Settings.ShadowMaps.Format, false);
 			SunCrossFadeReady = ShadowAtlasOldTexture && ShadowAtlasOldSurface;
 			Constants.CrossFade.x = 0.0f;
-			TheShaderManager->Effects.SunShadows->ClearSampler("TESR_ShadowAtlasOld", 19);
+			if (TheShaderManager->Effects.SunShadows) TheShaderManager->Effects.SunShadows->ClearSampler("TESR_ShadowAtlasOld", 19);
 			TheShaderManager->ClearShaderSamplers("TESR_ShadowAtlasOld", 19);
 		}
 		// (2026-11-15 fd-smoothsun) the deferred steps' copy: released, made again at the next step at the new size (DeferredSun::Apply
 		// re-reads the slot at every pass); a fade in progress ends
 		else {
+			if (TheTextureManager) {
+				TheTextureManager->ForgetTarget("TESR_ShadowAtlasOld", ShadowAtlasOldTexture, ShadowAtlasOldSurface);
+				TheTextureManager->ForgetTarget("TESR_ShadowDynamic", ShadowDynamicTexture, ShadowDynamicSurface);
+				TheTextureManager->ForgetTarget("", nullptr, ShadowDynamicDepthSurface);
+			}
 			ReleaseAndClear(ShadowAtlasOldSurface);
 			ReleaseAndClear(ShadowAtlasOldTexture);
+			ReleaseAndClear(ShadowDynamicDepthSurface);
 			ReleaseAndClear(ShadowDynamicSurface);
 			ReleaseAndClear(ShadowDynamicTexture);
 			ShadowDynamicSize = 0;
@@ -1211,7 +1234,7 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 
 		MakeCascadeSurfaces(*this, cascadeSize, atlasSize);
 
-		TheShaderManager->Effects.SunShadows->ClearSampler("TESR_ShadowAtlas", 16);
+		if (TheShaderManager->Effects.SunShadows) TheShaderManager->Effects.SunShadows->ClearSampler("TESR_ShadowAtlas", 16);
 
 		// Game shaders sample the atlas too when forward sun shadows are on, and each holds its own cached pointer to the texture
 		// just released above. Clearing only the deferred effect would leave them reading the dead texture, so the shadows would
@@ -1220,6 +1243,10 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 	}
 
 	if (ortho) {
+		if (TheTextureManager) {
+			TheTextureManager->ForgetTarget("TESR_OrthoMapBuffer", ShadowMapOrthoTexture, ShadowMapOrthoSurface);
+			TheTextureManager->ForgetTarget("", nullptr, ShadowMapOrthoDepthSurface);
+		}
 		ReleaseAndClear(ShadowMapOrthoSurface);
 		ReleaseAndClear(ShadowMapOrthoTexture);
 		ReleaseAndClear(ShadowMapOrthoDepthSurface);	// released here because it is recreated below
@@ -1231,9 +1258,9 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 		ShadowMaps[MapOrtho].ShadowMapResolution = (float)orthoRes;
 		ShadowMaps[MapOrtho].ShadowMapInverseResolution = 1.0f / (float)orthoRes;
 
-		TheShaderManager->Effects.Rain->ClearSampler("TESR_OrthoMapBuffer", 19);
-		TheShaderManager->Effects.Snow->ClearSampler("TESR_OrthoMapBuffer", 19);
-		TheShaderManager->Effects.SnowAccumulation->ClearSampler("TESR_OrthoMapBuffer", 19);
+		if (TheShaderManager->Effects.Rain) TheShaderManager->Effects.Rain->ClearSampler("TESR_OrthoMapBuffer", 19);
+		if (TheShaderManager->Effects.Snow) TheShaderManager->Effects.Snow->ClearSampler("TESR_OrthoMapBuffer", 19);
+		if (TheShaderManager->Effects.SnowAccumulation) TheShaderManager->Effects.SnowAccumulation->ClearSampler("TESR_OrthoMapBuffer", 19);
 
 		// UNOFFICIAL 2026-11-09 (crash log 2026-11-08 14:07, Ortho.Resolution 2 -> 3, access violation on the dxvk-cs thread 12 s later):
 		// the game's own shaders (SLS*, PAR*, SKIN* ...) sample the ortho map too, and each holds its own cached pointer to the texture
@@ -1255,6 +1282,10 @@ void ShadowsExteriorEffect::RecreateTextures(bool cascades, bool ortho, bool cub
 bool ShadowsExteriorEffect::EnsureCharacterMap() {
 	const UINT size = (UINT)Settings.ShadowMaps.CharacterMapResolution;
 	if (CharacterMapTexture && CharacterMapDepthSurface && CharacterMapSizeCreated == size) return true;
+	if (TheTextureManager) {
+		TheTextureManager->ForgetTarget("TESR_CharShadowMap", CharacterMapTexture, CharacterMapSurface);
+		TheTextureManager->ForgetTarget("", nullptr, CharacterMapDepthSurface);
+	}
 	if (CharacterMapSurface) { CharacterMapSurface->Release(); CharacterMapSurface = nullptr; }
 	if (CharacterMapTexture) { CharacterMapTexture->Release(); CharacterMapTexture = nullptr; }
 	if (CharacterMapDepthSurface) { CharacterMapDepthSurface->Release(); CharacterMapDepthSurface = nullptr; }
@@ -1267,6 +1298,9 @@ bool ShadowsExteriorEffect::EnsureCharacterMap() {
 	}
 	if (FAILED(TheRenderManager->device->CreateDepthStencilSurface(size, size, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, true, &CharacterMapDepthSurface, NULL)) || !CharacterMapDepthSurface) {
 		CharacterMapDepthSurface = nullptr;
+		if (TheTextureManager) TheTextureManager->ForgetTarget("TESR_CharShadowMap", CharacterMapTexture, CharacterMapSurface);
+		if (CharacterMapSurface) { CharacterMapSurface->Release(); CharacterMapSurface = nullptr; }
+		if (CharacterMapTexture) { CharacterMapTexture->Release(); CharacterMapTexture = nullptr; }
 		Logger::Log("UNOFFICIAL CharacterShadowMap: could not make the %u x %u depth surface; off until it can be.", size, size);
 		CharacterMapSizeCreated = 0;
 		return false;
@@ -1290,9 +1324,11 @@ bool ShadowsExteriorEffect::EnsureCharacterNpcMaps(int count, UINT size) {
 	if (count == CharacterNpcCountCreated && size == CharacterNpcSizeCreated && (count == 0 || CharacterNpcDepthSurface)) return count > 0;
 	auto release = [this]() {
 		for (int i = 0; i < CharacterNpcMax; i++) {
+			if (TheTextureManager) TheTextureManager->ForgetTarget("", CharacterNpcTexture[i], CharacterNpcSurface[i]);
 			if (CharacterNpcSurface[i]) { CharacterNpcSurface[i]->Release(); CharacterNpcSurface[i] = nullptr; }
 			if (CharacterNpcTexture[i]) { CharacterNpcTexture[i]->Release(); CharacterNpcTexture[i] = nullptr; }
 		}
+		if (TheTextureManager) TheTextureManager->ForgetTarget("", nullptr, CharacterNpcDepthSurface);
 		if (CharacterNpcDepthSurface) { CharacterNpcDepthSurface->Release(); CharacterNpcDepthSurface = nullptr; }
 		CharacterNpcCountCreated = 0;
 		CharacterNpcSizeCreated = 0;
@@ -1786,14 +1822,19 @@ bool ShadowsExteriorEffect::EnsureDeferredFadeTargets() {
 	if (!ShadowDynamicTexture && !DeferredDynamicFailed) {
 		const UINT dynSize = (std::max)(512u, desc.Width / 2);
 		TheTextureManager->InitTexture("TESR_ShadowDynamic", &ShadowDynamicTexture, &ShadowDynamicSurface, dynSize, dynSize, D3DFMT_R32F, false);
-		D3DSURFACE_DESC made = {};
+		D3DSURFACE_DESC made = {}, depthDesc = {};
 		if (ShadowDynamicTexture) ShadowDynamicTexture->GetLevelDesc(0, &made);
-		if (ShadowDynamicTexture && ShadowDynamicSurface && made.Width == dynSize && made.Height == dynSize) {
+		const D3DFORMAT depthFmt = (ShadowAtlasDepthSurface && SUCCEEDED(ShadowAtlasDepthSurface->GetDesc(&depthDesc))) ? depthDesc.Format : D3DFMT_D24X8;
+		const HRESULT depthHr = (ShadowDynamicTexture && ShadowDynamicSurface && made.Width == dynSize && made.Height == dynSize)
+			? TheRenderManager->device->CreateDepthStencilSurface(dynSize, dynSize, depthFmt, D3DMULTISAMPLE_NONE, 0, TRUE, &ShadowDynamicDepthSurface, nullptr)
+			: E_FAIL;
+		if (SUCCEEDED(depthHr) && ShadowDynamicDepthSurface) {
 			ShadowDynamicSize = dynSize;
 			Logger::Log("UNOFFICIAL deferred sun steps: %ux%u dynamic shadow overlay created (%.1f MB)", dynSize, dynSize,
 				TextureManager::TargetBytes((int)dynSize, (int)dynSize, D3DFMT_R32F, false) / 1048576.0);
 		}
 		else {
+			ReleaseAndClear(ShadowDynamicDepthSurface);
 			ReleaseAndClear(ShadowDynamicSurface);
 			ReleaseAndClear(ShadowDynamicTexture);
 			ShadowDynamicSize = 0;

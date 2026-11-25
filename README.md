@@ -85,6 +85,8 @@ noonemusteverknow, Mathieu U and others, see [License.md](License.md)). It is an
 endorsed or supported by the New Vegas Reloaded authors, so please don't ask for help with it in their channels.
 
 With work from:
+- [macrimmon12-tech](https://github.com/macrimmon12-tech/TESReloaded10): the fork this grew from (volumetric fog v2,
+  skin and lighting fixes, the first ImGui menu).
 - [Conor (mrfury97)](https://github.com/mrfury97): terrain shadow sweep, terrain variation, many lamps, skin work, Pip-Boy
   fit, the game MSAA block.
 - [PixelsSquared](https://github.com/PixelsSquared): the Perceptual tone mapper, eye adaptation, cloud moonlight and sky light.

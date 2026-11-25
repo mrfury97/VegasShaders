@@ -99,9 +99,13 @@ vec3 rtHitMap(uint instance, uint primitive, vec2 bary, bool glow) {
 	for (int pass = glow ? 0 : 1; pass < 2; pass++) {	// 0 the glow map, 1 the diffuse
 #ifndef RT_NO_REAL_TEXTURES
 		if (hasUv) {	// (2026-11-07) the game's own texture, filtered, its mip by the footprint (rtConeWidth)
-			const uvec3 ids = rtSlotTextures(records[instance].flags);
-			const uint id = pass == 0 ? ids.z : ids.x;
-			if (id != 0u) return min(rtTexToLinear(rtTexSampleHit(id, uv, instance, primitive).rgb) * (pass == 1 ? tint : vec3(1.0)), vec3(1.0));	// (perf-mirrorfix2: an albedo, at most 1)
+			const uvec4 slot4 = rtSlotTextures4(records[instance].flags);
+			const uint id = pass == 0 ? slot4.z : slot4.x;
+			if (id != 0u) {
+				const vec3 raw = rtTexSampleHit(id, uv, instance, primitive).rgb;
+				const bool hwSrgb = (slot4.w & (pass == 0 ? 2u : 1u)) != 0u;
+				return min((hwSrgb ? raw : rtTexToLinear(raw)) * (pass == 1 ? tint : vec3(1.0)), vec3(1.0));	// (perf-mirrorfix2: an albedo, at most 1)
+			}
 		}
 #endif
 		if (hasUv) {
@@ -293,9 +297,13 @@ vec3 rtHitGeomMap(const RtHitGeom g, bool glow) {
 	for (int pass = glow ? 0 : 1; pass < 2; pass++) {
 #ifndef RT_NO_REAL_TEXTURES
 		if (g.hasUv) {
-			const uvec3 ids = rtSlotTextures(hitFlags);
-			const uint id = pass == 0 ? ids.z : ids.x;
-			if (id != 0u) return min(rtTexToLinear(rtTexSampleCached(id, g.uv, g.hasGrads, g.gx, g.gy, g.worldArea, g.uvArea).rgb) * (pass == 1 ? tint : vec3(1.0)), vec3(1.0));
+			const uvec4 slot4 = rtSlotTextures4(hitFlags);
+			const uint id = pass == 0 ? slot4.z : slot4.x;
+			if (id != 0u) {
+				const vec3 raw = rtTexSampleCached(id, g.uv, g.hasGrads, g.gx, g.gy, g.worldArea, g.uvArea).rgb;
+				const bool hwSrgb = (slot4.w & (pass == 0 ? 2u : 1u)) != 0u;
+				return min((hwSrgb ? raw : rtTexToLinear(raw)) * (pass == 1 ? tint : vec3(1.0)), vec3(1.0));
+			}
 		}
 #endif
 		if (g.hasUv) {

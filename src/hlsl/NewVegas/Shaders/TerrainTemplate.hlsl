@@ -500,8 +500,9 @@ float getTerrainBlend(TerrainBlendGap gap, float landViewDepth, float slope) {
     // so more of the ground stays round rocks and walls. Sent as HeightBlend + 10, negated (Terrain.cpp).
     [branch] if (TESR_TerrainBlendShape.y < -9.5f) {
         const float slopeFactor = lerp(1.0f, TESR_TerrainBlendShape.z, saturate(slope * 2.0f));
-        const float range = max((1.0f / TESR_TerrainBlendData.y) * slopeFactor, 0.05f);
-        keep = saturate(gap.covered / max(range * 0.35f, 0.0001f));
+        const float dist = max((1.0f / TESR_TerrainBlendData.y) * slopeFactor, 0.05f);
+        const float range = clamp(gap.width * TESR_TerrainBlendShape.w, dist * 0.5f, dist * 4.0f);
+        keep = saturate(gap.covered / max(range, 0.0001f));
     }
     else {
         float distance = terrainBlendDepthRange(gap, slope);
@@ -528,7 +529,7 @@ float terrainBlendEdge(float keep, float height) {
         const float strength = edge2 ? -TESR_TerrainBlendShape.y - 10.0f : -TESR_TerrainBlendShape.y;
         if (strength <= 0.0f) return keep;
 #if HEIGHT_EDGE2_CONTRAST
-        if (edge2) height = saturate((height - 0.5f) * 8.0f + 0.5f + 0.20f);
+        if (edge2) height = saturate((height - 0.5f) * 2.5f + 0.5f);
 #endif
         const float coveragePower = 1.0f + strength, heightPower = 4.0f * strength;
         const float terrainWeight = pow(keep, coveragePower) * (0.001f + pow(saturate(height), heightPower));
@@ -645,14 +646,22 @@ PS_OUTPUT main(PS_INPUT pin) {
     float3 landVertexColor = lerp(pin.vcol, 1.0f, TESR_LODBlendData.z);
 #if TERRAIN_VARIATION
     // UNOFFICIAL 2026-10-19 Terrain Variation (Includes/TerrainVariation.hlsl; after Conor's port of Community Shaders' Terrain
-    // Variation). The lattice is built from the ORIGINAL uv, not offsetUV: a surface point has to keep the same hash offset whatever
-    // the view angle, and offsetUV moves with it. The samples still go to offsetUV + hash, so parallax still applies (its own height
-    // march reads the plain tiling: two taps per march step would not fit ps_3_0's budget). (Conor.) Nearer than StartDistance the
-    // single tap, the second fading in over the next w units.
+    // Variation). Keep stochastic.tap1Weight unmodified (0.5 at cell borders) and crossfade between plain and varied lookups
+    // across [StartDistance, StartDistance + StartFade] only when StartDistance > 0.
     StochasticOffsets stochastic = ComputeStochasticOffsets(pin.texc.xy, TESR_TerrainVariationData.x);
-    stochastic.tap1Weight = lerp(1.0f, stochastic.tap1Weight, saturate((viewDist - TESR_TerrainVariationData.z) / max(TESR_TerrainVariationData.w, 1.0f)));
+    const float varFade = TESR_TerrainVariationData.z > 0.0f ?
+        saturate((viewDist - TESR_TerrainVariationData.z) / max(TESR_TerrainVariationData.w, 1.0f)) : 1.0f;
     float tapWeights[7] = { 1, 1, 1, 1, 1, 1, 1 };
-    float3 baseColor = LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights));
+    float3 baseColor;
+    [branch] if (varFade >= 0.999f)
+        baseColor = LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights));
+    else if (varFade <= 0.001f)
+        baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts));
+    else
+        baseColor = lerp(
+            LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts)),
+            LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights)),
+            varFade);
 #else
     float3 baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts));	// UNOFFICIAL linear lighting: decoded
 #endif
@@ -667,10 +676,20 @@ PS_OUTPUT main(PS_INPUT pin) {
         clip(terrainKeep - terrainBlendNoise(screenPos));
 #endif
 #if TERRAIN_VARIATION
-    // NormalMaps off: the normal maps take the single tap (tap1Weight 1 takes the plain path in blendNormalMapsVaried).
-    StochasticOffsets stochasticNormals = stochastic;
-    stochasticNormals.tap1Weight = lerp(1.0f, stochastic.tap1Weight, saturate(TESR_TerrainVariationExtra.x));
-    float3 combinedNormal = blendNormalMapsVaried(offsetUV, odx, ody, texLayers, NormalMap, wts, specA, stochasticNormals, tapWeights, glossV, specPow);
+    float3 combinedNormal;
+    [branch] if (TESR_TerrainVariationExtra.x < 0.5f || varFade <= 0.001f)
+        combinedNormal = blendNormalMaps(offsetUV, odx, ody, texLayers, NormalMap, wts, specA, glossV, specPow);
+    else if (TESR_TerrainVariationExtra.x >= 0.999f && varFade >= 0.999f)
+        combinedNormal = blendNormalMapsVaried(offsetUV, odx, ody, texLayers, NormalMap, wts, specA, stochastic, tapWeights, glossV, specPow);
+    else {
+        float gloss0 = 0.0f, pow0 = 0.0f, gloss1 = 0.0f, pow1 = 0.0f;
+        const float normFade = varFade * saturate(TESR_TerrainVariationExtra.x);
+        const float3 n0 = blendNormalMaps(offsetUV, odx, ody, texLayers, NormalMap, wts, specA, gloss0, pow0);
+        const float3 n1 = blendNormalMapsVaried(offsetUV, odx, ody, texLayers, NormalMap, wts, specA, stochastic, tapWeights, gloss1, pow1);
+        glossV = lerp(gloss0, gloss1, normFade);
+        specPow = lerp(pow0, pow1, normFade);
+        combinedNormal = normalize(lerp(n0, n1, normFade));
+    }
 #else
     float3 combinedNormal = blendNormalMaps(offsetUV, odx, ody, texLayers, NormalMap, wts, specA, glossV, specPow);
 #endif

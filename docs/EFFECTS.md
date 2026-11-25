@@ -5226,6 +5226,12 @@ Changes from the old behaviour described above:
 
 Open: the Vulkan frag (Compute/ShadowsExteriors.frag) is not written; the file is not in this worktree.
 
+- Upstream 1.1.4 (merged 2026-11-26): `[Shaders.ShadowsExteriors.Deferred] MatchSunDisc` is off by default (settings step 100):
+  the deferred sun lights surfaces from vanilla FNV's clamped sun direction again, which keeps the land's normal-map and parallax
+  relief around midday; on, it follows the true sun disc (as the sky and the shadow cascades). 1.1.4 also adds a Vulkan compute
+  DeferredSun (`Compute/DeferredSun.comp`, behind `[Main.Main.Performance] NvrDxvkDeferred`, off here); it stands aside for the
+  D3D9 pass in frames where DeferredWetness's film is live (it has no film highlight).
+
 ## ShadowsInteriors
 
 REWRITTEN 2026-11-02 (branch claude/rw3-lights): the shaders are new, written from this spec (Effects/ShadowsInteriors.fx.hlsl; Compute/ShadowsInteriorsBlur.frag and ShadowsInteriorsApply.frag). The C++ and the settings are unchanged. Changes from the old file are marked below.

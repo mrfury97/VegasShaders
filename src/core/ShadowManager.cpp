@@ -2654,7 +2654,7 @@ void ShadowManager::RenderShadowMaps() {
 			loggedSkip = skipState;
 		}
 		SunCascadesDrawnMask = 0;	// set again below on the frames the sun cascades are drawn
-		if (sunShadowsOn && sunDir.z > 0.0f && !skipCascades) {
+		if (sunShadowsOn && sunDir.z > 0.0f && !skipCascades && (fx->ShadowAtlasSurfaceMSAA || fx->ShadowAtlasSurface) && fx->ShadowAtlasDepthSurface) {
 			// Recalculate billboard vectors for speedtree leaves shader.
 			RecalculateBillboardVectors(&sunDir);
 
@@ -3002,12 +3002,12 @@ void ShadowManager::RenderShadowMaps() {
 			if (ForceAllCascades) SunAtlasDrawn = true;	// UNOFFICIAL SkipWhenFaded: every cascade was drawn this frame
 			ForceAllCascades = false;
 			DisplaceShadows::EndCascades();	// UNOFFICIAL 2026-10-27
-			if (SunFadeDeferred::Fading && oneWalk && fx->ShadowDynamicSurface && fx->ShadowDynamicSize >= 512 && !fx->ShadowAtlasSurfaceMSAA) {
+			if (SunFadeDeferred::Fading && oneWalk && fx->ShadowDynamicSurface && fx->ShadowDynamicDepthSurface && fx->ShadowDynamicSize >= 512 && !fx->ShadowAtlasSurfaceMSAA) {
 				// UNOFFICIAL 2026-11-21: half-res dynamic-caster overlay so active fades preserve full live actor shadows without ghosting from ShadowAtlasOld.
 				const float zWas = dataConst->z;
 				dataConst->z = 1.0f;
 				dev->SetRenderTarget(0, fx->ShadowDynamicSurface);
-				dev->SetDepthStencilSurface(fx->ShadowAtlasDepthSurface);
+				dev->SetDepthStencilSurface(fx->ShadowDynamicDepthSurface);
 				rs->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE, RenderStateArgs);
 				rs->SetRenderState(D3DRS_ZWRITEENABLE, TRUE, RenderStateArgs);
 				rs->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE, RenderStateArgs);
@@ -3034,6 +3034,7 @@ void ShadowManager::RenderShadowMaps() {
 				}
 				dataConst->z = zWas;
 				dev->SetRenderTarget(0, fx->ShadowAtlasSurface);
+				dev->SetDepthStencilSurface(fx->ShadowAtlasDepthSurface);
 				fx->Constants.DynamicData = D3DXVECTOR4(1.0f / (float)fx->ShadowDynamicSize, 1.0f, 0.0f, 0.0f);
 			}
 			LogSunShadowStats(cachedDistant);
@@ -3111,7 +3112,7 @@ void ShadowManager::RenderShadowMaps() {
 				draw = skyFramesSinceDraw >= fx->Settings.OrthoMap.SkyMapRefresh || TheShaderManager->orthoSkyFresh || !skyLastDrawSkyOnly ||
 					D3DXVec3LengthSq(&moved) > moveRefresh * moveRefresh || skySettingsSeen != fx->Settings.OrthoMap.SkySettingsGeneration;
 			}
-			if (draw) {
+			if (draw && fx->ShadowMapOrthoSurface && fx->ShadowMapOrthoDepthSurface) {
 				dev->SetRenderTarget(0, fx->ShadowMapOrthoSurface);
 				dev->SetDepthStencilSurface(fx->ShadowMapOrthoDepthSurface);
 

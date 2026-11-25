@@ -177,7 +177,7 @@ void main() {
     vec2 base = floor(position);
     vec2 fraction = position - base;
     float tolerance = depth * 0.03 + 4.0;
-    bool pixelWeapon = IsWeapon(ruv);
+    bool pixelWeapon = WeaponAt(ruv);
     vec4 reflection = vec4(0.0);
     float weights = 1.0e-5;
     vec2 rectMaxTap = max(cb.renderScale.xy - 0.5 * LowTexel, 0.5 * LowTexel);
@@ -187,8 +187,10 @@ void main() {
             vec2 tapPixelUV = at - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
             float tapDepth = readDepthLod(tapPixelUV);
             float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
-            weight /= 1.0 + abs(tapDepth - depth) / tolerance;
-            if (IsWeapon(tapPixelUV) != pixelWeapon) weight *= 1.0e-4;
+            float zDiff = abs(tapDepth - depth);
+            weight *= exp(-zDiff / tolerance);
+            if (zDiff > tolerance * 4.0) weight *= 1.0e-4;
+            if (WeaponAt(tapPixelUV) != pixelWeapon) weight *= 1.0e-4;
             reflection += textureLod(sampler2D(t_buffer, POINT_S), at, 0.0) * weight;
             weights += weight;
         }
@@ -212,7 +214,7 @@ void main() {
     float dielectricF0 = mix(baseDielectricF0, 1.0, SurfaceMirror);
     vec3 f0 = vec3(dielectricF0);
     vec3 share;
-    if (MaterialOn || GBufferOn) {
+    if (MaterialOn || GBufferOn || (pixelWeapon && SurfaceMetal > 0.0)) {
         vec3 metalF0;
         if (pixelWeapon) {
             // Non-PBR weapon diffuse textures paint dark blued steel at linear ~0.03-0.08 (sRGB 0.2-0.3); map perceptual

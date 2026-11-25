@@ -669,7 +669,7 @@ namespace {
 		std::vector<IDirect3DBaseTexture9*> slotNormals;
 		UInt32		normalsHeld = 0;						// normal maps held back at 3/4 of the budget (times)
 		void		PumpTextures(NvrRtFrame& f, UInt64 n);
-		int			SendTexture(IDirect3DBaseTexture9* texture, NvrRtFrame& f, UInt64 n, bool& budgetRefused);
+		int			SendTexture(IDirect3DBaseTexture9* texture, NvrRtFrame& f, UInt64 n, bool& budgetRefused, bool srgb = false);
 		void		ReleaseTexture(UInt32 id, NvrRtFrame& f, UInt64 n);
 		void		NoteSlotUse(int slot, IDirect3DBaseTexture9* texture, IDirect3DBaseTexture9* normal, IDirect3DBaseTexture9* glow);
 		PositionElement lastElement;						// Describe's: where the texcoords are
@@ -762,6 +762,17 @@ namespace {
 		void		FaceReport(FaceState& f, const char* why);
 		void		FreeFaces(bool all);
 		bool		PositionIn(NiGeometryBufferData* data, PositionElement& position);	// DescribeData's position lookup (lastElement untouched)
+		// (2026-11-21) SettingsRevision caching: live settings read only when TheSettingManager->SettingsRevision changes.
+		bool		dispCached = false;
+		UInt32		dispCachedRev = 0;
+		bool		dispWantSetting = false;
+		float		dispLandReachCached = 2048.0f, dispObjectReachCached = 2048.0f;
+		float		dispBlocksCached[NVR_RT_DISPLACE_BLOCKS][6] = {};
+		bool		liveCached = false, idleCached = false, overlapCached = false;
+		UInt32		liveCachedRev = 0, idleCachedRev = 0, overlapCachedRev = 0;
+		int			overlapCachedSetting = 0;
+		bool		cachedOmm = false, cachedPtRealtime = false, cachedDecalsOn = false, cachedGlassOn = false, cachedFarLandOn = false;
+		float		cachedGrassRadius = 1500.0f;
 		// (2026-10-30) tree probe, one frame at the scene log (LeafCards on): every TREE ref of the loaded cells walked without culling, its
 		// leaf meshes counted by what would stop the scene walk. [0] tree refs, [1] NotCastShadows, [2] no node, [3] in SceneRadius,
 		// [4] leaf meshes, [5] under APP_CULLED, [6] under a faded node, [7] in a switch child not taken, [8] no buffer data, [9] reachable
@@ -1058,7 +1069,7 @@ namespace {
 	// in a column right of it. A transfer image's two halves alternate by exchange, so a half is only written again after the game's GPU
 	// waited for the helper's frame that read it. Over RealTextureBudgetMB, textures unused for kTexIdle exchanges are released (least
 	// recently used first) to make room; their slots fall back to the atlas and send them again when next used.
-	int Core::SendTexture(IDirect3DBaseTexture9* base, NvrRtFrame& f, UInt64 n, bool& budgetRefused) {
+	int Core::SendTexture(IDirect3DBaseTexture9* base, NvrRtFrame& f, UInt64 n, bool& budgetRefused, bool srgb) {
 		static UInt32 told = 0;
 		budgetRefused = false;
 		auto no = [&](const char* why, UInt32 a, UInt32 b) {
@@ -1104,7 +1115,7 @@ namespace {
 		const UInt32 id = texRes.Alloc(n);
 		if (!id) { budgetRefused = true; return no("no free texture id (4095 alive)", texRes.count, 0u); }
 		NvrRtTextureOp op = { NVR_RT_OP_TEXTURE, id, p.w0, p.h0, x | (y << 16), RtTexturePack::VkFormatOf(p.route), 0u,
-			p.levels | (p.swapRG ? NVR_RT_TEX_SWIZZLE_GR : 0u) };
+			p.levels | (p.swapRG ? NVR_RT_TEX_SWIZZLE_GR : 0u) | (srgb ? NVR_RT_TEX_SRGB : 0u) };
 		memcpy(&f.ops[f.opCount++], &op, sizeof(op));
 		texRes.Add(id, p.bytes, n);
 		// UNOFFICIAL 2026-11-11 (sungi, ABA guard F2): one reference while the id lives (given back in ReleaseTexture / ReleaseTexRefs)
@@ -1220,7 +1231,7 @@ namespace {
 				}
 				else if (due) {
 					bool budget = false;
-					const int r = SendTexture(want.tex[k], f, n, budget);
+					const int r = SendTexture(want.tex[k], f, n, budget, k == 0 || k == 2);
 					if (r < 0) { ready = false; break; }
 					e.tried = true;
 					e.id = (UInt32)r;
@@ -2296,7 +2307,7 @@ namespace {
 			instance.transform[2][3] = entry.poseCamera[2] - cz;
 			instance.geometryId = entry.id;
 			instance.customIndex = NVR_RT_CUSTOM_ACTOR | (walkingPlayer && playerHidden ? NVR_RT_CUSTOM_HIDDEN : 0u);	// (2026-11-07 hidden; 2026-11-19 actor tag)
-			instance.mask = NVR_RT_MASK_ACTOR;
+			instance.mask = (walkingPlayer && playerHidden) ? NVR_RT_MASK_HIDDEN : NVR_RT_MASK_ACTOR;
 			instance.flags = 0x1u;
 			skip[kTaken]++;
 		}
@@ -2773,34 +2784,50 @@ namespace {
 	// Once a gather: is the game's displacement on (and the RT setting), its settings as the helper's parameter blocks (the same clamps as
 	// DxvkCompute::DisplaceTick / DisplaceObjectSettings), sent every frame while either kind is on (the camera block changes every frame)
 	void Core::DisplaceSettings() {
-		const bool want = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Displacement") != 0 && realTextures && hitTextures;
+		const UInt32 rev = TheSettingManager ? TheSettingManager->SettingsRevision : 0u;
+		if (!dispCached || dispCachedRev != rev) {
+			dispCachedRev = rev;
+			dispCached = true;
+			dispWantSetting = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Displacement") != 0;
+			auto F = [](const char* section, const char* key, float missing) {
+				const float v = TheSettingManager->GetSettingF(section, key);
+				return v == v ? v : missing;
+			};
+			const char* l = "Shaders.Terrain.Displacement";
+			const char* o = "Shaders.POM.Displacement";
+			const char* r = "Main.Main.RayTracing";
+			const float spacing = std::clamp(F(r, "DisplaceSpacing", 16.0f), 4.0f, 256.0f);
+			const float split = (float)std::clamp(TheSettingManager->GetSettingI(r, "DisplaceMaxSplit"), 1, 16);
+			const float refresh = std::clamp(F(r, "DisplaceRefresh", 32.0f), 1.0f, 1024.0f);
+			const float landStart = (std::max)(F(l, "FadeStart", 1024.0f), 0.0f), objStart = (std::max)(F(o, "FadeStart", 1024.0f), 0.0f);
+			dispLandReachCached = (std::max)(F(l, "FadeEnd", 2048.0f), landStart + 1.0f);
+			dispObjectReachCached = (std::max)(F(o, "FadeEnd", 2048.0f), objStart + 1.0f);
+			const float blocks[NVR_RT_DISPLACE_BLOCKS][6] = {
+				{ std::clamp(F(l, "Strength", 10.0f), 0.0f, 64.0f), std::clamp(F(l, "Center", 0.5f), 0.0f, 1.0f), std::clamp(F(l, "Contrast", 4.0f), 0.0f, 32.0f),
+				  floorf(std::clamp(F(l, "BumpSize", 48.0f), 0.0f, 255.0f) + 0.5f), std::clamp(F(l, "LodBias", 0.0f), -2.0f, 4.0f), (std::max)(F(l, "BorderGrid", 2048.0f), 0.0f) },
+				{ landStart, dispLandReachCached, spacing, split, refresh, 0.0f },
+				{ std::clamp(F(o, "Strength", 8.0f), 0.0f, 64.0f), std::clamp(F(o, "Center", 0.5f), 0.0f, 1.0f), std::clamp(F(o, "Contrast", 2.0f), 0.0f, 32.0f),
+				  std::clamp(F(o, "EdgeFade", 1.5f), 0.0f, 8.0f), std::clamp(F(o, "LodBias", 0.0f), -2.0f, 4.0f), 0.0f },
+				{ objStart, dispObjectReachCached, spacing, split, refresh, 0.0f },
+				{ 0.0f, 0.0f, 0.0f,
+				  (float)(std::max)(0, TheSettingManager->GetSettingI(r, "DisplaceTrianglesPerFrame")), (float)(std::max)(0, TheSettingManager->GetSettingI(r, "DisplaceMaxTriangles")), 0.0f },
+			};
+			memcpy(dispBlocksCached, blocks, sizeof(dispBlocksCached));
+		}
+		const bool want = dispWantSetting && realTextures && hitTextures;
 		dispLand = want && DxvkCompute::DisplaceLandActive();
 		dispObjects = want && DxvkCompute::DisplaceObjectsActive();
 		dispInstances = 0;
 		if (!dispLand && !dispObjects && !dispSentOn) return;
-		auto F = [](const char* section, const char* key, float missing) {
-			const float v = TheSettingManager->GetSettingF(section, key);
-			return v == v ? v : missing;
-		};
-		const char* l = "Shaders.Terrain.Displacement";
-		const char* o = "Shaders.POM.Displacement";
-		const char* r = "Main.Main.RayTracing";
-		const float spacing = std::clamp(F(r, "DisplaceSpacing", 16.0f), 4.0f, 256.0f);
-		const float split = (float)std::clamp(TheSettingManager->GetSettingI(r, "DisplaceMaxSplit"), 1, 16);
-		const float refresh = std::clamp(F(r, "DisplaceRefresh", 32.0f), 1.0f, 1024.0f);
-		const float landStart = (std::max)(F(l, "FadeStart", 1024.0f), 0.0f), objStart = (std::max)(F(o, "FadeStart", 1024.0f), 0.0f);
-		dispLandReach = (std::max)(F(l, "FadeEnd", 2048.0f), landStart + 1.0f);
-		dispObjectReach = (std::max)(F(o, "FadeEnd", 2048.0f), objStart + 1.0f);
-		const float blocks[NVR_RT_DISPLACE_BLOCKS][6] = {
-			{ std::clamp(F(l, "Strength", 10.0f), 0.0f, 64.0f), std::clamp(F(l, "Center", 0.5f), 0.0f, 1.0f), std::clamp(F(l, "Contrast", 4.0f), 0.0f, 32.0f),
-			  floorf(std::clamp(F(l, "BumpSize", 48.0f), 0.0f, 255.0f) + 0.5f), std::clamp(F(l, "LodBias", 0.0f), -2.0f, 4.0f), (std::max)(F(l, "BorderGrid", 2048.0f), 0.0f) },
-			{ landStart, dispLandReach, spacing, split, refresh, dispLand ? 1.0f : 0.0f },
-			{ std::clamp(F(o, "Strength", 8.0f), 0.0f, 64.0f), std::clamp(F(o, "Center", 0.5f), 0.0f, 1.0f), std::clamp(F(o, "Contrast", 2.0f), 0.0f, 32.0f),
-			  std::clamp(F(o, "EdgeFade", 1.5f), 0.0f, 8.0f), std::clamp(F(o, "LodBias", 0.0f), -2.0f, 4.0f), 0.0f },
-			{ objStart, dispObjectReach, spacing, split, refresh, dispObjects ? 1.0f : 0.0f },
-			{ TheRenderManager->CameraForward.x, TheRenderManager->CameraForward.y, TheRenderManager->CameraForward.z,
-			  (float)(std::max)(0, TheSettingManager->GetSettingI(r, "DisplaceTrianglesPerFrame")), (float)(std::max)(0, TheSettingManager->GetSettingI(r, "DisplaceMaxTriangles")), 0.0f },
-		};
+		dispLandReach = dispLandReachCached;
+		dispObjectReach = dispObjectReachCached;
+		float blocks[NVR_RT_DISPLACE_BLOCKS][6];
+		memcpy(blocks, dispBlocksCached, sizeof(blocks));
+		blocks[1][5] = dispLand ? 1.0f : 0.0f;
+		blocks[3][5] = dispObjects ? 1.0f : 0.0f;
+		blocks[4][0] = TheRenderManager->CameraForward.x;
+		blocks[4][1] = TheRenderManager->CameraForward.y;
+		blocks[4][2] = TheRenderManager->CameraForward.z;
 		if (record->opCount + NVR_RT_DISPLACE_BLOCKS > NVR_RT_MAX_OPS) return;	// (next frame)
 		memcpy(dispParams, blocks, sizeof(blocks));
 		for (UInt32 b = 0; b < NVR_RT_DISPLACE_BLOCKS; b++) {
@@ -3549,19 +3576,42 @@ namespace {
 		}
 		pendingReleases.erase(pendingReleases.begin(), pendingReleases.begin() + sent);
 		DisplaceSettings();	// (2026-11-07 rtgap-tessblas) and the parameter blocks for the helper
-		compactOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Compact") != 0;
-		buildBudget = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "BuildTrianglesPerFrame"));
-		buildNear = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "BuildNearRadius"));
-		cullAngle = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "CullSmallAngle"));
-		plantSway = TheSettingManager->GetSettingI("Main.Main.RayTracing", "PlantSway") != 0;
-		const int planes = TheSettingManager->GetSettingI("Main.Main.RayTracing", "LeafCards");
-		leafPlanes = planes <= 0 ? 0u : planes >= 3 ? 3u : 2u;
-		leafOpaque = TheSettingManager->GetSettingI("Main.Main.RayTracing", "LeafCardsOpaque") != 0;
+		const UInt32 rev = TheSettingManager ? TheSettingManager->SettingsRevision : 0u;
+		if (!liveCached || liveCachedRev != rev) {
+			liveCachedRev = rev;
+			liveCached = true;
+			compactOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Compact") != 0;
+			buildBudget = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "BuildTrianglesPerFrame"));
+			buildNear = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "BuildNearRadius"));
+			cullAngle = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "CullSmallAngle"));
+			plantSway = TheSettingManager->GetSettingI("Main.Main.RayTracing", "PlantSway") != 0;
+			const int planes = TheSettingManager->GetSettingI("Main.Main.RayTracing", "LeafCards");
+			leafPlanes = planes <= 0 ? 0u : planes >= 3 ? 3u : 2u;
+			leafOpaque = TheSettingManager->GetSettingI("Main.Main.RayTracing", "LeafCardsOpaque") != 0;
+			cachedOmm = TheSettingManager->GetSettingI("Main.Main.RayTracing", "OpacityMicromaps") != 0;
+			radius = (std::max)(512.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "SceneRadius"));
+			cachedPtRealtime = TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTRealtime") != 0;
+			cachedGrassRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "GrassRadius"));
+			grassMax = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "GrassMaxTufts"));
+			cachedDecalsOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "Decals") != 0;
+			cachedGlassOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTGlass") > 0;
+			actorRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "ActorRadius"));
+			actorInterval = (UInt32)(std::max)(1, (std::min)(8, TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorUpdateInterval")));
+			farLodOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarObjectLOD") != 0;	// UNOFFICIAL 2026-10-31
+			cachedFarLandOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0;
+			farRadius = (std::max)(radius, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FarRadius"));
+			actorStillSkip = TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorStillSkip") != 0;
+			actorStillThreshold = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "ActorStillThreshold"));
+			firstPersonBody = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FirstPersonBody") != 0;
+			actorRebuild = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorRebuildInterval"));
+			faceMorphs = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FaceMorphs") != 0;	// UNOFFICIAL 2026-11-07
+			faceRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FaceMorphRadius"));
+		}
 		// UNOFFICIAL 2026-11-07 (ptaaa-omm, protocol 9) [Main.Main.RayTracing] OpacityMicromaps (live): the helper gives alpha-tested geometry
 		// opacity micromaps (known-solid micro-triangles resolved by the GPU, the rest by the shaders' alpha test as before) where the GPU has
 		// VK_EXT_opacity_micromap; it needs the alpha atlas' image (tools/nvr-rt-helper/NvrRtOmm.inl). No such GPU: nothing changes.
 		if (shared) {
-			const bool omm = atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "OpacityMicromaps") != 0;
+			const bool omm = atlasImage >= 0 && cachedOmm;
 			shared->opacityMicromaps = omm ? (NVR_RT_OMM_ON | ((uint32_t)(atlasImage + 1) & NVR_RT_OMM_ATLAS_MASK)) : 0u;
 			static UInt32 toldOmm = 0xFFFFFFFFu;
 			const UInt32 ommState = shared->ommState;
@@ -3573,21 +3623,17 @@ namespace {
 			}
 		}
 		trianglesThisFrame = 0;
-		radius = (std::max)(512.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "SceneRadius"));
 		// UNOFFICIAL 2026-11-07 (rtgap, RT-DETAIL-GAPS.md 6 + 7) PTRealtime overrides, as it overrides the path tracer's own settings
 		// (RtPathTrace.cpp): the grass on (with AlphaTested) within at most kPtGrassRadius, and FarLandLOD on (the distant hills block the
 		// low sun and the sky, and show in water and mirrors; FarObjectLOD stays the user's: its cost did not pass, RT-TEST-CHANGELOG.md)
-		const bool ptRealtime = TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTRealtime") != 0;
+		const bool ptRealtime = cachedPtRealtime;
 		grassOn = alphaOn && (grassSetting || ptRealtime);
-		grassRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "GrassRadius"));
-		if (ptRealtime) grassRadius = (std::min)(grassRadius, kPtGrassRadius);
-		grassMax = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "GrassMaxTufts"));
+		grassRadius = ptRealtime ? (std::min)(cachedGrassRadius, kPtGrassRadius) : cachedGrassRadius;
 		// (2026-11-07, RT-DETAIL-GAPS.md 5) decals: live, with the alpha atlas (they are alpha-tested)
-		decalsOn = alphaOn && atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "Decals") != 0;
+		decalsOn = alphaOn && atlasImage >= 0 && cachedDecalsOn;
 		// UNOFFICIAL 2026-11-07 (ptaaa-materials, RT-PATH-TRACING.md "materials") glass panes in the scene: only for the path tracer (every other
 		// shader passes them, RtAlpha.glsl), live; non-opaque instances, so they need the alpha test (AlphaTested + the atlas)
-		glassOn = alphaOn && atlasImage >= 0 && TheSettingManager->GetSettingI("Main.Main.RayTracing", "PTGlass") > 0 &&
-			(ptRealtime || RtPathTrace::ReferenceOn());	// (2026-11-11: ReferencePT as honoured)
+		glassOn = alphaOn && atlasImage >= 0 && cachedGlassOn && (ptRealtime || RtPathTrace::ReferenceOn());	// (2026-11-11: ReferencePT as honoured)
 		if (glassTaken || skinParts || foliageCards) {
 			static UInt32 told = 0;
 			if (told < 6 && (TheFrameRateManager->FrameNumber % 600u) == 0u) {
@@ -3597,17 +3643,7 @@ namespace {
 			}
 		}
 		glassTaken = skinParts = foliageCards = 0;
-		actorRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "ActorRadius"));
-		actorInterval = (UInt32)(std::max)(1, (std::min)(8, TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorUpdateInterval")));
-		farLodOn = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarObjectLOD") != 0;	// UNOFFICIAL 2026-10-31
-		farLandOn = ptRealtime || TheSettingManager->GetSettingI("Main.Main.RayTracing", "FarLandLOD") != 0;
-		farRadius = (std::max)(radius, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FarRadius"));
-		actorStillSkip = TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorStillSkip") != 0;
-		actorStillThreshold = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "ActorStillThreshold"));
-		firstPersonBody = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FirstPersonBody") != 0;
-		actorRebuild = (UInt32)(std::max)(0, TheSettingManager->GetSettingI("Main.Main.RayTracing", "ActorRebuildInterval"));
-		faceMorphs = TheSettingManager->GetSettingI("Main.Main.RayTracing", "FaceMorphs") != 0;	// UNOFFICIAL 2026-11-07
-		faceRadius = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "FaceMorphRadius"));
+		farLandOn = ptRealtime || cachedFarLandOn;
 		faceThisFrame = 0;
 		arenaUsed = 0;
 		waiting = 0;
@@ -3938,9 +3974,14 @@ namespace {
 		idleLastTick = now;
 		if (now - idleCheckedAt < 1000) return;
 		idleCheckedAt = now;
-		SettingManager::Configuration::ConfigNode node;
-		idleStopMinutes = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "IdleStopMinutes") ?
-			TheSettingManager->GetSettingF("Main.Main.RayTracing", "IdleStopMinutes") : 5.0f;	// (a missing key: 5)
+		const UInt32 rev = TheSettingManager ? TheSettingManager->SettingsRevision : 0u;
+		if (!idleCached || idleCachedRev != rev) {
+			idleCachedRev = rev;
+			idleCached = true;
+			SettingManager::Configuration::ConfigNode node;
+			idleStopMinutes = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "IdleStopMinutes") ?
+				TheSettingManager->GetSettingF("Main.Main.RayTracing", "IdleStopMinutes") : 5.0f;	// (a missing key: 5)
+		}
 		if (!(idleStopMinutes > 0.0f) || idleMs < (double)idleStopMinutes * 60000.0 || pendingN) return;
 		const NvrRtShared* s = shared;
 		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: no ray tracing effect has traced for %.1f minutes of play: the RT helper is stopped and its memory given back "
@@ -4395,9 +4436,15 @@ namespace {
 		const ULONGLONG now = GetTickCount64();
 		if (overlapReadAt && now - overlapReadAt < 500) return;
 		overlapReadAt = now;
-		SettingManager::Configuration::ConfigNode node;
-		int mode = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "OverlapExchange") ?
-			TheSettingManager->GetSettingI("Main.Main.RayTracing", "OverlapExchange") : 0;	// (a missing key: off)
+		const UInt32 rev = TheSettingManager ? TheSettingManager->SettingsRevision : 0u;
+		if (!overlapCached || overlapCachedRev != rev) {
+			overlapCachedRev = rev;
+			overlapCached = true;
+			SettingManager::Configuration::ConfigNode node;
+			overlapCachedSetting = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "OverlapExchange") ?
+				TheSettingManager->GetSettingI("Main.Main.RayTracing", "OverlapExchange") : 0;	// (a missing key: off)
+		}
+		int mode = overlapCachedSetting;
 		if (mode < 0 || mode > 3) mode = mode > 3 ? 3 : 0;
 		if (mode != overlapMode) {
 			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT OverlapExchange %d (was %d): %s%s", mode, overlapMode,

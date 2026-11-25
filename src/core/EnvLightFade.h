@@ -58,15 +58,15 @@ namespace EnvLightFade {
 		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
 		// the flashlight's lamp: its full brightness (its dimmer here is already its cone at the object, FlashlightLamp::ForPass)
 		const float pixelLum = flash ? Luminance(light->Diff) * FlashlightLamp::Dimmer : lampLum;
-		const float c[4][4] = {
+		float c[4][4] = {
 			{ -1.0f, gameF, sunLum, pixelLum },	// (x -1: on; FlashlightLamp puts its slot + 1, positive, in c28.x for the object shaders)
 			{ light->m_worldTransform.pos.x - cam.x, light->m_worldTransform.pos.y - cam.y, light->m_worldTransform.pos.z - cam.z, radius },
 			{ FlashlightLamp::Axis.x, FlashlightLamp::Axis.y, FlashlightLamp::Axis.z, FlashlightLamp::CosOuter },
 			{ FlashlightLamp::CosInner, flash ? 1.0f : 0.0f, 0.0f, 0.0f } };
 
-		// UNOFFICIAL 2026-11-20: gather up to 2 additional strongest active point lights on this property (c37-c39 in EnvTemplate.hlsl)
-		// so walking between lights at night smoothly crossblends instead of snapping when FNV swaps lamp 0.
-		float extra[3][4] = {};
+		// UNOFFICIAL 2026-11-20: gather up to 2 additional strongest active point lights on this property (c37-c38 + c31.zw in EnvTemplate.hlsl)
+		// so walking between lights at night smoothly crossblends instead of snapping when FNV swaps lamp 0 (FNV zeroes c39 every draw).
+		float extra[2][4] = {}, extraLum[2] = {};
 		float bestScore[2] = { 0.0f, 0.0f };
 		const UInt8* propBytes = (const UInt8*)property;
 		for (const UInt32* node = *(const UInt32* const*)(propBytes + 0x60); node; node = (const UInt32*)node[0]) {
@@ -100,11 +100,13 @@ namespace EnvLightFade {
 			extra[slot][1] = l->m_worldTransform.pos.y - cam.y;
 			extra[slot][2] = l->m_worldTransform.pos.z - cam.z;
 			extra[slot][3] = r;
-			extra[2][slot] = lum;
+			extraLum[slot] = lum;
 		}
 
+		c[3][2] = extraLum[0];
+		c[3][3] = extraLum[1];
 		TheRenderManager->device->SetPixelShaderConstantF(28, &c[0][0], 4);
-		TheRenderManager->device->SetPixelShaderConstantF(37, &extra[0][0], 3);
+		TheRenderManager->device->SetPixelShaderConstantF(37, &extra[0][0], 2);
 		Set = true;
 		StatPasses++;
 		if (StatPasses <= 3 || StatPasses % 50000 == 0)
@@ -115,7 +117,6 @@ namespace EnvLightFade {
 		if (!Set) return;
 		static const float none[4] = {};
 		TheRenderManager->device->SetPixelShaderConstantF(28, none, 1);
-		TheRenderManager->device->SetPixelShaderConstantF(39, none, 1);
 		Set = false;
 	}
 }

@@ -18,15 +18,16 @@ float readDepth(vec2 coord) {
 }
 
 void main() {
+    vec2 ruv = uv * aoRectScale();
     if (pc.gtaoEstimate != 0u) {
-        float vmD = POINT_LOD(t_viewmodel, uv).x;
-        if (invertedDepth ? vmD > 0.0 : vmD < 0.99999) { o_color = vec4(LINEAR_LOD(t_source, uv).rgb, 1.0); return; }
+        float vmD = POINT_LOD(t_viewmodel, ruv).x;
+        if (invertedDepth ? vmD > 0.0 : vmD < 0.99999) { o_color = vec4(LINEAR_LOD(t_source, ruv).rgb, 1.0); return; }
     }
-    vec2 position = uv / cb.aoLayout.zw - 0.5;
+    vec2 position = ruv / cb.aoLayout.zw - 0.5;
     vec2 base = floor(position);
     vec2 fraction = fract(position);
-    float depth = readDepth(uv);
-    if (depth >= endFade) { o_color = vec4(LINEAR_LOD(t_source, uv).rgb, 1.0); return; }
+    float depth = readDepth(ruv);
+    if (depth >= endFade) { o_color = vec4(LINEAR_LOD(t_source, ruv).rgb, 1.0); return; }
     float sum = 0.0, weights = 0.0;
     for (int y = 0; y < 2; ++y) {
         for (int x = 0; x < 2; ++x) {
@@ -39,7 +40,7 @@ void main() {
         }
     }
     float ao = mix(AOclamp, 1.0, sum / max(weights, 1.0e-6));
-    vec3 source = LINEAR_LOD(t_source, uv).rgb;
+    vec3 source = LINEAR_LOD(t_source, ruv).rgb;
     vec3 linearColor = pows(source, 2.2);
     ao = mix(ao, 1.0, smoothstep(AOlumThreshold * 0.5, AOlumThreshold * 1.5 + 0.15, luma(linearColor)));
     vec3 result = source * pow(abs(ao), 1.0 / 2.2);

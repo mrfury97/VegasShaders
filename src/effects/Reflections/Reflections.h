@@ -237,6 +237,7 @@ private:
 	void				RenderSkyPano(IDirect3DDevice9* Device);
 	UINT				rtWaterFrame = 0;		// the FrameNumber whose Buffer holds the water's RT reflection (0 none)
 	D3DXMATRIX			rtWaterView, rtWaterInvView, rtWaterProj;	// that frame's camera
+	D3DXVECTOR4			rtWaterCameraPos = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	float				rtWaterScaleX = 1.0f, rtWaterScaleY = 1.0f;	// UNOFFICIAL 2026-11-03 that frame's RenderScale rect (1: native)
 	bool				rtResolved = false;	// Resolve drew this frame (the blur passes read Rt.Spread)
 	bool				rtDenoiseFrame = false;	// UNOFFICIAL 2026-11-07: this frame's RT trace feeds the RT reflection denoiser (RayGen / Resolve: rt5.x)
@@ -268,6 +269,7 @@ private:
 	D3DXVECTOR4			extSky = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// NVR_ReflectionsSky as RenderBuffers set it
 	IDirect3DTexture9*	extSkyTexture = nullptr;	// the sky visibility it bound on stage 14 (null: none)
 	D3DXMATRIX	lastView, lastInvView, lastProj;
+	D3DXVECTOR4	lastCameraPos = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	D3DXVECTOR2	lastJitter = D3DXVECTOR2(0.0f, 0.0f);	// UNOFFICIAL 2026-11-09 TemporalJitterFix: the depth jitter of the frame lastView is
 	float		lastDenoiseScaleX = 1.0f, lastDenoiseScaleY = 1.0f;	// 2026-11-19 RenderRect sub-rect scale of the last rendered frame (for RtReflDenoise)
 	UINT		lastRenderedFrame = 0;	// TheFrameRateManager->FrameNumber of the last frame this effect drew (UNOFFICIAL 2026-10-18: it counted

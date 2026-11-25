@@ -28,7 +28,11 @@ MainDataHandler* __fastcall NewMainDataHandlerHook(MainDataHandler* self, UInt32
 
 // The cell's root node holds one child node per kind (land, statics, ...); null when the cell has no node yet.
 NiNode* TESObjectCELL::GetChildNode(CellNodes which) {
-	if (NiNode* root = GetNode()) return static_cast<NiNode*>(root->m_children.data[which]);
+	if (NiNode* root = GetNode()) {
+		if (root->m_children.data && static_cast<UInt32>(which) < root->m_children.capacity &&
+			static_cast<UInt32>(which) < root->m_children.end)
+			return static_cast<NiNode*>(root->m_children.data[which]);
+	}
 #if _DEBUG
 	Logger::Log("[ TESObjectCELL::GetChildNode ] %s has no master node", fullName.name.m_data);
 #endif

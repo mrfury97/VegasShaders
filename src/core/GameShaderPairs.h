@@ -61,17 +61,31 @@ namespace GameShaderPairs {
 	// after the game chose its own, so that number alone does not say; and the packages differ: 7's lit shaders clamp the light at 1).
 	struct Made { std::string name; IUnknown* handle; bool pixel; };
 	inline std::vector<Made> MadeByGame;
+	inline bool MadeDone = false;
 	inline std::mutex MadeLock;
 	inline void NoteMade(const char* name, IUnknown* handle, bool pixel) {
 		if (!name || !handle) return;
 		std::lock_guard<std::mutex> hold(MadeLock);
-		if (MadeByGame.size() < 4096) MadeByGame.push_back({ Upper(name), handle, pixel });
+		if (MadeDone || MadeByGame.size() >= 4096) return;
+		handle->AddRef();
+		MadeByGame.push_back({ Upper(name), handle, pixel });
 	}
-	// The game frees a shader object (ShaderRecord.cpp Free): its handle is not asked for its bytes afterwards.
+	// The game frees or replaces a shader object (ShaderRecord.cpp Free / SetupShader): release our ref and drop it before ReadPackage runs.
 	inline void Forget(const IUnknown* handle) {
 		if (!handle) return;
-		std::lock_guard<std::mutex> hold(MadeLock);
-		for (size_t i = 0; i < MadeByGame.size(); i++) if (MadeByGame[i].handle == handle) { MadeByGame[i] = MadeByGame.back(); MadeByGame.pop_back(); break; }
+		std::vector<IUnknown*> toRelease;
+		{
+			std::lock_guard<std::mutex> hold(MadeLock);
+			for (size_t i = 0; i < MadeByGame.size(); ) {
+				if (MadeByGame[i].handle == handle) {
+					toRelease.push_back(MadeByGame[i].handle);
+					MadeByGame[i] = std::move(MadeByGame.back());
+					MadeByGame.pop_back();
+				}
+				else i++;
+			}
+		}
+		for (IUnknown* h : toRelease) h->Release();
 	}
 	template <typename Handle> inline bool Bytes(Handle* shader, std::vector<DWORD>& code, UINT* bytes = nullptr) {
 		UINT size = 0;
@@ -114,14 +128,18 @@ namespace GameShaderPairs {
 		// The game's shaders (every one it made; many are the same bytes in several packages, so a few do not tell the packages apart)
 		struct Sample { std::string name; std::vector<DWORD> code; UINT size; };
 		std::vector<Sample> sample;
+		std::vector<Made> taken;
 		{
 			std::lock_guard<std::mutex> hold(MadeLock);
-			sample.reserve(MadeByGame.size());
-			for (const Made& made : MadeByGame) {
-				Sample one; one.name = made.name; one.size = 0;
-				const bool ok = made.pixel ? Bytes((IDirect3DPixelShader9*)made.handle, one.code, &one.size) : Bytes((IDirect3DVertexShader9*)made.handle, one.code, &one.size);
-				if (ok) sample.push_back(std::move(one));
-			}
+			MadeDone = true;
+			taken.swap(MadeByGame);
+		}
+		sample.reserve(taken.size());
+		for (const Made& made : taken) {
+			Sample one; one.name = made.name; one.size = 0;
+			const bool ok = made.pixel ? Bytes((IDirect3DPixelShader9*)made.handle, one.code, &one.size) : Bytes((IDirect3DVertexShader9*)made.handle, one.code, &one.size);
+			made.handle->Release();
+			if (ok) sample.push_back(std::move(one));
 		}
 		const unsigned current = *(const UInt32*)0x011F91C0;	// BSShaderManager's current package (7 with this mod: Hooks/ShaderIO.cpp)
 		unsigned best = 0, bestNumber = 0;
@@ -264,6 +282,7 @@ namespace GameShaderPairs {
 		BoundNote = "";
 		BoundVertex = nullptr; BoundPixel = nullptr;
 		if (!Check || !vs || !ps || !vs->ShaderHandle || !ps->ShaderHandle || !vs->ShaderHandleBackup || !ps->ShaderHandleBackup) return;
+		if (!ShaderOwnership::Ours(vs) || !ShaderOwnership::Ours(ps)) return;
 		if ((void*)vs->ShaderHandle != (void*)vs->ShaderHandleBackup && (void*)ps->ShaderHandle != (void*)ps->ShaderHandleBackup) return;	// both this mod's
 		const unsigned long long key = ((unsigned long long)(UInt32)(uintptr_t)vs->ShaderHandle << 32) | (UInt32)(uintptr_t)ps->ShaderHandle;
 		if (key != LastKey || !Last) {

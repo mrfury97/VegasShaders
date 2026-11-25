@@ -358,9 +358,8 @@ void main() {
 	}
 
 	rayQueryEXT q;
-	// (a weapon's ray leaves the people out (0x20) and the player's own rigid parts, their held and holstered weapons (0x40,
-	// NVR_RT_MASK_PLAYER, rt-sun-core 108cfa5b): they stand round the gun in the scene, and it would reflect them from inside)
-	const uint mask = weapon ? (RtMask & ~0x60u) : RtMask;
+	// (a weapon's ray leaves the player's hidden body (0x01) and rigid parts (0x40, NVR_RT_MASK_PLAYER) out while keeping NPCs/creatures (0x20))
+	const uint mask = weapon ? (RtMask & ~0x41u) : RtMask;
 	rayQueryInitializeEXT(q, scene, RT_RAY_FLAGS, mask, start, tMin, dir, tMax);
 	RtProceed(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) {

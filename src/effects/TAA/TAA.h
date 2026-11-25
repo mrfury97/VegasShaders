@@ -85,6 +85,7 @@ public:
 	// uv + this). RenderRect is not on yet at that point (it begins with the effects). False: the outputs are untouched.
 	static bool			WorldDrawnSmall(UINT& renderWidth, UINT& renderHeight, D3DXVECTOR2& jitterUV);
 	static void			NoteWorldDraw(bool firstPerson = false);	// RenderPassStandard/SkinnedHook, world (and v2: first-person) passes: counts which viewport they drew with (a check)
+	static void			NoteDoFDepthDraw();
 	static D3DXVECTOR4	RenderScaleConstant;		// TESR_RenderScale: xy = render size / screen size while the low-resolution world draws, else 1
 	// UNOFFICIAL 2026-10-28: in an FSR / DLSS LowResEffects frame whose world was jittered, the jitter as a screen-uv offset (a pixel of the
 	// small frame shows the unjittered screen at uv + this); else 0. VolumetricClouds' composite reads its clouds there.

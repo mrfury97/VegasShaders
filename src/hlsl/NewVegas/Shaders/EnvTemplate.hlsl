@@ -144,8 +144,8 @@ float4 TESR_PBREnv : register(c35);      // x: Lighting (0 the game's fixed brig
 // [2] the flashlight's beam axis, w cos of its outer edge; [3] x cos of its full-strength edge, y 1 = the lamp is the flashlight's
 float4 EnvLightFade[4] : register(c28);
 // UNOFFICIAL 2026-11-20: up to 2 additional active point lights for smooth multi-lamp crossblending at night (core/EnvLightFade.h):
-// [0]/[1] xyz camera-relative lamp pos, w reach; [2] x/y luminance of extra lamp 0/1 (0 = unused).
-float4 EnvLightFadeExtra[3] : register(c37);
+// [0]/[1] xyz camera-relative lamp pos, w reach; luminances packed in EnvLightFade[3].zw (c31.zw, since FNV zeroes c39).
+float4 EnvLightFadeExtra[2] : register(c37);
 // UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"): where the Reflections
 // effect answered this pixel's reflection last frame (TESR_ReflectionsBuffer's alpha: the screen, the rays, its cube / grid / sky), this
 // pass leaves that share of its cube map out, so the surface shows ONE reflection; where it had no answer (alpha 0: nothing reflects
@@ -217,17 +217,17 @@ float4 main(PS_INPUT pin) : COLOR0 {
             const float cone = smoothstep(EnvLightFade[2].w, EnvLightFade[3].x, dot(toPixel, EnvLightFade[2].xyz) * rsqrt(max(dot(toPixel, toPixel), 1.0f)));
             lampFade *= cone * cone;
         }
-        [flatten] if (EnvLightFadeExtra[2].x > 0.0f && EnvLightFadeExtra[0].w > 1.0f) {
+        [flatten] if (EnvLightFade[3].z > 0.0f && EnvLightFadeExtra[0].w > 1.0f) {
             const float3 tp1 = pin.rel - EnvLightFadeExtra[0].xyz;
             const float w1 = saturate(1.0f - dot(tp1, tp1) / (EnvLightFadeExtra[0].w * EnvLightFadeExtra[0].w));
-            lampFade += EnvLightFadeExtra[2].x * w1 * w1;
+            lampFade += EnvLightFade[3].z * w1 * w1;
         }
-        [flatten] if (EnvLightFadeExtra[2].y > 0.0f && EnvLightFadeExtra[1].w > 1.0f) {
+        [flatten] if (EnvLightFade[3].w > 0.0f && EnvLightFadeExtra[1].w > 1.0f) {
             const float3 tp2 = pin.rel - EnvLightFadeExtra[1].xyz;
             const float w2 = saturate(1.0f - dot(tp2, tp2) / (EnvLightFadeExtra[1].w * EnvLightFadeExtra[1].w));
-            lampFade += EnvLightFadeExtra[2].y * w2 * w2;
+            lampFade += EnvLightFade[3].w * w2 * w2;
         }
-        refl *= min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 8.0f);
+        refl *= min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 64.0f);
     }
     return float4(refl * pin.fog.x, 1.0f);
 }

@@ -9,6 +9,7 @@
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-11-18 next-111: the blur in the rect frame (ShouldRender)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo target is its skin source (NoteSkinAlbedo)
 #include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 DeferredSkin: its records write the G-buffer, not these targets; DeferredSkinBlur fills them
+#include "../../core/RtPathTrace.h"
 
 static const float SkinScatterMMPerUnit = 14.2857f;   // one game unit is 1/70 m
 
@@ -341,6 +342,7 @@ void SkinScatteringEffect::BindForSkinDraw(NiD3DPixelShaderEx* PixelShader) {
 
 	Bound = true;
 	SkinDrawn = true;
+	CapturedNormals::SkinScatteringBound = true;
 	CapturedNormals::NoteSkinAlbedo(AlbedoTexture, AlbedoMSAASurface, AlbedoTextureSurface);	// UNOFFICIAL 2026-10-31 AlbedoBuffer (copied in after the list)
 }
 
@@ -459,6 +461,7 @@ void SkinScatteringEffect::Unbind() {
 	Device->SetRenderState(D3DRS_COLORWRITEENABLE2, SavedWriteMask2);
 	Bound = false;
 	HighlightsBound = false;
+	CapturedNormals::SkinScatteringBound = false;
 }
 
 // UNOFFICIAL 2026-11-15 DeferredSkinBlur (core/DeferredSkin.h): after the deferred light passes (Render.cpp DeferredSpan), the two targets filled
@@ -488,6 +491,7 @@ void DeferredSkin::AfterPasses(IDirect3DDevice9* d) {
 }
 
 bool SkinScatteringEffect::ShouldRender() {
+	if (RtPathTrace::Replacing()) return false;
 	if (!TheShaderManager->Shaders.Skin->Active()) return false;	// Vanilla Plus Skin's shaders write none of its targets
 	if (!ScreenSpace || !SkinDrawn || !Texture || !TextureSurface || !AlbedoTextureSurface) return false;
 	// The skin shaders' debug views: shown as drawn, not blurred. The target stays bound during

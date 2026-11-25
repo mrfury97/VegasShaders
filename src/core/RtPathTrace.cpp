@@ -168,7 +168,7 @@ namespace {
 		int		cacheLog2 = 20;
 		int		allLamps = -1;		// (2026-11-07) PTAllLamps: -1 auto (on under PTRealtime), 0 the game's lamps of this view, 1 every lamp not hidden
 		RtMaterials::Keys materials;	// (2026-11-07 ptaaa-materials) PTGlass, PTGlassTint, PTFoliage, PTSkin, PTClothSheen (RtMaterials.h)
-		float	glassSurface = 0.0f;	// UNOFFICIAL 2026-11-11 PTGlassSurface (frame row texel kGlassSurfaceTexel: texels 24-26 have no room left)
+		float	glassSurface = 1.0f;	// UNOFFICIAL 2026-11-11 PTGlassSurface (frame row texel kGlassSurfaceTexel: texels 24-26 have no room left)
 		// UNOFFICIAL 2026-11-07 (ptaaa-emissive) PTEmissive: glowing triangles as lights (RtEmissiveRow.h, RtEmissiveBuild.comp; -1 auto: on under
 		// PTRealtime), at most PTEmissiveMax instances and PTEmissiveTriangles triangles in the list a frame (test keys)
 		int		emissive = -1;
@@ -781,12 +781,8 @@ namespace {
 	bool		vmPrepFailed = false, vmThisFrame = false;
 	UInt32		vmPrepFrames = 0;
 	IDirect3DTexture9*	vmCheckTex = nullptr;	IDirect3DSurface9* vmCheckSurface = nullptr;	IDirect3DSurface9* vmCheckSys = nullptr;
-	float FovScale() {	// as ReflectionsEffect::WeaponFovScale: tan(world FOV / 2) / tan(first-person FOV / 2), 1 when either is unknown
-		if (!Player) return 1.0f;
-		const float world = Player->worldFoV, first = Player->firstPersonFoV;
-		if (world <= 1.0f || world >= 179.0f || first <= 1.0f || first >= 179.0f) return 1.0f;
-		const float toRad = 3.14159265f / 360.0f;
-		return tanf(world * toRad) / tanf(first * toRad);
+	float FovScale() {	// match ReflectionsEffect::WeaponFovScale (handles ADS/zoom FOV too via CapturedNormals::ViewModelFovScale)
+		return CapturedNormals::ViewModelFovScale();
 	}
 	// (2026-11-11 PTScreenOwn) viewModel: the view model's part (as before); own: the marks (RtViewModel.h; tw, th the render rect, jitter the
 	// depth's, as the trace's ScreenHit). At least one of the two.
@@ -1368,11 +1364,12 @@ namespace {
 							row[2 * (kEmCostTexel + 5)] = S.bumpDetail; row[2 * (kEmCostTexel + 5) + 1] = S.matteNoHighlight ? 1.0f : 0.0f;
 							{
 								static int toldBump = -1;
-								const int nowBump = (S.bumpNormals ? 1 : 0) | (S.matteNoHighlight ? 2 : 0) | (CapturedNormals::BumpCompiledIn() ? 4 : 0) | (S.roughFresnel > 0.0f ? 8 : 0);
+								const bool landBumpReady = CapturedNormals::BumpCompiledIn() || CapturedNormals::V2CompiledIn();
+								const int nowBump = (S.bumpNormals ? 1 : 0) | (S.matteNoHighlight ? 2 : 0) | (landBumpReady ? 4 : 0) | (S.roughFresnel > 0.0f ? 8 : 0);
 								if (toldBump != nowBump) {
 									toldBump = nowBump;
 									Logger::Log("UNOFFICIAL RT path trace: PTBumpNormals %s (the first hit's shading normal: %s; a traced surface's own normal map%s), PTBumpDetail %.2f, PTMatteNoHighlight %s (meshes the game draws without a highlight are matte at the first hit%s), PTRoughFresnel %.2f",
-										S.bumpNormals ? "on" : "off", CapturedNormals::BumpCompiledIn() ? "the land's recorded bumped normal" : "NO land record in this start's shaders ([Main.Main.Quality] CapturedBumpNormals, needs the DXVK fork and AlbedoBuffer)",
+										S.bumpNormals ? "on" : "off", landBumpReady ? "the land's recorded bumped normal" : "NO land record in this start's shaders ([Main.Main.Quality] CapturedBumpNormals or GBufferV2, needs the DXVK fork and AlbedoBuffer)",
 										TheSettingManager->GetSettingI(kSection, "RealNormalMaps") ? "" : " needs RealNormalMaps, which is off", S.bumpDetail, S.matteNoHighlight ? "on" : "off",
 										CapturedNormals::PtCodesCompiled ? "" : "; NOT in this start's shaders: needs the DXVK fork and AlbedoBuffer", S.roughFresnel);
 								}
@@ -1451,7 +1448,7 @@ namespace {
 					const bool sunSplitWant = sunSplitScratchReady && sunSplitRoom && S.denoise && S.denoiseSplitSun && (flags & 512u) != 0u && !giReady &&
 						S.debugView == 0 && S.samples == 1 && sunUp && !earlyRecording &&
 						imageSunVis >= 0 && imageSunHit >= 0 && imageSunDirect >= 0 && shaderSunUnpack >= 0 && shaderSunDenoise >= 0 &&
-						!(S.denoiseUnderRr == 0 && Upscaler::RayReconstructionWantsRaw()) && !RtSunShadows::HelperDenoisedThisFrame();
+						!RtSunShadows::HelperDenoisedThisFrame();
 					row[2 * kSplitBaseTexel + 1] = sunSplitWant ? (float)(SunSplitBaseWords(w, h, cacheLog2Setup) / 4096ull) : 0.0f;
 					sunSplitThisFrame = sunSplitWant;
 				}
@@ -1877,7 +1874,7 @@ namespace {
 			}
 		}
 		ID3D9NvrExtPipeline* pipeline = ShowPipeline();
-		ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+		ID3D9NvrExtSampler* point = S.debugView == 7 ? DxvkCompute::LinearClamp() : DxvkCompute::PointClamp();
 		if (!pipeline || !point) return;
 		if (!parkSurface) {
 			Device->CreateTexture(16, 16, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &parkTexture, nullptr);
@@ -1897,8 +1894,9 @@ namespace {
 		// UNOFFICIAL 2026-11-11 PTEarlyLook: the merged first surface (bit 8: its a < -0.5 keeps the game's pixel); else the trace's own, as before
 		IDirect3DTexture9* const firstSurface = modulate ? FirstSurface() : nullptr;
 		const bool earlyLook = modulate && firstSurface != albedoTexture;
+		const bool rrRawShow = S.denoise && S.denoiseUnderRr == 0 && Upscaler::RayReconstructionWantsRaw();
 		struct { float exposure; UInt32 samplerIndex; float split, gamma; UInt32 modulate, pad[3]; float detail, detailRadius, texel[2], detailEdge; } push = { S.exposure, 0, S.split,
-			S.debugView == 1 || S.debugView == 2 || S.debugView == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | (hdr ? 2u : 0u) | (splitShow ? 4u : 0u) | (earlyLook ? 8u : 0u) | (sunSplitShow ? 16u : 0u), { 0, 0, 0 }, 0.0f, 4.0f, { 0.0f, 0.0f }, S.detailEdge };	// (the last: 2026-11-10 PTDetailEdge)
+			S.debugView == 1 || S.debugView == 2 || S.debugView == 4 ? 1.0f : 1.0f / 2.2f, (modulate ? 1u : 0u) | (hdr ? 2u : 0u) | (splitShow ? 4u : 0u) | (earlyLook ? 8u : 0u) | (sunSplitShow ? 16u : 0u) | (rrRawShow ? 32u : 0u), { 0, 0, 0 }, 0.0f, 4.0f, { 0.0f, 0.0f }, S.detailEdge };	// (the last: 2026-11-10 PTDetailEdge)
 		static_assert(sizeof(push) == 52, "RtPathTraceShow's push block: keep desc.PushConstantSize (the pipeline, above) the same");
 		IDirect3DBaseTexture9* depthBuffer = nullptr;
 		{ auto found = TheTextureManager->TextureNames.find("TESR_DepthBuffer"); if (found != TheTextureManager->TextureNames.end() && found->second) depthBuffer = *found->second; }

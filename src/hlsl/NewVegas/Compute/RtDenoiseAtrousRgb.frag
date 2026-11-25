@@ -65,7 +65,8 @@ void main() {
     // wire's) is an edge again instead of noise to smooth away (host ptdisocclusion: 2 frames keep 83 % of a 1-pixel shadow line, was 61 %)
     const float meanOf = pc.size.z > 1.5 ? clamp(ca.a, 1.0, pc.size.z) : 1.0;
     const float valueSigma = pc.params.w * sqrt(variance / meanOf + (ca.a < 4.0 ? 0.05 : 0.0)) + 1.0e-3;
-    const float zSlope = max(abs(dFdx(z)), abs(dFdy(z))) * pc.params.x + 1.0e-2 * z;
+    const float rawSlope = max(abs(dFdx(z)), abs(dFdy(z)));
+    const float zSlope = min(rawSlope, 0.05 * z) * pc.params.x + 1.0e-2 * z;
     const bool spec = (pc.specular & 1u) != 0u;
     // (ptaaa-denoiser) bit 1 (with AntiFirefly): the brightness test's tolerance from both pixels' deviations (their mean), not the
     // centre's only: with the centre's alone a bright, noisy pixel took its dim neighbours in while they shut it out, and the picture
@@ -92,6 +93,7 @@ void main() {
     if (spec && spread <= 0.0 && !mirror) { o_a = ca; o_b = cb; return; }   // (ptaaa-denoiser) a mirror: left as the temporal pass made it (no taps read)
     // (ptaaa-denoiser) the history fix: 1 at one frame of history, 0 from historyFix + 1 frames on
     const float fresh = pc.historyFix > 0.0 ? clamp((pc.historyFix + 1.0 - ca.a) / pc.historyFix, 0.0, 1.0) : 0.0;
+    const float effNormalPower = fresh > 0.0 ? mix(normalPower, min(normalPower, 10.0), fresh) : normalPower;
 
     vec3 sum = vec3(0.0);
     float moment = 0.0, weights = 0.0;
@@ -102,6 +104,7 @@ void main() {
             const vec4 ta = textureLod(sampler2D(t_a, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0);
             const vec4 tb = textureLod(sampler2D(t_b, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0);
             if (tb.g <= 0.0) continue;
+            if (!soft0 && abs(tb.g - z) > max(0.15 * z, 12.0)) continue;
             const vec3 tn = normalize(textureLod(sampler2D(t_normals, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).xyz * 2.0 - 1.0);
             float w = reach == 1 ? kernel3[abs(x)] * kernel3[abs(y)] : kernel[abs(x)] * kernel[abs(y)];
             if (soft0) {   // (2026-11-16 Settings.Soft) the loose depth test alone
@@ -110,7 +113,7 @@ void main() {
                 continue;
             }
             w *= exp(-abs(tb.g - z) / (pc.params.y * zSlope * length(vec2(x, y)) + 1.0e-3));
-            w *= pow(max(dot(n, tn), 0.0), normalPower);
+            w *= pow(max(dot(n, tn), 0.0), effNormalPower);
             if (spec && (x != 0 || y != 0)) {
                 const float rt = textureLod(sampler2D(t_guideFrame, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).g;
                 w *= (mirror ? 1.0 : spread) * exp(-abs(rt - r0) / (0.05 + 0.25 * r0));
@@ -128,9 +131,10 @@ void main() {
                 sigmaT = pc.params.w * 0.5 * (sqrt(ownVar + boost) + sqrt(tapVar + boost)) + 1.0e-3;
             }
             w *= mix(exp(-abs(luma(ta.rgb) - l) / sigmaT), 1.0, fresh);   // (ptaaa-denoiser: the history fix)
-            if (g0 >= 0.0 && (x != 0 || y != 0)) {
+            if (pc.guideSigma > 0.0 && !spec && (x != 0 || y != 0)) {
                 const float gt = guideInB ? tb.b : GuideShade(tapUv);
-                if (gt >= 0.0) w *= exp(-abs(gt - g0) / (pc.guideSigma * 0.5 * (gt + g0) + 1.0e-4));
+                if ((g0 >= 0.0) != (gt >= 0.0)) continue;
+                if (g0 >= 0.0 && gt >= 0.0) w *= exp(-abs(gt - g0) / (pc.guideSigma * 0.5 * (gt + g0) + 1.0e-4));
             }
             sum += ta.rgb * w;
             moment += tb.r * w;

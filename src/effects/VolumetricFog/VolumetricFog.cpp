@@ -557,7 +557,7 @@ void VolumetricFogEffect::RegisterTextures() {
 * those passes are skipped, so a later failure is exceptional.
 */
 bool VolumetricFogEffect::CanComposite(IDirect3DSurface9* aoSurface) {
-	if (!Enabled || !Effect || !ShouldRender() || dedicatedFogFailed || !fogSurface[0] || PlainOnly() ||
+	if (ReShadeIntegration::KeepDepthBound() || !Enabled || !Effect || !ShouldRender() || dedicatedFogFailed || !fogSurface[0] || PlainOnly() ||
 		TheSettingManager->SettingsMain.Main.DisableCompositeApply ||
 		!CompositeTechnique() || !ParameterHandle(paramCompositeFlags, "NVR_CompositeFlags"))
 		return false;
@@ -588,6 +588,8 @@ int VolumetricFogEffect::HalfStoreMode(IDirect3DDevice9* Device) {
 	IDirect3DSurface9* oldTarget0 = nullptr;
 	IDirect3DSurface9* oldTarget1 = nullptr;
 	IDirect3DVertexDeclaration9* oldDeclaration = nullptr;
+	IDirect3DVertexBuffer9* oldStream0 = nullptr;
+	UINT oldStreamOffset = 0, oldStreamStride = 0;
 	DWORD oldFVF = 0;
 	D3DVIEWPORT9 oldViewport = {};
 	unsigned nearest = 0, toward = 0, total = 0;
@@ -599,6 +601,7 @@ int VolumetricFogEffect::HalfStoreMode(IDirect3DDevice9* Device) {
 		Device->GetRenderTarget(1, &oldTarget1);
 		Device->GetVertexDeclaration(&oldDeclaration);
 		Device->GetFVF(&oldFVF);
+		const HRESULT gotStream0 = Device->GetStreamSource(0, &oldStream0, &oldStreamOffset, &oldStreamStride);
 		Device->GetViewport(&oldViewport);
 		if (oldTarget1) Device->SetRenderTarget(1, nullptr);
 		hr = Device->SetRenderTarget(0, surface);
@@ -628,13 +631,15 @@ int VolumetricFogEffect::HalfStoreMode(IDirect3DDevice9* Device) {
 			}
 			readback->UnlockRect();
 		}
-		// put back what was bound
+		// put back what was bound (DrawPrimitiveUP resets stream 0 to nullptr)
 		Device->SetRenderTarget(0, oldTarget0);
 		if (oldTarget1) Device->SetRenderTarget(1, oldTarget1);
 		if (oldDeclaration) Device->SetVertexDeclaration(oldDeclaration);
 		else if (oldFVF) Device->SetFVF(oldFVF);
+		if (SUCCEEDED(gotStream0)) Device->SetStreamSource(0, oldStream0, oldStreamOffset, oldStreamStride);
 		Device->SetViewport(&oldViewport);
 	}
+	if (oldStream0) oldStream0->Release();
 	if (oldTarget0) oldTarget0->Release();
 	if (oldTarget1) oldTarget1->Release();
 	if (oldDeclaration) oldDeclaration->Release();
@@ -669,8 +674,8 @@ bool VolumetricFogEffect::RenderShadowAO(IDirect3DDevice9* Device, IDirect3DSurf
 	if (!technique || !flagsHandle || !aoTexelHandle || !scene || !RenderedSurface || (!shadow && !aoTexture) ||
 		(aoTexture && FAILED(aoTexture->GetLevelDesc(0, &ao))))
 		return false;
-	// UNOFFICIAL 2026-10-25 (NVR DXVK): as a Vulkan pass when NvrDxvkPasses is on.
-	if (!ExtFailed && DxvkCompute::PassesOn() && ExtShadowAO(Device, RenderTarget, RenderedSurface, shadow, aoTexture)) return true;
+	// UNOFFICIAL 2026-10-25 (NVR DXVK): as a Vulkan pass when NvrDxvkPasses is on (or PassesOnRect at RenderScale < 1).
+	if (!ExtFailed && DxvkCompute::PassesOnRect() && ExtShadowAO(Device, RenderTarget, RenderedSurface, shadow, aoTexture)) return true;
 
 	FrameChain& chain = TheShaderManager->Chain;
 	const bool chained = chain.Owns(RenderTarget, RenderedSurface);
@@ -768,7 +773,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	}
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the two passes as Vulkan passes when NvrDxvkPasses is on (not for the diagnostic overrides).
-	if (!sm6[0] && !targetOverride && !sceneOverride && !ExtFailed && DxvkCompute::PassesOn() && !LampHazeOn()) {
+	if (!sm6[0] && !targetOverride && !sceneOverride && !ExtFailed && DxvkCompute::PassesOnRect() && !LampHazeOn()) {
 		const D3DXVECTOR4 extLayout((float)fog.Width / original.Width, (float)fog.Height / original.Height, 1.0f / fog.Width, 1.0f / fog.Height);
 		bool extGrid = false;
 		if (ExtDedicated(Device, RenderTarget, RenderedSurface, scene, composite, extLayout, extGrid)) {
@@ -1067,6 +1072,7 @@ void VolumetricFogEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 		FAILED(Effect->GetTechniqueDesc(technique, &description)) || description.Passes != 2 ||
 		FAILED(Device->GetViewport(&original)) || FAILED(RenderTarget->GetDesc(&target)) ||
 		FAILED(RenderedSurface->GetDesc(&scratch)) || original.X || original.Y ||
+		target.MultiSampleType != D3DMULTISAMPLE_NONE || scratch.MultiSampleType != D3DMULTISAMPLE_NONE ||
 		original.Width != target.Width || original.Height != target.Height ||
 		target.Width != scratch.Width || target.Height != scratch.Height ||
 		(target.Width & 1) || (target.Height & 1) ||
@@ -1077,6 +1083,7 @@ void VolumetricFogEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 
 	auto timer = TimeLogger();
 	TheShaderManager->Chain.Sync(); // the packed path reads the render target itself
+	RenderedSurface = TheTextureManager->RenderedSurface;
 	D3DVIEWPORT9 reduced = original;
 	reduced.Width /= 2;
 	reduced.Height /= 2;
@@ -1149,6 +1156,7 @@ namespace {
 		// UNOFFICIAL 2026-10-26: these colours linearized once a draw (what the D3D9 effect's preshader takes off the pixels; the GLSL
 		// linearized them on every pixel: most of the Vulkan fog estimate's extra 0.04 ms, desert). Order: FogExtLinearNames.
 		D3DXVECTOR4	Linear[9];
+		D3DXVECTOR4	RenderScale;			// xy: render size / screen size (1 = off), zw: 1 / xy
 	};
 	// UNOFFICIAL 2026-10-27: the sky colours are the fog's own copies with the sky look in them (Sky.cpp UpdateFogSky; the GLSL is unchanged)
 	const char* const FogExtLinearNames[] = { "TESR_FogWeatherColor", "TESR_FogSkyColor", "TESR_FogSkyLowColor", "TESR_FogHorizonColor", "TESR_SunDiskColor",
@@ -1247,6 +1255,9 @@ bool VolumetricFogEffect::ExtSetup(IDirect3DBaseTexture9* (&inputs)[ExtInputCoun
 	if (!registered) return false;
 	const D3DXVECTOR4& physSky = constants.Vectors[36];	// TESR_PhysSky
 	if (physical && !skyView && physSky.x > 0.0f && TheShaderManager->GameState.isExterior) return false;
+	constants.RenderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* uniforms = ExtUniforms(extUniforms, &constants, sizeof(constants));
 	if (!uniforms) return false;
 
@@ -1328,10 +1339,19 @@ bool VolumetricFogEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSurfac
 	NVR_EXT_RESOURCE_BINDING resources[8 + 4];
 	const UINT count = FogExtResources(resources, inputs, 8, extUniforms.Buffer);
 	if (!count) return false;
+	RECT fogVp = {};
+	const RECT* pFogVp = nullptr;
+	if (RenderRect::Active()) {
+		D3DSURFACE_DESC fogDesc = {};
+		if (FAILED(fogSurface[0]->GetDesc(&fogDesc))) return false;
+		fogVp.right = (LONG)RenderRect::Width(fogDesc.Width);
+		fogVp.bottom = (LONG)RenderRect::Height(fogDesc.Height);
+		pFogVp = &fogVp;
+	}
 	GpuTimer* passTimers = FogPassTimers();
 	{
 		GpuProfileScope gpuPass(passTimers[0], Device);
-		if (!ExtDrawTo(estimate, fogSurface, 2, resources, count, &push, sizeof(push))) return false;
+		if (!ExtDrawTo(estimate, fogSurface, 2, resources, count, &push, sizeof(push), pFogVp)) return false;
 	}
 	inputs[8] = fogTexture[0];
 	inputs[9] = fogTexture[1];

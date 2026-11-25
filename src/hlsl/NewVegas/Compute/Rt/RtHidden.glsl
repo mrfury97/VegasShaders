@@ -41,44 +41,23 @@ const int kRtAnyHit = 0, kRtOneSided = 1, kRtClosest = 2;
 bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mask, bool testAlpha, int mode, out float tHit, out uint hitCustom) {
 	tHit = -1.0;
 	hitCustom = 0u;
-	if (!(tMax > tMin)) return false;
+	const uint m = mask & ~0x01u;	// exclude dedicated NVR_RT_MASK_HIDDEN (0x01u) in hardware
+	if (!(tMax > tMin) || m == 0u) return false;
 	const uint terminate = mode == kRtAnyHit ? gl_RayFlagsTerminateOnFirstHitEXT : 0u;
-	float tNear = tMax;
-	bool hit = false, front = false;
-	uint ciHit = 0u;
-	const uint m1 = mask & 0x8Fu;
-	if (m1 != 0u) {
-		rayQueryEXT q;
-		rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT | terminate, m1, origin, tMin, dir, tMax);
-		for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
-		if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-			tNear = rayQueryGetIntersectionTEXT(q, true);
-			ciHit = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
-			if (mode == kRtAnyHit) { tHit = tNear; hitCustom = ciHit; return true; }
-			hit = true; front = rayQueryGetIntersectionFrontFaceEXT(q, true);
-		}
+	const uint opaque = testAlpha ? 0u : gl_RayFlagsOpaqueEXT;
+	rayQueryEXT q;
+	rayQueryInitializeEXT(q, scene, terminate | opaque, m, origin, tMin, dir, tMax);
+	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {
+		if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+		if (rtAlphaPassShadow(rayQueryGetIntersectionInstanceCustomIndexEXT(q, false), rayQueryGetIntersectionInstanceIdEXT(q, false),
+		                      uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)), rayQueryGetIntersectionBarycentricsEXT(q, false)))
+			rayQueryConfirmIntersectionEXT(q);
 	}
-	const uint m2 = mask & 0x70u;
-	if (m2 != 0u) {
-		rayQueryEXT q;
-		rayQueryInitializeEXT(q, scene, gl_RayFlagsNoOpaqueEXT | terminate, m2, origin, tMin, dir, tNear);
-		for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {
-			if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-			const uint ci = rayQueryGetIntersectionInstanceCustomIndexEXT(q, false);
-			if ((ci & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-			if (!testAlpha || rtAlphaPassShadow(ci, rayQueryGetIntersectionInstanceIdEXT(q, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, false)),
-			                                    rayQueryGetIntersectionBarycentricsEXT(q, false)))
-				rayQueryConfirmIntersectionEXT(q);
-		}
-		if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-			tNear = rayQueryGetIntersectionTEXT(q, true);   // (nearer than the first query's hit: that was its tMax)
-			ciHit = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
-			if (mode == kRtAnyHit) { tHit = tNear; hitCustom = ciHit; return true; }
-			hit = true; front = rayQueryGetIntersectionFrontFaceEXT(q, true);
-		}
-	}
-	if (hit && (mode == kRtClosest || !front)) { tHit = tNear; hitCustom = ciHit; return true; }
-	return false;
+	if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return false;
+	if (mode != kRtAnyHit && mode != kRtClosest && rayQueryGetIntersectionFrontFaceEXT(q, true)) return false;
+	tHit = rayQueryGetIntersectionTEXT(q, true);
+	hitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+	return true;
 }
 bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mask, bool testAlpha, int mode, out float tHit) {
 	uint ci;

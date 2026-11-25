@@ -59,7 +59,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 98;  // (98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 101;  // (101: upstream 1.1.4's PTGlassSurface, GIStrengthInterior, GlowGIInterior; 2026-11-26 upstream 1.1.4 merge: 100 = upstream's 96 [Shaders.ShadowsExteriors.Deferred] MatchSunDisc true -> false, 99 = upstream's 95 [Main.Main.RayTracing] ActorFlushPerSpace false -> true; 98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -921,8 +921,13 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	// own number there; any other file below 95 (upstream's 90-94, or ours at 90) runs all three. Upstream's 91, 92 and 94 change defaults
 	// this fork keeps as they were until the owner decides (each one switch below).
 	constexpr bool kParkUpstream91 = true, kParkUpstream92 = true, kParkUpstream94 = true;
-	const bool ourHistory = (version == 91 || version == 92) && !UserSection("Shaders.WetWorld");
-	const int ours = version >= 95 ? version - 5 : ourHistory ? version : 89;
+	// (2026-11-26, upstream 1.1.4 merge) upstream's builds now count to 96: a file at 95 or 96 WITH [Shaders.WetWorld] is upstream's (it ran
+	// upstream's 95 / 96, now our 99 / 100, and none of ours); one without it is ours (our 95-98).
+	const bool upstreamFile = UserSection("Shaders.WetWorld") != nullptr;
+	const bool ourHistory = (version == 91 || version == 92) && !upstreamFile;
+	const int ours = version >= 95 && !upstreamFile ? version - 5 : ourHistory ? version : 89;
+	constexpr int kUpstreamNewest = 96;	// the newest settings number upstream's builds write (1.1.4): bump it on the next upstream merge
+	auto upstreamRan = [&](int step) { return upstreamFile && version >= step && version <= kUpstreamNewest; };
 	// 90 (2026-11-18, owner: players switching from NVR keep their Cartographer / Atlas presets): those mods replay every value they
 	// captured through NVRSetSetting, which went into this table, and the menu's Save wrote it to the file after the steps above had run,
 	// so the old defaults of the fixes stayed. Since this build a preset or script can no longer set them (StalePresetValues.h); this
@@ -932,7 +937,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		struct Hit { tomlValue* saved; const StalePresetValues::OldDefault* old; const tomlValue* fresh; };
 		std::vector<Hit> hits;
 		for (const StalePresetValues::OldDefault& old : StalePresetValues::kOldDefaults) {
-			if (old.playerChoice) continue;
+			if (old.playerChoice || old.sinceVersion >= 90) continue;	// (2026-11-26: keys of later steps are moved by those steps)
 			tomlValue* saved = UserSection(old.section);
 			if (!saved || !saved->contains(old.key)) continue;
 			const tomlValue& value = saved->at(old.key);
@@ -1139,7 +1144,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	// RayGen would run before the deferred wetness film). A file saved by upstream's builds at 92-94 ran that step already: a false it
 	// holds is the player's own choice and stays.
 	{
-		const bool upstreamRan92 = version >= 92 && version <= 94 && !ourHistory;
+		const bool upstreamRan92 = upstreamRan(92);
 		if (version < 98 && !upstreamRan92) {
 			for (const auto& [section, key] : { std::pair<const char*, const char*>{ "Shaders.Reflections.Main", "ReplaceForward" },
 					std::pair<const char*, const char*>{ "Shaders.Reflections.RT", "FollowRenderScale" } }) {
@@ -1149,6 +1154,32 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 				changed += std::string(changed.empty() ? "" : ", ") + section + "." + key + " false -> true";
 			}
 		}
+	}
+	// 99, upstream 1.1.4's 95 (2026-11-21): [Main.Main.RayTracing] ActorFlushPerSpace false -> true (avoids flushing and rebuilding all actors on every
+	// exterior cell crossing; flushes only on worldspace/interior change or >8192 unit camera jumps).
+	if (version < 99 && !upstreamRan(95)) {
+		tomlValue* saved = UserSection("Main.Main.RayTracing");
+		if (saved && saved->contains("ActorFlushPerSpace") && saved->at("ActorFlushPerSpace").is_boolean() && !saved->at("ActorFlushPerSpace").as_boolean()) {
+			(*saved)["ActorFlushPerSpace"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.RayTracing.ActorFlushPerSpace false -> true";
+		}
+	}
+	// 100, upstream 1.1.4's 96 (2026-11-22): [Shaders.ShadowsExteriors.Deferred] MatchSunDisc true -> false (matching vanilla FNV sun direction avoids
+	// flattening terrain normal/parallax relief when the sky sun sits high around midday/afternoon).
+	if (version < 100 && !upstreamRan(96)) {
+		tomlValue* saved = UserSection("Shaders.ShadowsExteriors.Deferred");
+		if (saved && saved->contains("MatchSunDisc") && saved->at("MatchSunDisc").is_boolean() && saved->at("MatchSunDisc").as_boolean()) {
+			(*saved)["MatchSunDisc"] = false;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.Deferred.MatchSunDisc true -> false";
+		}
+	}
+	// 101 (2026-11-26, upstream 1.1.4's defaults, owner: take upstream's): [Main.Main.RayTracing] PTGlassSurface 0 -> 1,
+	// [Shaders.AmbientOcclusion.RT] GIStrengthInterior -1 -> 2 and GlowGIInterior -1 -> 1.5. Upstream changed them without a step, so a
+	// menu save of any earlier build (theirs or ours) holds the old values: each moves once from exactly its old default.
+	if (version < 101) {
+		replace("Main.Main.RayTracing", "PTGlassSurface", 0.0, 1.0, false);
+		replace("Shaders.AmbientOcclusion.RT", "GIStrengthInterior", -1.0, 2.0, false);
+		replace("Shaders.AmbientOcclusion.RT", "GlowGIInterior", -1.0, 1.5, false);
 	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "

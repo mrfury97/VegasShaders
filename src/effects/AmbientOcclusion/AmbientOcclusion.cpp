@@ -53,6 +53,7 @@ static int SkyVersion = 2;
 static D3DXMATRIX RtReproject;
 static D3DXVECTOR4 RtTemporal(0.0f, 4.0f, 0.0f, 0.0f);
 static D3DXMATRIX RtLastView, RtLastInvView, RtLastProj;
+static D3DXVECTOR4 RtLastCameraPos(0.0f, 0.0f, 0.0f, 0.0f);
 static double RtLastTime = -1.0;
 static bool RtHistoryValid = false;
 static UInt32 RtFrame = 0;
@@ -365,8 +366,16 @@ bool AmbientOcclusionEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSur
 	MakePipeline(extCombine, "AmbientOcclusionCombine", 5);
 	// UNOFFICIAL 2026-10-28 (fork RT): the RT estimate's temporal constants (into this call's uniforms, below) while it runs.
 	D3DSURFACE_DESC aoDesc = {};
-	const bool rt = !combineOnly && RtAmbient::AOReady() && SUCCEEDED(Surfaces[0]->GetDesc(&aoDesc));
+	const bool hasDesc = SUCCEEDED(Surfaces[0]->GetDesc(&aoDesc));
+	const bool rt = !combineOnly && RtAmbient::AOReady() && hasDesc;
 	if (rt) RtTemporalSetup(aoDesc);
+	RECT aoVp = {};
+	const RECT* pAoVp = nullptr;
+	if (RenderRect::Active() && hasDesc) {
+		aoVp.right = (LONG)RenderRect::Width(aoDesc.Width);
+		aoVp.bottom = (LONG)RenderRect::Height(aoDesc.Height);
+		pAoVp = &aoVp;
+	}
 	if (!estimate || !extBlur.Pipeline || !extCombine.Pipeline || !ExtConstants(extUniforms, Layout, D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f))) return false;
 	const UINT firstPass = combineOnly ? 3 : 0;
 	const UINT endPass = deferCombine ? 3 : 4;
@@ -389,11 +398,11 @@ bool AmbientOcclusionEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		if (p == 0 && rt && ExtEstimateRT(Device, Textures, Surfaces, aoDesc)) drawn = true;	// UNOFFICIAL 2026-10-28 (fork RT): into AO 0 like Estimate
 		else if (p == 0) {
 			IDirect3DBaseTexture9* inputs[4] = { depth, normals, noise, OrthoMap ? (IDirect3DBaseTexture9*)OrthoMap : depth };	// (no Skylighting v1: never read)
-			drawn = Resources(resources, count, inputs, 4, extUniforms.Buffer) && ExtDrawTo(estimate, &Surfaces[0], 1, resources, count, &push, sizeof(push));
+			drawn = Resources(resources, count, inputs, 4, extUniforms.Buffer) && ExtDrawTo(estimate, &Surfaces[0], 1, resources, count, &push, sizeof(push), pAoVp);
 		}
 		else {
 			IDirect3DBaseTexture9* inputs[3] = { Textures[p == 1 ? 0 : 1], depth, normals };
-			drawn = Resources(resources, count, inputs, 3, extUniforms.Buffer) && ExtDrawTo(extBlur.Pipeline, &Surfaces[p == 1 ? 1 : 0], 1, resources, count, &push, sizeof(push));
+			drawn = Resources(resources, count, inputs, 3, extUniforms.Buffer) && ExtDrawTo(extBlur.Pipeline, &Surfaces[p == 1 ? 1 : 0], 1, resources, count, &push, sizeof(push), pAoVp);
 		}
 		if (!drawn) return false;
 	}
@@ -412,7 +421,7 @@ void AmbientOcclusionEffect::RtTemporalSetup(const D3DSURFACE_DESC& AoDesc) {
 	D3DXMatrixIdentity(&RtReproject);
 	EffectStatus::History(StatusSlot, Name, continuous ? "kept (RT AO)" : !rectSame && RtHistoryValid ? "reset (RT AO: RenderScale rect changed)" :
 		"reset (RT AO: no history, size, gap, cut or shared rule)");	// UNOFFICIAL 2026-11-01
-	if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, RtLastView, RtLastInvView, RtLastProj, &RtReproject);
+	if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->CameraPosition, RtLastView, RtLastCameraPos, RtLastProj, &RtReproject);
 	// (2026-11-07 perf-history) 0.9 of last frame kept at 60 fps: the same decay a second at this frame rate (RtHistoryTime.h; 0.73 at 20 fps)
 	RtTemporal = D3DXVECTOR4(continuous ? RtHistoryTime::Keep(0.9f, RtDenoise::HistoryClock()) : 0.0f, 4.0f,
 		(float)(TemporalBackbone::Shared() ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetRtAmbient) : RtFrame % 1024), 0.0f);	// (SharedNoise: shared index, own offset)
@@ -431,7 +440,14 @@ bool AmbientOcclusionEffect::ExtSkyVisibility(IDirect3DSurface9* Target, const D
 	NVR_EXT_RESOURCE_BINDING resources[9] = {};
 	UINT count = 0;
 	AOPush push = {};
-	return Resources(resources, count, inputs, 5, extSkyUniforms.Buffer) && ExtDrawTo(extSky.Pipeline, &Target, 1, resources, count, &push, sizeof(push));
+	RECT skyVp = {};
+	const RECT* pSkyVp = nullptr;
+	if (RenderRect::Active()) {
+		skyVp.right = (LONG)RenderRect::Width(Desc.Width);
+		skyVp.bottom = (LONG)RenderRect::Height(Desc.Height);
+		pSkyVp = &skyVp;
+	}
+	return Resources(resources, count, inputs, 5, extSkyUniforms.Buffer) && ExtDrawTo(extSky.Pipeline, &Target, 1, resources, count, &push, sizeof(push), pSkyVp);
 }
 
 // UNOFFICIAL 2026-10-28 (fork RT, [Shaders.AmbientOcclusion.RT]; core/RtAmbient.h, docs/next/FORK-RT-CORE.md): this effect is the RT
@@ -580,10 +596,11 @@ namespace {
 		// UNOFFICIAL 2026-11-03 (rtspec) GIGameLamps: the game's lamp table's active lamps (ManyLamps.h: the deferred pass's lamps, reach
 		// Spec.r, colour diffuse x dimmer x LOD dimmer decoded together), the reach NEGATIVE = the game's falloff in RtAOTrace.comp LampFall.
 		// The reference path tracer's PTGameLamps 4 lights the same (its direct light 1.07x the deferred pass's at Lucky 38: section 21).
-		if (RtAmbient::Current.GIGameLamps && ManyLamps::TableFrame + 1 >= ManyLamps::FrameId && !ManyLamps::ActiveLamps.empty()) {
+		const auto& lampSrc = !ManyLamps::AllLamps.empty() ? ManyLamps::AllLamps : ManyLamps::ActiveLamps;
+		if (RtAmbient::Current.GIGameLamps && ManyLamps::TableFrame + 1 >= ManyLamps::FrameId && !lampSrc.empty()) {
 			static std::vector<Lamp> table;
 			table.clear();
-			for (const ManyLamps::ActiveLamp& a : ManyLamps::ActiveLamps) {
+			for (const ManyLamps::ActiveLamp& a : lampSrc) {
 				if (a.reach <= 0.0f) continue;
 				const D3DXVECTOR3 rel(a.pos[0] - eye.x, a.pos[1] - eye.y, a.pos[2] - eye.z);
 				table.push_back({ D3DXVECTOR4(rel.x, rel.y, rel.z, -a.reach), D3DXVECTOR4(a.colour[0] * ls, a.colour[1] * ls, a.colour[2] * ls, 0.0f),
@@ -1394,6 +1411,7 @@ bool AmbientOcclusionEffect::ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTe
 	RtLastTime = TheFrameRateManager->Time;
 	RtLastView = TheRenderManager->viewMatrix;
 	RtLastInvView = TheRenderManager->InvViewMatrix;
+	RtLastCameraPos = TheRenderManager->CameraPosition;
 	RtLastProj = TheRenderManager->projMatrix;
 	RtFrame++;
 	return true;
@@ -1479,7 +1497,7 @@ void AmbientOcclusionEffect::RenderSkyVisibility(IDirect3DDevice9* Device, IDire
 	HRESULT result = E_FAIL;
 	if (rtSky && !ExtFailed && ExtSkyVisibilityRT(target, sunMask, smoothedNormals)) result = S_OK;	// UNOFFICIAL 2026-10-28 (fork RT)
 	else if (!orthoMap) result = E_FAIL;	// (the RT sky failed and no map was drawn for it: no factor this frame)
-	else if (!ExtFailed && DxvkCompute::PassesOn() && ExtSkyVisibility(target, desc, orthoMap, sunMask, smoothedNormals)) result = S_OK;
+	else if (!ExtFailed && DxvkCompute::PassesOnRect() && ExtSkyVisibility(target, desc, orthoMap, sunMask, smoothedNormals)) result = S_OK;
 	else {
 	// UNOFFICIAL 2026-10-20 (skyamb): SetCT does nothing while this effect is off, and it is off whenever AmbientLight hosts the sky
 	// test (ShaderManager switches it off for the frame; the user may have it off too): the pass then ran with no depth, normals or
@@ -1613,7 +1631,7 @@ void AmbientOcclusionEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 	};
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the four passes as Vulkan passes first (ExtDedicated); false: nothing of the frame was
 	// committed and the D3D9 passes below draw it.
-	if (!ExtFailed && DxvkCompute::PassesOn() && ExtDedicated(Device, RenderTarget, RenderedSurface, textures, surfaces, layout, gtaoTechnique, orthoMap, skyVis)) {
+	if (!ExtFailed && DxvkCompute::PassesOnRect() && ExtDedicated(Device, RenderTarget, RenderedSurface, textures, surfaces, layout, gtaoTechnique, orthoMap, skyVis)) {
 		if (deferCombine) deferredReady = true;	// nothing was written to the frame; the fog pass applies ResultTexture()
 		reportActive();
 		renderTime = timer.LogTime(deferCombine ? "AmbientOcclusion::Deferred" : "AmbientOcclusion::PackedAO");
@@ -1621,7 +1639,7 @@ void AmbientOcclusionEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 	}
 	HRESULT result = scene ? Device->GetDepthStencilSurface(&depthSurface) : E_FAIL;
 	// UNOFFICIAL ReShadeDepthCompat: leave the game's depth-stencil bound (a single smaller target is legal with it).
-	if (SUCCEEDED(result) && !ReShadeIntegration::KeepDepthBound()) result = Device->SetDepthStencilSurface(nullptr);
+	if (SUCCEEDED(result) && !ReShadeIntegration::KeepDepthBoundFor(Device)) result = Device->SetDepthStencilSurface(nullptr);
 	if (FAILED(result)) {
 		if (depthSurface) depthSurface->Release();
 		return;

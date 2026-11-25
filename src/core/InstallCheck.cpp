@@ -1,6 +1,7 @@
 // 2026-11-03 the install self-check and the bug report (InstallCheck.h).
 #include "InstallCheck.h"
 #include "Branding.h"
+#include "DxvkLoader.h"
 #include "SessionLog.h"
 #include "imgui.h"	// the screen size for the report
 #include <algorithm>
@@ -80,6 +81,20 @@ void InstallCheck::OnPluginLoad(unsigned nvseVersion, unsigned gameVersion) {
 		Add(Level::Problem, "twin", std::string("Old New Vegas Reloaded plugin still installed: Data\\NVSE\\Plugins\\") + name,
 			std::string("Quit, delete or move ") + name + " out of Data\\NVSE\\Plugins (with Mod Organizer: untick the old New Vegas Reloaded mod), "
 			"then start again. Both plugins load and both replace the game's shaders: white or wrong objects and ground.");
+	}
+
+	if (!DxvkLoader::OverridingWrapper.empty()) {
+		Add(Level::Problem, "dxvk",
+			"A wrapper d3d9.dll in the game folder is blocking Vegas Shaders DXVK: " + DxvkLoader::OverridingWrapper,
+			"Quit and remove or rename d3d9.dll from the Fallout New Vegas game folder so Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll can load.");
+	}
+	else if (!DxvkLoader::BlockedRootDxvk.empty()) {
+		Add(Level::Info, "dxvk",
+			"Stale root DXVK in game folder was bypassed by Vegas Shaders: " + DxvkLoader::BlockedRootDxvk,
+			std::string("You can safely delete d3d9.dll") + (DxvkLoader::RootConfIgnored.empty() ? "" : " and dxvk.conf") + " from the Fallout New Vegas game folder.");
+		if (!DxvkLoader::RootConfIgnored.empty()) {
+			Add(Level::Info, "dxvk", "Ignored stale root dxvk.conf: " + DxvkLoader::RootConfIgnored);
+		}
 	}
 
 	// The shader folders: Paths uses the new one when it is there, else the old one
@@ -174,6 +189,15 @@ void InstallCheck::OnDevice(const std::string& gpuWindows, const std::string& gp
 	if (dxvk) title += ": d3d9.dll " + (gD3d9.empty() ? std::string("(no version info)") : gD3d9);
 	if (!nvrDxvk.empty()) title += "; Vegas Shaders DXVK: " + nvrDxvk;
 	Add(Level::Info, "device", title);
+	if (dxvk && nvrDxvk.empty()) {
+		DxvkLoader::ActiveNonForkDxvk = gD3d9.empty() ? "DXVK (non-fork)" : gD3d9;
+		Add(Level::Warning, "device",
+			"Non-fork DXVK is active (missing Vegas Shaders DXVK extension): " + DxvkLoader::ActiveNonForkDxvk,
+			"Install Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll and remove any leftover d3d9.dll or dxvk.conf from the Fallout New Vegas game folder.");
+	}
+	else {
+		DxvkLoader::ActiveNonForkDxvk.clear();
+	}
 }
 
 void InstallCheck::OnLoadOrder(const std::vector<std::string>& plugins, unsigned hash) {

@@ -361,6 +361,7 @@ public:
 	IDirect3DSurface9* ShadowAtlasOldSurface = nullptr;
 	IDirect3DTexture9* ShadowDynamicTexture = nullptr;
 	IDirect3DSurface9* ShadowDynamicSurface = nullptr;
+	IDirect3DSurface9* ShadowDynamicDepthSurface = nullptr;
 	UINT		ShadowDynamicSize = 0;
 	D3DXMATRIX	SunFadeMatrix[4];
 	D3DXVECTOR4	SunFadeCenter[4];

@@ -58,8 +58,8 @@ private:
 	void					ReadTargetSettings();
 	int						SwapTarget(OwnedTarget& Target, bool Park);	// 1 swapped, 0 could not (tried again later), -1 not ours any more
 	unsigned long long		TargetRetryAt = 0;	// after a swap that could not be made: nothing is tried before this tick
-	void					ForgetTarget(const std::string& Name, IDirect3DBaseTexture9* Texture, IDirect3DSurface9* Surface);
 public:
+	void					ForgetTarget(const std::string& Name, IDirect3DBaseTexture9* Texture, IDirect3DSurface9* Surface);
 
 	// screen buffers (texture + its top surface where it is a render target)
 	IDirect3DTexture9		*SourceTexture;

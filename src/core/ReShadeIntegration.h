@@ -14,6 +14,16 @@ public:
 
 	// ReShadeDepthCompat, also on by itself while ReShade is loaded: NVR's passes leave the game's depth buffer bound.
 	static bool KeepDepthBound() { return Loaded || TheSettingManager->SettingsMain.Main.ReShadeDepthCompat; }
+	// Same as KeepDepthBound(), except returns false when the bound depth-stencil is multisampled
+	// (D3D9 requires RT and depth-stencil MultiSampleType to match; NVR offscreen RTs are D3DMULTISAMPLE_NONE).
+	static bool KeepDepthBoundFor(IDirect3DDevice9* device);
+	struct MsaaDepthGuard {
+		IDirect3DDevice9* device = nullptr;
+		IDirect3DSurface9* saved = nullptr;
+		bool detached = false;
+		explicit MsaaDepthGuard(IDirect3DDevice9* d);
+		~MsaaDepthGuard();
+	};
 
 	static inline bool Loaded = false;	// a ReShade module is in the process (found at renderer start)
 };

@@ -7,18 +7,16 @@
 // Worked out in double precision round the two camera positions: far from the world's origin (the Mojave's coordinates
 // run past 100 000 units) the few units the camera moves between two frames would otherwise be lost to float rounding.
 // Header only, no game types, so the bench (work\bench\bounce-gi) uses the same code.
-inline void BounceLightReprojection(const D3DXMATRIX& viewNow, const D3DXMATRIX& invViewNow,
-	const D3DXMATRIX& viewLast, const D3DXMATRIX& invViewLast, const D3DXMATRIX& projLast, D3DXMATRIX* result) {
-	// Row vectors (D3D): view = world * R + t, so world = view * R^T + camera. A point's last-frame view position is
-	// (view * Rnow^T + cameraNow - cameraLast) * Rlast.
+inline void BounceLightReprojection(const D3DXMATRIX& viewNow, const D3DXVECTOR4& camPosNow,
+	const D3DXMATRIX& viewLast, const D3DXVECTOR4& camPosLast, const D3DXMATRIX& projLast, D3DXMATRIX* result) {
 	double rotation[3][3];
 	for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) {
 		double sum = 0.0;
 		for (int k = 0; k < 3; k++) sum += (double)viewNow.m[k][i] * (double)viewLast.m[k][j];
 		rotation[i][j] = sum;
 	}
-	const double move[3] = { (double)invViewNow._41 - invViewLast._41, (double)invViewNow._42 - invViewLast._42,
-		(double)invViewNow._43 - invViewLast._43 };
+	const double move[3] = { (double)camPosNow.x - camPosLast.x, (double)camPosNow.y - camPosLast.y,
+		(double)camPosNow.z - camPosLast.z };
 	double translation[3];
 	for (int j = 0; j < 3; j++) translation[j] = move[0] * viewLast.m[0][j] + move[1] * viewLast.m[1][j] + move[2] * viewLast.m[2][j];
 	D3DXMATRIX toLastView;
@@ -29,4 +27,10 @@ inline void BounceLightReprojection(const D3DXMATRIX& viewNow, const D3DXMATRIX&
 	}
 	toLastView.m[3][3] = 1.0f;
 	D3DXMatrixMultiply(result, &toLastView, &projLast);
+}
+
+inline void BounceLightReprojection(const D3DXMATRIX& viewNow, const D3DXMATRIX& invViewNow,
+	const D3DXMATRIX& viewLast, const D3DXMATRIX& invViewLast, const D3DXMATRIX& projLast, D3DXMATRIX* result) {
+	BounceLightReprojection(viewNow, D3DXVECTOR4(invViewNow._41, invViewNow._42, invViewNow._43, 1.0f),
+		viewLast, D3DXVECTOR4(invViewLast._41, invViewLast._42, invViewLast._43, 1.0f), projLast, result);
 }

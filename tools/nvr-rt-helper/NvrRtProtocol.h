@@ -67,6 +67,7 @@
 // (G, R, 1, 1) (the game's ATI2 normal maps as BC5: DXVK samples ATI2 through that swizzle, so the RT copy reads what the game reads)
 #define NVR_RT_TEX_LEVELS_MASK      0xFFu
 #define NVR_RT_TEX_SWIZZLE_GR       0x100u
+#define NVR_RT_TEX_SRGB             0x200u    // view UNORM block/pixel data as hardware _SRGB in real-texture descriptor table
 // (protocol 8) NvrRtShared::textureImage: up to NVR_RT_TEX_TRANSFERS transfer images, byte i = shared image index + 1 (0 = none); a GPU
 // route op (bytes 0) reads the one whose VkFormat equals its own (RGBA8 = the fork's decoding blit; BC1 / BC3 / BC5 = the game's blocks
 // copied as they are, fork 1.8-rt-bc). Byte 0 is the RGBA8 one, as protocol 7's single value.
@@ -128,6 +129,7 @@ inline float NvrRtRoughOf(uint32_t k) { return (float)(k * k) / 49.0f; }
 // 16 + 16 bit in object space, 0 = none (tools/nvr-rt-helper/RtNormals.comp makes them; RtHit.glsl rtHitSmoothNormal reads them).
 // A shader comparing geometryId masks it (RtEmissiveBuild.comp). No layout change (protocol 9): an older shader ignores the bit.
 #define NVR_RT_RECORD_GEO_NORMALS   0x80000000u
+#define NVR_RT_MASK_HIDDEN          0x01u     // dedicated bit for hidden near-eye / first-person actor body (land + static objects share 0x02u)
 #define NVR_RT_MASK_ACTOR           0x20u     // UNOFFICIAL 2026-10-29: skinned actors ([Main.Main.RayTracing] Actors), posed every frame
 #define NVR_RT_MASK_ALPHA           0x10u     // the instance mask of alpha-tested geometry (rays that cannot test alpha leave it out)
 #define NVR_RT_MASK_PLAYER          0x40u     // UNOFFICIAL 2026-10-30: the player's own rigid parts with Actors on (the third-person body's

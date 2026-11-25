@@ -551,38 +551,35 @@ bool Visible(vec3 from, vec3 dir, float tMax) {
 	// each with its own alpha test were too much code for the AMD driver's pipeline build). Near the eye: rtBlockedPassHidden's two queries
 	// (kRtAnyHit, mask 0xFF: the opaque 0x8F, then 0x70 every candidate tested, the hidden body passed over), as before; else one query
 	// over everything, glass tinting, cut-outs tested. Same answers as the two functions it replaces.
-	// UNOFFICIAL 2026-11-19: skip dual NoOpaqueEXT hidden-body pass whenever this frame has no hidden body (gOneCameraQuery > 0.5).
+	// UNOFFICIAL 2026-11-19 + dedicated NVR_RT_MASK_HIDDEN (0x01u): single HW query excludes 0x01u near the eye (no NoOpaqueEXT round-trips).
 	const bool near = !(gOneCameraQuery > 0.5) && rtHiddenPassOver(from, from + dir * (tMax + 16.0), vec3(0.0));
-	if (near && !(tMax > 0.0)) return true;
-	const bool glass = !near && GlassMode() > 0.5;
+	if (!(tMax > 0.0)) return true;
+	const bool glass = GlassMode() > 0.5;
 	uint seen0 = 0xFFFFFFFFu, seen1 = 0xFFFFFFFFu;
-	for (int k = near ? 0 : 1; k < 2; k++) {   // 0: near the eye, the opaque world first; 1: the candidates' query
-		const uint flags = gl_RayFlagsTerminateOnFirstHitEXT | (k == 0 ? gl_RayFlagsOpaqueEXT : near ? gl_RayFlagsNoOpaqueEXT : AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT);
-		rayQueryEXT s;
-		PT_RAY_INIT(s, flags, k == 0 ? 0x8Fu : near ? 0x70u : 0xFFu, from + p.origin.xyz, 0.0, dir, tMax)   // (hangfix)
-		uint n_ = 0u;
-		while (rayQueryProceedEXT(s)) {
-			PT_GUARD(s, n_)   // (hangfix)
-			if (rayQueryGetIntersectionTypeEXT(s, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-			const uint ci = rayQueryGetIntersectionInstanceCustomIndexEXT(s, false);
-			const uint instance = rayQueryGetIntersectionInstanceIdEXT(s, false), prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(s, false));
-			if (near && (ci & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;   // (the hidden body, near the eye)
-			if (!near && rtIsGlass(instance)) {
-				const uint key = (instance * 2654435761u) ^ (prim * 40503u + 1u);
-				if (glass && key != seen0 && key != seen1) {
-					seen1 = seen0; seen0 = key;
-					gShadowTint *= GlassShadow(instance, prim, mat3(rayQueryGetIntersectionObjectToWorldEXT(s, false)), dir, rayQueryGetIntersectionBarycentricsEXT(s, false));
-				}
-				continue;
+	const uint flags = gl_RayFlagsTerminateOnFirstHitEXT | (AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT);
+	rayQueryEXT s;
+	PT_RAY_INIT(s, flags, near ? 0xFEu : 0xFFu, from + p.origin.xyz, 0.0, dir, tMax)   // (hangfix)
+	uint n_ = 0u;
+	while (rayQueryProceedEXT(s)) {
+		PT_GUARD(s, n_)   // (hangfix)
+		if (rayQueryGetIntersectionTypeEXT(s, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+		const uint ci = rayQueryGetIntersectionInstanceCustomIndexEXT(s, false);
+		const uint instance = rayQueryGetIntersectionInstanceIdEXT(s, false), prim = uint(rayQueryGetIntersectionPrimitiveIndexEXT(s, false));
+		if (rtIsGlass(instance)) {
+			const uint key = (instance * 2654435761u) ^ (prim * 40503u + 1u);
+			if (glass && key != seen0 && key != seen1) {
+				seen1 = seen0; seen0 = key;
+				gShadowTint *= GlassShadow(instance, prim, mat3(rayQueryGetIntersectionObjectToWorldEXT(s, false)), dir, rayQueryGetIntersectionBarycentricsEXT(s, false));
 			}
-			if ((near && !AlphaTest()) || rtAlphaPassShadow(ci, instance, prim, rayQueryGetIntersectionBarycentricsEXT(s, false)))
-				rayQueryConfirmIntersectionEXT(s);
+			continue;
 		}
-		if (rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-			gShadowHitT = rayQueryGetIntersectionTEXT(s, true);
-			gShadowHitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(s, true);
-			return false;
-		}
+		if (rtAlphaPassShadow(ci, instance, prim, rayQueryGetIntersectionBarycentricsEXT(s, false)))
+			rayQueryConfirmIntersectionEXT(s);
+	}
+	if (rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+		gShadowHitT = rayQueryGetIntersectionTEXT(s, true);
+		gShadowHitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(s, true);
+		return false;
 	}
 	return true;
 }
@@ -675,7 +672,7 @@ float TransmitChance(Surface s) {
 // weights keep Lambert: gBounceEval).
 bool gBounceEval = false;
 vec3 SkinWrap() { return vec3(0.3, 0.12, 0.08) * clamp(MatKeys().w, 0.0, 2.0); }
-vec3 SkinWrapPi(float nl) { const vec3 w = SkinWrap(); nl = max(nl, 1.0e-4); return (nl + w) / ((1.0 + w) * (1.0 + w) * nl); }
+vec3 SkinWrapPi(float nl) { const vec3 w = SkinWrap() * smoothstep(0.0, 0.2, nl); nl = max(nl, 1.0e-4); return (nl + w) / ((1.0 + w) * (1.0 + w) * nl); }
 // CLOTH: a sheen lobe (Estevez & Kulla 2017 "Charlie" distribution, Neubelt & Pettineo's visibility) of colour PTClothSheen x sqrt(albedo),
 // roughness = the surface's (at least 0.3); the diffuse under it gives up the sheen's directional albedo (bounded from above by
 // 0.05 + 0.7 exp(-1.9 nv) for roughness 0.3-1, fitted to its numeric integral): energy never grows.
@@ -760,7 +757,7 @@ vec3 BrdfPi(Surface s, vec3 n, vec3 v, vec3 l) {
 	// (2026-11-12 ptbump) PTRoughFresnel: a rough non-metal's grazing reflectance (F90) below 1; key 0: F90 = 1, the line as it was.
 	// Not skin and not hair (their rim of light at low angles is their look, and their roughness is their own shaders' value)
 	const vec3 F0 = FresnelF0(s);
-	const vec3 f90 = gRoughFresnel > 0.0 && s.kind != kKindSkin && s.kind != kKindHair ?
+	const vec3 f90 = gRoughFresnel > 0.0 && s.kind != kKindHair ?
 		mix(vec3(1.0), max(vec3(1.0 - s.rough), F0), gRoughFresnel * (1.0 - clamp(s.metal, 0.0, 1.0))) : vec3(1.0);
 	const float omv = 1.0 - vh, omv2 = omv * omv;
 	vec3 F = F0 + (f90 - F0) * (omv2 * omv2 * omv);
@@ -852,7 +849,7 @@ bool NextDirection(vec3 n, vec3 v, Surface s, out vec3 l, out vec3 weight, out f
 	if (s.kind == kKindGlass) {   // the pane: mirror reflection or straight through, chosen in proportion to R and T (each then weighs R / P, T / (1 - P))
 		vec3 R, T;
 		GlassSlab(abs(dot(n, v)), s.albedo, R, T);
-		const float pr = Luma(R) / max(Luma(R) + Luma(T), 1.0e-6);
+		const float pr = clamp(Luma(R) / max(Luma(R) + Luma(T), 1.0e-6), 0.25, 0.95);
 		if (Rand() < pr) { l = reflect(-v, n); weight = R / max(pr, 1.0e-6); }
 		else { l = -v; weight = T / max(1.0 - pr, 1.0e-6); }
 		gBrdfSpec = gBrdfAll = vec3(1.0);   // (ptaaa-denoiser's split: both mirror-like lobes count as specular)
@@ -1321,7 +1318,7 @@ bool LightAt(LSample y, vec3 at, vec3 n, out vec3 light, out vec3 pos) {
 	l *= inversesqrt(d2);
 	const float cx = dot(n, l), cy = abs(dot(ny, l));
 	if (cx <= 0.0 || cy <= 1.0e-6) return false;
-	light = EmLe(g, y.tri, y.bary) * (cx * cy / (3.14159265 * d2));
+	light = EmLe(g, y.tri, y.bary) * (cx * cy / (3.14159265 * max(d2, max(area, 16.0))));
 	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
 }
 // The shadow ray's length to a sample's point from `from`: a lamp short of its fixture, an emissive point just short of its surface
@@ -1770,12 +1767,10 @@ void CacheKey(vec3 hit, vec3 n, vec3 offset, out uint slot, out uint check) {
 uint CacheEntry(uint slot, uint i) {
 	return gCacheBase + ((slot + i) & gCacheMask) * 8u;   // (fits inside LoadScratchLayout's 16-word allocation, half the L2 footprint)
 }
-// The cell's resolved indirect light at a point (jittered inside its cell along the surface); false: no cell / too few samples yet
-bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
-	light = vec3(0.0);
-	vec3 b, t = Basis(n, b);
+// The cell's resolved indirect light at a point (jittered inside its cell along the surface, falling back to unjittered); false: no cell / too few samples yet
+bool CacheLookup(vec3 hit, vec3 n, vec3 offset, out vec3 light) {
 	uint slot, check;
-	CacheKey(hit, n, t * (Rand() - 0.5) + b * (Rand() - 0.5), slot, check);
+	CacheKey(hit, n, offset, slot, check);
 	for (uint i = 0u; i < 4u; i++) {
 		const uint e = CacheEntry(slot, i), k = scratch.words[e];
 		if (k != check) continue;   // UNOFFICIAL 2026-11-19: do not stop on k == 0u (evicted slot tombstone hides live slots at i+1..3)
@@ -1787,10 +1782,17 @@ bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
 	}
 	return false;
 }
+bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
+	light = vec3(0.0);
+	vec3 b, t = Basis(n, b);
+	if (CacheLookup(hit, n, t * (Rand() - 0.5) + b * (Rand() - 0.5), light)) return true;
+	return CacheLookup(hit, n, vec3(0.0), light);
+}
 void CacheAdd(vec3 hit, vec3 n, vec3 light) {
 	if (any(isnan(light)) || any(isinf(light))) return;
+	vec3 b, t = Basis(n, b);
 	uint slot, check;
-	CacheKey(hit, n, vec3(0.0), slot, check);
+	CacheKey(hit, n, (t * (Rand() - 0.5) + b * (Rand() - 0.5)) * 0.5, slot, check);
 	const uvec3 q = uvec3(clamp(light, vec3(0.0), vec3(1024.0)) * 256.0 + 0.5);
 	for (uint i = 0u; i < 4u; i++) {
 		const uint e = CacheEntry(slot, i);
@@ -1995,6 +1997,11 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 #endif
 	for (int k = 0; k < 3; k++) {
 		if (pickOne && k != chosenC) continue;
+		if (k == 0 && decoupleSunHere && !(dot(cE[0], vec3(1.0)) > 0.0)) {
+			gFirstSunVis = 0.0;
+			gFirstSunHitT = 1.0;
+			continue;
+		}
 		if (!(dot(cE[k], vec3(1.0)) > 0.0)) continue;
 		if (k == 0 && decoupleSunHere) {
 			const bool sunFree = Visible(lift, cDir[0], cDist[0]);
@@ -2042,7 +2049,7 @@ Surface HitSurface(vec3 albedo, uint instance) {
 	// (2026-11-07 ptaaa-materials) the record's material kind (NvrRtProtocol.h NVR_RT_RECORD_KIND_*), each with its setting on
 	const uint kind = rtRecordKind(f);
 	const vec4 keys = MatKeys();
-	if (gHairKind > 0.5 && (f & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS) { s.kind = kKindHair; s.rough = max(s.rough, 0.8); s.metal = 0.0; }
+	if (gHairKind > 0.5 && (f & RT_HIT_TINTED_FLAGS) == RT_HIT_TINTED_FLAGS) { s.kind = kKindHair; s.rough = max(s.rough, 0.55); s.metal = 0.0; }
 	if (kind == 1u && keys.x > 0.5) { s.kind = kKindGlass; s.albedo = GlassTint(records[instance].albedo.rgb); s.rough = 0.0; s.metal = 0.0; }
 	else if (kind == 2u && keys.z > 0.0) s.kind = kKindFoliage;
 	else if (kind == 3u && keys.w > 0.0) s.kind = kKindSkin;
@@ -2219,14 +2226,14 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 			const vec4 keys = MatKeys();
 			if (cls == 3.0 && MatSheen() > 0.0) s.kind = kKindCloth;
 			else if (cls == 5.0 && keys.z > 0.0) s.kind = kKindFoliage;
-			else if (cls == 6.0 && keys.w > 0.0) s.kind = kKindSkin;
+			else if (cls == 6.0 && keys.w > 0.0) { s.kind = kKindSkin; s.rough = max(s.rough, 0.62); s.f0 = min(s.f0, 0.028); }
 		}
 		// (2026-11-11 PTScreenOwn) a skin pixel (the prep's person code: the skin template drew it) whose MaterialBuffer texel is not skin's:
 		// SkinFill did not reach it (MaterialBufferSkin off; a skin shader from before 2026-11-11, whose alpha code SkinFill clipped with
 		// AlbedoBuffer on), so the texel is still the wall's or the armour's drawn before the skin: its class, roughness and METAL. Skin's
 		// own instead: no metal, a skin roughness, the skin model.
 		if (person && cls != 6.0) {
-			s.metal = 0.0; s.rough = 0.6; s.f0 = 0.04; s.kind = MatKeys().w > 0.0 ? kKindSkin : kKindPlain;
+			s.metal = 0.0; s.rough = 0.6; s.f0 = 0.028; s.kind = MatKeys().w > 0.0 ? kKindSkin : kKindPlain;
 		}
 	}
 	return true;
@@ -2357,77 +2364,25 @@ vec3 Path(vec3 dir) {
 #endif
 		// UNOFFICIAL 2026-11-19: skip primary camera ray on clean screen-grass pixels (line 2250 always selects sHit)
 		const bool skipCamRay = viewModel || (screen && gScreenGrass && !gScreenStale);
-		// (2026-11-07 ptaaa-firstperson) a bounce ray that leaves from near the eye (off the view model, or a surface within arm's reach)
-		// passes over the hidden first-person body (RtHidden.glsl): the world without people and cut-outs (opaque), then people, the
-		// player's parts and cut-outs up to that hit, each candidate tested, hidden ones passed over (cut-outs as PTBounceAlpha says:
-		// 0 solid, 2 left out, 1 / 3 their texture)
-		// UNOFFICIAL 2026-11-19: skip dual NoOpaqueEXT hidden-body pass whenever this frame has no hidden body (gOneCameraQuery > 0.5).
-		if (bounce > 0 && !(gOneCameraQuery > 0.5) && rtHiddenNear(pos, vec3(0.0))) {
-			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x8Fu, pos + p.origin.xyz, 0.0, dir, rayLength)   // (hangfix: PT_RAY_INIT, the loop caps)
-			PT_PROCEED_OPAQUE(q)
-			PT_TAKE_HIT(q);
-			rayQueryEXT qp;
-			PT_RAY_INIT(qp, gl_RayFlagsNoOpaqueEXT, alphaMode == 2 ? 0x60u : 0x70u, pos + p.origin.xyz, 0.0, dir, traced ? qT : rayLength)
-			uint n_ = 0u;
-			while (rayQueryProceedEXT(qp)) {
-				PT_GUARD(qp, n_)
-				if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-				if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-				if (alphaMode == 0 || !AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
-				                                                    rayQueryGetIntersectionBarycentricsEXT(qp, false)))
-					rayQueryConfirmIntersectionEXT(qp);
-			}
-			if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
-		}
-		else if (bounce > 0 && alphaMode != 1) {   // opaque: no candidates to confirm; 2 without NVR_RT_MASK_ALPHA (FORK-RT-CORE.md's mask table)
-			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, alphaMode == 2 ? 0xEFu : 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength)   // (hangfix)
+		// Hidden first-person body uses dedicated mask 0x01u: exclude in BVH hardware via ~0x01u (single query for both camera & near bounces).
+		const uint hideClear = (bounce > 0 && !(gOneCameraQuery > 0.5) && rtHiddenNear(pos, vec3(0.0))) ? ~0x01u : 0xFFu;
+		if (bounce > 0 && alphaMode != 1) {   // opaque: no candidates to confirm; 2 without NVR_RT_MASK_ALPHA (FORK-RT-CORE.md's mask table)
+			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, (alphaMode == 2 ? 0xEFu : 0xFFu) & hideClear, pos + p.origin.xyz, 0.0, dir, rayLength)   // (hangfix)
 			PT_PROCEED_OPAQUE(q)
 			// 3: the nearest card's texel decides (as the game's alpha test); through a hole the ray goes on with the other cards left out
 			if (alphaMode == 3 && rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT &&
 				!rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, true), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true))) {
 				const float past = rayQueryGetIntersectionTEXT(q, true);
-				PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0xEFu, pos + p.origin.xyz, past, dir, rayLength)   // (hangfix)
+				PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0xEFu & hideClear, pos + p.origin.xyz, past, dir, rayLength)   // (hangfix)
 				PT_PROCEED_OPAQUE(q)
 			}
 			PT_TAKE_HIT(q);
 		}
-		// (2026-11-05 rtfull-gs-body) the camera's rays leave the far LOD out (NVR_RT_MASK_FAR 0x80: FarLandLOD / FarObjectLOD): where the
-		// screen has no world surface of NVR's, the game draws that distant land itself and a camera ray that met its coarse quads showed
-		// them as grey slabs (Goodsprings' hills under PTRealtime once the far ring had loaded); missing it, the ray takes the game's frame.
-		// Bounce and shadow rays keep it. (Constant masks: a variable mask cost the default path 5-8 %, section 27.)
-		// (2026-11-07, a tester's "the player's head projected over the entire sky") the camera's rays also pass over the player's own body
-		// in first person (FirstPersonBody: traced for shadows and reflections, not drawn; instance custom index NVR_RT_CUSTOM_HIDDEN, as
-		// RtLampPrimary.comp). The eye sits inside that body's head, so the one camera ray through everything met the inside of the head
-		// first: where the screen has no surface (the sky) the picture was the head's inside (hair, a hat, an eye) filling the sky, and on
-		// every other pixel the traced hit never matched the screen's, so the first hit lost its real texture, normal map and glow. Two
-		// queries now: the world without cut-outs and people (0x0F: land, objects, lamp glass, lamp models; opaque), then cut-outs, people
-		// and the player's rigid parts (0x70) up to that hit, every candidate tested, the hidden ones passed over; the nearer is the hit.
-		// (2026-11-07 ptaaa-firstperson) the view model's pixels: no camera ray (the screen's surface is the first hit)
-		// (perf-ptcost) only while this frame's scene holds the hidden body; without it the one query below gives the same hit (the people and
-		// the player's parts are opaque unless alpha-tested, and then under 0x10 with the cut-outs)
+		// (2026-11-05 rtfull-gs-body) the camera's rays leave the far LOD out (NVR_RT_MASK_FAR 0x80) and exclude hidden body 0x01u (0x7Eu)
 		else if (bounce == 0 && skipCamRay) {}
-		else if (bounce == 0 && !(gOneCameraQuery > 0.5)) {
-			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x0Fu, pos + p.origin.xyz, 1.0, dir, rayLength)   // (hangfix: PT_RAY_INIT, the loop caps)
-			PT_PROCEED_OPAQUE(q)
-			PT_TAKE_HIT(q);
-			rayQueryEXT qp;
-			PT_RAY_INIT(qp, gl_RayFlagsNoOpaqueEXT, 0x70u, pos + p.origin.xyz, 1.0, dir, traced ? qT : rayLength)
-			uint n_ = 0u;
-			while (rayQueryProceedEXT(qp)) {
-				PT_GUARD(qp, n_)
-				if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-				if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-				if (!AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
-				                                rayQueryGetIntersectionBarycentricsEXT(qp, false)))
-					rayQueryConfirmIntersectionEXT(qp);
-				else PT_NOTE_HAIR_SKIP(qp)   // (hair-through)
-			}
-			if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
-		}
-		// bounce rays with PTBounceAlpha 1, and (perf-ptcost) the camera's ray as ONE query over everything but the far LOD (0x7F) when no hidden
-		// body is in this frame's scene (frame row texel 29: RtCore counts them)
-		else if (bounce > 0 || !skipCamRay) {
-			PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, bounce > 0 ? 0xFFu : 0x7Fu, pos + p.origin.xyz, bounce > 0 ? 0.0 : 1.0, dir, rayLength)   // (hangfix)
+		else {
+			const uint camMask = !(gOneCameraQuery > 0.5) ? 0x7Eu : 0x7Fu;
+			PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, bounce > 0 ? (0xFFu & hideClear) : camMask, pos + p.origin.xyz, bounce > 0 ? 0.0 : 1.0, dir, rayLength)   // (hangfix)
 			Proceed(q);
 			PT_TAKE_HIT(q);
 		}
@@ -2567,12 +2522,12 @@ vec3 Path(vec3 dir) {
 			// (2026-11-12 ptbump) PTBumpNormals: the screen's first surface too, as its SHADING normal only (bump, split below): the land's
 			// recorded bump where the screen's record holds one, else the traced record's own normal map (the same call: the shader inlines
 			// every call). Not glass (a pane's mirror directions) and not hair (its cards' maps are strand detail).
-			const bool bendAsBefore = NormalAtlas() || bounce > 0 || (!screen && !(gEarlyLook > 0.5));
-			const bool bendFirst = !bendAsBefore && gBumpOn > 0.5 && bounce == 0 && screen && surf.kind != kKindGlass && surf.kind != kKindPane && surf.kind != kKindHair;
+			const bool hasScreenBump = gBumpOn > 0.5 && bounce == 0 && screen && surf.kind != kKindGlass && surf.kind != kKindPane && !hairFront && !hairThrough && !staleOwn && gScreenBump != vec3(0.0);
+			const bool bendAsBefore = !hasScreenBump && (NormalAtlas() || bounce > 0 || (!screen && !(gEarlyLook > 0.5)));
+			const bool bendFirst = hasScreenBump || (!bendAsBefore && gBumpOn > 0.5 && bounce == 0 && screen && surf.kind != kKindGlass && surf.kind != kKindPane);
 			if ((bendAsBefore || bendFirst) && !ownFlash) {
 				rtHitNormalAtlasOn = NormalAtlas();
-				const bool recorded = bendFirst && !hairFront && !hairThrough && !staleOwn && gScreenBump != vec3(0.0);
-				vec3 bent = recorded ? gScreenBump : rtHitGeomNormalMapped(hg, n, mat3(toScene));
+				vec3 bent = hasScreenBump ? gScreenBump : rtHitGeomNormalMapped(hg, n, mat3(toScene));
 				if (bendFirst) bump = bent;
 				else if (dot(bent, v) > 0.0) n = bent;   // (a map that turns it away from the eye: kept as it was)
 			}
@@ -2939,7 +2894,8 @@ void RunSplitSpatial(ivec2 pixel) {
 	bool yVisChecked = (fl & kSplitFlagVisChecked) != 0u && Valid(y);
 	vec3 yVisTint = yVisChecked ? UnpackVisTint(fl >> 13u) : vec3(1.0);
 	if (tileMean > 0.0 && Valid(y) && W * yTarget > 16.0 * tileMean) {
-		y = NoSample(); W = 0.0; yTarget = 0.0; M = min(M, 1.0); yVisChecked = false;
+		W = (16.0 * tileMean) / max(yTarget, 1.0e-6);
+		M = min(M, 4.0);
 	}
 
 	const bool geoSplit = (fl & kSplitFlagGeoSplit) != 0u;
@@ -3187,34 +3143,19 @@ void RunSplitBounce(ivec2 pixel) {
 #ifndef RT_NO_REAL_TEXTURES
 				rtConeWidth = 0.0;
 #endif
-				if (!(gOneCameraQuery > 0.5) && rtHiddenNear(pos, vec3(0.0))) {
-					PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x8Fu, pos + p.origin.xyz, 0.0, dir, rayLength)
-					PT_PROCEED_OPAQUE(q)
-					PT_TAKE_HIT(q);
-					rayQueryEXT qp;
-					PT_RAY_INIT(qp, gl_RayFlagsNoOpaqueEXT, alphaMode == 2 ? 0x60u : 0x70u, pos + p.origin.xyz, 0.0, dir, traced ? qT : rayLength)
-					uint n_ = 0u;
-					while (rayQueryProceedEXT(qp)) {
-						PT_GUARD(qp, n_)
-						if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-						if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-						if (alphaMode == 0 || !AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
-						                                                    rayQueryGetIntersectionBarycentricsEXT(qp, false)))
-							rayQueryConfirmIntersectionEXT(qp);
-					}
-					if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
-				} else if (alphaMode != 1) {
-					PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, alphaMode == 2 ? 0xEFu : 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength)
+				const uint hideClear = (!(gOneCameraQuery > 0.5) && rtHiddenNear(pos, vec3(0.0))) ? ~0x01u : 0xFFu;
+				if (alphaMode != 1) {
+					PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, (alphaMode == 2 ? 0xEFu : 0xFFu) & hideClear, pos + p.origin.xyz, 0.0, dir, rayLength)
 					PT_PROCEED_OPAQUE(q)
 					if (alphaMode == 3 && rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT &&
 						!rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, true), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true))) {
 						const float past = rayQueryGetIntersectionTEXT(q, true);
-						PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0xEFu, pos + p.origin.xyz, past, dir, rayLength)
+						PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0xEFu & hideClear, pos + p.origin.xyz, past, dir, rayLength)
 						PT_PROCEED_OPAQUE(q)
 					}
 					PT_TAKE_HIT(q);
 				} else {
-					PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength)
+					PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu & hideClear, pos + p.origin.xyz, 0.0, dir, rayLength)
 					Proceed(q);
 					PT_TAKE_HIT(q);
 				}

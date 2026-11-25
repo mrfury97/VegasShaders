@@ -32,6 +32,7 @@ layout(set = 1, binding = 12) uniform texture2D t_blend3;
 layout(set = 1, binding = 13) uniform texture2D t_volume;        // NVR_VolumeCloudShadow
 layout(set = 1, binding = 14) uniform texture2D t_water;         // NVR_WaterDepth
 layout(set = 1, binding = 15) uniform texture2D t_scene;         // NVR_Scene (2026-10-25: the world as drawn; POINT)
+layout(set = 1, binding = 16) uniform texture2D t_waterMask;     // WaterMask (2026-11-21: .g > 0.45 strictly on water pixels)
 
 // The constants the HLSL reads (std140: vec4s and mat4s only, in the order of SunFarUniforms in SunFar.cpp).
 layout(set = 2, binding = 0, std140) uniform Constants {
@@ -59,6 +60,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 fogData;                   // TESR_FogData (2026-10-25)
     vec4 fogColor;                  // TESR_FogColor
     vec4 sunFarLand;                // TESR_SunFarLand
+    vec4 sunFarJitter;              // TESR_SunFarJitter (w: water-mask mode)
     vec4 cameraData;                // TESR_CameraData
     vec4 cameraPosition;            // TESR_CameraPosition
     vec4 smoothedSunDir;            // TESR_SmoothedSunDir
@@ -320,6 +322,13 @@ bool OnWater(vec3 world, vec3 normal, float depth) {
     return normal.z > 0.7 && abs(world.z - cb.waterSettings.x) < max(2.0, depth * 0.002);
 }
 
+bool IsWaterPixel(vec2 uvc, vec3 world, vec3 normal, float depth) {
+    float mode = cb.sunFarJitter.w;
+    if (mode > 1.5) return LOD(t_waterMask, pc.samplerPoint, uvc, 0.0).g > 0.45;
+    if (mode > 0.5) return false;
+    return OnWater(world, normal, depth);
+}
+
 // How deep the water is here, 0 at the shore to 1 deep, from the game's water depth map; far off 1.
 float WaterDeep(vec2 uvc, vec3 rel) {
     float deep = saturate(LOD(t_water, pc.samplerLinear, uvc, 0.0).x);
@@ -346,7 +355,7 @@ vec4 SunFarPS(vec2 uvc) {
     if (cb.sunFarData.y > 0.5 && cb.sunFarData.y < 3.5) {
         vec3 tint = mix(vec3(1.0), vec3(0.25, 1.0, 0.25), (1.0 - terrain) * 0.8) * mix(vec3(1.0), vec3(0.35, 0.5, 1.0), (1.0 - cloud) * 0.8);
         if (cb.sunFarData.y > 1.5) tint *= mix(vec3(1.0), vec3(0.85, 0.9, 1.0), TerrainShadowCoverage(world));
-        float water = cb.sunFarWater.z * step(2.5, cb.sunFarData.y) * (OnWater(world, GetWorldNormalLod(uvc), depth) ? 1.0 : 0.0);
+        float water = cb.sunFarWater.z * step(2.5, cb.sunFarData.y) * (IsWaterPixel(uvc, world, GetWorldNormalLod(uvc), depth) ? 1.0 : 0.0);
         tint *= mix(vec3(1.0), mix(vec3(1.0), vec3(1.0, 0.15, 0.15), WaterDeep(uvc, rel)), water);
         return vec4(tint, 1.0);
     }
@@ -355,7 +364,7 @@ vec4 SunFarPS(vec2 uvc) {
 
     // Water is left alone (WaterShadows: shallow water fades in by its depth, the share of deep water is WaterDeepShare).
     float keep = 1.0;   // the share of the change this pixel takes (1 off the water)
-    if (OnWater(world, normal, depth)) {
+    if (IsWaterPixel(uvc, world, normal, depth)) {
         keep = cb.sunFarWater.x * mix(1.0, cb.sunFarWater.y, WaterDeep(uvc, rel));
         if (keep <= 0.0) return vec4(1.0, 1.0, 1.0, blocked);
     }

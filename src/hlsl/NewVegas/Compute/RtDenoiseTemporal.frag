@@ -37,7 +37,8 @@ void main() {
     const vec2 s = uv / pc.rect.xy;
     if (s.x > 1.0 || s.y > 1.0) { o_color = vec4(0.0); return; }
     const float value = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
-    const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
+    const float linear01 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
+    const float viewZ = (linear01 > 0.0 && linear01 < 0.999) ? min(linear01 * pc.forward.w, 60000.0) : 0.0;
     vec4 result = vec4(value, value * value, 1.0, viewZ);
     // (2026-10-31, rt-ao-sky) at half size (backbone.w 1) the mask over this pixel's 2 x 2 full-size pixels (uv sits on their corner):
     // a thin newly seen edge is not missed by the one tap a point sample takes

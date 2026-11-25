@@ -147,6 +147,9 @@ namespace CapturedNormals {
 	inline std::unordered_set<IDirect3DPixelShader9*> CodeWriters;
 	inline void NoteCodeWriter(IDirect3DPixelShader9* handle) { if (handle) CodeWriters.insert(handle); }
 	inline bool LastCodeWriter = false;
+	inline std::unordered_set<IDirect3DPixelShader9*> SkinCodeWriters;	// forward SKIN gear (COLOR3.a = 2, not LAMPS_DEFERRED)
+	inline void NoteSkinCodeWriter(IDirect3DPixelShader9* handle) { if (handle) SkinCodeWriters.insert(handle); }
+	inline bool LastSkinCodeWriter = false;
 	inline float CoverageSaved[4] = {};
 	inline UInt32 CoverageDraws = 0;
 	// UNOFFICIAL 2026-11-12 HairAndEyes ([Shaders.Flashlight.Deferred] HairAndEyes; core/FlashlightDeferred.h BeamBegin, Includes/FlashBeam.hlsl).
@@ -246,6 +249,7 @@ namespace CapturedNormals {
 	inline bool LastAlbedoWriter = false, LastAlbedoLightOnly = false, AlbedoBound = false, AlbedoDrawn = false;
 	inline UInt32 AlbedoWrites = 0, AlbedoBusy = 0, AlbedoLightOnlyDraws = 0, AlbedoSkinFills = 0;
 	inline IDirect3DTexture9* SkinAlbedoTex = nullptr;  inline IDirect3DSurface9* SkinAlbedoMsaa = nullptr;  inline IDirect3DSurface9* SkinAlbedoSurface = nullptr;	// the skin blur's albedo target, when skin drew this span (SkinScattering::BindForSkinDraw)
+	inline bool SkinScatteringBound = false;	// UNOFFICIAL 2026-11-21: true while SkinScattering bound SkinAlbedo for the active forward-skin draw
 	inline IDirect3DPixelShader9* SkinAlbedoFillPS = nullptr;  inline bool SkinAlbedoFillFailed = false, SkinAlbedoLogged = false, AlbedoWantLogged = false;
 	inline void NoteAlbedoWriter(IDirect3DPixelShader9* handle, bool lightOnly) { if (!handle) return; AlbedoWriters.insert(handle); if (lightOnly) AlbedoLightOnlyWriters.insert(handle); }
 	inline bool SunGIWantsAlbedo = false;	// UNOFFICIAL 2026-11-12 (sungi p4) set by AmbientLight (SunGI on, outdoors): AlbedoBuffer's reader asks for the capture without the AL key
@@ -577,14 +581,16 @@ namespace CapturedNormals {
 			static const char* kPS =
 				"sampler2D N : register(s0); sampler2D S : register(s1); float4 G : register(c0);"
 				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
-				"  float a = tex2D(N, uv).a; clip(a - 1.5);"
-				"  float3 c = max(tex2D(S, uv).rgb, 0.0); c = G.x > 1.0 ? pow(c, G.x) : c;"
+				"  float a = tex2D(N, uv).a; clip(a - 2.02);"
+				"  float3 raw = max(tex2D(S, uv).rgb, 0.0); clip(dot(raw, 1.0) - 0.002);"
+				"  float3 c = G.x > 1.0 ? pow(raw, G.x) : raw;"
 				"  return float4(c, 1.0); }";
 			static const char* kPSDeferred =	// (DeferredSkin: the deferred skin's own albedo stays)
 				"sampler2D N : register(s0); sampler2D S : register(s1); float4 G : register(c0);"
 				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
-				"  float a = tex2D(N, uv).a; clip(a - 1.5); clip(3.5 - a);"
-				"  float3 c = max(tex2D(S, uv).rgb, 0.0); c = G.x > 1.0 ? pow(c, G.x) : c;"
+				"  float a = tex2D(N, uv).a; clip(a - 2.02); clip(3.5 - a);"
+				"  float3 raw = max(tex2D(S, uv).rgb, 0.0); clip(dot(raw, 1.0) - 0.002);"
+				"  float3 c = G.x > 1.0 ? pow(raw, G.x) : raw;"
 				"  return float4(c, 1.0); }";
 			SkinAlbedoFillPS = FullScreenShader(d, SkinDeferredCodes ? kPSDeferred : kPS, "AlbedoBuffer skin fill", SkinAlbedoFillFailed);
 			if (!SkinAlbedoFillPS) return;
@@ -1435,6 +1441,7 @@ namespace CapturedNormals {
 			LastGrassWriter = GrassNow && ps && GrassWriters.count(ps) != 0; LastLeafWriter = LeafNow && ps && LeafWriters.count(ps) != 0;
 			LastFoliageDeferred = FoliageDeferred && ps && FoliageDeferredHandles.count(ps) != 0;	// UNOFFICIAL 2026-11-14 DeferredFoliage
 			LastCodeWriter = ps && CodeWriters.count(ps) != 0;	// (2026-11-12 CapturedCoverage: not for these)
+			LastSkinCodeWriter = ps && SkinCodeWriters.count(ps) != 0;
 			LastBeamMarker = ps && BeamMarkers.count(ps) != 0;	// UNOFFICIAL 2026-11-12 HairAndEyes: a hair shader with the mark output
 			if (LastGrassWriter || LastLeafWriter) LastWriter = LastMaterialWriter = LastAlbedoWriter = true; }
 		bool write = LastWriter;
@@ -1445,6 +1452,15 @@ namespace CapturedNormals {
 			const DWORD src = blend ? StateNow(d, D3DRS_SRCBLEND, D3DBLEND_ONE) : D3DBLEND_ONE, dst = blend ? StateNow(d, D3DRS_DESTBLEND, D3DBLEND_ZERO) : D3DBLEND_ZERO;
 			// opaque, or a SRCALPHA / INVSRCALPHA fade (the land over objects): the templates write alpha 1 there, a plain replace
 			write = (mask & 7) && (!blend || (src == D3DBLEND_SRCALPHA && dst == D3DBLEND_INVSRCALPHA));
+			// UNOFFICIAL 2026-11-21 (NPC transparent/dark skin under Flashlight): forward skin (writers not in MaterialWriters/AlbedoWriters)
+			// must not write RT3 under alpha blend (its COLOR3.a = 2.05..2.45 extrapolates FP16 RT3 as 2.25*skin - 1.25*bg, corrupting/clipping depth)
+			// or when SkinScattering did not bind SkinAlbedo (otherwise RT3 writes face depth & disables FlashlightLamp while AlbedoSurface still holds
+			// the background wall behind the NPC, causing FlashlightDeferred to project the background wall onto the NPC's skin or black it out).
+			const bool forwardSkin = !VmSpan && !LastMaterialWriter && !LastAlbedoWriter;
+			if (write && forwardSkin && (blend || (AlbedoCompiled && !SkinScatteringBound))) write = false;
+			// UNOFFICIAL 2026-11-22: blended forward SKIN gear (ObjectTemplate + SKIN, COLOR3.a = 2) extrapolates FP16 RT3 under
+			// SRCALPHA and wipes background deferred alphas under ONE/ZERO when marked by v2Mark; leave LAMPS_DEFERRED records alone.
+			if (write && blend && LastSkinCodeWriter) write = false;
 			// (2026-11-11 BlendedAlpha) ... of the targets' alpha too, under the scene's separate alpha blend (see BlendedAlphaBegin)
 			// (2026-11-12 CapturedCoverage) a blended template writer is marked for its one draw (CoverageBegin), and a record alpha of 0
 			// keeps the texel's alpha (the foliage shaders write 1 or 0 by themselves)
@@ -1895,6 +1911,7 @@ namespace CapturedNormals {
 		if (AlbedoTexture && AlbedoCompiled) ClearSurface(d, AlbedoDrawSurface(), t.Width, t.Height, D3DCOLOR_ARGB(0, 0, 0, 0), forceFullClear);	// UNOFFICIAL 2026-10-31 AlbedoBuffer: unwritten
 		AlbedoDrawn = AlbedoBound = false;
 		SkinAlbedoTex = nullptr; SkinAlbedoMsaa = nullptr; SkinAlbedoSurface = nullptr;	// (noted again by the skin draws of this span)
+		SkinScatteringBound = false;
 		{	// (2026-11-11) [Main.Main.Quality] CapturedBlendedAlpha, live (a missing key: on); a log line of its work now and then
 			SettingManager::Configuration::ConfigNode node;
 			BlendedAlphaOn = !TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedBlendedAlpha") || node.BoolValue;
@@ -1925,6 +1942,7 @@ namespace CapturedNormals {
 		if (SUCCEEDED(d->GetRenderTarget(3, &rt3)) && rt3) rt3->Release();
 		if ((rt3 && rt3 == DrawSurface()) || MaterialBound || AlbedoBound) Unbind(d);	// (AlbedoBound: 2026-10-31 AlbedoBuffer)
 		InSpan = false;
+		SkinScatteringBound = false;
 		Tracked = false;	// UNOFFICIAL lean hook: resynced at the next span
 		SharedDrawState::Valid = false;
 		if (MsaaSurface) d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);	// the game's MSAA: resolved for the readers

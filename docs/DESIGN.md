@@ -1699,4 +1699,30 @@ log "toml::insert_value ... already exists"): every defaults file is now parsed 
   DLL loaded and migrated the owner's settings file (v91) exactly as designed (only Gamma22 moved). Installed as install-test28, then
   install-test29 (`F:\VS-scratch\install-test29-2026-11-26estore.ps1` -> test28 -> test27).
 - Not run: the in-game pictures (owner: "dont worry about bench pics, ill do it myself"), ray tracing with the new helper, frame time.
-- Not in it: upstream 1.1.4 (a separate merge).
+- Not in it: upstream 1.1.4 (merged next, below).
+
+**Upstream 1.1.4 (2026-11-26, branch `upstream-114-merge`, upstream 2bf5110 = 1.1.4 5538f4b + WORKS-CITED):** terrain bump and sunrise
+continuity, shadow resize hardening, PT / RT and denoiser fixes, a `DeferredSun` compute pass, DoF at RenderScale, DXVK precedence. The owner
+said to take upstream's choices, so its five default changes come in: `[Main.Main.RayTracing] ActorFlushPerSpace` true and
+`[Shaders.ShadowsExteriors.Deferred] MatchSunDisc` false (upstream's steps 95 / 96, here 99 / 100, version 100), and, without a step as
+upstream ships them, `PTGlassSurface` 1, `[Shaders.AmbientOcclusion.RT] GIStrengthInterior` 2 and `GlowGIInterior` 1.5. Settings history:
+a file at 95 / 96 WITH `[Shaders.WetWorld]` was saved by upstream 1.1.4 (it ran their 95 / 96, none of ours); without it, by ours.
+Hand-merged: `ShaderRecord.cpp` (our failed-compile dump + upstream's null-safe constant table), `ShadowsExterior.cpp` (upstream's null
+checks, no WetWorld), `EnvTemplate.hlsl` (upstream's two-register `EnvLightFadeExtra`), `ReflectionsComposite.frag` (the metal F0 branch also
+for the G-buffer material). RT helper protocol stays 10 (rebuilt: `NvrRtTextures.inl` changed). Upstream's committed `Compute/Rt/RtPathTrace*.spv`
+do not rebuild byte for byte with our Vulkan SDK 1.3.296 (believed: another glslang); they are kept as upstream built them; every other
+.spv checked reproduces. `RtReflDenoisePrefilter.frag` (1.0.6, its FFX include removed upstream) no longer compiles and is not loaded.
+`docs/WORKS-CITED.md` is upstream's credits file, kept as theirs (not one of our four docs).
+
+**Bench, slot A, 2026-11-26 (the owner's settings of 11-26; sheets in `F:\VS-scratchtm-sheets`):**
+- Proven, test29 (1.1.1-1.1.3 merge): loads, migrates (step 98 moved ReplaceForward and FollowRenderScale); RT reflections and RT GI run
+  with the new helper (ready in 0.5 s once its shaders are cached); rain, RT, FSR 0.67 and night pictures show no specks or smears. Found:
+  REGISTER CLASH X4500 in `DeferredSun.pso`'s SunFade record (upstream's `TESR_ShadowDynamic` on s12 = our `DS_WetFilmMap`): that record
+  lost the film's sun highlight. Fixed in 4f242a4 (the atlas to s14); `template_compile` with the game's defines: main FAILED, fix OK.
+- Proven, test30 (this branch): no errors in the log; steps 98-101 moved ReplaceForward, FollowRenderScale, ActorFlushPerSpace,
+  MatchSunDisc (true -> false), PTGlassSurface, GIStrengthInterior, GlowGIInterior; the RT helper (rebuilt) ready in 0.6 s.
+- Control (test27 with the same settings): with MatchSunDisc on (the owner's saved 1.1.3 default) test29 lit the ground from the true sun
+  disc (another shadow direction, +14 luma); with 1.1.4's step 100 the direction matches test27 again. Rain darkens the ground by the same
+  amount in both builds (-7 / -8 luma). Believed: the remaining softer, lighter daylight (+12 luma) is upstream's lighting changes.
+- Not run: HDR (no HDR display on the bench), hair (the Character Kit Remake hair the fix targets is not in the slot), grass under lamps
+  (no lamp at these spots at night), frame time.

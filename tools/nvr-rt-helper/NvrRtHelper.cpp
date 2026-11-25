@@ -703,6 +703,12 @@ namespace {
 		b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
 		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
 	}
+	void ComputeBarrier(VkCommandBuffer cmd) {
+		VkMemoryBarrier b = { VK_STRUCTURE_TYPE_MEMORY_BARRIER };
+		b.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+		b.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+		vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &b, 0, nullptr, 0, nullptr);
+	}
 
 	uint32_t Average(const uint64_t* values, uint32_t count) {
 		const uint32_t n = std::min(count, 64u);
@@ -767,6 +773,7 @@ namespace {
 	// (2026-11-07, protocol 7) real textures (NvrRtTextures.inl)
 	struct RealTexture { VkImage image = VK_NULL_HANDLE; VkDeviceMemory memory = VK_NULL_HANDLE; VkImageView view = VK_NULL_HANDLE; VkDeviceSize bytes = 0;
 		uint32_t width = 0, height = 0, levels = 0;
+		bool srgb = false;
 		uint64_t serial = 0; };	// (2026-11-07, ptaaa-omm) a new one each upload: a micromap made from a texture is stale once its id holds another
 	struct PendingTextureFree { uint64_t frame; RealTexture texture; };
 	struct RealTextures {
@@ -820,6 +827,7 @@ namespace {
 		VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
 		std::vector<VkPipeline> pipelines;	// per shader index (null: not loaded yet or failed)
 		std::vector<bool>	pipelineTried;
+		std::vector<int8_t>	shaderUsesScratch;	// -1 unknown, 0 no, 1 uses binding 20 (scratchStore)
 		uint64_t		gpuUs[64] = {}, buildUs[64] = {}, sceneUs[64] = {}, traceUs[64] = {}, responseUs[64] = {};
 		uint32_t		gpuCount = 0, buildCount = 0, sceneCount = 0, traceCount = 0, responseCount = 0;
 		bool			loggedFirst = false;
@@ -859,8 +867,8 @@ namespace {
 	// NVR_RT_TLAS_FAST_TRACE in the environment it is built for tracing speed (PREFER_FAST_TRACE) instead of build speed. One function:
 	// the size query, the live build and the replay's build must ask with the same flags.
 	VkBuildAccelerationStructureFlagsKHR TlasBuildFlags() {
-		static const bool fastTrace = getenv("NVR_RT_TLAS_FAST_TRACE") != nullptr;
-		return fastTrace ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR;
+		static const bool fastBuild = getenv("NVR_RT_TLAS_FAST_BUILD") != nullptr;
+		return fastBuild ? VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_BUILD_BIT_KHR : VK_BUILD_ACCELERATION_STRUCTURE_PREFER_FAST_TRACE_BIT_KHR;
 	}
 	bool CreateTlas(Helper& h) {
 		VkAccelerationStructureGeometryKHR geometry = { VK_STRUCTURE_TYPE_ACCELERATION_STRUCTURE_GEOMETRY_KHR };
@@ -1559,6 +1567,22 @@ namespace {
 #include "NvrRtDisplace.inl"	// UNOFFICIAL 2026-11-07 (protocol 8, rtgap-tessblas) displaced copies of the land / parallax objects
 #include "NvrRtOmm.inl"	// UNOFFICIAL 2026-11-07 (ptaaa-omm, protocol 9) opacity micromaps for alpha-tested geometry
 
+	bool ShaderUsesScratch(Helper& h, uint32_t shader) {
+		if (shader >= NVR_RT_MAX_SHADERS) return false;
+		if (h.shaderUsesScratch.size() <= shader) h.shaderUsesScratch.resize(shader + 1, -1);
+		if (h.shaderUsesScratch[shader] >= 0) return h.shaderUsesScratch[shader] != 0;
+		char raw[260] = {};
+		memcpy(raw, g_shared->shaderPaths[shader], sizeof(raw));
+		raw[sizeof(raw) - 1] = 0;
+		const char* base = raw;
+		for (const char* p = raw; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+		std::string name;
+		for (const char* p = base; *p; p++) name.push_back((*p >= 'A' && *p <= 'Z') ? (char)(*p + 32) : *p);
+		const bool uses = name.rfind("rtpathtrace", 0) == 0 || name.rfind("rtemissivebuild", 0) == 0;
+		h.shaderUsesScratch[shader] = uses ? 1 : 0;
+		return uses;
+	}
+
 	// Records this frame's work into s.cmd (open). False: something could not be recorded (logged); the caller still submits.
 	bool RecordFrame(Helper& h, Slot& s, uint64_t frameNumber) {
 		const NvrRtFrame& f = h.frame;
@@ -1901,11 +1925,65 @@ namespace {
 			FullBarrier(cmd);
 			h.scratchCleared = true;
 		}
+		uint64_t writtenImages = 0, readImages = 0;
+		bool scratchWritten = false, scratchRead = false;
+		bool largeWritten = false, largeRead = false, anyPassRan = false;
+		auto syncIfNeeded = [&](uint64_t pRead, uint64_t pWrite, bool pLargeRead, bool pLargeWrite, bool usesScratch) {
+			const bool needBarrier =
+				((writtenImages & pRead) != 0) ||
+				(((writtenImages | readImages) & pWrite) != 0) ||
+				(pLargeRead && largeWritten) ||
+				(pLargeWrite && (largeWritten || largeRead)) ||
+				(usesScratch && (scratchWritten || scratchRead));
+			if (needBarrier) {
+				ComputeBarrier(cmd);
+				writtenImages = 0;
+				readImages = 0;
+				scratchWritten = false;
+				scratchRead = false;
+				largeWritten = false;
+				largeRead = false;
+			}
+		};
+		auto markUsed = [&](uint64_t pRead, uint64_t pWrite, bool pLargeRead, bool pLargeWrite, bool usesScratch) {
+			readImages |= pRead;
+			writtenImages |= pWrite;
+			largeRead = largeRead || pLargeRead;
+			largeWritten = largeWritten || pLargeWrite;
+			if (usesScratch) { scratchWritten = true; scratchRead = true; }
+			anyPassRan = true;
+		};
 		for (uint32_t p = 0; p < std::min<uint32_t>(f.passCount, NVR_RT_MAX_PASSES); p++) {
 			const NvrRtPass& pass = f.passes[p];
+			const bool isDenoiser = ShadowDenoise::IsModulePass(h, pass.shader);
+			VkPipeline pipeline = VK_NULL_HANDLE;
+			if (!isDenoiser) {
+				pipeline = Pipeline(h, pass.shader);
+				if (!pipeline || pass.imageCount > NVR_RT_PASS_IMAGES_MAX) continue;
+				bool imagesOk = true;
+				for (uint32_t i = 0; i < pass.imageCount; i++) imagesOk = imagesOk && NvrRtPassImage(pass, i) < h.imageCount && h.images[NvrRtPassImage(pass, i)].view;
+				if (!imagesOk) { Log("pass %u: an image index is not a shared image", p); continue; }
+			}
+			uint64_t pRead = 0, pWrite = 0;
+			bool pLargeRead = false, pLargeWrite = false;
+			const uint32_t trackImages = std::min<uint32_t>(pass.imageCount, NVR_RT_PASS_IMAGES_MAX);
+			for (uint32_t i = 0; i < trackImages; i++) {
+				const uint32_t idx = NvrRtPassImage(pass, i);
+				const bool wr = ((pass.writeMask >> i) & 1u) != 0;
+				if (idx < 64u) {
+					const uint64_t bit = 1ull << idx;
+					if (wr) pWrite |= bit; else pRead |= bit;
+				} else {
+					if (wr) pLargeWrite = true; else pLargeRead = true;
+				}
+			}
+			pRead &= ~pWrite;
+			const bool usesScratch = !isDenoiser && ShaderUsesScratch(h, pass.shader);
 			// UNOFFICIAL 2026-11-07 the RT shadow denoiser (NvrRtShadowDenoise.inl): a pass of RtShadowDenoise.spv runs the module
-			if (ShadowDenoise::IsModulePass(h, pass.shader)) {
+			if (isDenoiser) {
+				syncIfNeeded(pRead, pWrite, pLargeRead, pLargeWrite, false);
 				if (!ShadowDenoise::Run(h, slot, cmd, p, pass)) continue;
+				markUsed(pRead, pWrite, pLargeRead, pLargeWrite, false);
 				s.measured[2] = true;
 				if (h.queries && s.passesStamped < NVR_RT_MAX_PASSES) {
 					vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, slot * kQueriesPerSlot + 4 + s.passesStamped);
@@ -1913,11 +1991,7 @@ namespace {
 				}
 				continue;
 			}
-			VkPipeline pipeline = Pipeline(h, pass.shader);
-			if (!pipeline || pass.imageCount > NVR_RT_PASS_IMAGES_MAX) continue;
-			bool imagesOk = true;
-			for (uint32_t i = 0; i < pass.imageCount; i++) imagesOk = imagesOk && NvrRtPassImage(pass, i) < h.imageCount && h.images[NvrRtPassImage(pass, i)].view;
-			if (!imagesOk) { Log("pass %u: an image index is not a shared image", p); continue; }
+			syncIfNeeded(pRead, pWrite, pLargeRead, pLargeWrite, usesScratch);
 			memcpy((uint8_t*)s.constants.mapped + (size_t)p * NVR_RT_PASS_CONSTANTS, pass.constants, std::min<uint32_t>(pass.constantsSize, NVR_RT_PASS_CONSTANTS));
 
 			VkWriteDescriptorSetAccelerationStructureKHR asWrite = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET_ACCELERATION_STRUCTURE_KHR };
@@ -1943,13 +2017,14 @@ namespace {
 			const VkDescriptorSet bound[2] = { s.sets[p], h.tex.sets[slot] };	// (protocol 7) set 1: real textures
 			vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, h.pipelineLayout, 0, 2, bound, 0, nullptr);
 			vkCmdDispatch(cmd, std::max(1u, pass.groupsX), std::max(1u, pass.groupsY), std::max(1u, pass.groupsZ));
-			FullBarrier(cmd);	// the next pass may read this one's output; the game reads them after the signal
+			markUsed(pRead, pWrite, pLargeRead, pLargeWrite, usesScratch);
 			s.measured[2] = true;
 			if (h.queries && s.passesStamped < NVR_RT_MAX_PASSES) {	// per-pass GPU time (reported by shader every 120 frames)
 				vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, h.queries, slot * kQueriesPerSlot + 4 + s.passesStamped);
 				s.passShaders[s.passesStamped++] = pass.shader;
 			}
 		}
+		if (anyPassRan) FullBarrier(cmd);	// make all pass writes visible to CaptureAfter, D3D reads after signal, and next frame
 		if (h.capture.active) CaptureAfter(h, cmd);	// (2026-11-03) what the passes wrote
 		return true;
 	}

@@ -11,12 +11,14 @@ layout(location = 0) out vec4 o_mulDepth;
 layout(location = 1) out vec4 o_add;
 
 void main() {
-    vec2 h = 0.5 * (pc.fogLayout.zw - cb.reciprocalResolution.xy);
-    vec2 best = uv - h;
+    vec2 ruv = uv * fogRectScale();
+    vec2 texel = cb.reciprocalResolution.xy;
+    vec2 h = 0.5 * (pc.fogLayout.zw - texel);
+    vec2 best = fogClampToRect(ruv - h, texel);
     float bestDepth = readDepthLod(best);
     const vec2 signs[3] = vec2[3](vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));	// others: (h.x, -h.y), (-h.x, h.y), (h.x, h.y)
     for (int i = 0; i < 3; i++) {
-        vec2 candidate = uv + signs[i] * h;
+        vec2 candidate = fogClampToRect(ruv + signs[i] * h, texel);
         float candidateDepth = readDepthLod(candidate);
         if (candidateDepth < bestDepth) { best = candidate; bestDepth = candidateDepth; }
     }

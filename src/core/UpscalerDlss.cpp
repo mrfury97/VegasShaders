@@ -326,7 +326,12 @@ namespace {
 		IDirect3DTexture9*	Output() const override { return usedSelf ? output.Texture : Upscaler::Fsr2()->Output(); }
 		bool				Failed() const override { return state == Running ? false : Upscaler::Fsr2()->Failed(); }
 		bool				Evaluate(IDirect3DDevice9* Device, const Upscaler::Inputs& In) override;
-		void				ReleaseResources() override { Stop("its resources were released"); state = Idle; }
+		void				ReleaseResources() override {
+			if (state == Idle && !process && !output.Texture && !maskTex.Texture) return;
+			const bool wasOff = state == Off;
+			Stop("its resources were released");
+			if (!wasOff) state = Idle;
+		}
 		std::string			DiagText() const override {	// UNOFFICIAL 2026-11-01 (the history watch's lines)
 			const char* names[] = { "idle", "starting", "running", "off for the session" };
 			std::string text = std::string("DLSS helper ") + names[state] + (passThrough ? " (pass-through test)" : "") + ", this frame " +
@@ -529,7 +534,8 @@ namespace {
 		UINT64 done = 0;
 		d->outputReady->GetCompletedValue(&done);
 		const UINT64 recorded = (UINT64)InterlockedCompareExchange64(&d->lastRecorded, 0, 0);
-		d->outputReady->SignalFromHost((std::max)(done, recorded) + kReleaseMargin);
+		const UINT64 releaseBase = (std::max)(done, recorded);
+		if (releaseBase <= (~0ull) - kReleaseMargin) d->outputReady->SignalFromHost(releaseBase + kReleaseMargin);
 		InterlockedExchange(&d->tripped, 1);
 		return 0;
 	}
@@ -791,7 +797,7 @@ namespace {
 		if (outputReady) {
 			UINT64 done = 0;
 			outputReady->GetCompletedValue(&done);
-			if (done < recorded) outputReady->SignalFromHost(recorded + kReleaseMargin);
+			if (done < recorded && recorded <= (~0ull) - kReleaseMargin) outputReady->SignalFromHost(recorded + kReleaseMargin);
 		}
 		for (ID3D9NvrExtSharedImage*& image : images) DxvkCompute::Drop(image);
 		// UNOFFICIAL 2026-11-01 the bias mask's image and texture (the pass stays: made once a session)
@@ -1199,7 +1205,7 @@ namespace Upscaler {
 		// which falls back on them -- and is logged.
 		if (last && chosen != last) {
 			chosen->RequestReset();
-			if (last == Fsr31() || (last == Fsr2() && chosen != &TheDlss)) last->ReleaseResources();
+			if (last == Fsr31() || (last == Fsr2() && chosen != &TheDlss) || last == &TheDlss) last->ReleaseResources();
 			if (last == &TheDlss && chosen == Fsr31()) Fsr2()->ReleaseResources();	// DLSS's fallback textures, unused now
 			Logger::Log("UNOFFICIAL upscaler switched live: %s -> %s (history restarted)", last->Name(), chosen->Name());
 		}

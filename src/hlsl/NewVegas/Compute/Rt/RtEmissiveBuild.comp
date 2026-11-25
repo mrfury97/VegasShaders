@@ -92,7 +92,9 @@ void main() {
 	const ivec2 glowOrigin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
 	const vec3 fallbackAlbedo = ok ? records[g].albedo.rgb : vec3(0.0);
 #ifndef RT_NO_REAL_TEXTURES
-	const uint realGlowId = hasUv ? rtSlotTextures(records[g].flags).z : 0u;
+	const uvec4 slot4 = hasUv ? rtSlotTextures4(records[g].flags) : uvec4(0u);
+	const uint realGlowId = slot4.z;
+	const bool glowSrgb = (slot4.w & 2u) != 0u;
 #endif
 	float carry = 0.0;
 	vec3 lo = vec3(1.0e30), hi = vec3(-1.0e30);
@@ -127,7 +129,8 @@ void main() {
 							const float u = (float(k & 3) + 0.5) * 0.25, w = (float(k >> 2) + 0.5) * 0.25, su = sqrt(u);
 							const float b0 = su * (1.0 - w), b1 = su * w;
 							const vec2 uv = t0 * (1.0 - b0 - b1) + t1 * b0 + t2 * b1;
-							sum += min(rtTexToLinear(rtTexSample(realGlowId, uv, lod).rgb), vec3(1.0));
+							const vec3 glowRaw = rtTexSample(realGlowId, uv, lod).rgb;
+							sum += min(glowSrgb ? glowRaw : rtTexToLinear(glowRaw), vec3(1.0));
 						}
 					}
 					else

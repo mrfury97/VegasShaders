@@ -98,7 +98,8 @@ namespace ForwardCloudShadows {
 		Light[0] = lx; Light[1] = ly; Light[2] = Light[3] = 0.0f;
 		Foliage = PlantShadows;	// (2026-11-16 fast-restart) the foliage's own, ForwardShadows on or off
 		FoliageStrength = Foliage ? strength : 0.0f;
-		if (!active || !VertexFetch) return;	// ForwardShadows off (or cannot run): the surfaces get strength 0 (Send), SunFar draws the clouds' shadow
+		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+		if (!active || !VertexFetch || !shadows || shadows->Constants.ShadowFade.y <= 0.0f) return;	// ForwardShadows off (or cannot run): the surfaces get strength 0 (Send), SunFar draws the clouds' shadow
 		device->SetTexture(D3DVERTEXTEXTURESAMPLER1, clouds->Textures.ShadowTexture);
 		device->SetSamplerState(D3DVERTEXTEXTURESAMPLER1, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
 		device->SetSamplerState(D3DVERTEXTEXTURESAMPLER1, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);

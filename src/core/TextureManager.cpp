@@ -36,9 +36,9 @@ void TextureManager::Initialize() {
 	mgr->InitTexture("TESR_RenderedBuffer", &mgr->RenderedTexture, &mgr->RenderedSurface, screenW, screenH, D3DFMT_A16B16G16R16F);
 
 	// readable copies of the world's and of the first-person model's depth
-	MakeReadableDepth(dev, screenW, screenH, &mgr->DepthTexture);
+	if (FAILED(MakeReadableDepth(dev, screenW, screenH, &mgr->DepthTexture)) || !mgr->DepthTexture) { mgr->DepthTexture = nullptr; Logger::Log("[ERROR] : Failed to create readable world depth texture (%ux%u INTZ).", screenW, screenH); }
 	mgr->RegisterTexture("TESR_DepthBufferWorld", (IDirect3DBaseTexture9**)&mgr->DepthTexture);
-	MakeReadableDepth(dev, screenW, screenH, &mgr->DepthTextureViewModel);
+	if (FAILED(MakeReadableDepth(dev, screenW, screenH, &mgr->DepthTextureViewModel)) || !mgr->DepthTextureViewModel) { mgr->DepthTextureViewModel = nullptr; Logger::Log("[ERROR] : Failed to create readable viewmodel depth texture (%ux%u INTZ).", screenW, screenH); }
 	mgr->RegisterTexture("TESR_DepthBufferViewModel", (IDirect3DBaseTexture9**)&mgr->DepthTextureViewModel);
 	// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): made on first use (empty until then: readers keep the depth-rebuilt normal)
 	mgr->RegisterTexture("TESR_CapturedNormalsBuffer", (IDirect3DBaseTexture9**)&CapturedNormals::Texture);
@@ -50,8 +50,8 @@ void TextureManager::Initialize() {
 	mgr->RegisterTexture("TESR_SkyCoverage", (IDirect3DBaseTexture9**)&SkyCoverage::Texture);	// UNOFFICIAL 2026-11-04 SkyCoverage (the game's MSAA; made on first use)
 
 	// let NVAPI see the two depth textures (for the depth copies)
-	NvAPI_D3D9_RegisterResource(mgr->DepthTexture);
-	NvAPI_D3D9_RegisterResource(mgr->DepthTextureViewModel);
+	if (mgr->DepthTexture) NvAPI_D3D9_RegisterResource(mgr->DepthTexture);
+	if (mgr->DepthTextureViewModel) NvAPI_D3D9_RegisterResource(mgr->DepthTextureViewModel);
 
 	// UNOFFICIAL terrain blending ([Shaders.Terrain.Blending]): its depth copy exists only when the feature was on at startup,
 	// which is also when the land shaders are compiled with it (TERRAIN_BLEND, ShaderRecord::LoadShader).
@@ -129,7 +129,7 @@ void TextureManager::InitTexture(const char* samplerName, IDirect3DTexture9** ta
 	}
 
 	EffectStatus::TargetSize(samplerName, (unsigned)w, (unsigned)h);	// UNOFFICIAL 2026-11-01: logged when made at another size than before
-	(*target)->GetSurfaceLevel(0, topSurface);
+	if (!*target || FAILED((*target)->GetSurfaceLevel(0, topSurface)) || !*topSurface) { Logger::Log("[ERROR] : Failed to get surface level 0 for texture %s", samplerName); if (*target) { (*target)->Release(); *target = nullptr; } *topSurface = nullptr; return; }
 	RegisterTexture(samplerName, reinterpret_cast<IDirect3DBaseTexture9**>(target));
 
 	// (memleak) noted, by its slot: a slot made again (another size) replaces its old note
@@ -201,25 +201,67 @@ bool TextureManager::OwnerWanted(EffectRecord* Owner) {
 // Not covered, and why an effect must say so itself (EffectRecord::TargetParkable): a pointer an effect copied into a member or a
 // static, or a pass binding kept across frames.
 void TextureManager::ForgetTarget(const std::string& Name, IDirect3DBaseTexture9* Texture, IDirect3DSurface9* Surface) {
-	IDirect3DDevice9* device = TheRenderManager->device;
-	TheShaderManager->ClearShaderSamplers(Name.c_str(), Name.size() + 1);	// (+ 1: the whole name, not names that start with it)
-	NiDX9RenderState* state = TheRenderManager->renderState;
-	for (DWORD stage = 0; stage < 16; stage++) {
-		IDirect3DBaseTexture9* bound = nullptr;
-		const bool known = SUCCEEDED(device->GetTexture(stage, &bound));
-		if (bound) bound->Release();
-		if (!(known && bound == Texture) && state->unk10A0[stage] != (UInt32)Texture) continue;
-		device->SetTexture(stage, nullptr);
-		state->NoteDeviceTexture(stage, nullptr);
-	}
-	for (DWORD stage = D3DVERTEXTEXTURESAMPLER0; stage <= D3DVERTEXTEXTURESAMPLER3; stage++) {
-		IDirect3DBaseTexture9* bound = nullptr;
-		if (SUCCEEDED(device->GetTexture(stage, &bound)) && bound) {
-			bound->Release();
-			if (bound == Texture) device->SetTexture(stage, nullptr);
+	if (!Texture && !Surface) return;
+	IDirect3DDevice9* device = TheRenderManager ? TheRenderManager->device : nullptr;
+	NiDX9RenderState* state = TheRenderManager ? TheRenderManager->renderState : nullptr;
+	if (TheShaderManager) {
+		if (!Name.empty())
+			TheShaderManager->ClearShaderSamplers(Name.c_str(), Name.size() + 1);	// (+ 1: the whole name, not names that start with it)
+		if (Texture) {
+			auto forget = [&](ShaderProgram* program) {
+				if (!program) return;
+				for (UInt32 i = 0; i < program->TextureShaderValuesCount; i++) {
+					TextureRecord* record = program->TextureShaderValues[i].Texture;
+					if (record && record->Texture == Texture) record->Texture = nullptr;
+				}
+			};
+			for (const auto& named : TheShaderManager->EffectsNames) forget(named.second ? *named.second : nullptr);
+			for (const auto& named : TheShaderManager->ShaderNames) {
+				ShaderCollection* collection = named.second ? *named.second : nullptr;
+				if (!collection) continue;
+				for (auto& vertex : collection->VertexShaderList)
+					for (int kind = 0; vertex && kind < 3; kind++) forget(vertex->ShaderProg[kind]);	// Default / Exterior / Interior
+				for (auto& pixel : collection->PixelShaderList)
+					for (int kind = 0; pixel && kind < 3; kind++) forget(pixel->ShaderProg[kind]);
+			}
 		}
 	}
-	RenderRect::ForgetSurface(Surface);
+	if (device && Texture) {
+		for (DWORD stage = 0; stage < 16; stage++) {
+			IDirect3DBaseTexture9* bound = nullptr;
+			const bool onDevice = FAILED(device->GetTexture(stage, &bound)) || bound == Texture;
+			if (bound) bound->Release();
+			const bool noted = state && (state->GetTexture(stage) == Texture || state->unk10A0[stage] == (UInt32)Texture);
+			if (!onDevice && !noted) continue;
+			device->SetTexture(stage, nullptr);
+			if (state) {
+				state->NoteDeviceTexture(stage, nullptr);
+				if (state->GetTexture(stage) == Texture) state->SetTexture(stage, nullptr);
+			}
+		}
+		for (DWORD stage = D3DVERTEXTEXTURESAMPLER0; stage <= D3DVERTEXTEXTURESAMPLER3; stage++) {
+			IDirect3DBaseTexture9* bound = nullptr;
+			if (SUCCEEDED(device->GetTexture(stage, &bound)) && bound) {
+				if (bound == Texture) device->SetTexture(stage, nullptr);
+				bound->Release();
+			}
+		}
+	}
+	if (device && Surface) {
+		for (DWORD rt = 1; rt < 4; rt++) {
+			IDirect3DSurface9* bound = nullptr;
+			if (SUCCEEDED(device->GetRenderTarget(rt, &bound)) && bound) {
+				if (bound == Surface) device->SetRenderTarget(rt, nullptr);
+				bound->Release();
+			}
+		}
+		IDirect3DSurface9* ds = nullptr;
+		if (SUCCEEDED(device->GetDepthStencilSurface(&ds)) && ds) {
+			if (ds == Surface) device->SetDepthStencilSurface(nullptr);
+			ds->Release();
+		}
+	}
+	if (Surface) RenderRect::ForgetSurface(Surface);
 }
 
 // Park: the real target leaves, a 1 x 1 stand-in takes its slot. Unpark: the other way. 1: swapped; 0: the new texture could not be

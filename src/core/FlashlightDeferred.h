@@ -11,6 +11,7 @@
 #include "LinearScene.h"
 #include "ShaderRecord.h"
 #include "LightFreeRecords.h"
+#include "DxvkCompute.h"
 namespace FlashlightDeferred {
 	inline ShaderRecordPixel* Pass = nullptr;
 	inline bool PassFailed = false;
@@ -308,8 +309,11 @@ namespace FlashlightDeferred {
 		// dot(position, FL_Fwd) moves by under 0.1 % of the view z with it, far inside its 1 % + 2 unit pull.) Off: the unjittered ray, as before.
 		const bool jitterExact = TheSettingManager->GetSettingI("Shaders.Flashlight.Deferred", "JitterExact") != 0;
 		const float jx = jitterExact ? proj._31 * tanX : 0.0f, jy = jitterExact ? proj._32 * tanY : 0.0f;
+		float dispSlack[3] = {};
+		DxvkCompute::DisplaceRtSlack(dispSlack);
+		const float depthPull = 2.0f + (dispSlack[0] > 0.0f ? dispSlack[0] : 0.0f);
 		const float own[11][4] = {
-			{ proj._33, proj._43, 0.01f, 2.0f },	// FL_Depth: the depth of a view z, and the pull toward the camera (1 % and 2 units)
+			{ proj._33, proj._43, 0.01f, depthPull },	// FL_Depth: the depth of a view z, and the pull toward the camera (1 % and 2 + displace slack units)
 			{ 1.0f / (float)vp.Width, 1.0f / (float)vp.Height, (float)vp.X, (float)vp.Y },
 			{ iv._11, iv._12, iv._13, tanX },
 			{ iv._21, iv._22, iv._23, tanY },

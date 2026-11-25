@@ -243,8 +243,9 @@ float CloudSunAt(float3 P) {
 // the depth buffer does not hold, beyond the range, no traced frame yet) the cascades, exactly as before.
 // Compiled in only when RT sun shadows were on at startup on the DXVK fork (RT_SUN_FORWARD from ShaderRecord::BuildDefines), with the
 // forward path, outdoors, without the sun cross-fade (its registers): everywhere else the shaders are byte for byte what they were.
-// Registers: c162-c165 are the cross-fade's kept centres (never compiled in together); the land takes others (TerrainTemplate.hlsl:
-// the DLL writes c146-c165 for its lamps). s15 is free in every record without lamp-shadow code (the land: s13 below 7 layers).
+// Registers: c176-c179 are free in every !INTERIOR_SHADOWS non-land shader (c160-c164 belong to SUN_CONTACT_FORWARD / Bend, c165-c166 belong
+// to Wetness.hlsl PR_SHAPE/PR_STREAK, PointShadowForward c174-c189 is only used when INTERIOR_SHADOWS=1, ForwardPlus uses c180-c181, and
+// TerrainTemplate overrides RT_SUN_ROWX_REG..DATA_REG to c192, c193, c195, c196). s15 is free in every record without lamp-shadow code (the land: s13 below 7 layers).
 // An includer that cannot carry it defines RT_SUN_FORWARD_OFF before this file, or calls GetSunShadowMaps itself.
 #ifndef RT_SUN_FORWARD
     #define RT_SUN_FORWARD 0
@@ -267,10 +268,11 @@ float CloudSunAt(float3 P) {
     #define RT_SUN_DATA_REG c173
 #endif
 #ifndef RT_SUN_ROWX_REG
-    #define RT_SUN_ROWX_REG c162
-    #define RT_SUN_ROWY_REG c163
-    #define RT_SUN_ROWW_REG c164
-    #define RT_SUN_DATA_REG c165
+    // Clear of SUN_CONTACT_FORWARD (Bend c160-c164) and Wetness PR_SHAPE/PR_STREAK (c165-c166)
+    #define RT_SUN_ROWX_REG c176
+    #define RT_SUN_ROWY_REG c177
+    #define RT_SUN_ROWW_REG c178
+    #define RT_SUN_DATA_REG c179
 #endif
 float4 TESR_RtSunRowX : register(RT_SUN_ROWX_REG); // dot(float4(P, 1), .) = u w of the traced frame's texture
 float4 TESR_RtSunRowY : register(RT_SUN_ROWY_REG); // v w

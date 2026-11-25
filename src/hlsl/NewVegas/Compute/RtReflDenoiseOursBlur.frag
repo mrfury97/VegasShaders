@@ -25,9 +25,9 @@ void main() {
     o_blurred = centre;
     o_radius = vec4(0.0);
     vec4 g = Fetch(t_in2, px);
-    if (g.x <= 0.0 || IsMirror(g.y)) return;
+    if (g.x == 0.0 || IsMirror(g.y)) return;
     vec4 m = Fetch(t_in0, px);
-    float z = g.x, r = g.y, hit = max(m.x, 0.0), n = max(m.y, 1.0);
+    float z = abs(g.x), r = g.y, hit = max(m.x, 0.0), n = max(m.y, 1.0);
     bool centerWeapon;
     StripRoughness(Fetch(t_ray, px).y, centerWeapon);
     vec3 normal = OctDecodeN(g.zw);
@@ -51,11 +51,11 @@ void main() {
         ivec2 q = px + ivec2(round(o));
         if (q == px || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ACTIVE_GRID))) continue;
         vec4 gq = Fetch(t_in2, q);
-        if (gq.x <= 0.0) continue;
+        if (gq.x == 0.0) continue;
         bool tapWeapon;
         StripRoughness(Fetch(t_ray, q).y, tapWeapon);
         if (tapWeapon != centerWeapon) continue;
-        vec3 pq = PointAtSurface((vec2(q) + 0.5) * pc.size.zw, gq.x, tapWeapon);
+        vec3 pq = PointAtSurface((vec2(q) + 0.5) * pc.size.zw, abs(gq.x), tapWeapon);
         float plane = abs(dot(pq - point, normal)) / planeTolerance;
         float w = exp(-2.0 * t * t) * max(0.0, 1.0 - plane)
                 * pow(max(dot(OctDecodeN(gq.zw), normal), 0.0), 64.0)

@@ -91,7 +91,13 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     // UNOFFICIAL 2026-10-26 (VolumetricFog.cpp FogExtLinearNames): these colours linearized once a draw on the CPU, as the D3D9
     // effect's preshader does (linearized here on every pixel they cost most of the fog estimate's extra 0.04 ms, desert)
     vec4 fogColorLin, skyColorLin, skyLowColorLin, horizonColorLin, sunDiskColorLin, sunsetColorLin, sunAmbientLin, fogAerialTintLin, sunColorLin;
+    vec4 renderScale;          // xy: render size / screen size (1 = off), zw: 1 / xy
 } cb;
+
+vec2 fogRectScale() { return cb.renderScale.xy; }
+vec2 fogInvRectScale() { return cb.renderScale.zw; }
+vec2 fogRectToScreen(vec2 ruv) { return ruv * cb.renderScale.zw; }
+vec2 fogClampToRect(vec2 ruv, vec2 texel) { return clamp(ruv, 0.5 * texel, cb.renderScale.xy - 0.5 * texel); }
 
 // Push block: the samplers' heap indices (filled in by DXVK), the variant, and the effect's own NVR_ constants (set by the C++
 // with Effect->SetVector in the D3D9 path).
@@ -255,9 +261,10 @@ float hlslAsin(float x) {
 float readDepthLod(vec2 coord) { return LINEAR_LOD(t_depth, coord).x * farZ; }
 
 vec3 toWorld(vec2 tex) {
+    vec2 s = fogRectToScreen(tex);
     vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
-    v += (1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
-    v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
+    v += (1.0 / cb.projectionTransform[0][0] * (2.0 * s.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
+    v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * s.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
     return v;
 }
 
@@ -362,7 +369,7 @@ vec4 FogGridSum(vec2 coord, float depth) {
     float s = sqrt(planar / marchDistance) * 64.0;
     float z = min(floor(s), 63.0);
     vec2 gridSize = cb.vlGridLayout.xy;
-    vec2 local = clamp(coord * gridSize, vec2(0.5), gridSize - 0.5);
+    vec2 local = clamp(fogRectToScreen(coord) * gridSize, vec2(0.5), gridSize - 0.5);
     vec2 farTile = vec2(hlslFmod(z, 8.0), floor(z / 8.0));
     vec2 nearTile = vec2(hlslFmod(z - 1.0, 8.0), floor((z - 1.0) / 8.0));
     vec4 farSide = LINEAR_LOD(t_grid, (farTile * gridSize + local) * cb.vlGridLayout.zw);
@@ -563,11 +570,12 @@ float getSky(vec2 coord, bool interior) {
     dist *= 1.0;
 
     vec3 coeffs = vec3(vec2(1.0, -1.0) * dist, 0.9961);
-    bool depth = readDepthLod(coord) / farZ >= coeffs.z;
-    bool depth1 = readDepthLod(coord + coeffs.xx) / farZ >= coeffs.z;
-    bool depth2 = readDepthLod(coord + coeffs.xy) / farZ >= coeffs.z;
-    bool depth3 = readDepthLod(coord + coeffs.yx) / farZ >= coeffs.z;
-    bool depth4 = readDepthLod(coord + coeffs.yy) / farZ >= coeffs.z;
+    vec2 texel = cb.reciprocalResolution.xy;
+    bool depth = readDepthLod(fogClampToRect(coord, texel)) / farZ >= coeffs.z;
+    bool depth1 = readDepthLod(fogClampToRect(coord + coeffs.xx, texel)) / farZ >= coeffs.z;
+    bool depth2 = readDepthLod(fogClampToRect(coord + coeffs.xy, texel)) / farZ >= coeffs.z;
+    bool depth3 = readDepthLod(fogClampToRect(coord + coeffs.yx, texel)) / farZ >= coeffs.z;
+    bool depth4 = readDepthLod(fogClampToRect(coord + coeffs.yy, texel)) / farZ >= coeffs.z;
 
     float total = float(depth || depth1 || depth2 || depth3 || depth4) * luma(color);
     return saturate(total);
@@ -975,7 +983,7 @@ vec3 FogApply(vec3 gammaColor, vec2 coord, bool legacy, bool interior, bool clas
     vec2 fraction = fract(position);
     vec2 baseUV = (floor(position) + 0.5) * texel;
     vec2 minUV = texel * 0.5;
-    vec2 maxUV = 1.0 - minUV;
+    vec2 maxUV = cb.renderScale.xy - minUV;
 
     vec2 uv00 = clamp(baseUV, minUV, maxUV);
     vec2 uv10 = clamp(baseUV + vec2(texel.x, 0.0), minUV, maxUV);
@@ -1059,7 +1067,7 @@ vec3 CompositeAO(vec3 linearColor, vec2 coord) {
     bool sky = pc.compositeFlags.z > 0.5;
     for (int y = 0; y < 2; ++y) {
         for (int x = 0; x < 2; ++x) {
-            vec2 sampleUV = clamp((base + vec2(x, y) + 0.5) * texel, 0.5 * texel, 1.0 - 0.5 * texel);
+            vec2 sampleUV = fogClampToRect((base + vec2(x, y) + 0.5) * texel, texel);
             vec2 aoSample = LINEAR_LOD(t_ao, sampleUV).rg;
             float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
             weight /= 1.0 + abs(aoSample.y - depth) / max(blurDrop, 0.001);

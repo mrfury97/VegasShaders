@@ -89,7 +89,7 @@ float lampRay(vec3 point, vec3 lamp) {
 // the drawn, opaque world. People, the hidden first-person body and cut-outs are left out: they would only move the weights a little)
 float surfaceT(vec3 dir, float tMax) {
 	rayQueryEXT q;
-	rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0x8Bu, vec3(0.0), 0.0, dir, tMax);
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, 0x8Au, vec3(0.0), 0.0, dir, tMax);
 	for (uint cap = 0u; rayQueryProceedEXT(q); ) if (++cap > 256u) { rayQueryTerminateEXT(q); break; } else {}
 	return rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT ? rayQueryGetIntersectionTEXT(q, true) : tMax;
 }

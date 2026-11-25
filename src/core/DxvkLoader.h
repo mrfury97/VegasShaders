@@ -14,6 +14,8 @@
 // is and the mod's file is not loaded. Nothing is done in the editor or when the file is missing. GetModuleHandle("d3d9.dll")
 // still returns the game folder's or Windows' module afterwards: code that asks which d3d9.dll the game runs on uses Runtime().
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <shlobj.h>	// SHGetFolderPathA (AdapterNameFromPrefs)
@@ -22,6 +24,10 @@
 
 namespace DxvkLoader {
 	inline HMODULE Loaded = nullptr;	// the mod's d3d9.dll, when it was loaded and the entry points redirected
+	inline std::string BlockedRootDxvk;	// root <game>\d3d9.dll (another DXVK) that VSDxvk bypassed
+	inline std::string OverridingWrapper;	// non-DXVK wrapper (ENB/ReShade/SpecialK) or unbypassable root d3d9.dll preventing VSDxvk
+	inline std::string RootConfIgnored;	// leftover <game>\dxvk.conf ignored because a root DXVK was blocked and VSDxvk ships none
+	inline std::string ActiveNonForkDxvk;	// populated by InstallCheck when running under a non-Vegas-Shaders DXVK
 
 	// The d3d9.dll the game's Direct3D comes from.
 	inline HMODULE Runtime() { return Loaded ? Loaded : GetModuleHandleA("d3d9.dll"); }
@@ -97,27 +103,159 @@ namespace DxvkLoader {
 		return true;
 	}
 
-	// True when the file's ProductName starts with "DXVK" (what RenderManager's DXVK check reads too).
-	inline bool IsDxvk(const char* path) {
-		DWORD ignored = 0;
-		const DWORD size = GetFileVersionInfoSizeA(path, &ignored);
-		if (!size) return false;
-		std::vector<char> info(size);
-		if (!GetFileVersionInfoA(path, 0, size, info.data())) return false;
-		struct LangCodepage { WORD language, codePage; }* table = nullptr;
-		UINT bytes = 0;
-		if (!VerQueryValueA(info.data(), "\\VarFileInfo\\Translation", (LPVOID*)&table, &bytes)) return false;
-		for (UINT i = 0; i < bytes / sizeof(LangCodepage); i++) {
-			char key[64];
-			sprintf_s(key, "\\StringFileInfo\\%04x%04x\\ProductName", table[i].language, table[i].codePage);
-			char* product = nullptr;
-			UINT length = 0;
-			if (VerQueryValueA(info.data(), key, (LPVOID*)&product, &length) && product && !strncmp(product, "DXVK", 4)) return true;
+	inline bool IsInWindowsDir(const char* path) {
+		if (!path || !*path) return false;
+		char windows[MAX_PATH] = {};
+		const DWORD n = GetSystemWindowsDirectoryA(windows, MAX_PATH);
+		if (!n) return false;
+		if (_strnicmp(path, windows, n) != 0) return false;
+		return windows[n - 1] == '\\' || windows[n - 1] == '/' || path[n] == '\\' || path[n] == '/' || path[n] == '\0';
+	}
+
+	inline bool ContainsI(const char* haystack, const char* needle) {
+		if (!haystack || !needle || !*needle) return false;
+		const size_t nlen = strlen(needle);
+		for (const char* p = haystack; *p; ++p) {
+			size_t i = 0;
+			while (i < nlen && p[i] && std::tolower((unsigned char)p[i]) == std::tolower((unsigned char)needle[i])) ++i;
+			if (i == nlen) return true;
 		}
 		return false;
 	}
 
+	inline bool HasAsciiBytes(const std::vector<uint8_t>& buf, const char* needle) {
+		if (!needle || !*needle) return false;
+		const auto* n = reinterpret_cast<const uint8_t*>(needle);
+		const size_t nlen = strlen(needle);
+		return std::search(buf.begin(), buf.end(), n, n + nlen) != buf.end();
+	}
+
+	inline bool IsKnownNonDxvkWrapper(HMODULE mod) {
+		if (!mod) return false;
+		static const char* const kExports[] = {
+			"ReShadeRegisterAddon", "ReShadeLogMessage",
+			"ENBGetSDKVersion", "ENBGetVersion",
+			"SK_GetModuleName", "SK_IsInjected"
+		};
+		for (const char* name : kExports) {
+			if (GetProcAddress(mod, name)) return true;
+		}
+		return false;
+	}
+
+	// Binary PE marker fallback for stripped or resource-less DXVK builds (DXVK loads vulkan-1.dll
+	// dynamically, so it is absent from static IATs, while DXVK binaries carry "vulkan-1.dll" and
+	// "DXVK_CONFIG" or "dxvk.conf").
+	inline bool FileLooksLikeDxvk(const char* path) {
+		if (!path || !*path) return false;
+		HANDLE f = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (f == INVALID_HANDLE_VALUE) return false;
+		LARGE_INTEGER li = {};
+		if (!GetFileSizeEx(f, &li) || li.QuadPart < (LONGLONG)sizeof(IMAGE_DOS_HEADER) || li.QuadPart > (64LL << 20)) {
+			CloseHandle(f);
+			return false;
+		}
+		std::vector<uint8_t> buf((size_t)li.QuadPart);
+		size_t total = 0;
+		while (total < buf.size()) {
+			const size_t rem = buf.size() - total;
+			const DWORD chunk = rem > (1u << 20) ? (1u << 20) : (DWORD)rem;
+			DWORD got = 0;
+			if (!ReadFile(f, buf.data() + total, chunk, &got, nullptr) || got == 0) break;
+			total += got;
+		}
+		CloseHandle(f);
+		if (total != buf.size()) return false;
+		const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(buf.data());
+		if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return false;
+		const size_t peOff = (size_t)dos->e_lfanew;
+		if (peOff > buf.size() - sizeof(DWORD)) return false;
+		if (*reinterpret_cast<const DWORD*>(buf.data() + peOff) != IMAGE_NT_SIGNATURE) return false;
+		return HasAsciiBytes(buf, "vulkan-1.dll") && (HasAsciiBytes(buf, "DXVK_CONFIG") || HasAsciiBytes(buf, "dxvk.conf"));
+	}
+
+	// Rewrites FalloutNV.exe's d3d9.dll IAT entries when bypassing a non-system root d3d9.dll (another DXVK),
+	// so game calls reach VSDxvk even if the root DLL's prologue cannot be inline-patched. Not used for
+	// Windows' own d3d9.dll so pre-loaded plugins keeping behind-prologue hooks stay intact.
+	inline int PatchGameIat(void* orig9, void* new9, void* orig9Ex, void* new9Ex) {
+		if ((!orig9 || !new9) && (!orig9Ex || !new9Ex)) return 0;
+		HMODULE exe = GetModuleHandleA(nullptr);
+		if (!exe) return 0;
+		const uint8_t* base = reinterpret_cast<const uint8_t*>(exe);
+		const auto* dos = reinterpret_cast<const IMAGE_DOS_HEADER*>(base);
+		if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0) return 0;
+		const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS32*>(base + dos->e_lfanew);
+		if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) return 0;
+		const DWORD imageSize = nt->OptionalHeader.SizeOfImage;
+		if (nt->OptionalHeader.NumberOfRvaAndSizes <= IMAGE_DIRECTORY_ENTRY_IMPORT) return 0;
+		const IMAGE_DATA_DIRECTORY& dir = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+		if (!dir.VirtualAddress || !dir.Size || dir.VirtualAddress >= imageSize) return 0;
+
+		int patched = 0;
+		const auto* imp = reinterpret_cast<const IMAGE_IMPORT_DESCRIPTOR*>(base + dir.VirtualAddress);
+		while (reinterpret_cast<const uint8_t*>(imp + 1) <= base + imageSize && imp->Name) {
+			if (imp->Name < imageSize && imp->FirstThunk && imp->FirstThunk + sizeof(IMAGE_THUNK_DATA32) <= imageSize) {
+				const char* dllName = reinterpret_cast<const char*>(base + imp->Name);
+				if (_stricmp(dllName, "d3d9.dll") == 0) {
+					auto* iat = reinterpret_cast<IMAGE_THUNK_DATA32*>(const_cast<uint8_t*>(base) + imp->FirstThunk);
+					while (reinterpret_cast<const uint8_t*>(iat + 1) <= base + imageSize && iat->u1.Function) {
+						void* cur = reinterpret_cast<void*>(static_cast<uintptr_t>(iat->u1.Function));
+						void* target = nullptr;
+						if (orig9 && new9 && cur == orig9) target = new9;
+						else if (orig9Ex && new9Ex && cur == orig9Ex) target = new9Ex;
+						if (target && target != cur) {
+							DWORD oldProt = 0;
+							if (VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function), PAGE_READWRITE, &oldProt)) {
+								iat->u1.Function = static_cast<DWORD>(reinterpret_cast<uintptr_t>(target));
+								DWORD dummy = 0;
+								VirtualProtect(&iat->u1.Function, sizeof(iat->u1.Function), oldProt, &dummy);
+								++patched;
+							}
+						}
+						++iat;
+					}
+				}
+			}
+			++imp;
+		}
+		return patched;
+	}
+
+	// True when the file is DXVK (version info ProductName/FileDescription contains "DXVK", or stripped PE fallback).
+	inline bool IsDxvk(const char* path, HMODULE mod = nullptr) {
+		if (!path || !*path || IsInWindowsDir(path)) return false;
+		if (IsKnownNonDxvkWrapper(mod)) return false;
+		DWORD ignored = 0;
+		const DWORD size = GetFileVersionInfoSizeA(path, &ignored);
+		if (size) {
+			std::vector<char> info(size);
+			if (GetFileVersionInfoA(path, 0, size, info.data())) {
+				struct LangCodepage { WORD language, codePage; }* table = nullptr;
+				UINT bytes = 0;
+				if (VerQueryValueA(info.data(), "\\VarFileInfo\\Translation", (LPVOID*)&table, &bytes)) {
+					for (UINT i = 0; i < bytes / sizeof(LangCodepage); i++) {
+						for (const char* field : { "ProductName", "FileDescription" }) {
+							char key[64];
+							sprintf_s(key, "\\StringFileInfo\\%04x%04x\\%s", table[i].language, table[i].codePage, field);
+							char* val = nullptr;
+							UINT length = 0;
+							if (VerQueryValueA(info.data(), key, (LPVOID*)&val, &length) && val) {
+								if (ContainsI(val, "ReShade") || ContainsI(val, "ENBSeries") || ContainsI(val, "Special K")) return false;
+								if (ContainsI(val, "DXVK")) return true;
+							}
+						}
+					}
+				}
+			}
+		}
+		return FileLooksLikeDxvk(path);
+	}
+
 	inline void Load() {
+		BlockedRootDxvk.clear();
+		OverridingWrapper.clear();
+		RootConfIgnored.clear();
+
 		std::string dir = Paths::PluginsDir() + "VSDxvk\\";
 		// UNOFFICIAL 2026-11-15 (testers: "the DXVK build did not work"; their logs had no DxvkLoader line at all, so the file was never
 		// found and nothing said so). The zip's folders start at NVSE\: extracted into the GAME folder instead of Data (where a d3d9.dll
@@ -138,21 +276,43 @@ namespace DxvkLoader {
 		const std::string dll = dir + "d3d9.dll", config = dir + "dxvk.conf";
 
 		HMODULE system = GetModuleHandleA("d3d9.dll");
-		char systemPath[MAX_PATH] = {}, windows[MAX_PATH] = {};
+		char systemPath[MAX_PATH] = {};
 		if (system) GetModuleFileNameA(system, systemPath, MAX_PATH);
-		GetSystemWindowsDirectoryA(windows, MAX_PATH);
-		const bool windowsOwn = system && !_strnicmp(systemPath, windows, strlen(windows));
-		if (!system || (!windowsOwn && !IsDxvk(systemPath))) {
+		const bool windowsOwn = system && IsInWindowsDir(systemPath);
+		if (!system || (!windowsOwn && !IsDxvk(systemPath, system))) {
+			if (system) OverridingWrapper = systemPath;
 			Logger::Log("DxvkLoader: %s is there, but the game's d3d9.dll is %s, another wrapper: that one is used (remove it from the game folder to use the mod's)",
 				dll.c_str(), system ? systemPath : "not loaded");
 			return;
 		}
-		if (!windowsOwn) Logger::Log("DxvkLoader: the game folder's DXVK %s is blocked: the mod's is used", systemPath);
+		if (!windowsOwn) {
+			BlockedRootDxvk = systemPath;
+			Logger::Log("DxvkLoader: the game folder's DXVK %s is blocked: the mod's is used", systemPath);
+		}
 
 		const bool hasConfig = GetFileAttributesA(config.c_str()) != INVALID_FILE_ATTRIBUTES;
-		if (hasConfig && !GetEnvironmentVariableA("DXVK_CONFIG_FILE", nullptr, 0)) SetEnvironmentVariableA("DXVK_CONFIG_FILE", config.c_str());
+		const bool hasEnvConfig = GetEnvironmentVariableA("DXVK_CONFIG_FILE", nullptr, 0) != 0;
+		if (hasConfig && !hasEnvConfig) SetEnvironmentVariableA("DXVK_CONFIG_FILE", config.c_str());
+		else if (!hasConfig && !windowsOwn && !hasEnvConfig) {
+			const std::string rootConf = Paths::GameRoot() + "\\dxvk.conf";
+			if (GetFileAttributesA(rootConf.c_str()) != INVALID_FILE_ATTRIBUTES) {
+				RootConfIgnored = rootConf;
+				SetEnvironmentVariableA("DXVK_CONFIG_FILE", config.c_str());	// point away from CWD <game>\dxvk.conf (missing path -> empty config)
+				Logger::Log("DxvkLoader: ignoring stale %s left next to blocked root d3d9.dll", rootConf.c_str());
+			}
+		}
+
 		HMODULE dxvk = LoadLibraryA(dll.c_str());
-		if (!dxvk) { Logger::Log("[ERROR] DxvkLoader: could not load %s (Win32 error %lu): Windows' Direct3D 9", dll.c_str(), GetLastError()); return; }
+		if (!dxvk) {
+			BlockedRootDxvk.clear();
+			Logger::Log("[ERROR] DxvkLoader: could not load %s (Win32 error %lu): Windows' Direct3D 9", dll.c_str(), GetLastError());
+			return;
+		}
+
+		void* origCreate9 = (void*)GetProcAddress(system, "Direct3DCreate9");
+		void* origCreate9Ex = (void*)GetProcAddress(system, "Direct3DCreate9Ex");
+		void* newCreate9 = (void*)GetProcAddress(dxvk, "Direct3DCreate9");
+		void* newCreate9Ex = (void*)GetProcAddress(dxvk, "Direct3DCreate9Ex");
 
 		int redirected = 0, behind = 0, kept = 0;
 		for (const char* name : { "Direct3DCreate9", "Direct3DCreate9Ex" }) {
@@ -177,11 +337,18 @@ namespace DxvkLoader {
 			}
 			else Logger::Log("[ERROR] DxvkLoader: %s not redirected", name);
 		}
-		if (redirected) Loaded = dxvk;
+		int iatPatched = 0;
+		if (!windowsOwn) iatPatched = PatchGameIat(origCreate9, newCreate9, origCreate9Ex, newCreate9Ex);
+		if (redirected || iatPatched) Loaded = dxvk;
+		else if (!windowsOwn) {
+			OverridingWrapper = systemPath;
+			BlockedRootDxvk.clear();
+		}
 		char loadedConfig[MAX_PATH] = {};
 		GetEnvironmentVariableA("DXVK_CONFIG_FILE", loadedConfig, MAX_PATH);
-		Logger::Log("DxvkLoader: %s loaded (%d of 2 entry points redirected, %d behind the function's first instructions, %d earlier hook(s) kept; dxvk.conf %s)",
-			dll.c_str(), redirected, behind, kept, loadedConfig[0] ? loadedConfig : "none");
+		const std::string confDesc = !RootConfIgnored.empty() ? ("none (ignored stale " + RootConfIgnored + ")") : (loadedConfig[0] ? loadedConfig : "none");
+		Logger::Log("DxvkLoader: %s loaded (%d of 2 entry points redirected, %d behind the function's first instructions, %d earlier hook(s) kept, %d game IAT slot(s) patched; dxvk.conf %s)",
+			dll.c_str(), redirected, behind, kept, iatPatched, confDesc.c_str());
 	}
 
 	// UNOFFICIAL 2026-11-09 DxvkDescriptorHeapOff ([Main.Main.Misc], default on; docs/next/RT-PT-REVIEW-2026-11-09.md section 11): DXVK 3.0

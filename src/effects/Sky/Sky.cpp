@@ -293,7 +293,8 @@ Constants.SunsetColor.w = TheShaderManager->Shaders.Tonemapping->Enabled
 			D3DXVECTOR4(physExact ? 1.0f : 0.0f, physMs ? 1.0f : 0.0f, PhysicalSettings.GroundAlbedo, 0.0f), Constants.SkyTint,
 			Constants.SkyTintHorizon, Constants.SkyLook };
 		inputs.sunsetColor.w = 0.0f;	// only rgb is read below
-		const bool sunStill = lastProjectionValid &&
+		const bool nearHorizon = fabsf(inputs.sunPos.z) < 0.25f;
+		const bool sunStill = !nearHorizon && lastProjectionValid &&
 			inputs.sunPos.x * lastProjection.sunPos.x + inputs.sunPos.y * lastProjection.sunPos.y + inputs.sunPos.z * lastProjection.sunPos.z >= 0.9999985f;
 		if (sunStill) inputs.sunPos = lastProjection.sunPos;
 		if (lastProjectionValid && memcmp(&inputs, &lastProjection, sizeof(inputs)) == 0) return;

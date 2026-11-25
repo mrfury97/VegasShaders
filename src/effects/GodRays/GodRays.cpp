@@ -539,7 +539,7 @@ bool GodRaysEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSurface9*
 	if (ext && (FAILED(result) || oldScissorEnabled || !ExtPrepare(layout))) return false;
 	if (SUCCEEDED(result)) result = Device->GetDepthStencilSurface(&depthSurface);
 	// UNOFFICIAL ReShadeDepthCompat: leave the game's depth-stencil bound (a single smaller target is legal with it).
-	if (SUCCEEDED(result) && !ReShadeIntegration::KeepDepthBound()) result = Device->SetDepthStencilSurface(nullptr);
+	if (SUCCEEDED(result) && !ReShadeIntegration::KeepDepthBoundFor(Device)) result = Device->SetDepthStencilSurface(nullptr);
 	if (FAILED(result)) {
 		if (depthSurface) depthSurface->Release();
 		dedicatedRenderFailed.Set("a D3D9 call of the dedicated pass failed");
@@ -711,6 +711,7 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 	if (packedRenderFailed.Blocked() || !technique || !RenderedSurface || !SourceBuffer ||
 		FAILED(Effect->GetTechniqueDesc(technique, &description)) || description.Passes != 6 ||
 		FAILED(RenderTarget->GetDesc(&target)) || FAILED(RenderedSurface->GetDesc(&scratch)) ||
+		target.MultiSampleType != D3DMULTISAMPLE_NONE || scratch.MultiSampleType != D3DMULTISAMPLE_NONE ||
 		target.Width != scratch.Width || target.Height != scratch.Height ||
 		FAILED(Device->GetRenderState(D3DRS_SCISSORTESTENABLE, &oldScissorEnabled)) ||
 		FAILED(Device->GetScissorRect(&oldScissor))) {
@@ -720,6 +721,7 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 
 	auto timer = TimeLogger();
 	TheShaderManager->Chain.Sync(); // the packed path reads the render target itself
+	RenderedSurface = TheTextureManager->RenderedSurface;
 	RECT packed = {0, 0, (LONG)(target.Width / 2), (LONG)(target.Height / 2)};
 	D3DRECT packedClear = {packed.left, packed.top, packed.right, packed.bottom};
 	HRESULT result = Device->StretchRect(RenderTarget, NULL, SourceBuffer, NULL, D3DTEXF_LINEAR);

@@ -200,7 +200,55 @@ bool TAAEffect::WorldDrawnSmall(UINT& renderWidth, UINT& renderHeight, D3DXVECTO
 }
 
 extern bool NvrFirstPersonNativeNow;	// UNOFFICIAL 2026-11-13 Hooks/Render.cpp FirstPersonNative: this first-person pass draws into a full-size layer
+bool IsInVanillaDoFDepthPass();			// UNOFFICIAL 2026-11-22 Hooks/Render.cpp: inside DepthOfField::DoDepth / Add1stPersonToDepthBuffer
+
+void TAAEffect::NoteDoFDepthDraw() {
+	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
+	if (!taa || (!taa->Up.Active && !taa->Up.Deferred) || !taa->Up.Width || !taa->Up.Height) return;
+	IDirect3DDevice9* device = TheRenderManager ? TheRenderManager->device : nullptr;
+	if (!device) return;
+	IDirect3DSurface9* target = nullptr;
+	if (FAILED(device->GetRenderTarget(0, &target)) || !target) return;
+	if (target == taa->Up.Target) {
+		target->Release();
+		return;
+	}
+	D3DSURFACE_DESC desc = {};
+	D3DVIEWPORT9 port = {};
+	const bool ok = SUCCEEDED(target->GetDesc(&desc)) && SUCCEEDED(device->GetViewport(&port)) &&
+		desc.MultiSampleType == D3DMULTISAMPLE_NONE && RenderRect::ScreenShaped(desc.Width, desc.Height);
+	if (ok) {
+		const float sx = (float)taa->Up.RenderWidth / (float)taa->Up.Width;
+		const float sy = (float)taa->Up.RenderHeight / (float)taa->Up.Height;
+		const UINT rw = (UINT)floorf((float)desc.Width * sx + 0.5f);
+		const UINT rh = (UINT)floorf((float)desc.Height * sy + 0.5f);
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			Logger::Log("UNOFFICIAL RenderScale DoF depth: target %ux%u fmt %u, viewport %u,%u %ux%u, expected rect %ux%u (active=%d deferred=%d).",
+				desc.Width, desc.Height, (UInt32)desc.Format, (unsigned)port.X, (unsigned)port.Y, (unsigned)port.Width, (unsigned)port.Height,
+				rw, rh, taa->Up.Active ? 1 : 0, taa->Up.Deferred ? 1 : 0);
+		}
+		if (port.X == 0 && port.Y == 0 && port.Width <= rw + 1 && port.Height <= rh + 1)
+			RenderRect::RescaleGameSurfaceAfterUpscale(target, sx, sy, true);
+	}
+	target->Release();
+}
+
 void TAAEffect::NoteWorldDraw(bool firstPerson) {
+	if (IsInVanillaDoFDepthPass()) {
+		NoteDoFDepthDraw();
+		TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
+		IDirect3DDevice9* device = TheRenderManager ? TheRenderManager->device : nullptr;
+		if (taa && device) {
+			IDirect3DSurface9* target = nullptr;
+			if (SUCCEEDED(device->GetRenderTarget(0, &target)) && target) {
+				const bool isWorldTarget = (target == taa->Up.Target);
+				target->Release();
+				if (!isWorldTarget) return;
+			}
+		}
+	}
 	if (firstPerson && NvrFirstPersonNativeNow) return;	// (its viewport is the whole layer on purpose)
 	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
 	// UNOFFICIAL 2026-10-27 RenderScale v2: first-person passes while the frame waits for its upscale (the weapon into the same rect).
@@ -270,6 +318,7 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 		Up.Deferred = false;
 		RenderRect::End();
 		RenderRect::RescaleRegistered(TheRenderManager->device);
+		RenderRect::ClearGameRescales();
 		Up.HistoryValid = false;
 		UpscaleReleaseTargets();
 		Logger::Log("UNOFFICIAL RenderScale v2: a frame drawn small was never upscaled (no image space after it); dropped.");
@@ -279,6 +328,7 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 				"for this session: the world is upscaled right after it is drawn, before the weapon and Vegas Shaders' effects.", DroppedInARow);
 		}
 	}
+	RenderRect::ClearGameRescales();
 	Up.Active = false;
 	UpscaleReleaseTargets();
 	RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
@@ -288,6 +338,11 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	if (!firstWorld) { if (FSRSettings.Enabled && FSRSettings.RenderScale < 0.999f) Up.SkippedFrames++; return false; }
 	Up.Upscaled = false;
 	if (!FSRSettings.Enabled || FSRSettings.RenderScale >= 0.999f) { Up.HistoryValid = false; return false; }
+	static bool warnedDofFix = false;
+	if (!warnedDofFix && GetModuleHandleA("DoF-Fix.dll") != nullptr) {
+		warnedDofFix = true;
+		Logger::Log("[WARN] UNOFFICIAL RenderScale: DoF-Fix.dll is loaded alongside RenderScale %.2f; DoF-Fix runs vanilla Depth of Field at 0x00870FBD before RenderScale upscales the frame, which can cause a RenderScale-sized blur box. Remove DoF-Fix.dll or use Vegas Shaders' own DepthOfField when RenderScale < 1.0.", FSRSettings.RenderScale);
+	}
 	auto skip = [this](int reason) { UpscaleSkip(reason); return false; };
 	if (!Enabled || !Effect || !ShouldRender()) return skip(SkipTaaOff);
 	if (!TheSettingManager->SettingsMain.Main.RenderEffects || !Player || !Player->parentCell || TheShaderManager->GameState.OverlayIsOn) return skip(SkipGame);
@@ -702,6 +757,7 @@ void TAAEffect::UpscaleWorld() {
 			}
 		}
 	}
+	RenderRect::RescaleGameSurfaces(device);
 	UpscaleFinish(ok, false);
 }
 
@@ -765,7 +821,7 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 			if (FAILED(device->GetDepthStencilSurface(&oldDepth))) oldDepth = nullptr;
 			device->SetDepthStencilSurface(Up.DepthStencil);
 			TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
-			if ((needVmDirect || needDepth || needNormals) &&
+			if ((needVmDirect || needDepth || needNormals || reshade) &&
 				UpscaleComposite(device, nullptr, TheTextureManager->DepthTextureViewModel, false, ViewModelMotion::JitteredThisFrame())) {
 				device->SetDepthStencilSurface(Up.DepthStencil);
 				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
@@ -822,7 +878,7 @@ void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3
 			if (UpscaleComposite(Device, nullptr, nullptr, false, true)) {
 				Device->SetDepthStencilSurface(Up.DepthStencil);
 				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
-				if ((needVmDirect || needDepth || needNormals) &&
+				if ((needVmDirect || needDepth || needNormals || reshade) &&
 					UpscaleComposite(Device, nullptr, TheTextureManager->DepthTextureViewModel, false, ViewModelMotion::JitteredThisFrame())) {
 					Device->SetDepthStencilSurface(Up.DepthStencil);
 					TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);

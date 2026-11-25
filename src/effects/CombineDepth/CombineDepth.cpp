@@ -109,7 +109,7 @@ static void LogMergedState(IDirect3DDevice9* Device, const D3DCAPS9& caps, const
 
 bool CombineDepthEffect::RenderWithNormals(IDirect3DDevice9* Device, IDirect3DSurface9* NormalsSurface, bool allowInlineMerge, bool* outInlineMerged) {
 	if (outInlineMerged) *outInlineMerged = false;
-	if (ReShadeIntegration::KeepDepthBound()) return false;	// UNOFFICIAL ReShadeDepthCompat: the two-target pass unbinds the depth-stencil; separate passes instead
+	if (ReShadeIntegration::KeepDepthBoundFor(Device)) return false;	// UNOFFICIAL ReShadeDepthCompat: the two-target pass unbinds the depth-stencil; separate passes instead
 	if (!Enabled || !Effect || !ShouldRender() || !NormalsSurface || !Textures.CombinedDepthSurface)
 		return false;
 	// UNOFFICIAL 2026-10-25 (NVR DXVK) / 2026-11-19 RenderRect: the same two targets in one Vulkan pass (also at RenderScale < 1.0).

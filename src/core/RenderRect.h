@@ -65,6 +65,9 @@ namespace RenderRect {
 	// registered here while On; RescaleRegistered (TAAEffect, right after End: uses LastScale) stretches its drawn part over the
 	// whole of it, so those readers see the layout they always did.
 	void RescaleAfterUpscale(IDirect3DSurface9* Surface);
+	void RescaleGameSurfaceAfterUpscale(IDirect3DSurface9* Surface, float scaleX, float scaleY, bool pointFilter = false);
 	void RescaleRegistered(IDirect3DDevice9* Device);
+	void RescaleGameSurfaces(IDirect3DDevice9* Device);
+	void ClearGameRescales();
 	void ForgetSurface(IDirect3DSurface9* Surface);	// UNOFFICIAL 2026-11-12 (memleak): a registered buffer is being released: its spare too
 }
