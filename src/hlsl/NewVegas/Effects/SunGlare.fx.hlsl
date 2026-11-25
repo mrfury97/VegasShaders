@@ -5,7 +5,7 @@
 //   - how much brighter that patch is than the sky a few sun widths out (behind thick cloud it is no brighter: no glare).
 // The cover is measured once a frame into TESR_SunGlareCover (1 x 1) and eased there over a few frames: the pass blends its
 // value over what the texel held. Positions are measured in screen heights, so the shape is the same at any resolution and
-// aspect. Pixels the glare cannot reach return the picture as stored. src/effects/SunGlare/README.md.
+// aspect. Pixels the glare cannot reach return the picture as stored. docs/EFFECTS.md "SunGlare".
 
 #include "Includes/Helpers.hlsl"
 

@@ -5,7 +5,7 @@
 // a doorway seen from a dark room no longer burns white. Three small passes before the tone mapper measure each neighbourhood's
 // log brightness at 1/16 resolution and blur it (Effects\LocalExposure.fx.hlsl); the tone mapper (both ISHDRBLENDINSHADERCIN
 // shaders, Includes/Tonemapping.hlsl localExposure) then lifts dark neighbourhoods and calms bright ones toward a mid grey, less
-// at edges (no halos). README.md in this folder.
+// at edges (no halos). docs/EFFECTS.md "LocalExposure".
 class LocalExposureEffect : public EffectRecord
 {
 public:

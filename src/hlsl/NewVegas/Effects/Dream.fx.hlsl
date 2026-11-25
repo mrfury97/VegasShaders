@@ -1,5 +1,5 @@
 // Dream: a trip look for the finished picture. Ported from the author's own DreamSim shaders (godot/shaders/mix.gdshader and
-// post.gdshader), written fresh in HLSL from that GLSL. Off by default (Shaders > Extras > Dream); src/effects/Dream/README.md.
+// post.gdshader), written fresh in HLSL from that GLSL. Off by default (Shaders > Extras > Dream); docs/EFFECTS.md "Dream".
 //
 // Technique 0 DreamMix:        tracers (the last frames linger), the stare tunnel (a swirl, then a hexagonal kaleidoscope zooming in
 //                              forever) and datamosh blocks. Reads this frame and the effect's own history; writes the other history.

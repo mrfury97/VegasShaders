@@ -13,7 +13,7 @@ static float RmaosSpecular = 1.0f;
 // highlight STRENGTH, not a gloss map) and n the mesh's glossiness (NiMaterialProperty, the game's Toggles.z). NVR drew every
 // highlight with GGX at F0 0.04 and a roughness of (1 - mask) or a material class's: the mask set the WIDTH, n was dropped and the
 // strength was fixed, so authored glints (power armour, polished metal; n 30-100, mask 0.3-0.7) became faint wide sheens. The
-// bridge gives the GGX highlight the authored one's width, peak and energy instead (derivation and measurements: effects\PBR\README.md):
+// bridge gives the GGX highlight the authored one's width, peak and energy instead (derivation and measurements: docs\EFFECTS.md "PBR"):
 //   width: Blinn-Phong (N.H)^n ~ exp(-n t^2 / 2) is the Beckmann lobe of alpha^2 = 2 / (n + 2) (Walter et al. 2007). GGX at that
 //          alpha, peak matched (below), has 0.77-0.91 of Blinn-Phong's half width and 1.04-1.20 x its energy for n 2-200 (GGX: a
 //          narrower core, longer tails). An exact energy match would need alpha^2 = (1.7-1.9) / (n + 2) and narrows the core to 0.73;

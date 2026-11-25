@@ -1,4 +1,4 @@
-// UNOFFICIAL 2026-11-03: dust motes in lit air (DustMotes.h, README.md in this folder).
+// UNOFFICIAL 2026-11-03: dust motes in lit air (DustMotes.h, docs/EFFECTS.md "DustMotes").
 
 #include <algorithm>
 #include <cmath>

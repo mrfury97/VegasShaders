@@ -256,7 +256,7 @@ float OpenAbove(vec2 uv, float depth) {
     return top > p.z - max(RoofMargin * perUnit, 0.0001) ? 1.0 : 0.0;
 }
 
-// 2026-11-08 Puddles (src/effects/Puddles/README.md): the standing water the surface shaders draw (Shaders/Includes/Wetness.hlsl
+// 2026-11-08 Puddles (docs/EFFECTS.md "Puddles"): the standing water the surface shaders draw (Shaders/Includes/Wetness.hlsl
 // PuddleField), line for line, so the SSR and RT reflections mirror the same puddles at the water's roughness. Without the land's height
 // term (no height map here) and the ortho map's soft edge (OpenAbove's hard test is applied by the caller). 0-1.
 vec3 WetHash33(vec3 p3) {

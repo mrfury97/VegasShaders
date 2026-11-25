@@ -1,7 +1,7 @@
 #pragma once
 
 // A "fun" trip look for the finished picture, off by default (sidebar: Shaders > Extras > Dream). Ported from the author's own
-// DreamSim shaders (README.md): the picture warps and breathes, colours split and drift, the last frames linger as tracers,
+// DreamSim shaders (docs/EFFECTS.md "Dream"): the picture warps and breathes, colours split and drift, the last frames linger as tracers,
 // a still view falls into a tunnel, and now and then the scene melts into a Julia fractal or breaks into glitch blocks.
 // One "dream level" drives it all; the level breathes by itself, and low health can deepen it.
 class DreamEffect : public EffectRecord

@@ -1,4 +1,4 @@
-// 2026-11-04 local exposure (LocalExposure.h, README.md in this folder).
+// 2026-11-04 local exposure (LocalExposure.h, docs/EFFECTS.md "LocalExposure").
 
 #include <algorithm>
 

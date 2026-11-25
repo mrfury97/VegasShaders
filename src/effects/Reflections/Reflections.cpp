@@ -1153,7 +1153,7 @@ void ReflectionsEffect::UpdateWaterConstants() {
 	}
 	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, valid ? rtWaterScaleX : 1.0f);
 
-	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (README "Replace, not add"). The composite lays the reflection over the
+	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"). The composite lays the reflection over the
 	// lit picture by its Fresnel share only (4 % on stone or glass looking straight on), so the game's env-map pass, an additive cube map at
 	// the artist's strength drawn before it, stayed almost whole under it: two reflections on one surface. That pass is drawn in the world
 	// scene, before this frame's trace, so (as the water above) it reads LAST frame's Buffer: its alpha is how much of each pixel's

@@ -1,4 +1,4 @@
-// A "fun" trip look, off by default (Dream.h, README.md). Ported from the author's own DreamSim game: the timings and
+// A "fun" trip look, off by default (Dream.h, docs/EFFECTS.md "Dream"). Ported from the author's own DreamSim game: the timings and
 // curves below follow DreamSim's main.gd, the picture is src/hlsl/NewVegas/Effects/Dream.fx.hlsl.
 
 #include <algorithm>

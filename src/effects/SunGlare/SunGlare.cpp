@@ -1,6 +1,6 @@
 #include "SunGlare.h"
 
-// UNOFFICIAL 2026-11-13 (modern lighting): see SunGlare.h and README.md.
+// UNOFFICIAL 2026-11-13 (modern lighting): see SunGlare.h and docs/EFFECTS.md "SunGlare".
 
 void SunGlareEffect::UpdateSettings() {
 	const char* section = "Shaders.SunGlare.Main";

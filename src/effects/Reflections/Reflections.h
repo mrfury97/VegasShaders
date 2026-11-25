@@ -48,7 +48,7 @@ public:
 		float	GlassReflect;	// UNOFFICIAL 2026-10-29 (core/GlassMask.h, Vulkan passes only): how much see-through glass reflects (0 off: nothing hooked)
 		bool	MaterialBufferRoughness;	// UNOFFICIAL 2026-10-30 (Vulkan passes only): the floor guess takes TESR_MaterialBuffer's roughness where written
 		bool	CloudSky;		// UNOFFICIAL 2026-10-30 (Vulkan passes only, with VolumetricClouds): the sky fallback shows the clouds (the cloud sky probe)
-		bool	ReplaceForward;	// UNOFFICIAL 2026-11-12: the game's env-map pass leaves out the share of its cube map that last frame's reflection covered (README "Replace, not add")
+		bool	ReplaceForward;	// UNOFFICIAL 2026-11-12: the game's env-map pass leaves out the share of its cube map that last frame's reflection covered (docs/EFFECTS.md "Reflections", "Replace, not add")
 		bool	HiZSafeCells;		// test only: coarse cells read as min/max of their two channels, "behind" skip on the finest level only
 		bool	HiZInteriorsTest;	// test only: HiZ indoors too (the interior picture is not yet the old trace's; DebugView 9 / 10 to find why)
 		float	ReflectivityExterior;	// UNOFFICIAL 2026-10-25 [Shaders.PBR.Main] ReflectivityExterior / Interior: times the dry sheen and

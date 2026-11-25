@@ -1,5 +1,5 @@
 // GodRays: soft light shafts from the sun's screen position, from bright sky only (rewritten 2026-11-02, wave 3, from
-// src/effects/GodRays/README.md). Techniques, as GodRays.cpp asks for them:
+// docs/EFFECTS.md "GodRays"). Techniques, as GodRays.cpp asks for them:
 //   DedicatedGodRays   SkyMask, LightMask, Blur1, Blur2, Blur3, Combine     (6 passes, the main path)
 //   GodRaysMaxReduce   Reduce     the 8 x 8 maximum of the light mask (SkipEmpty, SkipIdle check)
 //   GodRaysIdleTest    Test       discards unless the sky maximum reaches the limit (SkipIdle; NaN counts as bright)
