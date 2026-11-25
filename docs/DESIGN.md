@@ -1713,3 +1713,16 @@ for the G-buffer material). RT helper protocol stays 10 (rebuilt: `NvrRtTextures
 do not rebuild byte for byte with our Vulkan SDK 1.3.296 (believed: another glslang); they are kept as upstream built them; every other
 .spv checked reproduces. `RtReflDenoisePrefilter.frag` (1.0.6, its FFX include removed upstream) no longer compiles and is not loaded.
 `docs/WORKS-CITED.md` is upstream's credits file, kept as theirs (not one of our four docs).
+
+**Bench, slot A, 2026-11-26 (the owner's settings of 11-26; sheets in `F:\VS-scratchtm-sheets`):**
+- Proven, test29 (1.1.1-1.1.3 merge): loads, migrates (step 98 moved ReplaceForward and FollowRenderScale); RT reflections and RT GI run
+  with the new helper (ready in 0.5 s once its shaders are cached); rain, RT, FSR 0.67 and night pictures show no specks or smears. Found:
+  REGISTER CLASH X4500 in `DeferredSun.pso`'s SunFade record (upstream's `TESR_ShadowDynamic` on s12 = our `DS_WetFilmMap`): that record
+  lost the film's sun highlight. Fixed in 4f242a4 (the atlas to s14); `template_compile` with the game's defines: main FAILED, fix OK.
+- Proven, test30 (this branch): no errors in the log; steps 98-101 moved ReplaceForward, FollowRenderScale, ActorFlushPerSpace,
+  MatchSunDisc (true -> false), PTGlassSurface, GIStrengthInterior, GlowGIInterior; the RT helper (rebuilt) ready in 0.6 s.
+- Control (test27 with the same settings): with MatchSunDisc on (the owner's saved 1.1.3 default) test29 lit the ground from the true sun
+  disc (another shadow direction, +14 luma); with 1.1.4's step 100 the direction matches test27 again. Rain darkens the ground by the same
+  amount in both builds (-7 / -8 luma). Believed: the remaining softer, lighter daylight (+12 luma) is upstream's lighting changes.
+- Not run: HDR (no HDR display on the bench), hair (the Character Kit Remake hair the fix targets is not in the slot), grass under lamps
+  (no lamp at these spots at night), frame time.
