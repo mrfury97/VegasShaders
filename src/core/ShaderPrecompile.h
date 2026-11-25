@@ -12,6 +12,7 @@
 #include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart (the Interior records' jobs after the start's)
 #include "LightFreeRecords.h"	// UNOFFICIAL 2026-11-16 fast-restart (the lighting-free records on the workers)
 #include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: startup shader-compile progress overlay
+#include "DeferredWetness.h"	// UNOFFICIAL 2026-11-26 faster-shader-compile (the LightFreeWet records' jobs)
 
 // UNOFFICIAL 2026-10-14 (user: "can u make the nvr shader compiler run in parallel threads"). The game asks for its shaders
 // one at a time while it starts, and NVR compiled each replacement right there: preprocess, compare with the cache, compile
@@ -21,6 +22,22 @@
 // shaders are exactly what ShaderRecord::LoadShader makes alone: the same defines (ShaderRecord::BuildDefines, worked out on
 // the main thread), the same cache comparison and the same compile. [Main.Main.Performance] ParallelShaderCompile (on).
 namespace ShaderPrecompile {
+
+	// UNOFFICIAL 2026-11-16 fast-restart (core/ForwardCloudShadows.h): the preprocessed source holds the clouds' lookup (Includes/Shadow.hlsl
+	// NVR_CloudSun, the land's NvrCloudSun, TerrainTemplate's vertex NVR_CloudSunVS, DeferredSun's): compiled into every outdoor record now.
+	// (2026-11-26 moved here from ShaderRecord.cpp, which calls these: the workers make the build without the lookup too)
+	inline bool CloudCodeIn(ID3DXBuffer* source) {
+		if (!source) return false;
+		const char* text = (const char*)source->GetBufferPointer();
+		const char* end = text + source->GetBufferSize();
+		static const char key[] = "NVR_CloudSun";
+		static const char land[] = "NvrCloudSun";
+		return std::search(text, end, key, key + sizeof(key) - 1) != end || std::search(text, end, land, land + sizeof(land) - 1) != end;
+	}
+	inline bool OverridesName(const D3DXMACRO* overrides, const char* name) {
+		for (const D3DXMACRO* o = overrides; o && o->Name; o++) if (!strcmp(o->Name, name)) return true;
+		return false;
+	}
 
 	struct Job {
 		std::string Name, Source, Preprocessed, Compiled;
@@ -34,7 +51,14 @@ namespace ShaderPrecompile {
 		std::atomic<bool> Done{ false };
 		bool Taken = false;
 		std::string DefineKey;	// UNOFFICIAL 2026-11-16 fast-restart: the define list the job was built with (Take compares the load's)
+		// UNOFFICIAL 2026-11-26 faster-shader-compile: the record's build without the clouds' lookup (Cache\NoCloud\..., FORWARD_CLOUD_SHADOWS 0),
+		// made by the same worker right after this job failed, the build ShaderRecord::LoadShader's ForwardCloudShadows retry asks for next.
+		// Before, that retry compiled on the main thread: 2-4 compiles of 5-15 s for each of the biggest object shaders on every cold start.
+		Job* CloudOff = nullptr;
+		Job* Parent = nullptr;	// (set on a CloudOff job: the job it belongs to)
 	};
+
+	inline std::unordered_map<std::string, Job*> CloudOffByPath;	// the CloudOff jobs by compiled path (filled before the workers start)
 
 	// UNOFFICIAL 2026-11-16 fast-restart: a define list as one string (names and values in order), for Take's check.
 	inline std::string KeyOf(const D3DXMACRO* defines) {
@@ -72,7 +96,7 @@ namespace ShaderPrecompile {
 	}
 
 	// One shader on a worker thread: as LoadShader's preprocess, cache check and compile.
-	inline void Run(Job* job) {
+	inline void RunOne(Job* job) {
 		ID3DXBuffer* errors = nullptr;
 		HRESULT prepass = D3DXPreprocessShaderFromFileA(job->Source.c_str(), &job->Template.Defines[0], NULL, &job->SourceBuffer, &errors);
 		if (prepass != D3D_OK) {
@@ -135,6 +159,20 @@ namespace ShaderPrecompile {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-26 faster-shader-compile: the job, then (when it failed with the clouds' lookup in its source, as LoadShader's
+	// ForwardCloudShadows retry tests) its build without the lookup. Done is set on the CloudOff job before the worker sets it on this one.
+	inline void Run(Job* job) {
+		RunOne(job);
+		Job* off = job->CloudOff;
+		if (!off) return;
+		// (no X4500 test: LoadShader retries a worker's failed record without the lookup whatever the error)
+		if (!job->ShaderBuffer && job->Preprocessed_ok && CloudCodeIn(job->SourceBuffer)) {
+			ShaderProgram::CreateFolders(off->Compiled.substr(0, off->Compiled.find_last_of('\\')));	// (before: the shipped-cache seed copies into it)
+			RunOne(off);
+			off->Done = true;
+		}
+	}
+
 	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors): jobs not finished yet.
 	inline unsigned Running() {
 		unsigned n = 0;
@@ -162,6 +200,29 @@ namespace ShaderPrecompile {
 		job->DefineKey = KeyOf(&job->Template.Defines[0]);
 		Jobs.push_back(job);
 		ByCompiledPath[job->Compiled] = job;
+		// (2026-11-26) its CloudOff job: the folder, template and overrides LoadShader's ForwardCloudShadows retry passes (overrides + FORWARD_CLOUD_SHADOWS 0)
+		const size_t length = strlen(Name);
+		if (length > 4 && !strcmp(Name + length - 4, ".pso") && !OverridesName(Overrides, "FORWARD_CLOUD_SHADOWS")) {
+			Job* off = new Job();
+			off->Name = Name;
+			off->Parent = job;
+			const std::string sub = std::string("NoCloud\\") + (CacheSubPath ? CacheSubPath : SubPath ? SubPath : "");
+			std::string base = ShadersPath, cache = std::string(ShadersPath) + "Cache\\" + sub;	// (as Paths, without making the folder now)
+			if (SubPath) base += SubPath;
+			off->Source = base + (Template.Name ? Template.Name : Name) + ".hlsl";
+			off->Preprocessed = cache + Name + ".hlsl";
+			off->Compiled = cache + Name;
+			if (CloudOffByPath.count(off->Compiled)) { delete off; return; }
+			std::vector<D3DXMACRO> cloudOff;
+			for (const D3DXMACRO* o = Overrides; o && o->Name; o++) cloudOff.push_back(*o);
+			cloudOff.push_back({ "FORWARD_CLOUD_SHADOWS", "0" });
+			cloudOff.push_back({ NULL, NULL });
+			off->Template = Template;
+			ShaderRecord::BuildDefines(off->Template, cloudOff.data());	// (copies the names and values, which are static strings, not the list)
+			off->DefineKey = KeyOf(&off->Template.Defines[0]);
+			job->CloudOff = off;
+			CloudOffByPath[off->Compiled] = off;
+		}
 	}
 
 	// From the first ShaderRecord::LoadShader (main thread): the job list, then the workers.
@@ -240,6 +301,15 @@ namespace ShaderPrecompile {
 		// the deferred renderer's default) compiled one after another on the main thread at load: 96 of them, 50 s of the owner's 11-16 cold
 		// start. Queued here with the same folder, cache folder and defines as that load, so LoadShader takes the workers' results.
 		const bool lightFree = LightFreeRecords::WantedAtStartup();
+		// UNOFFICIAL 2026-11-26 faster-shader-compile: with DeferredWetness (on by default) the near land's, objects' and parallax's records load
+		// from LightFreeWet\ with DEFERRED_WETNESS (LightFreeRecords::Load). The queue still made the dry LightFree\ ones nobody loads, and the 94
+		// wet ones compiled one after another on the main thread: about 250 s of the 540 s cold start on the bench (11-26, slot A). The workers
+		// start before DeferredWetness::LoadShaders (DeferredDepth's pass is the first load), so its switch is read here, not WetCompiled; if its
+		// pass then fails to load, the dry records compile at their load as before.
+		const bool lightFreeWet = lightFree && DeferredWetness::WantedAtStartup();
+		auto lightFreeWetTemplate = [](const ShaderTemplate& tmpl) {
+			return tmpl.Name && (!strcmp(tmpl.Name, "TerrainTemplate") || !strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate"));
+		};
 		std::unordered_set<std::string> templated;
 		for (const auto& [CollectionName, Pointer] : TheShaderManager->ShaderNames) {
 			ShaderCollection* Collection = Pointer ? *Pointer : nullptr;
@@ -251,7 +321,10 @@ namespace ShaderPrecompile {
 				if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
 				if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
 					addInterior(name, Template);
-				if (lightFree && LightFreeRecords::Eligible(name.c_str(), Template)) Add(name.c_str(), NULL, LightFreeRecords::kCache, Template, LightFreeRecords::Overrides());
+				if (lightFree && LightFreeRecords::Eligible(name.c_str(), Template)) {
+					const bool wet = lightFreeWet && lightFreeWetTemplate(Template);
+					Add(name.c_str(), NULL, wet ? LightFreeRecords::kWetCache : LightFreeRecords::kCache, Template, wet ? LightFreeRecords::WetOverrides() : LightFreeRecords::Overrides());
+				}
 				if (DeferredSkin::WantedAtStartup() && DeferredSkin::Eligible(name.c_str(), Template))
 					Add(name.c_str(), NULL, DeferredSkin::kCache, Template, DeferredRenderer::Mode() >= 2 ? skinDeferred : skinDeferred1);
 			}
@@ -287,6 +360,12 @@ namespace ShaderPrecompile {
 		// (2026-11-16 fast-restart) the lamp-shadow records' jobs last, the biggest first (the six-lamp ones are 10-12 s each: started first, they
 		// end with the rest)
 		const size_t lateFrom = Jobs.size();
+		// UNOFFICIAL 2026-11-26 faster-shader-compile: the shadow shaders and the vertex shaders first. They are small and are what the main thread
+		// asks for first (ShadowManager, then each collection's vertex shaders); at the back of the queue the main thread waited 106 s for
+		// ShadowMap.vso (bench 11-26) instead of getting on with its own compiles (the deferred passes) beside the workers.
+		std::stable_partition(Jobs.begin(), Jobs.end(), [](const Job* j) {
+			return j->Source.find("\\Shadows\\") != std::string::npos || (j->Name.size() > 4 && !j->Name.compare(j->Name.size() - 4, 4, ".vso"));
+		});
 		for (const auto& [name, tmpl] : lateJobs) addLampRecords(name, tmpl);
 		std::stable_sort(Jobs.begin() + lateFrom, Jobs.end(), [](const Job* a, const Job* b) {
 			auto weight = [](const Job* j) { const char* n = j->Name.c_str(); return !strncmp(n, "SLS203", 6) && n[6] >= '4' && n[6] <= '6' ? 2 : !strncmp(n, "SLS20", 5) || !strncmp(n, "SKIN", 4) ? 1 : 0; };
@@ -310,8 +389,15 @@ namespace ShaderPrecompile {
 		TakenOutOfRegisters = false;
 		if (!Started || Jobs.empty()) return false;
 		auto it = ByCompiledPath.find(CompiledPath);
-		if (it == ByCompiledPath.end() || it->second->Taken) return false;
-		Job* job = it->second;
+		Job* job = it == ByCompiledPath.end() ? nullptr : it->second;
+		if (!job) {	// (2026-11-26) a CloudOff build: made by its job's worker when that job failed with the clouds' lookup in its source
+			auto off = CloudOffByPath.find(CompiledPath);
+			if (off == CloudOffByPath.end()) return false;
+			job = off->second;
+			while (!job->Parent->Done) Sleep(1);
+			if (!job->Done) return false;	// (not made: the record compiled with the lookup, and the device refused it)
+		}
+		if (job->Taken) return false;
 		while (!job->Done) Sleep(1);
 		job->Taken = true;
 		if (Defines && KeyOf(Defines) != job->DefineKey) {
@@ -328,7 +414,7 @@ namespace ShaderPrecompile {
 		*Shader = job->ShaderBuffer;
 		job->SourceBuffer = job->ShaderBuffer = nullptr;
 		static size_t taken = 0;
-		if (++taken == Jobs.size()) {
+		if (!job->Parent && ++taken == Jobs.size()) {
 			Logger::Log("UNOFFICIAL ParallelShaderCompile: all %u taken, %.1f s after the start.", (unsigned)Jobs.size(), ((double)GetTickCount64() - StartTime) / 1000.0);
 		}
 		return true;
@@ -345,11 +431,13 @@ namespace ShaderPrecompile {
 		std::vector<std::pair<double, std::string>> all;
 		double workerMs = 0.0, mainMs = 0.0;
 		unsigned workerCount = 0, running = 0;
-		for (Job* job : Jobs) {
-			if (!job->Done) { running++; continue; }
-			if (job->CompileMs < 0.0) continue;
-			workerMs += job->CompileMs; workerCount++;
-			all.emplace_back(job->CompileMs, job->Compiled + (job->CompileFailed ? " (worker, FAILED)" : " (worker)"));
+		for (Job* listed : Jobs) {
+			if (!listed->Done) { running++; continue; }
+			for (Job* job : { listed, listed->CloudOff }) {	// (2026-11-26 + its CloudOff build, when made)
+				if (!job || !job->Done || job->CompileMs < 0.0) continue;
+				workerMs += job->CompileMs; workerCount++;
+				all.emplace_back(job->CompileMs, job->Compiled + (job->CompileFailed ? " (worker, FAILED)" : " (worker)"));
+			}
 		}
 		for (const auto& c : MainCompiles) { mainMs += c.first; all.emplace_back(c.first, c.second + " (main thread)"); }
 		std::sort(all.begin(), all.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
