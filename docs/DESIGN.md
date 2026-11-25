@@ -1692,4 +1692,11 @@ at 91 / 92 is recognised by its missing `[Shaders.WetWorld]`); files that only h
 **Mistakes caught:** the merged defaults had `DeferredStandalone` twice (both sides added it) and the game refused the whole file (slot
 log "toml::insert_value ... already exists"): every defaults file is now parsed with a TOML parser before an install.
 
-**Results:** see the bench notes below.
+**Results (2026-11-26):**
+- Proven: the DLL (release and test), `NvrRtHelper.exe` (x64, protocol 10) and the 12 rebuilt Vulkan shaders build (the committed .spv
+  match their sources); `Reflections.fx` compiles in its default, MaterialAware and UnifiedReflections variants; every defaults file
+  parses (TOML parser) and matches its fragments; lead-architect review: approve with changes, all applied. In a bench slot the merged
+  DLL loaded and migrated the owner's settings file (v91) exactly as designed (only Gamma22 moved). Installed as install-test28, then
+  install-test29 (`F:\VS-scratch\install-test29-2026-11-26estore.ps1` -> test28 -> test27).
+- Not run: the in-game pictures (owner: "dont worry about bench pics, ill do it myself"), ray tracing with the new helper, frame time.
+- Not in it: upstream 1.1.4 (a separate merge).
