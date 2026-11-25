@@ -608,11 +608,13 @@ void AmbientLightEffect::SunGIFrame() {
 	}
 	RoomGIFrame(outdoors, rt);	// UNOFFICIAL 2026-11-12 RoomGI (returns at once while the key is off)
 	CapturedNormals::SunGIWantsAlbedo = on || (roomGiOn && !outdoors) || (Enabled && albedoBuffer && RtAmbient::Current.GI);
-	const int state = !sunGi ? 0 : !outdoors ? 1 : rt ? 2 : 3;
+	const int state = !sunGi ? 0 : !outdoors ? (rt ? 1 : 4) : rt ? 2 : 3;	// (2026-11-26 al-menu: 4, indoors without ray tracing)
 	if (state == sunGiState) return;
 	sunGiState = state;
 	if (state == 0) Logger::Log("UNOFFICIAL SunGI: off (the settings are the toml's own).");
-	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced ? "; AmbientLight does not render there, its Status is off" : "");
+	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced && !roomGi ? "; AmbientLight does not render there, its Status is off" : "");
+	else if (state == 4) Logger::Log("UNOFFICIAL SunGI: on, indoors, the RT core is not running: nothing forced (interiors keep the toml's settings%s).",
+		sunGiForced ? "; AmbientLight renders there as GTAO + the light grid's lamps, as its switch shows (held on, Status off)" : "");
 	else if (state == 2) Logger::Log("UNOFFICIAL SunGI: on, outdoors, ray-traced path running. Forced in memory: RT GI + RadianceCache + CacheExteriors on (RT AO / RT Sky left to own switches), ExteriorBalance on, "
 		"AmbientReplace %.2f, AlbedoBuffer (AmbientLight key) on%s; GridBounce stays %.2f (the RT bounce is the sun bounce); GI denoiser %s.", ambientReplace,
 		sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce, RtAmbient::Current.GIDenoiseSunGI ? "SunGI settings (GIDenoiseSunGI)" : "as before (GIDenoiseSunGI off)");
@@ -655,15 +657,19 @@ void AmbientLightEffect::RoomGIFrame(bool outdoors, bool rt) {
 		ambientReplaceInterior, ambientFloorInterior, roomGiForced ? ", AmbientLight Status on (it was off)" : "",
 		RtAmbient::Current.GIDenoiseRoomGI ? "SunGI's settings (GIDenoiseRoomGI)" : "as before (GIDenoiseRoomGI off)");
 	else Logger::Log("UNOFFICIAL RoomGI: on, indoors, FALLBACK: the RT core is not running (native D3D9, stock DXVK, no ray-tracing GPU, NvrDxvkPasses off, or ray tracing switched off for this kind of space: RTInteriors / RTExteriors). "
-		"Nothing is changed: the room keeps the game's ambient%s.", roomGiForced ? "; AmbientLight does not render here, its Status is off" : "");
+		"Nothing is changed: the room keeps the game's ambient%s.", roomGiForced ? "; AmbientLight renders here as GTAO + the light grid's lamps, as its switch shows (held on, Status off)" : "");
 }
 
 bool AmbientLightEffect::ShouldRender() {
 	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
-	// (2026-11-26 al-menu) The space test below applies only while SunGI / RoomGI alone hold the effect on (its Status key off). With the user's own
-	// Status on, both flags are false and it renders on both sides of the door: indoors GTAO + the light grid's lamps, the RT estimate only where the
-	// RT core is ready (RtAmbient::AOReady / GIReady in Render), so RoomGI without ray tracing changes nothing there.
-	if ((sunGiForced || roomGiForced) && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi && RtAmbient::SunGIRtRunning())) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them.
+	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on outdoors only, RoomGI indoors only; the other side as the user set it.
+	// (2026-11-26 al-menu) That space test applies only while SunGI / RoomGI alone hold the effect on (Status key off) AND the RT core runs: the switch
+	// shows on whenever they hold it, and what the menu shows on must draw. Without the RT core (native D3D9, stock DXVK, no RT GPU, NvrDxvkPasses off,
+	// RTInteriors / RTExteriors off) it renders on both sides as with Status on: GTAO + the light grid (the sun's bounce outdoors, the lamps indoors),
+	// and the takeover (EffectChain PreStep_AmbientLightTakeover) switches AmbientOcclusion and BounceLight off while it draws, as outdoors. With the RT
+	// core running, the side the holding key is for gets the RT path, the other keeps AO / BounceLight as the user set them. With the user's own Status
+	// on both flags are false: it renders everywhere (the RT estimate only where RtAmbient::AOReady / GIReady in Render).
+	if ((sunGiForced || roomGiForced) && RtAmbient::SunGIRtRunning() && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi)) return false;
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
 
