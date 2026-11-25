@@ -48,3 +48,4 @@ committed or installed.
 - `vs-dxvk-input`: before touching menu input, the toggle key, cursor, input blocking, or any input/UI/game-object hook.
 - `vs-runtime-paths`: before code that reads or writes a runtime file or folder, or when an install has old NVR names.
 - `vs-architecture`: map of the key source files, runtime shader compile and cache, the 64-bit RT helper.
+- `vs-gbuffer-dxvk-facts`: before push constants in a DXVK/Vulkan pass, growing a land shader (X4505), or reading COLOR2/albedo.
