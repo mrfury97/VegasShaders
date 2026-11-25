@@ -2,7 +2,7 @@
 
 The shared rules load from `F:\Claude Brain\CLAUDE.md` (parent folder); this file adds only what is specific to this room.
 Technical reference is in `docs\`, workflows in the skills below, state and the owner's decisions in this room's memory. Tool paths:
-`F:\Claude Brain\00_GLOBAL\TOOL_PATHS.md`. Room index: `F:\Claude Brain\ROOMS.md`.
+`F:\Claude Brain\00_GLOBAL\TOOL_PATHS.md`. Room index: `F:\Claude Brain\INDEX.md`.
 
 ## What this room does
 Rendering: the Vegas Shaders plugin (32-bit xNVSE plugin `VegasShaders.dll`, formerly New Vegas Reloaded), DX9 and DXVK, the
