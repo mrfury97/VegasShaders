@@ -408,7 +408,7 @@ tomlValue* SettingManager::Configuration::UserSection(const char* section) {
 extern bool ParallaxLiteDistanceMigrationPending;  // effects/Terrain.cpp (version 65)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample; .z / .w set below)
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md "Step 3 as built"): with [Main.Main.Quality] DeferredWetness on,
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"): with [Main.Main.Quality] DeferredWetness on,
 // rain wetness has one switch, Wetness Effects' (SettingManager::RainWetnessOneSwitch): Puddles' saved Enabled is set to it here, when the files
 // are read and before anything reads it (the shaders' defines, the lighting-free records and the puddle map read the setting itself); the
 // menu's Save keeps it. No default changes, so no settings version. (review 2026-11-20) Saved, Puddles keeps that value when DeferredWetness is
@@ -896,7 +896,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	}
 	// 91 (2026-11-21, owner: "move the 'is it raining / is the ground wet' clock to Wetness Effects and remove WetWorld", then "make the
 	// default mine"): WetWorld is gone; Wetness Effects and Puddles are the rain wetness, on by default with the owner's look
-	// (docs/deferred-wetness-design.md step 4).
+	// (docs/DESIGN.md "Deferred wetness design" step 4).
 	//  - The cover map's shared keys (PersistentMapSize, PersistentMapResolution, PersistentDebugView) move from [Shaders.WetWorld.Main] to
 	//    [Shaders.SnowAccumulation.Main], a saved value carrying over; then the whole WetWorld section leaves the file.
 	//  - A saved Wetness Effects / Puddles Enabled false moves to true when WetWorld was on (the player had rain wetness, which WetWorld
@@ -1976,7 +1976,7 @@ SettingManager::MenuSwitch SettingManager::GetMenuShaderSwitch(const char* Name)
 }
 
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md "Step 3 as built"; SettingManager.h)
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"; SettingManager.h)
 bool SettingManager::RainWetnessOneSwitch() {
 	return GetSettingI("Main.Main.Quality", "DeferredWetness") != 0;
 }

@@ -79,12 +79,12 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 puddle;                // 2026-11-08 Puddles (src/effects/Puddles): TESR_PuddleData: x water level, y Coverage, z 1 / Size,
                                 // w Quality (0: off, or ReflectionPuddles off)
     vec4 puddle2;               // x slope start, y slope full, z the water's roughness, w edge softness
-    vec4 film;                  // UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): x 1 = t_film holds this frame's
+    vec4 film;                  // UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design"): x 1 = t_film holds this frame's
                                 // film (the wetness the surfaces were drawn with: the floors' wet look comes from it, not from the rain guess and
                                 // the puddle field below), y its strength (RainWetness outdoors, 0 indoors), z 1 = t_normals holds the
                                 // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing),
                                 // w 1 / MaxRainWetness (Wetness Effects': the film's gloss of open ground in full rain counts 1)
-    vec4 gbuffer;               // UNOFFICIAL 2026-11-20 UnifiedReflections (docs/unified-reflections-design.md step 1): x 1 = the surfaces' material is the
+    vec4 gbuffer;               // UNOFFICIAL 2026-11-20 UnifiedReflections (docs/DESIGN.md "Unified reflections design" step 1): x 1 = the surfaces' material is the
                                 // G-buffer's (t_matbuf = COLOR2, t_gbAlbedo, t_gbNormals) and MaterialAware's copy was not made this frame; y, z the
                                 // distance match's share and units (TESR_CapturedNormalsData y, z: core/FdIndirectShaders.h kShadingNormalsPS's)
     vec4 film2;                 // UNOFFICIAL 2026-11-21 damp ground to the cube: x 1 = on ([Shaders.Reflections.Main] DampTrace false),
@@ -294,7 +294,7 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
     return shore * shore * (3.0 - 2.0 * shore) * smoothstep(cb.puddle2.x, cb.puddle2.y, worldUp) * nearFactor;
 }
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md, "one system"): in a frame DeferredWetness drew its film (the
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design", "one system"): in a frame DeferredWetness drew its film (the
 // lighting-free records' pixels from its pass inside the sun pass, every other pixel from its fallback pass before the wet screen pass), the
 // floors' wet look is the film's: how much water (gloss, which already holds the rain's cover and the puddles' fill) and how rough (the water's
 // roughness under standing water, the film's elsewhere), so the mirror sits on the water the player sees and is as blurred as its highlight.

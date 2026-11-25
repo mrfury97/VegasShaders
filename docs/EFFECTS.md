@@ -3854,7 +3854,7 @@ MiddleHighProcess::IsWearingPowerArmorTorso (0x8D8290) on Player->process.
 
 ### 6. Open
 - **Open:** an in-game visual check of the tighter values and of power armor (not done as far as the note says).
-- **Open:** cloth wind on SMP-simulated garments needs an extra-data reader for "SMP Bones" (docs/smp-compatibility.md).
+- **Open:** cloth wind on SMP-simulated garments needs an extra-data reader for "SMP Bones" (docs/DESIGN.md "SMP compatibility").
 - Balebandro's fork fixed a crash in `PipboyFit::ForPartition` after a load; ours is the by-pointer bone match above.
 
 ## PointShadows

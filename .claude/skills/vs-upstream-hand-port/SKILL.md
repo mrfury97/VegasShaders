@@ -35,7 +35,7 @@ our own work (deferred wetness, unified reflections, speckle fixes, single pass)
 6. **Seams.** Where both touched the same pass (the Reflections compute/composite, the Reflections D3D9 variants) keep one source per
    frame (our G-buffer film or upstream's forward film), make binding numbers not collide, and write the choice in the effect's section of docs/EFFECTS.md.
 7. **Review.** `lead-architect` agent reviews the diff (approve / with changes / reject); apply the comments.
-8. **Record.** One merge doc in `docs/` (what came unchanged, what stays ours, seams, defaults table, proven / believed / not run), the
+8. **Record.** One merge section in `docs/DESIGN.md` (what came unchanged, what stays ours, seams, defaults table, proven / believed / not run), the
    affected effect sections in docs/EFFECTS.md, and the room memory note for the upstream state.
 
 ## Validation

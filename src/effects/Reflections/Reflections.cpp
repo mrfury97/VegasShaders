@@ -873,7 +873,7 @@ bool ReflectionsEffect::GBufferFrame() {
 	return gbufferOn;
 }
 
-// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/unified-reflections-design.md): with UnifiedReflections used this frame, outdoors in a
+// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/DESIGN.md "Unified reflections design"): with UnifiedReflections used this frame, outdoors in a
 // frame this effect can mirror the wet floors (its rain strength above 0, DeferredWetness's fallback able to give it the whole film, the effect
 // and its targets there), the wet floors' reflection is this effect's alone up to DrawDistance: DeferredWetness takes its sky reflection out there
 // (Shaders/DeferredWetness.hlsl DWSkyKeep) and Wetness Effects' screen pass skips its trace (it still draws the lamps' streaks). Walls, objects
@@ -1623,7 +1623,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	}
 	// 2026-11-08 Puddles: the puddles' field, so the SSR and RT reflections mirror them (zero: off).
 	if (PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles) puddles->ReflectionData(uniforms.puddle, uniforms.puddle2);
-	// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): in a frame DeferredWetness's film covers the whole screen
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design"): in a frame DeferredWetness's film covers the whole screen
 	// (FilmWhole: its fallback drew after its pass; review: with the fallback off the film holds only the pass's pixels, and the rest would turn
 	// dry), the floors' water and its roughness come from the film (Reflections.glsl FilmWetness), not from the rain guess (Data.y) and the puddle
 	// field; z: the normals are the normal-mapped ones (FdReflNormals put them in), so the passes widen the roughness by their variance
