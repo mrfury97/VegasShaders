@@ -86,13 +86,12 @@ namespace StalePresetValues {
 		{ "Main.Main.Quality", "DeferredSkinSSS", 0.0f, 88 }, { "Shaders.Skin.SSS", "Kernel", 0.0f, 88 },
 		{ "Main.Main.Quality", "DeferredSkin", 0.0f, 88 }, { "Main.Main.Quality", "DeferredHair", 0.0f, 88 },
 		{ "Main.Main.Quality", "DeferredTransparents", 0.0f, 89 },
-		{ "Main.Main.RayTracing", "HelperWait", 0.0f, 92 },
-		{ "Shaders.Reflections.RT", "RideMainExchange", 0.0f, 92 },
-		{ "Shaders.Reflections.RT", "FollowRenderScale", 0.0f, 92 },
-		{ "Shaders.Reflections.Main", "ReplaceForward", 0.0f, 92 },
-		{ "Shaders.WetWorld.Main", "ReflectionsOwnPuddles", 0.0f, 92 },
-		{ "Shaders.PBR.Main", "VanillaBridgeDielectricMax", 0.08f, 94 },
-		{ "Main.Main.RayTracing", "ActorFlushPerSpace", 0.0f, 95 },
+		// (2026-11-26 upstream 1.1.4 merge) upstream's HelperWait 0, RideMainExchange 0 (92), VanillaBridgeDielectricMax 0.08 (94) and
+		// WetWorld's ReflectionsOwnPuddles are left out: this fork keeps those values as its defaults (or has no WetWorld), so they are no
+		// leftovers here. The numbers are this fork's steps (98: ReplaceForward / FollowRenderScale, 99: upstream's 95).
+		{ "Shaders.Reflections.RT", "FollowRenderScale", 0.0f, 98 },
+		{ "Shaders.Reflections.Main", "ReplaceForward", 0.0f, 98 },
+		{ "Main.Main.RayTracing", "ActorFlushPerSpace", 0.0f, 99 },
 	};
 
 	// Keys that moved (UpdateOldDefaults 61 and 67): the value goes to the new key. [Shaders.VolumetricLight.Main] NightStrength (64) has

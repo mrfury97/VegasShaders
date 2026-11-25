@@ -421,6 +421,9 @@ namespace DeferredSun {
 	// and DEPTH output while supporting both full resolution and RenderScale < 1.0 natively.
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool linearDepth, const NiDirectionalLight* sun) {
 		if (ComputeFailed || Vm.on || SunFadeDeferred::Fading || SkylightingMode1) return false;
+		// (2026-11-26 upstream 1.1.4 merge, review) Compute\DeferredSun.comp has no DS_WET_FILM: with DeferredWetness's film live this
+		// frame the D3D9 pass draws, so the film's sun highlight stays
+		if (WetFilmCompiled && DeferredWetness::FilmLive) return false;
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSun")) return false;
 		const CachedSettings& cfg = SyncSettings();
 		if (cfg.nvrDxvkDeferred == 0) return false;
