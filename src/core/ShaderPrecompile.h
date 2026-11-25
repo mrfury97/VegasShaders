@@ -110,6 +110,13 @@ namespace ShaderPrecompile {
 		// UNOFFICIAL 2026-11-17 fast-restart (ShaderRecord.cpp KnownCloudFailure): this exact text did not compile with the clouds' lookup at an
 		// earlier start: not compiled again (LoadShader makes the build without the lookup)
 		if (!fresh && ShaderProgram::KnownCloudFailure(job->Preprocessed, job->SourceBuffer)) { job->CompileFailed = true; return; }
+		// (2026-11-26, ShaderRecord.cpp KnownOutOfRegisters) this exact text ran out of temp registers at both flags at an earlier start: the
+		// same failure without the compile ("X4505" in the log: Take passes it on as TakenOutOfRegisters)
+		if (!fresh && ShaderProgram::KnownOutOfRegisters(job->Preprocessed, job->SourceBuffer)) {
+			job->CompileFailed = true;
+			job->Log += "UNOFFICIAL " + job->Name + ": out of temp registers (X4505) at both flags with this exact text at an earlier start: not compiled again\n";
+			return;
+		}
 		if (fresh) {
 			FILE* f = nullptr;
 			if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {

@@ -133,6 +133,20 @@ void ShaderProgram::NoteCloudFailure(const std::string& PreprocessedPath, ID3DXB
 	const std::string portable = PortableSource(Source);
 	file.write(portable.data(), portable.size());
 }
+// UNOFFICIAL 2026-11-26 faster-shader-compile (room 06's warm bench starts): the same for any record that ran out of temp registers (X4505) at
+// both flags. With Wetness Effects, Puddles and Terrain Blending the NoCloud and NoCloud\PuddlesLean builds of SLS2023/24/26/27.pso failed so at
+// EVERY start, 6-8 s each on the main thread (54-59 s of a warm start), because only the build with the clouds' lookup remembered its
+// failure. The text D3DX was given is written as <entry>.hlsl.x4505 (portable, as the cache); while the record's text is exactly that, it is
+// not compiled again and fails as it would have. The same compiler and flags always give the same result for the same text; any change to
+// the text (a setting, a new build) compiles it again, and a later successful build removes the marker.
+bool ShaderProgram::KnownOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
+	return CheckPreprocessResult((PreprocessedPath + ".x4505").c_str(), Source);
+}
+void ShaderProgram::NoteOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
+	std::ofstream file(PreprocessedPath + ".x4505", std::ios::out | std::ios::binary);
+	const std::string portable = PortableSource(Source);
+	file.write(portable.data(), portable.size());
+}
 
 bool ShaderProgram::CheckPreprocessResult(const char* CachedPath, ID3DXBuffer* Source) {
 	std::ifstream File(CachedPath, std::ios::in | std::ios::binary);
@@ -751,12 +765,18 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 		// (2026-11-17 fast-restart) this exact text did not compile with the clouds' lookup before: straight to the build without it (below)
 		const bool knownCloudFailure = !precompiled && (recompile || !function) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS") && KnownCloudFailure(preprocessedPath, source);
 		if (knownCloudFailure) cloudRetry = compileFailed = true;
+		// (2026-11-26 faster-shader-compile) this exact text ran out of temp registers at both flags before (KnownOutOfRegisters): not compiled
+		// again, the same failure as if it had been (the fall-back chain below runs as it would after the compile)
+		const bool knownOutOfRegisters = !precompiled && (recompile || !function) && !knownCloudFailure && KnownOutOfRegisters(preprocessedPath, source);
+		if (knownOutOfRegisters) Logger::Log("UNOFFICIAL %s: out of temp registers (X4505) at both flags with this exact text at an earlier start: not compiled again", Name);
 		if (!precompiled && (recompile || !function) && !knownCloudFailure) {
 			// compile if option was enabled or compiled version not found
 			CompileProgress::Begin();
 			CompileProgress::NoteCurrent(Name);
 			const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (ShaderPrecompile::LogCompileTimes)
-			D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile, NULL, &binary, &messages, &table);
+			if (!knownOutOfRegisters) {
+				D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile, NULL, &binary, &messages, &table);
+			}
 			// UNOFFICIAL 2026-10-29: D3DX ran out of ps_3_0 temp registers (X4505). Measured: the 6-layer land shaders SLS2132-2138 with terrain
 			// blending and captured normals both on fail in Includes/Parallax.hlsl at flags 0 while 5 and 7 layers compile -- an allocation
 			// quirk, not a real budget. Compiled again with D3DXSHADER_PREFER_FLOW_CONTROL, which keeps the same branches and fits (all 256
@@ -772,13 +792,15 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 					D3DXSHADER_PREFER_FLOW_CONTROL, &binary, &messages, &table);
 			}
 			if (binary) CompileProgress::ShadersCompiled.fetch_add(1);
-			ShaderPrecompile::MainCompiles.emplace_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count(),
-				binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
+			if (!knownOutOfRegisters) {
+				ShaderPrecompile::MainCompiles.emplace_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count(),
+					binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
+			}
 			logCompilerMessages(messages, Name);
 			EffectStatus::ShaderLoaded(binary ? EffectStatus::Compiled : EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
 			if (!binary) {	// (2026-11-18)
 				compileFailed = true;
-				CompileOutOfRegisters = outOfRegisters = messages && strstr((const char*)messages->GetBufferPointer(), "X4505") != nullptr;
+				CompileOutOfRegisters = outOfRegisters = knownOutOfRegisters || (messages && strstr((const char*)messages->GetBufferPointer(), "X4505") != nullptr);
 				registerClash = messages && strstr((const char*)messages->GetBufferPointer(), "X4500") != nullptr;
 			}
 			if (!binary && !registerClash) cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");	// (2026-11-16 fast-restart)
@@ -817,8 +839,9 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			std::ofstream definesFile(failedDefinesPath, std::ios::out | std::ios::binary);
 			for (int d = 0; d < 63 && Template.Defines[d].Name; d++)
 				definesFile << Template.Defines[d].Name << "=" << (Template.Defines[d].Definition ? Template.Defines[d].Definition : "") << "\r\n";
+			if (outOfRegisters && !registerClash) NoteOutOfRegisters(preprocessedPath, source);	// (2026-11-26: here or on a worker; not compiled again at the next start)
 		}
-		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); }
+		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); DeleteFileA((preprocessedPath + ".x4505").c_str()); }
 
 		const HRESULT tableResult = function ? D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table) : E_FAIL;
 		if (function && FAILED(tableResult)) {

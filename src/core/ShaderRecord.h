@@ -63,6 +63,9 @@ public:
 	// preprocessed text (<cache entry>.hlsl.nocloud), so the next start goes straight to its build without the lookup.
 	static bool				KnownCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
 	static void				NoteCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
+	// UNOFFICIAL 2026-11-26: the same for any record out of temp registers (X4505) at both flags (<cache entry>.hlsl.x4505)
+	static bool				KnownOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source);
+	static void				NoteOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source);
 
 	// Drops the cached IDirect3DTexture9* for a named sampler so that SetCT re-resolves it
 	// on the next draw. MUST be called on every consumer of a texture that is released and
