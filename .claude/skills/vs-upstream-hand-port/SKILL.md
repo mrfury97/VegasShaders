@@ -49,5 +49,5 @@ our own work (deferred wetness, unified reflections, speckle fixes, single pass)
 - Shaders look stale after copying upstream's files: clear `Shaders\VegasShaders\Shaders\Cache\`.
 
 ## Links
-- `docs/archive/upstream-cherry-picks.md` and `docs/archive/fork-vs-upstream.md`: how earlier ports were recorded.
+- `archive/2026-11-25.zip vs/repo-docs-archive/upstream-cherry-picks.md` and `archive/2026-11-25.zip vs/repo-docs-archive/fork-vs-upstream.md`: how earlier ports were recorded.
 - Branch `upstream-refl-rt-compare`: `docs/upstream-reflections-rt-compare.md` (exists on that branch only), the comparison behind the full-merge choice.

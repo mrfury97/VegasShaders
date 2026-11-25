@@ -361,7 +361,7 @@ everything; Phases 0-1c (5-6 sessions) fix what breaks today and lift the shader
 
 ### Gaps today and "can it be fully unhooked from forward?" (2026-11-19)
 Asked by the owner. Read from the code on the installed test build (`test-p1a-bump` 90fc395 + deferred wetness step 1) and the docs
-`docs/DESIGN.md "Deferred vs forward"`, `archive/bumped-normals-study.md`, `docs/DESIGN.md "Deferred wetness design"`. Nothing measured; ranks are by what a player sees (believed).
+`docs/DESIGN.md "Deferred vs forward"`, `archive/2026-11-25.zip vs/repo-docs-archive/bumped-normals-study.md`, `docs/DESIGN.md "Deferred wetness design"`. Nothing measured; ranks are by what a player sees (believed).
 
 #### The gaps, most visible first
 | # | Gap | What the player sees | Fixed by |
@@ -730,7 +730,7 @@ Reflections effect mirrors (DWSkyKeep, `docs/DESIGN.md "Unified reflections desi
 
 Read from the code of the current test build (`test-p1a-bump` e31a5ed: deferred wetness steps 1-3, bumped normals, Reflections with the
 film). Paths are under `src\` unless they start with `docs\` or `resource\`. Nothing here was built or run. Costs are estimates, not
-measured. Background: `docs/DESIGN.md "Deferred roadmap"`, `docs/DESIGN.md "Deferred vs forward"`, `docs/archive/bumped-normals-study.md`,
+measured. Background: `docs/DESIGN.md "Deferred roadmap"`, `docs/DESIGN.md "Deferred vs forward"`, `archive/2026-11-25.zip vs/repo-docs-archive/bumped-normals-study.md`,
 `docs/DESIGN.md "Deferred wetness design"`, `docs/EFFECTS.md "Reflections"`.
 
 ### Short answer

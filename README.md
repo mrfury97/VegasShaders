@@ -93,7 +93,7 @@ With work from:
 - macintroll: snow accumulation and the snow look, captured normals, lens and underwater shaders.
 - Balebandro (Physically-Based-Reloaded): PBR weather scales, the grass size fade.
 - Sal, and VHeyes (mirjomi): fixes including SMAA and the material pass
-  ([docs/archive/upstream-cherry-picks.md](docs/archive/upstream-cherry-picks.md)).
+  (archived: `vs/repo-docs-archive/upstream-cherry-picks.md` in `F:\Claude Brain\archive\2026-11-25.zip`).
 - The [Community Shaders](https://github.com/community-shaders/skyrim-community-shaders) team (GPL-3.0): terrain and
   cloud shadows, grass collision, skylighting, LOD blending, terrain variation and the True PBR layout
   ([Community Shaders ports](docs/DESIGN.md#community-shaders-ports)).

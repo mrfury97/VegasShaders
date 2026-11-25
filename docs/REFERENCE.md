@@ -38,9 +38,8 @@ believed. Design docs and studies are in [DESIGN.md](DESIGN.md); per-effect note
 - xNVSE headers: `src/NewVegas/nvse/`.
 
 ### Docs
-- Docs map: the repo `CLAUDE.md`. Current design docs live in `docs\`, technical reference in `docs
-eference\`, history in
-  `docs\archive\` (see its `MANIFEST.md`). When a doc goes stale, rewrite it or move it to the archive; do not leave it in place.
+- Docs map: the repo `CLAUDE.md`. Design docs and studies are in [DESIGN.md](DESIGN.md), per-effect notes in [EFFECTS.md](EFFECTS.md), technical
+  reference is this file. History went to the dated zip in `F:\Claude Brain\archive\` (`vs/repo-docs-archive/MOVED.md` lists what left the repo). When a doc goes stale, rewrite it or move it to the archive; do not leave it in place.
 - Deferred vs forward background: [Deferred vs forward](DESIGN.md#deferred-vs-forward).
 
 ## DXVK input

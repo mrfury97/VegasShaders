@@ -30,7 +30,7 @@ namespace FdIndirect {
 	inline bool ReflectionsOn() { return Base() && MaterialNow() && Key("DeferredReflections"); }
 	inline bool ALAlbedoOn() { return Base() && MaterialNow() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f && Key("DeferredALAlbedo"); }
 	inline bool RRGuidesOn() { return Base() && MaterialNow() && Key("DeferredRRGuides"); }
-	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals (live, test only, off; docs/bumped-normals-study.md): the shading normals below for the
+	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals (live, test only, off; archive/2026-11-25.zip vs/repo-docs-archive/bumped-normals-study.md): the shading normals below for the
 	// reflections (as DeferredReflections, without its material copy) and Wetness Effects' wet reflections (WetWorld's wet surface too, until
 	// it was removed 2026-11-21). Every other reader keeps the smooth normals buffer: AO, bounce light and shadows would
 	// shimmer and self-shadow on a normal map's detail.
