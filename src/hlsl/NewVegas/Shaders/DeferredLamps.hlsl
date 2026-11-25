@@ -19,6 +19,13 @@
 #endif
 #define SPECULAR
 #define PBR_ROUGH_F90 1	// UNOFFICIAL 2026-11-19 (Finding 4.2): roughness-damped grazing F90 parity with RtPathTrace.comp
+#if defined(DL_LAND_ONLY) && !(defined(DL_LAND_FILM_ONLY) && DL_LAND_FILM_ONLY)
+// UNOFFICIAL 2026-11-26 DeferredLandRoughF90 ([Shaders.PBR.Main], live; TESR_LinearScales.w = 1 - the key, PBR.cpp): false (default) = the land
+// pass's lamps take the forward land's F90 (saturate(Reflectivity), Includes/Terrain.hlsl getPointLightLighting), not the damped one (set in
+// main). true (or a register never written) = the damped F90 exactly, as in 1.1.1. The other passes (objects, skin) keep the damping.
+static bool DLLandF90 = false;
+    #define PBR_ROUGH_F90_PICK(damped) (DLLandF90 ? REFLECTIVITY_F90 : (damped))
+#endif
 
 // UNOFFICIAL 2026-11-15 fd-lampfit (docs/next/FD-LAMPFIT.md): POINT_SHADOW_RT (RT lamp shadows on the fork, or CapsuleShadows on any runtime)
 // is read by the shadow passes only (DLShadow's traced read, a pixel's first 16 lamps). Every other pass of this file looks lamps past the 16th
@@ -487,6 +494,7 @@ float4 main(PS_IN IN, out float depth : DEPTH DL_SKIN_SPEC_OUT) : COLOR0 {
     }
     { DL_LAMP_LOOP(DLLampLandFilm) }
         #else
+    DLLandF90 = TESR_LinearScales.w > 0.5f;	// (2026-11-26 DeferredLandRoughF90 false: the forward land's F90, above)
     { DL_LAMP_LOOP(DLLampLand) }
         #endif
     #else
