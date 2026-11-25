@@ -22,6 +22,7 @@
 - xNVSE headers: `src/NewVegas/nvse/`.
 
 ## Docs
-- Docs map: the repo `CLAUDE.md`. Current design docs live in `docs\`, technical reference in `docseference\`, history in
-  `docsrchive\` (see its `MANIFEST.md`). When a doc goes stale, rewrite it or move it to the archive; do not leave it in place.
+- Docs map: the repo `CLAUDE.md`. Current design docs live in `docs\`, technical reference in `docs
+eference\`, history in
+  `docs\archive\` (see its `MANIFEST.md`). When a doc goes stale, rewrite it or move it to the archive; do not leave it in place.
 - Deferred vs forward background: [../deferred-vs-forward.md](../deferred-vs-forward.md).
