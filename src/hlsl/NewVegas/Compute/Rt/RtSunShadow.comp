@@ -157,7 +157,7 @@ void main() {
 			// Bias: along the normal (grows with distance: depth and normal precision), then a little toward the sun
 			// (2026-11-07 rtgap-tess 1a) + the bumps' Strength while they are drawn: a point in a hollow of the depth buffer lies under the
 			// flat RT surface, and its ray was blocked at once
-			vec3 start = position + normal * ((turned ? -1.0 : 1.0) * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ))) + p.sun.xyz * p.bias.z;
+			vec3 start = position + normal * ((turned ? 0.25 : 1.0) * (p.bias.x + p.bias.y * viewZ + rtTessSlack(p.slack, viewZ))) + p.sun.xyz * p.bias.z;
 			if (traceFixes) {	// (TraceFixes, fork F6) the sun's side of the geometric face; offsets by the pixel's footprint and 1 / cos (capped at 4x)
 				const vec3 sunSide = facingGeo >= 0.0 ? geo : -geo;
 				const float slope = min(1.0 / max(abs(facingGeo), 0.05), 4.0);

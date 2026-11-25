@@ -43,11 +43,120 @@ namespace RtLampShadows {
 	// rays test them too (RtAlpha.glsl, the alpha atlas at binding 12 / 13: a tester, "RT exterior shadows don't have alpha textures");
 	// without it they are not in the scene's tested set and let lamp light through, as before.
 	inline constexpr UINT MaskGlass = 0x04, MaskLampModel = 0x08, MaskAlphaTested = 0x10;
+	inline constexpr const char* kScreenSection = "Shaders.ShadowsInteriors.Capsules";
+
+	// (2026-11-21) SettingsRevision cache: settings read once when SettingsRevision changes instead of 50+ hash lookups per frame.
+	struct CachedSettings {
+		bool valid = false;
+		UInt32 revision = 0;
+		bool actorsFromCubeMaps = false, enabled = false, live = false, sameFrame = false;
+		bool exteriorForward = false, exteriorManyLights = false, manyLights = false;
+		bool skipTracedCubes = false, exteriors = false, shadowDenoiser = false;
+		bool denoise = false, flashlight = false, manyLightsOneRay = false, followRenderScale = false;
+		bool alphaTest = false, skipLampModels = false, skipLampGlass = false, oneSided = false;
+		bool denoiseLampsByCoverage = false, physicalLampSize = false, physicalLampSizeAll = false;
+		bool manyLightsSampleFix = false;
+		bool capsulesEnabled = false, capsules = false, capsulesContact = false;
+		bool forwardEnabled = false;
+		int manyLightsMax = 255, maxLamps = 63, debugView = 0, debugLamp = 0, denoiseLamps = 4;
+		int filter = -1, rays = 1, rankBy = 0, jitter = -1, lampsPerPixel = 3, interleave = 1;
+		int exteriorDebug = 0, movingCasterHistory = 8, manyLightsRays = 1, manyLightsHistory = 16;
+		int manyLightsSpatial = 1, manyLightsRestStride = 1, denoiserDebugView = 0, denoiserCore = 0;
+		int filterStep = 1;
+		float depthTolerance = 0.004f, exteriorLampStop = 0.0f, startOffset = 0.0f, flashlightStop = 0.0f;
+		float startOffsetPerUnit = 0.0f, lampStop = 0.0f, lampModelDistance = 0.0f;
+		float mainContactShadows = 0.0f, contactShadows = 0.0f, contactLength = 0.0f;
+		float lampRadius = 0.0f, invisibleLightRadius = 0.0f;
+		float physicalLampScale = 1.0f, physicalLampMin = 0.0f, physicalLampMax = 16.0f;
+		float physicalLampUnknown = 0.0f, physicalLampPerReach = 0.0f;
+		float denoiserHistory = 8.0f, denoiserMaxRadius = 8.0f, denoiserStabilize = 1.0f;
+		float filterDepthSigma = 0.01f, filterNormalPower = 0.0f, denoiseHistory = 8.0f;
+	};
+	inline CachedSettings gSettings;
+
+	inline const CachedSettings& SyncSettings() {
+		if (!TheSettingManager) return gSettings;
+		const UInt32 rev = TheSettingManager->SettingsRevision;
+		if (!gSettings.valid || gSettings.revision != rev) {
+			gSettings.revision = rev;
+			gSettings.valid = true;
+			gSettings.actorsFromCubeMaps = TheSettingManager->GetSettingI(kSection, "ActorsFromCubeMaps") != 0;
+			gSettings.enabled = TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
+			gSettings.live = TheSettingManager->GetSettingI(kSection, "Live") != 0;
+			gSettings.sameFrame = TheSettingManager->GetSettingI(kSection, "SameFrame") != 0;
+			gSettings.exteriorForward = TheSettingManager->GetSettingI(kSection, "ExteriorForward") != 0;
+			gSettings.exteriorManyLights = TheSettingManager->GetSettingI(kSection, "ExteriorManyLights") != 0;
+			gSettings.manyLights = TheSettingManager->GetSettingI(kSection, "ManyLights") != 0;
+			gSettings.skipTracedCubes = TheSettingManager->GetSettingI(kSection, "SkipTracedCubes") != 0;
+			gSettings.exteriors = TheSettingManager->GetSettingI(kSection, "Exteriors") != 0;
+			gSettings.shadowDenoiser = TheSettingManager->GetSettingI(kSection, "ShadowDenoiser") != 0;
+			gSettings.denoise = TheSettingManager->GetSettingI(kSection, "Denoise") != 0;
+			gSettings.flashlight = TheSettingManager->GetSettingI(kSection, "Flashlight") != 0;
+			gSettings.manyLightsOneRay = TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
+			gSettings.followRenderScale = TheSettingManager->GetSettingI(kSection, "FollowRenderScale") != 0;
+			gSettings.alphaTest = TheSettingManager->GetSettingI(kSection, "AlphaTest") != 0;
+			gSettings.skipLampModels = TheSettingManager->GetSettingI(kSection, "SkipLampModels") != 0;
+			gSettings.skipLampGlass = TheSettingManager->GetSettingI(kSection, "SkipLampGlass") != 0;
+			gSettings.oneSided = TheSettingManager->GetSettingI(kSection, "OneSided") != 0;
+			gSettings.denoiseLampsByCoverage = TheSettingManager->GetSettingI(kSection, "DenoiseLampsByCoverage") != 0;
+			gSettings.physicalLampSize = TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
+			gSettings.physicalLampSizeAll = TheSettingManager->GetSettingI(kSection, "PhysicalLampSizeAll") != 0;
+			gSettings.manyLightsSampleFix = TheSettingManager->GetSettingI(kSection, "ManyLightsSampleFix") != 0;
+			gSettings.capsulesEnabled = TheSettingManager->GetSettingI(kScreenSection, "Enabled") != 0;
+			gSettings.capsules = TheSettingManager->GetSettingI(kScreenSection, "Capsules") != 0;
+			gSettings.capsulesContact = TheSettingManager->GetSettingI(kScreenSection, "Contact") != 0;
+			gSettings.forwardEnabled = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
+			gSettings.manyLightsMax = TheSettingManager->GetSettingI(kSection, "ManyLightsMax");
+			gSettings.maxLamps = TheSettingManager->GetSettingI(kSection, "MaxLamps");
+			gSettings.debugView = TheSettingManager->GetSettingI(kSection, "DebugView");
+			gSettings.debugLamp = TheSettingManager->GetSettingI(kSection, "DebugLamp");
+			gSettings.denoiseLamps = TheSettingManager->GetSettingI(kSection, "DenoiseLamps");
+			gSettings.filter = TheSettingManager->GetSettingI(kSection, "Filter");
+			gSettings.rays = TheSettingManager->GetSettingI(kSection, "Rays");
+			gSettings.rankBy = TheSettingManager->GetSettingI(kSection, "RankBy");
+			gSettings.jitter = TheSettingManager->GetSettingI(kSection, "Jitter");
+			gSettings.lampsPerPixel = TheSettingManager->GetSettingI(kSection, "LampsPerPixel");
+			gSettings.interleave = TheSettingManager->GetSettingI(kSection, "Interleave");
+			gSettings.exteriorDebug = TheSettingManager->GetSettingI(kSection, "ExteriorDebug");
+			gSettings.movingCasterHistory = TheSettingManager->GetSettingI(kSection, "MovingCasterHistory");
+			gSettings.manyLightsRays = TheSettingManager->GetSettingI(kSection, "ManyLightsRays");
+			gSettings.manyLightsHistory = TheSettingManager->GetSettingI(kSection, "ManyLightsHistory");
+			gSettings.manyLightsSpatial = TheSettingManager->GetSettingI(kSection, "ManyLightsSpatial");
+			gSettings.manyLightsRestStride = TheSettingManager->GetSettingI(kSection, "ManyLightsRestStride");
+			gSettings.denoiserDebugView = TheSettingManager->GetSettingI(kSection, "DenoiserDebugView");
+			gSettings.denoiserCore = TheSettingManager->GetSettingI(kSection, "DenoiserCore");
+			gSettings.filterStep = TheSettingManager->GetSettingI(kSection, "FilterStep");
+			gSettings.depthTolerance = TheSettingManager->GetSettingF(kSection, "DepthTolerance");
+			gSettings.exteriorLampStop = TheSettingManager->GetSettingF(kSection, "ExteriorLampStop");
+			gSettings.startOffset = TheSettingManager->GetSettingF(kSection, "StartOffset");
+			gSettings.flashlightStop = TheSettingManager->GetSettingF(kSection, "FlashlightStop");
+			gSettings.startOffsetPerUnit = TheSettingManager->GetSettingF(kSection, "StartOffsetPerUnit");
+			gSettings.lampStop = TheSettingManager->GetSettingF(kSection, "LampStop");
+			gSettings.lampModelDistance = TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Forward", "LampModelDistance");
+			gSettings.mainContactShadows = TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Main", "ContactShadows");
+			gSettings.contactShadows = TheSettingManager->GetSettingF(kSection, "ContactShadows");
+			gSettings.contactLength = TheSettingManager->GetSettingF(kSection, "ContactLength");
+			gSettings.lampRadius = TheSettingManager->GetSettingF(kSection, "LampRadius");
+			gSettings.invisibleLightRadius = TheSettingManager->GetSettingF(kSection, "InvisibleLightRadius");
+			gSettings.physicalLampScale = TheSettingManager->GetSettingF(kSection, "PhysicalLampScale");
+			gSettings.physicalLampMin = TheSettingManager->GetSettingF(kSection, "PhysicalLampMin");
+			gSettings.physicalLampMax = TheSettingManager->GetSettingF(kSection, "PhysicalLampMax");
+			gSettings.physicalLampUnknown = TheSettingManager->GetSettingF(kSection, "PhysicalLampUnknown");
+			gSettings.physicalLampPerReach = TheSettingManager->GetSettingF(kSection, "PhysicalLampPerReach");
+			gSettings.denoiserHistory = TheSettingManager->GetSettingF(kSection, "DenoiserHistory");
+			gSettings.denoiserMaxRadius = TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius");
+			gSettings.denoiserStabilize = TheSettingManager->GetSettingF(kSection, "DenoiserStabilize");
+			gSettings.filterDepthSigma = TheSettingManager->GetSettingF(kSection, "FilterDepthSigma");
+			gSettings.filterNormalPower = TheSettingManager->GetSettingF(kSection, "FilterNormalPower");
+			gSettings.denoiseHistory = TheSettingManager->GetSettingF(kSection, "DenoiseHistory");
+		}
+		return gSettings;
+	}
 
 	// ActorsFromCubeMaps applies only while the traced scene has no people: with the RT core's posed actors in it (RtCore::Actors(),
 	// mask 0x20, which the lamp rays' masks keep) people cast traced shadows and their cube-map layer is neither read nor redrawn.
 	inline bool ActorsFromCubeMaps() {
-		return !RtCore::Actors() && TheSettingManager->GetSettingI(kSection, "ActorsFromCubeMaps");
+		return !RtCore::Actors() && SyncSettings().actorsFromCubeMaps;
 	}
 
 	// UNOFFICIAL 2026-11-11 BUG FIX (RTX bench: Enabled switched to 0 while the game ran, the helper's lamp passes kept running every
@@ -57,8 +166,8 @@ namespace RtLampShadows {
 	// from the next frame. Coming on when it was off at startup still needs the restart (the shaders).
 	// (2026-11-15 RT master switches) and not while RtCore::Gated (RTInteriors / RTExteriors off for this space): exactly Enabled switched off,
 	// indoors and outdoors (Exteriors) alike, without touching the setting
-	inline bool EnabledNow() { return TheSettingManager->GetSettingI(kSection, "Enabled") != 0 && !RtCore::Gated(); }
-	inline bool LiveNow() { return EnabledNow() && TheSettingManager->GetSettingI(kSection, "Live") != 0; }
+	inline bool EnabledNow() { return SyncSettings().enabled && !RtCore::Gated(); }
+	inline bool LiveNow() { return EnabledNow() && SyncSettings().live; }
 
 	inline bool CompiledIn = false;			// POINT_SHADOW_RT in the object shaders (fixed at startup)
 	// UNOFFICIAL 2026-11-15 (docs/next/FD-NATIVEFIX.md): some lit shader's Interior record loaded only without the read (ShaderManager::
@@ -68,11 +177,10 @@ namespace RtLampShadows {
 	// contact shadows), no RT needed. RtEnabled: the RT section on at startup with the RT core's interface (the RT path may trace);
 	// ScreenCompiledIn: [Shaders.ShadowsInteriors.Capsules] Enabled at startup. ScreenSourceFrame: this frame's buffer is the pass's
 	// (set in Submit: the pass is wanted and the RT path is not running).
-	inline constexpr const char* kScreenSection = "Shaders.ShadowsInteriors.Capsules";
 	inline bool RtEnabled = false, ScreenCompiledIn = false, ScreenSourceFrame = false;
 	inline bool ScreenWants() {
-		return ScreenCompiledIn && !TheShaderManager->GameState.isExterior &&
-			(TheSettingManager->GetSettingI(kScreenSection, "Capsules") != 0 || TheSettingManager->GetSettingI(kScreenSection, "Contact") != 0);
+		const CachedSettings& s = SyncSettings();
+		return ScreenCompiledIn && !TheShaderManager->GameState.isExterior && (s.capsules || s.capsulesContact);
 	}
 	inline char Status[200] = "not checked yet";
 
@@ -153,7 +261,7 @@ namespace RtLampShadows {
 	inline bool InPrimary = false;
 	inline bool SameFrameTraced() { return SameFrameTracedAt == TheFrameRateManager->FrameNumber; }
 	inline UInt32 SameFrames = 0, LateFrames = 0;	// traces before the world / after it (a frame late), for the log
-	inline bool SameFrameOn() { return primaryShader >= 0 && TheSettingManager->GetSettingI(kSection, "SameFrame") != 0; }
+	inline bool SameFrameOn() { return primaryShader >= 0 && SyncSettings().sameFrame; }
 	inline int imageAlphaStandIn = -1;	// (2026-11-03 rtalpha) 1 x 1 R16F: the alpha atlas binding when the core has no atlas (jitter.z 0)
 	// the alpha atlas when the core tests alpha (RtCore::AlphaTested), else the stand-in; Record sets jitter.z to match
 	inline int AlphaImage() {
@@ -198,7 +306,7 @@ namespace RtLampShadows {
 	// UNOFFICIAL 2026-10-30 the land (TerrainTemplate TERRAIN_LAMP_RT): each slot's world position in the traced frame (w 1 = traced),
 	// matched there by position (outdoor slots are ShadowLights indices, which may change order from frame to frame)
 	inline D3DXVECTOR4 TracedLampWorld[TableSlots] = {};
-	inline bool ExteriorForwardOn() { return TheSettingManager->GetSettingI(kSection, "ExteriorForward") != 0; }
+	inline bool ExteriorForwardOn() { return SyncSettings().exteriorForward; }
 	// UNOFFICIAL 2026-10-30 Flashlight ([Shaders.ShadowsInteriors.RT] Flashlight, off): the flashlight's (Pip-Boy light's) shadow traced
 	// (RtFlashTrace.comp, 1 lit / 0 blocked, screen space); Flashlight's shadow pass reads it instead of its shadow map
 	// (FlashlightShadowsRT.frag), and the shadow map is not drawn meanwhile.
@@ -286,11 +394,11 @@ namespace RtLampShadows {
 	// share of all the others): a lamp that is not one of a pixel's 2 strongest takes R instead of staying lit (Novac: the walkway lamps were
 	// never a pixel's 2 strongest, rtlamp-31..35). ExteriorSubmit: SubmitExterior's Submit is running.
 	inline bool ExteriorSubmit = false;
-	inline bool ExteriorManyOn() { return TheSettingManager->GetSettingI(kSection, "ExteriorManyLights") != 0; }
+	inline bool ExteriorManyOn() { return SyncSettings().exteriorManyLights; }
 	inline bool ManyOn() {
 		if (!ManyReady()) return false;
 		if (TheShaderManager->GameState.isExterior) return ExteriorSubmit && ExteriorManyOn();
-		return TheSettingManager->GetSettingI(kSection, "ManyLights") != 0;
+		return SyncSettings().manyLights;
 	}
 	// c217.w: 1 / the packing unit of the result the draws read
 	inline float PackingInverse() { return TracedMany ? 1.0f / 4096.0f : 1.0f / 1024.0f; }
@@ -323,7 +431,7 @@ namespace RtLampShadows {
 				if (Lamps[i].light == light) { const int id = Lamps[i].slot; Lamps[i] = data; Lamps[i].slot = id; Lamps[i].light = light; break; }
 			return;
 		}
-		const int limit = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsMax"), 64), ManyIds);
+		const int limit = (std::min)((std::max)(SyncSettings().manyLightsMax, 64), ManyIds);
 		if (64 + ExtraCount >= limit || LampCount >= ManyIds) {
 			PendingIds.emplace(light, ManyId{ -1, data.reach });	// counted once (ManyIdOf: -1, no id)
 			RefusedCount++;
@@ -360,9 +468,10 @@ namespace RtLampShadows {
 		for (int i = 0; i < MapSlots; i++) PendingMap[i] = TracedMap[i] = -1;
 		ID3D9NvrExtRt* rt = nullptr;
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
-		if (!TheSettingManager->GetSettingI(kSection, "Enabled"))
+		const CachedSettings& cfg = SyncSettings();
+		if (!cfg.enabled)
 			strcpy_s(Status, "off ([Shaders.ShadowsInteriors.RT] Enabled false at startup)");
-		else if (!TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled"))
+		else if (!cfg.forwardEnabled)
 			strcpy_s(Status, "off: needs the per-object lamp shadows ([Shaders.ShadowsInteriors.Forward] Enabled)");
 		else if (!ext || FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtRt), (void**)&rt)) || !rt)
 			strcpy_s(Status, "off: needs Vegas Shaders DXVK with the RT core (patch 0028)");
@@ -372,12 +481,11 @@ namespace RtLampShadows {
 			RtEnabled = true;
 			strcpy_s(Status, "lamp shaders compiled to read traced lamp shadows (used once the RT helper runs)");
 		}
-		if (TheSettingManager->GetSettingI(kSection, "Enabled")) Logger::Log("UNOFFICIAL RT lamp shadows: %s", Status);
+		if (cfg.enabled) Logger::Log("UNOFFICIAL RT lamp shadows: %s", Status);
 		// UNOFFICIAL 2026-10-31 CapsuleShadows: the same shader reader (POINT_SHADOW_RT), its buffer from a D3D9 pass (any GPU)
-		ScreenCompiledIn = TheSettingManager->GetSettingI(kScreenSection, "Enabled") != 0 &&
-			TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
+		ScreenCompiledIn = cfg.capsulesEnabled && cfg.forwardEnabled;
 		if (ScreenCompiledIn) CompiledIn = true;
-		if (TheSettingManager->GetSettingI(kScreenSection, "Enabled"))
+		if (cfg.capsulesEnabled)
 			Logger::Log("UNOFFICIAL CapsuleShadows: %s", ScreenCompiledIn ? "lamp shaders compiled to read the capsule and contact shadows (POINT_SHADOW_RT)" :
 				"off: needs the per-object lamp shadows ([Shaders.ShadowsInteriors.Forward] Enabled)");
 	}
@@ -417,7 +525,8 @@ namespace RtLampShadows {
 		// place, minutes ago): the first frames after use the cube maps until this frame's (SameFrame) or the next trace
 		if (RtCore::Gated()) Traced.valid = false;
 		if (!CompiledIn) return;
-		MaxLamps = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "MaxLamps"), 0), TableSlots);
+		const CachedSettings& cfg = SyncSettings();
+		MaxLamps = (std::min)((std::max)(cfg.maxLamps, 0), TableSlots);
 		const bool live = LiveNow();	// (2026-11-11) Enabled and Live, both read now
 		const bool many = ManyOn() && live;
 		// The table: every published lamp in cube slots 0-62, in NVR's order (its ranking), up to MaxLamps
@@ -430,7 +539,7 @@ namespace RtLampShadows {
 			}
 		ManyNoting = many;
 		if (many && CarriedCount > 0 && SameFrameOn()) {	// (2026-11-07) last frame's noted lamps, their ids kept; new notes after them
-			const int limit = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsMax"), 64), ManyIds);
+			const int limit = (std::min)((std::max)(SyncSettings().manyLightsMax, 64), ManyIds);
 			int top = 63, kept = 0;
 			for (int i = 0; i < CarriedCount; i++) {
 				const SlotLamp& l = Carried[i];
@@ -490,16 +599,17 @@ namespace RtLampShadows {
 				Reproject[i][0] = Traced.sx * Reproject[i][0] + (Traced.sx - 1.0f - 2.0f * Traced.sx * Traced.jx) * Reproject[i][3];
 				Reproject[i][1] = Traced.sy * Reproject[i][1] - (Traced.sy - 1.0f - 2.0f * Traced.sy * Traced.jy) * Reproject[i][3];
 			}
-		RtConstant[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "DepthTolerance"), 0.004f);	// at least the depth code's step
+		const CachedSettings& cfg = SyncSettings();
+		RtConstant[1] = (std::max)(cfg.depthTolerance, 0.004f);	// at least the depth code's step
 		RtConstant[2] = log2f((std::max)(Traced.farZ, 2.0f)) / 4095.0f;
 		RtConstant[3] = ScreenSourceFrame || ActorsFromCubeMaps() ? 1.0f : 0.0f;	// the capsule / contact buffer: always the darker of it and the lamp's map
 		// (2026-11-07) + 1 / the result's width: PointShadowTraced's edge search reads the four neighbours one texel away where a silhouette
 		// pixel's own texel holds the other side of the edge (the shaders test w < 0.5 for the flag: the texel stays below 0.5)
 		if (TextureWidth > 2) RtConstant[3] += 1.0f / (float)TextureWidth;
-		const int debugView = TheSettingManager->GetSettingI(kSection, "DebugView");
+		const int debugView = cfg.debugView;
 		// DebugView 4 (2026-10-31 ManyLights): R, the other lamps' traced share (x 5)
 		Mode = debugView == 1 ? 2.0f : debugView == 2 ? 3.0f : debugView == 3 ? 4.0f : debugView == 4 ? 5.0f : 1.0f;
-		DebugLamp = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DebugLamp"), 0), TableSlots - 1);
+		DebugLamp = (float)(std::min)((std::max)(cfg.debugLamp, 0), TableSlots - 1);
 		RtConstant[0] = Mode;
 	}
 
@@ -516,7 +626,7 @@ namespace RtLampShadows {
 	inline UInt32 SkippedCubes = 0, SkippedCubesFrames = 0;
 	inline bool KeepCube(int slot, const PointShadowSlotState& last, const PointShadowSlotState& now) {
 		if (!CompiledIn || ScreenSourceFrame || Mode <= 0.0f || slot < 0 || slot >= MapSlots || TracedMap[slot] < 0) return false;	// (the capsule buffer replaces no map)
-		if (!TheSettingManager->GetSettingI(kSection, "SkipTracedCubes")) return false;
+		if (!SyncSettings().skipTracedCubes) return false;
 		if (!last.valid || last.light != now.light || last.cell != now.cell || last.texture != now.texture ||
 			last.radius != now.radius) return false;
 		// A partial cube map (CubeFaceViewCull left the out-of-view faces of a people refresh as they were) is only the fallback here;
@@ -574,13 +684,14 @@ namespace RtLampShadows {
 	inline void SubmitExterior(ShadowSceneLight* const* shadowLights, int shadowCount, NiPointLight* const* lights, int lightCount) {
 		ExteriorFrame = false;
 		ExteriorForwardFrame = false;
+		const CachedSettings& cfg = SyncSettings();
 		const bool forward = CompiledIn && ExteriorForwardOn();
-		const bool maskMode = !forward && imageMask >= 0 && exteriorShader >= 0 && TheSettingManager->GetSettingI(kSection, "Exteriors");
+		const bool maskMode = !forward && imageMask >= 0 && exteriorShader >= 0 && cfg.exteriors;
 		if (!CompiledIn || (!forward && !maskMode)) { ExteriorLive = false; return; }
 		const float mult = TheShaderManager->Effects.ShadowsExteriors->Settings.Interiors.LightRadiusMult;
 		// outdoors the lamps' own heads are not told apart from other objects (LampFixtures is the interior cell's list): the rays stop
 		// this far short of each light, past a street lamp's or a lantern's own housing
-		const float stop = (std::max)(TheSettingManager->GetSettingF(kSection, "ExteriorLampStop"), 0.0f);
+		const float stop = (std::max)(cfg.exteriorLampStop, 0.0f);
 		SlotLamp list[TableSlots];
 		int n = 0;
 		auto add = [&](NiPointLight* light) {
@@ -630,9 +741,10 @@ namespace RtLampShadows {
 		imageTable = RtCore::AddImage("NVR RT lamp table", TableWidth, 1, NVR_EXT_SHARED_RG32F);
 		imageAlphaStandIn = RtCore::AddImage("NVR RT lamps alpha stand-in", 1, 1, NVR_EXT_SHARED_R16F);	// (2026-11-03 rtalpha)
 		// UNOFFICIAL 2026-11-07 ShadowDenoiser: the denoised lamps' signals, DenoiseLamps of them stacked (images stay within 16384 texels)
+		const CachedSettings& cfg = SyncSettings();
 		imageSigma = -1; DenoiserLayers = 0;
-		if (TheSettingManager->GetSettingI(kSection, "ShadowDenoiser") != 0) {
-			int layers = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiseLamps"), 1), RtShadowDenoise::MaxLayers);
+		if (cfg.shadowDenoiser) {
+			int layers = (std::min)((std::max)(cfg.denoiseLamps, 1), RtShadowDenoise::MaxLayers);
 			while (layers > 1 && h * (UINT)layers > 16384) layers--;
 			imageSigma = RtCore::AddImage("NVR RT lamps denoiser signal", w, h * layers, NVR_EXT_SHARED_RG16F);
 			if (imageSigma >= 0) DenoiserLayers = layers;
@@ -642,18 +754,17 @@ namespace RtLampShadows {
 		DenoiseLayers.Clear();
 		// optional images only when asked for at the helper's start (the core holds 32 shared images for every RT effect)
 		// (2026-11-07: Denoise not with ShadowDenoiser, which replaces it; Filter's image stays, so ShadowDenoiser false is a live A/B)
-		imageRaw = TheSettingManager->GetSettingI(kSection, "Filter") ? RtCore::AddImage("NVR RT lamps unfiltered", w, h, NVR_EXT_SHARED_RG32F) : -1;
+		imageRaw = cfg.filter ? RtCore::AddImage("NVR RT lamps unfiltered", w, h, NVR_EXT_SHARED_RG32F) : -1;
 		static const char* splitNames[4] = { "NVR RT lamps vis 0", "NVR RT lamps vis 1", "NVR RT lamps id 0", "NVR RT lamps id 1" };
-		const bool denoise = !shadowDenoiser && TheSettingManager->GetSettingI(kSection, "Denoise") != 0;
+		const bool denoise = !shadowDenoiser && cfg.denoise;
 		for (int i = 0; i < 4; i++) imageSplit[i] = denoise ? RtCore::AddImage(splitNames[i], w, h, NVR_EXT_SHARED_R32F) : -1;
-		imageMask = TheSettingManager->GetSettingI(kSection, "Exteriors") ? RtCore::AddImage("NVR RT lamps mask", w, h, NVR_EXT_SHARED_R32F) : -1;
-		imageFlash = TheSettingManager->GetSettingI(kSection, "Flashlight") ? RtCore::AddImage("NVR RT flashlight", w, h, NVR_EXT_SHARED_R32F) : -1;
+		imageMask = cfg.exteriors ? RtCore::AddImage("NVR RT lamps mask", w, h, NVR_EXT_SHARED_R32F) : -1;
+		imageFlash = cfg.flashlight ? RtCore::AddImage("NVR RT flashlight", w, h, NVR_EXT_SHARED_R32F) : -1;
 		// (2026-11-03 rtext) also for ExteriorManyLights (outdoors with ExteriorForward)
-		const bool many = TheSettingManager->GetSettingI(kSection, "ManyLights") != 0 ||
-			(TheSettingManager->GetSettingI(kSection, "ExteriorForward") != 0 && TheSettingManager->GetSettingI(kSection, "ExteriorManyLights") != 0);
+		const bool many = cfg.manyLights || (cfg.exteriorForward && cfg.exteriorManyLights);
 		imageHistory[0] = many ? RtCore::AddImage("NVR RT lamps rest history 0", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		imageHistory[1] = many ? RtCore::AddImage("NVR RT lamps rest history 1", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
-		const bool oneRay = many && TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
+		const bool oneRay = many && cfg.manyLightsOneRay;
 		imageHistoryIds[0] = oneRay ? RtCore::AddImage("NVR RT lamps ids history 0", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		imageHistoryIds[1] = oneRay ? RtCore::AddImage("NVR RT lamps ids history 1", w, h, NVR_EXT_SHARED_RGBA16F) : -1;
 		// (2026-11-07) also ShadowDenoiser's (the denoiser's history follows each surface's own move)
@@ -743,9 +854,10 @@ namespace RtLampShadows {
 		// the result is in the top-left tw x th of its texture and every reader (the forward draws, the deferred lamps, the land) finds it
 		// through Reproject, which Aim scales by Traced.sx / sy as it always did for the after-the-world trace of a rect frame. Off, a
 		// native frame, or the after-the-world path: nothing here runs.
+		const CachedSettings& cfg = SyncSettings();
 		bool followed = false;
 		D3DXVECTOR2 followedJitter(0.0f, 0.0f);
-		if (InPrimary && tw == w && th == h && TheSettingManager->GetSettingI(kSection, "FollowRenderScale") != 0) {
+		if (InPrimary && tw == w && th == h && cfg.followRenderScale) {
 			UINT rw = 0, rh = 0;
 			if (TAAEffect::WorldDrawnSmall(rw, rh, followedJitter) && rw <= w && rh <= h && (rw < w || rh < h)) { tw = rw; th = rh; followed = true; }
 		}
@@ -792,10 +904,10 @@ namespace RtLampShadows {
 				f.up[0] = fv._12 / fp._22; f.up[1] = fv._22 / fp._22; f.up[2] = fv._32 / fp._22;
 				f.origin[0] = feye.x; f.origin[1] = feye.y; f.origin[2] = feye.z;
 				f.light[0] = spot.x - fcam.x; f.light[1] = spot.y - fcam.y; f.light[2] = spot.z - fcam.z; f.light[3] = spot.w;
-				f.params[0] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffset"), 0.0f);
-				f.params[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "FlashlightStop"), 0.0f);
+				f.params[0] = (std::max)(cfg.startOffset, 0.0f);
+				f.params[1] = (std::max)(cfg.flashlightStop, 0.0f);
 				f.params[2] = (float)(0xFF & ~MaskAlphaTested & ~MaskGlass);	// people (0x20) block it; lamp glass never does
-				f.params[3] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffsetPerUnit"), 0.0f);	// (2026-11-04) as the lamp rays
+				f.params[3] = (std::max)(cfg.startOffsetPerUnit, 0.0f);	// (2026-11-04) as the lamp rays
 				const int flashImages[3] = { imageDepth, imageNormals, imageFlash };
 				if (RtCore::AddPass(flashShader, flashImages, 3, 0x4, &f, sizeof(f), (tw + 7) / 8, (th + 7) / 8))
 					FlashThisFrame = RtCore::CopyOut(imageFlash, FlashSurface);
@@ -816,7 +928,7 @@ namespace RtLampShadows {
 		if (TAAEffect* taa = TheShaderManager->Effects.TAA) jitter = taa->DepthJitterUV();
 		if (followed) jitter = followedJitter;	// (2026-11-11 FollowRenderScale) the small world's jitter (DepthJitterUV has it only once the frame waits for its upscale)
 		c.jitter[0] = jitter.x; c.jitter[1] = jitter.y;
-		c.jitter[2] = AlphaOn() && TheSettingManager->GetSettingI(kSection, "AlphaTest") != 0 ? 1.0f : 0.0f;	// (2026-11-03 rtalpha) test alpha-tested casters (the shaders add 0x10 to the masks)
+		c.jitter[2] = AlphaOn() && cfg.alphaTest ? 1.0f : 0.0f;	// (2026-11-03 rtalpha) test alpha-tested casters (the shaders add 0x10 to the masks)
 		c.forward[0] = view._13; c.forward[1] = view._23; c.forward[2] = view._33; c.forward[3] = cameraData->y;
 		c.right[0] = view._11 / proj._11; c.right[1] = view._21 / proj._11; c.right[2] = view._31 / proj._11;
 		c.up[0] = view._12 / proj._22; c.up[1] = view._22 / proj._22; c.up[2] = view._32 / proj._22;
@@ -826,30 +938,30 @@ namespace RtLampShadows {
 		c.origin[3] = 4095.0f / log2f((std::max)(cameraData->y, 2.0f));
 		static UInt32 frame = 0;
 		frame++;
-		c.params[0] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "Rays"), 1), 8);
-		c.params[1] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffset"), 0.0f);
-		c.mask[3] = (std::max)(TheSettingManager->GetSettingF(kSection, "StartOffsetPerUnit"), 0.0f);	// 2026-10-30: x the view depth
-		c.mask[2] = (float)TheSettingManager->GetSettingI(kSection, "RankBy");	// 2026-10-30 (the mask variant sets its ExteriorDebug there)
-		c.params[2] = (std::max)(TheSettingManager->GetSettingF(kSection, "LampStop"), 0.0f);
+		c.params[0] = (float)(std::min)((std::max)(cfg.rays, 1), 8);
+		c.params[1] = (std::max)(cfg.startOffset, 0.0f);
+		c.mask[3] = (std::max)(cfg.startOffsetPerUnit, 0.0f);	// 2026-10-30: x the view depth
+		c.mask[2] = (float)cfg.rankBy;	// 2026-10-30 (the mask variant sets its ExteriorDebug there)
+		c.params[2] = (std::max)(cfg.lampStop, 0.0f);
 		// (2026-11-06) Jitter -1 (the default) = automatic: the pattern turns every frame only while TAA / FSR / DLSS average frames.
 		// With TAA off (the default) a turning pattern is new noise every frame: the soft edges and the fence's hashed alpha shimmered in
 		// motion and at rest. A fixed pattern holds still (the Filter, also automatic, smooths it spatially).
-		const int jitterSetting = TheSettingManager->GetSettingI(kSection, "Jitter");
+		const int jitterSetting = cfg.jitter;
 		TAAEffect* taaJitter = TheShaderManager->Effects.TAA;
 		const bool turnPattern = jitterSetting > 0 || (jitterSetting < 0 && taaJitter && taaJitter->IsJitterActive());
 		c.params[3] = turnPattern ? fmodf((float)frame * 0.61803399f, 1.0f) : 0.0f;
 		// Lamp models skip their own light over the last LampModelDistance of each ray, as LampModelShadows false does for the cube maps
-		const bool skipModels = TheSettingManager->GetSettingI(kSection, "SkipLampModels") != 0;
-		c.params2[0] = skipModels ? (std::max)(TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Forward", "LampModelDistance"), 0.0f) : 0.0f;
+		const bool skipModels = cfg.skipLampModels;
+		c.params2[0] = skipModels ? (std::max)(cfg.lampModelDistance, 0.0f) : 0.0f;
 		UINT farMask = 0xFF & ~MaskAlphaTested;	// 0xEF: the alpha-tested casters (0x10) only with jitter.z (the shaders add it), else skipped
-		if (TheSettingManager->GetSettingI(kSection, "SkipLampGlass")) farMask &= ~MaskGlass;
+		if (cfg.skipLampGlass) farMask &= ~MaskGlass;
 		c.params2[1] = (float)farMask;
 		c.params2[2] = (float)(skipModels ? (farMask & ~MaskLampModel) : farMask);
 		c.params2[3] = (float)TableSlots;
-		c.flags[0] = TheSettingManager->GetSettingI(kSection, "OneSided") ? 1.0f : 0.0f;
-		c.flags[1] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "LampsPerPixel"), 1), 3);
+		c.flags[0] = cfg.oneSided ? 1.0f : 0.0f;
+		c.flags[1] = (float)(std::min)((std::max)(cfg.lampsPerPixel, 1), 3);
 		// UNOFFICIAL 2026-10-29 Interleave: 1/2 (checkerboard) or 1/4 (2 x 2 cells) of the pixels traced a frame, in turn
-		const int interleaveSetting = TheSettingManager->GetSettingI(kSection, "Interleave");
+		const int interleaveSetting = cfg.interleave;
 		const int interleave = interleaveSetting >= 4 ? 4 : interleaveSetting >= 2 ? 2 : 1;
 		c.flags[2] = (float)interleave;
 		c.flags[3] = (float)(frame % (UInt32)interleave);
@@ -860,27 +972,27 @@ namespace RtLampShadows {
 			float v[3]; DxvkCompute::DisplaceRtSlack(v);
 			RtTessContact::Slack slack; slack.strength = v[0]; slack.fadeStart = v[1]; slack.fadeEnd = v[2];
 			RtTessContact::SlackVec(slack, c.slack);
-			const bool rasterContact = TheSettingManager->GetSettingF("Shaders.ShadowsInteriors.Main", "ContactShadows") > 0.0f;
-			const RtTessContact::Contact contact = RtTessContact::Make(rasterContact ? 0.0f : (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "ContactShadows"), 0.0f), 1.0f),
-				TheSettingManager->GetSettingF(kSection, "ContactLength"));
+			const bool rasterContact = cfg.mainContactShadows > 0.0f;
+			const RtTessContact::Contact contact = RtTessContact::Make(rasterContact ? 0.0f : (std::min)((std::max)(cfg.contactShadows, 0.0f), 1.0f),
+				cfg.contactLength);
 			RtTessContact::ContactVecs(contact, c.contact, c.contactGate);
 		}
-		const float radius = (std::max)(TheSettingManager->GetSettingF(kSection, "LampRadius"), 0.0f);
-		const float invisible = TheSettingManager->GetSettingF(kSection, "InvisibleLightRadius");
+		const float radius = (std::max)(cfg.lampRadius, 0.0f);
+		const float invisible = cfg.invisibleLightRadius;
 		// UNOFFICIAL 2026-11-07 ShadowDenoiser: this frame's denoised lamps (the plain path only: not the outdoor mask, not ManyLights)
-		const bool shadowDenoiser = DenoiserReady() && TheSettingManager->GetSettingI(kSection, "ShadowDenoiser") != 0 && !ManyNoting &&
+		const bool shadowDenoiser = DenoiserReady() && cfg.shadowDenoiser && !ManyNoting &&
 			!(TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) && RtCore::PassesLeft() >= 2;	// (the trace + the denoiser)
 		if (shadowDenoiser) {
 			// the lamps worth it: intensity x reach over the distance from the camera (near, bright, far-reaching lamps first)
 			RtShadowDenoise::Candidate candidates[TableSlots];
 			int n = 0;
 			const D3DXVECTOR3 eyeWorld(camera.x + eye.x, camera.y + eye.y, camera.z + eye.z);
-			const bool coverageScore = ShadowHold::VisiblePixels != nullptr && TheSettingManager->GetSettingI(kSection, "DenoiseLampsByCoverage") != 0;	// (2026-11-12)
+			const bool coverageScore = ShadowHold::VisiblePixels != nullptr && cfg.denoiseLampsByCoverage;	// (2026-11-12)
 			const float coveragePixels = 160.0f * 90.0f;	// LampVisibility's measuring pass (W x H there): its answers are pixels of that, weighted by the lamp's falloff
 			{
 				static int coverageLogged = -1;
 				if ((int)coverageScore != coverageLogged) {
-					const bool asked = TheSettingManager->GetSettingI(kSection, "DenoiseLampsByCoverage") != 0;
+					const bool asked = cfg.denoiseLampsByCoverage;
 					if (coverageScore || (asked && coverageLogged != 0) || coverageLogged == 1)
 						Logger::Log("UNOFFICIAL RT lamp shadows: DenoiseLampsByCoverage %s", coverageScore ? "on: the denoised lamps are picked by the visible picture they light" :
 							asked ? "cannot run: no visible-pixel measurement here ([Shaders.ShadowsInteriors.Forward] VisibleRanking 0, or outdoors); picked by brightness x reach / distance" : "off");
@@ -908,7 +1020,7 @@ namespace RtLampShadows {
 					for (int k = 0; k < RtShadowDenoise::MaxLayers; k++) if (DenoiseLayers.slot[k] == l.slot) { c.score *= 1.25f; break; }
 				}
 			}
-			const int wanted = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiseLamps"), 1), DenoiserLayers);
+			const int wanted = (std::min)((std::max)(cfg.denoiseLamps, 1), DenoiserLayers);
 			DenoiseLayers.Update(candidates, n, wanted);
 			c.flags[2] = 1.0f; c.flags[3] = 0.0f;	// every pixel every frame (the denoiser's history is per pixel)
 		}
@@ -916,19 +1028,19 @@ namespace RtLampShadows {
 		// only the DenoiseLamps denoised ones (the others were LampRadius: a point, hard at every distance); with or without the denoiser.
 		// Their soft edge is the per-pixel trace's 1-ray noise: TAA / FSR / DLSS, Filter, ManyLights' history or Rays 4+ resolve it.
 		// PhysicalLampUnknown / PhysicalLampPerReach (0): the size of a lamp with no glowing part known (WriteTable's PhysicalSizes).
-		const bool physicalKey = TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
-		const bool physicalAll = physicalKey && TheSettingManager->GetSettingI(kSection, "PhysicalLampSizeAll") != 0;
+		const bool physicalKey = cfg.physicalLampSize;
+		const bool physicalAll = physicalKey && cfg.physicalLampSizeAll;
 		const bool physicalSize = physicalKey && (shadowDenoiser || physicalAll);
 		PhysicalSizes sizes;
 		int sizeKeys = 0;	// (2026-11-12) 1 PhysicalLampSizeAll on, 2 PhysicalLampUnknown / PhysicalLampPerReach above 0 (the block's sizesNow)
 		if (physicalSize) {
 			sizes.layers = shadowDenoiser ? &DenoiseLayers : nullptr;
 			sizes.all = physicalAll;
-			sizes.scale = TheSettingManager->GetSettingF(kSection, "PhysicalLampScale");
-			sizes.smallest = (std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMin"), 0.0f);
-			sizes.largest = (std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampMax"), 1.0f);
-			sizes.unknown = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampUnknown"), 0.0f), 64.0f);
-			sizes.perReach = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "PhysicalLampPerReach"), 0.0f), 0.25f);
+			sizes.scale = cfg.physicalLampScale;
+			sizes.smallest = (std::max)(cfg.physicalLampMin, 0.0f);
+			sizes.largest = (std::max)(cfg.physicalLampMax, 1.0f);
+			sizes.unknown = (std::min)((std::max)(cfg.physicalLampUnknown, 0.0f), 64.0f);
+			sizes.perReach = (std::min)((std::max)(cfg.physicalLampPerReach, 0.0f), 0.25f);
 			static int sizesLogged = -1;
 			const int sizesNow = (physicalAll ? 1 : 0) | (sizes.unknown > 0.0f || sizes.perReach > 0.0f ? 2 : 0);
 			if (sizesNow != sizesLogged && (sizesNow || sizesLogged > 0)) {
@@ -1012,7 +1124,7 @@ namespace RtLampShadows {
 			memcpy(pc.right, c.right, sizeof(pc.right)); memcpy(pc.up, c.up, sizeof(pc.up));
 			pc.origin[0] = eye.x; pc.origin[1] = eye.y; pc.origin[2] = eye.z;
 			pc.jitter[0] = jitter.x; pc.jitter[1] = jitter.y; pc.jitter[2] = AlphaOn() ? 1.0f : 0.0f;	// cut-outs as drawn (the raster's test)
-			pc.masks[0] = (float)(0xFFu & ~0x60u);	// everything drawn but people (0x20 actors, 0x40 the player's parts: their own query)
+			pc.masks[0] = (float)(0xFFu & ~0x61u);	// everything drawn but hidden first-person body (0x01) and people (0x20 actors, 0x40 player parts)
 			pc.masks[1] = (float)0x60u;
 			const int primaryImages[9] = { imageDepth, imageNormals, imageDepth, imageDepth, imageDepth, imageDepth, imageDepth, imageDepth, AlphaImage() };
 			if (!RtCore::AddPass(primaryShader, primaryImages, 9, 0x3, &pc, sizeof(pc), (tw + 7) / 8, (th + 7) / 8)) return;
@@ -1059,7 +1171,7 @@ namespace RtLampShadows {
 			if (!MaskSurface || imageMask < 0 || exteriorShader < 0) return;
 			const D3DXVECTOR4& pointNear = TheShaderManager->Effects.ShadowsExteriors->Constants.PointShadowNear;
 			c.mask[0] = pointNear.y; c.mask[1] = pointNear.z;
-			c.mask[2] = (float)TheSettingManager->GetSettingI(kSection, "ExteriorDebug");	// diagnostic: 1 = mask 0, 2 = mask 1
+			c.mask[2] = (float)cfg.exteriorDebug;	// diagnostic: 1 = mask 0, 2 = mask 1
 			// [8]: binding 12, the alpha atlas (rtalpha); [5]-[7] unused by this variant
 			const int exteriorImages[9] = { imageDepth, imageNormals, imageResult, imageTable, imageMask, imageDepth, imageDepth, imageDepth, AlphaImage() };
 			if (!RtCore::AddPass(exteriorShader, exteriorImages, 9, 0x14, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
@@ -1070,7 +1182,7 @@ namespace RtLampShadows {
 		if (ManyNoting) {
 			c.params2[3] = (float)(64 + ExtraCount);	// ids 0 .. 63 + the other lamps (empty slots have reach 0)
 			// ManyLightsOneRay: one ray a pixel (RtLampTraceRestir.spv), else RtLampTraceMany.spv; the history only from the same variant
-			const bool oneRay = OneRayReady() && TheSettingManager->GetSettingI(kSection, "ManyLightsOneRay") != 0;
+			const bool oneRay = OneRayReady() && cfg.manyLightsOneRay;
 			// (2026-11-04) and only at the scale it was traced at: a RenderScale change or a rect <-> native frame restarts the history
 			// (its texels are another layout); RenderScale 1: always 1 = 1, as before
 			const bool sameScale = Traced.sx == (float)tw / (float)w && Traced.sy == (float)th / (float)h;
@@ -1084,21 +1196,21 @@ namespace RtLampShadows {
 			c.rect[0] = (float)w; c.rect[1] = (float)h;
 			// (2026-11-07) MovingCasterHistory: where people's shadow is or just was, the history keeps at most this many frames (rays
 			// blocked by a person, mask 0x60, mark the pixel and its neighbours for 8 frames); 0 = no limit (their shadows smear)
-			c.rect[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "MovingCasterHistory"), 0), 64);
+			c.rect[2] = (float)(std::min)((std::max)(cfg.movingCasterHistory, 0), 64);
 			c.rect[3] = (float)0x60u;
 			static int rectLogs = 0;
 			if (tw < w && rectLogs < 2) {
 				rectLogs++;
 				Logger::Log("UNOFFICIAL RT lamp shadows: ManyLights (%s) traced in the RenderScale rect: %ux%u of %ux%u, history %d.", oneRay ? "one ray" : "many", tw, th, w, h, history ? 1 : 0);
 			}
-			c.many[0] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsRays"), 1), 4);
-			c.many[1] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsHistory"), 1), 64);
-			c.many[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsSpatial"), 0), 2);
+			c.many[0] = (float)(std::min)((std::max)(cfg.manyLightsRays, 1), 4);
+			c.many[1] = (float)(std::min)((std::max)(cfg.manyLightsHistory, 1), 64);
+			c.many[2] = (float)(std::min)((std::max)(cfg.manyLightsSpatial, 0), 2);
 			c.many[3] = history ? 1.0f : 0.0f;
 			memcpy(c.reproject, Reproject, sizeof(Reproject));
 			c.many2[0] = (float)(frame & 0xFFFFFF);
 			c.many2[1] = 0.05f;
-			c.many2[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "ManyLightsRestStride"), 1), 2);
+			c.many2[2] = (float)(std::min)((std::max)(cfg.manyLightsRestStride, 1), 2);
 			if (oneRay) {
 				// ObjectMotion's world move a pixel (B1), when it was made this frame; else the camera's reprojection alone
 				IDirect3DBaseTexture9* motion = Texture("TESR_ObjectMotionBuffer");
@@ -1109,7 +1221,7 @@ namespace RtLampShadows {
 				if (moved) MotionFrames++;
 				// UNOFFICIAL 2026-11-09 (rt-review R1) ManyLightsSampleFix: the one-ray variant's disc point, its two numbers stepped apart
 				// (RtLampTraceRestir.comp; many.x was unused there, ManyLightsRays is the other variant's)
-				c.many[0] = TheSettingManager->GetSettingI(kSection, "ManyLightsSampleFix") != 0 ? 1.0f : 0.0f;
+				c.many[0] = cfg.manyLightsSampleFix ? 1.0f : 0.0f;
 				const int images[10] = { imageDepth, imageNormals, imageResult, imageTable, imageHistory[HistoryParity], imageHistory[1 - HistoryParity],
 					imageHistoryIds[HistoryParity], imageHistoryIds[1 - HistoryParity], moved ? imageMotion : imageNormals, AlphaImage() };	// [9]: binding 13 (rtalpha)
 				if (!RtCore::AddPass(restirShader, images, 10, 0xA4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) return;
@@ -1159,12 +1271,12 @@ namespace RtLampShadows {
 		// UNOFFICIAL 2026-10-29 Filter: the soft edges' noise (LampRadius, 1 ray) smoothed per lamp (RtLampFilter.comp) before the copy out
 		// (2026-11-06) Filter -1 (the default) = automatic: on while nothing averages frames (TAA / FSR / DLSS off: TAA is off by default,
 		// so the 1-ray soft edges and the hashed alpha test's stipple showed raw; the fence's traced shadow was speckled), off while it does
-		const int filterSetting = TheSettingManager->GetSettingI(kSection, "Filter");
+		const int filterSetting = cfg.filter;
 		TAAEffect* taaNow = TheShaderManager->Effects.TAA;
 		const bool temporal = taaNow && taaNow->IsJitterActive();
 		const bool filter = !shadowDenoiser && imageRaw >= 0 && filterShader >= 0 && (filterSetting > 0 || (filterSetting < 0 && !temporal));
 		// Denoise: the split variant also writes ranks 0 and 1 apart (images 6-9), copied out for RtDenoise (Denoise() below)
-		bool split = !filter && !shadowDenoiser && splitShader >= 0 && imageSplit[3] >= 0 && TheSettingManager->GetSettingI(kSection, "Denoise");
+		bool split = !filter && !shadowDenoiser && splitShader >= 0 && imageSplit[3] >= 0 && cfg.denoise;
 		// (2026-11-07) SameFrame: no Denoise (its D3D9 passes need this frame's depth, drawn after the lookups, and their output was
 		// read a frame later): the raw (or Filtered) trace instead
 		if (split && InPrimary) {
@@ -1210,11 +1322,11 @@ namespace RtLampShadows {
 			const D3DXVECTOR4* motionData = Constant("TESR_ObjectMotionData");
 			const bool moved = imageMotion >= 0 && motion && motionData && ObjectMotion::Ready() && RtCore::CopyIn(imageMotion, motion);	// (2026-11-09 sweep: this frame's only)
 			RtShadowDenoise::Settings ds;
-			ds.maxHistory = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserHistory"), 1.0f), 64.0f);
-			ds.maxRadius = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserMaxRadius"), 1.0f), 64.0f);
-			ds.stabilize = (std::min)((std::max)(TheSettingManager->GetSettingF(kSection, "DenoiserStabilize"), 0.0f), 16.0f);
-			ds.debugView = TheSettingManager->GetSettingI(kSection, "DenoiserDebugView");
-			ds.core = (std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "DenoiserCore"), 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
+			ds.maxHistory = (std::min)((std::max)(cfg.denoiserHistory, 1.0f), 64.0f);
+			ds.maxRadius = (std::min)((std::max)(cfg.denoiserMaxRadius, 1.0f), 64.0f);
+			ds.stabilize = (std::min)((std::max)(cfg.denoiserStabilize, 0.0f), 16.0f);
+			ds.debugView = cfg.denoiserDebugView;
+			ds.core = (std::min)((std::max)(cfg.denoiserCore, 0), 2);	// (A/B: 1, 2 = AMD FidelityFX Shadows)
 			RtShadowDenoise::TimeScale(ds, RtDenoise::HistoryClock());	// UNOFFICIAL 2026-11-07 (perf-history) frames at 60 fps -> the same seconds
 			RtShadowDenoise::DenoiseConstants d;
 			RtShadowDenoise::Fill(d, now, before, tw, th, tw, th, 1, DenoiseLayers.count, frame, ds, moved, 0.0f);
@@ -1238,9 +1350,9 @@ namespace RtLampShadows {
 		if (filter) {
 			struct { float size[4], params[4]; } f = {};
 			f.size[0] = (float)tw; f.size[1] = (float)th;
-			f.size[2] = (float)(std::min)((std::max)(TheSettingManager->GetSettingI(kSection, "FilterStep"), 1), 4);
-			f.size[3] = (std::max)(TheSettingManager->GetSettingF(kSection, "FilterDepthSigma"), 0.01f);
-			f.params[0] = (std::max)(TheSettingManager->GetSettingF(kSection, "FilterNormalPower"), 0.0f);
+			f.size[2] = (float)(std::min)((std::max)(cfg.filterStep, 1), 4);
+			f.size[3] = (std::max)(cfg.filterDepthSigma, 0.01f);
+			f.params[0] = (std::max)(cfg.filterNormalPower, 0.0f);
 			const int filterImages[4] = { imageDepth, imageNormals, imageRaw, imageResult };
 			if (!RtCore::AddPass(filterShader, filterImages, 4, 0x8, &f, sizeof(f), (tw + 7) / 8, (th + 7) / 8)) return;
 		}
@@ -1276,7 +1388,7 @@ namespace RtLampShadows {
 		if ((++calls % 20000) == 0 && calls <= 200000)
 			Logger::Log("UNOFFICIAL RT lamp shadows: mask hook %u calls: land %u, objects %u, lamp glass %u, lamp models %u (cell glow list %u)",
 				calls, MaskCounts[0], MaskCounts[1], MaskCounts[2], MaskCounts[3], (UInt32)LampFixtures::Glows.size());
-		if (land) { MaskCounts[0]++; return 0x01; }
+		if (land) { MaskCounts[0]++; return 0x02; }
 		const UInt32 own = InstanceMask(geometry, false);
 		MaskCounts[own == MaskGlass ? 2 : own == MaskLampModel ? 3 : 1]++;
 		return own ? own : 0x02;
@@ -1339,7 +1451,7 @@ namespace RtLampShadows {
 		if (!repack || !point || !RepackSurface || !DenoisedSurface[0] || !DenoisedSurface[1]) return;
 		static RtDenoise::Denoiser* denoiser[2] = {};
 		RtDenoise::Settings settings;
-		settings.MaxHistory = (std::max)(TheSettingManager->GetSettingF(kSection, "DenoiseHistory"), 1.0f);
+		settings.MaxHistory = (std::max)(SyncSettings().denoiseHistory, 1.0f);
 		settings.IgnoreRr = true;	// UNOFFICIAL 2026-10-30 (DLSS RR review): next frame's object shaders read it; it stays denoised under RR
 		for (int k = 0; k < 2; k++) {
 			if (!denoiser[k]) denoiser[k] = RtDenoise::Create(k ? "RT lamp shadows rank 1" : "RT lamp shadows rank 0");
@@ -1370,7 +1482,7 @@ namespace RtLampShadows {
 	inline void ApplyExteriorMask(IDirect3DDevice9* Device, IDirect3DSurface9* target) {
 		const bool mask = MaskThisFrame;
 		MaskThisFrame = false;
-		ExteriorLive = mask && TheSettingManager->GetSettingI(kSection, "Live") != 0;
+		ExteriorLive = mask && SyncSettings().live;
 		if (!mask || !target || !MaskTexture) return;
 		static ID3D9NvrExtPipeline* combine = nullptr;
 		static bool tried = false;

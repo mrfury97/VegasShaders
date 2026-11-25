@@ -994,7 +994,7 @@ float2 SkyFactorAt(float2 uv, float depth) {
 float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	float4 color = tex2D(TESR_SourceBuffer, IN.UVCoord);
 	bool viewModel = IsViewModel(IN.UVCoord);
-	[branch] if (!viewModel && NVR_ALFlags.x > 0.5f) color = float4(SunShadowApply(color.rgb, IN.UVCoord), 1.0f);
+	[branch] if (!viewModel && NVR_ALFlags.x > 0.5f) color = float4(SunShadowApply(color.rgb, IN.UVCoord), color.a);
 	float depth = readDepth(IN.UVCoord);
 	float2 skyFactor = 1.0f;	// (the factor, the visibility; Includes/SkyTake.hlsl. 'if (sky)': compiled out of the technique without the sky)
 	if (sky && !viewModel) skyFactor = SkyFactorAt(IN.UVCoord, depth);
@@ -1023,7 +1023,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	[unroll] for (int y = 0; y < 2; y++) {
 		[unroll] for (int x = 0; x < 2; x++) {
 			float2 tapUV = clampToRectIfOn((base + float2(x, y) + 0.5f) * NVR_ALLayout.zw, NVR_ALLayout.zw);	// (RenderScale v2: no stale texels)
-			float tapDepth = readDepthLod(tapUV);
+			float tapDepth = readDepthLod(tapUV - 0.5f * max(NVR_ALLayout.zw - TESR_ReciprocalResolution.xy, 0.0f));
 			float weight = (x ? fraction.x : 1 - fraction.x) * (y ? fraction.y : 1 - fraction.y);
 			float closeness = abs(tapDepth - depth) / tolerance;
 			weight *= lerp(1.0f / (1.0f + closeness), saturate(1.0f - closeness), edgeReject);

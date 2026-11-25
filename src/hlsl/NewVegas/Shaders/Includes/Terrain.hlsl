@@ -100,7 +100,7 @@ float3 blendDiffuseMapsVaried(float3 tint, float2 uv, float2 odx, float2 ody, in
         [branch] if (wanted) {
             if (k < TERRAIN_VARIATION_LAYERS) {
                 [branch] if (stochastic.tap1Weight < 0.999f) sum += StochasticSampleAlbedo(maps[k], uv, odx, ody, stochastic, tapWeights[k]).xyz * weights[k];
-                else sum += tex2Dgrad(maps[k], uv, odx, ody).xyz * weights[k];
+                else { tapWeights[k] = 1.0f; sum += tex2Dgrad(maps[k], uv + stochastic.offset1, odx, ody).xyz * weights[k]; }
             }
             else sum += tex2Dgrad(maps[k], uv, odx, ody).xyz * weights[k];
         }
@@ -118,7 +118,7 @@ float3 blendNormalMapsVaried(float2 uv, float2 odx, float2 ody, int layers, samp
         [branch] if (wanted) {
             if (k < TERRAIN_VARIATION_LAYERS) {
                 [branch] if (stochastic.tap1Weight < 0.999f) texel = StochasticSampleWith(maps[k], uv, odx, ody, stochastic, tapWeights[k]);
-                else texel = tex2Dgrad(maps[k], uv, odx, ody);
+                else texel = tex2Dgrad(maps[k], uv + stochastic.offset1, odx, ody);
             }
             else texel = tex2Dgrad(maps[k], uv, odx, ody);
             nsum += texel.xyz * weights[k];

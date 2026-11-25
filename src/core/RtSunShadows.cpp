@@ -363,7 +363,7 @@ namespace {
 				cloudsInTrace ? imageCloud : imageNormals,	// [4]: binding 6, the clouds' shadow map (a stand-in with cloud.x 0)
 				c.alpha[3] > 0.0f ? imageHit : imageVisibility };	// [5]: binding 7, the blocker distances (a stand-in, not written, with alpha.w 0)
 			const bool roomForDenoiser = RtCore::PassesLeft() >= 2;	// 2026-11-07: the trace + the denoiser (else the old path this frame)
-			if (!RtCore::AddPass(shader, images, 6, 0x4, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) { cloudsInTrace = false; return; }
+			if (!RtCore::AddPass(shader, images, 6, c.alpha[3] > 0.0f ? 0x24u : 0x4u, &c, sizeof(c), (tw + 7) / 8, (th + 7) / 8)) { cloudsInTrace = false; return; }
 			// 2026-11-07 ShadowDenoiser: the helper's RT shadow denoiser over the visibility, in place (docs/next/RT-DENOISER.md)
 			if (helperDenoise && roomForDenoiser) {
 				RtShadowDenoise::View now;

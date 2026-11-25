@@ -71,6 +71,8 @@ BSRenderedTexture* __cdecl CreateSaveTextureHook(BSString* Name, const UInt32 Wi
 extern CallDetour kRenderInterfaceDetour;
 void __fastcall RenderInterfaceHook(void* Interface, void*, void* Culler, bool PipboyVisible);
 void InstallMenu3DGuardHook();
+void InstallDoFDepthGuardHooks();
+bool IsInVanillaDoFDepthPass();
 
 // Naked mid-function patches (bodies in Render.cpp).
 void SetTileShaderConstantsHook();

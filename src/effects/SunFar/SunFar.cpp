@@ -10,6 +10,8 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-04 PlantShadows (TESR_MaterialBuffer's plant class)
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (Active)
+#include "../../core/WaterMask.h"	// UNOFFICIAL 2026-11-21 water-only mask so dry ground at TESR_WaterSettings.x is never treated as water
+#include "../../core/DeferredRenderer.h"	// UNOFFICIAL 2026-11-22 (Issue 2): MatchSunDisc terrain direction parity
 
 // UNOFFICIAL 2026-10-19 SunFar: see SunFar.h and Effects\SunFar.fx.hlsl.
 
@@ -88,7 +90,13 @@ void SunFarEffect::UpdateConstants() {
 	Constants.Water = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	// UNOFFICIAL 2026-10-25: the land's own light vector (core/LandLight.h), while it was read in the last half second or so.
 	LandLight::Now++;
-	Constants.Land = LandLight::Frame && LandLight::Now - LandLight::Frame < 30 ?
+	// UNOFFICIAL 2026-11-22 (Issue 2): when DeferredSun aligns terrain lighting to the true sun disc (MatchSunDisc),
+	// SunFar must not fall back to vanilla's 45-degree-clamped LandLight::Dir (c18), or mid-slopes facing away from
+	// c18 get NdotL = 0 -> factor = 1.0 (bright unshadowed bands) when cloud ForwardShadows is off.
+	const bool deferredMatchSun = DeferredRenderer::Live && DeferredRenderer::Mode() >= 2 &&
+		DeferredSun::MatchSunDisc && TheShaderManager->GameState.isExterior &&
+		TheShaderManager->GameState.dayLight > 0.5f && TheShaderManager->ShaderConst.SunDir.z > 0.0f;
+	Constants.Land = (!deferredMatchSun && LandLight::Frame && LandLight::Now - LandLight::Frame < 30) ?
 		D3DXVECTOR4(LandLight::Dir[0], LandLight::Dir[1], LandLight::Dir[2], 1.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	cloudsReady = false;
 	for (int i = 0; i < 4; i++) layerTextures[i] = blendTextures[i] = nullptr;
@@ -323,6 +331,13 @@ void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Sce
 	if (volumetric) volumetric->shadowsViaSunFar = false;
 	if (!Enabled || !Effect || !ShouldRender()) return;
 	CapturedNormals::SunFarDrew = true;	// UNOFFICIAL 2026-11-17 fast-restart: the grass's own normal for this pass from the next frame (CapturedNormals.h)
+	// UNOFFICIAL 2026-11-21: capture real water draws so dry ground crossing TESR_WaterSettings.x is never skipped as water.
+	const UInt32 frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+	WaterMask::RequestWater(frame);
+	const bool waterTracked = !TheShaderManager->GameState.isUnderwater && WaterMask::WaterTracked(frame);
+	IDirect3DTexture9* waterMask = waterTracked ? WaterMask::WaterThisFrame(Device, frame) : nullptr;
+	extWaterTracked = waterTracked;
+	extWaterMask = waterMask;
 	static GpuTimer timer("Sun far shadows (land, clouds)");
 	GpuProfileScope gpu(timer, Device);
 	// The cloud layers on stages 5-12 (NVR_CloudLayer*, NVR_CloudBlend*), set after the pass begins (EffectRecord::PassTextures).
@@ -353,6 +368,12 @@ void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Sce
 	Constants.Water = waterDepth ? D3DXVECTOR4(Settings.WaterFade ? 1.0f : 0.0f, Settings.WaterDeepShare, 1.0f, 0.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	Constants.Water.w = Settings.OldSunModel || !sceneTexture ? 1.0f : 0.0f;	// UNOFFICIAL 2026-10-25: 1 = the light split as before (SunFar.fx.hlsl)
 	if (waterDepth) SetPassTexture(14, waterDepth);
+	// Water-mask mode for IsWaterPixel: 0 height fallback, 1 confirmed no water drawn, 2 mask on s14, 3 mask on s12.
+	if (!waterTracked) Constants.Jitter.w = 0.0f;
+	else if (!waterMask) Constants.Jitter.w = 1.0f;
+	else if (!waterDepth) { SetPassTexture(14, waterMask); Constants.Jitter.w = 2.0f; }
+	else if (Constants.Data.x <= 0.0f || Constants.CloudWeight.w <= 0.0f) { SetPassTexture(12, waterMask); Constants.Jitter.w = 3.0f; }
+	else Constants.Jitter.w = 0.0f;
 	if (Settings.HazardLog) {
 		hazard.frames++;
 		UInt32 mask, cacheMask;
@@ -396,6 +417,8 @@ void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Sce
 	if (Settings.TargetFix)
 		for (int i = 0; i < 7; i++) Device->SetRenderState(fixStates[i], savedStates[i]);
 	ClearPassTextures();
+	extWaterMask = nullptr;
+	extWaterTracked = false;
 	if (sceneTexture) sceneTexture->Release();
 	Constants.Apply.x = 1.0f;
 	if (volume) volumetric->shadowsViaSunFar = true;
@@ -449,6 +472,7 @@ namespace {
 		D3DXVECTOR4	fogData;		// UNOFFICIAL 2026-10-25 (the fog's share, the land's light vector)
 		D3DXVECTOR4	fogColor;
 		D3DXVECTOR4	sunFarLand;
+		D3DXVECTOR4	sunFarJitter;
 		D3DXVECTOR4	cameraData;
 		D3DXVECTOR4	cameraPosition;
 		D3DXVECTOR4	smoothedSunDir;
@@ -484,6 +508,7 @@ namespace {
 		{ 1, 13, NVR_EXT_BIND_SAMPLED_IMAGE, 13, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_volume: NVR_VolumeCloudShadow
 		{ 1, 14, NVR_EXT_BIND_SAMPLED_IMAGE, 14, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_water: NVR_WaterDepth
 		{ 1, 15, NVR_EXT_BIND_SAMPLED_IMAGE, 15, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_scene: NVR_Scene (UNOFFICIAL 2026-10-25)
+		{ 1, 16, NVR_EXT_BIND_SAMPLED_IMAGE, 16, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_waterMask: WaterMask (UNOFFICIAL 2026-11-21)
 		{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 },	// Constants
 		{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 },	// samplerPoint: push offset 0
 		{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 },	// samplerLinear: push offset 4
@@ -540,7 +565,7 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	IDirect3DBaseTexture9* volume = volumetric && Constants.Volume.x > 0.0f ? volumetric->Textures.ShadowTexture : nullptr;
 	IDirect3DBaseTexture9* water = Constants.Water.z > 0.0f ? WaterDepthMap() : nullptr;
 	// The stand-ins (the depth buffer) are never sampled where their input is absent: see the comment above the bindings.
-	IDirect3DBaseTexture9* inputs[16] = { depth, normals, atlas, terrain ? terrain : depth, ground ? ground : depth };
+	IDirect3DBaseTexture9* inputs[17] = { depth, normals, atlas, terrain ? terrain : depth, ground ? ground : depth };
 	// UNOFFICIAL 2026-10-25: the world as drawn, which RenderFactor puts on stage 15 for the D3D9 pass (Constants.Water.w 0 then).
 	inputs[15] = PassTextures[15] ? PassTextures[15] : depth;
 	for (int i = 0; i < 4; i++) {
@@ -549,6 +574,7 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	}
 	inputs[13] = volume ? volume : depth;
 	inputs[14] = water ? water : depth;
+	inputs[16] = extWaterMask ? extWaterMask : depth;
 
 	// The constants, as the D3D9 pass uploads them this frame.
 	SunFarUniforms uniforms = {};
@@ -578,6 +604,9 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	copy(&uniforms.fogData, sizeof(uniforms.fogData), "TESR_FogData");
 	copy(&uniforms.fogColor, sizeof(uniforms.fogColor), "TESR_FogColor");
 	copy(&uniforms.sunFarLand, sizeof(uniforms.sunFarLand), "TESR_SunFarLand");
+	copy(&uniforms.sunFarJitter, sizeof(uniforms.sunFarJitter), "TESR_SunFarJitter");
+	// Vulkan SunFar.frag has a dedicated t_waterMask binding (16), so never fall back to height when tracked.
+	uniforms.sunFarJitter.w = extWaterTracked ? (extWaterMask ? 2.0f : 1.0f) : 0.0f;
 	copy(&uniforms.cameraData, sizeof(uniforms.cameraData), "TESR_CameraData");
 	copy(&uniforms.cameraPosition, sizeof(uniforms.cameraPosition), "TESR_CameraPosition");
 	copy(&uniforms.smoothedSunDir, sizeof(uniforms.smoothedSunDir), "TESR_SmoothedSunDir");
@@ -598,11 +627,11 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	if (!constants) return false;
 
 	NVR_EXT_RESOURCE_BINDING resources[_countof(SunFarBindings)] = {};
-	for (UINT i = 0; i < 16; i++) { resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = inputs[i]; }
-	resources[16].Slot = 0; resources[16].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[16].pResource = constants;
-	resources[17].Slot = 0; resources[17].Type = NVR_EXT_BIND_SAMPLER; resources[17].pResource = point;
-	resources[18].Slot = 1; resources[18].Type = NVR_EXT_BIND_SAMPLER; resources[18].pResource = linear;
-	resources[19].Slot = 2; resources[19].Type = NVR_EXT_BIND_SAMPLER; resources[19].pResource = mip;
+	for (UINT i = 0; i < 17; i++) { resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = inputs[i]; }
+	resources[17].Slot = 0; resources[17].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[17].pResource = constants;
+	resources[18].Slot = 0; resources[18].Type = NVR_EXT_BIND_SAMPLER; resources[18].pResource = point;
+	resources[19].Slot = 1; resources[19].Type = NVR_EXT_BIND_SAMPLER; resources[19].pResource = linear;
+	resources[20].Slot = 2; resources[20].Type = NVR_EXT_BIND_SAMPLER; resources[20].pResource = mip;
 	SunFarPush push = {};	// the sampler heap indices: DXVK fills them in
 	IDirect3DSurface9* target = Surface;
 	if (!ExtDrawTo(extPass.Pipeline, &target, 1, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target

@@ -31,7 +31,7 @@ void main() {
     float sigma = max(radius * 0.5, 0.5);
     float falloff = -0.5 / (sigma * sigma);
     float tolerance = depth * 0.03 + 4.0;
-    bool centerWeapon = IsWeapon(pixelUV);
+    bool centerWeapon = WeaponAt(pixelUV);
     vec4 sum = centre;
     float weights = 1.0;
     for (int n = 1; n <= 8; n++) {
@@ -41,8 +41,8 @@ void main() {
         vec2 pa = ua - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
         vec2 pb = ub - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
         float da = readDepthLod(pa), db = readDepthLod(pb);
-        float wa = IsWeapon(pa) == centerWeapon ? gauss / (1.0 + abs(da - depth) / tolerance) : 0.0;
-        float wb = IsWeapon(pb) == centerWeapon ? gauss / (1.0 + abs(db - depth) / tolerance) : 0.0;
+        float wa = WeaponAt(pa) == centerWeapon ? gauss / (1.0 + abs(da - depth) / tolerance) : 0.0;
+        float wb = WeaponAt(pb) == centerWeapon ? gauss / (1.0 + abs(db - depth) / tolerance) : 0.0;
         sum += Source(ua) * wa + Source(ub) * wb;
         weights += wa + wb;
     }

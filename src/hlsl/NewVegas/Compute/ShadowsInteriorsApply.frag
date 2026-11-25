@@ -16,6 +16,9 @@ layout(push_constant) uniform Push {
     mat4 viewTransform;         // 48: TESR_ViewTransform
     mat4 projectionTransform;   // 112: TESR_ProjectionTransform
     uint samplerIndex;          // 176: LINEAR, CLAMP
+    float scaleX;               // 180: RenderRect::ScaleX (1 = off)
+    float scaleY;               // 184: RenderRect::ScaleY (1 = off)
+    uint pad;                   // 188
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -69,7 +72,8 @@ vec4 applyInteriorShadowDepth(vec2 coord, vec4 color, float shadowSample, float 
 
 // ShadowsInteriors.fx.hlsl CombineShadowDedicated
 void main() {
-    vec4 rendered = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv);
-    float mask = texture(sampler2D(t_mask, NVR_SAMPLER(pc.samplerIndex)), uv).r;
-    o_color = applyInteriorShadowDepth(uv, rendered, mask, readDepth(uv));
+    vec2 ruv = uv * vec2(pc.scaleX, pc.scaleY);
+    vec4 rendered = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), ruv);
+    float mask = texture(sampler2D(t_mask, NVR_SAMPLER(pc.samplerIndex)), ruv).r;
+    o_color = applyInteriorShadowDepth(uv, rendered, mask, readDepth(ruv));
 }

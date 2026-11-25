@@ -1116,7 +1116,8 @@ static bool sceneScenePick(Ctx&) {
 	{ RtScenePick::Geometry t = g; t.farLod = true; t.hasAlphaProperty = true; t.alphaFlags = kAlphaTest | kAlphaBlend; expectFate("far tree LOD (cut out)", t, on, Taken, true); }
 	// masks and op flags
 	auto expectU = [&](const char* what, uint32_t got, uint32_t want) { cases++; if (got != want) { bad++; say("    %s: 0x%08x, expected 0x%08x\n", what, got, want); } };
-	{ Record r; expectU("object mask", InstanceMask(r), 0x02); r.land = true; expectU("land mask", InstanceMask(r), 0x01);
+	{ Record r; expectU("object mask", InstanceMask(r), 0x02); r.land = true; expectU("land mask", InstanceMask(r), 0x02);
+	  Record h; h.hidden = true; expectU("hidden mask", InstanceMask(h), NVR_RT_MASK_HIDDEN); h.player = true; expectU("hidden over player", InstanceMask(h), NVR_RT_MASK_HIDDEN);
 	  r.hookMask = 0x0C; expectU("hook mask", InstanceMask(r), 0x0C); r.hookMask = 0x1FF; expectU("hook mask low 8 bits", InstanceMask(r), 0xFF);
 	  r.alphaTested = true; expectU("alpha-tested over the hook", InstanceMask(r), NVR_RT_MASK_ALPHA);
 	  Record p; p.player = true; expectU("player", InstanceMask(p), NVR_RT_MASK_PLAYER); p.farLod = true; expectU("player before far", InstanceMask(p), NVR_RT_MASK_PLAYER);

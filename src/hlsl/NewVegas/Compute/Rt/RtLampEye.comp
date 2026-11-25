@@ -67,7 +67,7 @@ void main() {
 		const float stop = max(p.params.z, e.x);
 		const float offset = 4.0;   // off the eye (nothing of the world sits this close to it)
 		if (dist > stop + offset) {
-			const uint people = 0x60u;   // the player's own body and gear may surround the eye; other people's shadows are left out too
+			const uint people = 0x61u;   // the hidden first-person body (0x01) and people (0x60) may surround the eye; other people's shadows are left out too
 			const uint farMask = uint(p.params2.y) & ~people, nearMask = uint(p.params2.z) & ~people;
 			const vec3 dir = toLamp / dist;
 			const vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));

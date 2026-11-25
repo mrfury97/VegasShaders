@@ -62,7 +62,7 @@ float HandBloodLayer(float2 p, float seed, float fill, float2 size, float stretc
 	float edge = r - dist;
 	// the run: a streak from the drop down the surface, thinning, ending in a small bead
 	[flatten] if (len > 0.01f) {
-		float t = saturate(dot(d, down) / len);
+		float t = saturate(dot(d, down) / max(len, 1e-4f));
 		float streak = r * lerp(0.45f, 0.22f, t) - length(d - down * len * t);
 		float bead = r * 0.5f - length(d - down * len);
 		edge = max(edge, max(streak, bead));

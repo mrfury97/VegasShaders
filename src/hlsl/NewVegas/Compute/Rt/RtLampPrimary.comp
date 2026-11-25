@@ -43,18 +43,16 @@ layout(set = 0, binding = 12, r16f) uniform readonly image2D alphaAtlas;
 struct Primary { bool hit; float t; uint instance; uint primitive; mat4x3 toScene; };
 
 #define NVR_RT_CUSTOM_HIDDEN 2u
-// people: every hit is a candidate (gl_RayFlagsNoOpaqueEXT) so the hidden first-person body can be passed over
-Primary closest(vec3 origin, vec3 dir, uint mask, bool alpha, bool people, float tMax) {
+Primary closest(vec3 origin, vec3 dir, uint mask, bool alpha, float tMax) {
 	Primary r;
 	r.hit = false; r.t = 1e30; r.instance = 0u; r.primitive = 0u; r.toScene = mat4x3(1.0);
 	if (mask == 0u) return r;
 	rayQueryEXT q;
-	rayQueryInitializeEXT(q, scene, people ? gl_RayFlagsNoOpaqueEXT : gl_RayFlagsOpaqueEXT, mask, origin, 0.5, dir, tMax);
+	rayQueryInitializeEXT(q, scene, alpha ? 0u : gl_RayFlagsOpaqueEXT, mask, origin, 0.5, dir, tMax);
 	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {
 		if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-		if (people && (rayQueryGetIntersectionInstanceCustomIndexEXT(q, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-		if (!alpha || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
-		                          rayQueryGetIntersectionBarycentricsEXT(q, false)))
+		if (rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false),
+		                rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	}
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
@@ -77,15 +75,10 @@ void main() {
 	float rayLength = length(ray);
 	vec3 dir = ray / rayLength;
 	bool alpha = p.jitter.z > 0.5;
-	// UNOFFICIAL 2026-11-11 (cloud task 034): cut-outs (0x10) moved from the static query into the tested one, as RtHidden.glsl does for
-	// shadow rays. The player's own hair, brows and beard are cut-outs (BlendedHair) AND hidden in first person; in the static query
-	// nobody looked at the hidden bit, so every camera ray stopped a few units from the eye, the depth-code test failed nearly
-	// everywhere and the draws took their cube maps (SameFrame lamp shadows cost ~3 ms and showed almost nothing).
-	uint staticMask = uint(p.masks.x) & 0x8Fu;                                      // never people or cut-outs: opaque
-	uint peopleMask = (uint(p.masks.y) | (alpha ? 0x10u : 0u)) & 0x70u;             // people, the player's parts, cut-outs (only with the atlas)
-	Primary a = closest(p.origin.xyz, dir, staticMask, false, false, 1e7);
-	Primary b = closest(p.origin.xyz, dir, peopleMask, alpha, true, a.hit ? a.t : 1e7);   // every candidate tested: hidden ones passed over
-	if (b.hit && (!a.hit || b.t < a.t)) a = b;
+	// Hidden near-eye body uses dedicated mask 0x01u, so a single hardware query skips it while keeping opaque geometry in fixed-function.
+	const uint rayMask = (uint(p.masks.x) | uint(p.masks.y)) & ~0x01u;
+	const uint finalMask = alpha ? (rayMask | 0x10u) : (rayMask & ~0x10u);
+	Primary a = closest(p.origin.xyz, dir, finalMask, alpha, 1e7);
 	if (!a.hit) {
 		imageStore(depthImage, pixel, vec4(1.0));
 		imageStore(normalImage, pixel, vec4(0.5, 0.5, 0.5, 1.0));

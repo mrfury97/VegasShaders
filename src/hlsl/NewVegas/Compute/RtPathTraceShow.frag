@@ -63,74 +63,74 @@ void main() {
     if ((pc.modulate & 1u) != 0u) {
         const vec4 a = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0);
         const vec3 raw = textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure;   // (demodulated by 1 there)
-        vec3 lit = c * a.rgb, rawLit = raw;
+        vec3 litDiff = c * a.rgb, litSpec = vec3(0.0), rawLit = raw;
         if ((pc.modulate & 4u) != 0u) {   // (ptaaa-denoiser) the two signals back together
             const vec3 sa = vec3(textureLod(sampler2D(t_specAlbedoRG, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rg,
                                  textureLod(sampler2D(t_specAlbedoB, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r);
-            lit += textureLod(sampler2D(t_spec, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure * sa;
+            litSpec = textureLod(sampler2D(t_spec, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure * sa;
             rawLit += textureLod(sampler2D(t_specRaw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure * sa;   // (0 off surfaces)
         }
-        c = mix(rawLit, lit, clamp(a.a, 0.0, 1.0));
-    }
-    // (2026-11-07, testers: "we're losing a lot of texture quality when RT is on") the path tracer shades the first surface with its
-    // smooth vertex normals (the G-buffer has no normal maps) and its denoiser smooths the light over a few pixels, so a road lost its
-    // cracks, bumps and glints. The game's own frame has them: its shading (its picture / the surface colour) against the same
-    // surface's average a few pixels round (4 taps, same depth) is that fine detail; the traced light takes it (clamped 0.5 - 2), its
-    // own large-scale light (bounces, soft shadows, sky) unchanged. As the RT GI apply's detail (AmbientLight.fx.hlsl, 2026-11-07).
-    if (pc.detail > 0.0 && (pc.modulate & 1u) != 0u) {
-        const vec4 a0 = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0);
-        const float z0 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
-        if (a0.a >= 0.5 && z0 > 0.0 && z0 < 0.9999) {
-            const float s0 = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(a0.rgb), 0.02);
-            float sum = 0.0, n = 0.0, lo = s0, hi = s0;
-            // (2026-11-12 ptbump, PTBumpNormals) the raw trace's alpha marks a pixel the trace lit with its normal-mapped normal: 2 + the
-            // share of PTDetail kept there (PTBumpDetail); 1 (every pixel before, and where no bump was known): PTDetail as before.
-            // The traced light then holds the bumps the denoiser left (the coarser ones); the game's shading adds the scale under the
-            // radius, and the fine contrast the TRACED light has at the same taps is divided out, so nothing counts twice.
-            // UNOFFICIAL 2026-11-20: negative rawA tags a moving-actor shadow blocker for RtDenoiseTemporalRgb; abs() recovers the bumped code
-            const float rawA = abs(textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).a);
-            const bool bumped = rawA >= 1.999 && rawA <= 3.001;
-            const float bumpKeep = bumped ? clamp(rawA - 2.0, 0.0, 1.0) : 1.0;
-            vec3 tr0 = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb;
-            if (bumped && (pc.modulate & 16u) != 0u)
-                tr0 += textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb *
-                       textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
-            const float t0 = bumped ? luma(tr0) : 1.0;
-            float tsum = 0.0, tlo = t0, thi = t0;
-            for (int k = 0; k < 4; k++) {
-                const vec2 o = (k == 0 ? vec2(1.0, 0.0) : k == 1 ? vec2(-1.0, 0.0) : k == 2 ? vec2(0.0, 1.0) : vec2(0.0, -1.0)) * pc.detailRadius * pc.texel;
-                const vec2 tt = tuv + o;
-                const vec4 at = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0);
-                const float zt = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).r;
-                if (at.a < 0.5 || abs(zt - z0) > 0.03 * z0) continue;
-                const float st = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(at.rgb), 0.02);
-                sum += st; lo = min(lo, st); hi = max(hi, st);
-                if (bumped) {
-                    vec3 trt = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb;
-                    if ((pc.modulate & 16u) != 0u)
-                        trt += textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb *
-                               textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).r;
-                    const float tt2 = luma(trt);
-                    tsum += tt2; tlo = min(tlo, tt2); thi = max(thi, tt2);
+        // (2026-11-07, testers: "we're losing a lot of texture quality when RT is on") the path tracer shades the first surface with its
+        // smooth vertex normals (the G-buffer has no normal maps) and its denoiser smooths the light over a few pixels, so a road lost its
+        // cracks, bumps and glints. The game's own frame has them: its shading (its picture / the surface colour) against the same
+        // surface's average a few pixels round (4 taps, same depth) is that fine detail; the traced light takes it, its own large-scale
+        // light (bounces, soft shadows, sky) unchanged; applied only to diffuse before adding specular reflections.
+        float detailMul = 1.0;
+        if (pc.detail > 0.0) {
+            const float z0 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
+            if (a.a >= 0.5 && z0 > 0.0 && z0 < 0.9999) {
+                const float s0 = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(a.rgb), 0.02);
+                float sum = 0.0, n = 0.0, lo = s0, hi = s0;
+                // (2026-11-12 ptbump, PTBumpNormals) the raw trace's alpha marks a pixel the trace lit with its normal-mapped normal: 2 + the
+                // share of PTDetail kept there (PTBumpDetail); 1 (every pixel before, and where no bump was known): PTDetail as before.
+                // The traced light then holds the bumps the denoiser left (the coarser ones); the game's shading adds the scale under the
+                // radius, and the fine contrast the TRACED light has at the same taps is divided out, so nothing counts twice.
+                // UNOFFICIAL 2026-11-20: negative rawA tags a moving-actor shadow blocker for RtDenoiseTemporalRgb; abs() recovers the bumped code
+                const float rawA = abs(textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).a);
+                const bool bumped = rawA >= 1.999 && rawA <= 3.001;
+                const float bumpKeep = bumped ? clamp(rawA - 2.0, 0.0, 1.0) : 1.0;
+                vec3 tr0 = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb;
+                if (bumped && (pc.modulate & 16u) != 0u)
+                    tr0 += textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb *
+                           textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
+                const float t0 = bumped ? luma(tr0) : 1.0;
+                float tsum = 0.0, tlo = t0, thi = t0;
+                for (int k = 0; k < 4; k++) {
+                    const vec2 o = (k == 0 ? vec2(1.0, 0.0) : k == 1 ? vec2(-1.0, 0.0) : k == 2 ? vec2(0.0, 1.0) : vec2(0.0, -1.0)) * pc.detailRadius * pc.texel;
+                    const vec2 tt = tuv + o;
+                    const vec4 at = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0);
+                    const float zt = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).r;
+                    if (at.a < 0.5 || abs(zt - z0) > 0.03 * z0) continue;
+                    const float st = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(at.rgb), 0.02);
+                    sum += st; lo = min(lo, st); hi = max(hi, st);
+                    if (bumped) {
+                        vec3 trt = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb;
+                        if ((pc.modulate & 16u) != 0u)
+                            trt += textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb *
+                                   textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).r;
+                        const float tt2 = luma(trt);
+                        tsum += tt2; tlo = min(tlo, tt2); thi = max(thi, tt2);
+                    }
+                    n += 1.0;
                 }
-                n += 1.0;
+                // (2026-11-10 PTDetailEdge; seen on an RTX-class card in the lamp test room: thin dark and light lines over people's faces and
+                // clothes, gone with PTDetail 0) the game's frame also holds the game's own LAMP AND SUN SHADOWS, and where one of their
+                // edges runs between this pixel and its taps the ratio below is that shadow step, clamped to 0.5 / 2: the old shadow's
+                // outline stamped onto the traced light, which has its own shadows elsewhere. Fine detail (a normal map's bumps, cracks)
+                // differs by tens of percent between the five samples; a shadow edge by a factor of several. Where the samples' largest
+                // over their smallest passes PTDetailEdge the detail fades out (gone at 1.25 x it).
+                const float edge = pc.detailEdge > 0.0 ? 1.0 - smoothstep(0.75 * pc.detailEdge, 1.25 * pc.detailEdge, hi / max(lo, 1.0e-4)) : 1.0;
+                // (ptbump) the traced light's own fine contrast at those taps (1 off a bumped pixel; not across one of its own shadow edges,
+                // which stay the trace's: the same step test as the game's above)
+                float own = 1.0;
+                if ((pc.modulate & 32u) == 0u && bumped && n >= 2.5 && t0 > 0.0 && tsum > 0.0) {
+                    const float edgeT = pc.detailEdge > 0.0 ? 1.0 - smoothstep(0.75 * pc.detailEdge, 1.25 * pc.detailEdge, thi / max(tlo, 1.0e-4)) : 1.0;
+                    own = max(mix(1.0, clamp(t0 / (tsum / n), 0.5, 2.0), edgeT), 0.85);
+                }
+                if (n >= 2.5 && s0 > 0.0 && sum > 0.0) detailMul = mix(1.0, clamp(s0 / (sum / n) / own, 0.55, 1.35), clamp(pc.detail, 0.0, 1.0) * edge * bumpKeep);
             }
-            // (2026-11-10 PTDetailEdge; seen on an RTX-class card in the lamp test room: thin dark and light lines over people's faces and
-            // clothes, gone with PTDetail 0) the game's frame also holds the game's own LAMP AND SUN SHADOWS, and where one of their
-            // edges runs between this pixel and its taps the ratio below is that shadow step, clamped to 0.5 / 2: the old shadow's
-            // outline stamped onto the traced light, which has its own shadows elsewhere. Fine detail (a normal map's bumps, cracks)
-            // differs by tens of percent between the five samples; a shadow edge by a factor of several. Where the samples' largest
-            // over their smallest passes PTDetailEdge the detail fades out (gone at 1.25 x it).
-            const float edge = pc.detailEdge > 0.0 ? 1.0 - smoothstep(0.75 * pc.detailEdge, 1.25 * pc.detailEdge, hi / max(lo, 1.0e-4)) : 1.0;
-            // (ptbump) the traced light's own fine contrast at those taps (1 off a bumped pixel; not across one of its own shadow edges,
-            // which stay the trace's: the same step test as the game's above)
-            float own = 1.0;
-            if (bumped && n > 0.5 && t0 > 0.0 && tsum > 0.0) {
-                const float edgeT = pc.detailEdge > 0.0 ? 1.0 - smoothstep(0.75 * pc.detailEdge, 1.25 * pc.detailEdge, thi / max(tlo, 1.0e-4)) : 1.0;
-                own = mix(1.0, clamp(t0 / (tsum / n), 0.5, 2.0), edgeT);
-            }
-            if (n > 0.5 && s0 > 0.0 && sum > 0.0) c *= mix(1.0, clamp(s0 / (sum / n) / own, 0.5, 2.0), clamp(pc.detail, 0.0, 1.0) * edge * bumpKeep);
         }
+        c = mix(rawLit, litDiff * detailMul + litSpec, clamp(a.a, 0.0, 1.0));
     }
     c = (pc.modulate & 2u) != 0u ? max(c, vec3(0.0)) : clamp(c, 0.0, 1.0);
     o_color = vec4(pow(c, vec3(pc.gamma)), 1.0);

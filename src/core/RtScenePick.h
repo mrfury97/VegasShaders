@@ -282,7 +282,8 @@ namespace RtScenePick {
 	}
 
 	inline uint32_t InstanceMask(const Record& r) {
-		uint32_t mask = r.hookMask >= 0 ? ((uint32_t)r.hookMask & 0xFFu) : (r.land ? 0x01u : 0x02u);	// default: bit 0 land, bit 1 objects
+		if (r.hidden) return NVR_RT_MASK_HIDDEN;
+		uint32_t mask = r.hookMask >= 0 ? ((uint32_t)r.hookMask & 0xFFu) : 0x02u;	// default: 0x02 holds land and static objects
 		// (2026-11-07 ptaaa-materials) glass: non-opaque under the alpha bit, so a ray either tests it (RtAlpha.glsl: every shader but the path
 		// tracer passes it) or leaves it out (a mask without 0x10)
 		if (r.alphaTested || r.kind == NVR_RT_KIND_GLASS) mask = NVR_RT_MASK_ALPHA;	// only rays that test alpha (RtAlpha.glsl) see it

@@ -81,12 +81,21 @@ layout(location = 3) out vec4 o_d;   // (ptaaa-denoiser) AntiFirefly: as RtDenoi
 #define SMP NVR_SAMPLER(pc.samplerIndex)
 
 // (ptaaa-denoiser) AntiFirefly's spatial support: the brightest of the 3 x 3 neighbours, the centre left out (RtDenoiseTemporalRgb.frag)
-float FireflyLimit(vec2 at) {
+float FireflyLimit(vec2 at, float viewZ) {
     float m = 0.0;
+    bool anyMatch = false;
+    const vec2 lo = 0.5 * pc.params.zw, hi = max(pc.rect.xy - 0.5 * pc.params.zw, lo);
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++)
-            if (dx != 0 || dy != 0) m = max(m, luma(textureLod(sampler2D(t_noisy, SMP), at + vec2(dx, dy) * pc.params.zw, 0.0).rgb));
-    return m;
+            if (dx != 0 || dy != 0) {
+                const vec2 quv = clamp(at + vec2(dx, dy) * pc.params.zw, lo, hi);
+                const float qLin = textureLod(sampler2D(t_depth, SMP), quv, 0.0).r;
+                const float qZ = (qLin > 0.0 && qLin < 0.999) ? min(qLin * pc.forward.w, 60000.0) : 0.0;
+                if (viewZ > 0.0 && (qZ <= 0.0 || abs(qZ - viewZ) > max(0.08 * viewZ, 6.0))) continue;
+                m = max(m, luma(textureLod(sampler2D(t_noisy, SMP), quv, 0.0).rgb));
+                anyMatch = true;
+            }
+    return anyMatch ? m : 1.0e30;
 }
 
 struct History { vec4 a; vec4 b; vec4 c; float weight; };
@@ -148,7 +157,8 @@ void main() {
     const vec4 noisy = textureLod(sampler2D(t_noisy, SMP), uv, 0.0);
     const vec3 value = noisy.rgb;
     const float l = luma(value);
-    const float viewZ = textureLod(sampler2D(t_depth, SMP), uv, 0.0).r * pc.forward.w;
+    const float linear01 = textureLod(sampler2D(t_depth, SMP), uv, 0.0).r;
+    const float viewZ = (linear01 > 0.0 && linear01 < 0.999) ? min(linear01 * pc.forward.w, 60000.0) : 0.0;
     const float rough = clamp(textureLod(sampler2D(t_rough, SMP), uv, 0.0).g, 0.0, 1.0);
     // the hit distance to track: the nearest of the 3 x 3 neighbourhood's known ones (one ray a pixel mixes the reflected object with
     // misses at its edges, and only the pixels whose ray was the specular lobe's know one)
@@ -162,7 +172,7 @@ void main() {
         }
     if (hit > 1.0e8) hit = 0.0;
     const float mirrorKind = mirrorOn ? (mirror ? 1.0 : 0.0) : -1.0;
-    const float spatialLimit = NVR_FIREFLY_K > 0.0 ? FireflyLimit(uv) : 1.0e30;   // (ptaaa-denoiser) AntiFirefly
+    const float spatialLimit = NVR_FIREFLY_K > 0.0 ? FireflyLimit(uv, viewZ) : 1.0e30;   // (ptaaa-denoiser) AntiFirefly
     vec3 used = l > spatialLimit ? value * (spatialLimit / l) : value;
     float excessWeight = 1.0, fastWeight = 1.0;
     vec4 a = vec4(used, 1.0);
@@ -179,10 +189,15 @@ void main() {
             own = textureLod(sampler2D(t_motion, SMP), uv, 0.0).rgb;
             if (pc.backbone.z > 0.5 && dot(own, own) > 0.0625) cap = min(cap, pc.backbone.z);
         }
-        if (pc.peopleCap > 0.5 && textureLod(sampler2D(t_captured, SMP), uv, 0.0).a > 1.5) cap = min(cap, pc.peopleCap);
-        // surface reprojection (as the RGB pass, bilinear)
+        const float people = pc.peopleCap > 0.5 ? textureLod(sampler2D(t_captured, SMP), uv, 0.0).a : 0.0;
+        const bool isVm = people > 3.5;
+        if (people > 1.5) cap = min(cap, pc.peopleCap);
+        if (isVm) cap = min(cap, 4.0);
+        // surface reprojection (as the RGB pass, bilinear; viewmodel is screen-locked)
         History hs; hs.a = vec4(0.0); hs.b = vec4(0.0); hs.c = vec4(0.0); hs.weight = 0.0;
-        {
+        if (isVm) {
+            hs = Gather(s, viewZ, pc.params.y * max(viewZ, 1.0), rough, 0.0, false, mirrorKind);
+        } else {
             const vec4 clip = pc.prevViewProj * vec4(point + pc.move.xyz - own, 1.0);
             if (clip.w > 0.0) {
                 const vec2 prevUv = vec2(clip.x / clip.w * 0.5 + 0.5, 0.5 - clip.y / clip.w * 0.5);
@@ -195,7 +210,7 @@ void main() {
         c.x = hit;
         History hv; hv.a = vec4(0.0); hv.b = vec4(0.0); hv.c = vec4(0.0); hv.weight = 0.0;
         float virtualPx = 1.0e9;   // (pt-mirrors) how far the virtual point moved on screen since last frame (pixels)
-        if (pc.spec.y > 0.5 && hit > 0.0) {
+        if (pc.spec.y > 0.5 && hit > 0.0 && !isVm) {
             const float d = length(point);
             // (pt-mirrors) a marked curved mirror's virtual point lies hit / (1 + 2 hit k) behind it (a flat one's: the whole hit)
             const float behind = mirror ? hit / max(1.0 + 2.0 * hit * Curvature(uv, point, viewZ), 1.0) : hit;

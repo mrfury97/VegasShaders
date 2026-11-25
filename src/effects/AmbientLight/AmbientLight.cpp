@@ -779,7 +779,7 @@ bool AmbientLightEffect::RenderPrepare(IDirect3DDevice9* Device) {
 	D3DXVECTOR4 edges((float)normalSmoothing, horizonBias * (3.14159265f / 180.0f), normalSmoothingWorld, 0.0f);	// z: 2026-10-24 (charfacets)
 	IDirect3DSurface9* depthSurface = nullptr;
 	Device->GetDepthStencilSurface(&depthSurface);
-	if (!ReShadeIntegration::KeepDepthBound()) Device->SetDepthStencilSurface(nullptr);
+	if (!ReShadeIntegration::KeepDepthBoundFor(Device)) Device->SetDepthStencilSurface(nullptr);
 	IDirect3DSurface9* target = nullptr;
 	Device->GetRenderTarget(0, &target);
 	static GpuTimer timer("  Ambient light prepare + smooth (half)");
@@ -1207,7 +1207,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	D3DXVECTOR4 layout((float)half.Width / original.Width, (float)half.Height / original.Height, 1.0f / half.Width, 1.0f / half.Height);
 	IDirect3DSurface9* depthSurface = nullptr;
 	Device->GetDepthStencilSurface(&depthSurface);
-	if (!ReShadeIntegration::KeepDepthBound()) Device->SetDepthStencilSurface(nullptr);
+	if (!ReShadeIntegration::KeepDepthBoundFor(Device)) Device->SetDepthStencilSurface(nullptr);
 
 	// UNOFFICIAL 2026-10-14 light grid: inject and spread when the sun map was drawn this frame; the apply reads the finished
 	// grid (stage 9) with its corner relative to the camera now.
@@ -1414,14 +1414,8 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	const bool albedoOn = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
 	// UNOFFICIAL 2026-11-15 DeferredALAlbedo (core/FdIndirect.h): made here, before any pass begins; AlbedoTexture itself while off
 	IDirect3DBaseTexture9* const albedoTexture = albedoOn ? FdIndirect::ALAlbedo(Device) : nullptr;
-	// DeferredBumpedNormals shading normals (core/FdIndirect.h): prepared before Effect->Begin when GI Apply is active
-	IDirect3DBaseTexture9* const depthTexForBump = ExtFileTexture("TESR_DepthBuffer");
-	IDirect3DBaseTexture9* const normalsTexForBump = ExtFileTexture("TESR_NormalsBuffer");
-	IDirect3DBaseTexture9* const shadingNormals = (giOn || rtGI != nullptr) && FdIndirect::BumpedNormalsOn() && normalsTexForBump && depthTexForBump
-		? FdIndirect::ShadingNormals(Device, normalsTexForBump, depthTexForBump) : nullptr;
-	const bool bumpOn = shadingNormals != nullptr && shadingNormals != normalsTexForBump;
 	if (D3DXHANDLE h = ParameterHandle(paramBump, "NVR_ALBump")) {
-		D3DXVECTOR4 bump(bumpOn ? 1.0f : 0.0f, roomShareScaleOffset, 0.0f, 0.0f);
+		D3DXVECTOR4 bump(0.0f, roomShareScaleOffset, 0.0f, 0.0f);
 		Effect->SetVector(h, &bump);
 	}
 	// UNOFFICIAL 2026-11-15 GIGrassBlur's mask (the blur passes read only its alpha): alpha 0 where there is no albedo record (the fork's test) OR the
@@ -1479,7 +1473,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		D3DXVECTOR4 temporalData(temporal && continuous ? HistoryShare : 0.0f, MotionPixels, (float)noiseFrame, jitterDelta.x);	// (w: TemporalJitterFix)
 		D3DXMATRIX reproject;
 		D3DXMatrixIdentity(&reproject);
-		if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, lastView, lastInvView, lastProj, &reproject);
+		if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->CameraPosition, lastView, lastCameraPos, lastProj, &reproject);
 		Effect->SetVector(temporalHandle, &temporalData);
 		Effect->SetMatrix(reprojectHandle, &reproject);
 	}
@@ -1538,6 +1532,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		return drawn;
 	};
 	HRESULT result = Effect->Begin(&passes, 0);
+	bool stage12Bound = false;
 	if (SUCCEEDED(result)) {
 		for (UINT p = 0; p < 8 && SUCCEEDED(result); ++p) {
 			// Prepare -> prep; Estimate (prep) -> 0; blur X (0) -> 1; blur Y (1) -> 0; Accumulate (0, last history) -> this
@@ -1647,7 +1642,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 					IDirect3DBaseTexture9* balance = interiorMode ? balanceTexture[balanceRuns ? balanceWrite : balanceRead] : nullptr;
 					IDirect3DBaseTexture9* textures[] = { scene, sunFar, depth, normals, ExtFileTexture("TESR_PointShadowBuffer"), skyTexture, viewModel,
 						occlusionHistory[writeIndex], waveStage, grid, gridColour, balance, bufferTexture[blurred], albedoTexture,
-						giDebugTexture ? giDebugTexture : historyTexture[writeIndex], bumpOn ? shadingNormals : nullptr };
+						giDebugTexture ? giDebugTexture : historyTexture[writeIndex], nullptr };
 					const UINT variant = (skyTexture ? 1u : 0u) | (waveStage ? 2u : 0u);
 					D3DVIEWPORT9 applyViewport = original;
 					if (RenderRect::Active()) {
@@ -1685,13 +1680,6 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			if (FAILED(result)) break;
 			if (p > 0) Device->SetTexture(5, prepTexture);
 			if (giApply) Device->SetTexture(5, giDebugTexture ? giDebugTexture : historyTexture[writeIndex]);	// UNOFFICIAL 2026-11-03 NVR_ALGIHistory (Apply does not read the prep; 2026-11-12: DebugView 14 / 15, giDebugTexture)
-			if (giApply && bumpOn) {
-				Device->SetTexture(3, shadingNormals);
-				TheRenderManager->renderState->NoteDeviceTexture(3, shadingNormals);
-				const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
-					{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
-				for (const auto& s : states) TheRenderManager->SetSamplerState(3, (D3DSAMPLERSTATETYPE)s[0], s[1]);
-			}
 			if (p == 1 && giD3D9Texture) Device->SetTexture(7, giD3D9Texture);	// UNOFFICIAL 2026-11-03 NVR_ALRTGI (Estimate does not read s7 otherwise)
 			if (p == 1 && aoD3D9Texture) Device->SetTexture(6, aoD3D9Texture);	// UNOFFICIAL 2026-11-13 NVR_ALRTAO (Estimate does not read s6 otherwise: its own target's stage)
 			Device->SetTexture(15, TheTextureManager->DepthTextureViewModel);	// NVR_ALViewModel (Prepare, Apply)
@@ -1711,6 +1699,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				IDirect3DBaseTexture9* const stage12 = (p == 2 || p == 3) && grassMaskTexture ? grassMaskTexture : albedoTexture;	// (2026-11-15: the blur passes: the grass mask)
 				Device->SetTexture(12, stage12);
 				TheRenderManager->renderState->NoteDeviceTexture(12, stage12);
+				stage12Bound = true;
 				const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP},
 					{D3DSAMP_MAGFILTER, D3DTEXF_POINT}, {D3DSAMP_MINFILTER, D3DTEXF_POINT}, {D3DSAMP_MIPFILTER, D3DTEXF_NONE} };
 				for (const auto& s : states) TheRenderManager->SetSamplerState(12, (D3DSAMPLERSTATETYPE)s[0], s[1]);
@@ -1757,9 +1746,9 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	Device->SetTexture(14, nullptr);
 	Device->SetTexture(15, nullptr);
 	Device->SetTexture(8, nullptr);
-	if (bumpOn) {
-		Device->SetTexture(3, nullptr);
-		TheRenderManager->renderState->NoteDeviceTexture(3, nullptr);
+	if (stage12Bound) {
+		Device->SetTexture(12, nullptr);
+		TheRenderManager->renderState->NoteDeviceTexture(12, nullptr);
 	}
 	if (sunFar) Device->SetTexture(13, nullptr);
 	if (skyTexture) {	// UNOFFICIAL 2026-10-20 (skyamb)
@@ -1780,6 +1769,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		historyValid = true;
 		lastView = TheRenderManager->viewMatrix;
 		lastInvView = TheRenderManager->InvViewMatrix;
+		lastCameraPos = TheRenderManager->CameraPosition;
 		lastProj = TheRenderManager->projMatrix;
 		lastTime = now;
 		frameNumber++;

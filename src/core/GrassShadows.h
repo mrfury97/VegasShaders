@@ -293,13 +293,15 @@ namespace GrassShadows {
 	// After GrassFirst's early grass: a cascade of the shadow atlas (near, middle or far) becomes the target and the draws are ours.
 	// False: nothing to do (off, no early grass, indoors, no sun shadow maps this frame, not PCF; past the near cascade also Reach 0,
 	// the cascade starting past Reach or not redrawn this frame), and nothing was changed.
-	inline bool Begin(IDirect3DDevice9* device, int cascade = ShadowsExteriorEffect::MapNear) {
+	inline bool Begin(IDirect3DDevice9* device, int cascade = ShadowsExteriorEffect::MapNear, bool oldAtlas = false) {
 		Active = false;
 		if (!Enabled || Records.empty() || !device || !TheShaderManager->GameState.isExterior) return false;
 		if (cascade < ShadowsExteriorEffect::MapNear || cascade > ShadowsExteriorEffect::MapFar) return false;
 		if (cascade > ShadowsExteriorEffect::MapNear && (!(Reach > 0.0f) || !(SunCascadesDrawnMask & (1u << cascade)))) return false;
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		if (!shadows || !shadows->Enabled || !shadows->ShadowAtlasSurface || !shadows->ShadowAtlasDepthSurface) return false;
+		if (oldAtlas && (!shadows->DeferredCaptureReady || !shadows->ShadowAtlasOldSurface)) return false;
+		IDirect3DSurface9* const target = oldAtlas ? shadows->ShadowAtlasOldSurface : shadows->ShadowAtlasSurface;
 		if (shadows->Settings.ShadowMaps.Mode != 3 || shadows->ShadowAtlasSurfaceMSAA) {
 			static bool told = false;
 			if (!told) Logger::Log("UNOFFICIAL grass shadows: only with the PCF sun shadow maps ([Shaders.ShadowsExteriors.ShadowMaps] Mode 3, no MSAA): off");
@@ -355,11 +357,11 @@ namespace GrassShadows {
 		device->GetViewport(&SavedViewport);
 		for (DWORD i = 0; i < 4; i++) if (FAILED(device->GetRenderTarget(i, &SavedTarget[i]))) SavedTarget[i] = nullptr;
 		if (FAILED(device->GetDepthStencilSurface(&SavedDepth))) SavedDepth = nullptr;
-		device->SetRenderTarget(0, shadows->ShadowAtlasSurface);	// (resets the viewport: set after)
+		device->SetRenderTarget(0, target);	// (resets the viewport: set after)
 		for (DWORD i = 1; i < 4; i++) if (SavedTarget[i]) device->SetRenderTarget(i, nullptr);
 		device->SetDepthStencilSurface(shadows->ShadowAtlasDepthSurface);
 		device->SetViewport(&map.ShadowMapViewPort);
-		AtlasTarget = shadows->ShadowAtlasSurface;
+		AtlasTarget = target;
 		AtlasDepth = shadows->ShadowAtlasDepthSurface;
 		AtlasViewport = map.ShadowMapViewPort;
 		if (!Query) device->CreateQuery(D3DQUERYTYPE_OCCLUSION, &Query);

@@ -18,15 +18,17 @@ vec3 GetNormal(vec2 uv) {
 }
 
 void main() {
-    vec2 center = LINEAR_LOD(t_ao, DedicatedUV(uv)).rg;
+    vec2 ruv = uv * aoRectScale();
+    vec2 cClamped = aoClampToRectIfOn(ruv, cb.reciprocalResolution.xy);
+    vec2 center = LINEAR_LOD(t_ao, DedicatedUV(ruv)).rg;
     if (center.y >= endFade) { o_color = vec4(1.0, center.y, 0.0, 1.0); return; }
-    float rawDepth = projectedDepthFromLinear(LINEAR_LOD(t_depth, uv).x);
+    float rawDepth = projectedDepthFromLinear(LINEAR_LOD(t_depth, cClamped).x);
     if (invertedDepth) rawDepth = 1.0 - rawDepth;
-    float depthTolerance = blurDrop * (0.5 + 2.0 * compress(GetNormal(uv).z));
+    float depthTolerance = blurDrop * (0.5 + 2.0 * compress(GetNormal(cClamped).z));
     float sum = center.x * 0.114725602;
     float weights = 0.114725602;
     for (int i = 0; i < cKernelSize; ++i) {
-        vec2 tapUV = uv + BlurOffsets(i) * pc.axis * blurRadius / max(rawDepth, 1.0e-6);
+        vec2 tapUV = ruv + BlurOffsets(i) * pc.axis * blurRadius / max(rawDepth, 1.0e-6) * aoRectScale();
         vec2 tap = LINEAR_LOD(t_ao, DedicatedUV(tapUV)).rg;
         float weight = BlurWeights[i] * (abs(center.y - tap.y) <= depthTolerance ? 1.0 : 0.0);
         sum += tap.x * weight;

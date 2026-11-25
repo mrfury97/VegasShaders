@@ -174,7 +174,7 @@ struct Object {               // one instance of one mesh
 		r.tinted = tinted && alphaTested;	// (2026-11-08 perf-reflfix4) the rigid hair: a TINTED static record
 		return r;
 	}
-	uint32_t mask() const { return actor ? NVR_RT_MASK_ACTOR : RtScenePick::InstanceMask(record()); }
+	uint32_t mask() const { return hidden ? NVR_RT_MASK_HIDDEN : actor ? NVR_RT_MASK_ACTOR : RtScenePick::InstanceMask(record()); }
 };
 
 struct World {

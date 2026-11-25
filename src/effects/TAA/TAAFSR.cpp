@@ -704,7 +704,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	// The same exponent encodes RR's output again below, so the final picture's curve is unchanged either way.
 	static bool tracedCurve = true;
 	{ static unsigned n = 0; if ((n++ % 120) == 0) { SettingManager::Configuration::ConfigNode on; tracedCurve = !TheSettingManager->Config.FillNode(&on, "Shaders.TAA.DLSS", "RRTracedCurve") || on.BoolValue; } }
-	const float linearization = tracedCurve && RtPathTrace::Replacing() ? 2.2f : toneMapping && toneMapping->w > 0.0f ? toneMapping->w : 2.2f;
+	const float linearization = tracedCurve && RtPathTrace::Replacing() ? 2.2f : toneMapping && toneMapping->w > 0.0f ? (std::max)(toneMapping->w, 1.0f) : 2.2f;
 	// The material buffer's roughness ([Main.Main.Quality] MaterialBuffer) only when it holds this frame's, at the screen's size.
 	bool materialOn = materialData && materialData->x > 0.5f && material && material->GetType() == D3DRTYPE_TEXTURE;
 	if (materialOn) {

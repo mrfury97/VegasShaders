@@ -41,7 +41,7 @@ float4 TESR_SunFarVolume;         // UNOFFICIAL 2026-10-21 the volumetric clouds
 float4 TESR_SunDirection;         // the light the volumetric clouds' shadow map was made with
 float4 TESR_FogData;              // UNOFFICIAL 2026-10-25: the game's fog as the object and land shaders apply it: x near, y far, w power
 float4 TESR_FogColor;
-float4 TESR_SunFarJitter;         // UNOFFICIAL 2026-10-31 xy: JitterFix's depth jitter in uv (0 off), z: 1 SkipCascadeCheck (test)
+float4 TESR_SunFarJitter;         // UNOFFICIAL 2026-10-31 xy: JitterFix's depth jitter in uv (0 off), z: 1 SkipCascadeCheck (test), w: water-mask mode (0 fallback height, 1 no water drawn, 2 mask s14, 3 mask s12)
 float4 TESR_SunFarLand;           // UNOFFICIAL 2026-10-25: xyz the light vector the land shaders lit with (core/LandLight.h), w 1 when read lately
 float4 TESR_SunFarWater;          // UNOFFICIAL 2026-10-23 [Shaders.CloudShadows.Main] WaterShadows: x 1 on (0: water left alone), y deep water's share, z 1 the depth map is bound; w 1 OldSunModel (test, 2026-10-25)
 
@@ -209,6 +209,16 @@ bool OnWater(float3 world, float3 normal, float depth) {
 	return normal.z > 0.7f && abs(world.z - TESR_WaterSettings.x) < max(2.0f, depth * 0.002f);
 }
 
+// UNOFFICIAL 2026-11-21: exact per-pixel water test from WaterMask (channel .g > 0.45) when captured for this frame,
+// so dry ground crossing TESR_WaterSettings.x is never skipped as water. Mode: 0 fallback height, 1 no water drawn, 2 mask on s14, 3 mask on s12.
+bool IsWaterPixel(float2 uv, float3 world, float3 normal, float depth) {
+	float mode = TESR_SunFarJitter.w;
+	if (mode > 2.5f) return tex2Dlod(NVR_CloudBlend3, float4(uv, 0.0f, 0.0f)).g > 0.45f;
+	if (mode > 1.5f) return tex2Dlod(NVR_WaterDepth, float4(uv, 0.0f, 0.0f)).g > 0.45f;
+	if (mode > 0.5f) return false;
+	return OnWater(world, normal, depth);
+}
+
 // UNOFFICIAL 2026-10-23 WaterShadows: how deep the water is here, 0 at the shore to 1 deep, from the game's water depth map;
 // far off 1, as the water shader fades to its LOD colour there (WATER000 LODfade, 4096-8192 units).
 float WaterDeep(float2 uv, float3 rel) {
@@ -253,7 +263,7 @@ float4 SunFarPS(VSOUT IN) : COLOR0 {
 		float3 tint = lerp(1.0f, float3(0.25f, 1.0f, 0.25f), (1.0f - terrain) * 0.8f) * lerp(1.0f, float3(0.35f, 0.5f, 1.0f), (1.0f - cloud) * 0.8f);
 		if (TESR_SunFarData.y > 1.5f) tint *= lerp(1.0f, float3(0.85f, 0.9f, 1.0f), TerrainShadowCoverage(world));
 		// 3: also the water's depth as WaterShadows reads it, white at the shore to red deep (with the depth map bound).
-		float water = TESR_SunFarWater.z * step(2.5f, TESR_SunFarData.y) * (OnWater(world, GetWorldNormalLod(uv), depth) ? 1.0f : 0.0f);
+		float water = TESR_SunFarWater.z * step(2.5f, TESR_SunFarData.y) * (IsWaterPixel(uv, world, GetWorldNormalLod(uv), depth) ? 1.0f : 0.0f);
 		tint *= lerp(1.0f, lerp(float3(1.0f, 1.0f, 1.0f), float3(1.0f, 0.15f, 0.15f), WaterDeep(uv, rel)), water);
 		return float4(tint, 1.0f);
 	}
@@ -265,7 +275,7 @@ float4 SunFarPS(VSOUT IN) : COLOR0 {
 	// shadow too (cut at the waterline, the shadow drew a hard line along every shore). The share it keeps fades from all of it
 	// at the shore to WaterDeepShare in deep water, by the game's own water depth map.
 	float keep = 1.0f;   // the share of the change this pixel takes (1 off the water)
-	[branch] if (OnWater(world, normal, depth)) {
+	[branch] if (IsWaterPixel(uv, world, normal, depth)) {
 		keep = TESR_SunFarWater.x * lerp(1.0f, TESR_SunFarWater.y, WaterDeep(uv, rel));
 		[branch] if (keep <= 0.0f) return float4(1.0f, 1.0f, 1.0f, blocked);
 	}

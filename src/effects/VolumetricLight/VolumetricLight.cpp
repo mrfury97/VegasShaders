@@ -201,9 +201,10 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	// UNOFFICIAL 2026-10-27 RenderScale v2: a history drawn at another scale (or native vs rect) holds other texels
 	if (RenderRect::ScaleChanged() || RenderRect::Active() != lastRect) usable = false;
 	lastRect = RenderRect::Active();
+	const D3DXVECTOR4 camPos = TheRenderManager->CameraPosition;
 	if (usable) {
-		const double dx = (double)invView._41 - lastInvView._41, dy = (double)invView._42 - lastInvView._42,
-			dz = (double)invView._43 - lastInvView._43;
+		const double dx = (double)camPos.x - lastCameraPos.x, dy = (double)camPos.y - lastCameraPos.y,
+			dz = (double)camPos.z - lastCameraPos.z;
 		usable = dx * dx + dy * dy + dz * dz < 500.0 * 500.0;
 	}
 	stats.Note(temporal, haveHistory, drewLastFrame, usable);
@@ -213,8 +214,8 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		// Camera-relative world position p -> last frame's view: (p + cameraNow - cameraLast) * Rlast, then last frame's
 		// projection. Worked out round the two camera positions in double precision (the Mojave's coordinates run past
 		// 100 000 units, where float rounding would lose the few units the camera moves between frames).
-		const double move[3] = { (double)invView._41 - lastInvView._41, (double)invView._42 - lastInvView._42,
-			(double)invView._43 - lastInvView._43 };
+		const double move[3] = { (double)camPos.x - lastCameraPos.x, (double)camPos.y - lastCameraPos.y,
+			(double)camPos.z - lastCameraPos.z };
 		D3DXMATRIX toLastView;
 		for (int i = 0; i < 3; i++) {
 			for (int j = 0; j < 3; j++) toLastView.m[i][j] = lastView.m[i][j];
@@ -240,7 +241,7 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		values.temporal = temporal; values.usable = usable; values.haveHistory = haveHistory; values.drewLastFrame = drewLastFrame;
 		values.sharedNoise = sharedNoise; values.historyValid = TemporalBackbone::HistoryValid();
 		values.rect = RenderRect::Active(); values.scaleChanged = RenderRect::ScaleChanged();
-		const double mx = (double)invView._41 - lastInvView._41, my = (double)invView._42 - lastInvView._42, mz = (double)invView._43 - lastInvView._43;
+		const double mx = (double)camPos.x - lastCameraPos.x, my = (double)camPos.y - lastCameraPos.y, mz = (double)camPos.z - lastCameraPos.z;
 		values.cameraMove = sqrt(mx * mx + my * my + mz * mz);
 		values.technique = CompositeTechnique();
 		Diagnostics::VLNote(values);
@@ -285,6 +286,7 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastRenderedFrame = now;
 	lastView = view;
 	lastInvView = invView;
+	lastCameraPos = camPos;
 	lastProj = TheRenderManager->projMatrix;
 	lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 }

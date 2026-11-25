@@ -55,7 +55,7 @@ static bool BindFaceGenMaps(void* apThis, NiGeometry* Geometry, NiD3DPass* Pass)
     if (!Geometry || !Pass || Pass->StageCount < 4) return false;
     BSShaderPPLightingProperty* Property = static_cast<BSShaderPPLightingProperty*>(Geometry->GetProperty(NiProperty::PropertyType::kType_Shade));
     if (!Property || !(Property->ulFlags[0] & BSShaderProperty::FaceGen)) return false;
-    if (!Property->ppTextures[0] || !Property->ppTextures[0][1]) return false;
+    if (!Property->ppTextures[0] || !Property->ppTextures[0][1] || !Property->ppTextures[1] || !Property->ppTextures[1][1]) return false;
 
     void** Stages = *(void***)((UInt8*)Pass + 0x24);   // NiD3DPass::m_kStages.m_pBase
     if (!Stages || !Stages[2] || !Stages[3]) return false;

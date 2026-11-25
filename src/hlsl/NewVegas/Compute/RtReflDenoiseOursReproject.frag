@@ -34,9 +34,13 @@ History Gather(vec2 rectUv, bool inFrustum, Surface s, float expectedZ, float zT
         ivec2 q = t + o;
         if (any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, lastGrid))) continue;
         vec4 g = Fetch(t_in2, q);
-        if (g.x <= 0.0) continue;
+        if (g.x == 0.0) continue;
+        bool gWeapon = g.x < 0.0;
+        float gz = abs(g.x);
+        if (gWeapon != s.weapon) continue;
         float w = (o.x == 1 ? b.x : 1.0 - b.x) * (o.y == 1 ? b.y : 1.0 - b.y);
-        bool same = abs(g.x - expectedZ) < zTolerance && dot(OctDecodeN(g.zw), s.n) > 0.9 && abs(g.y - s.roughness) < 0.05 + 0.25 * s.roughness;
+        float nDotMin = s.weapon ? 0.75 : 0.9;
+        bool same = abs(gz - expectedZ) < zTolerance && dot(OctDecodeN(g.zw), s.n) > nDotMin && abs(g.y - s.roughness) < 0.05 + 0.25 * s.roughness;
         vec4 m = Fetch(t_in1, q);
         if (virtualTest) same = same && abs(m.z - hit) < 0.25 * hit + 10.0;   // the same reflected thing (its hit distance)
         if (!same) continue;
@@ -68,7 +72,7 @@ void main() {
             if (Fetch(t_ray, q).x > 0.0 && hq > 0.0) hit = min(hit, hq);
         }
     if (hit > 1.0e8) hit = 0.0;
-    o_guide = vec4(s.z, s.roughness, OctEncodeN(s.n));
+    o_guide = vec4(s.weapon ? -s.z : s.z, s.roughness, OctEncodeN(s.n));
     o_accum = signal; o_average = signal;
     float rawHit = max(Fetch(t_hitDist, px).y, 0.0);
     o_moments = vec4(rawHit, 1.0, max(hit, 0.0), 0.0);
@@ -171,6 +175,7 @@ void main() {
 
     // history length cap by roughness; un-premultiplied Tame history clamp + anti-lag against this frame's 3 x 3 neighbourhood
     float maxN = mix(pc.params3.y, pc.params.x, smoothstep(MirrorRoughness, 0.25, s.roughness));
+    if (s.weapon) maxN = min(maxN, 6.0);
     float n = min(hm.y + 1.0, maxN);
     m1 /= max(c, 1.0); m2 /= max(c, 1.0);
     vec4 sigma = sqrt(max(m2 - m1 * m1, vec4(0.0)));

@@ -34,8 +34,23 @@ void main() {
     // (x 0: the RT sky pass's neighbour taps there never match a surface's distance)
     vec2 s = uv / cb.rtRect.xy;
     if (s.x > 1.0 || s.y > 1.0) { o_color = vec4(0.0); return; }
+    // Deterministic top-left full-res texel (2*hx, 2*hy) before any endFade early-out so corner-filtered depth does not drop foreground edges
+    const ivec2 dsize = textureSize(t_depth, 0);
+    const ivec2 dStep = max(ivec2(vec2(dsize) * cb.aoLayout.zw + 0.5), ivec2(1));
+    const ivec2 dpx = clamp(ivec2(floor(gl_FragCoord.xy)) * dStep, ivec2(0), dsize - 1);
+    float zp = 0.0;
+    vec3 Pp = vec3(0.0), C = vec3(0.0);
+    if (cb.skyLayout.y > 0.5) {
+        zp = projectedDepthFromLinear(texelFetch(t_depth, dpx, 0).x);
+        const vec2 sp = (vec2(dpx) + 0.5) / vec2(dsize) / cb.rtRect.xy;
+        vec4 a = cb.invProjectionTransform * vec4(sp.x * 2.0 - 1.0, (1.0 - sp.y) * 2.0 - 1.0, zp, 1.0);
+        Pp = a.xyz / a.w;                                 // the fetched pixel's point
+        if (!(Pp.z < endFade) || Pp.z <= 0.0) { o_color = vec4(0.0); return; }
+        a = cb.invProjectionTransform * vec4(s.x * 2.0 - 1.0, (1.0 - s.y) * 2.0 - 1.0, zp, 1.0);
+        C = a.xyz / a.w;                                  // the texel centre's ray at that depth
+    }
     vec3 P = reconstructPosition(uv, s);
-    if (!(P.z < endFade) || P.z <= 0.0) { o_color = vec4(0.0); return; }
+    if (cb.skyLayout.y <= 0.5 && (!(P.z < endFade) || P.z <= 0.0)) { o_color = vec4(0.0); return; }
     // UNOFFICIAL 2026-11-09 NormalGuard (cb.skyLayout.w 1, [Shaders.AmbientOcclusion.RT]; docs/next/RT-PT-REVIEW-2026-11-09.md 1.2 and 11).
     // PROVEN on a tester's RTX 5090 (NVIDIA 621.1, DXVK "Binding model: Descriptor heap"): the point-sampled read below returned a blank
     // texel there on every pixel, while the buffer itself held real normals. A blank texel decodes to (-1, -1, -1): every AO / GI ray
@@ -47,7 +62,8 @@ void main() {
     vec3 N;
     if (cb.skyLayout.w > 0.5) {
         const ivec2 size = textureSize(t_normals, 0);
-        N = texelFetch(t_normals, clamp(ivec2(uv * vec2(size)), ivec2(0), size - 1), 0).xyz * 2.0 - 1.0;
+        const ivec2 npx = size == dsize ? dpx : clamp(ivec2(floor(gl_FragCoord.xy)) * max(ivec2(vec2(size) * cb.aoLayout.zw + 0.5), ivec2(1)), ivec2(0), size - 1);
+        N = texelFetch(t_normals, npx, 0).xyz * 2.0 - 1.0;
         const float nn = dot(N, N);
         if (!(nn > 0.5625 && nn < 1.5625)) {
             const vec2 px = cb.aoLayout.zw;   // one target texel in uv
@@ -68,15 +84,6 @@ void main() {
     // the texel centre's view ray met with the plane through it (the pixel's point and normal), so a flat surface gives exactly the centre's point
     // (no half-pixel depth error at grazing angles); a plane the ray barely meets, or a result over 3 % off the pixel's depth, keeps the pixel's depth.
     if (cb.skyLayout.y > 0.5) {
-        const ivec2 dsize = textureSize(t_depth, 0);
-        const ivec2 dpx = clamp(ivec2(uv * vec2(dsize)), ivec2(0), dsize - 1);
-        const float zp = projectedDepthFromLinear(texelFetch(t_depth, dpx, 0).x);
-        const vec2 sp = (vec2(dpx) + 0.5) / vec2(dsize) / cb.rtRect.xy;
-        vec4 a = cb.invProjectionTransform * vec4(sp.x * 2.0 - 1.0, (1.0 - sp.y) * 2.0 - 1.0, zp, 1.0);
-        const vec3 Pp = a.xyz / a.w;                      // the fetched pixel's point
-        a = cb.invProjectionTransform * vec4(s.x * 2.0 - 1.0, (1.0 - s.y) * 2.0 - 1.0, zp, 1.0);
-        const vec3 C = a.xyz / a.w;                       // the texel centre's ray at that depth
-        if (!(Pp.z < endFade) || Pp.z <= 0.0) { o_color = vec4(0.0); return; }
         const float denom = dot(N, C);
         const float t = abs(denom) > 0.05 * length(C) ? dot(N, Pp) / denom : 1.0;
         P = C * (t > 0.97 && t < 1.03 ? t : 1.0);

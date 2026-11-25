@@ -503,7 +503,7 @@
 #endif
 // (1.0.5) not where the live metal cube holds s10 AND s3 is taken too: the 4+ lamp shaders (lamp table; object LOD, the only draws
 // that take the contact, is never drawn with lamps) and the light-only glow / hair-tint passes (GlowMap on s3). s4-s7 are the game's.
-#if defined(NVR_LIVE_CUBE) && ((defined(LIGHTS) && LIGHTS > 3) || ((defined(SI) || defined(HAIR)) && !defined(ONLY_SPECULAR) && defined(ONLY_LIGHT)))
+#if defined(NVR_LIVE_CUBE) && ((defined(LIGHTS) && LIGHTS > 3) || ((defined(SI) || defined(HAIR)) && !defined(ONLY_SPECULAR) && defined(ONLY_LIGHT)) || defined(NVR_FORWARD_PLUS))
     #define NVR_CONTACT_NO_SAMPLER 1
 #endif
 #if defined(PS) && !defined(NVR_SLOT_TIGHT) && !defined(NVR_CONTACT_NO_SAMPLER) && !defined(NVR_EYE)

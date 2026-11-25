@@ -187,9 +187,22 @@ namespace RealTex {
 		return ~0u;
 	}
 
+	VkFormat SrgbFormatOf(uint32_t vkFormat) {
+		switch (vkFormat) {
+		case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+		case VK_FORMAT_BC2_UNORM_BLOCK:      return VK_FORMAT_BC2_SRGB_BLOCK;
+		case VK_FORMAT_BC3_UNORM_BLOCK:      return VK_FORMAT_BC3_SRGB_BLOCK;
+		case VK_FORMAT_B8G8R8A8_UNORM:       return VK_FORMAT_B8G8R8A8_SRGB;
+		case VK_FORMAT_R8G8B8A8_UNORM:       return VK_FORMAT_R8G8B8A8_SRGB;
+		default:                             return VK_FORMAT_UNDEFINED;
+		}
+	}
+
 	bool Make(Helper& h, const NvrRtTextureOp& op, RealTexture& x) {
 		const uint32_t levels = LevelsOf(op);
+		const VkFormat srgbFmt = (op.levels & NVR_RT_TEX_SRGB) ? SrgbFormatOf(op.vkFormat) : VK_FORMAT_UNDEFINED;
 		VkImageCreateInfo ii = { VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO };
+		ii.flags = srgbFmt != VK_FORMAT_UNDEFINED ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : 0u;
 		ii.imageType = VK_IMAGE_TYPE_2D;
 		ii.format = (VkFormat)op.vkFormat;
 		ii.extent = { op.width, op.height, 1 };
@@ -212,13 +225,14 @@ namespace RealTex {
 		VkImageViewCreateInfo vi = { VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
 		vi.image = x.image;
 		vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
-		vi.format = ii.format;
+		vi.format = srgbFmt != VK_FORMAT_UNDEFINED ? srgbFmt : ii.format;
 		vi.subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 };
 		if (op.levels & NVR_RT_TEX_SWIZZLE_GR)	// (protocol 8) ATI2 as BC5: what DXVK's view of ATI2 gives the game's shaders
 			vi.components = { VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_ONE, VK_COMPONENT_SWIZZLE_ONE };
 		if (vkCreateImageView(h.vk.device, &vi, nullptr, &x.view) != VK_SUCCESS) { x.view = VK_NULL_HANDLE; Free(h, x); return false; }
 		x.bytes = req.size;
 		x.width = op.width; x.height = op.height; x.levels = levels;
+		x.srgb = srgbFmt != VK_FORMAT_UNDEFINED;
 		return true;
 	}
 
@@ -239,14 +253,20 @@ namespace RealTex {
 			if (op.op == NVR_RT_OP_SLOT_TEXTURES) {
 				if (op.id < NVR_RT_TEX_TABLE_SLOTS) {
 					auto valid = [&](uint32_t id) { return id < NVR_RT_MAX_TEXTURES && t.textures[id].view ? id : 0u; };
-					t.table[op.id][0] = valid(op.width); t.table[op.id][1] = valid(op.height); t.table[op.id][2] = valid(op.offset); t.table[op.id][3] = 0;
+					const uint32_t d = valid(op.width), n = valid(op.height), g = valid(op.offset);
+					t.table[op.id][0] = d; t.table[op.id][1] = n; t.table[op.id][2] = g;
+					t.table[op.id][3] = ((d && t.textures[d].srgb) ? 1u : 0u) | ((g && t.textures[g].srgb) ? 2u : 0u);
 				}
 				continue;
 			}
 			if (op.op == NVR_RT_OP_TEXTURE_RELEASE) {
 				if (op.id && op.id < NVR_RT_MAX_TEXTURES) {
 					Retire(h, op.id, frameNumber);
-					for (auto& row : t.table) for (uint32_t k = 0; k < 3; k++) if (row[k] == op.id) row[k] = 0;
+					for (auto& row : t.table) {
+						if (row[0] == op.id) { row[0] = 0; row[3] &= ~1u; }
+						if (row[1] == op.id) row[1] = 0;
+						if (row[2] == op.id) { row[2] = 0; row[3] &= ~2u; }
+					}
 				}
 				continue;
 			}
@@ -266,7 +286,7 @@ namespace RealTex {
 				}
 			}
 			const bool sane = op.id && op.id < NVR_RT_MAX_TEXTURES && Supported(op.vkFormat) && op.width && op.height && op.width <= 16384 &&
-				op.height <= 16384 && levels >= 1 && levels <= 15 && !(op.levels & ~(NVR_RT_TEX_LEVELS_MASK | NVR_RT_TEX_SWIZZLE_GR)) && (onGpu ? gpuOk :
+				op.height <= 16384 && levels >= 1 && levels <= 15 && !(op.levels & ~(NVR_RT_TEX_LEVELS_MASK | NVR_RT_TEX_SWIZZLE_GR | NVR_RT_TEX_SRGB)) && (onGpu ? gpuOk :
 				i < t.offsets.size() && t.offsets[i] != ~0u && AllBytes(op.vkFormat, op.width, op.height, levels) == op.bytes);
 			if (!sane) { t.refused++; continue; }
 			Retire(h, op.id, frameNumber);	// (NVR does not resend a live id; a resend replaces it)

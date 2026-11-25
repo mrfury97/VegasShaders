@@ -74,7 +74,7 @@ vec4 Apply(vec2 uv, bool sky) {
     vec2 ruv = uv * scale;
     vec4 color = texture(sampler2D(t_source, LINEAR_S), ruv);
     bool viewModel = IsViewModel(t_viewModel, ruv);
-    if (!viewModel && cb.alFlags.x > 0.5) color = vec4(SunShadowApply(color.rgb, ruv, uv), 1.0);
+    if (!viewModel && cb.alFlags.x > 0.5) color = vec4(SunShadowApply(color.rgb, ruv, uv), color.a);
     float depth = texture(sampler2D(t_depth, POINT_S), ruv).x * farZ;   // readDepth
     vec2 skyFactor = vec2(1.0);
     if (sky && !viewModel) skyFactor = SkyFactorAt(ruv, scale, depth);
@@ -97,7 +97,7 @@ vec4 Apply(vec2 uv, bool sky) {
     for (int y = 0; y < 2; y++) {
         for (int x = 0; x < 2; x++) {
             vec2 tapUV = clamp((base + vec2(float(x), float(y)) + 0.5) * cb.alLayout.zw, 0.5 * cb.alLayout.zw, maxHalfUV);
-            float tapDepth = readDepthLod(t_depth, tapUV);
+            float tapDepth = readDepthLod(t_depth, tapUV - 0.5 * max(cb.alLayout.zw - cb.reciprocalResolution.xy, vec2(0.0)));
             float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
             float closeness = abs(tapDepth - depth) / tolerance;
             weight *= mix(1.0 / (1.0 + closeness), saturate(1.0 - closeness), edgeReject);

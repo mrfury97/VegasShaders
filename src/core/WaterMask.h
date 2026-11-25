@@ -39,10 +39,13 @@ namespace WaterMask {
 	inline bool Enabled = true;					// [Main.Main.RayTracing] PTWaterMask (RtPathTrace.cpp's settings read; a missing key: on)
 	inline bool Failed = false;					// the mask could not be made: off for the session
 	inline UInt32 WantedFrame = 0xFFFFFFFFu;	// the last frame a path traced PTPrimary frame asked for the mask (Request)
+	inline UInt32 WaterOnlyWantedFrame = 0xFFFFFFFFu;	// last frame SunFar asked for water-only tracking (RequestWater)
+	inline UInt32 WaterTrackedFrame = 0xFFFFFFFFu;	// frame WaterMaskDraw::BeginWorld armed water capture for
 	inline UInt32 ClearedFrame = 0xFFFFFFFFu;	// the frame the mask was last cleared in (before its first water draw)
-	inline UInt32 WrittenFrame = 0xFFFFFFFFu;	// the frame a water draw last wrote it
+	inline UInt32 WrittenFrame = 0xFFFFFFFFu;	// the frame a water or grass draw last wrote it
+	inline UInt32 WaterWrittenFrame = 0xFFFFFFFFu;	// the frame a real water draw last wrote channel .g (never grass)
 	inline bool Resolved = false;				// this frame's multisampled mask is in Texture
-	inline IDirect3DTexture9* Texture = nullptr;  inline IDirect3DSurface9* TextureSurface = nullptr;	// what the prep pass reads (s5)
+	inline IDirect3DTexture9* Texture = nullptr;  inline IDirect3DSurface9* TextureSurface = nullptr;	// what the prep pass / SunFar reads
 	inline IDirect3DSurface9* MsaaSurface = nullptr;	// with the game's MSAA: what the redraws write, resolved into Texture
 	inline D3DSURFACE_DESC Made = {};
 	inline D3DVIEWPORT9 Rect = {};				// the viewport of the frame's water draws (the world's render rect)
@@ -53,15 +56,23 @@ namespace WaterMask {
 
 	// The path tracer takes its first surface from the screen this frame (RtPathTrace.cpp Record, every PTPrimary frame).
 	inline void Request(UInt32 frame) { WantedFrame = frame; }
+	// SunFar asks for water-only capture in `frame` without requiring PTWaterMask.
+	inline void RequestWater(UInt32 frame) { WaterOnlyWantedFrame = frame; }
 	// The world scene of `frame` should draw the mask: asked for in one of the last two frames (the request comes after the world is drawn).
 	inline bool Wanted(UInt32 frame) { return Enabled && !Failed && WantedFrame != 0xFFFFFFFFu && frame - WantedFrame <= 2u; }
+	// True when either PTWaterMask or SunFar asked to capture water draws in `frame`.
+	inline bool WaterWanted(UInt32 frame) {
+		return !Failed && ((Enabled && WantedFrame != 0xFFFFFFFFu && frame - WantedFrame <= 2u) ||
+			(WaterOnlyWantedFrame != 0xFFFFFFFFu && frame - WaterOnlyWantedFrame <= 2u));
+	}
+	inline bool WaterTracked(UInt32 frame) { return !Failed && WaterTrackedFrame == frame; }
 
 	inline void Release() {
 		if (TextureSurface) { TextureSurface->Release(); TextureSurface = nullptr; }
 		if (Texture) { Texture->Release(); Texture = nullptr; }
 		if (MsaaSurface) { MsaaSurface->Release(); MsaaSurface = nullptr; }
 		Made = {};
-		ClearedFrame = WrittenFrame = 0xFFFFFFFFu;
+		ClearedFrame = WrittenFrame = WaterWrittenFrame = WaterTrackedFrame = 0xFFFFFFFFu;
 	}
 
 	inline IDirect3DPixelShader9* Compile(IDirect3DDevice9* d, const char* profile) {
@@ -101,13 +112,14 @@ namespace WaterMask {
 		return true;
 	}
 
-	// Right after a water draw of the world scene: the same draw once more into the mask (the bound vertex shader, streams, constants, clip
-	// planes, scissor and z test as they are). Everything this changes on the device is put back (the game's state cache never sees it).
-	template <typename DrawFn> inline void Redraw(IDirect3DDevice9* d, UInt32 frame, DrawFn draw) {
+	// Right after a water (or unrecorded grass) draw of the world scene: the same draw once more into the mask (the bound vertex shader,
+	// streams, constants, clip planes, scissor and z test as they are). Everything this changes on the device is put back (the game's state
+	// cache never sees it). writeMask allows grass redraws to write .r only so .g stays water-exclusive for SunFar.
+	template <typename DrawFn> inline bool Redraw(IDirect3DDevice9* d, UInt32 frame, DrawFn draw, DWORD writeMask = 0xF, bool isWater = true) {
 		IDirect3DSurface9* rt0 = nullptr;
 		D3DSURFACE_DESC t = {};
-		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return;
-		if (FAILED(rt0->GetDesc(&t)) || !Ensure(d, t)) { rt0->Release(); return; }
+		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return false;
+		if (FAILED(rt0->GetDesc(&t)) || !Ensure(d, t)) { rt0->Release(); return false; }
 		IDirect3DSurface9* mask = MsaaSurface ? MsaaSurface : TextureSurface;
 		IDirect3DVertexShader9* vs = nullptr;
 		d->GetVertexShader(&vs);
@@ -132,21 +144,40 @@ namespace WaterMask {
 		// (a second target still bound would be written by nothing here, but must match the mask's sampling: off for the draw)
 		for (DWORD i = 1; i < 4; i++) if (SUCCEEDED(d->GetRenderTarget(i, &extra[i - 1])) && extra[i - 1]) d->SetRenderTarget(i, nullptr);
 		d->SetRenderTarget(0, mask);
-		if (ClearedFrame != frame) {	// the frame's first water draw: the whole mask to "no water" (SetRenderTarget set the full viewport)
+		if (ClearedFrame != frame) {	// the frame's first draw: the whole mask to 0 with all channels enabled (SetRenderTarget set the full viewport)
 			d->Clear(0, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(0, 0, 0, 0), 1.0f, 0);
 			ClearedFrame = frame;
 			Frames++;
 		}
 		d->SetViewport(&viewport);	// (SetRenderTarget reset it) the water's own: the world's render rect with RenderScale below 1
 		d->SetPixelShader(mine);
-		if (SUCCEEDED(draw())) { Draws++; WrittenFrame = frame; Resolved = false; Rect = viewport; }
+		if (writeMask != 0xF) d->SetRenderState(D3DRS_COLORWRITEENABLE, writeMask);
+		const bool ok = SUCCEEDED(draw());
+		if (ok) {
+			if (isWater) { Draws++; WaterWrittenFrame = frame; }
+			WrittenFrame = frame;
+			Resolved = false;
+			Rect = viewport;
+		}
 		d->SetRenderTarget(0, rt0);
 		for (DWORD i = 1; i < 4; i++) if (extra[i - 1]) { d->SetRenderTarget(i, extra[i - 1]); extra[i - 1]->Release(); }
 		d->SetViewport(&viewport);
 		d->SetPixelShader(ps);
-		for (unsigned i = 0; i < sizeof(kStates) / sizeof(kStates[0]); i++) if (saved[i] != want[i]) d->SetRenderState(kStates[i], saved[i]);
+		for (unsigned i = 0; i < sizeof(kStates) / sizeof(kStates[0]); i++)
+			if (i == 3 ? saved[i] != writeMask : saved[i] != want[i]) d->SetRenderState(kStates[i], saved[i]);
 		if (ps) ps->Release();
 		rt0->Release();
+		return ok;
+	}
+
+	// Water-only mask for SunFar (ignores PTWaterMask / grass redraws; channel .g is non-zero strictly on real water pixels).
+	inline IDirect3DTexture9* WaterThisFrame(IDirect3DDevice9* d, UInt32 frame) {
+		if (Failed || !Texture || WaterWrittenFrame != frame) return nullptr;
+		if (!Resolved) {
+			if (MsaaSurface && FAILED(d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE))) return nullptr;
+			Resolved = true;
+		}
+		return Texture;
 	}
 
 	// What the prep pass binds this frame (null: no water drawn in this frame's world scene, or off): the multisampled mask is resolved
@@ -168,17 +199,15 @@ namespace WaterMask {
 	}
 
 	// (PTGrassOwnPixel) right after a grass draw that wrote no record: the same draw once more into the mask, where its own depth stands
-	// (EQUAL; the draw wrote depth where its pixels survived). The z function is put back.
+	// (EQUAL; the draw wrote depth where its pixels survived). Writes .r only so .g stays water-exclusive for SunFar.
 	template <typename DrawFn> inline void RedrawGrass(IDirect3DDevice9* d, UInt32 frame, DrawFn draw) {
 		if (!GrassOn || Failed) return;
 		DWORD zfunc = D3DCMP_LESSEQUAL;
 		if (FAILED(d->GetRenderState(D3DRS_ZFUNC, &zfunc))) return;
 		d->SetRenderState(D3DRS_ZFUNC, D3DCMP_EQUAL);
-		const UInt32 before = Draws;
-		Redraw(d, frame, draw);
+		const bool ok = Redraw(d, frame, draw, D3DCOLORWRITEENABLE_RED, false);
 		d->SetRenderState(D3DRS_ZFUNC, zfunc);
-		if (Draws == before) return;
-		Draws = before;	// (the water's own count: Redraw counted this one)
+		if (!ok) return;
 		GrassDraws++;
 		if (GrassFrame != frame) {
 			GrassFrame = frame; GrassFrames++;

@@ -547,6 +547,39 @@ static bool sceneRealTexGpu(Ctx& c) {
 		all = all && ok && p.first == 1;
 		h.ReleaseTexture(id);
 	}
+	// 2b. Hardware _SRGB view (NVR_RT_TEX_SRGB) vs UNORM + software sRGB EOTF on a uniform mid-tone mip chain (no checker-edge filtering difference)
+	{
+		std::vector<HostTex::Level> srgbRefLevels;
+		std::vector<uint8_t> srgbBc1Bytes;
+		for (uint32_t s = cap; s >= 1; s /= 2) {
+			HostTex::Level lv(size_t(s) * s, HostTex::Rgba{ 184, 128, 64, 255 });
+			const std::vector<uint8_t> enc = HostTex::Encode(lv, s, s, RtTexturePack::Bc1);
+			srgbRefLevels.push_back(HostTex::Decode(enc, s, s, RtTexturePack::Bc1));
+			srgbBc1Bytes.insert(srgbBc1Bytes.end(), enc.begin(), enc.end());
+			if (s == 1) break;
+		}
+		const uint32_t srgbLevels = uint32_t(srgbRefLevels.size());
+		const std::vector<uint8_t> srgbBgraBytes = HostTex::Bgra(srgbRefLevels, 0);
+		std::vector<float> refSrgb, gotBgraSrgb, gotBc1Srgb;
+		if (!picture([&] {
+			if (!h.StageTexture(56, RtTexturePack::kVkBgra8, cap, cap, srgbLevels, srgbBgraBytes)) return false;
+			h.SlotTextures(slotC, 56, 0, 0); return true; }, refSrgb)) return false;
+		if (!picture([&] {
+			if (!h.StageTexture(52, RtTexturePack::kVkBgra8, cap, cap, srgbLevels | NVR_RT_TEX_SRGB, srgbBgraBytes)) return false;
+			h.SlotTextures(slotC, 52, 0, 0); return true; }, gotBgraSrgb)) return false;
+		bool okBgra = false;
+		compare("BGRA8 hardware _SRGB view (NVR_RT_TEX_SRGB):", gotBgraSrgb, refSrgb, okBgra);
+		all = all && okBgra;
+		h.ReleaseTexture(52);
+		if (!picture([&] {
+			if (!h.StageTexture(57, RtTexturePack::kVkBc1, cap, cap, srgbLevels | NVR_RT_TEX_SRGB, srgbBc1Bytes)) return false;
+			h.SlotTextures(slotC, 57, 0, 0); return true; }, gotBc1Srgb)) return false;
+		bool okBc1 = false;
+		compare("BC1 hardware _SRGB view (NVR_RT_TEX_SRGB):", gotBc1Srgb, refSrgb, okBc1);
+		all = all && okBc1;
+		h.ReleaseTexture(57);
+		h.ReleaseTexture(56);
+	}
 	// 3. ATI2 (two channels) as BC5 with the (G, R, 1, 1) view: the reference is the swizzled texels as BGRA8
 	if (bc) {
 		std::vector<HostTex::Level> two;

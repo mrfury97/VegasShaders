@@ -10,7 +10,7 @@ void main() {
     if (any(isnan(current)) || any(isinf(current))) current = vec4(0.0);   // (UNOFFICIAL 2026-10-30: no non-finite value into the history)
     vec2 pixelUV = uv - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
     float depth = readDepthLod(pixelUV);
-    bool centerWeapon = IsWeapon(pixelUV);
+    bool centerWeapon = WeaponAt(pixelUV);
 
     bool hasValid = current.a > 1.0e-4;
     vec3 curC = hasValid ? max(current.rgb / current.a, vec3(0.0)) : vec3(0.0);
@@ -21,7 +21,7 @@ void main() {
             if (x == 0 && y == 0) continue;
             vec2 tapUV = uv + vec2(x, y) * LowTexel;
             vec2 tapPixelUV = tapUV - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
-            if (IsWeapon(tapPixelUV) != centerWeapon) continue;
+            if (WeaponAt(tapPixelUV) != centerWeapon) continue;
             vec4 tap = textureLod(sampler2D(t_trace, POINT_S), tapUV, 0.0);
             if (any(isnan(tap)) || any(isinf(tap))) continue;   // (2026-10-30)
             lowA = min(lowA, tap.a); highA = max(highA, tap.a);

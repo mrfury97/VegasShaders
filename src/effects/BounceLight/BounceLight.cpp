@@ -198,7 +198,7 @@ bool BounceLightEffect::RenderSpillPyramid(IDirect3DDevice9* Device, IDirect3DTe
 		const bool usable = spillSteadyValid && gap > 0.0 && gap < 0.5 && !TheShaderManager->GameState.isCameraCut;
 		D3DXMATRIX reproject;
 		D3DXMatrixIdentity(&reproject);
-		if (usable) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, spillSteadyView, spillSteadyInvView, spillSteadyProj, &reproject);
+		if (usable) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->CameraPosition, spillSteadyView, spillSteadyCameraPos, spillSteadyProj, &reproject);
 		// w: the camera has not moved since the last average (as NeonSpillHoldAfterTurn's test): the shader reads it at the same
 		// texel, exactly, instead of through the reprojection (whose round trip is a hair off, which averaged neighbours in).
 		bool moved = false;
@@ -281,6 +281,7 @@ bool BounceLightEffect::RenderSpillPyramid(IDirect3DDevice9* Device, IDirect3DTe
 			spillSteadyTime = TheFrameRateManager->Time;
 			spillSteadyView = TheRenderManager->viewMatrix;
 			spillSteadyInvView = TheRenderManager->InvViewMatrix;
+			spillSteadyCameraPos = TheRenderManager->CameraPosition;
 			spillSteadyProj = TheRenderManager->projMatrix;
 		}
 		else spillSteadyValid = false;
@@ -548,7 +549,7 @@ void BounceLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	IDirect3DSurface9* depthSurface = nullptr;
 	Device->GetDepthStencilSurface(&depthSurface);
 	// UNOFFICIAL ReShadeDepthCompat: leave the game's depth-stencil bound (single smaller targets are legal with it).
-	if (!ReShadeIntegration::KeepDepthBound()) Device->SetDepthStencilSurface(nullptr);
+	if (!ReShadeIntegration::KeepDepthBoundFor(Device)) Device->SetDepthStencilSurface(nullptr);
 
 	// deferCombine: passes 0-3 only (the combine is SpecularEffect::RenderWithBounce's); combineOnly: pass 4 only, from them.
 	const bool onlyCombine = combineOnly && deferredReady && deferredTexture == lowTexture[0];
@@ -618,7 +619,7 @@ void BounceLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 			Player->parentCell->lighting)
 			ambient = Player->parentCell->lighting->ambient.toD3DXVECTOR4();
 		ambientData = D3DXVECTOR4(0.25f * BounceLinear(ambient.x), 0.25f * BounceLinear(ambient.y), 0.25f * BounceLinear(ambient.z), offScreenLight);
-		if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->InvViewMatrix, lastView, lastInvView, lastProj, &reproject);
+		if (continuous) BounceLightReprojection(TheRenderManager->viewMatrix, TheRenderManager->CameraPosition, lastView, lastCameraPos, lastProj, &reproject);
 		// UNOFFICIAL 2026-11-09 TemporalJitterFix: the gather was drawn from this frame's jittered depth, the history from last frame's
 		// (LastFrame() in BounceLight.fx.hlsl and Compute/BounceLight.glsl read the history where the jitter's change puts it)
 		if (continuous && jitterFix) TemporalBackbone::ShiftReprojection(reproject, TemporalBackbone::DepthJitter() - lastJitter);
@@ -739,6 +740,7 @@ void BounceLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	if (SUCCEEDED(result) && firstPass == 0) {
 		lastView = TheRenderManager->viewMatrix;
 		lastInvView = TheRenderManager->InvViewMatrix;
+		lastCameraPos = TheRenderManager->CameraPosition;
 		lastProj = TheRenderManager->projMatrix;
 		lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 		lastValid = true;

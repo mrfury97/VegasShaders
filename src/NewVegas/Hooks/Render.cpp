@@ -22,6 +22,7 @@
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds)
 #include "../../core/IOWorker2.h"	// UNOFFICIAL 2026-10-20: second loading thread (its once-a-minute log line)
 #include "../../core/CpuSplit.h"	// UNOFFICIAL 2026-10-21: game update split (F10 profiling only)
+#include "../../core/DeepProbe.h"	// UNOFFICIAL 2026-11-21: Help > Performance probe... (full DLL/script/draw census)
 #include "../../core/ConstantFilter.h"
 #include "../../core/HiddenObjectCulling.h"
 #include "../../core/LampScissor.h"
@@ -110,6 +111,12 @@ static void EndPreSceneTimer() {
 static UInt32 gMenu3DTarget = 0;
 static UInt32 gMenu3DReturn = 0;
 static volatile LONG gMenu3DDepth = 0;
+// UNOFFICIAL 2026-11-22: guard around ProcessImageSpaceShaders so Tonemapping (IS*) never gets treated as a 3D menu draw.
+static volatile LONG gInImageSpaceDepth = 0;
+struct ImageSpaceScope {
+	ImageSpaceScope() { InterlockedIncrement(&gInImageSpaceDepth); }
+	~ImageSpaceScope() { InterlockedDecrement(&gInImageSpaceDepth); }
+};
 
 static __declspec(naked) void DrawWorldMenu3DCallHook() {
 	__asm {
@@ -150,6 +157,71 @@ void InstallMenu3DGuardHook() {
 	FlushInstructionCache(GetCurrentProcess(), (LPCVOID)site, 5);
 	Menu3DGuardInstalled = true;
 	Logger::Log("UNOFFICIAL Menu3DGuard: hooked TESMain::DrawWorldMenu3D (%08X -> %08X)", site, target);
+}
+
+// UNOFFICIAL 2026-11-22: track vanilla DepthOfField::DoDepth / Add1stPersonToDepthBuffer calls so any screen-shaped
+// DoF depth buffer written inside a RenderScale sub-rect gets rescaled before ProcessImageSpaceShaders.
+static volatile LONG gInDoFDepthDepth = 0;
+
+bool IsInVanillaDoFDepthPass() {
+	return gInDoFDepthDepth > 0;
+}
+
+#define DEFINE_DOF_DEPTH_STUB(N) \
+	static UInt32 gDoFDepthTarget##N = 0; \
+	static UInt32 gDoFDepthReturn##N = 0; \
+	static __declspec(naked) void DoFDepthCallHook##N() { \
+		__asm { pop dword ptr [gDoFDepthReturn##N] } \
+		__asm { inc dword ptr [gInDoFDepthDepth] } \
+		__asm { call dword ptr [gDoFDepthTarget##N] } \
+		__asm { dec dword ptr [gInDoFDepthDepth] } \
+		__asm { jmp dword ptr [gDoFDepthReturn##N] } \
+	}
+
+DEFINE_DOF_DEPTH_STUB(0)
+DEFINE_DOF_DEPTH_STUB(1)
+DEFINE_DOF_DEPTH_STUB(2)
+DEFINE_DOF_DEPTH_STUB(3)
+#undef DEFINE_DOF_DEPTH_STUB
+
+void InstallDoFDepthGuardHooks() {
+	struct SiteDesc { UInt32 site; UInt32 expected; UInt32* targetSlot; UInt32 stub; const char* label; };
+	const SiteDesc kSites[4] = {
+		{ 0x008732C5, 0x00871220, &gDoFDepthTarget0, (UInt32)&DoFDepthCallHook0, "DrawScene/DepthOfField::DoDepth" },
+		{ 0x0087330C, 0x00871220, &gDoFDepthTarget1, (UInt32)&DoFDepthCallHook1, "DrawScene/DepthOfField::DoDepth (b)" },
+		{ 0x00870E4F, 0x00871220, &gDoFDepthTarget2, (UInt32)&DoFDepthCallHook2, "DrawWorld/DepthOfField::DoDepth" },
+		{ 0x00870ED0, 0x008746D0, &gDoFDepthTarget3, (UInt32)&DoFDepthCallHook3, "DrawWorld/Add1stPersonToDepthBuffer" },
+	};
+	unsigned hooked = 0;
+	for (int i = 0; i < 4; ++i) {
+		const SiteDesc& s = kSites[i];
+		const UInt8* code = (const UInt8*)s.site;
+		if (code[0] != 0xE8) {
+			Logger::Log("UNOFFICIAL DoFDepthGuard: %08X (%s) is not a call instruction (byte %02X); skipped", s.site, s.label, code[0]);
+			continue;
+		}
+		const UInt32 target = s.site + 5 + *(const SInt32*)(s.site + 1);
+		if (target != s.expected) {
+			if (CpuSplit::InExe(target)) {
+				Logger::Log("UNOFFICIAL DoFDepthGuard: %08X (%s) calls %08X inside the game (expected %08X); skipped", s.site, s.label, target, s.expected);
+				continue;
+			}
+			MEMORY_BASIC_INFORMATION mbi = {};
+			const DWORD exec = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+			if (!VirtualQuery((LPCVOID)target, &mbi, sizeof(mbi)) || mbi.State != MEM_COMMIT || !(mbi.Protect & exec)) {
+				Logger::Log("UNOFFICIAL DoFDepthGuard: %08X (%s) target %08X is not executable; skipped", s.site, s.label, target);
+				continue;
+			}
+			char mod[MAX_PATH];
+			CpuSplit::ModuleName(target, mod, sizeof(mod));
+			Logger::Log("UNOFFICIAL DoFDepthGuard: chaining %08X (%s) via %s (%08X)", s.site, s.label, mod, target);
+		}
+		*s.targetSlot = target;
+		ReplaceCall(s.site, s.stub);
+		FlushInstructionCache(GetCurrentProcess(), (LPCVOID)s.site, 5);
+		hooked++;
+	}
+	Logger::Log("UNOFFICIAL DoFDepthGuard: hooked %u of 4 vanilla DoF depth call sites", hooked);
 }
 
 // ---- F10: the game's own draws split by shader family; first shader uses; shader-bind cost ----
@@ -744,10 +816,11 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	SessionLog::StallWatch::FrameScope stallFrame;	// UNOFFICIAL 2026-11-07 (perf-ptcost): the STALL watchdog's frame begin / end (SessionLog.h)
 	static CpuTimer gameRenderCpuTimer("Game render (CPU)"), presentCpuTimer("Present (CPU)"), gameUpdateCpuTimer("Game update (CPU)");
 	const double renderStart = CpuTimer::NowMs();
-	if (GpuTimer::Enabled) {
+	const bool probeActive = DeepProbe::TickFrameBegin(TheRenderManager->device, renderStart, FrameSplit::RenderEnd, FrameSplit::PresentMs, FrameSplit::OriginalPresent != nullptr);
+	if (GpuTimer::Enabled || probeActive) {
 		FrameSplit::Install(TheRenderManager->device);
-		CpuSplit::Install();	// UNOFFICIAL 2026-10-21: the game update split ('Upd', 'Rnd', 'AI' lines), patched the first time F10 is on
-		if (FrameSplit::RenderEnd > 0.0 && FrameSplit::OriginalPresent) {
+		CpuSplit::Install();	// UNOFFICIAL 2026-10-21: the game update split ('Upd', 'Rnd', 'AI' lines), patched the first time F10 or Deep Probe is on
+		if (GpuTimer::Enabled && FrameSplit::RenderEnd > 0.0 && FrameSplit::OriginalPresent) {
 			const double between = renderStart - FrameSplit::RenderEnd;
 			presentCpuTimer.Add(FrameSplit::PresentMs);
 			gameUpdateCpuTimer.Add(between > FrameSplit::PresentMs ? between - FrameSplit::PresentMs : 0.0);
@@ -882,8 +955,10 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	EndPreSceneTimer();
 	ReportWorldRender(RenderedTexture, Arg2, Arg3);
 	const double renderEnd = CpuTimer::NowMs();
-	FrameSplit::RenderEnd = GpuTimer::Enabled ? renderEnd : 0.0;
-	if (GpuTimer::Enabled) gameRenderCpuTimer.Add(renderEnd - renderStart);
+	const double renderMs = renderEnd - renderStart;
+	FrameSplit::RenderEnd = (GpuTimer::Enabled || probeActive) ? renderEnd : 0.0;
+	if (GpuTimer::Enabled) gameRenderCpuTimer.Add(renderMs);
+	if (probeActive) DeepProbe::TickFrameEnd(renderMs);
 	CpuSplit::MarkNow(CpuSplit::kRenderEnd);
 }
 
@@ -3029,22 +3104,27 @@ namespace GrassFirst {
 	// the middle and far cascades for the tufts within CastShadowsReach (GrassShadows::Begin decides which cascades need them).
 	static void DrawGrassShadows() {
 		static GpuTimer grassShadowTimer("Grass shadows");
-		for (int cascade = ShadowsExteriorEffect::MapNear; cascade <= ShadowsExteriorEffect::MapFar; cascade++) {
-			if (!GrassShadows::Begin(TheRenderManager->device, cascade)) {
-				if (cascade == ShadowsExteriorEffect::MapNear) break;	// off, indoors, no sun maps, not PCF: none of them
-				continue;
+		ShadowsExteriorEffect* const shadows = TheShaderManager->Effects.ShadowsExteriors;
+		const bool drawOldAtlas = shadows && shadows->DeferredCaptureReady && shadows->ShadowAtlasOldSurface;
+		for (int passIdx = 0; passIdx < (drawOldAtlas ? 2 : 1); passIdx++) {
+			const bool oldAtlas = (passIdx == 1);
+			for (int cascade = ShadowsExteriorEffect::MapNear; cascade <= ShadowsExteriorEffect::MapFar; cascade++) {
+				if (!GrassShadows::Begin(TheRenderManager->device, cascade, oldAtlas)) {
+					if (cascade == ShadowsExteriorEffect::MapNear) break;	// off, indoors, no sun maps, not PCF: none of them
+					continue;
+				}
+				GpuProfileScope gpu(grassShadowTimer, TheRenderManager->device);
+				GrassShaders::DrawPart = 0;
+				((void(__cdecl*)())kEndPass)();	// the first pass binds again (SetShadersHook: c19 with w = 0)
+				for (const GrassShadows::Record& r : GrassShadows::Records) {
+					if (!GrassShadows::InNear(r.pass)) { GrassShadows::StatOutside++; continue; }
+					RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
+					GrassShadows::StatPasses++;
+				}
+				((void(__cdecl*)(char, int))0x00B98540)(0, 0);	// BSRenderState::SetAlphaToCoverageEnable(0, 0), as after a bucket
+				((void(__cdecl*)())kEndPass)();
+				GrassShadows::End(TheRenderManager->device);
 			}
-			GpuProfileScope gpu(grassShadowTimer, TheRenderManager->device);
-			GrassShaders::DrawPart = 0;
-			((void(__cdecl*)())kEndPass)();	// the first pass binds again (SetShadersHook: c19 with w = 0)
-			for (const GrassShadows::Record& r : GrassShadows::Records) {
-				if (!GrassShadows::InNear(r.pass)) { GrassShadows::StatOutside++; continue; }
-				RenderPassImmediately(r.pass, r.passId, r.a3, r.a4, r.a5);
-				GrassShadows::StatPasses++;
-			}
-			((void(__cdecl*)(char, int))0x00B98540)(0, 0);	// BSRenderState::SetAlphaToCoverageEnable(0, 0), as after a bucket
-			((void(__cdecl*)())kEndPass)();
-			GrassShadows::End(TheRenderManager->device);
 		}
 		// UNOFFICIAL 2026-11-04 the same passes into the flashlight's shadow map (drawn this frame, before the world), for the light pass
 		// at the main list's end and the grass drawn after this
@@ -3696,6 +3776,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// early grass pass of the frame already takes its deferred record (CapturedNormals::GrassBind is idempotent: the later call finds it open).
 	if (DeferredFoliage::Live && VertexShader && VertexShader->Name && !memcmp(VertexShader->Name, "GRASS", 5) && TheShaderManager->Shaders.Grass && TheShaderManager->Shaders.Grass->Enabled)
 		CapturedNormals::GrassBind(TheRenderManager->device, GrassShaders::DrawPart);
+	ShaderRecordPixel::Current = nullptr;
 	if (PixelShader) {
 		if (ShaderOwnership::MaySetUp(PixelShader, "pixel")) PixelShader->SetupShader(ForcePixelConstants ? nullptr : PixelShader2);
 		ForcePixelConstants = false;
@@ -3765,13 +3846,24 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	}
 	// UNOFFICIAL 2026-11-09 [Shaders.PBR.Main] GameShadersInMenus (generalized 2026-11-21 across all 3D menus & minigames):
 	// 3D menus (Blackjack, Roulette, SlotMachine, Caravan, Lockpick, Surgery, RaceSex, CharGen, Terminals, etc.) draw with their
-	// own camera and menu-local lights outside the world scene (Menu3DGuard::Depth > 0 or Outside while in Menu Mode, Pip-Boy excluded).
+	// own camera and menu-local lights outside the world scene (Menu3DGuard::Depth > 0 or Outside while in a 3D menu, Pip-Boy excluded).
 	// NVR's shaders use the world's lamp table, sun shadow and linear lighting, turning 3D menu meshes dark or black. Everything
-	// drawn in a 3D menu takes the game's own shaders as a pair, while the world behind live/transparent menus keeps full PBR/Deferred.
-	const bool inMenu3D = gMenu3DDepth > 0 ||
-		(ShaderSplit::CurrentContext == ShaderSplit::Outside && InterfaceManager &&
-		 InterfaceManager->currentMode != 1 && !InterfaceManager->IsPipBoyOpen());
-	if (GameShadersInMenus && inMenu3D) {
+	// drawn in a 3D menu takes the game's own shaders as a pair, while the world behind live/transparent menus keeps full PBR/Deferred,
+	// and ImageSpace (tonemapper IS*) / Sky / Water / Grass draws are never swapped.
+	auto isNonMenuShader = [](const char* name) {
+		return name && (!strncmp(name, "IS", 2) || !strncmp(name, "SKY", 3) ||
+			!strncmp(name, "WATER", 5) || !strncmp(name, "GRASS", 5));
+	};
+	const bool menu3DOpen = (TheShaderManager && (TheShaderManager->GameState.FaceMenuIsOn || TheShaderManager->GameState.OverlayIsOn)) ||
+		(InterfaceManager && (InterfaceManager->IsOpen(Menu::kMenuType_LockPick) ||
+		 InterfaceManager->IsOpen(Menu::kMenuType_Computers) ||
+		 InterfaceManager->IsOpen(Menu::kMenuType_Hacking)));
+	const bool inMenu3D = gInImageSpaceDepth == 0 && (gMenu3DDepth > 0 ||
+		(ShaderSplit::CurrentContext == ShaderSplit::Outside && menu3DOpen &&
+		 (!InterfaceManager || !InterfaceManager->IsPipBoyOpen())));
+	const bool nonMenuShader = isNonMenuShader(PixelShader ? PixelShader->Name : nullptr) ||
+		isNonMenuShader(VertexShader ? VertexShader->Name : nullptr);
+	if (GameShadersInMenus && inMenu3D && !nonMenuShader) {
 		const bool nvrPixel = PixelShader && PixelShader->ShaderHandleBackup && PixelShader->ShaderHandle != PixelShader->ShaderHandleBackup;
 		const bool nvrVertex = VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup;
 		if (nvrPixel) PixelShader->ShaderHandle = (IDirect3DPixelShader9*)PixelShader->ShaderHandleBackup;
@@ -3863,6 +3955,7 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 	// once in the log; with the repair on it is bound as a pair that fits, for the length of the game's bind.
 	GameShaderPairs::BeforeBind(VertexShader, PixelShader);
 	DeferredTransparents::BeforeBind(ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-15 DeferredTransparents: the bind's context, for SetupShader
+	if (DeepProbe::CensusActive()) DeepProbe::NoteShaderBind();
 	SetShaders(This, PassIndex);
 	GameShaderPairs::AfterBind(VertexShader, PixelShader);
 	IDirect3DVertexShader9* const boundVS = GameShaderPairs::BoundVertex ? GameShaderPairs::BoundVertex : (VertexShader ? VertexShader->ShaderHandle : nullptr);
@@ -4553,11 +4646,14 @@ namespace WaterMaskDraw {
 	static void BeginWorld(bool firstWorldOfFrame) {
 		WorldDepth = nullptr;
 		// (the camera under water: left as it was, the surface seen from below is not masked)
-		if (Stuck || !firstWorldOfFrame || !TheFrameRateManager || !WaterMask::Wanted(TheFrameRateManager->FrameNumber) || TheShaderManager->GameState.isUnderwater) return;
+		if (Stuck || !firstWorldOfFrame || !TheFrameRateManager || !WaterMask::WaterWanted(TheFrameRateManager->FrameNumber) || TheShaderManager->GameState.isUnderwater) return;
 		IDirect3DSurface9* depth = nullptr;
 		TheRenderManager->device->GetDepthStencilSurface(&depth);
 		WorldDepth = depth;
-		if (depth) depth->Release();
+		if (depth) {
+			depth->Release();
+			WaterMask::WaterTrackedFrame = TheFrameRateManager->FrameNumber;
+		}
 	}
 
 	static void EndWorld() { WorldDepth = nullptr; }
@@ -4667,6 +4763,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	if (countOpt) OnePassDepth::Counts::Before(TheRenderManager->device);
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) TAAEffect::NoteWorldDraw();	// UNOFFICIAL 2026-10-27 RenderScale: a check of the viewport
 	else if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) TAAEffect::NoteWorldDraw(true);	// v2: the weapon into the world's rect
+	else if (IsInVanillaDoFDepthPass()) TAAEffect::NoteDoFDepthDraw();	// UNOFFICIAL 2026-11-22: track vanilla DoF depth drawn after World/FirstPerson contexts
 	// UNOFFICIAL 2026-10-28 far land: a land piece wholly past the tessellation's FadeEnd is drawn untessellated (before its bind)
 	DxvkCompute::DisplaceLandPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ((const PointShadowForward::RenderPassView*)Pass)->passEnum,
 		ShaderSplit::CurrentContext == ShaderSplit::World ? DxvkCompute::kDisplaceWorld :
@@ -4681,6 +4778,7 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 		// runs for it), or the self-check
 		DeferredRenderer::BeforeDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot), TheRenderManager->device);	// UNOFFICIAL 2026-11-14 fd-fixes: a blended draw takes the forward record
 		if (DeferredRenderer::SwappedFrom) RmaosDraw::AfterBind();
+		if (DeepProbe::CensusActive()) DeepProbe::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, false, (int)ShaderSplit::CurrentContext);
 		if (MergeCopies::InList) MergeCopies::Entry(Pass, Arg2, Arg3, Arg4, RenderPassStandard);
 		else RenderPassStandard(Pass, Arg2, Arg3, Arg4);
 	}
@@ -4765,10 +4863,12 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (countOpt) OnePassDepth::Counts::Before(TheRenderManager->device);
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) TAAEffect::NoteWorldDraw();	// UNOFFICIAL 2026-10-27 RenderScale: a check of the viewport
 	else if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) TAAEffect::NoteWorldDraw(true);	// v2: the weapon into the world's rect
+	else if (IsInVanillaDoFDepthPass()) TAAEffect::NoteDoFDepthDraw();	// UNOFFICIAL 2026-11-22: track vanilla DoF depth drawn after World/FirstPerson contexts
 	GameEyes::Before((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GameShaderEyes, per draw
 	AlphaHash::ForPass(((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, TheRenderManager->device);	// UNOFFICIAL 2026-11-03 SmoothCutouts
 	DeferredRenderer::BeforeDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot), TheRenderManager->device);	// UNOFFICIAL 2026-11-14 fd-fixes: a blended draw takes the forward record
 	if (DeferredRenderer::SwappedFrom) RmaosDraw::AfterBind();
+	if (DeepProbe::CensusActive()) DeepProbe::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, true, (int)ShaderSplit::CurrentContext);
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
 	DeferredRenderer::AfterDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot));	// UNOFFICIAL 2026-11-14 full deferred renderer: mark / count
 	DeferredTransparents::AfterDraw(Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-15 forward+: mark / count
@@ -5136,6 +5236,10 @@ namespace FirstPersonNative {
 		if (!Wanted()) return false;
 		TAAEffect* taa = TheShaderManager->Effects.TAA;
 		if (RtPathTrace::Replacing()) { Note(0, "path tracing replaces the picture; the first-person pass is drawn where it was"); return false; }
+		if (ReflectionsEffect* refl = TheShaderManager->Effects.Reflections; refl && refl->Enabled && refl->Settings.RtEnabled && refl->Settings.RtWeapon > 0.0f && RtCore::Running()) {
+			Note(0, "RT weapon reflections are on; the first-person pass stays in the main depth/G-buffer so weapon reflections work at RenderScale < 1");
+			return false;
+		}
 		if (!taa || !taa->UpscalePending()) {
 			Note(0, "no upscale waits for this frame (RenderScale 1, FSR / DLSS off, or the frame is not drawn small)");
 			return false;
@@ -5781,6 +5885,7 @@ void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTex
 	// The game's image space alone, after the RenderScale upscale (UNOFFICIAL 2026-10-27 RenderScale v2)
 	auto gameImageSpaceOnly = [&]() {
 		FlushRenderScale(SourceTarget);
+		ImageSpaceScope isScope;
 		ProcessImageSpaceShaders(Renderer, SourceTarget, DestinationTarget);
 	};
 	if (LockPickMenu::GetSingleton() && InterfaceManager->IsOpen(Menu::kMenuType_LockPick) && !TheSettingManager->GetSettingI("Main.Main.Misc", "LockpickEffects")) {
@@ -5828,7 +5933,10 @@ void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTex
 		const float bloomFlag = bloom ? bloom->Constants.ExtraData.x : 0.0f;
 		if (bloom && TheSettingManager->SettingsMain.Main.MenuSceneGuard) bloom->Constants.ExtraData.x = 0.0f;
 		FlushRenderScale(SourceTarget);	// UNOFFICIAL 2026-10-27 RenderScale v2
-		ProcessImageSpaceShaders(Renderer, SourceTarget, DestinationTarget);
+		{
+			ImageSpaceScope isScope;
+			ProcessImageSpaceShaders(Renderer, SourceTarget, DestinationTarget);
+		}
 		if (bloom) bloom->Constants.ExtraData.x = bloomFlag;
 #if NVR_TEST_TOOLS
 		if (!DestinationTarget && TheRenderManager->currentRTGroup) SettingShots::Capture(TheRenderManager->currentRTGroup->RenderTargets[0]->data->Surface);
@@ -5889,6 +5997,7 @@ void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer* Renderer, BSRenderedTex
 	{
 		static GpuTimer imageSpaceTimer("Game image space");
 		GpuProfileScope gpu(imageSpaceTimer, device);
+		ImageSpaceScope isScope;
 		ProcessImageSpaceShaders(Renderer, SourceTarget, DestinationTarget);
 	}
 

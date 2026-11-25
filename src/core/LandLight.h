@@ -48,9 +48,12 @@ namespace LandLight {
 		const HRESULT hv = farLand ? d->GetVertexShaderConstantF(25, v, 1) : d->GetPixelShaderConstantF(18, v, 1);
 		if (FAILED(hv) || FAILED(d->GetPixelShaderConstantF(3, c, 1))) { Rejected++; return; }
 		const float length = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
-		if (length < 0.98f || length > 1.02f || v[2] <= 0.0f ||
+		if (length < 0.98f || length > 1.02f || v[2] < -0.05f ||
 			c[0] < 0.0f || c[1] < 0.0f || c[2] < 0.0f || c[0] >= 64.0f || c[1] >= 64.0f || c[2] >= 64.0f) { Rejected++; return; }
-		DeferredDir[0] = v[0] / length; DeferredDir[1] = v[1] / length; DeferredDir[2] = v[2] / length;
+		const float z = v[2] > 0.0f ? v[2] : 0.0f;
+		const float clampedLen = sqrtf(v[0] * v[0] + v[1] * v[1] + z * z);
+		const float invLen = clampedLen > 1.0e-6f ? 1.0f / clampedLen : 1.0f / length;
+		DeferredDir[0] = v[0] * invLen; DeferredDir[1] = v[1] * invLen; DeferredDir[2] = z * invLen;
 		Color[0] = c[0]; Color[1] = c[1]; Color[2] = c[2];
 		ColorGood = true;
 		ReadFrame = (UInt32)TheFrameRateManager->FrameNumber;

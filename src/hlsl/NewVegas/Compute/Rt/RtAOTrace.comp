@@ -191,31 +191,19 @@ vec2 R2(float i) { return fract(i * vec2(0.7548777, 0.5698403)); }
 // you stand at): the hidden first-person body (FirstPersonBody: the third-person head and arms round the eye) passed over (RtHidden.glsl):
 // the world without people and cut-outs (opaque), then people, the player's parts and cut-outs up to that hit, each candidate tested (the
 // alpha modes as Trace's: 0 cut-outs left out, 1 / 3 whole, 2 their texture; decals never occlude), hidden ones passed over
+float HitBackFace(uint instance, bool frontFace) {
+    return (frontFace || rtRecordKind(records[instance].flags) == 2u) ? 0.0 : 1.0;
+}
 vec2 TraceHidden(vec3 p, vec3 d, float tMin, float tMax, bool anyHit, int alpha) {
     const uint terminate = anyHit ? gl_RayFlagsTerminateOnFirstHitEXT : 0u;
-    float t = tMax;
-    vec2 result = vec2(-1.0, 0.0);
+    const uint m = (RT_CULL & ~0x01u) & (alpha == 0 ? ~0x10u : 0xFFu);   // exclude NVR_RT_MASK_HIDDEN (0x01u) in hardware
+    const uint flags = terminate | (alpha == 1 ? gl_RayFlagsOpaqueEXT : 0u);
     rayQueryEXT q;
-    rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT | terminate, RT_CULL & 0x8Fu, p + cb.origin.xyz, tMin, d, tMax);
-    for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
-    if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
-        t = rayQueryGetIntersectionTEXT(q, true);
-        result = vec2(t, rayQueryGetIntersectionFrontFaceEXT(q, true) ? 0.0 : 1.0);
-        if (anyHit) return result;
-    }
-    rayQueryEXT qp;
-    rayQueryInitializeEXT(qp, scene, gl_RayFlagsNoOpaqueEXT | terminate, RT_CULL & (alpha == 0 ? 0x60u : 0x70u), p + cb.origin.xyz, tMin, d, t);
-    for (uint rtCap_ = 0u; rayQueryProceedEXT(qp); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(qp); break; } else {
-        if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-        const uint ci = rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false);
-        if ((ci & NVR_RT_CUSTOM_HIDDEN) != 0u || rtIsDecal(ci)) continue;
-        if (alpha != 2 || rtAlphaPassShadow(ci, rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
-                                            rayQueryGetIntersectionBarycentricsEXT(qp, false)))
-            rayQueryConfirmIntersectionEXT(qp);
-    }
-    if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT)
-        result = vec2(rayQueryGetIntersectionTEXT(qp, true), rayQueryGetIntersectionFrontFaceEXT(qp, true) ? 0.0 : 1.0);
-    return result;
+    rayQueryInitializeEXT(q, scene, flags, m, p + cb.origin.xyz, tMin, d, tMax);
+    if (alpha == 3) { ProceedSolid(q); }
+    else { ProceedShadow(q); }
+    if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return vec2(-1.0, 0.0);
+    return vec2(rayQueryGetIntersectionTEXT(q, true), HitBackFace(rayQueryGetIntersectionInstanceIdEXT(q, true), rayQueryGetIntersectionFrontFaceEXT(q, true)));
 }
 vec2 Trace(vec3 p, vec3 d, float tMin, float tMax, bool anyHit, int alpha) {
     if (rtHiddenNear(p, vec3(0.0))) return TraceHidden(p, d, tMin, tMax, anyHit, alpha);   // (2026-11-07 ptaaa-firstperson)
@@ -225,7 +213,7 @@ vec2 Trace(vec3 p, vec3 d, float tMin, float tMax, bool anyHit, int alpha) {
     if (alpha == 3) { ProceedSolid(q); }
     else { ProceedShadow(q); }
     if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT) return vec2(-1.0, 0.0);
-    return vec2(rayQueryGetIntersectionTEXT(q, true), rayQueryGetIntersectionFrontFaceEXT(q, true) ? 0.0 : 1.0);
+    return vec2(rayQueryGetIntersectionTEXT(q, true), HitBackFace(rayQueryGetIntersectionInstanceIdEXT(q, true), rayQueryGetIntersectionFrontFaceEXT(q, true)));
 }
 
 vec3 Vertex(uint base, uint i) {
@@ -241,14 +229,15 @@ vec3 Vertex(uint base, uint i) {
 // With cosine sampling the pixel's irradiance estimate is pi x that radiance = albedo x E (returned).
 // Misses return 0: what the sky gives is the game's own ambient already. The hit's normal: its triangle's (the geometry data, to the
 // scene by the instance's transform), turned toward the ray; the ray's reverse when the helper had no room for the data.
-bool Visible(vec3 from, vec3 dir, float tMax) {
+bool VisibleMask(vec3 from, vec3 dir, float tMax, uint mask) {
     // (2026-11-07 ptaaa-firstperson) from or toward (a lamp at the eye) a point near the eye: the hidden first-person body passed over
-    if (rtHiddenPassOver(from, from + dir * tMax, vec3(0.0))) return !rtBlockedPassHidden(from + cb.origin.xyz, dir, 0.0, tMax, RT_CULL, true, kRtAnyHit);
+    if (rtHiddenPassOver(from, from + dir * tMax, vec3(0.0))) return !rtBlockedPassHidden(from + cb.origin.xyz, dir, 0.0, tMax, mask, true, kRtAnyHit);
     rayQueryEXT s;
-    rayQueryInitializeEXT(s, scene, gl_RayFlagsTerminateOnFirstHitEXT, RT_CULL, from + cb.origin.xyz, 0.0, dir, tMax);
+    rayQueryInitializeEXT(s, scene, gl_RayFlagsTerminateOnFirstHitEXT, mask, from + cb.origin.xyz, 0.0, dir, tMax);
     ProceedShadow(s);
     return rayQueryGetIntersectionTypeEXT(s, true) != gl_RayQueryCommittedIntersectionTriangleEXT;
 }
+bool Visible(vec3 from, vec3 dir, float tMax) { return VisibleMask(from, dir, tMax, RT_CULL); }
 
 // (GI v2, 2026-10-29) The light a hit really sends, where the screen saw it: the hit back into the view (the inverse of viewToWorld's
 // rotation), and if it lands on screen in front of the camera with the input's view distance there within the tolerance (the same
@@ -509,7 +498,7 @@ vec3 DirectLight(vec3 hit, vec3 lift, vec3 n, float xi) {
         if (total > 0.0 && chosenWeight > 0.0) {
             vec3 l = chosenPos - lift;
             float dist = length(l);
-            if (Visible(lift, l / dist, max(dist - 16.0, 0.0))) e += chosenLight * (total / chosenWeight);   // (short of its fixture)
+            if (VisibleMask(lift, l / dist, max(dist - 16.0, 0.0), RT_CULL & ~0x0Cu)) e += chosenLight * (total / chosenWeight);   // (short of its fixture)
         }
     }
     return e;
@@ -579,26 +568,11 @@ vec4 Bounce(vec3 origP, vec3 origN, vec3 start, vec3 d, float tMin, float xi, bo
         bool found = false;
         gBounceT = 0.0;
         mat4x3 toWorld = mat4x3(1.0);
-        // (2026-11-07 ptaaa-firstperson) from near the eye (the view model's pixels): the hidden first-person body passed over (as TraceHidden)
-        if (rtHiddenNear(start, vec3(0.0))) {
-            rayQueryInitializeEXT(q, scene, gl_RayFlagsOpaqueEXT, RT_CULL & 0x8Fu, start + cb.origin.xyz, tMin, d, cb.gi.x);
-            for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
-            AO_TAKE_HIT(q);
-            rayQueryEXT qp;
-            rayQueryInitializeEXT(qp, scene, gl_RayFlagsNoOpaqueEXT, RT_CULL & 0x70u, start + cb.origin.xyz, tMin, d, found ? t : cb.gi.x);
-            for (uint rtCap_ = 0u; rayQueryProceedEXT(qp); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(qp); break; } else {
-                if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
-                if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
-                if (rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)), rayQueryGetIntersectionBarycentricsEXT(qp, false)))
-                    rayQueryConfirmIntersectionEXT(qp);
-            }
-            if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) AO_TAKE_HIT(qp);
-        }
-        else {
-            rayQueryInitializeEXT(q, scene, 0u, RT_CULL, start + cb.origin.xyz, tMin, d, cb.gi.x);
-            Proceed(q);
-            AO_TAKE_HIT(q);
-        }
+        // (2026-11-07 ptaaa-firstperson) near the eye (view model): exclude dedicated NVR_RT_MASK_HIDDEN (0x01u) in single HW query
+        const uint bounceMask = rtHiddenNear(start, vec3(0.0)) ? (RT_CULL & ~0x01u) : RT_CULL;
+        rayQueryInitializeEXT(q, scene, 0u, bounceMask, start + cb.origin.xyz, tMin, d, cb.gi.x);
+        Proceed(q);
+        AO_TAKE_HIT(q);
         if (!found) return vec4(SkyMiss(d), 1.0);
         ng = HitNormal(instance, prim, toWorld, d);
         hit = start + d * t;

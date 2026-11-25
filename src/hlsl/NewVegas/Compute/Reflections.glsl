@@ -549,7 +549,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
                 hasPartRough = true;
             }
         }
-        roughness = hasPartRough ? clamp(cb.weapon.w * mix(0.6, 1.5, partRough), 0.02, 1.0) : cb.weapon.w;
+        roughness = hasPartRough ? clamp(cb.weapon.w * mix(0.6, 1.5, partRough), 0.02, cb.weapon.w <= 0.025 ? 0.028 : 1.0) : cb.weapon.w;
         if (cb.material2.w > 0.0) {
             float baseMetal;
             if (explicitRmaos) {

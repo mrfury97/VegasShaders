@@ -19,8 +19,9 @@ float readDepth(vec2 coord) {
 }
 
 vec3 reconstructPosition(vec2 uv) {
-    float x = uv.x * 2.0 - 1.0;
-    float y = (1.0 - uv.y) * 2.0 - 1.0;
+    vec2 s = uv * aoInvRectScale();
+    float x = s.x * 2.0 - 1.0;
+    float y = (1.0 - s.y) * 2.0 - 1.0;
     float z = projectedDepthFromLinear(LINEAR_LOD(t_depth, uv).x);
     vec4 clipSpace = vec4(x, y, z, 1.0);
 
@@ -72,7 +73,9 @@ vec2 PackedSSAOValues(vec2 uv) {
 
         vec3 pointX = origin + sampleX * uRadius;
         vec3 pointY = origin + sampleY * uRadius;
-        vec2 sampleDepth = vec2(readDepth(projectPosition(pointX).xy), readDepth(projectPosition(pointY).xy));
+        vec2 sampleDepth = vec2(
+            readDepth(aoClampToRectIfOn(projectPosition(pointX).xy, cb.reciprocalResolution.xy)),
+            readDepth(aoClampToRectIfOn(projectPosition(pointY).xy, cb.reciprocalResolution.xy)));
         vec2 actualDepth = vec2(pointX.z, pointY.z);
         vec2 distance = abs(actualDepth - sampleDepth);
         vec2 influence = vec2(lessThan(sampleDepth, actualDepth)) * vec2(lessThan(distance, vec2(uRadius)));
@@ -88,6 +91,7 @@ vec2 PackedSSAOValues(vec2 uv) {
 
 // GTAOPosition: on a depth texel's centre.
 vec3 GTAOPosition(vec2 uv) {
+    uv = aoClampToRectIfOn(uv, cb.reciprocalResolution.xy);
     return reconstructPosition((floor(uv / cb.reciprocalResolution.xy) + 0.5) * cb.reciprocalResolution.xy);
 }
 
@@ -98,7 +102,7 @@ float GTAOValue(vec2 uv) {
     vec3 N = normalize(GetNormal(uv));
     N = dot(N, V) < 0.0 ? -N : N;
     float radius = abs(AOrange);
-    vec2 radiusUV = radius / P.z * 0.5 * vec2(cb.projectionTransform[0][0], cb.projectionTransform[1][1]);
+    vec2 radiusUV = radius / P.z * 0.5 * vec2(cb.projectionTransform[0][0], cb.projectionTransform[1][1]) * aoRectScale();
     radiusUV *= min(1.0, cb.gtao.w * cb.reciprocalResolution.x / max(radiusUV.x, 1e-6));
     vec3 noise = random(uv);
     float falloffMul = -1.0 / (0.615 * radius);
@@ -169,16 +173,17 @@ float SkyVisibility(vec3 viewPosition, vec3 viewNormal, float turn) {
 }
 
 void main() {
+    vec2 ruv = uv * aoRectScale();
     // PackedEstimate / GTAOEstimate
     float ao;
-    if (AO_GTAO_ESTIMATE) ao = GTAOValue(uv);
+    if (AO_GTAO_ESTIMATE) ao = GTAOValue(ruv);
     else {
-        vec2 values = PackedSSAOValues(uv);
+        vec2 values = PackedSSAOValues(ruv);
         ao = values.x * values.y;
     }
-    vec3 skyOrigin = reconstructPosition(uv);
-    vec3 skyNormal = GetNormal(uv);
-    float skyTurn = random(uv).y * 2.0 * PI;
+    vec3 skyOrigin = reconstructPosition(ruv);
+    vec3 skyNormal = GetNormal(ruv);
+    float skyTurn = random(ruv).y * 2.0 * PI;
     if (cb.sky.x > 0.0 && skyOrigin.z < endFade) ao *= SkyVisibility(skyOrigin, skyNormal, skyTurn);
-    o_color = vec4(ao, min(readDepth(uv), endFade), 0.0, 1.0);
+    o_color = vec4(ao, min(readDepth(ruv), endFade), 0.0, 1.0);
 }

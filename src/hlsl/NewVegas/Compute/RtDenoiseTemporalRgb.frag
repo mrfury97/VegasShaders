@@ -82,18 +82,24 @@ vec3 FireflyExcess(vec3 excess, vec3 kept) {
 // excess is not thrown away: o_d carries it (x this frame's blend weight) and RtDenoiseFirefly.frag spreads it over the 5 x 5 round,
 // into the history. So the light of rare bright paths (a glow panel only bounces find) is kept as a soft spread instead of white dots.
 // The anti-lag's fast history then takes the clamped sample (fed the raw one, a firefly pulled the long history up to it: a dot).
-float FireflyLimit(vec2 at, out bool actorNear) {
+float FireflyLimit(vec2 at, float viewZ, out bool actorNear) {
     float m = 0.0;
+    bool anyMatch = false;
     actorNear = false;
     const vec2 lo = 0.5 * pc.params.zw, hi = max(pc.rect.xy - 0.5 * pc.params.zw, lo);
     for (int dy = -1; dy <= 1; dy++)
         for (int dx = -1; dx <= 1; dx++)
             if (dx != 0 || dy != 0) {
-                const vec4 q = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), clamp(at + vec2(dx, dy) * pc.params.zw, lo, hi), 0.0);
+                const vec2 quv = clamp(at + vec2(dx, dy) * pc.params.zw, lo, hi);
+                const float qLin = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), quv, 0.0).r;
+                const float qZ = (qLin > 0.0 && qLin < 0.999) ? min(qLin * pc.forward.w, 60000.0) : 0.0;
+                if (viewZ > 0.0 && (qZ <= 0.0 || abs(qZ - viewZ) > max(0.08 * viewZ, 6.0))) continue;
+                const vec4 q = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), quv, 0.0);
                 m = max(m, luma(q.rgb));
+                anyMatch = true;
                 if (q.a < 0.0) actorNear = true;
             }
-    return m;
+    return anyMatch ? m : 1.0e30;
 }
 
 // (2026-11-07 ptaaa-denoiser) last frame's A and B at the screen point prevUv: 2 x 2 bilinear over the texels of the same surface (each
@@ -136,14 +142,15 @@ void main() {
     const vec4 noisySample = textureLod(sampler2D(t_noisy, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
     const vec3 value = noisySample.rgb;
     const float l = luma(value);
-    const float viewZ = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r * pc.forward.w;
+    const float linear01 = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).r;
+    const float viewZ = (linear01 > 0.0 && linear01 < 0.999) ? min(linear01 * pc.forward.w, 60000.0) : 0.0;
     // (ptaaa-denoiser) AntiFirefly: the neighbours' support (a newly seen pixel has only that); c the sample used, its excess to o_d
     // UNOFFICIAL 2026-11-20: also detect moving-actor shadow blockers (t_noisy.a < 0) in the 3x3 neighbourhood with zero extra fetches when AntiFirefly is on
     bool actorShadowNear = noisySample.a < 0.0;
     float spatialLimit = 1.0e30;
     if (NVR_FIREFLY_K > 0.0) {
         bool neighActor = false;
-        spatialLimit = FireflyLimit(uv, neighActor);
+        spatialLimit = FireflyLimit(uv, viewZ, neighActor);
         actorShadowNear = actorShadowNear || neighActor;
     } else if (!actorShadowNear) {
         const vec2 lo = 0.5 * pc.params.zw, hi = max(pc.rect.xy - 0.5 * pc.params.zw, lo);

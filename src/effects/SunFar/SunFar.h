@@ -42,7 +42,7 @@ public:
 		D3DXVECTOR4	Apply;           // x: 1 while TESR_SunFarBuffer holds this frame's factor (the composites read it then)
 		D3DXVECTOR4	Land;            // UNOFFICIAL 2026-10-25 xyz the land shaders' light vector (core/LandLight.h), w 1 when read lately
 		D3DXVECTOR4	Water;           // UNOFFICIAL 2026-10-23 x: 1 water takes the shadows by its depth (0: left alone, the old way), y: deep water's share, z: 1 the depth map is bound
-		D3DXVECTOR4	Jitter;          // UNOFFICIAL 2026-10-31 xy: JitterFix's depth jitter in uv (0 off), z: 1 SkipCascadeCheck
+		D3DXVECTOR4	Jitter;          // UNOFFICIAL 2026-10-31 xy: JitterFix's depth jitter in uv (0 off), z: 1 SkipCascadeCheck, w: water-mask mode (0 height fallback, 1 no water drawn, 2 mask on s14, 3 mask on s12)
 		D3DXVECTOR4	Volume;          // UNOFFICIAL 2026-10-21 the volumetric clouds' shadow: x strength (0 off), y map width (m), z map texels, w cloud base (m)
 	};
 	ConstantsStruct	Constants = {};
@@ -66,6 +66,8 @@ public:
 private:
 	IDirect3DBaseTexture9*	layerTextures[4] = {};
 	IDirect3DBaseTexture9*	blendTextures[4] = {};
+	IDirect3DTexture9*		extWaterMask = nullptr;
+	bool					extWaterTracked = false;
 	double	drift[4][2] = {};       // uv drift per layer, accumulated
 	double	lastDays = -1.0;        // game days at the last update (the drift follows the game's clock)
 	bool	cloudsReady = false;    // the sky's layers were found this frame

@@ -672,7 +672,9 @@ technique Copy {
 		DepthEffect->SetVector(ParamsHandle, &params);
 		DepthEffect->SetVector(OptionsHandle, &options);
 		DepthEffect->SetTexture(SourceHandle, source);
-		// The game's depth-stencil stays bound (same size, Z off in the pass), as ReShadeDepthCompat keeps it.
+		// The game's depth-stencil stays bound (same size, Z off in the pass), as ReShadeDepthCompat keeps it,
+		// except under Game MSAA where D3D9 requires single-sampled RTs not to be paired with an MSAA depth-stencil.
+		ReShadeIntegration::MsaaDepthGuard msaaGuard(Device);
 		Device->SetRenderTarget(0, target);
 		for (DWORD i = 1; i < 4; ++i) Device->SetRenderTarget(i, nullptr);
 		Device->SetStreamSource(0, TheShaderManager->FrameVertex, 0, sizeof(FrameVS));
@@ -945,4 +947,32 @@ void ReShadeIntegration::RenderEffects(IDirect3DSurface9* OutputSurface) {
 	Device->SetDepthStencilSurface(depthStencil);
 	if (depthStencil) depthStencil->Release();
 	SavedState->Apply();
+}
+
+static bool SurfaceIsMsaa(IDirect3DDevice9* device, IDirect3DSurface9** outSurface = nullptr) {
+	if (!device) return false;
+	IDirect3DSurface9* ds = nullptr;
+	if (FAILED(device->GetDepthStencilSurface(&ds)) || !ds) return false;
+	D3DSURFACE_DESC desc = {};
+	const bool msaa = SUCCEEDED(ds->GetDesc(&desc)) && desc.MultiSampleType != D3DMULTISAMPLE_NONE;
+	if (msaa && outSurface) *outSurface = ds;
+	else ds->Release();
+	return msaa;
+}
+
+bool ReShadeIntegration::KeepDepthBoundFor(IDirect3DDevice9* device) {
+	if (!KeepDepthBound()) return false;
+	return !SurfaceIsMsaa(device);
+}
+
+ReShadeIntegration::MsaaDepthGuard::MsaaDepthGuard(IDirect3DDevice9* d) : device(d) {
+	if (SurfaceIsMsaa(d, &saved)) {
+		d->SetDepthStencilSurface(nullptr);
+		detached = true;
+	}
+}
+
+ReShadeIntegration::MsaaDepthGuard::~MsaaDepthGuard() {
+	if (detached && device) device->SetDepthStencilSurface(saved);
+	if (saved) saved->Release();
 }

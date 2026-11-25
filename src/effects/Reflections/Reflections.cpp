@@ -1013,8 +1013,9 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	static bool lastRect = false;
 	if (RenderRect::ScaleChanged() || RenderRect::Active() != lastRect) usable = false;
 	lastRect = RenderRect::Active();
-	const double move[3] = { (double)invView._41 - lastInvView._41, (double)invView._42 - lastInvView._42,
-		(double)invView._43 - lastInvView._43 };
+	const D3DXVECTOR4 camPos = TheRenderManager->CameraPosition;
+	const double move[3] = { (double)camPos.x - lastCameraPos.x, (double)camPos.y - lastCameraPos.y,
+		(double)camPos.z - lastCameraPos.z };
 	const bool cameraKept = move[0] * move[0] + move[1] * move[1] + move[2] * move[2] < 500.0 * 500.0;
 	if (usable) usable = cameraKept;
 	// (2026-11-07) the RT reflection denoiser keeps its own history: it needs last frame's camera whatever Temporal says
@@ -1116,6 +1117,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		rtWaterFrame = now;
 		rtWaterView = view;
 		rtWaterInvView = invView;
+		rtWaterCameraPos = TheRenderManager->CameraPosition;
 		rtWaterProj = TheRenderManager->projMatrix;
 		rtWaterScaleX = RenderRect::Active() ? RenderRect::ScaleX : 1.0f;	// UNOFFICIAL 2026-11-03 (Buffer's drawn part this frame)
 		rtWaterScaleY = RenderRect::Active() ? RenderRect::ScaleY : 1.0f;
@@ -1125,6 +1127,7 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	lastRenderedFrame = now;
 	lastView = view;
 	lastInvView = invView;
+	lastCameraPos = TheRenderManager->CameraPosition;
 	lastProj = TheRenderManager->projMatrix;
 	lastJitter = TemporalBackbone::DepthJitter();	// UNOFFICIAL 2026-11-09 TemporalJitterFix
 	lastDenoiseScaleX = RenderRect::Active() ? RenderRect::ScaleX : 1.0f;
@@ -1140,9 +1143,9 @@ void ReflectionsEffect::UpdateWaterConstants() {
 	const UINT now = TheFrameRateManager->FrameNumber;
 	bool valid = Enabled && Settings.RtWater && rtWaterFrame != 0 && rtWaterFrame + 1 == now && RtWanted() &&
 		!TheShaderManager->GameState.isUnderwater && !TheShaderManager->GameState.isCameraCut;
-	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
-	const double move[3] = { (double)invView._41 - rtWaterInvView._41, (double)invView._42 - rtWaterInvView._42,
-		(double)invView._43 - rtWaterInvView._43 };
+	const D3DXVECTOR4 camPos = TheRenderManager->CameraPosition;
+	const double move[3] = { (double)camPos.x - rtWaterCameraPos.x, (double)camPos.y - rtWaterCameraPos.y,
+		(double)camPos.z - rtWaterCameraPos.z };
 	if (valid) valid = move[0] * move[0] + move[1] * move[1] + move[2] * move[2] < 500.0 * 500.0;
 	if (valid) {
 		// As RenderBuffers' Reproject: camera-relative world now -> that frame's view (its rotation round the camera that moved by
@@ -1189,7 +1192,8 @@ void ReflectionsEffect::UpdateWaterConstants() {
 		else if (TheShaderManager->GameState.isUnderwater) why = "under water";
 		else if (lastRenderedFrame == 0 || lastRenderedFrame + 1 != now) why = "the reflections were not drawn last frame";
 		else {
-			const double jump[3] = { (double)invView._41 - lastInvView._41, (double)invView._42 - lastInvView._42, (double)invView._43 - lastInvView._43 };
+			const D3DXVECTOR4 camPos = TheRenderManager->CameraPosition;
+			const double jump[3] = { (double)camPos.x - lastCameraPos.x, (double)camPos.y - lastCameraPos.y, (double)camPos.z - lastCameraPos.z };
 			if (TheShaderManager->GameState.isCameraCut || jump[0] * jump[0] + jump[1] * jump[1] + jump[2] * jump[2] >= 500.0 * 500.0) why = "the camera jumped";
 		}
 		const bool on = why == nullptr;

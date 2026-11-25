@@ -14,6 +14,7 @@ layout(push_constant) uniform Push {
     vec2 offsetMask;            // 32: OffsetMaskH (1, 0) or OffsetMaskV (0, 1)
     float maxDistance;          // 40: MAXDISTANCE, TESR_ShadowFade.w: beyond it the pass writes black
     uint samplerIndex;          // 44: LINEAR, CLAMP
+    vec2 renderScale;           // 48: xy render size / screen size (1 = off)
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -55,8 +56,11 @@ vec4 sampleMask(vec2 coord) {
 
 // ShadowsInteriors.fx.hlsl InteriorShadowBlur
 void main() {
-    vec4 center = sampleMask(uv);
-    float depth1 = readDepthLod(uv);
+    vec2 ruv = uv * pc.renderScale;
+    vec2 minUV = 0.5 * pc.reciprocalResolution.xy;
+    vec2 maxUV = pc.renderScale - minUV;
+    vec4 center = sampleMask(ruv);
+    float depth1 = readDepthLod(ruv);
     if (depth1 > pc.maxDistance) {
         o_color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
@@ -65,7 +69,8 @@ void main() {
     vec4 taps[cKernelSize];
     vec4 spread = vec4(0.0);
     for (int t = 0; t < cKernelSize; t++) {
-        taps[t] = sampleMask(uv + (blurOffset(t) * pc.offsetMask) * 1.0);
+        vec2 tapUV = clamp(ruv + (blurOffset(t) * pc.offsetMask) * 1.0, minUV, maxUV);
+        taps[t] = sampleMask(tapUV);
         spread = max(spread, abs(taps[t] - center));
     }
     if (max(spread.r, spread.g) < 0.0001) {
@@ -78,7 +83,8 @@ void main() {
     float depthDrop = 3500.0 * (depth1 / pc.cameraData.y);
 
     for (int i = 0; i < cKernelSize; i++) {
-        float depth2 = readDepthLod(uv + (blurOffset(i) * pc.offsetMask) * 1.0);
+        vec2 tapUV = clamp(ruv + (blurOffset(i) * pc.offsetMask) * 1.0, minUV, maxUV);
+        float depth2 = readDepthLod(tapUV);
         float diff = abs(depth1 - depth2);
 
         float useForBlur = diff <= depthDrop ? 1.0 : 0.0;

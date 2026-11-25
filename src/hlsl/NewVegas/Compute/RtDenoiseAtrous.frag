@@ -34,7 +34,8 @@ void main() {
     const float variance = max(center.g - center.r * center.r, 0.0);
     // little history: trust the neighbours more (the variance estimate is not there yet)
     const float valueSigma = pc.params.w * sqrt(variance + (center.b < 4.0 ? 0.05 : 0.0)) + 1.0e-3;
-    const float zSlope = max(abs(dFdx(z)), abs(dFdy(z))) * pc.params.x + 1.0e-2 * z;
+    const float rawSlope = max(abs(dFdx(z)), abs(dFdy(z)));
+    const float zSlope = min(rawSlope, 0.05 * z) * pc.params.x + 1.0e-2 * z;
 
     vec4 sum = vec4(0.0);
     float weights = 0.0;
@@ -43,7 +44,7 @@ void main() {
         for (int x = -reach; x <= reach; x++) {
             const vec2 tapUv = uv + vec2(x, y) * pc.params.x * pc.size.xy;
             const vec4 tap = textureLod(sampler2D(t_in, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0);
-            if (tap.a <= 0.0) continue;
+            if (tap.a <= 0.0 || abs(tap.a - z) > max(0.15 * z, 12.0)) continue;
             if (pc.size.z > 0.5 && abs(textureLod(sampler2D(t_ids, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).r - id) > 0.5) continue;
             const vec3 tn = normalize(textureLod(sampler2D(t_normals, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0).xyz * 2.0 - 1.0);
             float w = reach == 1 ? kernel3[abs(x)] * kernel3[abs(y)] : kernel[abs(x)] * kernel[abs(y)];

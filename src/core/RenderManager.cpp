@@ -413,6 +413,7 @@ void RenderManager::Initialize() {
 }
 
 void RenderManager::ResolveDepthBuffer(IDirect3DTexture9* depthTarget) {
+	if (!depthTarget) return;
 	MixCheck::NoteWrite(depthTarget, MixCheck::kD3D9, "DepthResolve");	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck (RESZ writes it without a draw)
 
 	if (RESZ) {

@@ -44,7 +44,7 @@ namespace SettingForce {
 		// land, not only the seam: DeferredSun then lit those pixels from a mixed record. Smooth 0 is the dither (clip), with alpha 1 and no
 		// blend: each texel holds either the land's record or the object's. TAA / FSR / DLSS average the stipple (SharedNoise moves it while
 		// they resolve). Mode 1 has no land record (the land writes its albedo alpha 1 there, a replace): mode 2 only.
-		{ "Shaders.Terrain.Blending", "Smooth", 0, 2 },
+		{ "Shaders.Terrain.Blending", "Smooth", 0, 1 },
 	};
 
 	// The forced value of section / key, when the table applies. Called with State already decided.

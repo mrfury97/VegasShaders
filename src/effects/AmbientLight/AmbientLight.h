@@ -73,6 +73,7 @@ public:
 	bool				AmbientReplaceActive() const;	// UNOFFICIAL 2026-11-11 (sungi p2) outdoors and AmbientReplace > 0 (AmbientOcclusion forces the sky-miss weight)
 	bool				temporal = true;
 	D3DXMATRIX			lastView, lastInvView, lastProj;
+	D3DXVECTOR4			lastCameraPos = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	double				lastTime = 0.0;
 	unsigned			frameNumber = 0;
 

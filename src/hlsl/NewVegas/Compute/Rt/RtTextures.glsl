@@ -30,6 +30,7 @@ mat3 rtConeToScene = mat3(1.0);
 
 // The slot's real textures: x diffuse, y normal map, z glow map (0 = none)
 uvec3 rtSlotTextures(uint flags) { return rtTexSlots[(flags >> 16) & 0x3FFu].xyz; }
+uvec4 rtSlotTextures4(uint flags) { return rtTexSlots[(flags >> 16) & 0x3FFu]; }
 
 // The mip for texture `id` at a hit on (instance, primitive): texels per world unit of the triangle (its texcoord area against its
 // object-space area) times the footprint. Object space: the instance's scale is left out (references are nearly all at scale 1).

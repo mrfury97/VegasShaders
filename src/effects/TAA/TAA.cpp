@@ -169,6 +169,7 @@ void TAAEffect::UpdateSettings() {
 		// UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md) test only, live: PSR motion at flat path-traced mirrors (a missing key: off)
 		RRSettings.MirrorMotion = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "RRMirrorMotion") && node.BoolValue;
 	}
+	if (!Enabled || !dlss) Upscaler::Dlss()->ReleaseResources();
 }
 
 // Texture mip LOD bias on every sampler while the jittered world draws. Averaging jittered frames

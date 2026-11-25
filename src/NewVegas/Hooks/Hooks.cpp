@@ -112,7 +112,8 @@ void AttachHooks() {
 		TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "ScopeFix") ||
 		settings->Main.HiddenObjectCulling || settings->Main.LampScissor ||
 		TheSettingManager->GetSettingI("Shaders.PBR.MaterialRules", "Enabled") ||
-		TheSettingManager->GetSettingI("Main.Main.Misc", "LampsDepthFirst")) {	// UNOFFICIAL 2026-10-26 LampsDepthFirst draws its depth step there
+		TheSettingManager->GetSettingI("Main.Main.Misc", "LampsDepthFirst") ||	// UNOFFICIAL 2026-10-26 LampsDepthFirst draws its depth step there
+		TheSettingManager->GetSettingI("Shaders.TAA.FSR", "Enabled")) {			// UNOFFICIAL 2026-11-22: RenderScale viewport & vanilla DoF depth tracking
 		Redirect({ NVR_REDIRECT(RenderPassStandard), NVR_REDIRECT(RenderPassSkinned) });
 	}
 	Redirect({
@@ -230,6 +231,7 @@ void AttachHooks() {
 	});
 	kRenderInterfaceDetour.ReplaceCall(Jumpers::RenderInterface::Hook, RenderInterfaceHook);
 	InstallMenu3DGuardHook();
+	InstallDoFDepthGuardHooks();
 	Patch({
 		{ Branch::Jump, 0x871290, (UInt32)&RenderShadowMapHook },
 		{ Branch::Jump, Jumpers::Shadows::LeavesNodeNameHook, (UInt32)&LeavesNodeNameHook },

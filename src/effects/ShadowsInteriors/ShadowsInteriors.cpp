@@ -35,8 +35,8 @@ bool ShadowsInteriorsEffect::DedicatedUsable(IDirect3DSurface9* RenderTarget, ID
 
 // Push blocks of the two Vulkan passes (Compute\ShadowsInteriorsBlur.frag, ShadowsInteriorsApply.frag). The sampler's heap index
 // is filled in by the extension at the offset given to its binding (44 and 176).
-struct ShadowsInteriorsBlurPush { D3DXVECTOR4 cameraData; D3DXVECTOR4 reciprocalResolution; D3DXVECTOR2 offsetMask; float maxDistance; UInt32 samplerIndex; };
-struct ShadowsInteriorsApplyPush { D3DXVECTOR4 cameraData; D3DXVECTOR4 shadowData; D3DXVECTOR4 shadowFade; D3DXMATRIX viewTransform; D3DXMATRIX projectionTransform; UInt32 samplerIndex; UInt32 pad[3]; };
+struct ShadowsInteriorsBlurPush { D3DXVECTOR4 cameraData; D3DXVECTOR4 reciprocalResolution; D3DXVECTOR2 offsetMask; float maxDistance; UInt32 samplerIndex; D3DXVECTOR2 renderScale; };
+struct ShadowsInteriorsApplyPush { D3DXVECTOR4 cameraData; D3DXVECTOR4 shadowData; D3DXVECTOR4 shadowFade; D3DXMATRIX viewTransform; D3DXMATRIX projectionTransform; UInt32 samplerIndex; float scaleX; float scaleY; UInt32 pad; };
 
 // UNOFFICIAL 2026-10-25 (NVR DXVK): the dedicated path as Vulkan passes, in the same order with the same inputs. The blurs write the
 // two scratch targets through ExtDrawTo (the frame chain is not touched); the apply writes the frame through ExtFullScreen, the one
@@ -70,6 +70,17 @@ bool ShadowsInteriorsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	blur.cameraData = TheRenderManager->CameraData;
 	blur.reciprocalResolution = TheShaderManager->ShaderConst.ReciprocalResolution;
 	blur.maxDistance = TheShaderManager->Effects.ShadowsExteriors->Constants.ShadowFade.w; // MAXDISTANCE = TESR_ShadowFade.w
+	const bool rect = RenderRect::Active();
+	blur.renderScale = rect ? D3DXVECTOR2(RenderRect::ScaleX, RenderRect::ScaleY) : D3DXVECTOR2(1.0f, 1.0f);
+	RECT blurVp = {};
+	const RECT* pBlurVp = nullptr;
+	if (rect) {
+		D3DSURFACE_DESC blurDesc = {};
+		if (FAILED(scratch->scratchSurface[0]->GetDesc(&blurDesc))) return false;
+		blurVp.right = (LONG)RenderRect::Width(blurDesc.Width);
+		blurVp.bottom = (LONG)RenderRect::Height(blurDesc.Height);
+		pBlurVp = &blurVp;
+	}
 
 	// The blurs: the shadow term into scratch 0 (horizontal), then scratch 0 into scratch 1 (vertical). skipBlur: the apply reads the term as it is.
 	IDirect3DBaseTexture9* mask = shadowTexture;
@@ -82,7 +93,7 @@ bool ShadowsInteriorsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 			for (UINT i = 0; i < 2; i++) { resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = textures[i]; }
 			resources[2].Slot = 0; resources[2].Type = NVR_EXT_BIND_SAMPLER; resources[2].pResource = sampler;
 			IDirect3DSurface9* target = scratch->scratchSurface[p];
-			if (!ExtDrawTo(extBlur.Pipeline, &target, 1, resources, _countof(resources), &blur, sizeof(blur), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
+			if (!ExtDrawTo(extBlur.Pipeline, &target, 1, resources, _countof(resources), &blur, sizeof(blur), pBlurVp, rect ? ExtUv::TexelCentre : ExtUv::ScreenQuad)) return false;
 			mask = scratch->scratchTexture[p];
 		}
 	}
@@ -94,6 +105,8 @@ bool ShadowsInteriorsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	apply.shadowFade = TheShaderManager->Effects.ShadowsExteriors->Constants.ShadowFade;
 	apply.viewTransform = TheRenderManager->viewMatrix;		// as stored, as the D3D9 constants carry them
 	apply.projectionTransform = TheRenderManager->projMatrix;
+	apply.scaleX = rect ? RenderRect::ScaleX : 1.0f;
+	apply.scaleY = rect ? RenderRect::ScaleY : 1.0f;
 	IDirect3DBaseTexture9* inputs[3] = { TheTextureManager->RenderedTexture, mask, depth };
 	NVR_EXT_RESOURCE_BINDING resources[4] = {};
 	for (UINT i = 0; i < 3; i++) { resources[i].Slot = i; resources[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[i].pResource = inputs[i]; }
@@ -113,8 +126,8 @@ void ShadowsInteriorsEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 		EffectRecord::Render(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer);
 		return;
 	}
-	// UNOFFICIAL 2026-10-25 (NVR DXVK): the dedicated path as Vulkan passes when [Main.Main.Performance] NvrDxvkPasses is on.
-	if (!ExtFailed && DxvkCompute::PassesOn()) {
+	// UNOFFICIAL 2026-10-25 (NVR DXVK): the dedicated path as Vulkan passes when [Main.Main.Performance] NvrDxvkPasses is on (or PassesOnRect at RenderScale < 1).
+	if (!ExtFailed && DxvkCompute::PassesOnRect()) {
 		auto extTimer = TimeLogger();
 		if (ExtRender(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer)) {
 			Device->SetRenderTarget(0, RenderTarget);

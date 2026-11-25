@@ -1,0 +1,933 @@
+// UNOFFICIAL 2026-11-21 (Phase 2): Vulkan Compute DeferredSun pass (Compute\DeferredSun.spv).
+// Replaces the D3D9 DeferredSun pixel shader pass + 224-constant/208-sampler save/restore + DeferredFog::FrameCopy
+// StretchRect + DEPTH output (which disables Early-Z). Runs natively at full resolution and RenderScale < 1.0 over
+// [viewport.xy, viewport.xy + viewport.zw). Fallback: Vm.on (DeferredFirstPerson), SunFadeDeferred::Fading,
+// non-PCF shadow modes, and SkylightingMode 1 remain on the D3D9 pass.
+// Compile: glslangValidator -V --target-env vulkan1.1 -o DeferredSun.spv DeferredSun.comp
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_albedo;        // TESR_AlbedoBuffer (RGBA16F)
+layout(set = 1, binding = 1) uniform texture2D t_material;      // TESR_MaterialBuffer (RGBA16F)
+layout(set = 1, binding = 2) uniform texture2D t_normals;       // TESR_CapturedNormalsBuffer (RGBA16F)
+layout(set = 1, binding = 3) uniform texture2D t_depth;         // TESR_DeferredDepthLinear (R32F) or INTZ
+layout(set = 1, binding = 4) uniform texture2D t_shadowAtlas;   // TESR_ShadowAtlas (stand-in t_depth if unavailable)
+layout(set = 1, binding = 5) uniform texture2D t_charShadowMap; // TESR_CharShadowMap (stand-in t_depth if unavailable)
+layout(set = 1, binding = 6) uniform texture2D t_cloudShadow;   // TESR_CloudShadow (stand-in t_depth if unavailable)
+layout(set = 1, binding = 7) uniform texture2D t_rtSunForward;  // TESR_RtSunForward (stand-in t_depth if unavailable)
+layout(set = 1, binding = 8, rgba16f) uniform image2D i_scene;    // Scene HDR RT0 (unbound from RT0 during dispatch)
+layout(set = 1, binding = 9, rgba16f) uniform image2D i_skinSpec; // DeferredSkin::Spec (or 1x1 dummy when inactive)
+
+layout(push_constant) uniform Push {
+    uint linearSampler;   // 0: LINEAR, CLAMP (cloud shadow)
+    uint pointSampler;    // 4: POINT, CLAMP (shadow atlas, char shadow, rt sun)
+    uint flags;           // 8: feature flags bitmask
+    uint pad;             // 12
+} pc;
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 viewport;               // 0: vp.X, vp.Y, vp.Width, vp.Height
+    vec4  dd[6];                  // 1..6: TESR_DeferredDepthFrame[0..5]
+    vec4  dsSun;                  // 7: DS_Sun (toSun.xyz, has)
+    vec4  dsSunColor;             // 8: DS_SunColor (sunColor.rgb, foliageW)
+    vec4  dsCtrl;                 // 9: DS_Ctrl (DebugView, linearDepth, Shadows, grassShadowFix)
+    vec4  dsDepth;                // 10: DS_Depth (_33, _43, 0.01, 2.0)
+    vec4  dsFog;                  // 11: DS_Fog (fog.rgb, fogExact)
+    vec4  dsLandSun;              // 12: DS_LandSun (landDir.xyz, valid)
+    vec4  dsLandColor;            // 13: DS_LandColor (landColor.rgb, valid)
+    vec4  dsVis;                  // 14: DS_Vis (LandCrackShadow, AuthoredHighlight, specFadeStart, specFadeInvRange)
+    vec4  terrainData;            // 15: TESR_TerrainData
+    vec4  terrainExtraData;       // 16: TESR_TerrainExtraData
+    vec4  terrainParallaxIso;     // 17: TESR_TerrainParallaxIso
+    vec4  pbrData;                // 18: TESR_PBRData
+    vec4  pbrExtraData;           // 19: TESR_PBRExtraData
+    vec4  linearLighting;         // 20: TESR_LinearLighting
+    vec4  pbrMath;                // 21: TESR_PBRMath
+    vec4  skinMaterial;           // 22: TESR_SkinMaterial
+    vec4  skinLook;               // 23: TESR_SkinLook
+    vec4  skinDebug;              // 24: TESR_SkinDebug
+    vec4  skinSSS;                // 25: TESR_SkinSSS
+    vec4  skyIrradiance[9];       // 26..34: TESR_SkyIrradianceObjects[0..8]
+    mat4  shadowNear;             // 35..38: TESR_ShadowCameraToLightTransformNear
+    mat4  shadowMiddle;           // 39..42: TESR_ShadowCameraToLightTransformMiddle
+    mat4  shadowFar;              // 43..46: TESR_ShadowCameraToLightTransformFar
+    mat4  shadowLod;              // 47..50: TESR_ShadowCameraToLightTransformLod
+    vec4  shadowNearCenter;       // 51: TESR_ShadowNearCenter
+    vec4  shadowMiddleCenter;     // 52: TESR_ShadowMiddleCenter
+    vec4  shadowFarCenter;        // 53: TESR_ShadowFarCenter
+    vec4  shadowLodCenter;        // 54: TESR_ShadowLodCenter
+    vec4  shadowFormatData;       // 55: TESR_ShadowFormatData
+    vec4  shadowFade;             // 56: TESR_ShadowFade
+    vec4  smoothedSunDir;         // 57: TESR_SmoothedSunDir
+    vec4  shadowBlur;             // 58: TESR_ShadowBlur
+    vec4  shadowForwardData;      // 59: TESR_ShadowForwardData
+    vec4  contactHardeningData;   // 60: TESR_ContactHardeningData
+    mat4  charShadowCameraToLight;// 61..64: TESR_CharShadowCameraToLight
+    vec4  charShadowCenter;       // 65: TESR_CharShadowCenter
+    vec4  charShadowData;         // 66: TESR_CharShadowData
+    vec4  cloudSun;               // 67: NVR_CloudSun
+    vec4  rtSunRowX;              // 68: TESR_RtSunRowX
+    vec4  rtSunRowY;              // 69: TESR_RtSunRowY
+    vec4  rtSunRowW;              // 70: TESR_RtSunRowW
+    vec4  rtSunData;              // 71: TESR_RtSunData
+} cb;
+
+// Flag bits (must match DeferredSun.h)
+const uint kFlagGBufferV2        = 1u << 0u;
+const uint kFlagLinearLighting   = 1u << 1u;
+const uint kFlagSkinEnabled      = 1u << 2u;
+const uint kFlagSkinSpecActive   = 1u << 3u;
+const uint kFlagFoliageEnabled   = 1u << 4u;
+const uint kFlagHairEnabled      = 1u << 5u;
+const uint kFlagDepthIsLinear    = 1u << 6u;
+const uint kFlagReversedZ        = 1u << 7u;
+const uint kFlagDepthAgree       = 1u << 8u;
+const uint kFlagForwardShadows   = 1u << 9u;
+const uint kFlagContactHardening = 1u << 10u;
+const uint kFlagCharShadowMap    = 1u << 11u;
+const uint kFlagRtSunLookup      = 1u << 12u;
+const uint kFlagRtSunFirst       = 1u << 13u;
+const uint kFlagSmithCorrelated  = 1u << 14u;
+const uint kFlagSmithCorrTest    = 1u << 15u;
+const uint kFlagDiffuseKeep      = 1u << 16u;
+const uint kFlagCloudSample      = 1u << 17u;
+const uint kFlagSlackCapAll      = 1u << 18u;
+
+bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
+
+const float kSunRadius = 0.00918043;
+const float kFdFoliageLeafBase = 16.0;
+const float kFdFoliageGrassBase = 32.0;
+const float kFdFoliageGrassTop = 1024.0;
+const float kFoliageSunCode = 2.0;
+const float kFoliageHighlightMax = 1.0;
+
+const float kSkinF0 = 0.028;
+const float kSkinLobe0 = 0.75;
+const float kSkinLobe1 = 1.3;
+const float kSkinLobeMix = 0.15;
+const vec3  kSkinTransmitTint = vec3(1.0, 0.28, 0.12);
+const float kSkinTransmitDistortion = 0.3;
+const float kSkinTransmitPower = 4.0;
+const vec3  kSkinPenumbraTint = vec3(0.3, 0.06, 0.04);
+const float kFdSkinCodeBase = 4.0;
+const float kFdSkinCodeMin = 3.5;
+
+const vec2 kContactDisc8[8] = vec2[8](
+    vec2( 0.2500,  0.0000), vec2(-0.3193,  0.2925), vec2( 0.0489, -0.5569), vec2( 0.4025,  0.5248),
+    vec2(-0.7385, -0.1306), vec2( 0.6997, -0.4451), vec2(-0.2340,  0.8705), vec2(-0.4467, -0.8590)
+);
+
+const vec2 kContactSearch[5] = vec2[5](
+    vec2(0.0, 0.0), vec2(0.73, 0.20), vec2(-0.20, 0.73), vec2(-0.73, -0.20), vec2(0.20, -0.73)
+);
+
+float shades(vec3 a, vec3 b) { return max(dot(a, b), 0.0); }
+
+vec3 LinColor(vec3 c) {
+    if (HasFlag(kFlagLinearLighting) && cb.linearLighting.x > 1.0) return pow(max(c, vec3(0.0)), vec3(cb.linearLighting.x));
+    return c;
+}
+vec3 LinEncode(vec3 c) {
+    if (HasFlag(kFlagLinearLighting) && cb.linearLighting.x > 1.0) return pow(max(c, vec3(0.0)), vec3(cb.linearLighting.y));
+    return c;
+}
+float LinScale(float s) {
+    if (HasFlag(kFlagLinearLighting) && cb.linearLighting.x > 1.0) return pow(max(s, 0.0), cb.linearLighting.x);
+    return s;
+}
+
+// ---- DeferredPixel / FoliageDeferred / SkinDeferred ----
+float FDModel(float r) {
+    const float m = floor(r + 0.01);
+    if (HasFlag(kFlagGBufferV2)) return m >= 15.5 ? m - 16.0 : m;
+    return m;
+}
+float FDFarLand(float r) {
+    const float f = r - floor(r);
+    const float step64 = 1.0 / 64.0;
+    return (f > 0.5 * step64 && f < 1.5 * step64) ? 1.0 : 0.0;
+}
+bool FDSunDeferredPixel(float a, float r) {
+    if (HasFlag(kFlagGBufferV2)) {
+        const float model = FDModel(r);
+        if (HasFlag(kFlagHairEnabled)) return a > 1.0001 && a < 2.0005 && (model < 8.5 || model > 10.5);
+        return a > 1.0001 && a < 2.0005 && (model < 7.5 || model > 10.5);
+    }
+    return a > 2.5 && a < 6.5;
+}
+float FDSunSpecular(float a, float r) {
+    if (HasFlag(kFlagGBufferV2)) return floor(r + 0.01) >= 15.5 ? 1.0 : 0.0;
+    return a < 4.5 ? 1.0 : 0.0;
+}
+float FDLightFreeKeep(float a) {
+    if (HasFlag(kFlagGBufferV2)) return saturate(a > 2.5 ? a - 3.0 : a - 1.0);
+    const float base = a < 4.5 ? 3.0 : a < 6.5 ? 5.0 : 7.0;
+    return saturate(a - base);
+}
+void FDSunVisDecode(float a, out float vis, out float f0) {
+    const float q = (a > 0.99 && a < 2.005) ? floor(abs(a - (a > 1.5 ? 2.0 : 1.0)) * 1024.0 + 0.5) : 0.0;
+    const float s = floor((q + 0.5) / 48.0);
+    vis = 1.0 - (q - 48.0 * s) / 47.0;
+    f0 = s > 0.5 ? (s - 1.0) * 0.01 : 0.04;
+}
+
+float FDFoliageIsGrass(float g) { return (g > kFdFoliageGrassBase - 0.01 && g < kFdFoliageGrassTop) ? 1.0 : 0.0; }
+float FDFoliageGrassIndex(float g) {
+    const float o = (g >= 63.99 ? 1.0 : 0.0) + (g >= 127.99 ? 1.0 : 0.0) + (g >= 255.99 ? 1.0 : 0.0) + (g >= 511.99 ? 1.0 : 0.0);
+    const float p = kFdFoliageGrassBase * (o > 0.5 ? 2.0 : 1.0) * (o > 1.5 ? 2.0 : 1.0) * (o > 2.5 ? 2.0 : 1.0) * (o > 3.5 ? 2.0 : 1.0);
+    return 1024.0 * o + floor((g / p - 1.0) * 1024.0 + 0.5);
+}
+float FDFoliageKeep(float g) {
+    return g < kFdFoliageGrassBase - 0.01 ? saturate(floor((g - kFdFoliageLeafBase) * 64.0 + 0.5) / 1023.0)
+                                          : floor(FDFoliageGrassIndex(g) / 40.0 + 1.0e-3) / 127.0;
+}
+float FDFoliageHighlightEnc(float g) {
+    const float i = FDFoliageGrassIndex(g);
+    return (i - 40.0 * floor(i / 40.0 + 1.0e-3)) / 39.0;
+}
+float FoliageSunWeightOf(float b) { return LinColor(vec3(max(b - kFoliageSunCode, 0.0))).x; }
+float FoliageHighlightOf(float enc) { return kFoliageHighlightMax * LinColor(vec3(saturate(enc))).x; }
+
+// ---- Depth / Normal decode ----
+vec3 ShadowDecodeNormal(vec2 e) {
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = clamp(-n.z, 0.0, 1.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+vec3 ShadowFacingNormal(vec3 n, vec3 worldPos) {
+    float len2 = dot(n, n);
+    n = len2 > 1.0e-6 ? n * inversesqrt(len2) : vec3(0.0, 0.0, 1.0);
+    return n * (dot(n, worldPos) > 0.0 ? -1.0 : 1.0);
+}
+vec3 DSShadingNormal(vec4 m, vec4 normals, out float bumped) {
+    if (HasFlag(kFlagGBufferV2)) {
+        bumped = abs(m.g) <= 1.001 ? 1.0 : 0.0;
+        return bumped > 0.5 ? ShadowDecodeNormal(m.ga) : ShadowDecodeNormal(normals.rg);
+    }
+    bumped = (m.a > 1.005 && m.a < 1.995) ? 1.0 : 0.0;
+    return bumped > 0.5 ? ShadowDecodeNormal(vec2(m.g, (m.a - 1.01) / 0.49 - 1.0)) : ShadowDecodeNormal(normals.rg);
+}
+float GBufferRoughness(float b) {
+    return (b >= 0.0 && b <= 1.0) ? b : (b <= -1.99 && b >= -3.01) ? (-2.0 - b) : 1.0;
+}
+float DDViewZ(float device, float dd2w, float dd4w) {
+    float den = device - dd2w;
+    if (abs(den) < 1.0e-12) den = dd4w < 0.0 ? -1.0e-12 : 1.0e-12;
+    return dd4w / den;
+}
+vec3 DDRay(vec2 vpos) {
+    const vec2 local = (vpos - cb.dd[3].zw) * cb.dd[3].xy;
+    const vec2 ndc = vec2(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0) - cb.dd[5].xy;
+    return cb.dd[2].xyz + cb.dd[0].xyz * (ndc.x * cb.dd[0].w) + cb.dd[1].xyz * (ndc.y * cb.dd[1].w);
+}
+
+// ---- PBR (PBR.hlsl + Object.hlsl) ----
+vec3 ReflectivityF0(vec3 f0) { return clamp(f0 + f0 * cb.pbrMath.y, 0.0, 1.0); }
+vec3 RoughReflectivityF90(vec3 f0, float r, float metal) {
+    const vec3 f90 = vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0));
+    return max(f90 * (1.0 - clamp(r, 0.0, 1.0) * clamp(1.0 - metal, 0.0, 1.0)), f0);
+}
+vec3 Fresnel(vec3 f0, vec3 f90, float cosT) {
+    float omc = 1.0 - cosT;
+    float omc2 = omc * omc;
+    return f0 + (f90 - f0) * (omc2 * omc2 * omc);
+}
+float GGXPi(float nh, float r) {
+    float r2 = r * r;
+    float aSq = r2 * r2;
+    float dTerm = max((nh * aSq - nh) * nh + 1.0, 1.0e-5);
+    return aSq / (dTerm * dTerm);
+}
+vec3 BRDFPi(float r, vec3 F, float nv, float nl, float nh, bool allowSmith) {
+    const float dPi = GGXPi(nh, r);
+    if (allowSmith && (HasFlag(kFlagSmithCorrelated) || HasFlag(kFlagSmithCorrTest))) {
+        const float r2 = r * r;
+        const float aSq = r2 * r2;
+        const float visV = nl * sqrt(nv * nv * (1.0 - aSq) + aSq);
+        const float visL = nv * sqrt(nl * nl * (1.0 - aSq) + aSq);
+        const vec3 corr = dPi * (0.5 / (visV + visL)) * F;
+        if (!HasFlag(kFlagSmithCorrTest)) return corr;
+        const float rp1 = r + 1.0;
+        const float kk = (rp1 * rp1) * 0.125;
+        const float invK = 1.0 - kk;
+        const vec3 legacy = dPi * (0.25 / ((nv * invK + kk) * (nl * invK + kk))) * F;
+        return legacy + (corr - legacy) * cb.pbrMath.x;
+    }
+    const float rp1 = r + 1.0;
+    const float kk = (rp1 * rp1) * 0.125;
+    const float invK = 1.0 - kk;
+    const float vis = 0.25 / ((nv * invK + kk) * (nl * invK + kk));
+    return dPi * vis * F;
+}
+float SmithCorrelatedKeep(float NdotV, float roughness) {
+    const float rc = max(roughness, 0.056);
+    const float sq = sqrt(clamp(NdotV, 0.02, 1.0));
+    const float q0 = 0.8720785 + sq * (2.377077 + sq * (-15.78768 + sq * (20.7581 + sq * (-8.469884 + sq * 0.2183369))));
+    const float q1 = -2.350215 + sq * (6.164611 + sq * (12.53951 + sq * (-24.69559 + sq * 9.321004)));
+    const float q2 = -4.584592 + sq * (-17.91134 + sq * (14.6047 + sq * 0.8975321));
+    const float q3 = 20.67309 + sq * (6.171803 + sq * (-8.573712));
+    const float q4 = -22.05094 + sq * 2.260031;
+    const float q5 = 7.527356;
+    const float surplus = q0 + rc * (q1 + rc * (q2 + rc * (q3 + rc * (q4 + rc * q5))));
+    const float r2 = roughness * roughness;
+    const float lossClamp = 1.0 - min(1.0e5 * r2 * r2, 1.0);
+    return 1.0 - clamp(surplus * (1.0 - lossClamp * lossClamp), 0.0, 1.0);
+}
+float DiffuseEnergyKeep(float NdotV, float roughness) {
+    if (HasFlag(kFlagSmithCorrTest)) return 1.0 + (SmithCorrelatedKeep(NdotV, roughness) - 1.0) * cb.pbrMath.x;
+    if (HasFlag(kFlagSmithCorrelated)) return SmithCorrelatedKeep(NdotV, roughness);
+    if (!HasFlag(kFlagDiffuseKeep)) return 1.0;
+    const float tv = clamp((NdotV - 0.055) * (1.0 / 0.525), 0.0, 1.0);
+    const float rx = clamp((0.53 - roughness) * (1.0 / 0.461), 0.0, 1.0);
+    const float lowRough = clamp((roughness - 0.02) * (1.0 / 0.05), 0.0, 1.0);
+    const float inv = 1.0 - tv;
+    const float bump = rx * lowRough * tv * inv * inv * ((0.10380582 + 0.69366243 * rx) + tv * (0.27762281 - 0.88561283 * rx));
+    return cb.pbrMath.x > 0.5 ? 1.0 - bump * (1.0 / 0.95) : 1.0;
+}
+
+vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith) {
+    const float dielDiff = min(specF0Diel, 0.04);
+    const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), baseColor, metal));
+    const vec3 nrm = normalize(N);
+    const vec3 viewV = normalize(V);
+    const vec3 toLight = normalize(L);
+    const vec3 mirrorDir = reflect(toLight, nrm);
+    const float discSin = sin(kSunRadius);
+    const float discCos = cos(kSunRadius);
+    const float LdotR = dot(toLight, mirrorDir);
+    const vec3 offAxis = mirrorDir - LdotR * toLight;
+    const vec3 offAxisDir = dot(offAxis, offAxis) > 1.0e-12 ? normalize(offAxis) : vec3(0.0);
+    const vec3 sunDirV = LdotR < discCos ? normalize(discCos * toLight + offAxisDir * discSin) : mirrorDir;
+
+    const vec3 halfV = normalize(viewV + sunDirV);
+    const float NdotS = max(shades(nrm, sunDirV), 0.00001);
+    const float NdotV = max(shades(nrm, viewV), 0.00001);
+    const float NdotH = shades(nrm, halfV);
+    const float NdotL = shades(nrm, toLight);
+    const float LdotH = shades(toLight, halfV);
+
+    const vec3 fres = Fresnel(f0Base, RoughReflectivityF90(f0Base, r, metal), LdotH);
+    const float diffKeep = DiffuseEnergyKeep(NdotV, r);
+    const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
+
+    vec3 fresSpec = fres;
+    if (specF0Diel != dielDiff) {
+        const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), baseColor, metal));
+        fresSpec = Fresnel(f0Spec, RoughReflectivityF90(f0Spec, r, metal), LdotH);
+    }
+    const vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH, allowSmith);
+    return (diff * NdotL + specOut * NdotS) * radiance;
+}
+
+vec3 GetSunLightingModel(float specular, vec3 toSun, vec3 radiance, vec3 toEye, vec3 N, vec3 baseColor, float r, float metal, float specF0Diel, float specFade) {
+    const vec3 scaled = radiance * LinScale(cb.pbrData.z);
+    const vec3 graded = mix(vec3(luma(baseColor)), baseColor, cb.pbrExtraData.x);
+    if (specular > 0.5) {
+        const vec3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled, specF0Diel, true);
+        if (specFade < 0.9999) {
+            return mix((1.0 - metal) * graded * shades(normalize(N), normalize(toSun)) * scaled, sunLit, specFade);
+        }
+        return sunLit;
+    }
+    return (1.0 - metal) * graded * (shades(normalize(N), normalize(toSun)) * scaled);
+}
+
+vec3 LandSun(vec3 L, vec3 sunLin, vec3 V, vec3 N, vec3 albedo, float r) {
+    if (cb.terrainExtraData.x != 0.0) {
+        const vec3 graded = mix(vec3(luma(albedo)), albedo, cb.terrainExtraData.y);
+        return max(vec3(0.0), PBRSun(clamp(cb.terrainData.x, 0.0, 1.0), r, graded, N, V, L, sunLin * LinScale(cb.terrainData.z), 0.04, false));
+    }
+    return albedo * shades(N, L) * sunLin;
+}
+
+// ---- Skin (SkinDeferred.hlsl + Skin.hlsl) ----
+void FDSkinDecode(float a, out float mask, out float thin, out float soft) {
+    const float o = floor(log2(max(a, kFdSkinCodeBase) / kFdSkinCodeBase) + 1.0e-4);
+    const float i = 1024.0 * o + floor((a / (kFdSkinCodeBase * exp2(o)) - 1.0) * 1024.0 + 0.5);
+    const float mq = floor((i + 0.5) / 384.0);
+    const float rest = i - mq * 384.0;
+    const float cq = floor((rest + 0.5) / 16.0);
+    const float bq = rest - cq * 16.0;
+    mask = mq / 31.0;
+    thin = (cq / 23.0) * (cq / 23.0);
+    soft = bq / 15.0;
+}
+float SkinVanillaMatch() {
+    const float r0 = clamp(cb.skinMaterial.y * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(cb.skinMaterial.y * kSkinLobe1, 0.04, 1.0);
+    const float a0 = r0 * r0, a1 = r1 * r1;
+    const float peak = mix(kSkinF0 / (4.0 * a0 * a0), kSkinF0 / (4.0 * a1 * a1), kSkinLobeMix);
+    const float matched = clamp(1.0 / (2.0 * peak), 1.0, 12.0);
+    return mix(1.0, matched, clamp(cb.skinLook.w, 0.0, 1.0));
+}
+vec3 SkinSGIrradiance(vec3 NdotL, vec3 lambda) {
+    const float c0 = 0.36;
+    const float c1 = 1.0 / (4.0 * c0);
+    const vec3 eml = exp(-lambda);
+    const vec3 em2l = eml * eml;
+    const vec3 rl = 1.0 / lambda;
+    const vec3 scale = 1.0 + 2.0 * em2l - rl;
+    const vec3 bias = (eml - em2l) * rl - em2l;
+    const vec3 x = sqrt(max(vec3(1.0) - scale, vec3(1.0e-8)));
+    const vec3 x0 = c0 * NdotL;
+    const vec3 x1 = c1 * x;
+    const vec3 n = x0 + x1;
+    const vec3 y = mix(clamp(NdotL, 0.0, 1.0), (n * n) / x, lessThanEqual(abs(x0), x1));
+    return clamp(scale * y + bias, 0.0, 1.0);
+}
+vec3 SkinDiffusion(vec3 N, vec3 Nsoft, vec3 L, float skinCurvature) {
+    const vec3 normalGreen = normalize(mix(N, Nsoft, 0.6));
+    const vec3 normalBlue = normalize(mix(N, Nsoft, 0.3));
+    const vec3 NdotL = vec3(dot(Nsoft, L), dot(normalGreen, L), dot(normalBlue, L));
+    if (skinCurvature > 0.002) {
+        const float c = skinCurvature;
+        const vec3 lambda = vec3(2.4 * pow(c, -1.5), 28.0 / (c * c), 71.0 / (c * c));
+        return SkinSGIrradiance(NdotL, lambda);
+    }
+    return clamp(NdotL, 0.0, 1.0);
+}
+vec3 SkinShadow(float sh) {
+    const float penumbra = sh * (1.0 - sh) * 4.0;
+    return clamp(vec3(sh) + penumbra * kSkinPenumbraTint * cb.skinLook.z, 0.0, 1.0);
+}
+vec3 SkinLinearColor(vec3 c) { return LinColor(sqrt(max(c, vec3(0.0)))); }
+vec3 SkinSunSpecularDir(vec3 N, vec3 V, vec3 L) {
+    const vec3 r = reflect(-V, N);
+    const vec3 centerToRay = dot(L, r) * r - L;
+    return normalize(L + centerToRay * clamp(kSunRadius / max(length(centerToRay), 1.0e-5), 0.0, 1.0));
+}
+float SkinSunNormalization(float roughness) {
+    const float alpha = roughness * roughness;
+    const float ratio = alpha / clamp(alpha + kSunRadius * 0.5, 0.0, 1.0);
+    return ratio * ratio;
+}
+vec3 SkinSpecularSun(vec3 N, vec3 V, vec3 L, vec3 light, float skinRough, float skinSpecScale) {
+    const float r0 = clamp(skinRough * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(skinRough * kSkinLobe1, 0.04, 1.0);
+    L = SkinSunSpecularDir(N, V, L);
+    const float n0 = SkinSunNormalization(r0);
+    const float n1 = SkinSunNormalization(r1);
+    const vec3 H = normalize(V + L);
+    const float NdotL = max(shades(N, L), 0.00001);
+    const float NdotV = max(shades(N, V), 0.00001);
+    const float NdotH = shades(N, H);
+    const float LdotH = shades(L, H);
+    const vec3 fres = Fresnel(vec3(kSkinF0), vec3(1.0), LdotH);
+    const vec3 lobes = mix(BRDFPi(r0, fres, NdotV, NdotL, NdotH, false) * n0,
+                           BRDFPi(r1, fres, NdotV, NdotL, NdotH, false) * n1, kSkinLobeMix);
+    return lobes * (NdotL * skinSpecScale * SkinVanillaMatch()) * light;
+}
+vec3 SkinSunLight(vec3 albedo, vec3 N, vec3 Ngeo, vec3 Nsoft, vec3 V, vec3 L, vec3 light, float shadow,
+                  float skinRough, float skinSpecScale, float skinThinness, float skinCurvature, out vec3 specular) {
+    L = normalize(L);
+    const float geometricNdotL = dot(Ngeo, L);
+    const vec3 scattered = SkinDiffusion(N, Nsoft, L, skinCurvature);
+    const vec3 direct = min(scattered, vec3(clamp(dot(N, L), 0.0, 1.0)));
+    const vec3 wrapped = scattered - direct;
+    float selfShadowed = clamp((0.05 - geometricNdotL) / 0.15, 0.0, 1.0);
+    selfShadowed = selfShadowed * selfShadowed * (3.0 - 2.0 * selfShadowed) * clamp(cb.skinLook.z, 0.0, 1.0);
+    const vec3 shadowColor = SkinShadow(shadow);
+    const vec3 diffuse = albedo * (direct * shadowColor + wrapped * mix(shadowColor, vec3(1.0), selfShadowed));
+    const float thin = smoothstep(0.3, 0.9, skinThinness);
+    const float farSide = clamp(0.3 - geometricNdotL, 0.0, 1.0);
+    const vec3 transmitDir = normalize(L + Nsoft * kSkinTransmitDistortion);
+    const float back = pow(clamp(dot(V, -transmitDir), 0.0, 1.0), kSkinTransmitPower);
+    const vec3 transmitted = albedo * SkinLinearColor(kSkinTransmitTint) * (back * thin * farSide * cb.skinMaterial.w * shadow);
+    specular = SkinSpecularSun(N, V, L, light, skinRough, skinSpecScale) * shadow;
+    return (diffuse + transmitted) * light;
+}
+vec3 FDSkinSunTransmission(vec3 P, vec3 Ngeo, vec3 L, vec3 albedo, vec3 light) {
+    if (cb.skinSSS.w < 0.5 || cb.shadowFormatData.z == 0.0 || cb.shadowFade.y == 0.0 ||
+        length(P - cb.shadowNearCenter.xyz) >= cb.shadowNearCenter.w) {
+        return vec3(0.0);
+    }
+    const float farSide = clamp(0.3 - dot(Ngeo, L), 0.0, 1.0);
+    if (farSide <= 0.0) return vec3(0.0);
+    vec4 ls = cb.shadowNear * vec4(P, 1.0);
+    ls.xyz /= ls.w;
+    const vec2 uv = vec2(ls.x * 0.5 + 0.5, ls.y * -0.5 + 0.5) * 0.5;
+    const float occluder = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).x;
+    const float worldPerDepth = 1.0 / length(vec3(cb.shadowNear[0][2], cb.shadowNear[1][2], cb.shadowNear[2][2]));
+    const float t = max(ls.z - occluder, 0.0) * worldPerDepth;
+    const vec3 d = max(cb.skinSSS.xyz, vec3(1.0e-3));
+    const vec3 through = 0.25 * exp(-t / d) + 0.75 * exp(-t / (3.0 * d));
+    const float entered = clamp(t / max(d.r, 1.0e-3), 0.0, 1.0);
+    return albedo * through * (entered * farSide * cb.skinMaterial.w) * light;
+}
+vec3 SkyAmbientRadianceSH(vec3 N) {
+    vec3 E = cb.skyIrradiance[0].rgb
+         + cb.skyIrradiance[1].rgb * N.y
+         + cb.skyIrradiance[2].rgb * N.z
+         + cb.skyIrradiance[3].rgb * N.x
+         + cb.skyIrradiance[4].rgb * (N.x * N.y)
+         + cb.skyIrradiance[5].rgb * (N.y * N.z)
+         + cb.skyIrradiance[6].rgb * (3.0 * N.z * N.z - 1.0)
+         + cb.skyIrradiance[7].rgb * (N.x * N.z)
+         + cb.skyIrradiance[8].rgb * (N.x * N.x - N.y * N.y);
+    return sqrt(max(E, vec3(0.0)));
+}
+vec3 SkyAmbientSharpSH(vec3 dir) {
+    vec3 radiance = cb.skyIrradiance[0].rgb
+         + 1.5 * (cb.skyIrradiance[1].rgb * dir.y + cb.skyIrradiance[2].rgb * dir.z + cb.skyIrradiance[3].rgb * dir.x)
+         + 4.0 * (cb.skyIrradiance[4].rgb * (dir.x * dir.y) + cb.skyIrradiance[5].rgb * (dir.y * dir.z)
+                + cb.skyIrradiance[6].rgb * (3.0 * dir.z * dir.z - 1.0) + cb.skyIrradiance[7].rgb * (dir.x * dir.z)
+                + cb.skyIrradiance[8].rgb * (dir.x * dir.x - dir.y * dir.y));
+    return sqrt(max(radiance, vec3(0.0)));
+}
+vec3 EnvBRDFApprox(vec3 f0, float roughness, float NdotV) {
+    const vec4 k0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 k1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+    vec4 mixed = roughness * k0 + k1;
+    float bias0 = min(mixed.x * mixed.x, exp2(-9.28 * NdotV)) * mixed.x + mixed.y;
+    vec2 scaleBias = vec2(-1.04, 1.04) * bias0 + mixed.zw;
+    return f0 * scaleBias.x + scaleBias.y;
+}
+vec3 SkinSkyReflection(vec3 V, vec3 geometricNormal, vec3 N, float skinRough, float skinSpecScale) {
+    const vec3 r = reflect(-V, N);
+    const float NdotV = clamp(dot(N, V), 0.0, 1.0);
+    float horizon = clamp(1.0 + 1.2 * dot(r, geometricNormal), 0.0, 1.0);
+    horizon *= horizon;
+    const float r0 = clamp(skinRough * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(skinRough * kSkinLobe1, 0.04, 1.0);
+    const float response = mix(EnvBRDFApprox(vec3(kSkinF0), r0, NdotV), EnvBRDFApprox(vec3(kSkinF0), r1, NdotV), kSkinLobeMix).x;
+    const float weight = response * horizon * skinSpecScale * cb.skinLook.x;
+    const vec3 plain = SkyAmbientRadianceSH(r);
+    vec3 sharp = SkyAmbientSharpSH(r);
+    sharp = mix(sharp, max(sharp, plain), clamp(-r.z, 0.0, 1.0));
+    const vec3 rad0 = mix(sharp, plain, r0);
+    const vec3 rad1 = mix(sharp, plain, r1);
+    const vec3 radiance = mix(rad0, rad1, kSkinLobeMix);
+    return LinColor(radiance) * (LinScale(cb.pbrExtraData.y) * weight);
+}
+
+// ---- Sun Shadows (Shadow.hlsl Mode 3 PCF + Contact Hardening PCSS + CharacterMapShadow + RT Sun + Clouds) ----
+vec4 ShadowCascadeBands(vec4 radii) {
+    return max(0.1 * radii, min(vec4(cb.shadowForwardData.w), radii));
+}
+vec3 ShadowAtlasPoint(vec4 clipL, vec2 quad) {
+    clipL.xyz /= clipL.w;
+    vec2 uv01 = vec2(clipL.x * 0.5 + 0.5, clipL.y * -0.5 + 0.5);
+    return vec3(uv01 * 0.5 + quad, clipL.z);
+}
+float ShadowSlack(float n, float slopeBias, float slackCap, bool useCap) {
+    return useCap ? min(n * slopeBias, slackCap) : (n * slopeBias);
+}
+float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slackCap, bool useCap) {
+    const float texW = cb.shadowBlur.x;
+    const vec2 uvLo = quad + texW * 0.5;
+    const vec2 uvHi = quad + 0.5 - texW * 0.5;
+    if (cb.shadowBlur.z > 0.0) {
+        vec2 q = uv / texW - 0.5;
+        vec2 b = floor(q);
+        vec2 t = q - b;
+        vec2 t2 = t * t, t3 = t2 * t;
+        vec4 cx = vec4((1.0 - t.x) * (1.0 - t.x) * (1.0 - t.x), 3.0 * t3.x - 6.0 * t2.x + 4.0, -3.0 * t3.x + 3.0 * t2.x + 3.0 * t.x + 1.0, t3.x) / 6.0;
+        vec4 cy = vec4((1.0 - t.y) * (1.0 - t.y) * (1.0 - t.y), 3.0 * t3.y - 6.0 * t2.y + 4.0, -3.0 * t3.y + 3.0 * t2.y + 3.0 * t.y + 1.0, t3.y) / 6.0;
+        float cubicDepth = depth - (ShadowSlack(2.0, slopeBias, slackCap, useCap) - ShadowSlack(1.5, slopeBias, slackCap, useCap));
+        float cubic = 0.0;
+        for (int cyi = 0; cyi < 4; cyi++) {
+            for (int cxi = 0; cxi < 4; cxi++) {
+                vec2 tapUV = clamp((b + vec2(float(cxi - 1), float(cyi - 1)) + 0.5) * texW, uvLo, uvHi);
+                cubic += (cubicDepth <= textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * cx[cxi] * cy[cyi];
+            }
+        }
+        return cubic;
+    }
+    vec2 p = uv / texW - 0.5;
+    vec2 c = floor(p + 0.5);
+    vec2 f = p - c;
+    vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
+    vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
+    float lit = 0.0;
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 3; x++) {
+            vec2 tapUV = clamp((c + vec2(float(x - 1), float(y - 1)) + 0.5) * texW, uvLo, uvHi);
+            lit += (depth <= textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * wx[x] * wy[y];
+        }
+    }
+    return lit;
+}
+float ShadowPCF2x2Clamped(vec2 uv, float depth, vec2 uvLo, vec2 uvHi) {
+    const float texW = cb.shadowBlur.x;
+    vec2 p = uv / texW - 0.5;
+    vec2 base = floor(p);
+    vec2 f = p - base;
+    vec2 uv0 = (base + 0.5) * texW;
+    vec4 d = vec4(
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0, uvLo, uvHi), 0.0).x,
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texW, 0.0), uvLo, uvHi), 0.0).x,
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(0.0, texW), uvLo, uvHi), 0.0).x,
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + texW, uvLo, uvHi), 0.0).x
+    );
+    vec4 lit = vec4(lessThanEqual(vec4(depth), d));
+    return mix(mix(lit.x, lit.y, f.x), mix(lit.z, lit.w, f.x), f.y);
+}
+float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float bias, bool contact,
+                            float slopeBias, float slackCap, bool useCap, float softnessCap, float minPenumbra) {
+    vec4 lightSpace = lightTransform * vec4(position, 1.0);
+    lightSpace.xyz /= lightSpace.w;
+    vec2 uv = vec2(lightSpace.x * 0.5 + 0.5, lightSpace.y * -0.5 + 0.5) * 0.5 + quad;
+    float depth = lightSpace.z - bias;
+    if (!HasFlag(kFlagContactHardening)) {
+        return ShadowPCF3x3(uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
+    }
+    float worldPerDepth = 1.0 / length(vec3(lightTransform[0][2], lightTransform[1][2], lightTransform[2][2]));
+    float uvPerWorld = 0.25 * length(vec3(lightTransform[0][0], lightTransform[1][0], lightTransform[2][0]));
+    float texW = cb.shadowBlur.x;
+    float maxRadius = cb.contactHardeningData.y * softnessCap * texW;
+    vec2 uvLo = quad + texW * 0.5;
+    vec2 uvHi = quad + 0.5 - texW * 0.5;
+    float radius = 0.0;
+    if (contact) {
+        float casterSum = 0.0, casters = 0.0;
+        float searchDepth = depth - ShadowSlack(0.73 * cb.contactHardeningData.y * softnessCap + 1.0, slopeBias, slackCap, useCap);
+        for (int s = 0; s < 5; s++) {
+            float d = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv + kContactSearch[s] * maxRadius, uvLo, uvHi), 0.0).x;
+            float blocks = d < searchDepth ? 1.0 : 0.0;
+            casterSum += d * blocks;
+            casters += blocks;
+        }
+        float distance = max(depth - casterSum / max(casters, 1.0), 0.0) * worldPerDepth;
+        radius = (casters < 0.5 || casters > 4.5) ? 0.0 : min(0.5 * distance * cb.contactHardeningData.x * uvPerWorld, maxRadius);
+        if (minPenumbra > 0.0 && casters > 0.5 && casters < 4.5) {
+            radius = max(radius, min(minPenumbra * uvPerWorld, 0.73 * maxRadius));
+        }
+    }
+    float w3 = cb.contactHardeningData.z > 0.0 ? saturate(2.0 - radius / texW) : (radius <= texW ? 1.0 : 0.0);
+    float lit = 0.0;
+    if (w3 > 0.0) lit = w3 * ShadowPCF3x3(uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
+    if (w3 < 1.0) {
+        float discDepth = depth - ShadowSlack(radius / texW + 1.0, slopeBias, slackCap, useCap);
+        vec2 turn = vec2(1.0, 0.0);
+        if (cb.contactHardeningData.z > 0.0) {
+            float ang = 6.2831853 * fract(52.9829189 * fract(dot(floor(uv / texW * 3.0), vec2(0.06711056, 0.00583715))));
+            turn = vec2(cos(ang), sin(ang));
+        }
+        float disc = ShadowPCF2x2Clamped(uv, discDepth, uvLo, uvHi);
+        for (int i = 0; i < 8; i++) {
+            vec2 o = kContactDisc8[i];
+            disc += ShadowPCF2x2Clamped(uv + vec2(o.x * turn.x - o.y * turn.y, o.x * turn.y + o.y * turn.x) * radius, discDepth, uvLo, uvHi);
+        }
+        lit += (1.0 - w3) * disc / 9.0;
+    }
+    return lit;
+}
+float SunCascadeTap(float c, vec3 worldPos, vec3 worldNormal, float offset, float bias,
+                    float slopeBias, float slackCap, bool useCap, float softnessCap, float minPenumbra) {
+    mat4 lightTransform = c < 0.5 ? cb.shadowNear : c < 1.5 ? cb.shadowMiddle : c < 2.5 ? cb.shadowFar : cb.shadowLod;
+    vec2 quadrant = c < 0.5 ? vec2(0.0, 0.0) : c < 1.5 ? vec2(0.5, 0.0) : c < 2.5 ? vec2(0.0, 0.5) : vec2(0.5, 0.5);
+    vec3 position = worldPos + offset * worldNormal;
+    bool doContact = HasFlag(kFlagContactHardening) && (c < 1.5) && (cb.contactHardeningData.x > 0.0 || minPenumbra > 0.0);
+    return SampleShadowAtlasPCSS(position, lightTransform, quadrant, bias, doContact, slopeBias, slackCap, useCap, softnessCap, minPenumbra);
+}
+float CharacterMapShadow(vec3 worldPos, vec3 worldNormal, float NdotL, float cascadeShadow) {
+    float texel = max(cb.charShadowData.x, 1.0 / 16384.0);
+    float halfExtent = max(cb.charShadowCenter.w, 1.0);
+    float pushScale = saturate(1.0 - NdotL);
+    vec3 position = worldPos + worldNormal * (pushScale * 1.5 * 2.0 * halfExtent * texel);
+    vec4 lightSpace = cb.charShadowCameraToLight * vec4(position, 1.0);
+    float edge = max(abs(lightSpace.x), abs(lightSpace.y));
+    float band = max(cb.charShadowData.y, 0.01);
+    float weight = 1.0 - smoothstep(1.0 - band, 1.0, edge);
+    if (weight <= 0.0) return cascadeShadow;
+    vec2 uv = vec2(lightSpace.x * 0.5 + 0.5, lightSpace.y * -0.5 + 0.5);
+    float slope = min(sqrt(saturate(1.0 - NdotL * NdotL)) / max(NdotL, 0.05), 5.0);
+    float depth = min(lightSpace.z, 0.9999) - cb.charShadowData.z - 1.5 * texel * slope;
+    vec2 lo = vec2(texel * 0.5);
+    vec2 hi = vec2(1.0 - texel * 0.5);
+    float lit = 0.0;
+    if (cb.charShadowData.w < 0.75) {
+        vec2 q = uv / texel;
+        vec2 first = floor(q - 0.5) - 2.0;
+        float total = 0.0;
+        for (int ty = 0; ty < 6; ty++) {
+            float y = first.y + float(ty);
+            float wy = max(2.5 - abs(y + 0.5 - q.y), 0.0);
+            for (int tx = 0; tx < 6; tx++) {
+                float x = first.x + float(tx);
+                float w = max(2.5 - abs(x + 0.5 - q.x), 0.0) * wy;
+                vec2 tapUV = clamp((vec2(x, y) + 0.5) * texel, lo, hi);
+                lit += depth <= textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? w : 0.0;
+                total += w;
+            }
+        }
+        return mix(cascadeShadow, min(cascadeShadow, lit / max(total, 0.0001)), weight);
+    }
+    vec2 p = uv / texel - 0.5;
+    vec2 c = floor(p + 0.5);
+    vec2 f = p - c;
+    vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
+    vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 3; x++) {
+            vec2 tapUV = clamp((c + vec2(float(x - 1), float(y - 1)) + 0.5) * texel, lo, hi);
+            lit += (depth <= textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * wx[x] * wy[y];
+        }
+    }
+    if (cb.charShadowData.w > 1.5) {
+        if (cb.charShadowData.w > 3.5) return saturate(lightSpace.z);
+        if (cb.charShadowData.w > 2.5) return textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), clamp(uv, lo, hi), 0.0).x;
+        return lit;
+    }
+    return mix(cascadeShadow, min(cascadeShadow, lit), weight);
+}
+float DSCloudSunAt(vec3 P, float strength) {
+    vec3 light = normalize(cb.smoothedSunDir.xyz);
+    vec2 suv = cb.cloudSun.xy + (P.xy - light.xy * (P.z / max(light.z, 0.25))) * cb.cloudSun.z;
+    vec2 edge = min(suv, 1.0 - suv);
+    float inside = saturate(min(edge.x, edge.y) * 10.0);
+    return mix(1.0, textureLod(sampler2D(t_cloudShadow, NVR_SAMPLER(pc.linearSampler)), suv, 0.0).r, inside * strength);
+}
+float GetSunShadowMaps(vec3 P, vec3 Nw, bool skinPx) {
+    if (!HasFlag(kFlagForwardShadows) || cb.shadowForwardData.x != 0.0 || cb.shadowFormatData.z == 0.0 ||
+        cb.shadowFade.y == 0.0 || cb.shadowFormatData.x != 3.0) {
+        return 1.0;
+    }
+    float nDL = dot(Nw, cb.smoothedSunDir.xyz);
+    float offS = saturate(1.0 - nDL);
+    vec4 rad = vec4(cb.shadowNearCenter.w, cb.shadowMiddleCenter.w, cb.shadowFarCenter.w, cb.shadowLodCenter.w);
+    vec4 tw = 4.0 * rad * max(cb.shadowBlur.x, 1.0 / 16384.0);
+    vec4 offD = offS * 1.5 * tw;
+    float slopeBias = 2.0 * cb.shadowBlur.x * min(sqrt(saturate(1.0 - nDL * nDL)) / max(nDL, 0.05), 5.0);
+    float charReach = (HasFlag(kFlagSlackCapAll) ? cb.shadowBlur.w : (HasFlag(kFlagSkinEnabled) && skinPx ? cb.shadowBlur.w : 0.0));
+    bool useCap = charReach > 0.0;
+    float slackCap = 1.0e9;
+    if (useCap) {
+        offD = min(offD, charReach * rad / max(rad.x, 0.001));
+        slackCap = charReach / (2.0 * max(rad.x, 0.001) * max(nDL, 0.2));
+    }
+    float minPenumbra = (HasFlag(kFlagSkinEnabled) && skinPx) ? cb.shadowForwardData.z : 0.0;
+    float bi = 0.0002 * (1.0 + offS);
+    vec4 st = rad - ShadowCascadeBands(rad);
+    vec4 dst;
+    dst.x = length(P - cb.shadowNearCenter.xyz);
+    dst.y = length(P - cb.shadowMiddleCenter.xyz);
+    dst.z = length(P - cb.shadowFarCenter.xyz);
+    dst.w = length(P - cb.shadowLodCenter.xyz);
+
+    float cascade = -1.0, fade = 0.0;
+    if (dst.x < rad.x) { cascade = 0.0; fade = smoothstep(st.x, rad.x, dst.x); }
+    else if (dst.y < rad.y) { cascade = 1.0; fade = smoothstep(st.y, rad.y, dst.y); }
+    else if (dst.z < rad.z) { cascade = 2.0; fade = smoothstep(st.z, rad.z, dst.z); }
+    else if (dst.w < rad.w) { cascade = 3.0; fade = smoothstep(st.w, rad.w, dst.w); }
+    float offsetHere = cascade < 0.5 ? mix(offD.x, offD.y, fade) : cascade < 1.5 ? mix(offD.y, offD.z, fade) :
+                       cascade < 2.5 ? mix(offD.z, offD.w, fade) : offD.w;
+    float slackScale = cascade < 0.5 ? mix(rad.x / max(rad.y, 0.001), 1.0, fade) : 1.0;
+
+    // NVR_NO_SM3_LIMITS smooth handover blend (no temp register limit in Vulkan compute)
+    float sh = 1.0;
+    if (cascade >= 0.0 && cascade < 3.5) {
+        sh = SunCascadeTap(cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
+        if (fade > 0.0) {
+            float next = 1.0;
+            if (cascade < 2.5) {
+                next = SunCascadeTap(cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
+            }
+            sh = mix(sh, next, fade);
+        }
+    }
+    sh = saturate(sh);
+    if (HasFlag(kFlagCharShadowMap) && cb.charShadowData.w > 0.0) {
+        sh = CharacterMapShadow(P, Nw, nDL, sh);
+    }
+    sh = mix(sh, 1.0, saturate(cb.shadowFade.x));
+    return sh;
+}
+float GetSunShadow(vec3 P, vec3 Nw, bool skinPx) {
+    if (HasFlag(kFlagRtSunLookup) && HasFlag(kFlagRtSunFirst)) {
+        if (cb.rtSunData.x > 0.0 && cb.shadowForwardData.x == 0.0 && cb.rtSunData.y >= 0.0) {
+            vec4 Q = vec4(P, 1.0);
+            float w = dot(Q, cb.rtSunRowW);
+            vec2 uv = vec2(dot(Q, cb.rtSunRowX), dot(Q, cb.rtSunRowY)) / max(w, 1.0);
+            vec2 texel = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).rg;
+            bool seen = w > 1.0 && uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= cb.rtSunData.z && uv.y <= cb.rtSunData.w &&
+                        abs(texel.g - w) <= abs(cb.rtSunData.y) * w + 1.0;
+            float weight = seen ? saturate((cb.rtSunData.x - w) / (0.15 * cb.rtSunData.x)) : 0.0;
+            if (weight >= 1.0) return mix(saturate(texel.r), 1.0, saturate(cb.shadowFade.x));
+        }
+    }
+    float sh = GetSunShadowMaps(P, Nw, skinPx);
+    if (HasFlag(kFlagRtSunLookup) && cb.rtSunData.x > 0.0 && cb.shadowForwardData.x == 0.0) {
+        vec4 Q = vec4(P, 1.0);
+        float w = dot(Q, cb.rtSunRowW);
+        vec2 uv = vec2(dot(Q, cb.rtSunRowX), dot(Q, cb.rtSunRowY)) / max(w, 1.0);
+        vec2 texel = textureLod(sampler2D(t_rtSunForward, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).rg;
+        bool seen = w > 1.0 && uv.x >= 0.0 && uv.y >= 0.0 && uv.x <= cb.rtSunData.z && uv.y <= cb.rtSunData.w &&
+                    abs(texel.g - w) <= abs(cb.rtSunData.y) * w + 1.0;
+        float weight = seen ? saturate((cb.rtSunData.x - w) / (0.15 * cb.rtSunData.x)) : 0.0;
+        float traced = mix(saturate(texel.r), 1.0, saturate(cb.shadowFade.x));
+        sh = mix(sh, traced, weight);
+        if (cb.rtSunData.y < 0.0) sh = weight;
+    }
+    return sh;
+}
+float DSCascade(vec3 P) {
+    return length(P - cb.shadowNearCenter.xyz) < cb.shadowNearCenter.w ? 0.0 :
+           length(P - cb.shadowMiddleCenter.xyz) < cb.shadowMiddleCenter.w ? 1.0 :
+           length(P - cb.shadowFarCenter.xyz) < cb.shadowFarCenter.w ? 2.0 :
+           length(P - cb.shadowLodCenter.xyz) < cb.shadowLodCenter.w ? 3.0 : 4.0;
+}
+
+vec3 FDAddFogged(vec3 frame, vec3 D, float keep, vec3 F, float gamma, float frameLinear) {
+    gamma = max(gamma, 1.0);
+    const float invGamma = 1.0 / gamma;
+    const vec3 v = frameLinear > 0.5 ? pow(max(frame, vec3(0.0)), vec3(invGamma)) : max(frame, vec3(0.0));
+    const float f = 1.0 - keep;
+    const vec3 encA = max(v - f * F, vec3(0.0)) / max(keep, 1.0e-4);
+    const vec3 v2 = f * F + keep * pow(pow(encA, vec3(gamma)) + max(D, vec3(0.0)), vec3(invGamma));
+    return frameLinear > 0.5 ? pow(v2, vec3(gamma)) - max(frame, vec3(0.0)) : v2 - v;
+}
+
+void main() {
+    const ivec2 localPx = ivec2(gl_GlobalInvocationID.xy);
+    if (localPx.x >= cb.viewport.z || localPx.y >= cb.viewport.w) return;
+    const ivec2 px = cb.viewport.xy + localPx;
+
+    const vec4 albedo = texelFetch(t_albedo, px, 0);
+    const vec4 m = texelFetch(t_material, px, 0);
+
+    bool foliage = false;
+    if (HasFlag(kFlagFoliageEnabled)) {
+        foliage = m.r > 0.5 && m.b > 1.5 && albedo.a > 0.5 && albedo.a < 1.0005;
+    }
+    if (!FDSunDeferredPixel(albedo.a, m.r) && !foliage) return;
+
+    const vec4 normals = texelFetch(t_normals, px, 0);
+    bool skinPx = false;
+    if (HasFlag(kFlagSkinEnabled)) {
+        if (normals.a > 2.02 && normals.a < kFdSkinCodeMin) return;
+        skinPx = normals.a > kFdSkinCodeMin && abs(FDModel(m.r) - 6.0) < 0.5;
+    } else {
+        if (normals.a > 2.02) return;
+    }
+
+    const float keep = foliage ? FDFoliageKeep(m.g) : FDLightFreeKeep(albedo.a);
+    if (keep <= 1.0e-4 && !(skinPx && HasFlag(kFlagSkinSpecActive)) && cb.dsCtrl.x <= 0.5) return;
+
+    const vec3 ray = DDRay(vec2(px));
+    const float storedZ = normals.b * inversesqrt(dot(ray, ray));
+    const float rawDepth = texelFetch(t_depth, px, 0).x;
+
+    float viewZ = storedZ;
+    if (cb.dsCtrl.y > 0.5) {
+        const float linearZ = HasFlag(kFlagDepthIsLinear) ? rawDepth : DDViewZ(rawDepth, cb.dd[2].w, cb.dd[4].w);
+        if (!HasFlag(kFlagDepthAgree) || abs(linearZ - storedZ) <= storedZ * (1.0 / 512.0) + 0.5) {
+            viewZ = linearZ;
+        }
+    }
+
+    // Replicate D3D9 out-depth + Z-test against scene depth buffer
+    const float pulledZ = max(viewZ * (1.0 - cb.dsDepth.z) - cb.dsDepth.w, 1.0);
+    const float gbufProjZ = clamp(cb.dsDepth.x + cb.dsDepth.y / pulledZ, 0.0, 1.0);
+    if (HasFlag(kFlagDepthIsLinear)) {
+        const float sceneProjZ = rawDepth > 1.0e-4 ? clamp(cb.dsDepth.x + cb.dsDepth.y / rawDepth, 0.0, 1.0) : (HasFlag(kFlagReversedZ) ? 0.0 : 1.0);
+        if (HasFlag(kFlagReversedZ) ? (gbufProjZ < sceneProjZ) : (gbufProjZ > sceneProjZ)) return;
+    } else {
+        if (HasFlag(kFlagReversedZ) ? (gbufProjZ < rawDepth) : (gbufProjZ > rawDepth)) return;
+    }
+
+    const vec3 P = ray * viewZ;
+    const vec3 V = -normalize(P);
+    float bumped;
+    const vec3 N = DSShadingNormal(m, normals, bumped);
+    const bool grassF = foliage && (FDFoliageIsGrass(m.g) > 0.5);
+    const vec3 Nw = (foliage && grassF && cb.dsCtrl.w > 1.5) ? vec3(0.0, 0.0, 1.0) : ShadowDecodeNormal(normals.rg);
+    const float model = FDModel(m.r);
+    const bool land = abs(model - 4.0) < 0.5;
+    const float r = GBufferRoughness(m.b);
+    const float metal = clamp((m.r - floor(m.r)) / 0.49, 0.0, 1.0);
+    const vec3 L = cb.dsSun.xyz;
+    const vec3 sunLin = LinColor(cb.dsSunColor.rgb) * cb.dsSun.w;
+    const vec3 Lland = cb.dsLandSun.w > 0.5 ? cb.dsLandSun.xyz : L;
+    const vec3 sunLand = cb.dsLandColor.w > 0.5 ? LinColor(cb.dsLandColor.rgb) : sunLin;
+
+    float sunVis, specF0;
+    FDSunVisDecode(normals.a, sunVis, specF0);
+    sunVis = (land && cb.dsVis.x < 0.5) ? 1.0 : sunVis;
+    const float dsSpecF0 = (cb.dsVis.y > 0.5 && !land) ? specF0 : 0.04;
+    const float dsSpecFade = cb.dsVis.w > 0.0 ? clamp(1.0 - (length(P) - cb.dsVis.z) * cb.dsVis.w, 0.0, 1.0) : 1.0;
+
+    vec3 light;
+    if (skinPx) {
+        light = sunLin;
+    } else if (foliage) {
+        const vec3 hueF = sunLin / max(dot(sunLin, vec3(0.2126, 0.7152, 0.0722)), 1.0e-8);
+        light = albedo.rgb * hueF * FoliageSunWeightOf(m.b) + (grassF ? hueF * FoliageHighlightOf(FDFoliageHighlightEnc(m.g)) : vec3(0.0));
+    } else if (land) {
+        light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+    } else {
+        light = GetSunLightingModel(FDSunSpecular(albedo.a, m.r), L, sunLin, V, N, albedo.rgb, r, metal, dsSpecF0, dsSpecFade);
+    }
+
+    float shadow = 1.0;
+    if (cb.dsCtrl.z > 0.5 && dot(light, vec3(1.0)) > 0.0) {
+        shadow = GetSunShadow(P, foliage ? Nw : ShadowFacingNormal(Nw, P), skinPx);
+        if (HasFlag(kFlagCloudSample)) {
+            const float cloudPlant = (abs(model - 5.0) < 0.5 && cb.dsSunColor.w < 0.0) ? 0.0 : cb.cloudSun.w;
+            const float cloudStrength = foliage ? max(cb.dsSunColor.w, 0.0) : cloudPlant;
+            if (cloudStrength > 0.0) shadow *= DSCloudSunAt(P, cloudStrength);
+        }
+    }
+
+    if (skinPx) {
+        float skinMask, skinThin, skinSoft;
+        FDSkinDecode(normals.a, skinMask, skinThin, skinSoft);
+        const float wet = clamp(cb.skinLook.y, 0.0, 1.0);
+        const float skinSpecScale = skinMask * 2.0 * cb.skinMaterial.x * (1.0 + wet);
+        const float skinCurvature = cb.skinDebug.w > 0.5 ? 0.0 : clamp(skinThin * cb.skinMaterial.z, 0.0, 1.0);
+        if (cb.skinSSS.w > 0.5) skinThin = 0.0;
+        const vec3 skinNsoft = normalize(mix(Nw, N, skinSoft));
+        const vec3 skinSun = sunLin * LinScale(cb.pbrData.z);
+        vec3 skinSpecular;
+        light = SkinSunLight(albedo.rgb, N, Nw, skinNsoft, V, L, skinSun, shadow, r, skinSpecScale, skinThin, skinCurvature, skinSpecular);
+        light += skinSpecular;
+        light += FDSkinSunTransmission(P, Nw, L, albedo.rgb, skinSun);
+        if (HasFlag(kFlagSkinSpecActive)) {
+            const vec3 specTotal = skinSpecular + SkinSkyReflection(V, Nw, N, r, skinSpecScale);
+            if (dot(specTotal, vec3(1.0)) > 0.0) {
+                const vec4 prevSpec = imageLoad(i_skinSpec, px);
+                imageStore(i_skinSpec, px, vec4(prevSpec.rgb + specTotal, 1.0));
+            }
+        }
+    } else {
+        light *= shadow * (foliage ? 1.0 : sunVis);
+    }
+
+    if (land && cb.terrainParallaxIso.z > 0.0 && FDFarLand(m.r) < 0.5) {
+        const float reliefLoss = max(0.0, clamp(dot(Nw, Lland), 0.0, 1.0) - sunVis * clamp(dot(N, Lland), 0.0, 1.0));
+        light += sunLand * LinScale(cb.terrainData.z) * albedo.rgb * (reliefLoss * shadow * cb.terrainParallaxIso.z);
+    }
+
+    if (cb.dsCtrl.x > 0.5) {
+        const float v = cb.dsCtrl.x;
+        vec3 dbg;
+        if (v < 1.5) dbg = light * keep;
+        else if (v < 2.5) dbg = vec3(shadow);
+        else if (v < 3.5) { const float c = DSCascade(P); dbg = c < 0.5 ? vec3(1, 0, 0) : c < 1.5 ? vec3(0, 1, 0) : c < 2.5 ? vec3(0, 0, 1) : c < 3.5 ? vec3(1, 1, 1) : vec3(0, 0, 0); }
+        else if (v < 4.5) dbg = vec3(keep);
+        else if (v < 5.5) dbg = N * 0.5 + 0.5;
+        else if (v < 6.5) dbg = (land ? vec3(0, 0, 1) : FDSunSpecular(albedo.a, m.r) > 0.5 ? vec3(1, 0, 0) : vec3(0, 1, 0)) * (0.5 + 0.5 * bumped);
+        else if (v < 7.5) { const vec3 cell = floor((P + cb.dd[4].xyz) / 64.0); dbg = vec3(fract((cell.x + cell.y + cell.z) * 0.5) * 0.6 + 0.2, clamp(viewZ / 8192.0, 0.0, 1.0), 0.0); }
+        else dbg = vec3(sunVis, sunVis, clamp(dsSpecF0 / 0.08, 0.0, 1.0));
+        const vec4 dst = imageLoad(i_scene, px);
+        imageStore(i_scene, px, vec4(dbg, dst.a));
+        return;
+    }
+
+    if (dot(light, vec3(1.0)) <= 1.0e-9) return;
+
+    const vec4 dst = imageLoad(i_scene, px);
+    vec3 outRgb;
+    if (HasFlag(kFlagLinearLighting) && cb.dsFog.w > 0.5 && keep < 0.9999) {
+        outRgb = dst.rgb + FDAddFogged(dst.rgb, light, keep, cb.dsFog.rgb, cb.linearLighting.x, 1.0);
+    } else {
+        outRgb = dst.rgb + light * keep;
+    }
+    imageStore(i_scene, px, vec4(outRgb, dst.a));
+}

@@ -59,6 +59,11 @@ layout(push_constant) uniform Push {
 #define POINT_WRAP_LOD(t, coord) textureLod(sampler2D(t, NVR_SAMPLER(pc.pointWrapSampler)), (coord), 0.0)
 
 // Helpers.hlsl
+vec2 aoRectScale() { return cb.rtRect.xy; }
+vec2 aoInvRectScale() { return 1.0 / max(cb.rtRect.xy, vec2(1.0e-5)); }
+vec2 aoClampToRect(vec2 u, vec2 texel) { return clamp(u, 0.5 * texel, cb.rtRect.xy - 0.5 * texel); }
+vec2 aoClampToRectIfOn(vec2 u, vec2 texel) { return (cb.rtRect.x < 0.9999 || cb.rtRect.y < 0.9999) ? aoClampToRect(u, texel) : u; }
+
 #define expand(v) (((v) - 0.5) / 0.5)
 #define compress(v) (((v) * 0.5) + 0.5)
 #define invlerp(a, b, t) ((t - a) / (b - a))
@@ -100,6 +105,7 @@ vec3 projectPosition(vec3 position) {
 
     projection.x = projection.x * 0.5 + 0.5;
     projection.y = 0.5 - 0.5 * projection.y;
+    projection.xy *= aoRectScale();
 
     return projection.xyz;
 }
@@ -114,7 +120,7 @@ const float BlurSteps[cKernelSize] = float[](-6.0, -5.0, -4.0, -3.0, -2.0, -1.0,
 
 // AmbientOcclusion.fx.hlsl
 vec2 DedicatedUV(vec2 uv) {
-    return clamp(uv, 0.5 * cb.aoLayout.zw, 1.0 - 0.5 * cb.aoLayout.zw);
+    return clamp(uv, 0.5 * cb.aoLayout.zw, aoRectScale() - 0.5 * cb.aoLayout.zw);
 }
 
 // SkyShare.hlsl

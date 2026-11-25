@@ -36,6 +36,8 @@ void main() {
         for (int x = -2; x <= 2; x++) {
             const vec2 at = uv + vec2(x, y) * pc.size.xy;
             if (any(lessThan(at, vec2(0.0))) || any(greaterThan(at, vec2(1.0)))) continue;   // (the clamping sampler would count an edge texel twice)
+            const float tbz = textureLod(sampler2D(t_b, NVR_SAMPLER(pc.samplerIndex)), at, 0.0).g;
+            if (tbz <= 0.0 || abs(tbz - cb.g) > max(0.10 * cb.g, 8.0)) continue;
             sum += textureLod(sampler2D(t_excess, NVR_SAMPLER(pc.samplerIndex)), at, 0.0);
         }
     o_a = vec4(ca.rgb + sum.rgb * (1.0 / 25.0), ca.a);

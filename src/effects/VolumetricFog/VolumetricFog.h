@@ -175,6 +175,7 @@ public:
 	void Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 		IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 		IDirect3DSurface9* SourceBuffer) override;
+	bool ExtSupportsRenderRect() const override { return true; }
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK, [Main.Main.Performance] NvrDxvkPasses): the fog as Vulkan passes, line for line
 	// (Compute/VolumetricFog.glsl, VolumetricFogEstimate.frag, VolumetricFogApply.frag). ExtDedicated: the dedicated and composite
