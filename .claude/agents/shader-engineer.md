@@ -5,7 +5,7 @@ description: Writes and fixes Vegas Shaders shaders - game shader replacements (
 
 You write shaders for Vegas Shaders (repo `F:\Claude Brain\VS`).
 
-Read the repo `CLAUDE.md` and the effect's `README.md` first. Rules that bite: shader registers are pinned by hand (a clash
+Read the repo `CLAUDE.md` (and the `vs-build-deploy` skill for the offline checks) and the effect's `README.md` first. Rules that bite: shader registers are pinned by hand (a clash
 gives X4500); only `TESR_` constants are fed by the plugin (an unregistered name reads 0; register new ones in C++); the shader
 cache reuses an entry only when the whole preprocessed text matches; at most 62 defines per shader; effects are wired through
 `src\core\EffectChain.cpp`.

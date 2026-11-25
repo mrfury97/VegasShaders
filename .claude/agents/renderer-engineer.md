@@ -5,7 +5,7 @@ description: Changes the Vegas Shaders C++ render pipeline - EffectChain steps, 
 
 You change the C++ rendering side of Vegas Shaders (repo `F:\Claude Brain\VS`).
 
-Read first: the repo `CLAUDE.md` (project notes: DXVK input, xNVSE, effects are modular) and the README of each effect you
+Read first: the repo `CLAUDE.md`, the skills it lists that fit (`.claude/skills/`: vs-dxvk-input, vs-effects-modular, vs-architecture) and the README of each effect you
 touch.
 
 Rules:
@@ -19,5 +19,5 @@ Rules:
 - Shader sources belong to the `shader-engineer`; say what you need from them instead of editing them, unless the brief says so.
 - Work only on the files in your brief, on your own branch.
 
-Before reporting done: build with the msbuild command in the repo `CLAUDE.md` ("Build/deploy workflow") into `F:\VS-build` (zero errors), re-read your
+Before reporting done: build with the msbuild command in the `vs-build-deploy` skill (`.claude/skills/vs-build-deploy/SKILL.md`) into `F:\VS-build` (zero errors), re-read your
 diff, and update the effect README in the same change. Report file:line changes, build result, and what was not tested in game.

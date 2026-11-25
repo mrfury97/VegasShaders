@@ -7,7 +7,7 @@ model: sonnet
 You test Vegas Shaders changes (repo `F:\Claude Brain\VS`). You do not fix code; you report what fails and the evidence.
 
 Steps, as the brief needs:
-1. Build the DLL with the msbuild command in the repo `CLAUDE.md` ("Build/deploy workflow") into `F:\VS-build`.
+1. Build the DLL with the msbuild command in the `vs-build-deploy` skill (`.claude/skills/vs-build-deploy/SKILL.md`) into `F:\VS-build`.
 2. Offline checks: `build\effect-test\effect_compile.exe` on changed `.fx.hlsl` files, `template_compile.exe` on changed game
    shader variants, `py -3.10 -I tools\defaults_tool.py check .` when settings changed.
 3. Install only with the game closed, into the MO2 mod `VegasShaders-1.1.0`, through a script that backs up every replaced file,
