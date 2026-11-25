@@ -1,6 +1,6 @@
 ---
 name: vs-runtime-paths
-description: Vegas Shaders runtime file and folder names after the 2026-11-02 rename (VegasShaders.* vs old NewVegasReloaded.*), which old names are still read, which names were kept on purpose, and the Paths:: rule. Use before touching any code that reads or writes a runtime file or folder (DLL, settings toml, shader/texture/preset folders, logs), or when a tester's install has old names.
+description: "Vegas Shaders runtime file and folder names after the 2026-11-02 rename (VegasShaders.* vs old NewVegasReloaded.*), which old names are still read, which names were kept on purpose, and the Paths:: rule. Use before touching any code that reads or writes a runtime file or folder (DLL, settings toml, shader/texture/preset folders, logs), or when a tester's install has old names."
 ---
 
 # Runtime names (2026-11-02 rename)
