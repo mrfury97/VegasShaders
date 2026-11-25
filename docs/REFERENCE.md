@@ -85,7 +85,7 @@ Not built, ranked by gain:
    entries in the owner's 1.1.0 install), but every later change to a shader's text misses it, and so does every setting that changes a
    define. Making `CacheShipped\` from a default-settings start for each install or release would leave a first start with only the post
    effects (seconds) for players on default settings. Cost: about 71 MB of game-shader cache and 6.5 MB of effects cache in the package.
-   Room 06 is making the bench pre-seed its cache offline; the same output can fill `CacheShipped\`. A release needs the owner's word.
+   Nobody builds it yet (the bench needs no pre-seed: room 06's store keeps each tree's cache). A release needs the owner's word.
 2. Queue the deferred passes (`DeferredLamps` and its skin, land, film, fog and shadow passes, `DeferredSun`, `DeferredWetness`): the 13
    compiles left on the main thread. Now that the CPU is full, about 10-20 s. Their define lists are built in each module's load, so a copy
    in `StartOnce` can drift (as the `LightFreeWet` one did); a list of last start's main-thread compiles, queued first, would not.
