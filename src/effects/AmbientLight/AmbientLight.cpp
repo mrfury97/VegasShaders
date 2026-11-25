@@ -107,6 +107,7 @@ void AmbientLightEffect::UpdateSettings() {
 		// Forced here: ExteriorBalance on, AmbientReplace (the key if above 0, else 0.8), AlbedoBuffer (this effect's key), the Status switch. The grid
 		// fallback (GridBounce) depends on the RT core and is SunGIFrame's. The strength / quality keys are not touched.
 		SettingManager::Configuration::ConfigNode node;
+		const bool wasHeld = sunGi || roomGi;	// (2026-11-26 al-menu) the keys as the last read found them
 		sunGi = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
 		roomGi = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "RoomGI") && node.BoolValue;	// UNOFFICIAL 2026-11-12 RoomGI (missing key: off)
 		const bool status = TheSettingManager->GetSettingI("Shaders.AmbientLight.Status", "Enabled") != 0;
@@ -114,7 +115,10 @@ void AmbientLightEffect::UpdateSettings() {
 		sunGiForced = sunGi && !status;
 		roomGiForced = roomGi && !status;	// UNOFFICIAL 2026-11-12 RoomGI: the same for the interior switch (ShouldRender keeps each to its own side of the door)
 		// the runtime Enabled flag follows a live change of the key (load and revert: SettingManager::GetMenuShaderEnabled)
-		if (IsLoaded()) { if ((sunGi || roomGi) && !Enabled) Enabled = true; else if (!sunGi && !roomGi && wasForced) Enabled = false; }
+		// (2026-11-26 al-menu) Dropped when the keys let go and the Status key is off: wasHeld too, because a preset or script may write Status = 0
+		// while SunGI holds the effect (SetSettingF then writes the key only) and SunGI = 0 after it in the same reload (wasForced was false then, the
+		// runtime flag stayed on against both keys). '!status' added: Status 1 and SunGI 0 in one reload no longer switch the effect off.
+		if (IsLoaded()) { if ((sunGi || roomGi) && !Enabled) Enabled = true; else if (!sunGi && !roomGi && !status && (wasForced || wasHeld)) Enabled = false; }
 		settingsOutdoors = TheShaderManager->GameState.isExterior;
 		const bool on = sunGi && settingsOutdoors;
 		CapturedNormals::SunGIWantsAlbedo = on;
@@ -604,11 +608,13 @@ void AmbientLightEffect::SunGIFrame() {
 	}
 	RoomGIFrame(outdoors, rt);	// UNOFFICIAL 2026-11-12 RoomGI (returns at once while the key is off)
 	CapturedNormals::SunGIWantsAlbedo = on || (roomGiOn && !outdoors) || (Enabled && albedoBuffer && RtAmbient::Current.GI);
-	const int state = !sunGi ? 0 : !outdoors ? 1 : rt ? 2 : 3;
+	const int state = !sunGi ? 0 : !outdoors ? (rt ? 1 : 4) : rt ? 2 : 3;	// (2026-11-26 al-menu: 4, indoors without ray tracing)
 	if (state == sunGiState) return;
 	sunGiState = state;
 	if (state == 0) Logger::Log("UNOFFICIAL SunGI: off (the settings are the toml's own).");
-	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced ? "; AmbientLight does not render there, its Status is off" : "");
+	else if (state == 1) Logger::Log("UNOFFICIAL SunGI: on, indoors: nothing forced (interiors keep the toml's settings%s).", sunGiForced && !roomGi ? "; AmbientLight does not render there, its Status is off" : "");
+	else if (state == 4) Logger::Log("UNOFFICIAL SunGI: on, indoors, the RT core is not running: nothing forced (interiors keep the toml's settings%s).",
+		sunGiForced ? "; AmbientLight renders there as GTAO + the light grid's lamps, as its switch shows (held on, Status off)" : "");
 	else if (state == 2) Logger::Log("UNOFFICIAL SunGI: on, outdoors, ray-traced path running. Forced in memory: RT GI + RadianceCache + CacheExteriors on (RT AO / RT Sky left to own switches), ExteriorBalance on, "
 		"AmbientReplace %.2f, AlbedoBuffer (AmbientLight key) on%s; GridBounce stays %.2f (the RT bounce is the sun bounce); GI denoiser %s.", ambientReplace,
 		sunGiForced ? ", AmbientLight Status on (it was off)" : "", gridBounce, RtAmbient::Current.GIDenoiseSunGI ? "SunGI settings (GIDenoiseSunGI)" : "as before (GIDenoiseSunGI off)");
@@ -651,12 +657,19 @@ void AmbientLightEffect::RoomGIFrame(bool outdoors, bool rt) {
 		ambientReplaceInterior, ambientFloorInterior, roomGiForced ? ", AmbientLight Status on (it was off)" : "",
 		RtAmbient::Current.GIDenoiseRoomGI ? "SunGI's settings (GIDenoiseRoomGI)" : "as before (GIDenoiseRoomGI off)");
 	else Logger::Log("UNOFFICIAL RoomGI: on, indoors, FALLBACK: the RT core is not running (native D3D9, stock DXVK, no ray-tracing GPU, NvrDxvkPasses off, or ray tracing switched off for this kind of space: RTInteriors / RTExteriors). "
-		"Nothing is changed: the room keeps the game's ambient%s.", roomGiForced ? "; AmbientLight does not render here, its Status is off" : "");
+		"Nothing is changed: the room keeps the game's ambient%s.", roomGiForced ? "; AmbientLight renders here as GTAO + the light grid's lamps, as its switch shows (held on, Status off)" : "");
 }
 
 bool AmbientLightEffect::ShouldRender() {
 	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
-	if ((sunGiForced || roomGiForced) && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi && RtAmbient::SunGIRtRunning())) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them.
+	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on outdoors only, RoomGI indoors only; the other side as the user set it.
+	// (2026-11-26 al-menu) That space test applies only while SunGI / RoomGI alone hold the effect on (Status key off) AND the RT core runs: the switch
+	// shows on whenever they hold it, and what the menu shows on must draw. Without the RT core (native D3D9, stock DXVK, no RT GPU, NvrDxvkPasses off,
+	// RTInteriors / RTExteriors off) it renders on both sides as with Status on: GTAO + the light grid (the sun's bounce outdoors, the lamps indoors),
+	// and the takeover (EffectChain PreStep_AmbientLightTakeover) switches AmbientOcclusion and BounceLight off while it draws, as outdoors. With the RT
+	// core running, the side the holding key is for gets the RT path, the other keeps AO / BounceLight as the user set them. With the user's own Status
+	// on both flags are false: it renders everywhere (the RT estimate only where RtAmbient::AOReady / GIReady in Render).
+	if ((sunGiForced || roomGiForced) && RtAmbient::SunGIRtRunning() && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi)) return false;
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
 
@@ -1173,6 +1186,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		if (!reported) Logger::Log("UNOFFICIAL AmbientLight: buffers missing or AmbientLight.fx.hlsl is not the matching version (8 passes), effect skipped.");
 		reported = true;
 		renderTime = 0;
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, "buffers missing or AmbientLight.fx.hlsl not the 8-pass version");	// (2026-11-26 al-menu)
 		return;
 	}
 	RenderRect::WholeViewport(Device, original);	// UNOFFICIAL 2026-10-27 RenderScale v2: the layout is for the whole target
@@ -1790,5 +1804,8 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		if (!reported) Logger::Log("UNOFFICIAL AmbientLight: render failed (%08lx).", result);
 		reported = true;
 	}
+	// (2026-11-26 al-menu) The chain calls Render itself (EffectChain PreStep_AmbientLight), not EffectRecord::Render, so the HEARTBEAT's drawn count
+	// was never noted here: it read "AmbientLight 0/0" while the effect drew every frame.
+	EffectStatus::Note(StatusSlot, Name, SUCCEEDED(result) ? EffectStatus::Drawn : EffectStatus::Skipped, SUCCEEDED(result) ? nullptr : "a pass failed (see the render failed line)");
 	renderTime = timer.LogTime("AmbientLight::Render");
 }

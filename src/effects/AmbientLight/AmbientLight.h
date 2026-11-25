@@ -53,7 +53,7 @@ public:
 	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, in memory only): UpdateSettings keeps the toml's keys apart from the values in use
 	// (gridBounceKey / ambientReplaceKey; ambientReplace and gridBounce are the values in use) and SunGIFrame, once a frame, applies the parts that depend on
 	// the RT core running (the grid fallback) and on being outdoors; sunGiForced = SunGI has Status Enabled on (the user's switch is off): ShouldRender then
-	// keeps the effect off indoors.
+	// keeps the effect off indoors while the RT core runs (2026-11-26: without it, it renders there as GTAO + the grid's lamps, as the switch shows).
 	bool				sunGi = false, sunGiForced = false, settingsOutdoors = true;
 	float				gridBounceKey = 0.0f, ambientReplaceKey = 0.0f, ambientReplaceSunGI = 0.8f;
 	int					sunGiState = 0;

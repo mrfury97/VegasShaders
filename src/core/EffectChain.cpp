@@ -869,6 +869,8 @@ void ShaderManager::PreStep_AmbientLight(ChainContext& ctx) {
 			{ Effects.ShadowsExteriors->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.ShadowsExteriors); }
 		}
 	}
+	// (2026-11-26 al-menu) not drawn this frame: say so in the HEARTBEAT (off, not loaded, or ShouldRender false: indoors while only SunGI / RoomGI hold it on)
+	else if (Effects.AmbientLight) Effects.AmbientLight->NoteSkip();
 }
 
 void ShaderManager::PreStep_LitProbes(ChainContext& ctx) {

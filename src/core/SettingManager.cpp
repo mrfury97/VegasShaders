@@ -1875,7 +1875,16 @@ void SettingManager::SetSettingF(const char* section, const char* key, float val
 		const bool on = value != 0.0f;
 		// [Shaders.<Name>.Status] Enabled also switches the effect itself
 		const bool statusSwitch = !memcmp(section, "Shaders", 7) && !memcmp(section + strlen(section) - 6, "Status", 6) && !memcmp(key, "Enabled", 7);
-		if (statusSwitch && node.BoolValue != on && (on || !IsShaderForced(node.MidSection)))
+		// (2026-11-26 al-menu) AmbientLight while SunGI or RoomGI holds it on: the key alone is written, the effect is not switched (presets and
+		// NVRSetSetting scripts keep the designed "SunGI on, switch off" state, outdoors only: AmbientLightEffect::UpdateSettings keeps it held on).
+		// Switching would have flipped the running effect (1 turned it off) and, through SetMenuShaderEnabled, cleared SunGI and RoomGI: that is
+		// the menu's click only.
+		bool held = false;
+		if (statusSwitch && !strcmp(node.MidSection, "AmbientLight")) {
+			SettingNode gi;
+			held = (Config.FillNode(&gi, "Shaders.AmbientLight.Main", "SunGI") && gi.BoolValue) || (Config.FillNode(&gi, "Shaders.AmbientLight.Main", "RoomGI") && gi.BoolValue);
+		}
+		if (statusSwitch && !held && node.BoolValue != on && (on || !IsShaderForced(node.MidSection)))
 			TheShaderManager->SwitchShaderStatus(node.MidSection);
 		node.BoolValue = on;
 		strcpy(node.Value, ToString<bool>(on).c_str());
@@ -2212,7 +2221,8 @@ bool SettingManager::GetMenuShaderEnabled(const char* name) {
 	if (!strcmp(name, "Puddles") && RainWetnessOneSwitch()) return GetMenuShaderEnabled("WetnessEffects");
 	// UNOFFICIAL 2026-11-12 (sungi p4) SunGI ([Shaders.AmbientLight.Main] SunGI, the one switch for the exterior sun bounce) implies AmbientLight's
 	// Status Enabled: it is on at load and after a revert (the runtime flag; AmbientLight::UpdateSettings follows a live change). The toml is not written;
-	// AmbientLight::ShouldRender keeps it off indoors while only SunGI has it on, so interiors stay as the user set them.
+	// AmbientLight::ShouldRender keeps it off indoors while only SunGI has it on, so interiors stay as the user set them. RoomGI the same, indoors.
+	// (2026-11-26 al-menu) Switching the effect off clears both keys (SetMenuShaderEnabled below), so the row then reads the Status key alone.
 	if (!strcmp(name, "AmbientLight")) {
 		Configuration::ConfigNode sunGi;
 		if (Config.FillNode(&sunGi, "Shaders.AmbientLight.Main", "SunGI") && sunGi.BoolValue) return true;
@@ -2258,6 +2268,16 @@ void SettingManager::SetMenuShaderEnabled(const char* name, bool enabled) {
 	if (RainWetnessOneSwitch()) {
 		if (!strcmp(name, "Puddles")) return;
 		if (!strcmp(name, "WetnessEffects")) SetSetting("Shaders.Puddles.Status", "Enabled", enabled);
+	}
+	// UNOFFICIAL 2026-11-26 (al-menu) Ambient light off also turns SunGI and RoomGI off. Either one holds the effect on in memory (GetMenuShaderEnabled
+	// above, AmbientLightEffect::UpdateSettings), so with one left on the switch was put straight back: the row stayed on, and its Status key, written
+	// false, could never be written true again from the menu (the row only offered "off"). One place for the effect row, the effects list, the AO page's
+	// pickers and the hiding notes' buttons: all of them reach here through ShaderManager::SwitchShaderStatus. Switching on writes Status only.
+	if (!enabled && !strcmp(name, "AmbientLight")) {
+		for (const char* key : { "SunGI", "RoomGI" }) {
+			Configuration::ConfigNode node;
+			if (Config.FillNode(&node, "Shaders.AmbientLight.Main", key) && node.BoolValue) SetSetting("Shaders.AmbientLight.Main", key, false);
+		}
 	}
 	const MenuSwitch kind = GetMenuShaderSwitch(name);
 	if (kind == MenuSwitch::None) return;
