@@ -2,7 +2,7 @@
 
 Read from the code of the current test build (`test-p1a-bump` e31a5ed: deferred wetness steps 1-3, bumped normals, Reflections with the
 film). Paths are under `src\` unless they start with `docs\` or `resource\`. Nothing here was built or run. Costs are estimates, not
-measured. Background: `docs/deferred-roadmap.md`, `docs/deferred-vs-forward.md`, `docs/bumped-normals-study.md`,
+measured. Background: `docs/deferred-roadmap.md`, `docs/deferred-vs-forward.md`, `docs/archive/bumped-normals-study.md`,
 `docs/deferred-wetness-design.md`, `effects/Reflections/README.md`.
 
 ## Short answer

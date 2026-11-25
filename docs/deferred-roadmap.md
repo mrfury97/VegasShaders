@@ -139,7 +139,7 @@ everything; Phases 0-1c (5-6 sessions) fix what breaks today and lift the shader
 
 ## Gaps today and "can it be fully unhooked from forward?" (2026-11-19)
 Asked by the owner. Read from the code on the installed test build (`test-p1a-bump` 90fc395 + deferred wetness step 1) and the docs
-`deferred-vs-forward.md`, `bumped-normals-study.md`, `deferred-wetness-design.md`. Nothing measured; ranks are by what a player sees (believed).
+`deferred-vs-forward.md`, `archive/bumped-normals-study.md`, `deferred-wetness-design.md`. Nothing measured; ranks are by what a player sees (believed).
 
 ### The gaps, most visible first
 | # | Gap | What the player sees | Fixed by |

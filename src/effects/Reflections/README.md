@@ -141,7 +141,7 @@ the gold one banded orange, neither reflecting anything. docs/next/RT-PATH-TRACI
   (2026-11-18: G-buffer v2 now holds it, and `[Main.Main.Quality] DeferredReflections` or `DeferredBumpedNormals` (test keys, both off)
   give every pass of this effect the mapped normal in TESR_NormalsBuffer's place, `core/FdIndirect.h` ShadingNormals. That swaps the whole
   texture: the ray start, the trace, the temporal pass, RayGen and the denoiser all take the mapped normal, not only the reflection
-  direction. Not run in game. `docs/bumped-normals-study.md`.)
+  direction. Not run in game. `docs/archive/bumped-normals-study.md`.)
 - RT test host scene `reflfix` (`tools/nvr-rt-host/run.ps1 -Scene reflfix`).
 
 ## Lamps as the game lights them, glossy metal bounces, the flashlight (2026-11-07, perf-reflfix2)
