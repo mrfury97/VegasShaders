@@ -52,6 +52,12 @@ static float DSSpecFade = 1.0f;
 
 #include "includes/Helpers.hlsl"
 #include "includes/Object.hlsl"
+// UNOFFICIAL 2026-11-26 (bench, upstream 1.1.3 merge): the sun cross-fade's dynamic-caster atlas (Shadow.hlsl TESR_ShadowDynamic, s12 by
+// default) clashed with this pass's wet film on s12 (DS_WetFilmMap, bound by stage in core/DeferredSun.h): X4500 in the SunFade record, which
+// then fell back without the film's sun highlight. The atlas is bound by name, so it moves to s14 (free in every DeferredSun record).
+#ifndef SHADOW_DYNAMIC_SAMPLER_REG
+    #define SHADOW_DYNAMIC_SAMPLER_REG s14
+#endif
 #include "includes/Shadow.hlsl"
 #include "includes/DeferredDepth.hlsl"
 #include "includes/DeferredPixel.hlsl"
