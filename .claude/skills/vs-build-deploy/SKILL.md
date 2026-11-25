@@ -57,9 +57,10 @@ Turn a source change into a built DLL and checked shaders, put it in the owner's
   in the game folder has no shader errors after the first start.
 
 ## Troubleshooting
-- A shader change doesn't take effect: clear `Shaders\VegasShaders\Shaders\Cache\`. The cache reuses an entry only when the whole
-  preprocessed text matches, so editing a shared include recompiles every shader using it (minutes on a slow PC); normally it
-  recompiles on its own.
+- Shader cache (one wording, used in the repo `CLAUDE.md`, `docs/reference/architecture.md` and the memory note): the cache reuses an
+  entry only when the whole preprocessed text matches, so changed shaders recompile by themselves and editing a shared include
+  recompiles every shader using it (minutes on a slow PC). Do not tell the owner to delete the cache after an install; clear
+  `Shaders\VegasShaders\Shaders\Cache\` only if a shader genuinely looks stale (for example a failed compile left an old binary).
 - MSB4184 on SolutionDir: see the `\\` note in step 2.
 - A test tool is missing from a build: the marker `ReleaseBuild.h` is present; remove it and `/t:Rebuild`.
 
