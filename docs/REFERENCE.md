@@ -27,6 +27,78 @@ believed. Design docs and studies are in [DESIGN.md](DESIGN.md); per-effect note
   Do not tell the owner to delete the cache after an install; clear it only if a shader looks stale.
 - Ray-traced effects run in a separate 64-bit helper through the project's DXVK fork, because 32-bit Vulkan has no ray tracing.
 
+### Shader compiling at start-up
+Study 2026-11-26 (owner: "how we can speed compiling shaders"). Code: `src/core/ShaderPrecompile.h` (game shaders), `src/core/EffectPrecompile.h`
+(post effects), `ShaderRecord::LoadShader` (`src/core/ShaderRecord.cpp`).
+
+How it works. The first `LoadShader` call (`DeferredDepth`'s pass, in `ShaderManager::Initialize`) queues one job per record the start will ask
+for: each collection's templates, their lighting-free, skin, foliage, hair, glass and lamp-shadow records, the hand-written shaders and the
+shadow shaders, each with the define list `BuildDefines` gives it. Worker threads (cores - 1, at most 12) preprocess, compare with the cache
+and compile; each `LoadShader` then takes its job's result (`Take`, only with the same define list), or does the work itself on the main thread
+when nothing was queued for it. The cache key is the whole preprocessed text (`<x>.pso.hlsl` beside `<x>.pso`); a release can ship a
+read-only copy in `CacheShipped\` that seeds an entry whose text matches (`ShaderProgram::SeedFromShipped`). Compiler: `D3DXCompileShader`
+from `d3dx9_43.dll`, flags 0, `ps_3_0` / `vs_3_0`; after X4505 (out of temp registers) once more with `PREFER_FLOW_CONTROL`; a record whose
+build fails with the clouds' lookup is made again without it (`Cache\NoCloud\`, `FORWARD_CLOUD_SHADOWS 0`). The log's
+`UNOFFICIAL compile times:` line (at the main menu) gives worker and main-thread totals and the slowest 15.
+
+Where the time went (proven: bench slot A, VegasShaders 441 = main 10e49fe + the AmbientLight fix, run 20261126-110522, cold for that build,
+main menu at +540 s): 498 compiles on 11 workers (2219 s of thread time) and 117 on the main thread (418 s, which the start waits for):
+- 94 `LightFreeWet\` records (with their X4505 and no-clouds retries, about 250 s): the queue made the dry `LightFree\` records, but with
+  DeferredWetness on (default) `LightFreeRecords::Load` loads the wet ones, so every one compiled at its load.
+- the deferred passes, never queued: `DeferredLamps.pso` Fit3 Land 95 s, `DeferredLampSkin` 20 s, `DeferredLampLand` 17 s,
+  `DeferredLampLandFilm` 14 s, `DeferredSun` and its fade 11 s, the lamp shadow pass 4 s (about 160 s);
+- the forward records `SLS2023/24/26/27.pso` without the clouds' lookup (each: default flags X4505, `PREFER_FLOW_CONTROL` X4505, then the
+  no-clouds build twice);
+- and 106 s where the main thread waited for `Shadows\ShadowMap.vso`, queued behind about 400 big jobs.
+- Post effects: 60 on 11 threads, ready in seconds (not a cost).
+
+Compiler facts (proven offline, `D3DXCompileShader` from the 64-bit `d3dx9_43.dll` on cached sources; it reproduces the game's cached bytes):
+- One compile alone is 4-5x faster than in game: `DeferredLamps` Fit3 Land 21.5 s alone vs 95 s in game, `SLS2144.pso` 16 s vs 75 s.
+- Cheaper flags give other bytes: optimisation level 0 cuts the lamp pass from 21.5 s to 0.7 s, but every flag change (O0, O3,
+  `PREFER_FLOW_CONTROL`) and `d3dcompiler_47` (which fails outright on `SLS2034.pso` and `Interiors\SLS2036.pso`) changed the bytes of every
+  shader tried. Not usable without a GPU-cost and picture check per shader.
+- `SLS2034` and `SLS2144` fail X4505 at every flag but `PREFER_FLOW_CONTROL`, so their first attempt (5-8 s) is always wasted. Skipping it from
+  memory is safe only for the exact same text (as `KnownCloudFailure` does for the clouds); after an update the text is new.
+
+Changes (branch `faster-shader-compile`; same compiler, flags and define lists, so the same bytes):
+1. The lighting-free records are queued in the folder and with the defines `LightFreeRecords::Load` will use (`LightFreeWet\` +
+   `DEFERRED_WETNESS` when `DeferredWetness::WantedAtStartup()`; the workers start before the pass loads, so the switch is read, not `WetCompiled`).
+2. The shadow and vertex shader jobs go first: they are small and the main thread asks for them first.
+3. A failed job with the clouds' lookup in its source makes its no-clouds build on the same worker right away (`Job::CloudOff`), which the
+   no-clouds `LoadShader` then takes.
+
+Result (proven: bench slot A, scene v-SunGI2 + tour-al-out, both runs with an empty shader store, so the slot's cache held only the
+11-20 snapshot's stale entries; runs 20261126-120400 and -121340):
+- main 10e49fe: main menu 446 s after launch; 119 compiles on the main thread (307 s), 508 on the workers (2083 s). (Its first two minutes
+  overlapped a DLL build; the earlier VS 441 run above took 540 s.)
+- the branch: main menu 238 s after launch; 21 compiles on the main thread (210 s: only the deferred passes), 512 on the workers (1976 s).
+- Every compiled shader the game loaded is byte-identical in both runs (646 files of the slot's cache). The only 88 differences are dry
+  `LightFree\` records the old queue rewrote and nothing loads. Pictures: mean |diff| 0.2 of 255 per shot (TAA noise), the same by eye.
+- Now the main thread (210 s) and the workers (1976 s over 11 threads, 180 s) end together: the start is bound by the total compile work.
+
+Compiler scaling (believed: measured offline with a slot game running beside): one process, 1 thread 0.36 compiles a second, 11 threads 1.34
+(3.7x on this 6-core, 12-thread CPU); 11 separate processes 1.36. So the compiler has no inner lock, the CPU is simply full, and compiling in
+helper processes would gain nothing. Keep cores - 1 threads.
+
+Not built, ranked by gain:
+1. A shipped cache for every build (largest; the picture is identical, the same bytes): a release ships `CacheShipped\` since 1.1.0 (593
+   entries in the owner's 1.1.0 install), but every later change to a shader's text misses it, and so does every setting that changes a
+   define. Making `CacheShipped\` from a default-settings start for each install or release would leave a first start with only the post
+   effects (seconds) for players on default settings. Cost: about 71 MB of game-shader cache and 6.5 MB of effects cache in the package.
+   Room 06 is making the bench pre-seed its cache offline; the same output can fill `CacheShipped\`. A release needs the owner's word.
+2. Queue the deferred passes (`DeferredLamps` and its skin, land, film, fog and shadow passes, `DeferredSun`, `DeferredWetness`): the 13
+   compiles left on the main thread. Now that the CPU is full, about 10-20 s. Their define lists are built in each module's load, so a copy
+   in `StartOnce` can drift (as the `LightFreeWet` one did); a list of last start's main-thread compiles, queued first, would not.
+3. Cheaper compile flags: no. Optimisation level 0 makes the lamp pass 30x faster to compile, but every flag tried changes the bytes; each
+   shader would need a GPU-cost and picture check. `d3dcompiler_47` fails on two shaders and changes the bytes of the rest.
+4. Predicting the `PREFER_FLOW_CONTROL` retry: 30 X4505 retries on a cold start, 5-8 s each in game (about 7% of the thread time). The same
+   bytes are only guaranteed for the same text, which an update changes; not worth it.
+5. Compiling at first use instead of at start: no. With a cold cache that is hundreds of 5-40 s compiles during play (hitches or the game's
+   own shaders drawing until each is ready).
+6. DXVK: its pipeline cache covers DXVK's own SPIR-V and pipeline work at draw time; this cost is D3DX turning HLSL into DX9 bytecode before
+   DXVK sees anything, so neither DXVK nor the fork can cut it. The fork's SPIR-V replacements (`Compute\Replace`) skip D3DX only for
+   shaders rewritten by hand.
+
 ### Key files
 - `src/core/ShaderManager.cpp`: main render loop; calls `ImGuiManager::NewFrame()` and `Render()`.
 - `src/core/EffectChain.cpp`: frame order of the effects (see the `vs-effects-modular` skill).

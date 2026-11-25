@@ -59,20 +59,10 @@ bool hasDefine(const ShaderTemplate& Template, const char* Name) {
 	return false;
 }
 
-// UNOFFICIAL 2026-11-16 fast-restart (core/ForwardCloudShadows.h): the preprocessed source holds the clouds' lookup (Includes/Shadow.hlsl
-// NVR_CloudSun, the land's NvrCloudSun, TerrainTemplate's vertex NVR_CloudSunVS, DeferredSun's): compiled into every outdoor record now.
-bool cloudCodeIn(ID3DXBuffer* source) {
-	if (!source) return false;
-	const char* text = (const char*)source->GetBufferPointer();
-	const char* end = text + source->GetBufferSize();
-	static const char key[] = "NVR_CloudSun";
-	static const char land[] = "NvrCloudSun";
-	return std::search(text, end, key, key + sizeof(key) - 1) != end || std::search(text, end, land, land + sizeof(land) - 1) != end;
-}
-bool overridesName(const D3DXMACRO* overrides, const char* name) {
-	for (const D3DXMACRO* o = overrides; o && o->Name; o++) if (!strcmp(o->Name, name)) return true;
-	return false;
-}
+// UNOFFICIAL 2026-11-16 fast-restart (core/ForwardCloudShadows.h): the preprocessed source holds the clouds' lookup. (2026-11-26 both in
+// ShaderPrecompile.h now, whose workers make the build without the lookup too.)
+bool cloudCodeIn(ID3DXBuffer* source) { return ShaderPrecompile::CloudCodeIn(source); }
+bool overridesName(const D3DXMACRO* overrides, const char* name) { return ShaderPrecompile::OverridesName(overrides, name); }
 
 // Logs the compiler's messages and gives them to RegisterClash (null: nothing).
 void logCompilerMessages(ID3DXBuffer* messages, const char* shaderName) {
