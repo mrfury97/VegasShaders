@@ -1,6 +1,6 @@
 # Lessons kept from the archived room-02 memory notes
 
-Written 2026-11-25 when the old per-feature memory notes were archived to `F:\Claude Brain\archive\2026-11-25\vs\memory\` (see its
+Written 2026-11-25 when the old per-feature memory notes were archived to `F:\Claude Brain\archive\2026-11-25.zip\vs\memory\` (see its
 `MANIFEST.md`). Only lessons that are still true and not already in the code docs are kept here. Each line names its source note and is
 labelled **proven** (the note names the evidence or a fix that worked), **believed**, or **owner decision**. Paths in the old notes
 (`VegasShaders-104`, `VEGAS_SHADERS.md`, `nvr-bench`, `RESUME_*.md`) no longer exist; the repo is `F:\Claude Brain\VS`.

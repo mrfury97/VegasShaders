@@ -1,6 +1,6 @@
 # Vegas Shaders with NV-SMP-Physics (2026-11-18)
 
-NV-SMP-Physics (github.com/Balebandro/NV-SMP-Physics, commit fd9ff44, read as a reference only at `F:\Claude Brain\refs\NV-SMP-Physics`)
+NV-SMP-Physics (github.com/Balebandro/NV-SMP-Physics, commit fd9ff44, read as a reference only at `F:\Claude-refs\refs\NV-SMP-Physics`)
 simulates SMP cloth, hair and physics bones in New Vegas. A tester crashed with it (CrashLogger 2026-11-18-09-20-54). This is what was
 found and changed on branch `pipboyfit-crash`.
 

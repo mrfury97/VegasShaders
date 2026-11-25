@@ -2,7 +2,7 @@
 
 Code: `src/core/PipboyFit.h` (no C++ file in this folder), shader `src/hlsl/NewVegas/Shaders/Includes/PipboyFit.hlsl`, defaults
 `resource/defaults/PipboyFit.toml` (`[_Shaders.PipboyFit.Main]`). Written 2026-11-25 from the room-02 memory note
-`pipboy-sleeve-clipping-research` (2026-11-03 to 2026-11-05 work), which is archived in `F:\Claude Brain\archive\2026-11-25\vs\memory\`.
+`pipboy-sleeve-clipping-research` (2026-11-03 to 2026-11-05 work), which is archived in `F:\Claude Brain\archive\2026-11-25.zip\vs\memory\`.
 Where this file and the code disagree, the code wins: the note's values were checked against `resource/defaults/PipboyFit.toml` on 2026-11-25.
 
 ## 1. Purpose
