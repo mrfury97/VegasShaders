@@ -3,7 +3,7 @@
 #include <algorithm>	// (std::max)
 
 // UNOFFICIAL 2026-11-21 the ONE rain clock (owner: "move the 'is it raining / is the ground wet' clock to Wetness Effects and remove
-// WetWorld"; docs/deferred-wetness-design.md step 4). It was RainStateGuard (2026-11-12), hosted on WetWorld with its own timing
+// WetWorld"; docs/DESIGN.md "Deferred wetness design" step 4). It was RainStateGuard (2026-11-12), hosted on WetWorld with its own timing
 // (Increase / Decrease game hours, Precipitations' 0.05 / 0.07 h fades), so the Rain setting groups, skin and the heat haze could dry on
 // another schedule than the ground Wetness Effects and Puddles draw. Now Wetness Effects' weather clock is the only one
 // (WetnessEffectsShaders::TickWeather: Raining, Wetness and PuddleWetness, eased by [Shaders.WetnessEffects.Main] WeatherTransitionSpeed),

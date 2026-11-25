@@ -35,7 +35,7 @@ namespace FdIndirect {
 	// it was removed 2026-11-21). Every other reader keeps the smooth normals buffer: AO, bounce light and shadows would
 	// shimmer and self-shadow on a normal map's detail.
 	inline bool BumpedNormalsOn() { return Base() && MaterialNow() && Key("DeferredBumpedNormals"); }
-	// UNOFFICIAL 2026-11-20 UnifiedReflections (live, test only, off; docs/unified-reflections-design.md step 1): with the renderer in mode 2
+	// UNOFFICIAL 2026-11-20 UnifiedReflections (live, test only, off; docs/DESIGN.md "Unified reflections design" step 1): with the renderer in mode 2
 	// the Reflections effect reads its material (COLOR2: roughness, metal, model, specular bit; COLOR1: the metal's colour; COLOR3: is the
 	// record the visible surface) straight from the G-buffer instead of MaterialAware's copy, and always the shading normals below. True only
 	// in a frame whose three targets hold this frame's records. Mode 0 / 1: false (MaterialAware stays the material source).

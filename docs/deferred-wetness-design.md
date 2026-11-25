@@ -186,7 +186,7 @@ Log lines to look for: "DeferredWetness: the fallback loaded", "the fallback dre
 Not done in step 3: the D3D9 Reflections technique; the two screen-space reflections on wet ground (Wetness Effects' SSR, then Reflections'
 mix over it, as before step 3) are still two passes; the fallback's and the reflections' frame cost (not measured).
 After step 3 (2026-11-21): the Reflections effect reads the film's damp ground from its cube, not the trace (only standing water is
-traced; `src/effects/Reflections/README.md` last section, `docs/reflection-speckle.md`). The film's roughness is what tells them apart, so
+traced; `docs/EFFECTS.md "Reflections"` last section, `docs/DESIGN.md "Reflection speckle"`). The film's roughness is what tells them apart, so
 the film must keep the Puddles Roughness under standing water and the rougher damp value elsewhere.
 
 ## Step 4 as built (2026-11-21, branch `retire-wetworld` off `deferred-wetness-ground`)
@@ -252,7 +252,7 @@ sun-shadow mask has no cascade shadows (a highlight inside cast shadows); a doub
 
 ## The film's sky reflection under unified reflections (2026-11-20)
 With `[Main.Main.Quality] UnifiedReflections` used, outdoors, the pass and the fallback leave out the film's sky reflection on the floors the
-Reflections effect mirrors (DWSkyKeep, `docs/unified-reflections-design.md` "Step 2 as built"), and Wetness Effects' screen pass skips its trace
+Reflections effect mirrors (DWSkyKeep, `docs/DESIGN.md "Unified reflections design"` "Step 2 as built"), and Wetness Effects' screen pass skips its trace
 (its lamp streaks stay). Off: as before.
 
 ## Not decided (owner)

@@ -171,7 +171,7 @@ public:
 	bool	CubeReady() const;							// the cube was kept up last frame (what the object shaders read now)
 	void	CaptureMaterial(IDirect3DDevice9* Device);	// UNOFFICIAL 2026-10-20 MaterialAware: the scene's alpha into the material buffer, before any effect draws
 	void	BindMaterial();								// the material buffer on stage 15 for the next passes (ClearPassTextures unbinds it)
-	// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1): this frame's
+	// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/DESIGN.md "Unified reflections design" step 1): this frame's
 	// material is the G-buffer's (core/FdIndirect.h UnifiedReflectionsOn, and the back end that draws can read it). Asked once a frame.
 	bool	GBufferFrame();
 	// MaterialAware's copy is still made in a G-buffer frame while the RT weapon rays run: the first-person weapon's material is the copy's

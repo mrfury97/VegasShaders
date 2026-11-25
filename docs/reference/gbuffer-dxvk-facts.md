@@ -3,8 +3,8 @@
 > Technical reference. Moved from the `vs-gbuffer-dxvk-facts` skill on 2026-11-25; proven/believed labels kept. Read it before adding push
 > constants or samplers to a DXVK-fork pass, growing a land or lighting-free shader, or reading COLOR2 / albedo for grass or land.
 
-Each fact says proven (with the evidence) or believed. Layout of the G-buffer itself: [../deferred-vs-forward.md](../deferred-vs-forward.md); wetness
-design: [../deferred-wetness-design.md](../deferred-wetness-design.md); reasons behind the X4505 work: [../deferred-roadmap.md](../deferred-roadmap.md).
+Each fact says proven (with the evidence) or believed. Layout of the G-buffer itself: [Deferred vs forward](../deferred-vs-forward.md); wetness
+design: [Deferred wetness design](../deferred-wetness-design.md); reasons behind the X4505 work: [Deferred roadmap](../deferred-roadmap.md).
 
 ## DXVK push blocks: two different limits (checked against this repo 2026-11-25)
 - **Proven in this repo (`src/core/NvrDxvkExt.h:55`):** the NVR extension's own passes (compute and full-screen graphics passes made through

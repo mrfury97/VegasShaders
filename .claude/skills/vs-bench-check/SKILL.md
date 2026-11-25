@@ -49,4 +49,4 @@ with an earlier run. Source of every fact below: `F:\NVR-bench\MO2-SLOTS.md` (re
 
 ## Links
 - `F:\NVR-bench\MO2-SLOTS.md` (full record, proven / believed / not run), `F:\NVR-bench\CLAUDE.md`, `F:\NVR-bench\SETUP.md`.
-- The owner-level skill `nvr-bench-run` covers the whole bench (slots B and C too). Build: skill `vs-build-deploy`. Reflection pictures: `docs/reflection-speckle.md`.
+- The owner-level skill `nvr-bench-run` covers the whole bench (slots B and C too). Build: skill `vs-build-deploy`. Reflection pictures: `docs/DESIGN.md "Reflection speckle"`.

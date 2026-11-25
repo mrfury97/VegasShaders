@@ -11,7 +11,7 @@ our own work (deferred wetness, unified reflections, speckle fixes, single pass)
 
 ## Prerequisites
 - `git fetch upstream`. Worktree on a side branch (`vs-build-deploy` skill); never commit on main without the owner's word.
-- Know what is ours: `docs/deferred-roadmap.md`, `docs/unified-reflections-design.md`, `docs/deferred-wetness-design.md`.
+- Know what is ours: `docs/DESIGN.md "Deferred roadmap"`, `docs/DESIGN.md "Unified reflections design"`, `docs/DESIGN.md "Deferred wetness design"`.
 - Upstream's `docs/next/*` files are not in either repo: a number cited only from there is unverified.
 - Decision from the owner decides the mode: **hand port** (select fixes) or **full merge** (take upstream's RT as is, keep ours,
   hand-merge the seams). Example of each: hand port = branch `upstream-1.1.2-fixes`, commit f4e43e3 (in main); full merge = branch

@@ -2,8 +2,8 @@
 
 Read from the code of the current test build (`test-p1a-bump` e31a5ed: deferred wetness steps 1-3, bumped normals, Reflections with the
 film). Paths are under `src\` unless they start with `docs\` or `resource\`. Nothing here was built or run. Costs are estimates, not
-measured. Background: `docs/deferred-roadmap.md`, `docs/deferred-vs-forward.md`, `docs/archive/bumped-normals-study.md`,
-`docs/deferred-wetness-design.md`, `effects/Reflections/README.md`.
+measured. Background: `docs/DESIGN.md "Deferred roadmap"`, `docs/DESIGN.md "Deferred vs forward"`, `docs/archive/bumped-normals-study.md`,
+`docs/DESIGN.md "Deferred wetness design"`, `docs/EFFECTS.md "Reflections"`.
 
 ## Short answer
 - **Doable, and most of it exists already.** The Reflections effect's Vulkan path is already the source ladder the request describes:

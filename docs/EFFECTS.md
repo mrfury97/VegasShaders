@@ -3828,7 +3828,7 @@ in the frame of the "Bip01 L ForeTwist" bone, so sleeves no longer poke through 
 - Finding its draws: `ForGeometry` from `RenderPassSkinnedHook` (skin has "Bip01 L ForeTwist", name not containing "pipboy"); in third
   person only for the player (`OnPlayer` walks m_parent to Player->GetNode()). Only vertices weighted to L ForeTwist / Forearm / Hand move.
 - Bone matching goes through `src/core/SkinBones.h` (by pointer; an earlier `_stricmp` through a bad bone slot crashed with a VirtualLegs
-  mesh from PlayerPhysics / NV-SMP-Physics: see `docs/smp-compatibility.md`). Tester workaround for old builds: `Exclude += virtuallegs`.
+  mesh from PlayerPhysics / NV-SMP-Physics: see `docs/DESIGN.md "SMP compatibility"`). Tester workaround for old builds: `Exclude += virtuallegs`.
 
 ### 3. Settings (`[_Shaders.PipboyFit.Main]`, all live except Enabled; defaults as in the repo)
 Shape: Strength 1, Knee 0.7, Falloff 2, Start 4.5, End 17, CenterY 0.1, CenterZ 0.4, RadiusY 2.6, RadiusZ 2.6, WristScale 0.6, Axis 0.
@@ -4734,7 +4734,7 @@ Only the land, by default (user): `ObjectPuddles = false` sends object draws TES
 - Puddles has no switch of its own: it follows Wetness Effects' (the menu's "Rain wetness"; `SettingManager` RainWetnessOneSwitch /
   ApplyRainWetnessSwitch keep `[Shaders.Puddles.Status] Enabled` equal to it).
 - `ReflectionPuddles` is hidden: the Vulkan reflection passes take the standing water and its roughness from DeferredWetness's film in frames
-  that have one (`src/effects/Reflections/README.md`, last section), not from the field / mask in section 3.
+  that have one (`docs/EFFECTS.md "Reflections"`, last section), not from the field / mask in section 3.
 - Wetness Effects' own puddle settings are hidden while Puddles is on with Quality above 0 (2026-11-20, owner's request;
   `ImGuiManager.cpp` RainWetnessDeadKey): MaxPuddleWetness, PuddleRadius, PuddleMaxAngle, HeightAwareness, CreviceFill. Every record then
   takes GetWetness's Puddles branch (`Includes/Wetness.hlsl` PUDDLES_ON), which replaces the CS noise puddle they shaped. PuddleMinWetness
@@ -5009,7 +5009,7 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   (2026-11-20, unified reflections, the owner's first look at step 1: "reflections dont seem to be using the normal bump at all") Standing
   water is flat in the G-buffer already (DeferredWetness's flatten), so the lean is for damp ground only and partial: at the film's full wet
   share the bump keeps 0 % (DampBumpLean 1; 2026-11-21 owner's choice "Smooth-normal ray": bump-bent rays speckled damp dirt in low sun
-  and the cube alternative lost the streets' crisp mirror, docs/reflection-speckle.md; before: 100 % on 2026-11-20, 20 %, 0 %). The
+  and the cube alternative lost the streets' crisp mirror, docs/DESIGN.md "Reflection speckle"; before: 100 % on 2026-11-20, 20 %, 0 %). The
   puddles stay flat: that is DeferredWetness's own flatten of the G-buffer's shading normal under standing water (with Puddles compiled in),
   not this lean.
 - The bump's fade (`BumpKeep`, `cb.film.z`: the normals are the normal-mapped shading normals, DeferredBumpedNormals, DeferredReflections or
@@ -5030,7 +5030,7 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
   RayGen, Composite; the other five only declare it). The "Reflections shader files" log line's hash table is older than these (it says OLD).
 
 ### The material from the G-buffer: UnifiedReflections (2026-11-20, unified reflections step 1; NOT yet run in a game)
-`[Main.Main.Quality] UnifiedReflections` (live, test only, off, hidden in the menu's Internal list; docs/unified-reflections-design.md step 1).
+`[Main.Main.Quality] UnifiedReflections` (live, test only, off, hidden in the menu's Internal list; docs/DESIGN.md "Unified reflections design" step 1).
 With `DeferredRenderer = 2` and this frame's G-buffer (COLOR1-3) the passes read each pixel's material from the G-buffer itself
 (`Compute/Reflections.glsl` GBufferMaterial, the .fx the same) instead of MaterialAware's copy, which is not made then (no technique 7, no
 DeferredReflections / MaterialBufferRoughness merge; still made while the RT weapon rays run, `MaterialCopySkipped`: the weapon's material is
@@ -5068,7 +5068,7 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
   way; grey-white + green: the floor rule's known materials; dimmed: no record).
 - (2026-11-20, step 2) In a frame `WetReach` says so, the wet floors' reflection is this effect's alone: DeferredWetness drops its sky term on
   those floors and Wetness Effects' screen pass its trace (its lamp streaks stay); the D3D9 technique got the film, the bump fade, the damp lean
-  and the curvature AA. docs/unified-reflections-design.md "Step 2 as built".
+  and the curvature AA. docs/DESIGN.md "Unified reflections design" "Step 2 as built".
 - What correct looks like: polished metal props, chrome, glossy counters and smooth objects reflect the room by their own roughness (sharp on
   chrome, blurred on brushed metal), whatever way they face; gold / brass reflect in their own colour, mirror-smooth metal in silver; tiled
   floors and wet ground as with the switch off. Wrong: a person, plant or post in front of a shiny surface turning into a mirror (the record
@@ -5078,7 +5078,7 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
 ### Damp ground reads the cube; only standing water is traced (2026-11-21; owner: "Yes, try it"; NOT yet looked at in game)
 - Why: the owner's save `reflection01` (sunny after rain, install-test18): damp dirt's reflection broke into white speckles at mid distance.
   A ray bent by one pixel's bump at a low angle flips between bright sky and dark ground block by block; no blur averages that
-  (`docs/reflection-speckle.md`, on test-p1a-bump). Community Shaders never traces wet ground: damp ground reads a cube pre-blurred by roughness.
+  (`docs/DESIGN.md "Reflection speckle"`, on test-p1a-bump). Community Shaders never traces wet ground: damp ground reads a cube pre-blurred by roughness.
 - What (Vulkan passes only; the D3D9 technique and the RT passes are unchanged): `Reflections.glsl` FilmWetness splits the film into standing
   water and damp ground by its roughness: standing water's is the running Puddles Roughness (`cb.film2.y`: TESR_PuddleLook.x while
   TESR_PuddleData.w is on, else 0.05 for Wetness Effects' own puddles), damp ground's is rougher (lerp(1, 0.22, rain): 0.61 at
@@ -6821,7 +6821,7 @@ at the surface (not for the sky) with the include's normal offset and bias (FogS
 past the last one with a 10 % fade); lerp(1, vis, ShadowStrength). 35 % x dayFade of the fog colour counts as direct sun and is shaded;
 the glow (4a SunGlow) is added on top and shaded. inscatter = (shaded colour + sunLight x glow x vis) x albedo.
 (2026-11-07, ptaaa-fog) While the ray tracing core runs for another RT effect, the grid's a channel holds the TRACED sun visibility
-(`[Shaders.VolumetricLight.RT]`, src/effects/VolumetricLight/README.md "RT fog visibility"): with FogVolume + Froxels the fog's sun
+(`[Shaders.VolumetricLight.RT]`, docs/EFFECTS.md "VolumetricLight" "RT fog visibility"): with FogVolume + Froxels the fog's sun
 shading inside MaxDistance follows the RT sun shadows' casters with no change here. The surface lookup past the grid (and the ClassicLook /
 no-grid paths) stays the cascades.
 
@@ -7034,7 +7034,7 @@ cutout, so the cutout read as a solid shape in the light.
   sky share takes the whole view's air; a pixel that is sky by depth but only partly sky (sample-0 resolves) takes, for its surface share,
   the air up to the nearest surface 1-2 px round it. Ported to the Vulkan composites (`Compute/VolumetricLightComposite.frag`,
   `VolumetricLightCompositeGrid.frag`, `Compute/MsaaSkyEdge.glsl`; binding 3 `TESR_SkyCoverage`, `TESR_GameMultisample` at the end of
-  the uniform block). The fog's FogGridLight blends the grid depth instead (see `src/effects/VolumetricFog/README.md`, section 7).
+  the uniform block). The fog's FogGridLight blends the grid depth instead (see `docs/EFFECTS.md "VolumetricFog"`, section 7).
 - `[Main.Main.Quality] MsaaEdgeDebugView 1` (test only): these composites show red where the depth says sky, green the exact sky share.
 
 Bench 2026-11-05 (og-desert, `bench/foundations/lists/alphacut-vl.txt`, MaxDistance 15000 so the pylons lie inside the march): with MSAA 4
@@ -7317,7 +7317,7 @@ Neither path needs extra render targets or a second frame copy.
 Ported from Community Shaders' Wetness Effects (through Physically-Based-Reloaded): in the rain surfaces open to the sky darken and gain a
 glossy water film with its own highlight and reflection, drops ripple on flat wet ground, nothing gets wet under cover (the top-down ortho
 map). Puddles (`src/effects/Puddles`) builds on it for the standing water. Since 2026-11-21 it is THE rain wetness, on by default:
-WetWorld, the old screen-space wet pass, is removed (owner's word; `docs/deferred-wetness-design.md` step 4). It is a shader collection, not
+WetWorld, the old screen-space wet pass, is removed (owner's word; `docs/DESIGN.md "Deferred wetness design"` step 4). It is a shader collection, not
 a pass: the water layer is `Shaders/Includes/Wetness.hlsl` inside the object, parallax and land pixel shaders (and, with
 `[Main.Main.Quality] DeferredWetness`, the deferred wetness pass, `core/DeferredWetness.h`).
 

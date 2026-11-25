@@ -216,7 +216,7 @@ vec3 SmoothViewNormal(vec2 uv) {
 //    small bumps. Standing water is already flat in the G-buffer (DeferredWetness's flatten, with Puddles compiled in), so here damp ground
 //    leans: at the film's full wet share it keeps 1 - DampBumpLean of its bump. (Was 0.8, then 1 before it; 2026-11-20 owner: "make Wet ground
 //    keep 100% of its bump": 0, the whole bump; the grain the owner saw on wet grass and dirt may come back, DebugView 12 shows the bend.)
-//    (2026-11-21, owner's choice "Smooth-normal ray" after the speckle hunt, docs/reflection-speckle.md: 1. A bump-bent ray at a low angle
+//    (2026-11-21, owner's choice "Smooth-normal ray" after the speckle hunt, docs/DESIGN.md "Reflection speckle": 1. A bump-bent ray at a low angle
 //    flipped between bright sky and dark ground pixel block by pixel block on damp dirt in low sun (save reflection01); the cube instead
 //    cost the wet streets their crisp mirror. At the film's full wet share the ray, the blur and the Fresnel follow the smooth ground:
 //    crisp, steady wet reflections; the bumps stay in the ground's own shading, on dry shiny surfaces and on partly wet ground.)
@@ -312,7 +312,7 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
 // puddle, through the dirt's bumps: a speckled sky. The blur is now the film's own, held between WetRoughness (standing water: the
 // owner's sharp puddles) and DampMaxRoughness (damp ground: blurred, yet under the 0.35 hand-over, so it still shows).
 const float DampMaxRoughness = 0.3;
-// (2026-11-21, owner's save reflection01: the damp dirt's reflection still broke into white speckles at mid distance; docs/reflection-speckle.md)
+// (2026-11-21, owner's save reflection01: the damp dirt's reflection still broke into white speckles at mid distance; docs/DESIGN.md "Reflection speckle")
 // Damp ground is no longer traced (owner: "Yes, try it"): a ray bent by one pixel's bump at a low angle flips between bright sky and dark
 // ground block by block, which no blur averages. As Community Shaders does wet ground, damp ground reads the surroundings cube (pre-blurred
 // by roughness), then the light grid and the sky, at the film's OWN roughness, along the plain mirror direction; only standing water keeps the
@@ -396,7 +396,7 @@ float WaterReflectivity(float depth, out float roughness) {
 float SurfaceMetal = 0.0;     // set by Reflectivity: the surface's metal (0 without material data)
 vec4 MaterialAt(vec2 uv) { return cb.material.x > 0.5 ? textureLod(sampler2D(t_material, POINT_S), uv, 0.0) : vec4(0.0); }
 
-// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1): with the renderer in
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/DESIGN.md "Unified reflections design" step 1): with the renderer in
 // mode 2 the surface's material is the G-buffer's own record, read here per pixel (no copy pass, no scene-alpha rule), decoded into the layout
 // of MaterialAware's copy so the rules below stay one: r roughness, g metal, b 1 = reflects by its smoothness whatever way it faces (objects,
 // worn gear and cloth the game lights with a highlight: COLOR2's specular bit, models 1-3), b 0.5 = a known material for the floor rule (the

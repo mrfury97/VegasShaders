@@ -111,7 +111,7 @@ Low value, recorded so nobody re-checks:
 - **VisibleRanking** (on): up to 128 small draws and occlusion queries a frame; the froxel lists carry no occlusion, so they are no
   substitute. Weak.
 - **The facet normal is rebuilt from depth in five shaders** (AO sky term, `Reflections.glsl:340`, `RtAOInput.frag`, `RtSunShadow.comp`,
-  Normals). Deliberate (`docs/deferred-vs-forward.md:149-150`): a shared include is code tidiness only, no time.
+  Normals). Deliberate (`docs/DESIGN.md "Deferred vs forward":149-150`): a shared include is code tidiness only, no time.
 - **Normals smoothing in two places** (Normals `SmoothNormals`, default 0, vs AmbientLight's own smooth): never compared (Normals README
   open question 4). BELIEVED overlap.
 - **Private fp16 copies per deferred pass** (DeferredLamps, Flashlight, DeferredFog, DeferredSkin, DeferredWetness, LinearScene): mostly
@@ -127,7 +127,7 @@ most change the look a little, so each needs the owner's word before it is built
   GLSL copy of the puddle noise and the old switches all go: M5, M6, M8, M9, Q2, Q6, Q8, plus the lighting-free records' wetness code.
 - **Evidence:**
   - PROVEN that every piece listed exists and runs; the reflections/wetness helper and this session checked them.
-  - The owner already runs the end state's switches: the design docs `deferred-wetness-design.md` and `unified-reflections-design.md`,
+  - The owner already runs the end state's switches: the design docs `docs/DESIGN.md "Deferred wetness design"` and `docs/DESIGN.md "Unified reflections design"`,
     plus the 2026-11-21 log.
 - **Saving:** NOT MEASURED. It removes one screen trace (0.4-1 ms, design estimate) and one full-screen pass + copy in rain. Its biggest
   gain is complexity: about 15 switches become 2.
@@ -264,7 +264,7 @@ most change the look a little, so each needs the owner's word before it is built
 
   10-14 sessions. Mostly correctness (every lamp lights them); the frame-time effect is unknown until Phase 0 measures the forward
   share.
-- **Evidence:** `docs/deferred-roadmap.md`, `docs/deferred-vs-forward.md`; owner's log for the switches.
+- **Evidence:** `docs/DESIGN.md "Deferred roadmap"`, `docs/DESIGN.md "Deferred vs forward"`; owner's log for the switches.
 - **Risk:** per group, low-medium.
 - **Players see:** lamps lighting what they don't today.
 

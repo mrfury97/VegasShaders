@@ -22,9 +22,9 @@ engine research (room 05), cross-project test runs (room 06).
   (`.git\info\exclude`); never commit them. Address lookup: `F:\Claude Brain\fnv_decomp\build\units.json`.
 
 ## Docs map
-- `docs\` current design docs: `deferred-vs-forward.md` (G-buffer, which path), `deferred-roadmap.md`, `deferred-wetness-design.md`,
-  `unified-reflections-design.md`, `reflection-speckle.md`, `pipeline-audit.md`, `ssfx-rain-comparison.md`, `smp-compatibility.md`,
-  `COMMUNITY-SHADERS-PORTS.md`.
+- `docs\` current design docs: `docs/DESIGN.md "Deferred vs forward"` (G-buffer, which path), `docs/DESIGN.md "Deferred roadmap"`, `docs/DESIGN.md "Deferred wetness design"`,
+  `docs/DESIGN.md "Unified reflections design"`, `docs/DESIGN.md "Reflection speckle"`, `docs/DESIGN.md "Pipeline audit"`, `docs/DESIGN.md "SSFX rain comparison"`, `docs/DESIGN.md "SMP compatibility"`,
+  `docs/DESIGN.md "Community Shaders ports"`.
 - `docs\reference\` technical reference: `architecture.md` (key files, runtime shaders and cache, RT helper), `dxvk-input.md` (menu input
   under DXVK, cursor, input blocking, xNVSE first), `runtime-paths.md` (file and folder names, `Paths::`), `gbuffer-dxvk-facts.md`
   (push-block limits, X4505, grass, land height), `lessons-from-archived-notes.md`.

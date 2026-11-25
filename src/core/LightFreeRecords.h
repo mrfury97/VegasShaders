@@ -49,7 +49,7 @@ namespace LightFreeRecords {
 		return overrides;
 	}
 
-	// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredStandalone (restart, bug fix, default on; docs/deferred-roadmap.md Phase 1a): a shader
+	// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredStandalone (restart, bug fix, default on; docs/DESIGN.md "Deferred roadmap" Phase 1a): a shader
 	// whose forward (Default) record did not load still gets its lighting-free record, so the main view draws it deferred instead of the game's
 	// own shader. Seen 2026-11-18: the 5-7 layer land (SLS2124-2146) ran out of ps_3_0 temp registers (X4505) with Terrain Blending + Wetness
 	// Effects + Puddles; with no forward record nothing deferred was even tried, and those land pieces were the game's (pale, unlit) everywhere.

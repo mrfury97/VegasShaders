@@ -96,7 +96,7 @@ With work from:
   ([docs/archive/upstream-cherry-picks.md](docs/archive/upstream-cherry-picks.md)).
 - The [Community Shaders](https://github.com/community-shaders/skyrim-community-shaders) team (GPL-3.0): terrain and
   cloud shadows, grass collision, skylighting, LOD blending, terrain variation and the True PBR layout
-  ([docs/COMMUNITY-SHADERS-PORTS.md](docs/COMMUNITY-SHADERS-PORTS.md)).
+  ([Community Shaders ports](docs/DESIGN.md#community-shaders-ports)).
 - [WallSoGB](https://github.com/WallSoGB)'s Fallout: New Vegas database, behind the engine fixes; the NVSE / xNVSE
   projects and the community's reverse engineering of the game.
 - SMAA by Jorge Jimenez et al. (MIT).

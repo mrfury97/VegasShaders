@@ -1,6 +1,6 @@
 # Deferred renderer: what is and isn't deferred, and the road map (2026-11-18)
 
-Read from the code on `vs-1.1.0-plus-fork` (upstream 1.1.0's renderer). Background and file:line detail: `docs/deferred-vs-forward.md`.
+Read from the code on `vs-1.1.0-plus-fork` (upstream 1.1.0's renderer). Background and file:line detail: `docs/DESIGN.md "Deferred vs forward"`.
 Effort is in working sessions and is an estimate. Nothing here was run in game. Upstream's own result docs (`docs/next/*`) are not in
 either repo, so anything resting on them is "claimed".
 
@@ -125,7 +125,7 @@ missing result docs only.
 - **Distant trees** (1-2 sessions): a replacement for the game's DISTTREE shader that writes the G-buffer. Small screen share (Phase 0 will say).
 - **Cube-map layer** (1-2 sessions): fold the EnvTemplate pass into the deferred reflections (cube map as the fallback when a ray misses).
   Risk: double reflections during the change.
-  (2026-11-20) Part of the one-reflection-pass plan: `docs/unified-reflections-design.md` (steps 1-5, 6-9 sessions).
+  (2026-11-20) Part of the one-reflection-pass plan: `docs/DESIGN.md "Unified reflections design"` (steps 1-5, 6-9 sessions).
 - **DeferredSun's missing terms** (1 session): metal's tint, the wet film's sun highlight, the land's highlight with UsePBR off, parallax's
   sun with POM shadows off (`Shaders/DeferredSun.hlsl:17-18`).
 
@@ -139,7 +139,7 @@ everything; Phases 0-1c (5-6 sessions) fix what breaks today and lift the shader
 
 ## Gaps today and "can it be fully unhooked from forward?" (2026-11-19)
 Asked by the owner. Read from the code on the installed test build (`test-p1a-bump` 90fc395 + deferred wetness step 1) and the docs
-`deferred-vs-forward.md`, `archive/bumped-normals-study.md`, `deferred-wetness-design.md`. Nothing measured; ranks are by what a player sees (believed).
+`docs/DESIGN.md "Deferred vs forward"`, `archive/bumped-normals-study.md`, `docs/DESIGN.md "Deferred wetness design"`. Nothing measured; ranks are by what a player sees (believed).
 
 ### The gaps, most visible first
 | # | Gap | What the player sees | Fixed by |

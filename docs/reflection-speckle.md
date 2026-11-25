@@ -78,7 +78,7 @@ our own. Clone: `F:\VS-scratch\ext\cs` (sparse) and `F:\VS-scratch\ext\cs-files`
   light grid / sky along the mirror direction at the film's own roughness (0.61 for the owner). Standing water keeps the trace. The
   composite takes the damp share's Fresnel at most at 0.3 rough (at 0.61 it is a quarter of 0.3's at 5 degrees: the test10 "no
   reflections" look). `[Shaders.Reflections.Main] DampTrace = true` (hidden) brings the trace back for an A/B. Vulkan passes only; RT
-  passes unaware (known gap). Details: `src/effects/Reflections/README.md`, last section. Not yet looked at in game; frame cost not measured
+  passes unaware (known gap). Details: `docs/EFFECTS.md "Reflections"`, last section. Not yet looked at in game; frame cost not measured
   (believed cheaper). What to look at: `reflection01`: speckles gone? damp ground still reads wet? puddles still sharp?
 - 2026-11-21 test20 (144544a): lamps and fires on damp ground came back (bright screen hits kept over the cube).
 - 2026-11-21 slot A/B (owner's word; sheets `F:\NVR-bench\shots\refl-ab-sheets`, `refl-ab2-sheets`): PROVEN the cube cost the puddle edges

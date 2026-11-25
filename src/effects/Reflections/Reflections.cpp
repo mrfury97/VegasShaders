@@ -841,7 +841,7 @@ void ReflectionsEffect::BindMaterial() {
 	for (const auto& s : point) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
 }
 
-// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], live, test only, off; docs/unified-reflections-design.md step 1): in mode 2
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], live, test only, off; docs/DESIGN.md "Unified reflections design" step 1): in mode 2
 // the passes read the surfaces' material from the G-buffer (Reflections.glsl GBufferMaterial, Reflections.fx.hlsl the same) and MaterialAware's
 // copy is not made. On when the switch is (FdIndirect::UnifiedReflectionsOn: mode 2, this frame's COLOR1-3) and the back end that will draw
 // reads them: the Vulkan passes always, the D3D9 technique only when compiled with it (on at startup). Decided once a frame, so every pass of

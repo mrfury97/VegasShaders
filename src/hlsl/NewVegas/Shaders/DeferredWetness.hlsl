@@ -1,4 +1,4 @@
-// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; docs/deferred-wetness-design.md, step 1: the land; step 2, 2026-11-20: the
+// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; docs/DESIGN.md "Deferred wetness design", step 1: the land; step 2, 2026-11-20: the
 // objects and parallax too, DWObject below, with their own forward inputs).
 // The land's water layer (Includes/Wetness.hlsl GetWetness), worked out ONCE per pixel after the G-buffer is resolved, for the pixels the
 // near land's lighting-free records drew (LAMPS_DEFERRED 2 with DEFERRED_WETNESS: TerrainTemplate.hlsl TERRAIN_WET_DEFERRED, which drops its

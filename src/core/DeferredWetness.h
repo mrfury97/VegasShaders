@@ -1,5 +1,5 @@
 #pragma once
-// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only, off; docs/deferred-wetness-design.md step 1:
+// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only, off; docs/DESIGN.md "Deferred wetness design" step 1:
 // the land; step 2, 2026-11-20: the objects and parallax too, their lighting-free records with DEFERRED_WETNESS; Shaders/DeferredWetness.hlsl).
 // The land's water layer (Wetness Effects + Puddles: the darker albedo, the flattened puddle normal, the film) worked out once per pixel in a
 // full-screen pass after the G-buffer is resolved, instead of inside every land shader: the near land's lighting-free records (LAMPS_DEFERRED 2)
