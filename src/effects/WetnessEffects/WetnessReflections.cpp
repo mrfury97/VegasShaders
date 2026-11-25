@@ -51,7 +51,7 @@ bool WetnessReflectionsEffect::ShouldRender() {
 	return Wetness->Constants.Flags.x > 0.5f && Settings.Strength > 0.0f;
 }
 
-// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredBumpedNormals (live, test only, off; core/FdIndirect.h, docs/bumped-normals-study.md):
+// UNOFFICIAL 2026-11-18 [Main.Main.Quality] DeferredBumpedNormals (live, test only, off; core/FdIndirect.h, archive/2026-11-25.zip vs/repo-docs-archive/bumped-normals-study.md):
 // the shader's NVR_WetShadingNormals (s4) has no texture slot, so it is set here before every Render (EffectChain): the G-buffer's
 // normal-mapped shading normal while the switch is on, else TESR_NormalsBuffer itself; TESR_WetnessReflectionBump.x says which (0: the
 // shader takes exactly its old path). The caller clears the stage after the Render (ClearPassTextures).

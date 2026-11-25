@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  NvrRtHelper.exe: the 64-bit ray tracing helper for New Vegas Reloaded (README.md). Built on its own, never part of VegasShaders.dll.
+  NvrRtHelper.exe: the 64-bit ray tracing helper for New Vegas Reloaded (docs/TOOLS.md "nvr-rt-host", the RT helper is built by its scripts). Built on its own, never part of VegasShaders.dll.
 
   msbuild tools\nvr-rt-helper\NvrRtHelper.vcxproj /p:Configuration=Release /p:Platform=x64 [/p:PlatformToolset=v143]
   Needs only the Vulkan SDK headers + vulkan-1.lib (%VULKAN_SDK%, else C:\VulkanSDK\1.3.296.0).

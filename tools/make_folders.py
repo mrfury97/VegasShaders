@@ -4,6 +4,7 @@ Moves every effect's C++ into src/effects/<Folder>/ (git mv), rewrites every #in
 updates the project files, and gives each folder its README.md (the effect's spec from rw-tools/specs, when there is one) and
 SHADERS.txt (the shader files the effect's runtime loads; the shaders themselves stay where the game loads them from).
 Shared files (Effects.h, Animator.*) stay in src/effects/.
+One-off, already run. Since 2026-11-25 an effect's README lives as a section of docs/EFFECTS.md, so do not rerun step 5's README copy.
 """
 import os, re, subprocess, sys, shutil
 

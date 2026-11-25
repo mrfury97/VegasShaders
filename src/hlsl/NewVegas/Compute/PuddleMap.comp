@@ -1,4 +1,4 @@
-// 2026-11-12 Puddles, map mode (WETNESS_EFFECTS 3; src/effects/Puddles/README.md "Puddle map"): the large-scale puddle terms, once
+// 2026-11-12 Puddles, map mode (WETNESS_EFFECTS 3; docs/EFFECTS.md "Puddles", "Puddle map"): the large-scale puddle terms, once
 // per texel of a world-space map round the camera instead of in every surface pixel (they cost the ps_3_0 shaders their temps).
 //
 // TESR_PuddleMap, rgba16f, 2048 x 1024: two cascades side by side, each 1024 x 1024, each snapped to its own texel grid around the

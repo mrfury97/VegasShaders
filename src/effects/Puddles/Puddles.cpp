@@ -4,7 +4,7 @@
 #include "PuddleMap.h"
 #include "../../core/RainState.h"	// 2026-11-21 ForcedRain / ForcedSnow
 
-// 2026-11-08 Puddles: see README.md here.
+// 2026-11-08 Puddles: see docs/EFFECTS.md "Puddles".
 
 void PuddlesShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_PuddleData", &Constants.Data);

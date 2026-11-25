@@ -2,7 +2,7 @@
 
 // UNOFFICIAL 2026-11-13 (modern lighting): the sun's lens glare. A tight halo, a many-pointed starburst and a long horizontal
 // streak drawn round the sun's place on screen, as a camera lens (and the eye's lashes) makes them. It shows only as much as the
-// sun's disc itself shows: hidden behind a tree, a wall, the first-person weapon or a thick cloud, it is gone. See README.md.
+// sun's disc itself shows: hidden behind a tree, a wall, the first-person weapon or a thick cloud, it is gone. See docs/EFFECTS.md "SunGlare".
 class SunGlareEffect : public EffectRecord
 {
 public:

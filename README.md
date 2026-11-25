@@ -75,7 +75,7 @@ git submodule update --init --recursive
 Then build `NewVegasReloaded/NewVegasReloaded.vcxproj` (Release, Win32), or run `build.bat "NewVegasReloaded"`. The
 plugin comes out as `VegasShaders.dll`. Shaders are compiled by the game at runtime from `src/hlsl/NewVegas`, which
 maps to `Data\Shaders\VegasShaders\`. Each effect's code, settings defaults and notes are in `src/effects/<Name>/`
-(index: `src/effects/INDEX.md`). The generated textures can be rebuilt with `tools/gen_textures.py`.
+(the notes and an index are in `docs/EFFECTS.md`). The generated textures can be rebuilt with `tools/gen_textures.py`.
 
 ## Credits
 
@@ -91,10 +91,10 @@ With work from:
 - macintroll: snow accumulation and the snow look, captured normals, lens and underwater shaders.
 - Balebandro (Physically-Based-Reloaded): PBR weather scales, the grass size fade.
 - VHeyes (mirjomi): fixes including SMAA and the material pass
-  ([docs/upstream-cherry-picks.md](docs/upstream-cherry-picks.md)).
+  (archived: `vs/repo-docs-archive/upstream-cherry-picks.md` in `F:\Claude Brain\archive\2026-11-25.zip`).
 - The [Community Shaders](https://github.com/community-shaders/skyrim-community-shaders) team (GPL-3.0): terrain and
   cloud shadows, grass collision, skylighting, LOD blending, terrain variation and the True PBR layout
-  ([docs/COMMUNITY-SHADERS-PORTS.md](docs/COMMUNITY-SHADERS-PORTS.md)).
+  ([Community Shaders ports](docs/DESIGN.md#community-shaders-ports)).
 - [WallSoGB](https://github.com/WallSoGB)'s Fallout: New Vegas database, behind the engine fixes; the NVSE / xNVSE
   projects and the community's reverse engineering of the game.
 - SMAA by Jorge Jimenez et al. (MIT).

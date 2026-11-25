@@ -341,7 +341,7 @@ float TerrainLampShadow(float3 lampPos, float3 vis, float3 p0, float3 p1, float3
 // (WETNESS_HEIGHT, c158: [Shaders.WetnessEffects.Main] HeightAwareness, CreviceFill, NormalAwareness), as in Physically-Based-Reloaded.
 // (2026-11-13 fork port) the lamp record's water layer (WETNESS_ALT_REGS) only with Puddles (WETNESS_EFFECTS 2+): Wetness Effects alone as before
 // UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only; core/DeferredWetness.h, Shaders/DeferredWetness.hlsl,
-// docs/deferred-wetness-design.md step 1): the lighting-free record (LAMPS_DEFERRED 2) with DEFERRED_WETNESS leaves the water layer to that
+// docs/DESIGN.md "Deferred wetness design" step 1): the lighting-free record (LAMPS_DEFERRED 2) with DEFERRED_WETNESS leaves the water layer to that
 // pass, which works it out once per pixel after the G-buffer is resolved, from this record's G-buffer and the layers' height it leaves in
 // COLOR2.r (below, at the outputs). Without DEFERRED_WETNESS (every record but that one) nothing here changes.
 #if defined(PS) && defined(DEFERRED_WETNESS) && defined(NVR_LIGHT_DEFERRED) && defined(WETNESS_EFFECTS) && CAPTURED_NORMALS_ON >= 4

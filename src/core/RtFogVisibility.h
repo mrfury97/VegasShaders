@@ -1,7 +1,7 @@
 #pragma once
 
 // UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility ([Shaders.VolumetricLight.RT]; docs\next\RT-PATH-TRACING.md "ptaaa-fog",
-// src\effects\VolumetricLight\README.md): the sun's visibility in the AIR, per cell of the volumetric light's froxel grid, traced against
+// docs\EFFECTS.md "VolumetricLight"): the sun's visibility in the AIR, per cell of the volumetric light's froxel grid, traced against
 // the ray tracing core's scene (RtCore.h) instead of read from the cascaded shadow maps, so the shafts (VolumetricLight) and the fog's sun
 // shading (VolumetricFog with FogVolume: the grid's sums) follow the same casters as the RT sun shadows and the path tracer: far
 // geometry past the cascades, alpha-tested cards, actors, the far LOD. The trace (Compute\Rt\RtFogVisibility.comp, its constants by

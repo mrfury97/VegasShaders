@@ -1,7 +1,7 @@
 # UNOFFICIAL 2026-11-09 (pt-mirrors) scores the playground's denoised mirror / chrome / glass shots against their matched references.
 #   py -3.11 -I tools\nvr-rt-playground\score_mirror.py [--out <folder>] <tag> [<tag> ...]
 # For each tag it reads out\05_mirror_spheres<tag>.png against out\09_reference_of_05<tag>.png and out\08_glass_leaf_skin<tag>.png against
-# out\10_reference_of_08<tag>.png (the demo's matched references: the same camera and the same frozen moment, ~450 samples; README).
+# out\10_reference_of_08<tag>.png (the demo's matched references: the same camera and the same frozen moment, ~450 samples; docs/TOOLS.md "nvr-rt-playground").
 # The shots are the window (1280x720, the 320x180 internal picture scaled up x4 + the HUD): each region is box-averaged back to the
 # internal size first. Per region:
 #   mae    mean absolute difference from the reference (0-255, all channels), the reference first 3 x 3 median-filtered (its own rare

@@ -1,4 +1,4 @@
-# Builds the RT test host (tools/nvr-rt-host/README.md): NvrRtHelper.exe (x64, MSBuild) and NvrRtHost.exe (x86, cl), and puts the
+# Builds the RT test host (docs/TOOLS.md "nvr-rt-host"): NvrRtHelper.exe (x64, MSBuild) and NvrRtHost.exe (x86, cl), and puts the
 # NVR DXVK fork's d3d9.dll next to the host. Output: tools\nvr-rt-host\bin\ (git-ignored).
 #   -Fork <d3d9.dll>    the fork to test with (default: the bench copy fork-r13, or $env:NVR_RT_HOST_FORK)
 #   -Compile            also compile the trace shaders the scenes use from src\hlsl\NewVegas\Compute\Rt\*.comp into bin\spv

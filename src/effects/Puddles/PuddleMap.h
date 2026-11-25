@@ -1,5 +1,5 @@
 #pragma once
-// 2026-11-12 Puddles, map mode (README.md "Puddle map"; Compute/PuddleMap.comp): the large-scale puddle terms (the noise field, the
+// 2026-11-12 Puddles, map mode (docs/EFFECTS.md "Puddles", "Puddle map"; Compute/PuddleMap.comp): the large-scale puddle terms (the noise field, the
 // rim wander, the rain cover as the top surface's height) computed once per texel of a world-space map round the camera on the NVR
 // DXVK extension, instead of in every surface pixel, where they cost the ps_3_0 shaders the temps that forced the lean and dry
 // fallbacks (and left 7-layer land, which has no sampler for the ortho map, without any rain cover).

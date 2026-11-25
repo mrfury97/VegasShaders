@@ -1,4 +1,4 @@
-// pg_scene.h: the RT playground's world (tools/nvr-rt-playground/README.md "Adding a scene object"): meshes from basic shapes, objects
+// pg_scene.h: the RT playground's world (docs/TOOLS.md "nvr-rt-playground" "Adding a scene object"): meshes from basic shapes, objects
 // (an instance of a mesh with a material), lamps, CPU-made textures, and BuildRoom(), the test room. World units are the game's (z up,
 // ~70 units a metre); the materials and lamps use the game's encodings so the path tracer reads them exactly as in Fallout.
 #pragma once

@@ -172,7 +172,6 @@ public:
 	void					PreStep_AmbientLight(ChainContext& ctx);
 	void					PreStep_LitProbes(ChainContext& ctx);
 	void					PreStep_BounceLight(ChainContext& ctx);
-	void					PreStep_BloodFlow(ChainContext& ctx);
 	void					PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx);
 	void					PreStep_SpillSelfTest(ChainContext& ctx);
 	void					PreStep_Reflections(ChainContext& ctx);
@@ -221,7 +220,6 @@ public:
 		AvgLumaEffect*			AvgLuma;
 		SkyViewEffect*			SkyView;	// UNOFFICIAL: the physical sky's table ([Shaders.Sky.Physical])
 		AmbientLightEffect*		AmbientLight;	// UNOFFICIAL: AO and bounce light in one pass (replaces both while on)
-		BloodLensEffect*		BloodLens;
 		BloomEffect*			Bloom;
 		BloomLegacyEffect*		BloomLegacy;
 		ColoringEffect*			Coloring;
@@ -267,7 +265,6 @@ public:
 		DreamEffect*			Dream;				// "fun" trip look (from the author's DreamSim), off by default
 		SkyDitherEffect*		SkyDither;			// UNOFFICIAL: breaks up the sky's banding before the 8-bit screen
 		VolumetricCloudsEffect*	VolumetricClouds;	// UNOFFICIAL: 3D clouds in place of the game's cloud layers
-		BloodFlowEffect*		BloodFlow;	// UNOFFICIAL: blood that runs and dries, pools under bodies
 		VolumetricSmokeEffect*	VolumetricSmoke;
 		DitherBusterEffect*		DitherBuster;
 		SMAAEffect*				SMAA;

@@ -1,4 +1,4 @@
-// pg_host.h: the game's side of the RT core for the RT playground (tools/nvr-rt-playground/README.md).
+// pg_host.h: the game's side of the RT core for the RT playground (docs/TOOLS.md "nvr-rt-playground").
 //
 // The same device / helper / shared-image / exchange code as tools/nvr-rt-host/rt_host.cpp's Host (kept as a copy, not an include:
 // rt_host.cpp is one translation unit with its own main and scene list), changed for an interactive program:

@@ -1,4 +1,4 @@
-# bridge_lobe_fit.py (2026-11-05, VanillaBridge: Shaders/Includes/Object.hlsl BridgeSetup, effects/PBR/README.md)
+# bridge_lobe_fit.py (2026-11-05, VanillaBridge: Shaders/Includes/Object.hlsl BridgeSetup, docs/EFFECTS.md "PBR")
 # py -3.11 -I tests/furnace/bridge_lobe_fit.py   (numpy)
 #
 # 1. The game's highlight mask x (N.H)^n against NVR's GGX highlight (PBR.hlsl: GGX D with alpha = roughness^2, Karis' separable

@@ -162,7 +162,7 @@ sampler2D TESR_OrthoMapBuffer : register(WETNESS_ORTHO_REG) = sampler_state { AD
 
 #define WETNESS_ON (TESR_WetnessFlags.x > 0.5f)
 
-// 2026-11-08 Puddles (src/effects/Puddles/README.md, [Shaders.Puddles]): a water level that fills in the rain and dries from the edges,
+// 2026-11-08 Puddles (docs/EFFECTS.md "Puddles", [Shaders.Puddles]): a water level that fills in the rain and dries from the edges,
 // a world-space puddle field (noise + the land's height crevices + slope + the rain cover), a flat water layer with ripples, a soaked ring
 // (the wall streaks were removed 2026-11-18). Compiled into the surface shaders with WETNESS_EFFECTS 2 ([Shaders.Puddles.Status] Enabled at startup); the D3D9
 // wetness reflection effect defines PUDDLES_RUNTIME. c165-c166 are the sun cross-fade's (never with Wetness Effects), c174-c175 free in the

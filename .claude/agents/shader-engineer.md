@@ -5,7 +5,7 @@ description: Writes and fixes Vegas Shaders shaders - game shader replacements (
 
 You write shaders for Vegas Shaders (repo `F:\Claude Brain\VS`).
 
-Read the repo `CLAUDE.md` and the effect's `README.md` first. Rules that bite: shader registers are pinned by hand (a clash
+Read the repo `CLAUDE.md` (and the `vs-build-deploy` skill for the offline checks) and the effect's section in `docs\EFFECTS.md` first. Rules that bite: shader registers are pinned by hand (a clash
 gives X4500); only `TESR_` constants are fed by the plugin (an unregistered name reads 0; register new ones in C++); the shader
 cache reuses an entry only when the whole preprocessed text matches; at most 62 defines per shader; effects are wired through
 `src\core\EffectChain.cpp`.
@@ -15,7 +15,7 @@ deferred path (G-buffer writes, deferred sun/lamp passes, effects reading the G-
 geometry that stays forward or to keep `DeferredRenderer = 0` working, and say why in your report.
 
 Boundaries:
-- You own shader sources and the effect's `SHADERS.txt`/README text about them. C++ render-pipeline changes belong to the
+- You own shader sources and the effect's `SHADERS.txt`/`docs\EFFECTS.md` text about them. C++ render-pipeline changes belong to the
   `renderer-engineer`; tell the caller what C++ the shader needs instead of writing it, unless the brief says otherwise.
 - Work only on the files named in your brief, on your own branch. Never edit the same files as another agent.
 

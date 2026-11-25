@@ -105,7 +105,7 @@ namespace PtApplies {
 
 	// Effects drawn after the traced picture went into the scene, with nothing that tests for it: they work as always.
 	inline const char* const kOnTop = "VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, Sandstorm, HeatHaze, DustMotes, CloudShadows, SunFar, "
-		"Precipitations, Snow, SnowAccumulation, HudRaindrops, Underwater, WaterLens, Plants, Cloth, PipboyFit, BloodFlow, Tonemapping, "
+		"Precipitations, Snow, SnowAccumulation, HudRaindrops, Underwater, WaterLens, Plants, Cloth, PipboyFit, Tonemapping, "
 		"Exposure, LocalExposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF, "
 		"TAA, SMAA, Sharpening, DitherBuster, SkyDither, GPUParticles, Dream, Debug";
 	inline const Row kOnTopRow = { "", nullptr, Applies, "Still applies: it is drawn on top of the path traced picture." };

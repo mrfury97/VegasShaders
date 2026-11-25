@@ -1,4 +1,4 @@
-"""Constant-block layout check for the RT trace passes (tools/nvr-rt-host/README.md).
+"""Constant-block layout check for the RT trace passes (docs/TOOLS.md "nvr-rt-host").
 
 The game's C++ fills each trace pass's 512-byte constant block from a struct (RtLampShadows.h PassConstants, ...); the shader reads
 it as a std140 uniform block. Nothing ties the two together at build time, and they drifted on 2026-11-06 (RtLampTrace.comp had

@@ -64,7 +64,7 @@ namespace ReflMaterial {
 	inline UInt32 DiagBound = 0, DiagChanged = 0, DiagFlagged = 0, DiagMask[16] = {};	// diagnostic counts for the log (per report)
 	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the other passes' own alpha (ReflMaterialRule.h Own / Cover)
 	inline bool FirstPersonLive = false;		// the first-person scene writes alpha (BeginFirstPerson)
-	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (effects/Reflections/README.md "Replace, not add"): TESR_ReflReplace as
+	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"): TESR_ReflReplace as
 	// the game's env-map pass (EnvTemplate.hlsl) reads it: x the share of last frame's reflection coverage taken out of the env map (0: off,
 	// the pass is exactly as before), zw one pixel of the scene target in UV. The Reflections effect makes the frame's value once
 	// (UpdateWaterConstants); it is LIVE only inside the frame's first world scene and the first-person scene. Any other scene the game

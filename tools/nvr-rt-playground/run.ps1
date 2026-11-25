@@ -1,4 +1,4 @@
-# The RT playground's one command (tools/nvr-rt-playground/README.md): build (helper + playground + fork + shaders into bin\), then
+# The RT playground's one command (docs/TOOLS.md "nvr-rt-playground"): build (helper + playground + fork + shaders into bin\), then
 # open the window. No game launch.
 #   powershell -ExecutionPolicy Bypass -File tools\nvr-rt-playground\run.ps1 [-Size 640x360] [-Window 1280x720] [-Device Radeon]
 #                                                                           [-Demo 60] [-Fork <d3d9.dll>] [-Compile] [-NoBuild] [-SkipHelper]
@@ -31,6 +31,6 @@ foreach ($s in $Set) { foreach ($one in $s.Split(",")) { if ($one) { $a += @("--
 if ($Tag) { $a += @("--tag", $Tag) }
 if ($FixedStep -gt 0) { $a += @("--fixed-step", "$FixedStep") }
 if ($FramesRange) { $a += @("--frames-range", $FramesRange) }   # (2026-11-09) only the demo's script seconds a,b (e.g. 30,40: segment 05)
-if ($Frames) { $a += @("--frames", $Frames) }   # (2026-11-09) every frame's picture, raw RGB at the window size, for a film (see the README)
+if ($Frames) { $a += @("--frames", $Frames) }   # (2026-11-09) every frame's picture, raw RGB at the window size, for a film (see docs/TOOLS.md "nvr-rt-playground")
 & "$bin\NvrRtPlayground.exe" @a
 exit $LASTEXITCODE

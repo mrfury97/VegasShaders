@@ -26,7 +26,7 @@ public:
 	// needs the contents or size of while TargetsWanted() is false, and whose pointer nobody keeps past a frame: the texture manager
 	// then keeps a 1 x 1 stand-in in its place while the effect is off and makes the real one again when it is switched on. The base
 	// answer is no (kept as before). Before answering yes for a new effect: every reader and writer of the target outside the effect,
-	// every method of the effect reachable while it is off, every copy of the pointer (docs: the effect's README, "Idle targets").
+	// every method of the effect reachable while it is off, every copy of the pointer (docs: the effect's section in docs/EFFECTS.md, "Idle targets").
 	virtual bool			TargetParkable(const char* SamplerName) { return false; }
 	// ... and whether the effect needs its targets now. Enabled, unless it is on but stands aside (SMAA while TAA runs).
 	virtual bool			TargetsWanted() { return Enabled; }

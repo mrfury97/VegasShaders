@@ -1,5 +1,5 @@
 // NvrRtHost, the path tracer's quality scenes (2026-11-07, included by rt_host.cpp after rt_host_light.inl): ReSTIR DI for the lamps
-// (PTRestirDI, RtPathTrace.comp RestirLamps + the game's RtRestirRow.h), README.md has the table.
+// (PTRestirDI, RtPathTrace.comp RestirLamps + the game's RtRestirRow.h), docs/TOOLS.md "nvr-rt-host" has the table.
 
 #include "../../src/core/RtRestirRow.h"
 

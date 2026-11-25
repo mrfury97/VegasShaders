@@ -249,7 +249,6 @@ namespace CapturedNormals {
 	inline IDirect3DPixelShader9* SkinAlbedoFillPS = nullptr;  inline bool SkinAlbedoFillFailed = false, SkinAlbedoLogged = false, AlbedoWantLogged = false;
 	inline void NoteAlbedoWriter(IDirect3DPixelShader9* handle, bool lightOnly) { if (!handle) return; AlbedoWriters.insert(handle); if (lightOnly) AlbedoLightOnlyWriters.insert(handle); }
 	inline bool SunGIWantsAlbedo = false;	// UNOFFICIAL 2026-11-12 (sungi p4) set by AmbientLight (SunGI on, outdoors): AlbedoBuffer's reader asks for the capture without the AL key
-	inline bool BloodWantsAlbedo = false;	// UNOFFICIAL 2026-11-12 set by BloodFlow ([Shaders.BloodFlow.Surface] on with a patch of blood): its film takes the light from the picture over this record
 	inline void NoteSkinAlbedo(IDirect3DTexture9* tex, IDirect3DSurface9* msaa, IDirect3DSurface9* surface) { SkinAlbedoTex = tex; SkinAlbedoMsaa = msaa; SkinAlbedoSurface = surface; }
 	inline bool AlbedoCompiledIn() {
 		if (!AlbedoChecked) { AlbedoChecked = true; AlbedoCompiled = MaterialCompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "AlbedoBuffer") != 0; }
@@ -313,7 +312,7 @@ namespace CapturedNormals {
 	// the G-buffer would never be made). Logged once.
 	inline bool AlbedoWanted() {
 		const bool rr = TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RayReconstruction") != 0 && TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "RRAlbedo") == 2;
-		const bool al = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0 || SunGIWantsAlbedo || BloodWantsAlbedo;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI outdoors asks for it too; BloodFlow Surface too
+		const bool al = TheSettingManager->GetSettingI("Shaders.AmbientLight.Main", "AlbedoBuffer") != 0 || SunGIWantsAlbedo;
 		if (!AlbedoCompiledIn()) {
 			// UNOFFICIAL 2026-10-31 (round 1's AlbedoBuffer-off twin run: the AmbientLight switch went on and off without a word): a reader
 			// switched on without the capture gets its one line, so the silence is explained.
@@ -321,11 +320,11 @@ namespace CapturedNormals {
 			if (!missingLogged && (rr || al)) {
 				missingLogged = true;
 				Logger::Log("AlbedoBuffer: %s asked for it, but [Main.Main.Quality] AlbedoBuffer is off (restart; needs CapturedNormals + MaterialBuffer): the guessed colour stays (logged once)",
-					rr && al ? "DLSS RR albedo and AmbientLight / BloodFlow Surface" : rr ? "DLSS RR albedo" : "AmbientLight / BloodFlow Surface");
+					rr && al ? "DLSS RR albedo and AmbientLight" : rr ? "DLSS RR albedo" : "AmbientLight");
 			}
 			return false;
 		}
-		if (!AlbedoWantLogged && (rr || al)) { AlbedoWantLogged = true; Logger::Log("AlbedoBuffer: captured every frame for its readers (%s%s%s)", rr ? "DLSS RR albedo" : "", rr && al ? ", " : "", al ? "AmbientLight bounce / BloodFlow Surface" : ""); }
+		if (!AlbedoWantLogged && (rr || al)) { AlbedoWantLogged = true; Logger::Log("AlbedoBuffer: captured every frame for its readers (%s%s%s)", rr ? "DLSS RR albedo" : "", rr && al ? ", " : "", al ? "AmbientLight bounce" : ""); }
 		return rr || al;
 	}
 

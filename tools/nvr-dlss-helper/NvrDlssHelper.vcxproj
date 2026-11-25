@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  NvrDlssHelper.exe: the 64-bit DLSS helper for New Vegas Reloaded (README.md). Built on its own, never part of VegasShaders.dll.
+  NvrDlssHelper.exe: the 64-bit DLSS helper for New Vegas Reloaded (docs/TOOLS.md "nvr-dlss-helper"). Built on its own, never part of VegasShaders.dll.
 
   msbuild tools\nvr-dlss-helper\NvrDlssHelper.vcxproj /p:Configuration=Release /p:Platform=x64
     /p:DlssSdkDir=<NVIDIA DLSS SDK folder>   (default: %NVR_DLSS_SDK%, else $(MSBuildThisFileDirectory)dlss-sdk)

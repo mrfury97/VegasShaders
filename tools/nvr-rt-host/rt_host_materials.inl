@@ -1,6 +1,6 @@
 // NvrRtHost, the path tracer's material models (2026-11-07, ptaaa-materials; included by rt_host.cpp after rt_host_pt.inl): glass panes,
 // light through leaves, skin's wrap and light through thin parts, cloth sheen (RtPathTrace.comp; the keys in the frame row, the game's
-// src/core/RtMaterials.h; the kinds in the records, src/core/RtScenePick.h). README.md has the table; docs/next/RT-PATH-TRACING.md the
+// src/core/RtMaterials.h; the kinds in the records, src/core/RtScenePick.h). docs/TOOLS.md "nvr-rt-host" has the table; docs/next/RT-PATH-TRACING.md the
 // section "materials".
 //   (a) FURNACE: an open white box under a uniform sky L with a glass pane over it (the camera looks through it), a white leaf card and a
 //       white skin card inside: every path that escapes carries exactly L (glass R + T = 1, leaf / skin R + T = 1 per colour at albedo 1),

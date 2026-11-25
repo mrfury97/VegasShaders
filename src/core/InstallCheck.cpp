@@ -22,11 +22,7 @@ namespace {
 	// The textures the effects load from loose files (TextureManager reads them with D3DX: a BSA does not count). The release zip's
 	// Textures folder (resource\Textures) has exactly these; missing ones mean the Textures folder was not copied into Data.
 	const char* const kTextures[] = {
-#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: BloodDrops, BloodRuns and BloodSpatterSmall are BloodFlow's alone (not in a release zip)
-		"Effects\\BloodDrops.dds", "Effects\\bloodlens.dds", "Effects\\BloodRuns.dds", "Effects\\BloodSpatterSmall.dds", "Effects\\bluenoise256.dds",
-#else
-		"Effects\\bloodlens.dds", "Effects\\bluenoise256.dds",
-#endif
+		"Effects\\bluenoise256.dds",
 		"Effects\\CloudDetail.dds", "Effects\\CloudShape.dds", "Effects\\CloudWeather.dds", "Effects\\noise.dds", "Effects\\NoiseVolume.dds",
 		"Effects\\SMAA_AreaTex.dds", "Effects\\SMAA_SearchTex.dds", "Effects\\Snownoise256.dds", "Effects\\water_NRM_lens.dds",
 		"Precipitations\\ripples.dds", "Precipitations\\snow_NRM.dds",	// (2026-11-05: puddles.dds and snow.dds, read by nothing, removed)

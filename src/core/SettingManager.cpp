@@ -59,7 +59,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 97;  // (2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 98;  // (98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -68,7 +68,7 @@ static const int UnofficialSettingsVersion = 97;  // (2026-11-22 upstream 1.1.3 
 // 2026-11-05: settings this build removed on purpose (the Oblivion-era leftovers: the old text menu's fonts, colours, layout and keys,
 // SleepingMode, TorchesCastShadows). Older settings files still hold them; they are skipped quietly instead of counted as unknown.
 static bool Retired(const std::string& Name) {
-	static const char* const kSections[] = { "Main.SleepingMode", "Shaders.WetWorld", "Shaders.Blood" };	// (Shaders.Blood: upstream 1.1.1's dead stub; exact or dot: BloodFlow / BloodLens stay)	// (2026-11-21: WetWorld removed; settings step 91 drops it)
+	static const char* const kSections[] = { "Main.SleepingMode", "Shaders.WetWorld", "Shaders.Blood", "Shaders.BloodFlow", "Shaders.BloodLens" };	// (2026-11-26: BloodFlow and BloodLens removed, as upstream 1.1.1 did, owner's word)	// (Shaders.Blood: upstream 1.1.1's dead stub; exact or dot: BloodFlow / BloodLens stay)	// (2026-11-21: WetWorld removed; settings step 91 drops it)
 	static const char* const kKeys[] = { "Shaders.ShadowsInteriors.Main.TorchesCastShadows", "Shaders.ShadowsExteriors.ScreenSpace.LodOnly",	// (2026-11-06: always on now)
 		"Shaders.Puddles.Main.Streaks", "Shaders.Puddles.Main.StreakWidth", "Shaders.Puddles.Main.StreakSpeed",	// (2026-11-18: the wall streaks removed)
 		"Main.Menu.Keys.KeyAdd", "Main.Menu.Keys.KeyDown", "Main.Menu.Keys.KeyEditing", "Main.Menu.Keys.KeyLeft", "Main.Menu.Keys.KeyPageDown",
@@ -425,7 +425,7 @@ tomlValue* SettingManager::Configuration::UserSection(const char* section) {
 extern bool ParallaxLiteDistanceMigrationPending;  // effects/Terrain.cpp (version 65)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-05 Hooks/Settings.cpp (TESR_GameMultisample; .z / .w set below)
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md "Step 3 as built"): with [Main.Main.Quality] DeferredWetness on,
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"): with [Main.Main.Quality] DeferredWetness on,
 // rain wetness has one switch, Wetness Effects' (SettingManager::RainWetnessOneSwitch): Puddles' saved Enabled is set to it here, when the files
 // are read and before anything reads it (the shaders' defines, the lighting-free records and the puddle map read the setting itself); the
 // menu's Save keeps it. No default changes, so no settings version. (review 2026-11-20) Saved, Puddles keeps that value when DeferredWetness is
@@ -1067,7 +1067,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	}
 	// 96, was 91 (2026-11-21, owner: "move the 'is it raining / is the ground wet' clock to Wetness Effects and remove WetWorld", then "make the
 	// default mine"): WetWorld is gone; Wetness Effects and Puddles are the rain wetness, on by default with the owner's look
-	// (docs/deferred-wetness-design.md step 4).
+	// (docs/DESIGN.md "Deferred wetness design" step 4).
 	//  - The cover map's shared keys (PersistentMapSize, PersistentMapResolution, PersistentDebugView) move from [Shaders.WetWorld.Main] to
 	//    [Shaders.SnowAccumulation.Main], a saved value carrying over; then the whole WetWorld section leaves the file.
 	//  - A saved Wetness Effects / Puddles Enabled false moves to true when WetWorld was on (the player had rain wetness, which WetWorld
@@ -1132,6 +1132,22 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		if (saved && saved->is_table() && saved->contains("Gamma22") && saved->at("Gamma22").is_boolean() && !saved->at("Gamma22").as_boolean()) {
 			(*saved)["Gamma22"] = true;
 			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.HDR.Main.Gamma22 false -> true (HDR output: pure 2.2 gamma decode)";
+		}
+	}
+	// 98 (2026-11-26, owner via Main brain: "do it all", upstream's defaults): [Shaders.Reflections.Main] ReplaceForward and
+	// [Shaders.Reflections.RT] FollowRenderScale false -> true, as upstream's step 92 moves them (its RideMainExchange stays off here:
+	// RayGen would run before the deferred wetness film). A file saved by upstream's builds at 92-94 ran that step already: a false it
+	// holds is the player's own choice and stays.
+	{
+		const bool upstreamRan92 = version >= 92 && version <= 94 && !ourHistory;
+		if (version < 98 && !upstreamRan92) {
+			for (const auto& [section, key] : { std::pair<const char*, const char*>{ "Shaders.Reflections.Main", "ReplaceForward" },
+					std::pair<const char*, const char*>{ "Shaders.Reflections.RT", "FollowRenderScale" } }) {
+				tomlValue* saved = UserSection(section);
+				if (!saved || !saved->contains(key) || !saved->at(key).is_boolean() || saved->at(key).as_boolean()) continue;
+				(*saved)[key] = true;
+				changed += std::string(changed.empty() ? "" : ", ") + section + "." + key + " false -> true";
+			}
 		}
 	}
 	if (!changed.empty())
@@ -2153,7 +2169,7 @@ SettingManager::MenuSwitch SettingManager::GetMenuShaderSwitch(const char* Name)
 }
 
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md "Step 3 as built"; SettingManager.h)
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"; SettingManager.h)
 bool SettingManager::RainWetnessOneSwitch() {
 	return GetSettingI("Main.Main.Quality", "DeferredWetness") != 0;
 }

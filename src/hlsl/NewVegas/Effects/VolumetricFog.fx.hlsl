@@ -488,7 +488,7 @@ float FogLayerAt(float z) { return exp(-max(z - TESR_VolumetricFogShape.y, 0.0) 
 // banding however near the view passes to a lamp. The result is in core lengths (about 2.3 through a lamp's centre at the default core,
 // whatever its size) times the fog's in-scattering density there (BaseDensity with its noise x Inscattering) x LampHaze, added to the
 // fog's add term before Amount.
-// No shadows: a lamp's sphere that reaches through a wall glows on this side too (see the README). Compiled in only where lamps is true
+// No shadows: a lamp's sphere that reaches through a wall glows on this side too (see docs/EFFECTS.md "VolumetricFog"). Compiled in only where lamps is true
 // (ModernFogTerms); at run time the whole term sits in one dynamic branch on TESR_VolumetricFogLamps.x, 0 outdoors, with LampHaze 0 or
 // no lamp: the fog is then exactly as before.
 #define LAMP_HAZE_MAX 16
@@ -1458,7 +1458,7 @@ float4 DedicatedFogComposite(VSOUT IN, uniform bool legacy, uniform bool classic
 	colV = pows(colV, 1.0 / 2.2);
 	// (UNOFFICIAL 2026-10-30 GameFogFloor: not in this pass's per-pixel fallback with the physical sky: ModernFogTerms says why)
 	// (UNOFFICIAL 2026-11-03 LampHaze: nor the lamps' light, with or without the physical sky: either way it put this pass over the 224
-	// constant registers. Those rare pixels keep the fog without the lamps' light; see the README.)
+	// constant registers. Those rare pixels keep the fog without the lamps' light; see docs/EFFECTS.md "VolumetricFog".)
 	colV = FogApply(colV, IN.UVCoord, legacy, false, classic, !PHYSICAL_SKY_ON);
 	[branch] if (NVR_FogGridFlags.y > 0.5) colV = FogGridLight(colV, IN.UVCoord);	// UNOFFICIAL froxel grid
 	return float4(colV, 1);
@@ -1634,7 +1634,7 @@ float4 DedicatedFogCompositeInterior(VSOUT IN, uniform bool legacy, uniform bool
 	[branch] if (NVR_CompositeFlags.y > 0.5) colV = CompositeAO(colV, IN.UVCoord);
 	colV = pows(colV, 1.0 / 2.2);
 	// (UNOFFICIAL 2026-11-03 LampHaze: not in this pass's per-pixel fallback: with it the pass went over ps_3_0's 224 constant registers. The
-	// rare pixels that take it (edges matching none of the four half-size estimates) keep the fog without the lamps' light; see the README.)
+	// rare pixels that take it (edges matching none of the four half-size estimates) keep the fog without the lamps' light; see docs/EFFECTS.md "VolumetricFog".)
 	colV = FogApply(colV, IN.UVCoord, legacy, true, classic);
 	[branch] if (NVR_FogGridFlags.y > 0.5) colV = FogGridLight(colV, IN.UVCoord);	// UNOFFICIAL froxel grid
 	return float4(colV, 1);

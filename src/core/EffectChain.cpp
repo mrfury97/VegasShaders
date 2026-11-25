@@ -624,7 +624,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	const bool aoApplies = wouldRender(AO);
 	// (2026-11-21: WetWorld, which held this off in wet frames, is gone; the wet passes of the material step read and change the picture there
 	// too, so they count: Wetness Effects' reflections and the deferred wetness fallback.)
-	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) || wouldRender(Effects.BloodFlow) ||
+	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) ||
 		wouldRender(Effects.WetnessReflections) || DeferredWetness::FallbackMayDraw() ||
 		wouldRender(Effects.Specular) || wouldRender(Effects.Underwater) ||
 		wouldRender(Effects.BounceLight) || wouldRender(Effects.Reflections) || ambientLight; // must see the scene with its shadows and AO applied
@@ -897,21 +897,6 @@ void ShaderManager::PreStep_BounceLight(ChainContext& ctx) {
 		{ Effects.BounceLight->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.BounceLight); }
 		Effects.BounceLight->deferCombine = false;
 	}
-}
-
-void ShaderManager::PreStep_BloodFlow(ChainContext& ctx) {
-#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: release builds have no BloodFlow (and no step row below)
-	IDirect3DDevice9* Device = ctx.Device;
-	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
-	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
-	{
-		// UNOFFICIAL, optional: blood that runs and dries, and pools under bodies (BloodFlow.h). On the shadowed, AO'd scene,
-		// before the wet world and the fog. Costs nothing when no blood is near.
-		static GpuTimer bloodFlowTimer("Blood flow");
-		GpuProfileScope gpu(bloodFlowTimer, Device);
-		{ Effects.BloodFlow->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.BloodFlow); }
-	}
-#endif
 }
 
 void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
@@ -1296,7 +1281,7 @@ void ShaderManager::PostStep_FinalEffect(ChainContext& ctx) {
 	{
 		EffectRecord* const order[] = {
 			Effects.Rain, Effects.Snow, Effects.BloomLegacy, Effects.HeatHaze, Effects.VolumetricSmoke, Effects.BarrelHaze, Effects.Coloring, Effects.LUT, Effects.DepthOfField,
-			Effects.MotionBlur, Effects.BloodLens, Effects.WaterLens, Effects.LowHF, Effects.DitherBuster,
+			Effects.MotionBlur, Effects.WaterLens, Effects.LowHF, Effects.DitherBuster,
 			Effects.SMAA, Effects.FXAA, Effects.Sharpening, Effects.Cinema, Effects.ImageAdjust, Effects.Bodycam, Effects.Dream, Effects.SkyDither, Effects.Debug,
 			TheCoverMap };	// UNOFFICIAL 2026-10-27: the cover map's debug view (PersistentDebugView), last
 		EffectRecord* last = nullptr;
@@ -1417,7 +1402,6 @@ void ShaderManager::PostStep_LensOverlays(ChainContext& ctx) {
 	// lens effects
 	{
 		GpuProfileScope gpu(lensTimer, Device);
-		{ Effects.BloodLens->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.BloodLens); }
 		{ Effects.WaterLens->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.WaterLens); }
 		{ Effects.LowHF->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.LowHF); }
 	}
@@ -1610,9 +1594,6 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "AmbientLight", EffectChain::PreTonemap, &ShaderManager::PreStep_AmbientLight },
 	{ "LitProbes", EffectChain::PreTonemap, &ShaderManager::PreStep_LitProbes },
 	{ "BounceLight", EffectChain::PreTonemap, &ShaderManager::PreStep_BounceLight },
-#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h
-	{ "BloodFlow", EffectChain::PreTonemap, &ShaderManager::PreStep_BloodFlow },
-#endif
 	{ "WetFlashlightSpecularUnderwater", EffectChain::PreTonemap, &ShaderManager::PreStep_WetFlashlightSpecularUnderwater },
 	{ "SpillSelfTest", EffectChain::PreTonemap, &ShaderManager::PreStep_SpillSelfTest },
 	{ "Reflections", EffectChain::PreTonemap, &ShaderManager::PreStep_Reflections },

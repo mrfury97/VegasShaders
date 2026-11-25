@@ -1,5 +1,5 @@
 // UNOFFICIAL 2026-11-03: dust motes -- sparse tiny specks of dust in the air, seen only where light falls on them (near lamps, in
-// the sun's shafts), glinting towards the light. Procedural, so it works in every cell (src\effects\DustMotes\README.md).
+// the sun's shafts), glinting towards the light. Procedural, so it works in every cell (docs\EFFECTS.md "DustMotes").
 //
 // The specks live in a 3D grid of cells (CellSize game units, 40 = 57 cm) that drifts slowly with the air. A cell holds one speck
 // or none (a hash of the cell's number against Density); the speck sits at a hashed spot inside the cell, kept away from its faces,

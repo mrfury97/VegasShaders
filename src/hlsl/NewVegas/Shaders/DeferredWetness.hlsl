@@ -1,4 +1,4 @@
-// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; docs/deferred-wetness-design.md, step 1: the land; step 2, 2026-11-20: the
+// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h; docs/DESIGN.md "Deferred wetness design", step 1: the land; step 2, 2026-11-20: the
 // objects and parallax too, DWObject below, with their own forward inputs).
 // The land's water layer (Includes/Wetness.hlsl GetWetness), worked out ONCE per pixel after the G-buffer is resolved, for the pixels the
 // near land's lighting-free records drew (LAMPS_DEFERRED 2 with DEFERRED_WETNESS: TerrainTemplate.hlsl TERRAIN_WET_DEFERRED, which drops its
@@ -67,7 +67,7 @@ sampler2D TESR_DeferredDepthLinear : register(s6) = sampler_state { ADDRESSU = C
 #define DW_LAND_SPEC_BIT 16.0f	// Includes/CapturedNormals.hlsl GBV2_SPEC_BIT: the land's lamps lit with a highlight
 #define DW_HEIGHT_SCALE 0.99f	// TerrainTemplate.hlsl TERRAIN_WET_DEFERRED: r = 4 + DW_HEIGHT_SCALE x height
 
-// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/unified-reflections-design.md; effects/Reflections/Reflections.cpp WetReach): how much of
+// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/DESIGN.md "Unified reflections design"; effects/Reflections/Reflections.cpp WetReach): how much of
 // the film's sky reflection this pass still adds. While the Reflections effect mirrors the wet floors this frame (reach > 0: its DrawDistance)
 // it is THE wet reflection there (the screen, its cube and grid, the sky where they find nothing), so a floor's sky term goes, by the effect's
 // own floor share (the normal 0.75 .. 0.95 up) and its fade toward the reach; walls, steep slopes and the far floors keep it, the effect gives
@@ -115,7 +115,7 @@ float DWObject(float a, float r) {
 }
 
 #ifdef DW_FALLBACK
-// UNOFFICIAL 2026-11-20 step 3 (docs/deferred-wetness-design.md "Step 3 as built"): the film for every pixel the pass below did not work out,
+// UNOFFICIAL 2026-11-20 step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"): the film for every pixel the pass below did not work out,
 // drawn in the effect chain right before the Wetness Effects screen pass (core/DeferredWetness.h Fallback), on the lit frame, so that pass and
 // the Reflections effect read ONE film for the whole screen. By what the G-buffer says drew the pixel (COLOR1.a, Includes/DeferredPixel.hlsl):
 //   - a lighting-free record the pass below took (DW_FB.x 1: its film stands) or left out on purpose (skin, grass, eyes, unlit, the far land,

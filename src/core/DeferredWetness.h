@@ -1,5 +1,5 @@
 #pragma once
-// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only, off; docs/deferred-wetness-design.md step 1:
+// UNOFFICIAL 2026-11-19 DeferredWetness ([Main.Main.Quality] DeferredWetness, restart, test only, off; docs/DESIGN.md "Deferred wetness design" step 1:
 // the land; step 2, 2026-11-20: the objects and parallax too, their lighting-free records with DEFERRED_WETNESS; Shaders/DeferredWetness.hlsl).
 // The land's water layer (Wetness Effects + Puddles: the darker albedo, the flattened puddle normal, the film) worked out once per pixel in a
 // full-screen pass after the G-buffer is resolved, instead of inside every land shader: the near land's lighting-free records (LAMPS_DEFERRED 2)
@@ -40,7 +40,7 @@ namespace DeferredWetness {
 	inline D3DSURFACE_DESC Made = {};
 	inline bool TargetsFailed = false;
 	inline unsigned long long StatWet = 0, StatDry = 0, StatSkipped = 0;
-	// UNOFFICIAL 2026-11-20 step 3 (docs/deferred-wetness-design.md "Step 3 as built"): the fallback (Shaders/DeferredWetness.hlsl DW_FALLBACK, Fallback
+	// UNOFFICIAL 2026-11-20 step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"): the fallback (Shaders/DeferredWetness.hlsl DW_FALLBACK, Fallback
 	// below): the film for every pixel the pass did not work out, and the water layer on the lit colour where no record drew at all
 	inline ShaderRecordPixel* FallbackPass = nullptr;
 	inline bool FallbackDrawn = false;				// this frame's film target holds the fallback's film too (Reflections, WetnessReflections)
@@ -257,7 +257,7 @@ namespace DeferredWetness {
 		Done = false;
 	}
 
-	// UNOFFICIAL 2026-11-20 step 3 (docs/deferred-wetness-design.md "Step 3 as built"): the fallback, in the effect chain right before the Wetness
+	// UNOFFICIAL 2026-11-20 step 3 (docs/DESIGN.md "Deferred wetness design" "Step 3 as built"): the fallback, in the effect chain right before the Wetness
 	// Effects screen pass (EffectChain.cpp PreStep_WetFlashlightSpecularUnderwater), outdoors in wet frames. One full-screen draw on the lit frame
 	// with two targets: the frame (rgb: the water layer where no record drew) and the film target (the film for every pixel the pass inside the sun
 	// pass did not work out; cleared first in a frame that pass did not run). The frame is drawn in place: the chain's current image (or, off the

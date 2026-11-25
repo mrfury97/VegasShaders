@@ -75,15 +75,6 @@ ShadowsAtNight = true
 MaxDistance = 4096
 IsoHeightTaps = false
 
-[_Shaders.BloodFlow.Main]
-MaxSplats = 96
-MaxPools = 32
-MaxDistance = 6000.0
-
-# Sharper, steadier shadows: 32-bit sun shadow maps, every cascade and the ortho map redrawn every frame, the contact
-# shadows' even 16-step trace, the lamp shadows' blurred darkening. Lamp shadow cube maps stay at your size (1024 per face
-# would need about 600 MB more video memory), and so does how many lamps cast shadows at once (LightPoints: 64 would need
-# about 300-600 MB more).
 [_Shaders.ShadowsExteriors.ShadowMaps]
 CascadeResolution = 6
 SmoothFilter = true

@@ -20,7 +20,7 @@
 namespace ShelvedEffects {
 
 	// The shelved effects, by their effect / settings name ([Shaders.<Name>.*]).
-	inline const char* const kNames[] = { "BloodFlow", "DustMotes" };
+	inline const char* const kNames[] = { "DustMotes" };
 	// Shelved settings sections (their Enabled reads as off; see ForcedOff below).
 	inline const char* const kSettingSections[] = { "Shaders.ShadowsInteriors.Capsules" };
 
@@ -59,6 +59,6 @@ namespace ShelvedEffects {
 
 	// The one log line of a release build (ShaderManager::Initialize).
 	inline const char* LogLine() {
-		return "Blood flow (BloodFlow) and dust motes (DustMotes) are not part of this release (work in progress): not loaded, whatever the settings say; their settings are kept as they are.";
+		return "Dust motes (DustMotes) are not part of this release (work in progress): not loaded, whatever the settings say; their settings are kept as they are.";
 	}
 }

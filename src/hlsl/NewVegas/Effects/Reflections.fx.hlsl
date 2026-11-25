@@ -89,7 +89,7 @@ sampler2D NVR_ReflectionsSkyVis : register(s14) = sampler_state { ADDRESSU = CLA
 #ifndef REFL_MATERIAL_ON
     #define REFL_MATERIAL_ON 0
 #endif
-// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1; core/FdIndirect.h):
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/DESIGN.md "Unified reflections design" step 1; core/FdIndirect.h):
 // with the renderer in mode 2 the surfaces' material is the G-buffer's own record, read per pixel (GBufferMaterial below; the Vulkan passes'
 // Reflections.glsl has the same) instead of MaterialAware's copy, which is not made then. Compiled in only when the switch is on at startup
 // (REFL_GBUFFER_ON), so that otherwise this effect is exactly what it was. While TESR_ReflectionsGBuffer.x is 1 (ReflectionsEffect::

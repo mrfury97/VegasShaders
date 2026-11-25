@@ -1,4 +1,4 @@
-// NvrRtHost: a standalone test host for the Vegas Shaders / LegacyRT ray tracing framework (tools/nvr-rt-host/README.md).
+// NvrRtHost: a standalone test host for the Vegas Shaders / LegacyRT ray tracing framework (docs/TOOLS.md "nvr-rt-host").
 //
 // This 32-bit program plays the game's side of the RT core (src/core/RtCore.cpp) without Fallout New Vegas: a D3D9 device through the
 // NVR DXVK fork's d3d9.dll next to it, the fork's shared images + timeline semaphores (ID3D9NvrExtShare), geometry staged from D3D9

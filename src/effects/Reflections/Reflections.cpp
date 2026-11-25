@@ -852,7 +852,7 @@ void ReflectionsEffect::BindMaterial() {
 	for (const auto& s : point) TheRenderManager->SetSamplerState(15, (D3DSAMPLERSTATETYPE)s[0], s[1]);
 }
 
-// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], live, test only, off; docs/unified-reflections-design.md step 1): in mode 2
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], live, test only, off; docs/DESIGN.md "Unified reflections design" step 1): in mode 2
 // the passes read the surfaces' material from the G-buffer (Reflections.glsl GBufferMaterial, Reflections.fx.hlsl the same) and MaterialAware's
 // copy is not made. On when the switch is (FdIndirect::UnifiedReflectionsOn: mode 2, this frame's COLOR1-3) and the back end that will draw
 // reads them: the Vulkan passes always, the D3D9 technique only when compiled with it (on at startup). Decided once a frame, so every pass of
@@ -884,7 +884,7 @@ bool ReflectionsEffect::GBufferFrame() {
 	return gbufferOn;
 }
 
-// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/unified-reflections-design.md): with UnifiedReflections used this frame, outdoors in a
+// UNOFFICIAL 2026-11-20 unified reflections step 2 (docs/DESIGN.md "Unified reflections design"): with UnifiedReflections used this frame, outdoors in a
 // frame this effect can mirror the wet floors (its rain strength above 0, DeferredWetness's fallback able to give it the whole film, the effect
 // and its targets there), the wet floors' reflection is this effect's alone up to DrawDistance: DeferredWetness takes its sky reflection out there
 // (Shaders/DeferredWetness.hlsl DWSkyKeep) and Wetness Effects' screen pass skips its trace (it still draws the lamps' streaks). Walls, objects
@@ -1169,7 +1169,7 @@ void ReflectionsEffect::UpdateWaterConstants() {
 	}
 	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, valid ? rtWaterScaleX : 1.0f);
 
-	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (README "Replace, not add"). The composite lays the reflection over the
+	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"). The composite lays the reflection over the
 	// lit picture by its Fresnel share only (4 % on stone or glass looking straight on), so the game's env-map pass, an additive cube map at
 	// the artist's strength drawn before it, stayed almost whole under it: two reflections on one surface. That pass is drawn in the world
 	// scene, before this frame's trace, so (as the water above) it reads LAST frame's Buffer: its alpha is how much of each pixel's
@@ -1606,7 +1606,7 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	}
 	// 2026-11-08 Puddles: the puddles' field, so the SSR and RT reflections mirror them (zero: off).
 	if (PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles) puddles->ReflectionData(uniforms.puddle, uniforms.puddle2);
-	// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): in a frame DeferredWetness's film covers the whole screen
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design"): in a frame DeferredWetness's film covers the whole screen
 	// (FilmWhole: its fallback drew after its pass; review: with the fallback off the film holds only the pass's pixels, and the rest would turn
 	// dry), the floors' water and its roughness come from the film (Reflections.glsl FilmWetness), not from the rain guess (Data.y) and the puddle
 	// field; z: the normals are the normal-mapped ones (FdReflNormals put them in), so the passes widen the roughness by their variance

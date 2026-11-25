@@ -2001,28 +2001,6 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.PipboyFit.Main", "Enabled", "Sleeves fit under the Pip-Boy", nullptr, "In first person, armour sleeves are pulled in so they do not poke through the Pip-Boy. Needs a restart." },
 	{ "Shaders.PipboyFit.Main", "Strength", "Fit strength", nullptr, "How much the sleeves are pulled in. Zero leaves them as they were." },
 	{ "Shaders.PipboyFit.Main", "ThirdPerson", "Also in third person", nullptr, "Your own sleeves are fitted in third person too. Other characters are not changed." },
-	// Blood (Main)
-	{ "Shaders.BloodFlow.Main", "Splats", "Blood runs down walls", nullptr, "Blood splats grow streams that run down walls and slopes." },
-	{ "Shaders.BloodFlow.Main", "Pools", "Blood pools under bodies", nullptr, "A pool of blood spreads under a body after death and slides downhill on slopes." },
-	{ "Shaders.BloodFlow.Main", "BloodAmount", "Amount of blood", nullptr, "How much blood shows. Lower breaks it up into beads and thin streaks." },
-	{ "Shaders.BloodFlow.Main", "DripLength", "Blood stream length", nullptr, "How long blood streams run. Zero means no streams." },
-	{ "Shaders.BloodFlow.Main", "Gloss", "Blood shine", nullptr, "How much fresh blood glints in sun and lamp light. Dry blood stays dull." },
-	{ "Shaders.BloodFlow.Main", "FreshColorR", "Fresh blood colour", nullptr, "The colour of fresh blood." },
-	{ "Shaders.BloodFlow.Main", "DryColorR", "Dried blood colour", nullptr, "The colour blood dries to." },
-	{ "Shaders.BloodFlow.Main", "MaxDistance", "Blood distance", nullptr, "How far from you blood streams and pools are drawn. They fade out over the last stretch." },
-	// Blood (Fluid)
-	{ "Shaders.BloodFlow.Fluid", "Enabled", "Fluid blood (simulated, heavy)", nullptr, "Fresh blood is simulated as a real liquid that runs, gathers and drips. Costs a lot of frame rate." },
-	{ "Shaders.BloodFlow.Fluid", "Amount", "Amount of blood", nullptr, "How much liquid blood each splat and pool makes." },
-	{ "Shaders.BloodFlow.Fluid", "Viscosity", "Blood thickness", nullptr, "Higher gives thicker, slower blood that moves as one blob." },
-	{ "Shaders.BloodFlow.Fluid", "Drops", "Dripping drops", nullptr, "How much of the blood in the air shows as drops, such as dripping off ledges." },
-	{ "Shaders.BloodFlow.Fluid", nullptr, "Fluid blood detail",
-		"Low: MaxParticles=8192 | Medium: MaxParticles=16384 | High: MaxParticles=65536",
-		"How much liquid blood can exist at once. More looks fuller and costs more frame rate and memory." },
-	// Blood (Surface), UNOFFICIAL 2026-11-12
-	{ "Shaders.BloodFlow.Surface", "Enabled", "Blood lies on the ground (simulated)", nullptr, "Blood is simulated as a thin liquid on the ground it lies on: it runs into cracks and round stones, pools in hollows, and takes the light that is there. Replaces the drawn pools and streams." },
-	{ "Shaders.BloodFlow.Surface", "PoolAmount", "Amount of blood (bodies)", nullptr, "How much blood a body loses." },
-	{ "Shaders.BloodFlow.Surface", "SplatAmount", "Amount of blood (splats)", nullptr, "How much blood a fresh splat lays down." },
-	{ "Shaders.BloodFlow.Surface", "Viscosity", "Blood thickness", nullptr, "Higher gives thicker blood that creeps. Lower gives thin blood that runs fast and far." },
 	// Blood on weapon and hands (Main)
 	{ "Shaders.HandBlood.Main", "PerHit", "Blood on weapon and hands", nullptr, "Fresh blood nearby splashes onto your weapon and gloves. Higher gets you bloodier faster." },
 	{ "Shaders.HandBlood.Main", "Reach", "Distance blood reaches you", nullptr, "How close fresh blood must be to get on you. Small means point blank only." },
@@ -4006,40 +3984,6 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.Bodycam.Interiors", "Camera movement", "MotionBlur, RollingShutter, Bounce, GunJolt",
 		FogType::None, false, "Indoors: bob, smear, wobble and shot kick.", nullptr },
 
-	// Shaders.BloodFlow.Main
-	{ "Shaders.BloodFlow.Main", "Streams", "DripLength, FlowSpeed, Viscosity, MaxFall, StreamWidth, DryTime",
-		FogType::None, true, "How far and how fast blood runs down walls and slopes from a splat, and how soon it dries.", nullptr },
-	{ "Shaders.BloodFlow.Main", "Pools", "PoolSize, PoolSpreadTime, PoolDryTime, GibPools, GibHold",
-		FogType::None, false, "The pools that spread under bodies and cut-off limbs.", nullptr },
-	{ "Shaders.BloodFlow.Main", "Splat shape", "Splat, SplatReach, SplatSpray, SplatDrips",
-		FogType::None, false, "Each splat gets its own impact shape, with arms, spray lines and drips.", nullptr },
-	{ "Shaders.BloodFlow.Main", "Colour",
-		"FreshColorR, FreshColorG, FreshColorB, DryColorR, DryColorG, DryColorB, MatchGameColor, MatchShade, MatchBrightness, MatchFloor",
-		FogType::None, false, "The colour of fresh and dried blood, or the game's own splat colour.", nullptr },
-	{ "Shaders.BloodFlow.Main", "Wet look", "Gloss, Sheen, SheenTint, Beads, BeadSize, OldLook",
-		FogType::None, false, "How fresh blood shines and mirrors its surroundings, and its glossy drops.", nullptr },
-	{ "Shaders.BloodFlow.Main", "Limits and speed",
-		"CheapGather, SplatFast, SplatMask, Merge, MergeCount, MaxDistance, MaxSplats, MaxPools",
-		FogType::None, false, "How many splats and pools are drawn and how far away, and cheaper ways to draw them.", nullptr },
-	{ "Shaders.BloodFlow.Main", "Test tools", "GroundTestUnseen, TestSplats, DebugView",
-		FogType::None, false, nullptr, nullptr },
-
-	// Shaders.BloodFlow.Fluid
-	{ "Shaders.BloodFlow.Fluid", "How the blood flows", "SettleTime, BleedTime, Viscosity, Cling, Friction, Lifetime",
-		FogType::None, true, "How long the blood keeps moving, how thick it is and how it clings to walls.", nullptr },
-	{ "Shaders.BloodFlow.Fluid", "Fluid look", "StainSize, Threshold, Bump, Drops, DropSize, TextureRelief, SteadyContact, SteadyFloor, RestSpeed, SteadyTiles, TileCap",
-		FogType::None, false, "How the fluid's stains, edges and drops look.", nullptr },
-	{ "Shaders.BloodFlow.Fluid", "Test tools", "OldThrow, OldColour, DebugView, TestThrow, TestPour, StatsEvery",
-		FogType::None, false, nullptr, nullptr },
-
-	// Shaders.BloodFlow.Surface (UNOFFICIAL 2026-11-12)
-	{ "Shaders.BloodFlow.Surface", "How the blood flows", "SplatAmount, PoolAmount, BleedTime, FlowTime, Viscosity, Roughness",
-		FogType::None, true, "How much blood there is, how long it keeps moving and how thick it is.", nullptr },
-	{ "Shaders.BloodFlow.Surface", "Limits and light", "Lifetime, MaxPatches, UseAlbedo",
-		FogType::None, false, "How long blood stays, how many pools are kept, and where its light comes from.", nullptr },
-	{ "Shaders.BloodFlow.Surface", "Test tools", "DebugView, TestPour",
-		FogType::None, false, nullptr, nullptr },
-
 	// Shaders.AmbientOcclusion.RT
 	{ "Shaders.AmbientOcclusion.RT", "Sky visibility", "Sky, SkyRays, SkyDistance",
 		FogType::None, false, "How much of the sky each spot sees, from rays instead of a top-down map.", nullptr },
@@ -5365,9 +5309,6 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Shaders.VolumetricClouds.Main", "ShadowDebug", "Cloud shadow" },
 	{ "Shaders.VolumetricClouds.Main", "ReflectionDebug", "Cloud reflections" },
 	{ "Shaders.HandBlood.Main", "DebugView", "Hand blood" },
-	{ "Shaders.BloodFlow.Main", "DebugView", "Blood flow" },
-	{ "Shaders.BloodFlow.Fluid", "DebugView", "Blood fluid" },
-	{ "Shaders.BloodFlow.Surface", "DebugView", "Blood surface" },
 	{ "Shaders.Skin.Debug", "DebugView", "Skin" },
 	{ "Shaders.SnowAccumulation.Main", "CapturedNormalsDebugView", "Snow normals" },
 	{ "Shaders.Terrain.Blending", "DebugView", "Terrain blending" },
@@ -7086,8 +7027,7 @@ static bool HiddenFromSidebar(const std::string& path, const std::string& name) 
 	if (ShouldHideSection(name)) return true;
 	if (IsRtSection(path)) return true;	// 2026-11-05: on the Ray tracing page instead
 	// 2026-11-05: SleepingMode hidden; GunFX lives in "Particles and gun effects"
-	// (2026-11-05, user: "remove blood lens"; kept by this fork through the upstream 1.1.3 merge) BloodLens's page is hidden, its settings work
-	if (path == "Shaders.BloodLens" || path == "Main.SleepingMode" || path == "Main.GunFX") return true;
+	if (path == "Main.SleepingMode" || path == "Main.GunFX") return true;
 	if (path == "Shaders.Debug" && !DevOptionsShown()) return true;
 	// While Ambient Light is on in Simple mode, standalone AmbientOcclusion and BounceLight are superseded; switch modes on AO & Bounce Light or toggle Advanced
 	if (!AdvancedShown() && EffectOn("AmbientLight") && (path == "Shaders.AmbientOcclusion" || path == "Shaders.BounceLight")) return true;
@@ -7128,7 +7068,7 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Sky and atmosphere", "Sky, VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, SunGlare, Sandstorm, HeatHaze" },
 	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, Puddles, Water, Underwater, WaterLens" },
 	{ "Ground and plants", "Terrain, POM, Grass, Plants" },
-	{ "Characters", "Skin, Cloth, PipboyFit, BloodFlow, HandBlood" },
+	{ "Characters", "Skin, Cloth, PipboyFit, HandBlood" },
 	{ "Camera and colour", "Tonemapping, Exposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF" },
 	{ "Anti-aliasing and sharpening", "TAA, SMAA, Sharpening, DitherBuster, SkyDither" },
 	{ "Particles and gun effects", "Particles, GPUParticles", "Main.GunFX.Main", "Gun effects (smoke, barrel glow)##GunFX" },

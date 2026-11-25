@@ -79,12 +79,12 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 puddle;                // 2026-11-08 Puddles (src/effects/Puddles): TESR_PuddleData: x water level, y Coverage, z 1 / Size,
                                 // w Quality (0: off, or ReflectionPuddles off)
     vec4 puddle2;               // x slope start, y slope full, z the water's roughness, w edge softness
-    vec4 film;                  // UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md): x 1 = t_film holds this frame's
+    vec4 film;                  // UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design"): x 1 = t_film holds this frame's
                                 // film (the wetness the surfaces were drawn with: the floors' wet look comes from it, not from the rain guess and
                                 // the puddle field below), y its strength (RainWetness outdoors, 0 indoors), z 1 = t_normals holds the
                                 // normal-mapped shading normals (DeferredBumpedNormals / DeferredReflections: specular anti-aliasing),
                                 // w 1 / MaxRainWetness (Wetness Effects': the film's gloss of open ground in full rain counts 1)
-    vec4 gbuffer;               // UNOFFICIAL 2026-11-20 UnifiedReflections (docs/unified-reflections-design.md step 1): x 1 = the surfaces' material is the
+    vec4 gbuffer;               // UNOFFICIAL 2026-11-20 UnifiedReflections (docs/DESIGN.md "Unified reflections design" step 1): x 1 = the surfaces' material is the
                                 // G-buffer's (t_matbuf = COLOR2, t_gbAlbedo, t_gbNormals) and MaterialAware's copy was not made this frame; y, z the
                                 // distance match's share and units (TESR_CapturedNormalsData y, z: core/FdIndirectShaders.h kShadingNormalsPS's)
     vec4 film2;                 // UNOFFICIAL 2026-11-21 damp ground to the cube: x 1 = on ([Shaders.Reflections.Main] DampTrace false),
@@ -234,7 +234,7 @@ vec3 SmoothViewNormal(vec2 uv) {
 //    small bumps. Standing water is already flat in the G-buffer (DeferredWetness's flatten, with Puddles compiled in), so here damp ground
 //    leans: at the film's full wet share it keeps 1 - DampBumpLean of its bump. (Was 0.8, then 1 before it; 2026-11-20 owner: "make Wet ground
 //    keep 100% of its bump": 0, the whole bump; the grain the owner saw on wet grass and dirt may come back, DebugView 12 shows the bend.)
-//    (2026-11-21, owner's choice "Smooth-normal ray" after the speckle hunt, docs/reflection-speckle.md: 1. A bump-bent ray at a low angle
+//    (2026-11-21, owner's choice "Smooth-normal ray" after the speckle hunt, docs/DESIGN.md "Reflection speckle": 1. A bump-bent ray at a low angle
 //    flipped between bright sky and dark ground pixel block by pixel block on damp dirt in low sun (save reflection01); the cube instead
 //    cost the wet streets their crisp mirror. At the film's full wet share the ray, the blur and the Fresnel follow the smooth ground:
 //    crisp, steady wet reflections; the bumps stay in the ground's own shading, on dry shiny surfaces and on partly wet ground.)
@@ -274,7 +274,7 @@ float OpenAbove(vec2 uv, float depth) {
     return top > p.z - max(RoofMargin * perUnit, 0.0001) ? 1.0 : 0.0;
 }
 
-// 2026-11-08 Puddles (src/effects/Puddles/README.md): the standing water the surface shaders draw (Shaders/Includes/Wetness.hlsl
+// 2026-11-08 Puddles (docs/EFFECTS.md "Puddles"): the standing water the surface shaders draw (Shaders/Includes/Wetness.hlsl
 // PuddleField), line for line, so the SSR and RT reflections mirror the same puddles at the water's roughness. Without the land's height
 // term (no height map here) and the ortho map's soft edge (OpenAbove's hard test is applied by the caller). 0-1.
 vec3 WetHash33(vec3 p3) {
@@ -315,7 +315,7 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
     return shore * shore * (3.0 - 2.0 * shore) * smoothstep(cb.puddle2.x, cb.puddle2.y, worldUp) * nearFactor;
 }
 
-// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/deferred-wetness-design.md, "one system"): in a frame DeferredWetness drew its film (the
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (docs/DESIGN.md "Deferred wetness design", "one system"): in a frame DeferredWetness drew its film (the
 // lighting-free records' pixels from its pass inside the sun pass, every other pixel from its fallback pass before the wet screen pass), the
 // floors' wet look is the film's: how much water (gloss, which already holds the rain's cover and the puddles' fill) and how rough (the water's
 // roughness under standing water, the film's elsewhere), so the mirror sits on the water the player sees and is as blurred as its highlight.
@@ -333,7 +333,7 @@ float PuddleStanding(vec2 uv, float depth, float worldUp) {
 // puddle, through the dirt's bumps: a speckled sky. The blur is now the film's own, held between WetRoughness (standing water: the
 // owner's sharp puddles) and DampMaxRoughness (damp ground: blurred, yet under the 0.35 hand-over, so it still shows).
 const float DampMaxRoughness = 0.3;
-// (2026-11-21, owner's save reflection01: the damp dirt's reflection still broke into white speckles at mid distance; docs/reflection-speckle.md)
+// (2026-11-21, owner's save reflection01: the damp dirt's reflection still broke into white speckles at mid distance; docs/DESIGN.md "Reflection speckle")
 // Damp ground is no longer traced (owner: "Yes, try it"): a ray bent by one pixel's bump at a low angle flips between bright sky and dark
 // ground block by block, which no blur averages. As Community Shaders does wet ground, damp ground reads the surroundings cube (pre-blurred
 // by roughness), then the light grid and the sky, at the film's OWN roughness, along the plain mirror direction; only standing water keeps the
@@ -423,7 +423,7 @@ float SurfaceWetGloss = 0.0;  // 2026-11-19 WetnessEffects water film gloss (0..
 float SurfaceWetRough = 1.0;  // 2026-11-19 WetnessEffects water film roughness
 vec4 MaterialAt(vec2 uv) { return cb.material.x > 0.5 ? textureLod(sampler2D(t_material, POINT_S), uv, 0.0) : vec4(0.0); }
 
-// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/unified-reflections-design.md step 1): with the renderer in
+// UNOFFICIAL 2026-11-20 UnifiedReflections ([Main.Main.Quality], test only; docs/DESIGN.md "Unified reflections design" step 1): with the renderer in
 // mode 2 the surface's material is the G-buffer's own record, read here per pixel (no copy pass, no scene-alpha rule), decoded into the layout
 // of MaterialAware's copy so the rules below stay one: r roughness, g metal, b 1 = reflects by its smoothness whatever way it faces (objects,
 // worn gear and cloth the game lights with a highlight: COLOR2's specular bit, models 1-3), b 0.5 = a known material for the floor rule (the

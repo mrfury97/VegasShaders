@@ -6,7 +6,7 @@
 // hashed spot that drifts and wobbles slowly); a half-resolution pass walks each pixel's view through the cells it crosses, keeps
 // the speck nearest its view, lights it from the nearby lamps (and the sun shafts' froxel grid outdoors) and writes the light it
 // adds; a full-resolution pass then adds that to the frame with additive blending, only where a speck is (no frame copy).
-// Effects\DustMotes.fx.hlsl; README.md in this folder.
+// Effects\DustMotes.fx.hlsl; docs/EFFECTS.md "DustMotes".
 class DustMotesEffect : public EffectRecord
 {
 public:

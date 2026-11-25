@@ -788,7 +788,6 @@ bool ShadowsExteriorEffect::FadedContactUnread() {
 #endif
 	auto draws = [](EffectRecord* effect) { return effect && effect->Enabled && effect->Effect && effect->ShouldRender(); };
 	return SunFaded && Constants.ShadowFade.z == 0.0f && Settings.Exteriors.Darkness >= 0.0f &&
-		!draws(TheShaderManager->Effects.BloodFlow) &&
 		!draws(TheShaderManager->Effects.Underwater) && !draws(TheShaderManager->Effects.Debug);
 }
 

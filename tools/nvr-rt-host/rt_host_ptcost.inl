@@ -1,5 +1,5 @@
 // NvrRtHost, the path tracer's ray budget (2026-11-07 perf-ptcost; included by rt_host.cpp after rt_host_emissive.inl): RtPathTrace.comp's
-// PTRestirDIRays / PTBounceLights / one camera query (src/core/RtPtCost.h) against the old ray budget, on a PTRealtime-like frame. README.md
+// PTRestirDIRays / PTBounceLights / one camera query (src/core/RtPtCost.h) against the old ray budget, on a PTRealtime-like frame. docs/TOOLS.md "nvr-rt-host"
 // has the table; docs/next/RT-PATH-TRACING.md section "perf-ptcost" the numbers.
 
 // ==============================================================================================================================

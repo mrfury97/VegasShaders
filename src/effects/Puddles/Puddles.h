@@ -1,6 +1,6 @@
 #pragma once
 
-// 2026-11-08 Puddles (README.md here): rain puddles that fill and dry over game time, a flat water layer with ripples, a soaked ring and
+// 2026-11-08 Puddles (docs/EFFECTS.md "Puddles"): rain puddles that fill and dry over game time, a flat water layer with ripples, a soaked ring and
 // wall streaks, on top of Wetness Effects' water layer. The shading is in Shaders/Includes/Wetness.hlsl (PUDDLES_COMPILED: the surface
 // shaders with WETNESS_EFFECTS 2, ShaderRecord::BuildDefines) and Compute/Reflections.glsl (PuddleStanding). This collection holds the
 // settings, works out the water level from the game's weather and clock, and fills the constants.

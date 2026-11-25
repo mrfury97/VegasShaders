@@ -40,7 +40,7 @@ The mirror (both rooms)
 - Textures\VegasShaders\Test\vs_mirror01_d.dds (4 x 4 near-black) + vs_mirror01_rmaos.dds (4 x 4: roughness 0.02, metal 1): only
   the reflection shows; RoughnessOverrides "vs_mirror01:0.02" + Mirror 1 with MirrorSmoothOnly make it a mirror and nothing else.
 
-Sources: tools\testkit (build_rtroom.py, build_alphalamp.py, their shared writers, verify_kit.py; README.md there says how to
+Sources: tools\testkit (build_rtroom.py, build_alphalamp.py, their shared writers, verify_kit.py; docs/TOOLS.md "testkit" says how to
 rebuild). The mirror model is patched from the vanilla mesh by a small script (alpha flags 0x12EC -> 0x10EC on block 16, block 15's
 first texture path swapped, its size fixed); that script is not kept.
 Packaging: the test release copies resource\testkit\Data as "Optional - RT test room".

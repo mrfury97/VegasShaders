@@ -146,7 +146,7 @@ float4 EnvLightFade[4] : register(c28);
 // UNOFFICIAL 2026-11-20: up to 2 additional active point lights for smooth multi-lamp crossblending at night (core/EnvLightFade.h):
 // [0]/[1] xyz camera-relative lamp pos, w reach; [2] x/y luminance of extra lamp 0/1 (0 = unused).
 float4 EnvLightFadeExtra[3] : register(c37);
-// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (effects/Reflections/README.md "Replace, not add"): where the Reflections
+// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"): where the Reflections
 // effect answered this pixel's reflection last frame (TESR_ReflectionsBuffer's alpha: the screen, the rays, its cube / grid / sky), this
 // pass leaves that share of its cube map out, so the surface shows ONE reflection; where it had no answer (alpha 0: nothing reflects
 // there, or the ray found nothing) the game's cube map stays, as the probe. TESR_ReflReplace (Reflections.cpp UpdateWaterConstants,
