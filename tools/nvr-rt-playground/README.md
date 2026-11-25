@@ -19,7 +19,7 @@ frames (the camera, the lamps, the random seeds); the run still stops at N secon
 `out\playground.log`. Its exit code is 0 only without helper errors. `-Set <key>=<value>` holds a toggle through it, by its key
 (`R=0`, `B=1`, `Z=1`, `G=1`, `F2=0`, `F5=1`); `-Tag` suffixes the screenshot names and shows on the HUD. Each screenshot's line in the log
 (and `out\fireflies.csv`) carries a count of bright outliers on the window-size frame (a sparkle detector; at a small `-Size` the frame
-is scaled up and a sparkle becomes a block, so count at the internal size instead: the method is in docs/next/RT-PATH-TRACING.md).
+is scaled up and a sparkle becomes a block, so count at the internal size instead: the method is in docs/next/RT-PATH-TRACING.md (not in this repo)).
 `--max-frames N` stops after N frames.
 
 **Films (2026-11-09).** `-Frames <file>` appends every frame's finished picture (window size, RGB, 3 bytes a pixel) to one raw file;
@@ -132,7 +132,7 @@ passes `traceUsAvg`), the GPU, the mode, and every toggle.
      same firefly and a-trous passes in specular mode. With PTDenoiseMirrorSurface (F11, on by default since 2026-11-09) the trace marks
      smooth pure metals (negative hit distance, the reflected colour divided out); the temporal pass gets the normals as a 10th image
      (a curved mirror's virtual point) and keeps the full history there, the a-trous passes smooth them (bit 4, the raw specular image
-     in the guide albedo's slot). docs/next/PT-MIRRORS-2026-11-09.md.
+     in the guide albedo's slot). docs/next/PT-MIRRORS-2026-11-09.md (not in this repo).
 
    The settings are PTDenoiseHistory 32, PTDenoiseSigma 1, AntiLag 3, Guide 0.35, HistoryFix 3, MeanVariance 2 and FireflyK 2. The
    push blocks are the game's; `rt_layout_check.py` checks the playground's copies against them.

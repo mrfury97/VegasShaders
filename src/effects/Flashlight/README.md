@@ -54,10 +54,10 @@ table, PointShadowForward::NoteManyLamp), and the light pass's shadow is its own
 FirstPersonBody, SameFrame and the RT shadow denoiser change nothing on the beam (host scene `flashhead`: a lamp in the hidden head is
 traced as if the body were absent anyway). What RT does change: RT reflections replace the Fresnel share of a shiny surface's lit colour,
 the beam's light included, with a reflection whose off-screen hits are lit without the flashlight (mirrors, chrome, gold: the spot fades
-there). Checks: DebugView 1 / 2 here, `[Shaders.Reflections.RT] Enabled = false` for the reflections. docs/next/RT-PATH-TRACING.md
+there). Checks: DebugView 1 / 2 here, `[Shaders.Reflections.RT] Enabled = false` for the reflections. docs/next/RT-PATH-TRACING.md (not in this repo)
 "Team perf-flashlight".
 
 ## Path tracing (2026-11-07)
 Under PTRealtime / PTReplace the path tracer lights the picture itself; the flashlight is passed to it as lamp 0 with its cone
-(core/RtPathTrace.cpp Lamps, Compute/Rt/RtPathTrace.comp LampSpot; docs/next/RT-PATH-TRACING.md section 53). Before, it showed only on
+(core/RtPathTrace.cpp Lamps, Compute/Rt/RtPathTrace.comp LampSpot; docs/next/RT-PATH-TRACING.md (not in this repo) section 53). Before, it showed only on
 the few pixels where the path-traced picture falls back to the game's frame.

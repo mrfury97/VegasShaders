@@ -1,9 +1,7 @@
----
-name: vs-dxvk-input
-description: Why window messages and raw input don't reach Vegas Shaders under DXVK and how the ImGui menu gets keyboard, wheel, mouse buttons and cursor position instead (GetAsyncKeyState polling, DikToVk table, DI wheel read), the click-to-refocus cursor freeze, how game input is blocked while the overlay is open, and the xNVSE-first rule. Use before touching ImGuiManager input, the toggle key, input blocking, or any hook on input, UI or game objects.
----
-
 # DXVK input, cursor and input blocking
+
+> Technical reference. Moved from the `vs-dxvk-input` skill on 2026-11-25 (content unchanged). Read it before touching `ImGuiManager` input,
+> the toggle key, input blocking, or any hook on input, UI or game objects.
 
 ## DXVK input: critical finding
 FNV is commonly run under **DXVK** (Vulkan translation layer). DXVK suppresses `WM_KEYDOWN` and `WM_MOUSEWHEEL` before they reach

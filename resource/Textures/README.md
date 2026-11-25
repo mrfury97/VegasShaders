@@ -15,11 +15,11 @@ original file's size, mip count, pixel format and channel layout, so the shaders
 | `Effects/water_NRM_lens.dds` | 256 A8R8G8B8, no mips | RG = streak/droplet normal xy, B = soft patch mask (refraction z), A = smooth noise (all x2-1) | WaterLens |
 | `Effects/noise.dds` | 255 R8G8B8, no mips | white gaussian noise per channel | none at present |
 | `Effects/bluenoise256.dds` | 256 A8R8G8B8, no mips | four independent void-and-cluster blue-noise channels, each value 0..255 exactly 256 times | AO, AmbientLight, BounceLight, Cinema, SunShadows, Snow, Underwater, clouds |
-| `Water/water_NRM.dds` | 1024 R8G8B8, 11 mips | ocean-spectrum wave normal map | water shaders, WetWorld puddles, Underwater |
+| `Water/water_NRM.dds` | 1024 R8G8B8, 11 mips | ocean-spectrum wave normal map | water shaders, Underwater |
 | `Water/water_NRM_LOD.dds` | 4096x128 R8G8B8, no mips | 32 looping 128x128 frames: RG wave normal xy, B crest height | none at present |
 | `Water/watercalm_NRM.dds` | 4096 DXT5, 13 mips | calm-water normal map (long swells, fine ripples) | WATER001, WATER018 |
 | `Water/caust_001.dds` | 256 DXT1, 9 mips | caustics: light refracted through a tiling wave surface onto a floor (red used) | Underwater |
-| `Precipitations/ripples.dds` | 256 A8R8G8B8, 9 mips | rain drops: R = 1 at centre to 0 at rim, GB = outward direction (x right, y up) as 0.5+0.5*dir, A = phase | water shaders (ComputeRipple), WetWorld |
+| `Precipitations/ripples.dds` | 256 A8R8G8B8, 9 mips | rain drops: R = 1 at centre to 0 at rim, GB = outward direction (x right, y up) as 0.5+0.5*dir, A = phase | water shaders (ComputeRipple) |
 | `Precipitations/snow_NRM.dds` | 512 R8G8B8, no mips | snow grain + soft drift normal map | SnowAccumulation |
 | `VegasShaders/LUTs/neutral_lut.png` | 256x16 RGB | exact identity LUT strip (16 slices of 16x16) | LUT (skipped when it is the identity) |
 

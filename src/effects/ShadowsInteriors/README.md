@@ -87,18 +87,18 @@ Every key this effect reads, with where it is read:
 
 Notes: the C++ also reads `[Shaders.ShadowsInteriors.Main] Enabled` into the interior settings, but no such key is in the
 defaults file (see section 9). `[_Shaders.ShadowsInteriors.RT]` (traced lamp shadows) lives in this folder's defaults fragment but is
-read by `src/core/RtLampShadows.h`, not by this effect: docs/next/FORK-RT-LAMPS.md (2026-11-07: `SameFrame`, on = this frame's trace
+read by `src/core/RtLampShadows.h`, not by this effect: docs/next/FORK-RT-LAMPS.md (not in this repo) (2026-11-07: `SameFrame`, on = this frame's trace
 before the world draw, with the helper pass `Compute/Rt/RtLampPrimary.comp`; `MovingCasterHistory` 2 = ManyLights' histories follow
 people's moving shadows). The `Darkness` value is shared with the lamp-shadow code that writes the mask.
 
 The ray-traced lamp shadows (`[_Shaders.ShadowsInteriors.RT]`, core/RtLampShadows.h) feed the per-object lamp shadows, not this pass.
 Since 2026-11-07 their `ShadowDenoiser` (default true; a restart to come on, off is live) traces the `DenoiseLamps` lamps that matter
 most with one ray at their physical size (`PhysicalLampSize`, `PhysicalLampScale/Min/Max`) and denoises them in the RT helper
-(`Denoiser*` keys): docs/next/RT-DENOISER.md. Nothing here changes.
-Since 2026-11-07 (perf-history, docs/next/RT-PATH-TRACING.md "perf-history") `[_Shaders.ShadowsInteriors.RT] DenoiserHistory`,
+(`Denoiser*` keys): docs/next/RT-DENOISER.md (not in this repo). Nothing here changes.
+Since 2026-11-07 (perf-history, docs/next/RT-PATH-TRACING.md (not in this repo) "perf-history") `[_Shaders.ShadowsInteriors.RT] DenoiserHistory`,
 `DenoiserStabilize` and `DenoiseHistory` (the RtDenoise path) are frames AT 60 FPS: with `[Main.Main.RayTracing] DenoiseTimeBased`
 (default on) they are kept as the same seconds at the game's frame rate. At 60 fps nothing changes.
-Since 2026-11-07 (rtgap-tess, docs/next/RT-DETAIL-GAPS.md section 1) `[_Shaders.ShadowsInteriors.RT] ContactShadows` (0-1, default 1) and
+Since 2026-11-07 (rtgap-tess, docs/next/RT-DETAIL-GAPS.md (not in this repo) section 1) `[_Shaders.ShadowsInteriors.RT] ContactShadows` (0-1, default 1) and
 `ContactLength` (pixels, 24) add a screen-space contact march toward each traced lamp (RtLampTrace's variants) for what the depth buffer
 has and the RT scene lacks; it stays off while this effect's own lamp contact shadows (`[_Shaders.ShadowsInteriors.Main]
 ContactShadows` > 0) draw. With the tessellated bumps on the traced rays start the bumps' Strength further off the surface

@@ -95,7 +95,7 @@ lamps would be the next step). The fog's surface lookup past MaxDistance (FogSun
 
 ## "rt vol light = no worky" (2026-11-13, a tester on an RTX card)
 
-Full note with the measurements, the reference photographs and the targets: `docs/next/RT-LIGHT-SHAFTS-2026-11-13.md`. In short:
+Full note with the measurements, the reference photographs and the targets: `docs/next/RT-LIGHT-SHAFTS-2026-11-13.md` (not in this repo). In short:
 
 - The RT version runs and reaches the picture (also under path tracing: it has no stand-down, the path tracer is its host), but it only
   swaps the shadow lookup of the lit air. At the default look the picture changes within its frame-to-frame noise (bench, og-goodsprings:

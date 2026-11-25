@@ -4,8 +4,8 @@ The 64-bit helper program behind New Vegas Reloaded's DLSS upscaler (`[Shaders.T
 NVR and the NVR DXVK `d3d9.dll` are 32-bit; NVIDIA ships DLSS (NGX, `nvngx_dlss.dll`) for 64-bit Windows only, so DLSS runs
 in this separate program, on the same GPU, with its own Vulkan device. NVR starts it, shares four GPU images (eight with Ray
 Reconstruction) and two GPU timeline semaphores with it through the NVR DXVK fork (patch 1.7-dlss, `ID3D9NvrExtShare`) and a
-small shared-memory block (`NvrDlssProtocol.h`, protocol 3), and it exits with the game. Design: `docs/next/FORK2-DLSS.md`;
-Ray Reconstruction: `docs/next/FORK2-DLSS-RR.md`.
+small shared-memory block (`NvrDlssProtocol.h`, protocol 3), and it exits with the game. Design: `docs/next/FORK2-DLSS.md` (not in this repo);
+Ray Reconstruction: `docs/next/FORK2-DLSS-RR.md` (not in this repo).
 
 Licence: this folder is MIT (`LICENSE`). NVIDIA's SDK parts are NVIDIA's (`NVIDIA-SDK-NOTICE.txt`). Nothing from NVIDIA's SDK
 is in this repository, and none of it is in NewVegasReloaded.dll.
@@ -102,7 +102,7 @@ verified: denoise mode 1, `DLSS.Use.HW.Depth` 1 = hardware depth, the normals' s
 `NvrDlssHelper.cpp`, above `RayReconstructionCapability`. RR presets (`RRPreset`): 0 none, 1 D, 2 E, the same at every
 quality mode.
 
-2026-11-15 (`docs/next/DLSS-RR-MODEL.md`): `RRPreset` 3 = preset F, NVIDIA's second-generation RR transformer ("DLSS 4.5 Ray
+2026-11-15 (`docs/next/DLSS-RR-MODEL.md` (not in this repo)): `RRPreset` 3 = preset F, NVIDIA's second-generation RR transformer ("DLSS 4.5 Ray
 Reconstruction"). It is already in `nvngx_dlssd.dll` 310.9.16 (its strings name Preset_A to Preset_F and the "RR2" kernels for
 sm_75 to sm_120); it needs driver 580.00 or newer, so with an older driver the helper sends E instead and says so. `RRPreset` 4 =
 auto: F on Ada and newer (RTX 40 / 50, L4), E on Turing and Ampere (RTX 20 / 30, where PCGH measured up to 25-29 % lower frame

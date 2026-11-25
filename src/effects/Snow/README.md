@@ -126,5 +126,5 @@ The snow amount is not a setting. It is driven only by weather and the animator.
 - Limits kept from the shader: 40 cells cover (40 - 3) x 64 / 1.733 = 1366 units, hence WorldDistance's top of 1300. A flake's radius is capped at 2.88 units (4.5 % of the cell) so a billboard never crosses its cell.
 - Vulkan path: none. `ExtRender` returns false for any technique but 0, so with the DXVK fork WorldSpace runs as D3D9 passes. A twin would need two fragment shaders, six textures and more constants than the 240-byte push block holds (a uniform buffer).
 - The flake sheet was made by the contributor for this project (confirmed 2026-11-09): it may ship, with credit.
-- Bench results and cost: docs/next/SNOW-WORLDSPACE-2026-11-09.md.
+- Bench results and cost: docs/next/SNOW-WORLDSPACE-2026-11-09.md (not in this repo).
 - Cost cut added here (2026-11-09): a cell is skipped as soon as the ray is further from the flake's resting place than the wobble plus the radius can reach (the reach test in SnowWorld's loop). Same picture; 2.2 ms -> 1.2 ms at 1080p on a GTX 1070.

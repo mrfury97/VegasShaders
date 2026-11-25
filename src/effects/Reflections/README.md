@@ -3,7 +3,7 @@
 Screen-space reflections on the ground (wet streets, dry sheen, interior floors, materials that reflect), with ray-traced reflections
 on top where the RT core runs. Half-resolution trace, history and blur into the effect's own buffers, then a full-resolution composite
 in the HDR chain (after Specular, before the fog). Started 2026-11-07 (this README did not exist before; the RT path's long history is
-in docs/next/FORK-RT-REFLECTIONS.md).
+in docs/next/FORK-RT-REFLECTIONS.md (not in this repo)).
 
 ## Frame (RenderBuffers)
 
@@ -17,7 +17,7 @@ in docs/next/FORK-RT-REFLECTIONS.md).
    bricks and panels off screen keep their bumps in mirrors. The shadow rays still leave from the flat triangle normal.
 3. Smoothing, one of:
    - **the RT reflection denoiser** (`[Shaders.Reflections.RT] Denoiser`, default on with RT; core/RtReflDenoise.h,
-     docs/next/RT-REFLECTION-DENOISER.md): 4 fork passes on frames the RT trace ran (native frames, not under DLSS RR), result copied
+     docs/next/RT-REFLECTION-DENOISER.md (not in this repo)): 4 fork passes on frames the RT trace ran (native frames, not under DLSS RR), result copied
      into Buffer. Core 0 ours (ReBLUR-style: hit-point reprojection, long history, lobe-sized blur), core 1 AMD FidelityFX
      Reflections (ported, A/B). With it on, RayGen's glossy rays use decorrelated noise (the old pair sampled one line of each lobe).
    - **the old chain**: Temporal (technique 3: surface reprojection, 3 x 3 clamp, `Temporal` 0.85) -> Blur X / Y (2 / 4: depth-aware
@@ -31,11 +31,11 @@ in docs/next/FORK-RT-REFLECTIONS.md).
 `DenoiserDebugView`; see defaults.toml for each).
 - (2026-11-20, owner's request) `HiZ`, `HiZSafeCells`, `HiZCheck` and `HiZInteriorsTest` have no menu row (`ImGuiManager.cpp`
   InternalHidden; shown with ShowInternal): the Hi-Z walk measured slower, the others are its test keys. The file still sets them.
-- (2026-11-07 perf-history, docs/next/RT-PATH-TRACING.md "perf-history") `DenoiserHistory` and `DenoiserMirrorHistory` are frames AT 60
+- (2026-11-07 perf-history, docs/next/RT-PATH-TRACING.md (not in this repo) "perf-history") `DenoiserHistory` and `DenoiserMirrorHistory` are frames AT 60
   FPS: with `[Main.Main.RayTracing] DenoiseTimeBased` (default on) the denoiser keeps the same seconds at the game's frame rate (32 -> ~11
   frames at 20 fps, at most 64 above 120 fps). At 60 fps nothing changes.
 - (2026-11-07) The RT rays' reach is FarRadius when the core holds the far ring: FarObjectLOD, FarLandLOD, or PTRealtime (which turns
-  FarLandLOD on by itself, docs/next/RT-DETAIL-GAPS.md 7).
+  FarLandLOD on by itself, docs/next/RT-DETAIL-GAPS.md (not in this repo) 7).
 - (2026-11-07) Decals (`[Main.Main.RayTracing] Decals`, with AlphaTested: the ReflectionsRTAlpha* variants): the reflection rays see
   posters, cracks and blood (lifted 0.5 unit off their surface); the sun / key-lamp shadow ray at a hit passes them
   (ReflectionsRTBody.glsl RtProceedShadow). RT host scene `decals`.
@@ -93,7 +93,7 @@ blend property and hair, never came through the pass hooks; ReflMaterialRule::De
 once a session (`MaterialAware reflections draw (session list N)`): a `KEEPS the alpha under it` line for an opaque or skinned draw is
 the one to look at if something still shows the mirror. RT-PATH-TRACING.md section 68.
 Known gap: the path tracer's G-buffer (CapturedNormals MaterialBuffer / AlbedoBuffer) keeps the same leak for draws that write no
-G-buffer (the game's own shaders, hair, blended draws): docs/next/RT-PATH-TRACING.md section 67.
+G-buffer (the game's own shaders, hair, blended draws): docs/next/RT-PATH-TRACING.md (not in this repo) section 67.
 
 ## What correct / wrong looks like (the denoiser)
 - At rest, a glossy floor's reflection settles within a second to a clean blur that is sharp where an object stands on the floor.
@@ -114,7 +114,7 @@ G-buffer (the game's own shaders, hair, blended draws): docs/next/RT-PATH-TRACIN
 
 ## Mirrors: smooth hits, metal that reflects, rays only (2026-11-07, perf-reflfix)
 Tester (RTX 4090, test 9, the RT test room's mirror wall): spheres in the mirror were FACETED, the chrome sphere a plain white ball and
-the gold one banded orange, neither reflecting anything. docs/next/RT-PATH-TRACING.md "perf-reflfix" has the whole change.
+the gold one banded orange, neither reflecting anything. docs/next/RT-PATH-TRACING.md (not in this repo) "perf-reflfix" has the whole change.
 - **Smooth hits**: the RT helper now keeps a vertex normal per vertex (tools/nvr-rt-helper/RtNormals.comp, made from each mesh's own
   triangles); the helper's pass (`ReflectionsRTBody.glsl` ShadeHit) shades a hit with them interpolated (RtHit.glsl
   `rtHitSmoothNormal`), then the normal map; the shadow rays still leave along the flat triangle normal.
@@ -145,7 +145,7 @@ the gold one banded orange, neither reflecting anything. docs/next/RT-PATH-TRACI
 - RT test host scene `reflfix` (`tools/nvr-rt-host/run.ps1 -Scene reflfix`).
 
 ## Lamps as the game lights them, glossy metal bounces, the flashlight (2026-11-07, perf-reflfix2)
-Tester (RTX 4090, test 10, the RT test room) and the flashlight team. docs/next/RT-PATH-TRACING.md "Team perf-reflfix2" has the numbers.
+Tester (RTX 4090, test 10, the RT test room) and the flashlight team. docs/next/RT-PATH-TRACING.md (not in this repo) "Team perf-reflfix2" has the numbers.
 - **Lamps at hits the screen cannot show** (Resolve `RtShadeHit`, the helper's key-lamp pick): `RtGatherLamps` packs each lamp through
   `RtReflLamps.h` as the game lights it: diffuse x Dimmer at most 1 without HDR x the LOD dimmer x LightingScale, decoded on the CPU
   (linear), the game's falloff `(1 - (d/r)^2)^2.2` or LampFalloff's shape; `Rt/RtLampLight.glsl` evaluates it in both passes. Before:
@@ -167,7 +167,7 @@ Tester (RTX 4090, test 10, the RT test room) and the flashlight team. docs/next/
 - RT test host scenes `reflorbs`, `reflbounce` (`tools/nvr-rt-host/run.ps1 -Scene reflorbs`).
 
 ## Steady gold in mirrors, the flashlight near the player, undrawn hair (2026-11-08, perf-reflfix3)
-docs/next/RT-PATH-TRACING.md "Team perf-reflfix3" has the numbers.
+docs/next/RT-PATH-TRACING.md (not in this repo) "Team perf-reflfix3" has the numbers.
 - **MetalBounce on rough metal** (roughness 0.1 and up: gold, brass): the bounce's GGX sample is fixed per pixel (one of 9 lobe points by
   its place in a 3 x 3 block) and Resolve averages each bouncing pixel with its neighbours on the same metal: the lobe's 9-ray mean, the
   same every frame (test 11 drew a new sample each frame and a mirror keeps no history: the gold shimmered). Chrome keeps one exact ray.
@@ -181,7 +181,7 @@ docs/next/RT-PATH-TRACING.md "Team perf-reflfix3" has the numbers.
 - **MirrorLampHighlight** (`[Shaders.Reflections.Main]`, default 0, live; the Vulkan composite): the point lamps' own highlight on mirror-smooth / chrome surfaces the reflection covers (the blooming dots) is taken out before the mix (above 1.0 linear and above its 12-pixel surroundings); the sun's and the flashlight's glints stay, the gold's soft highlights (roughness 0.15 and up) are not touched. 1 = as before. Host scene `mirrorlamp`.
 
 ## Silver mirrors, smooth gold, hair in its colour (2026-11-08, perf-reflfix4)
-docs/next/RT-PATH-TRACING.md "Team perf-reflfix4" has the facts (each checked against the game's code / files) and the numbers.
+docs/next/RT-PATH-TRACING.md (not in this repo) "Team perf-reflfix4" has the facts (each checked against the game's code / files) and the numbers.
 - **Metal's F0 (MaterialAware)**: the composite took a metal's reflection colour from the hue of its own lit colour; on a mirror (a
   near-black diffuse) that hue is the lamps', and the whole reflected room went orange under warm lamps. Now (`Compute/ReflMetalF0.glsl`,
   the D3D9 composite's `ReflMetalF0`, MetalBounce's F0 in the RT pass) a metal up to roughness 0.06 reflects in neutral silver (0.95),

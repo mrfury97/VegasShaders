@@ -16,27 +16,27 @@ Only d3d9.dll is built and shipped; NVR's own DLL, menu, settings and presets st
                  0009       injected graphics passes end suspended (no barrier after every pass)
                  0010       1.6: DrawDepthStencil (SMAA's weight pass through its stencil)
                  0011       managed textures (and pending AUTOGENMIPMAP mips) uploaded before a pass samples them
-                 0012       "1.5-hdr": ID3D9NvrExtHdr, HDR10 / scRGB output (docs/next/FORK-1026-HDR.md)
+                 0012       "1.5-hdr": ID3D9NvrExtHdr, HDR10 / scRGB output (docs/next/FORK-1026-HDR.md (not in this repo))
                  0013       "1.5-particles": ID3D9NvrExtGeometry, passes with their own vertex shader and instanced draws
-                            (GPU particles, docs/next/FORK-1026-PARTICLES.md)
+                            (GPU particles, docs/next/FORK-1026-PARTICLES.md (not in this repo))
                  0014       "1.5-sm6": 64 slots per type / 96 bindings per pipeline for the SM6 builds of NVR's own passes
-                            (`tools/nvr-sm6`, docs/next/FORK-1026-SM6.md; NVR reads MaxSlots from GetInfo)
+                            (`tools/nvr-sm6`, docs/next/FORK-1026-SM6.md (not in this repo); NVR reads MaxSlots from GetInfo)
                  0015       "1.5-debug": dxvk.conf `nvr.debugEnv = "NAME=value|..."` sets environment variables (DXVK_DEBUG,
                             Vulkan loader/layer settings) before DXVK and the loader read them
                  0016       "1.5-debug": ID3D9NvrExtReadback (readback that never waits), storage buffers in the pass stages
                  0017       (deep/fork-async) "1.5-warm": dxvk.conf `nvr.pipelineLog = True` logs every pipeline compiled or
                             linked at first use on the recording thread (a wait the frame cannot hide), with time and shader
                             names; measurement only, off by default; only `src/dxvk/dxvk_{options,graphics,compute}.*` + new
-                            `dxvk_nvr_pipelog.h` change. docs/next/FORK-1027-ASYNC-WARMUP.md.
+                            `dxvk_nvr_pipelog.h` change. docs/next/FORK-1027-ASYNC-WARMUP.md (not in this repo).
                  0021       (deep/fork2-displace) "1.7-displace": ID3D9NvrExtTess, tessellation displacement of the land
-                            (new files `src/d3d9/d3d9_nvr_tess.{h,cpp}`; docs/next/FORK2-DISPLACE.md). Its shaders:
+                            (new files `src/d3d9/d3d9_nvr_tess.{h,cpp}`; docs/next/FORK2-DISPLACE.md (not in this repo)). Its shaders:
                             `compile-tess.sh` (src/hlsl/NewVegas/Compute/Tess -> .spv, Windows Git Bash with the Vulkan SDK).
                  0024       (deep/fork2-grass) "1.7-grass": ID3D9NvrExtGeometryScene,
                             geometry passes drawn INTO the scene: the game's depth buffer with real depth, multisampled and
                             attachment-only targets, culling, indirect counts (NVR_EXT_BUFFER_INDIRECT); GPU grass,
-                            docs/next/FORK2-GRASS.md. Only the three d3d9_nvr_ext* files change.
+                            docs/next/FORK2-GRASS.md (not in this repo). Only the three d3d9_nvr_ext* files change.
                  0026       (deep/fork2-dlss) "1.7-dlss": ID3D9NvrExtShare, images and timeline semaphores exported to another
-                            process (NVR's 64-bit DLSS helper, `tools/nvr-dlss-helper`, docs/next/FORK2-DLSS.md): plain Vulkan
+                            process (NVR's 64-bit DLSS helper, `tools/nvr-dlss-helper`, docs/next/FORK2-DLSS.md (not in this repo)): plain Vulkan
                             external memory/semaphores, no NVIDIA code; the d3d9_nvr_ext* files, plus `src/dxvk/dxvk_memory.*`,
                             `dxvk_fence.*` and `dxvk_image.cpp`: an NT handle is exported ONCE per object and kept (NVIDIA returns
                             the same handle value on a second export), callers get duplicates.
@@ -44,7 +44,7 @@ Only d3d9.dll is built and shipped; NVR's own DLL, menu, settings and presets st
                  0028       (claude/rt-sun-core) "1.8-rt": ID3D9NvrExtRt, the ray tracing core. Geometry staging for the
                             64-bit ray tracing helper (`tools/nvr-rt-helper`; Windows' 32-bit drivers have no ray tracing)
                             on every GPU, plus opt-in in-process acceleration structures (dxvk.conf nvr.rayTracing = True,
-                            default off = device created as before). docs/next/FORK-RT-CORE.md. Test: `test/nvr_rt_test.cpp`
+                            default off = device created as before). docs/next/FORK-RT-CORE.md (not in this repo). Test: `test/nvr_rt_test.cpp`
                             (in-process) and `tools/nvr-rt-helper/test/rt_helper_test.cpp` (the helper path, end to end).
                  0029       (claude/rt-sun-2) "1.8-rt-uv": NVR_EXT_RT_GEOMETRY_DESC::Flags = NVR_EXT_RT_TEXCOORD_FLAGS(...)
                             makes StageGeometry also write each vertex's texcoord (float2) after the triangle list, for
@@ -67,20 +67,20 @@ Only d3d9.dll is built and shipped; NVR's own DLL, menu, settings and presets st
                             same-format block copy in CopyToShared / CopyFromShared (offsets on blocks, sizes whole blocks or
                             to the subresource's edge; another format into a BC image is refused). The RT real textures then
                             copy the game's DXT1 / DXT5 / ATI2 blocks as they are instead of decoding them to RGBA8
-                            (docs/next/RT-REAL-TEXTURES.md). No new interface: an older fork refuses the new formats and NVR
+                            (docs/next/RT-REAL-TEXTURES.md (not in this repo)). No new interface: an older fork refuses the new formats and NVR
                             falls back to RGBA8. Only the d3d9_nvr_ext* files change. Built on r13 (0001-0029 + 0033 + 0034 +
                             the HDR stack) in WSL ~/fork-rtgap-tex; RT-test forks: + 0035.
                GetInfo reports 1.6. The "1.5-<feature>" parts are separate interfaces found with QueryInterface (or, for sm6,
                by MaxSlots), not by the minor version: NVR checks each one itself and keeps its D3D9 path without it.
 - `debug/`     dxvk.conf templates for debugging (`dxvk.conf.pipelinelog`: the 0017 measurement): `dxvk.conf.markers` (RenderDoc captures with NVR's named groups),
                `dxvk.conf.renderdoc-slot` (RenderDoc loaded as a Vulkan layer in a slot game, for the 'capture' shot) and
-               `dxvk.conf.validation` (Khronos validation + synchronization validation). docs/next/FORK-DEBUG-CAPTURE.md.
+               `dxvk.conf.validation` (Khronos validation + synchronization validation). docs/next/FORK-DEBUG-CAPTURE.md (not in this repo).
 - `build.sh`   clone + patch + build the 32-bit d3d9.dll (Linux or WSL, MinGW-w64). The GitHub workflow
                `.github/workflows/nvr-dxvk.yml` runs the same and uploads the DLL as an artifact.
 - `test/`      `nvr_ext_test.cpp`: an end-to-end test of the extension on dxvk-native (Linux, any Vulkan device, also
                lavapipe software Vulkan): the AvgLuma compute pass against the D3D9 pass's arithmetic, storage images,
                buffers, the graphics passes, every ported NVR .spv, a pixel shader replacement (`nvr_ext_test_replace.frag`
                for a hand-assembled ps_3_0), device Reset. Arguments: AvgLuma.spv, the three test .spv, the Compute
-               folder, nvr_ext_test_replace.spv. See docs/next/NVR-DXVK-EXTENSION.md.
+               folder, nvr_ext_test_replace.spv. See docs/next/NVR-DXVK-EXTENSION.md (not in this repo).
 
 The public interface NVR compiles against is `src/d3d9/d3d9_nvr_ext_api.h` in the patch; NVR's copy is `src/core/NvrDxvkExt.h`.

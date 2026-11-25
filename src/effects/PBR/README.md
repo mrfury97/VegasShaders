@@ -165,4 +165,4 @@ NVR or game handle, blend state, textures) once.
 Trap met while building it: a pixel record's `SetCT` empties all 16 texture stages (it expects to run at a bind, before the game binds
 the pass's textures). The eye record's `SetCT` runs inside the draw, so eye records have `ClearSamplers` off and the restore after the
 draw uploads constants only; otherwise the second eye drawn (both share `eyeblue.dds`, so the game does not bind it again) is black.
-Bench pictures and the full write-up: `docs/next/EYES-ENVFLAG-2026-11-09.md`.
+Bench pictures and the full write-up: `docs/next/EYES-ENVFLAG-2026-11-09.md` (not in this repo).

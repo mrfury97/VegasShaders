@@ -81,7 +81,7 @@ high for big particles).
 
 ## 8. Measured
 
-See docs/next/PARTICLES-BENCH-2026-11-09.md (pictures off / on / phase, MSAA 0 and 4, frame totals).
+See docs/next/PARTICLES-BENCH-2026-11-09.md (not in this repo) (pictures off / on / phase, MSAA 0 and 4, frame totals).
 
 ## 9. Known problems (bench 2026-11-09)
 

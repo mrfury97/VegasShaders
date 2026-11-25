@@ -2,8 +2,8 @@
 
 GunFX used to be a plugin of its own (`GunFX.dll`); since 2026-11-16 it is built into Vegas Shaders: the source is
 in [`src/gunfx/`](../src/gunfx/) and its settings are in Vegas Shaders' own settings (`[Main.GunFX.*]`). The player
-guide is [`docs/GUNFX.md`](../docs/GUNFX.md); the move is described in
-[`docs/next/GUNFX-BUILTIN.md`](../docs/next/GUNFX-BUILTIN.md).
+guide is `docs/GUNFX.md` (not in this repo); the move is described in
+`docs/next/GUNFX-BUILTIN.md` (not in this repo).
 
 What is left here:
 
