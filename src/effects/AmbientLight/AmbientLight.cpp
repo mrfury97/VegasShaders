@@ -656,6 +656,9 @@ void AmbientLightEffect::RoomGIFrame(bool outdoors, bool rt) {
 
 bool AmbientLightEffect::ShouldRender() {
 	if (RtPathTrace::Replacing()) return false;	// UNOFFICIAL 2026-11-03 PTReplace: the path traced frame has its own indirect light
+	// (2026-11-26 al-menu) The space test below applies only while SunGI / RoomGI alone hold the effect on (its Status key off). With the user's own
+	// Status on, both flags are false and it renders on both sides of the door: indoors GTAO + the light grid's lamps, the RT estimate only where the
+	// RT core is ready (RtAmbient::AOReady / GIReady in Render), so RoomGI without ray tracing changes nothing there.
 	if ((sunGiForced || roomGiForced) && !(TheShaderManager->GameState.isExterior ? sunGi : roomGi && RtAmbient::SunGIRtRunning())) return false;	// UNOFFICIAL 2026-11-12 (sungi p4): SunGI turned the effect on, outdoors only; interiors as the user set them.
 	return Enabled && Effect && !TheShaderManager->GameState.isUnderwater;
 }
@@ -1173,6 +1176,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		if (!reported) Logger::Log("UNOFFICIAL AmbientLight: buffers missing or AmbientLight.fx.hlsl is not the matching version (8 passes), effect skipped.");
 		reported = true;
 		renderTime = 0;
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, "buffers missing or AmbientLight.fx.hlsl not the 8-pass version");	// (2026-11-26 al-menu)
 		return;
 	}
 	RenderRect::WholeViewport(Device, original);	// UNOFFICIAL 2026-10-27 RenderScale v2: the layout is for the whole target
@@ -1790,5 +1794,8 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		if (!reported) Logger::Log("UNOFFICIAL AmbientLight: render failed (%08lx).", result);
 		reported = true;
 	}
+	// (2026-11-26 al-menu) The chain calls Render itself (EffectChain PreStep_AmbientLight), not EffectRecord::Render, so the HEARTBEAT's drawn count
+	// was never noted here: it read "AmbientLight 0/0" while the effect drew every frame.
+	EffectStatus::Note(StatusSlot, Name, SUCCEEDED(result) ? EffectStatus::Drawn : EffectStatus::Skipped, SUCCEEDED(result) ? nullptr : "a pass failed (see the render failed line)");
 	renderTime = timer.LogTime("AmbientLight::Render");
 }
