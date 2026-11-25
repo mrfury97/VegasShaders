@@ -18,6 +18,9 @@ layout(set = 1, binding = 6) uniform texture2D t_spec;
 layout(set = 1, binding = 7) uniform texture2D t_specRaw;
 layout(set = 1, binding = 8) uniform texture2D t_specAlbedoRG;
 layout(set = 1, binding = 9) uniform texture2D t_specAlbedoB;
+// UNOFFICIAL 2026-11-20: decoupled direct sun shadow visibility (denoised by RtShadowDenoise) + unshadowed demodulated diffuse sun (modulate bit 4 = 16)
+layout(set = 1, binding = 10) uniform texture2D t_sunVis;
+layout(set = 1, binding = 11) uniform texture2D t_sunDirect;
 
 layout(push_constant) uniform Push {
     float exposure;      // 0
@@ -52,6 +55,11 @@ void main() {
     // skin; slice 2: where the traced first hit is not the game's surface) the scene already holds it: keep it, as the view model above
     if ((pc.modulate & 8u) != 0u && textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).a < -0.5) discard;
     vec3 c = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure;
+    if ((pc.modulate & 16u) != 0u) {
+        const float sv = textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
+        const vec3 sd = textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure;
+        c += sd * sv;
+    }
     if ((pc.modulate & 1u) != 0u) {
         const vec4 a = textureLod(sampler2D(t_albedo, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0);
         const vec3 raw = textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb * pc.exposure;   // (demodulated by 1 there)
@@ -79,10 +87,15 @@ void main() {
             // share of PTDetail kept there (PTBumpDetail); 1 (every pixel before, and where no bump was known): PTDetail as before.
             // The traced light then holds the bumps the denoiser left (the coarser ones); the game's shading adds the scale under the
             // radius, and the fine contrast the TRACED light has at the same taps is divided out, so nothing counts twice.
-            const float rawA = textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).a;
+            // UNOFFICIAL 2026-11-20: negative rawA tags a moving-actor shadow blocker for RtDenoiseTemporalRgb; abs() recovers the bumped code
+            const float rawA = abs(textureLod(sampler2D(t_raw, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).a);
             const bool bumped = rawA >= 1.999 && rawA <= 3.001;
             const float bumpKeep = bumped ? clamp(rawA - 2.0, 0.0, 1.0) : 1.0;
-            const float t0 = bumped ? luma(textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb) : 1.0;
+            vec3 tr0 = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb;
+            if (bumped && (pc.modulate & 16u) != 0u)
+                tr0 += textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).rgb *
+                       textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tuv, 0.0).r;
+            const float t0 = bumped ? luma(tr0) : 1.0;
             float tsum = 0.0, tlo = t0, thi = t0;
             for (int k = 0; k < 4; k++) {
                 const vec2 o = (k == 0 ? vec2(1.0, 0.0) : k == 1 ? vec2(-1.0, 0.0) : k == 2 ? vec2(0.0, 1.0) : vec2(0.0, -1.0)) * pc.detailRadius * pc.texel;
@@ -92,7 +105,14 @@ void main() {
                 if (at.a < 0.5 || abs(zt - z0) > 0.03 * z0) continue;
                 const float st = luma(pow(max(textureLod(sampler2D(t_frame, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb, vec3(0.0)), vec3(2.2))) / max(luma(at.rgb), 0.02);
                 sum += st; lo = min(lo, st); hi = max(hi, st);
-                if (bumped) { const float tt2 = luma(textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb); tsum += tt2; tlo = min(tlo, tt2); thi = max(thi, tt2); }
+                if (bumped) {
+                    vec3 trt = textureLod(sampler2D(t_traced, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb;
+                    if ((pc.modulate & 16u) != 0u)
+                        trt += textureLod(sampler2D(t_sunDirect, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).rgb *
+                               textureLod(sampler2D(t_sunVis, NVR_SAMPLER(pc.samplerIndex)), tt, 0.0).r;
+                    const float tt2 = luma(trt);
+                    tsum += tt2; tlo = min(tlo, tt2); thi = max(thi, tt2);
+                }
                 n += 1.0;
             }
             // (2026-11-10 PTDetailEdge; seen on an RTX-class card in the lamp test room: thin dark and light lines over people's faces and

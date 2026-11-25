@@ -49,6 +49,10 @@ const float kernel[3] = float[3](3.0 / 8.0, 1.0 / 4.0, 1.0 / 16.0);
 const float kernel3[2] = float[2](1.0 / 2.0, 1.0 / 4.0);   // the 3 x 3 kernel (Settings.Kernel 3): 9 taps instead of 25
 
 void main() {
+    const vec2 rectMax = (pc.specular >> 6u) != 0u
+        ? vec2(float((pc.specular >> 6u) & 0x1FFFu), float((pc.specular >> 19u) & 0x1FFFu)) * (1.0 / 8191.0)
+        : vec2(1.0);
+    if (uv.x >= rectMax.x || uv.y >= rectMax.y) { o_a = vec4(0.0); o_b = vec4(0.0); return; }
     const vec4 ca = textureLod(sampler2D(t_a, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
     const vec4 cb = textureLod(sampler2D(t_b, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
     const vec3 n = normalize(textureLod(sampler2D(t_normals, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).xyz * 2.0 - 1.0);
@@ -94,7 +98,7 @@ void main() {
     const int reach = pc.size.w > 0.5 ? 1 : 2;
     for (int y = -reach; y <= reach; y++) {
         for (int x = -reach; x <= reach; x++) {
-            const vec2 tapUv = uv + vec2(x, y) * pc.params.x * pc.size.xy;
+            const vec2 tapUv = clamp(uv + vec2(x, y) * pc.params.x * pc.size.xy, 0.5 * pc.size.xy, rectMax - 0.5 * pc.size.xy);
             const vec4 ta = textureLod(sampler2D(t_a, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0);
             const vec4 tb = textureLod(sampler2D(t_b, NVR_SAMPLER(pc.samplerIndex)), tapUv, 0.0);
             if (tb.g <= 0.0) continue;

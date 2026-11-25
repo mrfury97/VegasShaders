@@ -20,6 +20,7 @@ layout(set = 1, binding = 2, rg16f) writeonly uniform image2D o_motion;
 layout(set = 1, binding = 3, rg32f) writeonly uniform image2D o_depth;
 layout(set = 1, binding = 5) uniform texture2D t_reactive;    // UNOFFICIAL 2026-10-30 ReactiveMask (core/ReactiveMask.h; a placeholder while extra.x is 0)
 layout(set = 1, binding = 4) uniform texture2D t_objmotion;   // UNOFFICIAL 2026-10-29 TESR_ObjectMotionBuffer (world move since last frame; a placeholder while cameraDelta.w is 0)
+layout(set = 1, binding = 6) uniform texture2D t_vmmotion;    // UNOFFICIAL 2026-11-21 TESR_ViewModelMotionBuffer (prevUV - curUV, valid in .b)
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;   // TESR_ProjectionTransform (unjittered)
@@ -29,7 +30,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 prevProjection;        // x, y: last frame's projMatrix._11, _22
     vec4 cameraDelta;           // xyz: camera position this frame minus last frame's
     vec4 size;                  // xy render size, z: 1 = no history (motion 0), w: reactive value on weapon pixels
-    vec4 extra;                 // UNOFFICIAL 2026-10-30 x: 1 = t_reactive holds this frame's reactive mask (the alpha draws), 0 = weapon only; y: ReactiveMaxDistance
+    vec4 extra;                 // UNOFFICIAL 2026-10-30 x: 1 = t_reactive valid; y: ReactiveMaxDistance; 2026-11-21 z: 1 = t_vmmotion valid
 } cb;
 
 layout(push_constant) uniform Push {
@@ -53,7 +54,8 @@ void main() {
     vec2 uv = (vec2(pixel) + 0.5) / cb.size.xy;
 
     float linear01 = texelFetch(sampler2D(t_depth, POINT_S), pixel, 0).x;
-    bool weapon = texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x > 0.0;
+    float vmRaw = texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x;
+    bool weapon = vmRaw > 0.0;
 
     // TAA.glsl Reproject, line for line.
     vec3 cameraVector = toWorld(uv) * (linear01 * farZ);
@@ -69,14 +71,29 @@ void main() {
     vec2 prevUV = vec2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
 
     vec2 motion = prevUV - uv;
-    if (weapon || cb.size.z > 0.5 || viewZ <= 0.0) motion = vec2(0.0);   // behind last frame's camera: no usable motion
+    float weaponReactive = cb.size.w;
+    if (weapon) {
+        motion = vec2(0.0);
+        if (cb.size.z <= 0.5 && cb.extra.z > 0.5) {
+            vec4 vm = texelFetch(sampler2D(t_vmmotion, POINT_S), pixel, 0);
+            if (vm.z > 0.5) {
+                motion = vm.xy;
+                weaponReactive = 0.0;
+            }
+        }
+    } else if (cb.size.z > 0.5 || viewZ <= 0.0) {
+        motion = vec2(0.0);   // behind last frame's camera: no usable motion
+    }
 
     float z = max(linear01 * farZ, nearZ);
     float device = clamp(farZ / (farZ - nearZ) * (1.0 - nearZ / z), 0.0, 1.0);
+    float vmDepth = (1.0 - clamp(vmRaw, 0.0, 1.0)) * 0.001;
+    float outDepth = weapon ? (cb.extra.z > 0.5 ? vmDepth : 0.0) : device;
 
     imageStore(o_motion, pixel, vec4(motion, 0.0, 0.0));
     // UNOFFICIAL 2026-10-30 ReactiveMask: smoke, fire, glass and other alpha draws over the world are reactive too
     // (only nearer than ReactiveMaxDistance: the sky and the distant land are drawn after the main list too, and change only with the camera)
     float reactive = cb.extra.x > 0.5 && z < cb.extra.y ? texelFetch(sampler2D(t_reactive, POINT_S), pixel, 0).x : 0.0;
-    imageStore(o_depth, pixel, vec4(weapon ? 0.0 : device, weapon ? max(cb.size.w, reactive) : reactive, 0.0, 0.0));
+    float outReactive = weapon ? (cb.extra.z > 0.5 ? weaponReactive : max(cb.size.w, reactive)) : reactive;
+    imageStore(o_depth, pixel, vec4(outDepth, outReactive, 0.0, 0.0));
 }

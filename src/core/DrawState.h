@@ -6,9 +6,10 @@
 #include <d3d9.h>
 
 namespace SharedDrawState {
-	struct TrackedState { IDirect3DSurface9* rt[4]; IDirect3DPixelShader9* ps; DWORD colorWrite, blend, src, dst, colorWrite2, colorWrite3, colorWrite1; };	// colorWrite1: UNOFFICIAL 2026-10-31 AlbedoBuffer
+	struct TrackedState { IDirect3DSurface9* rt[4]; IDirect3DPixelShader9* ps; DWORD colorWrite, blend, src, dst, colorWrite2, colorWrite3, colorWrite1, zWrite; };	// colorWrite1: UNOFFICIAL 2026-10-31 AlbedoBuffer
 	inline TrackedState T = {};
 	inline bool Valid = false;
+	inline bool WatchingDepth = false, DepthWrittenSinceCopy = false;
 	// UNOFFICIAL 2026-11-04 DrawStateTracking (CapturedNormals.h): ConstantFilter's detours of the device's SetPixelShader body and of the
 	// state-block Apply / EndStateBlock / Reset bodies tell the tracker here (null until it is in). Observers: set once, never cleared.
 	inline void (*PixelShaderSet)(IDirect3DPixelShader9*) = nullptr;

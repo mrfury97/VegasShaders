@@ -90,7 +90,7 @@ sampler2D TESR_CloudCurrentFull : register(s12) = sampler_state { ADDRESSU = CLA
 sampler2D TESR_CloudCurrentFull : register(s11) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 #endif
 // UNOFFICIAL 2026-10-15 weather sync: one of the game's cloud layer textures, bound by hand (VolumetricClouds.cpp ProbeLayer).
-sampler2D NVR_CloudLayerProbe : register(s13) = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
+sampler2D NVR_CloudLayerProbe : register(s14) = sampler_state { ADDRESSU = WRAP; ADDRESSV = WRAP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = LINEAR; };
 texture NoTexture;   // never set: unbinds a technique's own render target from its sampler
 
 static const float Base = TESR_CloudsShape.x;

@@ -35,6 +35,8 @@ public:
 		// SunFar add: Irradiance, or with the switch off the game's own sky (IrradianceGame, SkylightingSaturation applied) while the physical
 		// sky still draws the sky, the fog and the clouds.
 		D3DXVECTOR4		IrradianceObjects[9];
+		// UNOFFICIAL 2026-11-21 [Shaders.Terrain.*] SkylightingSaturation: independent terrain sky SH (SunFar & Terrain shaders read this).
+		D3DXVECTOR4		IrradianceTerrain[9];
 		// UNOFFICIAL 2026-10-25: rgb the sky's tint at this hour (TintDay to TintNight on the day/night curve; white indoors)
 		D3DXVECTOR4		SkyTint = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 		// UNOFFICIAL 2026-10-25: x the moon disc's brightness (MoonBrightness, SKYTEX.pso.hlsl)
@@ -61,7 +63,7 @@ public:
 	// UNOFFICIAL: the spherical-harmonic projection in UpdateConstants (512 samples of the sky model, and UpdateConstants
 	// runs twice a frame) is redone only when something it reads has changed: these are the last run's inputs. The sun's
 	// direction counts as changed when it has turned by more than a tenth of a degree (it creeps every frame outdoors).
-	struct ProjectionInputs { D3DXVECTOR4 sunPos, skyColor, skyLowColor, horizonColor, skyData, sunDiskColor, sunsetColor, physical; float sunAmount, saturation, exterior; D3DXVECTOR4 physicalMS, skyTint, skyTintHorizon, skyLook; };
+	struct ProjectionInputs { D3DXVECTOR4 sunPos, skyColor, skyLowColor, horizonColor, skyData, sunDiskColor, sunsetColor, physical; float sunAmount, saturation, terrainSaturation, exterior; D3DXVECTOR4 physicalMS, skyTint, skyTintHorizon, skyLook; };
 	ProjectionInputs lastProjection = {};
 	bool lastProjectionValid = false;
 
@@ -69,10 +71,10 @@ public:
 	// results (Values: the constants it reads and writes, under their Constants names), so it can run on FrameWorker's thread.
 	struct ProjectionJob {
 		struct Settings { float Haze, Brightness; bool LightsObjects; };
-		struct Values { D3DXVECTOR4 SkyData, PhysSky, PhysSkySun, SkyTint, SkyTintHorizon, SkyLook, Irradiance[9], IrradianceGame[9], IrradianceObjects[9]; };
+		struct Values { D3DXVECTOR4 SkyData, PhysSky, PhysSkySun, SkyTint, SkyTintHorizon, SkyLook, Irradiance[9], IrradianceGame[9], IrradianceObjects[9], IrradianceTerrain[9]; };
 		D3DXVECTOR4 sunPos;
 		D3DXVECTOR3 skyC, skyLowC, horizonC, sunColor;
-		float sunHeight, isDayTime, saturation;
+		float sunHeight, isDayTime, saturation, terrainSaturation;
 		bool physical, physExact, physMs;
 		const PhysSky::Tables* tables;
 		Settings settings;

@@ -252,9 +252,10 @@ namespace RtScenePick {
 	// The tint's linear colour for the record from the shader's HairTint (c2, the stored curve, 0..1)
 	inline float TintLinear(float c) { c = c < 0.0f ? 0.0f : c > 1.0f ? 1.0f : c; return powf(c, 2.2f); }
 
-	// The instance's custom index (NvrRtProtocol.h NVR_RT_CUSTOM_*): land, hidden (the first-person body), decal
+	// The instance's custom index (NvrRtProtocol.h NVR_RT_CUSTOM_*): land, hidden (the first-person body), decal, player/actor
 	inline uint32_t CustomIndex(const Record& r) {
-		return (r.land ? NVR_RT_CUSTOM_LAND : 0u) | (r.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u) | (r.decal ? NVR_RT_CUSTOM_DECAL : 0u);
+		const bool actor = r.player || (r.hookMask >= 0 && (r.hookMask & 0x60) != 0);
+		return (r.land ? NVR_RT_CUSTOM_LAND : 0u) | (r.hidden ? NVR_RT_CUSTOM_HIDDEN : 0u) | (r.decal ? NVR_RT_CUSTOM_DECAL : 0u) | (actor ? NVR_RT_CUSTOM_ACTOR : 0u);
 	}
 
 	inline uint32_t RecordFlags(const Record& r) {

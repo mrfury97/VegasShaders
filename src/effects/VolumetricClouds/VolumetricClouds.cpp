@@ -560,15 +560,15 @@ void VolumetricCloudsEffect::ProbeLayer(IDirect3DDevice9* Device) {
 	ProbeJob job = probeQueue.front();
 	probeQueue.erase(probeQueue.begin());
 	float fill = -1.0f;
-	Device->SetTexture(13, job.texture);
-	TheRenderManager->renderState->NoteDeviceTexture(13, job.texture);
+	Device->SetTexture(14, job.texture);
+	TheRenderManager->renderState->NoteDeviceTexture(14, job.texture);
 	const DWORD states[][2] = { {D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP}, {D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP},
 		{D3DSAMP_MAGFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MINFILTER, D3DTEXF_LINEAR}, {D3DSAMP_MIPFILTER, D3DTEXF_LINEAR} };
-	for (const auto& state : states) TheRenderManager->SetSamplerState(13, (D3DSAMPLERSTATETYPE)state[0], state[1]);
+	for (const auto& state : states) TheRenderManager->SetSamplerState(14, (D3DSAMPLERSTATETYPE)state[0], state[1]);
 	Constants.Motion.z = job.lod;
 	TheShaderManager->RenderEffectToRT(Textures.ProbeSurface, this, false, 5);
-	Device->SetTexture(13, nullptr);
-	TheRenderManager->renderState->NoteDeviceTexture(13, nullptr);
+	Device->SetTexture(14, nullptr);
+	TheRenderManager->renderState->NoteDeviceTexture(14, nullptr);
 	D3DLOCKED_RECT locked;
 	if (SUCCEEDED(Device->GetRenderTargetData(Textures.ProbeSurface, probeReadback)) && SUCCEEDED(probeReadback->LockRect(&locked, nullptr, D3DLOCK_READONLY))) {
 		fill = (float)(*(const UInt32*)locked.pBits >> 24) / 255.0f;
@@ -715,7 +715,7 @@ void VolumetricCloudsEffect::RenderClouds(IDirect3DDevice9* Device, IDirect3DSur
 static const UINT SkyProbePass = 99;
 
 void VolumetricCloudsEffect::RenderSkyProbe(IDirect3DDevice9* Device) {
-	if (!Textures.SkyProbeSurface || !DxvkCompute::PassesOn()) return;
+	if (!Textures.SkyProbeSurface || !DxvkCompute::PassesOnRect()) return;
 	static GpuTimer probeTimer("  Clouds sky probe");
 	GpuProfileScope gpu(probeTimer, Device);
 	if (ExtRender(Device, Textures.SkyProbeSurface, Textures.SkyProbeSurface, SkyProbePass, false, Textures.SkyProbeSurface)) { skyProbeFrame = frame; skyProbeBands++; }
@@ -925,9 +925,8 @@ namespace {
 		"TESR_SkyColor", "TESR_HorizonColor", "TESR_CloudsShape", "TESR_CloudsNoise", "TESR_CloudsLight", "TESR_CloudsWind",
 		"TESR_CloudsMarch", "TESR_CloudsLayout", "TESR_CloudsBlocks", "TESR_CloudsLook", "TESR_CloudsDetail", "TESR_CloudsExtra",
 		"TESR_CloudsMotion", "TESR_WaterSettings", "TESR_CameraData", "TESR_CameraPosition", "TESR_CloudsTint", "TESR_CloudsTower",
-		"TESR_PhysSky", "TESR_PhysSkySun", "TESR_GameMultisample" };	// (TESR_CloudsTint, TESR_CloudsTower: UNOFFICIAL 2026-10-26, WeatherTint and Towering)
-	// (TESR_GameMultisample: UNOFFICIAL 2026-11-05, the game's MSAA and the composite's sky shares, Compute/MsaaSkyEdge.glsl)
-	const UINT CloudsOptionalVectors = 3;	// the last three
+		"TESR_PhysSky", "TESR_PhysSkySun", "TESR_GameMultisample", "TESR_RenderScale", "TESR_CloudsHistoryScale" };	// (2026-11-19 RenderRect composite + jitter offset)
+	const UINT CloudsOptionalVectors = 5;	// the last five
 	struct CloudsUniforms {
 		D3DXMATRIX	Matrices[_countof(CloudsMatrixNames)];
 		D3DXVECTOR4	Vectors[_countof(CloudsVectorNames)];
@@ -1029,6 +1028,13 @@ bool VolumetricCloudsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 		else if (i < _countof(CloudsVectorNames) - CloudsOptionalVectors) return false;
 		// UNOFFICIAL 2026-10-26: the Vulkan march has no instruction limit: the full Steps (above 64 too; D3D9 gets at most 64).
 		if (!strcmp(CloudsVectorNames[i], "TESR_CloudsMarch")) uniforms.Vectors[i].x = (float)ExtMarchSteps;
+		// UNOFFICIAL 2026-11-19 RenderRect: fill active RenderRect scale and jitter offset directly for VolumetricCloudsComposite.
+		if (!strcmp(CloudsVectorNames[i], "TESR_RenderScale")) {
+			const float sx = RenderRect::Active() ? RenderRect::ScaleX : 1.0f;
+			const float sy = RenderRect::Active() ? RenderRect::ScaleY : 1.0f;
+			uniforms.Vectors[i] = D3DXVECTOR4(sx, sy, 1.0f / sx, 1.0f / sy);
+		}
+		if (!strcmp(CloudsVectorNames[i], "TESR_CloudsHistoryScale")) uniforms.Vectors[i] = Constants.HistoryScale;
 	}
 	ID3D9NvrExtBuffer* buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!buffer) return false;

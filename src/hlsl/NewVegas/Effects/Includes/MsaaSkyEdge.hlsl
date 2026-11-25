@@ -26,7 +26,7 @@ sampler2D TESR_SkyCoverage : register(MSAA_SKY_EDGE_REG) = sampler_state { ADDRE
 // sky pixels one or two pixels away (the pixel's own colour when none is that near). (MsaaEdgeFix off: as on 2026-11-04.)
 float SkyShare(float2 uv, float3 color, out float3 skyBefore) {
 	skyBefore = linearize(max(color, 0.0));
-	[branch] if (TESR_GameMultisample.x <= 1.0) return 0.0;
+	[branch] if (TESR_GameMultisample.x <= 1.0 || TESR_GameMultisample.y < 0.5) return 0.0;
 	float share = tex2Dlod(TESR_SkyCoverage, float4(uv, 0, 0)).r;
 	[branch] if (share <= 0.002) return 0.0;
 	float3 skySum = 0.0;

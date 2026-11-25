@@ -81,8 +81,6 @@ struct PS_OUTPUT {
         #define FP_ATLAS_REG s12
         #define FP_NO_BEAM	// (the deferred flashlight pass lights the deferred leaves: their game flashlight lamp is left out, CapturedNormals)
         #define FP_ATT(toLamp, reach) (1.0f - saturate(dot(toLamp, toLamp) / ((reach) * (reach))))
-        // (upstream 1.1.2, 6e85afb: the falloff through LampAtt, as the objects' getPointLightLightingAtt takes it. att as it is was the
-        // game's gamma-space curve used as linear light: a flat, over-bright disc on the leaves with a hard edge at the lamp's reach.)
         #define FP_LAMP_TERM(toLamp, att, color, V, n, albedo, rough, metal) ((color) * (LampAtt(att) * saturate(dot(n, toLamp) * rsqrt(max(dot(toLamp, toLamp), 1.0e-6f)))))
         #ifdef __INTELLISENSE__
             #include "ForwardPlus.hlsl"

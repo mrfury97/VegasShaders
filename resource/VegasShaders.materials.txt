@@ -28,9 +28,9 @@ class vehicle       metal=guess strength=0.6 rough=0.5-0.9   reflections=0.5 tin
 class building      metal=off                                tint=0.6,0.6,0.6
 class interior      metal=off                                tint=0.5,0.5,0.45
 class interiormetal metal=guess strength=0.5 rough=0.4-0.9   reflections=0.6 tint=0.2,0.6,1
-class ground        metal=off               rough=0.7-1      reflections=0.3 tint=0.55,0.4,0.2
-class plant         metal=off               rough=0.6-1      reflections=0.3 tint=0.1,0.8,0.1
-class clothing      metal=off               rough=0.5-1      reflections=0.5 tint=0.8,0.2,0.8
+class ground        metal=off               rough=0.75-1     reflections=0.3 tint=0.55,0.4,0.2 authored=replace
+class plant         metal=off               rough=0.68-1     reflections=0.3 tint=0.1,0.8,0.1 authored=replace
+class clothing      metal=off               rough=0.72-0.98  reflections=0.25 tint=0.8,0.2,0.8 authored=replace
 class armourmetal   metal=guess strength=0.7 rough=0.35-0.8  reflections=0.8 tint=0.5,0.2,1
 class robot         metal=guess strength=0.8 rough=0.3-0.7   tint=0,1,1
 class creature      metal=off                                reflections=0.5 tint=0.9,0.6,0.5
@@ -41,10 +41,10 @@ class metal         metal=guess strength=0.8 rough=0.3-0.8   tint=0.4,0.7,1
 class rustymetal    metal=guess strength=0.4 rough=0.7-1     tint=0.7,0.35,0.1
 class colouredmetal metal=full  strength=1   rough=0.2-0.5   tint=1,0.8,0
 class glass         metal=off               rough=0.02-0.1   reflections=1.5 tint=0.6,1,1
-class wood          metal=off               rough=0.6-0.95   tint=0.6,0.35,0.1
-class masonry       metal=off               rough=0.75-1     tint=0.75,0.7,0.65
-class rock          metal=off               rough=0.75-1     tint=0.45,0.45,0.4
-class soft          metal=off               rough=0.85-1     tint=1,0.6,0.8
+class wood          metal=off               rough=0.65-0.95  tint=0.6,0.35,0.1 authored=replace
+class masonry       metal=off               rough=0.78-1     tint=0.75,0.7,0.65 authored=replace
+class rock          metal=off               rough=0.78-1     tint=0.45,0.45,0.4 authored=replace
+class soft          metal=off               rough=0.85-1     tint=1,0.6,0.8 authored=replace
 class leather       metal=off               rough=0.45-0.8   tint=0.5,0.25,0.1
 class rubber        metal=off               rough=0.6-0.9    tint=0.15,0.15,0.15
 class stonepolished metal=off               rough=0.3-0.6    tint=0.9,0.9,1
@@ -97,6 +97,9 @@ folder textures\landscape\trees\       plant
 folder textures\trees\                 plant
 folder textures\plants\                plant
 folder textures\armor\                         clothing
+folder textures\clothes\                       clothing
+folder textures\clothing\                      clothing
+folder textures\outfits\                       clothing
 folder textures\armor\powerarmor\              armourmetal
 folder textures\armor\advancedpowerarmor\      armourmetal
 folder textures\armor\enclavepowerarmor\       armourmetal
@@ -144,6 +147,9 @@ keyword asphalt   masonry
 keyword sidewalk  masonry
 keyword rock      rock          not=rockit,rocket,rocker
 keyword cliff     rock
+keyword boulder   rock
+keyword rubble    rock
+keyword canyon    rock
 keyword cloth     soft
 keyword fabric    soft
 keyword carpet    soft

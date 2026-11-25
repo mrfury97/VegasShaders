@@ -16,6 +16,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [Pipeline audit](#pipeline-audit)
 - [SMP compatibility](#smp-compatibility)
 - [Community Shaders ports](#community-shaders-ports)
+- [Upstream 1.1.1-1.1.3 merge](#upstream-111-113-merge)
 
 ## Deferred vs forward
 
@@ -1649,3 +1650,53 @@ measurable with them off (0.47, the same as P81's shader without it).
 - "Conor (mrfury97, github.com/mrfury97/Conor-sClaudeHell-NVR-SAL-Fork, GPL-3.0-or-later): the terrain shadows' height-map
   sweep and share composite, and the terrain variation port."
 - "Terrain variation after Deliot and Heitz 2019."
+
+## Upstream 1.1.1-1.1.3 merge
+
+*Merged 2026-11-22 to 2026-11-26 on branch `upstream-rt-merge` (merge commit 68cbb9c; upstream 5559923, base d3477de = 1.1.0).*
+
+Owner's word, relayed by Main brain: "yea tell it to start that" (2026-11-22: take upstream's RT as is, keep our deferred wetness,
+unified reflections and speckle fixes, hand-merge where they meet), then "do it all jfc" (2026-11-26: take upstream's defaults for the
+four open choices, bench, merge into main, push). Upstream 1.1.4 (5538f4b) came out during the merge and is NOT in it.
+
+**From upstream, unchanged:** ray tracing (path tracer 3-pass split, ReSTIR GI, pure direct-lit GI, RT AO / Sky / GI as separate switches,
+RT fog lamps, RT shadow denoise, RT reflections at RenderScale with their own denoiser, `ViewModelMotion.h`), RT helper protocol 9 -> 10
+(`tools/nvr-rt-helper` builds `NvrRtHelper.exe`, which must replace the installed one), the 1.1.1-test2 menu overhaul, Vulkan
+`DeferredLamps` compute (off here, below), RenderRect post-FX, matte materials, first-person / ADS / AA fixes, 3D menu PBR isolation,
+Sandstorm and shadow ghosting fixes, Hi-Z removed, BloodFlow and BloodLens removed (owner's word 2026-11-26; their saved settings are
+retired quietly). Fork patches 0036 (security) and 0037 (HDR blitter) touch no RT: no fork rebuild (`docs/TOOLS.md` "nvr-dxvk").
+
+**Ours, kept:** deferred wetness (G-buffer film, `core/RainState.h`, WetWorld removed: its files, settings and the menu's "Legacy WetWorld"
+choice stay out), unified reflections (`GBufferFrame`, `WetReach`, DebugView 12), the speckle fixes (`DampTrace`, `DampBumpLean`, the
+`DampMaxRoughness` Fresnel cap), our own `WetnessReflections`, the retired old text-menu settings.
+
+**Hand-merged:** Reflections (Vulkan and D3D9: one wetness source per frame; `docs/EFFECTS.md` "Reflections", "Upstream 1.1.1-1.1.3
+merge"); settings migrations (upstream's 90-94, ours renumbered 95-97, step 98 for the RT reflection defaults; a file from our own builds
+at 91 / 92 is recognised by its missing `[Shaders.WetWorld]`); files that only held our hand-port of 1.1.2 are upstream's now.
+
+**Defaults:**
+
+| Key | Shipped | Upstream | Why |
+|---|---|---|---|
+| `[Shaders.Reflections.Main] ReplaceForward` | true | true | owner: upstream's (step 98) |
+| `[Shaders.Reflections.RT] FollowRenderScale` | true | true | owner: upstream's (step 98) |
+| `[Shaders.Reflections.RT] RideMainExchange` | false | true | RayGen would run before the deferred wetness film: RT rays and the composite would disagree on wet ground |
+| `[Shaders.Reflections.Main] ForwardWetFilm` (ours) | false | (always on) | with MaxRainWetness 0.5 wet open ground loses its mirror (review) |
+| `[Main.Main.RayTracing] HelperWait` | 0 | 1 | owner's question |
+| `[Shaders.PBR.Rmaos] MetalFromMap` | false | true | owner's question |
+| `[Shaders.PBR.Main] VanillaBridgeDielectricMax` | 0.08 | 0.04 | owner's question |
+| `[Main.Main.Quality] DeferredBumpedNormals` | false | true | owner's question |
+| `[Main.Main.Performance] NvrDxvkDeferred` | false | true | frame-cost change, owner's question |
+| `[Shaders.AmbientOcclusion.RT] Sky` | false | false | independent of RT AO now; true would start sky rays nobody asked for |
+
+**Mistakes caught:** the merged defaults had `DeferredStandalone` twice (both sides added it) and the game refused the whole file (slot
+log "toml::insert_value ... already exists"): every defaults file is now parsed with a TOML parser before an install.
+
+**Results (2026-11-26):**
+- Proven: the DLL (release and test), `NvrRtHelper.exe` (x64, protocol 10) and the 12 rebuilt Vulkan shaders build (the committed .spv
+  match their sources); `Reflections.fx` compiles in its default, MaterialAware and UnifiedReflections variants; every defaults file
+  parses (TOML parser) and matches its fragments; lead-architect review: approve with changes, all applied. In a bench slot the merged
+  DLL loaded and migrated the owner's settings file (v91) exactly as designed (only Gamma22 moved). Installed as install-test28, then
+  install-test29 (`F:\VS-scratch\install-test29-2026-11-26estore.ps1` -> test28 -> test27).
+- Not run: the in-game pictures (owner: "dont worry about bench pics, ill do it myself"), ray tracing with the new helper, frame time.
+- Not in it: upstream 1.1.4 (a separate merge).

@@ -39,7 +39,7 @@ static bool sceneGISky(Ctx& c) {
 		std::memcpy(a.viewToWorld, m, sizeof(m));
 		put4(a.projection, 1.0f / cam.p00, 1.0f / cam.p11, float(S), float(S));
 		put4(a.origin, 0, 0, 0, 3);
-		put4(a.ao, 300.0f, 0.0f, 1.0f, 0.0f);      // no AO rays
+		put4(a.ao, 300.0f, 0.0f, 2.0f, 0.0f);      // no AO rays; SampleLockFix on (2.0f, as the game's default)
 		put4(a.sky, 3000.0f, 0.0f, 0.0f, 0.0f);    // no sky rays
 		put4(a.gi, 5000.0f, giY, 0.0f, 0.0f);      // GI: 5000 units, 1 ray (+ GISky), no lamps, GIAmbient 0
 		put4(a.sunDir, V3{ 0, 0, 1 }, 1.0f); put4(a.sunColor, 1.0f, 1.0f, 1.0f, 0.0f);

@@ -246,16 +246,17 @@ float4 SandstormPS(VSOUT IN) : COLOR0
 	// colour of what is behind it, undusted, but only the near surface's depth: on its own depth it got no dust and
 	// showed as a dark rim. Averaged, it gets about as much as the mix of the two it shows. Even surfaces are unchanged.
 	float fullDensity = max(TESR_SandstormData.y, 1e-6f);
-	float2 texel = TESR_ReciprocalResolution.xy * 2.0f;   // taps two pixels apart: hair fringes run a few pixels wide
-	float distance;
-	[branch] if (TESR_SandstormQuality.z > 0.5f) {
-		float shown = 0.0f;
+	float distance = ViewDistance(uv, visibility);
+	[branch] if (TESR_SandstormQuality.z > 0.5f && distance < visibility * 5.99f) {
+		float2 texel = TESR_ReciprocalResolution.xy * 2.0f;   // taps two pixels apart: hair fringes run a few pixels wide
+		float centerShown = exp(-distance * fullDensity);
+		float shown = 4.0f * centerShown;
 		[unroll] for (int y = -1; y <= 1; y++)
 			[unroll] for (int x = -1; x <= 1; x++)
-				shown += (2 - abs(x)) * (2 - abs(y)) * exp(-ViewDistance(uv + float2(x, y) * texel, visibility) * fullDensity);
+				if (x != 0 || y != 0)
+					shown += (2 - abs(x)) * (2 - abs(y)) * min(exp(-ViewDistance(uv + float2(x, y) * texel, visibility) * fullDensity), centerShown);
 		distance = min(-log(max(shown / 16.0f, 1e-9f)) / fullDensity, visibility * 6.0f);
 	}
-	else distance = ViewDistance(uv, visibility);   // UNOFFICIAL (SoftEdges off): the pixel's own depth only
 
 	float3 camera = TESR_CameraPosition.xyz;
 
@@ -665,16 +666,20 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 
 	// How far the dust runs before the pixel's surface: as SandstormPS (the 3 x 3 tent with SoftEdges).
 	float fullDensity = max(TESR_SandstormData.y, 1e-6f);
-	float2 texel = TESR_ReciprocalResolution.xy * 2.0f;
-	float distance;
-	[branch] if (TESR_SandstormQuality.z > 0.5f) {
+	float centerDist = ViewDistance(uv, visibility);
+	float distance = centerDist;
+	[branch] if (TESR_SandstormQuality.z > 0.5f && centerDist < visibility * 5.99f) {
+		float2 texel = TESR_ReciprocalResolution.xy * 2.0f;
+		float centerShown = exp(-centerDist * fullDensity);
 		float shown = 0.0f;
 		[unroll] for (int y = -1; y <= 1; y++)
-			[unroll] for (int x = -1; x <= 1; x++)
-				shown += (2 - abs(x)) * (2 - abs(y)) * exp(-ViewDistance(uv + float2(x, y) * texel, visibility) * fullDensity);
+			[unroll] for (int x = -1; x <= 1; x++) {
+				float w = (2 - abs(x)) * (2 - abs(y));
+				float tapShown = (x == 0 && y == 0) ? centerShown : min(exp(-ViewDistance(uv + float2(x, y) * texel, visibility) * fullDensity), centerShown);
+				shown += w * tapShown;
+			}
 		distance = min(-log(max(shown / 16.0f, 1e-9f)) / fullDensity, visibility * 6.0f);
 	}
-	else distance = ViewDistance(uv, visibility);
 
 	float3 dustAmbient, dustSun;
 	DustLighting(dir, dustAmbient, dustSun);

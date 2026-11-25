@@ -189,9 +189,7 @@ float4 Combine(VSOUT IN) : COLOR0
 	float3 linC = pows(srcC,2.2); // linearise
 	float aoV = lerp(aoFloor, 1.0, tex2D(TESR_RenderedBuffer, IN.UVCoord).r);
 
-	float luminance = luma(linC);
-	float lt = luminance - aoLumCut;
-	luminance = saturate(lt * 3.0);
+	float luminance = smoothstep(aoLumCut * 0.5f, aoLumCut * 1.5f + 0.15f, luma(linC));
 	aoV = lerp(aoV, 1.0, luminance);
     #if viewao
 		return float4(aoV, aoV, aoV, 1.0f);
@@ -510,7 +508,7 @@ float4 PackedCombine(VSOUT IN) : COLOR0
 	float aoV = lerp(aoFloor, 1, sumV / max(wgts, 1.0e-6));
 	float3 srcC = tex2D(TESR_SourceBuffer, IN.UVCoord).rgb;
 	float3 linC = pows(srcC, 2.2);
-	aoV = lerp(aoV, 1, saturate((luma(linC) - aoLumCut) * 3));
+	aoV = lerp(aoV, 1, smoothstep(aoLumCut * 0.5, aoLumCut * 1.5 + 0.15, luma(linC)));
 	#if viewao
 		return float4(aoV, aoV, aoV, 1);
 	#endif
@@ -667,7 +665,7 @@ float4 DedicatedCombine(VSOUT IN) : COLOR0
 	float aoV = lerp(aoFloor, 1, sumV / max(wgts, 1.0e-6));
 	float3 srcC = tex2D(TESR_SourceBuffer, IN.UVCoord).rgb;
 	float3 linearColor = pows(srcC, 2.2);
-	aoV = lerp(aoV, 1, saturate((luma(linearColor) - aoLumCut) * 3));
+	aoV = lerp(aoV, 1, smoothstep(aoLumCut * 0.5, aoLumCut * 1.5 + 0.15, luma(linearColor)));
 	#if viewao
 		return float4(aoV, aoV, aoV, 1);
 	#endif
@@ -688,7 +686,7 @@ float4 DedicatedCombine(VSOUT IN) : COLOR0
 		// The factor on the linear colour (it was the same as a gamma factor on the gamma colour), taking away at most what LightCap allows
 		// (Includes/SkyTake.hlsl; no limit: as before).
 		float2 sky = saturate(skySum / max(skyWeights, 1.0e-6));
-		result = pows(SkyTake(pows(result, 2.2), sky.x, sky.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w), 1.0 / 2.2);
+		result = pows(SkyTake(pows(result, 2.2), max(sky.x, aoFloor), sky.y, TESR_AmbientOcclusionSky5.x, TESR_AmbientOcclusionSky5.w), 1.0 / 2.2);
 	}
 	return float4(result, 1);
 }

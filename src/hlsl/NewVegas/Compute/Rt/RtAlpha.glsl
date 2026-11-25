@@ -60,30 +60,32 @@ bool rtAlphaPass(uint instance, uint primitive, vec2 bary) {
 	const uvec3 i = uvec3(words[indexOffset + 3u * primitive], words[indexOffset + 3u * primitive + 1u], words[indexOffset + 3u * primitive + 2u]);
 	const vec2 uv = rtTexcoord(uvOffset, i.x) * (1.0 - bary.x - bary.y) + rtTexcoord(uvOffset, i.y) * bary.x + rtTexcoord(uvOffset, i.z) * bary.y;
 	const uint slot = (flags >> 16) & 0x3FFu;	// (2026-11-06) bits 16-25: bits 26-31 are the material rule since 11-03 (an unmasked slot read alpha 0 off the atlas: every ray passed the mesh)
-	// (2026-11-06) the slot's size off the atlas itself: [Main.Main.RayTracing] AlphaDetail (64 / 128 / 256 texels a texture) sets the
-	// atlas' size (32 slots a row; 2048 / 4096 / 8192 are whole multiples of the core's 256 rounding), no shader rebuild
-	const int slotSize = imageSize(RT_ALPHA_ATLAS).x / int(RT_ALPHA_SLOTS_A_ROW);
-	const ivec2 origin = ivec2(int(slot % RT_ALPHA_SLOTS_A_ROW), int(slot / RT_ALPHA_SLOTS_A_ROW)) * slotSize;
-	const ivec2 texel = origin + clamp(ivec2(fract(uv) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
-	float alpha = imageLoad(RT_ALPHA_ATLAS, texel).r;
+	// UNOFFICIAL 2026-11-19: sample real texture first and only load RT_ALPHA_ATLAS on fallback (id == 0u); eliminates dead atlas imageLoad on every real-textured candidate.
+	float alpha;
 #ifndef RT_NO_REAL_TEXTURES
-	{	// (2026-11-07) the real texture's alpha (full size: wires, leaves and hair edges as the game draws them)
-		const uint id = rtTexSlots[slot].x;
-		if (id != 0u) {
-			const float lod = rtTexLod(id, instance, primitive);
-			alpha = rtTexSample(id, uv, lod).a;
-			// at the full texture's own detail (the finest mips) the game's plain test is exact: no dither (that is for averaged alpha)
+	const uint id = rtTexSlots[slot].x;
+	if (id != 0u) {
+		const float lod = rtTexLod(id, instance, primitive);
+		alpha = rtTexSample(id, uv, lod).a;
+		// at the full texture's own detail (the finest mips) the game's plain test is exact: no dither (that is for averaged alpha)
 #ifdef RT_ALPHA_BLEND_TINTED   // (an expression, as RT_ALPHA_GLASS_SOLID: true = hair's alpha is dithered at the finest mip too)
-			// (2026-11-10, the path tracer) hair (a TINTED record: alpha-tested + textured, 0x60) is BLENDED by the game, not cut: a beard texel
-			// at alpha 0.3 covers 30 % there. The hard cut at the reference left beards (47 % of their texels under 128) and eyebrows (70 %)
-			// thin or gone for every camera ray; the dithered test below lets a texel block its alpha's share of the rays.
-			if (lod < 0.5 && !((RT_ALPHA_BLEND_TINTED) && (flags & 0x60u) == 0x60u)) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
+		// (2026-11-10, the path tracer) hair (a TINTED record: alpha-tested + textured, 0x60) is BLENDED by the game, not cut: a beard texel
+		// at alpha 0.3 covers 30 % there. The hard cut at the reference left beards (47 % of their texels under 128) and eyebrows (70 %)
+		// thin or gone for every camera ray; the dithered test below lets a texel block its alpha's share of the rays.
+		if (lod < 0.5 && !((RT_ALPHA_BLEND_TINTED) && (flags & 0x60u) == 0x60u)) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
 #else
-			if (lod < 0.5) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
+		if (lod < 0.5) return alpha > float((flags >> 8) & 0xFFu) / 255.0;
 #endif
-		}
 	}
+	else
 #endif
+	{
+		// (2026-11-06) the slot's size off the atlas itself: [Main.Main.RayTracing] AlphaDetail (64 / 128 / 256 texels a texture)
+		const int slotSize = imageSize(RT_ALPHA_ATLAS).x / int(RT_ALPHA_SLOTS_A_ROW);
+		const ivec2 origin = ivec2(int(slot % RT_ALPHA_SLOTS_A_ROW), int(slot / RT_ALPHA_SLOTS_A_ROW)) * slotSize;
+		const ivec2 texel = origin + clamp(ivec2(fract(uv) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
+		alpha = imageLoad(RT_ALPHA_ATLAS, texel).r;
+	}
 	const float ref = float((flags >> 8) & 0xFFu) / 255.0;
 #ifndef RT_ALPHA_PLAIN
 	// (2026-11-06) hashed alpha test: the slot holds the texture's mip at 64 texels (RtAlphaToAtlas), the AVERAGE alpha of an 8 x 8 block

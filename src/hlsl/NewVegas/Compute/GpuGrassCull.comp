@@ -13,9 +13,20 @@
 // Rendering' (compute culling, width grows with distance).
 //
 // Build: glslangValidator -V --target-env vulkan1.1 -o GpuGrassCull.spv GpuGrassCull.comp (tools/nvr-dxvk/compile-compute.sh)
+//        glslangValidator -V --target-env vulkan1.1 -DGG_COUNT=1 -o GpuGrassCount.spv GpuGrassCull.comp
+//
+// UNOFFICIAL 2026-11-16 grass-cull (docs/next/GRASS-CULL.md): the strand lists never drop a clump. Before, a clump whose strands did not
+// fit in its list (MaxBlades) was simply not drawn, while its card had already been skipped (KeepCards off): whole grass types gone, which
+// ones depending on how much grass the camera saw. Now a count pass (GG_COUNT 1, the same code up to the strand count) first adds up what
+// every visible clump asks for in each list; this pass then, where a list would overflow, gives every clump its first strand and shares
+// what is left in proportion (fewer, wider strands: the clump keeps its coverage). Lists that fit are drawn exactly as before.
 #version 450
 #extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require   // (2026-11-17 t_cloud: texelFetch / textureSize on a texture2D)
 #include "GpuGrass.glsl"
+#ifndef GG_COUNT
+#define GG_COUNT 0
+#endif
 
 layout(local_size_x = 64) in;
 
@@ -24,11 +35,32 @@ layout(set = 0, binding = 1, std430) readonly buffer Tufts { vec4 tufts[]; };   
 layout(set = 0, binding = 2, std430) readonly buffer TuftDraw { uint tuftDraw[]; }; // which draw each tuft came from
 layout(set = 0, binding = 3, std430) readonly buffer Draws { GGDraw draws[]; };
 layout(set = 0, binding = 4, std430) writeonly buffer Blades { GGBlade blades[]; }; // near list [0, cap), far list [cap, 2 cap)
+// UNOFFICIAL 2026-11-17 fast-restart (the tester: "the volumetric cloud shadows do not hit the grass", GPU grass on): the volumetric clouds'
+// shadow map (VolumetricClouds ShadowMap: r the sunlight through the layer, 1 clear), read while f.cloud.w > 0 (ForwardShadows on: the
+// surfaces take the clouds themselves and SunFar leaves them out, so the strands, lit here and in GpuGrass.vert alone, must too)
+layout(set = 0, binding = 7) uniform texture2D t_cloud;
 layout(set = 0, binding = 5, std430) buffer Args {
     uint nearArgs[4];   // VkDrawIndirectCommand: vertexCount 15, instanceCount (counted here), 0, 0
     uint farArgs[4];    // vertexCount 3
-    uint stats[8];      // 0 clumps drawn, 1 clumps outside the view, 2 strands written, 3 strands that did not fit, 4 tufts past the fade start
+    uint stats[8];      // 0 clumps drawn, 1 clumps outside the view, 2 strands written, 3 strands that did not fit, 4 tufts past the fade start,
+                        // 5 clumps given fewer strands than they asked for (a list was full)
+    uint asked[4];      // (2026-11-16, the count pass) strands asked for near / far, clumps near / far
 };
+
+// Includes/Shadow.hlsl CloudSunAt at a camera-relative point (the strands' eye), bilinear by hand (no sampler here): 1 lit.
+float cloudSun(vec3 p) {
+    const vec2 suv = f.cloud.xy + (p.xy - f.cloudLight.xy * p.z) * f.cloud.z;
+    const vec2 edge = min(suv, 1.0 - suv);
+    const float inside = clamp(min(edge.x, edge.y) * 10.0, 0.0, 1.0);
+    const ivec2 size = textureSize(t_cloud, 0);
+    const vec2 q = clamp(suv, 0.0, 1.0) * vec2(size) - 0.5;
+    const ivec2 i0 = ivec2(floor(q));
+    const vec2 w = q - floor(q);
+    const ivec2 last = size - 1;
+    const float a = texelFetch(t_cloud, clamp(i0, ivec2(0), last), 0).r, b = texelFetch(t_cloud, clamp(i0 + ivec2(1, 0), ivec2(0), last), 0).r;
+    const float c = texelFetch(t_cloud, clamp(i0 + ivec2(0, 1), ivec2(0), last), 0).r, d = texelFetch(t_cloud, clamp(i0 + ivec2(1, 1), ivec2(0), last), 0).r;
+    return mix(1.0, mix(mix(a, b, w.x), mix(c, d, w.x), w.y), inside * f.cloud.w);
+}
 
 void main() {
     const uint tuftCount = uint(f.cam.w);
@@ -54,7 +86,7 @@ void main() {
                      dot(f.rows[2].xyz, rel) + f.rows[2].w, dot(f.rows[3].xyz, rel) + f.rows[3].w);
     const uint flags = uint(d.scaleMask.w + 0.5);
     if ((flags & 1u) != 0u && length(vec3(clip.xy, clip.w)) > f.fade.x) {
-        if (c == 0u) atomicAdd(stats[4], 1u);
+        if (GG_COUNT == 0 && c == 0u) atomicAdd(stats[4], 1u);   // (counted once: by the drawing pass)
         return;
     }
 
@@ -81,7 +113,7 @@ void main() {
     const float radius = max(plantH, halfW * f.shape2.x) + 64.0;
     for (int i = 0; i < 4; i++) {
         if (dot(f.planes[i].xyz, centre) + f.planes[i].w < -radius) {
-            atomicAdd(stats[1], 1u);
+            if (GG_COUNT == 0) atomicAdd(stats[1], 1u);
             return;
         }
     }
@@ -94,12 +126,30 @@ void main() {
     const uint k = uint(ceil(kf));
     const bool far = dist >= f.shape3.w;
     const uint cap = uint(f.misc.y);
+#if GG_COUNT
+    // the count pass: what this clump asks of its list, nothing else
+    atomicAdd(asked[far ? 1 : 0], k);
+    atomicAdd(asked[far ? 3 : 2], 1u);
+    return;
+#else
+    // 2026-11-16: a list that would overflow (the count pass's sums): every clump keeps its first strand, the rest is shared in proportion.
+    // With s = (cap - 2 C) / (T - C) (T strands asked, C clumps) the reservations ceil(1 + (kf - 1) s) add up to at most cap.
+    float kfUse = kf;
+    {
+        const uint askedT = asked[far ? 1 : 0], askedC = asked[far ? 3 : 2];
+        if (askedT > cap && kf > 1.0) {
+            const float share = 2u * askedC < cap ? float(cap - 2u * askedC) / float(max(askedT - askedC, 1u)) : 0.0;
+            kfUse = 1.0 + (kf - 1.0) * clamp(share, 0.0, 1.0);
+            atomicAdd(stats[5], 1u);
+        }
+    }
+    const uint kUse = uint(ceil(kfUse));
 
-    uint base = far ? atomicAdd(farArgs[1], k) : atomicAdd(nearArgs[1], k);
+    uint base = far ? atomicAdd(farArgs[1], kUse) : atomicAdd(nearArgs[1], kUse);
     atomicAdd(stats[0], 1u);
-    if (base >= cap) { atomicAdd(stats[3], k); return; }
-    const uint count = min(k, cap - base);
-    if (count < k) atomicAdd(stats[3], k - count);
+    if (base >= cap) { atomicAdd(stats[3], kUse); return; }
+    const uint count = min(kUse, cap - base);
+    if (count < kUse) atomicAdd(stats[3], kUse - count);
     atomicAdd(stats[2], count);
     base += far ? cap : 0u;
 
@@ -107,7 +157,7 @@ void main() {
     // field keeps its density), never thinner than the narrowest strand in pixels at this distance (no shimmer of sub-pixel strands).
     const float meanLen = 0.5 * (1.0 + f.shape.z);
     const float area = d.ambient.w * scale.x * scale.z * f.shape.y;
-    const float coverWidth = area / max(kf * plantH * meanLen * 0.66, 1.0);
+    const float coverWidth = area / max(kfUse * plantH * meanLen * 0.66, 1.0);
     const float pixelWidth = f.shape3.y * dist * f.shape3.z;
 
     // the game's sway for this tuft: its phase from the tuft's place, its size from the weather (WindData), the card's weight by height
@@ -116,13 +166,14 @@ void main() {
     const bool fieldWind = dot(f.lanes.xy, f.lanes.xy) > 0.0;
 
     // the sun term exactly as the game lights its cards (the packed slope normal, the light scale, the grass dimmer)
-    const float sunAmount = clamp(dot(orient, f.sunDir.xyz), 0.0, 1.0) * lightScale * f.sunDir.w;
+    float sunAmount = clamp(dot(orient, f.sunDir.xyz), 0.0, 1.0) * lightScale * f.sunDir.w;
+    if (f.cloud.w > 0.0) sunAmount *= cloudSun(rel);   // (2026-11-17) the clouds' shadow at the clump, ForwardShadows on
     const uint lightPacked = packHalf2x16(vec2(lightScale, sunAmount));
 
     for (uint i = 0u; i < count; i++) {
         uint bs = ggSeed(inst.xy + vec2(float(c) * 3.7, float(c) * 1.9), i * 2654435761u + 1u);
         const float h1 = ggRand(bs), h2 = ggRand(bs), h3 = ggRand(bs), h4 = ggRand(bs), h5 = ggRand(bs);
-        const float keep = clamp(kf - float(i), 0.0, 1.0);   // the last strand of a fractional count shrinks away (no popping)
+        const float keep = clamp(kfUse - float(i), 0.0, 1.0);   // the last strand of a fractional count shrinks away (no popping)
 
         const float len = mix(f.shape.z, 1.0, h1);
         const float height = max(plantH * len * keep, 0.5);
@@ -164,4 +215,5 @@ void main() {
         b.light = lightPacked;
         blades[base + i] = b;
     }
+#endif
 }

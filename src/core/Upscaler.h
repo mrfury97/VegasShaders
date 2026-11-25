@@ -86,6 +86,7 @@ namespace Upscaler {
 	// WeaponMask [0, 1], DLSS SR's bias current colour mask on the weapon (Inputs::ViewModel; FSR's reactive value elsewhere). 0: no mask is
 	// given to DLSS (as before). Per frame, no restart. Set by TAAEffect::UpdateSettings next to DlssOptions.
 	void		DlssWeaponMask(float Value);
+	float		DlssWeaponMaskValue();
 
 	// 0 FSR 2 ([Shaders.TAA.FSR] Enabled), 1 DLSS ([Shaders.TAA.DLSS] Enabled) (Dlss(), which falls back to FSR 2 whenever DLSS cannot run),
 	// 2 FSR 3.1 ([Shaders.TAA.FSR] Enabled + Version 1; FSR 2 from its first failure on, logged once).

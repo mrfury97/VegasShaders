@@ -349,7 +349,8 @@ namespace {
 		if (c.grid[3] < 1.0f) return;	// no lamp
 		const int out = L.image[L.nextOut], hist = L.image[L.nextOut ^ 1];
 		const int images[3] = { out, hist, s.alphaTested ? atlas : hist };	// [2]: binding 4, a stand-in (never read) without alpha-tested casters
-		if (!RtCore::AddPass(L.shader, images, 3, 0x1, &c, sizeof(c), (w + 7) / 8, (rows * RtFogLampGrid::TileRows(c) + 7) / 8)) return;
+		// UNOFFICIAL 2026-11-19: 1 thread per screen cell (shares 1 primary camera ray across all lamp slots instead of up to 16).
+		if (!RtCore::AddPass(L.shader, images, 3, 0x1, &c, sizeof(c), (columns + 7) / 8, (rows + 7) / 8)) return;
 		if (!RtCore::CopyOut(out, L.surface, w, h)) return;
 		L.slots = next;
 		L.tracedFrame = frameNow;
@@ -362,7 +363,7 @@ namespace {
 		if (L.frames++ == 0 || (L.frames % 3600) == 0)
 			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT fog lamps traced (LampHazeShadows, frame %u): %d lamp(s), %u x %u cells a lamp (one per %u pixels), %d point(s) a cell "
 				"(at most %u rays), last frame's weight %.2f, lamp stop %.0f, lamp models skipped over the last %.0f, alpha-tested casters %s.", L.frames, L.submitCount, columns, rows, L.cell,
-				s.samples, (unsigned)L.submitCount * columns * rows * (unsigned)(s.samples + 1), weight, s.lampStop, s.modelDistance, s.alphaTested ? "tested" : "not in the scene");
+				s.samples, columns * rows * (1u + (unsigned)L.submitCount * (unsigned)s.samples), weight, s.lampStop, s.modelDistance, s.alphaTested ? "tested" : "not in the scene");
 	}
 }
 

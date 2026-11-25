@@ -1,0 +1,816 @@
+// UNOFFICIAL 2026-11-19 (Phase 2B): Vulkan Compute DeferredLamps pass (replaces up to 8 D3D9 ps_3_0 passes:
+// 4x DeferredLampShadows + DeferredLamps + DeferredLampLand + DeferredLampSkin + DeferredLampFog, eliminates the
+// 4 A8R8G8B8 VisTex RTs, CopyTex StretchRect, LightTex, per-lamp G-buffer re-fetches, and ps_3_0 X4505 limits).
+// Runs natively at both full resolution and RenderScale < 1.0 over [vp.xy, vp.xy + vp.zw).
+// Compile: glslangValidator -V --target-env vulkan1.1 -o DeferredLamps.spv DeferredLamps.comp
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_albedo;      // TESR_AlbedoBuffer (RGBA16F)
+layout(set = 1, binding = 1) uniform texture2D t_material;    // TESR_MaterialBuffer (RGBA16F)
+layout(set = 1, binding = 2) uniform texture2D t_normals;     // TESR_CapturedNormalsBuffer (RGBA16F)
+layout(set = 1, binding = 3) uniform texture2D t_lampTable;   // ManyLamps::Table (RGBA32F, 2048 x TableRowsNow)
+layout(set = 1, binding = 4) uniform texture2D t_shadowAtlas; // PointShadowForward::AtlasTexture (R16F)
+layout(set = 1, binding = 5) uniform texture2D t_rtLampVis;   // RtLampShadows::Stage15Texture() (RG32F)
+layout(set = 1, binding = 6) uniform texture2D t_depth;       // DeferredDepth::LinearTexture (R32F) or INTZ
+layout(set = 1, binding = 7, rgba16f) uniform image2D i_scene;    // Scene HDR RT0 (unbound from RT0 during dispatch)
+layout(set = 1, binding = 8, rgba16f) uniform image2D i_skinSpec; // DeferredSkin::Spec (optional; 1x1 dummy when inactive)
+
+layout(push_constant) uniform Push {
+    uint linearSampler;   // 0: LINEAR, CLAMP (shadow atlas)
+    uint pointSampler;    // 4: POINT, CLAMP (RT lamp visibility)
+    uint flags;           // 8: feature flags bitmask
+    uint pad;             // 12
+} pc;
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 viewport;           // 0: vp.X, vp.Y, vp.Width, vp.Height
+    vec4  dlGrid;             // 1: TilesX, TilesY, listsReady, Unshadowed
+    vec4  dlView;             // 2: 1/vp.W, 1/vp.H, vp.X, vp.Y
+    vec4  dlRight;            // 3: right.xyz, tanX
+    vec4  dlUp;               // 4: up.xyz, tanY
+    vec4  dlFwd;              // 5: fwd.xyz (with jitter), linearScene
+    vec4  dlRows[3];          // 6..8: world -> camera-relative rows
+    vec4  dlTable;            // 9: TableRowsNow, TileRow, gamma, 1/gamma
+    vec4  dlDebug;            // 10: DebugView, Shadows, BinW/TileSize, BinH/TileSize
+    vec4  dlShadow;           // 11: 0, 0, PrecisionBias*0.001, linearDepthReady
+    vec4  dlDepth;            // 12: proj._33, proj._43, 0.01, 2.0
+    vec4  dlFog;              // 13: fog.rgb (stored curve), fogExact
+    vec4  dlLand;             // 14: landLive, UsePBR, saturate(metal), linTerrainLightScale
+    vec4  pbrData;            // 15: TESR_PBRData
+    vec4  pbrExtraData;       // 16: TESR_PBRExtraData (.x saturation)
+    vec4  pbrMetal;           // 17: TESR_PBRMetal
+    vec4  pbrMetalLook;       // 18: TESR_PBRMetalLook
+    vec4  debugVar;           // 19: TESR_DebugVar
+    vec4  linearScales;       // 20: TESR_LinearScales (.x light scale)
+    vec4  linearLighting;     // 21: TESR_LinearLighting (x gamma, y 1/gamma, z falloffExp, w linearScene)
+    vec4  lampFalloff;        // 22: TESR_LampFalloff
+    vec4  pbrMath;            // 23: TESR_PBRMath (.x diffuseEnergyKeep/smithBlend, .y reflectivityF0 offset)
+    vec4  skinMaterial;       // 24: TESR_SkinMaterial
+    vec4  skinLook;           // 25: TESR_SkinLook
+    vec4  skinDebug;          // 26: TESR_SkinDebug
+    vec4  skinSSS;            // 27: TESR_SkinSSS
+    vec4  psParams;           // 28: NVR_PointShadowParams (x strength, y bias, z normalOffset, w spread)
+    vec4  psDebug;            // 29: NVR_PointShadowDebug (x 0, y NearFade, z InvisibleSize, w Quality)
+    vec4  psFocus;            // 30: NVR_PointShadowFocus (xyz MagnifiedSoftness, w atlasSize for TruePCF)
+    vec4  psSoft;             // 31: NVR_PointShadowSoft (x contactHarden, y minSpread, z lampSize, w maxSoft)
+    vec4  rtReproject[4];     // 32..35: NVR_RtLampReproject rows (row_major)
+    vec4  rtParams;           // 36: NVR_PointShadowRT (x mode, y tol, z depthUnit, w actors+edgeTexel)
+    vec4  rtSlot[2];          // 37..38: NVR_PointShadowRTSlot[0..1] ([1].w = PackingInverse)
+    vec4  spare;              // 39: reserved
+} cb;
+
+// Flag bit definitions (must match DeferredLamps.h)
+const uint kFlagGBufferV2        = 1u << 0u;
+const uint kFlagLinearLighting   = 1u << 1u;
+const uint kFlagSkinEnabled      = 1u << 2u;
+const uint kFlagSkinSpecActive   = 1u << 3u;
+const uint kFlagLandEnabled      = 1u << 4u;
+const uint kFlagRtCompiled       = 1u << 5u;
+const uint kFlagDepthIsLinear    = 1u << 6u;
+const uint kFlagReversedZ        = 1u << 7u;
+const uint kFlagLampFallShaped   = 1u << 8u;
+const uint kFlagLampFallMatch    = 1u << 9u;
+const uint kFlagPsSmooth         = 1u << 10u;
+const uint kFlagPsMag            = 1u << 11u;
+const uint kFlagPsEven           = 1u << 12u;
+const uint kFlagSmithCorrelated  = 1u << 13u;
+const uint kFlagSmithCorrTest    = 1u << 14u;
+const uint kFlagDiffuseKeep      = 1u << 15u;
+const uint kFlagLightFree        = 1u << 16u;
+
+bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
+
+const float kPi = 3.14159265359;
+const float kSkinF0 = 0.028;
+const float kSkinLobe0 = 0.75;
+const float kSkinLobe1 = 1.3;
+const float kSkinLobeMix = 0.15;
+const vec3  kSkinTransmitTint = vec3(1.0, 0.28, 0.12);
+const float kSkinTransmitDistortion = 0.3;
+const float kSkinTransmitPower = 4.0;
+const vec3  kSkinPenumbraTint = vec3(0.3, 0.06, 0.04);
+const float kFdSkinCodeBase = 4.0;
+const float kFdSkinCodeMin = 3.5;
+
+float shades(vec3 a, vec3 b) { return max(dot(a, b), 0.0); }
+
+vec3 ShadowDecodeNormal(vec2 e) {
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = clamp(-n.z, 0.0, 1.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+
+vec3 ShadowFacingNormal(vec3 n, vec3 worldPos) {
+    float len2 = dot(n, n);
+    n = len2 > 1.0e-6 ? n * inversesqrt(len2) : vec3(0.0, 0.0, 1.0);
+    return n * (dot(n, worldPos) > 0.0 ? -1.0 : 1.0);
+}
+
+float GBufferRoughness(float b) {
+    return (b >= 0.0 && b <= 1.0) ? b : (b <= -1.99 && b >= -3.01) ? (-2.0 - b) : 1.0;
+}
+
+float vanillaAtt(vec3 toLight, float radius) {
+    float r = max(radius, 1.0e-3);
+    float d2 = dot(toLight, toLight);
+    return clamp(1.0 - d2 / (r * r), 0.0, 1.0);
+}
+
+// Hoisted per-pixel lamp falloff helpers (LampFalloff.hlsl exact math)
+struct FalloffParams {
+    bool  shaped;
+    float expObj;
+    float expOther;
+};
+
+FalloffParams BuildFalloffParams() {
+    FalloffParams fp;
+    const bool lin = HasFlag(kFlagLinearLighting);
+    const float linG = cb.linearLighting.x;
+    const float oldExp = (lin && linG > 1.0) ? (cb.linearLighting.z > 0.0 ? cb.linearLighting.z : linG) : 1.0;
+    const float shapeExp = lin ? (max(linG, 1.0) * (1.0 / 2.2)) : (1.0 / 2.2);
+    fp.shaped = HasFlag(kFlagLampFallShaped) && cb.lampFalloff.x > 0.0;
+    fp.expObj = fp.shaped ? shapeExp : oldExp;
+    const bool otherMatch = HasFlag(kFlagLampFallMatch) && cb.lampFalloff.w > 0.0;
+    fp.expOther = fp.shaped ? shapeExp : (otherMatch ? oldExp : 1.0);
+    return fp;
+}
+
+float LampShape(float att) {
+    const float q = 1.0 - att;
+    float win = 1.0 - q * q;
+    win *= win;
+    return cb.lampFalloff.z * win / (1.0 + q * cb.lampFalloff.y);
+}
+
+float EvalLampAtt(float att, bool shaped, float exponent) {
+    const float base = shaped ? LampShape(att) : att;
+    if (exponent == 1.0) return max(base, 0.0);
+    return pow(max(abs(base), 0.0), exponent);
+}
+
+// PBR helpers (Includes/PBR.hlsl exact math + 2026-11-19 PBR_ROUGH_F90 + exact algebra)
+vec3 ReflectivityF0(vec3 f0) { return clamp(f0 + f0 * cb.pbrMath.y, 0.0, 1.0); }
+vec3 RoughReflectivityF90(vec3 f0, float r, float metal) {
+    const vec3 f90 = vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0));
+    return max(f90 * (1.0 - clamp(r, 0.0, 1.0) * clamp(1.0 - metal, 0.0, 1.0)), f0);
+}
+
+vec3 Fresnel(vec3 f0, vec3 f90, float cosT) {
+    float omc = 1.0 - cosT;
+    float omc2 = omc * omc;
+    return f0 + (f90 - f0) * (omc2 * omc2 * omc);
+}
+
+float GGXPi(float nh, float r) {
+    float r2 = r * r;
+    float aSq = r2 * r2;
+    float dTerm = max((nh * aSq - nh) * nh + 1.0, 1.0e-5);
+    return aSq / (dTerm * dTerm);
+}
+
+vec3 BRDFPi(float r, vec3 F, float nv, float nl, float nh, bool allowSmith) {
+    const float dPi = GGXPi(nh, r);
+    if (allowSmith && (HasFlag(kFlagSmithCorrelated) || HasFlag(kFlagSmithCorrTest))) {
+        const float r2 = r * r;
+        const float aSq = r2 * r2;
+        const float visV = nl * sqrt(nv * nv * (1.0 - aSq) + aSq);
+        const float visL = nv * sqrt(nl * nl * (1.0 - aSq) + aSq);
+        const vec3 corr = dPi * (0.5 / (visV + visL)) * F;
+        if (!HasFlag(kFlagSmithCorrTest)) return corr;
+        const float rp1 = r + 1.0;
+        const float kk = (rp1 * rp1) * 0.125;
+        const float invK = 1.0 - kk;
+        const vec3 legacy = dPi * (0.25 / ((nv * invK + kk) * (nl * invK + kk))) * F;
+        return legacy + (corr - legacy) * cb.pbrMath.x;
+    }
+    const float rp1 = r + 1.0;
+    const float kk = (rp1 * rp1) * 0.125;
+    const float invK = 1.0 - kk;
+    const float vis = 0.25 / ((nv * invK + kk) * (nl * invK + kk));
+    return dPi * vis * F;
+}
+
+float SmithCorrelatedKeep(float NdotV, float roughness) {
+    const float rc = max(roughness, 0.056);
+    const float sq = sqrt(clamp(NdotV, 0.02, 1.0));
+    const float q0 = 0.8720785 + sq * (2.377077 + sq * (-15.78768 + sq * (20.7581 + sq * (-8.469884 + sq * 0.2183369))));
+    const float q1 = -2.350215 + sq * (6.164611 + sq * (12.53951 + sq * (-24.69559 + sq * 9.321004)));
+    const float q2 = -4.584592 + sq * (-17.91134 + sq * (14.6047 + sq * 0.8975321));
+    const float q3 = 20.67309 + sq * (6.171803 + sq * (-8.573712));
+    const float q4 = -22.05094 + sq * 2.260031;
+    const float q5 = 7.527356;
+    const float surplus = q0 + rc * (q1 + rc * (q2 + rc * (q3 + rc * (q4 + rc * q5))));
+    const float r2 = roughness * roughness;
+    const float lossClamp = 1.0 - min(1.0e5 * r2 * r2, 1.0);
+    return 1.0 - clamp(surplus * (1.0 - lossClamp * lossClamp), 0.0, 1.0);
+}
+
+float DiffuseEnergyKeep(float NdotV, float roughness) {
+    if (HasFlag(kFlagSmithCorrTest)) return 1.0 + (SmithCorrelatedKeep(NdotV, roughness) - 1.0) * cb.pbrMath.x;
+    if (HasFlag(kFlagSmithCorrelated)) return SmithCorrelatedKeep(NdotV, roughness);
+    if (!HasFlag(kFlagDiffuseKeep)) return 1.0;
+    const float tv = clamp((NdotV - 0.055) * (1.0 / 0.525), 0.0, 1.0);
+    const float rx = clamp((0.53 - roughness) * (1.0 / 0.461), 0.0, 1.0);
+    const float lowRough = clamp((roughness - 0.02) * (1.0 / 0.05), 0.0, 1.0);
+    const float inv = 1.0 - tv;
+    const float bump = rx * lowRough * tv * inv * inv * ((0.10380582 + 0.69366243 * rx) + tv * (0.27762281 - 0.88561283 * rx));
+    return cb.pbrMath.x > 0.5 ? 1.0 - bump * (1.0 / 0.95) : 1.0;
+}
+
+vec3 PBRDiffuse(float metal, vec3 baseColor, vec3 N, vec3 L, vec3 radiance) {
+    const float NdotL = shades(N, L);
+    return (1.0 - metal) * baseColor * (NdotL * radiance);
+}
+
+vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith) {
+    const vec3 f0Base = ReflectivityF0(mix(vec3(0.04), baseColor, metal));
+    const vec3 halfV = normalize(V + L);
+    const float NdotL = max(shades(N, L), 0.00001);
+    const float NdotV = max(shades(N, V), 0.00001);
+    const float NdotH = shades(N, halfV);
+    const float LdotH = shades(L, halfV);
+    const vec3 fres = Fresnel(f0Base, RoughReflectivityF90(f0Base, r, metal), LdotH);
+    const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
+    const vec3 specOut = BRDFPi(r, fres, NdotV, NdotL, NdotH, allowSmith);
+    return (diff + specOut) * (NdotL * radiance);
+}
+
+// Deferred Skin helpers (Includes/SkinDeferred.hlsl + Includes/Skin.hlsl exact math)
+void FDSkinDecode(float a, out float mask, out float thin, out float soft) {
+    const float o = floor(log2(max(a, kFdSkinCodeBase) / kFdSkinCodeBase) + 1.0e-4);
+    const float i = 1024.0 * o + floor((a / (kFdSkinCodeBase * exp2(o)) - 1.0) * 1024.0 + 0.5);
+    const float mq = floor((i + 0.5) / 384.0);
+    const float rest = i - mq * 384.0;
+    const float cq = floor((rest + 0.5) / 16.0);
+    const float bq = rest - cq * 16.0;
+    mask = mq / 31.0;
+    thin = (cq / 23.0) * (cq / 23.0);
+    soft = bq / 15.0;
+}
+
+float SkinVanillaMatch() {
+    const float r0 = clamp(cb.skinMaterial.y * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(cb.skinMaterial.y * kSkinLobe1, 0.04, 1.0);
+    const float a0 = r0 * r0, a1 = r1 * r1;
+    const float peak = mix(kSkinF0 / (4.0 * a0 * a0), kSkinF0 / (4.0 * a1 * a1), kSkinLobeMix);
+    const float matched = clamp(1.0 / (2.0 * peak), 1.0, 12.0);
+    return mix(1.0, matched, clamp(cb.skinLook.w, 0.0, 1.0));
+}
+
+vec3 SkinSGIrradiance(vec3 NdotL, vec3 lambda) {
+    const float c0 = 0.36;
+    const float c1 = 1.0 / (4.0 * c0);
+    const vec3 eml = exp(-lambda);
+    const vec3 em2l = eml * eml;
+    const vec3 rl = 1.0 / lambda;
+    const vec3 scale = 1.0 + 2.0 * em2l - rl;
+    const vec3 bias = (eml - em2l) * rl - em2l;
+    const vec3 x = sqrt(max(1.0 - scale, vec3(1.0e-8)));
+    const vec3 x0 = c0 * NdotL;
+    const vec3 x1 = c1 * x;
+    const vec3 n = x0 + x1;
+    const vec3 y = mix(clamp(NdotL, 0.0, 1.0), (n * n) / x, lessThanEqual(abs(x0), x1));
+    return clamp(scale * y + bias, 0.0, 1.0);
+}
+
+vec3 SkinDiffusion(vec3 N, vec3 Nsoft, vec3 L, float skinCurvature) {
+    const vec3 normalGreen = normalize(mix(N, Nsoft, 0.6));
+    const vec3 normalBlue = normalize(mix(N, Nsoft, 0.3));
+    const vec3 NdotL = vec3(dot(Nsoft, L), dot(normalGreen, L), dot(normalBlue, L));
+    if (skinCurvature > 0.002) {
+        const float c = skinCurvature;
+        const vec3 lambda = vec3(2.4 * pow(c, -1.5), 28.0 / (c * c), 71.0 / (c * c));
+        return SkinSGIrradiance(NdotL, lambda);
+    }
+    return clamp(NdotL, 0.0, 1.0);
+}
+
+vec3 SkinShadow(float sh) {
+    const float penumbra = sh * (1.0 - sh) * 4.0;
+    return clamp(vec3(sh) + penumbra * kSkinPenumbraTint * cb.skinLook.z, 0.0, 1.0);
+}
+
+vec3 SkinLinearColor(vec3 c) {
+    if (HasFlag(kFlagLinearLighting) && cb.linearLighting.x > 1.0) return c;
+    return pow(max(c, vec3(0.0)), vec3(1.0 / 2.2));
+}
+
+void SkinLampBoth(vec3 albedo, vec3 N, vec3 Ngeo, vec3 Nsoft, vec3 V, vec3 L, vec3 radiance,
+                  float skinRough, float skinSpecScale, float skinThinness, float skinCurvature, float vanillaMatch,
+                  out vec3 outDiff, out vec3 outSpec) {
+    // Diffuse + transmission (FDSkinLampDiffuse)
+    const float geometricNdotL = dot(Ngeo, L);
+    const vec3 scattered = SkinDiffusion(N, Nsoft, L, skinCurvature);
+    const vec3 direct = min(scattered, vec3(clamp(dot(N, L), 0.0, 1.0)));
+    const vec3 wrapped = scattered - direct;
+    float selfShadowed = clamp((0.05 - geometricNdotL) / 0.15, 0.0, 1.0);
+    selfShadowed = selfShadowed * selfShadowed * (3.0 - 2.0 * selfShadowed) * clamp(cb.skinLook.z, 0.0, 1.0);
+    const vec3 shadowColor = SkinShadow(1.0);
+    const vec3 diffuse = albedo * (direct * shadowColor + wrapped * mix(shadowColor, vec3(1.0), selfShadowed));
+    const float thin = smoothstep(0.3, 0.9, skinThinness);
+    const float farSide = clamp(0.3 - geometricNdotL, 0.0, 1.0);
+    const vec3 transmitDir = normalize(L + Nsoft * kSkinTransmitDistortion);
+    const float back = pow(clamp(dot(V, -transmitDir), 0.0, 1.0), kSkinTransmitPower);
+    const vec3 transmitted = albedo * SkinLinearColor(kSkinTransmitTint) * (back * thin * farSide * cb.skinMaterial.w);
+    outDiff = (diffuse + transmitted) * radiance;
+
+    // Dual-lobe GGX specular (FDSkinLampSpecular)
+    const float r0 = clamp(skinRough * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(skinRough * kSkinLobe1, 0.04, 1.0);
+    const vec3 H = normalize(V + L);
+    const float NdotL = max(shades(N, L), 0.00001);
+    const float NdotV = max(shades(N, V), 0.00001);
+    const float NdotH = shades(N, H);
+    const float LdotH = shades(L, H);
+    const vec3 fres = Fresnel(vec3(kSkinF0), vec3(1.0), LdotH);
+    const vec3 lobes = mix(BRDFPi(r0, fres, NdotV, NdotL, NdotH, false), BRDFPi(r1, fres, NdotV, NdotL, NdotH, false), kSkinLobeMix);
+    outSpec = lobes * (NdotL * skinSpecScale * vanillaMatch) * radiance;
+}
+
+// Point shadow helpers (PointShadowForward.hlsl FIT 0 + TruePCF + EvenTaps + RT)
+const vec4 kPointShadowEven[12] = vec4[12](
+    vec4(-0.60000, +0.60000, +0.20000, 1.0), vec4(-0.20000, -0.20000, -0.20000, 1.0),
+    vec4(+0.20000, -0.60000, +0.60000, 1.0), vec4(+0.60000, +0.20000, -0.60000, 1.0),
+    vec4(-0.08452, -0.25355, -0.59161, 1.0), vec4(-0.42258, +0.42258, +0.59161, 1.0),
+    vec4(+0.59161, -0.08452, -0.08452, 1.0), vec4(+0.25355, +0.08452, +0.42258, 1.0),
+    vec4(-0.59161, +0.25355, -0.42258, 1.0), vec4(+0.42258, -0.59161, +0.25355, 1.0),
+    vec4(+0.08452, +0.59161, -0.25355, 1.0), vec4(-0.25355, -0.42258, +0.08452, 1.0)
+);
+
+vec2 PointShadowOct(vec3 v) {
+    vec3 n = v / (abs(v.x) + abs(v.y) + abs(v.z));
+    vec2 sgn = vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    vec2 p = n.z < 0.0 ? (1.0 - abs(n.yx)) * sgn : n.xy;
+    return p * 0.5 + 0.5;
+}
+
+float PointShadowAtlasTap(vec4 tile, vec3 v) {
+    return textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.linearSampler)), tile.xy + PointShadowOct(v) * tile.z, 0.0).r;
+}
+
+vec4 PointShadowNear(vec4 stored, float lightW) {
+    if (cb.psDebug.y <= 0.0) return vec4(1.0);
+    return smoothstep(vec4(0.0), vec4(cb.psDebug.y * lightW), stored);
+}
+
+vec4 PointShadowKeep(vec4 v, float nearK, float lightW) {
+    if (HasFlag(kFlagPsMag)) {
+        vec4 t = clamp(v * nearK, 0.0, 1.0);
+        return t * t * (3.0 - 2.0 * t);
+    }
+    return vec4(greaterThan(v, vec4(0.0))) * PointShadowNear(v, lightW);
+}
+
+float PointShadowAtlasBlocked(vec4 tile, vec3 v, float threshold, float nearK, float lightW) {
+    float size = cb.psFocus.w;
+    vec2 p = (tile.xy + PointShadowOct(v) * tile.z) * size - 0.5;
+    vec2 f = fract(p);
+    vec2 b = (p - f + 0.5) / size;
+    float t = 1.0 / size;
+    vec4 s = vec4(
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.linearSampler)), b, 0.0).r,
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.linearSampler)), b + vec2(t, 0.0), 0.0).r,
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.linearSampler)), b + vec2(0.0, t), 0.0).r,
+        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.linearSampler)), b + vec2(t, t), 0.0).r);
+    vec4 blk = vec4(lessThanEqual(s, vec4(threshold))) * PointShadowKeep(s, nearK, lightW);
+    return mix(mix(blk.x, blk.y, f.x), mix(blk.z, blk.w, f.x), f.y);
+}
+
+float PointShadowRing(vec4 tile, vec3 dir, float s, float threshold, float nearK, float lightW) {
+    vec4 a = vec4(
+        PointShadowAtlasTap(tile, dir + vec3( s, 0.0, 0.0)),
+        PointShadowAtlasTap(tile, dir + vec3(-s, 0.0, 0.0)),
+        PointShadowAtlasTap(tile, dir + vec3(0.0,  s, 0.0)),
+        PointShadowAtlasTap(tile, dir + vec3(0.0, -s, 0.0)));
+    vec4 b = vec4(
+        PointShadowAtlasTap(tile, dir + vec3(0.0, 0.0,  s)),
+        PointShadowAtlasTap(tile, dir + vec3(0.0, 0.0, -s)), 1.0, 1.0);
+    return dot(vec4(lessThanEqual(a, vec4(threshold))) * PointShadowKeep(a, nearK, lightW), vec4(1.0)) +
+           dot((vec4(lessThanEqual(b, vec4(threshold))) * PointShadowKeep(b, nearK, lightW)).xy, vec2(1.0));
+}
+
+float PointShadowEven4(vec4 tile, vec3 dir, float s, float threshold, float nearK, float lightW, int idx) {
+    vec4 v = vec4(
+        PointShadowAtlasTap(tile, dir + s * kPointShadowEven[idx].xyz),
+        PointShadowAtlasTap(tile, dir + s * kPointShadowEven[idx + 1].xyz),
+        PointShadowAtlasTap(tile, dir + s * kPointShadowEven[idx + 2].xyz),
+        PointShadowAtlasTap(tile, dir + s * kPointShadowEven[idx + 3].xyz));
+    return dot(vec4(lessThanEqual(v, vec4(threshold))) * PointShadowKeep(v, nearK, lightW), vec4(1.0));
+}
+
+float PointShadowTraced(float slot, vec3 worldPos) {
+    vec4 clip = worldPos.x * cb.rtReproject[0] + worldPos.y * cb.rtReproject[1] + worldPos.z * cb.rtReproject[2] + cb.rtReproject[3];
+    if (!(clip.w > 1.0)) return -1.0;
+    vec2 uv = (clip.xy / clip.w) * vec2(0.5, -0.5) + 0.5;
+    if (any(greaterThan(abs(uv - 0.5), vec2(0.5)))) return -1.0;
+    vec2 traced = textureLod(sampler2D(t_rtLampVis, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).xy;
+    float unit = cb.rtSlot[1].w;
+    vec2 scaled = traced * unit;
+    vec2 high = floor(scaled);
+    float depthError = abs(exp2(high.y * cb.rtParams.z) - clip.w) / clip.w;
+    if (!(depthError <= cb.rtParams.y)) {
+        float tx = fract(cb.rtParams.w);
+        bool found = false;
+        if (tx > 0.0) {
+            float ty = tx * length(vec3(cb.rtReproject[0].y, cb.rtReproject[1].y, cb.rtReproject[2].y)) /
+                max(length(vec3(cb.rtReproject[0].x, cb.rtReproject[1].x, cb.rtReproject[2].x)), 1.0e-6);
+            const vec2 offs[4] = vec2[4](vec2(tx, 0.0), vec2(-tx, 0.0), vec2(0.0, ty), vec2(0.0, -ty));
+            for (int i = 0; i < 4; i++) {
+                vec2 t2 = textureLod(sampler2D(t_rtLampVis, NVR_SAMPLER(pc.pointSampler)), uv + offs[i], 0.0).xy;
+                vec2 h2 = floor(t2 * unit);
+                if (abs(exp2(h2.y * cb.rtParams.z) - clip.w) <= cb.rtParams.y * clip.w) {
+                    traced = t2; scaled = t2 * unit; high = h2; found = true; break;
+                }
+            }
+        }
+        if (!found) return -2.0 - clamp(depthError, 0.0, 1.0);
+    }
+    vec3 entries = vec3(scaled.x - high.x, high.x * unit, scaled.y - high.y) * 16.0;
+    vec3 visible = floor(entries);
+    vec3 slots = entries - visible;
+    float lampSlot = slot > 255.5 ? slot - 256.0 : slot;
+    vec3 m = vec3(lessThan(abs(slots - vec3(lampSlot * 16.0 * unit)), vec3(8.0 * unit)));
+    bool many = unit < 0.0005;
+    if (many) m.z = 0.0;
+    float mSum = dot(m, vec3(1.0));
+    if (!(mSum > 0.5)) return many ? clamp(entries.z * (256.0 / 4095.0), 0.0, 1.0) : -4.0;
+    return dot(m, visible) / (15.0 * mSum);
+}
+
+float PointShadowDone(float cubeLit, float rayLit, float fade) {
+    float l = (rayLit >= 0.0 && cb.rtParams.x > 0.0 && cb.rtParams.x < 1.5)
+        ? (cb.rtParams.w >= 0.5 ? min(rayLit, cubeLit) : rayLit) : cubeLit;
+    return mix(1.0, l, cb.psParams.x * abs(fade));
+}
+
+float PointShadowCube(vec4 tile, vec4 light, float fade, vec3 worldPos, vec3 normal, float att, float rtSlot) {
+    if (!(light.w > 0.0)) return 1.0;
+    vec3 toPixel = worldPos - light.xyz;
+    float len = length(toPixel);
+    if (!(att > 0.0) || !(len * light.w < 1.0)) return 1.0;
+
+    float rayLit = -1.0;
+    if (HasFlag(kFlagRtCompiled)) {
+        if (rtSlot < -1.5 && cb.rtParams.x > 0.0) {
+            rayLit = clamp(-2.0 - rtSlot, 0.0, 1.0);
+            return PointShadowDone(1.0, rayLit, fade);
+        }
+        if (cb.rtParams.x > 0.0 && rtSlot >= 0.0) {
+            rayLit = PointShadowTraced(rtSlot, worldPos);
+            if (cb.rtParams.x < 1.5 && rayLit >= 0.0 && cb.rtParams.w < 0.5)
+                return mix(1.0, rayLit, cb.psParams.x * abs(fade));
+        }
+        if (rtSlot > 255.5) return PointShadowDone(1.0, rayLit, fade);
+        if (!(tile.z > 0.0)) return PointShadowDone(1.0, rayLit, fade);
+    }
+
+    vec3 p = toPixel + normal * (cb.psParams.z * len);
+    float d = length(p) * light.w;
+    float threshold = d - cb.psParams.y * d;
+    float nearK = cb.psDebug.y > 0.0 ? 1.0 / (cb.psDebug.y * light.w) : 1.0e18;
+    vec3 dir = p * vec3(1.0, 1.0, -1.0);
+
+    float lit;
+    if (cb.psParams.w > 0.0) {
+        float major = max(abs(dir.x), max(abs(dir.y), abs(dir.z)));
+        float s = cb.psParams.w * major;
+        if (HasFlag(kFlagPsMag)) {
+            s = max(s, clamp(len * inversesqrt(max(dot(worldPos, worldPos), 1.0e-8)) * cb.psFocus.x + cb.psFocus.y, 0.0, 1.0) * cb.psFocus.z * major);
+        }
+        if (cb.psSoft.x + cb.psSoft.w > 0.0) {
+            float wide = max(cb.psSoft.w * major, s);
+            vec4 search = vec4(
+                PointShadowAtlasTap(tile, dir + wide * vec3( 1.0,  1.0,  1.0)),
+                PointShadowAtlasTap(tile, dir + wide * vec3(-1.0, -1.0,  1.0)),
+                PointShadowAtlasTap(tile, dir + wide * vec3( 1.0, -1.0, -1.0)),
+                PointShadowAtlasTap(tile, dir + wide * vec3(-1.0,  1.0, -1.0)));
+            float centre = PointShadowAtlasTap(tile, dir);
+            vec4 isBlocker = vec4(lessThanEqual(search, vec4(threshold))) * vec4(greaterThan(search, vec4(0.0)));
+            float centreBlocker = (centre <= threshold && centre > 0.0) ? 1.0 : 0.0;
+            float blockers = dot(isBlocker, vec4(1.0)) + centreBlocker;
+            if (!(blockers > 0.0)) return PointShadowDone(1.0, rayLit, fade);
+            float blocker = (dot(search * isBlocker, vec4(1.0)) + centre * centreBlocker) / blockers;
+            float t = 1.0 / max(blocker, 0.0001) - 1.0 / d;
+            float sz = fade < 0.0 ? cb.psDebug.z : cb.psSoft.z;
+            s = clamp(t * (sz * light.w * major + cb.psSoft.x * s * d), cb.psSoft.y * s, wide);
+        }
+
+        vec4 blocked;
+        if (cb.psFocus.w > 0.0) {
+            blocked = vec4(
+                PointShadowAtlasBlocked(tile, dir + s * vec3( 1.0,  1.0,  1.0), threshold, nearK, light.w),
+                PointShadowAtlasBlocked(tile, dir + s * vec3(-1.0, -1.0,  1.0), threshold, nearK, light.w),
+                PointShadowAtlasBlocked(tile, dir + s * vec3( 1.0, -1.0, -1.0), threshold, nearK, light.w),
+                PointShadowAtlasBlocked(tile, dir + s * vec3(-1.0,  1.0, -1.0), threshold, nearK, light.w));
+        } else {
+            vec4 stored = vec4(
+                PointShadowAtlasTap(tile, dir + s * vec3( 1.0,  1.0,  1.0)),
+                PointShadowAtlasTap(tile, dir + s * vec3(-1.0, -1.0,  1.0)),
+                PointShadowAtlasTap(tile, dir + s * vec3( 1.0, -1.0, -1.0)),
+                PointShadowAtlasTap(tile, dir + s * vec3(-1.0,  1.0, -1.0)));
+            if (HasFlag(kFlagPsSmooth)) {
+                float invRamp = 1.0 / max(threshold - min(min(stored.x, stored.y), min(stored.z, stored.w)), 0.0001);
+                blocked = clamp((threshold - stored) * invRamp, 0.0, 1.0) * PointShadowKeep(stored, nearK, light.w);
+            } else {
+                blocked = vec4(lessThanEqual(stored, vec4(threshold))) * PointShadowKeep(stored, nearK, light.w);
+            }
+        }
+
+        if (cb.psDebug.w > 1.5) {
+            if (HasFlag(kFlagPsEven)) {
+                float sum = dot(blocked, vec4(1.0)) + PointShadowEven4(tile, dir, s, threshold, nearK, light.w, 0);
+                float taps = 8.0;
+                if (cb.psDebug.w > 2.5) {
+                    sum += PointShadowEven4(tile, dir, s, threshold, nearK, light.w, 4) +
+                           PointShadowEven4(tile, dir, s, threshold, nearK, light.w, 8);
+                    taps = 16.0;
+                }
+                lit = 1.0 - sum / taps;
+            } else {
+                float sum = dot(blocked, vec4(1.0)) + PointShadowRing(tile, dir, s, threshold, nearK, light.w);
+                float taps = 10.0;
+                if (cb.psDebug.w > 2.5) {
+                    float h = 0.5 * s;
+                    vec4 inner = vec4(
+                        PointShadowAtlasTap(tile, dir + h * vec3( 1.0,  1.0,  1.0)),
+                        PointShadowAtlasTap(tile, dir + h * vec3(-1.0, -1.0,  1.0)),
+                        PointShadowAtlasTap(tile, dir + h * vec3( 1.0, -1.0, -1.0)),
+                        PointShadowAtlasTap(tile, dir + h * vec3(-1.0,  1.0, -1.0)));
+                    sum += dot(vec4(lessThanEqual(inner, vec4(threshold))) * PointShadowKeep(inner, nearK, light.w), vec4(1.0)) +
+                           PointShadowRing(tile, dir, h, threshold, nearK, light.w);
+                    taps = 20.0;
+                }
+                lit = 1.0 - sum / taps;
+            }
+        } else {
+            lit = 1.0 - 0.25 * dot(blocked, vec4(1.0));
+        }
+    } else {
+        float stored = PointShadowAtlasTap(tile, dir);
+        float blk = (stored <= threshold && stored > 0.0) ? PointShadowNear(vec4(stored), light.w).x : 0.0;
+        lit = 1.0 - blk;
+    }
+    return PointShadowDone(lit, rayLit, fade);
+}
+
+float DLShadow(int lampIdx, vec3 shadowPos, vec3 smoothFacingN, float att) {
+    const int tileRow = int(cb.dlTable.y + 0.5);
+    const vec4 sTile = texelFetch(t_lampTable, ivec2(lampIdx * 2, tileRow), 0);
+    float rtId = -1.0;
+    if (HasFlag(kFlagRtCompiled)) {
+        rtId = texelFetch(t_lampTable, ivec2(lampIdx, tileRow + 1), 0).y;
+        if (cb.dlDebug.x > 7.5) {
+            if (rtId < 0.0) return sTile.z > 0.0 ? 0.25 : 0.05;
+            const float t = PointShadowTraced(rtId, shadowPos);
+            return t >= 0.0 ? 0.5 + 0.5 * t : t > -1.5 ? 0.15 : t < -3.5 ? 0.35 : 0.45;
+        }
+    }
+    if (sTile.z > 0.0 || (HasFlag(kFlagRtCompiled) && rtId >= 0.0)) {
+        const vec4 sLight = texelFetch(t_lampTable, ivec2(lampIdx * 2 + 1, tileRow), 0);
+        return PointShadowCube(sTile, sLight, sTile.w, shadowPos, smoothFacingN, att, rtId);
+    }
+    return cb.dlGrid.w;
+}
+
+vec4 ListTexel(int t) {
+    return texelFetch(t_lampTable, ivec2(t & 2047, (t >> 11) + 1), 0);
+}
+
+vec3 FDAddFogged(vec3 frame, vec3 D, float keep, vec3 F, float gamma, float frameLinear) {
+    gamma = max(gamma, 1.0);
+    const float invGamma = 1.0 / gamma;
+    const vec3 v = frameLinear > 0.5 ? pow(max(frame, vec3(0.0)), vec3(invGamma)) : max(frame, vec3(0.0));
+    const float f = 1.0 - keep;
+    const vec3 encA = max(v - f * F, vec3(0.0)) / max(keep, 1.0e-4);
+    const vec3 v2 = f * F + keep * pow(pow(encA, vec3(gamma)) + max(D, vec3(0.0)), vec3(invGamma));
+    return frameLinear > 0.5 ? pow(v2, vec3(gamma)) - max(frame, vec3(0.0)) : v2 - v;
+}
+
+void main() {
+    const ivec2 localPx = ivec2(gl_GlobalInvocationID.xy);
+    if (localPx.x >= cb.viewport.z || localPx.y >= cb.viewport.w) return;
+    const ivec2 px = cb.viewport.xy + localPx;
+
+    // Fetch G-buffer ONCE per pixel (replaces per-lamp re-fetches in D3D9 ps_3_0).
+    const vec4 albedo4 = texelFetch(t_albedo, px, 0);
+    const vec4 mat4v = texelFetch(t_material, px, 0);
+    const vec4 norm4 = texelFetch(t_normals, px, 0);
+
+    // Deferred pixel clip (DL_DEFERRED_CLIP)
+    const bool v2 = HasFlag(kFlagGBufferV2);
+    if (v2) {
+        if (albedo4.a <= 1.0001) return;
+    } else {
+        const bool oldCode = mat4v.a > 1.005 && mat4v.a < 1.995;
+        if (HasFlag(kFlagLightFree)) {
+            if (!(albedo4.a > 2.5 || oldCode)) return;
+        } else {
+            if (!oldCode) return;
+        }
+    }
+
+    // Actor clip (DL_ACTOR_CLIP): skip forward skin/gear (1.5..3.5), allow deferred skin (> 3.5) when FD_SKIN
+    const bool isDeferredSkin = HasFlag(kFlagSkinEnabled) && abs(floor(mat4v.r + 0.01) - 6.0) < 0.5 && norm4.a > kFdSkinCodeMin;
+    if (norm4.a >= 1.5 && !(HasFlag(kFlagSkinEnabled) && norm4.a > kFdSkinCodeMin)) return;
+
+    // Keep = 1 - fog (FDAddedLightKeep)
+    float keep;
+    if (v2) {
+        keep = albedo4.a > 4.5 ? albedo4.a - 5.0 : albedo4.a > 2.5 ? albedo4.a - 3.0 : albedo4.a > 1.0001 ? albedo4.a - 1.0 : albedo4.a;
+    } else {
+        if (albedo4.a > 2.5) {
+            float baseC = albedo4.a < 4.5 ? 3.0 : albedo4.a < 6.5 ? 5.0 : 7.0;
+            keep = clamp(albedo4.a - baseC, 0.0, 1.0);
+        } else {
+            keep = albedo4.a;
+        }
+    }
+    if (keep <= 1.0e-4) return;
+
+    // Pixel view ray & depth test against scene depth buffer (replaces hardware D3DRS_ZENABLE depth clip for hair/non-G-buffer draws)
+    const vec2 local = (vec2(localPx) + 0.5) * cb.dlView.xy;
+    const vec2 exact = vec2(localPx) * cb.dlView.xy;
+    const vec3 view = cb.dlFwd.xyz + cb.dlRight.xyz * ((exact.x * 2.0 - 1.0) * cb.dlRight.w) + cb.dlUp.xyz * ((1.0 - exact.y * 2.0) * cb.dlUp.w);
+    const float invViewLen = inversesqrt(dot(view, view));
+    const vec3 ray = view * invViewLen;
+    const float storedViewZ = norm4.b * invViewLen;
+    const float pulledViewZ = max(storedViewZ * (1.0 - cb.dlDepth.z) - cb.dlDepth.w, 1.0);
+    const float gbufProjZ = clamp(cb.dlDepth.x + cb.dlDepth.y / pulledViewZ, 0.0, 1.0);
+    const float rawDepth = texelFetch(t_depth, px, 0).x;
+    if (HasFlag(kFlagDepthIsLinear)) {
+        const float sceneProjZ = rawDepth > 1.0e-4 ? clamp(cb.dlDepth.x + cb.dlDepth.y / rawDepth, 0.0, 1.0) : (HasFlag(kFlagReversedZ) ? 0.0 : 1.0);
+        if (HasFlag(kFlagReversedZ) ? (gbufProjZ < sceneProjZ) : (gbufProjZ > sceneProjZ)) return;
+    } else {
+        if (HasFlag(kFlagReversedZ) ? (gbufProjZ < rawDepth) : (gbufProjZ > rawDepth)) return;
+    }
+
+    // Reconstruct exact surface position (unpushed for lighting, pushed for shadow lookup)
+    float useViewZ = storedViewZ;
+    if (cb.dlShadow.w > 0.5) {
+        float sceneViewZ = rawDepth;
+        if (!HasFlag(kFlagDepthIsLinear)) {
+            float den = rawDepth - cb.dlDepth.x;
+            if (abs(den) < 1.0e-12) den = cb.dlDepth.y < 0.0 ? -1.0e-12 : 1.0e-12;
+            sceneViewZ = cb.dlDepth.y / den;
+        }
+        if (abs(sceneViewZ - storedViewZ) <= storedViewZ * (1.0 / 512.0) + 0.5) {
+            useViewZ = sceneViewZ;
+        }
+    }
+    const vec3 surfacePos = (cb.dlShadow.w > 0.5) ? (view * useViewZ) : (ray * norm4.b);
+    const vec3 smoothN = ShadowDecodeNormal(norm4.rg);
+    const vec3 smoothFacingN = ShadowFacingNormal(smoothN, surfacePos);
+    const vec3 shadowPos = surfacePos + smoothFacingN * (norm4.b * cb.dlShadow.z);
+
+    // Froxel lamp list lookup (exact integer coords)
+    const float viewZ = dot(shadowPos, cb.dlFwd.xyz);
+    const vec2 tileF = min(floor(clamp(local, 0.0, 1.0) * cb.dlDebug.zw), cb.dlGrid.xy - 1.0);
+    const int slice = viewZ < 64.0 ? 0 : min(7, int(floor(log2(viewZ))) - 5);
+    const int base = (slice * int(cb.dlGrid.x + 0.5) * int(cb.dlGrid.y + 0.5) + int(tileF.y) * int(cb.dlGrid.x + 0.5) + int(tileF.x)) * 16;
+    const int count = cb.dlGrid.z > 0.5 ? min(int(ListTexel(base).x + 0.5), 63) : 0;
+
+    // Decode shading normal & material ONCE per pixel
+    vec3 N;
+    if (v2) {
+        N = abs(mat4v.g) <= 1.001 ? ShadowDecodeNormal(mat4v.ga) : smoothN;
+    } else {
+        const bool oldCode = mat4v.a > 1.005 && mat4v.a < 1.995;
+        N = oldCode ? ShadowDecodeNormal(vec2(mat4v.g, (mat4v.a - 1.01) / 0.49 - 1.0)) : smoothN;
+    }
+    const vec3 V = -ray;
+    const float rough = GBufferRoughness(mat4v.b);
+    const float metal = clamp((mat4v.r - floor(mat4v.r)) / 0.49, 0.0, 1.0);
+    const bool isLand = HasFlag(kFlagLandEnabled) && cb.dlLand.x > 0.5 && abs(floor(mat4v.r + 0.01) - 20.0) < 0.5;
+    const bool isDiffuseOnly = v2 && !isDeferredSkin && !isLand && floor(mat4v.r + 0.01) < 15.5;
+    const float diffKeep = (!isDeferredSkin && !isLand) ? DiffuseEnergyKeep(max(shades(N, V), 0.00001), rough) : 1.0;
+
+    // Precompute skin parameters once per pixel if skin
+    float skinMask = 0.0, skinThin = 0.0, skinSoft = 1.0, skinSpecScale = 0.0, skinCurv = 0.0, skinVMatch = 1.0;
+    vec3 skinNsoft = N;
+    if (isDeferredSkin) {
+        FDSkinDecode(norm4.a, skinMask, skinThin, skinSoft);
+        const float wet = clamp(cb.skinLook.y, 0.0, 1.0);
+        skinSpecScale = skinMask * 2.0 * cb.skinMaterial.x * (1.0 + wet);
+        skinCurv = cb.skinDebug.w > 0.5 ? 0.0 : clamp(skinThin * cb.skinMaterial.z, 0.0, 1.0);
+        if (cb.skinSSS.w > 0.5) skinThin = 0.0;
+        skinNsoft = normalize(mix(smoothN, N, skinSoft));
+        skinVMatch = SkinVanillaMatch();
+    }
+
+    const FalloffParams fp = BuildFalloffParams();
+    const vec3 gradedAlbedo = mix(vec3(luma(albedo4.rgb)), albedo4.rgb, cb.pbrExtraData.x);
+    const float linScaleLight = HasFlag(kFlagLinearLighting) ? cb.linearScales.x : cb.pbrData.z;
+
+    // DebugView 8 (RT shadow codes for lamps 0..2)
+    if (cb.dlDebug.x > 7.5) {
+        vec3 dbg8 = vec3(0.0);
+        for (int k = 0; k < min(count, 3); k++) {
+            const int e = k + 1;
+            const vec4 lv = ListTexel(base + (e >> 2));
+            const int comp = e & 3;
+            const int lampIdx = int((comp == 0 ? lv.x : comp == 1 ? lv.y : comp == 2 ? lv.z : lv.w) + 0.5);
+            const vec4 lp = texelFetch(t_lampTable, ivec2(lampIdx * 2, 0), 0);
+            const vec3 lampCam = vec3(dot(vec4(lp.xyz, 1.0), cb.dlRows[0]), dot(vec4(lp.xyz, 1.0), cb.dlRows[1]), dot(vec4(lp.xyz, 1.0), cb.dlRows[2]));
+            const float att = lp.w > 0.0 ? vanillaAtt(lampCam - shadowPos, lp.w) : 0.0;
+            const float sh = att > 0.0 ? DLShadow(lampIdx, shadowPos, smoothFacingN, att) : 0.0;
+            if (k == 0) dbg8.r = sh; else if (k == 1) dbg8.g = sh; else dbg8.b = sh;
+        }
+        const vec4 dst = imageLoad(i_scene, px);
+        imageStore(i_scene, px, vec4(dbg8, dst.a));
+        return;
+    }
+
+    // Main lamp loop (0..62 lamps, full shadow filter + exact surface lighting in ONE pass)
+    vec3 light = vec3(0.0);
+    vec3 skinSpecSum = vec3(0.0);
+    const bool dbg1 = cb.dlDebug.x > 0.5 && cb.dlDebug.x < 1.5;
+
+    for (int k = 0; k < count; k++) {
+        const int e = k + 1;
+        const vec4 lv = ListTexel(base + (e >> 2));
+        const int comp = e & 3;
+        const int lampIdx = int((comp == 0 ? lv.x : comp == 1 ? lv.y : comp == 2 ? lv.z : lv.w) + 0.5);
+        const vec4 lp = texelFetch(t_lampTable, ivec2(lampIdx * 2, 0), 0);
+        if (!(lp.w > 0.0)) continue;
+        const vec3 lampCam = vec3(dot(vec4(lp.xyz, 1.0), cb.dlRows[0]), dot(vec4(lp.xyz, 1.0), cb.dlRows[1]), dot(vec4(lp.xyz, 1.0), cb.dlRows[2]));
+        const float att = vanillaAtt(lampCam - shadowPos, lp.w);
+        if (!(att > 0.0)) continue;
+
+        const float sh = cb.dlDebug.y > 0.5 ? DLShadow(lampIdx, shadowPos, smoothFacingN, att) : 1.0;
+        if (!(sh > 0.0)) continue;
+
+        const vec3 color = texelFetch(t_lampTable, ivec2(lampIdx * 2 + 1, 0), 0).rgb;
+        const vec3 toLamp = lampCam - surfacePos;
+        const float toLampLen2 = dot(toLamp, toLamp);
+        if (!(toLampLen2 > 1.0e-10)) continue;
+        const vec3 L = toLamp * inversesqrt(toLampLen2);
+
+        if (dbg1) {
+            const float fAtt = (isLand || isDeferredSkin) ? EvalLampAtt(att, fp.shaped, fp.expOther) : EvalLampAtt(att, fp.shaped, fp.expObj);
+            light += color * (fAtt * sh);
+        } else if (isDeferredSkin) {
+            const vec3 rad = color * (linScaleLight * EvalLampAtt(att, fp.shaped, fp.expOther));
+            vec3 dOut, sOut;
+            SkinLampBoth(albedo4.rgb, N, smoothN, skinNsoft, V, L, rad, rough, skinSpecScale, skinThin, skinCurv, skinVMatch, dOut, sOut);
+            light += (dOut + sOut) * sh;
+            skinSpecSum += sOut * sh;
+        } else if (isLand) {
+            const vec3 rad = color * EvalLampAtt(att, fp.shaped, fp.expOther);
+            vec3 lit;
+            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false));
+            else lit = albedo4.rgb * (shades(N, L) * rad);
+            light += lit * sh;
+        } else if (isDiffuseOnly) {
+            const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
+            light += PBRDiffuse(metal, gradedAlbedo, N, L, color * (linScaleLight * fAtt)) * sh;
+        } else {
+            const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
+            light += PBRFull(metal, rough, gradedAlbedo, N, V, L, color * (linScaleLight * fAtt), diffKeep, true) * sh;
+        }
+    }
+
+    // Write skin specular target inline when SSS v2 is active
+    if (isDeferredSkin && HasFlag(kFlagSkinSpecActive) && dot(skinSpecSum, vec3(1.0)) > 0.0) {
+        const vec4 prevSpec = imageLoad(i_skinSpec, px);
+        imageStore(i_skinSpec, px, vec4(prevSpec.rgb + skinSpecSum, 1.0));
+    }
+
+    // Debug views 2..7 overwrite frame RGB
+    if (cb.dlDebug.x > 6.5) {
+        const vec4 dst = imageLoad(i_scene, px);
+        const vec3 out7 = cb.dlFwd.w > 0.5 ? light * keep : pow(max(light * keep, vec3(0.0)), vec3(cb.dlTable.w));
+        imageStore(i_scene, px, vec4(out7, dst.a));
+        return;
+    }
+    if (cb.dlDebug.x > 1.5) {
+        const vec3 cell = floor(shadowPos / 64.0);
+        const vec3 dbg = cb.dlDebug.x < 2.5 ? vec3(fract((cell.x + cell.y + cell.z) * 0.5) * 0.6 + 0.2, clamp(length(shadowPos) / 4096.0, 0.0, 1.0), 0.0) :
+                         cb.dlDebug.x < 3.5 ? N * 0.5 + 0.5 :
+                         cb.dlDebug.x < 4.5 ? vec3(keep) : vec3(float(count) / 31.0);
+        const vec4 dst = imageLoad(i_scene, px);
+        imageStore(i_scene, px, vec4(dbg, dst.a));
+        return;
+    }
+
+    if (dot(light, vec3(1.0)) <= 1.0e-9) return;
+
+    // Read-modify-write directly into scene HDR RT0 (no CopyTex, no LightTex, no FogPass!)
+    const vec4 dst = imageLoad(i_scene, px);
+    vec3 outRgb;
+    if (cb.dlFog.w > 0.5 && keep < 0.999) {
+        outRgb = dst.rgb + FDAddFogged(dst.rgb, light, keep, cb.dlFog.rgb, cb.dlTable.z, cb.dlFwd.w);
+    } else if (cb.dlFwd.w > 0.5) {
+        outRgb = dst.rgb + light * keep;
+    } else {
+        const vec3 stored = max(dst.rgb, vec3(0.0));
+        outRgb = pow(pow(stored, vec3(cb.dlTable.z)) + light * keep, vec3(cb.dlTable.w));
+    }
+    imageStore(i_scene, px, vec4(outRgb, dst.a));
+}

@@ -23,6 +23,7 @@ public:
 		float	Mirror;			// 2026-11-05: 0 real stone/tile (F0 0.04) .. 1 a true mirror (F0 1): how much of the reflection shows at any angle
 		float	WetRoughness;	// wet surfaces
 		float	FilmRainScale = 1.0f;	// UNOFFICIAL 2026-11-20 1 / [Shaders.WetnessEffects.Main] MaxRainWetness (cb.film.w, Reflections.glsl FilmWetness)
+		bool	ForwardWetFilm = false;	// UNOFFICIAL 2026-11-22 upstream 1.1.3 merge: upstream's forward wet film (ComputeWetFxFilm) in frames without the G-buffer film
 		bool	DampTrace = false;	// UNOFFICIAL 2026-11-21 test key (Internal): damp ground traced as before instead of the cube (cb.film2.x 0)
 		float	MaxDistance;	// ray length, game units
 		int		Steps;
@@ -44,13 +45,10 @@ public:
 		float	ReflectAdd;		// UNOFFICIAL 2026-10-21: 0 the reflection replaces its share of the surface's colour (as before), 1 it is added on top
 		float	SpecularOcclusion;		// UNOFFICIAL 2026-10-21: how much blurred reflections dim where the surface itself is dark (0 off)
 		float	SpecularOcclusionLevel;	// the surface / reflection brightness ratio that keeps all of the reflection
-		bool	HiZ;			// UNOFFICIAL 2026-10-26 (NVR DXVK, core/HiZ.h): the hierarchical ray march on the Hi-Z pyramid (Vulkan trace only), outdoors
 		float	GlassReflect;	// UNOFFICIAL 2026-10-29 (core/GlassMask.h, Vulkan passes only): how much see-through glass reflects (0 off: nothing hooked)
 		bool	MaterialBufferRoughness;	// UNOFFICIAL 2026-10-30 (Vulkan passes only): the floor guess takes TESR_MaterialBuffer's roughness where written
 		bool	CloudSky;		// UNOFFICIAL 2026-10-30 (Vulkan passes only, with VolumetricClouds): the sky fallback shows the clouds (the cloud sky probe)
 		bool	ReplaceForward;	// UNOFFICIAL 2026-11-12: the game's env-map pass leaves out the share of its cube map that last frame's reflection covered (docs/EFFECTS.md "Reflections", "Replace, not add")
-		bool	HiZSafeCells;		// test only: coarse cells read as min/max of their two channels, "behind" skip on the finest level only
-		bool	HiZInteriorsTest;	// test only: HiZ indoors too (the interior picture is not yet the old trace's; DebugView 9 / 10 to find why)
 		float	ReflectivityExterior;	// UNOFFICIAL 2026-10-25 [Shaders.PBR.Main] ReflectivityExterior / Interior: times the dry sheen and
 		float	ReflectivityInterior;	// MaterialReflect (not the rain's wetness); 1 = as before
 		// UNOFFICIAL 2026-10-28 [Shaders.Reflections.RT] (NVR DXVK + the RT core; docs/next/FORK-RT-REFLECTIONS.md): ray queries where the
@@ -117,6 +115,8 @@ public:
 		D3DXVECTOR4	Grid2;		// x: 1 = the grid is in use, y: brightness, z: 1 = it carries colours
 		D3DXVECTOR4	Grid3;		// rgb: the light every surface gets here (AmbientLight's, linear)
 		D3DXVECTOR4	Material;	// UNOFFICIAL 2026-10-20 x: 1 = the material buffer is read, y: MaterialMaxRoughness, z: MaterialReflect
+		D3DXVECTOR4	WetFx;		// 2026-11-19 WetnessEffects consolidation: x 1 = active (+2 = SkylightingMode 1), y rainWetness, z puddleWetness, w MinRainWetness
+		D3DXVECTOR4	WetFx2;		// x MaxPuddleWetness, y PuddleRoughness, z AlbedoBuffer bound on stage 14 for CompositePS, w PuddlesOn
 		D3DXVECTOR4	WaterData;		// UNOFFICIAL 2026-10-31 RT water (TESR_RTWaterData, the water shaders): x 1 = last frame's RT reflection
 									// holds the water, y 1 = the planar pass is skipped this frame, z its strength, w (2026-11-03) the
 									// traced frame's RenderScale (x; 1 native): Buffer's drawn part, WaterReproject is pre-scaled into it
@@ -183,17 +183,11 @@ public:
 	float	WetReach();
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): every technique as src\hlsl\NewVegas\Compute\Reflections*.frag (EffectRecord::ExtRender)
+	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) override;
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
-	// UNOFFICIAL 2026-10-26 (NVR DXVK, core/HiZ.h): HiZ on, outdoors (or HiZInteriorsTest), its pass usable (ShaderManager builds the pyramid then).
-	bool	HiZWanted() const;
 
 private:
 	ExtPass				extPasses[8];		// by technique (Blur X and Blur Y share [2])
-	ExtPass				extTraceHiZ;		// UNOFFICIAL 2026-10-26: Compute\ReflectionsTraceHiZ.spv (HiZ)
-	bool				hizTraceFailed = false;	// its pipeline could not be made: the normal trace for the session
-	UINT				hizTraceFrames = 0;
-	ExtPass				extTraceHiZCount;	// UNOFFICIAL 2026-10-26 debugging tool: Compute\ReflectionsTraceHiZCount.spv (the trace + shader counters,
-											// [Main.Develop.ShaderCounters] ReflectionsHiZ; core/ShaderCounters.h). Failed: the normal Hi-Z trace.
 	// UNOFFICIAL 2026-10-28 RT reflections ([Shaders.Reflections.RT], Compute\ReflectionsRT.glsl): the trace as RayGen (technique 8,
 	// Compute\ReflectionsRayGen.spv) -> the RT core's helper (Compute\Rt\ReflectionsRT.spv) -> Resolve (technique 9, ReflectionsRTResolve.spv).
 	ExtPass				extRtPasses[2];		// RayGen, Resolve
@@ -223,6 +217,7 @@ public:	// (the RT core user in Reflections.cpp reads the images)
 	void				RtRideBeforeFrame(IDirect3DDevice9* Device, IDirect3DSurface9* GameTarget);
 	std::string			RtStatusText() const;	// UNOFFICIAL 2026-11-01: the RT trace's state as of its last frame, for the REPORT block
 	bool				NothingReflects() const { return nothingReflects; }	// UNOFFICIAL 2026-11-05: ShouldRender found no reflecting surface (the Ray tracing page)
+	bool				RtWeaponActive() const { return Enabled && Settings.RtEnabled && Settings.RtWeapon > 0.0f && RtWanted(); }	// UNOFFICIAL 2026-11-20: only replace forward env map on 1st-person when RT weapon reflections are actually active
 private:
 	bool				nothingReflects = false;	// dry, GroundSheen / InteriorFloors 0, no material reflections (ShouldRender, last asked)
 	bool				PuddlesActive = false;	// 2026-11-08 Puddles: standing water left outdoors (the passes run for it after the rain)
@@ -274,6 +269,7 @@ private:
 	IDirect3DTexture9*	extSkyTexture = nullptr;	// the sky visibility it bound on stage 14 (null: none)
 	D3DXMATRIX	lastView, lastInvView, lastProj;
 	D3DXVECTOR2	lastJitter = D3DXVECTOR2(0.0f, 0.0f);	// UNOFFICIAL 2026-11-09 TemporalJitterFix: the depth jitter of the frame lastView is
+	float		lastDenoiseScaleX = 1.0f, lastDenoiseScaleY = 1.0f;	// 2026-11-19 RenderRect sub-rect scale of the last rendered frame (for RtReflDenoise)
 	UINT		lastRenderedFrame = 0;	// TheFrameRateManager->FrameNumber of the last frame this effect drew (UNOFFICIAL 2026-10-18: it counted
 										// UpdateConstants calls, two a frame, so last frame's history and cube were never kept)
 	bool		haveHistory = false;

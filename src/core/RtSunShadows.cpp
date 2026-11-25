@@ -9,6 +9,7 @@
 #include "GpuProfiler.h"
 #include "RtTessContact.h"	// UNOFFICIAL 2026-11-07 (rtgap-tess) the bumps' slack + ContactShadows (docs/next/RT-DETAIL-GAPS.md section 1)
 #include "RtShadowDenoise.h"	// UNOFFICIAL 2026-11-07 ShadowDenoiser (docs/next/RT-DENOISER.md)
+#include "RtPathTrace.h"		// UNOFFICIAL 2026-11-20 PTStandDownRT: stand down when path tracing replaces the scene
 #include "SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (ForwardCrossFade)
 
 namespace {
@@ -124,7 +125,7 @@ namespace {
 		S.enabled = TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
 		S.mode = TheSettingManager->GetSettingI(kSection, "Mode");
 		S.strength = TheSettingManager->GetSettingF(kSection, "Strength");
-		S.range = (std::max)(500.0f, TheSettingManager->GetSettingF(kSection, "Range"));
+		S.range = (std::min)(1.0e6f, (std::max)(500.0f, TheSettingManager->GetSettingF(kSection, "Range")));	// (2026-11-17: a ceiling too)
 		S.normalBias = TheSettingManager->GetSettingF(kSection, "NormalBias");
 		S.normalBiasPerUnit = TheSettingManager->GetSettingF(kSection, "NormalBiasPerUnit");
 		S.startBias = TheSettingManager->GetSettingF(kSection, "StartBias");
@@ -173,6 +174,7 @@ namespace {
 		ReadSettings();
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		if (S.enabled && HitView()) return true;	// 2026-10-30: the hit texture / glow checks run indoors too (the neon is in casinos)
+		if (RtPathTrace::StandDownRT()) return false;	// UNOFFICIAL 2026-11-20: path tracing replaces the scene and owns sun shadows (+ frees RtShadowDenoise mode 0)
 		return S.enabled && TheShaderManager->GameState.isExterior && shadows && shadows->Enabled && shadows->Settings.Exteriors.Enabled;
 	}
 
@@ -851,8 +853,8 @@ namespace RtSunShadows {
 	std::string StatusText() {
 		if (!S.enabled) return "RT sun shadows off ([Shaders.ShadowsExteriors.RT] Enabled false): the cascades alone";
 		const unsigned frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
-		char t[400];
-		sprintf_s(t, "RT sun shadows on, Mode %d (%s)%s | %s | traced %ux%u, frames traced %u, last traced frame f%u%s | Range %.0f, SunAngle %.2f, Denoise %s, HalfResolution %s, "
+		char t[640];	// 2026-11-17: was 400 with sprintf_s; the text reaches 400 once the frame counters have six digits, and sprintf_s ends the game
+		_snprintf_s(t, sizeof(t), _TRUNCATE, "RT sun shadows on, Mode %d (%s)%s | %s | traced %ux%u, frames traced %u, last traced frame f%u%s | Range %.0f, SunAngle %.2f, Denoise %s, HalfResolution %s, "
 			"DebugView %d (1 traced alone, 2 traced not applied, 4 traced visibility as grey: white = the sun reaches the pixel, black = blocked)",
 			S.mode, S.mode == 1 ? "replace: the cascades off inside Range, the traced visibility alone" : "combine: the traced visibility multiplied into the cascades",
 			Replacing() ? ", replacing now" : "", !RtCore::Running() ? "the RT core is not running: the cascades alone" : !TheShaderManager->GameState.isExterior ? "indoors: not traced" : "the core runs",
@@ -877,4 +879,9 @@ namespace RtSunShadows {
 	}
 
 	D3DXVECTOR4* ReplaceConstant() { return &replaceConstant; }
+
+	bool HelperDenoisedThisFrame() {
+		const UInt32 frameNow = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		return denoisedInHelper && lastTracedFrame == frameNow;
+	}
 }

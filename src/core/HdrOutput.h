@@ -12,17 +12,14 @@
 // computed here from the scene before tonemapping and the tonemapper's SDR result): 1 for shadows and mid-tones (the SDR look,
 // unchanged), rising towards PeakNits / PaperWhiteNits for what the SDR tonemapper squeezed into white (sun, sky near the sun,
 // lamps, fire, specular glints). HUD and menus therefore stay at paper white, never blinding.
-// Gamma22 (default on since upstream 1.1.2; settings step 92 moves a saved old default false to true): the fork decodes the SDR
-// picture with a pure 2.2 gamma instead of the sRGB curve (NVR_EXT_HDR_FLAG_GAMMA22): slightly darker, deeper shadows, as on most SDR
-// monitors, instead of the lifted blacks of the piecewise sRGB decode.
 //
 // Display check: the output must be in HDR mode in Windows (DXGI colour space ST.2084), else the output stays SDR automatically
 // (logged); IgnoreDisplayCheck forces it (tests on an SDR desktop: Windows then maps the HDR signal down itself).
 // UNOFFICIAL 2026-10-29: the colour space DXGI reports is the monitor's CURRENT mode, and the game's own fullscreen SDR picture
 // switches an HDR desktop's monitor to SDR (and back on alt-tab). The check alone therefore locked itself out: SDR at the first
 // frame although Windows HDR was on, or SDR again after a short mode change while HDR10 was being set up (user's log 10-29 15:11).
-// Now a monitor seen in HDR mode once in this run (at any check; since upstream 1.1.2 no longer at plugin load, see NoteDesktop)
-// counts as "Windows HDR on" for the rest of the run; a later SDR reading for it is logged once and ignored.
+// Now a monitor seen in HDR mode once in this run (at plugin load, before the game opens its window: NoteDesktop, or at any later
+// check) counts as "Windows HDR on" for the rest of the run; a later SDR reading for it is logged once and ignored.
 // UNOFFICIAL 2026-10-29 (user's run 16:04, "still nothing"): the latch can miss it altogether. Windows HDR was switched on at
 // 16:03:55, the game started at 16:04:01: SDR at load (the monitor was still switching) and at every check after (the game's
 // picture had switched it to SDR), so the fork was never asked. The Windows SETTING ("Use HDR", which the game's picture does not
@@ -53,6 +50,7 @@ namespace HdrOutput {
 		unsigned				RefusedRetries = 0;	// asked again every 600 frames, 6 times (UNOFFICIAL 2026-10-29)
 		bool					RetryNow = false;	// the display read HDR (e.g. alt-tabbed): ask a refused mode again now
 		bool					SwapSdr = false;	// on, but the fork says its swap chain is SDR (asked again: 3 timed attempts + alt-tab)
+		bool					SwapConfirmed = false;	// UNOFFICIAL 2026-11-21: fork swap chain confirmed HDR; skip redundant 600-frame GetHdrInfo WSI polls
 		UINT					ForkMode = NVR_EXT_HDR_OFF;	// the mode the fork holds (it can hold one while Active is false: SetOff sends OFF then too)
 		int						LastCurrent = -1;	// the display's current mode at the last check (RetryNow on SDR -> HDR only)
 		unsigned				SwapSdrRetries = 0;
@@ -288,11 +286,9 @@ namespace HdrOutput {
 
 	inline const char* OnOff(int value) { return value > 0 ? "on" : value == 0 ? "off" : "not found"; }
 
-	// At plugin load, before the game makes its window and swap chain (Render.cpp's HdrOutputNoteDesktop, called from
-	// NVSEPlugin_Load): the Windows HDR setting only. Only with HDR output enabled.
-	// (upstream 1.1.2) No DXGI monitor enumeration here any more: LoadLibraryEx("dxgi.dll") / CreateDXGIFactory1 inside
-	// NVSEPlugin_Load risks loader-lock / DXGI-lock deadlocks with overlays that hook dxgi. The monitors are read by the
-	// background display check (CheckWorker) once rendering starts, which also fills S.SeenHdr.
+	// At plugin load, before the game makes its window and swap chain: read the Windows HDR setting without calling
+	// LoadLibraryEx("dxgi.dll") / CreateDXGIFactory1 inside NVSEPlugin_Load (avoids loader/DXGI lock hazards with overlays;
+	// DXGI monitor enumeration runs on the background CheckWorker thread once rendering starts).
 	inline void NoteDesktop() {
 		if (!TheSettingManager->GetSettingI("Shaders.HDR.Main", "Enabled")) return;
 		const WindowsHdr windows = ReadWindowsSetting(nullptr);
@@ -363,7 +359,7 @@ namespace HdrOutput {
 		float maxNits = Reading.MaxNits;
 		WindowsHdr windows = Reading.Windows;
 		InterlockedExchange(&CheckState, 0);
-		if (monitor != S.LastMonitor) { S.LastMonitor = monitor; S.LastSetting = -1; S.SupportedSeen = false; }
+		if (monitor != S.LastMonitor) { S.LastMonitor = monitor; S.LastSetting = -1; S.SupportedSeen = false; S.SwapConfirmed = false; }
 		if (windows.Setting >= 0) S.LastSetting = windows.Setting;
 		else if (S.LastSetting >= 0) { windows.Setting = S.LastSetting; windows.From = "last reading"; }	// a failed read keeps the last answer
 		if (windows.Supported > 0) S.SupportedSeen = true;
@@ -378,7 +374,7 @@ namespace HdrOutput {
 		else if (windows.Supported == 0 && !S.SupportedSeen) hdr = 0;	// no setting found and Windows says the display cannot do HDR now
 		else hdr = now || seen ? 1 : 0;
 		if (hdr && S.DisplayHdr == 0) { S.Refused = false; S.RefusedRetries = 0; }	// Windows HDR just came on: ask the fork afresh
-		if (current && S.LastCurrent == 0 && (S.Refused || S.SwapSdr)) S.RetryNow = true;	// e.g. alt-tabbed: the desktop went HDR, the surface may offer it now
+		if (current && S.LastCurrent == 0 && (S.Refused || S.SwapSdr)) { S.RetryNow = true; S.SwapConfirmed = false; }	// e.g. alt-tabbed: the desktop went HDR, the surface may offer it now
 		S.LastCurrent = current;
 		if (maxNits <= 0.0f) maxNits = S.DisplayMaxNits;
 		// UNOFFICIAL 2026-11-01 (log privacy): the MonitorDataStore entry holds the monitor's EDID serial number after the PnP id
@@ -419,8 +415,11 @@ namespace HdrOutput {
 			Logger::Log("UNOFFICIAL HDR output: the fork answered %08lX in %lu ms", (unsigned long)hr, GetTickCount() - start);
 			S.SwitchFrame = S.Frame;
 			S.SwitchTime = GetTickCount();
+			S.SwapConfirmed = false;
 		}
-		else Logger::Log("UNOFFICIAL HDR output: parameter update answered %08lX in %lu ms", (unsigned long)hr, GetTickCount() - start);
+		else {
+			Logger::Log("UNOFFICIAL HDR output: parameter update answered %08lX in %lu ms", (unsigned long)hr, GetTickCount() - start);
+		}
 		return hr;
 	}
 
@@ -433,6 +432,7 @@ namespace HdrOutput {
 		S.Active = false;
 		S.Applied = {};
 		S.SwapSdr = false;
+		S.SwapConfirmed = false;
 		S.SwapSdrRetries = 0;
 	}
 
@@ -464,7 +464,7 @@ namespace HdrOutput {
 			S.Hdr->GetHdrInfo(&S.Info);
 			Logger::Log("UNOFFICIAL HDR output: the fork's surface offers HDR10 %s, scRGB %s; EDID peak %.0f nits", S.Info.SupportsHdr10 ? "yes" : "no", S.Info.SupportsScRgb ? "yes" : "no", S.Info.DisplayMaxNits);
 		}
-		if (!S.SwitchFrame && (S.DisplayHdr < 0 || S.Frame % 600 == 0)) StartCheck(Device);	// UNOFFICIAL 2026-11-03: on its own thread (upstream 1.1.2: never while a swap chain switch waits for its frame)
+		if (!S.SwitchFrame && (S.DisplayHdr < 0 || S.Frame % 600 == 0)) StartCheck(Device);	// UNOFFICIAL 2026-11-03: on its own thread (never overlapping a swapchain switch)
 		const bool check = FinishCheck();	// a new answer this frame (what the old every-600-frames check did, a few frames later)
 		if (S.DisplayHdr < 0 && !Setting("IgnoreDisplayCheck")) { Reason("Enabled: checking the display"); return; }
 		if (!S.DisplayHdr && !Setting("IgnoreDisplayCheck")) {
@@ -475,10 +475,17 @@ namespace HdrOutput {
 
 		// UNOFFICIAL 2026-10-29: while on, the fork says at each check whether its swap chain really is HDR (ActiveMode is OFF when
 		// the driver gave it an SDR format; the fork then shows the SDR picture as before and logs it)
-		if (check && S.Active) {
+		// UNOFFICIAL 2026-11-21: only query GetHdrInfo() on the render thread until the HDR swap chain is confirmed
+		// (or while recovering from SDR), avoiding redundant WSI surface queries under D3D9DeviceLock every 600 frames.
+		if (check && S.Active && (!S.SwapConfirmed || S.SwapSdr)) {
 			NVR_EXT_HDR_INFO now = {};
-			if (SUCCEEDED(S.Hdr->GetHdrInfo(&now))) {
+			const DWORD t0 = GetTickCount();
+			const HRESULT hr = S.Hdr->GetHdrInfo(&now);
+			const DWORD dt = GetTickCount() - t0;
+			if (dt > 20) Logger::Log("UNOFFICIAL HDR output: GetHdrInfo took %lu ms (hr %08lX)", (unsigned long)dt, (unsigned long)hr);
+			if (SUCCEEDED(hr)) {
 				S.SwapSdr = now.ActiveMode == NVR_EXT_HDR_OFF;
+				if (!S.SwapSdr) S.SwapConfirmed = true;
 				if (S.SwapSdr) Reason("on, but the fork's swap chain is SDR (the driver did not give it an HDR format; DXVK's log says which): SDR picture");
 				else if (!strncmp(S.LastReason, "on, but", 7) || !strncmp(S.LastReason, "asked", 5)) Reason("on: the fork's swap chain is HDR");
 			}
@@ -533,6 +540,7 @@ namespace HdrOutput {
 				Send(off, false);
 				S.ForkMode = NVR_EXT_HDR_OFF;
 				S.SwapSdr = false;
+				S.SwapConfirmed = false;
 				S.SwapSdrRetries = 0;
 			}
 			if (S.Refused) S.Hdr->GetHdrInfo(&S.Info);	// the fork logs the surface formats again if they changed

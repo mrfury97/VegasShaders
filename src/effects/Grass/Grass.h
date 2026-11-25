@@ -26,6 +26,11 @@ public:
 	static inline bool	LastBindNVR = false;	// GrassFirst: the last grass bind used NVR's vertex shader (which honours DrawPart)
 	static inline unsigned	BindSerial = 0;			// UNOFFICIAL 2026-10-28: grass binds so far (GrassFirst trusts LastBindNVR only for a bind of its own run)
 	static inline const char*	LastBindName = nullptr;	// the vertex shader of that bind (GrassFirst's log)
+	static inline bool	PendingTstgRestore = false;
+	static inline bool	TstgDetected = false;
+	static inline bool	TstgChecked = false;
+	static void	CheckTstg(IDirect3DDevice9* device);
+	static bool	IsStaticGeometry(NiGeometry* Geometry);
 
 	// UNOFFICIAL 2026-11-04 the rest of this class is ported from Physically-Based-Reloaded (effects/Grass.h), in place of Grass
 	// Collision and PointLights (VegasShaders-backups/before_grass_port_20261104).

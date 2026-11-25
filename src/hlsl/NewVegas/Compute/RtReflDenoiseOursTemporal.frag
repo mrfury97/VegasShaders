@@ -12,18 +12,22 @@ layout(location = 0) out vec4 o_result;
 layout(location = 1) out vec4 o_moments;
 
 void main() {
-    ivec2 p = ivec2(gl_FragCoord.xy);
-    vec4 m = Fetch(t_in3, p);
+    ivec2 px = ivec2(gl_FragCoord.xy);
+    if (any(greaterThanEqual(px, ACTIVE_GRID))) {
+        o_result = vec4(0.0); o_moments = vec4(0.0);
+        return;
+    }
+    vec4 m = Fetch(t_in3, px);
     o_moments = m;
-    o_result = Fetch(t_in0, p);
+    o_result = Fetch(t_in0, px);
     if (!Finite(o_result)) o_result = vec4(0.0);
     int view = int(pc.params2.y + 0.5);
-    if (view == 0 || Fetch(t_ray, p).x <= 0.0) return;
+    if (view == 0 || Fetch(t_ray, px).x <= 0.0) return;
     // (debug views: the result shows them; the history keeps the real result only while the view is off, so a view is A/B only)
-    if (view == 1) o_result = Fetch(t_signal, p);
-    else if (view == 2) o_result = Fetch(t_in2, p);
+    if (view == 1) o_result = Fetch(t_signal, px);
+    else if (view == 2) o_result = Fetch(t_in2, px);
     else if (view == 3) o_result = vec4(vec3(m.y / max(pc.params.x, 1.0)), 1.0);
-    else if (view == 4) o_result = vec4(vec3(Fetch(t_in1, p).x / max(pc.params2.z, 1.0)), 1.0);
+    else if (view == 4) o_result = vec4(vec3(Fetch(t_in1, px).x / max(pc.params2.z, 1.0)), 1.0);
     else if (view == 5) o_result = vec4(0.0, m.w, 0.0, 1.0);
     else if (view == 6) o_result = vec4(vec3(1.0 / (1.0 + m.z / 200.0)), 1.0);
 }

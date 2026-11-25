@@ -112,7 +112,7 @@ const uint RecordLand = 0x01u, RecordGlow = 0x04u, RecordAlbedoKnown = 0x10u;
 // Every query's loop (a macro: a ray query cannot be passed to a function): alpha-tested candidates are confirmed where their texel
 // passes; opaque geometry commits by itself.
 #ifdef RT_ALPHA
-#define RtProceed(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false)) || p.size.w > 1.5) 			rayQueryConfirmIntersectionEXT(q); }
+#define RtProceed(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { 		if (rayQueryGetIntersectionTypeEXT(q, false) == gl_RayQueryCandidateIntersectionTriangleEXT && 			(p.size.w > 1.5 || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, false), rayQueryGetIntersectionPrimitiveIndexEXT(q, false), 				rayQueryGetIntersectionBarycentricsEXT(q, false)))) 			rayQueryConfirmIntersectionEXT(q); }
 // (2026-11-07 rtgap-decals) the shadow rays at the hit: decals (NVR_RT_CUSTOM_DECAL) never block them (RtAlpha.glsl rtAlphaPassShadow),
 // AlphaSolid's whole cards included
 #define RtProceedShadow(q) for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else { \
@@ -145,17 +145,17 @@ vec3 Position(uint offset, uint index) {
 // smooth shading normal (vertex normals, then the normal map), the flat one facing the ray (offsets), the albedo (+ glow), and the sun /
 // key lamp through one shadow ray. cone: the hit's texture footprint (rtConeWidth).
 struct HitShade { vec3 geo; vec3 normal; vec3 albedo; uint flags; float visible; };
-HitShade ShadeHit(uint instance, uint prim, vec2 bary, mat3 toScene, vec3 hitPos, vec3 dir, float t, float roughness, float cone) {
+HitShade ShadeHit(uint instance, uint prim, vec2 bary, mat3 toScene, vec3 hitPos, vec3 dir, float t, float roughness, float cone, bool skipShadow) {
 	HitShade h;
 	const Record r = records[instance];
 	h.flags = ((r.flags & RecordLand) != 0u ? 1u : 0u) | ((r.flags & RecordAlbedoKnown) != 0u ? 2u : 0u) | ((r.flags & RecordGlow) != 0u ? 8u : 0u);
+	// UNOFFICIAL 2026-11-19: unified RtHitGeom loads triangle indices/positions/UVs once per hit and caches ray-cone gradients
+	RtHitGeom hg = rtHitLoadGeom(instance, prim, bary);
 	// The hit triangle's normal, from the helper's copy of the geometry, into scene axes (Gamebryo scales uniformly: the 3x3 part will
 	// do), turned to face the ray (the scene is traced from both sides).
 	h.geo = -dir;
-	if (r.vertexOffset != NoData && r.indexOffset != NoData) {
-		uint w = r.indexOffset + 3u * prim;
-		vec3 v0 = Position(r.vertexOffset, words[w]), v1 = Position(r.vertexOffset, words[w + 1u]), v2 = Position(r.vertexOffset, words[w + 2u]);
-		vec3 n = cross(v1 - v0, v2 - v0);
+	if (hg.hasPos) {
+		vec3 n = rtHitGeomObjectNormal(hg);
 		if (dot(n, n) > 1.0e-12) {
 			n = normalize(toScene * n);
 			h.geo = dot(n, dir) > 0.0 ? -n : n;
@@ -163,57 +163,59 @@ HitShade ShadeHit(uint instance, uint prim, vec2 bary, mat3 toScene, vec3 hitPos
 		}
 	}
 	// (2026-11-07 perf-reflfix) the vertex normals interpolated (a sphere in a mirror was faceted with the triangle's)
-	h.normal = (h.flags & 4u) != 0u ? rtHitSmoothNormal(instance, prim, bary, h.geo, toScene, dir) : h.geo;
+	h.normal = (h.flags & 4u) != 0u ? rtHitGeomSmoothNormal(hg, bary, h.geo, toScene, dir) : h.geo;
 
 	// The sun at the hit: one shadow ray off the hit along its (flat) normal. Indoors or at night instead: the lamp of the nearest 12 that
 	// lights the hit most (ReflectionsRTResolve.frag adds all 12, this one through its shadow ray).
 	h.visible = 1.0;
-	vec3 off = hitPos + h.geo * max(1.0, t * 0.001);
-	if (mod(p.size.w, 2.0) > 0.5 && p.sun.w > 0.5 && p.origin.w < 0.5) {
-		if (dot(h.normal, p.sun.xyz) > 0.0) {
-			rayQueryEXT s;
-			rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, p.sun.xyz, 30000.0);
-			RtProceedShadow(s);
-			h.visible = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+	// UNOFFICIAL 2026-11-19: skip direct shadow ray & 12-lamp loop when MetalBounce will replace this hit (and skip 12-lamp loop when roughness >= LampShadowRoughness).
+	if (!(skipShadow && (h.flags & 4u) != 0u) && mod(p.size.w, 2.0) > 0.5 && p.origin.w < 0.5) {
+		vec3 off = hitPos + h.geo * max(1.0, t * 0.001);
+		if (p.sun.w > 0.5) {
+			if (dot(h.normal, p.sun.xyz) > 0.0) {
+				rayQueryEXT s;
+				rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, p.sun.xyz, 30000.0);
+				RtProceedShadow(s);
+				h.visible = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+			}
 		}
-	}
-	else if (mod(p.size.w, 2.0) > 0.5 && p.origin.w < 0.5) {
-		int key = -1;
-		float best = 0.0;
-		int count = int(floor(p.forward.w));
-		for (int i = 0; i < count; i++) {   // (2026-11-07 perf-reflfix2: the light Resolve gives it, RtLampLight.glsl)
-			if (i == int(p.frame.z + 0.5) - 1) continue;   // (perf-reflfix2) the flashlight: never the key lamp (no shadow ray: the player stands at it)
-			const float c = dot(RtLampLight(p.lamps[2 * i], p.lamps[2 * i + 1], hitPos, h.normal), vec3(0.2126, 0.7152, 0.0722));
-			if (c > best) { best = c; key = i; }
-		}
-		// (The shadow ray only where the reflection is sharp enough to show it: roughness below LampShadowRoughness; rougher hits keep
-		// the lamp unshadowed, visible = 1. rtrefl-4 luxe: this ray cost 1.5-5 ms on the iGPU on all hits.)
-		if (key >= 0 && roughness < LampShadowRoughness) {
-			vec3 toLamp = p.lamps[2 * key].xyz - off;
-			float d = length(toLamp);
-			// Stop short of the lamp itself (its bulb, shade or glass mesh is in the scene).
-			rayQueryEXT s;
-			rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, toLamp / max(d, 1.0e-3), max(d - 24.0, 0.6));
-			RtProceedShadow(s);
-			h.visible = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
-			h.flags += 16u * uint(key + 1);
+		else if (roughness < LampShadowRoughness) {
+			int key = -1;
+			float best = 0.0;
+			int count = int(floor(p.forward.w));
+			for (int i = 0; i < count; i++) {   // (2026-11-07 perf-reflfix2: the light Resolve gives it, RtLampLight.glsl)
+				if (i == int(p.frame.z + 0.5) - 1) continue;   // (perf-reflfix2) the flashlight: never the key lamp (no shadow ray: the player stands at it)
+				const float c = dot(RtLampLight(p.lamps[2 * i], p.lamps[2 * i + 1], hitPos, h.normal), vec3(0.2126, 0.7152, 0.0722));
+				if (c > best) { best = c; key = i; }
+			}
+			if (key >= 0) {
+				vec3 toLamp = p.lamps[2 * key].xyz - off;
+				float d = length(toLamp);
+				// Stop short of the lamp itself (its bulb, shade or glass mesh is in the scene).
+				rayQueryEXT s;
+				rayQueryInitializeEXT(s, scene, RT_SHADOW_FLAGS, RtMask, off, 0.5, toLamp / max(d, 1.0e-3), max(d - 24.0, 0.6));
+				RtProceedShadow(s);
+				h.visible = rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionNoneEXT ? 1.0 : 0.0;
+				h.flags += 16u * uint(key + 1);
+			}
 		}
 	}
 	h.albedo = (h.flags & 2u) != 0u ? r.albedo.rgb : vec3(0.4);
 #ifdef RT_TEX
-	if (rtHitHasTexcoords(instance)) {
+	if (hg.hasUv) {
 #ifndef RT_NO_REAL_TEXTURES
 		rtConeWidth = cone;
 		rtConeDir = dir; rtConeToScene = toScene;	// (2026-11-07) anisotropic filtering (RtTextures.glsl)
+		rtHitGeomComputeGrads(hg);
 #endif
-		h.albedo = rtHitAlbedo(instance, prim, bary);
+		h.albedo = rtHitGeomAlbedo(hg);
 		h.flags |= 2u;
 #ifdef RT_HIT_NORMAL_MAPS
 		// (2026-11-07, RT-DETAIL-GAPS.md section 2) RealNormalMaps: the hit's own normal map (record flag 0x80, the real map at the same
 		// footprint as its colour) bends the normal Resolve shades the hit with (sun N.L, the lamps); the shadow rays above left from the
 		// flat triangle normal. Resolve's shading is diffuse (RtShadeHit: N.L, the grid / cube along N), so the bend counts however the
 		// ray sees the bump (one facing the light is lit even where the ray meets it edge-on); it stays on the triangle's side.
-		if ((h.flags & 4u) != 0u) h.normal = rtHitNormalMapped(instance, prim, bary, h.normal, toScene);
+		if ((h.flags & 4u) != 0u) h.normal = rtHitGeomNormalMapped(hg, h.normal, toScene);
 #endif
 	}
 #endif
@@ -221,10 +223,13 @@ HitShade ShadeHit(uint instance, uint prim, vec2 bary, mat3 toScene, vec3 hitPos
 	// 2026-10-30: a glowing draw glows only where its glow map is lit (sign letters, lamp globes): there the shade carries the glow
 	// colour and the glow flag stays (Resolve adds it x GlowBrightness); elsewhere on the mesh it is lit like any surface.
 	if ((h.flags & 8u) != 0u) {
-		const vec3 glow = rtHitGlow(instance, prim, bary);
+		const vec3 glow = rtHitGeomGlow(hg);
 		if (max(glow.r, max(glow.g, glow.b)) > 0.02) h.albedo = glow;
 		else h.flags &= ~8u;
 	}
+#endif
+#if defined(RT_TEX) && !defined(RT_NO_REAL_TEXTURES)
+	rtConeWidth = 0.0;   // UNOFFICIAL 2026-11-19: prevent hit cone width from leaking into subsequent MetalBounce / shadow alpha tests
 #endif
 	return h;
 }
@@ -291,6 +296,18 @@ vec3 BounceDirection(vec3 dir, vec3 n, vec3 geo, float rough, ivec2 pixel) {
 	}
 	if (dot(d2, geo) <= 0.0) d2 = reflect(dir, geo);   // (a bent normal at a grazing angle: the triangle's mirror direction)
 	return d2;
+}
+
+// Lossless fp16 packing for MetalBounce's secondary surface normal + visibility in shadeImage.a (rgba16f), while keeping
+// hitImage = vec4(t, flags2, OctEncode(d2)) and bounceImage = vec4(tint, t2) untouched for primary hits and nvr-rt-host.
+float PackBounceNormalVis(vec3 n, bool normalKnown, float visible) {
+	vec2 e = clamp(OctEncode(n) * 0.5 + 0.5, vec2(0.0), vec2(1.0));
+	uvec2 q = uvec2(round(e * 88.0));
+	uint idx = (q.x + 89u * q.y) | (normalKnown ? 8192u : 0u);   // 0 .. 16112 (exact normal fp16 mantissa + exponent in [1.0, 56832.0])
+	uint hi = idx >> 10u;
+	uint lo = idx & 1023u;
+	float code = uintBitsToFloat(((127u + hi) << 23u) | (lo << 13u));
+	return visible >= 0.5 ? code : -code;
 }
 
 void main() {
@@ -374,14 +391,15 @@ void main() {
 	// surface's roughness squared (the reflection lobe's GGX alpha), so a mirror shows the texture sharp and a rough floor its coarse mips (no speckle)
 	const float pixelAngle = length(p.up.xyz) / max(p.size.y, 1.0);
 	const float cone = (length(surface - p.origin.xyz) + t) * pixelAngle + t * roughness * roughness * 0.5;	// (the lobe's width goes with GGX alpha = roughness^2: a 0.02 mirror is sharp)
-	const HitShade h = ShadeHit(hitInstance, hitPrim, hitBary, hitToScene, hitPos, dir, t, roughness, cone);
+	float hitRough;
+	const bool willBounce = p.origin.w < 0.5 && MetalBounce(hitInstance, hitRough);
+	const HitShade h = ShadeHit(hitInstance, hitPrim, hitBary, hitToScene, hitPos, dir, t, roughness, cone, willBounce);
 
 	// (2026-11-07 perf-reflfix) MetalBounce: smooth metal reflects. ONE more ray along the mirror direction about its shading normal
 	// (2026-11-07 perf-reflfix2: about a GGX microfacet normal of its roughness, a new one each frame, while a denoiser averages the frames)
 	// (depth 1: what that ray meets is shaded, never reflected again: a mirror -> chrome -> chrome path ends on the second chrome's estimate). The
 	// pixel is then the metal's Fresnel tint x what the bounce sees (ReflectionsRTResolve.frag: the screen there, else its estimate).
-	float hitRough;
-	if (p.origin.w < 0.5 && (h.flags & 4u) != 0u && MetalBounce(hitInstance, hitRough)) {
+	if (willBounce && (h.flags & 4u) != 0u) {
 		// (2026-11-07 perf-reflfix2) the direction from the metal's GGX lobe (BounceDirection), not always the exact mirror direction
 		const vec3 d2 = BounceDirection(dir, h.normal, h.geo, hitRough, pixel);
 		// the metal's Fresnel (Schlick): F0 = its colour (the record's texture at the hit: gold, chrome); (2026-11-08 perf-reflfix4) a
@@ -404,10 +422,10 @@ void main() {
 		const float cone2 = cone + t2 * (pixelAngle + hitRough * hitRough * 0.5);
 		const HitShade h2 = ShadeHit(uint(rayQueryGetIntersectionInstanceIdEXT(q2, true)), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q2, true)),
 			rayQueryGetIntersectionBarycentricsEXT(q2, true), mat3(rayQueryGetIntersectionObjectToWorldEXT(q2, true)), off + d2 * t2, d2, t2,
-			max(roughness, hitRough), cone2);
+			max(roughness, hitRough), cone2, false);
 		const uint flags2 = 256u | (h2.flags & (2u | 8u | 0xF0u)) | BounceClassBits(BounceClass(hitRough));   // its albedo / glow / key lamp; (perf-reflfix3) bits 1, 4: the metal's class
 		imageStore(hitImage, pixel, vec4(t, float(flags2), OctEncode(d2)));
-		imageStore(shadeImage, pixel, vec4(h2.albedo, h2.visible));
+		imageStore(shadeImage, pixel, vec4(h2.albedo, PackBounceNormalVis(h2.normal, (h2.flags & 4u) != 0u, h2.visible)));
 		imageStore(bounceImage, pixel, vec4(tint, max(t2, 1.0e-3)));
 		return;
 	}

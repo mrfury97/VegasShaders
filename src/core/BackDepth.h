@@ -13,6 +13,7 @@
 #include "RenderPass.h"
 #include "RenderRect.h"
 #include "GpuProfiler.h"
+#include "ClothWind.h"
 
 namespace BackDepth {
 	inline IDirect3DTexture9* Texture = nullptr;
@@ -90,6 +91,7 @@ namespace BackDepth {
 		static float savedVC[256][4], savedPC[224][4];
 		Device->GetVertexShaderConstantF(0, &savedVC[0][0], 256);
 		Device->GetPixelShaderConstantF(0, &savedPC[0][0], 224);
+		const bool savedClothNonZero = ClothWind::NonZeroSent, savedClothGrass = ClothWind::GrassInC248;
 		const bool reversed = TheRenderManager->IsReversedDepth();
 		Device->SetRenderTarget(0, Surface);
 		Device->SetDepthStencilSurface(Depth);
@@ -166,6 +168,7 @@ namespace BackDepth {
 		state->SetPixelShader(savedPSh, false); if (savedPSh) savedPSh->Release();
 		for (DWORD t = 0; t < 16; t++) { state->SetTexture(t, savedTex[t]); if (savedTex[t]) savedTex[t]->Release(); }
 		Device->SetVertexShaderConstantF(0, &savedVC[0][0], 256);
+		ClothWind::OnVSConstantsRestored(savedVC[248], savedClothNonZero, savedClothGrass);
 		Device->SetPixelShaderConstantF(0, &savedPC[0][0], 224);
 		for (int p = 0; p < 5; p++) { passes[p]->VertexShader = savedVS[p]; passes[p]->PixelShader = savedPS[p]; }
 		state->SetRenderState(D3DRS_ZFUNC, savedZFunc, RenderStateArgs);

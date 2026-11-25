@@ -158,7 +158,6 @@
     <ClCompile Include="..\src\core\Paths.cpp" />
     <ClCompile Include="..\src\core\InstallCheck.cpp" />
     <ClCompile Include="..\src\core\Diagnostics.cpp" />
-    <ClCompile Include="..\src\core\HiZ.cpp" />
     <ClCompile Include="..\src\core\PixelInspector.cpp" />
     <ClCompile Include="..\src\core\MenuSkin.cpp" />
     <ClCompile Include="..\src\core\MenuWidgets.cpp" />
@@ -166,7 +165,6 @@
     <ClCompile Include="..\src\effects\AvgLuma\AvgLuma.cpp" />
     <ClCompile Include="..\src\effects\SkyView\SkyView.cpp" />
     <ClCompile Include="..\src\effects\AmbientLight\AmbientLight.cpp" />
-    <ClCompile Include="..\src\effects\BloodLens\BloodLens.cpp" />
     <ClCompile Include="..\src\effects\BarrelHaze\BarrelHaze.cpp" />
     <ClCompile Include="..\src\effects\Bloom\Bloom.cpp" />
     <ClCompile Include="..\src\effects\BloomLegacy\BloomLegacy.cpp" />
@@ -224,8 +222,6 @@
     <ClCompile Include="..\src\effects\Dream\Dream.cpp" />
     <ClCompile Include="..\src\effects\Reflections\Reflections.cpp" />
     <ClCompile Include="..\src\effects\VolumetricClouds\VolumetricClouds.cpp" />
-    <ClCompile Include="..\src\effects\BloodFlow\BloodFlow.cpp" />
-    <ClCompile Include="..\src\effects\BloodFlow\BloodFluid.cpp" />
     <ClCompile Include="..\src\effects\BounceLight\BounceLight.cpp" />
     <ClCompile Include="..\src\effects\Skin\Skin.cpp" />
     <ClCompile Include="..\src\effects\SkinScattering\SkinScattering.cpp" />
@@ -321,7 +317,7 @@
     <ClInclude Include="..\src\core\RtHistoryTime.h" />
     <ClInclude Include="..\src\core\RtFlashlightCode.h" />
     <ClInclude Include="..\src\effects\Reflections\RtReflLamps.h" />
-    <ClInclude Include="..\src\core\HiZ.h" />
+    <ClInclude Include="..\src\core\RtLightUnits.h" />
     <ClInclude Include="..\src\core\Upscaler.h" />
     <ClInclude Include="..\src\core\PixelInspector.h" />
     <ClInclude Include="..\src\core\MenuSkin.h" />
@@ -354,7 +350,6 @@
     <ClInclude Include="..\src\effects\SkyView\SkyView.h" />
     <ClInclude Include="..\src\effects\Sky\PhysSkyModel.h" />
     <ClInclude Include="..\src\effects\AmbientLight\AmbientLight.h" />
-    <ClInclude Include="..\src\effects\BloodLens\BloodLens.h" />
     <ClInclude Include="..\src\effects\Bloom\Bloom.h" />
     <ClInclude Include="..\src\effects\BloomLegacy\BloomLegacy.h" />
     <ClInclude Include="..\src\effects\Cinema\Cinema.h" />
@@ -404,9 +399,6 @@
     <ClInclude Include="..\src\effects\Dream\Dream.h" />
     <ClInclude Include="..\src\effects\Reflections\Reflections.h" />
     <ClInclude Include="..\src\effects\VolumetricClouds\VolumetricClouds.h" />
-    <ClInclude Include="..\src\effects\BloodFlow\BloodFlow.h" />
-    <ClInclude Include="..\src\effects\BloodFlow\BloodFlowBoxes.h" />
-    <ClInclude Include="..\src\effects\BloodFlow\BloodFluid.h" />
     <ClInclude Include="..\src\effects\BounceLight\BounceLight.h" />
     <ClInclude Include="..\src\effects\BounceLight\BounceLightMath.h" />
     <ClInclude Include="..\src\effects\Skin\Skin.h" />

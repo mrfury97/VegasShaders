@@ -52,6 +52,7 @@ layout(set = 0, binding = 16, rg32f) uniform readonly image2D prevSurf;   // las
 layout(set = 0, binding = 17, rg32f) uniform writeonly image2D curSurf;
 #define RT_ALPHA_ATLAS alphaAtlas
 #include "RtAlpha.glsl"
+#include "RtHidden.glsl"
 #include "RtRestirGI.glsl"
 
 uint state;
@@ -169,7 +170,8 @@ int CgnsPick(ivec2 centre, vec3 x1, vec3 n1, float t1, int count, uint K, out iv
 		const ivec2 q = centre + ivec2(round(vec2(cos(a), sin(a)) * r));
 		if (q == centre || any(lessThan(q, ivec2(0))) || any(greaterThanEqual(q, ivec2(p.size.xy)))) continue;
 		vec3 px, pn;
-		if (!PrevSurface(q, px, pn)) continue;
+		// UNOFFICIAL 2026-11-19: pre-filter by SameSurface so CGNS top-K slots are not wasted on rejected neighbours.
+		if (!PrevSurface(q, px, pn) || !SameSurface(x1, n1, t1, px, pn)) continue;
 		float c = max(dot(pn, n1), 0.0);
 		c *= c; c *= c; c *= c;
 		const float h = exp(-distance(px, x1) / s) * c;
@@ -195,9 +197,16 @@ bool Visible(vec3 from, vec3 to) {
 	const vec3 d = to - from;
 	const float len = length(d);
 	if (len < 1.0) return true;
+	const float tMax = max(len - 2.0, 0.0);
+	if (!(tMax > 0.0)) return true;
+	const vec3 orig = from + p.origin.xyz;
+	const vec3 dir = d / len;
+	// UNOFFICIAL 2026-11-19: pass over NVR_RT_CUSTOM_HIDDEN near eye (1st-person body must not block GI reuse rays)
+	if (rtHiddenPassOver(orig, orig + dir * tMax, p.origin.xyz))
+		return !rtBlockedPassHidden(orig, dir, 0.0, tMax, 0xFFu, AlphaTest(), kRtAnyHit);
 	rayQueryEXT q;
-	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT), 0xFFu, from + p.origin.xyz,
-		0.0, d / len, max(len - 2.0, 0.0));
+	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | (AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT), 0xFFu, orig,
+		0.0, dir, tMax);
 	ProceedShadow(q);
 	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionTriangleEXT;
 }
@@ -237,30 +246,37 @@ void main() {
 	bool fromNeighbour = false;
 	const float maxM = max(p.prevEye.w, 1.0);
 
+	float W = 0.0;
 	if (History()) {
 		ivec2 prev;
 		vec3 px, pn;
 		const bool onScreen = PrevPixel(x1, prev);
-		// temporal: the same surface last frame
+		// 1. Temporal merge (1/M canonical + reprojected pixel -> post-temporal canonical reservoir (sel, W, M))
 		if (onScreen && PrevSurface(prev, px, pn) && SameSurface(x1, n1, t1, px, pn)) {
 			Sample s;
-			float W, m;
-			LoadPrev(prev, s, W, m);
+			float Wp, m;
+			LoadPrev(prev, s, Wp, m);
 			m = Confidence(prev, min(m, maxM));   // (PTRestirDupMap off: min(m, maxM))
 			if (m > 0.0) {
-				const float w = Target(s, x1, n1) * W * m;
+				const float w = Target(s, x1, n1) * Wp * m;
 				wSum += w;
 				M += m;
 				if (Rand() * wSum < w) { sel = s; fromNeighbour = false; }
 			}
 		}
-		// spatial: neighbours of last frame round where this surface was (or this pixel, off last frame's screen)
+		const float tCanon = Target(sel, x1, n1);
+		W = tCanon > 0.0 ? wSum / (M * tCanon) : 0.0;
+
+		// 2. Spatial merge with Pairwise MIS (UNOFFICIAL 2026-11-19: fixes Jacobian/domain asymmetry & CGNS darkening).
 		const ivec2 centre = onScreen ? prev : pixel;
 		int count = int(p.params.x + 0.5);
-		// (2026-11-15 PTRestirCGNS) the neighbours picked by their surfaces' match instead of at random
 		const uint cgnsK = CgnsCandidates();
 		ivec2 picks[kCgnsMax];
 		if (cgnsK > 0u) count = CgnsPick(centre, x1, n1, t1, min(count, kCgnsMax), cgnsK, picks);
+		const float Mc = M, pcc = tCanon;
+		int nb = 0;
+		float mcSum = 0.0, sumM = M, nbSum = 0.0;
+		Sample nbSel = sel;
 		for (int k = 0; k < count; k++) {
 			ivec2 q;
 			if (cgnsK > 0u) q = picks[k];
@@ -271,24 +287,51 @@ void main() {
 			}
 			if (!PrevSurface(q, px, pn) || !SameSurface(x1, n1, t1, px, pn)) continue;
 			Sample s;
-			float W, m;
-			LoadPrev(q, s, W, m);
+			float Wn, m;
+			LoadPrev(q, s, Wn, m);
 			m = Confidence(q, min(m, maxM));
-			if (!(m > 0.0) || !(W > 0.0)) continue;
-			const float J = Jacobian(s, px, x1);
-			if (!(J > 0.1 && J < 10.0)) continue;
-			const float w = Target(s, x1, n1) * W * m * J;
-			wSum += w;
-			M += m;
-			if (Rand() * wSum < w) { sel = s; fromNeighbour = true; }
+			if (!(m > 0.0)) continue;
+			nb++;
+			sumM += m;
+			// Reverse shift x_c -> x_i for canonical MIS weight
+			if (pcc > 0.0 && W > 0.0) {
+				const float Jci = Jacobian(sel, x1, px);
+				const float pic = (Jci > 0.1 && Jci < 10.0) ? Target(sel, px, pn) * Jci : 0.0;
+				mcSum += Mc * pcc / max(Mc * pcc + m * pic, 1.0e-30);
+			}
+			// Forward shift x_i -> x_c for neighbour MIS weight
+			if (!(Wn > 0.0)) continue;
+			const float Jic = Jacobian(s, px, x1);
+			if (!(Jic > 0.1 && Jic < 10.0)) continue;
+			const float pci = Target(s, x1, n1) * Jic;
+			if (!(pci > 0.0)) continue;
+			const float pii = Target(s, px, pn);
+			const float wi = (m * pii / max(m * pii + Mc * pci, 1.0e-30)) * pci * Wn;
+			if (wi > 0.0) {
+				nbSum += wi;
+				if (Rand() * nbSum < wi) nbSel = s;
+			}
 		}
+		if (nb > 0) {
+			const float cWeight = pcc > 0.0 ? mcSum * pcc * W : 0.0;
+			const float totalSum = cWeight + nbSum;
+			if (nbSum > 0.0 && Rand() * totalSum < nbSum) {
+				sel = nbSel;
+				fromNeighbour = true;
+			}
+			const float targetFinal = Target(sel, x1, n1);
+			W = targetFinal > 0.0 ? (totalSum / float(nb)) / targetFinal : 0.0;
+			M = sumM;
+		}
+	} else {
+		const float target0 = Target(sel, x1, n1);
+		W = target0 > 0.0 ? wSum / (M * target0) : 0.0;
 	}
-
-	const float target = Target(sel, x1, n1);
-	float W = target > 0.0 ? wSum / (M * target) : 0.0;
 	const vec3 lift = x1 + n1 * (1.0 + 0.002 * t1);
-	if (fromNeighbour && W > 0.0 && !Visible(lift, sel.x2)) W = 0.0;   // a neighbour's sample this surface does not see
-	if (isnan(W) || isinf(W)) W = 0.0;
+	// UNOFFICIAL 2026-11-19: when a neighbour sample is killed by visibility, also reset M to <= 1 so a high-M black
+	// reservoir does not poison subsequent temporal/spatial merges (fixes CGNS/ReSTIR GI dark-reservoir poisoning).
+	if (fromNeighbour && W > 0.0 && !Visible(lift, sel.x2)) { W = 0.0; M = min(M, 1.0); }
+	if (isnan(W) || isinf(W)) { W = 0.0; M = 0.0; }
 	M = min(M, maxM);
 
 	// the first bounce's light: colour / pi x cos x L x W (the game's units fold pi into the light: a cosine sample alone gives colour x L)

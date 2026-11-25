@@ -59,7 +59,7 @@ namespace DeferredSkin {
 		if (!name || !tmpl.Name || strcmp(tmpl.Name, "SkinTemplate")) return false;
 		const size_t length = strlen(name);
 		if (length < 4 || strcmp(name + length - 4, ".pso")) return false;
-		for (int d = 0; d < 63 && tmpl.Defines[d].Name; d++)
+		for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++)
 			if (!strcmp(tmpl.Defines[d].Name, "ONLY_LIGHT") || !strcmp(tmpl.Defines[d].Name, "DIFFUSE")) return false;
 		return true;
 	}
@@ -78,6 +78,7 @@ namespace DeferredSkin {
 			return;
 		}
 		ShaderRecordPixel* forward = (ShaderRecordPixel*)(shader->ShaderProg[ShaderRecordType::Interior] ? shader->ShaderProg[ShaderRecordType::Interior] : shader->ShaderProg[ShaderRecordType::Default]);
+		ShaderRecordPixel* outdoor = DeferredRenderer::OutdoorRecord(shader);
 		Records[shader] = record;
 		Handles.insert(record->ShaderHandle);
 		CapturedNormals::SkinDeferredCodes = true;	// SkinFill / SkinAlbedoFill leave COLOR3.a 3.5+ alone (their shaders are made at their first use, later)
@@ -86,8 +87,9 @@ namespace DeferredSkin {
 		// skin are kept as forward keeps them (muted by [Shaders.Skin.Main] MuteGameHighlights, the default)
 		DeferredRenderer::Handles.insert(record->ShaderHandle);
 		DeferredRenderer::PlainHandles.insert(record->ShaderHandle);
-		DeferredRenderer::Pairs[record->ShaderHandle] = { record, forward && forward->ShaderHandle ? forward : nullptr };
+		DeferredRenderer::Pairs[record->ShaderHandle] = { record, forward && forward->ShaderHandle ? forward : nullptr, outdoor && outdoor->ShaderHandle ? outdoor : nullptr };
 		if (forward && forward->ShaderHandle) DeferredLamps::ForwardOf[record->ShaderHandle] = forward->ShaderHandle;
+		if (outdoor && outdoor->ShaderHandle) DeferredLamps::ForwardOfOutdoor[record->ShaderHandle] = outdoor->ShaderHandle;
 		// a lighting-free record's binds open DeferredSun's pass for the span (mode 2; DeferredSun::OnBind counts this set)
 		if (DeferredRenderer::Mode() >= 2) DeferredSun::FoliageHandles.insert(record->ShaderHandle);
 		DeferredLamps::EnsurePass();
@@ -122,7 +124,7 @@ namespace DeferredSkin {
 		auto found = Records.find(shader);
 		if (found == Records.end()) return nullptr;
 		Refresh();
-		if (!Live || !CapturedNormals::InSpan) return nullptr;
+		if (!Live || !CapturedNormals::InSpan || (CapturedNormals::VmSpan && !CapturedNormals::VmDeferred)) return nullptr;
 		if (exterior && (DeferredRenderer::Mode() < 2 || !DeferredRenderer::SunRuns())) return nullptr;
 		if (DeferredRenderer::BlendedNow) { StatBlended++; return nullptr; }
 		StatBinds++;
@@ -308,6 +310,7 @@ namespace DeferredSkin {
 		if (!CopyFrame(d, target) || !EnsureTarget(d, t, D3DFMT_A16B16G16R16F, LightTex, LightSurf, LightDesc)) { target->Release(); return; }
 		static GpuTimer timer("Deferred skin SSS");
 		GpuProfileScope gpu(timer, d);
+		const bool linearZ = DeferredDepth::EnsureLinear(d);
 		float savedC[3 + kSssTaps][4];	// (+ c26 SSS_Debug, 2026-11-16)
 		d->GetPixelShaderConstantF(0, &savedC[0][0], 3 + kSssTaps);
 		// the constants: scatter distances in world units (1 unit = 1/70 m: 14.29 mm), the pixels a world unit covers at view z 1, the angle
@@ -321,7 +324,6 @@ namespace DeferredSkin {
 		const bool turn = TemporalBackbone::Shared() ? TemporalBackbone::TemporalResolve() : false;
 		const float angle = turn ? 6.2831853f * fmodf(0.61803399f * (float)((TemporalBackbone::NoiseIndex() + TemporalBackbone::OffsetSkin) % 1024), 1.0f) : 0.0f;
 		c[0][0] = 1.0f / t.Width; c[0][1] = 1.0f / t.Height; c[0][2] = 0.5f * t.Height / (std::max)(tanY, 1.0e-3f); c[0][3] = angle;
-		const bool linearZ = DeferredDepth::LinearReady();
 		c[1][0] = dmm[0];
 		c[1][1] = (std::max)(0.1f, TheSettingManager->GetSettingF("Shaders.Skin.SSS", "DepthFollow"));
 		c[1][2] = std::clamp(TheSettingManager->GetSettingF("Shaders.Skin.SSS", "AlbedoDetail"), 0.0f, 1.0f);
@@ -345,9 +347,6 @@ namespace DeferredSkin {
 	inline bool FillBlurTargets(IDirect3DDevice9* d, IDirect3DSurface9* blurSurface, IDirect3DSurface9* albedoSurface, float gamma, bool frameLinear) {
 		if (!DrawnThisSpan || FillFailed || !blurSurface || !albedoSurface || !CapturedNormals::Texture || !CapturedNormals::AlbedoTexture) return false;
 		if (!FillScatterPS) {
-			// (upstream 1.1.2, Character Kit Remake 4844 one-bit alpha-test hair) all three also clip where the albedo record is unwritten
-			// (a < 0.5): opaque hair over the scalp clears it (CapturedNormals::BeforeDraw) but leaves COLOR3.a's skin code, so the skin's
-			// blur and highlight share would otherwise still take those pixels. A deferred skin record's albedo a is 1 or more (DeferredPixel.hlsl).
 			static const char* kScatter =
 				"sampler2D N : register(s0); sampler2D A : register(s1);"
 				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
@@ -360,9 +359,11 @@ namespace DeferredSkin {
 				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
 				"  float4 n = tex2D(N, uv); float a = tex2D(A, uv).a; clip(min(n.a - 3.5, a - 0.5));"
 				"  float keep = saturate(a > 4.5 ? a - 5.0 : a > 2.5 ? a - 3.0 : a > 1.0001 ? a - 1.0 : a);"
-				"  float3 f = max(tex2D(F, uv).rgb, 0.0); float3 s = max(tex2D(S, uv).rgb, 0.0) * keep; float3 d = max(f - s, 0.0);"
+				"  float3 f = max(tex2D(F, uv).rgb, 0.0); float3 s = max(tex2D(S, uv).rgb, 0.0) * keep;"
 				"  float e = G.x > 1.0 ? 1.0 / G.x : 1.0;"
-				"  float3 share = G.y > 0.5 ? pow(f, e) - pow(d, e) : s;"
+				"  float3 fLin = G.y > 0.5 ? f : (G.x > 1.0 ? pow(f, G.x) : f);"
+				"  float3 dLin = max(fLin - s, 0.0);"
+				"  float3 share = (G.y > 0.5 || G.x > 1.0) ? (G.y > 0.5 ? pow(fLin, e) : f) - pow(dLin, e) : s;"
 				"  return float4(max(share, 0.0), n.b); }";
 			// G: x the linear lighting's gamma (1 = none), y 1 = the frame is linear now. Written as the forward skin record writes them
 			// (SkinTemplate.hlsl COLOR2): the albedo as the texture holds it (saturate(texColor): the G-buffer's LinColor undone), and the luminance

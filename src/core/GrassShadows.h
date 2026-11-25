@@ -163,9 +163,26 @@ namespace GrassShadows {
 		ShaderRecordVertex* vs = GrassShaders::LastBindNVR && v >= '0' && v <= '7' ? (SpotMode ? SpotVS : VS)[(v - '0') & 3] : nullptr;
 		if (!vs || !vs->ShaderHandle || (!SpotMode && !CameraToLight)) { StatSkipped++; return D3D_OK; }
 
-		// c252-c255: the inverse view matrix (rows) with the wind lanes in w -> the view -> shadow map transform, lanes kept.
-		float view[4][4];
-		if (FAILED(device->GetVertexShaderConstantF(252, &view[0][0], 4))) { StatSkipped++; return D3D_OK; }
+		// c252-c255: save whatever was bound, then upload view -> shadow map transform directly from TheRenderManager->InvViewMatrix
+		// (preserving GrassWind::Lanes in column 4) and world-space GrassBend in c0-c1.
+		float view[4][4] = {};
+		const bool viewSaved = SUCCEEDED(device->GetVertexShaderConstantF(252, &view[0][0], 4));
+		if (!viewSaved) { StatSkipped++; return D3D_OK; }
+		float bendSaved[2][4] = {};
+		const bool bendSavedOk = SUCCEEDED(device->GetVertexShaderConstantF(0, &bendSaved[0][0], 2));
+		float bendWorld[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, bendParams[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+		if (GrassShaders* grass = TheShaderManager ? TheShaderManager->Shaders.Grass : nullptr) {
+			if (grass->Have && grass->BendPush > 0.0f) {
+				bendWorld[0] = grass->BendCentre.x;
+				bendWorld[1] = grass->BendCentre.y;
+				bendWorld[2] = grass->BendCentre.z;
+				bendWorld[3] = grass->Constants.Bend.w;
+				bendParams[0] = grass->BendPush;
+			}
+		}
+		device->SetVertexShaderConstantF(0, bendWorld, 1);
+		device->SetVertexShaderConstantF(1, bendParams, 1);
+
 		float spotSaved[6][4] = {};	// c13-c18 (the flashlight caster's, SpotMode)
 		if (SpotMode) {
 			device->GetVertexShaderConstantF(13, &spotSaved[0][0], 6);
@@ -174,11 +191,17 @@ namespace GrassShadows {
 		}
 		else {
 			D3DXMATRIX invView;
-			for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) invView.m[r][c] = view[r][c]; invView.m[r][3] = r == 3 ? 1.0f : 0.0f; }
+			for (int r = 0; r < 4; r++) {
+				for (int c = 0; c < 3; c++) invView.m[r][c] = TheRenderManager->InvViewMatrix.m[r][c];
+				invView.m[r][3] = r == 3 ? 1.0f : 0.0f;
+			}
 			D3DXMATRIX viewToLight;
 			D3DXMatrixMultiply(&viewToLight, &invView, CameraToLight);
 			float light[4][4];
-			for (int r = 0; r < 4; r++) { for (int c = 0; c < 3; c++) light[r][c] = viewToLight.m[r][c]; light[r][3] = view[r][3]; }
+			for (int r = 0; r < 4; r++) {
+				for (int c = 0; c < 3; c++) light[r][c] = viewToLight.m[r][c];
+				light[r][3] = GrassWind::On ? GrassWind::Lanes[r] : (r == 3 ? 1.0f : 0.0f);
+			}
 			device->SetVertexShaderConstantF(252, &light[0][0], 4);
 		}
 		// 2026-10-28 (Conor, streaks with cloth on): c248-c251, the camera's inverse projection the caster places each tuft with, written
@@ -247,9 +270,10 @@ namespace GrassShadows {
 		if (oldVS) oldVS->Release();
 		if (oldPS) oldPS->Release();
 		for (unsigned i = 0; i < sizeof(kStates) / sizeof(kStates[0]); i++) if (saved[i] != want[i]) device->SetRenderState(kStates[i], saved[i]);
-		device->SetVertexShaderConstantF(252, &view[0][0], 4);
+		if (viewSaved) device->SetVertexShaderConstantF(252, &view[0][0], 4);
 		if (projSaved) device->SetVertexShaderConstantF(248, &proj[0][0], 4);
 		if (SpotMode) device->SetVertexShaderConstantF(13, &spotSaved[0][0], 6);
+		if (bendSavedOk) device->SetVertexShaderConstantF(0, &bendSaved[0][0], 2);
 		return hr;
 	}
 

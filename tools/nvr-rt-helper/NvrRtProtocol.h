@@ -26,13 +26,13 @@
 #include <stddef.h>   // offsetof (protocol 9's layout check)
 
 #define NVR_RT_MAGIC            0x54525256u   // 'VRRT'
-#define NVR_RT_PROTOCOL_VERSION 9u            // 9 (2026-11-07, ptaaa-omm): opacity micromaps (NvrRtShared::opacityMicromaps, NVR -> helper, was pad4; the helper's omm* counters after it: NvrRtOmm.inl); 8 (2026-11-07, one bump for two teams): rtgap-tessblas: displaced geometry (NVR_RT_OP_DISPLACE_PARAMS / _SOURCE / _DATA, instance flag bits 8-31: NvrRtDisplace below); rtgap-textures: real textures block-compressed on the GPU route (NvrRtShared::textureImage = up to 4 transfer images, a byte each, picked by the op's VkFormat; NVR_RT_TEX_SWIZZLE_GR in NvrRtTextureOp::levels); 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
+#define NVR_RT_PROTOCOL_VERSION 10u           // 10 (2026-11-19, Phase 3B): 64 shaders (shaderFailures widened to uint64_t), 12 passes per frame for 3-pass PT split; 9 (2026-11-07, ptaaa-omm): opacity micromaps (NvrRtShared::opacityMicromaps, NVR -> helper, was pad4; the helper's omm* counters after it: NvrRtOmm.inl); 8 (2026-11-07, one bump for two teams): rtgap-tessblas: displaced geometry (NVR_RT_OP_DISPLACE_PARAMS / _SOURCE / _DATA, instance flag bits 8-31: NvrRtDisplace below); rtgap-textures: real textures block-compressed on the GPU route (NvrRtShared::textureImage = up to 4 transfer images, a byte each, picked by the op's VkFormat; NVR_RT_TEX_SWIZZLE_GR in NvrRtTextureOp::levels); 7 (2026-11-07): real textures (set 1, NVR_RT_OP_TEXTURE / _SLOT_TEXTURES, the -tex staging block); 2 (2026-10-28): instance records + the geometry data (bindings 10, 11); 3 (2026-10-29): 32 shared images; 4 (2026-10-30): 32 shaders; 5 (2026-11-02): 48 shared images; 6 (2026-11-07): the scratch store (binding 20, NvrRtShared::scratchMB)
 #define NVR_RT_FRAME_RING       4u            // frame records; NVR waits for consumedFrame before reusing one
 #define NVR_RT_MAX_IMAGES       64u           // (protocol 7: 64, was 48: 46 in use with every RT effect, the path tracer was left out)           // shared images, registered at setup (index 0 is the geometry arena); 16 was too few with all four RT effects (~20), 32 with the reference path tracer (31: every user's Setup registers, on or off; 2026-11-02)
-#define NVR_RT_MAX_SHADERS      32u           // trace shaders (.spv paths), registered any time (16 until 2026-10-30: the four RT strands used 15)
+#define NVR_RT_MAX_SHADERS      64u           // (protocol 10: 64, was 32: 30 used before 3-pass PT split) trace shaders (.spv paths), registered any time
 #define NVR_RT_MAX_OPS          2048u         // geometry operations per frame
 #define NVR_RT_MAX_INSTANCES    32768u        // scene instances per frame
-#define NVR_RT_MAX_PASSES       8u            // trace passes per frame
+#define NVR_RT_MAX_PASSES       12u           // (protocol 10: 12, was 8: room for 3-pass PT split + cache + emissive + hybrid passes) trace passes per frame
 #define NVR_RT_PASS_IMAGES      8u            // images bound to one pass (bindings 2..9) in NvrRtPass::images
 // UNOFFICIAL 2026-10-30 (rt-ao-sky: GI merged into the AO pass): up to 4 more images (8..11) at bindings 12..15, their indices as
 // bytes in NvrRtPass::extraImages (the old pad word: same layout, protocol 3). A helper older than this skips a pass with more than 8.
@@ -143,6 +143,9 @@ inline float NvrRtRoughOf(uint32_t k) { return (float)(k * k) / 49.0f; }
 // 0.5 unit off what they lie on): shadow, AO and visibility rays pass them (RtAlpha.glsl rtAlphaPassShadow), every other ray sees them.
 // A value in the instances only: the protocol's layout is unchanged (an older helper passes the custom index through as it is).
 #define NVR_RT_CUSTOM_DECAL         0x4u
+// UNOFFICIAL 2026-11-19: bit 3 = moving actor / player instance (mask NVR_RT_MASK_ACTOR / NVR_RT_MASK_PLAYER): lets RtLampTraceMany /
+// RtLampTraceRestir detect a person blocker directly on the committed shadow hit with zero extra shadow rays.
+#define NVR_RT_CUSTOM_ACTOR         0x8u
 #define NVR_RT_ALPHA_SLOT_SIZE      64u
 #define NVR_RT_ALPHA_ATLAS_SLOTS    32u       // a row (and rows): 2048 x 2048 texels, 1024 slots
 
@@ -385,8 +388,7 @@ struct NvrRtShared {
 	volatile uint64_t	geometryBytes;       // their structures
 	volatile uint32_t	lastInstances;       // in the last scene build
 	volatile uint32_t	failedOps;           // build ops refused (bad sizes, no memory) since start
-	volatile uint32_t	shaderFailures;      // bitmask: shaders that did not load / compile
-	volatile uint32_t	pad3;
+	volatile uint64_t	shaderFailures;      // (protocol 10: 64-bit bitmask for NVR_RT_MAX_SHADERS = 64) shaders that did not load / compile
 	char				message[512];        // the last status line, NUL-terminated (the helper's log has them all)
 
 	// ---- written by NVR
@@ -432,5 +434,6 @@ static_assert(sizeof(NvrRtPass) == 580, "NvrRtPass layout");	// (protocol 5: + e
 static_assert(sizeof(NvrRtInstanceRecord) == 32, "NvrRtInstanceRecord layout");
 static_assert(sizeof(NvrRtFrame) % 8 == 0, "NvrRtFrame layout");
 static_assert(sizeof(NvrRtShared) % 8 == 0, "NvrRtShared layout");
+static_assert(offsetof(NvrRtShared, shaderFailures) % 8 == 0, "NvrRtShared::shaderFailures 8-byte alignment");
 static_assert(offsetof(NvrRtShared, ommBuilt) % 8 == 0, "NvrRtShared layout (protocol 9: the same offsets in the 32-bit game and the 64-bit helper)");
 #endif

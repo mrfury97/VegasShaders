@@ -5,7 +5,6 @@
 #include "AvgLuma/AvgLuma.h"
 #include "SkyView/SkyView.h"
 #include "AmbientLight/AmbientLight.h"
-#include "BloodLens/BloodLens.h"
 #include "Bloom/Bloom.h"
 #include "BloomLegacy/BloomLegacy.h"
 #include "Cinema/Cinema.h"
@@ -47,7 +46,6 @@
 #include "Dream/Dream.h"	// "fun" trip look, off by default (from the author's DreamSim)
 #include "Reflections/Reflections.h"
 #include "VolumetricClouds/VolumetricClouds.h"
-#include "BloodFlow/BloodFlow.h"
 #include "DitherBuster/DitherBuster.h"
 #include "SMAA/SMAA.h"
 #include "FXAA/FXAA.h"

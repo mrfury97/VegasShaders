@@ -91,7 +91,7 @@ float ClothTri(float c) {	// 0..1, period 1, smooth at the turns
 static const float ClothBillowIn = 1.5f;
 
 // Mask 5 (worn clothing by its own mesh) alone; mask 6 (still cloth) shares only its stream weight (ClothMask).
-bool ClothIsMask5() { return ClothA.y > 4.5f && ClothA.y < 5.5f; }
+bool ClothIsMask5() { return ClothA.x > 0.0f && ClothA.y > 4.5f && ClothA.y < 5.5f; }
 // The billow's direction: mask 5 away from the wearer's axis (out5), mask 6 along the normal x its side (out5.x), else the normal.
 float3 ClothBillowDir(float3 n, float3 out5) {
     return ClothA.y > 5.5f ? n * (out5.x < 0.0f ? -1.0f : 1.0f) : (ClothIsMask5() ? out5 : n);

@@ -1,5 +1,6 @@
 // UNOFFICIAL 2026-11-01: the session header, live changes, heartbeat, exit / crash summary and the frame journal (SessionLog.h).
 #include "SessionLog.h"
+#include "TestTools.h"	// NVR_TEST_TOOLS (CrashTest, StallTest)
 #include "FrameTimeStats.h"
 #include "DxvkCompute.h"
 #include "Diagnostics.h"
@@ -975,6 +976,7 @@ void SessionLog::OnFrame() {
 		const bool on = TheSettingManager->GetSettingI("Main.Develop.Main", "FrameJournal") != 0;
 		if (on != FrameJournal::On) Logger::Log("FJ frame journal %s (%u of %u lines used)", on ? "ON" : "off", FrameJournal::Lines, FrameJournal::Cap);
 		FrameJournal::On = on;
+#if NVR_TEST_TOOLS	// 2026-11-17 (security review 2): development builds only; a downloaded settings file could switch both on in a release
 		// 2026-11-04 [Main.Develop.Main] CrashTest: a crash on purpose, to check the CRASH lines (inside the effects stage)
 		if (const int crash = TheSettingManager->GetSettingI("Main.Develop.Main", "CrashTest")) {
 			Logger::Log("SESSION CrashTest %d: crashing the game on purpose now", crash);
@@ -992,6 +994,7 @@ void SessionLog::OnFrame() {
 			}
 			lastStallTest = stall;
 		}
+#endif
 		FlushChanges(false);
 		{	// UNOFFICIAL 2026-11-12 (memleak): one warning when the address space gets tight (3000 MB of a large-address-aware game's 4096;
 			// three quarters of whatever the process has otherwise). The game's own out-of-memory loop starts near 3.2-3.3 GB.
@@ -1175,7 +1178,29 @@ namespace {
 		unsigned samples = 0;
 		struct Spot { UINT_PTR eip; unsigned count; } spots[8] = {};
 		bool toldOutOfMemory = false;	// (2026-11-12 memleak) the "STALL cause" line went out for this stall
+		bool unfocused = false;			// UNOFFICIAL 2026-11-21: window lost focus / overlay over game when stall fired
+		char fgExe[64] = "";
 	};
+
+	void StallForegroundExe(char* out, size_t size) {
+		if (!out || !size) return;
+		out[0] = '\0';
+		HWND fg = GetForegroundWindow();
+		if (!fg) { strcpy_s(out, size, "(none)"); return; }
+		DWORD pid = 0;
+		GetWindowThreadProcessId(fg, &pid);
+		if (!pid) { strcpy_s(out, size, "(unknown)"); return; }
+		HANDLE proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+		if (!proc) { strcpy_s(out, size, "(protected)"); return; }
+		char path[MAX_PATH] = "";
+		DWORD len = sizeof(path);
+		if (QueryFullProcessImageNameA(proc, 0, path, &len) && len > 0) {
+			const char* base = strrchr(path, '\\');
+			strncpy_s(out, size, base ? base + 1 : path, _TRUNCATE);
+		}
+		else strcpy_s(out, size, "(unknown)");
+		CloseHandle(proc);
+	}
 
 	ULONGLONG StallThreadCpu() {
 		FILETIME c, e, k, u;
@@ -1232,6 +1257,8 @@ namespace {
 
 	void StallReport(StallState& s, double ms, bool final) {
 		char stages[400], memory[400], extra[600], where[MAX_PATH + 32], stack[1600] = "";
+		char focusTag[96] = "";
+		if (s.unfocused) sprintf_s(focusTag, " (UNFOCUSED, foreground=%s)", s.fgExe[0] ? s.fgExe : "?");
 		StallStagesText(stages, sizeof(stages));
 		StallMemoryText(memory, sizeof(memory));
 		StallExtraText(extra, sizeof(extra));
@@ -1243,8 +1270,8 @@ namespace {
 			unsigned best = 0;
 			for (unsigned i = 1; i < 8; i++) if (s.spots[i].count > s.spots[best].count) best = i;
 			if (s.spots[best].count) StallModuleText(s.spots[best].eip, where, sizeof(where)); else strcpy_s(where, "(no sample)");
-			Logger::Log("STALL over after %.1f s (frame %ld, %s): the render thread used %.0f ms of CPU in it (%.0f %%), %lu page faults; most of %u samples at %s "
-				"(%s, %u times) | %s", ms / 1000.0, (long)s.frame, s.inRender ? "inside the game frame" : "between game frames", cpuMs, ms > 0 ? 100.0 * cpuMs / ms : 0.0,
+			Logger::Log("STALL over after %.1f s (frame %ld, %s%s): the render thread used %.0f ms of CPU in it (%.0f %%), %lu page faults; most of %u samples at %s "
+				"(%s, %u times) | %s", ms / 1000.0, (long)s.frame, s.inRender ? "inside the game frame" : "between game frames", focusTag, cpuMs, ms > 0 ? 100.0 * cpuMs / ms : 0.0,
 				(unsigned long)(faults - s.faultsStart), s.samples, where, s.spots[best].count ? StallKind(s.spots[best].eip) : "-", s.spots[best].count, memory);
 			return;
 		}
@@ -1257,9 +1284,9 @@ namespace {
 			if (i) strcat_s(stack, ", ");
 			strncat_s(stack, entry, _TRUNCATE);
 		}
-		Logger::Log("STALL: the render thread has not finished a game frame for %.1f s (frame %ld, %s; stages: %s) | now in %s: %s | callers (a stack scan, newest first): "
+		Logger::Log("STALL: the render thread has not finished a game frame for %.1f s (frame %ld, %s%s; stages: %s) | now in %s: %s | callers (a stack scan, newest first): "
 			"%s | CPU used in the stall %.0f ms (%.0f %%: %s), page faults %lu | %s%s%s", ms / 1000.0, (long)s.frame,
-			s.inRender ? "inside the game frame (RenderHook)" : "BETWEEN game frames: the game's update, Present, or a pause", stages, where, eip ? StallKind(eip) : "?",
+			s.inRender ? "inside the game frame (RenderHook)" : "BETWEEN game frames: the game's update, Present, or a pause", focusTag, stages, where, eip ? StallKind(eip) : "?",
 			count ? stack : "(none found)", cpuMs, ms > 0 ? 100.0 * cpuMs / ms : 0.0, ms > 0 && cpuMs < 0.2 * ms ? "it waits" : "it computes", (unsigned long)(faults - s.faultsStart),
 			memory, extra[0] ? " | " : "", extra);
 		// UNOFFICIAL 2026-11-12 (memleak): a stall inside the game's out-of-memory routine says so in plain words (once a stall)
@@ -1298,15 +1325,19 @@ namespace {
 				continue;
 			}
 			if (ms < 1000.0 || last == 0) continue;
-			// not a stall: a loading screen, the game minimised or behind another window (the game pauses its loop there)
 			if (InterlockedCompareExchange(&StallLoading, 0, 0)) continue;
-			if (GameWindow && (IsIconic(GameWindow) || GetForegroundWindow() != GameWindow)) continue;
+			// UNOFFICIAL 2026-11-21: still capture unfocused hangs inside RenderHook (at 1 s) or between frames/Present (single sample at 5 s)
+			// so overlay/Alt-Tab/DXVK-Present freezes are no longer hidden by the foreground check.
+			const bool inRender = InterlockedCompareExchange(&StallInRender, 0, 0) != 0;
+			const bool unfocused = GameWindow && (IsIconic(GameWindow) || GetForegroundWindow() != GameWindow);
+			if (unfocused && !inRender && ms < 5000.0) continue;
 			if (stalls >= 40) continue;
 			stalls++;
-			s.on = true; s.frame = frame; s.inRender = InterlockedCompareExchange(&StallInRender, 0, 0) != 0; s.startQpc = last;
+			s.on = true; s.frame = frame; s.inRender = inRender; s.unfocused = unfocused; s.startQpc = last;
+			if (unfocused) StallForegroundExe(s.fgExe, sizeof(s.fgExe));
 			s.cpuStart = StallThreadCpu(); s.faultsStart = StallPageFaults();
 			StallReport(s, ms, false);
-			s.nextReportMs = 4000.0;
+			s.nextReportMs = (unfocused && !inRender) ? 1e12 : 4000.0;
 		}
 		return 0;
 	}

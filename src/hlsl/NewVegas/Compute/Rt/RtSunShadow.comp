@@ -80,6 +80,7 @@ void main() {
 
 	float result = 1.0;
 	float blocker = 0.0;	// 2026-10-31 Penumbra: the hit's distance along the sun ray (0: free, or not traced)
+	bool actorBlocker = false;	// UNOFFICIAL 2026-11-20: committed shadow blocker is a moving actor (NVR_RT_CUSTOM_ACTOR -> negative hitImage)
 	// the full-size pixel this traced pixel stands for (the same one at full resolution)
 	const ivec2 source = ivec2((vec2(pixel) + 0.5) * p.full.xy * p.size.zw);
 	float linear01 = imageLoad(depthImage, source).r;
@@ -187,23 +188,24 @@ void main() {
 			const bool nearest = p.alpha.w > 1.5;
 			bool hit;
 			float hitT = 0.0;
+			uint hitCustom = 0u;
 			// UNOFFICIAL 2026-11-12 LeafTransmission / LeafSoftEdges: `through` is the sunlight left behind what the ray met (0 on the old
 			// paths: a hit is black). Both keys off (origin.w 0, cloudCentre.w 0): the old queries below, untouched.
 			float through = 0.0;
 			if (testAlpha && (p.origin.w > 0.0 || p.cloudCentre.w > 0.5)) {
 				through = rtSunFoliageTrace(start, toSun, p.bias.w, uint(p.range.z) & 0xFFu, rtHiddenNear(start, p.origin.xyz), p.origin.w,
-					p.cloudCentre.w > 0.5, p.alpha.y, hitT);
+					p.cloudCentre.w > 0.5, nearest, p.alpha.y, hitT, hitCustom);
 				// the coin toss (cloudLight.w): the pixel is lit or blocked, lit for `through` of the frames (its own noise, not the disc's)
 				if (p.cloudLight.w > 0.5 && through > 0.0 && through < 1.0)
 					through = fract(52.9829189 * fract(0.06711056 * float(pixel.x + 17) + 0.00583715 * float(pixel.y + 59)) + 0.754877666 * p.alpha.y) < through ? 1.0 : 0.0;
 				hit = through < 1.0;
-				if (!hit) hitT = 0.0;
+				if (!hit) { hitT = 0.0; hitCustom = 0u; }
 			}
 			else
 			// (2026-11-07 ptaaa-firstperson) a ray from within arm's reach of the eye (the first-person view model's pixels, a counter you
 			// stand at) passes over the hidden first-person body (RtHidden.glsl): the third-person head and arms round the eye shadowed the gun
 			if (rtHiddenNear(start, p.origin.xyz))
-				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, nearest ? kRtClosest : kRtAnyHit, hitT);
+				hit = rtBlockedPassHidden(start, toSun, 0.0, p.bias.w, uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), testAlpha, nearest ? kRtClosest : kRtAnyHit, hitT, hitCustom);
 			else {
 			rayQueryInitializeEXT(q, scene, (nearest ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 				uint(p.range.z) & (testAlpha ? 0xFFu : 0xEFu), start, 0.0, toSun, p.bias.w);
@@ -214,10 +216,13 @@ void main() {
 						rayQueryGetIntersectionBarycentricsEXT(q, false)))
 					rayQueryConfirmIntersectionEXT(q);
 			hit = rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
-			if (hit) hitT = rayQueryGetIntersectionTEXT(q, true);
+			if (hit) {
+				hitT = rayQueryGetIntersectionTEXT(q, true);
+				hitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+			}
 			}
 			state = hit ? 0.6 : 0.8;
-			if (hit) blocker = max(hitT, 1.0);
+			if (hit) { blocker = max(hitT, 1.0); actorBlocker = (hitCustom & NVR_RT_CUSTOM_ACTOR) != 0u; }
 			if (debug == 1)
 				result = hit ? clamp(hitT / 4096.0, 0.0, 1.0) : 1.0;
 			else
@@ -246,7 +251,8 @@ void main() {
 		imageStore(visibilityImage, pixel, vec4(linear01 > 0.0 && linear01 < 0.9999 ? cloudTransmittance(position) : 1.0, 0.0, 0.0, 0.0));
 		return;
 	}
-	if (p.cloud.x > 0.0 && debug == 0 && linear01 > 0.0 && linear01 < 0.9999) {
+	// UNOFFICIAL 2026-11-19: skip normal reload & 4 cloud texture fetches when pixel is already in full RT shadow (result <= 0)
+	if (p.cloud.x > 0.0 && debug == 0 && result > 0.0 && linear01 > 0.0 && linear01 < 0.9999) {
 		const vec3 position = p.origin.xyz + (p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0)) * viewZ;
 		const vec3 n = imageLoad(normalImage, source).xyz * 2.0 - 1.0;
 		const vec3 normal = normalize(normalize(p.right.xyz) * n.x + normalize(p.up.xyz) * n.y + normalize(p.forward.xyz) * n.z);
@@ -254,5 +260,8 @@ void main() {
 		if (facing > 0.0) result *= mix(1.0, cloudTransmittance(position), p.cloud.x * facing);
 	}
 	imageStore(visibilityImage, pixel, vec4(debug == 2 ? state : result, 0.0, 0.0, 0.0));
-	if (p.alpha.w > 0.5) imageStore(hitImage, pixel, vec4(min(blocker, 60000.0), 0.0, 0.0, 0.0));
+	if (p.alpha.w > 0.5) {
+		const float hitOut = min(blocker, 60000.0);
+		imageStore(hitImage, pixel, vec4(actorBlocker ? -hitOut : hitOut, 0.0, 0.0, 0.0));
+	}
 }

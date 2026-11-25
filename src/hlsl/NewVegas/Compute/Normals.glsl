@@ -64,3 +64,36 @@ vec3 viewNormalFromTaps(vec2 uv, vec2 texel, mat4 invProjection, float farZ,
     vec3 pD2 = nvrPositionFromPost(uv + vec2(0.0, 2.0) * texel, d2.y, invProjection);
     return nvrNormal(pC, pL1, pL2, pR1, pR2, pU1, pU2, pD1, pD2);
 }
+
+// Inline CapturedNormals merge (mirrors core/CapturedNormals.h MergeIntoNormals):
+// Must be called under uniform row0.w > 0.5 BEFORE any per-pixel early return so dFdx/dFdy execute in uniform quad control flow.
+bool nvrTryCapturedNormal(vec2 s, float z, float farZ, vec4 c, vec4 m, float vmRaw,
+                          vec4 tol, vec4 mergeView, vec4 row0, vec4 row1, vec4 row2,
+                          out vec3 outEncoded) {
+    bool vm = mergeView.z > 0.0 && (mergeView.w > 0.5 ? vmRaw > 0.0 : vmRaw < 0.99999);
+    vec3 vp = vec3((s.x * 2.0 - 1.0) * mergeView.x, (1.0 - s.y * 2.0) * mergeView.y, 1.0) * z;
+    if (vm) vp.xy *= mergeView.z;
+    vec3 fn = cross(dFdy(vp), dFdx(vp));
+    fn = normalize(fn + vec3(0.0, 0.0, 1.0e-20));
+    if (dot(fn, vp) > 0.0) fn = -fn;
+    if (c.a <= 0.99 || z >= farZ * 0.99) return false;
+    float d = length(vp);
+    float distTol = vm ? (d * max(tol.x, 0.12) + max(tol.y, 4.0)) : (d * tol.x + tol.y);
+    if (abs(c.b - d) > distTol) return false;
+    float grass = 0.0;
+    if (row1.w > 0.5) {
+        if (row2.w < 0.5) grass = (m.a > 0.5 && m.r > 0.5 && abs(m.g - 0.5) < 0.1) ? 1.0 : 0.0;
+        else if (row2.w < 1.5) grass = (m.r > 0.5 && abs(m.g - 4.5) < 0.1) ? 1.0 : 0.0;
+        else grass = (m.r > 0.5 && (abs(m.g - 4.5) < 0.1 || (m.g > 31.99 && m.g < 1024.0))) ? 1.0 : 0.0;
+    }
+    vec3 n = vec3(c.rg, 1.0 - abs(c.r) - abs(c.g));
+    float t = clamp(-n.z, 0.0, 1.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    n = normalize(n);
+    vec3 nv = normalize(n.x * row0.xyz + n.y * row1.xyz + n.z * row2.xyz);
+    if (dot(nv, fn) > tol.z || grass > 0.5 || vm) {
+        outEncoded = nv * 0.5 + 0.5;
+        return true;
+    }
+    return false;
+}

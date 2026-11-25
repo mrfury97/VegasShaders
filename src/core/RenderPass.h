@@ -39,6 +39,7 @@ public:
 	static inline int LayerMode = 0;
 	// UNOFFICIAL 2026-10-31 BackDepth (BackDepth.h): every caster's cull mode turned round, so only its back faces draw
 	static inline bool FlipCull = false;
+	static inline bool FirstPerson = false;	// UNOFFICIAL 2026-11-21: true during RenderViewModelShadowMap (skip cloth/plant displacement)
 	static inline RenderPass* LayerTreePass = nullptr;
 	static inline std::unordered_map<NiGeometry*, const void*> LayerGeoRef;
 	static inline std::unordered_set<const void*>* LayerMovingRefs = nullptr;

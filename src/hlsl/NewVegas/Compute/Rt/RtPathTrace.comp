@@ -463,7 +463,7 @@ void LoadCostKeys() {
 }
 // The camera ray's point in the pixel (screen uv): the random sub-pixel point (rnd) as before, or with texel 23.x the jittered centre
 vec2 CameraUV(ivec2 pixel, vec2 rnd) { return gCameraJitter ? (vec2(pixel) + 0.5) * p.size.zw + p.rect.xy : (vec2(pixel) + rnd) * p.size.zw; }
-int RestirRaysMode() { return int(clamp(gRestirRays, 0.0, 3.0) + 0.5); }
+int RestirRaysMode() { return int(clamp(gRestirRays, 0.0, 4.0) + 0.5); }
 float GlassMode() { return MatKeys().x; }
 float Luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
 
@@ -529,8 +529,20 @@ vec3 GlassShadow(uint instance, uint prim, mat3 toScene, vec3 dir, vec2 bary) {
 // the last Visible ray (1 when it met none; Direct multiplies the sun and the lamp by it). A pane's triangle reported twice (the API allows
 // a duplicate any-hit) counts once (the last two crossings are remembered).
 vec3 gShadowTint = vec3(1.0);
+// UNOFFICIAL 2026-11-20: committed shadow blocker info (zero extra rays) + primary-hit actor-blocker flag & decoupled sun output
+uint gShadowHitCustom = 0u;
+float gShadowHitT = 0.0;
+bool gFirstActorShadow = false;
+vec3 gFirstSunDiff = vec3(0.0);
+float gFirstSunVis = 1.0, gFirstSunHitT = 0.0;
 bool Visible(vec3 from, vec3 dir, float tMax) {
 	gShadowTint = vec3(1.0);
+	gShadowHitCustom = 0u;
+	gShadowHitT = 0.0;
+	if (!(tMax > 0.0)) return true;   // UNOFFICIAL 2026-11-19: skip zero/negative-length shadow rays
+#ifndef RT_NO_REAL_TEXTURES
+	rtConeWidth = 0.0;   // UNOFFICIAL 2026-11-19: shadow rays must not inherit prior hit's cone width (OMM / sharp cutout alpha)
+#endif
 	// (merge 2026-11-07) a near-eye ray (ptaaa-firstperson) returns untinted: glass panes within arm's reach of the eye are rare
 	// (2026-11-07 ptaaa-firstperson) a ray from (the view model, a surface within arm's reach) or toward (the flashlight, the Pip-Boy
 	// light: lamps at the eye; the lamp lies ~16 units past tMax) a point near the eye passes over the hidden first-person body
@@ -539,7 +551,8 @@ bool Visible(vec3 from, vec3 dir, float tMax) {
 	// each with its own alpha test were too much code for the AMD driver's pipeline build). Near the eye: rtBlockedPassHidden's two queries
 	// (kRtAnyHit, mask 0xFF: the opaque 0x8F, then 0x70 every candidate tested, the hidden body passed over), as before; else one query
 	// over everything, glass tinting, cut-outs tested. Same answers as the two functions it replaces.
-	const bool near = rtHiddenPassOver(from, from + dir * (tMax + 16.0), vec3(0.0));
+	// UNOFFICIAL 2026-11-19: skip dual NoOpaqueEXT hidden-body pass whenever this frame has no hidden body (gOneCameraQuery > 0.5).
+	const bool near = !(gOneCameraQuery > 0.5) && rtHiddenPassOver(from, from + dir * (tMax + 16.0), vec3(0.0));
 	if (near && !(tMax > 0.0)) return true;
 	const bool glass = !near && GlassMode() > 0.5;
 	uint seen0 = 0xFFFFFFFFu, seen1 = 0xFFFFFFFFu;
@@ -565,7 +578,11 @@ bool Visible(vec3 from, vec3 dir, float tMax) {
 			if ((near && !AlphaTest()) || rtAlphaPassShadow(ci, instance, prim, rayQueryGetIntersectionBarycentricsEXT(s, false)))
 				rayQueryConfirmIntersectionEXT(s);
 		}
-		if (rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionTriangleEXT) return false;
+		if (rayQueryGetIntersectionTypeEXT(s, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
+			gShadowHitT = rayQueryGetIntersectionTEXT(s, true);
+			gShadowHitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(s, true);
+			return false;
+		}
 	}
 	return true;
 }
@@ -618,8 +635,8 @@ vec3 HitNormal(uint instance, uint prim, mat4x3 toScene, vec3 d) {
 // and a path's throughput the physical BRDF x cos / pdf (diffuse alone: x albedo, as before).
 bool Specular() { return (uint(p.accum.w) & 128u) != 0u; }
 // (2026-11-07 ptaaa-materials) kind: the material model (HitSurface from the record, ScreenHit from the MaterialBuffer's class); for glass
-// the albedo is the pane's tint (GlassTint)
-struct Surface { vec3 albedo; float rough; float metal; uint kind; };
+// the albedo is the pane's tint (GlassTint). (2026-11-19 Finding 4.2) f0: non-metal head-on reflectance (0.04 default, or the deferred G-buffer's FD_SV_F0)
+struct Surface { vec3 albedo; float rough; float metal; float f0; uint kind; };
 const uint kKindPlain = 0u, kKindGlass = 1u, kKindFoliage = 2u, kKindSkin = 3u, kKindCloth = 4u, kKindHair = 5u;   // (hair: 2026-11-10, a traced TINTED record with texel 30.x's bit 2)
 // (2026-11-11 PTGlassSurface) a glass pane's surface share (Path, only with the key > 0): a THIN two-sided sheet. The game draws a blended
 // pane from both faces, so a lamp right behind it lights it; facing the viewer only, the share stayed dark there. It takes the thin
@@ -671,8 +688,8 @@ float SheenAlbedoBound(float nv) { return 0.05 + 0.7 * exp(-1.9 * clamp(nv, 0.0,
 // the hair's own colour, between 0.4 % and 4 %: a dark head keeps a dark, coloured sheen, a blond one nearly the plain highlight.
 vec3 FresnelF0(Surface s) {
 	if (s.kind == kKindHair) return clamp(s.albedo, vec3(0.004), vec3(0.04));
-	return mix(vec3(s.kind == kKindSkin ? 0.028 : 0.04), s.albedo, s.metal);
-}   // (skin: Skin.hlsl SKIN_F0)
+	return mix(vec3(s.kind == kKindSkin ? 0.028 : s.f0), s.albedo, s.metal);
+}   // (skin: Skin.hlsl SKIN_F0; plain: 0.04 or ScreenHit's decoded FD_SV_F0)
 // (2026-11-07 ptaaa-denoiser) the specular albedo PTDenoiseSplit divides the specular light by: Karis' fit of the split-sum environment
 // BRDF (as DlssRRGuides.comp / Shaders/Includes/PBR.hlsl EnvBRDFApprox), clamped to 1. Only a demodulation factor (the show pass
 // multiplies the same stored value back), so its accuracy changes how much texture the denoiser sees, never the light.
@@ -698,9 +715,20 @@ float SpecE(float nv, float rough) {
 	const vec2 f = vec2(clamp(nv, 0.0, 1.0) * 31.0, clamp(rough, 0.0, 1.0) * 15.0);
 	const ivec2 i = min(ivec2(f), ivec2(30, 14));
 	const vec2 w = f - vec2(i);
-	float e[4];   // (merge 2026-11-07, the size fix: one EnergyAt site) e00, e10, e01, e11
-	for (int c = 0; c < 4; c++) e[c] = EnergyAt((i.y + (c >> 1)) * 32 + i.x + (c & 1));
-	const float e00 = e[0], e10 = e[1], e01 = e[2], e11 = e[3];
+	// UNOFFICIAL 2026-11-19: eliminate e[4] scratch array and halve imageLoads when i.x is even (adjacent pair shares one RG texel)
+	const int row0 = i.y * 16 + (i.x >> 1);
+	const vec2 t0 = imageLoad(lampImage, ivec2(32 + row0, kFrameRow)).rg;
+	const vec2 t1 = imageLoad(lampImage, ivec2(32 + row0 + 16, kFrameRow)).rg;
+	float e00, e10, e01, e11;
+	if ((i.x & 1) == 0) {
+		e00 = t0.x; e10 = t0.y;
+		e01 = t1.x; e11 = t1.y;
+	} else {
+		const vec2 t0b = imageLoad(lampImage, ivec2(33 + row0, kFrameRow)).rg;
+		const vec2 t1b = imageLoad(lampImage, ivec2(33 + row0 + 16, kFrameRow)).rg;
+		e00 = t0.y; e10 = t0b.x;
+		e01 = t1.y; e11 = t1b.x;
+	}
 	return max(mix(mix(e00, e10, w.x), mix(e01, e11, w.x), w.y), 0.05);
 }
 
@@ -731,17 +759,23 @@ vec3 BrdfPi(Surface s, vec3 n, vec3 v, vec3 l) {
 	float a = max(s.rough * s.rough, 0.002), a2 = a * a;
 	// (2026-11-12 ptbump) PTRoughFresnel: a rough non-metal's grazing reflectance (F90) below 1; key 0: F90 = 1, the line as it was.
 	// Not skin and not hair (their rim of light at low angles is their look, and their roughness is their own shaders' value)
+	const vec3 F0 = FresnelF0(s);
 	const vec3 f90 = gRoughFresnel > 0.0 && s.kind != kKindSkin && s.kind != kKindHair ?
-		mix(vec3(1.0), max(vec3(1.0 - s.rough), FresnelF0(s)), gRoughFresnel * (1.0 - clamp(s.metal, 0.0, 1.0))) : vec3(1.0);
-	vec3 F = FresnelF0(s) + (f90 - FresnelF0(s)) * pow(1.0 - vh, 5.0);
-	vec3 spec = F * (GgxD(nh, a2) * SmithG1(nl, a2) * SmithG1(nv, a2) / (4.0 * nl * nv));
-	spec *= 1.0 + FresnelF0(s) * (1.0 / SpecE(nv, s.rough) - 1.0);   // (2026-11-07) the light of multiple scattering
+		mix(vec3(1.0), max(vec3(1.0 - s.rough), F0), gRoughFresnel * (1.0 - clamp(s.metal, 0.0, 1.0))) : vec3(1.0);
+	const float omv = 1.0 - vh, omv2 = omv * omv;
+	vec3 F = F0 + (f90 - F0) * (omv2 * omv2 * omv);
+	// UNOFFICIAL 2026-11-19: exact algebraic cancellation of PI and 4*nl*nv in PI * GgxD * SmithG1(nl) * SmithG1(nv) / (4*nl*nv)
+	const float dTerm = nh * nh * (a2 - 1.0) + 1.0;
+	const float visL = nl + sqrt(a2 + (1.0 - a2) * nl * nl);
+	const float visV = nv + sqrt(a2 + (1.0 - a2) * nv * nv);
+	vec3 specPi = F * (a2 / (dTerm * dTerm * visL * visV));
+	specPi *= 1.0 + F0 * (1.0 / SpecE(nv, s.rough) - 1.0);   // (2026-11-07) the light of multiple scattering
 	if (s.kind == kKindCloth) {   // (2026-11-07 ptaaa-materials) the sheen lobe on top, the diffuse giving up its share (the split: specular)
 		const vec3 sheen = clamp(MatSheen(), 0.0, 1.0) * sqrt(max(s.albedo, vec3(0.0)));
 		diffuse *= 1.0 - max(max(sheen.r, sheen.g), sheen.b) * SheenAlbedoBound(nv);
-		spec += sheen * (SheenD(nh, clamp(s.rough, 0.3, 1.0)) * SheenV(nl, nv));
+		specPi += 3.14159265 * sheen * (SheenD(nh, clamp(s.rough, 0.3, 1.0)) * SheenV(nl, nv));
 	}
-	gBrdfSpec = 3.14159265 * spec;   // (ptaaa-denoiser)
+	gBrdfSpec = specPi;   // (ptaaa-denoiser)
 	gBrdfAll = (gSpecOnly ? vec3(0.0) : diffuse * (1.0 - F)) + gBrdfSpec;
 	return gBrdfAll;
 }
@@ -1023,14 +1057,16 @@ const int kEmissiveRow = 50;   // RtEmissiveRow.h kRow (after the frame row)
 // is right (core\RtPathTrace.cpp CacheBaseWords / EmissiveBaseWords). (tools/nvr-rt-playground sized its reservoirs for the old 4 words a
 // pixel: its cache's first entries lay under the second reservoir set, each pass writing over the other's words.)
 const uint kEmMax = 128u, kEmTriangles = 65536u, kEmWords = 128u * 32u + 65536u;   // RtEmissiveRow.h kMax, kTrianglesMax, kScratchWords
-bool gScratchRestir = false, gScratchCache = false;
-uint gCacheBase = 0u, gCacheMask = 0u, gEmBase = 0u;
+const int kSplitBaseTexel = 300;   // UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass PT split scratch base (4096-word pages)
+bool gScratchRestir = false, gScratchCache = false, gScratchSplit = false, gScratchSunSplit = false;
+uint gCacheBase = 0u, gCacheMask = 0u, gEmBase = 0u, gSplitTempBase = 0u, gSplitPayloadBase = 0u, gSunSplitBase = 0u;
 int gEmCount = 0;
 void LoadScratchLayout() {
 	if (!LampImage()) return;
 	const uint total = uint(scratch.words.length());
 	const float pages = float(total / 4096u);   // (bases are in 4096-word pages: compared as floats first, no uint overflow)
-	const uint reservoirs = 12u * uint(max(p.size.x, 0.0)) * uint(max(p.size.y, 0.0));   // two sets of 6 words a pixel (ReservoirWord)
+	const uint pixels = uint(max(p.size.x, 0.0)) * uint(max(p.size.y, 0.0));
+	const uint reservoirs = 12u * pixels;   // two sets of 6 words a pixel (ReservoirWord)
 	const bool restir = (uint(p.accum.w) & 262144u) != 0u;
 	gScratchRestir = reservoirs <= total;
 	const vec2 c9 = FrameTexel(9), c12 = FrameTexel(12);
@@ -1047,6 +1083,33 @@ void LoadScratchLayout() {
 			gEmCount = PtCount(e22.x, int(kEmMax));
 		}
 	}
+	const vec2 s300 = FrameTexel(kSplitBaseTexel);
+	if (s300.x > 0.5 && s300.x <= pages) {
+		const uint base = uint(s300.x + 0.5) * 4096u;
+		const uint need = 22u * pixels;   // 6 words/px intermediate temporal reservoir + 16 words/px primary payload
+		if (base >= reservoirs && base + need <= total) {
+			gScratchSplit = true;
+			gSplitTempBase = base;
+			gSplitPayloadBase = base + 6u * pixels;
+		}
+	}
+	// UNOFFICIAL 2026-11-20: decoupled direct sun shadow buffer in scratch (3 words/px: vis+signedHitT, sunDiffDemod.rgb)
+	if (s300.y > 0.5 && s300.y <= pages) {
+		const uint base = uint(s300.y + 0.5) * 4096u;
+		const uint need = 3u * pixels;
+		if (base >= reservoirs && base + need <= total) {
+			gScratchSunSplit = true;
+			gSunSplitBase = base;
+		}
+	}
+}
+void StoreSunSplit(ivec2 px, vec3 albedo) {
+	if (!gScratchSunSplit) return;
+	const uint at = gSunSplitBase + 3u * (uint(px.y) * uint(p.size.x) + uint(px.x));
+	const vec3 sunDemod = min(max(gFirstSunDiff, vec3(0.0)) / max(albedo, vec3(0.02)), vec3(gDenoiseCeil));
+	scratch.words[at + 0u] = packHalf2x16(vec2(clamp(gFirstSunVis, 0.0, 1.0), clamp(gFirstSunHitT, -60000.0, 60000.0)));
+	scratch.words[at + 1u] = packHalf2x16(sunDemod.rg);
+	scratch.words[at + 2u] = packHalf2x16(vec2(sunDemod.b, 0.0));
 }
 int EmCount() { return gEmCount; }   // (hangfix: was the frame row's texel 22 .x, unchecked)
 uint EmBlock(int e) { return gEmBase + uint(e) * 32u; }
@@ -1221,15 +1284,18 @@ bool gRestirFirst = false;   // Direct() at the path's first hit, the picture vi
 int FrameParity() { return int(FrameTexel(7).y + 0.5) & 1; }
 
 // Lamp k's light at a surface point (colour x falloff x cos): false out of its reach or behind the surface
+// UNOFFICIAL 2026-11-19: cull range & backfacing lamps before loading colour texels, sqrt, LampFall, or FlashShape.
 bool LampAt(int k, vec3 hit, vec3 n, out vec3 light, out vec3 pos) {
-	vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
-	vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
+	const vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
 	pos = vec3(a, b.x);
 	light = vec3(0.0);
-	vec3 l = pos - hit;
-	const float dist = length(l), reach = b.y;
-	if (dist >= reach || dist < 1.0e-3) return false;
-	light = FlashShape(k, dist, reach, -l / dist, vec3(c, d.x) * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist)));   // (2026-11-11 FlashShape)
+	const vec3 l = pos - hit;
+	const float d2 = dot(l, l), reach = b.y, nlRaw = dot(n, l);
+	if (d2 >= reach * reach || d2 < 1.0e-6 || nlRaw <= 0.0) return false;
+	const float invD = inversesqrt(d2), dist = d2 * invD;
+	const vec3 dirL = l * invD;
+	const vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
+	light = FlashShape(k, dist, reach, -dirL, vec3(c, d.x) * (LampFall(dist / reach) * (nlRaw * invD) * LampSpot(k, -dirL)));   // (2026-11-11 FlashShape)
 	return dot(light, vec3(0.2126, 0.7152, 0.0722)) > 0.0;
 }
 // (ptaaa-emissive) a light sample: lamp >= 0 a lamp; em >= 0 instance em's triangle tri at bary; neither: none
@@ -1287,6 +1353,57 @@ void StoreReservoir(LSample y, float M, float W, float dist, vec3 n) {
 }
 void ClearReservoir() { scratch.words[ReservoirWord(FrameParity(), gPixel)] = 0u; }
 
+// UNOFFICIAL 2026-11-19 (Phase 3B): 3-pass PT split intermediate temporal reservoir (6 words/px) + primary payload (16 words/px)
+#if defined(PT_SPLIT_PRIMARY) || defined(PT_SPLIT_SPATIAL) || defined(PT_SPLIT_BOUNCE)
+const uint kSplitFlagHasSurface = 1u << 3u;
+const uint kSplitFlagDoBounce   = 1u << 4u;
+const uint kSplitFlagGeoSplit   = 1u << 5u;
+const uint kSplitFlagFirstBump  = 1u << 6u;
+const uint kSplitFlagContact    = 1u << 7u;
+const uint kSplitFlagGlowMark   = 1u << 8u;
+const uint kSplitFlagPane       = 1u << 9u;
+const uint kSplitFlagVisChecked = 1u << 10u;
+const uint kSplitFlagViewModel  = 1u << 11u;
+const uint kSplitFlagEmRestir   = 1u << 12u;
+const uint kSplitFlagActorShadow = 1u << 31u;   // UNOFFICIAL 2026-11-20: primary direct shadow ray blocked by NVR_RT_CUSTOM_ACTOR
+
+uint TempResWord(ivec2 px) { return gSplitTempBase + 6u * (uint(px.y) * uint(p.size.x) + uint(px.x)); }
+uint PayloadWord(ivec2 px) { return gSplitPayloadBase + 16u * (uint(px.y) * uint(p.size.x) + uint(px.x)); }
+uint PackVisTint(vec3 c) {
+	const uvec3 q = uvec3(clamp(c, vec3(0.0), vec3(1.0)) * 15.0 + 0.5);
+	return (q.r & 15u) | ((q.g & 15u) << 4u) | ((q.b & 15u) << 8u);
+}
+vec3 UnpackVisTint(uint bits) {
+	return vec3(float(bits & 15u), float((bits >> 4u) & 15u), float((bits >> 8u) & 15u)) * (1.0 / 15.0);
+}
+void StoreTempReservoir(LSample y, float M, float W, float dist, vec3 n) {
+	const uint at = TempResWord(gPixel);
+	const uint code = y.lamp >= 0 ? uint(y.lamp + 1) : y.em >= 0 ? 0x8000u | uint(y.em) : 0u;
+	scratch.words[at] = code | (uint(clamp(M, 0.0, 65535.0)) << 16);
+	scratch.words[at + 1u] = floatBitsToUint(W);
+	scratch.words[at + 2u] = floatBitsToUint(dist);
+	scratch.words[at + 3u] = packSnorm2x16(OctEncode(n));
+	scratch.words[at + 4u] = y.tri;
+	scratch.words[at + 5u] = packUnorm2x16(y.bary);
+}
+void ClearTempReservoir() { scratch.words[TempResWord(gPixel)] = 0u; }
+LSample CurSample(uint code, uint tri, vec2 bary) {
+	LSample y = NoSample();
+	if (code == 0u) return y;
+	if ((code & 0x8000u) != 0u) {
+		const int j = int(code & 0x7FFFu);
+		if (j < EmCount()) { y.em = j; y.tri = tri; y.bary = bary; }
+		return y;
+	}
+	const int k = int(code) - 1;
+	if (k >= 0 && k < LampCount()) y.lamp = k;
+	return y;
+}
+bool gSplitVisChecked = false;
+vec3 gSplitVisTint = vec3(1.0);
+bool gSplitWrotePayload = false;
+#endif
+
 // The direct light (lamps, PTEmissive's glow) leaving the first hit toward v (shadowed), by ReSTIR DI. k0: the lamp loop's pick (-1: none),
 // total / w0 its weights. Every target includes VISIBILITY (a light is only picked after a shadow ray from here says it is seen), so the
 // chosen sample needs no final ray. Three steps:
@@ -1337,7 +1454,8 @@ LSample OldSample(uint code, uint tri, vec2 bary) {
 // takes a picked neighbour as it takes a random one; fewer picks are thrown away by the plane / normal tests at edges.
 const int kCgnsTexel = 299;
 int RestirCgnsK() { return int(clamp(FrameTexel(kCgnsTexel).x, 0.0, 31.0) + 0.5); }
-int RestirCgnsPick(vec2 at, vec3 here, vec3 n, float dist, float radius, int want, int K, vec3 pe, vec3 pf, vec3 pr, vec3 pu,
+// UNOFFICIAL 2026-11-19: pre-filter CGNS candidates by normal & plane thresholds so top-K slots aren't wasted on rejected neighbours.
+int RestirCgnsPick(vec2 at, vec3 here, vec3 n, float dist, float radius, float minDot, float maxPlane, int want, int K, vec3 pe, vec3 pf, vec3 pr, vec3 pu,
 	out ivec2 picks[kRestirNeighbours]) {
 	float keys[kRestirNeighbours];
 	int got = 0;
@@ -1349,13 +1467,20 @@ int RestirCgnsPick(vec2 at, vec3 here, vec3 n, float dist, float radius, int wan
 		const float u = Rand();
 		const ivec2 px = ivec2(floor(at + r * vec2(cos(a), sin(a))));
 		if (any(lessThan(px, ivec2(0))) || any(greaterThanEqual(px, ivec2(p.size.xy)))) continue;
+#ifdef PT_SPLIT_SPATIAL
+		const uint w = TempResWord(px);
+#else
 		const uint w = ReservoirWord(FrameParity() ^ 1, px);
+#endif
 		if (scratch.words[w] == 0u) continue;   // no surface there last frame
-		const float oldDist = uintBitsToFloat(scratch.words[w + 2u]);
 		const vec3 oldN = OctDecode(unpackSnorm2x16(scratch.words[w + 3u]));
+		const float nd = dot(oldN, n);
+		if (nd < minDot) continue;
+		const float oldDist = uintBitsToFloat(scratch.words[w + 2u]);
 		const vec2 ouv = (vec2(px) + 0.5) / p.size.xy;
 		const vec3 oldPoint = pe + normalize(pf + pr * (2.0 * ouv.x - 1.0) - pu * (2.0 * ouv.y - 1.0)) * oldDist;
-		float c = max(dot(oldN, n), 0.0);
+		if (abs(dot(oldPoint - here, n)) > maxPlane) continue;
+		float c = nd;
 		c *= c; c *= c; c *= c;
 		const float h = exp(-length(oldPoint - here) / sc) * c;
 		if (!(h > 1.0e-8)) continue;
@@ -1369,16 +1494,12 @@ int RestirCgnsPick(vec2 at, vec3 here, vec3 n, float dist, float radius, int wan
 }
 vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float total, float w0) {
 	const float maxM = FrameTexel(10).x;
-	// (perf-ptcost) PTRestirDIRays (LoadCostKeys): 0 / 1 / 3 visibility in the targets (the shadow rays below; 0 and 3 skip the temporal
-	// ones on the same spot, 3 also the neighbours' MIS rays); 2 unshadowed targets + one final ray
+	// (perf-ptcost) PTRestirDIRays (LoadCostKeys): 0 / 1 / 3 visibility in the targets; 2 unshadowed + 1 final ray;
+	// UNOFFICIAL 2026-11-19 mode 4: RTXDI 2-ray visibility (1 canonical initial visibility ray + unshadowed reuse + 1 final visibility ray on non-canonical winner).
 	const int raysMode = RestirRaysMode();
-	gRestirVis = raysMode != 2;
-	// (perf-ptcost, PTRestirDIRays 3) the canonical candidates (the lamp, the emissive point) are streamed by their unshadowed weights and
-	// only the winner gets a shadow ray (one, not one each); occluded, the canonical reservoir holds no sample (M 1). Still a reservoir for
-	// the shadowed target: E[g(y) W] = sum_i w_i V_i g(y_i) / t_i = the integral of g x V (the weights' own normalisation, wSum / t). Host:
-	// the mean right, 0.6-0.7 rays a pixel fewer with emissive lights, but the emissive scene's ReSTIR run 1.4 x noisier (a visible loser is
-	// lost when the winner is shadowed): not in mode 0
-	const bool canonOne = raysMode == 3;
+	const bool rtxdi2Ray = raysMode == 4;
+	gRestirVis = raysMode != 2 && !rtxdi2Ray;
+	const bool canonOne = raysMode == 3 || rtxdi2Ray;
 	const bool canonEach = gRestirVis && !canonOne;   // (mode 1: a ray for each candidate before it enters, as before)
 	// 1. canonical
 	LSample y = NoSample();
@@ -1424,10 +1545,16 @@ vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float 
 		}
 		else c.em = -1;
 	}
-	if (canonOne && Valid(y)) {   // (perf-ptcost) the winner's one shadow ray
+	bool yVisChecked = canonEach && Valid(y);
+	vec3 yVisTint = vec3(1.0);
+	if (canonOne && Valid(y)) {   // (perf-ptcost / RTXDI 2-ray) Ray 1: the canonical winner's initial visibility ray
 		const vec3 l = yPos - lift;
 		const float dist = length(l);
-		if (!(dist > 1.0e-4) || !Visible(lift, l / dist, LightGap(y, dist))) y = NoSample();
+		if (!(dist > 1.0e-4) || !Visible(lift, l / dist, LightGap(y, dist))) {
+			if (dist > 1.0e-4 && (gShadowHitCustom & NVR_RT_CUSTOM_ACTOR) != 0u) gFirstActorShadow = true;
+			y = NoSample();
+		}
+		else { yVisChecked = true; yVisTint = gShadowTint; }
 	}
 	if (Valid(y)) W = wSum / yTarget;
 	const vec2 f1 = FrameTexel(1);
@@ -1440,17 +1567,57 @@ vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float 
 		if (depth > 1.0e-3) {
 			const vec2 ndc = vec2(dot(rel, pr) / (dot(pr, pr) * depth), -dot(rel, pu) / (dot(pu, pu) * depth));
 			const vec2 at = (ndc * 0.5 + 0.5) * p.size.xy;
-			int count = min(1 + int(sp.y + 0.5), 1 + kRestirNeighbours);
 			const float dist = length(rel);
-			// UNOFFICIAL 2026-11-15 PTRestirCGNS (rt-reuse; docs/next/RT-REUSE-CGNS.md; Junkins et al., HPG 2026): the spatial neighbours picked
-			// from K candidates in the same disk by their surfaces' match (RestirCgnsPick); 0: random as before, the same random numbers
+#ifdef PT_SPLIT_PRIMARY
+			const ivec2 px = ivec2(floor(at));
+			if (all(greaterThanEqual(px, ivec2(0))) && all(lessThan(px, ivec2(p.size.xy)))) {
+				const uint w = ReservoirWord(FrameParity() ^ 1, px);
+				const uint head = scratch.words[w];
+				if (head != 0u) {
+					const float oldW = uintBitsToFloat(scratch.words[w + 1u]), oldDist = uintBitsToFloat(scratch.words[w + 2u]);
+					const vec3 oldN = OctDecode(unpackSnorm2x16(scratch.words[w + 3u]));
+					const vec2 ouv = (vec2(px) + 0.5) / p.size.xy;
+					const vec3 oldPoint = pe + normalize(pf + pr * (2.0 * ouv.x - 1.0) - pu * (2.0 * ouv.y - 1.0)) * oldDist;
+					const float oldM = min(float(head >> 16), maxM);
+					if (dot(oldN, n) >= sr.y && abs(dot(oldPoint - here, n)) <= sq.x * dist && oldM > 0.0) {
+						LSample old = OldSample(head & 0xFFFFu, scratch.words[w + 4u], unpackUnorm2x16(scratch.words[w + 5u]));
+						if (!(oldW > 0.0) || !(oldW < 3.0e38)) old = NoSample();
+						const vec3 src = oldPoint - p.origin.xyz;
+						float tSum = Valid(y) ? yTarget * W : 0.0;
+						vec3 light, pos;
+						const bool sameSpot = (raysMode == 0 || raysMode == 3) && length(oldPoint - here) < 1.5 * max(dist * 2.0 * length(p.up.xyz) * p.size.w, 0.05);
+						if (Valid(old) && LightAt(old, hit, n, light, pos)) {
+							const float t = RestirTarget(light, pos, hit, s, n, v);
+							const float wi = t * oldW * oldM;
+							if (wi > 0.0 && (Same(old, y) || sameSpot || LightVisibleFrom(old, hit, n))) {
+								tSum += wi;
+								if (Rand() * tSum < wi) {
+									if (!Same(old, y)) yVisChecked = false;
+									y = old; yTarget = t; yLight = light; yPos = pos;
+								}
+							}
+						}
+						if (Valid(y)) {
+							const float Z = 1.0 + (Same(old, y) || (sameSpot ? LightLuma(y, src, oldN) > 0.0 : LightVisibleFrom(y, src, oldN)) ? oldM : 0.0);
+							W = tSum / (Z * yTarget);
+						}
+						M += oldM;
+					}
+				}
+			}
+#else
+			int count = min(1 + int(sp.y + 0.5), 1 + kRestirNeighbours);
 			const int cgnsK = RestirCgnsK();
 			ivec2 cgnsPx[kRestirNeighbours];
-			if (cgnsK > 0) count = 1 + RestirCgnsPick(at, here, n, dist, sr.x, count - 1, cgnsK, pe, pf, pr, pu, cgnsPx);
+			if (cgnsK > 0) count = 1 + RestirCgnsPick(at, here, n, dist, sr.x, sr.y, sq.x * dist, count - 1, cgnsK, pe, pf, pr, pu, cgnsPx);
+			// UNOFFICIAL 2026-11-19: single-pass streaming spatial pairwise MIS (1/nb cancels from WRS probabilities and scales W once at the end).
+			// Eliminates all 6 neighbour arrays (nY/nW/nM/nPoint/nN/nWeight: ~112 VGPRs) and redundant LightAt/RestirTarget recomputation.
 			int nb = 0;
-			LSample nY[kRestirNeighbours];
-			float nW[kRestirNeighbours], nM[kRestirNeighbours];
-			vec3 nPoint[kRestirNeighbours], nN[kRestirNeighbours];
+			bool spInit = false;
+			float Mc = 0.0, qcy = 0.0, mcSum = 0.0, sumM = 0.0, nbSum = 0.0;
+			LSample nbY = NoSample();
+			float nbYTarget = 0.0;
+			vec3 nbYLight = vec3(0.0), nbYPos = vec3(0.0);
 			for (int i = 0; i < count; i++) {
 				vec2 q = at;
 				if (i > 0 && cgnsK > 0) q = vec2(cgnsPx[i - 1]) + 0.5;
@@ -1477,16 +1644,17 @@ vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float 
 					// 2. temporal, 1 / Z
 					float tSum = Valid(y) ? yTarget * W : 0.0;   // (the canonical's weight, M = 1)
 					vec3 light, pos;
-					// (perf-ptcost, PTRestirDIRays 0 / 3) last frame's point within 1.5 pixels of this hit: the same spot. Its sample was seen
-					// there (every target holds visibility), so it is taken as seen here, and y seen here as seen there: no rays (a still
-					// camera: 1 ray a pixel less; host scene restirdi: the error vs the exact sum lower, 0.0097 vs 0.0133, the mean the same)
+					// (perf-ptcost, PTRestirDIRays 0 / 3) last frame's point within 1.5 pixels of this hit: the same spot.
 					const bool sameSpot = (raysMode == 0 || raysMode == 3) && length(oldPoint - here) < 1.5 * max(dist * 2.0 * length(p.up.xyz) * p.size.w, 0.05);
 					if (Valid(old) && LightAt(old, hit, n, light, pos)) {
 						const float t = RestirTarget(light, pos, hit, s, n, v);
 						const float wi = t * oldW * oldM;
 						if (wi > 0.0 && (Same(old, y) || sameSpot || LightVisibleFrom(old, hit, n))) {
 							tSum += wi;
-							if (Rand() * tSum < wi) { y = old; yTarget = t; yLight = light; yPos = pos; }
+							if (Rand() * tSum < wi) {
+								if (!Same(old, y)) yVisChecked = false;
+								y = old; yTarget = t; yLight = light; yPos = pos;
+							}
 						}
 					}
 					if (Valid(y)) {   // Z: this pixel (y is seen here) + last frame's if it could have produced y
@@ -1496,80 +1664,76 @@ vec3 RestirDirect(vec3 hit, vec3 lift, vec3 n, vec3 v, Surface s, int k0, float 
 					M += oldM;
 					continue;
 				}
-				if (nb < kRestirNeighbours) { nY[nb] = old; nW[nb] = oldW; nM[nb] = oldM; nPoint[nb] = src; nN[nb] = oldN; nb++; }
+				if (nb >= kRestirNeighbours) continue;
+				if (!spInit) { spInit = true; Mc = M; sumM = M; qcy = Valid(y) ? LightLuma(y, hit, n) : 0.0; }
+				nb++;
+				sumM += oldM;
+				// 3. spatial, pairwise MIS against the canonical (y, W, M), streamed directly
+				if (Valid(y)) {
+					gRestirVis = raysMode <= 1;
+					const float qiy = Same(old, y) || LightVisibleFrom(y, src, oldN) ? LightLuma(y, src, oldN) : 0.0;
+					gRestirVis = raysMode != 2 && !rtxdi2Ray;
+					mcSum += Mc * qcy / max(Mc * qcy + oldM * qiy, 1.0e-30);
+				}
+				if (!Valid(old)) continue;
+				vec3 light, pos;
+				if (!LightAt(old, hit, n, light, pos)) continue;
+				const float t = RestirTarget(light, pos, hit, s, n, v);
+				if (!(t > 0.0) || !(Same(old, y) || LightVisibleFrom(old, hit, n))) continue;
+				const float qii = LightLuma(old, src, oldN);
+				const float qci = dot(light, vec3(0.2126, 0.7152, 0.0722));
+				const float wi = (oldM * qii / max(oldM * qii + Mc * qci, 1.0e-30)) * t * oldW;
+				if (wi > 0.0) {
+					nbSum += wi;
+					if (Rand() * nbSum < wi) { nbY = old; nbYTarget = t; nbYLight = light; nbYPos = pos; }
+				}
 			}
-			// 3. spatial, pairwise MIS against the canonical (y, W, M)
 			if (nb > 0) {
-				const float k = float(nb), Mc = M;
-				const float qcy = Valid(y) ? LightLuma(y, hit, n) : 0.0;   // the canonical sample here (seen)
-				float mc = 0.0, sumM = Mc;
-				float nWeight[kRestirNeighbours];
-				for (int i = 0; i < nb; i++) {
-					// the canonical's share in pair i: does neighbour i's surface see the canonical sample?
-					if (Valid(y)) {
-						// (perf-ptcost, PTRestirDIRays 3) only an MIS weight: the canonical sample at the neighbour's surface unshadowed (no ray;
-						// host scene restirdi: 1.2 % dark, shadow edges 2.5 % of the pixels off > 15 %: a test value)
-						gRestirVis = raysMode <= 1;
-						const float qiy = Same(nY[i], y) || LightVisibleFrom(y, nPoint[i], nN[i]) ? LightLuma(y, nPoint[i], nN[i]) : 0.0;
-						gRestirVis = raysMode != 2;
-						mc += Mc * qcy / max(Mc * qcy + nM[i] * qiy, 1.0e-30);
-					}
-					sumM += nM[i];
-					nWeight[i] = 0.0;
-					if (!Valid(nY[i])) continue;
-					vec3 light, pos;
-					if (!LightAt(nY[i], hit, n, light, pos)) continue;
-					const float t = RestirTarget(light, pos, hit, s, n, v);
-					if (!(t > 0.0) || !(Same(nY[i], y) || LightVisibleFrom(nY[i], hit, n))) continue;
-					const float qii = LightLuma(nY[i], nPoint[i], nN[i]);   // its own sample there (seen there: its weight was kept)
-					const float qci = dot(light, vec3(0.2126, 0.7152, 0.0722));
-					const float mi = nM[i] * qii / max(nM[i] * qii + Mc * qci, 1.0e-30) / k;
-					nWeight[i] = mi * t * nW[i];
+				const float cWeight = Valid(y) ? mcSum * yTarget * W : 0.0;
+				const float totalSum = cWeight + nbSum;
+				if (nbSum > 0.0 && Rand() * totalSum < nbSum) {
+					if (!Same(nbY, y)) yVisChecked = false;
+					y = nbY; yTarget = nbYTarget; yLight = nbYLight; yPos = nbYPos;
 				}
-				mc /= k;
-				// stream: the canonical first, then the neighbours
-				float sum = Valid(y) ? mc * yTarget * W : 0.0;
-				int ny = -1;
-				for (int i = 0; i < nb; i++) {
-					const float wi = nWeight[i];
-					if (!(wi > 0.0)) continue;
-					sum += wi;
-					if (Rand() * sum < wi) ny = i;
-				}
-				if (ny >= 0) {
-					vec3 light, pos;
-					LightAt(nY[ny], hit, n, light, pos);
-					y = nY[ny]; yTarget = RestirTarget(light, pos, hit, s, n, v); yLight = light; yPos = pos;
-				}
-				W = Valid(y) && yTarget > 0.0 ? sum / yTarget : 0.0;
+				W = Valid(y) && yTarget > 0.0 ? (totalSum / float(nb)) / yTarget : 0.0;
 				M = sumM;
 			}
+#endif
 		}
 	}
 	if (!(W < 3.0e38)) W = 0.0;
-	// (perf-ptcost, PTRestirDIRays 2, a test value) unshadowed targets: ONE shadow ray, for the chosen sample (RTXDI's final visibility); an
-	// occluded sample gives 0 and is stored with W 0 (RTXDI's visibility reuse). Host scene restirdi: 1.5 % dark, the error 1.8 x mode 0's.
-	// (Keeping the occluded sample instead is unbiased but its noise was 5.5 x; dropping the reservoir 36 % too bright: measured, not kept.)
-	vec3 tint = vec3(1.0);
+	const vec2 cuv = (vec2(gPixel) + 0.5) * p.size.zw;
+	const vec3 centre = normalize(p.forward.xyz + p.right.xyz * (2.0 * cuv.x - 1.0) - p.up.xyz * (2.0 * cuv.y - 1.0));
+	const float facing = dot(centre, n);
+	const float planeDist = abs(facing) > 0.05 ? dot(hit, n) / facing : length(hit);
+#ifdef PT_SPLIT_PRIMARY
+	gRestirVis = true;
+	gSplitVisChecked = yVisChecked && Valid(y);
+	gSplitVisTint = yVisChecked ? yVisTint : vec3(1.0);
+	StoreTempReservoir(y, min(M, maxM), W, planeDist, n);
+	return vec3(0.0);
+#else
+	vec3 tint = yVisChecked ? yVisTint : vec3(1.0);
 	float storeW = W;
 	bool seen = true;
-	if (!gRestirVis && Valid(y) && W > 0.0) {
+	if (!gRestirVis && !yVisChecked && Valid(y) && W > 0.0) {
 		const vec3 l = yPos - lift;
 		const float dist = length(l);
 		seen = dist > 1.0e-4 && Visible(lift, l / dist, LightGap(y, dist));
 		tint = gShadowTint;
-		if (!seen) storeW = 0.0;
+		if (!seen) {
+			if (dist > 1.0e-4 && (gShadowHitCustom & NVR_RT_CUSTOM_ACTOR) != 0u) gFirstActorShadow = true;
+			storeW = 0.0; M = min(M, 1.0);
+		}
 	}
 	gRestirVis = true;
 	// the surface as next frame rebuilds it: the distance along this pixel's CENTRE ray (no jitter) to the hit's tangent plane, so the
 	// rebuilt point lies on the surface (the jittered hit's own distance put it up to a pixel's footprint under a slanted floor)
-	const vec2 cuv = (vec2(gPixel) + 0.5) * p.size.zw;
-	const vec3 centre = normalize(p.forward.xyz + p.right.xyz * (2.0 * cuv.x - 1.0) - p.up.xyz * (2.0 * cuv.y - 1.0));
-	const float facing = dot(centre, n);
-	StoreReservoir(y, min(M, maxM), storeW, abs(facing) > 0.05 ? dot(hit, n) / facing : length(hit), n);   // (from this frame's eye)
+	StoreReservoir(y, min(M, maxM), storeW, planeDist, n);   // (from this frame's eye)
 	// (2026-11-07 rtgap-tess 1b) the chosen light's contact march (after the reuse: darkening only, not in the targets)
 	return Valid(y) && W > 0.0 && seen ? yLight * W * BrdfPi(s, n, v, normalize(yPos - hit)) * tint *
 		(gContact ? PtContact(normalize(yPos - gContactFrom), length(yPos - gContactFrom)) : 1.0) : vec3(0.0);
+#endif
 }
 
 // ---- UNOFFICIAL 2026-11-07 PTRadianceCache (flag 524288, RT-PATH-TRACING.md section 48): a world-space radiance cache in the helper's scratch
@@ -1601,8 +1765,10 @@ void CacheKey(vec3 hit, vec3 n, vec3 offset, out uint slot, out uint check) {
 	slot = h & gCacheMask;   // (hangfix: LoadScratchLayout's checked size; was the frame row's log2, unchecked)
 	check = Hash32(h ^ 0x9E3779B9u) | 1u;
 }
+// UNOFFICIAL 2026-11-19: packed 8-word (32 B, 2 entries / cache line) layout matching RtPathTraceCache.comp:
+// [0] key, [1..3] frame RGB sum (x256), [4] frame count, [5] packHalf2x16(mean.rg), [6] (age<<16)|half(mean.b), [7] fp32 n.
 uint CacheEntry(uint slot, uint i) {
-	return gCacheBase + ((slot + i) & gCacheMask) * 16u;   // (hangfix: LoadScratchLayout's checked base and size)
+	return gCacheBase + ((slot + i) & gCacheMask) * 8u;   // (fits inside LoadScratchLayout's 16-word allocation, half the L2 footprint)
 }
 // The cell's resolved indirect light at a point (jittered inside its cell along the surface); false: no cell / too few samples yet
 bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
@@ -1612,10 +1778,11 @@ bool CacheRead(vec3 hit, vec3 n, out vec3 light) {
 	CacheKey(hit, n, t * (Rand() - 0.5) + b * (Rand() - 0.5), slot, check);
 	for (uint i = 0u; i < 4u; i++) {
 		const uint e = CacheEntry(slot, i), k = scratch.words[e];
-		if (k == 0u) return false;
-		if (k != check) continue;
-		if (uintBitsToFloat(scratch.words[e + 6u]) < FrameTexel(14).y) return false;
-		light = vec3(uintBitsToFloat(scratch.words[e + 8u]), uintBitsToFloat(scratch.words[e + 9u]), uintBitsToFloat(scratch.words[e + 10u]));
+		if (k != check) continue;   // UNOFFICIAL 2026-11-19: do not stop on k == 0u (evicted slot tombstone hides live slots at i+1..3)
+		if (uintBitsToFloat(scratch.words[e + 7u]) < FrameTexel(14).y) return false;
+		const vec2 rg = unpackHalf2x16(scratch.words[e + 5u]);
+		const vec2 b0 = unpackHalf2x16(scratch.words[e + 6u] & 0xFFFFu);
+		light = vec3(rg, b0.x);
 		return true;
 	}
 	return false;
@@ -1627,8 +1794,13 @@ void CacheAdd(vec3 hit, vec3 n, vec3 light) {
 	const uvec3 q = uvec3(clamp(light, vec3(0.0), vec3(1024.0)) * 256.0 + 0.5);
 	for (uint i = 0u; i < 4u; i++) {
 		const uint e = CacheEntry(slot, i);
-		const uint k = atomicCompSwap(scratch.words[e], 0u, check);
+		uint k = scratch.words[e];
+		if (k == 0u) k = atomicCompSwap(scratch.words[e], 0u, check);   // plain read avoids atomic write-lock on existing cells
 		if (k != 0u && k != check) continue;
+		// Cap per-cell per-frame writes (prevents uint32 overflow & cuts atomic contention on large distant cells)
+		const uint cur = scratch.words[e + 4u];
+		if (cur >= 512u) return;
+		if (cur >= 64u && (Hash32(uint(gPixel.x) ^ (uint(gPixel.y) << 16u) ^ uint(p.origin.w)) & 7u) != 0u) return;
 		atomicAdd(scratch.words[e + 1u], q.x); atomicAdd(scratch.words[e + 2u], q.y); atomicAdd(scratch.words[e + 3u], q.z);
 		atomicAdd(scratch.words[e + 4u], 1u);
 		return;
@@ -1682,12 +1854,15 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		const int k = int(((e & 1) != 0 ? two.y : two.x) + 0.5);
 		if (gFlashOnly && k != 0) continue;
 		vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
-		vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
-		vec4 pos = vec4(a, b), colour = vec4(c, d);
+		vec4 pos = vec4(a, b);
 		vec3 l = pos.xyz - hit;
-		float dist = length(l), reach = pos.w;
-		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = FlashShape(k, dist, reach, -l / dist, colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist)));   // (2026-11-11 FlashShape)
+		float reach = pos.w, d2 = dot(l, l), nlRaw = dot(n, l);
+		if (d2 >= reach * reach || d2 < 1.0e-6 || nlRaw <= 0.0) continue;
+		vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
+		vec4 colour = vec4(c, d);
+		float invDist = inversesqrt(d2), dist = d2 * invDist;
+		vec3 lDir = l * invDist;
+		vec3 light = FlashShape(k, dist, reach, -lDir, colour.rgb * (LampFall(dist / reach) * (nlRaw * invDist) * LampSpot(k, -lDir)));   // (2026-11-11 FlashShape)
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -1713,8 +1888,11 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		if (gFlashOnly && k != 0) break;
 		if (LampImage()) {
 			vec2 a = imageLoad(lampImage, ivec2(4 * k, 0)).rg, b = imageLoad(lampImage, ivec2(4 * k + 1, 0)).rg;
-			vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
-			pos = vec4(a, b); colour = vec4(c, d);
+			pos = vec4(a, b);
+			if (k >= lamps) {
+				vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
+				colour = vec4(c, d);
+			}
 		}
 		else if (k < 8) { pos = p.lampPos[k]; colour = p.lampColor[k]; }
 		else break;
@@ -1726,9 +1904,15 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 			continue;
 		}
 		vec3 l = pos.xyz - hit;
-		float dist = length(l), reach = pos.w;
-		if (dist >= reach || dist < 1.0e-3) continue;
-		vec3 light = FlashShape(k, dist, reach, -l / dist, colour.rgb * (LampFall(dist / reach) * max(dot(n, l / dist), 0.0) * LampSpot(k, -l / dist)));   // (2026-11-11 FlashShape)
+		float reach = pos.w, d2 = dot(l, l), nlRaw = dot(n, l);
+		if (d2 >= reach * reach || d2 < 1.0e-6 || nlRaw <= 0.0) continue;
+		if (LampImage()) {
+			vec2 c = imageLoad(lampImage, ivec2(4 * k + 2, 0)).rg, d = imageLoad(lampImage, ivec2(4 * k + 3, 0)).rg;
+			colour = vec4(c, d);
+		}
+		float invDist = inversesqrt(d2), dist = d2 * invDist;
+		vec3 lDir = l * invDist;
+		vec3 light = FlashShape(k, dist, reach, -lDir, colour.rgb * (LampFall(dist / reach) * (nlRaw * invDist) * LampSpot(k, -lDir)));   // (2026-11-11 FlashShape)
 		float w = dot(light, vec3(0.2126, 0.7152, 0.0722));
 		if (!(w > 0.0)) continue;
 		total += w;
@@ -1802,10 +1986,38 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 		if (le > 0.0 && le < bound) cE[2] = Rand() * bound < le ? cE[2] * (bound / le) : vec3(0.0);
 	}
 #endif
+#ifndef PT_RESTIR_GI
+	// UNOFFICIAL 2026-11-20: decouple primary front-side direct sun diffuse so RtShadowDenoise (SIGMA + actor anti-lag) denoises it separately from 32-frame GI
+	const bool decoupleSunHere = gScratchSunSplit && gBounce == 0 && !gBackSide && !gFlashOnly && p.sunDir.w > 0.5 &&
+		(uint(p.accum.w) & 512u) != 0u && int(p.misc.w + 0.5) == 0;
+#else
+	const bool decoupleSunHere = false;
+#endif
 	for (int k = 0; k < 3; k++) {
 		if (pickOne && k != chosenC) continue;
 		if (!(dot(cE[k], vec3(1.0)) > 0.0)) continue;
-		if (!Visible(lift, cDir[k], cDist[k])) continue;
+		if (k == 0 && decoupleSunHere) {
+			const bool sunFree = Visible(lift, cDir[0], cDist[0]);
+			const float contact = sunFree ? PtContact(cDir[0], 30000.0) : 0.0;
+			const vec3 tint = sunFree ? gShadowTint : vec3(1.0);
+			const bool actor = !sunFree && (gShadowHitCustom & NVR_RT_CUSTOM_ACTOR) != 0u;
+			if (actor) gFirstActorShadow = true;
+			const float hitD = sunFree ? (contact < 1.0 ? 1.0 : 0.0) : max(gShadowHitT, 1.0);
+			gFirstSunVis = contact;
+			gFirstSunHitT = actor ? -hitD : hitD;
+			const vec3 sunSpec = Split() ? cE[0] * cSpec[0] : vec3(0.0);
+			gFirstSunDiff = max(cE[0] - sunSpec, vec3(0.0)) * tint;
+			if (sunFree && dot(sunSpec, vec3(1.0)) > 0.0) {
+				const vec3 addSpec = sunSpec * contact * tint;
+				e += addSpec;
+				if (gSplitTake) gSplitSpec += addSpec;
+			}
+			continue;
+		}
+		if (!Visible(lift, cDir[k], cDist[k])) {
+			if (gBounce == 0 && (gShadowHitCustom & NVR_RT_CUSTOM_ACTOR) != 0u) gFirstActorShadow = true;
+			continue;
+		}
 		// the sun and the lamp: the contact march (2026-11-07 1b) and the panes' tint (ptaaa: through glass); the emissive point: neither
 		vec3 add = cE[k] * (pickOne ? 1.0 / P[k] : 1.0);
 		if (k == 0) add *= PtContact(cDir[0], 30000.0) * gShadowTint;
@@ -1820,7 +2032,7 @@ vec3 Direct(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 
 // A traced hit's material (2026-11-03): the material rule in the record's bits 26-31 (VegasShaders.materials.txt, as the object shaders
 // use it): roughness (k / 7)^2 (2026-11-07 perf-reflfix2; was k / 7), metal (k - 1) / 6; a rough dielectric (0.8, 0) where the rule gives none
-Surface HitSurface(vec3 albedo) { Surface s; s.albedo = albedo; s.rough = 0.8; s.metal = 0.0; s.kind = kKindPlain; return s; }
+Surface HitSurface(vec3 albedo) { Surface s; s.albedo = albedo; s.rough = 0.8; s.metal = 0.0; s.f0 = 0.04; s.kind = kKindPlain; return s; }
 Surface HitSurface(vec3 albedo, uint instance) {
 	Surface s = HitSurface(albedo);
 	uint f = records[instance].flags;
@@ -1849,11 +2061,18 @@ vec3 DirectSides(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	const bool restir = gRestirFirst;
 #endif
 	float glowTotal = 0.0;
+#ifndef PT_RESTIR_GI
+	float emTotal = 0.0, emSelect = 1.0;
+#endif
 	vec3 e = vec3(0.0);
 	for (int side = 0; side < (through ? 2 : 1); side++) {
 		Surface b = s;
 		if (side == 1) {   // the far side
 			glowTotal = gGlowTotal;   // (the lit side's: the next bounce's glow MIS needs it)
+#ifndef PT_RESTIR_GI
+			// UNOFFICIAL 2026-11-19: preserve lit side's emissive MIS state across far-side Direct() call
+			emTotal = gEmTotal; emSelect = gEmSelect;
+#endif
 			b.albedo = TransmitColour(s);
 			gContact = false; gBackSide = true;
 #ifndef PT_RESTIR_GI
@@ -1865,6 +2084,7 @@ vec3 DirectSides(vec3 hit, vec3 n, float t, vec3 v, Surface s) {
 	if (through) {
 		gBackSide = false; gContact = contact; gGlowTotal = glowTotal;
 #ifndef PT_RESTIR_GI
+		gEmTotal = emTotal; gEmSelect = emSelect;
 		gRestirFirst = restir;
 #endif
 	}
@@ -1961,6 +2181,10 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 	if (dot(n, hit) > 0.0) n = -n;
 	gScreenPerson = person;
 	gScreenStale = !gViewModel && ownMark; gScreenStaleSure = gScreenStale && ownSure;   // (PTScreenOwn: + 0.25 maybe, + 0.5 sure)
+	// UNOFFICIAL 2026-11-19 (Finding 4.2): lighting-free deferred G-buffer records pack FD_SV_F0 (VanillaBridge / _rmaos.a, 0.00..0.08 as s = 1..9)
+	// into COLOR3.a (Includes/DeferredPixel.hlsl FDSunVisCode), bridged by ViewModelPrep into +s/128 of gNormals.a; 0 when unrecorded / synthetic
+	const float f0Frac = !gViewModel && !ownSure && nv.a > 0.5 && nv.a < 3.5 ? fract(nv.a) - (ownMark ? 0.25 : 0.0) : 0.0;
+	const float f0Slot = f0Frac > 0.003 && f0Frac < 0.08 ? floor(f0Frac * 128.0 + 0.5) : 0.0;
 	s.albedo = clamp(a.rgb, 0.0, 1.0);
 	if (gAlbedoGamma > 0.0) s.albedo = pow(s.albedo, vec3(gAlbedoGamma));   // (2026-11-12 PTAlbedoGamma)
 	if ((uint(p.accum.w) & 256u) != 0u) {
@@ -1976,7 +2200,9 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 			s.rough = m.b >= 0.0 ? clamp(m.b, 0.05, 1.0) : cls == 4.0 || cls == 5.0 ? 0.95 : 0.7;
 			// (2026-11-12 ptbump) PTMatteNoHighlight: a record the game draws with no highlight (b = -2 - the shader's roughness, objects
 			// only: class 1-3; the land's b, -8 .. -6, is its bump below): matte with the key, else the roughness as before the code
+			const bool noHighlightMatte = cls <= 3.0 && m.b <= -1.99 && m.b >= -3.01 && gMatteOn > 0.5;
 			if (cls <= 3.0 && m.b <= -1.99 && m.b >= -3.01) s.rough = gMatteOn > 0.5 ? 1.0 : clamp(-2.0 - m.b, 0.05, 1.0);
+			if (f0Slot >= 1.0 && f0Slot <= 9.0 && cls != 4.0 && cls != 6.0 && !noHighlightMatte) s.f0 = (f0Slot - 1.0) * 0.01;
 			// PTBumpNormals: the land's bumped normal (g = 3 + e.x, b = -7 + e.y, e hemi-octahedral about +z; written whole: a 1)
 			if (gBumpOn > 0.5 && cls == 4.0 && m.a > 0.995 && m.a < 1.005 && m.g >= 1.99 && m.g <= 4.01 && m.b >= -8.01 && m.b <= -5.99) {
 				const vec2 e = vec2(m.g - 3.0, m.b + 7.0), h = vec2(e.x + e.y, e.x - e.y) * 0.5;
@@ -2000,7 +2226,7 @@ bool ScreenHit(ivec2 pixel, out vec3 hit, out vec3 n, out Surface s) {
 		// AlbedoBuffer on), so the texel is still the wall's or the armour's drawn before the skin: its class, roughness and METAL. Skin's
 		// own instead: no metal, a skin roughness, the skin model.
 		if (person && cls != 6.0) {
-			s.metal = 0.0; s.rough = 0.6; s.kind = MatKeys().w > 0.0 ? kKindSkin : kKindPlain;
+			s.metal = 0.0; s.rough = 0.6; s.f0 = 0.04; s.kind = MatKeys().w > 0.0 ? kKindSkin : kKindPlain;
 		}
 	}
 	return true;
@@ -2017,7 +2243,8 @@ float gFirstSurface; // 1: the path met a surface first; 0: the sky / the game's
 // (2026-11-07 ptaaa-denoiser) PTDenoiseSplit: the first surface's roughness, metal and cos(view) (its specular albedo), the path's light
 // after the first hit's own (glow + direct: what came later came through the first bounce), that bounce direction's specular share of
 // the BRDF (per channel) and its ray's hit distance (60000 a miss, 0 no bounce). Set by main() before each Path().
-float gFirstRough = 1.0, gFirstMetal = 0.0, gFirstNV = 1.0;
+float gFirstRough = 1.0, gFirstMetal = 0.0, gFirstNV = 1.0, gFirstF0 = 0.04;
+uint gFirstKind = kKindPlain;
 vec3 gSplitRad0 = vec3(0.0), gSplitRatio = vec3(0.0);
 float gSplitHitT = 0.0, gSplitSpecLobe = 0.0;   // (+ the chance that the bounce direction was the specular lobe's: SpecLobeChance)
 // UNOFFICIAL 2026-11-09 (pt-mirrors) PTDenoiseMirrorSurface: the colour of what the first bounce ray met (1: a miss, the sky). On a smooth
@@ -2051,6 +2278,7 @@ float PtFlashPlaneT(vec3 at, uint instance, uint prim, mat4x3 toScene, vec3 dir)
 	return abs(dn) > 1.0e-3 ? dot(at, pn) / dn : length(at);
 }
 
+#if !defined(PT_SPLIT_SPATIAL) && !defined(PT_SPLIT_BOUNCE)
 vec3 Path(vec3 dir) {
 	vec3 pos = vec3(0.0), radiance = vec3(0.0), throughput = vec3(1.0);
 	int bounces = PtCount(p.accum.y, kPtMaxBounces), view = int(p.misc.w + 0.5);   // (hangfix: bounces capped)
@@ -2060,8 +2288,11 @@ vec3 Path(vec3 dir) {
 	float pathRough = 0.0;   // (2026-11-09 PTBounceRoughen) the roughest bounce so far (a matte bounce: 1)
 #ifndef PT_RESTIR_GI
 	// (2026-11-07) PTRadianceCache: the vertices that go on (where, the throughput that reached them, the light gathered up to their own)
+	// UNOFFICIAL 2026-11-19: pack cvN (OctEncode snorm2x16) and cvT+cvR (FP16 uvec3) -> saves 20 VGPRs live across the bounce loop.
 	const bool cache = CacheOn() && view == 0;
-	vec3 cvHit[kCacheVerts], cvN[kCacheVerts], cvT[kCacheVerts], cvR[kCacheVerts];
+	vec3 cvHit[kCacheVerts];
+	uint cvN[kCacheVerts];
+	uvec3 cvTR[kCacheVerts];
 	int cvCount = 0;
 	// (2026-11-07 ptaaa-emissive) PTEmissive: the previous hit's emissive weights' sum (0: it took no emissive sample), whether ReSTIR DI took
 	// its emissive light (then a bounce ray's glow from a listed triangle counts 0 in the picture), and that glow's balance share for the
@@ -2074,7 +2305,11 @@ vec3 Path(vec3 dir) {
 #endif
 	bool cacheEnd = false;
 	float ptFirstT = 0.0, ptPath = 0.0;   // (2026-11-07) real textures' mip: the camera ray's length, the bounces' since
+#ifdef PT_SPLIT_PRIMARY
+	for (int bounce = 0; bounce <= 0; bounce++) {   // Pass 1 traces bounce 0 only; keeps real `bounces` intact for gEmMis
+#else
 	for (int bounce = 0; bounce <= bounces; bounce++) {
+#endif
 		rayQueryEXT q;
 		gGlassSolid = GlassMode() > (bounce > 0 ? 0.5 : 1.5);   // (2026-11-07 ptaaa-materials) bounce rays meet glass panes; the camera's with PTGlass 2
 		// (2026-11-04 b) bounce rays: the alpha test is ~30 % of the pass outdoors (helper replays, section 25): PTBounceAlpha 0 / 2 skip it
@@ -2117,11 +2352,17 @@ vec3 Path(vec3 dir) {
 				n11 < -0.5 ? 1.0 : gScreenStaleSure ? 0.75 : gScreenStale ? 0.5 : d11 > 0.0 && d11 < 0.9999 ? 0.25 : 0.0);
 		}
 		const bool viewModel = screen && gViewModel;
+#ifndef RT_NO_REAL_TEXTURES
+		rtConeWidth = 0.0;   // UNOFFICIAL 2026-11-19: reset cone width before each primary/bounce trace
+#endif
+		// UNOFFICIAL 2026-11-19: skip primary camera ray on clean screen-grass pixels (line 2250 always selects sHit)
+		const bool skipCamRay = viewModel || (screen && gScreenGrass && !gScreenStale);
 		// (2026-11-07 ptaaa-firstperson) a bounce ray that leaves from near the eye (off the view model, or a surface within arm's reach)
 		// passes over the hidden first-person body (RtHidden.glsl): the world without people and cut-outs (opaque), then people, the
 		// player's parts and cut-outs up to that hit, each candidate tested, hidden ones passed over (cut-outs as PTBounceAlpha says:
 		// 0 solid, 2 left out, 1 / 3 their texture)
-		if (bounce > 0 && rtHiddenNear(pos, vec3(0.0))) {
+		// UNOFFICIAL 2026-11-19: skip dual NoOpaqueEXT hidden-body pass whenever this frame has no hidden body (gOneCameraQuery > 0.5).
+		if (bounce > 0 && !(gOneCameraQuery > 0.5) && rtHiddenNear(pos, vec3(0.0))) {
 			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x8Fu, pos + p.origin.xyz, 0.0, dir, rayLength)   // (hangfix: PT_RAY_INIT, the loop caps)
 			PT_PROCEED_OPAQUE(q)
 			PT_TAKE_HIT(q);
@@ -2164,7 +2405,8 @@ vec3 Path(vec3 dir) {
 		// (2026-11-07 ptaaa-firstperson) the view model's pixels: no camera ray (the screen's surface is the first hit)
 		// (perf-ptcost) only while this frame's scene holds the hidden body; without it the one query below gives the same hit (the people and
 		// the player's parts are opaque unless alpha-tested, and then under 0x10 with the cut-outs)
-		else if (bounce == 0 && !viewModel && !(gOneCameraQuery > 0.5)) {
+		else if (bounce == 0 && skipCamRay) {}
+		else if (bounce == 0 && !(gOneCameraQuery > 0.5)) {
 			PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x0Fu, pos + p.origin.xyz, 1.0, dir, rayLength)   // (hangfix: PT_RAY_INIT, the loop caps)
 			PT_PROCEED_OPAQUE(q)
 			PT_TAKE_HIT(q);
@@ -2184,7 +2426,7 @@ vec3 Path(vec3 dir) {
 		}
 		// bounce rays with PTBounceAlpha 1, and (perf-ptcost) the camera's ray as ONE query over everything but the far LOD (0x7F) when no hidden
 		// body is in this frame's scene (frame row texel 29: RtCore counts them)
-		else if (bounce > 0 || !viewModel) {
+		else if (bounce > 0 || !skipCamRay) {
 			PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, bounce > 0 ? 0xFFu : 0x7Fu, pos + p.origin.xyz, bounce > 0 ? 0.0 : 1.0, dir, rayLength)   // (hangfix)
 			Proceed(q);
 			PT_TAKE_HIT(q);
@@ -2282,8 +2524,15 @@ vec3 Path(vec3 dir) {
 			uint instance = qInstance, prim = qPrim;
 			vec2 bary = qBary;
 			mat4x3 toScene = qToScene;
-			n = HitNormal(instance, prim, toScene, dir);
-			n = rtHitSmoothNormal(instance, prim, bary, n, mat3(toScene), dir);   // (2026-11-07 perf-reflfix) the vertex normals: no facets
+			// UNOFFICIAL 2026-11-19: unified RtHitGeom loads triangle indices/positions/UVs once per hit and caches ray-cone gradients
+			RtHitGeom hg = rtHitLoadGeom(instance, prim, bary);
+			n = -dir;
+			if (hg.hasPos) {
+				vec3 face = mat3(toScene) * rtHitGeomObjectNormal(hg);
+				if (dot(face, face) > 1.0e-12) n = normalize(face);
+			}
+			n = dot(n, dir) > 0.0 ? -n : n;
+			n = rtHitGeomSmoothNormal(hg, bary, n, mat3(toScene), dir);   // (2026-11-07 perf-reflfix) the vertex normals: no facets
 			hit = pos + dir * t;
 #ifndef RT_NO_REAL_TEXTURES
 			// (2026-11-07) the ray's footprint for the real textures' mip: a pixel's width along the camera ray, then the bounces'
@@ -2291,8 +2540,9 @@ vec3 Path(vec3 dir) {
 			rtConeWidth = bounce == 0 ? t * 2.0 * length(p.up.xyz) * p.size.w : ptFirstT * 2.0 * length(p.up.xyz) * p.size.w + (ptPath + t) * 0.5;
 			// (2026-11-07) anisotropic filtering along the ray's tilt (RtTextures.glsl rtTexSampleHit); flag 2097152 (the RT host's A/B): one mip
 			rtConeDir = (uint(p.accum.w) & 2097152u) != 0u ? vec3(0.0) : dir; rtConeToScene = mat3(toScene);
+			rtHitGeomComputeGrads(hg);
 #endif
-			const vec3 hitAlbedo = clamp(AlbedoAtlas() ? rtHitAlbedo(instance, prim, bary) : records[instance].albedo.rgb, 0.0, 1.0);
+			const vec3 hitAlbedo = clamp(AlbedoAtlas() ? rtHitGeomAlbedo(hg) : records[instance].albedo.rgb, 0.0, 1.0);
 			surf = HitSurface(hitAlbedo, instance);
 			if (screen && !ownFlash && !hairFront && !hairThrough && !staleOwn && surf.kind != kKindGlass) { n = sN; surf = sS; }   // the same surface: the screen's colour, normal and material, the traced point (ptaaa: a pane stays glass)
 			// (2026-11-11 PTGlassSurface) a pane with a surface share: with that chance this path meets the pane's OWN surface, its texture's
@@ -2304,7 +2554,7 @@ vec3 Path(vec3 dir) {
 				const float share = GlassShare(instance, prim, bary);
 				if (bounce == 0) { paneShare = share; paneAlbedo = hitAlbedo; }
 				if (share > 0.0 && Rand() < share) {
-					surf.kind = kKindPane; surf.albedo = hitAlbedo; surf.rough = 1.0; surf.metal = 0.0;
+					surf.kind = kKindPane; surf.albedo = hitAlbedo; surf.rough = 1.0; surf.metal = 0.0; surf.f0 = 0.04;
 					gContact = false;   // (the screen's normal there is what the blended pane was drawn over, not the pane's: no contact march from it)
 				}
 			}
@@ -2322,7 +2572,7 @@ vec3 Path(vec3 dir) {
 			if ((bendAsBefore || bendFirst) && !ownFlash) {
 				rtHitNormalAtlasOn = NormalAtlas();
 				const bool recorded = bendFirst && !hairFront && !hairThrough && !staleOwn && gScreenBump != vec3(0.0);
-				vec3 bent = recorded ? gScreenBump : rtHitNormalMapped(instance, prim, bary, n, mat3(toScene));
+				vec3 bent = recorded ? gScreenBump : rtHitGeomNormalMapped(hg, n, mat3(toScene));
 				if (bendFirst) bump = bent;
 				else if (dot(bent, v) > 0.0) n = bent;   // (a map that turns it away from the eye: kept as it was)
 			}
@@ -2338,7 +2588,7 @@ vec3 Path(vec3 dir) {
 			const bool glowFrame = bounce == 0 && view == 0 && screen && GlowFromFrame() && ScreenFrame() && (records[instance].flags & RT_HIT_GLOW_FLAG) != 0u;
 			const bool glowWanted = (view == 0 || (view >= 5 && view != 8 && bounce > 0)) && GlowAtlas() && p.skyHorizon.w > 0.0 && !ownFlash;   // (PTFlashOwnPixels: the game's pixel holds its glow)
 			const bool glowTest = glowFrame && gGlowTexel > 0.0 && GlowAtlas();
-			const vec3 glowAt = glowWanted || glowTest ? rtHitGlow(instance, prim, bary) : vec3(0.0);
+			const vec3 glowAt = glowWanted || glowTest ? rtHitGeomGlow(hg) : vec3(0.0);
 			if (glowFrame && !(glowTest && dot(max(glowAt, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)) < gGlowTexel)) {
 				radiance = pow(max(imageLoad(gFrame, gPixel).rgb, vec3(0.0)), vec3(2.2));
 				break;
@@ -2383,13 +2633,13 @@ vec3 Path(vec3 dir) {
 		// (2026-11-09 PTBounceRoughen) a surface met after a bounce: at least the roughest bounce so far x the key
 		if (bounce > 0 && gBounceRoughen > 0.0) surf.rough = max(surf.rough, pathRough * gBounceRoughen);
 		if (bounce == 0 && !ownFlash) { gFirstAlbedo = surf.albedo; gFirstSurface = 1.0; }   // (PTFlashOwnPixels: the game's pixel, no first surface)
-		if (bounce == 0) { gFirstRough = surf.rough; gFirstMetal = surf.metal; gFirstNV = dot(n, v); gSplitTake = Split() && view == 0 && !ownFlash; }   // (ptaaa-denoiser)
+		if (bounce == 0) { gFirstRough = surf.rough; gFirstMetal = surf.metal; gFirstNV = dot(n, v); gFirstKind = surf.kind; gFirstF0 = surf.f0; gSplitTake = Split() && view == 0 && !ownFlash; }   // (ptaaa-denoiser)
 		// (2026-11-11 PTGlassSurface) a pane with a surface share reports the SAME first surface whichever branch this path took (the
 		// denoiser must not see it flip between a pane and its glass frame to frame): the pane's texture colour as the albedo (demodulation is
 		// exact either way: the show pass multiplies the same value back), roughness = the share (the mix of the glass's 0 and the surface's
 		// 1: a mostly clear pane keeps what is seen through it sharp), metal 0 (never the mirror mark). The glass branch's light arrives as
 		// that surface's (noisy, specular in the split) light, as a glossy surface's does.
-		if (bounce == 0 && paneShare > 0.0) { gFirstAlbedo = paneAlbedo; gFirstRough = paneShare; gFirstMetal = 0.0; }
+		if (bounce == 0 && paneShare > 0.0) { gFirstAlbedo = paneAlbedo; gFirstRough = paneShare; gFirstMetal = 0.0; gFirstKind = kKindPlain; gFirstF0 = 0.04; }
 		if (bounce == 1) { gSplitHitT = t; gReflAlbedo = surf.albedo; }   // (ptaaa-denoiser) the first bounce ray's hit (pt-mirrors: + its colour)
 		if (bounce == 0) ptFirstT = t; else ptPath += t;
 		// (2026-11-11 PTEarlyLook slice 2) the first hit's view z / farZ (dir: the camera ray's, unit; p.forward.xyz the view's forward, w farZ)
@@ -2453,9 +2703,52 @@ vec3 Path(vec3 dir) {
 		if (bounce == bounces && bounce > 0 && (uint(p.accum.w) & 32768u) != 0u && view == 0 && p.skyZenith.w > 0.5 && !cached)
 			radiance += Indirect(throughput * surf.albedo * Sky(CosineDirection(n, vec2(Rand(), Rand()))));
 #ifndef PT_RESTIR_GI
-		if (cache && bounce < bounces && !cacheEnd && cvCount < kCacheVerts) { cvHit[cvCount] = hit; cvN[cvCount] = gGeoSplit ? gGeoN : n; cvT[cvCount] = throughput; cvR[cvCount] = radiance; cvCount++; }
+		if (cache && bounce < bounces && !cacheEnd && cvCount < kCacheVerts) {
+			const vec3 tCl = min(max(throughput, vec3(0.0)), vec3(65504.0)), rCl = min(max(radiance, vec3(0.0)), vec3(65504.0));
+			cvHit[cvCount] = hit;
+			cvN[cvCount] = packSnorm2x16(OctEncode(gGeoSplit ? gGeoN : n));
+			cvTR[cvCount] = uvec3(packHalf2x16(tCl.xy), packHalf2x16(rCl.xy), packHalf2x16(vec2(tCl.z, rCl.z)));
+			cvCount++;
+		}
 #endif
 		if (bounce == 0) { gSplitTake = false; gSplitRad0 = radiance; }   // (ptaaa-denoiser) the first hit's own light ends here
+#ifdef PT_SPLIT_PRIMARY
+		{
+			const uint at = PayloadWord(gPixel);
+			const vec3 rCl = min(max(radiance, vec3(0.0)), vec3(65504.0));
+			const vec3 sCl = min(max(gSplitSpec, vec3(0.0)), vec3(65504.0));
+			scratch.words[at + 0u] = floatBitsToUint(hit.x);
+			scratch.words[at + 1u] = floatBitsToUint(hit.y);
+			scratch.words[at + 2u] = floatBitsToUint(hit.z);
+			scratch.words[at + 3u] = floatBitsToUint(t);
+			scratch.words[at + 4u] = packSnorm2x16(OctEncode(n));
+			scratch.words[at + 5u] = packSnorm2x16(OctEncode(gGeoSplit ? gGeoN : n));
+			scratch.words[at + 6u] = packHalf2x16(rCl.rg);
+			scratch.words[at + 7u] = packHalf2x16(vec2(rCl.b, sCl.r));
+			scratch.words[at + 8u] = packHalf2x16(sCl.gb);
+			scratch.words[at + 9u] = packHalf2x16(surf.albedo.rg);
+			scratch.words[at + 10u] = packHalf2x16(vec2(surf.albedo.b, surf.rough));
+			scratch.words[at + 11u] = packHalf2x16(vec2(surf.metal, surf.f0));
+			scratch.words[at + 12u] = packHalf2x16(gFirstAlbedo.rg);
+			scratch.words[at + 13u] = packHalf2x16(vec2(gFirstAlbedo.b, gFirstRough));
+			scratch.words[at + 14u] = packHalf2x16(vec2(min(max(gGlowTotal, 0.0), 65504.0), min(max(gEmTotal, 0.0), 65504.0)));
+			uint fl = (surf.kind & 7u) | kSplitFlagHasSurface | (bounces > 0 ? kSplitFlagDoBounce : 0u);
+			if (gGeoSplit) fl |= kSplitFlagGeoSplit;
+			if (gFirstBump) fl |= kSplitFlagFirstBump;
+			if (gContact) fl |= kSplitFlagContact;
+			if (gFirstGlowMark) fl |= kSplitFlagGlowMark;
+			if (paneShare > 0.0) fl |= kSplitFlagPane;
+			if (gSplitVisChecked) fl |= kSplitFlagVisChecked;
+			if (viewModel) fl |= kSplitFlagViewModel;
+			if (emRestir) fl |= kSplitFlagEmRestir;
+			if (gFirstActorShadow) fl |= kSplitFlagActorShadow;
+			fl |= (PackVisTint(gSplitVisTint) << 13u);
+			fl |= (min(gRayCount, 63u) << 25u);
+			scratch.words[at + 15u] = fl;
+			gSplitWrotePayload = true;
+			break;
+		}
+#endif
 		if (bounce == bounces || cacheEnd || view == 3 || view == 8) break;
 		vec3 l, w;
 		float pdf;
@@ -2484,16 +2777,14 @@ vec3 Path(vec3 dir) {
 			const float share = Specular() ? SpecularShare(surf) : 0.0;
 			gGISurface = true; gGIT1 = t; gGIN1 = n; gGIShare = share; gGIMetal = Specular() ? surf.metal : 0.0;
 			if (Rand() < share) {
+				// UNOFFICIAL 2026-11-19: use VNDF sampling (matching NextDirectionReflect) instead of raw GGX NDF for lower grazing variance
 				const float a = max(surf.rough * surf.rough, 0.002), a2 = a * a;
-				const float u = Rand(), phi = 6.2831853 * Rand();
-				const float cosT = sqrt((1.0 - u) / (1.0 + (a2 - 1.0) * u)), sinT = sqrt(max(1.0 - cosT * cosT, 0.0));
-				vec3 b, tg = Basis(n, b);
-				const vec3 h = normalize(tg * (sinT * cos(phi)) + b * (sinT * sin(phi)) + n * cosT);
+				const vec3 h = SampleVndf(n, v, a, vec2(Rand(), Rand()));
 				l = reflect(-v, h);
 				const float nl = dot(n, l);
 				if (nl <= 0.0) break;
-				const float nh = max(dot(n, h), 0.0), vh = max(dot(v, h), 1.0e-4);
-				const float pdfG = GgxD(nh, a2) * nh / (4.0 * vh);
+				const float nh = max(dot(n, h), 0.0), nv = max(dot(n, v), 1.0e-4);
+				const float pdfG = GgxD(nh, a2) * SmithG1(nv, a2) / (4.0 * nv);
 				gSpecOnly = true;
 				w = BrdfPi(surf, n, v, l) * (nl / (3.14159265 * max(share * pdfG, 1.0e-6)));
 				gSpecOnly = false;
@@ -2521,10 +2812,12 @@ vec3 Path(vec3 dir) {
 		}
 		// (ptaaa-denoiser) the bounce goes on: its direction's specular share (NextDirection's BrdfPi was the last; for glass and a leaf's
 		// transmission NextDirection sets it: glass all specular, the leaf all diffuse), a miss unless it hits
-		if (bounce == 0) { gSplitRatio = SpecShare(); gSplitHitT = 60000.0; gSplitSpecLobe = Split() ? SpecLobeChance(n, v, surf, l) : 0.0; }
+		// UNOFFICIAL 2026-11-19: compute SpecLobeChance once instead of twice back-to-back
+		const float lobeChance = ((bounce == 0 && Split()) || gBounceRoughen > 0.0) ? SpecLobeChance(n, v, surf, l) : 0.0;
+		if (bounce == 0) { gSplitRatio = SpecShare(); gSplitHitT = 60000.0; gSplitSpecLobe = Split() ? lobeChance : 0.0; }
 		// (2026-11-09 PTBounceRoughen) how rough this bounce was: the surface's roughness by the chance its direction was the glossy lobe's,
 		// 1 (matte) by the rest
-		if (gBounceRoughen > 0.0) pathRough = max(pathRough, mix(1.0, surf.rough, clamp(SpecLobeChance(n, v, surf, l), 0.0, 1.0)));
+		if (gBounceRoughen > 0.0) pathRough = max(pathRough, mix(1.0, surf.rough, clamp(lobeChance, 0.0, 1.0)));
 		// (2026-11-07 ptaaa-materials) through glass or a leaf: the next ray leaves from the far side's face (and no glow light sample was taken
 		// there: a glow met along it keeps its full weight)
 		if (dot(l, n) < 0.0) { n = -n; gGlowTotal = 0.0; }
@@ -2542,18 +2835,547 @@ vec3 Path(vec3 dir) {
 		pos = hit + (gGeoSplit ? (dot(l, gGeoN) < 0.0 ? -gGeoN : gGeoN) : n) * (1.0 + 0.002 * t);   // (ptbump: off the smooth surface)
 		dir = l;
 	}
-#ifndef PT_RESTIR_GI
+#if !defined(PT_RESTIR_GI) && !defined(PT_SPLIT_PRIMARY)
 	// (2026-11-07) PTRadianceCache: each vertex that went on gets what came back through it (its outgoing indirect light)
+	// UNOFFICIAL 2026-11-19: subsample bounce-0 writes 1-in-4 pixels (SHaRC style) to slash L2 atomic contention on primary hits.
+	const bool writeBounce0 = ((uint(gPixel.x) ^ (uint(gPixel.y) << 1u) ^ uint(p.origin.w)) & 3u) == 0u;
 	for (int i = 0; i < cvCount; i++) {
-		const vec3 rest = radiance - cvR[i] + (i == 0 ? cacheFirstGlow : vec3(0.0)), T = cvT[i];   // (ptaaa-emissive: the first vertex's glow share)
-		CacheAdd(cvHit[i], cvN[i], max(vec3(T.x > 1.0e-4 ? rest.x / T.x : 0.0, T.y > 1.0e-4 ? rest.y / T.y : 0.0, T.z > 1.0e-4 ? rest.z / T.z : 0.0), vec3(0.0)));
+		if (i == 0 && !writeBounce0) continue;
+		const vec2 txy = unpackHalf2x16(cvTR[i].x), rxy = unpackHalf2x16(cvTR[i].y), trz = unpackHalf2x16(cvTR[i].z);
+		const vec3 T = vec3(txy, trz.x), R = vec3(rxy, trz.y);
+		const vec3 rest = radiance - R + (i == 0 ? cacheFirstGlow : vec3(0.0));   // (ptaaa-emissive: the first vertex's glow share)
+		CacheAdd(cvHit[i], OctDecode(unpackSnorm2x16(cvN[i])), max(vec3(T.x > 1.0e-4 ? rest.x / T.x : 0.0, T.y > 1.0e-4 ? rest.y / T.y : 0.0, T.z > 1.0e-4 ? rest.z / T.z : 0.0), vec3(0.0)));
 	}
 #endif
 	return radiance;
 }
+#endif   // !PT_SPLIT_SPATIAL && !PT_SPLIT_BOUNCE
+
+#ifdef PT_SPLIT_SPATIAL
+// UNOFFICIAL 2026-11-19 (Phase 3B Pass 2): Uniform 8x8 spatial ReSTIR DI pass reading THIS frame's intermediate temporal
+// reservoirs (TempResWord), running an RTXDI shared-memory boiling filter (0 global reads), CGNS + streaming pairwise MIS,
+// final visibility ray, and storing final reservoirs into FrameParity() + adding DI radiance into the Primary Payload.
+shared float sTileW[64];
+shared uint  sTileCount[64];
+
+void RunSplitSpatial(ivec2 pixel) {
+	const uint lid = gl_LocalInvocationIndex;
+	const bool inBounds = pixel.x < int(p.size.x) && pixel.y < int(p.size.y);
+	sTileW[lid] = 0.0;
+	sTileCount[lid] = 0u;
+
+	uint head0 = 0u;
+	LSample y = NoSample();
+	float W = 0.0, M = 0.0, yTarget = 0.0, t = 0.0;
+	vec3 yLight = vec3(0.0), yPos = vec3(0.0);
+	vec3 hit = vec3(0.0), n = vec3(0.0, 0.0, 1.0), geoN = vec3(0.0, 0.0, 1.0), v = vec3(0.0, 0.0, 1.0);
+	Surface surf = HitSurface(vec3(1.0));
+	uint fl = 0u;
+	uint pAt = 0u;
+	float maxM = 20.0;
+	bool activePx = false;
+
+	if (inBounds) {
+		state = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + uint(p.origin.w) * 26699u;
+		LoadMatKeys();
+		LoadBounceRoughen();
+		LoadCostKeys();
+		LoadEmCostKeys();
+		LoadScratchLayout();
+		Pcg();
+		gPixel = pixel;
+		const vec2 camUV = CameraUV(pixel, vec2(Rand(), Rand()));
+		const vec3 camDir = normalize(p.forward.xyz + p.right.xyz * (2.0 * camUV.x - 1.0) - p.up.xyz * (2.0 * camUV.y - 1.0));
+		state ^= 0x6C8E9CF5u; Pcg();   // decorrelate spatial RNG from Pass 1
+
+		if (gScratchSplit && gScratchRestir) {
+			const uint tw = TempResWord(pixel);
+			head0 = scratch.words[tw];
+			if (head0 != 0u) {
+				maxM = FrameTexel(10).x;
+				pAt = PayloadWord(pixel);
+				fl = scratch.words[pAt + 15u];
+				hit = vec3(uintBitsToFloat(scratch.words[pAt + 0u]), uintBitsToFloat(scratch.words[pAt + 1u]), uintBitsToFloat(scratch.words[pAt + 2u]));
+				t = uintBitsToFloat(scratch.words[pAt + 3u]);
+				n = OctDecode(unpackSnorm2x16(scratch.words[pAt + 4u]));
+				geoN = OctDecode(unpackSnorm2x16(scratch.words[pAt + 5u]));
+				const vec2 aRG = unpackHalf2x16(scratch.words[pAt + 9u]);
+				const vec2 aBR = unpackHalf2x16(scratch.words[pAt + 10u]);
+				const vec2 mF0 = unpackHalf2x16(scratch.words[pAt + 11u]);
+				surf.albedo = vec3(aRG, aBR.x);
+				surf.rough = aBR.y;
+				surf.metal = mF0.x;
+				surf.f0 = mF0.y;
+				surf.kind = fl & 7u;
+				v = (fl & kSplitFlagViewModel) != 0u ? -normalize(hit) : -camDir;
+				M = min(float(head0 >> 16), maxM);
+				W = uintBitsToFloat(scratch.words[tw + 1u]);
+				if (!(W > 0.0) || !(W < 3.0e38)) W = 0.0;
+				y = W > 0.0 ? CurSample(head0 & 0xFFFFu, scratch.words[tw + 4u], unpackUnorm2x16(scratch.words[tw + 5u])) : NoSample();
+				if (Valid(y) && LightAt(y, hit, n, yLight, yPos)) {
+					yTarget = RestirTarget(yLight, yPos, hit, surf, n, v);
+					if (!(yTarget > 0.0)) { y = NoSample(); W = 0.0; }
+				} else { y = NoSample(); W = 0.0; }
+				activePx = true;
+				const float est = Valid(y) && W > 0.0 ? W * yTarget : 0.0;
+				if (est > 0.0 && est < 3.0e38) { sTileW[lid] = est; sTileCount[lid] = 1u; }
+			}
+		}
+	}
+
+	// Uniform 8x8 shared-memory boiling filter (all 64 lanes participate in barriers)
+	barrier();
+	for (uint stride = 32u; stride > 0u; stride >>= 1u) {
+		if (lid < stride) {
+			sTileW[lid] += sTileW[lid + stride];
+			sTileCount[lid] += sTileCount[lid + stride];
+		}
+		barrier();
+	}
+	if (!inBounds || !gScratchSplit || !gScratchRestir) return;
+	if (!activePx) { ClearReservoir(); return; }
+
+	const float tileMean = sTileCount[0] >= 16u ? sTileW[0] / float(sTileCount[0]) : 0.0;
+	bool yVisChecked = (fl & kSplitFlagVisChecked) != 0u && Valid(y);
+	vec3 yVisTint = yVisChecked ? UnpackVisTint(fl >> 13u) : vec3(1.0);
+	if (tileMean > 0.0 && Valid(y) && W * yTarget > 16.0 * tileMean) {
+		y = NoSample(); W = 0.0; yTarget = 0.0; M = min(M, 1.0); yVisChecked = false;
+	}
+
+	const bool geoSplit = (fl & kSplitFlagGeoSplit) != 0u;
+	const vec3 lift = hit + (geoSplit ? (dot(geoN, n) < 0.0 ? -geoN : geoN) : n) * (1.0 + 0.002 * t);
+	const int raysMode = RestirRaysMode();
+	const bool rtxdi2Ray = raysMode == 4;
+	gRestirVis = raysMode != 2 && !rtxdi2Ray;
+
+	// Spatial pairwise MIS reading THIS frame's intermediate temporal reservoirs (0-frame lag!)
+	const vec2 sp = FrameTexel(10), sr = FrameTexel(11), sq = FrameTexel(12);
+	const int spWant = min(int(sp.y + 0.5), kRestirNeighbours);
+	if (spWant > 0) {
+		const vec3 here = hit + p.origin.xyz;
+		const float dist = max(length(hit), 1.0e-3);
+		const vec2 at = vec2(pixel) + 0.5;
+		const int cgnsK = RestirCgnsK();
+		ivec2 cgnsPx[kRestirNeighbours];
+		int spCount = spWant;
+		if (cgnsK > 0) spCount = RestirCgnsPick(at, here, n, dist, sr.x, sr.y, sq.x * dist, spWant, cgnsK, p.origin.xyz, p.forward.xyz, p.right.xyz, p.up.xyz, cgnsPx);
+
+		int nb = 0;
+		const float Mc = M;
+		float sumM = M, mcSum = 0.0, nbSum = 0.0;
+		const float qcy = Valid(y) ? LightLuma(y, hit, n) : 0.0;
+		LSample nbY = NoSample();
+		float nbYTarget = 0.0;
+		vec3 nbYLight = vec3(0.0), nbYPos = vec3(0.0);
+
+		for (int i = 0; i < spCount; i++) {
+			vec2 q = at;
+			if (cgnsK > 0) q = vec2(cgnsPx[i]) + 0.5;
+			else { const float r = sr.x * sqrt(Rand()), a = 6.2831853 * Rand(); q += r * vec2(cos(a), sin(a)); }
+			const ivec2 px = ivec2(floor(q));
+			if (px == pixel || any(lessThan(px, ivec2(0))) || any(greaterThanEqual(px, ivec2(p.size.xy)))) continue;
+			const uint w = TempResWord(px);
+			const uint head = scratch.words[w];
+			if (head == 0u) continue;
+			const float oldW = uintBitsToFloat(scratch.words[w + 1u]), oldDist = uintBitsToFloat(scratch.words[w + 2u]);
+			const vec3 oldN = OctDecode(unpackSnorm2x16(scratch.words[w + 3u]));
+			if (dot(oldN, n) < sr.y) continue;
+			const vec2 ouv = (vec2(px) + 0.5) * p.size.zw;
+			const vec3 oldPoint = p.origin.xyz + normalize(p.forward.xyz + p.right.xyz * (2.0 * ouv.x - 1.0) - p.up.xyz * (2.0 * ouv.y - 1.0)) * oldDist;
+			if (abs(dot(oldPoint - here, n)) > sq.x * dist) continue;
+			const float oldM = min(float(head >> 16), maxM);
+			if (!(oldM > 0.0)) continue;
+			LSample old = CurSample(head & 0xFFFFu, scratch.words[w + 4u], unpackUnorm2x16(scratch.words[w + 5u]));
+			if (!(oldW > 0.0) || !(oldW < 3.0e38)) old = NoSample();
+			const vec3 src = oldPoint - p.origin.xyz;
+			nb++;
+			sumM += oldM;
+			if (Valid(y)) {
+				gRestirVis = raysMode <= 1;
+				const float qiy = Same(old, y) || LightVisibleFrom(y, src, oldN) ? LightLuma(y, src, oldN) : 0.0;
+				gRestirVis = raysMode != 2 && !rtxdi2Ray;
+				mcSum += Mc * qcy / max(Mc * qcy + oldM * qiy, 1.0e-30);
+			}
+			if (!Valid(old)) continue;
+			vec3 light, pos;
+			if (!LightAt(old, hit, n, light, pos)) continue;
+			const float tt = RestirTarget(light, pos, hit, surf, n, v);
+			if (!(tt > 0.0) || !(Same(old, y) || LightVisibleFrom(old, hit, n))) continue;
+			const float qii = LightLuma(old, src, oldN);
+			const float qci = dot(light, vec3(0.2126, 0.7152, 0.0722));
+			const float wi = (oldM * qii / max(oldM * qii + Mc * qci, 1.0e-30)) * tt * oldW;
+			if (wi > 0.0) {
+				nbSum += wi;
+				if (Rand() * nbSum < wi) { nbY = old; nbYTarget = tt; nbYLight = light; nbYPos = pos; }
+			}
+		}
+		if (nb > 0) {
+			const float cWeight = Valid(y) ? mcSum * yTarget * W : 0.0;
+			const float totalSum = cWeight + nbSum;
+			if (nbSum > 0.0 && Rand() * totalSum < nbSum) {
+				if (!Same(nbY, y)) yVisChecked = false;
+				y = nbY; yTarget = nbYTarget; yLight = nbYLight; yPos = nbYPos;
+			}
+			W = Valid(y) && yTarget > 0.0 ? (totalSum / float(nb)) / yTarget : 0.0;
+			M = sumM;
+		}
+	}
+
+	if (!(W < 3.0e38)) W = 0.0;
+	vec3 tint = yVisChecked ? yVisTint : vec3(1.0);
+	float storeW = W;
+	bool seen = true;
+	bool actorShadowSpatial = false;
+	if (!gRestirVis && !yVisChecked && Valid(y) && W > 0.0) {
+		const vec3 l = yPos - lift;
+		const float ldist = length(l);
+		seen = ldist > 1.0e-4 && Visible(lift, l / ldist, LightGap(y, ldist));
+		tint = gShadowTint;
+		if (!seen) {
+			if (ldist > 1.0e-4 && (gShadowHitCustom & NVR_RT_CUSTOM_ACTOR) != 0u) actorShadowSpatial = true;
+			storeW = 0.0; M = min(M, 1.0);
+		}
+	}
+	gRestirVis = true;
+	const vec2 cuv = (vec2(pixel) + 0.5) * p.size.zw;
+	const vec3 centre = normalize(p.forward.xyz + p.right.xyz * (2.0 * cuv.x - 1.0) - p.up.xyz * (2.0 * cuv.y - 1.0));
+	const float facing = dot(centre, n);
+	StoreReservoir(y, min(M, maxM), storeW, abs(facing) > 0.05 ? dot(hit, n) / facing : length(hit), n);
+
+	if (Valid(y) && W > 0.0 && seen) {
+		gContact = (fl & kSplitFlagContact) != 0u;
+		if (gContact) { gContactFrom = hit; gContactN = geoN; gContactZ = dot(hit, p.forward.xyz); gContactNoise = Rand(); }
+		const vec3 diLit = yLight * W * BrdfPi(surf, n, v, normalize(yPos - hit)) * tint *
+			(gContact ? PtContact(normalize(yPos - gContactFrom), length(yPos - gContactFrom)) : 1.0);
+		const vec2 rRG = unpackHalf2x16(scratch.words[pAt + 6u]);
+		const vec2 rBS = unpackHalf2x16(scratch.words[pAt + 7u]);
+		const vec2 sGB = unpackHalf2x16(scratch.words[pAt + 8u]);
+		vec3 rad0 = vec3(rRG, rBS.x) + diLit;
+		vec3 spec0 = vec3(rBS.y, sGB) + (Split() ? diLit * SpecShare() : vec3(0.0));
+		rad0 = min(max(rad0, vec3(0.0)), vec3(65504.0));
+		spec0 = min(max(spec0, vec3(0.0)), vec3(65504.0));
+		scratch.words[pAt + 6u] = packHalf2x16(rad0.rg);
+		scratch.words[pAt + 7u] = packHalf2x16(vec2(rad0.b, spec0.r));
+		scratch.words[pAt + 8u] = packHalf2x16(spec0.gb);
+	}
+	if (actorShadowSpatial || gCountRays) {
+		uint outFl = fl | (actorShadowSpatial ? kSplitFlagActorShadow : 0u);
+		if (gCountRays) {
+			const uint prevRays = (outFl >> 25u) & 63u;
+			outFl = (outFl & ~(63u << 25u)) | (min(prevRays + gRayCount, 63u) << 25u);
+		}
+		scratch.words[pAt + 15u] = outFl;
+	}
+}
+#endif   // PT_SPLIT_SPATIAL
+
+#ifdef PT_SPLIT_BOUNCE
+// UNOFFICIAL 2026-11-19 (Phase 3B Pass 3): Wave-coherent secondary bounce tracer + Radiance Cache + Final Demodulate & Output.
+// Zero G-buffer / ReSTIR DI live registers; sky, ownFlash, and PTBounceHalf skipped tiles bypass bounce tracing cleanly.
+void RunSplitBounce(ivec2 pixel) {
+	if (!gScratchSplit) return;
+	gPixel = pixel;
+	const uint pAt = PayloadWord(pixel);
+	const uint fl = scratch.words[pAt + 15u];
+	const vec2 camUV = CameraUV(pixel, vec2(Rand(), Rand()));
+	const vec3 camDir = normalize(p.forward.xyz + p.right.xyz * (2.0 * camUV.x - 1.0) - p.up.xyz * (2.0 * camUV.y - 1.0));
+	state ^= 0x9E3779B9u; Pcg();   // decorrelate bounce RNG from Pass 1 & Pass 2
+
+	const vec2 rRG = unpackHalf2x16(scratch.words[pAt + 6u]);
+	const vec2 rBS = unpackHalf2x16(scratch.words[pAt + 7u]);
+	const vec2 sGB = unpackHalf2x16(scratch.words[pAt + 8u]);
+	const vec2 faRG = unpackHalf2x16(scratch.words[pAt + 12u]);
+	const vec2 faBR = unpackHalf2x16(scratch.words[pAt + 13u]);
+	vec3 radiance = vec3(rRG, rBS.x);
+	const vec3 rad0 = radiance;
+	const vec3 spec0 = vec3(rBS.y, sGB);
+	const vec3 firstAlbedo = vec3(faRG, faBR.x);
+	const float firstRough = faBR.y;
+	const float t0 = uintBitsToFloat(scratch.words[pAt + 3u]);
+	const bool hasSurface = (fl & kSplitFlagHasSurface) != 0u;
+	const bool doBounce = (fl & kSplitFlagDoBounce) != 0u;
+	const bool bumped = (fl & kSplitFlagFirstBump) != 0u;
+	const bool glowMark = (fl & kSplitFlagGlowMark) != 0u;
+	const bool isPane = (fl & kSplitFlagPane) != 0u;
+	const bool viewModel = (fl & kSplitFlagViewModel) != 0u;
+	const bool actorShadow = (fl & kSplitFlagActorShadow) != 0u;
+	const uint prevRays = (fl >> 25u) & 63u;
+	const bool split = Split() && (uint(p.accum.w) & 512u) != 0u;
+
+	vec3 n0 = OctDecode(unpackSnorm2x16(scratch.words[pAt + 4u]));
+	vec3 geoN0 = OctDecode(unpackSnorm2x16(scratch.words[pAt + 5u]));
+	const vec3 hit0 = vec3(uintBitsToFloat(scratch.words[pAt + 0u]), uintBitsToFloat(scratch.words[pAt + 1u]), uintBitsToFloat(scratch.words[pAt + 2u]));
+	const vec3 v0 = viewModel ? -normalize(hit0) : -camDir;
+	const vec2 aRG = unpackHalf2x16(scratch.words[pAt + 9u]);
+	const vec2 aBR = unpackHalf2x16(scratch.words[pAt + 10u]);
+	const vec2 mF0 = unpackHalf2x16(scratch.words[pAt + 11u]);
+	Surface surf0;
+	surf0.albedo = vec3(aRG, aBR.x);
+	surf0.rough = aBR.y;
+	surf0.metal = mF0.x;
+	surf0.f0 = mF0.y;
+	surf0.kind = fl & 7u;
+
+	const float firstMetal = isPane ? 0.0 : surf0.metal;
+	const uint firstKind = isPane ? kKindPlain : surf0.kind;
+	const float firstF0 = isPane ? 0.04 : surf0.f0;
+	const float firstNV = dot(n0, v0);
+
+	vec3 splitRatio = vec3(0.0);
+	float splitHitT = 0.0, splitSpecLobe = 0.0;
+	vec3 reflAlbedo = vec3(1.0);
+	const int bounces = PtCount(p.accum.y, kPtMaxBounces);
+	const bool halfSkip = (uint(p.accum.w) & 16384u) != 0u && ((((pixel.x >> 3) + (pixel.y >> 3) + int(uint(p.origin.w))) & 1) != 0);
+
+	if (doBounce && bounces > 0 && !halfSkip) {
+		const bool geoSplit0 = (fl & kSplitFlagGeoSplit) != 0u;
+		const vec2 misGE = unpackHalf2x16(scratch.words[pAt + 14u]);
+		float prevGlowTotal = misGE.x, prevEmTotal = misGE.y, prevEmSelect = 1.0;
+		bool prevEmRestir = (fl & kSplitFlagEmRestir) != 0u;
+		const bool cache = CacheOn();
+		const bool cacheShort = cache && gCacheShort > 0.5 && bounces > 1 && Rand() * gCacheShort >= 1.0;
+		vec3 cvHit[kCacheVerts];
+		uint cvN[kCacheVerts];
+		uvec3 cvTR[kCacheVerts];
+		int cvCount = 0;
+		vec3 cacheFirstGlow = vec3(0.0);
+
+		if (cache) {
+			const vec3 rCl = min(max(radiance, vec3(0.0)), vec3(65504.0));
+			cvHit[0] = hit0;
+			cvN[0] = packSnorm2x16(OctEncode(geoSplit0 ? geoN0 : n0));
+			cvTR[0] = uvec3(packHalf2x16(vec2(1.0)), packHalf2x16(rCl.xy), packHalf2x16(vec2(1.0, rCl.z)));
+			cvCount = 1;
+		}
+
+		vec3 l0, w0;
+		float pdf0;
+		bool go = NextDirection(n0, v0, surf0, l0, w0, pdf0);
+		if (go && geoSplit0 && (dot(l0, n0) < 0.0) != (dot(l0, geoN0) < 0.0)) go = false;
+
+		if (go) {
+			vec3 throughput = ((uint(p.accum.w) & 16384u) != 0u ? 2.0 : 1.0) * w0;
+			const float lobeChance = (Split() || gBounceRoughen > 0.0) ? SpecLobeChance(n0, v0, surf0, l0) : 0.0;
+			splitRatio = SpecShare();
+			splitHitT = 60000.0;
+			splitSpecLobe = Split() ? lobeChance : 0.0;
+			float pathRough = gBounceRoughen > 0.0 ? mix(1.0, surf0.rough, clamp(lobeChance, 0.0, 1.0)) : 0.0;
+			vec3 prevN = n0;
+			if (dot(l0, prevN) < 0.0) { prevN = -prevN; prevGlowTotal = 0.0; }
+			vec3 prevHit = hit0;
+			float prevPdf = pdf0;
+			vec3 pos = hit0 + (geoSplit0 ? (dot(l0, geoN0) < 0.0 ? -geoN0 : geoN0) : prevN) * (1.0 + 0.002 * t0);
+			vec3 dir = l0;
+			float ptPath = 0.0;
+			bool cacheEnd = false;
+			gGeoSplit = false;
+			gContact = false;
+			gSplitTake = false;
+			gRestirFirst = false;
+
+			const int alphaMode = int(p.rect.w + 0.5);
+			const float rayLength = p.grid[2].z > 0.0 ? p.grid[2].z : p.misc.z;
+
+			for (int bounce = 1; bounce <= bounces; bounce++) {
+				rayQueryEXT q;
+				gGlassSolid = GlassMode() > 0.5;
+				bool traced = false;
+				float qT = 0.0;
+				uint qInstance = 0u, qPrim = 0u;
+				vec2 qBary = vec2(0.0);
+				mat4x3 qToScene = mat4x3(1.0);
+#ifndef RT_NO_REAL_TEXTURES
+				rtConeWidth = 0.0;
+#endif
+				if (!(gOneCameraQuery > 0.5) && rtHiddenNear(pos, vec3(0.0))) {
+					PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0x8Fu, pos + p.origin.xyz, 0.0, dir, rayLength)
+					PT_PROCEED_OPAQUE(q)
+					PT_TAKE_HIT(q);
+					rayQueryEXT qp;
+					PT_RAY_INIT(qp, gl_RayFlagsNoOpaqueEXT, alphaMode == 2 ? 0x60u : 0x70u, pos + p.origin.xyz, 0.0, dir, traced ? qT : rayLength)
+					uint n_ = 0u;
+					while (rayQueryProceedEXT(qp)) {
+						PT_GUARD(qp, n_)
+						if (rayQueryGetIntersectionTypeEXT(qp, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
+						if ((rayQueryGetIntersectionInstanceCustomIndexEXT(qp, false) & NVR_RT_CUSTOM_HIDDEN) != 0u) continue;
+						if (alphaMode == 0 || !AlphaTest() || rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(qp, false), uint(rayQueryGetIntersectionPrimitiveIndexEXT(qp, false)),
+						                                                    rayQueryGetIntersectionBarycentricsEXT(qp, false)))
+							rayQueryConfirmIntersectionEXT(qp);
+					}
+					if (rayQueryGetIntersectionTypeEXT(qp, true) == gl_RayQueryCommittedIntersectionTriangleEXT) PT_TAKE_HIT(qp);
+				} else if (alphaMode != 1) {
+					PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, alphaMode == 2 ? 0xEFu : 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength)
+					PT_PROCEED_OPAQUE(q)
+					if (alphaMode == 3 && rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT &&
+						!rtAlphaPass(rayQueryGetIntersectionInstanceIdEXT(q, true), uint(rayQueryGetIntersectionPrimitiveIndexEXT(q, true)), rayQueryGetIntersectionBarycentricsEXT(q, true))) {
+						const float past = rayQueryGetIntersectionTEXT(q, true);
+						PT_RAY_INIT(q, gl_RayFlagsOpaqueEXT, 0xEFu, pos + p.origin.xyz, past, dir, rayLength)
+						PT_PROCEED_OPAQUE(q)
+					}
+					PT_TAKE_HIT(q);
+				} else {
+					PT_RAY_INIT(q, AlphaTest() ? 0u : gl_RayFlagsOpaqueEXT, 0xFFu, pos + p.origin.xyz, 0.0, dir, rayLength)
+					Proceed(q);
+					PT_TAKE_HIT(q);
+				}
+
+				if (!traced) {
+					radiance += Indirect(throughput * Sky(dir));
+					break;
+				}
+				const float t = qT;
+				const vec3 v = -dir;
+				RtHitGeom hg = rtHitLoadGeom(qInstance, qPrim, qBary);
+				vec3 n = -dir;
+				if (hg.hasPos) {
+					vec3 face = mat3(qToScene) * rtHitGeomObjectNormal(hg);
+					if (dot(face, face) > 1.0e-12) n = normalize(face);
+				}
+				n = dot(n, dir) > 0.0 ? -n : n;
+				n = rtHitGeomSmoothNormal(hg, qBary, n, mat3(qToScene), dir);
+				const vec3 hit = pos + dir * t;
+#ifndef RT_NO_REAL_TEXTURES
+				rtConeWidth = t0 * 2.0 * length(p.up.xyz) * p.size.w + (ptPath + t) * 0.5;
+				rtConeDir = (uint(p.accum.w) & 2097152u) != 0u ? vec3(0.0) : dir;
+				rtConeToScene = mat3(qToScene);
+				rtHitGeomComputeGrads(hg);
+#endif
+				const vec3 hitAlbedo = clamp(AlbedoAtlas() ? rtHitGeomAlbedo(hg) : records[qInstance].albedo.rgb, 0.0, 1.0);
+				Surface surf = HitSurface(hitAlbedo, qInstance);
+				if (surf.kind == kKindGlass && gGlassSurface > 0.0) {
+					const float share = GlassShare(qInstance, qPrim, qBary);
+					if (share > 0.0 && Rand() < share) { surf.kind = kKindPane; surf.albedo = hitAlbedo; surf.rough = 1.0; surf.metal = 0.0; surf.f0 = 0.04; }
+				}
+				rtHitNormalAtlasOn = NormalAtlas();
+				const vec3 bent = rtHitGeomNormalMapped(hg, n, mat3(qToScene));
+				if (dot(bent, v) > 0.0) n = bent;
+				if (GlowAtlas() && p.skyHorizon.w > 0.0) {
+					const vec3 glow = rtHitGeomGlow(hg);
+					if (glow != vec3(0.0)) {
+						float mis = 1.0;
+						if (GlowLightCount() > 0 && prevGlowTotal > 0.0) {
+							const int owner = GlowOwner(hit);
+							if (owner >= 0) {
+								const float light = GlowWeight(owner, prevHit, prevN) / prevGlowTotal * GlowConePdf(GlowSphere(owner), pos, prevN, dir);
+								mis = prevPdf / max(prevPdf + light, 1.0e-8);
+							}
+						}
+						if (prevEmTotal > 0.0) {
+							const float light = EmPdfAt(qInstance, qPrim, dir, t, prevHit, prevN, prevEmTotal) * prevEmSelect;
+							if (light > 0.0) {
+								const float balance = prevPdf / max(prevPdf + light, 1.0e-30);
+								if (prevEmRestir) { cacheFirstGlow += Indirect(throughput * glow * (p.skyHorizon.w * balance)); mis = 0.0; }
+								else mis *= balance;
+							}
+						}
+						radiance += Indirect(throughput * glow * (p.skyHorizon.w * mis));
+					}
+				}
+				if (gBounceRoughen > 0.0) surf.rough = max(surf.rough, pathRough * gBounceRoughen);
+				if (bounce == 1) { splitHitT = t; reflAlbedo = surf.albedo; }
+				ptPath += t;
+
+				bool cached = false;
+				if (cache && (bounce == bounces || cacheShort)) {
+					vec3 cl;
+					if (CacheRead(hit, n, cl)) { radiance += Indirect(throughput * cl); cached = true; cacheEnd = bounce < bounces; }
+				}
+				gEmMis = (bounce < bounces) || cached;
+				gBounce = bounce;
+				gFlashOnly = false;
+				const vec3 lit = DirectSides(hit, n, t, v, surf);
+				radiance += Indirect(throughput * lit);
+				if (bounce == bounces && (uint(p.accum.w) & 65536u) != 0u && !cached)
+					radiance += Indirect(throughput * surf.albedo * lit * 0.75);
+				if (bounce == bounces && (uint(p.accum.w) & 32768u) != 0u && p.skyZenith.w > 0.5 && !cached)
+					radiance += Indirect(throughput * surf.albedo * Sky(CosineDirection(n, vec2(Rand(), Rand()))));
+				if (cache && bounce < bounces && !cacheEnd && cvCount < kCacheVerts) {
+					const vec3 tCl = min(max(throughput, vec3(0.0)), vec3(65504.0)), rCl = min(max(radiance, vec3(0.0)), vec3(65504.0));
+					cvHit[cvCount] = hit;
+					cvN[cvCount] = packSnorm2x16(OctEncode(n));
+					cvTR[cvCount] = uvec3(packHalf2x16(tCl.xy), packHalf2x16(rCl.xy), packHalf2x16(vec2(tCl.z, rCl.z)));
+					cvCount++;
+				}
+				if (bounce == bounces || cacheEnd) break;
+				vec3 l, w;
+				float pdf;
+				if (!NextDirection(n, v, surf, l, w, pdf)) break;
+				if (gBounceRoughen > 0.0) {
+					const float lc = SpecLobeChance(n, v, surf, l);
+					pathRough = max(pathRough, mix(1.0, surf.rough, clamp(lc, 0.0, 1.0)));
+				}
+				if (dot(l, n) < 0.0) { n = -n; gGlowTotal = 0.0; }
+				prevHit = hit; prevN = n; prevPdf = pdf; prevGlowTotal = gGlowTotal;
+				prevEmTotal = gEmTotal; prevEmSelect = gEmSelect; prevEmRestir = false;
+				throughput *= w;
+				if (bounce >= (gRouletteFrom > 0.5 ? 1 : 2)) {
+					const float keep = clamp(max(throughput.r, max(throughput.g, throughput.b)), bounce < 2 ? 0.25 : 0.05, 0.95);
+					if (Rand() >= keep) break;
+					throughput /= keep;
+				}
+				pos = hit + n * (1.0 + 0.002 * t);
+				dir = l;
+			}
+			const bool writeBounce0 = ((uint(pixel.x) ^ (uint(pixel.y) << 1u) ^ uint(p.origin.w)) & 3u) == 0u;
+			for (int i = 0; i < cvCount; i++) {
+				if (i == 0 && !writeBounce0) continue;
+				const vec2 txy = unpackHalf2x16(cvTR[i].x), rxy = unpackHalf2x16(cvTR[i].y), trz = unpackHalf2x16(cvTR[i].z);
+				const vec3 T = vec3(txy, trz.x), R = vec3(rxy, trz.y);
+				const vec3 rest = radiance - R + (i == 0 ? cacheFirstGlow : vec3(0.0));
+				CacheAdd(cvHit[i], OctDecode(unpackSnorm2x16(cvN[i])), max(vec3(T.x > 1.0e-4 ? rest.x / T.x : 0.0, T.y > 1.0e-4 ? rest.y / T.y : 0.0, T.z > 1.0e-4 ? rest.z / T.z : 0.0), vec3(0.0)));
+			}
+		}
+	}
+
+	const bool bad = any(isnan(radiance)) || any(isinf(radiance));
+	if (bad) radiance = vec3(0.0);
+	vec3 spec = vec3(0.0);
+	if (split && !bad && hasSurface && Specular()) {
+		spec = spec0 + max(radiance - rad0, vec3(0.0)) * splitRatio;
+		spec = (any(isnan(spec)) || any(isinf(spec))) ? vec3(0.0) : clamp(spec, vec3(0.0), max(radiance, vec3(0.0)));
+	}
+	const float lumaC = dot(radiance, vec3(0.2126, 0.7152, 0.0722));
+	if (p.misc.y > 0.0 && lumaC > p.misc.y) { radiance *= p.misc.y / lumaC; spec *= p.misc.y / lumaC; }
+
+	const float firstViewZ = (gEarlyLook > 0.5 && p.forward.w > 0.0 && t0 > 0.0) ? t0 * dot(viewModel ? normalize(hit0) : camDir, p.forward.xyz) / p.forward.w : 0.0;
+	const float earlyZ = glowMark ? -1.0 : (isnan(firstViewZ) || isinf(firstViewZ) ? 0.0 : firstViewZ);
+	const float displayABase = gCountRays ? 1.0 + float(prevRays + gRayCount) : gEarlyLook > 0.5 ? earlyZ : bumped ? 2.0 + gBumpDetail : 1.0;
+	const float displayA = (actorShadow && !gCountRays && !(gEarlyLook > 0.5)) ? -displayABase : displayABase;
+	const vec3 albedo = max(firstAlbedo, vec3(0.02));
+
+	if (split) {
+		vec3 specAlbedo = vec3(0.0);
+		bool specMirror = false;
+		if (hasSurface && Specular()) {
+			const vec3 f0 = firstKind == kKindHair ? clamp(firstAlbedo, vec3(0.004), vec3(0.04)) :
+				mix(vec3(firstKind == kKindSkin ? 0.028 : firstF0), firstAlbedo, clamp(firstMetal, 0.0, 1.0));
+			specAlbedo = EnvBrdfApprox(f0, clamp(firstRough, 0.0, 1.0), clamp(firstNV, 0.0, 1.0));
+			specMirror = gMirrorSurface > 0.0 && firstRough < gMirrorSurface && firstMetal >= 0.99;
+			if (specMirror && splitSpecLobe > 0.5) specAlbedo *= max(reflAlbedo, vec3(0.02));
+			specAlbedo = max(specAlbedo, vec3(0.01));
+		}
+		const vec3 diffuse = min(max(radiance - spec, vec3(0.0)) / albedo, vec3(gDenoiseCeil));
+		const vec3 specular = specAlbedo.x > 0.0 ? min(spec / specAlbedo, vec3(gDenoiseCeil)) : vec3(0.0);
+		const float albedoA = hasSurface ? (1.0 + clamp(firstMetal, 0.0, 1.0)) : 0.0;
+		const float outHitT = splitSpecLobe > 0.5 ? splitHitT : 0.0;
+		imageStore(albedoOut, pixel, vec4(albedo, albedoA));
+		imageStore(display, pixel, vec4(diffuse, displayA));
+		imageStore(specOut, pixel, vec4(specular, specMirror ? (outHitT >= 1.0 ? -outHitT : -0.5) : outHitT));
+		imageStore(accumA, pixel, vec4(specAlbedo.rg, 0.0, 0.0));
+		imageStore(accumB, pixel, vec4(specAlbedo.b, firstRough, 0.0, 0.0));
+		return;
+	}
+	imageStore(albedoOut, pixel, vec4(albedo, hasSurface ? 1.0 : 0.0));
+	imageStore(display, pixel, vec4(min(radiance / albedo, vec3(gDenoiseCeil)), displayA));
+}
+#endif   // PT_SPLIT_BOUNCE
 
 void main() {
 	const ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
+#ifdef PT_SPLIT_SPATIAL
+	RunSplitSpatial(pixel);
+	return;
+#endif
 	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y)) return;
 	state = uint(pixel.x) * 1973u + uint(pixel.y) * 9277u + uint(p.origin.w) * 26699u;
 	LoadMatKeys();   // (2026-11-07 ptaaa-materials) the material models' keys, once
@@ -2564,6 +3386,49 @@ void main() {
 	LoadScratchLayout();   // (ptaaa-hangfix) the scratch store's regions, checked once
 #endif
 	Pcg();
+#ifdef PT_SPLIT_BOUNCE
+	RunSplitBounce(pixel);
+	return;
+#endif
+#ifdef PT_SPLIT_PRIMARY
+	if (!gScratchSplit) return;
+	{
+		const vec2 uv = CameraUV(pixel, vec2(Rand(), Rand()));
+		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
+		gPixel = pixel;
+		ClearTempReservoir();
+		gFirstAlbedo = vec3(1.0);
+		gFirstSurface = 0.0;
+		gFirstRough = 1.0; gFirstMetal = 0.0; gFirstNV = 1.0; gFirstKind = kKindPlain; gFirstF0 = 0.04;
+		gSplitTake = false; gSplitSpec = vec3(0.0); gSplitRad0 = vec3(0.0); gSplitRatio = vec3(0.0); gSplitHitT = 0.0; gSplitSpecLobe = 0.0;
+		gReflAlbedo = vec3(1.0);
+		gFirstViewZ = 0.0; gFirstGlowMark = false; gFirstBump = false;
+		gFirstActorShadow = false; gFirstSunDiff = vec3(0.0); gFirstSunVis = 1.0; gFirstSunHitT = 0.0;
+		gSplitVisChecked = false; gSplitVisTint = vec3(1.0); gSplitWrotePayload = false;
+		vec3 c = Path(dir);
+		StoreSunSplit(pixel, gFirstAlbedo);
+		if (!gSplitWrotePayload) {
+			if (any(isnan(c)) || any(isinf(c))) c = vec3(0.0);
+			const uint at = PayloadWord(pixel);
+			const vec3 rCl = min(max(c, vec3(0.0)), vec3(65504.0));
+			const vec3 sCl = min(max(gSplitSpec, vec3(0.0)), vec3(65504.0));
+			scratch.words[at + 3u] = floatBitsToUint(0.0);
+			scratch.words[at + 6u] = packHalf2x16(rCl.rg);
+			scratch.words[at + 7u] = packHalf2x16(vec2(rCl.b, sCl.r));
+			scratch.words[at + 8u] = packHalf2x16(sCl.gb);
+			scratch.words[at + 12u] = packHalf2x16(gFirstAlbedo.rg);
+			scratch.words[at + 13u] = packHalf2x16(vec2(gFirstAlbedo.b, gFirstRough));
+			uint fl = 0u;
+			if (gFirstBump) fl |= kSplitFlagFirstBump;
+			if (gFirstGlowMark) fl |= kSplitFlagGlowMark;
+			if (gFirstActorShadow) fl |= kSplitFlagActorShadow;
+			fl |= (min(gRayCount, 63u) << 25u);
+			scratch.words[at + 15u] = fl;
+		}
+		return;
+	}
+#endif
+#if !defined(PT_SPLIT_PRIMARY) && !defined(PT_SPLIT_SPATIAL) && !defined(PT_SPLIT_BOUNCE)
 #ifdef PT_RESTIR_GI
 	{   // (2026-11-04 d) one path: the first-bounce sample and the rest apart, for RtRestirGI.comp (which demodulates)
 		const vec2 uv = CameraUV(pixel, vec2(Rand(), Rand()));   // (2026-11-10 early kick: texel 23.x)
@@ -2593,6 +3458,7 @@ void main() {
 	bool specMirror = false;   // (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: the first path's reflected thing stands in for the surface
 	float earlyZ = 0.0;   // (2026-11-11 PTEarlyLook slice 2) the first path's first hit: view z / farZ, 0 a miss, -1 a glow the game draws
 	bool bumped = false;   // (2026-11-12 ptbump) the first path's first hit was lit with its bumped normal (PTBumpNormals)
+	bool actorShadow = false;   // UNOFFICIAL 2026-11-20: any path's primary direct shadow hit a moving actor (NVR_RT_CUSTOM_ACTOR)
 	for (int s = 0; s < paths; s++) {
 		const vec2 uv = CameraUV(pixel, vec2(Rand(), Rand()));   // (2026-11-10 early kick: texel 23.x; the random numbers drawn either way)
 		const vec3 dir = normalize(p.forward.xyz + p.right.xyz * (2.0 * uv.x - 1.0) - p.up.xyz * (2.0 * uv.y - 1.0));
@@ -2602,11 +3468,14 @@ void main() {
 #endif
 		gFirstAlbedo = vec3(1.0);
 		gFirstSurface = 0.0;
-		gFirstRough = 1.0; gFirstMetal = 0.0; gFirstNV = 1.0;   // (ptaaa-denoiser)
+		gFirstRough = 1.0; gFirstMetal = 0.0; gFirstNV = 1.0; gFirstKind = kKindPlain; gFirstF0 = 0.04;   // (ptaaa-denoiser)
 		gSplitTake = false; gSplitSpec = vec3(0.0); gSplitRad0 = vec3(0.0); gSplitRatio = vec3(0.0); gSplitHitT = 0.0; gSplitSpecLobe = 0.0;
 		gReflAlbedo = vec3(1.0);   // (pt-mirrors)
 		gFirstViewZ = 0.0; gFirstGlowMark = false;   // (2026-11-11 PTEarlyLook)
+		gFirstActorShadow = false;
+		if (s == 0) { gFirstSunDiff = vec3(0.0); gFirstSunVis = 1.0; gFirstSunHitT = 0.0; }
 		vec3 c = Path(dir);
+		actorShadow = actorShadow || gFirstActorShadow;
 		if (s == 0) earlyZ = gFirstGlowMark ? -1.0 : (isnan(gFirstViewZ) || isinf(gFirstViewZ) ? 0.0 : gFirstViewZ);
 		if (s == 0) bumped = gFirstBump;   // (2026-11-12 ptbump)
 		const bool bad = any(isnan(c)) || any(isinf(c));
@@ -2626,7 +3495,9 @@ void main() {
 		if (split) {
 			specSum += spec;
 			if (gFirstSurface > 0.0 && Specular()) {
-				const vec3 f0 = mix(vec3(0.04), gFirstAlbedo, clamp(gFirstMetal, 0.0, 1.0));
+				// UNOFFICIAL 2026-11-19: match FresnelF0 for skin (0.028), hair (0.004..0.04), and decoded FD_SV_F0 in specular guide demodulation
+				const vec3 f0 = gFirstKind == kKindHair ? clamp(gFirstAlbedo, vec3(0.004), vec3(0.04)) :
+					mix(vec3(gFirstKind == kKindSkin ? 0.028 : gFirstF0), gFirstAlbedo, clamp(gFirstMetal, 0.0, 1.0));
 				vec3 specAlbedoPath = EnvBrdfApprox(f0, clamp(gFirstRough, 0.0, 1.0), clamp(gFirstNV, 0.0, 1.0));
 				// (2026-11-09 pt-mirrors) PTDenoiseMirrorSurface: a smooth metal whose bounce took the specular lobe: the reflected thing's colour
 				// joins the specular albedo (divided out here, multiplied back by the show pass with this frame's), so the denoiser smooths only
@@ -2650,14 +3521,15 @@ void main() {
 	// the display's alpha: the RT host's count mode first (perf-ptcost), then PTEarlyLook's depth (2026-11-11), else 1 as before
 	// (2026-11-12 ptbump) ... or 2 + PTBumpDetail where the first hit's light already holds its bumps: RtPathTraceShow.frag keeps that
 	// share of PTDetail there, less the fine contrast the traced light has itself (2 <= a <= 3; a = 1: PTDetail as before)
-	const float displayA = gCountRays ? 1.0 + float(gRayCount) : gEarlyLook > 0.5 ? earlyZ : bumped ? 2.0 + gBumpDetail : 1.0;
+	const float displayABase = gCountRays ? 1.0 + float(gRayCount) : gEarlyLook > 0.5 ? earlyZ : bumped ? 2.0 + gBumpDetail : 1.0;
+	const float displayA = (actorShadow && !gCountRays && !(gEarlyLook > 0.5)) ? -displayABase : displayABase;
 	if ((uint(p.accum.w) & 512u) != 0u) {   // (2026-11-03) demodulated for the denoiser
 		// (2026-11-04 c FIX) the colour stored is the one divided by (with its 0.02 floor): RtPathTraceShow.frag multiplies it back, and with
 		// the raw colour every surface darker than 0.02 in a channel came out darker by colour / 0.02 (rtdenoise-int: PTDenoise 0.87-0.90x
 		// the converged mean overall, dark tiles down to 0.57x)
 		const vec3 albedo = max(albedoSum / float(paths), vec3(0.02));
-		imageStore(albedoOut, pixel, vec4(albedo, surfaceSum / float(paths)));
 #ifndef PT_RESTIR_GI
+		StoreSunSplit(pixel, albedo);
 		if (split) {   // (ptaaa-denoiser) the two signals, each divided by its own albedo (fp16-safe), and the specular albedo itself
 			const vec3 specMean = specSum / float(paths);
 			const vec3 specAlbedo = surfaceSum > 0.0 ? max(specAlbedoSum / float(paths), vec3(0.01)) : vec3(0.0);
@@ -2665,7 +3537,9 @@ void main() {
 			const vec3 specular = specAlbedo.x > 0.0 ? min(specMean / specAlbedo, vec3(gDenoiseCeil)) : vec3(0.0);
 			// albedoOut.a: 1 + the metal where every path met a surface (DLSS RR's diffuse albedo = colour x (1 - metal); the show pass and
 			// the guide read a >= 0.5 / clamp it to 1, as the GI variant's)
-			if (surfaceSum >= float(paths)) imageStore(albedoOut, pixel, vec4(albedo, 1.0 + metalSum / float(paths)));
+			// UNOFFICIAL 2026-11-19: single albedoOut store (eliminates redundant prior imageStore)
+			const float albedoA = surfaceSum >= float(paths) ? (1.0 + metalSum / float(paths)) : (surfaceSum / float(paths));
+			imageStore(albedoOut, pixel, vec4(albedo, albedoA));
 			imageStore(display, pixel, vec4(diffuse, displayA));   // (perf-ptcost: the host's count mode; 2026-11-11 PTEarlyLook's depth)
 			// (2026-11-09 pt-mirrors) a negative hit distance marks the mirror pixels whose reflected thing stands in (PTDenoiseMirrorSurface);
 			// -0.5: marked, its hit not known this frame (the denoisers read |hit| < 1 as unknown)
@@ -2675,6 +3549,7 @@ void main() {
 			return;
 		}
 #endif
+		imageStore(albedoOut, pixel, vec4(albedo, surfaceSum / float(paths)));
 		sample_ = min(sample_ / albedo, vec3(gDenoiseCeil));   // (2026-11-11 PTDenoiseCeiling: was uncapped here)
 	}
 	const float n = p.accum.x;
@@ -2686,4 +3561,5 @@ void main() {
 	imageStore(accumA, pixel, vec4(mean.rg, 0.0, 0.0));
 	imageStore(accumB, pixel, vec4(mean.b, n + float(paths), 0.0, 0.0));
 	imageStore(display, pixel, vec4(mean, displayA));   // (perf-ptcost: the host's count mode; 2026-11-11 PTEarlyLook's depth)
+#endif   // !PT_SPLIT_*
 }

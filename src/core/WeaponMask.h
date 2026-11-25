@@ -25,6 +25,7 @@ namespace WeaponMask {
 	inline bool Failed = false;				// no stencil in the depth surface, or the mask could not be made: off for the session
 	inline bool HooksOn = false;			// Render.cpp InstallMaterialDrawHooks hooked both object draw paths (the tags come from them)
 	inline bool ToldNoDraws = false;
+	inline bool ToldNoWeaponDraws = false;
 	inline bool Tagging = false;			// the first-person pass in progress tags its draws
 	inline UInt32 ReadyFrame = 0xFFFFFFFFu;	// the frame whose first-person pass left a mask
 	inline NiNode* WeaponNode = nullptr;	// this pass's: the first-person skin info's
@@ -228,6 +229,17 @@ namespace WeaponMask {
 			if (!ToldNoDraws) {
 				ToldNoDraws = true;
 				Logger::Log("UNOFFICIAL WeaponMask: no first-person draw came through the object draw hooks this pass: no mask, the weapon reflections keep the whole first-person model");
+			}
+			return;
+		}
+		if (WeaponNode && PassWeaponDraws == 0 && PassOtherDraws > 0) {
+			// A weapon is equipped (WeaponNode present) but custom/modded weapon geometry did not land under WeaponNode:
+			// do not publish an all-black mask that would mute weapon reflections; clear stencil bit and fall back to unmasked.
+			Scope s(d);
+			if (s.ok) s.Quad(D3DCMP_ALWAYS, 0, 0xFF, kBit, D3DSTENCILOP_REPLACE, 0, BlackPS);
+			if (!ToldNoWeaponDraws) {
+				ToldNoWeaponDraws = true;
+				Logger::Log("UNOFFICIAL WeaponMask: weapon node present but 0 draws tagged under it (%u non-weapon draws): falling back to unmasked weapon reflections", PassOtherDraws);
 			}
 			return;
 		}

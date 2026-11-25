@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals
 #include "ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion
+#include "ViewModelMotion.h"	// UNOFFICIAL 2026-11-21 ViewModelMotion
 #include "SkyCoverage.h"	// UNOFFICIAL 2026-11-04
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-12 (memleak) idle targets: ForgetSurface
@@ -45,6 +46,7 @@ void TextureManager::Initialize() {
 	mgr->RegisterTexture("TESR_AlbedoBuffer", (IDirect3DBaseTexture9**)&CapturedNormals::AlbedoTexture);	// UNOFFICIAL 2026-10-31 AlbedoBuffer (made on first use)
 	mgr->RegisterTexture("TESR_BackDepthBuffer", (IDirect3DBaseTexture9**)&BackDepth::Texture);	// UNOFFICIAL 2026-10-31 BackDepth	// UNOFFICIAL 2026-10-29 MaterialBuffer
 	mgr->RegisterTexture("TESR_ObjectMotionBuffer", (IDirect3DBaseTexture9**)&ObjectMotion::Texture);	// UNOFFICIAL 2026-10-29 ObjectMotion (made on first use)
+	mgr->RegisterTexture("TESR_ViewModelMotionBuffer", (IDirect3DBaseTexture9**)&ViewModelMotion::Texture);	// UNOFFICIAL 2026-11-21 ViewModelMotion (made on first use)
 	mgr->RegisterTexture("TESR_SkyCoverage", (IDirect3DBaseTexture9**)&SkyCoverage::Texture);	// UNOFFICIAL 2026-11-04 SkyCoverage (the game's MSAA; made on first use)
 
 	// let NVAPI see the two depth textures (for the depth copies)
@@ -70,13 +72,17 @@ void TextureManager::Initialize() {
 	// UNOFFICIAL 2026-11-14 DeferredDepth (core/DeferredDepth.h; [Main.Main.Quality] DeferredDepth / DeferredDepthProbe at startup): the world's
 	// depth as the main opaque list leaves it, for the deferred light passes. Not made (and never copied) with both off.
 	if (DeferredDepth::ReadStartup() > 0) {
-		if (SUCCEEDED(MakeReadableDepth(dev, screenW, screenH, &DeferredDepth::Texture))) {
+		const bool shareWorld = !DeferredDepth::ProbeWanted && mgr->DepthTexture;
+		if (shareWorld || SUCCEEDED(MakeReadableDepth(dev, screenW, screenH, &DeferredDepth::Texture))) {
+			if (shareWorld) DeferredDepth::Texture = mgr->DepthTexture;
+			else NvAPI_D3D9_RegisterResource(DeferredDepth::Texture);
+			DeferredDepth::SharedWithWorld = shareWorld;
 			DeferredDepth::Width = screenW; DeferredDepth::Height = screenH;
 			mgr->RegisterTexture("TESR_DeferredDepth", (IDirect3DBaseTexture9**)&DeferredDepth::Texture);
-			NvAPI_D3D9_RegisterResource(DeferredDepth::Texture);
 			// mode 2: the view z made from it (R32F), which D3D9 passes read as any float texture
 			if (DeferredDepth::Mode >= 2) mgr->InitTexture("TESR_DeferredDepthLinear", &DeferredDepth::LinearTexture, &DeferredDepth::LinearSurface, screenW, screenH, D3DFMT_R32F);
-			Logger::Log("UNOFFICIAL DeferredDepth: mode %d, the depth copy for the deferred passes is on (%ux%u INTZ, TESR_DeferredDepth)%s%s", DeferredDepth::Mode, screenW, screenH,
+			Logger::Log("UNOFFICIAL DeferredDepth: mode %d, the depth copy for the deferred passes is on (%ux%u INTZ, TESR_DeferredDepth%s)%s%s", DeferredDepth::Mode, screenW, screenH,
+				shareWorld ? ", shared with TESR_DepthBufferWorld" : "",
 				DeferredDepth::LinearSurface ? " + its view z (R32F, TESR_DeferredDepthLinear)" : "", DeferredDepth::ProbeWanted ? "; the probe is on (test only)" : "");
 		}
 		else {

@@ -38,7 +38,7 @@ namespace DeferredSun {
 	// UNOFFICIAL 2026-11-16 fd-sunvis ([Shaders.ShadowsExteriors.Deferred], live; DeferredSun.hlsl DS_Vis, Includes/DeferredPixel.hlsl FDSunVisCode):
 	// the forward sun's terms the G-buffer now carries. The pass's own: the land's height self-shadow, the recorded highlight F0, SpecularFade's
 	// highlight fade rebuilt from the pixel's distance. (CanopyShadow, ParallaxShadow and MicroShadow are applied by the records: PBR.cpp.)
-	inline bool LandCrackShadow = true, AuthoredHighlight = true, HighlightFade = true;
+	inline bool LandCrackShadow = true, AuthoredHighlight = true, HighlightFade = true, MatchSunDisc = true;
 	inline int SpecFadeCompiled = -1;	// [Shaders.PBR.Main] SpecularFade at startup (the records' SPEC_FADE_ON; core/PbrPop.h SpecFade::Compiled), -1 not read yet
 	inline std::unordered_set<IDirect3DPixelShader9*> Handles;	// the lighting-free records' handles (from LightFreeRecords::Records)
 	inline size_t HandlesFrom = 0;
@@ -252,6 +252,7 @@ namespace DeferredSun {
 		Shadows = TheSettingManager->GetSettingI(kSection, "Shadows") != 0;
 		LandCrackShadow = TheSettingManager->GetSettingI(kSection, "LandCrackShadow") != 0;
 		AuthoredHighlight = TheSettingManager->GetSettingI(kSection, "AuthoredHighlight") != 0;
+		MatchSunDisc = TheSettingManager->GetSettingI(kSection, "MatchSunDisc") != 0;
 		if (SpecFadeCompiled < 0) SpecFadeCompiled = TheSettingManager->GetSettingI("Shaders.PBR.Main", "SpecularFade") != 0 ? 1 : 0;
 		HighlightFade = TheSettingManager->GetSettingI(kSection, "HighlightFade") != 0 && SpecFadeCompiled == 1 &&
 			TheSettingManager->GetSettingI("Shaders.PBR.Main", "SpecularFade") != 0;	// (as the records fade: compiled at startup, live while compiled)
@@ -376,7 +377,7 @@ namespace DeferredSun {
 		target->GetDesc(&t);
 
 
-		const bool linearDepth = DeferredDepth::LinearReady() && !Vm.on;	// (the world's view z: not the view model's)
+		const bool linearDepth = !Vm.on && DeferredDepth::EnsureLinear(d);	// (the world's view z: not the view model's)
 		// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h): the land's water layer, now that the frame is linear and before the sun
 		// lights the albedo and normal it makes wet (it saves and puts back every state it changes; the world's view only)
 		if (!Vm.on) DeferredWetness::Apply(d, target, linearDepth);
@@ -431,13 +432,29 @@ namespace DeferredSun {
 		// ForwardCloudShadows::ForShader, whose strength is 0 when the last object pass drawn was a plant's with PlantShadows off (PassPlant):
 		// the whole frame's cloud shadow then came and went with the last object drawn. Here the frame's own strength, whatever was drawn last
 		// (put back with the other pixel constants below). Plants with PlantShadows off: their pixels are told apart in the shader (batch D).
-		if (ForwardCloudShadows::Compiled) ForwardCloudShadows::SendFrame(d);
+		ForwardCloudShadows::SendFrame(d);	// (2026-11-16 fast-restart: always; strength 0 while off)
+		// (2026-11-16 fast-restart) the foliage records' clouds: with ForwardShadows on, as every pixel's; off: none (SunFar shades them, as before)
+		const float foliageW = ForwardCloudShadows::FoliageW(pass->CloudSunReg && ForwardCloudShadows::Active);
 		// the pass's own (c6-c9)
 		const NiPoint3& dir = sun->direction;
 		D3DXVECTOR3 toSun(-dir.x, -dir.y, -dir.z);
+		// UNOFFICIAL 2026-11-19 MatchSunDisc: outdoors by day, vanilla FNV clamps Tes->directionalLight (and land c18) to a
+		// 45-degree southern plane (only 24.9 deg high at 14:17 while the sun disc and shadow maps are at 70.6 deg). Align
+		// surface sun lighting to the true sun disc direction (ShaderConst.SunDir) while above the horizon so N.L matches
+		// the sky and shadow cascades. Interiors and nighttime (moon) keep Tes->directionalLight unchanged.
+		bool matchedSunDisc = false;
+		if (MatchSunDisc && TheShaderManager && TheShaderManager->GameState.isExterior && TheShaderManager->GameState.dayLight > 0.5f) {
+			const D3DXVECTOR4& disc = TheShaderManager->ShaderConst.SunDir;
+			D3DXVECTOR3 discV(disc.x, disc.y, disc.z);
+			const float discLen = D3DXVec3Length(&discV);
+			if (discLen > 1.0e-6f && discV.z > 0.0f) {
+				toSun = discV / discLen;
+				matchedSunDisc = true;
+			}
+		}
 		const float len = D3DXVec3Length(&toSun);
 		const bool has = len > 1.0e-6f;
-		if (has) toSun /= len;
+		if (has && !matchedSunDisc) toSun /= len;
 		const bool objectFresh = LandLight::ObjectReadFrame && (UInt32)TheFrameRateManager->FrameNumber - LandLight::ObjectReadFrame <= 4;
 		const D3DXMATRIX& proj = NiDX9Renderer::GetSingleton()->projMatrix;
 		const float own[4][4] = {
@@ -447,7 +464,8 @@ namespace DeferredSun {
 			{ objectFresh ? LandLight::ObjectColor[0] : sun->Diff.r * sun->Dimmer, objectFresh ? LandLight::ObjectColor[1] : sun->Diff.g * sun->Dimmer,
 			  // w (2026-11-16 fd-merged-1116, FD-BATCH-D item 22): 1 = the forward clouds shade plants ([Shaders.VolumetricClouds.Main]
 			  // PlantShadows), 0 = they do not: DeferredSun.hlsl leaves model 5's pixels out of the cloud term then, as forward's PassPlant does
-			  objectFresh ? LandLight::ObjectColor[2] : sun->Diff.b * sun->Dimmer, ForwardCloudShadows::PlantShadows ? 1.0f : 0.0f },
+			  // (2026-11-16 fast-restart) the clouds' strength for the foliage records' pixels (ForwardShadows on; 0 off), -1 = PlantShadows off
+			  objectFresh ? LandLight::ObjectColor[2] : sun->Diff.b * sun->Dimmer, foliageW },
 			// w (2026-11-14, read only by the foliage branch, FD_FOLIAGE): 2 = [Shaders.Grass.Main] ShadowFix (the grass's lookup takes the world's up)
 			{ (float)DebugView, linearDepth ? 1.0f : 0.0f, Shadows ? 1.0f : 0.0f, FoliageCompiled && TheSettingManager->GetSettingI("Shaders.Grass.Main", "ShadowFix") ? 2.0f : 1.0f },
 			{ proj._33, proj._43, 0.01f, 2.0f } };
@@ -466,8 +484,10 @@ namespace DeferredSun {
 		// draw; c14 / c15, w 1 = valid (else the directional light, as before).
 		const UInt32 frameNow = (UInt32)TheFrameRateManager->FrameNumber;
 		const bool landFresh = LandLight::ReadFrame && frameNow - LandLight::ReadFrame <= 4;
+		const float* const landDir = matchedSunDisc ? &toSun.x : LandLight::DeferredDir;
+		const bool landDirValid = matchedSunDisc ? has : landFresh;
 		const float land[2][4] = {
-			{ LandLight::DeferredDir[0], LandLight::DeferredDir[1], LandLight::DeferredDir[2], landFresh ? 1.0f : 0.0f },
+			{ landDir[0], landDir[1], landDir[2], landDirValid ? 1.0f : 0.0f },
 			{ LandLight::Color[0], LandLight::Color[1], LandLight::Color[2], landFresh && LandLight::ColorGood ? 1.0f : 0.0f } };
 		d->SetPixelShaderConstantF(14, land[0], 2);
 		// (2026-11-16 fd-sunvis) c16 DS_Vis: x 1 = the land's height self-shadow, y 1 = the recorded highlight F0, z / w SpecularFade's band

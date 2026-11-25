@@ -31,6 +31,7 @@ public:
 		float	Sharpness;		// sharpening of the TAA output (never of the history), 0 off
 		float	MipBias;		// texture mip LOD bias while the jittered world draws, 0 off
 		bool	BackboneReset;	// UNOFFICIAL 2026-11-09: drop the history whenever TemporalBackbone::HistoryValid() is false
+		bool	WeaponAA = true;	// UNOFFICIAL 2026-11-21: jitter 1st-person viewmodel & track 1st-person motion vectors for DLAA/FSR/TAA
 	};
 	TAASettingsStruct	Settings;
 
@@ -49,6 +50,7 @@ public:
 		int		DebugView;		// RenderScale: 0 off, 1 the low-resolution world as drawn (its corner), 2 it stretched without FSR, 3 FSR's motion input
 		bool	LowResEffects;	// UNOFFICIAL 2026-10-27 RenderScale v2: the weapon and NVR's pre-tonemap effects run small too, upscaled after them
 		bool	SmoothEffects = true;	// UNOFFICIAL 2026-11-01: frames upscaled before the effects (LowResEffects off) get TAA's own resolve after them
+		bool	PreTonemapHDR = true;	// UNOFFICIAL 2026-11-21: native-res DLAA / FSR runs in 16-bit HDR before tonemapping & AtToneMap dither
 	};
 	FSRSettingsStruct	FSRSettings;
 
@@ -127,6 +129,9 @@ public:
 	void	BeginJitter(bool firstWorld = true);
 	void	EndJitter();
 	bool	IsJitterActive() const { return jitterActive; }
+	bool	UsesUpscaler();	// UNOFFICIAL 2026-11-21: native or RenderScale FSR / DLSS is active this session
+	// UNOFFICIAL 2026-11-21: current-frame 1st-person jitter and render-viewport state for ViewModelMotion.
+	void	GetViewModelAAState(bool& wantCapture, bool& wantJitter, float& jx, float& jy, UINT& vpW, UINT& vpH);
 
 	// UNOFFICIAL 2026-10-27 RenderScale (effects/TAAUpscale.cpp): right after the world scene (RenderWorldSceneGraphHook, after
 	// EndJitter): when this world scene was drawn at the lower internal resolution, FSR 2 upscales it into the world's own target
@@ -167,6 +172,8 @@ public:
 	// The RR point: FSRPrep (motion, depth), DlssRRGuides, Upscaler::EvaluateRayReconstruction, DlssRRComposite into the frame chain.
 	// False: the frame is untouched (RR off, not this frame, or a failure: logged once) and TAA's resolve runs after the tonemap as before.
 	bool				RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);
+	// UNOFFICIAL 2026-11-21: native-resolution DLAA / FSR 3.1 / FSR 2 in 16-bit pre-tonemap HDR (when RR did not run).
+	bool				PreTonemapNativeAA(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);
 
 private:
 	bool		historyValid = false;
@@ -199,6 +206,10 @@ private:
 	float		frameJitterY = 0.0f;
 	bool		frameJittered = false;
 	bool		lastPathFSR = false;	// the history in hand is FSR's (true) or TAA's own (false)
+	bool		lastPathPreTonemap = false;	// UNOFFICIAL 2026-11-21: last FSR / DLSS frame ran in pre-tonemap HDR
+	bool		preTonemapRanThisFrame = false;	// UNOFFICIAL 2026-11-21: PreTonemapNativeAA resolved this frame before tonemap
+	int			preLastWidth = 0, preLastHeight = 0;
+	UInt32		fsrPreFrames = 0;
 	bool		FSRWanted();			// FSRSettings.Enabled and the extension there and no failure so far
 	bool		FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, bool reset);
 	bool		FSREnsureResources();

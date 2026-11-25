@@ -182,7 +182,7 @@ float4 SpecularLowPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 bool AddSpecular(float2 uv, float depth, inout float3 lin) {
 	// (The weapon's depth buffer is empty where there is no weapon: 1, or 0 with reversed depth -- as WetWorld tests it.)
 	float viewmodelDepth = tex2Dlod(TESR_DepthBufferViewModel, float4(uv, 0, 0)).x;
-	bool weapon = TESR_DepthConstants.z == 0.0 ? viewmodelDepth < 0.9 : viewmodelDepth > 0.01;
+	bool weapon = TESR_DepthConstants.z == 0.0 ? viewmodelDepth < 0.99999 : viewmodelDepth > 0.0;
 	[branch] if (depth >= DrawDistance || depth >= farZ * 0.98 || weapon) return false;
 
 	// Water has its own reflections: tested again here with this pixel's own depth and normal. SpecularLowPS tests a 4 x 4

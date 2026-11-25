@@ -287,8 +287,8 @@ public:
 
 	template <class T> static std::string	ToString(const T number);	// through float, except bool and int
 	template <class T> static T				FromString(const char* text);
-	static void								SplitString(const char* text, const char* delimiters, StringList* parts);	// text < 256 characters
-	template <class T> static void			FillFromString(const char* text, const char* delimiters, T* values);
+	static void								SplitString(const char* text, const char* delimiters, StringList* parts);
+	template <class T, size_t N> static void	FillFromString(const char* text, const char* delimiters, T (&values)[N]);	// fills at most N
 
 	Configuration					Config;			// the files in memory
 	UInt32							SettingsRevision = 0;	// UNOFFICIAL 2026-10-18: bumped by every SetSetting / LoadSettings; the menu's "New in this patch" list re-reads its values when it changes

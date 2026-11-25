@@ -85,6 +85,15 @@ void main() {
 		tris <= kTrianglesMax && first <= kTrianglesMax - tris;   // (ptaaa-hangfix: no uint wrap; was first + tris <= 65536)
 
 	// 2. + 3. the triangles' power, running sum, bound
+	// UNOFFICIAL 2026-11-19: hoist instance-invariant and triangle-invariant UV / texture id / LOD lookups out of the 16-tap loop.
+	const bool hasUv = ok && rtHitHasTexcoords(g);
+	const uint uvOffset = hasUv ? floatBitsToUint(records[g].albedo.w) : 0u;
+	const uint slot = ok ? ((records[g].flags >> 16) & 0x3FFu) : 0u;
+	const ivec2 glowOrigin = ivec2(int(slot % 32u), int(slot / 32u)) * 64;
+	const vec3 fallbackAlbedo = ok ? records[g].albedo.rgb : vec3(0.0);
+#ifndef RT_NO_REAL_TEXTURES
+	const uint realGlowId = hasUv ? rtSlotTextures(records[g].flags).z : 0u;
+#endif
 	float carry = 0.0;
 	vec3 lo = vec3(1.0e30), hi = vec3(-1.0e30);
 	for (uint c0 = 0u; c0 < (ok ? tris : 0u); c0 += 64u) {
@@ -101,14 +110,37 @@ void main() {
 			lo = min(lo, min(a, min(b, c))); hi = max(hi, max(a, max(b, c)));
 			const float area = 0.5 * length(cross(b - a, c - a));
 			if (area > 1.0e-6) {
-#ifndef RT_NO_REAL_TEXTURES
-				rtConeWidth = 0.25 * sqrt(2.0 * area);   // (each read a filtered quarter of the triangle; no direction: one isotropic mip)
-				rtConeDir = vec3(0.0);
-#endif
 				vec3 sum = vec3(0.0);
-				for (int k = 0; k < 16; k++) {   // 4 x 4 stratified points, uniform over the triangle
-					const float u = (float(k & 3) + 0.5) * 0.25, w = (float(k >> 2) + 0.5) * 0.25, su = sqrt(u);
-					sum += rtHitGlow(g, prim, vec2(su * (1.0 - w), su * w));
+				if (!hasUv) {
+					sum = fallbackAlbedo * 16.0;
+				}
+				else {
+					const vec2 t0 = vec2(uintBitsToFloat(words[uvOffset + 2u * i.x]), uintBitsToFloat(words[uvOffset + 2u * i.x + 1u]));
+					const vec2 t1 = vec2(uintBitsToFloat(words[uvOffset + 2u * i.y]), uintBitsToFloat(words[uvOffset + 2u * i.y + 1u]));
+					const vec2 t2 = vec2(uintBitsToFloat(words[uvOffset + 2u * i.z]), uintBitsToFloat(words[uvOffset + 2u * i.z + 1u]));
+#ifndef RT_NO_REAL_TEXTURES
+					rtConeWidth = 0.25 * sqrt(2.0 * area);   // (each read a filtered quarter of the triangle; isotropic mip)
+					rtConeDir = vec3(0.0);
+					if (realGlowId != 0u) {
+						const float lod = rtTexLod(realGlowId, g, prim);
+						for (int k = 0; k < 16; k++) {
+							const float u = (float(k & 3) + 0.5) * 0.25, w = (float(k >> 2) + 0.5) * 0.25, su = sqrt(u);
+							const float b0 = su * (1.0 - w), b1 = su * w;
+							const vec2 uv = t0 * (1.0 - b0 - b1) + t1 * b0 + t2 * b1;
+							sum += min(rtTexToLinear(rtTexSample(realGlowId, uv, lod).rgb), vec3(1.0));
+						}
+					}
+					else
+#endif
+					{
+						for (int k = 0; k < 16; k++) {
+							const float u = (float(k & 3) + 0.5) * 0.25, w = (float(k >> 2) + 0.5) * 0.25, su = sqrt(u);
+							const float b0 = su * (1.0 - w), b1 = su * w;
+							const vec2 uv = t0 * (1.0 - b0 - b1) + t1 * b0 + t2 * b1;
+							const vec3 cs = imageLoad(RT_GLOW_ATLAS, glowOrigin + clamp(ivec2(fract(uv) * 64.0), ivec2(0), ivec2(63))).rgb;
+							sum += min(mix(pow((cs + 0.055) / 1.055, vec3(2.4)), cs / 12.92, lessThanEqual(cs, vec3(0.04045))), vec3(1.0));
+						}
+					}
 				}
 				const float glow = dot(max(sum, vec3(0.0)) / 16.0, vec3(0.2126, 0.7152, 0.0722));
 				power = glow >= 1.0e-4 ? glow * area : 0.0;

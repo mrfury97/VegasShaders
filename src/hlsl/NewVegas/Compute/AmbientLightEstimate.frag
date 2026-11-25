@@ -28,6 +28,8 @@ layout(set = 1, binding = 0) uniform texture2D t_prep;       // NVR_ALPrep (POIN
 layout(set = 1, binding = 1) uniform texture2D t_blueNoise;  // TESR_BlueNoiseSampler (POINT, WRAP)
 #ifdef NVR_GI
 layout(set = 1, binding = 2) uniform texture2D t_light;      // NVR_AmbientLightGILight: the frame's light per prep texel, sqrt (POINT)
+#else
+layout(set = 1, binding = 2) uniform texture2D t_rtgi;       // optional NVR_RTGIRaw / NVR_RTGIDenoised (variant bit 8)
 #endif
 
 layout(location = 0) out vec4 o_color;
@@ -65,7 +67,14 @@ vec4 Estimate(vec2 uv) {
     vec4 center = pointLod(t_prep, uv);
     vec3 origin = PositionFromViewZ(uv, center.x);
     float fade = smoothstep(NearFade, NearFade * 2.0, origin.z) * (1.0 - smoothstep(DrawDistance * 0.7, DrawDistance, origin.z));
+#ifndef NVR_GI
+    if (fade <= 0.0) {
+        vec3 vmBounce = (origin.z >= 9.0e5 && (pc.variant & 0x100u) != 0u) ? pointLod(t_rtgi, uv).rgb : vec3(0.0);
+        return vec4(vmBounce, 1.0);
+    }
+#else
     if (fade <= 0.0) return vec4(0.0, 0.0, 0.0, 1.0);
+#endif
 
     vec3 normal = OctDecode(Unpack2(center.y));
     vec3 viewVec = normalize(-origin);
@@ -169,13 +178,17 @@ vec4 Estimate(vec2 uv) {
     // the GI's rgb is the light DebugView 13 shows (the first v2 run showed these raw values there: the pink "normal" picture).
     if (DebugView > 5.5 && DebugView < 6.5) return vec4(visibility / max(weightSum, 1e-4), firstCos * 0.5 + 0.5, firstLow, 1.0);
 #else
-    if (DebugView > 5.5) return vec4(visibility / max(weightSum, 1e-4), firstCos * 0.5 + 0.5, firstLow, 1.0);
+    if (DebugView > 5.5 && (pc.variant & 0x100u) == 0u) return vec4(visibility / max(weightSum, 1e-4), firstCos * 0.5 + 0.5, firstLow, 1.0);
 #endif
     visibility = pow(saturate(visibility / max(weightSum, 1e-4)), 1.5 * OcclusionStrength);
     visibility = mix(1.0, visibility, fade);
 #ifdef NVR_GI
     return vec4(bounce * fade, saturate(visibility));
 #else
+    if ((pc.variant & 0x100u) != 0u) {
+        float rtFade = fade * (cb.sunFarFlags.w > 0.5 ? (1.0 - smoothstep(0.75 * endFade, endFade, origin.z)) : 1.0);
+        return vec4(pointLod(t_rtgi, uv).rgb * rtFade, saturate(visibility));
+    }
     return vec4(bounce * (BounceScale * fade / float(SLICES * STEPS * 2)), saturate(visibility));
 #endif
 }

@@ -42,16 +42,18 @@ bool rtSunFoliageSoftPass(uint instance, uint primitive, vec2 bary, float frame)
 	const uvec3 i = uvec3(words[indexOffset + 3u * primitive], words[indexOffset + 3u * primitive + 1u], words[indexOffset + 3u * primitive + 2u]);
 	const vec2 uv = rtTexcoord(uvOffset, i.x) * (1.0 - bary.x - bary.y) + rtTexcoord(uvOffset, i.y) * bary.x + rtTexcoord(uvOffset, i.z) * bary.y;
 	const uint slot = (flags >> 16) & 0x3FFu;
-	const int slotSize = imageSize(RT_ALPHA_ATLAS).x / int(RT_ALPHA_SLOTS_A_ROW);
-	const ivec2 origin = ivec2(int(slot % RT_ALPHA_SLOTS_A_ROW), int(slot / RT_ALPHA_SLOTS_A_ROW)) * slotSize;
-	const ivec2 texel = origin + clamp(ivec2(fract(uv) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
-	float alpha = imageLoad(RT_ALPHA_ATLAS, texel).r;
+	float alpha;
 #ifndef RT_NO_REAL_TEXTURES
-	{
-		const uint id = rtTexSlots[slot].x;
-		if (id != 0u) alpha = rtTexSample(id, uv, rtTexLod(id, instance, primitive)).a;   // (bilinear: a leaf's edge is a ramp of alpha)
-	}
+	const uint id = rtTexSlots[slot].x;
+	if (id != 0u) alpha = rtTexSample(id, uv, rtTexLod(id, instance, primitive)).a;   // (bilinear: a leaf's edge is a ramp of alpha)
+	else
 #endif
+	{
+		const int slotSize = imageSize(RT_ALPHA_ATLAS).x / int(RT_ALPHA_SLOTS_A_ROW);
+		const ivec2 origin = ivec2(int(slot % RT_ALPHA_SLOTS_A_ROW), int(slot / RT_ALPHA_SLOTS_A_ROW)) * slotSize;
+		const ivec2 texel = origin + clamp(ivec2(fract(uv) * float(slotSize)), ivec2(0), ivec2(slotSize - 1));
+		alpha = imageLoad(RT_ALPHA_ATLAS, texel).r;
+	}
 	// the reference dithered as rtAlphaPass does it (uniform over 0..1 at a reference of 0.5, narrower toward 0 or 1: alpha 0 never
 	// blocks), so the share of rays an edge texel blocks follows its alpha and the cut stays centred on the game's reference
 	const float ref = float((flags >> 8) & 0xFFu) / 255.0;
@@ -67,12 +69,33 @@ bool rtSunFoliageSoftPass(uint instance, uint primitive, vec2 bary, float frame)
 // tHit: the solid hit's distance (any hit, not always the nearest, as the plain shadow query), else the nearest leaf gone through,
 // else 0. passHidden: the ray starts within reach of the eye (rtHiddenNear) and passes over the hidden first-person body.
 // leafT 0 = leaves are solid (then only `soft` differs from the plain query).
-float rtSunFoliageTrace(vec3 origin, vec3 dir, float tMax, uint mask, bool passHidden, float leafT, bool soft, float frame, out float tHit) {
+float rtSunFoliageTrace(vec3 origin, vec3 dir, float tMax, uint mask, bool passHidden, float leafT, bool soft, bool nearest, float frame, out float tHit, out uint hitCustom) {
 	tHit = 0.0;
+	hitCustom = 0u;
+	const uint termFlag = nearest ? 0u : gl_RayFlagsTerminateOnFirstHitEXT;
+	// UNOFFICIAL 2026-11-19: two-phase opaque-first traversal when !passHidden. Every decal, glass pane, and alpha-tested plant lives
+	// under mask 0x10; testing opaque geometry (mask & ~0x10) with gl_RayFlagsOpaqueEXT runs 100% in fixed-function RT hardware with
+	// zero shader candidate round-trips on walls/terrain, and exits immediately on solid hits before touching foliage.
+	uint alphaMask = mask;
+	if (!passHidden) {
+		const uint opaqueMask = mask & ~0x10u;
+		if (opaqueMask != 0u) {
+			rayQueryEXT qO;
+			rayQueryInitializeEXT(qO, scene, gl_RayFlagsOpaqueEXT | termFlag, opaqueMask, origin, 0.0, dir, tMax);
+			while (rayQueryProceedEXT(qO)) {}
+			if (rayQueryGetIntersectionTypeEXT(qO, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+				tHit = rayQueryGetIntersectionTEXT(qO, true);
+				hitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(qO, true);
+				return 0.0;
+			}
+		}
+		alphaMask = mask & 0x10u;
+		if (alphaMask == 0u) return 1.0;
+	}
 	float through = 1.0, nearLeaf = 1.0e30;
 	bool dense = false;
 	rayQueryEXT q;
-	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsNoOpaqueEXT, mask, origin, 0.0, dir, tMax);
+	rayQueryInitializeEXT(q, scene, termFlag | gl_RayFlagsNoOpaqueEXT, alphaMask, origin, 0.0, dir, tMax);
 	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) {
 		if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; }
 		if (rayQueryGetIntersectionTypeEXT(q, false) != gl_RayQueryCandidateIntersectionTriangleEXT) continue;
@@ -89,9 +112,17 @@ float rtSunFoliageTrace(vec3 origin, vec3 dir, float tMax, uint mask, bool passH
 		nearLeaf = min(nearLeaf, rayQueryGetIntersectionTEXT(q, false));
 		if (through < kRtSunFoliageFloor) { dense = true; rayQueryTerminateEXT(q); break; }
 	}
-	if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) { tHit = rayQueryGetIntersectionTEXT(q, true); return 0.0; }
+	if (rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT) {
+		tHit = rayQueryGetIntersectionTEXT(q, true);
+		hitCustom = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+		return 0.0;
+	}
 	if (through < 1.0) tHit = nearLeaf;
 	return dense ? 0.0 : through;
+}
+float rtSunFoliageTrace(vec3 origin, vec3 dir, float tMax, uint mask, bool passHidden, float leafT, bool soft, bool nearest, float frame, out float tHit) {
+	uint ci;
+	return rtSunFoliageTrace(origin, dir, tMax, mask, passHidden, leafT, soft, nearest, frame, tHit, ci);
 }
 
 #endif

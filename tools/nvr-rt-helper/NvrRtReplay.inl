@@ -23,6 +23,7 @@
 		NvrRtCaptureImage	desc = {};
 		const uint8_t*		before = nullptr;	// in the capture file
 		const uint8_t*		after = nullptr;
+		uint64_t			beforeBytes = 0, afterBytes = 0;	// (2026-11-17) their chunks' sizes, checked against the image in LoadCapture
 		SharedImage			image;				// made here (only for the images a pass binds)
 		VkDeviceSize		staging = 0;		// offset of its "before" contents in the upload buffer
 		VkDeviceSize		readback = 0;		// offset in the read-back buffer (written images)
@@ -39,6 +40,7 @@
 		uint64_t				dataBytes = 0;
 		const NvrRtInstance*	instances = nullptr;
 		const NvrRtInstanceRecord* records = nullptr;
+		uint64_t				recordsBytes = 0;	// (2026-11-17) the RECS chunk's size
 		uint32_t				instanceCount = 0;
 		std::vector<NvrRtPass>	passes;
 		std::vector<float>		passMs;			// the captured frame's own pass times (the game's run)
@@ -85,6 +87,14 @@
 			Log("replay: %ls is not a capture of this version (magic 0x%08X, version %u)", path.c_str(), c.header.magic, c.header.version);
 			return false;
 		}
+		// 2026-11-17 (security review 2): a capture is a file, and may come from someone else. Every count and size in it is checked
+		// here against the file before anything uses it: counts within the protocol's limits, each chunk inside the file (no wrap),
+		// each image's contents as long as its size says, the records as many as the instances, each geometry inside its data.
+		if (c.header.imageCount > NVR_RT_MAX_IMAGES || c.header.shaderCount > NVR_RT_MAX_SHADERS) {
+			Log("replay: %ls names %u images and %u shaders (at most %u and %u): not a usable capture", path.c_str(), c.header.imageCount, c.header.shaderCount, NVR_RT_MAX_IMAGES, NVR_RT_MAX_SHADERS);
+			return false;
+		}
+		c.header.device[sizeof(c.header.device) - 1] = 0;
 		c.images.resize(c.header.imageCount);
 		c.shaderPaths.resize(c.header.shaderCount);
 		c.shaderCode.resize(c.header.shaderCount);
@@ -93,15 +103,15 @@
 			NvrRtCaptureChunk k;
 			memcpy(&k, c.file.data() + at, sizeof(k));
 			const uint8_t* p = c.file.data() + at + sizeof(k);
-			if (at + sizeof(k) + k.size > c.file.size()) { Log("replay: the capture is cut short (chunk at %llu)", (unsigned long long)at); return false; }
+			if (k.size > c.file.size() - at - sizeof(k)) { Log("replay: the capture is cut short (chunk at %llu)", (unsigned long long)at); return false; }
 			switch (k.tag) {
-				case NVR_RT_CHUNK_IMAGE_DESC: if (k.index < c.images.size()) memcpy(&c.images[k.index].desc, p, sizeof(NvrRtCaptureImage)); break;
-				case NVR_RT_CHUNK_IMAGE_BEFORE: if (k.index < c.images.size()) c.images[k.index].before = p; break;
-				case NVR_RT_CHUNK_IMAGE_AFTER: if (k.index < c.images.size()) c.images[k.index].after = p; break;
+				case NVR_RT_CHUNK_IMAGE_DESC: if (k.index < c.images.size() && k.size >= sizeof(NvrRtCaptureImage)) memcpy(&c.images[k.index].desc, p, sizeof(NvrRtCaptureImage)); break;
+				case NVR_RT_CHUNK_IMAGE_BEFORE: if (k.index < c.images.size()) { c.images[k.index].before = p; c.images[k.index].beforeBytes = k.size; } break;
+				case NVR_RT_CHUNK_IMAGE_AFTER: if (k.index < c.images.size()) { c.images[k.index].after = p; c.images[k.index].afterBytes = k.size; } break;
 				case NVR_RT_CHUNK_GEOMETRIES: c.geometries = (const NvrRtCaptureGeometry*)p; c.geometryCount = (uint32_t)(k.size / sizeof(NvrRtCaptureGeometry)); break;
 				case NVR_RT_CHUNK_GEOMETRY_DATA: c.data = p; c.dataBytes = k.size; break;
 				case NVR_RT_CHUNK_INSTANCES: c.instances = (const NvrRtInstance*)p; c.instanceCount = (uint32_t)(k.size / sizeof(NvrRtInstance)); break;
-				case NVR_RT_CHUNK_RECORDS: c.records = (const NvrRtInstanceRecord*)p; break;
+				case NVR_RT_CHUNK_RECORDS: c.records = (const NvrRtInstanceRecord*)p; c.recordsBytes = k.size; break;
 				case NVR_RT_CHUNK_PASSES: c.passes.assign((const NvrRtPass*)p, (const NvrRtPass*)p + k.size / sizeof(NvrRtPass)); break;
 				case NVR_RT_CHUNK_PASS_TIMES: c.passMs.assign((const float*)p, (const float*)p + k.size / sizeof(float)); break;
 				case NVR_RT_CHUNK_SHADER_PATH: if (k.index < c.shaderPaths.size()) c.shaderPaths[k.index] = std::string((const char*)p, strnlen((const char*)p, (size_t)k.size)); break;
@@ -111,6 +121,25 @@
 			at += sizeof(k) + (size_t)((k.size + 7) & ~7ull);
 		}
 		if (!c.geometries || !c.instances || !c.records) { Log("replay: the capture has no scene"); return false; }
+		if (c.recordsBytes / sizeof(NvrRtInstanceRecord) < std::min<uint32_t>(c.instanceCount, NVR_RT_MAX_INSTANCES)) { Log("replay: the capture has fewer records than instances"); return false; }
+		for (size_t i = 0; i < c.images.size(); i++) {
+			ReplayImage& im = c.images[i];
+			// the texel size from the format, as the capturing helper does (the file's own number sized the buffers before)
+			im.desc.texelBytes = TexelBytes((VkFormat)im.desc.vkFormat);
+			if (im.desc.width > 16384 || im.desc.height > 16384) { Log("replay: image %u is %ux%u: not a usable capture", (uint32_t)i, im.desc.width, im.desc.height); return false; }
+			const uint64_t bytes = (uint64_t)im.desc.width * im.desc.height * im.desc.texelBytes;
+			if (im.before && (!bytes || im.beforeBytes < bytes)) { Log("replay: the contents of image %u before the passes are shorter than the image: left out", (uint32_t)i); im.before = nullptr; }
+			if (im.after && (!bytes || im.afterBytes < bytes)) { Log("replay: the contents of image %u after the passes are shorter than the image: left out", (uint32_t)i); im.after = nullptr; }
+		}
+		for (uint32_t g = 0; g < c.geometryCount; g++) {
+			const NvrRtCaptureGeometry& geo = c.geometries[g];
+			if (!geo.dataWords) continue;
+			const uint64_t end = (uint64_t)geo.vertexOffset + geo.dataWords;
+			if (!geo.vertices || (uint64_t)geo.vertices * 3 > geo.dataWords || geo.indexOffset < geo.vertexOffset || (uint64_t)geo.indexOffset + (uint64_t)geo.triangles * 3 > end) {
+				Log("replay: geometry %u (id %u) reaches outside its own data: not a usable capture", g, geo.id);
+				return false;
+			}
+		}
 		return true;
 	}
 

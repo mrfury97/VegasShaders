@@ -67,9 +67,6 @@
     <ClInclude Include="..\src\effects\AmbientLight\AmbientLight.h">
       <Filter>Effects</Filter>
     </ClInclude>
-    <ClInclude Include="..\src\effects\BloodLens\BloodLens.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
     <ClInclude Include="..\src\effects\BloomLegacy\BloomLegacy.h">
       <Filter>Effects</Filter>
     </ClInclude>
@@ -173,15 +170,6 @@
       <Filter>Effects</Filter>
     </ClInclude>
     <ClInclude Include="..\src\effects\VolumetricClouds\VolumetricClouds.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\effects\BloodFlow\BloodFlow.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\effects\BloodFlow\BloodFlowBoxes.h">
-      <Filter>Effects</Filter>
-    </ClInclude>
-    <ClInclude Include="..\src\effects\BloodFlow\BloodFluid.h">
       <Filter>Effects</Filter>
     </ClInclude>
     <ClInclude Include="..\src\effects\Skin\Skin.h">
@@ -435,9 +423,6 @@
     <ClCompile Include="..\src\effects\AmbientLight\AmbientLight.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\effects\BloodLens\BloodLens.cpp">
-      <Filter>Effects</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\effects\BarrelHaze\BarrelHaze.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
@@ -538,12 +523,6 @@
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\VolumetricClouds\VolumetricClouds.cpp">
-      <Filter>Effects</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\effects\BloodFlow\BloodFlow.cpp">
-      <Filter>Effects</Filter>
-    </ClCompile>
-    <ClCompile Include="..\src\effects\BloodFlow\BloodFluid.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
     <ClCompile Include="..\src\effects\Skin\Skin.cpp">

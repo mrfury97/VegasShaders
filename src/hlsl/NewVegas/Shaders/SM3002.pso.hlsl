@@ -11,7 +11,7 @@
 #ifndef SHADOW_NORMAL_BIAS_TEXELS
     #define SHADOW_NORMAL_BIAS_TEXELS 2.50f
 #endif
-#define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (compiled in only when on at startup)
+#define SHADOW_CLOUD_IN 1   // UNOFFICIAL 2026-11-04 ForwardCloudShadows (Includes/Shadow.hlsl): the clouds' shadow on the sun term (always compiled in; its strength switches it live)
 #include "includes/Shadow.hlsl"
 #include "includes/Helpers.hlsl"
 #include "includes/PBR.hlsl"

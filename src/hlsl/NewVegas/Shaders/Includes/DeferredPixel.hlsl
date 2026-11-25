@@ -161,6 +161,12 @@ void FDSunVisDecode(float a, out float vis, out float f0) {
     vis = 1.0f - (q - 48.0f * s) / 47.0f;
     f0 = s > 0.5f ? (s - 1.0f) * 0.01f : 0.04f;
 }
+// UNOFFICIAL 2026-11-21: decode recorded non-metal specular F0 for DeferredLamps / FlashlightDeferred.
+float FDSpecF0Decode(float a) {
+    const float q = a > 0.99f && a < 2.005f ? floor(abs(a - (a > 1.5f ? 2.0f : 1.0f)) * 1024.0f + 0.5f) : 0.0f;
+    const float s = floor((q + 0.5f) / 48.0f);
+    return s > 0.5f ? (s - 1.0f) * 0.01f : 0.04f;
+}
 
 // UNOFFICIAL 2026-11-14 foliage (claude/fd-foliage; Includes/FoliageDeferred.hlsl, core/DeferredFoliage.h): the leaf / grass DEFERRED records'
 // fog factor, the writer and the reader in one place like the templates' FD_LF_CODE. Those records keep COLOR1.a at a forward record's 1

@@ -201,7 +201,7 @@ vec2 envBRDFApprox(float roughness, float NdotV) {
 bool addSpecular(vec2 uv, float depth, uint pointS, uint linearS, texture2D depthViewModel, texture2D normals, texture2D pointShadow,
                  texture2D specularBuffer, inout vec3 lin) {
     float viewmodelDepth = sampleLod(depthViewModel, pointS, uv).x;
-    bool weapon = cb.depthConstants.z == 0.0 ? viewmodelDepth < 0.9 : viewmodelDepth > 0.01;
+    bool weapon = cb.depthConstants.z == 0.0 ? viewmodelDepth < 0.99999 : viewmodelDepth > 0.0;
     if (depth >= cb.specularData.w || depth >= cb.cameraData.y * 0.98 || weapon) return false;
 
     vec3 pixelPos = cb.cameraPosition.xyz + toWorld(uv) * depth;

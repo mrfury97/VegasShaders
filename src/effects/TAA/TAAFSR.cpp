@@ -27,10 +27,14 @@
 #include "../../core/Upscaler.h"
 #include "../../core/ReactiveMask.h"	// UNOFFICIAL 2026-10-30 ReactiveMask: FSR's reactive mask from the world's alpha draws
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion: FSR's motion vectors for what moved itself
+#include "../../core/ViewModelMotion.h"	// UNOFFICIAL 2026-11-21 ViewModelMotion: 1st-person AA motion vectors
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (no RR in rect frames)
 #include "../../core/FdIndirect.h"	// UNOFFICIAL 2026-11-15 DeferredRRGuides (full deferred renderer, phase 6: docs/next/FD-GI-RESULTS.md)
 #include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-07 (ptaaa-denoiser) RR's guides from the path tracer
 #include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) RR at RenderScale < 1: sizes, jitter, the composite's rect mapping
+#include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-21 HistoryProbe (pre-tonemap native AA)
+#include "../../core/SessionLog.h"	// UNOFFICIAL 2026-11-21 HistoryReset
+#include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-21 BackboneReset (pre-tonemap native AA)
 
 namespace {
 	// Constants of FSRPrep.comp (std140).
@@ -55,7 +59,7 @@ namespace {
 #define UAV(b)      { 1, b, NVR_EXT_BIND_STORAGE_IMAGE, b, NVR_EXT_VIEW_2D, TRUE, 0 }
 #define CB(s, b)    { s, b, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }
 #define POINTS      { 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }
-	const NVR_EXT_BINDING_DESC PrepBindings[] = { IMG(0), IMG(1), UAV(2), UAV(3), CB(2, 0), POINTS, IMG(4), IMG(5) };	// IMG(4): UNOFFICIAL 2026-10-29 TESR_ObjectMotionBuffer; IMG(5): 2026-10-30 ReactiveMask
+	const NVR_EXT_BINDING_DESC PrepBindings[] = { IMG(0), IMG(1), UAV(2), UAV(3), CB(2, 0), POINTS, IMG(4), IMG(5), IMG(6) };	// IMG(4): TESR_ObjectMotionBuffer; IMG(5): ReactiveMask; IMG(6): TESR_ViewModelMotionBuffer
 	const NVR_EXT_BINDING_DESC CompositeBindings[] = { IMG(0), IMG(1), IMG(2), IMG(3), IMG(4), POINTS };
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction: DlssRRGuides.comp (colour, normals, depth, material; the five guides; the constants)
 	// and DlssRRComposite.frag (RR's output, the frame before RR, the weapon's depth). Same conventions as above.
@@ -94,6 +98,59 @@ namespace {
 		NVR_EXT_RESOURCE_BINDING b = {};
 		b.Slot = slot; b.Type = NVR_EXT_BIND_SAMPLER; b.pResource = sampler;
 		return b;
+	}
+
+	void FillNativePrepConstants(FSRPrepConstants& prep, const D3DXVECTOR4* projection, const D3DXVECTOR4* view,
+		const D3DXMATRIX& prevView, const D3DXVECTOR4& cameraData, const D3DXVECTOR4& prevProjection,
+		const D3DXVECTOR4& camDelta, int width, int height, bool reset, float weaponFallback,
+		bool objectMotion, bool reactive, bool vmMotion)
+	{
+		memset(&prep, 0, sizeof(prep));
+		memcpy(&prep.projection, projection, sizeof(D3DXMATRIX));
+		memcpy(&prep.view, view, sizeof(D3DXMATRIX));
+		prep.prevView = prevView;
+		prep.cameraData = cameraData;
+		prep.prevProjection = prevProjection;
+		prep.cameraDelta = D3DXVECTOR4(camDelta.x, camDelta.y, camDelta.z, objectMotion ? 1.0f : 0.0f);
+		prep.size = D3DXVECTOR4((float)width, (float)height, reset ? 1.0f : 0.0f, weaponFallback);
+		prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), vmMotion ? 1.0f : 0.0f, 0.0f);
+	}
+
+	Upscaler::IUpscaler* EvaluateNativeUpscaler(IDirect3DDevice9* Device, int upscalerId, IDirect3DBaseTexture9* color,
+		IDirect3DTexture9* depthTex, IDirect3DTexture9* motionTex, IDirect3DBaseTexture9* viewModel,
+		int width, int height, bool jittered, float jitterX, float jitterY,
+		float nearZ, float farZ, const D3DXMATRIX& proj, float deltaTime, float sharpness,
+		bool hdr, bool reset, Upscaler::Inputs& outInputs)
+	{
+		outInputs = Upscaler::Inputs();
+		outInputs.Color = color;
+		outInputs.Depth = depthTex;
+		outInputs.Motion = motionTex;
+		outInputs.ViewModel = viewModel;
+		outInputs.RenderWidth = outInputs.InputWidth = outInputs.DisplayWidth = (UINT)width;
+		outInputs.RenderHeight = outInputs.InputHeight = outInputs.DisplayHeight = (UINT)height;
+		// The jitter as FSR defines it (the sample at pixel p shows the unjittered point p - jitter, y down): BeginJitter moves the
+		// frustum right/up by (x, y) pixels, i.e. the picture left/down, so FSR's offset is (-x, +y).
+		outInputs.JitterX = jittered ? -jitterX : 0.0f;
+		outInputs.JitterY = jittered ? jitterY : 0.0f;
+		outInputs.JitterPhases = 8.0f;	// ffxFsr2GetJitterPhaseCount at scale 1; TAA's Halton sequence is 8 long
+		outInputs.NearZ = nearZ;
+		outInputs.FarZ = farZ;
+		outInputs.TanHalfFovX = 1.0f / proj._11;
+		outInputs.TanHalfFovY = 1.0f / proj._22;
+		outInputs.DeltaSeconds = deltaTime;
+		outInputs.Sharpness = sharpness;
+		outInputs.Hdr = hdr;
+		outInputs.Reset = reset;
+		Upscaler::IUpscaler* upscaler = Upscaler::Choose(upscalerId);
+		bool evaluated = upscaler->Evaluate(Device, outInputs);
+		if (!evaluated && upscaler == Upscaler::Fsr31() && upscaler->Failed()) {
+			// UNOFFICIAL 2026-10-28: FSR 3.1 failing (logged by it) hands this frame and the rest of the session to FSR 2.
+			upscaler = Upscaler::Choose(upscalerId);
+			outInputs.Reset = true;
+			evaluated = upscaler->Evaluate(Device, outInputs);
+		}
+		return evaluated ? upscaler : nullptr;
 	}
 }
 
@@ -136,6 +193,10 @@ bool TAAEffect::FSRWanted() {
 	return true;
 }
 
+bool TAAEffect::UsesUpscaler() {
+	return FSRWanted();
+}
+
 bool TAAEffect::FSRDispatchPrep(const NVR_EXT_RESOURCE_BINDING* bindings, UINT count, const void* push, UINT pushSize, UINT groupsX, UINT groupsY) {
 	NVR_EXT_DISPATCH_DESC dispatch = {};
 	dispatch.pPipeline = fsrPrep;
@@ -172,7 +233,7 @@ bool TAAEffect::FSRPipelines() {
 		fsrPrep = DxvkCompute::CreatePipeline("FSRPrep", PrepBindings, _countof(PrepBindings), 4, true);
 		if (!fsrPrep) return fail("a compute pipeline could not be made (Compute\\FSR*.spv missing or refused)");
 		fsrComposite.Tried = true;
-		fsrComposite.Pipeline = DxvkCompute::CreateGraphicsPipeline("FSRComposite", CompositeBindings, _countof(CompositeBindings), 16, true);
+		fsrComposite.Pipeline = DxvkCompute::CreateGraphicsPipeline("FSRComposite", CompositeBindings, _countof(CompositeBindings), 20, true);
 		if (!fsrComposite.Pipeline) return fail("the composite pass could not be made (Compute\\FSRComposite.spv)");
 		QueryPerformanceCounter(&fsrLastTime);
 	}
@@ -211,58 +272,35 @@ bool TAAEffect::FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 
 	// 1. NVR's inputs: motion vectors, FSR depth + reactive.
 	FSRPrepConstants prep = {};
-	memcpy(&prep.projection, projection, sizeof(D3DXMATRIX));
-	memcpy(&prep.view, view, sizeof(D3DXMATRIX));
-	prep.prevView = Constants.PrevViewTransform;
-	prep.cameraData = *cameraData;
-	prep.prevProjection = Constants.PrevProjection;
-	prep.cameraDelta = Constants.CameraDelta;
 	const bool objectMotion = ObjectMotion::Ready();	// UNOFFICIAL 2026-10-29: cameraDelta.w = FSRPrep.comp's switch for t_objmotion
-	prep.cameraDelta.w = objectMotion ? 1.0f : 0.0f;
-	prep.size = D3DXVECTOR4((float)width, (float)height, reset ? 1.0f : 0.0f, FSRSettings.WeaponReactive);
+	const bool vmMotion = ViewModelMotion::Ready();	// UNOFFICIAL 2026-11-21: extra.z = FSRPrep.comp's switch for t_vmmotion
+	const bool vmJittered = ViewModelMotion::JitteredThisFrame();
+	const float weaponFallback = (FSRSettings.Upscaler == 1 && vmMotion) ? Upscaler::DlssWeaponMaskValue() : FSRSettings.WeaponReactive;
 	const bool reactive = ReactiveMask::Ready();	// UNOFFICIAL 2026-10-30
-	prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), 0.0f, 0.0f);
+	FillNativePrepConstants(prep, projection, view, Constants.PrevViewTransform, *cameraData, Constants.PrevProjection,
+		Constants.CameraDelta, width, height, reset, weaponFallback, objectMotion, reactive, vmMotion);
 	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(fsrPrepUniforms, &prep, sizeof(prep));
 	if (!prepBuffer) return fail("its constant buffer could not be written");
 	{
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, depth), Image(1, viewModel), Image(2, fsrMotion.Texture, true), Image(3, fsrDepth.Texture, true),
 			Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, prepBuffer), Sampler(0, point), Image(4, objectMotion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth),
-			Image(5, reactive ? (IUnknown*)ReactiveMask::Texture : (IUnknown*)depth) };
+			Image(5, reactive ? (IUnknown*)ReactiveMask::Texture : (IUnknown*)depth),
+			Image(6, vmMotion ? (IUnknown*)ViewModelMotion::Texture : (IUnknown*)depth) };
 		UInt32 prepPush = 0;
 		if (!FSRDispatchPrep(b, _countof(b), &prepPush, 4, (width + 7) / 8, (height + 7) / 8)) return false;
 	}
 
 	// 2. The upscaler (FSR 2) at render size = display size, on TAA's 8-step jitter.
 	Upscaler::Inputs in;
-	in.Color = source;
-	in.Depth = fsrDepth.Texture;
-	in.Motion = fsrMotion.Texture;
-	in.ViewModel = viewModel;	// UNOFFICIAL 2026-11-01: DLSS's bias current colour mask on the weapon ([Shaders.TAA.DLSS] WeaponMask)
-	in.RenderWidth = in.InputWidth = in.DisplayWidth = (UINT)width;
-	in.RenderHeight = in.InputHeight = in.DisplayHeight = (UINT)height;
-	// The jitter as FSR defines it (the sample at pixel p shows the unjittered point p - jitter, y down): BeginJitter moves the
-	// frustum right/up by (x, y) pixels, i.e. the picture left/down, so FSR's offset is (-x, +y).
-	in.JitterX = frameJittered ? -frameJitterX : 0.0f;
-	in.JitterY = frameJittered ? frameJitterY : 0.0f;
-	in.JitterPhases = 8.0f;					// ffxFsr2GetJitterPhaseCount at scale 1; TAA's Halton sequence is 8 long
-	in.NearZ = nearZ;
-	in.FarZ = farZ;
-	in.TanHalfFovX = 1.0f / proj._11;		// tan(horizontal fov / 2)
-	in.TanHalfFovY = 1.0f / proj._22;		// tan(vertical fov / 2)
-	in.DeltaSeconds = deltaTime;
-	in.Sharpness = FSRSettings.Sharpness;
-	in.Hdr = false;							// the tonemapped frame
-	in.Reset = reset || !lastPathFSR;		// the upscaler's history is RenderScale's after an upscaled frame
-	if (in.Reset && !reset) SessionLog::HistoryReset("TAA FSR / DLSS (native)", "the last frame was upscaled by RenderScale or resolved by TAA");	// UNOFFICIAL 2026-11-01
-	Upscaler::IUpscaler* upscaler = Upscaler::Choose(FSRSettings.Upscaler);	// FSR 2 (DLSS is not built: core/Upscaler.h)
-	bool evaluated = upscaler->Evaluate(Device, in);
-	if (!evaluated && upscaler == Upscaler::Fsr31() && upscaler->Failed()) {
-		// UNOFFICIAL 2026-10-28: FSR 3.1 failing (logged by it) hands this frame and the rest of the session to FSR 2.
-		upscaler = Upscaler::Choose(FSRSettings.Upscaler);
-		in.Reset = true;
-		evaluated = upscaler->Evaluate(Device, in);
+	const bool fsrReset = reset || !lastPathFSR;
+	if (fsrReset && !reset) SessionLog::HistoryReset("TAA FSR / DLSS (native)", "the last frame was upscaled by RenderScale or resolved by TAA");	// UNOFFICIAL 2026-11-01
+	Upscaler::IUpscaler* upscaler = EvaluateNativeUpscaler(Device, FSRSettings.Upscaler, source, fsrDepth.Texture, fsrMotion.Texture,
+		vmMotion ? nullptr : viewModel, width, height, frameJittered, frameJitterX, frameJitterY, nearZ, farZ, proj,
+		deltaTime, FSRSettings.Sharpness, false, fsrReset, in);
+	if (!upscaler) {
+		Upscaler::IUpscaler* chosen = Upscaler::Choose(FSRSettings.Upscaler);
+		return fail(chosen->Failed() ? "the upscaler failed" : "the upscaler could not run this frame");
 	}
-	if (!evaluated) return fail(upscaler->Failed() ? "the upscaler failed" : "the upscaler could not run this frame");
 	EffectStatus::Level("TAA upscaler in use (native)", upscaler->Name(), true);	// UNOFFICIAL 2026-11-01 (the REPORT's path; a fallback shows as its own line)
 	// UNOFFICIAL 2026-11-01 (Diagnostics.h part 5): this frame's state for the log lines (Render adds the frame count and probes the output)
 	Diag.path = FSRSettings.Upscaler == 1 ? "DLSS at native resolution (FSR 2 while the helper cannot run)" : FSRSettings.Upscaler == 2 ? "FSR 3.1 at native resolution" : "FSR 2 at native resolution";
@@ -280,13 +318,160 @@ bool TAAEffect::FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 	{
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, upscaler->Output()), Image(1, source), Image(2, viewModel), Image(3, fsrMotion.Texture),
 			Image(4, fsrDepth.Texture), Sampler(0, point) };
-		struct { UInt32 pointIndex; float debugView; float w, h; } compositePush = { 0, (float)Settings.DebugView, (float)width, (float)height };
+		struct { UInt32 pointIndex; float debugView; float w, h; UInt32 weaponAA; } compositePush = { 0, (float)Settings.DebugView, (float)width, (float)height, vmJittered ? 1u : 0u };
+		static_assert(sizeof(compositePush) == 20, "FSRComposite.frag's push block");
 		static GpuTimer compositeTimer("  FSR composite (NVR)");
 		GpuProfileScope gpu(compositeTimer, Device);
 		if (!ExtDrawTo(fsrComposite.Pipeline, &RenderTarget, 1, b, _countof(b), &compositePush, sizeof(compositePush))) return fail("the composite pass failed");
 	}
 
 	if (++fsrFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: TAA runs %s (AMD FidelityFX Super Resolution) as its resolve, %ix%i native, sharpness %.2f.", upscaler->Name(), width, height, FSRSettings.Sharpness);
+	return true;
+}
+
+// UNOFFICIAL 2026-11-21: native-resolution DLAA / FSR 3.1 / FSR 2 in 16-bit pre-tonemap HDR (step 38, when RR did not run).
+// Runs before exposure, bloom, ISHDRBLENDINSHADERCIN tonemapping, and AtToneMap dithering so custom LUT/tonemap/dither presets cannot degrade DLAA/FSR.
+bool TAAEffect::PreTonemapNativeAA(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget) {
+	preTonemapRanThisFrame = false;
+	if (!FSRSettings.PreTonemapHDR || !Enabled || !Effect || !ShouldRender()) return false;
+	if (!TheSettingManager->SettingsMain.Main.RenderPreTonemapping) return false;
+	if (Up.Upscaled || Up.Deferred || RenderRect::Active() || rrRanThisFrame) return false;
+	if (!FSRWanted()) return false;
+	FrameChain& chain = TheShaderManager->Chain;
+	if (!chain.Owns(RenderTarget, TheTextureManager->RenderedSurface)) return false;
+
+	IDirect3DBaseTexture9* baseColor = TheTextureManager->RenderedTexture;
+	if (!baseColor || baseColor->GetType() != D3DRTYPE_TEXTURE) return false;
+	IDirect3DTexture9* color = static_cast<IDirect3DTexture9*>(baseColor);
+	D3DSURFACE_DESC colorDesc = {};
+	if (FAILED(color->GetLevelDesc(0, &colorDesc))) return false;
+	if (colorDesc.Format != D3DFMT_A16B16G16R16F && colorDesc.Format != D3DFMT_A32B32G32R32F) return false;
+
+	if (!FSRPipelines() || !FSREnsureResources()) return false;
+	const int width = fsrWidth, height = fsrHeight;
+	if (colorDesc.Width != (UINT)width || colorDesc.Height != (UINT)height) return false;
+
+	const D3DXVECTOR4* projection = Registered("TESR_ProjectionTransform");
+	const D3DXVECTOR4* view = Registered("TESR_ViewTransform");
+	const D3DXVECTOR4* cameraData = Registered("TESR_CameraData");
+	IDirect3DBaseTexture9* depth = SlotTexture("TESR_DepthBuffer");
+	IDirect3DBaseTexture9* viewModel = SlotTexture("TESR_DepthBufferViewModel");
+	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+	if (!projection || !view || !cameraData || !depth || !viewModel || !point) return false;
+
+	const float nearZ = cameraData->x, farZ = cameraData->y;
+	const D3DXMATRIX& proj = *(const D3DXMATRIX*)projection;
+
+	LARGE_INTEGER now, frequency;
+	QueryPerformanceCounter(&now);
+	QueryPerformanceFrequency(&frequency);
+	const float deltaTime = fsrLastTime.QuadPart ? (float)(now.QuadPart - fsrLastTime.QuadPart) / (float)frequency.QuadPart : 0.0f;
+	fsrLastTime = now;
+
+	const bool reset = !historyValid || !lastPathFSR || !lastPathPreTonemap ||
+		TheShaderManager->GameState.isCameraCut ||
+		(Settings.BackboneReset && TemporalBackbone::Shared() && !TemporalBackbone::HistoryValid()) ||
+		deltaTime > 0.5f || width != preLastWidth || height != preLastHeight;
+	if (reset) {
+		if (historyValid) SessionLog::HistoryReset("TAA FSR / DLSS (pre-tonemap HDR)",
+			TheShaderManager->GameState.isCameraCut ? "camera cut" :
+			(!lastPathFSR || !lastPathPreTonemap) ? "path switch" :
+			deltaTime > 0.5f ? "frame gap over 0.5 s" :
+			(width != preLastWidth || height != preLastHeight) ? "size" : "shared history rule");
+		RememberCamera();
+	}
+
+	static GpuTimer preTaaTimer("TAA / DLAA (pre-tonemap HDR)");
+	GpuProfileScope gpu(preTaaTimer, Device);
+
+	const D3DXVECTOR4 delta = TheRenderManager->CameraPosition - prevCameraPosition;
+	const bool objectMotion = ObjectMotion::Ready();
+	const bool vmMotion = ViewModelMotion::Ready();
+	const bool vmJittered = ViewModelMotion::JitteredThisFrame();
+	const float weaponFallback = (FSRSettings.Upscaler == 1 && vmMotion) ? Upscaler::DlssWeaponMaskValue() : FSRSettings.WeaponReactive;
+	const bool reactive = ReactiveMask::Ready();
+
+	FSRPrepConstants prep = {};
+	FillNativePrepConstants(prep, projection, view, Constants.PrevViewTransform, *cameraData, Constants.PrevProjection,
+		delta, width, height, reset, weaponFallback, objectMotion, reactive, vmMotion);
+	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(fsrPrepUniforms, &prep, sizeof(prep));
+	if (!prepBuffer) { historyValid = false; lastPathPreTonemap = false; return false; }
+	{
+		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, depth), Image(1, viewModel), Image(2, fsrMotion.Texture, true), Image(3, fsrDepth.Texture, true),
+			Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, prepBuffer), Sampler(0, point), Image(4, objectMotion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth),
+			Image(5, reactive ? (IUnknown*)ReactiveMask::Texture : (IUnknown*)depth),
+			Image(6, vmMotion ? (IUnknown*)ViewModelMotion::Texture : (IUnknown*)depth) };
+		UInt32 prepPush = 0;
+		if (!FSRDispatchPrep(b, _countof(b), &prepPush, 4, (width + 7) / 8, (height + 7) / 8)) {
+			historyValid = false;
+			lastPathPreTonemap = false;
+			return false;
+		}
+	}
+
+	Upscaler::Inputs in;
+	Upscaler::IUpscaler* upscaler = EvaluateNativeUpscaler(Device, FSRSettings.Upscaler, color, fsrDepth.Texture, fsrMotion.Texture,
+		vmMotion ? nullptr : viewModel, width, height, frameJittered, frameJitterX, frameJitterY, nearZ, farZ, proj,
+		deltaTime, FSRSettings.Sharpness, true, reset, in);
+	if (!upscaler) {
+		historyValid = false;
+		lastPathPreTonemap = false;
+		return false;
+	}
+
+	IDirect3DSurface9* preSurface = TheTextureManager->RenderedSurface;
+	IDirect3DSurface9* target = chain.Output();
+	{
+		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, upscaler->Output()), Image(1, color), Image(2, viewModel), Image(3, fsrMotion.Texture),
+			Image(4, fsrDepth.Texture), Sampler(0, point) };
+		struct { UInt32 pointIndex; float debugView; float w, h; UInt32 weaponAA; } compositePush = {
+			0, (float)Settings.DebugView, (float)width, (float)height, (vmJittered ? 1u : 0u) | 2u
+		};
+		static_assert(sizeof(compositePush) == 20, "FSRComposite.frag's push block");
+		static GpuTimer compositeTimer("  FSR composite (NVR)");
+		GpuProfileScope gpuComp(compositeTimer, Device);
+		if (!ExtDrawTo(fsrComposite.Pipeline, &target, 1, b, _countof(b), &compositePush, sizeof(compositePush))) {
+			historyValid = false;
+			lastPathPreTonemap = false;
+			return false;
+		}
+	}
+	chain.Commit();
+
+	EffectStatus::Level("TAA upscaler in use (native)", upscaler->Name(), true);
+	Diag.path = FSRSettings.Upscaler == 1 ? "DLSS at native resolution (pre-tonemap HDR; FSR 2 while the helper cannot run)" :
+		FSRSettings.Upscaler == 2 ? "FSR 3.1 at native resolution (pre-tonemap HDR)" : "FSR 2 at native resolution (pre-tonemap HDR)";
+	Diag.upscaler = std::string(upscaler->Name()) + ": " + upscaler->DiagText();
+	Diag.reset = in.Reset;
+	Diag.sinceReset = in.Reset ? 0 : Diag.sinceReset + 1;
+	Diag.jitter = jitterIndex;
+	Diag.jitterX = in.JitterX;
+	Diag.jitterY = in.JitterY;
+	Diag.deltaMs = deltaTime * 1000.0f;
+	Diag.inW = in.RenderWidth; Diag.inH = in.RenderHeight; Diag.outW = in.DisplayWidth; Diag.outH = in.DisplayHeight;
+	Diag.hdr = true;
+	Diag.output = upscaler->Output();
+	Diag.frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+
+	if (Diag.output) {
+		IDirect3DSurface9* probeOut = nullptr;
+		if (SUCCEEDED(Diag.output->GetSurfaceLevel(0, &probeOut)) && probeOut) {
+			Diagnostics::HistoryProbe("TAA / upscaler at native resolution", preSurface, 0, 0, probeOut, &TAAEffect::DiagTextStatic);
+			probeOut->Release();
+		}
+	}
+
+	RememberCamera();
+	historyValid = true;
+	lastPathFSR = true;
+	lastPathPreTonemap = true;
+	preTonemapRanThisFrame = true;
+	preLastWidth = width;
+	preLastHeight = height;
+
+	if (++fsrPreFrames == 1)
+		Logger::Log("UNOFFICIAL Vegas Shaders DXVK: TAA runs %s at native resolution %ix%i in pre-tonemap HDR (sharpness %.2f).",
+			upscaler->Name(), width, height, FSRSettings.Sharpness);
 	return true;
 }
 
@@ -533,7 +718,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	// on, the guides take G-buffer v2: its albedo (the RRAlbedo 2 path whatever RRAlbedo says) and its normal-mapped shading normal in place
 	// of the smooth normals buffer (the same view-space encoding: DlssRRGuides.comp reads it unchanged). Off: as before.
 	const bool fdGuides = FdIndirect::RRGuidesOn();
-	if (fdGuides) normals = FdIndirect::ShadingNormals(Device, normals, depth);
+	if (fdGuides || FdIndirect::BumpedNormalsOn()) normals = FdIndirect::ShadingNormals(Device, normals, depth);
 	bool albedoOn = (RRSettings.Albedo == 2 || fdGuides) && albedoData && albedoData->x > 0.5f && albedo && albedo->GetType() == D3DRTYPE_TEXTURE;
 	if (albedoOn) {
 		D3DSURFACE_DESC desc = {};
@@ -575,13 +760,17 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	const D3DXVECTOR4 delta = TheRenderManager->CameraPosition - rrPrevCameraPosition;
 	const bool objectMotion = ObjectMotion::Ready();	// cameraDelta.w = FSRPrep.comp's switch for t_objmotion
 	prep.cameraDelta = D3DXVECTOR4(delta.x, delta.y, delta.z, objectMotion ? 1.0f : 0.0f);
+	const bool vmMotion = ViewModelMotion::Ready();
+	const bool vmJittered = ViewModelMotion::JitteredThisFrame();
 	// (perf-rr) the render size: in a rect frame the rect of the screen-size depth / weapon depth, motion in uv of the render picture
-	prep.size = D3DXVECTOR4((float)rw, (float)rh, reset ? 1.0f : 0.0f, FSRSettings.WeaponReactive);
+	prep.size = D3DXVECTOR4((float)rw, (float)rh, reset ? 1.0f : 0.0f, vmMotion ? Upscaler::DlssWeaponMaskValue() : FSRSettings.WeaponReactive);
+	prep.extra = D3DXVECTOR4(0.0f, 0.0f, vmMotion ? 1.0f : 0.0f, 0.0f);
 	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(rrPrepUniforms, &prep, sizeof(prep));
 	if (!prepBuffer) return fail("its constant buffers could not be written");
 	{
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, depth), Image(1, viewModel), Image(2, fsrMotion.Texture, true), Image(3, fsrDepth.Texture, true),
-			Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, prepBuffer), Sampler(0, point), Image(4, objectMotion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth) };
+			Buffer(0, NVR_EXT_BIND_UNIFORM_BUFFER, prepBuffer), Sampler(0, point), Image(4, objectMotion ? (IUnknown*)ObjectMotion::Texture : (IUnknown*)depth),
+			Image(5, depth), Image(6, vmMotion ? (IUnknown*)ViewModelMotion::Texture : (IUnknown*)depth) };
 		static GpuTimer prepTimer("  RR prep (FSRPrep)");
 		GpuProfileScope gpuPrep(prepTimer, Device);
 		if (!RRDispatch(fsrPrep, b, _countof(b), plan.groupsX, plan.groupsY)) return fail("FSRPrep failed to dispatch");
@@ -707,7 +896,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		// (2026-11-07 perf-rr) rect: the frame before RR (its alpha, the weapon test and colour) is the render rect: read at the screen pixel's
 		// centre x scale (DlssRRComposite.frag; core/RrRectPlan.h RectPoint / NearestRectPixel); RR's output is the whole screen either way.
 		struct { UInt32 pointIndex; float invLinearization; UInt32 rawFrame, rect; float scaleX, scaleY, renderW, renderH; } push = { 0, 1.0f / linearization,
-			Upscaler::RayReconstructionWantsRaw() ? 1u : 0u, rect ? 1u : 0u, plan.scaleX, plan.scaleY, (float)plan.renderW, (float)plan.renderH };
+			(Upscaler::RayReconstructionWantsRaw() || vmJittered) ? 1u : 0u, rect ? 1u : 0u, plan.scaleX, plan.scaleY, (float)plan.renderW, (float)plan.renderH };
 		static_assert(sizeof(push) == 32, "DlssRRComposite.frag's push block");
 		static GpuTimer compositeTimer("  RR composite");
 		GpuProfileScope gpuComposite(compositeTimer, Device);

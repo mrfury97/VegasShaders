@@ -10,12 +10,21 @@ layout(push_constant) uniform Push {
     vec4 glowExtra;     // 48: TESR_BloomGlowExtra
     uint samplerIndex;  // 64: LINEAR, CLAMP
     uint pad[3];        // 68
+    vec4 renderScale;   // 80: (src0ScaleX, src0ScaleY, src1ScaleX, src1ScaleY) (UNOFFICIAL 2026-11-19 RenderRect)
+    vec4 clampBounds;   // 96: (src0MaxU, src0MaxV, src1MaxU, src1MaxV)
 } pc;
 
-// One read. The sampler2D is built here, at the point of use (glslang does not take a sampler constructor as an argument).
+// One read, clamped inside the active RenderRect (no-op at scale 1.0).
 vec4 tap(texture2D tex, sampler smp, vec2 p) {
-    return texture(sampler2D(tex, smp), p);
+    vec2 hi = pc.clampBounds.x > 0.0 ? pc.clampBounds.xy : vec2(1.0);
+    return texture(sampler2D(tex, smp), clamp(p, vec2(0.0), hi));
 }
+vec4 tap1(texture2D tex, sampler smp, vec2 p) {
+    vec2 hi = pc.clampBounds.z > 0.0 ? pc.clampBounds.zw : vec2(1.0);
+    return texture(sampler2D(tex, smp), clamp(p, vec2(0.0), hi));
+}
+vec2 srcUV0(vec2 uv) { return uv * (pc.renderScale.x > 0.0 ? pc.renderScale.xy : vec2(1.0)); }
+vec2 srcUV1(vec2 uv) { return uv * (pc.renderScale.z > 0.0 ? pc.renderScale.zw : vec2(1.0)); }
 
 // Downsample with the 13 tap box (Effects/Includes/Sampling.hlsl DownsampleBox13).
 vec4 DownsampleBox13(texture2D buf, sampler smp, vec2 uv, vec2 texelSize) {
@@ -73,6 +82,7 @@ vec4 GlowTap(vec4 c, float threshold) {
 
 // UNOFFICIAL: the first downsample, from the image (Bloom.fx.hlsl DownsampleFirst).
 vec4 DownsampleFirst(texture2D buf, sampler smp, vec2 uv) {
+    uv = srcUV0(uv);
     const float x = pc.resolution.z;
     const float y = pc.resolution.w;
 
@@ -124,7 +134,7 @@ vec4 DownsampleFirst(texture2D buf, sampler smp, vec2 uv) {
 
 // Downsample (Bloom.fx.hlsl Downsample): the texel size is this level's (TESR_BloomResolution.zw).
 vec4 Downsample(texture2D buf, sampler smp, vec2 uv) {
-    return DownsampleBox13(buf, smp, uv, vec2(pc.resolution.z, pc.resolution.w));
+    return DownsampleBox13(buf, smp, srcUV0(uv), vec2(pc.resolution.z, pc.resolution.w));
 }
 
 // Upsample with tent filter (Effects/Includes/Sampling.hlsl UpsampleTent9).
@@ -154,8 +164,8 @@ vec4 UpsampleTent9(texture2D buf, sampler smp, vec2 uv, vec2 filterRadius) {
 
 // Intermediary upsamples (Bloom.fx.hlsl Upsample).
 vec4 Upsample(texture2D buf, texture2D addBuf, sampler smp, vec2 uv) {
-    vec4 upsample = UpsampleTent9(buf, smp, uv, vec2(pc.data.x, pc.data.y));
-    vec4 nextMip = tap(addBuf, smp, uv);
+    vec4 upsample = UpsampleTent9(buf, smp, srcUV0(uv), vec2(pc.data.x, pc.data.y));
+    vec4 nextMip = tap1(addBuf, smp, srcUV1(uv));
 
     if (pc.data.z > 0.0) {
         return vec4(mix(nextMip.rgb, upsample.rgb, pc.data.z), 1.0);
@@ -166,8 +176,8 @@ vec4 Upsample(texture2D buf, texture2D addBuf, sampler smp, vec2 uv) {
 
 // Last upsample that normalizes the result if needed (Bloom.fx.hlsl UpsampleLast).
 vec4 UpsampleLast(texture2D buf, texture2D addBuf, sampler smp, vec2 uv) {
-    vec4 upsample = UpsampleTent9(buf, smp, uv, vec2(pc.data.x, pc.data.y));
-    vec4 nextMip = tap(addBuf, smp, uv);
+    vec4 upsample = UpsampleTent9(buf, smp, srcUV0(uv), vec2(pc.data.x, pc.data.y));
+    vec4 nextMip = tap1(addBuf, smp, srcUV1(uv));
 
     vec3 result;
     if (pc.data.z > 0.0) {

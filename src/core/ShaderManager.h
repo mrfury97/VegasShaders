@@ -118,7 +118,10 @@ public:
 	ShaderCollection*		GetShaderCollectionByName(const char* collectionName);
 	void					ClearShaderSamplers(const char* textureName, size_t byteCount);
 	void					RegisterConstant(const char* constantName, D3DXVECTOR4* value);
-	void					RenderDepthAndNormals(IDirect3DSurface9* renderTarget);	// UNOFFICIAL 2026-10-27: TESR_DepthBuffer + TESR_NormalsBuffer (chain start; RenderScale v2 again after its upscale)
+	void					RenderDepthAndNormals(IDirect3DSurface9* renderTarget, bool needNormals = true);	// UNOFFICIAL 2026-10-27: TESR_DepthBuffer + TESR_NormalsBuffer (chain start; RenderScale v2 again after its upscale)
+	bool					PostTonemapNeedsNormals();
+	bool					PostTonemapNeedsViewModelDepth();
+	bool					PostUpscaleNeedsDepth(bool beforeLuma);
 	void					CreateFrameVertex(UInt32 width, UInt32 height, IDirect3DVertexBuffer9** vertexBuffer, float scaleX = 1.0f, float scaleY = 1.0f);
 	void					InitializeConstants();	// the screen-size constants, no weather yet
 	void					UpdateConstants();		// the per-frame game state and constants
@@ -160,7 +163,6 @@ public:
 	void					PreStep_SkyViewTable(ChainContext& ctx);
 	void					PreStep_VolumetricClouds(ChainContext& ctx);
 	void					PreStep_AmbientLightTakeover(ChainContext& ctx);
-	void					PreStep_HiZ(ChainContext& ctx);
 	void					PreStep_CompositePlan(ChainContext& ctx);
 	void					PreStep_ShadowApply(ChainContext& ctx);
 	void					PreStep_CoverMapUpdate(ChainContext& ctx);
@@ -170,7 +172,6 @@ public:
 	void					PreStep_AmbientLight(ChainContext& ctx);
 	void					PreStep_LitProbes(ChainContext& ctx);
 	void					PreStep_BounceLight(ChainContext& ctx);
-	void					PreStep_BloodFlow(ChainContext& ctx);
 	void					PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx);
 	void					PreStep_SpillSelfTest(ChainContext& ctx);
 	void					PreStep_Reflections(ChainContext& ctx);
@@ -219,7 +220,6 @@ public:
 		AvgLumaEffect*			AvgLuma;
 		SkyViewEffect*			SkyView;	// UNOFFICIAL: the physical sky's table ([Shaders.Sky.Physical])
 		AmbientLightEffect*		AmbientLight;	// UNOFFICIAL: AO and bounce light in one pass (replaces both while on)
-		BloodLensEffect*		BloodLens;
 		BloomEffect*			Bloom;
 		BloomLegacyEffect*		BloomLegacy;
 		ColoringEffect*			Coloring;
@@ -265,7 +265,6 @@ public:
 		DreamEffect*			Dream;				// "fun" trip look (from the author's DreamSim), off by default
 		SkyDitherEffect*		SkyDither;			// UNOFFICIAL: breaks up the sky's banding before the 8-bit screen
 		VolumetricCloudsEffect*	VolumetricClouds;	// UNOFFICIAL: 3D clouds in place of the game's cloud layers
-		BloodFlowEffect*		BloodFlow;	// UNOFFICIAL: blood that runs and dries, pools under bodies
 		VolumetricSmokeEffect*	VolumetricSmoke;
 		DitherBusterEffect*		DitherBuster;
 		SMAAEffect*				SMAA;
@@ -278,7 +277,6 @@ public:
 		TonemappingShaders*		Tonemapping;
 		POMShaders*				POM;
 		PBRShaders*				PBR;
-		ShaderCollection*		Blood;
 		SkyShaders*				Sky;
 		SkinShaders*			Skin;
 		GrassShaders*			Grass;

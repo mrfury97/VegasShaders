@@ -322,6 +322,7 @@ void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Sce
 	VolumetricCloudsEffect* volumetric = TheShaderManager->Effects.VolumetricClouds;
 	if (volumetric) volumetric->shadowsViaSunFar = false;
 	if (!Enabled || !Effect || !ShouldRender()) return;
+	CapturedNormals::SunFarDrew = true;	// UNOFFICIAL 2026-11-17 fast-restart: the grass's own normal for this pass from the next frame (CapturedNormals.h)
 	static GpuTimer timer("Sun far shadows (land, clouds)");
 	GpuProfileScope gpu(timer, Device);
 	// The cloud layers on stages 5-12 (NVR_CloudLayer*, NVR_CloudBlend*), set after the pass begins (EffectRecord::PassTextures).
@@ -433,6 +434,7 @@ namespace {
 		D3DXVECTOR4	terrainData;
 		D3DXVECTOR4	terrainSkyData;
 		D3DXVECTOR4	skyIrradiance[9];
+		D3DXVECTOR4	skyIrradianceTerrain[9];
 		D3DXVECTOR4	terrainShadowData;
 		D3DXVECTOR4	terrainShadowRange;
 		D3DXVECTOR4	terrainShadowParams;
@@ -561,6 +563,7 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	copy(&uniforms.terrainData, sizeof(uniforms.terrainData), "TESR_TerrainData");
 	copy(&uniforms.terrainSkyData, sizeof(uniforms.terrainSkyData), "TESR_TerrainSkyData");
 	copy(&uniforms.skyIrradiance, sizeof(uniforms.skyIrradiance), "TESR_SkyIrradianceObjects");
+	copy(&uniforms.skyIrradianceTerrain, sizeof(uniforms.skyIrradianceTerrain), "TESR_SkyIrradianceTerrain");
 	copy(&uniforms.terrainShadowData, sizeof(uniforms.terrainShadowData), "TESR_TerrainShadowData");
 	copy(&uniforms.terrainShadowRange, sizeof(uniforms.terrainShadowRange), "TESR_TerrainShadowRange");
 	copy(&uniforms.terrainShadowParams, sizeof(uniforms.terrainShadowParams), "TESR_TerrainShadowParams");

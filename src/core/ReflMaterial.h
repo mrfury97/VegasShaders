@@ -195,8 +195,8 @@ namespace ReflMaterial {
 	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the first-person scene (Render.cpp RenderFirstPersonHook): drawn into the same target before
 	// the effects copy the material out (the arms and gun over a mirror kept its material: a chrome gun). No material passes here; every
 	// pass that replaces the colour writes its own alpha (Own), under the same separate alpha blend as the world scene.
-	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live) {
-		ForwardReplaceLive(true);	// UNOFFICIAL 2026-11-12 ReplaceForward: the gun's env map too (same target and screen as the world)
+	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live, bool replaceForward = false) {
+		ForwardReplaceLive(replaceForward);	// UNOFFICIAL 2026-11-20: only subtract last frame's reflection coverage from the gun's env map when RT weapon reflections are active (otherwise world reflections behind the gun cut holes out of it)
 		FirstPersonLive = CompiledIn() && live && state && device && !StatesSet;
 		NeutralDepth = 0;
 		if (FirstPersonLive) SetSceneStates(state, device);

@@ -36,13 +36,16 @@ bool rtHiddenPassOver(vec3 from, vec3 to, vec3 eye) { return rtHiddenNear(from, 
 // decides, a front face (facing the ray's start) does not block (RtLampTrace's OneSided); kRtClosest = the nearest hit blocks, tHit is
 // its t (RtLampTrace SIGMA's closestBlocker). Returns true when blocked; tHit -1 when free. (Callers that do not test alpha leave 0x10
 // out of the mask themselves.)
+#define NVR_RT_CUSTOM_ACTOR 8u    // UNOFFICIAL 2026-11-19: moving actor / player instance (NvrRtProtocol.h)
 const int kRtAnyHit = 0, kRtOneSided = 1, kRtClosest = 2;
-bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mask, bool testAlpha, int mode, out float tHit) {
+bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mask, bool testAlpha, int mode, out float tHit, out uint hitCustom) {
 	tHit = -1.0;
+	hitCustom = 0u;
 	if (!(tMax > tMin)) return false;
 	const uint terminate = mode == kRtAnyHit ? gl_RayFlagsTerminateOnFirstHitEXT : 0u;
 	float tNear = tMax;
 	bool hit = false, front = false;
+	uint ciHit = 0u;
 	const uint m1 = mask & 0x8Fu;
 	if (m1 != 0u) {
 		rayQueryEXT q;
@@ -50,7 +53,8 @@ bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mas
 		for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
 		if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
 			tNear = rayQueryGetIntersectionTEXT(q, true);
-			if (mode == kRtAnyHit) { tHit = tNear; return true; }
+			ciHit = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+			if (mode == kRtAnyHit) { tHit = tNear; hitCustom = ciHit; return true; }
 			hit = true; front = rayQueryGetIntersectionFrontFaceEXT(q, true);
 		}
 	}
@@ -68,16 +72,21 @@ bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mas
 		}
 		if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionTriangleEXT) {
 			tNear = rayQueryGetIntersectionTEXT(q, true);   // (nearer than the first query's hit: that was its tMax)
-			if (mode == kRtAnyHit) { tHit = tNear; return true; }
+			ciHit = rayQueryGetIntersectionInstanceCustomIndexEXT(q, true);
+			if (mode == kRtAnyHit) { tHit = tNear; hitCustom = ciHit; return true; }
 			hit = true; front = rayQueryGetIntersectionFrontFaceEXT(q, true);
 		}
 	}
-	if (hit && (mode == kRtClosest || !front)) { tHit = tNear; return true; }
+	if (hit && (mode == kRtClosest || !front)) { tHit = tNear; hitCustom = ciHit; return true; }
 	return false;
 }
+bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mask, bool testAlpha, int mode, out float tHit) {
+	uint ci;
+	return rtBlockedPassHidden(origin, dir, tMin, tMax, mask, testAlpha, mode, tHit, ci);
+}
 bool rtBlockedPassHidden(vec3 origin, vec3 dir, float tMin, float tMax, uint mask, bool testAlpha, int mode) {
-	float t;
-	return rtBlockedPassHidden(origin, dir, tMin, tMax, mask, testAlpha, mode, t);
+	float t; uint ci;
+	return rtBlockedPassHidden(origin, dir, tMin, tMax, mask, testAlpha, mode, t, ci);
 }
 
 #endif

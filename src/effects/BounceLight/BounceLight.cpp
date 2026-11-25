@@ -4,6 +4,12 @@
 #include "../../core/GpuProfiler.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
+#include "../../core/RtPathTrace.h"	// UNOFFICIAL 2026-11-19: skip bounce light when path tracing replaces indirect lighting
+
+bool BounceLightEffect::ShouldRender() {
+	if (RtPathTrace::Replacing()) return false;
+	return true;
+}
 
 void BounceLightEffect::UpdateConstants() {
 }

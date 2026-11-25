@@ -49,6 +49,8 @@ public:
 	void LoadLUT(int slot, const char* filename);
 
 	static const char* LUTFolder();	// Paths::LutDir()
+	// 2026-11-17: a LUT name from a setting, preset or script is a file in the LUT folder (or below it): no "..", drive or leading slash.
+	static bool SafeName(const char* filename);
 
 private:
 	// Cell count N of each slot's strip LUT (day, night, interior), passed to the shader per slot. 0 means

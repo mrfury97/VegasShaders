@@ -142,7 +142,12 @@ void TerrainShaders::UpdateSettings() {
 		g.into->AmbientScale = cfg->GetSettingF(g.section, "AmbientScale");
 		g.into->SkylightingScale = cfg->GetSettingF(g.section, "SkylightingScale");
 		g.into->SkylightingDirectionality = cfg->GetSettingF(g.section, "SkylightingDirectionality");
+		{
+			SettingManager::Configuration::ConfigNode node;
+			g.into->SkylightingSaturation = cfg->Config.FillNode(&node, g.section, "SkylightingSaturation") ? node.FloatValue : 1.0f;
+		}
 	}
+	SkylightSaturation = Settings.Default.SkylightingSaturation;
 
 	const char* parallax = "Shaders.Terrain.Parallax";
 	ParallaxSettings.Enabled = TheSettingManager->GetSettingF(parallax, "Enabled");
@@ -243,6 +248,14 @@ void TerrainShaders::UpdateSettings() {
 	BlendingConstants.Extra.w = TheSettingManager->GetSettingI("Shaders.Terrain.Blending", "Smooth") ? 1.0f : 0.0f;
 }
 
+float TerrainShaders::CurrentSkylightSaturation() const {
+	if (!TheShaderManager || !TheShaderManager->GameState.isExterior) return 1.0f;
+	const float rainFactor = RainState::Factor();
+	ShaderManager* sm = TheShaderManager;
+	return std::lerp(sm->GetTransitionValue(Settings.Default.SkylightingSaturation, Settings.Night.SkylightingSaturation, 0.0),
+		sm->GetTransitionValue(Settings.Rain.SkylightingSaturation, Settings.NightRain.SkylightingSaturation, 0.0), rainFactor);
+}
+
 void TerrainShaders::UpdateConstants() {
 	// UNOFFICIAL 2026-11-21 the one rain clock (core/RainState.h): how wet the ground is (Wetness Effects' clock, 0-1, this frame's,
 	// whatever is switched on or off) drives the dry-to-wet blend, so the Rain group comes and goes with the wet ground the shaders draw.
@@ -283,6 +296,7 @@ void TerrainShaders::UpdateConstants() {
 	Constants.SkyData.x = weather(&TerrainSettings::SkylightingScale);
 	// Used only when SKYLIGHTING_MODE is 1; the SH path has no direction to lean.
 	Constants.SkyData.y = weather(&TerrainSettings::SkylightingDirectionality);
+	SkylightSaturation = weather(&TerrainSettings::SkylightingSaturation);
 
 	Constants.ExtraData.z = LODSettings.NoiseScale;
 	Constants.ExtraData.w = LODSettings.NoiseTile;

@@ -14,6 +14,8 @@
 // no tool counted. Reproduced without the game on the same GPU (d3dx9_43's compiler and a bare Direct3D 9 device from a script: the
 // same 19 refused with the same hr 0x8876086C; with Wetness Effects left out all 28 are accepted, the longest 3598 slots).
 //
+// (2026-11-18) A default record that does not COMPILE (X4505, out of temp registers: DXVK too) is handled the same way (OnCompileFailed).
+//
 // WHAT. When a shader of a template family is refused (or counted over the cap), an optional feature is left out of the WHOLE
 // family, in a fixed order, and the family is built again, until it is accepted. Only when nothing is left to drop does the game's
 // own shader draw, as before, with an [ERROR] line and a notice in the menu.
@@ -102,6 +104,8 @@ namespace ShaderFallback {
 	inline unsigned Key = 0;
 	inline std::string File;				// <shaders>\Cache\ShaderFallback.txt
 	inline unsigned Refusals = 0;			// shaders the device refused (or counted over a forced cap) this session, recovered or not
+	inline unsigned CompileFailures = 0;	// (2026-11-18) default records that did not compile (X4505: out of ps_3_0 temp registers), recovered or not
+	inline unsigned RegisterFamilies = 0;	// (2026-11-18) bit per Family: its drops came from a compile failure, not a refusal (the notice's wording)
 	inline unsigned Lost[FamilyCount] = {};	// shaders refused with nothing left to drop: the game's own shader draws them
 	inline unsigned Longest[FamilyCount] = {};	// the longest refused shader of the family, in slots
 	// The menu's notice (ImGuiManager.cpp, with the install check's): empty title = nothing to say for that family.
@@ -158,6 +162,7 @@ namespace ShaderFallback {
 		if (fopen_s(&out, File.c_str(), "wb") || !out) return;
 		fprintf(out, "key %08X\r\n", Key);
 		for (unsigned family = 0; family < FamilyCount; family++) fprintf(out, "%s %X\r\n", FamilyNames[family], Own[family]);
+		fprintf(out, "registers %X\r\n", RegisterFamilies);	// (2026-11-18: the families whose drops came from a compile failure)
 		fprintf(out, "# Vegas Shaders: the optional shader parts left out so the shaders fit this graphics driver (ShaderFallback.h). Safe to delete: the full set is tried again.\r\n");
 		fclose(out);
 	}
@@ -180,8 +185,12 @@ namespace ShaderFallback {
 		}
 		if (names.empty() && !Lost[family]) return;	// nothing to say
 		char head[400], longest[48] = "";
+		const bool registers = ((RegisterFamilies >> family) & 1u) != 0;
 		if (Longest[family]) sprintf_s(longest, "; the longest was %u", Longest[family]);	// (none refused this session when the drops were remembered)
-		sprintf_s(head, "The %s shaders are too long for this graphics driver%s (cap %u instruction slots%s%s%s) with these settings",
+		if (registers)	// (2026-11-18) a compile failure: the same on every driver and on DXVK
+			sprintf_s(head, "The %s shaders run out of shader model 3 registers%s with these settings", FamilyNames[family],
+				Remembered ? " (remembered from an earlier start)" : "");
+		else sprintf_s(head, "The %s shaders are too long for this graphics driver%s (cap %u instruction slots%s%s%s) with these settings",
 			FamilyNames[family], Native ? " on native Direct3D 9" : "", Cap(false), Forced ? ", forced by ShaderSlotCapOverride" : "",
 			Remembered ? ", remembered from an earlier start" : "", longest);
 		title = head;
@@ -190,15 +199,20 @@ namespace ShaderFallback {
 		if (Lost[family]) {
 			char lost[260], number[16];
 			sprintf_s(number, "%u", Lost[family]);
-			sprintf_s(lost, " %s of them %s still too long%s: the game's own shaders draw those pieces, and the %s settings do nothing there.",
-				counts ? number : "Some", counts && Lost[family] == 1 ? "is" : "are",
+			sprintf_s(lost, " %s of them %s still too %s%s: the game's own shaders draw those pieces, and the %s settings do nothing there.",
+				counts ? number : "Some", counts && Lost[family] == 1 ? "is" : "are", registers ? "big" : "long",
 				On() ? " with every optional part left out" : " ([Main.Main.Misc] ShaderFallback is off)", FamilyNames[family]);
 			title += lost;
 		}
 		fix = losses;
-		fix += std::string(fix.empty() ? "" : " ") + "To keep everything, use the Vegas Shaders DXVK build (no such limit there)";
-		if (!others.empty()) fix += ", or make room by turning off other options that lengthen these shaders: " + others;
-		fix += ".";
+		if (registers) {	// (DXVK has the same register limit: only fewer options help)
+			if (!others.empty()) fix += std::string(fix.empty() ? "" : " ") + "To keep everything, make room by turning off other options that lengthen these shaders: " + others + ".";
+		}
+		else {
+			fix += std::string(fix.empty() ? "" : " ") + "To keep everything, use the Vegas Shaders DXVK build (no such limit there)";
+			if (!others.empty()) fix += ", or make room by turning off other options that lengthen these shaders: " + others;
+			fix += ".";
+		}
 	}
 
 	// The family's summary: the menu's notice always, and one log line when what is left out changes or the first shader is lost.
@@ -254,6 +268,25 @@ namespace ShaderFallback {
 		return false;
 	}
 
+	// UNOFFICIAL 2026-11-18 (a co-developer: terrain blending + Puddles on DXVK, the land drawn by the game's own shader): a default record that
+	// did not compile (X4505, out of ps_3_0's 32 temp registers; also with PREFER_FLOW_CONTROL and without the clouds' lookup) is handled as a
+	// refused one: its family loses the next optional feature, in the same order. Until then only the device's refusal (native, too many
+	// instruction slots) did that, so the settings that lose Wetness Effects on native D3D9 left whole land pieces to the game on DXVK.
+	// The land only, for now: some object shaders X4505 on DXVK with the deferred set even without terrain blending (offline 2026-11-18:
+	// SLS2024 / SLS2026 / SLS2027 with Wetness Effects + Puddles, SLS2024 / SLS2027 with SkylightingMode 1). Handled here they would take
+	// Wetness Effects away from every DXVK player with Puddles on, who until now keep it with those few objects drawn by the game's shader.
+	// That trade is the owner's to make (docs/next/TERRAIN-BLEND-FIT.md).
+	inline bool OnCompileFailed(const char* templateName) {
+		const Family family = FamilyOf(templateName);
+		if (family != Land) return false;
+		CompileFailures++;
+		RegisterFamilies |= 1u << family;
+		if (DropNext(family)) return true;
+		Lost[family]++;
+		Summarize(family);
+		return false;
+	}
+
 	// Once, before the first shader is built (ShaderRecord.cpp FallbackInit): the keys, the caps, the memory.
 	inline void Init(unsigned defineKey, const std::string& cacheFolder) {
 		if (State >= 0) return;
@@ -279,13 +312,14 @@ namespace ShaderFallback {
 		FILE* in = nullptr;
 		if (fopen_s(&in, File.c_str(), "rb") || !in) return;
 		char line[256];
-		unsigned key = 0, masks[FamilyCount] = {};
+		unsigned key = 0, masks[FamilyCount] = {}, registers = 0;
 		bool keyed = false;
 		while (fgets(line, sizeof(line), in)) {
 			char word[32] = {};
 			unsigned value = 0;
 			if (sscanf_s(line, "%31s %X", word, (unsigned)sizeof(word), &value) != 2) continue;
 			if (!strcmp(word, "key")) { key = value; keyed = true; continue; }
+			if (!strcmp(word, "registers")) { registers = value & ((1u << FamilyCount) - 1u); continue; }
 			for (unsigned family = 0; family < FamilyCount; family++)
 				if (!strcmp(word, FamilyNames[family])) masks[family] = value & ((1u << FeatureCount) - 1u);
 		}
@@ -296,6 +330,7 @@ namespace ShaderFallback {
 		}
 		bool any = false;
 		for (unsigned family = 0; family < FamilyCount; family++) { Own[family] = masks[family]; any = any || masks[family] != 0; }
+		RegisterFamilies = registers;
 		Rebuild();
 		Remembered = any;
 		for (unsigned family = 0; family < FamilyCount; family++) if (Own[family]) Summarize((Family)family);

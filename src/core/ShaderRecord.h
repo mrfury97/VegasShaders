@@ -59,6 +59,10 @@ public:
 	static long				ShippedSeeds();
 	// UNOFFICIAL 2026-11-16: makes every missing level of a folder path (CreateDirectoryA makes only the last one).
 	static void				CreateFolders(const std::string& Path);
+	// UNOFFICIAL 2026-11-17 fast-restart (ShaderRecord.cpp): a record with the clouds' lookup that did not compile is remembered by its exact
+	// preprocessed text (<cache entry>.hlsl.nocloud), so the next start goes straight to its build without the lookup.
+	static bool				KnownCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
+	static void				NoteCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
 
 	// Drops the cached IDirect3DTexture9* for a named sampler so that SetCT re-resolves it
 	// on the next draw. MUST be called on every consumer of a texture that is released and
@@ -96,7 +100,8 @@ public:
 	bool					PointShadowForward = false;	// UNOFFICIAL: compiled with INTERIOR_SHADOWS (PointShadowForward.h)
 	bool					UsedOnce = false;			// UNOFFICIAL: SetCT ran once this session (ShaderWarmUp.h)
 	bool					IsLandLight = false;			// UNOFFICIAL 2026-10-25: a land pixel shader reading the game's SunDir in c18 (LandLight.h)
-	bool					CloudSunReg = false;			// UNOFFICIAL 2026-11-04 ForwardCloudShadows: declares NVR_CloudSun (c169, pixel) or NVR_CloudSunVS (c240-c241, vertex)
+	bool					CloudSunReg = false;
+	bool					CloudSunFoliage = false;		// UNOFFICIAL 2026-11-16 fast-restart: ... and it is a grass or SpeedTree leaf pixel shader (its strength follows PlantShadows)			// UNOFFICIAL 2026-11-04 ForwardCloudShadows: declares NVR_CloudSun (c169, pixel) or NVR_CloudSunVS (c240-c241, vertex)
 	unsigned char			DisplaceFamily = 0;			// UNOFFICIAL 2026-10-28: registered for tessellation under this family (DxvkCompute::DisplaceBind)
 };
 
@@ -144,9 +149,11 @@ inline bool GameShaderEyes = true;
 // UNOFFICIAL 2026-11-09 [Shaders.PBR.Main] EyeShaderOld (A/B, Render.cpp GameEyes): true = the eyes as before 11-09 (the game's own shaders
 // while LinearScene is off, the mod's ordinary object shader while it is on); false (default) = the eye variant (ObjectTemplate.hlsl NVR_EYE).
 inline bool EyeShaderOld = false;
-// UNOFFICIAL 2026-11-09 [Shaders.PBR.Main] GameShadersInMenus (SetShadersHook, Render.cpp): the character creation menu's head (hair, eyes,
-// teeth, clothes: everything but the skin, which has had this rule since 10-27) drawn with the game's own shaders.
+// UNOFFICIAL 2026-11-09 [Shaders.PBR.Main] GameShadersInMenus (SetShadersHook, Render.cpp): 3D menu views (casino tables, slots,
+// caravan, lockpick, character creation / surgery, etc.) drawn with the game's own shaders (Pip-Boy kept on PBR).
 inline bool GameShadersInMenus = true;
+// UNOFFICIAL 2026-11-21: TESMain::DrawWorldMenu3D call hook active (Render.cpp Menu3DGuard).
+inline bool Menu3DGuardInstalled = false;
 
 // 2026-11-03 (white env-mapped objects with Real Time Reflections, three testers): NVR keeps its own fields INSIDE the game's shader
 // objects (Enabled, ShaderProg[3], ShaderHandleBackup: GameNi.h NiD3DShaderProgram), filled in by the CreateVertexShader /

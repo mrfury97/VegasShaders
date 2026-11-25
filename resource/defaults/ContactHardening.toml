@@ -5,5 +5,5 @@ MaxSoftness = 4.0                    # Cap on the blur, in shadow map texels (1-
 Smooth = true                        # UNOFFICIAL (2026-10-15), PCF shadows (Mode 3): smoother contact-hardening edges. Narrow and wide penumbrae blend instead of switching along a line, and the soft-edge samples are turned a little differently at each spot on the ground, so wide penumbrae show a fine even grain instead of stair-steps and bands. Costs a little in penumbrae only.
 
 [_Shaders.ContactHardening.Status]
-Enabled = true                       # UNOFFICIAL, optional: sun shadows sharp where an object meets the ground and softer the further they fall from it. Needs a game RESTART the first time it is turned on (compiled into the shaders only then, so off costs nothing); after that the switch works live. Needs ForwardShadows.
+Enabled = true                       # UNOFFICIAL, optional: sun shadows sharp where an object meets the ground and softer the further they fall from it. Needs a game RESTART the first time it is turned on (compiled into the shaders only then, so off costs nothing); after that the switch works live. Needs ForwardShadows. Adds to the ground shader's length on native Direct3D 9: about 495 of the driver's 4096 instruction slots.
 

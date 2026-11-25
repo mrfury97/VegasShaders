@@ -57,6 +57,7 @@ namespace NewGrass {
 	inline const unsigned kTufts = 228, kMaxBlades = 32;	// 32 x 228 x 7 = 51072 vertices (16-bit indices)
 	inline bool Active = false;					// this early call replaces draws (settings + resources OK)
 	inline bool Hooked = false;
+	inline bool InDraw = false;					// inside NewGrass::Draw's own DIP call
 	typedef HRESULT(STDMETHODCALLTYPE* DrawIndexedPrimitiveFn)(IDirect3DDevice9*, D3DPRIMITIVETYPE, INT, UINT, UINT, UINT, UINT);
 	inline DrawIndexedPrimitiveFn Next = nullptr;
 
@@ -624,7 +625,9 @@ namespace NewGrass {
 		// re-sent from the game's own copy for this draw (TallGrassShader's instance buffer, the one its constant map uploads).
 		if (TallGrassShader* shader = TallGrassShader::GetShader())
 			if (shader->pInstanceData && tufts) device->SetVertexShaderConstantF(20, (const float*)shader->pInstanceData, tufts);
+		InDraw = true;
 		Next(device, D3DPT_TRIANGLELIST, 0, 0, verts, 0, prims);	// straight to the runtime: the hooked entry would swallow it
+		InDraw = false;
 
 		if (haveVS) device->SetVertexShaderConstantF(248, &savedVS[0][0], 8);	// 2026-10-19: the constants above, put back (see the save)
 		if (wind) device->SetVertexShaderConstantF(7, savedC7, 1);	// 2026-10-20: the game's c7 (grass field wind)
@@ -642,7 +645,7 @@ namespace NewGrass {
 
 	inline HRESULT STDMETHODCALLTYPE DrawHook(IDirect3DDevice9* device, D3DPRIMITIVETYPE type, INT base, UINT minIndex, UINT numVertices, UINT start, UINT count) {
 		if (!Armed) return Next(device, type, base, minIndex, numVertices, start, count);
-		if (Replaced) { if (S.KeepCards) return Next(device, type, base, minIndex, numVertices, start, count); StatSwallowed++; return D3D_OK; }
+		if (Replaced) { if (S.KeepCards) return Next(device, type, base, minIndex, numVertices, start, count); GrassShaders::PendingTstgRestore = false; StatSwallowed++; return D3D_OK; }
 		NiGeometry* geometry = ArmPass ? *(NiGeometry**)ArmPass : nullptr;
 		bool ok = geometry && geometry->geomData;
 		if (ok && !(LastVariant == '0' || LastVariant == '2')) { ok = false; StatNormals++; }
@@ -665,6 +668,7 @@ namespace NewGrass {
 		Draw(device, *model, *ramp, tufts);
 		// Hybrid: the game's own card draw follows (its bindings were put back), the strands already in the depth buffer under its edges.
 		if (S.KeepCards) return Next(device, type, base, minIndex, numVertices, start, count);
+		GrassShaders::PendingTstgRestore = false;
 		return D3D_OK;
 	}
 

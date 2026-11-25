@@ -29,8 +29,9 @@ public:
 	// walk would have found them, then handed to the passes cascade by cascade (PushSunCasters).
 	// kSunDisplaceLand (UNOFFICIAL 2026-10-27, core/DisplaceShadows.h): cell land drawn with its tessellation bumps
 	enum SunPass : UInt8 { kSunOpaque, kSunLodLand, kSunAlpha, kSunSkinned, kSunTree, kSunDisplaceLand };
-	struct SunCaster { NiGeometry* geometry; UInt8 pass; };
+	struct SunCaster { NiGeometry* geometry; UInt8 pass; UInt8 dynamic; };
 	std::vector<SunCaster>	SunCasters[4];
+	bool					WalkSunDynamic = false;
 	std::vector<std::pair<NiAVObject*, unsigned>> SunContainers;
 	ShadowsExteriorEffect::FormsStruct* SunForms[4] = {};
 	NiFrustumPlanes*		SunPlanes[4] = {};
@@ -50,7 +51,7 @@ public:
 	void					WalkSunChildren(NiAVObject* Object, unsigned mask, bool isLand, bool isLOD);
 	void					WalkSunObject(NiAVObject* Object, unsigned mask, bool isLODLand);
 	RenderPass*				SunPassOf(UInt8 pass);
-	void					PushSunCasters(int cascade);
+	void					PushSunCasters(int cascade, int dynamicFilter = -1);
 	void					AccumExteriorCell(TESObjectCELL*, ShadowsExteriorEffect::ShadowMapSettings* Map);
 	// UNOFFICIAL RedrawActorsOnly (PointShadowSchedule.h): which casters RenderShadowCubeMap draws, into which cube map.
 	// All: every caster into the live cube map (as before). StaticOnly: those that never move, into the slot's static cube

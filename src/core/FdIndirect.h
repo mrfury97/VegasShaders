@@ -19,6 +19,7 @@
 #include "CapturedNormals.h"
 #include "SettingForce.h"
 #include "FdIndirectShaders.h"
+#include "RtAmbient.h"
 
 namespace FdIndirect {
 	inline const char* kSection = "Main.Main.Quality";
@@ -28,13 +29,9 @@ namespace FdIndirect {
 	inline bool Key(const char* key) { return TheSettingManager->GetSettingI(kSection, key) != 0; }
 	inline bool MaterialNow() { return CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f; }
 	inline bool ReflectionsOn() { return Base() && MaterialNow() && Key("DeferredReflections"); }
-	inline bool ALAlbedoOn() { return Base() && MaterialNow() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f && Key("DeferredALAlbedo"); }
+	// UNOFFICIAL 2026-11-19: RT GI always splits diffuse albedo by (1 - metal) so metals receive zero diffuse GI (reflections carry metal indirect).
+	inline bool ALAlbedoOn() { return Base() && MaterialNow() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f && (Key("DeferredALAlbedo") || RtAmbient::Current.GI); }
 	inline bool RRGuidesOn() { return Base() && MaterialNow() && Key("DeferredRRGuides"); }
-	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals (live, test only, off; archive/2026-11-25.zip vs/repo-docs-archive/bumped-normals-study.md): the shading normals below for the
-	// reflections (as DeferredReflections, without its material copy) and Wetness Effects' wet reflections (WetWorld's wet surface too, until
-	// it was removed 2026-11-21). Every other reader keeps the smooth normals buffer: AO, bounce light and shadows would
-	// shimmer and self-shadow on a normal map's detail.
-	inline bool BumpedNormalsOn() { return Base() && MaterialNow() && Key("DeferredBumpedNormals"); }
 	// UNOFFICIAL 2026-11-20 UnifiedReflections (live, test only, off; docs/DESIGN.md "Unified reflections design" step 1): with the renderer in mode 2
 	// the Reflections effect reads its material (COLOR2: roughness, metal, model, specular bit; COLOR1: the metal's colour; COLOR3: is the
 	// record the visible surface) straight from the G-buffer instead of MaterialAware's copy, and always the shading normals below. True only
@@ -50,6 +47,13 @@ namespace FdIndirect {
 		if (UnifiedStartup < 0) UnifiedStartup = SettingForce::Mode() == 2 && CapturedNormals::V2CompiledIn() && Key("UnifiedReflections") ? 1 : 0;
 		return UnifiedStartup == 1;
 	}
+	// UNOFFICIAL 2026-11-18/19 DeferredBumpedNormals (live; default off in this fork, on upstream since 1.1.1: the owner decides;
+	// docs/bumped-normals-study.md): feeds the G-buffer's normal-mapped
+	// shading normals (with distance fade and grazing silhouette softening) to Reflections (SSR, Vulkan & RT), WetnessReflections, WetWorld,
+	// and DLSS Ray Reconstruction guide normals. AO, bounce light and shadows keep the smooth normals buffer so they never shimmer or self-shadow.
+	inline bool BumpedNormalsOn() { return Base() && MaterialNow() && Key("DeferredBumpedNormals"); }
+	inline constexpr float kBumpFadeStart = 1500.0f;	// game units (~21 m): full normal-map bump detail up to here
+	inline constexpr float kBumpFadeEnd = 4000.0f;		// game units (~57 m): smoothly relaxed to smooth normal past here (no distant aliasing)
 
 	// One render target, remade when the size or format it must have changes.
 	struct Target {
@@ -65,6 +69,7 @@ namespace FdIndirect {
 				Logger::Log("[ERROR] UNOFFICIAL %s: its %ux%u target could not be made: off for this session", what, w, h);
 				return false;
 			}
+			d->ColorFill(Surface, NULL, D3DCOLOR_ARGB(0, 0, 0, 0));	// clean border outside active RenderRect on first make
 			Width = w; Height = h; Format = f;
 			return true;
 		}
@@ -98,29 +103,22 @@ namespace FdIndirect {
 		if (!NormalsPS && !(NormalsPS = CapturedNormals::FullScreenShader(d, FdIndirectShaders::kShadingNormalsPS, "UNOFFICIAL FdIndirect shading normals", NormalsPSFailed))) return normals;
 		static GpuTimer timer("FD shading normals");
 		GpuProfileScope gpu(timer, d);
-		float saved[7][4] = {};
-		d->GetPixelShaderConstantF(0, &saved[0][0], 7);
-		const float c[7][4] = {
+		IDirect3DBaseTexture9* vmDepth = CapturedNormals::VmCapturedThisFrame(frame) ? CapturedNormals::ViewModelDepthTexture() : nullptr;
+		float saved[8][4] = {};
+		d->GetPixelShaderConstantF(0, &saved[0][0], 8);
+		const float c[8][4] = {
 			{ 1.0f / proj->_11, 1.0f / proj->_22, CapturedNormals::Data.w, camera->y },
 			{ scale ? scale->x : 1.0f, scale ? scale->y : 1.0f, scale ? scale->z : 1.0f, scale ? scale->w : 1.0f },
 			{ view->_11, view->_12, view->_13, view->_14 }, { view->_21, view->_22, view->_23, view->_24 },
 			{ view->_31, view->_32, view->_33, view->_34 }, { view->_41, view->_42, view->_43, view->_44 },
-			{ CapturedNormals::Data.y, CapturedNormals::Data.z, 0.0f, 0.0f } };
-		d->SetPixelShaderConstantF(0, &c[0][0], 7);
-		// stage 3 (FullScreenPass takes three): the depth, point / clamp, put back after
-		IDirect3DBaseTexture9* tex3 = nullptr; d->GetTexture(3, &tex3);
-		static const D3DSAMPLERSTATETYPE kSS[] = { D3DSAMP_MINFILTER, D3DSAMP_MAGFILTER, D3DSAMP_MIPFILTER, D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_SRGBTEXTURE };
-		const DWORD wantS[] = { D3DTEXF_POINT, D3DTEXF_POINT, D3DTEXF_NONE, D3DTADDRESS_CLAMP, D3DTADDRESS_CLAMP, FALSE };
-		DWORD savedS[sizeof(kSS) / sizeof(kSS[0])];
-		for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) { if (FAILED(d->GetSamplerState(3, kSS[i], &savedS[i]))) savedS[i] = wantS[i]; if (savedS[i] != wantS[i]) d->SetSamplerState(3, kSS[i], wantS[i]); }
-		d->SetTexture(3, depth);
-		CapturedNormals::FullScreenPass(d, Normals.Surface, NormalsPS, normals, false, D3DBLEND_ONE, D3DBLEND_ZERO, CapturedNormals::Texture, CapturedNormals::MaterialTexture);
-		d->SetTexture(3, tex3); if (tex3) tex3->Release();
-		for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) if (savedS[i] != wantS[i]) d->SetSamplerState(3, kSS[i], savedS[i]);
-		d->SetPixelShaderConstantF(0, &saved[0][0], 7);
+			{ CapturedNormals::Data.y, CapturedNormals::Data.z, kBumpFadeStart, kBumpFadeEnd },
+			{ vmDepth ? 1.0f / CapturedNormals::ViewModelFovScale() : 0.0f, CapturedNormals::DepthReversed() ? 1.0f : 0.0f, 0.0f, 0.0f } };
+		d->SetPixelShaderConstantF(0, &c[0][0], 8);
+		CapturedNormals::FullScreenPass(d, Normals.Surface, NormalsPS, normals, false, D3DBLEND_ONE, D3DBLEND_ZERO, CapturedNormals::Texture, CapturedNormals::MaterialTexture, depth, vmDepth);
+		d->SetPixelShaderConstantF(0, &saved[0][0], 8);
 		NormalsMade = true;
-		if (!NormalsRuns++) Logger::Log("UNOFFICIAL FdIndirect: the shading normals made (%ux%u): the G-buffer's normal-mapped normal where the normals buffer shows the captured surface (least cosine %.2f)",
-			desc.Width, desc.Height, CapturedNormals::Data.w);
+		if (!NormalsRuns++) Logger::Log("UNOFFICIAL FdIndirect: the shading normals made (%ux%u): the G-buffer's normal-mapped normal where the normals buffer shows the captured surface (least cosine %.2f, distance fade %.0f-%.0f)",
+			desc.Width, desc.Height, CapturedNormals::Data.w, kBumpFadeStart, kBumpFadeEnd);
 		return Normals.Texture;
 	}
 
@@ -130,7 +128,14 @@ namespace FdIndirect {
 	inline bool ReflMaterial(IDirect3DDevice9* d, IDirect3DSurface9* target) {
 		if (!d || !target || ReflPSFailed || !ReflectionsOn()) return false;
 		if (!ReflPS && !(ReflPS = CapturedNormals::FullScreenShader(d, FdIndirectShaders::kReflMaterialPS, "UNOFFICIAL DeferredReflections material", ReflPSFailed))) return false;
-		CapturedNormals::FullScreenPass(d, target, ReflPS, CapturedNormals::MaterialTexture, true, D3DBLEND_INVDESTALPHA, D3DBLEND_DESTALPHA);
+		IDirect3DBaseTexture9* vmDepth = CapturedNormals::ViewModelDepthTexture();
+		const bool clipVm = vmDepth && !CapturedNormals::VmCapturedThisFrame(TheFrameRateManager->FrameNumber);
+		float saved[4] = {};
+		d->GetPixelShaderConstantF(0, saved, 1);
+		const float q[4] = { clipVm ? 1.0f : 0.0f, CapturedNormals::DepthReversed() ? 1.0f : 0.0f, 0.0f, 0.0f };
+		d->SetPixelShaderConstantF(0, q, 1);
+		CapturedNormals::FullScreenPass(d, target, ReflPS, CapturedNormals::MaterialTexture, true, D3DBLEND_INVDESTALPHA, D3DBLEND_DESTALPHA, clipVm ? vmDepth : nullptr);
+		d->SetPixelShaderConstantF(0, saved, 1);
 		if (!ReflLogged) { ReflLogged = true; Logger::Log("UNOFFICIAL DeferredReflections: the reflections' material from G-buffer v2 (shiny objects reflect by their smoothness whatever way they face; plants, skin, grass, hair, eyes rough) and the shading normal in place of the smooth one"); }
 		return true;
 	}

@@ -8,6 +8,7 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../../core/Upscaler.h"		// UNOFFICIAL 2026-10-27 (DLSS helper options)
 #include "../../core/ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (the Vulkan passes' motion input)
+#include "../../core/ViewModelMotion.h"	// UNOFFICIAL 2026-11-21 ViewModelMotion (1st-person AA motion vectors)
 #include "../../core/Diagnostics.h"	// UNOFFICIAL 2026-11-01 the history watch (HistoryProbe)
 #include "../../core/SessionLog.h"
 #include "../../core/TemporalBackbone.h"	// UNOFFICIAL 2026-11-09 BackboneReset (the shared history rule)
@@ -65,6 +66,8 @@ void TAAEffect::UpdateSettings() {
 
 	// UNOFFICIAL 2026-11-09: the history follows TemporalBackbone::HistoryValid (default on; a missing key reads as on).
 	{ SettingManager::Configuration::ConfigNode node; Settings.BackboneReset = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.Main", "BackboneReset") || node.BoolValue; }
+	// UNOFFICIAL 2026-11-21: 1st-person viewmodel sub-pixel jitter + per-pixel motion vectors (default on; missing key reads as on).
+	{ SettingManager::Configuration::ConfigNode node; Settings.WeaponAA = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.Main", "WeaponAA") || node.BoolValue; }
 
 	// UNOFFICIAL 2026-10-26 (NVR DXVK): FSR 2 as the resolve. All three read as 0 (off) when missing.
 	// UNOFFICIAL 2026-10-27 (user: "give dlss its own tab like fsr does ... toggling one disables the other"): [Shaders.TAA.DLSS]
@@ -122,6 +125,10 @@ void TAAEffect::UpdateSettings() {
 	{	// UNOFFICIAL 2026-11-01 SmoothEffects (missing key, an older toml: on)
 		SettingManager::Configuration::ConfigNode node;
 		FSRSettings.SmoothEffects = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.FSR", "SmoothEffects") || node.BoolValue;
+	}
+	{	// UNOFFICIAL 2026-11-21 PreTonemapHDR: native-res DLAA / FSR runs in 16-bit HDR before tonemapping (missing key: on)
+		SettingManager::Configuration::ConfigNode node;
+		FSRSettings.PreTonemapHDR = !TheSettingManager->Config.FillNode(&node, "Shaders.TAA.FSR", "PreTonemapHDR") || node.BoolValue;
 	}
 	// UNOFFICIAL 2026-10-27 DLSS through the 64-bit helper (core/UpscalerDlss.cpp keeps them; DLSS Enabled above is real DLSS,
 	// with FSR 2 whenever it cannot run). Both read as 0 (off) when missing.
@@ -228,11 +235,12 @@ namespace {
 		{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE, 2, NVR_EXT_VIEW_2D,   FALSE, 0 },	// TESR_DepthBuffer
 		{ 1, 3, NVR_EXT_BIND_SAMPLED_IMAGE, 3, NVR_EXT_VIEW_2D,   FALSE, 0 },	// TESR_DepthBufferViewModel
 		{ 1, 4, NVR_EXT_BIND_SAMPLED_IMAGE, 4, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-10-29 TESR_ObjectMotionBuffer (placeholder: depth)
+		{ 1, 5, NVR_EXT_BIND_SAMPLED_IMAGE, 5, NVR_EXT_VIEW_2D,   FALSE, 0 },	// UNOFFICIAL 2026-11-21 TESR_ViewModelMotionBuffer (placeholder: depth)
 		{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D,  FALSE, 0 },	// Constants
 		{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D,  FALSE, 0 },	// POINT, CLAMP
 		{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D,  FALSE, 4 },	// LINEAR, CLAMP
 	};
-	const UINT TAATextureCount = 5;
+	const UINT TAATextureCount = 6;
 
 	IDirect3DBaseTexture9* SlotTexture(const char* name) {
 		std::string slotName = name;
@@ -269,7 +277,9 @@ bool TAAEffect::ExtDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 	uniforms.cameraDelta = Constants.CameraDelta;
 	const bool objectMotion = ObjectMotion::Ready();	// UNOFFICIAL 2026-10-29: cameraDelta.w = TAA.glsl's switch for t_objmotion
 	uniforms.cameraDelta.w = objectMotion ? 1.0f : 0.0f;
+	const bool vmMotion = ViewModelMotion::Ready();	// UNOFFICIAL 2026-11-21: weapon.y = TAA.glsl's switch for t_vmmotion
 	uniforms.weapon = Constants.Weapon;
+	uniforms.weapon.y = vmMotion ? 1.0f : 0.0f;
 	uniforms.sharpen = Constants.Sharpen;
 	ID3D9NvrExtBuffer* buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!buffer) return false;
@@ -303,11 +313,12 @@ bool TAAEffect::ExtDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 	IDirect3DBaseTexture9* history[2] = { Textures.ResolveTexture, Textures.HistoryTexture };
 	IDirect3DSurface9* surfaces[2] = { Textures.ResolveSurface, Textures.HistorySurface };
 	IDirect3DBaseTexture9* motion = objectMotion ? (IDirect3DBaseTexture9*)ObjectMotion::Texture : depth;
-	IDirect3DBaseTexture9* resolveInputs[TAATextureCount] = { source, history[historyIndex], depth, viewModel, motion };
+	IDirect3DBaseTexture9* vm = vmMotion ? (IDirect3DBaseTexture9*)ViewModelMotion::Texture : depth;
+	IDirect3DBaseTexture9* resolveInputs[TAATextureCount] = { source, history[historyIndex], depth, viewModel, motion, vm };
 	IDirect3DSurface9* resolveTarget = surfaces[write];
 	if (!draw(0, resolveInputs, &resolveTarget)) return false;
 
-	IDirect3DBaseTexture9* outputInputs[TAATextureCount] = { source, history[write], depth, viewModel, motion };
+	IDirect3DBaseTexture9* outputInputs[TAATextureCount] = { source, history[write], depth, viewModel, motion, vm };
 	const bool shown = Settings.DebugView > 0 ? draw(1, resolveInputs, &RenderTarget) : draw(2, outputInputs, &RenderTarget);
 	if (shown && ++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as a Vulkan pass.", Name);
 	return shown;
@@ -439,6 +450,32 @@ D3DXVECTOR2 TAAEffect::DepthJitterUV() const {
 	return D3DXVECTOR2(frameJitterX / (float)TheRenderManager->width, -frameJitterY / (float)TheRenderManager->height);
 }
 
+void TAAEffect::GetViewModelAAState(bool& wantCapture, bool& wantJitter, float& jx, float& jy, UINT& vpW, UINT& vpH) {
+	wantCapture = false;
+	wantJitter = false;
+	jx = jy = 0.0f;
+	vpW = vpH = 0;
+	if (!Settings.WeaponAA || !Enabled || !Effect || !ShouldRender()) return;
+	if (!TheSettingManager->SettingsMain.Main.RenderEffects || !Player || !Player->parentCell || TheShaderManager->GameState.OverlayIsOn) return;
+	if (Up.Deferred) {
+		wantCapture = true;
+		wantJitter = Up.Jittered && Settings.Jitter;
+		jx = Up.JitterX;
+		jy = Up.JitterY;
+		vpW = Up.RenderWidth;
+		vpH = Up.RenderHeight;
+		return;
+	}
+	if (Up.Upscaled) return;
+	if (!FSRWanted() && Settings.WeaponTAA <= 0.0f) return;
+	wantCapture = true;
+	wantJitter = frameJittered && Settings.Jitter;
+	jx = frameJitterX;
+	jy = frameJitterY;
+	vpW = TheRenderManager->width;
+	vpH = TheRenderManager->height;
+}
+
 void TAAEffect::EndJitter() {
 	if (mipBiasActive) {
 		SetMipBias(0.0f);
@@ -469,6 +506,8 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 		// Whatever is in the history now will be stale, or somewhere else entirely, by the time
 		// this runs again.
 		historyValid = false;
+		preTonemapRanThisFrame = false;
+		lastPathPreTonemap = false;
 		renderTime = 0.0f;
 		return;
 	}
@@ -494,6 +533,8 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, rrRanThisFrame ? "DLSS Ray Reconstruction denoised and upscaled this RenderScale frame" :
 			"RenderScale: the world was upscaled before the effects");	// UNOFFICIAL 2026-11-01
 		rrRanThisFrame = false;
+		preTonemapRanThisFrame = false;
+		lastPathPreTonemap = false;
 		Up.Upscaled = false;
 		historyValid = false;
 		lastPathFSR = false;
@@ -508,8 +549,20 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 	if (rrRanThisFrame) {
 		EffectStatus::Note(StatusSlot, Name, EffectStatus::Skipped, "DLSS Ray Reconstruction resolved this frame");	// UNOFFICIAL 2026-11-01
 		rrRanThisFrame = false;
+		preTonemapRanThisFrame = false;
+		lastPathPreTonemap = false;
 		historyValid = false;
 		lastPathFSR = false;
+		jitterIndex = (jitterIndex + 1) % JitterSequenceLength;
+		frameJittered = false;
+		renderTime = 0.0f;
+		return;
+	}
+	// UNOFFICIAL 2026-11-21: native DLAA / FSR 3.1 / FSR 2 already resolved this frame in 16-bit pre-tonemap HDR (TAAFSR.cpp PreTonemapNativeAA).
+	if (preTonemapRanThisFrame) {
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn, "FSR / DLSS at native resolution (pre-tonemap HDR)");
+		EffectStatus::History(StatusSlot, Name, Diag.reset ? "reset: no history (cut, path switch, first frame)" : "kept");
+		preTonemapRanThisFrame = false;
 		jitterIndex = (jitterIndex + 1) % JitterSequenceLength;
 		frameJittered = false;
 		renderTime = 0.0f;
@@ -527,7 +580,7 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 	// keeps its own history, so switching between them starts from scratch.
 	const bool useFSR = !afterUpscale && FSRWanted();	// (SmoothEffects: TAA's own resolve, the upscaler already ran)
 	const bool hadHistory = historyValid;	// UNOFFICIAL 2026-11-01 (Diag)
-	if (useFSR != lastPathFSR) { if (historyValid) SessionLog::HistoryReset("TAA", "path switch (TAA / FSR)"); historyValid = false; }
+	if (useFSR != lastPathFSR || lastPathPreTonemap) { if (historyValid) SessionLog::HistoryReset("TAA", "path switch (TAA / FSR)"); historyValid = false; }
 
 	// A new cell means a loading screen or a teleport: last frame's history shows another place.
 	if (TheShaderManager->GameState.isCameraCut) { if (historyValid) SessionLog::HistoryReset("TAA", "camera cut"); historyValid = false; }
@@ -547,6 +600,7 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 	D3DXVECTOR4 delta = TheRenderManager->CameraPosition - prevCameraPosition;
 	Constants.CameraDelta = D3DXVECTOR4(delta.x, delta.y, delta.z, 0.0f);
 	Constants.Data.z = historyValid ? 1.0f : 0.0f;
+	Constants.Weapon.y = ViewModelMotion::Ready() ? 1.0f : 0.0f;
 
 	if (SourceBuffer) Device->StretchRect(RenderTarget, NULL, SourceBuffer, NULL, D3DTEXF_NONE);
 
@@ -626,6 +680,7 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 		historyValid = false;
 	}
 	lastPathFSR = fsrShown;
+	lastPathPreTonemap = false;
 	frameJittered = false;
 
 	renderTime = timer.LogTime("EffectRecord::Render TAA");

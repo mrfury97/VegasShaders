@@ -48,6 +48,7 @@ public:
 		float LightScale, AmbientScale;
 		float Roughness, Metallicness, Saturation;
 		float SkylightingScale, SkylightingDirectionality;
+		float SkylightingSaturation = 1.0f;	// UNOFFICIAL 2026-11-21: SkyShaders::UpdateConstants (TESR_SkyIrradianceTerrain)
 	};
 	struct ParallaxSettingsStruct {
 		bool Enabled, HighQuality, Shadows;
@@ -107,7 +108,9 @@ public:
 	BlendingStruct	BlendingConstants = {};
 
 	bool			usePBR;
+	float			SkylightSaturation = 1.0f;	// UNOFFICIAL 2026-11-21: current terrain SkylightingSaturation
 
+	float	CurrentSkylightSaturation() const;
 	void	UpdateConstants(), RegisterConstants(), UpdateSettings();
 
 	// Terrain blending. Begin/End bracket the game's world scene (RenderWorldSceneGraphHook): the first land shader bound

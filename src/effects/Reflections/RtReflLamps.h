@@ -25,22 +25,26 @@ namespace RtReflLamps {
 	struct Frame {
 		bool hdr = false;			// BSShaderManager::bHDR (with it the game keeps dimmers above 1)
 		float lightScale = 1.0f;	// [Shaders.PBR.*] LightScale this frame, as set (PBRShaders Constants.Data.z: the stored curve)
+		float gamma = 2.2f;			// PBR->Constants.Linear.x (>= 1.0; 2.2 default for host scenes)
+		float linearLightScale = -1.0f;	// PBR->Constants.LinearScales.x (LIN_SCALE_LIGHT) when >= 0; < 0 derives pow(lightScale, gamma)
 		bool shaped = false;		// [Shaders.PBR.LampFalloff]'s physical shape this frame (Constants.LampFalloff.x)
 		float shapeY = 0.0f;		// its 1 / Falloff^2 (.y)
 		float shapeStrength = 1.0f;	// its strength (.z: the energy match x Brightness)
 	};
 
-	inline float Decode(float v) { return std::pow((std::max)(v, 0.0f), 2.2f); }
+	inline float Decode(float v, float gamma = 2.2f) { return std::pow((std::max)(v, 0.0f), gamma); }
 
 	// out[0..3]: camera-relative position, reach; out[4..7]: the linear colour (x the shape's strength), the falloff (0 the game's, > 0 the
 	// shape's 1 / Falloff^2)
 	inline void Pack(const Raw& r, const Frame& f, const float eye[3], float out[8]) {
 		out[0] = r.pos[0] - eye[0]; out[1] = r.pos[1] - eye[1]; out[2] = r.pos[2] - eye[2]; out[3] = r.reach;
 		const float dimmer = f.hdr ? r.dimmer : (std::min)(r.dimmer, 1.0f);
-		const float scale = dimmer * r.lodDimmer * (std::max)(f.lightScale, 0.0f);
+		const float colW = dimmer * r.lodDimmer;
+		const float G = (std::max)(f.gamma, 1.0f);
+		const float linScale = f.linearLightScale >= 0.0f ? f.linearLightScale : std::pow((std::max)(f.lightScale, 0.0f), G);
 		const bool shaped = f.shaped && f.shapeY > 0.0f;
 		const float strength = shaped ? f.shapeStrength : 1.0f;
-		for (int k = 0; k < 3; k++) out[4 + k] = Decode(r.diffuse[k] * scale) * strength;
+		for (int k = 0; k < 3; k++) out[4 + k] = std::pow((std::max)(r.diffuse[k] * colW, 0.0f), G) * linScale * strength;
 		out[7] = shaped ? f.shapeY : 0.0f;
 	}
 

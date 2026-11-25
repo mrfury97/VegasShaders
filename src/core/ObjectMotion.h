@@ -34,7 +34,6 @@ namespace ObjectMotion {
 	inline IDirect3DVertexShader9* VS = nullptr;  inline IDirect3DPixelShader9* PS = nullptr;
 	inline UInt32 Frames = 0, DrawnGeometries = 0, DrawnSkinned = 0, Noted = 0, CameraFollowers = 0;
 	inline UInt32 MadeFrame = 0xFFFFFFFF;	// the frame TESR_ObjectMotionBuffer was made in
-	inline IDirect3DSurface9* CheckTarget = nullptr;  inline IDirect3DSurface9* CheckCopy = nullptr;	// the 600-frame read-back (Render)
 	// For the Vulkan readers (TAA.glsl, FSRPrep / FSRUpPrep): the buffer holds THIS frame's (a reader that runs before the effects, as the
 	// upscale before them does, finds last frame's and keeps camera motion only).
 	inline bool Ready() { return Data.x > 0.0f && Texture && MadeFrame == TheFrameRateManager->FrameNumber; }
@@ -431,45 +430,16 @@ namespace ObjectMotion {
 		DrawnGeometries += drawnGeos; DrawnSkinned += drawnSkinned;
 		Data.x = Failed ? 0.0f : 1.0f;
 		Data.y = (float)drawnGeos;
-		if (++Frames >= 600) {
-			// What the buffer holds this frame, read back small (a 96 x 54 point copy; one wait for the GPU every 600 frames): how many
-			// pixels carry a move, and the largest one (game units). Proof the moved things land on screen, not only that they were drawn.
-			int moving = -1; float largest = 0.0f;
-			if (drawnGeos) {
-				if (!CheckTarget && (FAILED(d->CreateRenderTarget(96, 54, D3DFMT_A16B16G16R16F, D3DMULTISAMPLE_NONE, 0, FALSE, &CheckTarget, NULL)) ||
-					FAILED(d->CreateOffscreenPlainSurface(96, 54, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &CheckCopy, NULL)))) {
-					if (CheckTarget) { CheckTarget->Release(); CheckTarget = nullptr; }
-				}
-				D3DLOCKED_RECT r = {};
-				if (CheckTarget && SUCCEEDED(d->StretchRect(Surface, NULL, CheckTarget, NULL, D3DTEXF_POINT)) && SUCCEEDED(d->GetRenderTargetData(CheckTarget, CheckCopy)) &&
-					SUCCEEDED(CheckCopy->LockRect(&r, NULL, D3DLOCK_READONLY))) {
-					moving = 0;
-					for (int y = 0; y < 54; y++) {
-						const D3DXFLOAT16* row = (const D3DXFLOAT16*)((const char*)r.pBits + y * r.Pitch);
-						for (int x = 0; x < 96; x++) {
-							float v[4]; D3DXFloat16To32Array(v, row + x * 4, 4);
-							if (v[3] > 0.5f) { moving++; largest = (std::max)(largest, sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2])); }
-						}
-					}
-					CheckCopy->UnlockRect();
-				}
-			}
-			Logger::Log("ObjectMotion: per frame %.1f geometries noted, %.1f moved ones drawn (%.1f skinned), %.1f left out as following the camera; this frame %d of 5184 sampled pixels carry a move (largest %.2f units); %u notes found another geometry at a known address (identity check %s)",
-				Noted / (double)Frames, DrawnGeometries / (double)Frames, DrawnSkinned / (double)Frames, CameraFollowers / (double)Frames, moving, largest,
+		// UNOFFICIAL 2026-11-19: removed the 600-frame synchronous GPU read-back (StretchRect + GetRenderTargetData + LockRect)
+		// that caused a periodic pipeline-flush hitch during normal play; CPU counters log only when F10 profiling is active.
+		if (!GpuTimer::Enabled) {
+			Frames = DrawnGeometries = DrawnSkinned = Noted = CameraFollowers = Reused = 0;
+		}
+		else if (++Frames >= 600) {
+			Logger::Log("ObjectMotion: per frame %.1f geometries noted, %.1f moved ones drawn (%.1f skinned), %.1f left out as following the camera; %u notes found another geometry at a known address (identity check %s)",
+				Noted / (double)Frames, DrawnGeometries / (double)Frames, DrawnSkinned / (double)Frames, CameraFollowers / (double)Frames,
 				Reused, IdentityCheck ? "on" : "off");
 			Frames = DrawnGeometries = DrawnSkinned = Noted = CameraFollowers = Reused = 0;
-			// UNOFFICIAL 2026-10-30 (blur ring hunt): what moved this frame, against the camera's own move.
-			for (size_t k = 0; k < Moving.size() && k < 8; k++) {
-				auto found = Map.find(Moving[k]);
-				if (found == Map.end()) continue;
-				const Entry& e = found->second;
-				const D3DXVECTOR3 cam = e.camCur - e.camPrev;
-				const float mx = e.cur.pos.x - e.prev.pos.x, my = e.cur.pos.y - e.prev.pos.y, mz = e.cur.pos.z - e.prev.pos.z;
-				const NiAVObject* parent = (const NiAVObject*)Moving[k]->m_parent;
-				Logger::Log("ObjectMotion: moved '%s' (parent '%s') %s: move %.2f %.2f %.2f, camera %.2f %.2f %.2f, radius %.0f",
-					Moving[k]->m_pcName ? Moving[k]->m_pcName : "", parent && parent->m_pcName ? parent->m_pcName : "", e.skinned ? "skinned" : "rigid",
-					mx, my, mz, cam.x, cam.y, cam.z, Moving[k]->m_kWorldBound ? Moving[k]->m_kWorldBound->Radius : -1.0f);
-			}
 		}
 	}
 }

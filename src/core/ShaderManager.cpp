@@ -3,6 +3,7 @@
 #include "RegisterClash.h"	// UNOFFICIAL 2026-10-31
 #include "CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals (TESR_CapturedNormalsData)
 #include "ObjectMotion.h"	// UNOFFICIAL 2026-10-29 ObjectMotion (TESR_ObjectMotionData)
+#include "ViewModelMotion.h"	// UNOFFICIAL 2026-11-21 ViewModelMotion (TESR_ViewModelMotionData)
 #include "TemporalBackbone.h"	// UNOFFICIAL 2026-11-01 the temporal backbone (TESR_FrameNoise, [Main.Main.Quality] SharedNoise)
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (TESR_AlphaHash)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (Diagnostics::VLCapturing)
@@ -10,7 +11,6 @@
 #include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "GpuProfiler.h"
-#include "HiZ.h"	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 #include "PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the flash detector's stage probes (StageMark)
 #include "PointShadowSlots.h"
@@ -42,6 +42,8 @@
 #include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback (the family's members loaded again after a drop)
 #include "GameShaderPairs.h"	// UNOFFICIAL 2026-11-13 [Main.Main.Misc] GameShaderPairCheck / GameShaderPairRepair (its settings, read below)
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16 BloodFlow and DustMotes are left out of release builds
+#include "ShaderPrecompile.h"	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors: the workers' jobs still running)
+#include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
 
@@ -100,7 +102,6 @@ void ShaderManager::Initialize() {
 	EnrollEffect<AmbientLightEffect>(sm, sm->Effects.AmbientLight);
 	EnrollEffect<AmbientOcclusionEffect>(sm, sm->Effects.AmbientOcclusion);
 	EnrollEffect<SkinScatteringEffect>(sm, sm->Effects.SkinScattering);	// UNOFFICIAL Conor's skin shader
-	EnrollEffect<BloodLensEffect>(sm, sm->Effects.BloodLens);
 	EnrollEffect<BloomEffect>(sm, sm->Effects.Bloom);
 	EnrollEffect<BloomLegacyEffect>(sm, sm->Effects.BloomLegacy);
 	EnrollEffect<ColoringEffect>(sm, sm->Effects.Coloring);
@@ -151,9 +152,6 @@ void ShaderManager::Initialize() {
 	EnrollEffect<WetnessReflectionsEffect>(sm, sm->Effects.WetnessReflections);	// UNOFFICIAL 2026-11-04 Wetness Effects
 	EnrollEffect<HudRaindropsEffect>(sm, sm->Effects.HudRaindrops);
 	EnrollEffect<VolumetricCloudsEffect>(sm, sm->Effects.VolumetricClouds);
-#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: not in release builds
-	EnrollEffect<BloodFlowEffect>(sm, sm->Effects.BloodFlow);
-#endif
 	sm->Effects.BarrelHaze->Enabled = sm->Effects.BarrelHaze->Effect != nullptr;
 	EnrollEffect<VolumetricSmokeEffect>(sm, sm->Effects.VolumetricSmoke);
 	sm->Effects.VolumetricSmoke->Enabled = sm->Effects.VolumetricSmoke->Effect != nullptr;
@@ -163,7 +161,6 @@ void ShaderManager::Initialize() {
 	EnrollEffect<TAAEffect>(sm, sm->Effects.TAA);
 #if NVR_SHELVED_OUT
 	sm->Effects.DustMotes = nullptr;	// never created: the chain steps and every reader skip a null slot
-	sm->Effects.BloodFlow = nullptr;
 	Logger::Log("%s", ShelvedEffects::LogLine());
 	TheSettingManager->GetSettingI(ShelvedEffects::kSettingSections[0], "Enabled");	// (reads as 0; notes whether the saved file had it on)
 	if (ShelvedEffects::SavedOn) Logger::Log("Capsule shadows ([Shaders.ShadowsInteriors.Capsules] Enabled) are not part of this release (work in progress): left off although your settings file has them on; the setting is kept as it is.");
@@ -222,6 +219,7 @@ void ShaderManager::Initialize() {
 		{ "TESR_AlbedoBufferData", &CapturedNormals::AlbedoData },	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		{ "TESR_BackDepthData", &BackDepth::Data },	// UNOFFICIAL 2026-10-31 BackDepth
 		{ "TESR_ObjectMotionData", &ObjectMotion::Data },	// UNOFFICIAL 2026-10-29 ObjectMotion
+		{ "TESR_ViewModelMotionData", &ViewModelMotion::Data },	// UNOFFICIAL 2026-11-21 ViewModelMotion
 		{ "TESR_FrameNoise", &TemporalBackbone::Constant },	// UNOFFICIAL 2026-11-01 the temporal backbone
 		{ "TESR_AlphaHash", &AlphaHash::Constant },	// UNOFFICIAL 2026-11-03 SmoothCutouts
 		{ "TESR_FogData", &sm->ShaderConst.fogData },
@@ -547,6 +545,7 @@ void ShaderManager::EndExtraCamera() {
 
 void ShaderManager::InitializeConstants() {
 	ShaderConst.pWeather = nullptr;	// no weather seen yet
+	if (Effects.WaterLens) Effects.WaterLens->Reset();	// UNOFFICIAL 2026-11-20: clear WaterLens state on save load / init
 
 	// x, y: one pixel in uv; z: the aspect ratio; w: kept for the field of view (0 until set).
 	const float w = (float)TheRenderManager->width, h = (float)TheRenderManager->height;
@@ -621,30 +620,32 @@ void ShaderManager::UpdateConstants() {
 	// Menus and overlays.
 	auto* const ui = InterfaceManager;
 	GameState.PipBoyIsOn = ui->IsPipBoyOpen();
-	GameState.VATSIsOn = ui->IsActive(Menu::kMenuType_VATS);
-	GameState.FaceMenuIsOn = ui->IsActive(Menu::kMenuType_RaceSex) || ui->IsActive(Menu::kMenuType_CharGen);	// UNOFFICIAL 2026-11-09 (GameShadersInMenus)
+	GameState.VATSIsOn = ui->IsOpen(Menu::kMenuType_VATS);
+	// UNOFFICIAL 2026-11-09 (GameShadersInMenus)
+	GameState.FaceMenuIsOn = ui->IsOpen(Menu::kMenuType_RaceSex) || ui->IsOpen(Menu::kMenuType_CharGen) || ui->IsOpen(Menu::kMenuType_Surgery);
 
-	// A game menu counts as open when it is active and, if the live menu API is there, paused.
+	// A game menu counts as open when it is on the stack and, if the live menu API is there, paused.
 	const bool hasLiveMenus = TheGameMenuManager->IsLiveMenu != nullptr;
 	auto menuPaused = [&](auto menuType) {
 		return !hasLiveMenus || TheGameMenuManager->IsLiveMenu(menuType, false, false) == GameMenuManager::MENU_PAUSED;
 	};
-	const bool terminalOpen = (ui->IsActive(Menu::kMenuType_Computers) && menuPaused(Menu::kMenuType_Computers)) ||
-		(ui->IsActive(Menu::kMenuType_Hacking) && menuPaused(Menu::kMenuType_Hacking));
-	const bool lockpickOpen = LockPickMenu::GetSingleton() && menuPaused(Menu::kMenuType_LockPick);
+	const bool terminalOpen = (ui->IsOpen(Menu::kMenuType_Computers) && menuPaused(Menu::kMenuType_Computers)) ||
+		(ui->IsOpen(Menu::kMenuType_Hacking) && menuPaused(Menu::kMenuType_Hacking));
+	const bool lockpickOpen = LockPickMenu::GetSingleton() && ui->IsOpen(Menu::kMenuType_LockPick) && menuPaused(Menu::kMenuType_LockPick);
 	// Full-screen game menus over a still world (the effects are skipped under them); asked in this order, first hit wins.
 	static const UInt32 overlayMenus[] = { Menu::kMenuType_Surgery, Menu::kMenuType_SlotMachine, Menu::kMenuType_Blackjack,
 		Menu::kMenuType_Roulette, Menu::kMenuType_Caravan };
 	bool overlay = terminalOpen || lockpickOpen;
-	for (UInt32 menu : overlayMenus) overlay = overlay || ui->IsActive(menu);
+	for (UInt32 menu : overlayMenus) overlay = overlay || ui->IsOpen(menu);
 	GameState.OverlayIsOn = overlay;
-	GameState.isDialog = ui->IsActive(Menu::kMenuType_Dialog);
-	// UNOFFICIAL 2026-11-01 LockpickEffects (user: the lock is black in the lockpick view; "it's pbr"): while the lockpick screen is open the
-	// objects are drawn with the game's own shaders, as the menu's PBR switch does (the lock is lit by the menu's own light, which NVR's
-	// object shaders do not light it with). Back as they were when it closes. LockpickEffects = true: as before.
+	GameState.isDialog = ui->IsOpen(Menu::kMenuType_Dialog);
+	// UNOFFICIAL 2026-11-01 LockpickEffects (fallback only when per-draw 3D menu isolation in Render.cpp is unavailable/off):
+	// while GameShadersInMenus + Menu3DGuardInstalled handle Lockpick per-draw, the global Shaders.PBR list stays enabled so
+	// live-menu backgrounds keep PBR; if either is unavailable/off, fall back to disabling Shaders.PBR while Lockpick is open.
 	{
 		static bool pbrHeld = false;
-		const bool lockOpen = LockPickMenu::GetSingleton() && InterfaceManager->IsActive(Menu::kMenuType_LockPick) &&
+		const bool needPbrFallback = !GameShadersInMenus || !Menu3DGuardInstalled;
+		const bool lockOpen = needPbrFallback && LockPickMenu::GetSingleton() && ui->IsOpen(Menu::kMenuType_LockPick) &&
 			!TheSettingManager->GetSettingI("Main.Main.Misc", "LockpickEffects");
 		if (lockOpen != pbrHeld && Shaders.PBR && Shaders.PBR->Enabled) {
 			for (auto& ps : Shaders.PBR->PixelShaderList) ps->Enabled = !lockOpen;
@@ -914,7 +915,6 @@ ShaderCollection* ShaderManager::GetShaderCollection(const char* shaderName) {
 	// UNOFFICIAL lit particles and blood decals (NOLIGHT006/016/017.vso, NOLIGHTTEXVC.pso, GDECAL(S)); 2026-11-05 soft particles: the rest
 	// of the NOLIGHT family too (Includes/NoLighting.hlsl), except the skinned NOLIGHT008-015.vso, which stay the game's.
 	if (ShaderNameBegins(shaderName, "NOLIGHT", 7) || ShaderNameBegins(shaderName, "GDECAL", 6)) return Shaders.Particles;
-	if (strstr(BloodShaders, shaderName)) return Shaders.Blood;	// (a substring of the list)
 
 	// Last, the families that list their shaders in a template table.
 	if (Shaders.PBR->GetTemplate(shaderName).Name) return Shaders.PBR;
@@ -1095,51 +1095,11 @@ static void TouchCacheCopy(const char* sub, const char* name) {
 	CloseHandle(f);
 }
 
-/*
-* The pixel-shader version of the above, plus the UNOFFICIAL lamp-shadow records (interior forward shadows, RT exterior lamps).
-*/
-bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
-
-	NiD3DPixelShaderEx* pixel = (NiD3DPixelShaderEx*)Shader;
-	if (!ShaderSetsReady) {	// (UNOFFICIAL 2026-10-27, see LoadEarlyShaders)
-		LeaveToGame(pixel);
-		EarlyPixelShaders.push_back(Shader);
-		Logger::Log("UNOFFICIAL shader %s made before Vegas Shaders' shader sets: loaded once they exist", pixel->Name ? pixel->Name : "?");
-		return false;
-	}
-	ShaderCollection* family = GetShaderCollection(pixel->Name);
-	if (!family) { LeaveToGame(pixel); return false; }
-
-	const bool familyOn = family->Enabled;
-	ShaderTemplate tmpl = family->GetTemplate(pixel->Name);
-
-	// generic, exterior, interior: each where its file exists
-	static const char* const variantFolders[3] = { NULL, "Exteriors\\", "Interiors\\" };
-	// 2026-11-12 Puddles (combined puddles + sun-GI test): with puddles AND the albedo buffer compiled in, SLS2027's main record ran out of
-	// temp registers in game (it fits offline) and did not load at all: its objects fell back to the game's shader. A main record that
-	// does not load with puddles compiled in is made again with the lean puddle path (PUDDLES_LEAN, Cache\PuddlesLean); its copy, newer than
-	// the full one and than the sources, says the full one failed last time (the failed compile is not cached): straight to it then.
-	static D3DXMACRO puddlesLean[3] = { { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };	// (map mode: the in-shader lean path for this record)
-	const bool puddlesIn = TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
-	bool leanFirst = false;
-	if (puddlesIn) {
-		const std::string cache = std::string(ShadersPath) + "Cache\\";
-		WIN32_FILE_ATTRIBUTE_DATA lean = {}, full = {};
-		const bool hasLean = GetFileAttributesExA((cache + "PuddlesLean\\" + pixel->Name).c_str(), GetFileExInfoStandard, &lean) != 0;
-		const bool hasFull = GetFileAttributesExA((cache + pixel->Name).c_str(), GetFileExInfoStandard, &full) != 0;
-		leanFirst = hasLean && (!hasFull || CompareFileTime(&lean.ftLastWriteTime, &full.ftLastWriteTime) > 0) &&
-			FallbackNewerThanSources(lean.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
-	}
-	for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
-		pixel->ShaderProg[variant] = variant == ShaderRecordType::Default && leanFirst ? nullptr :
-			(ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, variantFolders[variant], tmpl);
-	if (!pixel->ShaderProg[ShaderRecordType::Default] && puddlesIn) {
-		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "PuddlesLean\\", puddlesLean);
-		if (pixel->ShaderProg[ShaderRecordType::Default]) {
-			if (!leanFirst) TouchCacheCopy("PuddlesLean\\", pixel->Name);
-			Logger::Log("UNOFFICIAL Puddles: %s's main record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", pixel->Name);
-		}
-	}
+// UNOFFICIAL 2026-11-16 fast-restart (docs/next/FAST-RESTART.md): a lit pixel shader's lamp-shadow records, moved out of LoadShader
+// (pixel) unchanged so LateInteriors can make them after the start: the Interior record (with its shorter levels, FitLevel / Refused /
+// ReadDropped, and the deferred records made from its overrides: DeferredLamps::LoadRecord, DeferredRenderer::LoadInterior,
+// DeferredTransparents::Load), then the RT ExteriorForward record made from the shader the game uses outdoors.
+static void LoadLampShadowRecords(NiD3DPixelShaderEx* pixel, const ShaderTemplate& tmpl) {
 	// UNOFFICIAL interior forward point-light shadows (PointShadowForward.h): the lit pixel shaders get an Interior record
 	// from their own source with INTERIOR_SHADOWS, the sun's code compiled out (it never runs indoors). Only with the
 	// setting on at startup; exteriors keep their records.
@@ -1295,6 +1255,131 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		}
 		else Logger::Log("[ERROR] UNOFFICIAL RT lamp shadows: %s with outdoor lamp shadows did not load (ExteriorForward): it stays without them outdoors.", pixel->Name);
 	}
+}
+
+// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h, docs/next/FAST-RESTART.md): the Interior lamp-shadow records off the start.
+namespace LateInteriors {
+	struct Entry { NiD3DPixelShaderEx* shader; ShaderTemplate tmpl; };
+	static std::vector<Entry> Pending;	// in load order
+	static bool Attached = false;		// the first attach ran: every later load makes its records in place again
+	static int WantedState = -1;
+	static unsigned Made = 0;
+
+	bool Wanted() {
+		if (WantedState < 0) {
+			WantedState = TheSettingManager->GetSettingI("Main.Main.Performance", "ParallelShaderCompile") != 0 &&
+				TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0 && DeferredRenderer::Mode() != 1 ? 1 : 0;
+			// (DeferredRenderer 1: DeferredRenderer::Load, run at load, would make its LAMPS_DEFERRED 3 record from the default overrides for a
+			// shader whose Interior record is not there yet, and LoadInterior would then keep that one: that mode keeps the old order)
+		}
+		return WantedState == 1;
+	}
+	bool Defer(void* shader, const ShaderTemplate& tmpl) {
+		NiD3DPixelShaderEx* pixel = (NiD3DPixelShaderEx*)shader;
+		if (Attached || !Wanted() || pixel->ShaderProg[ShaderRecordType::Interior] || !pixel->ShaderProg[ShaderRecordType::Default] ||
+			!PointShadowForward::Eligible(pixel->Name, tmpl)) return false;
+		for (Entry& e : Pending) if (e.shader == pixel) { e.tmpl = tmpl; return true; }	// (loaded again: ShaderFallback, ReloadShaders)
+		Pending.push_back({ pixel, tmpl });
+		return true;
+	}
+	void Forget(void* shader) {
+		Pending.erase(std::remove_if(Pending.begin(), Pending.end(), [shader](const Entry& e) { return e.shader == shader; }), Pending.end());
+	}
+	bool Any() { return !Pending.empty(); }
+	// The deferred renderer's records were made at load with the Default record as their forward partner (DeferredRenderer::Load and
+	// DeferredSkin::Load take the Interior record when there is one): the blended-draw swap (Pairs) and the span-end swap (ForwardOf) get
+	// the Interior record now, as they would have at load.
+	static void FixForwardPartners(NiD3DPixelShaderEx* pixel) {
+		ShaderRecordPixel* interior = (ShaderRecordPixel*)pixel->ShaderProg[ShaderRecordType::Interior];
+		if (!interior || !interior->ShaderHandle) return;
+		auto fix = [interior](ShaderRecordPixel* deferred) {
+			if (!deferred || !deferred->ShaderHandle) return;
+			auto pair = DeferredRenderer::Pairs.find(deferred->ShaderHandle);
+			if (pair == DeferredRenderer::Pairs.end()) return;
+			pair->second.forward = interior;
+			DeferredLamps::ForwardOf[deferred->ShaderHandle] = interior->ShaderHandle;
+		};
+		auto r = DeferredRenderer::Records.find(pixel);
+		if (r != DeferredRenderer::Records.end()) fix(r->second);
+		auto k = DeferredSkin::Records.find(pixel);
+		if (k != DeferredSkin::Records.end()) fix(k->second);
+	}
+	// Every pending shader's records, in load order, as LoadShader would have made them (the workers' results taken; waits for the ones still
+	// compiling). where: for the log line.
+	static void Attach(const char* where) {
+		if (Pending.empty()) { Attached = true; return; }
+		const auto t0 = std::chrono::steady_clock::now();
+		const unsigned running = ShaderPrecompile::Running();
+		std::vector<Entry> list;
+		list.swap(Pending);
+		Attached = true;
+		const int countBefore = PointShadowForward::CompiledCount;
+		for (Entry& e : list) {
+			LoadLampShadowRecords(e.shader, e.tmpl);
+			FixForwardPartners(e.shader);
+		}
+		Made += (unsigned)list.size();
+		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+		Logger::Log("UNOFFICIAL lamp-shadow records: the Interior records of %u lit shaders made at %s (%d loaded; %u compiles were still running then, "
+			"%.1f s spent here)%s", (unsigned)list.size(), where, PointShadowForward::CompiledCount - countBefore, running, ms / 1000.0,
+			running ? ": the start no longer waits for them, this was the one wait" : "");
+	}
+	void Tick(bool gameLoaded) {
+		if (Pending.empty()) return;
+		if (gameLoaded) Attach("the first world frame");
+		else if (ShaderPrecompile::Running() == 0) Attach("the main menu (their compiles had finished)");
+	}
+}
+
+/*
+* The pixel-shader version of the above, plus the UNOFFICIAL lamp-shadow records (interior forward shadows, RT exterior lamps).
+*/
+bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
+
+	NiD3DPixelShaderEx* pixel = (NiD3DPixelShaderEx*)Shader;
+	if (!ShaderSetsReady) {	// (UNOFFICIAL 2026-10-27, see LoadEarlyShaders)
+		LeaveToGame(pixel);
+		EarlyPixelShaders.push_back(Shader);
+		Logger::Log("UNOFFICIAL shader %s made before Vegas Shaders' shader sets: loaded once they exist", pixel->Name ? pixel->Name : "?");
+		return false;
+	}
+	ShaderCollection* family = GetShaderCollection(pixel->Name);
+	if (!family) { LeaveToGame(pixel); return false; }
+
+	const bool familyOn = family->Enabled;
+	ShaderTemplate tmpl = family->GetTemplate(pixel->Name);
+
+	// generic, exterior, interior: each where its file exists
+	static const char* const variantFolders[3] = { NULL, "Exteriors\\", "Interiors\\" };
+	// 2026-11-12 Puddles (combined puddles + sun-GI test): with puddles AND the albedo buffer compiled in, SLS2027's main record ran out of
+	// temp registers in game (it fits offline) and did not load at all: its objects fell back to the game's shader. A main record that
+	// does not load with puddles compiled in is made again with the lean puddle path (PUDDLES_LEAN, Cache\PuddlesLean); its copy, newer than
+	// the full one and than the sources, says the full one failed last time (the failed compile is not cached): straight to it then.
+	static D3DXMACRO puddlesLean[3] = { { "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL } };	// (map mode: the in-shader lean path for this record)
+	const bool puddlesIn = TheSettingManager->GetSettingI("Shaders.Puddles.Status", "Enabled") && TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled");
+	bool leanFirst = false;
+	if (puddlesIn) {
+		const std::string cache = std::string(ShadersPath) + "Cache\\";
+		WIN32_FILE_ATTRIBUTE_DATA lean = {}, full = {};
+		const bool hasLean = GetFileAttributesExA((cache + "PuddlesLean\\" + pixel->Name).c_str(), GetFileExInfoStandard, &lean) != 0;
+		const bool hasFull = GetFileAttributesExA((cache + pixel->Name).c_str(), GetFileExInfoStandard, &full) != 0;
+		leanFirst = hasLean && (!hasFull || CompareFileTime(&lean.ftLastWriteTime, &full.ftLastWriteTime) > 0) &&
+			FallbackNewerThanSources(lean.ftLastWriteTime, tmpl.Name, "Includes\\Wetness.hlsl");
+	}
+	for (int variant = ShaderRecordType::Default; variant <= ShaderRecordType::Interior; variant++)
+		pixel->ShaderProg[variant] = variant == ShaderRecordType::Default && leanFirst ? nullptr :
+			(ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, variantFolders[variant], tmpl);
+	if (!pixel->ShaderProg[ShaderRecordType::Default] && puddlesIn) {
+		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "PuddlesLean\\", puddlesLean);
+		if (pixel->ShaderProg[ShaderRecordType::Default]) {
+			if (!leanFirst) TouchCacheCopy("PuddlesLean\\", pixel->Name);
+			Logger::Log("UNOFFICIAL Puddles: %s's main record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", pixel->Name);
+		}
+	}
+	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors below): while the start's shaders load, the lamp-shadow records wait for LateInteriors'
+	// attach (their compiles run on the worker threads after everything the start needs); any other time, and with ParallelShaderCompile
+	// off or DeferredRenderer 1, right here as before.
+	if (!LateInteriors::Defer(pixel, tmpl)) LoadLampShadowRecords(pixel, tmpl);
 	// UNOFFICIAL 2026-10-30 RT lamp shadows ExteriorForward on the land: the land shaders with lamps (TerrainTemplate, NUM_PT_LIGHTS) get an
 	// outdoor record with TERRAIN_LAMP_RT (their lamps matched by position to the traced entries). Only with terrain blending off: its
 	// depth takes s15, the one stage the land has left (register audit 2026-10-30).
@@ -2302,32 +2387,88 @@ void ShaderManager::RenderEffectToRT(IDirect3DSurface9* renderTarget, EffectReco
 
 // UNOFFICIAL 2026-10-27 RenderScale v2: the chain's first step on its own, so TAAEffect::UpscaleAfterEffects can redraw both at full
 // size after its upscale. In a rect frame (RenderRect::On) both draw into the rect (EffectRecord / ApplyViewport).
-void ShaderManager::RenderDepthAndNormals(IDirect3DSurface9* RenderTarget) {
+bool ShaderManager::PostTonemapNeedsNormals() {
+	auto renders = [](EffectRecord* e) { return e && e->Enabled && e->Effect && e->ShouldRender(); };
+	if (renders(Effects.Debug)) return true;
+	if (renders(Effects.Snow) && Effects.Snow->Technique() == 2) return true;
+	return false;
+}
+
+bool ShaderManager::PostTonemapNeedsViewModelDepth() {
+	VolumetricSmoke::SyncFrame();
+	if (Effects.VolumetricSmoke && Effects.VolumetricSmoke->Effect && Effects.VolumetricSmoke->ShouldRender() &&
+		TheSettingManager->GetSettingI("Main.GunFX.Main", "VolumetricSmokeTest") != 4)
+		return true;
+	auto renders = [](EffectRecord* e) { return e && e->Enabled && e->Effect && e->ShouldRender(); };
+	if (renders(Effects.Snow) && Effects.Snow->Technique() == 2) return true;
+	return false;
+}
+
+bool ShaderManager::PostUpscaleNeedsDepth(bool beforeLuma) {
+	if (beforeLuma && avglumaRequired) return true;
+	if (PostTonemapNeedsNormals() || PostTonemapNeedsViewModelDepth()) return true;
+	auto renders = [](EffectRecord* e) { return e && e->Enabled && e->Effect && e->ShouldRender(); };
+	if (renders(Effects.Rain) || renders(Effects.Snow) || GpuParticles::Wanted() ||
+		renders(Effects.HeatHaze) || renders(Effects.BarrelHaze) || renders(Effects.DepthOfField) ||
+		renders(Effects.Bodycam))
+		return true;
+	if (renders(Effects.Sharpening) && Effects.Sharpening->Constants.Data.z > 0.0f) return true;
+	if (renders(Effects.SkyDither) && Effects.SkyDither->Constants.Data.y > 0.0f) return true;
+	if (renders(Effects.SMAA) && Effects.SMAA->Settings.Main.EdgeDetection >= SMAAEffect::INPUT_DEPTH) {
+		bool runsWithTaa = !Effects.TAA || !Effects.TAA->Enabled;
+		if (!runsWithTaa) {
+			SettingManager::Configuration::ConfigNode node;
+			runsWithTaa = TheSettingManager->Config.FillNode(&node, "Shaders.SMAA.Main", "WithTAA") && node.BoolValue;
+		}
+		if (runsWithTaa) return true;
+	}
+	return false;
+}
+
+void ShaderManager::RenderDepthAndNormals(IDirect3DSurface9* RenderTarget, bool needNormals) {
 	IDirect3DDevice9* const Device = TheRenderManager->device;
 	static GpuTimer depthTimer("Depth combine");
 	static GpuTimer normalsTimer("Normal reconstruction");
 	auto bindFrameQuad = [&] { Device->SetStreamSource(0, FrameVertex, 0, sizeof(FrameVS)); };
 	bindFrameQuad();
 	Device->SetFVF(FrameFVF);	// the full-screen quad for both passes
+	NormalsEffect* const normals = Effects.Normals;
+	CombineDepthEffect* const depth = Effects.CombineDepth;
+	if (!needNormals) {
+		{
+			GpuProfileScope gpu(depthTimer, Device);
+			RenderEffectToRT(depth->Textures.CombinedDepthSurface, depth, false);
+		}
+		Device->SetRenderTarget(0, RenderTarget);
+		if (RenderRect::Active()) bindFrameQuad();
+		return;
+	}
+	const bool mergeWanted = CapturedNormals::MergeWanted() && !TAAEffect::UpscaledBeforeEffects();
+	const bool smoothOn = TheSettingManager->SettingsMain.Main.SmoothNormals > 0 && normals->Enabled && normals->Effect && normals->ShouldRender();
+	const bool allowInlineMerge = mergeWanted && !smoothOn;
 	// When the normals pass would run anyway, try producing depth and normals in one draw.
 	bool mergedNormals = false;
+	bool inlineMerged = false;
 	{
 		GpuProfileScope gpu(depthTimer, Device);
-		NormalsEffect* Normals = Effects.Normals;
-		CombineDepthEffect* const depth = Effects.CombineDepth;
-		if (Normals->Enabled && Normals->Effect && Normals->ShouldRender())
-			mergedNormals = depth->RenderWithNormals(Device, Normals->Textures.NormalsSurface);
+		if (normals->Enabled && normals->Effect && normals->ShouldRender())
+			mergedNormals = depth->RenderWithNormals(Device, normals->Textures.NormalsSurface, allowInlineMerge, &inlineMerged);
 		if (!mergedNormals) RenderEffectToRT(depth->Textures.CombinedDepthSurface, depth, false);
 	}
 	{
 		GpuProfileScope gpu(normalsTimer, Device);
-		NormalsEffect* const normals = Effects.Normals;
-		if (!mergedNormals) RenderEffectToRT(normals->Textures.NormalsSurface, normals, false);
+		if (!mergedNormals) {
+			normals->inlineMergeAllowed = allowInlineMerge;
+			normals->inlineMerged = false;
+			RenderEffectToRT(normals->Textures.NormalsSurface, normals, false);
+			inlineMerged = normals->inlineMerged;
+			normals->inlineMergeAllowed = false;
+		}
 		// UNOFFICIAL 2026-10-23 (sharednormals; [Main.Main.Quality] SmoothNormals): the buffer smoothed in place, once, for every reader.
 		Effects.Normals->RenderSmooth(Device);
 		// UNOFFICIAL 2026-10-28 [Main.Main.Quality] CapturedNormals (core/CapturedNormals.h): the surfaces' own smooth normals written into
 		// the buffer, for every reader. Not after an upscale to the screen (the normals were drawn at the internal resolution).
-		if (CapturedNormals::MergeWanted() && !TAAEffect::UpscaledBeforeEffects())
+		if (mergeWanted && !inlineMerged)
 			CapturedNormals::MergeIntoNormals(Device, Effects.Normals->Textures.NormalsSurface, Effects.CombineDepth->Textures.CombinedDepthTexture);
 		Device->SetRenderTarget(0, RenderTarget);	// the caller's target back
 	}
@@ -2455,7 +2596,7 @@ static void LogActiveSwitches(bool force) {
 void ShaderManager::RenderEffects(IDirect3DSurface9* RenderTarget) {
 	SharedDrawState::OwnPass ownPass;	// UNOFFICIAL 2026-11-11 (as RenderEffectsPreTonemapping: the effects' constants are their own)
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker (as RenderEffectsPreTonemapping)
-	VolumetricSmoke::FrameNumber++;   // the smoke is fetched once a frame (VolumetricSmoke::Fetch)
+	VolumetricSmoke::SyncFrame();   // the smoke is fetched once a frame (VolumetricSmoke::Fetch)
 	SessionLog::OnFrame();	// UNOFFICIAL 2026-11-01: heartbeat, cell / weather / loading lines, setting changes, the frame journal switch (SessionLog.h)
 	{	// UNOFFICIAL 2026-10-31 register-clash guard: the total once, 300 frames into the first loaded game (the startup shaders are in; core/RegisterClash.h)
 		static unsigned clashFrames = 0;

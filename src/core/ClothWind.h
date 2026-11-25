@@ -1362,6 +1362,22 @@ namespace ClothWind {
 		device->SetVertexShaderConstantF(248, zero, 1);
 		NonZeroSent = false; GrassInC248 = false;
 	}
+	// UNOFFICIAL 2026-11-21: force c248 zero regardless of cached flags (e.g. entering RenderFirstPerson after a bulk constant restore).
+	inline void ForceZero(IDirect3DDevice9* device) {
+		ActiveWeights = nullptr;
+		ActiveWalk = nullptr; ActiveSkin = nullptr;
+		ActiveStill = nullptr;
+		if (!device) return;
+		static const float zero[4] = { 0, 0, 0, 0 };
+		device->SetVertexShaderConstantF(248, zero, 1);
+		NonZeroSent = false; GrassInC248 = false;
+	}
+	// UNOFFICIAL 2026-11-21: call immediately after any bulk SetVertexShaderConstantF(0, saved, 256) restore so c248 tracking stays in sync.
+	inline void OnVSConstantsRestored(const float c248[4], bool prevNonZero, bool prevGrass) {
+		const bool nonZero = prevNonZero || c248[0] != 0.0f || c248[1] != 0.0f || c248[2] != 0.0f || c248[3] != 0.0f;
+		NonZeroSent = nonZero;
+		GrassInC248 = prevGrass || nonZero;
+	}
 	// 2026-10-19 (user: 'cloth is causing unintended meshes to flicker and distort violently'): right after each hooked draw. Before,
 	// a cloth draw's values stayed in c248 until the next hooked object; anything drawn in between by another path with an NVR object
 	// vertex shader moved as that cloth did -- harmless while cloth moved 5 cm, violent with the walking offset.

@@ -35,14 +35,24 @@ float4 TESR_PBRMath : register(c223); // x: EnergySplit (1 = on), y: Reflectivit
 #endif
 float3 ReflectivityF0(float3 f0) { return saturate(f0 + f0 * TESR_PBRMath.y); }
 #define REFLECTIVITY_F90 saturate(1.0f + TESR_PBRMath.y).xxx
+// UNOFFICIAL 2026-11-19 (Finding 4.2): opt-in roughness-damped grazing F90 (Lagarde 2014, matching RtPathTrace.comp PTRoughFresnel = 1)
+// for deferred light passes; forward templates leave PBR_ROUGH_F90 undefined so their bytecode and ps_3_0 register counts stay identical.
+#if defined(PBR_ROUGH_F90) && PBR_ROUGH_F90
+float3 RoughReflectivityF90(float3 f0, float r, float metal) {
+    return max(REFLECTIVITY_F90 * (1.0f - saturate(r) * saturate(1.0f - metal)), f0);
+}
+    #define PBR_F90_FOR(f0, r, metal) RoughReflectivityF90((f0), (r), (metal))
+#else
+    #define PBR_F90_FOR(f0, r, metal) REFLECTIVITY_F90
+#endif
 // UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl): the Fresnel of the HIGHLIGHT, which may start from a different reflectance
 // than the diffuse's (1 - F) share: an includer that defines PBR_SPEC_F0(baseColor, metal) gives the highlight that F0 (the
 // authored Blinn-Phong highlight's strength); the diffuse keeps the dielectric's, so a surface's diffuse light is unchanged.
 // Without it the highlight takes the same Fresnel as before (the macro is that value itself: the shaders are unchanged).
 #ifdef PBR_SPEC_F0
-    #define PBR_SPEC_FRESNEL(fres, baseColor, metal, cosT) Fresnel(ReflectivityF0(PBR_SPEC_F0(baseColor, metal)), REFLECTIVITY_F90, cosT)
+    #define PBR_SPEC_FRESNEL(fres, baseColor, r, metal, cosT) Fresnel(ReflectivityF0(PBR_SPEC_F0(baseColor, metal)), PBR_F90_FOR(ReflectivityF0(PBR_SPEC_F0(baseColor, metal)), (r), (metal)), cosT)
 #else
-    #define PBR_SPEC_FRESNEL(fres, baseColor, metal, cosT) (fres)
+    #define PBR_SPEC_FRESNEL(fres, baseColor, r, metal, cosT) (fres)
 #endif
 
 // UNOFFICIAL 2026-10-18 SpecularFade ([Shaders.PBR.Main], restart: SPEC_FADE_ON from ShaderRecord::BuildDefines; the object templates
@@ -117,9 +127,12 @@ void SetDiffuseEnergyKeep(float3 normal, float3 eyeDir, float roughness) {
 }
 
 // Fresnel, Schlick approximation.
+// UNOFFICIAL 2026-11-19: exact multiplies instead of pow(1 - cosT, 5) (saves log2+mul+exp2 and avoids pow(0,5) NaN).
 float3 Fresnel(float3 f0, float3 f90, float cosT) {
     float3 span = f90 - f0;
-    float falloff = pow(1 - cosT, 5.f);
+    float omc = 1.0f - cosT;
+    float omc2 = omc * omc;
+    float falloff = omc2 * omc2 * omc;
     return f0 + span * falloff;
 }
 
@@ -155,17 +168,24 @@ float3 DisneyDiffuse(float3 diffColor, float r, float nv, float nl, float lh) {
     return (diffColor / PI) * lightScatter * viewScatter * factor;
 }
 
-// Specular. D: GGX normal distribution.
+// Specular. D: GGX normal distribution (times PI helper cancels /PI * PI in PBR* callers).
+// UNOFFICIAL 2026-11-19: exact multiplies instead of pow(r, 4) and pow(r + 1, 2); exact nv*nl cancellation in BRDF.
+float GGXPi(float nh, float r) {
+    float r2 = r * r;
+    float aSq = r2 * r2;
+    float dTerm = max((nh * aSq - nh) * nh + 1.0f, 1e-5f);
+    return aSq / (dTerm * dTerm);
+}
+
 float GGX(float nh, float r) {
-    float aSq = pow(r, 4);
-    float dTerm = max((nh * aSq - nh) * nh + 1, 1e-5);
-    return aSq / (PI * dTerm * dTerm);
+    return GGXPi(nh, r) / PI;
 }
 
 // G1: Schlick-Beckmann.
 float ShlickBeckmann(float nx, float r) {
-    float kk = pow(r + 1, 2) / 8.0;
-    return nx/max(nx * (1 - kk) + kk, 0.00000001);
+    float rp1 = r + 1.0f;
+    float kk = (rp1 * rp1) * 0.125f;
+    return nx / max(nx * (1.0f - kk) + kk, 0.00000001f);
 }
 
 // Smith masking, separable.
@@ -175,8 +195,10 @@ float GeometryShadowing(float r, float nv, float nl) {
 
 // F: Schlick.
 float3 FresnelShlick(float3 R0, float3 H, float3 V) {
-    float3 invRefl = 1 - R0;
-    return R0 + invRefl * pow(1 - shades(H, V), 5.0);
+    float3 invRefl = 1.0f - R0;
+    float omc = 1.0f - shades(H, V);
+    float omc2 = omc * omc;
+    return R0 + invRefl * (omc2 * omc2 * omc);
 }
 
 // UNOFFICIAL 2026-10-18 SmithCorrelated ([Shaders.PBR.Main], restart: SMITH_CORRELATED_ON from ShaderRecord::BuildDefines; the object
@@ -191,24 +213,35 @@ float3 FresnelShlick(float3 R0, float3 H, float3 V) {
 // Face-on (N.V = N.L = 1) both give 1; off-normal highlights are brighter (about 1.45x at 45 degrees for roughness 0.3-0.65).
 // A look change: off by default. Off, BRDF is exactly the old code (the preprocessor removes this). SmithCorrelated = 2 is a TEST mode:
 // both terms, blended by SmithCorrelatedTest (TESR_PBRMath.x), so one launch can show off (0, the old picture exactly) and on (1).
-// BRDF
-float3 BRDF(float r, float3 F, float nv, float nl, float nh){
+// BRDF * PI (avoids dividing by PI then multiplying by PI in PBR* callers).
+float3 BRDFPi(float r, float3 F, float nv, float nl, float nh) {
 #if PBR_SMITH_CORRELATED
     // The callers clamp N.V and N.L to 1e-5 and r >= 0.02, so the sum below is >= 8e-9: never a division by zero.
-    const float aSq = pow(r, 4);
-    const float visV = nl * sqrt(nv * nv * (1 - aSq) + aSq);
-    const float visL = nv * sqrt(nl * nl * (1 - aSq) + aSq);
+    const float r2 = r * r;
+    const float aSq = r2 * r2;
+    const float visV = nl * sqrt(nv * nv * (1.0f - aSq) + aSq);
+    const float visL = nv * sqrt(nl * nl * (1.0f - aSq) + aSq);
+    const float dPi = GGXPi(nh, r);
     #if PBR_SMITH_CORRELATED == 2
-        const float3 legacy = GGX(nh, r) * GeometryShadowing(r, nv, nl) * F / (4.0 * nv * nl);
-        return legacy + (GGX(nh, r) * (0.5 / (visV + visL)) * F - legacy) * TESR_PBRMath.x;
+        const float rp1 = r + 1.0f;
+        const float kk = (rp1 * rp1) * 0.125f;
+        const float invK = 1.0f - kk;
+        const float3 legacy = dPi * (0.25f / ((nv * invK + kk) * (nl * invK + kk))) * F;
+        return legacy + (dPi * (0.5f / (visV + visL)) * F - legacy) * TESR_PBRMath.x;
     #else
-        return GGX(nh, r) * (0.5 / (visV + visL)) * F;
+        return dPi * (0.5f / (visV + visL)) * F;
     #endif
 #else
-    float3 numer = GGX(nh, r) * GeometryShadowing(r, nv, nl) * F;
-    float denomin = 4.0 * nv * nl;
-    return numer/denomin;
+    const float rp1 = r + 1.0f;
+    const float kk = (rp1 * rp1) * 0.125f;
+    const float invK = 1.0f - kk;
+    const float vis = 0.25f / ((nv * invK + kk) * (nl * invK + kk));
+    return GGXPi(nh, r) * vis * F;
 #endif
+}
+
+float3 BRDF(float r, float3 F, float nv, float nl, float nh) {
+    return BRDFPi(r, F, nv, nl, nh) / PI;
 }
 
 // Plain diffuse term for the light: no highlight, Lambert only.
@@ -223,9 +256,7 @@ float3 PBRDiffuse(float metal, float r, float3 baseColor, float3 N, float3 V, fl
     // Keeping (1 - LdotH)^5 would send the surface black as V nears -L, where
     // normalize(V + L) is singular. Leaving the term out removes the last view
     // dependence, which is what a purely Lambertian material should have.
-    const float3 lambert = (1 - metal) * baseColor / PI;
-
-    return lambert * NdotL * radiance * PI;
+    return (1.0f - metal) * baseColor * (NdotL * radiance);
 }
 
 float3 PBRSpecular(float metal, float r, float3 baseColor, float3 N, float3 V, float3 L, float3 radiance) {
@@ -241,14 +272,14 @@ float3 PBRSpecular(float metal, float r, float3 baseColor, float3 N, float3 V, f
     const float NdotH = shades(nrm, halfV);
     const float LdotH = shades(toLight, halfV);
 
-    const float3 fres = Fresnel(f0Base, REFLECTIVITY_F90, LdotH);
+    const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
 
-    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotL, NdotH);
+    float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotL, NdotH);
 #ifdef PBR_SPEC_FADE
     specOut *= NVR_SpecFade.x;	// UNOFFICIAL SpecularFade (above)
 #endif
 
-    return specOut * NdotL * radiance * PI;
+    return specOut * (NdotL * radiance);
 }
 
 // Full PBR: Lambert diffuse plus GGX specular for one light.
@@ -265,20 +296,20 @@ float3 PBR(float metal, float r, float3 baseColor, float3 N, float3 V, float3 L,
     const float NdotH = shades(nrm, halfV);
     const float LdotH = shades(toLight, halfV);
 
-    const float3 fres = Fresnel(f0Base, REFLECTIVITY_F90, LdotH);
+    const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
 
-    float3 diff = (1 - metal) * LambertianDiffuse(baseColor, fres) * PBRDiffuseKeep;
+    float3 diff = (1.0f - metal) * (1.0f - fres) * baseColor * PBRDiffuseKeep;
 
-    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotL, NdotH);
+    float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotL, NdotH);
 #ifdef PBR_SPEC_FADE
     // UNOFFICIAL SpecularFade (above): the highlight out, the diffuse light towards PBRDiffuse's plain form.
     #ifndef PBR_SPEC_FADE_HIGHLIGHT_ONLY
-    diff += ((1 - metal) * baseColor / PI - diff) * (1.0f - NVR_SpecFade.x);
+    diff += ((1.0f - metal) * baseColor - diff) * (1.0f - NVR_SpecFade.x);
     #endif
     specOut *= NVR_SpecFade.x;
 #endif
 
-    return (diff + specOut) * NdotL * radiance * PI;
+    return (diff + specOut) * (NdotL * radiance);
 }
 
 #define SUN_RADIUS 0.00918043
@@ -310,14 +341,14 @@ float3 PBRSunSpecular(float metal, float r, float3 baseColor, float3 N, float3 V
     const float NdotL = shades(nrm, toLight);
     const float LdotH = shades(toLight, halfV);
 
-    const float3 fres = Fresnel(f0Base, REFLECTIVITY_F90, LdotH);
+    const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
 
-    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotS, NdotH);
+    float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotS, NdotH);
 #ifdef PBR_SPEC_FADE
     specOut *= NVR_SpecFade.x;	// UNOFFICIAL SpecularFade (above)
 #endif
 
-    return specOut * NdotS * radiance * PI;
+    return specOut * (NdotS * radiance);
 }
 
 // Sun: diffuse plus the disc specular, in one call.
@@ -347,18 +378,18 @@ float3 PBRSun(float metal, float r, float3 baseColor, float3 N, float3 V, float3
     const float NdotL = shades(nrm, toLight);
     const float LdotH = shades(toLight, halfV);
 
-    const float3 fres = Fresnel(f0Base, REFLECTIVITY_F90, LdotH);
+    const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
 
-    float3 diff = (1 - metal) * LambertianDiffuse(baseColor, fres) * PBRDiffuseKeep;
+    float3 diff = (1.0f - metal) * (1.0f - fres) * baseColor * PBRDiffuseKeep;
 
-    float3 specOut = BRDF(r, PBR_SPEC_FRESNEL(fres, baseColor, metal, LdotH), NdotV, NdotS, NdotH);
+    float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotS, NdotH);
 #ifdef PBR_SPEC_FADE
     // UNOFFICIAL SpecularFade (above): the highlight out, the diffuse light towards PBRDiffuse's plain form.
     #ifndef PBR_SPEC_FADE_HIGHLIGHT_ONLY
-    diff += ((1 - metal) * baseColor / PI - diff) * (1.0f - NVR_SpecFade.x);
+    diff += ((1.0f - metal) * baseColor - diff) * (1.0f - NVR_SpecFade.x);
     #endif
     specOut *= NVR_SpecFade.x;
 #endif
 
-    return (diff * NdotL + specOut * NdotS) * radiance * PI;
+    return (diff * NdotL + specOut * NdotS) * radiance;
 }

@@ -30,6 +30,8 @@ namespace VolumetricSmoke {
     // tick, GetTickCount64, which only moves every 15.6 ms: at 95 frames a second every third frame drew the last frame's
     // smoke, built for the last frame's camera, so it jumped and the haze flickered.)
     inline unsigned FrameNumber = 0, FetchedFrame = ~0u;
+    inline UInt32 LastGameFrame = 0xFFFFFFFFu;
+    void SyncFrame();
     inline LARGE_INTEGER EnvAt = {};      // when the room light was last worked out (it eases to the new value)
     inline RECT Scissor = {};
     inline IDirect3DTexture9* Texture = nullptr;      // the buffer used this frame (TESR_SmokeBuffer follows it)

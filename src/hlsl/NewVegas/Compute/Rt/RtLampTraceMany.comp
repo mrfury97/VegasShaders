@@ -75,6 +75,8 @@ float random01() {
 	return float((w >> 22u) ^ w) * (1.0 / 4294967296.0);
 }
 
+// UNOFFICIAL 2026-11-19: detect moving actor blockers directly on the committed shadow hit (NVR_RT_CUSTOM_ACTOR) with zero extra shadow rays.
+bool peopleBlock = false;
 bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	if (!(tMax > tMin)) return false;
 	rayQueryEXT q;
@@ -82,10 +84,15 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 	// (2026-11-03 rtalpha) jitter.z 1: alpha-tested casters (foliage cards, fences, chain link, wires: non-opaque, mask 0x10) come as
 	// candidates and their diffuse alpha decides (RtAlpha.glsl, as the sun's rays); 0: they are skipped (mask without 0x10), as before
 	const bool testAlpha = p.jitter.z > 0.5;
+	const bool trackPeople = uint(p.rect.w) != 0u;
 	// (2026-11-07 ptaaa-firstperson) from (the view model, a counter you stand at) or toward (the Pip-Boy light, the flashlight moved
 	// onto the beam) a point within arm's reach of the eye: the hidden first-person body is passed over (RtHidden.glsl)
-	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz))
-		return rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtAnyHit);
+	if (rtHiddenPassOver(origin, origin + segment, p.origin.xyz)) {
+		float tHit; uint ci;
+		const bool hit = rtBlockedPassHidden(origin, segment, tMin, tMax, testAlpha ? (mask | 0x10u) : mask, testAlpha, oneSided ? kRtOneSided : kRtAnyHit, tHit, ci);
+		if (hit && trackPeople && (ci & NVR_RT_CUSTOM_ACTOR) != 0u) peopleBlock = true;
+		return hit;
+	}
 	rayQueryInitializeEXT(q, scene, (oneSided ? 0u : gl_RayFlagsTerminateOnFirstHitEXT) | (testAlpha ? 0u : gl_RayFlagsOpaqueEXT),
 		testAlpha ? (mask | 0x10u) : mask, origin, tMin, segment, tMax);
 	// (2026-11-07 rtgap-decals) a shadow ray: decals (NVR_RT_CUSTOM_DECAL) never block it (RtAlpha.glsl rtAlphaPassShadow)
@@ -95,19 +102,9 @@ bool blocked(vec3 origin, vec3 segment, float tMin, float tMax, uint mask) {
 				rayQueryGetIntersectionBarycentricsEXT(q, false)))
 			rayQueryConfirmIntersectionEXT(q);
 	if (rayQueryGetIntersectionTypeEXT(q, true) == gl_RayQueryCommittedIntersectionNoneEXT) return false;
-	return !oneSided || !rayQueryGetIntersectionFrontFaceEXT(q, true);
-}
-
-// (2026-11-07) MovingCasterHistory: a blocked ray asks again with only the people's mask: was it a person (actors move, so their
-// shadows on still walls and floors move: the history there would smear them; a tester's ghost silhouettes)
-bool peopleBlock = false;
-bool blockedByPeople(vec3 origin, vec3 segment, float tMin, float tMax) {
-	uint people = uint(p.rect.w) & (uint(p.params2.y) | uint(p.params2.z));
-	if (people == 0u || !(tMax > tMin)) return false;
-	rayQueryEXT q;
-	rayQueryInitializeEXT(q, scene, gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT, people, origin, tMin, segment, tMax);
-	for (uint rtCap_ = 0u; rayQueryProceedEXT(q); ) if (++rtCap_ > 256u) { rayQueryTerminateEXT(q); break; } else {}
-	return rayQueryGetIntersectionTypeEXT(q, true) != gl_RayQueryCommittedIntersectionNoneEXT;
+	if (oneSided && rayQueryGetIntersectionFrontFaceEXT(q, true)) return false;
+	if (trackPeople && (rayQueryGetIntersectionInstanceCustomIndexEXT(q, true) & NVR_RT_CUSTOM_ACTOR) != 0u) peopleBlock = true;
+	return true;
 }
 
 // One ray from the point to a point of lamp s's disc (radius r, angle ang): true when it reaches the lamp. As RtLampTrace.comp: two
@@ -124,10 +121,10 @@ bool reaches(vec3 origin, float offset, int s, float rr, float ang) {
 	float invLen = inversesqrt(dot(segment, segment));
 	float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
 	float tMin = min(offset * invLen, tEnd);
+	uint farMask = uint(p.params2.y), nearMask = uint(p.params2.z);
+	if (farMask == nearMask) return !blocked(origin, segment, tMin, tEnd, farMask);
 	float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
-	bool lit = !blocked(origin, segment, tMin, tSplit, uint(p.params2.y)) && !blocked(origin, segment, tSplit, tEnd, uint(p.params2.z));
-	if (!lit && !peopleBlock && blockedByPeople(origin, segment, tMin, tEnd)) peopleBlock = true;
-	return lit;
+	return !blocked(origin, segment, tMin, tSplit, farMask) && !blocked(origin, segment, tSplit, tEnd, nearMask);
 }
 
 // The light lamp s brings the point unshadowed (RtLampTrace.comp's ranking weight), 0 when none

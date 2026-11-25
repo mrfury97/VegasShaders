@@ -410,7 +410,7 @@ struct Host {
 		}
 		say("helper: state %u after %llu ms: %s\n", shared->state, (unsigned long long)(GetTickCount64() - start), shared->message);
 		if (shared->state != NVR_RT_STATE_READY) return false;
-		if (shared->shaderFailures) { say("  error: helper shader failures 0x%x (see NvrRtHelper.log)\n", shared->shaderFailures); return false; }
+		if (shared->shaderFailures) { say("  error: helper shader failures 0x%llx (see NvrRtHelper.log)\n", (unsigned long long)shared->shaderFailures); return false; }
 		return true;
 	}
 
@@ -796,7 +796,7 @@ struct Ctx {
 	int ptA, ptB, ptDisplay, aux16, pano;
 	int refDir, refRay, refHit, refShade;
 	// shaders
-	int shPath, shLamp, shMany, shRefl;
+	int shPath, shPathPrimary, shPathSpatial, shPathBounce, shLamp, shMany, shRefl;
 };
 
 // Stage every mesh of a world (one frame's BUILD ops); fills the geometry ids
@@ -1353,6 +1353,7 @@ static bool sceneCameraMove(Ctx& c) {
 #include "rt_host_gisky.inl"	// (2026-11-10) GISky: RT GI rays that miss bring back the sky light
 #include "rt_host_tessblas.inl"	// (2026-11-07, rtgap-tessblas, protocol 8) displaced geometry in the RT scene vs the CPU's truth
 #include "rt_host_textures.inl"	// (2026-11-07, protocol 8) real textures' routes: BC blocks, the GPU route through the fork, auto caps, release
+#define NVR_HOST_FOGLAMPS
 #include "rt_host_fog.inl"	// (2026-11-07 ptaaa-fog) RT fog visibility: the froxel grid's traced sun visibility vs the CPU's rays
 #include "rt_host_materials.inl"	// (2026-11-07 ptaaa-materials) glass, foliage, skin, cloth in the path tracer
 #include "rt_host_firstperson.inl"	// (2026-11-07 ptaaa-firstperson) the view model lit by the path tracer; rays near the eye pass over the hidden first-person body
@@ -1426,6 +1427,9 @@ int main(int argc, char** argv) {
 	for (int i : { c.depth, c.normals, c.lampResult, c.lampTable, c.alphaAtlas, c.alphaStandIn, c.histA, c.histB, c.ptA, c.ptB, c.ptDisplay, c.aux16,
 		c.pano, c.refDir, c.refRay, c.refHit, c.refShade }) if (i < 0) { say("RESULT: FAIL (shared images)\n"); return 1; }
 	c.shPath = host.AddShader(spv + "\\RtPathTrace.spv");
+	c.shPathPrimary = host.AddShader(spv + "\\RtPathTracePrimary.spv");
+	c.shPathSpatial = host.AddShader(spv + "\\RtPathTraceSpatial.spv");
+	c.shPathBounce = host.AddShader(spv + "\\RtPathTraceBounce.spv");
 	c.shLamp = host.AddShader(spv + "\\RtLampTrace.spv");
 	c.shMany = host.AddShader(spv + "\\RtLampTraceMany.spv");
 	c.shRefl = host.AddShader(spv + "\\ReflectionsRT.spv");
@@ -1444,6 +1448,7 @@ int main(int argc, char** argv) {
 	gEmissiveShader = host.AddShader(spv + "\\RtEmissiveBuild.spv");   // (2026-11-07 ptaaa-emissive) PTEmissive's light list
 	if (!registerTextureRoutes(host)) { say("RESULT: FAIL (texture transfer images)\n"); return 1; }   // (2026-11-07, protocol 8)
 	if (!registerFog(host, spv)) { say("RESULT: FAIL (fog visibility images)\n"); return 1; }   // (2026-11-07 ptaaa-fog)
+	if (!registerFogLamps(host, spv)) { say("RESULT: FAIL (fog lamps images)\n"); return 1; }   // (2026-11-12 / Phase 3A)
 	if (!registerFlashHead(host, spv)) { say("RESULT: FAIL (shared images)\n"); return 1; }   // (2026-11-07 perf-flashlight)
 	for (auto& s : host.shaders) if (GetFileAttributesA(s.c_str()) == INVALID_FILE_ATTRIBUTES) { say("RESULT: FAIL (no %s)\n", s.c_str()); return 1; }
 	if (!host.Start(helperExe.c_str())) { host.Stop(); say("RESULT: FAIL (helper did not get ready)\n"); return 1; }
@@ -1532,6 +1537,7 @@ int main(int argc, char** argv) {
 		{ "materials", "path tracer materials: glass / leaf / skin furnace, sun through a window (tinted), back-lit leaf, skin wrap + light through, cloth sheen, the camera through glass; picking + packing (RtPathTrace + RtScenePick.h)", [&] { return sceneMaterials(c); } },
 		{ "facemorph", "FaceMorphs: a skinned head whose vertices change with still bones is re-posed by its hash, an unchanged one is not; the CPU-vertex copy (RtFaceMorph.h + StageSkinnedGeometry + RtLampPrimary)", [&] { return sceneFaceMorph(c); } },
 		{ "fogvis", "RT fog visibility: the froxel grid's traced sun visibility (a window's shaft, an alpha-tested card) = the CPU's rays per cell; the history converges and follows a moving camera (RtFogVisibility + RtFogGrid.h)", [&] { return sceneFogVis(c); } },
+		{ "foglamps", "RT fog lamps: a lamp's light in the air behind a wall with a doorway = the CPU's rays per cell and lamp (RtFogLamps + RtFogLampGrid.h)", [&] { return sceneFogLamps(c); } },
 		{ "ptviewmodel", "the first-person view model lit by the path tracer (PTViewModel: its G-buffer, its own FOV, the hidden body round the eye passed over; not-captured pixels keep the game's) (RtPathTrace)", [&] { return scenePtViewModel(c); } },
 		{ "screenown", "hair and skin take on the wall's material (PTScreenOwn): a blended hair cap over a head, a face, a body before a wall and an armour plate, the G-buffer as the game leaves it; the prep pass's marks (RtViewModel.h, ps_3_0) vs the CPU, then the first surface's colour / roughness / metal / normal before and after (RtPathTrace)", [&] { return sceneScreenOwn(c); } },
 		{ "vmprep", "PTViewModel's prep pass (src/core/RtViewModel.h, ps_3_0 on the fork's D3D9 device): the view model's code (4 + s / -1), its captured view-space normal, people 2, the world 1, vs the CPU", [&] { return sceneVmPrep(c); } },
@@ -1565,8 +1571,8 @@ int main(int argc, char** argv) {
 	// one empty frame so the last scene's releases reach the helper (a failed scene may have left its geometry: released here)
 	for (auto it = host.live.begin(); it != host.live.end();) { NvrRtGeometryOp op = {}; op.op = NVR_RT_OP_RELEASE; op.id = it->first; host.ops.push_back(op); it = host.live.erase(it); }
 	if (host.Exchange(World(), {}, V3()) && host.Finish()) host.EndFrame();
-	say("helper: %u geometries alive, %u failed ops, shader failures 0x%x, GPU %.3f ms avg (builds %.3f, scene %.3f, passes %.3f), last: %s\n",
-		host.shared->geometries, host.shared->failedOps, host.shared->shaderFailures, host.shared->gpuTimeUsAvg / 1000.0, host.shared->buildUsAvg / 1000.0,
+	say("helper: %u geometries alive, %u failed ops, shader failures 0x%llx, GPU %.3f ms avg (builds %.3f, scene %.3f, passes %.3f), last: %s\n",
+		host.shared->geometries, host.shared->failedOps, (unsigned long long)host.shared->shaderFailures, host.shared->gpuTimeUsAvg / 1000.0, host.shared->buildUsAvg / 1000.0,
 		host.shared->sceneUsAvg / 1000.0, host.shared->traceUsAvg / 1000.0, host.shared->message);
 	if (host.shared->failedOps) { say("  helper refused %u ops -> FAIL\n", host.shared->failedOps); failed++; }
 	{	// (2026-11-07 rt-shutdown) the game's shutdown order (Host::Stop); forced = FAIL

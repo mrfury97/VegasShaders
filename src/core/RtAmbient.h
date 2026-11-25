@@ -23,7 +23,7 @@ namespace RtAmbient {
 		bool	Enabled = false;	// Enabled
 		int		RayCount = 2;		// [1-16] AO rays per half-resolution pixel and frame (2026-10-30: 2, rt-ao-6: denoised the same as 4)
 		float	Distance = 120.0f;	// [8-1000] AO ray length, world units (about 70 = 1 m)
-		bool	Sky = true;			// also the sky visibility (needs Skylighting on, as the ortho version)
+		bool	Sky = false;			// also the sky visibility (needs Skylighting on; independent of RT AO)
 		int		SkyRays = 16;		// 8 or 16 (one or two rings round the normal + straight up)
 		float	SkyDistance = 800.0f;	// [64-8000] sky ray length (Skylighting's Distance: 800)
 		// UNOFFICIAL 2026-11-08 (alsky; tester: Skylighting with RT AO draws hard straight lines on roads, RT AO alone looks right) BUG FIXES,
@@ -229,9 +229,6 @@ namespace RtAmbient {
 			Current.GIStrengthNight = TheSettingManager->Config.FillNode(&node, s, "GIStrengthNight") ? std::clamp(node.FloatValue, -1.0f, 20.0f) : -1.0f;	// UNOFFICIAL 2026-11-10
 			Current.GISkyNight = TheSettingManager->Config.FillNode(&node, s, "GISkyNight") ? std::clamp(node.FloatValue, -1.0f, 1.0f) : -1.0f;
 			Current.LegacyTilt = TheSettingManager->Config.FillNode(&node, s, "LegacyTilt") ? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;	// UNOFFICIAL 2026-11-10
-			// UNOFFICIAL 2026-11-10 (tester request: interiors and exteriors balanced apart): indoors, a <Key>Interior value of 0 or more replaces
-			// the key's own (below 0 or a missing key: the same value everywhere, as before). AmbientOcclusion's RT pass calls this when the
-			// player goes in or out (InteriorNow).
 			if (InteriorNow) {
 				auto indoors = [&](const char* key, float& value, float lo, float hi) {
 					if (TheSettingManager->Config.FillNode(&node, s, key) && node.FloatValue >= 0.0f) value = std::clamp(node.FloatValue, lo, hi);
@@ -261,24 +258,13 @@ namespace RtAmbient {
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
 			Current.GIScreenAmbientOut = TheSettingManager->Config.FillNode(&node, s, "GIScreenAmbientOut") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;
-			if (Current.SunGI && !InteriorNow) Current.Enabled = Current.GI = Current.Sky = Current.RadianceCache = Current.CacheExteriors = true;
-			// UNOFFICIAL 2026-11-12 (sungi p6, user screenshot: the GI-only view lit a shaded shack evenly, cream all over, the sunlit floor patch no
-			// brighter than the far corners) GIAmbient lights EVERY bounce hit with the game's ambient, with no visibility test: inside a room each
-			// wall got the open sky's light. With SunGI the sky already comes in through the ray misses (and the cache, both visibility-tested), so
-			// GIAmbient is an unshadowed second copy of it that drowns the sun's bounce: 0 outdoors with SunGI (the key stays for the old chain).
+			if (Current.SunGI && !InteriorNow) Current.GI = Current.RadianceCache = Current.CacheExteriors = true;
 			if (Current.SunGI && !InteriorNow) Current.GIAmbient = 0.0f;
-			// UNOFFICIAL 2026-11-12 RoomGI: the one switch indoors. Indoors only: outdoors every key is the user's own (or SunGI's). A ray MISS indoors keeps
-			// bringing nothing (AmbientOcclusion.cpp giSky: 0 unless outdoors; a miss in a room is a gap in the walls or the ray's end, not the sky).
-			// GIAmbient is forced to 0, for SunGI's reason and two more: (1) it lights EVERY bounce hit with a flat ambient and no visibility test, and in a
-			// room nearly every ray hits, so it comes back as one even layer of the hits' colour that is strongest in the corners (all rays hit there): the
-			// very light AmbientReplaceInterior takes out, put back unoccluded; (2) the share of the room's ambient that is meant to stay is AmbientFloorInterior,
-			// kept at the pixel itself and darkened by the occlusion (its visibility test); (3) the colour the trace has for it is the sky object's ambient
-			// (TESR_SunAmbient), not the cell's own ambient colour AmbientLight reads from the cell. The GIAmbient / GIAmbientInterior keys stay for RoomGI off.
 			Current.RoomGI = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "RoomGI") && node.BoolValue;
 			Current.GIDenoiseRoomGI = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseRoomGI") || node.BoolValue;
 			Current.OcclusionOnD3D9 = !TheSettingManager->Config.FillNode(&node, s, "OcclusionOnD3D9") || node.BoolValue;	// UNOFFICIAL 2026-11-13
 			if (Current.RoomGI && InteriorNow) {
-				Current.Enabled = Current.GI = Current.RadianceCache = true;
+				Current.GI = Current.RadianceCache = true;
 				Current.GIAmbient = 0.0f;
 				Current.RoomGIGlow = TheSettingManager->Config.FillNode(&node, s, "RoomGIGlow") ? std::clamp(node.FloatValue, 0.0f, 4.0f) : 1.0f;
 				if (Current.GlowGI <= 0.0f) Current.GlowGI = Current.RoomGIGlow;
@@ -379,19 +365,22 @@ namespace RtAmbient {
 		return day >= 1.0f ? 0.0f : share * (1.0f - (day > 0.0f ? day : 0.0f));
 	}
 	inline bool GISunDuskFadeOn() { return Current.GISunDuskFade >= 0.0f ? Current.GISunDuskFade > 0.5f : SunGIOutdoors(); }
-	inline bool Ready() {
+	inline bool CoreAvailable(bool wanted) {
 		static int reported = -1;
-		const int state = !Current.Enabled ? 0 : !PassesWanted() ? 1 : RtCore::Gated() ? 5 : !CoreReady() ? 2 : 3;	// (2026-11-15: 5 the RT master switches)
+		const int state = !wanted ? 0 : !PassesWanted() ? 1 : RtCore::Gated() ? 5 : !CoreReady() ? 2 : 3;	// (2026-11-15: 5 the RT master switches)
 		if (state != reported && (state != 0 || reported > 0)) {
-			const char* text[] = { "off", "on but the Vegas Shaders DXVK passes are off ([Main.Main.Performance] NvrDxvkPasses): Vegas Shaders' AO runs",
-				"on but the RT core is not running (see its log line: no NvrRtHelper, no fork 0028, or a GPU without ray tracing): Vegas Shaders' AO runs",
-				"running (ray-traced occlusion in place of the screen estimate)",
-				"on but not at RenderScale below 1 (FSR / DLSS with LowResEffects: frames drawn small, not supported yet): Vegas Shaders' AO runs",
-				"on but ray tracing is off in this kind of space ([Main.Main.RayTracing] RTInteriors / RTExteriors): Vegas Shaders' AO runs" };
-			Logger::Log("UNOFFICIAL RT AO: %s.", text[state]);
+			const char* text[] = { "off", "on but the Vegas Shaders DXVK passes are off ([Main.Main.Performance] NvrDxvkPasses): Vegas Shaders' own passes run",
+				"on but the RT core is not running (see its log line: no NvrRtHelper, no fork 0028, or a GPU without ray tracing): Vegas Shaders' own passes run",
+				"running",
+				"on but not at RenderScale below 1 (FSR / DLSS with LowResEffects: frames drawn small, not supported yet): Vegas Shaders' own passes run",
+				"on but ray tracing is off in this kind of space ([Main.Main.RayTracing] RTInteriors / RTExteriors): Vegas Shaders' own passes run" };
+			Logger::Log("UNOFFICIAL RT AO/GI: %s.", text[state]);
 		}
 		reported = state;
 		return state == 3;
 	}
-	inline bool SkyReady() { return Current.Sky && Ready(); }
+	inline bool AOReady() { const bool avail = CoreAvailable(Current.Enabled || Current.GI || Current.Sky); return Current.Enabled && avail; }
+	inline bool GIReady() { const bool avail = CoreAvailable(Current.Enabled || Current.GI || Current.Sky); return Current.GI && avail; }
+	inline bool SkyReady() { const bool avail = CoreAvailable(Current.Enabled || Current.GI || Current.Sky); return Current.Sky && avail; }
+	inline bool Ready() { return AOReady(); }
 }

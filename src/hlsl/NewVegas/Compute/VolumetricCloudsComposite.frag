@@ -50,16 +50,20 @@ float CloudShadowAt(vec3 world) {
 }
 
 vec4 Composite() {
-    vec4 color = POINT_LOD(t_rendered, uv);
-    float depth = readDepthLod(uv);
-    if (MsaaEdgeDebugOn()) return MsaaEdgeDebug(uv, depth, color.rgb);
+    // UNOFFICIAL 2026-11-19 RenderRect: uv is screen UV 0..1 across the active viewport; screen-shaped buffers live in [0, scale).
+    vec2 scale = cb.renderScale.x > 0.0 ? cb.renderScale.xy : vec2(1.0);
+    vec2 ruv = uv * scale;
+    vec2 cloudUV = uv + cb.historyScale.zw;
+    vec4 color = POINT_LOD(t_rendered, ruv);
+    float depth = readDepthLod(ruv);
+    if (MsaaEdgeDebugOn()) return MsaaEdgeDebug(ruv, depth, color.rgb);
     bool sky = depth >= farZ * 0.996;
     // UNOFFICIAL 2026-11-05 MsaaEdgeFix: as the .fx's CompositePS.
     if (MsaaEdgeFixOn()) {
-        float share = MsaaSkyCoverage(uv);
+        float share = MsaaSkyCoverage(ruv);
         if (share > MsaaNoSky && share < MsaaAllSky) {
-            vec4 clouds = CloudsHere(uv);
-            vec3 behind = MsaaSkyBehind(uv, color.rgb);
+            vec4 clouds = CloudsHere(cloudUV);
+            vec3 behind = MsaaSkyBehind(ruv, color.rgb);
             // UNOFFICIAL 2026-11-06: as the .fx's MsaaCloudsOverShare (the resolve averaged stored values: swap the share there, no black bands).
             vec3 skyBefore = delinearize(max(behind, vec3(0.0)));
             vec3 skyAfter = delinearize(max(behind * clouds.a + clouds.rgb * cb.cloudLayout.w, vec3(0.0)));
@@ -73,7 +77,7 @@ vec4 Composite() {
         vec3 eye = toWorld(uv);
         vec3 world = (cb.cameraPosition.xyz + eye * depth) * MetresPerUnit;
         // HLSL mul((float3x3)TESR_ViewTransform, n)
-        vec3 normal = normalize(POINT_LOD(t_normals, uv).xyz * 2.0 - 1.0) * mat3(cb.viewTransform);
+        vec3 normal = normalize(POINT_LOD(t_normals, ruv).xyz * 2.0 - 1.0) * mat3(cb.viewTransform);
         float height = cb.cameraPosition.z + eye.z * depth;
         bool water = normal.z > 0.7 && abs(height - cb.waterSettings.x) < max(2.0, depth * 0.002);
         if (ShadowStrength > 0.0 && !water) {
@@ -89,7 +93,7 @@ vec4 Composite() {
         }
         return color;
     }
-    vec4 clouds = CloudsHere(uv);
+    vec4 clouds = CloudsHere(cloudUV);
     vec3 lin = linearize(max(color.rgb, vec3(0.0))) * clouds.a + clouds.rgb * cb.cloudLayout.w;
     return vec4(delinearize(max(lin, vec3(0.0))), color.a);
 }

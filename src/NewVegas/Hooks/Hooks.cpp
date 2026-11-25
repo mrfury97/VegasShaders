@@ -10,13 +10,50 @@ void AttachScopeCameraHooks();	// Render.cpp (UNOFFICIAL 2026-11-12 [Main.Main.S
 namespace {
 	// One Detours redirection: the game function pointer variable and the function that replaces it.
 	struct Redirection {
+		const char*	name;
 		PVOID*	original;
 		PVOID	replacement;
 	};
-	#define NVR_REDIRECT(name) Redirection{ &(PVOID&)name, (PVOID)&name##Hook }
+	#define NVR_REDIRECT(name) Redirection{ #name, &(PVOID&)name, (PVOID)&name##Hook }
 
-	void Redirect(std::initializer_list<Redirection> list) {
-		for (const Redirection& r : list) DetourAttach(r.original, r.replacement);
+	// UNOFFICIAL 2026-11-19: attach and commit each detour in its own transaction and check return codes.
+	// Bundling ~25 detours into one unchecked transaction let a single incompatible inline patch from another
+	// plugin (e.g. NVAC) silently roll back InitializeRenderer and every other core hook, leaving
+	// TheRenderManager / TheShaderManager null while raw WriteRelCall / vtable hooks still ran and crashed.
+	bool AttachOne(const Redirection& r) {
+		const PVOID target = *r.original;
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		const LONG attached = DetourAttach(r.original, r.replacement);
+		const LONG committed = attached == NO_ERROR ? DetourTransactionCommit() : (DetourTransactionAbort(), attached);
+		if (committed != NO_ERROR) {
+			const UInt8* b = (const UInt8*)target;
+			Logger::Log("[ERROR] AttachHooks: detour failed for %s (%08X, first bytes %02X %02X %02X %02X, attach %ld, commit %ld) -- another plugin (e.g. NVAC) may have patched this function",
+				r.name, (UInt32)target, b ? b[0] : 0, b ? b[1] : 0, b ? b[2] : 0, b ? b[3] : 0, attached, committed);
+			return false;
+		}
+		return true;
+	}
+
+	bool Redirect(std::initializer_list<Redirection> list) {
+		bool allOk = true;
+		for (const Redirection& r : list) {
+			if (!AttachOne(r)) allOk = false;
+		}
+		return allOk;
+	}
+
+	template <typename Fn>
+	bool RunDetourGroup(const char* name, Fn&& fn) {
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		fn();
+		const LONG committed = DetourTransactionCommit();
+		if (committed != NO_ERROR) {
+			Logger::Log("[ERROR] AttachHooks: DetourTransactionCommit failed for %s (err %ld)", name, committed);
+			return false;
+		}
+		return true;
 	}
 
 	// A patched call or jump instruction in the game's code.
@@ -44,12 +81,14 @@ namespace {
 void AttachHooks() {
 	SettingsMainStruct* settings = &TheSettingManager->SettingsMain;
 
-	// --- function detours (one transaction) ---
-	DetourTransactionBegin();
-	DetourUpdateThread(GetCurrentThread());
+	// --- function detours (isolated transactions so one plugin conflict cannot roll back InitializeRenderer) ---
+	if (!AttachOne(NVR_REDIRECT(InitializeRenderer))) {
+		Logger::Log("[ERROR] AttachHooks: InitializeRenderer could not be hooked -- skipping remaining hooks/patches to prevent null-manager crashes (check for NVAC or conflicting plugins)");
+		return;
+	}
 	Redirect({
 		NVR_REDIRECT(ReadSetting), NVR_REDIRECT(WriteSetting),			// INI reads / writes
-		NVR_REDIRECT(NewMain), NVR_REDIRECT(InitializeRenderer),		// startup: main object, renderer
+		NVR_REDIRECT(NewMain),											// startup: main object
 		NVR_REDIRECT(NewTES), NVR_REDIRECT(NewPlayerCharacter), NVR_REDIRECT(NewSceneGraph),
 		NVR_REDIRECT(NewMainDataHandler), NVR_REDIRECT(NewMenuInterfaceManager), NVR_REDIRECT(NewQueuedModelLoader),
 		NVR_REDIRECT(CreateVertexShader), NVR_REDIRECT(CreatePixelShader), NVR_REDIRECT(SetShaderPackage),	// shader loading
@@ -57,13 +96,13 @@ void AttachHooks() {
 		NVR_REDIRECT(RenderBlended),   // UNOFFICIAL sandport: glass writes no depth in a sandstorm (ThroughBlended)
 		NVR_REDIRECT(RenderFirstPerson), NVR_REDIRECT(SetShaders), NVR_REDIRECT(SetSamplerState),
 	});
-	AttachGrassFirstRenderPassHook();	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless DrawFirst is on
-	DeferredDistant::Attach();	// UNOFFICIAL 2026-11-14 [Main.Main.Quality] DeferredDistant (test only): not attached with it off at startup
-	AttachScopeCameraHooks();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene): pass-through for the game's own calls; not installed with Detect off
+	RunDetourGroup("GrassFirst", [] { AttachGrassFirstRenderPassHook(); });	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless DrawFirst is on
+	if (!RunDetourGroup("DeferredDistant", [] { DeferredDistant::Attach(); })) DeferredDistant::Installed = false;	// UNOFFICIAL 2026-11-14 [Main.Main.Quality] DeferredDistant
+	RunDetourGroup("ScopeCamera", [] { AttachScopeCameraHooks(); });	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene)
 	LampReachMargin = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.Misc", "LampReachMargin"));
 	if (LampReachMargin > 0.0f) {	// UNOFFICIAL, Render.cpp
-		const LONG attached = DetourAttach(&(PVOID&)BoundWithinLightRadius, &BoundWithinLightRadiusHook);
-		Logger::Log("UNOFFICIAL LampReachMargin %.0f: hook %s (%ld), first bytes %02X %02X %02X", LampReachMargin, attached == NO_ERROR ? "attached" : "FAILED", attached,
+		const bool ok = AttachOne(NVR_REDIRECT(BoundWithinLightRadius));
+		Logger::Log("UNOFFICIAL LampReachMargin %.0f: hook %s, first bytes %02X %02X %02X", LampReachMargin, ok ? "attached" : "FAILED",
 			((const UInt8*)0x00B9DAE0)[0], ((const UInt8*)0x00B9DAE0)[1], ((const UInt8*)0x00B9DAE0)[2]);
 	}
 	// UNOFFICIAL interior forward shadows: each object's own lamps (PointShadowForward.h).
@@ -84,7 +123,6 @@ void AttachHooks() {
 		NVR_REDIRECT(RenderPipboy), NVR_REDIRECT(ShowDetectorWindow), NVR_REDIRECT(LoadForm),
 	});
 	if (settings->FlyCam.Enabled) Redirect({ NVR_REDIRECT(UpdateFlyCam) });
-	DetourTransactionCommit();
 	GrassTiming::Install();	// UNOFFICIAL 2026-11-09, test builds only, off unless [Main.Main.Performance] GrassTiming > 0 (own Detours transaction)
 
 	// --- the game's own shaders: per-draw constant updates ---
@@ -100,7 +138,8 @@ void AttachHooks() {
 
 	// UNOFFICIAL KeepLampsInView (PointShadowForward.h): the game's one lamp view test call, with forward shadows, unless another
 	// plugin has taken it.
-	if (TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled")) {
+	if (TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") ||
+		TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "KeepLampsInView")) {
 		const UInt32 site = PointShadowForward::kTestFrustumCallSite;
 		if (*(UInt8*)site == 0xE8 && site + 5 + *(SInt32*)(site + 1) == PointShadowForward::kTestFrustumCull) {
 			WriteRelCall(site, (UInt32)&PointShadowForward::TestFrustumCullHook);
@@ -190,6 +229,7 @@ void AttachHooks() {
 		{ Branch::Call, Jumpers::DetectorWindow::SetNodeName, (UInt32)&DetectorWindowSetNodeName },
 	});
 	kRenderInterfaceDetour.ReplaceCall(Jumpers::RenderInterface::Hook, RenderInterfaceHook);
+	InstallMenu3DGuardHook();
 	Patch({
 		{ Branch::Jump, 0x871290, (UInt32)&RenderShadowMapHook },
 		{ Branch::Jump, Jumpers::Shadows::LeavesNodeNameHook, (UInt32)&LeavesNodeNameHook },

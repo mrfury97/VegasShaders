@@ -8,7 +8,7 @@
 #include <vector>
 #include "EffectCompiler47.h"	// UNOFFICIAL 2026-10-29 NewEffectCompiler
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release build compiles no shelved effect, even from an older install's files
-#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20 (upstream 1.1.2): the startup compile progress window
+#include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: startup shader-compile progress overlay
 
 // UNOFFICIAL 2026-10-28 (user: "we should port it"): NVR's effects compiled in parallel at startup, after Conor (mrfury97)'s fork
 // (github.com/mrfury97/Conor-sClaudeHell-NVR-SAL-Fork, commit ee3ac888, GPL-3.0-or-later: its ShaderPrecompile also does the effects;

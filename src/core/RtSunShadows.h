@@ -24,6 +24,8 @@ namespace RtSunShadows {
 	// UNOFFICIAL 2026-11-16 [Shaders.ShadowsExteriors.RT] RealSun (port of mrfury97's fef7c30ba F2, off by default): every sun shadow follows the
 	// real sun (no SunSmoothing steps) while the traced lookup runs; never while the deferred sun fade holds the sun
 	bool	RealSun();
+	// UNOFFICIAL 2026-11-20: true when RT sun shadows used the helper's RtShadowDenoise (mode 0) this frame
+	bool	HelperDenoisedThisFrame();
 
 	// UNOFFICIAL 2026-11-13 ForwardLookup ([Shaders.ShadowsExteriors.RT], on; Shaders\Includes\Shadow.hlsl RT_SUN_FORWARD): Mode 1 through
 	// the object / skin / land shaders' own sun lookup. The old Mode 1 switched those lookups off and left the sun to the deferred apply,

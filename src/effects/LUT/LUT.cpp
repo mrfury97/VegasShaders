@@ -37,6 +37,12 @@ namespace {
 // Data\Textures\VegasShaders\LUTs\ (or the old Data\Textures\NewVegasReloaded\LUTs\ of an older install, Paths.h)
 const char* LUTEffect::LUTFolder() { return Paths::LutDir(); }
 
+bool LUTEffect::SafeName(const char* filename) {
+	if (!filename || !*filename || filename[0] == '\\' || filename[0] == '/' || strchr(filename, ':')) return false;
+	for (const auto& part : std::filesystem::path(filename)) if (part == "..") return false;
+	return true;
+}
+
 void LUTEffect::ScanLUTFolder()
 {
 	LUTFiles.clear();
@@ -102,7 +108,7 @@ void LUTEffect::SaveLUTSetting(int slot, const char* filename)
 
 void LUTEffect::LoadLUT(int slot, const char* filename)
 {
-	if (!filename || !*filename) return;
+	if (!SafeName(filename)) return;
 
 	IDirect3DBaseTexture9* loaded = GetLUTTexture(std::string(LUTFolder()) + filename);
 	if (!loaded) return;
@@ -130,7 +136,7 @@ void LUTEffect::RegisterTextures()
 	for (int slot = 0; slot < 3; slot++) {
 		char saved[80];
 		TheSettingManager->GetSettingS("Shaders.LUT.Main", kSlots[slot].settingKey, saved);
-		if (!saved[0] || saved[0] == '"') continue;
+		if (!saved[0] || saved[0] == '"' || !SafeName(saved)) continue;
 
 		IDirect3DBaseTexture9* loaded = GetLUTTexture(std::string(LUTFolder()) + saved);
 		if (loaded) AssignLUTSlot(slot, loaded, saved);

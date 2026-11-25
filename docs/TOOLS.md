@@ -89,6 +89,15 @@ Only d3d9.dll is built and shipped; NVR's own DLL, menu, settings and presets st
                             (docs/next/RT-REAL-TEXTURES.md (not in this repo)). No new interface: an older fork refuses the new formats and NVR
                             falls back to RGBA8. Only the d3d9_nvr_ext* files change. Built on r13 (0001-0029 + 0033 + 0034 +
                             the HDR stack) in WSL ~/fork-rtgap-tex; RT-test forks: + 0035.
+                 0036       (2026-11-17, security review) "1.5-debug": from dxvk.conf alone nvr.debugEnv sets only DXVK_DEBUG,
+                            DXVK_LOG_LEVEL, DXVK_HUD, DXVK_FILTER_DEVICE_NAME (the bench's GPU pick), VK_KHRONOS_VALIDATION_VALIDATE_*,
+                            VK_LAYER_ENABLES, VK_LOADER_LAYERS_DISABLE and ENABLE_VULKAN_RENDERDOC_CAPTURE; any other
+                            name (VK_ADD_LAYER_PATH, PATH, ...) needs NVR_DXVK_DEV set in the game's environment. Applies
+                            on the full stack (git am on v3.0.1). Built 2026-11-17 in WSL ~/fork-secfix (the fork-rtgap-tex tree + 0036), d3d9.dll
+                            sha256 e9ad7814; RT test host PASS on it and its log shows the refusals. In no release yet.
+                 0037       (upstream 1.1.2/1.1.3) HDR blitter: fallback descriptors and an HDR metadata guard (sets the
+                            swap chain's HDR metadata only when the mode changed or none is set). Not RT. Merged 2026-11-26
+                            with upstream 1.1.1-1.1.3; the installed fork was not rebuilt for it (RT needs neither patch).
                GetInfo reports 1.6. The "1.5-<feature>" parts are separate interfaces found with QueryInterface (or, for sm6,
                by MaxSlots), not by the minor version: NVR checks each one itself and keeps its D3D9 path without it.
 - `debug/`     dxvk.conf templates for debugging (`dxvk.conf.pipelinelog`: the 0017 measurement): `dxvk.conf.markers` (RenderDoc captures with NVR's named groups),

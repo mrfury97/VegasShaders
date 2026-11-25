@@ -124,22 +124,28 @@ float3 SkyAmbientSharpened(float3 dir, float3 plain) {
 // The cosine form factor, the wall/floor split and the sun-side azimuthal bias are all inherent
 // to the convolution. There is no direction to lean, so `directionality` is ignored here.
 // ---------------------------------------------------------------------------
+#ifdef SKY_AMBIENT_TERRAIN
+float4 TESR_SkyIrradianceTerrain[9] : register(c137);
+#define SKY_IRRADIANCE_SH TESR_SkyIrradianceTerrain
+#else
 float4 TESR_SkyIrradianceObjects[9] : register(c137);
+#define SKY_IRRADIANCE_SH TESR_SkyIrradianceObjects
+#endif
 
 // N: the GEOMETRIC world normal, unit length; lean is unused in this mode.
 float3 SkyAmbientRadiance(float3 N, float lean) {
 
     // Reconstruction is LINEAR irradiance; encode it. max() first because an order-2 SH fit can
     // ring slightly negative, and sqrt of a negative is NaN.
-    float3 E = TESR_SkyIrradianceObjects[0].rgb
-         + TESR_SkyIrradianceObjects[1].rgb * N.y
-         + TESR_SkyIrradianceObjects[2].rgb * N.z
-         + TESR_SkyIrradianceObjects[3].rgb * N.x
-         + TESR_SkyIrradianceObjects[4].rgb * (N.x * N.y)
-         + TESR_SkyIrradianceObjects[5].rgb * (N.y * N.z)
-         + TESR_SkyIrradianceObjects[6].rgb * (3.0f * N.z * N.z - 1.0f)
-         + TESR_SkyIrradianceObjects[7].rgb * (N.x * N.z)
-         + TESR_SkyIrradianceObjects[8].rgb * (N.x * N.x - N.y * N.y);
+    float3 E = SKY_IRRADIANCE_SH[0].rgb
+         + SKY_IRRADIANCE_SH[1].rgb * N.y
+         + SKY_IRRADIANCE_SH[2].rgb * N.z
+         + SKY_IRRADIANCE_SH[3].rgb * N.x
+         + SKY_IRRADIANCE_SH[4].rgb * (N.x * N.y)
+         + SKY_IRRADIANCE_SH[5].rgb * (N.y * N.z)
+         + SKY_IRRADIANCE_SH[6].rgb * (3.0f * N.z * N.z - 1.0f)
+         + SKY_IRRADIANCE_SH[7].rgb * (N.x * N.z)
+         + SKY_IRRADIANCE_SH[8].rgb * (N.x * N.x - N.y * N.y);
     return sqrt(max(E, 0.0f));
 }
 
@@ -148,11 +154,11 @@ float3 SkyAmbientRadiance(float3 N, float lean) {
 // the convolution weights bands 1, 1.5 and 4 (band 0 stays 1). Order 2 rings: a plain sky reads about a quarter brighter in
 // linear light at the zenith and dips below zero under the horizon, so the sum is clamped here.
 float3 SkyAmbientSharp(float3 dir) {
-    float3 radiance = TESR_SkyIrradianceObjects[0].rgb
-         + 1.5f * (TESR_SkyIrradianceObjects[1].rgb * dir.y + TESR_SkyIrradianceObjects[2].rgb * dir.z + TESR_SkyIrradianceObjects[3].rgb * dir.x)
-         + 4.0f * (TESR_SkyIrradianceObjects[4].rgb * (dir.x * dir.y) + TESR_SkyIrradianceObjects[5].rgb * (dir.y * dir.z)
-                 + TESR_SkyIrradianceObjects[6].rgb * (3.0f * dir.z * dir.z - 1.0f) + TESR_SkyIrradianceObjects[7].rgb * (dir.x * dir.z)
-                 + TESR_SkyIrradianceObjects[8].rgb * (dir.x * dir.x - dir.y * dir.y));
+    float3 radiance = SKY_IRRADIANCE_SH[0].rgb
+         + 1.5f * (SKY_IRRADIANCE_SH[1].rgb * dir.y + SKY_IRRADIANCE_SH[2].rgb * dir.z + SKY_IRRADIANCE_SH[3].rgb * dir.x)
+         + 4.0f * (SKY_IRRADIANCE_SH[4].rgb * (dir.x * dir.y) + SKY_IRRADIANCE_SH[5].rgb * (dir.y * dir.z)
+                 + SKY_IRRADIANCE_SH[6].rgb * (3.0f * dir.z * dir.z - 1.0f) + SKY_IRRADIANCE_SH[7].rgb * (dir.x * dir.z)
+                 + SKY_IRRADIANCE_SH[8].rgb * (dir.x * dir.x - dir.y * dir.y));
     return sqrt(max(radiance, 0.0f));
 }
 

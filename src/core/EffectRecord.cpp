@@ -26,7 +26,7 @@ void dropHeld(Iface*& held) {
 
 void logMessages(ID3DXBuffer* messages, const char* sourcePath) {
 	if (!messages) return;
-	Logger::Log((char*)messages->GetBufferPointer());
+	Logger::Log("%s", (char*)messages->GetBufferPointer());	// (2026-11-17: as text, not as the format: the messages quote the effect file)
 	RegisterClash::Check(sourcePath, (const char*)messages->GetBufferPointer());
 }
 }
@@ -365,6 +365,7 @@ void EffectRecord::SetCT() {
 	for (UInt32 i = 0; i < TextureShaderValuesCount; i++) {
 		ShaderTextureValue& slot = TextureShaderValues[i];
 		TextureRecord* tex = slot.Texture;
+		if (!tex || slot.RegisterIndex >= 16) continue;	// (2026-11-17: no record, or a 17th TESR_ sampler: the device and the game's state arrays have 16 stages)
 		// Follow the TextureManager slot rather than the pointer cached at first bind, so the
 		// frame chain's swapped rendered buffer is picked up.
 		if (tex->TextureRef) tex->Texture = *tex->TextureRef;
@@ -506,7 +507,9 @@ void EffectRecord::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTar
 	// UNOFFICIAL 2026-10-23 (NVR DXVK): the ported effects draw through the extension when it is there and on.
 	// (UNOFFICIAL 2026-10-26: not for a technique whose passes all have an SM6 build while NvrSm6Shaders is on: those draw below;
 	// nor for an effect NvrDxvkKeepD3D9 names.)
-	if (!ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name) && !Sm6Covers(techniqueIndex) && [&] { GpuDebug::LabelScope ext(Name, " (DXVK extension)");
+	// UNOFFICIAL 2026-11-19: RenderRect-aware Vulkan effects (ExtSupportsRenderRect) run through PassesOnRect() at RenderScale < 1.0 too.
+	const bool extAllowed = DxvkCompute::PassesOn() || (ExtSupportsRenderRect() && DxvkCompute::PassesOnRect());
+	if (!ExtFailed && extAllowed && !DxvkCompute::KeptOnD3D9(Name) && !Sm6Covers(techniqueIndex) && [&] { GpuDebug::LabelScope ext(Name, " (DXVK extension)");
 			return ExtRender(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer); }()) {
 		finishOnTarget("EffectRecord::ExtRender ");
 		return;
@@ -619,12 +622,39 @@ bool EffectRecord::ExtFullScreen(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 	draw.PushDataSize = PushSize;
 
 	FrameChain& chain = TheShaderManager->Chain;
+	const bool inChain = chain.Owns(RenderTarget, RenderedSurface);
+	const bool direct = inChain && last && chain.IsDirectFinal(this);
+	IDirect3DSurface9* targetSurface = inChain ? (direct ? chain.FinalSurface() : chain.Output()) : RenderTarget;
+
+	// UNOFFICIAL 2026-11-19: RenderRect-aware viewport and StretchRect sub-rect on screen-shaped targets (uv 0..1 spans [0, rw) x [0, rh)).
+	const bool rectActive = RenderRect::Active();
+	const UINT rw = rectActive ? RenderRect::Width(TheRenderManager->width) : 0;
+	const UINT rh = rectActive ? RenderRect::Height(TheRenderManager->height) : 0;
+	const RECT subRect = { 0, 0, (LONG)rw, (LONG)rh };
+	auto isScreenShaped = [](IDirect3DSurface9* s, bool requireNoMsaa) -> bool {
+		if (!s) return false;
+		D3DSURFACE_DESC d = {};
+		return SUCCEEDED(s->GetDesc(&d)) && d.Width == TheRenderManager->width && d.Height == TheRenderManager->height &&
+			(!requireNoMsaa || d.MultiSampleType == D3DMULTISAMPLE_NONE);
+	};
+	const bool useRect = rectActive && rw > 0 && rh > 0 && isScreenShaped(targetSurface, false);
+	if (useRect) {
+		draw.ViewportX = 0;
+		draw.ViewportY = 0;
+		draw.ViewportWidth = rw;
+		draw.ViewportHeight = rh;
+	}
+	auto copySubRect = [&](IDirect3DSurface9* src, IDirect3DSurface9* dst) -> const RECT* {
+		return (useRect && isScreenShaped(src, true) && isScreenShaped(dst, true)) ? &subRect : nullptr;
+	};
+
 	HRESULT result;
-	if (chain.Owns(RenderTarget, RenderedSurface)) {
-		if (SourceBuffer && usesSourceBuffer && SourceBuffer != RenderTarget)
-			Device->StretchRect(TheTextureManager->RenderedSurface, NULL, SourceBuffer, NULL, D3DTEXF_LINEAR);
-		const bool direct = last && chain.IsDirectFinal(this);
-		draw.Targets[0].pResource = direct ? chain.FinalSurface() : chain.Output();
+	if (inChain) {
+		if (SourceBuffer && usesSourceBuffer && SourceBuffer != RenderTarget) {
+			const RECT* r = copySubRect(TheTextureManager->RenderedSurface, SourceBuffer);
+			Device->StretchRect(TheTextureManager->RenderedSurface, r, SourceBuffer, r, D3DTEXF_LINEAR);
+		}
+		draw.Targets[0].pResource = targetSurface;
 		// UNOFFICIAL 2026-10-26 (alflicker): the managed file textures on the GPU. (2026-10-30: after the SourceBuffer copy above, so
 		// NvrDxvkMixCheck sees the pass read the copy it made.)
 		DxvkCompute::PreLoad(Bindings, BindingCount);
@@ -633,14 +663,18 @@ bool EffectRecord::ExtFullScreen(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 		if (SUCCEEDED(result)) { if (direct) chain.CommitFinal(); else chain.Commit(); }
 	}
 	else {
-		if (SourceBuffer && usesSourceBuffer && SourceBuffer != RenderTarget)
-			Device->StretchRect(RenderTarget, NULL, SourceBuffer, NULL, D3DTEXF_LINEAR);
-		draw.Targets[0].pResource = RenderTarget;
+		if (SourceBuffer && usesSourceBuffer && SourceBuffer != RenderTarget) {
+			const RECT* r = copySubRect(RenderTarget, SourceBuffer);
+			Device->StretchRect(RenderTarget, r, SourceBuffer, r, D3DTEXF_LINEAR);
+		}
+		draw.Targets[0].pResource = targetSurface;
 		DxvkCompute::PreLoad(Bindings, BindingCount);	// (as above)
 		result = ext->Draw(&draw);
 		if (SUCCEEDED(result)) MixCheck::NoteWrite(RenderTarget, MixCheck::kVulkan);
-		if (SUCCEEDED(result) && RenderedSurface && RenderedSurface != RenderTarget)
-			Device->StretchRect(RenderTarget, NULL, RenderedSurface, NULL, D3DTEXF_LINEAR);	// the result into the texture, as the legacy path
+		if (SUCCEEDED(result) && RenderedSurface && RenderedSurface != RenderTarget) {
+			const RECT* r = copySubRect(RenderTarget, RenderedSurface);
+			Device->StretchRect(RenderTarget, r, RenderedSurface, r, D3DTEXF_LINEAR);	// the result into the texture, as the legacy path
+		}
 	}
 	if (FAILED(result)) {
 		ExtFailed = true;

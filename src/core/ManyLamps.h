@@ -589,6 +589,20 @@ namespace ManyLamps {
 		return NoLamp;	// a lamp the scene's list did not hold at the frame's first draw: left out this frame
 	}
 
+	// UNOFFICIAL 2026-11-20: read FNV's exact current-frame kLightingOffset directly from ShadowSceneNode + 0x1E4
+	// (set by 0x00874C10 before RenderFirstPerson) instead of relying solely on 1-frame-stale c19 readback from AfterDraw,
+	// eliminating sudden light-to-light jumping when the 1st-person viewmodel enters/leaves point lights.
+	inline D3DXVECTOR3 ReadFirstPersonOffset() {
+		if (const ShadowSceneNode* node = BSShaderManager::GetShadowSceneNode(0)) {
+			const NiPoint3& o = *(const NiPoint3*)((const char*)node + 0x1E4);
+			if (_finite(o.x) && _finite(o.y) && _finite(o.z)) {
+				FirstPersonOffset = D3DXVECTOR3(o.x, o.y, o.z);
+				return FirstPersonOffset;
+			}
+		}
+		return FirstPersonOffset;
+	}
+
 	// The object's lamps for this pass as table indices (the same choice and order as SetForPass below).
 	inline void SetForPassTable(const PointShadowForward::RenderPassView* pass) {
 		// UNOFFICIAL 2026-10-30 ClusteredLamps: made again at the frame's first world draw (a discarding lock: earlier draws keep theirs)
@@ -600,7 +614,7 @@ namespace ManyLamps {
 			NiGeometry* geometry = pass->geometry;
 			GetInverseWorldMatrix(&geometry->m_worldTransform, geometry->skinInstance, &ToObject);
 			ReachScale = !geometry->skinInstance && geometry->m_worldTransform.scale > 0.0f ? 1.0f / geometry->m_worldTransform.scale : 1.0f;
-			LightingOffset = FirstPerson ? FirstPersonOffset : D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+			LightingOffset = FirstPerson ? ReadFirstPersonOffset() : D3DXVECTOR3(0.0f, 0.0f, 0.0f);
 			for (int i = 1; i < pass->numLights && count < MaxLamps; i++) {
 				const ShadowSceneLight* light = pass->lights[i];	// (lamp k stays light k + 1 of the pass: its shadow slot)
 				idx[count++] = light && light->sourceLight && light->bPointLight ? TableSlot(light) : NoLamp;
@@ -683,7 +697,7 @@ namespace ManyLamps {
 			NiGeometry* geometry = pass->geometry;
 			GetInverseWorldMatrix(&geometry->m_worldTransform, geometry->skinInstance, &ToObject);
 			ReachScale = !geometry->skinInstance && geometry->m_worldTransform.scale > 0.0f ? 1.0f / geometry->m_worldTransform.scale : 1.0f;
-			LightingOffset = FirstPerson ? FirstPersonOffset : D3DXVECTOR3(0.0f, 0.0f, 0.0f);
+			LightingOffset = FirstPerson ? ReadFirstPersonOffset() : D3DXVECTOR3(0.0f, 0.0f, 0.0f);
 			for (int i = 1; i < pass->numLights && count < MaxLamps; i++) {
 				const ShadowSceneLight* light = pass->lights[i];
 				// Lamp k must stay light k + 1 of the pass (the shader gives it that light's cube-map shadow slot): one that is not a usable

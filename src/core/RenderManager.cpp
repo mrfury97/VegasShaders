@@ -460,10 +460,20 @@ void RenderManager::ResolveDepthBuffer(IDirect3DTexture9* depthTarget) {
 	else {
 		// NVAPI path: the game's depth surface (or its INTZ texture) is stretched into the depth texture.
 		TextureManager* textures = TheTextureManager;
-		if (textures->DepthSurface == nullptr) {
-			// first call: find the game's depth surface; an INTZ one is read through its texture
-			device->GetDepthStencilSurface(&textures->DepthSurface);
-			D3DSURFACE_DESC gameDepth;
+		IDirect3DSurface9* currentDepth = nullptr;
+		if (FAILED(device->GetDepthStencilSurface(&currentDepth)) || !currentDepth) {
+			static bool toldNullDepth = false;
+			if (!toldNullDepth) { toldNullDepth = true; Logger::Log("[ERROR] depth (NVAPI): GetDepthStencilSurface returned null; skipping depth resolve."); }
+			return;
+		}
+		if (currentDepth != textures->DepthSurface) {
+			if (textures->DepthSurface) {
+				Logger::Log("UNOFFICIAL depth (NVAPI): game depth surface changed (%p -> %p); re-registering.", textures->DepthSurface, currentDepth);
+				if (textures->DepthTextureINTZ) { textures->DepthTextureINTZ->Release(); textures->DepthTextureINTZ = nullptr; }
+				textures->DepthSurface->Release();
+			}
+			textures->DepthSurface = currentDepth;
+			D3DSURFACE_DESC gameDepth = {};
 			textures->DepthSurface->GetDesc(&gameDepth);
 			const bool isIntz = gameDepth.Format == (D3DFORMAT)MAKEFOURCC('I', 'N', 'T', 'Z');
 			if (isIntz) {
@@ -471,7 +481,13 @@ void RenderManager::ResolveDepthBuffer(IDirect3DTexture9* depthTarget) {
 				textures->DepthSurface->GetContainer(IID_IDirect3DTexture9, &owner);
 				textures->DepthTextureINTZ = static_cast<IDirect3DTexture9*>(owner);
 			}
-			NvAPI_D3D9_RegisterResource(isIntz ? (IDirect3DResource9*)textures->DepthTextureINTZ : (IDirect3DResource9*)textures->DepthSurface);
+			const NvAPI_Status regStatus = NvAPI_D3D9_RegisterResource(isIntz ? (IDirect3DResource9*)textures->DepthTextureINTZ : (IDirect3DResource9*)textures->DepthSurface);
+			if (regStatus != NVAPI_OK) {
+				Logger::Log("[ERROR] depth (NVAPI): NvAPI_D3D9_RegisterResource failed (status=%d, isIntz=%d).", (int)regStatus, isIntz ? 1 : 0);
+			}
+		}
+		else {
+			currentDepth->Release();
 		}
 
 		// UNOFFICIAL 2026-10-30 (terrain flicker deep dive): the game's depth surface can be larger than the picture (seen: 1024 lines
@@ -494,7 +510,11 @@ void RenderManager::ResolveDepthBuffer(IDirect3DTexture9* depthTarget) {
 		// UNOFFICIAL, test only: NvAPI bypasses the device, so the frame recorder notes the copy itself (FrameRecorder.h; whole surface).
 		FrameRecorder::NvStretchRect(copyFrom, depthTarget);
 #endif
-		NvAPI_D3D9_StretchRectEx(device, copyFrom, sourceRect, depthTarget, sourceRect ? &target : NULL, D3DTEXF_NONE);
+		const NvAPI_Status stretchStatus = NvAPI_D3D9_StretchRectEx(device, copyFrom, sourceRect, depthTarget, sourceRect ? &target : NULL, D3DTEXF_NONE);
+		if (stretchStatus != NVAPI_OK) {
+			static bool toldStretchErr = false;
+			if (!toldStretchErr) { toldStretchErr = true; Logger::Log("[ERROR] depth (NVAPI): NvAPI_D3D9_StretchRectEx failed (status=%d); depth buffer may be stale/empty.", (int)stretchStatus); }
+		}
 	}
 }
 

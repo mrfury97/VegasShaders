@@ -907,6 +907,13 @@ public:
 		return (s[0] == Menu::kMenuType_Loading && s[1] == Menu::kMenuType_Start) ||
 			   (s[0] == Menu::kMenuType_Console && s[1] == Menu::kMenuType_Loading && s[2] == Menu::kMenuType_Start);
 	}
+	bool IsOpen(UInt32 MenuType) const {
+		if (MenuType == Menu::kMenuType_Main) return const_cast<MenuInterfaceManager*>(this)->IsActive(MenuType);
+		if (MenuType == Menu::kMenuType_None) return menuStack[0] == Menu::kMenuType_None;
+		for (int i = 0; i < 10 && menuStack[i]; i++)
+			if (menuStack[i] == MenuType) return true;
+		return false;
+	}
 	// Corner notification, 2 seconds (0x7052F0).
 	void ShowMessage(const char* Message) { CdeclCall<bool>(0x007052F0, Message, (UInt32)0, (const char*)nullptr, (const char*)nullptr, 2.0f, false); }
 	UInt8 IsPipBoyOpen() { return pipBoyMode == 3; }

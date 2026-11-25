@@ -105,6 +105,41 @@ vec4 rtTexSampleHit(uint id, vec2 uv, uint instance, uint primitive) {
 	return rtTexSample(id, uv, rtTexLod(id, instance, primitive));
 }
 
+// UNOFFICIAL 2026-11-19: preloaded-triangle ray-cone helpers (0 SSBO loads; computed once per committed hit via RtHitGeom)
+bool rtTexGradsPreloaded(vec3 p0, vec3 p1, vec3 p2, vec2 u0, vec2 u1, vec2 u2, out vec2 gx, out vec2 gy) {
+	gx = vec2(0.0); gy = vec2(0.0);
+	if (rtConeWidth <= 0.0 || dot(rtConeDir, rtConeDir) < 0.5) return false;
+	const vec3 e1 = rtConeToScene * (p1 - p0), e2 = rtConeToScene * (p2 - p0);
+	const vec3 c = cross(e1, e2);
+	const float c2 = dot(c, c);
+	if (c2 < 1.0e-12) return false;
+	const vec3 n = c * inversesqrt(c2);
+	const vec3 d = rtConeDir;
+	const float cosT = max(abs(dot(d, n)), 1.0 / 16.0);
+	vec3 h1 = d - dot(d, n) * n;
+	const float h1len = length(h1);
+	h1 = h1len > 1.0e-4 ? h1 / h1len : normalize(e1);
+	const vec3 h2 = cross(n, h1);
+	const vec3 a1 = h1 * (rtConeWidth / cosT), a2 = h2 * rtConeWidth;
+	const float g11 = dot(e1, e1), g12 = dot(e1, e2), g22 = dot(e2, e2), det = g11 * g22 - g12 * g12;
+	if (abs(det) < 1.0e-12) return false;
+	const vec2 du1 = u1 - u0, du2 = u2 - u0;
+	const float invDet = 1.0 / det;
+	const float s1 = (g22 * dot(e1, a1) - g12 * dot(e2, a1)) * invDet, t1 = (g11 * dot(e2, a1) - g12 * dot(e1, a1)) * invDet;
+	const float s2 = (g22 * dot(e1, a2) - g12 * dot(e2, a2)) * invDet, t2 = (g11 * dot(e2, a2) - g12 * dot(e1, a2)) * invDet;
+	gx = du1 * s1 + du2 * t1;
+	gy = du1 * s2 + du2 * t2;
+	return !any(isnan(gx)) && !any(isinf(gx)) && !any(isnan(gy)) && !any(isinf(gy));
+}
+
+vec4 rtTexSampleCached(uint id, vec2 uv, bool hasGrads, vec2 gx, vec2 gy, float worldArea, float uvArea) {
+	if (hasGrads) return textureGrad(sampler2D(rtTextures[nonuniformEXT(id)], rtTexSampler), uv, gx, gy);
+	if (rtConeWidth <= 0.0 || worldArea <= 0.0) return rtTexSample(id, uv, 0.0);
+	const vec2 size = vec2(textureSize(sampler2D(rtTextures[nonuniformEXT(id)], rtTexSampler), 0));
+	const float texelsPerUnit = sqrt(uvArea * size.x * size.y / max(worldArea, 1.0e-8));
+	return rtTexSample(id, uv, log2(max(rtConeWidth * texelsPerUnit, 1.0e-6)));
+}
+
 vec3 rtTexToLinear(vec3 c) {   // the textures are sRGB-encoded (sampled as UNORM, as the atlases)
 	return mix(pow((c + 0.055) / 1.055, vec3(2.4)), c / 12.92, lessThanEqual(c, vec3(0.04045)));
 }

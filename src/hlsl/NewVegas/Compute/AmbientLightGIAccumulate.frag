@@ -22,7 +22,7 @@ void main() {
     float viewZ = pointLod(t_prep, uv).x;
     o_bounce = vec4(current.rgb, viewZ);
     o_occlusion = vec4(current.a, viewZ, 0.0, 1.0);
-    if (!(cb.alTemporal.x > 0.0) || viewZ < NearFade) return;
+    if (!(cb.alTemporal.x > 0.0) || viewZ < NearFade || viewZ >= 9.0e5) return;
     vec3 origin = PositionFromViewZ(uv, viewZ);
     vec4 clip = cb.reproject * vec4(origin, 1.0);   // mul(float4(origin, 1), NVR_ALReproject)
     float w = max(clip.w, 0.001);

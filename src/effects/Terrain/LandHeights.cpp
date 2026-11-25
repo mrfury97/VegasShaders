@@ -263,7 +263,7 @@ const uint8_t* FindSub(const std::vector<uint8_t>& data, uint32_t type, uint32_t
 		uint32_t n = s;
 		if (longSize) { n = longSize; longSize = 0; }
 		if (t == Tag("XXXX") && s == 4 && p + 4 <= data.size()) { memcpy(&longSize, &data[p], 4); p += 4; continue; }
-		if (p + n > data.size()) return nullptr;
+		if (n > data.size() - p) return nullptr;	// (2026-11-17: was p + n, which wraps with a huge XXXX size; p <= size here)
 		if (t == type) { size = n; return &data[p]; }
 		p += n;
 	}
@@ -302,6 +302,10 @@ struct Walker {
 		int32_t v[2];
 		memcpy(v, xclc, 8);
 		x = v[0]; y = v[1];
+		// 2026-11-17: a cell far outside any real worldspace (a damaged or hand-made plugin) is left out: the map's size is
+		// computed from the outermost cells, and a huge span wrapped it to a small one that the other cells then wrote outside of.
+		const int limit = 2048;
+		if (x < -limit || x > limit || y < -limit || y > limit) return false;
 		return true;
 	}
 
@@ -436,6 +440,7 @@ bool LandHeights::Read(const std::vector<Plugin>& Plugins, const std::string& Wo
 				if (c) v += steps[r * 33 + c];
 				const float h = v * 8.0f;
 				const size_t k = (size_t)imageRow * Out.Width + ((uint32_t)(l->x - west) * 32 + c) / factor;
+				if (k >= counts.size()) continue;	// (2026-11-17: cannot happen with the cell range checked in CellGrid; kept as the last guard)
 				Out.Heights[k] += h;
 				Out.Peaks[k] = (std::max)(Out.Peaks[k], h);
 				counts[k]++;

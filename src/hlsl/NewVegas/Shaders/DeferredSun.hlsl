@@ -48,6 +48,7 @@ static float DSSpecFade = 1.0f;
 #define PBR_SPEC_F0(baseColor, metal) lerp(DSSpecF0.xxx, (baseColor), (metal))
 #define PBR_DIELECTRIC_F0 min(DSSpecF0, 0.04f)
 #define FD_SUN_SPEC_FADE DSSpecFade
+#define PBR_ROUGH_F90 1	// UNOFFICIAL 2026-11-19 (Finding 4.2): roughness-damped grazing F90 parity with RtPathTrace.comp
 
 #include "includes/Helpers.hlsl"
 #include "includes/Object.hlsl"
@@ -103,17 +104,23 @@ sampler2D TESR_DeferredDepthLinear : register(s6) = sampler_state { ADDRESSU = C
 // to every pixel but those: the foliage records' pixels, and model 5 (plants) while DS_SunColor.w < 0.5.
 //   DS_SunColor.w (c7) = 1 the clouds shade plants (PlantShadows on), 0 they do not: core/DeferredSun.h Apply sends PlantShadows there
 //   (fd-merged-1116) and c169 as the frame's strength (ForwardCloudShadows::SendFrame, batch B).
+// UNOFFICIAL 2026-11-16 fast-restart (testers: grass and bushes glowing in full sun under a cloud's shadow, docs/next/FAST-RESTART.md): with
+// ForwardShadows on, the foliage records' pixels (grass, SpeedTree leaves) take the clouds' shadow here too, on the sun light they carry
+// (COLOR2.b), as their forward records now do (before, they never took it: full sun under a cloud). DS_SunColor.w: the clouds' strength for
+// the foliage (> 0 ForwardShadows on and PlantShadows on; 0 ForwardShadows off: SunFar shades them, as before), -1 PlantShadows off (the
+// foliage and model 5 keep their sun, as before). c169.xyz is sent whenever the clouds draw a shadow (ForwardCloudShadows::SendFrame), its w
+// only with ForwardShadows on (every other pixel's strength).
 #if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS
     #define DS_CLOUD 1
 float4 NVR_CloudSun : register(c169); // xy: the map's uv under the camera along the light, z: map uv per world unit, w: strength (0 off)
 sampler2D TESR_CloudShadow : register(s8) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 // Includes/Shadow.hlsl CloudSunAt, the same expression (keep in step).
-float DSCloudSunAt(float3 P) {
+float DSCloudSunAt(float3 P, float strength) {	// (2026-11-16 fast-restart: the strength a parameter, the foliage's own or c169.w)
     float3 light = normalize(TESR_SmoothedSunDir.xyz);
     float2 suv = NVR_CloudSun.xy + (P.xy - light.xy * (P.z / max(light.z, 0.25f))) * NVR_CloudSun.z;
     float2 edge = min(suv, 1.0f - suv);
     float inside = saturate(min(edge.x, edge.y) * 10.0f);
-    return lerp(1.0f, tex2Dlod(TESR_CloudShadow, float4(suv, 0.0f, 0.0f)).r, inside * NVR_CloudSun.w);
+    return lerp(1.0f, tex2Dlod(TESR_CloudShadow, float4(suv, 0.0f, 0.0f)).r, inside * strength);
 }
 #else
     #define DS_CLOUD 0
@@ -341,12 +348,15 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
 #endif
 #if DS_CLOUD
         // (2026-11-16 batch D) the clouds' share, where GetSunShadow put it (its last factor), but not on what forward kept out of it
+        // (2026-11-16 fast-restart) the foliage records' pixels: DS_SunColor.w (their own strength, ForwardShadows on; -1 PlantShadows off);
+        // model 5 (plants) with PlantShadows off: none; every other pixel: c169.w (ForwardShadows on)
+        const float cloudPlant = abs(model - 5.0f) < 0.5f && DS_SunColor.w < 0.0f ? 0.0f : NVR_CloudSun.w;
     #if FD_FOLIAGE
-        const bool cloudless = foliage || (abs(model - 5.0f) < 0.5f && DS_SunColor.w < 0.5f);
+        const float cloudStrength = foliage ? max(DS_SunColor.w, 0.0f) : cloudPlant;
     #else
-        const bool cloudless = abs(model - 5.0f) < 0.5f && DS_SunColor.w < 0.5f;
+        const float cloudStrength = cloudPlant;
     #endif
-        [branch] if (NVR_CloudSun.w > 0.0f && !cloudless) shadow *= DSCloudSunAt(P);
+        [branch] if (cloudStrength > 0.0f) shadow *= DSCloudSunAt(P, cloudStrength);
 #endif
     }
 #if FD_SKIN

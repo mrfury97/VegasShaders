@@ -29,9 +29,13 @@ namespace GpuGrass {
 	void	Disarm();
 	bool	Took();									// UNOFFICIAL 2026-11-04: the armed pass's card draw was caught (before Disarm)
 	bool	KeepsCards();								// KeepCards: the caught cards are drawn too
+	bool	DiagEveryFrame();							// UNOFFICIAL 2026-11-16 grass-cull: Log 2 (test only), GrassFirst's frame line every frame too
 	// UNOFFICIAL 2026-11-04: the strands stand in for the cards nearer than this in the flashlight's shadow map (they cast it themselves);
 	// 0 when they do not (off, turned off, KeepCards, not outdoors, the strand casters missing): the cards cast it as before
 	float	FlashlightCasterReach();
 	void	DrawFlashlightCasters(IDirect3DDevice9* Device);	// last frame's strands into this frame's flashlight shadow map (early in the frame)
 	void	EndEarly(IDirect3DDevice9* Device);			// unhooks; the GPU work (cull + draws) for what was caught
+	// UNOFFICIAL 2026-11-16 grass-cull: after EndEarly, true when the caught cards were skipped (KeepCards off) and no strands could be drawn
+	// for them this frame (a buffer, an upload, a dispatch or a draw refused): the caller draws those passes' cards after all
+	bool	StrandsFailed();
 }

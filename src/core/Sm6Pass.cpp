@@ -113,7 +113,7 @@ bool Sm6Pass::LoadLayout(const char* Path) {
 		}
 		else if (tag == "sampler") {
 			UINT slot; std::string filter, address;
-			in >> slot >> filter >> address;
+			if (!(in >> slot >> filter >> address) || slot >= 64) return Fail("a bad sampler line");	// (2026-11-17: the slot sized and indexed the list unchecked)
 			SamplerStates.push_back({ slot, filter + " " + address });
 			ID3D9NvrExtSampler* s = Sm6Sampler(Sm6Filter(filter), Sm6Address(address));
 			if (!s) return Fail("a sampler could not be made");
@@ -126,6 +126,7 @@ bool Sm6Pass::LoadLayout(const char* Path) {
 		else if (tag == "targets") in >> TargetCount;
 	}
 	if (!header) return Fail("not an nvr-sm6 layout");
+	if (UboSize > (1u << 20)) return Fail("bad uniform buffer size");	// (2026-11-17: allocated as given)
 	for (ID3D9NvrExtSampler* s : Samplers) if (!s) return Fail("a sampler slot has no state");
 	return true;
 }
@@ -251,7 +252,7 @@ void Sm6Pass::FillConstants() {
 	ID3DXEffect* effect = Owner->Effect;
 	std::fill(UboData.begin(), UboData.end(), 0);
 	for (const Constant& c : Constants) {
-		if (c.Offset + c.Size > UboData.size()) continue;
+		if (c.Offset > UboData.size() || c.Size > UboData.size() - c.Offset) continue;	// (2026-11-17: was Offset + Size, which wraps: the layout file's numbers)
 		unsigned char* dst = &UboData[c.Offset];
 		auto over = VectorOverrides.find(c.Name);
 		if (over != VectorOverrides.end()) { memcpy(dst, &over->second, min(c.Size, (UINT)sizeof(D3DXVECTOR4))); continue; }
@@ -366,6 +367,7 @@ bool Sm6Pass::Draw(IDirect3DDevice9* Device, IDirect3DSurface9* const* Targets, 
 	if (Frames == 120) {	// once: what the pass was fed (constants' first four values, textures), for checking against the D3D9 pass
 		std::string line;
 		for (const Constant& c : Constants) {
+			if (c.Size < 4 || c.Offset > UboData.size() || c.Size > UboData.size() - c.Offset) continue;	// (2026-11-17: as FillConstants)
 			const float* v = (const float*)&UboData[c.Offset];
 			char one[160];
 			_snprintf_s(one, sizeof(one), _TRUNCATE, " %s=(%g %g %g %g)%s", c.Name.c_str(), v[0], c.Size > 4 ? v[1] : 0.0f, c.Size > 8 ? v[2] : 0.0f,

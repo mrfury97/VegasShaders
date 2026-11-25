@@ -11,6 +11,7 @@ layout(set = 1, binding = 1) uniform texture2D t_history;     // TESR_TAAHistory
 layout(set = 1, binding = 2) uniform texture2D t_depth;       // TESR_DepthBuffer (POINT)
 layout(set = 1, binding = 3) uniform texture2D t_viewmodel;   // TESR_DepthBufferViewModel (POINT)
 layout(set = 1, binding = 4) uniform texture2D t_objmotion;   // UNOFFICIAL 2026-10-29 TESR_ObjectMotionBuffer (POINT; a placeholder while cameraDelta.w is 0)
+layout(set = 1, binding = 5) uniform texture2D t_vmmotion;    // UNOFFICIAL 2026-11-21 TESR_ViewModelMotionBuffer (POINT; a placeholder while weapon.y is 0)
 
 layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;   // TESR_ProjectionTransform
@@ -164,10 +165,21 @@ TAAResult ResolveCore(vec2 p) {
     float inFront;
     vec2 prevUV = Reproject(p, inFront);
 
-    // The weapon is fixed to the camera, so it was at this same pixel last frame.
+    // The weapon gets real 1st-person motion vectors when WeaponAA is active; otherwise fixed to camera (same pixel).
     float isViewModel = textureLod(sampler2D(t_viewmodel, POINT_S), p, 0.0).x > 0.0 ? 1.0 : 0.0;
-    prevUV = mix(prevUV, p, isViewModel);
-    inFront = max(inFront, isViewModel);
+    if (isViewModel > 0.5 && cb.weapon.y > 0.5) {
+        vec4 vm = textureLod(sampler2D(t_vmmotion, POINT_S), p, 0.0);
+        if (vm.z > 0.5) {
+            prevUV = p + vm.xy;
+            inFront = 1.0;
+        } else {
+            prevUV = p;
+            inFront = 0.0;
+        }
+    } else {
+        prevUV = mix(prevUV, p, isViewModel);
+        inFront = max(inFront, isViewModel);
+    }
 
     vec2 inside = step(vec2(0.0), prevUV) * step(prevUV, vec2(1.0));
     float onScreen = inside.x * inside.y;

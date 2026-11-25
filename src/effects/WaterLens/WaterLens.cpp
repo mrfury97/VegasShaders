@@ -1,22 +1,51 @@
 #include "WaterLens.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
+#include <algorithm>
+
+void WaterLensEffect::Reset() {
+	fadeValue = 0.0f;
+	wasUnderwater = false;
+	needsSync = true;
+	lastUpdateTime = -1.0;
+	Constants.Data.w = 0.0f;
+	Constants.WaterLensAnimator.Initialize(0.0f);
+	Constants.WaterLensAnimator.switched = false;
+}
 
 void WaterLensEffect::UpdateConstants() {
-	Animator& fade = Constants.WaterLensAnimator;
+	// UNOFFICIAL 2026-11-20: real-time fade (seconds, not GameDaysPassed game hours) + reset on save load, camera cut, or gap.
+	// Previously WaterLens used Animator on GameDaysPassed: reloading an earlier save while fading caused invLerp to extrapolate
+	// wildly negative (strength >> 1.0, blinding white contour lines and smeared refraction stuck until game time caught up),
+	// low/zero timescale stalled the fade, and reloading from underwater into a dry save fired a false exit-water fade.
 	const bool underwater = TheShaderManager->GameState.isUnderwater;
+	const double now = TheFrameRateManager->Time;
+	const bool gap = lastUpdateTime >= 0.0 && (now < lastUpdateTime || now - lastUpdateTime >= 0.5);
 
-	if (underwater && !fade.switched) {
-		// just went under: hold the lens at zero
-		fade.switched = true;
-		fade.Start(0.f, 0);
-	} else if (!underwater && fade.switched) {
-		// just came up: start the droplets at full and fade them out
-		fade.switched = false;
-		fade.Initialize(1);
-		fade.Start(0.01f, 0);
+	if (needsSync || gap || TheShaderManager->GameState.isCameraCut || TheSettingManager->GameLoading) {
+		wasUnderwater = underwater;
+		fadeValue = 0.0f;
+		needsSync = false;
+		lastUpdateTime = now;
+		Constants.Data.w = 0.0f;
+		return;
 	}
 
-	Constants.Data.w = amount * fade.GetValue();
+	const float dt = lastUpdateTime >= 0.0 ? (std::clamp)((float)(now - lastUpdateTime), 0.0f, 0.25f) : 0.0f;
+	lastUpdateTime = now;
+
+	if (underwater) {
+		wasUnderwater = true;
+		fadeValue = 0.0f;
+	} else if (wasUnderwater) {
+		wasUnderwater = false;
+		fadeValue = 1.0f;
+	} else if (fadeValue > 0.0f) {
+		constexpr float kFadeSeconds = 1.5f;
+		fadeValue = (std::max)(0.0f, fadeValue - dt / kFadeSeconds);
+	}
+
+	fadeValue = (std::clamp)(fadeValue, 0.0f, 1.0f);
+	Constants.Data.w = (std::max)(0.0f, amount) * fadeValue;
 }
 
 void WaterLensEffect::UpdateSettings(){
@@ -32,7 +61,7 @@ void WaterLensEffect::RegisterConstants(){
 }
 
 bool WaterLensEffect::ShouldRender() {
-	return Constants.Data.w > 0.0f;
+	return !TheShaderManager->GameState.isUnderwater && Constants.Data.w > 0.0f;
 };
 
 // UNOFFICIAL 2026-10-23 (NVR DXVK): WaterLens.frag; the textures (the file texture through the WRAP sampler) and constants the technique reads.

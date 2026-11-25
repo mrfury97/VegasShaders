@@ -69,6 +69,7 @@ static bool BindFaceGenMaps(void* apThis, NiGeometry* Geometry, NiD3DPass* Pass)
 
 void* __fastcall SkinShader__PrepareGeometryForRendering(void* apThis, void*, void* apGeometry, void* apPartition, void* apRendererData, void* apState) {
     void* Result = (void*)ThisCall(kSkinPrepareGeometryDetour.GetOverwrittenAddr(), apThis, apGeometry, apPartition, apRendererData, apState);
+    if (!TheShaderManager || !TheRenderManager || !TheSettingManager) return Result;
 
     NiD3DPass* Pass = *(NiD3DPass**)0x0126F74C;   // NiD3DShader::m_pCurrentPass
     NiD3DPixelShaderEx* PixelShader = Pass ? (NiD3DPixelShaderEx*)Pass->PixelShader : nullptr;
@@ -140,13 +141,14 @@ void* __fastcall SkinShader__PrepareGeometryForRendering(void* apThis, void*, vo
 
 void __fastcall SkinShader__PostGeometry(void* apThis, void*, void* apProperties) {
     ThisCall(kSkinPostGeometryDetour.GetOverwrittenAddr(), apThis, apProperties);
-    if (TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->Unbind();
+    if (TheShaderManager && TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->Unbind();
     if (sFaceGenStage2) {
         *(void**)((UInt8*)sFaceGenStage2 + 0x08) = nullptr;   // NiD3DTextureStage::m_pkTexture
         sFaceGenStage2 = nullptr;
     }
     if (sSkinHighlightMuted) {
-        TheRenderManager->device->SetRenderState(D3DRS_COLORWRITEENABLE, sSkinSavedWriteMask);
+        if (TheRenderManager && TheRenderManager->device)
+            TheRenderManager->device->SetRenderState(D3DRS_COLORWRITEENABLE, sSkinSavedWriteMask);
         sSkinHighlightMuted = false;
     }
 }

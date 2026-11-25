@@ -24,43 +24,73 @@ layout(set = 0, binding = 18, r32f) uniform readonly image2D prevDepth;      // 
 vec2 signalAt(ivec2 pixel, int layer) {
 #ifdef SUN
 	float v = imageLoad(visImage, pixel).r;
-	float d = imageLoad(hitImage, pixel).r;
+	float d = abs(imageLoad(hitImage, pixel).r);	// UNOFFICIAL 2026-11-20: negative hitImage encodes moving actor blocker (NVR_RT_CUSTOM_ACTOR)
 	return vec2(v, d > 0.0 ? d * p.light.w : 0.0);
 #else
 	return imageLoad(signalImage, pixel + ivec2(0, layer * TILE_H)).rg;
 #endif
 }
 
+// UNOFFICIAL 2026-11-19: 12x12 shared-memory tile (8x8 group + 2-px border) for 5x5 anti-lag neighbourhood (~11x less global bandwidth)
+shared float shDepth[144];
+shared float shVis[144];
+#ifdef SUN
+shared uint shActor[144];	// UNOFFICIAL 2026-11-20: 1 where hitImage < 0 (moving actor blocker)
+#endif
+
 void main() {
 	ivec2 g = ivec2(gl_GlobalInvocationID.xy);
 	int layer = g.y / TILE_H;
 	ivec2 pixel = ivec2(g.x, g.y - layer * TILE_H);
+	// Check uniformly whether the whole 8x8 workgroup lies in one layer (always true for SUN; ~98.5% for LAMPS)
+	int wgY0 = int(gl_WorkGroupID.y) * 8;
+	int wgLayer = wgY0 / TILE_H;
+	bool sameLayer = (wgLayer == (wgY0 + 7) / TILE_H) && (wgLayer < layers());
+	bool useShared = sameLayer && (p.antiLag.x > 0.0) && (p.prevForward.w >= 0.5);
+	ivec2 tileBase = ivec2(int(gl_WorkGroupID.x) * 8 - 2, wgY0 - wgLayer * TILE_H - 2);
+	if (useShared) {
+		for (uint idx = gl_LocalInvocationIndex; idx < 144u; idx += 64u) {
+			ivec2 q = clamp(tileBase + ivec2(int(idx % 12u), int(idx / 12u)), ivec2(0), ivec2(TILE_W - 1, TILE_H - 1));
+			shDepth[idx] = imageLoad(depthImage, sourceOf(q)).r;
+#ifdef SUN
+			shVis[idx] = imageLoad(visImage, q).r;
+			shActor[idx] = imageLoad(hitImage, q).r < 0.0 ? 1u : 0u;
+#else
+			shVis[idx] = imageLoad(signalImage, q + ivec2(0, wgLayer * TILE_H)).x;
+#endif
+		}
+		barrier();
+	}
 	if (g.x >= TILE_W || layer >= layers()) return;
 
 	ivec2 src = sourceOf(pixel);
 	Surface s = surfaceAt(pixel, src, imageLoad(depthImage, src).r, imageLoad(normalImage, src).xyz);
 	vec2 sig = signalAt(pixel, layer);
-	if (!s.valid) { imageStore(histNext, g, vec4(1.0, 1.0, 0.0, 0.0)); return; }
+	if (!s.valid) { imageStore(histNext, g, vec4(1.0, 0.0, 0.0, 0.0)); return; }
 
-	// This frame's 5 x 5 neighbourhood on the same surface: the mean and spread of the raw samples (anti-lag)
-	float sum = 0.0, sum2 = 0.0, count = 0.0;
-	float plane = p.params.z * 4.0 * s.viewZ;
-	for (int y = -2; y <= 2; y++)
-		for (int x = -2; x <= 2; x++) {
-			ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), ivec2(TILE_W - 1, TILE_H - 1));
-			ivec2 qs = sourceOf(q);
-			float z = imageLoad(depthImage, qs).r;
-			Surface t = surfaceAt(q, qs, z, imageLoad(normalImage, qs).xyz);
-			if (!t.valid || abs(dot(s.normal, t.position - s.position)) > plane) continue;
-			float v = signalAt(q, layer).x;
-			sum += v; sum2 += v * v; count += 1.0;
-		}
-	float mean = sum / max(count, 1.0);
-	float sigma = sqrt(max(sum2 / max(count, 1.0) - mean * mean, 0.0));
+#ifdef SUN
+	// UNOFFICIAL 2026-11-20: 3x3 dilation of moving-actor shadow blockers (zero extra rays; catches edges moving into/out of a pixel)
+	bool actorNear = false;
+	if (useShared) {
+		ivec2 sl0 = ivec2(gl_LocalInvocationID.xy) + ivec2(2, 2);
+		for (int dy = -1; dy <= 1; dy++)
+			for (int dx = -1; dx <= 1; dx++)
+				if (shActor[(sl0.y + dy) * 12 + (sl0.x + dx)] != 0u) actorNear = true;
+	} else {
+		for (int dy = -1; dy <= 1; dy++)
+			for (int dx = -1; dx <= 1; dx++) {
+				ivec2 q = clamp(pixel + ivec2(dx, dy), ivec2(0), ivec2(TILE_W - 1, TILE_H - 1));
+				if (imageLoad(hitImage, q).r < 0.0) actorNear = true;
+			}
+	}
+#endif
 
 	// The history where this surface was last frame
 	vec4 h = vec4(0.0);
 	float hlen = 0.0;
+#ifdef SUN
+	float prevActor = 0.0;
+#endif
 	bool reset = p.prevForward.w < 0.5 || layerResetOf(layer);
 	vec3 move = p.prevRight.w > 0.5 ? imageLoad(motionImage, src).xyz : vec3(0.0);
 	vec2 prevPixel;
@@ -83,15 +113,48 @@ void main() {
 			if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, ivec2(TILE_W, TILE_H)))) continue;
 			if (!sameSurface(imageLoad(prevDepth, t).r, prevZ, facing)) continue;
 			float w = (o.x == 1 ? fr.x : 1.0 - fr.x) * (o.y == 1 ? fr.y : 1.0 - fr.y);
-			h += w * imageLoad(histPrev, t + ivec2(0, layer * TILE_H));
+			vec4 ht = imageLoad(histPrev, t + ivec2(0, layer * TILE_H));
+			h += w * ht;
+#ifdef SUN
+			prevActor = max(prevActor, ht.y);
+#endif
 			wsum += w;
 		}
 		if (wsum > 0.05) { h /= wsum; hlen = h.w; }
 	}
 
 	// Anti-lag: history further from this frame's neighbourhood than its noise allows (a shadow that moved, a light switched) is
-	// shortened in proportion, so the new answer shows within a frame or two
+	// shortened in proportion, so the new answer shows within a frame or two.
+	// UNOFFICIAL 2026-11-19: run the 5x5 neighbourhood only when history exists and anti-lag is on, without unused normalImage or SUN hitImage loads.
 	if (hlen > 0.0 && p.antiLag.x > 0.0) {
+		float sum = 0.0, sum2 = 0.0, count = 0.0;
+		float plane = p.params.z * 4.0 * s.viewZ;
+		for (int y = -2; y <= 2; y++)
+			for (int x = -2; x <= 2; x++) {
+				ivec2 q = clamp(pixel + ivec2(x, y), ivec2(0), ivec2(TILE_W - 1, TILE_H - 1));
+				float z, v;
+				if (useShared) {
+					ivec2 sl = ivec2(gl_LocalInvocationID.xy) + ivec2(x + 2, y + 2);
+					int sidx = sl.y * 12 + sl.x;
+					z = shDepth[sidx];
+					v = shVis[sidx];
+				} else {
+					z = imageLoad(depthImage, sourceOf(q)).r;
+#ifdef SUN
+					v = imageLoad(visImage, q).r;
+#else
+					v = imageLoad(signalImage, q + ivec2(0, layer * TILE_H)).x;
+#endif
+				}
+				float vz = z * p.forward.w;
+				if (!(z > 0.0 && z < 0.9999 && vz >= 1.0)) continue;
+				vec2 quv = (vec2(q) + 0.5) * p.size.zw + p.jitter.xy;
+				vec3 qpos = (p.forward.xyz + p.right.xyz * (2.0 * quv.x - 1.0) - p.up.xyz * (2.0 * quv.y - 1.0)) * vz;
+				if (abs(dot(s.normal, qpos - s.position)) > plane) continue;
+				sum += v; sum2 += v * v; count += 1.0;
+			}
+		float mean = sum / max(count, 1.0);
+		float sigma = sqrt(max(sum2 / max(count, 1.0) - mean * mean, 0.0));
 		float allowed = p.antiLag.x * sigma + p.antiLag.y;
 		float off = abs(h.x - mean);
 		if (off > allowed) hlen = max(hlen * allowed / off, 0.0);
@@ -107,10 +170,18 @@ void main() {
 	// history: the faster the surface moves on screen, the fewer frames it keeps (all standing still, half at 2 pixels a frame), so a shadow
 	// does not smear behind a running camera. Off (0): as before.
 	if (p.history.w > 0.5) hlen = min(hlen, max(1.0, p.params.x / (1.0 + 0.5 * speed)));
+	// UNOFFICIAL 2026-11-20: moving actor blocker countdown in hist.y (2..9 active > 1.5, 0 inactive; never collides with LAMPS m2 <= 1.0).
+	// Cap history to 2 frames where a moving character is casting (or just finished casting) a shadow so actor shadows never smear on static ground.
+	float actorRecent = actorNear ? 9.0 : (prevActor > 2.5 ? prevActor - 1.0 : 0.0);
+	if (actorRecent > 1.5) hlen = min(hlen, 2.0);
 #endif
 	float a = 1.0 / hlen;
 	float m1 = mix(h.x, sig.x, a);
+#ifdef SUN
+	float m2 = actorRecent;
+#else
 	float m2 = mix(h.y, sig.x * sig.x, a);
+#endif
 	// the penumbra width: from the blocked samples only (a lit sample says nothing about the blocker)
 	float width = h.w > 0.0 && hlen > 1.0 ? h.z : 0.0;
 	if (sig.y > 0.0) width = width > 0.0 ? mix(width, sig.y, max(a, 0.2)) : sig.y;

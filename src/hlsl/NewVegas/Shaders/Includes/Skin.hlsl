@@ -268,7 +268,7 @@ float3 SkinAmbient(float3 ambient, float3 albedo, float3 N, float3 Nsoft) {
     const float3 sharp = SkyAmbient(N, 1.0f);
     const float3 soft = SkyAmbient(Nsoft, 1.0f);
     const float3 sky = float3(soft.r, lerp(sharp.g, soft.g, 0.6f), lerp(sharp.b, soft.b, 0.3f));
-    return (flat + sky) * albedo * (1.0f - skinSkyWeight);
+    return (flat + sky * (1.0f - skinSkyWeight)) * albedo;
 }
 
 #endif

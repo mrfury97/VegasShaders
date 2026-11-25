@@ -68,7 +68,7 @@ static bool scenePtCost(Ctx& c) {
 	bool interior = false;   // the second pass: walls and a ceiling round the yard, no sun, no sky (the bounces stay in the room)
 
 	struct Run { std::vector<std::vector<float>> frames; double traceMs = 0, rays = 0; };
-	auto run = [&](const RtPtCost::Keys& cost, float spatial, int frames, uint32_t seed, Run& out) {
+	auto run = [&](const RtPtCost::Keys& cost, float spatial, int frames, uint32_t seed, Run& out, bool split3Pass = false) {
 		RtRestirRow::State state;
 		RtRestirRow::Keys keys;
 		keys.radius = 6.0f; keys.spatial = spatial;
@@ -88,7 +88,7 @@ static bool scenePtCost(Ctx& c) {
 			PathConstants k = PathConstants();
 			cameraConstants(cam, k.size, k.forward, k.right, k.up, k.origin);
 			k.origin[3] = float((uint32_t(f + 1) * 7919u + seed) & 0xFFFFFu);
-			const uint32_t flags = 1024u | 2048u | 4u | 262144u | 128u | 1048576u;   // the lamp image, the game's falloff, glow, ReSTIR DI, GGX + its table
+			const uint32_t flags = 1024u | 2048u | 4u | 262144u | 128u | 1048576u | (split3Pass ? 512u : 0u);   // the lamp image, the game's falloff, glow, ReSTIR DI, GGX + its table (+ demodulated for 3-pass split)
 			put4(k.accum, 0.0f, 3.0f, 1.0f, float(flags));
 			put4(k.sunDir, sun, interior ? 0.0f : 1.0f); put4(k.sunColor, 2.2f, 2.0f, 1.8f, std::tan(0.5f * 0.53f * 0.0174533f));
 			put4(k.skyZenith, 0.25f, 0.35f, 0.55f, interior ? 0.0f : 1.0f); put4(k.skyHorizon, 0.45f, 0.45f, 0.45f, 3.0f);   // (skyHorizon.w = PTGlow)
@@ -122,6 +122,7 @@ static bool scenePtCost(Ctx& c) {
 			}
 			const unsigned emBase4096 = 1024u;   // (as the emissive scene: past the reservoirs)
 			frameRow[2 * RtEmissiveRow::kFrameTexel] = float(count); frameRow[2 * RtEmissiveRow::kFrameTexel + 1] = float(emBase4096);
+			frameRow[2 * 300] = split3Pass ? 2048.0f : 0.0f; frameRow[2 * 300 + 1] = 0.0f;   // kSplitBaseTexel (Phase 3B)
 			if (!h.Upload(gM.ptLamps, image)) return false;
 			if (count > 0) {
 				const float ec[4] = { float(count), float(emBase4096), 0.0f, 0.0f };
@@ -129,12 +130,22 @@ static bool scenePtCost(Ctx& c) {
 			}
 			const std::vector<int> imgs{ c.ptA, c.ptB, c.ptDisplay, c.ptDisplay, c.ptDisplay, gM.albedoAtlas, c.depth, c.normals, c.aux16, c.pano, c.aux16,
 				c.ptDisplay, c.aux16, gM.ptAlbedoOut, gM.ptLamps };
-			h.AddPass(c.shPath, imgs, 0x7u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+			if (split3Pass) {
+				h.AddPass(c.shPathPrimary, imgs, 0u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+				h.AddPass(c.shPathSpatial, imgs, 0u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+				h.AddPass(c.shPathBounce, imgs, 0x7u | (1u << 13), &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+			} else {
+				h.AddPass(c.shPath, imgs, 0x7u, &k, sizeof(k), (S + 7) / 8, (S + 7) / 8);
+			}
 			if (!h.Exchange(w, ids, cam.eye)) return false;
-			std::vector<float> disp;
+			std::vector<float> disp, alb;
 			if (!h.Read(c.ptDisplay, disp)) return false;
+			if (split3Pass && !h.Read(gM.ptAlbedoOut, alb)) return false;
 			h.EndFrame();
-			for (size_t p = 0; p < size_t(S) * S; p++) { const float a = disp[p * 4 + 3]; if (a > 0.5f) { raySum += a - 1.0; rayPixels++; } }
+			for (size_t p = 0; p < size_t(S) * S; p++) {
+				if (split3Pass) { disp[p * 4 + 0] *= alb[p * 4 + 0]; disp[p * 4 + 1] *= alb[p * 4 + 1]; disp[p * 4 + 2] *= alb[p * 4 + 2]; }
+				const float a = disp[p * 4 + 3]; if (a > 0.5f) { raySum += a - 1.0; rayPixels++; }
+			}
 			out.frames.push_back(std::move(disp));
 		}
 		if (h.Finish()) out.traceMs = h.shared->traceUsAvg / 1000.0;
@@ -170,11 +181,13 @@ static bool scenePtCost(Ctx& c) {
 	RtPtCost::Keys kC = kA; kC.restirRays = 0;
 	RtPtCost::Keys kD; kD.restirRays = 0; kD.bounceLights = 0; kD.oneCameraQuery = 1;
 	RtPtCost::Keys kE = kD; kE.restirRays = 3;   // (informational: the cheapest budget that keeps visibility in ReSTIR DI's targets)
-	// one pass of the four runs (the yard, then the room), its lines and its verdict
+	RtPtCost::Keys kF = kD; kF.restirRays = 4;   // (Phase 3A: RTXDI 2-ray visibility)
+	// one pass of the runs (the yard, then the room), its lines and its verdict
 	auto pass4 = [&](const char* where, bool& ok) {
-		Run a, b, cc, d, e;
-		if (!run(kA, 4.0f, F, 11u, a) || !run(kB, 4.0f, F, 23u, b) || !run(kC, 2.0f, F, 37u, cc) || !run(kD, 2.0f, F, 53u, d) || !run(kE, 2.0f, F, 71u, e)) return false;
-		const Stats sA = stats(a), sB = stats(b), sC = stats(cc), sD = stats(d), sE = stats(e);
+		Run a, b, cc, d, e, f4, g3, h3;
+		if (!run(kA, 4.0f, F, 11u, a) || !run(kB, 4.0f, F, 23u, b) || !run(kC, 2.0f, F, 37u, cc) || !run(kD, 2.0f, F, 53u, d) || !run(kE, 2.0f, F, 71u, e)
+			|| !run(kF, 2.0f, F, 83u, f4) || !run(kD, 2.0f, F, 97u, g3, true) || !run(kF, 2.0f, F, 109u, h3, true)) return false;
+		const Stats sA = stats(a), sB = stats(b), sC = stats(cc), sD = stats(d), sE = stats(e), sF = stats(f4), sG = stats(g3), sH = stats(h3);
 		auto rmsDiff = [&](const Stats& x) { double e = 0; for (size_t p = 0; p < x.pixelMean.size(); p++) { const double q = x.pixelMean[p] - sA.pixelMean[p]; e += q * q; } return std::sqrt(e / double(x.pixelMean.size())); };
 		auto line = [&](const char* name, const Run& r, const Stats& s) {
 			say("  %s: rays %.2f a pixel, mean %.4f (x%.4f of A +- %.4f), per-pixel noise %.4f (%.2f x A), per-pixel mean vs A RMS %.4f, GPU %.3f ms\n", name, r.rays, s.mean,
@@ -186,9 +199,12 @@ static bool scenePtCost(Ctx& c) {
 		line("C PTRestirDIRays 0 + 2 n", cc, sC);
 		line("D all new + 1 cam query ", d, sD);
 		line("(E as D, PTRestirDIRays 3)", e, sE);
+		line("(F as D, PTRestirDIRays 4)", f4, sF);
+		line("(G as D, 3-pass split PT )", g3, sG);
+		line("(H as F, 3-pass split PT )", h3, sH);
 		auto within = [&](const Stats& s) { const double lim = std::max(0.015, 4.0 * std::sqrt(s.se * s.se + sA.se * sA.se) / std::max(sA.mean, 1e-9)); return std::fabs(s.mean / std::max(sA.mean, 1e-9) - 1.0) < lim; };
-		const bool finite = sA.finite && sB.finite && sC.finite && sD.finite;
-		ok = finite && sA.mean > 0.01 && within(sB) && within(sC) && within(sD) && sD.noise < 1.3 * sA.noise && d.rays < 0.8 * a.rays;
+		const bool finite = sA.finite && sB.finite && sC.finite && sD.finite && sF.finite && sG.finite && sH.finite;
+		ok = finite && sA.mean > 0.01 && within(sB) && within(sC) && within(sD) && within(sG) && within(sH) && sD.noise < 1.3 * sA.noise && d.rays < 0.8 * a.rays;
 		say("  -> %s%s\n", ok ? "ok" : "BAD", finite ? "" : " (NaN / inf in the output)");
 		return true;
 	};

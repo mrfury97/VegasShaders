@@ -103,9 +103,6 @@ namespace {
 			combine->JG_GetClipDist = reinterpret_cast<float(__cdecl*)()>(GetProcAddress(jg, "JGGetViewmodelClipDistance"));
 		}
 
-		// Vanilla Plus AO present: NVR's ambient occlusion knows the game's AO is replaced
-		if (GetModuleHandle(L"VanillaPlusAO.dll")) TheShaderManager->Effects.AmbientOcclusion->bNVAOLoaded = true;
-
 		// (Vanilla Plus Skin is detected earlier, in InitializeRendererHook (core/Hooks/GameCommon.cpp): the game has made all
 		// its SKIN shaders by the time this message arrives, so knowing it here would be too late.)
 
@@ -144,6 +141,7 @@ extern "C" {
 			return;
 		case Msg::kMessage_PreLoadGame:
 			TheSettingManager->GameLoading = true;
+			if (TheShaderManager && TheShaderManager->Effects.WaterLens) TheShaderManager->Effects.WaterLens->Reset();
 			SessionLog::OnEvent("loading a save");	// UNOFFICIAL 2026-11-01 (SessionLog.h; the save's name and path are never logged)
 			return;
 		case Msg::kMessage_PostLoadGame: {
@@ -158,9 +156,11 @@ extern "C" {
 			SessionLog::OnEvent("game saved");
 			return;
 		case Msg::kMessage_NewGame:
+			if (TheShaderManager && TheShaderManager->Effects.WaterLens) TheShaderManager->Effects.WaterLens->Reset();
 			SessionLog::OnEvent("new game");
 			return;
 		case Msg::kMessage_ExitToMainMenu:
+			if (TheShaderManager && TheShaderManager->Effects.WaterLens) TheShaderManager->Effects.WaterLens->Reset();
 			SessionLog::OnEvent("exit to the main menu");
 			return;
 		// UNOFFICIAL 2026-11-07 (rt-shutdown): the RT helper's shutdown first (RtCore::Shutdown: no GPU wait left for a value it never

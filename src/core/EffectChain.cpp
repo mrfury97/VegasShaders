@@ -158,7 +158,6 @@
 #include "LampVisibility.h"	// UNOFFICIAL 2026-10-30 VisibleRanking
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "GpuProfiler.h"
-#include "HiZ.h"	// UNOFFICIAL 2026-10-26 (deep/fork-hiz)
 #include "PixelInspector.h"	// UNOFFICIAL 2026-10-26 (debugging tool)
 #include "PointShadowSlots.h"
 #include "PointShadowForward.h"
@@ -609,15 +608,6 @@ void ShaderManager::PreStep_AmbientLightTakeover(ChainContext& ctx) {
 	ctx.ambientLight = ambientLight;
 }
 
-void ShaderManager::PreStep_HiZ(ChainContext& ctx) {
-	IDirect3DDevice9* Device = ctx.Device;
-	const bool ambientLight = ctx.ambientLight;
-	// UNOFFICIAL 2026-10-26 (NVR DXVK, deep/fork-hiz; core/HiZ.h): the Hi-Z pyramid, one compute dispatch after the depth and normals,
-	// only for the readers that want it this frame ([Shaders.Reflections.Main] HiZ, [Shaders.AmbientLight.Main] HiZ, both Vulkan passes).
-	// (Reflections alone builds it right before its own passes, below: built here, the dispatch slowed AmbientLight's prepare by ~0.015 ms.)
-	HiZ::Build(Device, DxvkCompute::PassesOn() && ambientLight && Effects.AmbientLight->HiZWanted());
-}
-
 void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	IDirect3DDevice9* Device = ctx.Device;
 	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
@@ -634,7 +624,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	const bool aoApplies = wouldRender(AO);
 	// (2026-11-21: WetWorld, which held this off in wet frames, is gone; the wet passes of the material step read and change the picture there
 	// too, so they count: Wetness Effects' reflections and the deferred wetness fallback.)
-	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) || wouldRender(Effects.BloodFlow) ||
+	const bool effectsBetween = wouldRender(Effects.SnowAccumulation) ||
 		wouldRender(Effects.WetnessReflections) || DeferredWetness::FallbackMayDraw() ||
 		wouldRender(Effects.Specular) || wouldRender(Effects.Underwater) ||
 		wouldRender(Effects.BounceLight) || wouldRender(Effects.Reflections) || ambientLight; // must see the scene with its shadows and AO applied
@@ -909,21 +899,6 @@ void ShaderManager::PreStep_BounceLight(ChainContext& ctx) {
 	}
 }
 
-void ShaderManager::PreStep_BloodFlow(ChainContext& ctx) {
-#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h: release builds have no BloodFlow (and no step row below)
-	IDirect3DDevice9* Device = ctx.Device;
-	IDirect3DSurface9* RenderTarget = ctx.RenderTarget;
-	IDirect3DSurface9* SourceSurface = ctx.SourceSurface;
-	{
-		// UNOFFICIAL, optional: blood that runs and dries, and pools under bodies (BloodFlow.h). On the shadowed, AO'd scene,
-		// before the wet world and the fog. Costs nothing when no blood is near.
-		static GpuTimer bloodFlowTimer("Blood flow");
-		GpuProfileScope gpu(bloodFlowTimer, Device);
-		{ Effects.BloodFlow->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.BloodFlow); }
-	}
-#endif
-}
-
 void ShaderManager::PreStep_WetFlashlightSpecularUnderwater(ChainContext& ctx) {
 	static GpuTimer materialEffectsTimer("Wet + light materials");
 	IDirect3DDevice9* Device = ctx.Device;
@@ -996,8 +971,6 @@ void ShaderManager::PreStep_Reflections(ChainContext& ctx) {
 		static GpuTimer reflectionsTimer("Reflections (SSR)");
 		GpuProfileScope gpu(reflectionsTimer, Device);
 		if (wouldRender(Effects.Reflections)) {
-			// UNOFFICIAL 2026-10-26 (deep/fork-hiz): the Hi-Z pyramid for the trace, once a frame (nothing new if AmbientLight's HiZ built it).
-			if (DxvkCompute::PassesOn() && Effects.Reflections->HiZWanted()) HiZ::Build(Device, true);
 			Effects.Reflections->RenderBuffers(Device);
 			Device->SetRenderTarget(0, RenderTarget);
 			Effects.Reflections->BindMaterial();	// UNOFFICIAL 2026-10-20 MaterialAware (stage 15; nothing without it)
@@ -1175,7 +1148,12 @@ void ShaderManager::PreStep_RayReconstruction(ChainContext& ctx) {
 	// rays (drawn with this frame's jittered depth: RR resolves them with the rest); nothing of exposure, bloom, lens and LUT yet. DLSS-D
 	// denoises and anti-aliases it here, and TAA's resolve after the tonemap skips the frame. Off, or whenever it cannot run this frame
 	// (logged once): nothing happens.
-	if (Effects.TAA) Effects.TAA->RayReconstruct(Device, RenderTarget);
+	if (Effects.TAA) {
+		if (!Effects.TAA->RayReconstruct(Device, RenderTarget)) {
+			if (Effects.TAA->PreTonemapNativeAA(Device, RenderTarget))
+				PixelInspector::AfterFrame(Effects.TAA);
+		}
+	}
 }
 
 void ShaderManager::PreStep_LumaExposureBloom(ChainContext& ctx) {
@@ -1303,7 +1281,7 @@ void ShaderManager::PostStep_FinalEffect(ChainContext& ctx) {
 	{
 		EffectRecord* const order[] = {
 			Effects.Rain, Effects.Snow, Effects.BloomLegacy, Effects.HeatHaze, Effects.VolumetricSmoke, Effects.BarrelHaze, Effects.Coloring, Effects.LUT, Effects.DepthOfField,
-			Effects.MotionBlur, Effects.BloodLens, Effects.WaterLens, Effects.LowHF, Effects.DitherBuster,
+			Effects.MotionBlur, Effects.WaterLens, Effects.LowHF, Effects.DitherBuster,
 			Effects.SMAA, Effects.FXAA, Effects.Sharpening, Effects.Cinema, Effects.ImageAdjust, Effects.Bodycam, Effects.Dream, Effects.SkyDither, Effects.Debug,
 			TheCoverMap };	// UNOFFICIAL 2026-10-27: the cover map's debug view (PersistentDebugView), last
 		EffectRecord* last = nullptr;
@@ -1424,7 +1402,6 @@ void ShaderManager::PostStep_LensOverlays(ChainContext& ctx) {
 	// lens effects
 	{
 		GpuProfileScope gpu(lensTimer, Device);
-		{ Effects.BloodLens->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.BloodLens); }
 		{ Effects.WaterLens->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.WaterLens); }
 		{ Effects.LowHF->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.LowHF); }
 	}
@@ -1608,7 +1585,6 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "SkyViewTable", EffectChain::PreTonemap, &ShaderManager::PreStep_SkyViewTable },
 	{ "VolumetricClouds", EffectChain::PreTonemap, &ShaderManager::PreStep_VolumetricClouds },
 	{ "AmbientLightTakeover", EffectChain::PreTonemap, &ShaderManager::PreStep_AmbientLightTakeover },
-	{ "HiZ", EffectChain::PreTonemap, &ShaderManager::PreStep_HiZ },
 	{ "CompositePlan", EffectChain::PreTonemap, &ShaderManager::PreStep_CompositePlan },
 	{ "ShadowApply", EffectChain::PreTonemap, &ShaderManager::PreStep_ShadowApply },
 	{ "CoverMapUpdate", EffectChain::PreTonemap, &ShaderManager::PreStep_CoverMapUpdate },
@@ -1618,9 +1594,6 @@ static const EffectChain::Step PreTonemapSteps[] = {
 	{ "AmbientLight", EffectChain::PreTonemap, &ShaderManager::PreStep_AmbientLight },
 	{ "LitProbes", EffectChain::PreTonemap, &ShaderManager::PreStep_LitProbes },
 	{ "BounceLight", EffectChain::PreTonemap, &ShaderManager::PreStep_BounceLight },
-#if !NVR_SHELVED_OUT	// UNOFFICIAL 2026-11-16 ShelvedEffects.h
-	{ "BloodFlow", EffectChain::PreTonemap, &ShaderManager::PreStep_BloodFlow },
-#endif
 	{ "WetFlashlightSpecularUnderwater", EffectChain::PreTonemap, &ShaderManager::PreStep_WetFlashlightSpecularUnderwater },
 	{ "SpillSelfTest", EffectChain::PreTonemap, &ShaderManager::PreStep_SpillSelfTest },
 	{ "Reflections", EffectChain::PreTonemap, &ShaderManager::PreStep_Reflections },

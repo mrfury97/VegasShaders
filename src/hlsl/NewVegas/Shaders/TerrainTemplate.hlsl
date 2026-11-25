@@ -81,7 +81,7 @@
 #define RT_SUN_ROWW_REG c195
 #define RT_SUN_DATA_REG c196
 #include "includes/Shadow.hlsl"	// shared code
-// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel), compiled in only when on at startup.
+// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow per vertex (texc.z; w the sentinel); always compiled in, its strength (c160.w) switches it live.
 #if FORWARD_CLOUD_SHADOWS && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
     #define TERRAIN_CLOUD 1
 #else
@@ -585,6 +585,17 @@ PS_OUTPUT main(PS_INPUT pin) {
         if (TESR_TerrainBlendData.w <= 0.0f && TESR_TerrainBlendExtra.w > 0.5f && terrainKeep >= 0.0f && terrainKeep < 0.004f)
             clip(-1.0f);
     }
+    // UNOFFICIAL 2026-11-18 (a co-developer: terrain blending made land shaders fail with X4505 on DXVK): debug views 3 and 4 are
+    // worked out here, into one value, instead of at the end. Read at the end, they kept the gap's depth and angle and the normal's
+    // z alive through the whole shader: with Wetness Effects + Puddles, or Wetness Effects + SkylightingMode 1, that was the
+    // temp register too many (fxc X4505, also with PREFER_FLOW_CONTROL; the game's own shader drew that ground). The same colours:
+    // -1 = nothing behind the land (dark blue), else the grey. 0 when neither view is on.
+    float blendDebugGrey = 0.0f;
+    [branch] if (TESR_TerrainBlendData.w > 2.5f && TESR_TerrainBlendData.x > 0.0f) {
+        if (blendGap.covered < 0.0f) blendDebugGrey = -1.0f;
+        else if (TESR_TerrainBlendData.w < 3.5f) blendDebugGrey = saturate(blendGap.covered * TESR_TerrainBlendData.y * 0.25f);
+        else blendDebugGrey = saturate(terrainBlendDepthRange(blendGap, 1.0f - blendNormal.z) * TESR_TerrainBlendData.y);
+    }
 #endif
 
     int texLayers = TEX_COUNT;  // Macro.
@@ -815,11 +826,8 @@ PS_OUTPUT main(PS_INPUT pin) {
     // all), 3 how deep the object is below the surface (black at the surface, white at four times BlendDistance; dark blue:
     // nothing behind the land), 4 how deep the fade reaches (white: the full BlendDistance, grey: a shallow object's seam).
     float blendDebug = TESR_TerrainBlendData.w;
-    [branch] if (blendDebug > 2.5f && TESR_TerrainBlendData.x > 0.0f) {
-        if (blendGap.covered < 0.0f) outCol = float3(0.0f, 0.0f, 0.3f);
-        else if (blendDebug < 3.5f) outCol = saturate(blendGap.covered * TESR_TerrainBlendData.y * 0.25f);
-        else outCol = saturate(terrainBlendDepthRange(blendGap, 1.0f - blendNormal.z) * TESR_TerrainBlendData.y);
-    }
+    [branch] if (blendDebug > 2.5f && TESR_TerrainBlendData.x > 0.0f)	// views 3 and 4: worked out at the top (blendDebugGrey)
+        outCol = blendDebugGrey < 0.0f ? float3(0.0f, 0.0f, 0.3f) : blendDebugGrey.xxx;
     else if (blendDebug > 1.5f && terrainKeep >= 0.0f) outCol = terrainKeep;
     else if (blendDebug > 0.5f && terrainKeep >= 0.0f) outCol = lerp(float3(1.0f, 0.0f, 1.0f), outCol, terrainKeep);
 #endif

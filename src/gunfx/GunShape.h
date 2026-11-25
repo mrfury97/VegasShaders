@@ -195,7 +195,7 @@ inline bool GunShape::Build(const float* tris, int count, float voxelSize, float
 
 inline float GunShape::Sample(const float* p, float* normal) const {
 	normal[0] = normal[1] = normal[2] = 0.0f;
-	if (d.empty()) return 1e3f;
+	if (d.empty() || !std::isfinite(p[0]) || !std::isfinite(p[1]) || !std::isfinite(p[2])) return 1e3f;	// (2026-11-17: a NaN point indexed far outside the map)
 	const int n[3] = { nx, ny, nz };
 	float g[3], ext[3], f[3];
 	int i[3];

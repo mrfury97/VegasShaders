@@ -170,7 +170,21 @@ float closestBlocker(vec3 origin, vec3 segment, float tMin, float tMax, uint mas
 }
 #endif
 
+// UNOFFICIAL 2026-11-19: cooperative shared-memory lamp table (up to 63 lamps, 1 load/thread vs up to 189 global imageLoads/thread)
+shared vec4 shLampA[63];   // xyz pos, w reach
+shared vec4 shLampB[63];   // x intensity, y game radius, z stop, w disc radius
+
 void main() {
+	int count = min(int(p.params2.w), 63);
+	int lid = int(gl_LocalInvocationIndex);
+	if (lid < count) {
+		vec4 a = imageLoad(lampTable, ivec2(4 * lid, 0)), b = imageLoad(lampTable, ivec2(4 * lid + 1, 0));
+		vec4 c = imageLoad(lampTable, ivec2(4 * lid + 2, 0)), e = imageLoad(lampTable, ivec2(4 * lid + 3, 0));
+		shLampA[lid] = vec4(a.xy, b.x, b.y);
+		shLampB[lid] = vec4(c.x, c.y, e.x, e.y);
+	}
+	barrier();
+
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= int(p.size.x) || pixel.y >= int(p.size.y))
 		return;
@@ -212,24 +226,23 @@ void main() {
 	// The pixel's strongest lamps (unshadowed): intensity x the game's falloff (1 - (d / radius)^2) x N.L, within the shadow's reach
 	int best[3] = int[3](-1, -1, -1);
 	float weight[3] = float[3](0.0, 0.0, 0.0);
-	int count = min(int(p.params2.w), 63);
 	float total = 0.0;   // EXTERIOR: the mask's sum, unshadowed
 	for (int s = 0; s < count; s++) {
-		vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), c = imageLoad(lampTable, ivec2(4 * s + 2, 0));
-		if (!(b.y > 0.0)) continue;
-		vec3 toLamp = vec3(a.xy, b.x) - origin;
+		vec4 la = shLampA[s], lb = shLampB[s];
+		if (!(la.w > 0.0)) continue;
+		vec3 toLamp = la.xyz - origin;
 		float d2 = dot(toLamp, toLamp);
-		if (d2 >= b.y * b.y) continue;
+		if (d2 >= la.w * la.w) continue;
 #ifdef EXTERIOR
 		// the mask's amount for this lamp (reach = the mask's radius, intensity = its weight); it ranks the lamps too
-		float w = lampAmount(toLamp, sqrt(d2) / b.y, normal, c.x);
+		float w = lampAmount(toLamp, sqrt(d2) / la.w, normal, lb.x);
 		total += w;
 		if (!(w > 0.0)) continue;
 #else
 		float ndl = dot(toLamp, normal);
 		if (ndl <= 0.0) continue;
-		float falloff = clamp(1.0 - d2 / max(c.y * c.y, 1.0), 0.0, 1.0);
-		float w = c.x * max(falloff, 0.02) * ndl * inversesqrt(d2);   // a floor, so lamps past their game radius still rank by intensity
+		float falloff = clamp(1.0 - d2 / max(lb.y * lb.y, 1.0), 0.0, 1.0);
+		float w = lb.x * max(falloff, 0.02) * ndl * inversesqrt(d2);   // a floor, so lamps past their game radius still rank by intensity
 		// RankBy 1 (2026-10-30): the lamps the game would give the draw here: its own falloff over its radius, brightness left out
 		// (Novac, rtlamp-31: by light brought, each pixel's two strongest were not the draw's own lamps)
 		if (p.mask.z > 0.5) w = falloff > 0.0 ? falloff + 1e-3 : 0.0;
@@ -249,34 +262,40 @@ void main() {
 	// is whole over the screen for the denoiser's spatial filter
 	{
 		float u1 = hash12(vec2(pixel) * 1.37 + 11.0), u2 = hash12(vec2(pixel.yx) * 0.71 + 3.0);
+		uint sigmaFar = uint(p.params2.y), sigmaNear = uint(p.params2.z);
 		for (int k = 0; k < sigmaLayers(); k++) {
 			vec2 signal = vec2(1.0, 0.0);
 			int s = sigmaSlot(k);
 			if (s >= 0 && s < count) {
-				vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), e = imageLoad(lampTable, ivec2(4 * s + 3, 0));
-				vec3 toLamp = vec3(a.xy, b.x) - origin;
+				vec4 la = shLampA[s], lb = shLampB[s];
+				vec3 toLamp = la.xyz - origin;
 				float d2 = dot(toLamp, toLamp);
-				float stop = max(p.params.z, e.x);
-				if (b.y > 0.0 && d2 < b.y * b.y && dot(toLamp, normal) > 0.0 && sqrt(d2) > stop + offset) {
+				float stop = max(p.params.z, lb.z);
+				if (la.w > 0.0 && d2 < la.w * la.w && dot(toLamp, normal) > 0.0 && sqrt(d2) > stop + offset) {
 					vec3 dir = toLamp * inversesqrt(d2);
 					vec3 t = normalize(cross(dir, abs(dir.z) < 0.9 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0)));
 					vec3 bt = cross(dir, t);
 					// a uniform point of the disc: a per-pixel pattern stepped per frame and decorrelated per lamp (golden ratios)
-					float rr = e.y * sqrt(fract(u1 + p.sigma.y * 0.61803399 + float(k) * 0.38196601));
+					float rr = lb.w * sqrt(fract(u1 + p.sigma.y * 0.61803399 + float(k) * 0.38196601));
 					float ang = 6.2831853 * fract(u2 + p.sigma.y * 0.75487767 + float(k) * 0.56984029);
 					vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
 					float invLen = inversesqrt(dot(segment, segment));
 					float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
 					float tMin = min(offset * invLen, tEnd);
-					float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
-					float th = closestBlocker(origin, segment, tMin, tSplit, uint(p.params2.y));
-					if (th < 0.0) th = closestBlocker(origin, segment, tSplit, tEnd, uint(p.params2.z));
+					float th;
+					if (sigmaFar == sigmaNear) {
+						th = closestBlocker(origin, segment, tMin, tEnd, sigmaFar);
+					} else {
+						float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
+						th = closestBlocker(origin, segment, tMin, tSplit, sigmaFar);
+						if (th < 0.0) th = closestBlocker(origin, segment, tSplit, tEnd, sigmaNear);
+					}
 					if (th >= 0.0) {
 						float lampDistance = 1.0 / invLen, blocker = th * lampDistance;
-						signal = vec2(0.0, max(e.y * blocker / max(lampDistance - blocker, 0.02 * lampDistance), 1.0e-3));
+						signal = vec2(0.0, max(lb.w * blocker / max(lampDistance - blocker, 0.02 * lampDistance), 1.0e-3));
 					}
 					else if (p.contact.w > 0.0) {   // (2026-11-07 1b) free: the contact march may still block it (sharp: a blocker at the surface)
-						const float cv = LAMP_CONTACT(vec3(a.xy, b.x));
+						const float cv = LAMP_CONTACT(la.xyz);
 						if (cv < 1.0) signal = vec2(cv, 1.0e-3);
 					}
 				}
@@ -293,10 +312,10 @@ void main() {
 	for (int k = 0; k < perPixel; k++) {
 		int s = best[k];
 		if (s < 0) break;
-		vec4 a = imageLoad(lampTable, ivec2(4 * s, 0)), b = imageLoad(lampTable, ivec2(4 * s + 1, 0)), e = imageLoad(lampTable, ivec2(4 * s + 3, 0));
-		vec3 toLamp = vec3(a.xy, b.x) - origin;
+		vec4 la = shLampA[s], lb = shLampB[s];
+		vec3 toLamp = la.xyz - origin;
 		float dist = length(toLamp);
-		float stop = max(p.params.z, e.x);
+		float stop = max(p.params.z, lb.z);
 		float steps = 15.0;                                   // lit: at the lamp (within its stop)
 #ifdef SIGMA
 		if (sigmaLamp(s)) { entry[k] = float(s) + 64.0 * steps; continue; }   // the denoiser's (RtShadowDenoisePack)
@@ -307,18 +326,23 @@ void main() {
 			vec3 bt = cross(dir, t);
 			uint lit = 0u;
 			for (uint i = 0u; i < rays; i++) {
-				float rr = e.y * sqrt((float(i) + 0.5) / float(rays));
+				float rr = lb.w * sqrt((float(i) + 0.5) / float(rays));
 				float ang = float(i) * 2.3999632 + spin;
 				vec3 segment = toLamp + (t * cos(ang) + bt * sin(ang)) * rr;
 				float invLen = inversesqrt(dot(segment, segment));
 				float tEnd = clamp(1.0 - stop * invLen, 0.0, 1.0);
 				float tMin = min(offset * invLen, tEnd);
-				float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
-				if (!blocked(origin, segment, tMin, tSplit, farMask) && !blocked(origin, segment, tSplit, tEnd, nearMask))
-					lit++;
+				bool ok;
+				if (farMask == nearMask) {
+					ok = !blocked(origin, segment, tMin, tEnd, farMask);
+				} else {
+					float tSplit = clamp(1.0 - p.params2.x * invLen, tMin, tEnd);
+					ok = !blocked(origin, segment, tMin, tSplit, farMask) && !blocked(origin, segment, tSplit, tEnd, nearMask);
+				}
+				if (ok) lit++;
 			}
 			steps = floor(15.0 * float(lit) / float(rays) + 0.5);
-			if (steps > 0.0 && p.contact.w > 0.0) steps = floor(steps * LAMP_CONTACT(vec3(a.xy, b.x)) + 0.5);   // (2026-11-07 1b)
+			if (steps > 0.0 && p.contact.w > 0.0) steps = floor(steps * LAMP_CONTACT(la.xyz) + 0.5);   // (2026-11-07 1b)
 		}
 		entry[k] = float(s) + 64.0 * steps;
 #ifdef EXTERIOR
