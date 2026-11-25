@@ -49,6 +49,11 @@ static float DSSpecFade = 1.0f;
 #define PBR_DIELECTRIC_F0 min(DSSpecF0, 0.04f)
 #define FD_SUN_SPEC_FADE DSSpecFade
 #define PBR_ROUGH_F90 1	// UNOFFICIAL 2026-11-19 (Finding 4.2): roughness-damped grazing F90 parity with RtPathTrace.comp
+// UNOFFICIAL 2026-11-26 DeferredLandRoughF90 ([Shaders.PBR.Main], live; TESR_LinearScales.w = 1 - the key, PBR.cpp): false (default) = the land's
+// sun takes the forward land's F90 (saturate(Reflectivity), Includes/Terrain.hlsl), not the damped one, so Reflectivity scales the ground's shine
+// as in forward; set in LandSun only, so objects keep the damping. true (or a register never written) = the damped F90 exactly, as in 1.1.1.
+static bool DSLandF90 = false;
+#define PBR_ROUGH_F90_PICK(damped) (DSLandF90 ? REFLECTIVITY_F90 : (damped))
 
 #include "includes/Helpers.hlsl"
 #include "includes/Object.hlsl"
@@ -194,6 +199,7 @@ float3 DSShadingNormal(float4 m, float4 normals, out float bumped) {
 float3 LandSun(float3 L, float3 sunLin, float3 V, float3 N, float3 albedo, float r) {
     [branch] if (TESR_TerrainExtraData.x) {
         const float3 graded = lerp(luma(albedo), albedo, TESR_TerrainExtraData.y);
+        DSLandF90 = TESR_LinearScales.w > 0.5f;	// (2026-11-26 DeferredLandRoughF90 false: the forward land's F90, above)
         return max(0.0f, PBRSun(saturate(TESR_TerrainData.x), r, graded, N, V, L, sunLin * LinScale(TESR_TerrainData.z)));
     }
     return albedo * shades(N, L) * sunLin;

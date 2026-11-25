@@ -46,7 +46,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  pbrMetal;           // 17: TESR_PBRMetal
     vec4  pbrMetalLook;       // 18: TESR_PBRMetalLook
     vec4  debugVar;           // 19: TESR_DebugVar
-    vec4  linearScales;       // 20: TESR_LinearScales (.x light scale)
+    vec4  linearScales;       // 20: TESR_LinearScales (.x light scale, .w 1 = DeferredLandRoughF90 false)
     vec4  linearLighting;     // 21: TESR_LinearLighting (x gamma, y 1/gamma, z falloffExp, w linearScene)
     vec4  lampFalloff;        // 22: TESR_LampFalloff
     vec4  pbrMath;            // 23: TESR_PBRMath (.x diffuseEnergyKeep/smithBlend, .y reflectivityF0 offset)
@@ -229,14 +229,16 @@ vec3 PBRDiffuse(float metal, vec3 baseColor, vec3 N, vec3 L, vec3 radiance) {
     return (1.0 - metal) * baseColor * (NdotL * radiance);
 }
 
-vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith) {
+// landF90 (UNOFFICIAL 2026-11-26 DeferredLandRoughF90 false, the default: cb.linearScales.w > 0.5; the land only): the forward land's F90 (saturate(Reflectivity),
+// Includes/Terrain.hlsl), as DeferredLamps.hlsl's land pass; false = the damped F90 exactly, as before.
+vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, bool landF90) {
     const vec3 f0Base = ReflectivityF0(mix(vec3(0.04), baseColor, metal));
     const vec3 halfV = normalize(V + L);
     const float NdotL = max(shades(N, L), 0.00001);
     const float NdotV = max(shades(N, V), 0.00001);
     const float NdotH = shades(N, halfV);
     const float LdotH = shades(L, halfV);
-    const vec3 fres = Fresnel(f0Base, RoughReflectivityF90(f0Base, r, metal), LdotH);
+    const vec3 fres = Fresnel(f0Base, landF90 ? vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0)) : RoughReflectivityF90(f0Base, r, metal), LdotH);
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
     const vec3 specOut = BRDFPi(r, fres, NdotV, NdotL, NdotH, allowSmith);
     return (diff + specOut) * (NdotL * radiance);
@@ -764,7 +766,7 @@ void main() {
         } else if (isLand) {
             const vec3 rad = color * EvalLampAtt(att, fp.shaped, fp.expOther);
             vec3 lit;
-            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false));
+            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, cb.linearScales.w > 0.5));
             else lit = albedo4.rgb * (shades(N, L) * rad);
             light += lit * sh;
         } else if (isDiffuseOnly) {
@@ -772,7 +774,7 @@ void main() {
             light += PBRDiffuse(metal, gradedAlbedo, N, L, color * (linScaleLight * fAtt)) * sh;
         } else {
             const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
-            light += PBRFull(metal, rough, gradedAlbedo, N, V, L, color * (linScaleLight * fAtt), diffKeep, true) * sh;
+            light += PBRFull(metal, rough, gradedAlbedo, N, V, L, color * (linScaleLight * fAtt), diffKeep, true, false) * sh;
         }
     }
 
