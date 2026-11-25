@@ -1,4 +1,4 @@
-# Builds the RT playground (tools/nvr-rt-playground/README.md) into tools\nvr-rt-playground\bin\ (git-ignored), a folder that runs on
+# Builds the RT playground (docs/TOOLS.md "nvr-rt-playground") into tools\nvr-rt-playground\bin\ (git-ignored), a folder that runs on
 # its own: NvrRtPlayground.exe (x86), NvrRtHelper.exe (x64, the project's MSBuild), the NVR DXVK fork's d3d9.dll, the shaders it runs
 # (shaders\Rt: the trace passes; shaders\Compute: the fork's denoiser + show passes) and run-playground.cmd.
 #   -Fork <d3d9.dll>   the fork (default: $env:NVR_RT_HOST_FORK, then tools\nvr-rt-host\fork-path.txt)

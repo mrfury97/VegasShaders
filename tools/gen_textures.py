@@ -3,7 +3,7 @@
 Every texture is made procedurally from fixed seeds, so a run always gives the same pixels (the block-compressed
 ones go through Microsoft's texconv, which is deterministic too). Each one keeps the original file's size, mip
 count, pixel format and channel layout, because the shaders and their samplers were written against those.
-See resource/Textures/README.md for what each texture is and which shader reads it.
+See docs/TOOLS.md "Textures" for what each texture is and which shader reads it.
 
     py -3.11 tools/gen_textures.py                     # all of them, written into resource/Textures/
     py -3.11 tools/gen_textures.py --only ripples,caust_001

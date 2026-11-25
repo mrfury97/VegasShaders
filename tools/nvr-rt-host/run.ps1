@@ -1,4 +1,4 @@
-# The RT test host's one command (tools/nvr-rt-host/README.md): build the helper + host, check the constant-block layouts, run every
+# The RT test host's one command (docs/TOOLS.md "nvr-rt-host"): build the helper + host, check the constant-block layouts, run every
 # scene; PASS / FAIL per scene. Exit code 0 only when everything passed. No game launch.
 #   powershell -ExecutionPolicy Bypass -File tools\nvr-rt-host\run.ps1 [-Compile] [-Spv <folder>] [-Scene furnace,mirror] [-Fork <d3d9.dll>] [-NoBuild]
 #   -Compile   run the scenes on .spv compiled now from the .comp sources (bin\spv) instead of the committed .spv

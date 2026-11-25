@@ -1,5 +1,5 @@
 // NvrRtHost, PTEmissive (2026-11-07 ptaaa-emissive; included by rt_host.cpp after rt_host_pt.inl): glowing triangles as lights in the path
-// tracer (RtPathTrace.comp EmissiveSample / RestirDirect, RtEmissiveBuild.comp, the game's src/core/RtEmissiveRow.h). README.md has the table.
+// tracer (RtPathTrace.comp EmissiveSample / RestirDirect, RtEmissiveBuild.comp, the game's src/core/RtEmissiveRow.h). docs/TOOLS.md "nvr-rt-host" has the table.
 
 #include "../../src/core/RtEmissiveRow.h"
 

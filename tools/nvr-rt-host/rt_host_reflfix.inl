@@ -12,7 +12,7 @@
 //      direction about the sphere's (smooth) normal, its distance and what it meets (colour) vs the CPU's mirror ray about the exact
 //      normal; the metal's Fresnel tint vs Schlick. Before (MetalBounce 0): the chrome's own colour on every such pixel, no red / green.
 // Not here: Resolve (ReflectionsRTResolve.frag: the screen at the bounced hit, the facing test) and RayGen (RaysOnly skips the march)
-// are D3D9-side passes the host does not run (README "Still not covered").
+// are D3D9-side passes the host does not run (docs/TOOLS.md "nvr-rt-host", "Still not covered").
 
 struct ReflFixCtx { int bounce = -1; };
 static ReflFixCtx gRF;

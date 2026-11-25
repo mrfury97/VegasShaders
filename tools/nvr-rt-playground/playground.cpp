@@ -1,4 +1,4 @@
-// NvrRtPlayground: a walkable test room for Vegas Shaders' ray tracing without the game (tools/nvr-rt-playground/README.md).
+// NvrRtPlayground: a walkable test room for Vegas Shaders' ray tracing without the game (docs/TOOLS.md "nvr-rt-playground").
 //
 // A 32-bit D3D9 program on the NVR DXVK fork (d3d9.dll next to the exe) that plays the game's side of the RT core, as the RT test host
 // does (tools/nvr-rt-host), but interactively: a window, a WASD + mouse-look camera, a room made of boxes, spheres and cards, and each
@@ -92,7 +92,7 @@ static_assert(sizeof(TemporalPush) == 200 && sizeof(SpecPush) == 216 && sizeof(A
 static_assert(offsetof(SpecPush, spec) == offsetof(TemporalPush, samplerIndex), "SpecPush = TemporalPush's head + spec");
 
 // ------------------------------------------------------------------------------------------------------------------------------
-// Settings: what the keys toggle (README "Adding a feature toggle": a field here, a line in the toggle table, its use in TracePass)
+// Settings: what the keys toggle (docs/TOOLS.md "nvr-rt-playground", "Adding a feature toggle": a field here, a line in the toggle table, its use in TracePass)
 struct Settings {
 	int pt = 1;            // P: the path tracer (off: the raster shading + RT sun shadows)
 	int ptMode = 0;        // N: 0 PTRealtime (denoised), 1 the reference (ReferencePT: a running mean while nothing moves), 2 raw (one path, no denoiser)

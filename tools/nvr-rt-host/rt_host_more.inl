@@ -1,7 +1,7 @@
 // NvrRtHost, the second set of scenes (2026-11-06, included by rt_host.cpp before main): the sun shadow and AO / sky passes, the path
 // tracer with the albedo atlas and the lamp image (all-lamp loop vs PTLightGrid, built by the game's RtLightGrid.h), both ReSTIR passes
 // (RtLampTraceRestir, RtPathTraceGI + RtRestirGI), the game's D3D9 side (RtDenoise's fork passes, PointShadowForward.hlsl's
-// PointShadowTraced lookup), and the scene picking rules (RtScenePick.h). README.md has the table.
+// PointShadowTraced lookup), and the scene picking rules (RtScenePick.h). docs/TOOLS.md "nvr-rt-host" has the table.
 
 struct Ctx2 {
 	// images

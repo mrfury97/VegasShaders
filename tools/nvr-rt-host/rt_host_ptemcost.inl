@@ -1,6 +1,6 @@
 // NvrRtHost, PTEmissive's cost keys (2026-11-11 pt-emissive-cost; included by rt_host.cpp after rt_host_ptcost.inl): RtPathTrace.comp's
 // PTEmissiveCut / PTEmissiveFloor / PTEmissiveHits / PTEmissiveRoulette (src/core/RtEmissiveRow.h CostKeys, frame row texels 289.y-291.x)
-// against PTEmissive as it was, on a PTRealtime-like frame. README.md has the table.
+// against PTEmissive as it was, on a PTRealtime-like frame. docs/TOOLS.md "nvr-rt-host" has the table.
 
 // ==============================================================================================================================
 // Scene: ptcost's yard (a floor, the emissive scene's glowing sign + box, a back wall, a glossy side wall, a block, 7 posts), the path tracer
