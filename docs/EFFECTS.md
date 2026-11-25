@@ -3497,7 +3497,46 @@ brighter because its diffuse light is also brighter on the armour (region mean 6
 which leaves the metal parts no diffuse light), not because of the highlight alone.
 
 Known gaps: the FoldHighlights light-only passes (objects reached by 3+ lamps indoors) and the DeferredLamps pass have no `n`
-and keep the old highlight (DeferredLamps reads the bridged roughness from the material buffer, but with F0 0.04).
+and keep the old highlight. DeferredLamps reads the bridged roughness from the material buffer and, since upstream 1.1.3, the record's
+non-metal F0 (`DLSpecF0` from `FDSpecF0Decode`, D3D9 passes only; the Vulkan lamp compute `Compute/DeferredLamps.comp` still uses 0.04).
+
+### Reflectivity under the deferred renderer (checked 2026-11-26)
+
+`ReflectivityExterior` / `ReflectivityInterior` reach every PBR highlight as `TESR_PBRMath.y` (c223) = Reflectivity - 1 (`PBR.cpp`
+UpdateConstants): `Includes/PBR.hlsl` `ReflectivityF0` (F0 x R) and `REFLECTIVITY_F90` (saturate(R)), in `PBR`, `PBRSun`,
+`PBRSunSpecular`, `PBRSpecular` and `PBR_SPEC_FRESNEL`. In DeferredRenderer 2 the deferred passes get the same value:
+
+| Pass | Surfaces | How c223 is set | Code path |
+|---|---|---|---|
+| DeferredSun | land, objects, parallax, metal | the record's `SetCT` (c223 is in its constant table: the game's cached `Deferred\Sun\DeferredSun.pso`) | `LandSun` -> `PBRSun`; `getSunLightingModel` |
+| DeferredLamps (lamp, land, land film passes) | objects, land | `core/DeferredLamps.h` Apply, `kGlobals` | `getPointLightLightingAtt`, `DLLampLand` -> `PBR` |
+| Vulkan lamp compute | objects, land | `cb.pbrMath` (`copyConst`) | `DeferredLamps.comp` `ReflectivityF0` |
+
+Not scaled, as in forward: skin (its own F0), the wet film (`WetSpecular`), the foliage records' carried sun.
+
+Why the slider showed little on the ground after the upstream 1.1.1-1.1.3 merge (58b8e1c): upstream added `PBR_ROUGH_F90`
+(roughness-damped grazing F90, for parity with the path tracer) to DeferredSun, DeferredLamps, FlashlightDeferred and the lamp compute.
+There F90 = max(saturate(R) x (1 - roughness x (1 - metal)), F0); the forward templates (TerrainTemplate, ObjectTemplate) keep
+saturate(R). The slider still scales F0 and F90 the same way in both (for R up to 1 the highlight is exactly R times), but on rough ground
+the grazing sheen toward the sun, which is most of what the slider moved, is damped away, so the scaled part is small. A model of the
+`PBRSun` maths (flat ground, sun 25 degrees up, eye 10 degrees up looking toward the sun, albedo 0.25), total sun light at R 0.5 against
+R 1: roughness 0.4 -47 % forward / -45 % deferred; 0.8 -27 % / -14 %; 0.95 -15 % / -4 %. Not measured in game.
+
+`[Shaders.PBR.Main] DeferredLandRoughF90` (2026-11-26, live; default false, the owner's call: "add the reflectivity to ground"). False: the
+deferred land skips the damping and takes the forward land's F90, saturate(R), so the Reflectivity sliders scale the ground's shine as in
+forward and as before the merge; rough ground also shines more toward a low sun at Reflectivity 1 than in 1.1.1-1.1.3. True: upstream's
+damped F90, as in 1.1.1-1.1.3 (the fallback). Objects, parallax, skin and the flashlight keep the damping either way; the land's wet film
+never had it. How it is sent: `TESR_LinearScales.w` (c168.w, a lane nothing else reads) = 1 for false, 0 for true (`PBR.cpp`
+UpdateConstants; a register never written = the damped F90). Where it is read:
+
+- `DeferredSun.hlsl` `LandSun` sets `DSLandF90` before `PBRSun`; the pass's `PBR_ROUGH_F90_PICK` then gives `REFLECTIVITY_F90` instead
+  of `RoughReflectivityF90` for the land's calls only.
+- `DeferredLamps.hlsl`'s land pass (`DL_LAND_ONLY`, not the film pass) sets `DLLandF90` before its lamp loop.
+- `Compute/DeferredLamps.comp` `PBRFull(..., landF90)`: true only for land pixels, from `cb.linearScales.w`.
+
+`Includes/PBR.hlsl`: `PBR_ROUGH_F90_PICK(damped)` defaults to `(damped)` inside the `PBR_ROUGH_F90` block, which now starts on its old
+comment's line so that every forward shader's preprocessed text is unchanged (checked with fxc /P on the land, object, skin, parallax,
+water, env and hair templates: byte-identical). With the key true the deferred maths is the old expression, chosen by a select.
 
 ### Material maps (`_rmaos`)
 

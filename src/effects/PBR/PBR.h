@@ -180,6 +180,10 @@ public:
 	// same two for the floor sheen. 1 = as before.
 	struct ReflectivitySettingsStruct {
 		float Exterior = 1.0f, Interior = 1.0f;
+		// UNOFFICIAL 2026-11-26 [Shaders.PBR.Main] DeferredLandRoughF90 (live): false (default, the owner's call) = the deferred land's sun and
+		// lamps take the forward land's F90 (saturate(Reflectivity)), so Reflectivity scales the ground's shine as in forward; true = upstream
+		// 1.1.1's roughness-damped F90 (the fallback). Sent as TESR_LinearScales.w = 1 / 0 (UpdateConstants)
+		bool DeferredLandRoughF90 = false;
 	};
 	ReflectivitySettingsStruct	ReflectivitySettings;
 

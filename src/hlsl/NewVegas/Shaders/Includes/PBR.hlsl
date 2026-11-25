@@ -35,13 +35,13 @@ float4 TESR_PBRMath : register(c223); // x: EnergySplit (1 = on), y: Reflectivit
 #endif
 float3 ReflectivityF0(float3 f0) { return saturate(f0 + f0 * TESR_PBRMath.y); }
 #define REFLECTIVITY_F90 saturate(1.0f + TESR_PBRMath.y).xxx
-// UNOFFICIAL 2026-11-19 (Finding 4.2): opt-in roughness-damped grazing F90 (Lagarde 2014, matching RtPathTrace.comp PTRoughFresnel = 1)
-// for deferred light passes; forward templates leave PBR_ROUGH_F90 undefined so their bytecode and ps_3_0 register counts stay identical.
-#if defined(PBR_ROUGH_F90) && PBR_ROUGH_F90
+#if defined(PBR_ROUGH_F90) && PBR_ROUGH_F90	// UNOFFICIAL 2026-11-19 (Finding 4.2): roughness-damped grazing F90 (Lagarde 2014, RtPathTrace.comp PTRoughFresnel = 1), deferred passes only
+    #ifndef PBR_ROUGH_F90_PICK	// UNOFFICIAL 2026-11-26 DeferredLandRoughF90: the pass's own choice, per call, between the damped F90 and REFLECTIVITY_F90 (DeferredSun.hlsl, DeferredLamps.hlsl)
+        #define PBR_ROUGH_F90_PICK(damped) (damped)	// (the block starts on its old comment's line: every line the forward shaders see stays where it was)
+    #endif
 float3 RoughReflectivityF90(float3 f0, float r, float metal) {
-    return max(REFLECTIVITY_F90 * (1.0f - saturate(r) * saturate(1.0f - metal)), f0);
-}
-    #define PBR_F90_FOR(f0, r, metal) RoughReflectivityF90((f0), (r), (metal))
+    return max(REFLECTIVITY_F90 * (1.0f - saturate(r) * saturate(1.0f - metal)), f0); }
+    #define PBR_F90_FOR(f0, r, metal) PBR_ROUGH_F90_PICK(RoughReflectivityF90((f0), (r), (metal)))
 #else
     #define PBR_F90_FOR(f0, r, metal) REFLECTIVITY_F90
 #endif

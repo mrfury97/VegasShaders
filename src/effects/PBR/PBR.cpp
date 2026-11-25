@@ -102,6 +102,8 @@ void PBRShaders::UpdateSettings() {
 	// UNOFFICIAL 2026-10-25 Reflectivity (live): applied in UpdateConstants by whether the player is outdoors or in.
 	ReflectivitySettings.Exterior = std::clamp(RmaosScaleOr1("Shaders.PBR.Main", "ReflectivityExterior"), 0.0f, 3.0f);
 	ReflectivitySettings.Interior = std::clamp(RmaosScaleOr1("Shaders.PBR.Main", "ReflectivityInterior"), 0.0f, 3.0f);
+	// UNOFFICIAL 2026-11-26 DeferredLandRoughF90 (live; a missing key: false, the default: the land lit as the forward land)
+	{ SettingManager::Configuration::ConfigNode node; ReflectivitySettings.DeferredLandRoughF90 = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "DeferredLandRoughF90") && node.BoolValue; }
 	// UNOFFICIAL 2026-11-01 HairHighlight (SM3003.pso.hlsl TESR_HairData): the hair's strand highlight times this, and GameLook = added as
 	// the game adds it (missing keys, an older toml: 1 and the game's look).
 	HairData.x = std::clamp(RmaosScaleOr1("Shaders.PBR.Main", "HairHighlight"), 0.0f, 4.0f) - 1.0f;
@@ -348,7 +350,10 @@ void PBRShaders::UpdateConstants() {
 	// (LinScale: pow(max(s, 0), gamma) when gamma > 1).
 	const float gamma = Constants.Linear.x;
 	auto linScale = [gamma](float s) { return gamma > 1.0f ? powf(s > 0.0f ? s : 0.0f, gamma) : s; };
-	Constants.LinearScales = D3DXVECTOR4(linScale(Constants.Data.z), linScale(Constants.Data.w), linScale(Constants.ExtraData.y), 0.0f);
+	// w (UNOFFICIAL 2026-11-26 DeferredLandRoughF90): 1 (key false, default) = the deferred land takes the forward land's F90 (DeferredSun.hlsl
+	// LandSun, DeferredLamps.hlsl's land pass, Compute/DeferredLamps.comp); 0 (key true) = upstream's roughness-damped F90. A lane nothing else reads (c168.w).
+	Constants.LinearScales = D3DXVECTOR4(linScale(Constants.Data.z), linScale(Constants.Data.w), linScale(Constants.ExtraData.y),
+		ReflectivitySettings.DeferredLandRoughF90 ? 0.0f : 1.0f);
 
 	// UNOFFICIAL 2026-10-18 per-weather scales for materials with an _rmaos map (idea from Physically-Based-Reloaded (Balebandro), GPL-3.0,
 	// commit c1415cb8; Object.hlsl RmaosRead): blended over day / night / interiors and rain like the values above. TESR_PBRMath z and w
