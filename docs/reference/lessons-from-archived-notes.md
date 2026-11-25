@@ -37,7 +37,7 @@ labelled **proven** (the note names the evidence or a fix that worked), **believ
   PT on needs a restart).
 - **Proven.** Never kill the RT helper by image name (`taskkill /IM NvrRtHelper.exe` kills the owner's helper too); stop only the process you started.
 - **Proven.** The no-limits replacement set is matched by ps_3_0 bytecode hash: after any settings or shader change that recompiles shaders,
-  rebuild it with `tools/nvr-dxvk/replace/rt_sun_set.py`, or those shaders silently fall back to the cascades. (The set was 67 replacements for
+  rebuild it with `rt_sun_set.py` (it existed only on the old combo-106 build; it is NOT in this repo's `tools/nvr-dxvk/replace/`, which has `nolimits.py`, `psasm2glsl.py`, `sm4asm2glsl.py`), or those shaders silently fall back to the cascades. (The set was 67 replacements for
   the forward RT sun in 2026-11-14; whether main still ships it: **open**, upstream 1.1.0 keeps `NvrDxvkReplacements` off.)
 - **Proven.** The forward RT sun's traced visibility rides in the blue channel of Bend's `TESR_ContactForward` (rgba16f); the 15-degree-quantised
   sun direction (F2) caused "dark streaks on a sunlit slope with a backlit sun".

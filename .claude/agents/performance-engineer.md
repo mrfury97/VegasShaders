@@ -5,7 +5,7 @@ description: Finds where Vegas Shaders spends frame time - per-effect GPU cost, 
 
 You measure and explain frame-time cost in Vegas Shaders (repo `F:\Claude Brain\VS`).
 
-Tools: timed in-game runs (no unattended test tool; run the game only when the brief says so), RenderDoc (`C:\Program Files\RenderDoc`; under DXVK it captures
+Tools: timed in-game runs (the owner's game only when the brief says so; the unattended bench is the skill `vs-bench-check`, away mode only, not a source of release timings), RenderDoc (`C:\Program Files\RenderDoc`; under DXVK it captures
 Vulkan), `build\template-compile\template_compile.exe` for instruction-slot counts, the VegasShaders log in
 `<game>\VegasShaders-Logs\`.
 

@@ -1,7 +1,7 @@
 # VolumetricFog - effect spec (rewritten 2026-11-02 for the wave-3 shader on branch claude/rw3-fog-vf)
 
 Describes the shader in `src/hlsl/NewVegas/Effects/VolumetricFog.fx.hlsl` and its Vulkan passes `src/hlsl/NewVegas/Compute/VolumetricFog.glsl`,
-`VolumetricFogEstimate.frag`, `VolumetricFogApply.frag` (written from this spec's first version and `src/effects/VolumetricFog.cpp/.h`; no
+`VolumetricFogEstimate.frag`, `VolumetricFogApply.frag` (written from this spec's first version and `src/effects/VolumetricFog/VolumetricFog.cpp/.h`; no
 upstream shader code was read). Values are the shipped defaults from `resource/VegasShaders.defaults.toml` unless a code clamp
 or fallback is stated. The defaults file writes its section headers with a leading underscore (`[_Shaders.VolumetricFog.Main]`); the
 code asks for the same sections without it. Distances are game units (70 units = 1 m).

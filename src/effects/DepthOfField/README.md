@@ -1,6 +1,6 @@
 # DepthOfField
 
-Rewritten 2026-11-02 (wave 3, branch `claude/rw3-screen`, commit 05647249) from the spec of the same name. The C++ (`src/effects/DepthOfField.cpp`,
+Rewritten 2026-11-02 (wave 3, branch `claude/rw3-screen`, commit 05647249) from the spec of the same name. The C++ (`src/effects/DepthOfField/DepthOfField.cpp`,
 `.h`) is unchanged. The new shaders: `src/hlsl/NewVegas/Effects/DepthOfField.fx.hlsl` (D3D9), `src/hlsl/NewVegas/Compute/DepthOfField.glsl`
 (shared push block and helpers), `DepthOfField.frag` (distant pass), `DepthOfFieldFocus.frag`, `DepthOfFieldMosaic.frag`,
 `DepthOfFieldBokeh.frag`, `DepthOfFieldCombine.frag`, `DepthOfFieldCombineBokeh.frag` (Vulkan). The bokeh scatter and resolve

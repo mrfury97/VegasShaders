@@ -50,4 +50,4 @@ our own work (deferred wetness, unified reflections, speckle fixes, single pass)
 
 ## Links
 - `docs/archive/upstream-cherry-picks.md` and `docs/archive/fork-vs-upstream.md`: how earlier ports were recorded.
-- Branch `upstream-refl-rt-compare`: `docs/upstream-reflections-rt-compare.md` (on that branch), the comparison behind the full-merge choice.
+- Branch `upstream-refl-rt-compare`: `docs/upstream-reflections-rt-compare.md` (exists on that branch only), the comparison behind the full-merge choice.

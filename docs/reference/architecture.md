@@ -6,8 +6,9 @@
 - Vegas Shaders (formerly New Vegas Reloaded) is a 32-bit xNVSE plugin for Fallout: New Vegas: `VegasShaders.dll`, built from
   `NewVegasReloaded\NewVegasReloaded.vcxproj` (Release, Win32, MSVC toolset v142). Build: the `vs-build-deploy` skill.
 - Shaders under `src\hlsl\NewVegas\` are compiled at runtime, not built into the DLL: a shader change ships as files under
-  `<game>\Data\Shaders\VegasShaders\`. The shader cache reuses an entry only when the whole preprocessed text matches, so editing
-  a shared include recompiles every shader that uses it (minutes on a slow PC).
+  `<game>\Data\Shaders\VegasShaders\`. The shader cache reuses an entry only when the whole preprocessed text matches, so changed
+  shaders recompile by themselves and editing a shared include recompiles every shader that uses it (minutes on a slow PC).
+  Do not tell the owner to delete the cache after an install; clear it only if a shader looks stale.
 - Ray-traced effects run in a separate 64-bit helper through the project's DXVK fork, because 32-bit Vulkan has no ray tracing.
 
 ## Key files

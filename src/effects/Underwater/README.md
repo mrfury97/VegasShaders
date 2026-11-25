@@ -57,7 +57,7 @@ Units: game units for distances and heights. Colours are the game's own values; 
 - TESR_RenderScale (rect frames only): xy = the drawn part's share of the frame. Used by the coordinate helpers and the clips (section 6).
 - Not read by this effect: TESR_WaterLODColor, the TESR_Placed* water constants, TESR_DebugVar.
 
-The water constants are registered by the Water shader (`src/effects/Water.cpp`). This effect has no constants of its own; its own constant block and settings update are empty. The effect's constants are refreshed from the Water shader's values even when the Water shader itself is disabled (ShaderManager, underwater check).
+The water constants are registered by the Water shader (`src/effects/Water/Water.cpp`). This effect has no constants of its own; its own constant block and settings update are empty. The effect's constants are refreshed from the Water shader's values even when the Water shader itself is disabled (ShaderManager, underwater check).
 
 ## 4. Settings
 

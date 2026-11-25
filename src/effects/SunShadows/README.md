@@ -2,7 +2,7 @@
 
 Files: `src/hlsl/NewVegas/Effects/SunShadows.fx.hlsl` (D3D9), `src/hlsl/NewVegas/Compute/SunShadows.glsl` with `SunShadowsMarch.frag`,
 `SunShadowsBlur.frag`, `SunShadowsApply.frag` (+ `SunShadowsApply-c1.spv`), `SunShadowsSharp.frag`, `SunShadowsSharpFinish.frag` (Vulkan).
-C++: `src/effects/SunShadows.cpp/.h` (passes, ping-pong, Vulkan), `src/effects/ShadowsExterior.cpp/.h` (constants, settings),
+C++: `src/effects/SunShadows/SunShadows.cpp/.h` (passes, ping-pong, Vulkan), `src/effects/ShadowsExteriors/ShadowsExterior.cpp/.h` (constants, settings),
 `src/core/ShadowManager.cpp` (cascade atlas and character map), `src/core/ShaderManager.cpp` (technique choice), `src/core/RtSunShadows.cpp`.
 Reference for the cascade rules: `src/hlsl/NewVegas/Shaders/Includes/Shadow.hlsl` (`GetSunShadow`, `CharacterMapShadow`), not edited.
 Settings sections in the toml carry a leading underscore (`[_Shaders.ShadowsExteriors.ScreenSpace]`); this spec drops it as the C++ does.
