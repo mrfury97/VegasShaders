@@ -1875,10 +1875,16 @@ void SettingManager::SetSettingF(const char* section, const char* key, float val
 		const bool on = value != 0.0f;
 		// [Shaders.<Name>.Status] Enabled also switches the effect itself
 		const bool statusSwitch = !memcmp(section, "Shaders", 7) && !memcmp(section + strlen(section) - 6, "Status", 6) && !memcmp(key, "Enabled", 7);
-		// (2026-11-26 al-menu) AmbientLight: compared with what the switch shows (SunGI / RoomGI hold it on with the key off), so Enabled = 1 while they
-		// hold it on no longer flips the running effect off (and, since SetMenuShaderEnabled clears them on an off, SunGI and RoomGI with it)
-		const bool was = statusSwitch && !strcmp(node.MidSection, "AmbientLight") ? GetMenuShaderEnabled("AmbientLight") : node.BoolValue;
-		if (statusSwitch && was != on && (on || !IsShaderForced(node.MidSection)))
+		// (2026-11-26 al-menu) AmbientLight while SunGI or RoomGI holds it on: the key alone is written, the effect is not switched (presets and
+		// NVRSetSetting scripts keep the designed "SunGI on, switch off" state, outdoors only: AmbientLightEffect::UpdateSettings keeps it held on).
+		// Switching would have flipped the running effect (1 turned it off) and, through SetMenuShaderEnabled, cleared SunGI and RoomGI: that is
+		// the menu's click only.
+		bool held = false;
+		if (statusSwitch && !strcmp(node.MidSection, "AmbientLight")) {
+			SettingNode gi;
+			held = (Config.FillNode(&gi, "Shaders.AmbientLight.Main", "SunGI") && gi.BoolValue) || (Config.FillNode(&gi, "Shaders.AmbientLight.Main", "RoomGI") && gi.BoolValue);
+		}
+		if (statusSwitch && !held && node.BoolValue != on && (on || !IsShaderForced(node.MidSection)))
 			TheShaderManager->SwitchShaderStatus(node.MidSection);
 		node.BoolValue = on;
 		strcpy(node.Value, ToString<bool>(on).c_str());

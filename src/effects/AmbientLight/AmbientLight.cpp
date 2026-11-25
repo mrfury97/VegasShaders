@@ -107,6 +107,7 @@ void AmbientLightEffect::UpdateSettings() {
 		// Forced here: ExteriorBalance on, AmbientReplace (the key if above 0, else 0.8), AlbedoBuffer (this effect's key), the Status switch. The grid
 		// fallback (GridBounce) depends on the RT core and is SunGIFrame's. The strength / quality keys are not touched.
 		SettingManager::Configuration::ConfigNode node;
+		const bool wasHeld = sunGi || roomGi;	// (2026-11-26 al-menu) the keys as the last read found them
 		sunGi = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "SunGI") && node.BoolValue;
 		roomGi = TheSettingManager->Config.FillNode(&node, "Shaders.AmbientLight.Main", "RoomGI") && node.BoolValue;	// UNOFFICIAL 2026-11-12 RoomGI (missing key: off)
 		const bool status = TheSettingManager->GetSettingI("Shaders.AmbientLight.Status", "Enabled") != 0;
@@ -114,7 +115,10 @@ void AmbientLightEffect::UpdateSettings() {
 		sunGiForced = sunGi && !status;
 		roomGiForced = roomGi && !status;	// UNOFFICIAL 2026-11-12 RoomGI: the same for the interior switch (ShouldRender keeps each to its own side of the door)
 		// the runtime Enabled flag follows a live change of the key (load and revert: SettingManager::GetMenuShaderEnabled)
-		if (IsLoaded()) { if ((sunGi || roomGi) && !Enabled) Enabled = true; else if (!sunGi && !roomGi && wasForced) Enabled = false; }
+		// (2026-11-26 al-menu) Dropped when the keys let go and the Status key is off: wasHeld too, because a preset or script may write Status = 0
+		// while SunGI holds the effect (SetSettingF then writes the key only) and SunGI = 0 after it in the same reload (wasForced was false then, the
+		// runtime flag stayed on against both keys). '!status' added: Status 1 and SunGI 0 in one reload no longer switch the effect off.
+		if (IsLoaded()) { if ((sunGi || roomGi) && !Enabled) Enabled = true; else if (!sunGi && !roomGi && !status && (wasForced || wasHeld)) Enabled = false; }
 		settingsOutdoors = TheShaderManager->GameState.isExterior;
 		const bool on = sunGi && settingsOutdoors;
 		CapturedNormals::SunGIWantsAlbedo = on;
