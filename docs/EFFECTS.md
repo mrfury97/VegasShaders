@@ -50,7 +50,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [PBR](#pbr) | true | yes | 0 | 14 | PBR.cpp, PBR.h |  |
 | [POM](../src/effects/POM/) | true | - | 0 | 3 | POM.cpp, POM.h |  |
 | [Particles](#particles) | false | yes | 23 | 2 | Particles.cpp, Particles.h | The game draws smoke, dust, blood and debris particle systems unlit: they keep full brightness in shade, at night and indoors. This collection replaces their sh |
-| [PipboyFit](#pipboyfit) | - | yes | 0 | 0 |  | After GPU skinning, pulls the left-forearm vertices of armor sleeves in under the Pip-Boy casing, using a soft clamp inside an ellipse in the frame of the "Bip0 |
+| [PipboyFit](#pipboyfit) | - | yes | 0 | 0 | (no folder) | After GPU skinning, pulls the left-forearm vertices of armor sleeves in under the Pip-Boy casing, using a soft clamp inside an ellipse in the frame of the "Bip0 |
 | [PointShadows](#pointshadows) | - | yes | 15 | 0 | PointShadows.cpp, PointShadows.h | This pass builds one grey mask for the whole screen that says how much of the nearby point lights (lamps) and the one spot light reach each visible surface. A l |
 | [PointShadows2](#pointshadows2) | - | yes | 3 | 0 | PointShadows2.cpp, PointShadows2.h | PointShadows2 darkens or lights the scene for point lamps that PointShadows does not handle. It is a screen-space pass over the point-shadow buffer: for every p |
 | [Precipitations](#precipitations) | true | yes | 3 | 2 | Rain.cpp, Rain.h | While it rains outdoors, the picture gets falling rain streaks laid over the view. Drops are drawn in layers at increasing distance from the camera, so near str |
