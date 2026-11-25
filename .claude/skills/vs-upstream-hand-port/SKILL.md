@@ -33,10 +33,10 @@ our own work (deferred wetness, unified reflections, speckle fixes, single pass)
    Edit fragments then `py -3.10 -I tools/defaults_tool.py merge .` and `check .` (skill `vs-effects-modular`). After a merge a
    duplicated default line has failed to load in game once: check for duplicates.
 6. **Seams.** Where both touched the same pass (the Reflections compute/composite, the Reflections D3D9 variants) keep one source per
-   frame (our G-buffer film or upstream's forward film), make binding numbers not collide, and write the choice in the effect README.
+   frame (our G-buffer film or upstream's forward film), make binding numbers not collide, and write the choice in the effect's section of docs/EFFECTS.md.
 7. **Review.** `lead-architect` agent reviews the diff (approve / with changes / reject); apply the comments.
 8. **Record.** One merge doc in `docs/` (what came unchanged, what stays ours, seams, defaults table, proven / believed / not run), the
-   affected effect READMEs, and the room memory note for the upstream state.
+   affected effect sections in docs/EFFECTS.md, and the room memory note for the upstream state.
 
 ## Validation
 - Build and offline checks: skill `vs-build-deploy`. Defaults `check` clean; settings version equals the last step.

@@ -75,7 +75,7 @@ git submodule update --init --recursive
 Then build `NewVegasReloaded/NewVegasReloaded.vcxproj` (Release, Win32), or run `build.bat "NewVegasReloaded"`. The
 plugin comes out as `VegasShaders.dll`. Shaders are compiled by the game at runtime from `src/hlsl/NewVegas`, which
 maps to `Data\Shaders\VegasShaders\`. Each effect's code, settings defaults and notes are in `src/effects/<Name>/`
-(index: `src/effects/INDEX.md`). The generated textures can be rebuilt with `tools/gen_textures.py`.
+(the notes and an index are in `docs/EFFECTS.md`). The generated textures can be rebuilt with `tools/gen_textures.py`.
 
 ## Credits
 
