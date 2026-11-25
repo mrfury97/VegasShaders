@@ -43,4 +43,4 @@ Edit an effect, change a settings default, or add a new effect, keeping the effe
   in game).
 
 ## Links
-- Code map: `docs/reference/architecture.md`. Overlay and input code: `docs/reference/dxvk-input.md`.
+- Code map: `docs/REFERENCE.md "Architecture"`. Overlay and input code: `docs/REFERENCE.md "DXVK input"`.

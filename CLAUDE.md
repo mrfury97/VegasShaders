@@ -40,7 +40,7 @@ engine research (room 05), cross-project test runs (room 06).
   Change the forward templates only for geometry that stays forward (water, sky, particles, decals, first person, distant trees,
   glass, menus), and so that `DeferredRenderer = 0` still renders correctly; it need not gain the feature. Every plan says which
   path each change uses, and why when it's forward.
-- Many players run under DXVK: never rely on window messages for input (`docs\reference\dxvk-input.md`). Check xNVSE
+- Many players run under DXVK: never rely on window messages for input (`docs\REFERENCE.md "DXVK input"`). Check xNVSE
   (`src\NewVegas\nvse\`) before writing a hook. Runtime files and folders go through `Paths::`.
 - Shader cache: changed shaders recompile by themselves; don't tell me to delete the cache after an install.
 

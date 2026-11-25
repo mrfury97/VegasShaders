@@ -57,7 +57,7 @@ Turn a source change into a built DLL and checked shaders, put it in the owner's
   in the game folder has no shader errors after the first start.
 
 ## Troubleshooting
-- Shader cache (one wording, used in the repo `CLAUDE.md`, `docs/reference/architecture.md` and the memory note): the cache reuses an
+- Shader cache (one wording, used in the repo `CLAUDE.md`, `docs/REFERENCE.md "Architecture"` and the memory note): the cache reuses an
   entry only when the whole preprocessed text matches, so changed shaders recompile by themselves and editing a shared include
   recompiles every shader using it (minutes on a slow PC). Do not tell the owner to delete the cache after an install; clear
   `Shaders\VegasShaders\Shaders\Cache\` only if a shader genuinely looks stale (for example a failed compile left an old binary).
@@ -65,5 +65,5 @@ Turn a source change into a built DLL and checked shaders, put it in the owner's
 - A test tool is missing from a build: the marker `ReleaseBuild.h` is present; remove it and `/t:Rebuild`.
 
 ## Links
-- Runtime names: `docs/reference/runtime-paths.md`. Code map: `docs/reference/architecture.md`.
+- Runtime names: `docs/REFERENCE.md "Runtime paths"`. Code map: `docs/REFERENCE.md "Architecture"`.
 - Bench run of a build: skill `vs-bench-check`. Porting upstream: skill `vs-upstream-hand-port`.

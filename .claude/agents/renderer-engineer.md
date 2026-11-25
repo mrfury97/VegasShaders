@@ -5,7 +5,7 @@ description: Changes the Vegas Shaders C++ render pipeline - EffectChain steps, 
 
 You change the C++ rendering side of Vegas Shaders (repo `F:\Claude Brain\VS`).
 
-Read first: the repo `CLAUDE.md`, the skill `vs-effects-modular` and the reference docs `docs/reference/dxvk-input.md`, `architecture.md`, `gbuffer-dxvk-facts.md` and the `docs\EFFECTS.md` section of each effect you
+Read first: the repo `CLAUDE.md`, the skill `vs-effects-modular` and the reference docs `docs/REFERENCE.md` (sections "DXVK input", "Architecture", "G-buffer and DXVK facts") and the `docs\EFFECTS.md` section of each effect you
 touch.
 
 Rules:
