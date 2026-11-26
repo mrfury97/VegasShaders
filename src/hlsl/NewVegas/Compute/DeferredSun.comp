@@ -74,6 +74,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  rtSunRowY;              // 69: TESR_RtSunRowY
     vec4  rtSunRowW;              // 70: TESR_RtSunRowW
     vec4  rtSunData;              // 71: TESR_RtSunData
+    vec4  dsSheen;                // 72: DS_Sheen (2026-11-26 SunSheen: x strength, y roughness, z 1 = the land's smooth-roughness gate)
 } cb;
 
 // Flag bits (must match DeferredSun.h)
@@ -336,6 +337,32 @@ vec3 GetSunLightingModel(float specular, vec3 toSun, vec3 radiance, vec3 toEye, 
         return sunLit;
     }
     return (1.0 - metal) * graded * (shades(normalize(N), normalize(toSun)) * scaled);
+}
+
+// UNOFFICIAL 2026-11-26 SunSheen (ported by hand from upstream 1.1.5-test4): Shaders/DeferredSun.hlsl EvalSunSheen, keep in step.
+vec3 EvalSunSheen(vec3 N, vec3 V, vec3 L, vec3 albedo, vec3 sunColor, float r, float metal, float isSpecular, float strength, float rSheen) {
+    const float dry = clamp(1.0 - metal, 0.0, 1.0);
+    const float NdotL = clamp(dot(N, L), 0.0, 1.0);
+    if (strength <= 0.0001 || dry <= 0.001 || NdotL <= 1.0e-4) return vec3(0.0);
+    const float NdotV = clamp(dot(N, V), 0.0, 1.0);
+    const vec3 H = normalize(V + L);
+    const float NdotH = clamp(dot(N, H), 0.0, 1.0);
+    const float roughW = isSpecular > 0.5 ? smoothstep(0.18, 0.50, r) : 1.0;
+    const float a = rSheen * rSheen;
+    const float a2 = a * a;
+    const float dDenom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    const float broadD = a2 / max(3.14159265 * dDenom * dDenom, 1.0e-4);
+    const float fGraz = pow(1.0 - NdotV, 3.0);
+    const float fSheen = 0.04 + 0.14 * fGraz;
+    const vec3 glaze = sunColor * (broadD * fSheen * NdotL * 0.65);
+    const float litGate = smoothstep(0.0, 0.22, NdotL);
+    const float graze = pow(1.0 - NdotV, 2.5);
+    const float retro = 0.5 + 0.5 * clamp(dot(V, L), 0.0, 1.0);
+    const float orenLift = (0.28 * NdotL + 0.38 * graze * litGate) * (0.75 + 0.45 * retro);
+    const float albLuma = dot(albedo, vec3(0.2126, 0.7152, 0.0722));
+    const vec3 sheenTint = mix(albedo, vec3(albLuma * 0.70 + 0.30), 0.40);
+    const vec3 dustSheen = sunColor * sheenTint * orenLift;
+    return (glaze + dustSheen) * (strength * dry * roughW);
 }
 
 vec3 LandSun(vec3 L, vec3 sunLin, vec3 V, vec3 N, vec3 albedo, float r) {
@@ -861,8 +888,16 @@ void main() {
         light = albedo.rgb * hueF * FoliageSunWeightOf(m.b) + (grassF ? hueF * FoliageHighlightOf(FDFoliageHighlightEnc(m.g)) : vec3(0.0));
     } else if (land) {
         light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+        // (2026-11-26 SunSheen) as DeferredSun.hlsl; this pass never runs with DeferredWetness's film live (core/DeferredSun.h), so the
+        // weather's wetness in dsSheen.x and the standing-water gate (z: the land's smooth pixels) are the wet gates here
+        if (cb.dsSheen.x > 0.0001) {
+            const float sheenKeep = cb.dsSheen.z > 0.5 ? smoothstep(0.08, 0.25, r) : 1.0;
+            light += sheenKeep * EvalSunSheen(N, V, Lland, albedo.rgb, sunLand * (cb.terrainExtraData.x != 0.0 ? LinScale(cb.terrainData.z) : 1.0), r, clamp(cb.terrainData.x, 0.0, 1.0), 0.0, cb.dsSheen.x, cb.dsSheen.y);
+        }
     } else {
-        light = GetSunLightingModel(FDSunSpecular(albedo.a, m.r), L, sunLin, V, N, albedo.rgb, r, metal, dsSpecF0, dsSpecFade);
+        const float isSpec = FDSunSpecular(albedo.a, m.r);
+        light = GetSunLightingModel(isSpec, L, sunLin, V, N, albedo.rgb, r, metal, dsSpecF0, dsSpecFade);
+        if (cb.dsSheen.x > 0.0001) light += EvalSunSheen(N, V, L, albedo.rgb, sunLin * LinScale(cb.pbrData.z), r, metal, isSpec, cb.dsSheen.x, cb.dsSheen.y);
     }
 
     float shadow = 1.0;

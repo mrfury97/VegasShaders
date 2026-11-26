@@ -98,7 +98,41 @@ float4 DS_LandSun   : register(c14);	// (2026-11-15) the land's own light as its
 float4 DS_LandColor : register(c15);	// rgb SunColor (c3, the stored curve), w 1 = read back (core/LandLight.h); else the directional light (DS_Sun / DS_SunColor)
 float4 DS_Vis      : register(c16);	// (2026-11-16 fd-sunvis) x 1 = the land's recorded height self-shadow, y 1 = the recorded highlight F0, z SpecularFade's start (game units), w 1 / its range (0: no fade)
 float4 DS_Fog      : register(c13);	// (2026-11-14) rgb the fog colour the records lerped with (stored curve), w 1 = the game's fog is drawn: the exact stored-curve add (FDAddFogged) from the frame's copy on s0
+// UNOFFICIAL 2026-11-26 SunSheen (core/DeferredSun.h FillSheenConst; ported by hand from upstream 1.1.5-test4, the same register there): x the
+// strength (0 off: indoors, at night, the view model, wet weather), y the lobe's roughness (0.45-0.95), z 1 = drop it on the land's smooth pixels
+// (standing water without the film, below)
+float4 DS_Sheen    : register(c18);
 #define DD TESR_DeferredDepthFrame
+
+// UNOFFICIAL 2026-11-26 SunSheen (upstream 1.1.5-test4's EvalSunSheen, the same maths; Compute/DeferredSun.comp keeps a copy in step): what the
+// sun gives a dry, dusty, rough surface beyond the PBR lobe: a very broad GGX glaze (a fixed micro-roughness rSheen, a small grazing Fresnel)
+// and an Oren-Nayar-like backscatter lift toward grazing view and the sun behind the viewer, tinted by a desaturated albedo. Metal takes none;
+// on records with a highlight it fades in only past roughness 0.18-0.5, so polished surfaces keep their own highlight alone. Unshadowed: the
+// caller adds it to the sun's light before the shadow and the recorded share multiply it.
+float3 EvalSunSheen(float3 N, float3 V, float3 L, float3 albedo, float3 sunColor, float r, float metal, float isSpecular, float strength, float rSheen) {
+    const float dry = saturate(1.0f - metal);
+    const float NdotL = saturate(dot(N, L));
+    [branch] if (strength <= 0.0001f || dry <= 0.001f || NdotL <= 1.0e-4f) return 0.0f;
+    const float NdotV = saturate(dot(N, V));
+    const float3 H = normalize(V + L);
+    const float NdotH = saturate(dot(N, H));
+    const float roughW = isSpecular > 0.5f ? smoothstep(0.18f, 0.50f, r) : 1.0f;
+    const float a = rSheen * rSheen;
+    const float a2 = a * a;
+    const float dDenom = NdotH * NdotH * (a2 - 1.0f) + 1.0f;
+    const float broadD = a2 / max(3.14159265f * dDenom * dDenom, 1.0e-4f);
+    const float fGraz = pow(1.0f - NdotV, 3.0f);
+    const float fSheen = 0.04f + 0.14f * fGraz;
+    const float3 glaze = sunColor * (broadD * fSheen * NdotL * 0.65f);
+    const float litGate = smoothstep(0.0f, 0.22f, NdotL);
+    const float graze = pow(1.0f - NdotV, 2.5f);
+    const float retro = 0.5f + 0.5f * saturate(dot(V, L));
+    const float orenLift = (0.28f * NdotL + 0.38f * graze * litGate) * (0.75f + 0.45f * retro);
+    const float albLuma = dot(albedo, float3(0.2126f, 0.7152f, 0.0722f));
+    const float3 sheenTint = lerp(albedo, (albLuma * 0.70f + 0.30f).xxx, 0.40f);
+    const float3 dustSheen = sunColor * sheenTint * orenLift;
+    return (glaze + dustSheen) * (strength * dry * roughW);
+}
 
 // The G-buffer (one line each: ShaderTextureValue reads the sampler states to the end of the line).
 sampler2D DS_Frame : register(s0);	// (2026-11-14) the frame's copy, linear (DeferredSun::Apply), while DS_Fog.w is 1
@@ -152,6 +186,23 @@ sampler2D DS_WetFilmMap : register(s12);
     #define PUDDLES_NOMAP	// (no puddle map sampler here: only WetSpecular is used)
     #include "includes/Wetness.hlsl"	// WetSpecular (its constants are not read here)
 #endif
+
+// UNOFFICIAL 2026-11-26 SunSheen: how much of the dry sheen a pixel keeps (ours, not upstream's: a dusty glow must not sit on wet ground). The
+// weather's wetness is already in DS_Sheen.x (core/DeferredSun.h FillSheenConst). Here, per pixel: DeferredWetness's film (wet ground,
+// puddles, wet objects) by the weight its own sun highlight takes, smoothstep(0, 0.2, gloss), as 1 - it; and while Puddles' standing water
+// is out with no film this frame (DS_Sheen.z) the land's smooth pixels, where the land record wrote the water's gloss into its roughness.
+// Called inside the land and object branches (upstream's places): evaluated after them, the sheen ran the sun-fade record out of temp
+// registers (X4505).
+float DSSheenKeep(float2 uv, bool land, float r) {
+    float keep = land && DS_Sheen.z > 0.5f ? smoothstep(0.08f, 0.25f, r) : 1.0f;
+#if DS_WET_FILM
+    [branch] if (DS_WetFilm.x > 0.5f) {
+        const float film = tex2Dlod(DS_WetFilmMap, float4(uv, 0.0f, 0.0f)).r;
+        keep *= 1.0f - smoothstep(0.0f, 0.2f, saturate((film - floor(film)) / 0.99f));
+    }
+#endif
+    return keep;
+}
 
 #ifndef DS_RT_SUN_FIRST
     #define DS_RT_SUN_FIRST 0
@@ -319,10 +370,15 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     }
     else
 #endif
-    [branch] if (land) light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+    [branch] if (land) {
+        light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+        [branch] if (DS_Sheen.x > 0.0001f) light += DSSheenKeep(IN.uv, true, r) * EvalSunSheen(N, V, Lland, albedo.rgb, sunLand * (TESR_TerrainExtraData.x ? LinScale(TESR_TerrainData.z) : 1.0f), r, saturate(TESR_TerrainData.x), 0.0f, DS_Sheen.x, DS_Sheen.y);
+    }
     else {
         SetDiffuseEnergyKeep(N, V, r);	// (the object shaders' EnergySplit; the land does not take it)
-        light = getSunLightingModel(FDSunSpecular(albedo.a, m.r), L, sunLin, V, N, albedo.rgb, r, metal);
+        const float isSpec = FDSunSpecular(albedo.a, m.r);
+        light = getSunLightingModel(isSpec, L, sunLin, V, N, albedo.rgb, r, metal);
+        [branch] if (DS_Sheen.x > 0.0001f) light += DSSheenKeep(IN.uv, false, r) * EvalSunSheen(N, V, L, albedo.rgb, sunLin * LIN_SCALE_LIGHT, r, metal, isSpec, DS_Sheen.x, DS_Sheen.y);
     }
 #if DS_WET_FILM
     // (2026-11-19 / 2026-11-20 step 2) the wet film's sun highlight where DeferredWetness wrote a film this frame (the near land, objects and
