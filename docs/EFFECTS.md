@@ -57,7 +57,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [Reflections](#reflections) | false | yes | 44 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
 | [SMAA](../src/effects/SMAA/) | false | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](../src/effects/Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
-| [ShadowsExteriors](#shadowsexteriors) | true | yes | 3 | 11 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
+| [ShadowsExteriors](#shadowsexteriors) | true | yes | 5 | 12 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
 | [ShadowsInteriors](#shadowsinteriors) | true | yes | 10 | 7 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
 | [Sharpening](#sharpening) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening makes near surfaces look crisper. CAS adapts per pixel: it measures how much headroom the pixel has before its 3x3 neighbourhood would clip, and shar |
 | [Skin](../src/effects/Skin/) | true | - | 3 | 6 | Skin.cpp, Skin.h |  |
@@ -5360,6 +5360,43 @@ Ported by hand from upstream 1.1.5-test4 (only this term; its MaterialSSS, RealS
   (`SUN_CROSSFADE_PASS`, on by default) ran out of temp registers (X4505).
 - Cost (offline, `template_compile`, ps_3_0 slots): the sun record 2206 -> 2358, with the film 2270 -> 2453, the sun-fade record 3364 ->
   3512 (with the film 3434 -> 3613); all flow 0 (no X4505). Frame time not measured.
+
+### 12. Screen-Space Shadows (Bottled Shaders port, deferred sun, 2026-11-26)
+
+Owner: "make it fully deffered one to one port of bottle shaders versions". A one-to-one port of Bottled Shaders' Screen-Space Shadows
+(github.com/InTheBottle/Bottled-Shaders, a Skyrim Community Shaders fork, GPL-3.0: `src/Features/ScreenSpaceShadows.cpp`,
+`features/Screen-Space Shadows/Shaders/ScreenSpaceShadows/RaymarchCS.hlsl` + `bend_sss_gpu.hlsli`), whose raymarch is Bend Studio's
+(Copyright 2023 Sony Interactive Entertainment, Apache-2.0; the header is kept in the port). Files: `core/ScreenSpaceShadows.h`,
+`Compute/ScreenSpaceShadows.comp` (+ `.spv`), `core/BendDispatch.h` (Bend's `BuildDispatchList`, the same code as theirs token for token).
+
+- What theirs does, and so this: each frame after the depth is complete the mask is cleared to 1 (lit) and, outdoors with the switch on,
+  Bend's march toward the sun writes it. Waves of 64 threads each take a line of pixels running toward the sun's projected position
+  (up to 8 dispatches, wedges round that point); each thread reads its own depths (two taps across the line, point-read where the step is
+  above `BilinearThreshold`) into groupshared memory, then tests `SampleCount` x 60 (at 1080p, by the square root of the area, a multiple
+  of 8) depths between it and the sun; a nearer depth within `SurfaceThickness` (relative to the distance to the far depth) shadows it,
+  four interleaved minima averaged, `ShadowContrast` applied. The deferred lighting multiplies the SUN's shadow by the mask where N.L >= 0,
+  outdoors, at every distance; the ambient is not touched.
+- Path: deferred only. The march runs at the end of each deferred span (`Hooks/Render.cpp` DeferredSpan, `ScreenSpaceShadows::Produce`,
+  right after `DeferredDepth::AtSpanEnd`) on that span's depth, and `Shaders/DeferredSun.hlsl` multiplies it in (`DS_SSS` c19,
+  `TESR_ScreenSpaceShadows` s13; +11 ps_3_0 slots in every record). No forward template changes: forward surfaces (water, glass, hair,
+  particles, first person, distant trees) and `DeferredRenderer 0` do not get it.
+- Translations (one line each): D3D11 cs_5_0 -> GLSL for the NVR DXVK extension's compute (native D3D9 has no compute: off there);
+  `SAMPLE_COUNT` compile define -> push constant (arrays sized for 512); `SampleLevel(PointBorderSampler)` -> `texelFetch`, off the drawn
+  rect = FarDepthValue (their border colour 1); the depth pre-pass -> the main opaque list's depth copied at the span's end
+  (`DeferredDepth`, which `DeferredRenderer 2` always makes: `SettingForce` forces `DeferredDepth 2`); Far 1 / Near 0 as theirs, swapped for a reversed depth; R8_UNORM -> G16R16F (r); full sky -> outdoors; the sun light ->
+  `ShaderConst.SunDir` (the shadow maps' sun); dynamic resolution -> `RenderRect`; their JSON settings ->
+  `[Shaders.ShadowsExteriors.SSShadows]` with their defaults and ranges (Enabled true, SampleCount 1 [1-4], SurfaceThickness 0.02
+  [0.005-0.05], BilinearThreshold 0.02 [0.02-1], ShadowContrast 1 [0-4]); `Enabled` is live, but the depth copy is made only when it is
+  on at start.
+- Not taken by: the first-person pass (`DeferredFirstPerson`): the view model is not in the depth the march read (theirs is, through
+  their pre-pass); the Vulkan sun pass (`DeferredSun.comp`, `NvrDxvkDeferred`, off by default) has no lookup and stands aside while there
+  is a mask.
+- Overlaps: in a frame where the sun pass took the mask, the old contact pass ([ScreenSpace], over the finished picture, ambient included)
+  writes no contact (`EffectChain.cpp`), so the sun is darkened once. The forward Bend port ([ScreenSpace] Bend, section above, off by
+  default) is untouched. RT sun shadows: the mask multiplies the traced shadow too (theirs multiplies whatever sun shadow there is); with
+  RT on, its own contact march (`[ShadowsExteriors.RT] ContactShadows`) can add to it near the camera (believed; RT is off by default).
+  AO and AmbientLight shade the ambient: no overlap. Lamps: theirs has no lamp version, so none here.
+- Cost and look: see the bench note below.
 
 ## ShadowsInteriors
 

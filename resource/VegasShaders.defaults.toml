@@ -2071,6 +2071,13 @@ FadeLength = 1000.0                  # UNOFFICIAL (2026-11-06) [100-10000], with
 BendDebug = 0                        # UNOFFICIAL (2026-11-06), diagnostic, with Bend, live: 1 = the sun's light shows the Bend contact shadows alone (the shadow maps left out), 2 = where last frame's result was taken (white) and where not (black: no contact there).
 FastPaths = true                     # UNOFFICIAL (2026-10-17): the same contact shadows for less GPU time: the march's early exits (too far, surface turned away from the sun) really skip work (the shader compiler had turned them into work every pixel did). Off = the original pass. Applies immediately
 
+[_Shaders.ShadowsExteriors.SSShadows]
+Enabled = true                       # UNOFFICIAL (2026-11-26), a LOOK OPTION, live (turning it on from off at start needs a restart): Bottled Shaders' Screen-Space Shadows (Bend Studio's), ported one to one: fine contact shadows of the sun from the depth buffer, made each frame before the deferred sun pass and multiplied into the sun's light only (not the ambient), outdoors, on every deferred surface at every distance. Needs the deferred renderer and the Vegas Shaders DXVK (fork) d3d9.dll; without them nothing changes. Where they draw, the old contact shadows ([ScreenSpace]) stand aside.
+SampleCount = 1                      # [1-4] UNOFFICIAL (2026-11-26), live: Bottled Shaders' Sample Count Multiplier: how far each shadow reaches across the screen (60 samples per ray at 1080p times this, scaled with the render size); more costs more GPU.
+SurfaceThickness = 0.02              # [0.005-0.05] UNOFFICIAL (2026-11-26), live: Bottled Shaders' Surface Thickness: how thick each surface is assumed to be behind what the screen shows. Lower = thinner, more precise shadows.
+BilinearThreshold = 0.02             # [0.02-1.0] UNOFFICIAL (2026-11-26), live: Bottled Shaders' Bilinear Threshold: depth steps bigger than this (relative) are read sharp instead of smoothed, so the edges of objects cast and do not bleed.
+ShadowContrast = 1.0                 # [0.0-4.0] UNOFFICIAL (2026-11-26), live: Bottled Shaders' Shadow Contrast: above 1 the shadows get darker and harder, below 1 lighter.
+
 [_Shaders.ShadowsExteriors.ShadowMaps]
 CascadeResolution = 1				 # Resolution used for shadow cascades. 0: 1024, 1: 1536, 2: 2048, 3: 2560, 4: 3072, 5: 3584, 6: 4096 (UNOFFICIAL; 6 needs about 256 MB of video memory with PCF shadows, Max Quality uses it).
                                      # 3: 2560, 4: 3072, 5: 3584. The atlas holds 2x2 cascades, so

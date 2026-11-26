@@ -102,6 +102,10 @@ float4 DS_Fog      : register(c13);	// (2026-11-14) rgb the fog colour the recor
 // strength (0 off: indoors, at night, the view model, wet weather), y the lobe's roughness (0.45-0.95), z 1 = drop it on the land's smooth pixels
 // (standing water without the film, below)
 float4 DS_Sheen    : register(c18);
+// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h, a one-to-one port of Bottled Shaders'): x 1 = this span's mask
+// is to be taken (outdoors, made from this span's depth; 0 in the first-person pass). The mask: r 1 lit .. 0 shadowed, at the pixel.
+float4 DS_SSS      : register(c19);
+sampler2D TESR_ScreenSpaceShadows : register(s13) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
 #define DD TESR_DeferredDepthFrame
 
 // UNOFFICIAL 2026-11-26 SunSheen (upstream 1.1.5-test4's EvalSunSheen, the same maths; Compute/DeferredSun.comp keeps a copy in step): what the
@@ -426,6 +430,9 @@ float4 main(PS_IN IN, out float depth : DEPTH DS_SKIN_SPEC_OUT) : COLOR0 {
     #endif
         [branch] if (cloudStrength > 0.0f) shadow *= DSCloudSunAt(P, cloudStrength);
 #endif
+        // UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders' Lighting.hlsl, DEFERRED: outdoors, dirLightAngle >= 0, the sun's
+        // shadow times the mask at the pixel; their Load at the pixel = this point read at the pixel's centre)
+        [branch] if (DS_SSS.x > 0.5f && dot(N, L) >= 0.0f) shadow *= tex2Dlod(TESR_ScreenSpaceShadows, DDUv(IN.vpos, DD[5])).r;
     }
 #if FD_SKIN
     [branch] if (skinPx) {	// SkinTemplate.hlsl's sun: SkinLight(PBRLight(the sun), the shadow) + its highlight, in world space
