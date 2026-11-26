@@ -88,7 +88,6 @@ void HdrOutputNoteDesktop() { HdrOutput::NoteDesktop(); }	// UNOFFICIAL 2026-10-
 #include "../../core/ScopeFog.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] PostEffects 1: distance fog on that picture
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows: the clouds' shadow in the surface shaders
 #include "../../core/LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart: the Interior lamp-shadow records made after the start
-#include "../../core/BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (LOD only, per draw; fork port 2026-11-13)
 #include "../../gunfx/GunFX.h"	// 2026-11-16 (gunfx-builtin): GunFX built in: its heat, haze and smoke by direct calls
 #include "../../gunfx/GunFXHost.h"
 
@@ -4742,7 +4741,6 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
 	DustDraw::ForDraw(TheRenderManager->device, ShaderSplit::CurrentContext == ShaderSplit::World);	// 2026-11-04: a static mesh in the world scene takes dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
-	BendContact::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-06 LodOnly
 	ForwardShadowsForPass(Pass);
 	if (LampScissor::Before((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World, BarrelHeat::Active) == LampScissor::Skip) {
 		HiddenObjectCulling::Abandon();	// (a lamp-only pass is never an object's first pass in practice; if it was, its query is not used)
@@ -4849,7 +4847,6 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	NpcCharacterMaps::ForDraw(TheRenderManager->device, (const NiAVObject*)((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World, false);	// UNOFFICIAL 2026-11-08
 	DustDraw::ForDraw(TheRenderManager->device, false);	// 2026-11-04: skinned (people, creatures, armour, arms): no dust
 	BarrelHeat::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL GunFX barrel glow, per object
-	BendContact::ForDraw(TheRenderManager->device, ((const PointShadowForward::RenderPassView*)Pass)->geometry, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-06 LodOnly
 	ForwardShadowsForPass(Pass);
 	ClothWind::PassGeometry = ((const PointShadowForward::RenderPassView*)Pass)->geometry;	// UNOFFICIAL 2026-10-19 cloth: SetShadersHook notes this object
 #if NVR_TEST_TOOLS

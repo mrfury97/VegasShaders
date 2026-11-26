@@ -199,7 +199,8 @@ Gaps:
 
 ### Believed (not proven)
 - VolumetricLight / VolumetricFog / TAA behave the same in both modes (no branch found; not run).
-- Bend's in-lighting contact shadows do not reach the deferred sun (DeferredSun.hlsl has no such opt-in); Bend is off by default.
+- Bend's in-lighting contact shadows do not reach the deferred sun (DeferredSun.hlsl has no such opt-in); Bend is off by default. (2026-11-27: that
+  forward port is removed; the deferred sun takes the Bottled Shaders port, EFFECTS.md "ShadowsExteriors" section 12.)
 - Tree trunks and branches are deferred as objects (inferred from the shader pairing, not traced).
 - Menus and the Pip-Boy are forward (inferred from the span's size and context gate).
 
