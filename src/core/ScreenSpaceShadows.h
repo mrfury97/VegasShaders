@@ -175,4 +175,30 @@ namespace ScreenSpaceShadows {
 				reversed ? "reversed" : "standard");
 		return true;
 	}
+
+	// UNOFFICIAL 2026-11-27 LAMPS (owner: "Yes, add for lamps"; the producer is core/LampScreenShadows.h, Render.cpp's DeferredSpan; the
+	// reader DeferredLamps.hlsl DLShadow in the shadow passes): the same raymarch toward up to four lamps' positions, one lamp a channel of
+	// TESR_LampScreenShadows (A16B16G16R16F, cleared to 1). [Shaders.ShadowsInteriors.SSShadows] Enabled, Lamps (0-4), FadeStart, FadeLength;
+	// the march's own knobs (SampleCount, SurfaceThickness, BilinearThreshold, ShadowContrast) are the sun's section's, one set for both.
+	namespace Lamps {
+		inline constexpr const char* kSection = "Shaders.ShadowsInteriors.SSShadows";
+		inline bool WantedAtStart() {
+			return TheSettingManager->GetSettingI(kSection, "Enabled") != 0 && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer") > 0;
+		}
+		inline IDirect3DTexture9* Texture = nullptr;	// TESR_LampScreenShadows
+		inline IDirect3DSurface9* Surface = nullptr;
+		inline ID3D9NvrExtPipeline* Pipeline = nullptr;
+		inline bool Tried = false, Failed = false;
+		inline UINT MadeFrame = 0xFFFFFFFF, MadeSpan = 0xFFFFFFFF;
+		inline float TableIndex[4] = { -1.0f, -1.0f, -1.0f, -1.0f };	// DL_SSLamp: the table index each channel holds (-1 none)
+		inline const void* Chosen[4] = {};								// the lamps (ShadowSceneLight) chosen last time (hysteresis)
+		inline float Fade[2] = { 1000.0f, 1.0f / 1000.0f };				// DL_SSL y, z
+		inline UINT Frames = 0;
+		inline bool MadeThisSpan() { return Texture && MadeFrame == Now() && MadeSpan == SpanCounter; }
+		inline void MakeTextures(TextureManager* mgr, UINT w, UINT h) {
+			if (!WantedAtStart() || !DeferredDepth::Texture || Texture) return;
+			mgr->InitTexture("TESR_LampScreenShadows", &Texture, &Surface, w, h, D3DFMT_A16B16G16R16F);
+			Logger::Log("UNOFFICIAL Screen-Space Shadows for lamps: %s (%ux%u, up to 4 lamps)", Texture ? "mask made" : "the mask was REFUSED: off", w, h);
+		}
+	}
 }

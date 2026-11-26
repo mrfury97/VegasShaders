@@ -1,0 +1,158 @@
+#version 450
+#extension GL_EXT_samplerless_texture_functions : enable
+
+// Copyright 2023 Sony Interactive Entertainment.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// If you have feedback, or found this code useful, we'd love to hear from you.
+// https://www.bendstudio.com
+// https://www.twitter.com/bendstudio
+//
+// Port: Bottled Shaders' Screen-Space Shadows (github.com/InTheBottle/Bottled-Shaders, a Skyrim Community Shaders fork, GPL-3.0:
+// features/Screen-Space Shadows/Shaders/ScreenSpaceShadows/RaymarchCS.hlsl + bend_sss_gpu.hlsli), one to one, to GLSL for the
+// NVR DXVK extension (core/ScreenSpaceShadows.h). Vegas Shaders is GPL-3.0-or-later.
+//
+// UNOFFICIAL 2026-11-27 LAMP version (owner: "Yes, add for lamps"; core/ScreenSpaceShadows.h Lamps): the same raymarch toward a lamp's
+// position (a point light: BuildDispatchList with w +-1, its dispatches limited to the lamp's screen rectangle), writing one channel
+// (pc.channel) of an rgba16f mask that holds up to four lamps (read, the channel replaced, written back: each pixel once per dispatch).
+// Otherwise exactly ScreenSpaceShadows.comp (the sun's), whose notes follow.
+// UNOFFICIAL 2026-11-26 (room 02, owner: "make it fully deffered one to one port of bottle shaders versions"). The same algorithm,
+// parameters and defaults as theirs. Translations, one line each:
+//   - HLSL cs_5_0 -> GLSL 450 (half -> float: SM5 half is float unless min-precision is asked for, which theirs does not);
+//   - SAMPLE_COUNT (a compile define per count in theirs) -> pc.sampleCount / pc.readCount (push), arrays sized for SampleCount 4 at 4K;
+//   - DepthTexture.SampleLevel(PointBorderSampler, uv) at the pixel centre -> texelFetch of that pixel; off the drawn rect -> the border
+//     value (theirs: border colour 1 = FarDepthValue);
+//   - DepthTexture = the game's depth of the main opaque list, copied at the deferred span's end (core/DeferredDepth.h, INTZ, raw
+//     device depth: FarDepthValue 1, NearDepthValue 0 as theirs; swapped when the depth is reversed);
+//   - OutputTexture R8_UNORM UAV -> an rg16f storage image (the format the fork's other compute passes write; r used), cleared to 1
+//     before the dispatches as theirs;
+//   - GroupMemoryBarrierWithGroupSync -> barrier(); the debug outputs (off in theirs) and RIGHT (VR) are left out.
+
+#define WAVE_SIZE 64
+#define MAX_SAMPLES 512
+#define MAX_READS (MAX_SAMPLES / WAVE_SIZE + 2)
+
+layout(local_size_x = WAVE_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_depth;            // DeferredDepth::Texture (raw device depth)
+layout(set = 1, binding = 1, rgba16f) uniform image2D i_out;         // TESR_LampScreenShadows (one lamp a channel: 1 lit .. 0 shadowed)
+
+layout(push_constant) uniform Push {
+    vec4  lightCoordinate;    // DispatchList::LightCoordinate_Shader (BuildDispatchList)
+    ivec2 waveOffset;         // DispatchData::WaveOffset_Shader
+    ivec2 size;               // the drawn rect (pixels); reads outside it return FarDepthValue
+    float farDepthValue;
+    float nearDepthValue;
+    float surfaceThickness;
+    float bilinearThreshold;
+    float shadowContrast;
+    uint  sampleCount;
+    uint  readCount;
+    uint  channel;            // 0-3: the mask channel this lamp writes
+} pc;
+
+shared float DepthData[MAX_READS * WAVE_SIZE];
+
+float ReadDepth(vec2 xy) {
+    ivec2 p = ivec2(floor(xy));
+    if (p.x < 0 || p.y < 0 || p.x >= pc.size.x || p.y >= pc.size.y) return pc.farDepthValue;
+    return texelFetch(t_depth, p, 0).x;
+}
+
+void main() {
+    ivec3 inGroupID = ivec3(gl_WorkGroupID);
+    int inGroupThreadID = int(gl_LocalInvocationID.x);
+
+    // ComputeWavefrontExtents
+    ivec2 xy = inGroupID.yz * WAVE_SIZE + pc.waveOffset.xy;
+    vec2 light_xy = floor(pc.lightCoordinate.xy) + 0.5;
+    vec2 light_xy_fraction = pc.lightCoordinate.xy - light_xy;
+    bool reverse_direction = pc.lightCoordinate.w > 0.0;
+    ivec2 sign_xy = ivec2(sign(vec2(xy)));
+    bool horizontal = abs(xy.x + sign_xy.y) < abs(xy.y - sign_xy.x);
+    ivec2 axis;
+    axis.x = horizontal ? (+sign_xy.y) : 0;
+    axis.y = horizontal ? 0 : (-sign_xy.x);
+    xy = axis * inGroupID.x + xy;
+    vec2 xy_f = vec2(xy);
+    bool x_axis_major = abs(xy_f.x) > abs(xy_f.y);
+    float major_axis = x_axis_major ? xy_f.x : xy_f.y;
+    float major_axis_start = abs(major_axis);
+    float major_axis_end = abs(major_axis) - float(WAVE_SIZE);
+    float ma_light_frac = x_axis_major ? light_xy_fraction.x : light_xy_fraction.y;
+    ma_light_frac = major_axis > 0.0 ? -ma_light_frac : ma_light_frac;
+    vec2 start_xy = xy_f + light_xy;
+    vec2 end_xy = mix(pc.lightCoordinate.xy, start_xy, (major_axis_end + ma_light_frac) / (major_axis_start + ma_light_frac));
+    vec2 xy_delta = start_xy - end_xy;
+    float thread_step = float(inGroupThreadID ^ (reverse_direction ? 0 : (WAVE_SIZE - 1)));
+    vec2 pixel_xy = mix(start_xy, end_xy, thread_step / float(WAVE_SIZE));
+    float pixel_distance = major_axis_start - thread_step + ma_light_frac;
+
+    // WriteScreenSpaceShadow
+    float sampling_depth[MAX_READS];
+    float shadowing_depth[MAX_READS];
+    float depth_thickness_scale[MAX_READS];
+    float sample_distance[MAX_READS];
+    const float direction = -pc.lightCoordinate.w;
+    const float z_sign = pc.nearDepthValue > pc.farDepthValue ? -1.0 : 1.0;
+    const int reads = int(pc.readCount);
+    vec2 write_xy = floor(pixel_xy);
+
+    for (int i = 0; i < reads; i++) {
+        vec2 read_xy = floor(pixel_xy);
+        float minor_axis = x_axis_major ? pixel_xy.y : pixel_xy.x;
+        vec2 depths;
+        float bilinear = fract(minor_axis) - 0.5;
+        read_xy += 0.5;   // USE_HALF_PIXEL_OFFSET 1
+        float bias = bilinear > 0.0 ? 1.0 : -1.0;
+        vec2 offset_xy = vec2(x_axis_major ? 0.0 : bias, x_axis_major ? bias : 0.0);
+        depths.x = ReadDepth(read_xy);
+        depths.y = ReadDepth(read_xy + offset_xy);
+        depth_thickness_scale[i] = max(abs(pc.farDepthValue - depths.x), 1e-4);   // kDepthThicknessFloor
+        bool use_point_filter = abs(depths.x - depths.y) > depth_thickness_scale[i] * pc.bilinearThreshold;
+        sampling_depth[i] = depths.x;
+        float edge_depth = depths.x;   // IgnoreEdgePixels false (SetDefaults)
+        float shadow_depth = depths.x + abs(depths.x - depths.y) * z_sign;
+        shadowing_depth[i] = use_point_filter ? edge_depth : shadow_depth;
+        sample_distance[i] = pixel_distance + float(WAVE_SIZE * i) * direction;
+        pixel_xy += xy_delta * direction;
+    }
+
+    for (int i = 0; i < reads; i++) {
+        float stored_depth = (shadowing_depth[i] - pc.lightCoordinate.z) / sample_distance[i];
+        if (i != 0) stored_depth = sample_distance[i] > 0.0 ? stored_depth : 1e10;
+        DepthData[i * WAVE_SIZE + inGroupThreadID] = stored_depth;
+    }
+
+    barrier();
+
+    float start_depth = sampling_depth[0];
+    if (start_depth == 0.0 || start_depth == 1.0) return;   // (the output was cleared to 1)
+    start_depth = mix(start_depth, pc.farDepthValue, -1.0 / 65535.0);   // UsePrecisionOffset true (RaymarchCS)
+    start_depth = (start_depth - pc.lightCoordinate.z) / sample_distance[0];
+    int sample_index = inGroupThreadID + 1;
+    vec4 shadow_value = vec4(1.0);
+    float depth_scale = min(sample_distance[0] + direction, 1.0 / pc.surfaceThickness) * sample_distance[0] / depth_thickness_scale[0];
+    start_depth = start_depth * depth_scale - z_sign;
+
+    for (int i = 0; i < int(pc.sampleCount); i++) {
+        float depth_delta = abs(start_depth - DepthData[sample_index + i] * depth_scale);
+        shadow_value[i & 3] = min(shadow_value[i & 3], depth_delta);
+    }
+
+    shadow_value = clamp(shadow_value * pc.shadowContrast + (1.0 - pc.shadowContrast), 0.0, 1.0);
+    float result = dot(shadow_value, vec4(0.25));
+    ivec2 write_p = ivec2(write_xy);
+    if (write_p.x >= 0 && write_p.y >= 0 && write_p.x < pc.size.x && write_p.y < pc.size.y) { vec4 v = imageLoad(i_out, write_p); v[pc.channel] = result; imageStore(i_out, write_p, v); }
+}
