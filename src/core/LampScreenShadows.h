@@ -7,8 +7,8 @@
 //      keeps its place unless another scores a quarter more: no flicker between two equal lamps);
 //   2. each one's march runs only over its reach's screen rectangle (LampScissor's exact sphere bound) into one channel of
 //      TESR_LampScreenShadows (cleared to 1);
-//   3. DeferredLamps' shadow passes (DeferredLamps.hlsl DLShadow) multiply that lamp's shadow by its channel, faded out from FadeStart to
-//      FadeStart + FadeLength (camera distance). Lamps 0-15 of a pixel's list only (the lighting pass has no registers for it).
+//   3. DeferredLamps' shadow passes (DeferredLamps.hlsl DLShadow) multiply that lamp's deferred shadow term by its channel, faded out from LampFadeStart to
+//      LampFadeStart + LampFadeLength (camera distance). Settings: next to the sun's, [Shaders.ShadowsExteriors.SSShadows]. Lamps 0-15 of a pixel's list only (the lighting pass has no registers for it).
 // Not while RT lamp shadows run with their own contact march ([ShadowsInteriors.RT] ContactShadows): one contact shadow, not two. Not in the
 // first-person run (the view model is not in the depth). Native D3D9: no compute, off. A point light in Bend: the light's clip position
 // with w = +-1 (BuildDispatchList), rays toward / away from it.
@@ -182,8 +182,8 @@ namespace LampScreenShadows {
 			}
 		}
 		if (!made) return false;
-		const float fadeStart = (std::max)(TheSettingManager->GetSettingF(kSection, "FadeStart"), 0.0f);
-		const float fadeLength = (std::max)(TheSettingManager->GetSettingF(kSection, "FadeLength"), 1.0f);
+		const float fadeStart = (std::max)(TheSettingManager->GetSettingF(kSection, "LampFadeStart"), 0.0f);
+		const float fadeLength = (std::max)(TheSettingManager->GetSettingF(kSection, "LampFadeLength"), 1.0f);
 		Fade[0] = fadeStart; Fade[1] = 1.0f / fadeLength;
 		MadeFrame = ScreenSpaceShadows::Now();
 		MadeSpan = ScreenSpaceShadows::SpanCounter;

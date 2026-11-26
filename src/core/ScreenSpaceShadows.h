@@ -178,12 +178,13 @@ namespace ScreenSpaceShadows {
 
 	// UNOFFICIAL 2026-11-27 LAMPS (owner: "Yes, add for lamps"; the producer is core/LampScreenShadows.h, Render.cpp's DeferredSpan; the
 	// reader DeferredLamps.hlsl DLShadow in the shadow passes): the same raymarch toward up to four lamps' positions, one lamp a channel of
-	// TESR_LampScreenShadows (A16B16G16R16F, cleared to 1). [Shaders.ShadowsInteriors.SSShadows] Enabled, Lamps (0-4), FadeStart, FadeLength;
-	// the march's own knobs (SampleCount, SurfaceThickness, BilinearThreshold, ShadowContrast) are the sun's section's, one set for both.
+	// TESR_LampScreenShadows (A16B16G16R16F, cleared to 1). Part of the deferred lamp shadows (owner: "this is for deffered shadows"); its
+	// settings sit next to the sun's (one place): [Shaders.ShadowsExteriors.SSShadows] Enabled (both), Lamps (0-4), LampFadeStart,
+	// LampFadeLength, and the march's knobs (SampleCount, SurfaceThickness, BilinearThreshold, ShadowContrast) for both.
 	namespace Lamps {
-		inline constexpr const char* kSection = "Shaders.ShadowsInteriors.SSShadows";
+		inline constexpr const char* kSection = "Shaders.ShadowsExteriors.SSShadows";
 		inline bool WantedAtStart() {
-			return TheSettingManager->GetSettingI(kSection, "Enabled") != 0 && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer") > 0;
+			return ScreenSpaceShadows::WantedAtStart() && TheSettingManager->GetSettingI(kSection, "Lamps") > 0;
 		}
 		inline IDirect3DTexture9* Texture = nullptr;	// TESR_LampScreenShadows
 		inline IDirect3DSurface9* Surface = nullptr;
