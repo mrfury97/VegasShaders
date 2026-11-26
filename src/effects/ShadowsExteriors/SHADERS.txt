@@ -3,3 +3,5 @@
 src/hlsl/NewVegas/Compute/ShadowsExteriors.frag
 src/hlsl/NewVegas/Compute/ShadowsExteriors.spv
 src/hlsl/NewVegas/Effects/ShadowsExteriors.fx.hlsl
+src/hlsl/NewVegas/Compute/ScreenSpaceShadows.comp
+src/hlsl/NewVegas/Compute/ScreenSpaceShadows.spv

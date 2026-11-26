@@ -99,6 +99,9 @@ With work from:
   ([Community Shaders ports](docs/DESIGN.md#community-shaders-ports)).
 - [WallSoGB](https://github.com/WallSoGB)'s Fallout: New Vegas database, behind the engine fixes; the NVSE / xNVSE
   projects and the community's reverse engineering of the game.
+- [Bottled Shaders](https://github.com/InTheBottle/Bottled-Shaders) (GPL-3.0, a Community Shaders fork): the screen-space
+  shadows, ported one to one; their raymarch is Bend Studio's screen-space shadows, Copyright 2023 Sony Interactive
+  Entertainment (Apache-2.0).
 - SMAA by Jorge Jimenez et al. (MIT).
 - Polyphony Digital: the Perceptual tone mapper (their sample code, MIT) and the eye adaptation design, from "Driving Toward
   Reality" (SIGGRAPH 2025, Gran Turismo 7).

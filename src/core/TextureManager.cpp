@@ -7,6 +7,7 @@
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth
 #include "RenderRect.h"	// UNOFFICIAL 2026-11-12 (memleak) idle targets: ForgetSurface
 #include "DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDepth
+#include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders port): their mask
 
 namespace {
 	// A depth-stencil texture the shaders can sample (the INTZ format), screen sized.
@@ -90,6 +91,8 @@ void TextureManager::Initialize() {
 			Logger::Log("[ERROR] UNOFFICIAL DeferredDepth: could not create its INTZ depth texture: no depth copy");
 		}
 	}
+	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h, the Bottled Shaders port): their mask, when on and the depth copy exists
+	ScreenSpaceShadows::MakeTextures(mgr, screenW, screenH);
 
 	// UNOFFICIAL 2026-11-04 soft particles (Particles.h): with lit particles on at startup, as their vertices carry the size (ParticleSize.h).
 	if (TheSettingManager->GetSettingI("Shaders.Particles.Status", "Enabled")) {

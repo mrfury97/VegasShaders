@@ -1650,6 +1650,8 @@ measurable with them off (0.47, the same as P81's shader without it).
 - "Conor (mrfury97, github.com/mrfury97/Conor-sClaudeHell-NVR-SAL-Fork, GPL-3.0-or-later): the terrain shadows' height-map
   sweep and share composite, and the terrain variation port."
 - "Terrain variation after Deliot and Heitz 2019."
+- "Bottled Shaders (github.com/InTheBottle/Bottled-Shaders, GPL-3.0): Screen-Space Shadows, ported one to one; the raymarch is
+  Bend Studio's screen-space shadows, Copyright 2023 Sony Interactive Entertainment (Apache-2.0)."
 
 ## Upstream 1.1.1-1.1.3 merge
 

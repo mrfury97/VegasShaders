@@ -171,6 +171,7 @@
 #include "RtCore.h"	// UNOFFICIAL 2026-10-28 (NVR DXVK) the ray tracing core
 #include "RtSunShadows.h"	// UNOFFICIAL 2026-10-28 RT sun shadows
 #include "BendContact.h"	// UNOFFICIAL 2026-11-06 forward Bend contact shadows (fork port 2026-11-13)
+#include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders port): the old contact pass stands aside where it ran
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) RT fog visibility
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
@@ -493,7 +494,9 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 				const bool bendRan = fusedForwardContact && sunShadows->Constants.ScreenSpaceData.x != 0.0f && BendContact::Produce(Device);
 				if (!bendRan) BendContact::Invalidate();	// the old pass has the contact this frame: next frame's lit shaders take none
 				const float screenSpaceWas = sunShadows->Constants.ScreenSpaceData.x;
-				if (bendRan) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
+				// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h, the Bottled Shaders port): where the deferred sun pass took
+				// this frame's mask, the old contact pass writes no contact too (the sun is darkened once, the ambient no longer)
+				if (bendRan || ScreenSpaceShadows::UsedThisFrame()) sunShadows->Constants.ScreenSpaceData.x = 0.0f;
 				RenderEffectToRT(sunShadows->Textures.ShadowPassSurface, Effects.SunShadows, false, sharpContact ? 2 : fusedForwardContact ? 1 : 0);
 				sunShadows->Constants.ScreenSpaceData.x = screenSpaceWas;
 				sunShadows->Constants.ForwardData.x = forwardWas;

@@ -26,6 +26,7 @@
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-16 fd-batchB: c169 for this pass (item 22)
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-19 DeferredWetness: the land's water layer, drawn inside Apply; the film's sun highlight
 #include "RainState.h"	// UNOFFICIAL 2026-11-26 SunSheen: no dry sheen on wet ground (FillSheenConst)
+#include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders port): this span's mask (DS_SSS c19, s13)
 #include <unordered_set>
 
 namespace DeferredSun {
@@ -455,6 +456,8 @@ namespace DeferredSun {
 		// (2026-11-26 upstream 1.1.4 merge, review) Compute\DeferredSun.comp has no DS_WET_FILM: with DeferredWetness's film live this
 		// frame the D3D9 pass draws, so the film's sun highlight stays
 		if (WetFilmCompiled && DeferredWetness::FilmLive) return false;
+		// (2026-11-26) Compute\DeferredSun.comp has no screen-space shadows lookup: with this span's mask the D3D9 pass draws
+		if (ScreenSpaceShadows::MadeThisSpan()) return false;
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSun")) return false;
 		const CachedSettings& cfg = SyncSettings();
 		if (cfg.nvrDxvkDeferred == 0) return false;
@@ -938,6 +941,14 @@ namespace DeferredSun {
 		d->SetPixelShaderConstantF(211, one, 1);	// NVR_SpecFade: full (no per-draw fade in a screen pass)
 		const float zero[4] = {};
 		d->SetPixelShaderConstantF(204, zero, 1);	// NVR_ShadowCharacterDraw (Shadow.hlsl, per draw for actors' heads): not an actor's draw
+		// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h): this span's mask (TESR_ScreenSpaceShadows, bound by name on s13
+		// by SetCT) taken by the world's pass; never by the first-person pass (the view model is not in the depth the march read)
+		{
+			const bool sss = !Vm.on && ScreenSpaceShadows::MadeThisSpan();
+			const float sssConst[4] = { sss ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+			d->SetPixelShaderConstantF(19, sssConst, 1);
+			if (sss) ScreenSpaceShadows::UsedFrame = ScreenSpaceShadows::Now();	// the old contact pass stands aside this frame (EffectChain.cpp)
+		}
 		// (2026-11-14) the stored-curve fog (core/DeferredFog.h, Includes/DeferredPixel.hlsl FDAddFogged): with the game's fog drawn, the fog
 		// colour in c13 and the frame's copy (linear now) on s0, through the state cache like SetCT's stages (put back below)
 		float fog[4] = {};	// (2026-11-15: zero for the first-person call, which uploads it unread)
