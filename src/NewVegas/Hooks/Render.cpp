@@ -51,6 +51,7 @@
 #include "../../core/DeferredFirstPerson.h"	// UNOFFICIAL 2026-11-15 the first-person view model through the deferred renderer (+ GearWeather)
 #include "../../core/DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list ([Main.Main.Quality] DeferredTransparents)
 #include "../../core/DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDepth: the world depth for the deferred passes
+#include "../../core/LampScreenShadows.h"	// UNOFFICIAL 2026-11-27 the lamps' screen-space shadows (their march at the deferred span's end)
 #include "../../core/ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders port): the march at the deferred span's end
 #include "../../core/DeferredSun.h"	// UNOFFICIAL 2026-11-14 DeferredSun: the lighting-free records' sun in one pass
 #include "../../core/DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the far world (geometry group 0) drawn in the G-buffer span
@@ -3210,7 +3211,7 @@ namespace GrassFirst {
 		// UNOFFICIAL 2026-10-31 DeferredLamps (core/DeferredLamps.h): declared between LinearSpan and the CaptureSpans, so its end runs after
 		// CapturedNormals::EndSpan (the G-buffer resolved) and before LinearScene::EndSpan (the encode): the lamps of the deferred pixels.
 		struct DeferredSpan { bool on; DeferredSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) {}
-			~DeferredSpan() { if (on) { IDirect3DDevice9* dev = TheRenderManager->device; DeferredDepth::AtSpanEnd(dev); ScreenSpaceShadows::Produce(dev); DeferredRenderer::AtSpanEnd(dev); DeferredSkin::BeforePasses(dev); DeferredSun::Apply(dev); DeferredLamps::Apply(dev); FlashlightDeferred::Apply(dev); DeferredSkin::AfterPasses(dev); if (DeferredDepth::SharedWithWorld && DeferredDepth::Ready() && CapturedNormals::Hooked) { SharedDrawState::DepthWrittenSinceCopy = false; SharedDrawState::WatchingDepth = true; } } } } deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight; 2026-11-26 + the screen-space shadows' march (ScreenSpaceShadows::Produce) before the sun pass
+			~DeferredSpan() { if (on) { IDirect3DDevice9* dev = TheRenderManager->device; DeferredDepth::AtSpanEnd(dev); ScreenSpaceShadows::Produce(dev); LampScreenShadows::Produce(dev); DeferredRenderer::AtSpanEnd(dev); DeferredSkin::BeforePasses(dev); DeferredSun::Apply(dev); DeferredLamps::Apply(dev); FlashlightDeferred::Apply(dev); DeferredSkin::AfterPasses(dev); if (DeferredDepth::SharedWithWorld && DeferredDepth::Ready() && CapturedNormals::Hooked) { SharedDrawState::DepthWrittenSinceCopy = false; SharedDrawState::WatchingDepth = true; } } } } deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight; 2026-11-26 + the screen-space shadows' march (ScreenSpaceShadows::Produce) before the sun pass
 		ActiveAccumulator = nullptr;
 		// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the normal target bound around the game's own call only (the early
 		// grass part above it draws grass and the grass shadows, which write none).

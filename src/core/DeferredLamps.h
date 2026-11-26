@@ -17,6 +17,7 @@
 #include "DeferredFog.h"	// UNOFFICIAL 2026-11-14 the stored-curve fog (DeferredLamps.hlsl DL_FOG_EXACT)
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-20 the land's wet film (the land pass's DL_WET_FILM)
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-11-19 (Phase 2B): Vulkan Compute DeferredLamps pass
+#include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-27 the lamps' screen-space shadow mask (core/LampScreenShadows.h makes it)
 
 namespace DeferredLamps {
 	inline const char* kSection = "Shaders.ShadowsInteriors.Deferred";
@@ -467,6 +468,8 @@ namespace DeferredLamps {
 	// land/skin/SSS-v2/exact-fog inline, and RMWs directly into the FP16 scene RT0 (no VisTex, CopyTex, or LightTex).
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t) {
 		if (ComputeFailed || Vm.on) return false;
+		// (2026-11-27) Compute\DeferredLamps.comp has no lamp screen-space shadows: with this span's mask the D3D9 passes draw
+		if (ScreenSpaceShadows::Lamps::MadeThisSpan()) return false;
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredLamps")) return false;
 		if (TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferred") == 0) return false;
 		if (ManyLamps::ListTexelsNow() != 16) return false;
@@ -803,13 +806,14 @@ namespace DeferredLamps {
 		d->GetVertexShader(&vs); d->GetPixelShader(&ps); d->GetVertexDeclaration(&decl); d->GetFVF(&fvf); d->GetStreamSource(0, &vb, &vbOffset, &vbStride);
 		// 15: (2026-11-03 rtfwd) the RT lamp trace's result; 7, last: (2026-11-14) DL_LINEAR_DEPTH's view z, saved and touched only with DeferredDistant
 		// 6: (2026-11-20) the land pass's wet film (DL_WET_FILM)
-		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 6, 8, 9, 10, 11, 12, 15, 7 };
+		// 13: (2026-11-27) the lamps' screen-space shadow mask (TESR_LampScreenShadows, the shadow passes)
+		static const DWORD kStages[] = { 0, 1, 3, 4, 5, 6, 8, 9, 10, 11, 12, 15, 13, 7 };
 		constexpr int kStageCount = sizeof(kStages) / sizeof(kStages[0]);
 		const int stageCount = DeferredDistant::CompiledIn() ? kStageCount : kStageCount - 1;
 		IDirect3DBaseTexture9* tex[kStageCount] = {};
 		for (int s = 0; s < stageCount; s++) d->GetTexture(kStages[s], &tex[s]);
 		// every constant the pass sets, saved and put back (c0-c11, c32-c36, c135, c168, c180-c189, c191, c205, c206-c209, c211, c215-c217, c223)
-		struct Range { UINT reg, count; float v[16][4]; } saved[] = { { 0, 15 }, { 32, 5 }, { 135, 1 }, { 168, 1 }, { 180, 10 }, { 191, 1 }, { 205, 1 }, { 206, 4 }, { 211, 1 }, { 215, 3 }, { 223, 1 },	// (c13-c14: fd-batchA DL_Land, 2026-11-16)
+		struct Range { UINT reg, count; float v[16][4]; } saved[] = { { 0, 17 }, { 32, 5 }, { 135, 1 }, { 168, 1 }, { 180, 10 }, { 191, 1 }, { 205, 1 }, { 206, 4 }, { 211, 1 }, { 215, 3 }, { 223, 1 },	// (c13-c14: fd-batchA DL_Land, 2026-11-16)
 			{ 192, SkinPass ? 5u : 0u } };	// (2026-11-15 DeferredSkin: the skin's constants c192-c195, only with the skin pass)
 		for (Range& r : saved) d->GetPixelShaderConstantF(r.reg, &r.v[0][0], r.count);
 		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHATESTENABLE, D3DRS_CULLMODE, D3DRS_STENCILENABLE,
@@ -963,6 +967,15 @@ namespace DeferredLamps {
 			static GpuTimer shadowTimer("Deferred lamp shadows"), vmShadowTimer("Deferred lamp shadows (first person)");
 			GpuProfileScope shadowGpu(Vm.on ? vmShadowTimer : shadowTimer, d);
 			d->SetPixelShader(ShadowPass->ShaderHandle);
+			// UNOFFICIAL 2026-11-27 lamp screen-space shadows (core/LampScreenShadows.h; DeferredLamps.hlsl DLShadow): this span's mask on s13, the
+			// chosen lamps' table indices in c16, on + the distance fade in c15; none in the first-person run (the view model is not in the depth)
+			{
+				const bool sss = !Vm.on && ScreenSpaceShadows::Lamps::MadeThisSpan();
+				const float c15[4] = { sss ? 1.0f : 0.0f, ScreenSpaceShadows::Lamps::Fade[0], ScreenSpaceShadows::Lamps::Fade[1], 0.0f };
+				d->SetPixelShaderConstantF(15, c15, 1);
+				d->SetPixelShaderConstantF(16, ScreenSpaceShadows::Lamps::TableIndex, 1);
+				d->SetTexture(13, sss ? ScreenSpaceShadows::Lamps::Texture : nullptr);
+			}
 			d->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE);
 			d->SetRenderState(D3DRS_COLORWRITEENABLE, 0xF);
 			for (int k = 0; k < 4; k++) {

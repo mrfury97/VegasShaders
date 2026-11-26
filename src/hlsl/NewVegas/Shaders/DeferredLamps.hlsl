@@ -118,6 +118,14 @@ float4 DL_Debug  : register(c9);	// x DebugView: 0 the light, 1 lamp colour x fa
 float4 DL_Shadow : register(c10);	// x the shadow pass's first lamp of the list (0, 4, 8, 12), y 1 = the lighting pass has the shadow targets (s9-s12),
 								// z PrecisionBias x 0.001 (2026-11-01: the shadow lookup's push off the surface per unit of camera distance),
 								// w 1 = this frame's exact linear view z is on s7 (2026-11-14 DL_LINEAR_DEPTH, below)
+#if defined(DL_SHADOW_PASS) && DL_SHADOW_PASS
+// UNOFFICIAL 2026-11-27 lamp screen-space shadows (core/ScreenSpaceShadows.h Lamps; the Bottled Shaders port's raymarch toward a lamp): the
+// shadow passes multiply a chosen lamp's shadow by its channel of this span's mask. DL_SSL x 1 = a mask to take (0: none, the first-person
+// run), y the camera distance where it starts to fade out, z 1 / the fade's length; DL_SSLamp the table index of the lamp in r, g, b, a (-1 none).
+float4 DL_SSL    : register(c15);
+float4 DL_SSLamp : register(c16);
+sampler2D DL_LampSSS : register(s13);	// no sampler_state: DeferredLamps::Apply binds it point / clamp (kStages)
+#endif
 float4 DL_Depth  : register(c11);	// (lighting pass) x, y the projection's _33, _43 (depth = x + y / view z), z the share and w the units the surface is pulled nearer
 #if (defined(DL_LAND_SPLIT) && DL_LAND_SPLIT) || defined(DL_LAND_ONLY)
 float4 DL_Land   : register(c14);	// UNOFFICIAL 2026-11-16 fd-batchA (DLLampLand): x 1 = the land loop on, y UsePBR, z the land's metal, w its light scale (decoded)
@@ -330,6 +338,16 @@ float DLShadow(float i, float3 position, float att, float4 uv4) {
         const float4 sLight = tex2Dlod(NVR_LampTable, float4(x + 1.0f / LIGHT_COMMON_TEXELS, tileY, 0.0f, 0.0f));
         shadow = PointShadowCube(sTile, sLight, sTile.w, position, ShadowFacingNormal(ShadowDecodeNormal(tex2Dlod(DL_Normals, uv4).rg), position), att POINT_SHADOW_RT_ARG(rtId));	// (fd-roofedge: view-faced, above)
     }
+#if defined(DL_SHADOW_PASS) && DL_SHADOW_PASS
+    // UNOFFICIAL 2026-11-27 lamp screen-space shadows (DL_SSL above): this lamp's channel of the mask, faded out with the camera distance
+    [branch] if (DL_SSL.x > 0.5f && shadow > 0.0f) {
+        const float4 pick = (float4)(abs(DL_SSLamp - i) < 0.5f);
+        [branch] if (dot(pick, 1.0f) > 0.0f) {
+            const float contact = dot(tex2Dlod(DL_LampSSS, uv4), pick);
+            shadow *= lerp(contact, 1.0f, saturate((length(position) - DL_SSL.y) * DL_SSL.z));
+        }
+    }
+#endif
     return shadow;
 }
 

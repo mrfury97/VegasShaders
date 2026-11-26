@@ -11,3 +11,5 @@ src/hlsl/NewVegas/Compute/Rt/RtLampTrace.comp
 src/hlsl/NewVegas/Compute/Rt/RtLampTraceMany.comp
 src/hlsl/NewVegas/Compute/Rt/RtLampTraceRestir.comp
 src/hlsl/NewVegas/Compute/Rt/RtLampFilter.comp
+src/hlsl/NewVegas/Compute/ScreenSpaceShadowsLamp.comp
+src/hlsl/NewVegas/Compute/ScreenSpaceShadowsLamp.spv

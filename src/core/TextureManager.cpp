@@ -93,6 +93,7 @@ void TextureManager::Initialize() {
 	}
 	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (core/ScreenSpaceShadows.h, the Bottled Shaders port): their mask, when on and the depth copy exists
 	ScreenSpaceShadows::MakeTextures(mgr, screenW, screenH);
+	ScreenSpaceShadows::Lamps::MakeTextures(mgr, screenW, screenH);	// UNOFFICIAL 2026-11-27 the lamps' mask (core/LampScreenShadows.h)
 
 	// UNOFFICIAL 2026-11-04 soft particles (Particles.h): with lit particles on at startup, as their vertices carry the size (ParticleSize.h).
 	if (TheSettingManager->GetSettingI("Shaders.Particles.Status", "Enabled")) {
