@@ -3670,6 +3670,22 @@ emptied at 4096 entries.
 How to check it: an object with a hand-made map whose alpha is dark should show weaker sun and lamp highlights on its non-metal
 parts than before; with Vegas Shaders' generated maps nothing changes.
 
+### Micro Shadow (`[Shaders.PBR.MicroShadow]`; forward dropped 2026-11-27)
+
+The bumps of a normal map shadow themselves by the `_rmaos` map's occlusion (blue): per light `saturate(|N.L| + 2 AO^2 - 1)`, with
+`Strength` deepening the map and `Bounce` the least light a crevice keeps (`Includes/Object.hlsl` `MicroShadowTerm`, c194).
+- Since 2026-11-27 (owner: "Yes, forward only") it is compiled only into the deferred lighting-free object and parallax records
+  (`LAMPS_DEFERRED 2`, `CAPTURED_NORMALS_ON >= 4`), which record the SUN's share for DeferredSun (`FDSunVisMicro`, switched by
+  `[Shaders.ShadowsExteriors.Deferred] MicroShadow`). The main view under the deferred renderer is unchanged (those records are
+  byte-identical to before, offline). The forward records no longer take it, for the sun or the lamps: in reflections, blended (fading)
+  draws, other cameras and everything with `DeferredRenderer 0`, crevices on objects with `_rmaos` maps lose that extra darkening (a slight
+  change). It only ever acted where an `_rmaos` map exists, so skin and vanilla armour lose nothing; the one visible exception is gear
+  with its own `_rmaos` maps (e.g. room 04's Ghost outfit), whose crevices lose the darkening in forward draws. Bench 2026-11-27 (the
+  owner's settings, v-desert-noon, 600-frame settle): the main view matches main 550d8c9 by eye; SLS2024 loads (dry, as on main with
+  these settings) and SLS2036 now fits with the water layer. The deferred lamp passes and the flashlight never had it (no `_rmaos` read there; their `MICRO_SHADOW` expands to nothing):
+  lamps to be done in the deferred path later. ShaderFallback's object order is Wetness alone now (dropping Micro Shadow cannot shorten a
+  forward record any more). The settings stay: the deferred sun reads all three.
+
 ### Which data decides metal (mirror-like surfaces)
 
 | Mode | A pixel's metal share | Code |
