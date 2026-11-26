@@ -329,11 +329,15 @@ float BumpKeep(float2 uv) {
 	}
 	return keep;
 }
+// (2026-11-27) a bend under the DXT normal maps' compression error (~2 degrees: red's 5 bits store a flat 128 as 123) is not followed: a
+// mirror doubled it into a leaning, narrower reflection (Compute/Reflections.glsl BumpCodecFloor / BumpCodecFull: keep the numbers in step).
 float3 ViewNormal(float2 uv) {
 	float3 n = normalize(tex2Dlod(TESR_NormalsBuffer, float4(uv, 0, 0)).xyz * 2.0 - 1.0);
 	[branch] if (TESR_ReflectionsGBuffer.x > 0.5) {
-		float keep = BumpKeep(uv);
-		[branch] if (keep < 1.0) n = normalize(lerp(SmoothViewNormalAt(uv, n), n, keep));
+		float3 s = SmoothViewNormalAt(uv, n);
+		float3 bend = n - s;
+		float keep = BumpKeep(uv) * smoothstep(0.045, 0.09, length(bend));
+		[branch] if (keep < 1.0) n = normalize(s + bend * keep);
 	}
 	return n;
 }

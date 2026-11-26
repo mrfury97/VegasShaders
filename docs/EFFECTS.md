@@ -4777,6 +4777,31 @@ on top where the RT core runs. Half-resolution trace, history and blur into the 
 in the HDR chain (after Specular, before the fog). Started 2026-11-07 (this README did not exist before; the RT path's long history is
 in docs/next/FORK-RT-REFLECTIONS.md (not in this repo)).
 
+### Leaning, narrower mirror images: the normal maps' DXT offset (2026-11-27, refl-projection-fix)
+
+- Seen: owner's save tilted01 (the ARK Computer Room, a room 07 port), level camera facing a red door on a glossy floor: the door's
+  reflection leaned and was 10-15 % narrower than the door at the far end (its right edge ~12 px in at 1080p, more with Roughness 0.02).
+- Not the projection: the trace, the composite and every reconstruction use the same projection (ViewPosition / ToScreen / toWorld agree);
+  with the floor's true normal a level mirror keeps every reflected point's screen x exactly, whatever the depth. Proven on the bench
+  (DIAG run 20261127-113331-slotA, a throwaway composite that classed the normals): the depth's own plane and the smooth normal were level
+  (|x|, |z| under 0.02 in view space); only the normal-mapped shading normal leaned (0.02-0.08 in view x and z, a few degrees).
+- Cause, proven: the floor's normal map (sm22_111_A_..._n.dds, DXT5) stores 95 % of its red texels as 123, the 5-bit red's nearest value
+  to a flat 128: x = -0.035, a ~2 degree tilt of the whole floor along the map's u axis. A mirror doubles it and the reflection carries it out
+  to the door. A/B (run 20261127-113547-slotA): UnifiedReflections and DeferredBumpedNormals both off (the smooth normal) gave an exact
+  mirror. (The earlier run that switched them one at a time kept the shading normals on in both shots: each one alone brings them.)
+- Fix: `ViewNormal` (Compute/Reflections.glsl, and the D3D9 effect's REFL_GBUFFER_ON one) leaves out a bend from the smooth normal up to
+  BumpCodecFloor 0.045 (~2.6 degrees) and keeps it whole from BumpCodecFull 0.09 (~5 degrees), smoothstep between, on top of BumpKeep's
+  distance fade. The DXT error (red up to ~0.035, green ~0.02) is under the floor; tile edges, dents and cobbles stay in the ray. All Vulkan
+  passes (trace, Hi-Z trace, temporal, blur, composite, RT RayGen / Resolve) read ViewNormal, so RT follows. Every surface with a DXT normal
+  map and the shading normals in use, inside or out, had the offset; it shows on smooth near-mirror floors.
+- Bench after (runs 20261127-114138-slotA before, -114243-slotA after; crops `F:\NVR-bench\shots\tilt-fix-crops.png`): the reflection's edges
+  line up with the door's at the owner's settings, with Mirror 1 and with Roughness 0.02; the octagon window sits straight under the door's.
+  Outdoors (puddle1, owner-b-wet-r01.toml, puddles held full, level, Mirror 1; runs 20261127-114409-slotA / -114900-slotA): the truck's
+  reflection in the standing water sat under the truck before and after (DeferredWetness flattens the shading normal there); only the rain
+  differs between the two pictures.
+- Left as it was: the D3D9 effect without REFL_GBUFFER_ON (DeferredBumpedNormals with the D3D9 fallback) has no smooth normal bound to
+  compare with, so it still follows the offset. Gentle real slopes under ~3 degrees in a normal map no longer bend a mirror.
+
 ### Puddles as mirrors (2026-11-26)
 
 - Cause, proven on the bench (owner's puddle1 save, the owner's settings, puddles held full; runs 20261126-163231-slotD and
@@ -5128,7 +5153,7 @@ With `[Main.Main.Performance] TargetReleaseSeconds` above 0 (default 20) the tex
 - The bump's fade (`BumpKeep`, `cb.film.z`: the normals are the normal-mapped shading normals, DeferredBumpedNormals, DeferredReflections or
   UnifiedReflections): the reflection follows the whole bump while a full-resolution pixel covers up to 0.5 world units, the smooth normal from
   2.0 (at 1440p about 12 m and 47 m), smoothstep between: bumps bend the ray where they are drawn larger than a pixel and do not alias into
-  grain where they are not.
+  grain where they are not. (2026-11-27) A bend under the DXT normal maps' offset is left out too (BumpCodecFloor, the section at the top).
 - `NormalVarianceRoughness` (`cb.film.z`): the roughness is widened by how much the SMOOTH normal changes to the right and lower full-resolution
   neighbour (alpha^2 + min(2 x 1/(2 pi) x |dn|^2, 0.015 = 0.35^4: never past the trace's hand-over by itself), Kaplanyan / Tokuyoshi; a depth jump over 2 % not counted), after Mirror, not on water
   or the weapon: the geometry's own curvature. (2026-11-20 step 3 measured the bumped normal with kappa 0.18: every visible bump became
