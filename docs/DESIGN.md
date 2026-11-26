@@ -1837,10 +1837,10 @@ Then E (lamp contact shadows) for thin detail touching surfaces. Sun: no change 
 ### Bench A/B (queued 2026-11-26)
 Job `F:\NVR-bench\work\bench\deep-roadmap\multirun\jobs\lampq.txt`, list `lists/lampq-1.txt`, tree VS-sheen (= test36), scene v-saloon
 (Prospector Saloon, 17:13), four views x {Quality 1 (owner), Quality 3, MagnifiedSoftness 0}, at the owner's toml and with NearCubeSize
-1024. Queued in away mode because the owner's own game was running. Result: not run yet.
+1024. Ran 2026-11-26 19:02-19:05 (slot A, runs 20261126-190327-slotA and -190438-slotA, VERDICT PASS both). Result: inconclusive for the blockiness question. In the Saloon the lamp shadows (table, stools) are soft and not magnified (a texel covers only a few pixels), so Quality 1 / 3, MagnifiedSoftness 0 and NearCubeSize 1024 look the same; the two runs' cameras also differ slightly (whole-frame |diff| about 9 from placement and TAA). Crops: `F:\VS-scratch\lampq-pics\lampq-floor.png` (not in the repo: game pictures). Settling it needs a close-up of a thin caster on a wall under a lamp (the owner's screenshot type): a scene not yet in the bench.
 
 ### Proven / believed / not run
 - Proven (code + toml): which pass draws the shadow, cube 512 -> atlas copy, tile sizes, the 4-tap + MagnifiedSoftness filter, the
   bias terms, that TexelFilter has no atlas form, that the screen-space mask is not doubled over it; the sun's cascade setup.
 - Believed: the texel-to-pixel ratio in the screenshot; the fringe = the 4-tap quantisation; the cost estimates for A-E.
-- Not run: any frame-time measurement; any prototype of A.
+- Not run: any frame-time measurement; any prototype of A; the A/B at a magnified thin-caster spot (the Saloon run did not show the problem).
