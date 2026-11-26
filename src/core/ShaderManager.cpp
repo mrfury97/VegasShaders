@@ -1447,6 +1447,18 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 			Logger::Log("UNOFFICIAL Puddles: %s's main record did not fit with the full puddles: made with the lean path (PUDDLES_LEAN).", pixel->Name);
 		}
 	}
+	// UNOFFICIAL 2026-11-27 (owner: "do it"): a main record that fits neither with the full nor with the lean puddles (SLS2023/24/26/27.pso
+	// with Wetness Effects + Puddles + Terrain Blending: out of temp registers at both flags, with and without the clouds' lookup) is made once
+	// more without the water layer (WETNESS_OFF, Cache\Dry, as the dry lamp-shadow records): its forward draws (reflections, other cameras,
+	// blended draws, DeferredRenderer 0) keep this mod's shader, dry, instead of the game's own. Under the deferred renderer its main-view
+	// pixels take their water from DeferredWetness, not from this record. Only the templates that honour WETNESS_OFF for their water layer.
+	if (!pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name && (!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate")) &&
+		TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+		static D3DXMACRO dry[2] = { { "WETNESS_OFF", "1" }, { NULL, NULL } };
+		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "Dry\\", dry);
+		if (pixel->ShaderProg[ShaderRecordType::Default])
+			Logger::Log("UNOFFICIAL Wetness Effects: %s's main record did not fit with the water layer (full or lean puddles): made without it (WETNESS_OFF), dry, instead of leaving it to the game's shader.", pixel->Name);
+	}
 	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors below): while the start's shaders load, the lamp-shadow records wait for LateInteriors'
 	// attach (their compiles run on the worker threads after everything the start needs); any other time, and with ParallelShaderCompile
 	// off or DeferredRenderer 1, right here as before.

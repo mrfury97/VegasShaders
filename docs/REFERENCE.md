@@ -69,7 +69,8 @@ Changes (branch `faster-shader-compile`; same compiler, flags and define lists, 
 4. (branch `fallback-failure-memo`) A record that ran out of temp registers at both flags is not compiled again while its text is the same
    (`<entry>.hlsl.x4505`, as `.nocloud` does for the clouds' build; `ShaderProgram::KnownOutOfRegisters`, main thread and workers). Room 06
    found the `NoCloud\` and `NoCloud\PuddlesLean\` builds of `SLS2023/24/26/27.pso` failing so at every start with Wetness Effects, Puddles and
-   Terrain Blending: 8 compiles, 54-59 s of a warm start on the main thread (bench runs 20261126-114414 and -120106).
+   Terrain Blending: 8 compiles, 54-59 s of a warm start on the main thread (bench runs 20261126-114414 and -120106). (2026-11-27: these
+   four now end in a dry build, `Cache\Dry\`, instead of the game's shader: `docs/EFFECTS.md` "Puddles", "Dry last fallback".)
 
 Result (proven: bench slot A, scene v-SunGI2 + tour-al-out, both runs with an empty shader store, so the slot's cache held only the
 11-20 snapshot's stale entries; runs 20261126-120400 and -121340):
