@@ -58,7 +58,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [SMAA](../src/effects/SMAA/) | false | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](../src/effects/Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
 | [ShadowsExteriors](#shadowsexteriors) | true | yes | 5 | 12 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
-| [ShadowsInteriors](#shadowsinteriors) | true | yes | 10 | 7 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
+| [ShadowsInteriors](#shadowsinteriors) | true | yes | 12 | 7 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
 | [Sharpening](#sharpening) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening makes near surfaces look crisper. CAS adapts per pixel: it measures how much headroom the pixel has before its 3x3 neighbourhood would clip, and shar |
 | [Skin](../src/effects/Skin/) | true | - | 3 | 6 | Skin.cpp, Skin.h |  |
 | [SkinScattering](../src/effects/SkinScattering/) | - | - | 3 | 0 | SkinScattering.cpp, SkinScattering.h |  |
@@ -5487,6 +5487,31 @@ Owner: "make it fully deffered one to one port of bottle shaders versions". A on
   ray, 2-3 dispatches), on the bench's GTX 1070 under the DXVK fork; 0.52-0.53 ms in the last half-minute when no other game ran. The
   whole-frame difference was not measured cleanly (another room's slot games ran during part of the run; the 60 s HEARTBEAT windows
   straddle the on / off phases). Shader: +11 ps_3_0 slots in the deferred sun pass.
+
+### 13. Screen-space shadows for lamps (deferred lamp shadows, 2026-11-27)
+
+Owner: "Yes, add for lamps" and "this is for deffered shadows". The same Bottled Shaders raymarch (Bend's), toward lamps, as part of the
+deferred lamp shadows. Files: `core/LampScreenShadows.h` (the choice and the dispatches), `Compute/ScreenSpaceShadowsLamp.comp` (the
+sun's shader with one change: it writes one channel of an rgba16f mask, read back and written), the state in `core/ScreenSpaceShadows.h`
+(`Lamps`), the reader in `Shaders/DeferredLamps.hlsl` `DLShadow`.
+- Settings, next to the sun's in `[Shaders.ShadowsExteriors.SSShadows]`: `Enabled` (sun and lamps), `Lamps` (0-4, default 2),
+  `LampFadeStart` 1400, `LampFadeLength` 700 (camera distance, game units); the march's knobs are the sun's.
+- Each deferred span's end, after the sun's march on the same depth copy: the lamp table's active lamps (ManyLamps `SceneLamps` /
+  `ActiveIndex`) are scored by brightness x the share of the view their reach covers (1 with the camera inside); the top `Lamps` (a lamp
+  chosen last frame scores a quarter more, so two equal lamps do not swap) get Bend's march toward their position (clip position with
+  w = +-1: rays toward or away from a point), only over their reach's exact screen rectangle (`LampScissor::AxisRange`), one lamp a channel
+  of `TESR_LampScreenShadows` (A16B16G16R16F, cleared to 1).
+- `DLShadow` (the shadow passes: a pixel's first 16 lamps; not the lighting pass, which has no registers left) multiplies the lamp's
+  deferred shadow term by its channel (`DL_SSLamp` c16 = the chosen table indices, `DL_SSL` c15 = on + the distance fade, s13 = the mask),
+  faded out by camera distance. +106-112 ps_3_0 slots in the shadow pass, every FIT level and the RT variant compiled offline.
+- Off: in the first-person run, while RT lamp shadows run their own contact march (`RtLampShadows::EnabledNow` and
+  `[ShadowsInteriors.RT] ContactShadows` > 0), on native D3D9, with the deferred renderer off. The Vulkan lamp pass (`DeferredLamps.comp`,
+  `NvrDxvkDeferred`, off by default) stands aside while there is a mask.
+- Bench 2026-11-27 (tree VS-lampsss, 4 lamps, on vs off live, 600-frame settle; no other game ran): Prospector Saloon: small contact
+  shadows on and under the stools and table legs; Vault 21: faint ones on the railings, chairs and ceiling struts; nothing wrong seen.
+  GPU timer "Screen-space shadows, lamps (compute)": 2.5 ms for four lamps filling the Saloon's view, 0.47 ms for four in Vault 21
+  (about 0.6 ms a lamp whose light fills the screen): hence 2 lamps by default. Not run: the owner's pipe-on-a-wall spot (no bench save
+  for it in the slim slots).
 
 ## ShadowsInteriors
 
