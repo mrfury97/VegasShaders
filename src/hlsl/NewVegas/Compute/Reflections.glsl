@@ -262,11 +262,21 @@ float BumpKeep(vec2 uv) {
     }
     return keep;
 }
+// (2026-11-27, refl-projection-fix: the owner's "tilted" reflections) the bend the reflection follows starts above the normal map's own
+// compression error. A BC1 / BC3 (DXT) normal map keeps red in 5 bits, so a flat texel (128) is stored as 123 (or 132): the whole surface
+// tilts ~2 degrees along the map's u axis (green, 6 bits: up to ~1 degree more). The surface's own shading never shows it, but a mirror doubles
+// a tilt and the reflection carries it out to what it reflects: on the ARK Computer Room's floor (95 % of its map's red texels 123) the
+// door's reflection leaned and was 10-15 % narrower than the door (docs/EFFECTS.md "Reflections", bench 20261127-113547-slotA: exact with the
+// smooth normal). A bend (|bumped - smooth|, about the angle in radians) up to BumpCodecFloor is left out, from BumpCodecFull it is whole;
+// real detail (tile edges, dents, cobbles: 5 degrees and more) keeps bending the ray.
+const float BumpCodecFloor = 0.045, BumpCodecFull = 0.09;
 vec3 ViewNormal(vec2 uv) {
     vec3 n = normalize(textureLod(sampler2D(t_normals, POINT_S), uv, 0.0).xyz * 2.0 - 1.0);
     if (cb.film.z > 0.5) {
-        float keep = BumpKeep(uv);
-        if (keep < 1.0) n = normalize(mix(SmoothViewNormal(uv), n, keep));
+        vec3 s = SmoothViewNormal(uv);
+        vec3 bend = n - s;
+        float keep = BumpKeep(uv) * smoothstep(BumpCodecFloor, BumpCodecFull, length(bend));
+        if (keep < 1.0) n = normalize(s + bend * keep);
     }
     return n;
 }
