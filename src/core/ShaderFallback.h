@@ -35,7 +35,7 @@
 //   5. Contact Hardening     -492 / -493   on the ground only: its sun shadows keep one edge softness (objects keep theirs)
 // Nothing else on the land is worth a drop: CharacterShadowMap, SpecularFade, SmoothObjectNormals, LandAllLamps, SmithCorrelated 0
 // slots, ForwardCloudShadows 4, CapturedNormals 27, linear lighting 77 (a look change everywhere). Objects / parallax objects:
-// Wetness Effects, then Micro Shadow (a short generic list: no refusal of theirs is known that the lamp-shadow FIT levels do not
+// Wetness Effects (2026-11-27: Micro Shadow left the forward records, so it is no longer in the list) (a short generic list: no refusal of theirs is known that the lamp-shadow FIT levels do not
 // already handle). Skin: nothing optional, so a refused skin shader is the game's, as before, but said loudly.
 //
 // CONSISTENCY. A feature is dropped for every template of the family (the land: TerrainTemplate, TerrainLODTemplate and
@@ -76,9 +76,9 @@ namespace ShaderFallback {
 	// The removal order of a family (see THE ORDER); count 0: nothing optional.
 	inline const Feature* Order(Family family, int& count) {
 		static const Feature land[] = { Wetness, TerrainMacro, TerrainVariation, TerrainBlend, LandContactHardening };
-		static const Feature objects[] = { Wetness, MicroShadow };
+		static const Feature objects[] = { Wetness };	// (2026-11-27: Micro Shadow is only in the deferred lighting-free records now: dropping it cannot shorten a forward one)
 		if (family == Land) { count = 5; return land; }
-		if (family == Objects) { count = 2; return objects; }
+		if (family == Objects) { count = 1; return objects; }
 		count = 0;
 		return nullptr;
 	}

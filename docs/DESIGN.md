@@ -1820,6 +1820,11 @@ where the lookup runs. What the deferred split does buy:
   channels (option H) both fit there. A screen-space blur of the targets alone is not a fix: it is what the old blurred room mask did, and
   a blurred staircase is still a wavy edge.
 
+### Micro Shadow (2026-11-27)
+Removed from the forward object shaders (owner: "Yes, forward only"); kept in the deferred sun (the lighting-free records record its share,
+`FDSunVisMicro`). The deferred lamp passes never had it: to be redone in the deferred lamp path later (store the `_rmaos` occlusion in the
+G-buffer, or read it there). `docs/EFFECTS.md` "PBR", "Micro Shadow".
+
 ### Sun options (lower priority: the sun is already good)
 - `CascadeResolution = 2` (2048 per cascade): 1.8x the texels for about 1.8x the cascade memory and draw fill; `SmoothFilter` (4x4 cubic,
   16 compares instead of 9); `FitToDepth` (cascades fitted to what is on screen, about 0.05 ms). All built and off; each 0-0.5 session.

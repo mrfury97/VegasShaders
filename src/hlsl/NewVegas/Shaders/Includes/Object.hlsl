@@ -161,7 +161,12 @@ float4 NVR_EnvData : register(c94);	// x 1 = on for this draw, y the env-map str
 // The Last of Us Part II) darkens the direct light where the material's own ambient occlusion says the surface sits in a crevice,
 // more as the light comes in at a grazing angle: saturate(|N.L| + 2 AO^2 - 1) per light. The occlusion is the _rmaos map's blue
 // channel; without a map (or with the feature off) the factor is exactly 1. Strength blends it in (c194.x).
-#if defined(RMAOS) && defined(MICRO_SHADOW_ON) && MICRO_SHADOW_ON
+// UNOFFICIAL 2026-11-27 (owner: "Yes, forward only"): compiled into the deferred lighting-free records only (the same test as FD_SV_RECORD
+// below), which record the SUN's micro-shadow for DeferredSun (FDSunVisMicro, [Shaders.ShadowsExteriors.Deferred] MicroShadow): the main
+// view under the deferred renderer is unchanged. The forward records (forward draws: reflections, blended, other cameras, and every draw
+// with DeferredRenderer 0) no longer take it, for the sun or the lamps: they compile exactly as with Micro Shadow off, which gave the
+// skinned SLS2024 its room. The deferred lamp passes never had it (no _rmaos read there): to be done in the deferred path later.
+#if defined(RMAOS) && defined(MICRO_SHADOW_ON) && MICRO_SHADOW_ON && defined(NVR_LIGHT_DEFERRED) && defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 4
 #define MICRO_SHADOW_ACTIVE
 float4 TESR_MicroShadow : register(c194);	// x strength (0: none, 1: the map as it is, up to 3: its crevices that much deeper), y Bounce
 static float MicroShadowAO = 1.0f;	// the map's occlusion at this pixel, toward 1 by (1 - strength); set in RmaosRead
