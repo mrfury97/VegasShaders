@@ -3679,7 +3679,10 @@ The bumps of a normal map shadow themselves by the `_rmaos` map's occlusion (blu
   `[Shaders.ShadowsExteriors.Deferred] MicroShadow`). The main view under the deferred renderer is unchanged (those records are
   byte-identical to before, offline). The forward records no longer take it, for the sun or the lamps: in reflections, blended (fading)
   draws, other cameras and everything with `DeferredRenderer 0`, crevices on objects with `_rmaos` maps lose that extra darkening (a slight
-  change). The deferred lamp passes and the flashlight never had it (no `_rmaos` read there; their `MICRO_SHADOW` expands to nothing):
+  change). It only ever acted where an `_rmaos` map exists, so skin and vanilla armour lose nothing; the one visible exception is gear
+  with its own `_rmaos` maps (e.g. room 04's Ghost outfit), whose crevices lose the darkening in forward draws. Bench 2026-11-27 (the
+  owner's settings, v-desert-noon, 600-frame settle): the main view matches main 550d8c9 by eye; SLS2024 loads (dry, as on main with
+  these settings) and SLS2036 now fits with the water layer. The deferred lamp passes and the flashlight never had it (no `_rmaos` read there; their `MICRO_SHADOW` expands to nothing):
   lamps to be done in the deferred path later. ShaderFallback's object order is Wetness alone now (dropping Micro Shadow cannot shorten a
   forward record any more). The settings stay: the deferred sun reads all three.
 
