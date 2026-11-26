@@ -153,21 +153,24 @@ PS_OUT main(PS_IN IN) {
     float3 a = albedo.rgb;
 
     // mud: splashed up from the ground (the lower and side faces), dark, dull, it hides the metal and fills the grooves
-    const float mud = dry * saturate((GW_Level.w * 1.7f - 0.35f) + (field.x - 0.5f) * 1.3f) * saturate(0.75f - 0.45f * N.z);
+    // (2026-11-26 rain fix) each dry layer's cover x saturate(its level x 4): the noise term alone reached past 0 where the field is high, so a
+    // layer at level 0 still painted coarse blotches (pale sand, grey frost, dark mud) whenever the pass ran for another layer: the pale camo
+    // on wet gear in rain. A layer at 0 now covers nothing; from a quarter up it is as before.
+    const float mud = dry * saturate((GW_Level.w * 1.7f - 0.35f) + (field.x - 0.5f) * 1.3f) * saturate(0.75f - 0.45f * N.z) * saturate(GW_Level.w * 4.0f);
     a = lerp(a, float3(0.105f, 0.078f, 0.052f), mud * 0.9f);
     rough = lerp(rough, 0.9f, mud);
     metal *= 1.0f - mud;
     N = normalize(lerp(N, Ns, mud * 0.7f));
 
     // sand and dust: settles on the faces turned up and in the crevices, pale and matte
-    const float sand = dry * saturate(GW_Level.z * 1.6f * (0.3f + 0.7f * max(up, crevice)) + (field.x * 0.6f + field.y * 0.4f - 0.5f) * 0.9f - 0.12f);
+    const float sand = dry * saturate(GW_Level.z * 1.6f * (0.3f + 0.7f * max(up, crevice)) + (field.x * 0.6f + field.y * 0.4f - 0.5f) * 0.9f - 0.12f) * saturate(GW_Level.z * 4.0f);
     a = lerp(a, float3(0.40f, 0.31f, 0.20f), sand * 0.85f);
     rough = lerp(rough, 0.92f, sand);
     metal *= 1.0f - sand * 0.9f;
     N = normalize(lerp(N, Ns, sand * 0.5f));
 
     // frost: the rims and the metal first (thin, cold parts), pale and rough, its crystals tilting the normal a little
-    const float frost = dry * saturate(GW_Level.y * 1.5f * (0.4f + 0.35f * edge + 0.45f * metal) + (field.y - 0.5f) * 0.9f - 0.15f);
+    const float frost = dry * saturate(GW_Level.y * 1.5f * (0.4f + 0.35f * edge + 0.45f * metal) + (field.y - 0.5f) * 0.9f - 0.15f) * saturate(GW_Level.y * 4.0f);
     a = lerp(a, float3(0.62f, 0.68f, 0.74f), frost * 0.8f);
     rough = lerp(rough, 0.65f, frost);
     metal *= 1.0f - frost * 0.7f;

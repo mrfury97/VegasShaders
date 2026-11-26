@@ -2243,9 +2243,12 @@ after the first-person records and before the first-person sun and lamp passes, 
   units across, the same size whatever `GearWeatherScale`), in up to 60 % of the cells at full wet (30 % on skin); inside a drop the
   roughness goes to 0.1 and the normal bulges outward from its middle (tilt up to 0.45 at the rim). Skinned parts read the beads from
   their nearest bone.
-- Why (2026-11-26): the wet layer used to follow the 3-unit noise and drop the roughness to 0.07. The first-person sun and lamps then gave
-  mirror glints on the wet part of each blotch and dull patches between, which read as big pale camo blotches in rain (believed from the
-  code; the owner saw the blotches). Sand fading slowly in rain (40 s) added pale patches too.
+- Why (2026-11-26, proven on the bench): each dry layer's cover added a noise term that did not scale with its level, so mud, sand and
+  frost at level 0 still covered the spots where the noise is high. The pass runs only while some layer is above 0, so dry gear looked
+  clean, but rain (wet > 0) switched the pass on and those spots showed as big pale tan and grey camo blotches (bench run
+  20261126-145648-slotA, `GearWeatherForce 1`: the blotches with wet alone). Fix: each dry layer's cover x saturate(level x 4). The old wet
+  layer also followed the 3-unit noise with roughness 0.07 (mirror glints in patches), and sand faded slowly in rain (40 s); both changed
+  as above.
 - Brightness: the pass never touches COLOR0 (the record's ambient and sky light), so under sky light wet gear is exactly as bright as dry.
   The sun's and the lamps' diffuse only lose light (darker albedo; at a lower roughness a smaller diffuse keep and more Fresnel); their
   highlight gathers the same light into a tighter lobe (a sheen at 0.28, small glints on the beads), so a highlight can be brighter than
