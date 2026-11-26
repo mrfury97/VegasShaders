@@ -5336,6 +5336,31 @@ Open: the Vulkan frag (Compute/ShadowsExteriors.frag) is not written; the file i
   DeferredSun (`Compute/DeferredSun.comp`, behind `[Main.Main.Performance] NvrDxvkDeferred`, off here); it stands aside for the
   D3D9 pass in frames where DeferredWetness's film is live (it has no film highlight).
 
+### 11. Sun sheen (deferred sun, 2026-11-26)
+
+Ported by hand from upstream 1.1.5-test4 (only this term; its MaterialSSS, RealSunPath and other 1.1.5 changes are not taken).
+`[Shaders.ShadowsExteriors.Deferred] SunSheen` (default 0.9, upstream ships 0.0; natural 0.75-1.2, 0 off) and `SunSheenRoughness`
+(default 0.78, clamped 0.45-0.95), both live (read with the section's other keys on a settings change, `DeferredSun::SyncSettings`).
+
+- What: the deferred sun pass (`Shaders/DeferredSun.hlsl` and `Compute/DeferredSun.comp`, `EvalSunSheen`, the same maths in both) adds
+  to the sun's light of land and object pixels a very broad GGX glaze at a fixed micro-roughness (`SunSheenRoughness`, small grazing
+  Fresnel) and a dusty backscatter lift (stronger toward grazing view and with the sun behind the viewer), tinted by a desaturated albedo.
+  It is added before the shadow lookup, so it is shadowed and takes the recorded sun share like the sun itself. Not on metal; on records
+  with a highlight only past roughness 0.18-0.5; not on skin or foliage pixels.
+- Upstream's gates (`DeferredSun.h FillSheenConst`): outdoors only, not the first-person view model, `dayLight` above 0.35 with a
+  smoothstep to 0.65.
+- Wet gating (ours): a dry glow must not sit on wet ground. The strength is multiplied by `1 - RainState::Factor()` (the rain, or the
+  wetness it left), which covers every path, including DeferredWetness off and the compute pass. With DeferredWetness's film live, each
+  pixel keeps `1 - smoothstep(0, 0.2, film gloss)` of it (the weight the film's own sun highlight takes: wet ground, puddles, wet objects).
+  While Puddles' standing water is out with no film this frame, the land's pixels with roughness under 0.08-0.25 drop it (the land record
+  writes the water's gloss into its roughness there).
+- Constants: D3D9 `DS_Sheen` c18 (x strength, y roughness, z the land's smooth-roughness gate); compute `cb.dsSheen`, 16-byte slot 72
+  (byte 1152; the block is 73 x 16 bytes, `static_assert` in `DeferredSun.h`).
+- Placement: evaluated inside the land and object branches, as upstream. After them (with the wet-film read) the sun-fade record
+  (`SUN_CROSSFADE_PASS`, on by default) ran out of temp registers (X4505).
+- Cost (offline, `template_compile`, ps_3_0 slots): the sun record 2206 -> 2358, with the film 2270 -> 2453, the sun-fade record 3364 ->
+  3512 (with the film 3434 -> 3613); all flow 0 (no X4505). Frame time not measured.
+
 ## ShadowsInteriors
 
 REWRITTEN 2026-11-02 (branch claude/rw3-lights): the shaders are new, written from this spec (Effects/ShadowsInteriors.fx.hlsl; Compute/ShadowsInteriorsBlur.frag and ShadowsInteriorsApply.frag). The C++ and the settings are unchanged. Changes from the old file are marked below.

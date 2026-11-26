@@ -25,6 +25,7 @@
 #include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 901 / 902)
 #include "ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-16 fd-batchB: c169 for this pass (item 22)
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-19 DeferredWetness: the land's water layer, drawn inside Apply; the film's sun highlight
+#include "RainState.h"	// UNOFFICIAL 2026-11-26 SunSheen: no dry sheen on wet ground (FillSheenConst)
 #include <unordered_set>
 
 namespace DeferredSun {
@@ -40,10 +41,35 @@ namespace DeferredSun {
 	// the forward sun's terms the G-buffer now carries. The pass's own: the land's height self-shadow, the recorded highlight F0, SpecularFade's
 	// highlight fade rebuilt from the pixel's distance. (CanopyShadow, ParallaxShadow and MicroShadow are applied by the records: PBR.cpp.)
 	inline bool LandCrackShadow = true, AuthoredHighlight = true, HighlightFade = true, MatchSunDisc = false;
+	// UNOFFICIAL 2026-11-26 SunSheen (ported by hand from upstream 1.1.5-test4, live; DeferredSun.hlsl / Compute\DeferredSun.comp EvalSunSheen):
+	// a broad dry glaze and backscatter on sunlit matte surfaces outdoors by day.
+	inline float SunSheen = 0.9f, SunSheenRoughness = 0.78f;
 	inline float SmoothStep01(float edge0, float edge1, float x) {
 		float t = (x - edge0) / (edge1 - edge0);
 		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
 		return t * t * (3.0f - 2.0f * t);
+	}
+	// The sheen's constant (D3D9 c18 DS_Sheen; the compute pass's dsSheen, 16-byte slot 72): x the strength, y the lobe's roughness, z 1 = the
+	// land's smooth-roughness gate (below). Upstream's gates: outdoors, not the first-person view model, the day light past 0.35 with a
+	// smoothstep to 0.65; the roughness clamped to 0.45-0.95. Ours on top (a dry glow must not sit on wet ground): the strength x (1 - RainState::
+	// Factor()), the ground's wetness (the rain or what it left), which is all the pass knows of wetness without DeferredWetness's film; the
+	// film's per-pixel gloss is gated in the shader (DS_WET_FILM). Puddles' standing water outlasts that wetness (its own slower clock) and,
+	// without the film, the land record writes it into the G-buffer only as a near-zero roughness: so while standing water is out and no film
+	// is live this frame, z asks the shader to drop the sheen on the land's smooth pixels.
+	inline void FillSheenConst(bool isVm, bool filmLive, float out[4]) {
+		const ShaderManager* const sm = TheShaderManager;
+		float on = (!isVm && sm && sm->GameState.isExterior && sm->GameState.dayLight > 0.35f && SunSheen > 0.0f)
+			? SunSheen * SmoothStep01(0.35f, 0.65f, sm->GameState.dayLight) : 0.0f;
+		if (on > 0.0f) on *= 1.0f - RainState::Factor();
+		bool puddles = false;
+		if (on > 0.0f && !filmLive) {
+			auto it = TheShaderManager->ConstantsTable.find("TESR_PuddleData");
+			puddles = it != TheShaderManager->ConstantsTable.end() && it->second && it->second->x > 0.001f;
+		}
+		out[0] = on;
+		out[1] = SunSheenRoughness < 0.45f ? 0.45f : (SunSheenRoughness > 0.95f ? 0.95f : SunSheenRoughness);
+		out[2] = puddles ? 1.0f : 0.0f;
+		out[3] = 0.0f;
 	}
 	inline float BlendMatchSunDisc(D3DXVECTOR3& toSun, bool& has) {
 		const float len = D3DXVec3Length(&toSun);
@@ -149,6 +175,7 @@ namespace DeferredSun {
 		bool enabled = false, shadows = true, landCrackShadow = true, authoredHighlight = true;
 		bool matchSunDisc = false, highlightFade = true, specFadeLive = true, grassShadowFix = false;
 		int debugView = 0, nvrDxvkDeferred = 1, smithMode = 0;
+		float sunSheen = 0.9f, sunSheenRoughness = 0.78f;	// (2026-11-26 SunSheen)
 	} gSettings;
 	inline const CachedSettings& SyncSettings() {
 		if (!TheSettingManager) return gSettings;
@@ -162,6 +189,8 @@ namespace DeferredSun {
 			gSettings.landCrackShadow = TheSettingManager->GetSettingI(kSection, "LandCrackShadow") != 0;
 			gSettings.authoredHighlight = TheSettingManager->GetSettingI(kSection, "AuthoredHighlight") != 0;
 			gSettings.matchSunDisc = TheSettingManager->GetSettingI(kSection, "MatchSunDisc") != 0;
+			gSettings.sunSheen = TheSettingManager->GetSettingF(kSection, "SunSheen");
+			gSettings.sunSheenRoughness = TheSettingManager->GetSettingF(kSection, "SunSheenRoughness");
 			gSettings.highlightFade = TheSettingManager->GetSettingI(kSection, "HighlightFade") != 0;
 			gSettings.specFadeLive = TheSettingManager->GetSettingI("Shaders.PBR.Main", "SpecularFade") != 0;
 			gSettings.grassShadowFix = TheSettingManager->GetSettingI("Shaders.Grass.Main", "ShadowFix") != 0;
@@ -343,6 +372,8 @@ namespace DeferredSun {
 		LandCrackShadow = cfg.landCrackShadow;
 		AuthoredHighlight = cfg.authoredHighlight;
 		MatchSunDisc = cfg.matchSunDisc;
+		SunSheen = cfg.sunSheen;
+		SunSheenRoughness = cfg.sunSheenRoughness;
 		if (SpecFadeCompiled < 0) SpecFadeCompiled = cfg.specFadeLive ? 1 : 0;
 		HighlightFade = cfg.highlightFade && SpecFadeCompiled == 1 && cfg.specFadeLive;	// (as the records fade: compiled at startup, live while compiled)
 		{
@@ -484,8 +515,9 @@ namespace DeferredSun {
 			float rtSunRowY[4];              // 69
 			float rtSunRowW[4];              // 70
 			float rtSunData[4];              // 71
+			float dsSheen[4];                // 72 (2026-11-26 SunSheen: FillSheenConst; Compute\DeferredSun.comp cb.dsSheen)
 		};
-		static_assert(sizeof(ComputeConstants) == 72 * 16, "DeferredSun ComputeConstants layout mismatch");
+		static_assert(sizeof(ComputeConstants) == 73 * 16, "DeferredSun ComputeConstants layout mismatch");
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -643,6 +675,7 @@ namespace DeferredSun {
 		float fog[4] = {};
 		const bool fogExact = LinearCompiled && DebugView == 0 && DeferredFog::Params(fog);
 		if (fogExact) memcpy(cb.dsFog, fog, 16);
+		FillSheenConst(false, false, cb.dsSheen);	// (2026-11-26 SunSheen: this pass never runs for the view model or with the film live, above)
 
 		UINT flags = 0;
 		if (GBufferV2()) flags |= 1u << 0u;
@@ -893,6 +926,12 @@ namespace DeferredSun {
 				TheRenderManager->SetSamplerState(12, D3DSAMP_MIPFILTER, D3DTEXF_NONE); TheRenderManager->SetSamplerState(12, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP);
 				TheRenderManager->SetSamplerState(12, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP); TheRenderManager->SetSamplerState(12, D3DSAMP_SRGBTEXTURE, FALSE);
 			}
+		}
+		// (2026-11-26 SunSheen) c18 DS_Sheen (FillSheenConst); upstream 1.1.5-test4 put it in c18 too (our c17 is the wet film's, theirs MaterialSSS)
+		{
+			float sheen[4];
+			FillSheenConst(Vm.on, WetFilmCompiled && DeferredWetness::FilmLive && !Vm.on, sheen);
+			d->SetPixelShaderConstantF(18, sheen, 1);
 		}
 		LogLight(toSun, sun, landFresh);
 		const float one[4] = { 1.0f, 0.0f, 0.0f, 0.0f };
