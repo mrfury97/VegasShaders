@@ -4691,6 +4691,15 @@ dry lamp record, and 7-layer land had no sampler for the cover map.
   (a register-allocation quirk: it fails even with the map read replaced by a constant) and loads through the lean retry
   (`PUDDLES_LEAN` + `PUDDLES_NOMAP`: the in-shader lean path for that record only); its outdoor lamp-shadow record stays dry (as since
   2026-11-09). Fix: the no-limits SPIR-V route (NvrDxvkReplacements).
+- **Dry last fallback (2026-11-27):** with Wetness Effects + Puddles + Terrain Blending the forward main records of SLS2023/24/26/27.pso
+  fit neither the full nor the lean puddles (X4505 at both flags, with and without the clouds' lookup), so their forward draws
+  (reflections, other cameras, blended draws, DeferredRenderer 0) used the game's own shader. A record that fails both is now made once
+  more without the water layer (`WETNESS_OFF`, `Cache\Dry\`; `ShaderManager.cpp` after the PuddlesLean retry, Object and Parallax templates
+  only): this mod's shader, dry. Under the deferred renderer the main-view pixels keep their water from DeferredWetness (the lighting-free
+  records). Offline: the water layer is about 750 of the 2,550 ps_3_0 slots of these four.
+  Bench 2026-11-27: with the bench toml all four load dry; with the owner's live wet toml six failed on main (also SLS2034 / SLS2036, the
+  many-lamp records) and five now load dry; SLS2024 (skinned) still does not fit dry and stays on the game's shader. Main-view pictures
+  (v-desert-noon, the owner's puddle1 save, 900-frame settle) match main 2480e33 by eye.
 - **Checking a record the way the game compiles it:** `tools\landc\landcf.exe` (D3DX9 + the PREFER_FLOW_CONTROL retry); the offline
   template tool's newer compiler fits shaders the game's does not. A record that fails in game leaves `<cache>\<name>.failed.hlsl` (the
   exact source) for it.
