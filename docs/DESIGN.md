@@ -17,6 +17,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [SMP compatibility](#smp-compatibility)
 - [Community Shaders ports](#community-shaders-ports)
 - [Upstream 1.1.1-1.1.3 merge](#upstream-111-113-merge)
+- [Deferred shadow quality](#deferred-shadow-quality)
 
 ## Deferred vs forward
 
@@ -1729,3 +1730,102 @@ do not rebuild byte for byte with our Vulkan SDK 1.3.296 (believed: another glsl
   amount in both builds (-7 / -8 luma). Believed: the remaining softer, lighter daylight (+12 luma) is upstream's lighting changes.
 - Not run: HDR (no HDR display on the bench), hair (the Character Kit Remake hair the fix targets is not in the slot), grass under lamps
   (no lamp at these spots at night), frame time.
+
+## Deferred shadow quality
+
+*Study 2026-11-26 (room 02, branch `shadow-quality-study`, main 04d9515 = test36). Owner's question: "what can we do to increase the
+quality of deferred shadows". Trigger: a thin pipe's lamp shadow on a white interior wall showed as a hard staircase of big texels with
+a pale fringe round a dark core.*
+
+### In short
+The blocky interior shadows are the **lamp** shadows, and two things make them look like that: the source is a **512-texel cube map**
+per lamp (seen close, one texel covers about 20 screen pixels), and the deferred lookup filters it with **four taps** that MagnifiedSoftness
+spreads two texels apart, so a shadow edge shows as up to four stacked, shifted copies of the texel staircase (the pale fringe). The sun is
+not the problem: it already has four stabilised 1536-texel cascades (about 4 mm a texel near the camera) with a B-spline PCF and
+contact hardening. Best look per ms, in order: (1) replace the four lamp taps with a noise-rotated disc of bilinear-PCF taps, (2) draw the
+nearest 8 lamps' cube maps at 1024 (`NearCubeSize`, already built), (3) contact hardening on the lamps (already built) once (1) is in.
+
+### Which shadow the screenshot shows (proven from code and the owner's toml unless marked)
+- Interior, deferred renderer 2: the wall is lit by the deferred lamp pass. `DeferredLamps.hlsl` `DLShadow` (shadow passes, a pixel's
+  first 16 lamps, full filter) calls `PointShadowCube` in `includes/PointShadowForward.hlsl`, reading the lamp's tile of the **shadow
+  atlas** (`POINT_SHADOW_ATLAS`, `core/ShadowAtlas.h`). RT lamp shadows are off (`[_Shaders.ShadowsInteriors.RT] Enabled = false`,
+  `RTInteriors = false`), capsules off, lamp contact shadows off (`[_Shaders.ShadowsInteriors.Main] ContactShadows = 0`). The old
+  screen-space lamp mask is not laid over it (`[Deferred] ReplaceScreenShadows = true`), so the fringe is not a doubled shadow.
+- **Resolution.** Each lamp's shadow is first drawn as a cube map, `ShadowCubeMapSize = 512` per face (`NearCubeSize = 0`), then copied
+  with POINT sampling into an octahedral tile of the 8192 R16F atlas: the first 8 live lamps get 2048-texel tiles (`NearTiles = 8`),
+  the other live lamps (up to `LightPoints = 24`) 1024, pool lamps 512 (`ShadowAtlas.h:80-120`). At the centre of a cube face a texel is
+  2/512 rad, so its world size is about lamp distance / 256: a lamp 256 units (3.7 m) away gives 1 unit (1.4 cm) a texel. With the camera
+  about 40 units from the wall that is roughly 20-25 screen pixels a texel, the step size in the screenshot (believed: camera and lamp
+  distance estimated from the picture). An octahedral 2048 tile is about 4x finer than the cube near a face centre (2/2048 vs 2/512 rad;
+  the octahedral stretch varies about 2x across the tile, believed), so for the near 8 lamps **the 512 cube is the limit, not the atlas**;
+  1024 tiles are about as fine as the cube; pool lamps' 512 tiles are coarser than their cube.
+- **Filter** (owner: `[Forward] Quality = 1`, `Softness = 0.4`, `MagnifiedSoftness = 2.0`, `SmoothEdges`, `EvenTaps`, `TruePCF` on,
+  `ContactHardening` off, `LampSize = 0`, `TexelFilter` off): Medium = 4 taps on a rotated 2x2 pattern at +-spread on each face axis
+  (`PointShadowCube`). Spread = Softness texels (0.4), raised by MagnifiedSoftness to at least 2 texels where one texel covers 2-8+ screen
+  pixels (`POINT_SHADOW_MAG`, `PointShadowForward.h:480-491`). Each tap is a bilinear PCF of the 4 atlas texels round it (TruePCF,
+  `PointShadowAtlasBlocked`): the soft edge it gives is one **atlas** texel, about a third to a quarter of a cube texel for the near tiles,
+  so the cube's stair-steps stay hard. `TexelFilter` (the sun-style B-spline) has no atlas form: with the atlas on it falls back to the
+  taps (comment at `PointShadowForward.hlsl:94-95`).
+- **Why the pale fringe** (believed, from the filter's geometry; the A/B below checks it): with 4 taps 4 texels apart per axis, the result
+  can only be 0, 25, 50, 75 or 100 % blocked. Inside a wide-enough caster all four taps are blocked (the black core); within 2 texels of the
+  edge only one or two are (a 50-75 % lit band), and each band is a copy of the texel staircase shifted by the tap offset. A thin caster
+  (2-4 texels wide) can never block all four. It is not a bias artefact.
+- **Bias:** threshold = d - 0.018 d (`[Forward] Bias`, proportional to the lamp distance), plus a normal offset of max(NormalOffset,
+  1.5 x Softness, 1.5 x MagnifiedSoftness) = 3 texels (`AutoNormalOffset`, `PointShadowForward.h:444-458`), plus the deferred
+  `PrecisionBias = 4` (0.4 % of the camera distance, along the face normal, `DeferredLamps.hlsl:258-266`). The 3-texel push is tied to
+  MagnifiedSoftness: a smaller filter footprint would allow a smaller push (less light leaking under contact).
+- **Sun** (for comparison, helper read of `Shadow.hlsl`, `ShadowsExterior.cpp`): 4 cascades (Near, Middle, Far, Lod) of 1536 texels in
+  one 3072 atlas (`CascadeResolution = 1`), lambda 0.9 over 6000 units, about 0.3 / 0.75 / 2.1 / 7.4 units a texel (believed: FOV
+  assumed). Sphere-fitted and texel-snapped (no shimmer on turning), sun direction quantised and faded. 3x3 B-spline PCF of manual compares
+  (no hardware compare), ContactHardening on (5-tap blocker search, then a 1+8 golden-angle disc of bilinear compares, hash-rotated with
+  Smooth), normal offset 1.5 texels x (1 - N.L), receiver-plane slope slack. Cascade hand-over is a dithered pick over a 70-unit band.
+  `SmoothFilter` (4x4 cubic) and `CascadeResolution` 2-6 exist and are off / at 1.
+
+### What upstream and Community Shaders do (helper read, 2026-11-26)
+- Upstream 1.1.5-test4 (`4b29278`, one squashed commit): the same lamp scheme (512 cubes, octahedral atlas with NearTiles, Quality 0-3 =
+  1/4/10/20 taps, ContactHardening and LampSize off, Bias 0.018); its shadow changes are resource work (atlas released outdoors, targets
+  skipped when unread) and night lamp shadows outdoors (`UsePointShadowsNight` true). Nothing new for filter quality.
+- Community Shaders (Skyrim): no point-light filter of its own (it reuses the game's shadow-mask channels, a few lamps). Sun: a 2-moment
+  variance map with an 11-tap Gaussian blur and light-bleed reduction, two cascades blended with a smoothstep, and Bend Studio's
+  screen-space shadows. Ruled out for us: variance maps need 2-4 float channels (the 8192 atlas would grow 2-8x) and leak light; this fork
+  already removed VSM/EVSM for the sun (2026-10-27).
+
+### Options for the lamp shadows (deferred first: all of these change the deferred shadow passes; forward objects use the same include)
+
+| Option | Gain | Frame cost | Effort | Risk |
+|---|---|---|---|---|
+| **A. Disc filter**: 8-12 bilinear-PCF taps on a golden-angle (Vogel) disc, rotated per pixel by interleaved-gradient noise that TAA averages, radius in cube texels (at least 1, MagnifiedSoftness where magnified); the sun's own disc (`Shadow.hlsl`, contact hardening) is the model. D3D9 shadow passes and `Compute/DeferredLamps.comp` | Removes the 4 stacked copies: a smooth penumbra with many levels, the staircase blurred into it. Biggest visible change per ms | +0.2-0.8 ms in busy rooms (believed: 9 bilinear taps = 36 reads vs 16 now per lamp, 16 lamps a pixel at most). Not measured | 1-2 sessions | ps_3_0 temp registers (X4505) in the D3D9 shadow pass; noise must be stable under TAA (no crawl) |
+| B. `Quality = 3` (Ultra, EvenTaps 16 taps), built | 17 levels instead of 5: the fringe becomes finer steps, still a box filter | "Ultra with twenty cost 0.85 ms more than the grid" (EvenTaps comment); defaults text: soft edges 1-2 ms in busy rooms. Not measured here | 0 (a default) | Cost in lamp-heavy rooms |
+| **C. `NearCubeSize = 1024`**, built (cube slots 0-7, the NearTiles lamps) | Texels half as wide for the 8 nearest lamps: steps 10-12 px instead of 20-25 at the screenshot's distance | Memory about 200 MB (400 with RedrawActorsOnly); 4x the fill when those cubes redraw (static lamps draw once). Not measured | 0.5 (default + migration step + bench) | VRAM on 4 GB cards; restart needed; untested in game before this study |
+| C2. Screen-size allocation: give the big cube/tile to the lamps whose shadows cover the most screen (lamp distance to camera / lamp radius), not the first 8 slots | The resolution goes where the texels are magnified | Same memory as C | 2-3 | Lamps swapping sizes visibly (needs hysteresis, as `LampSwitchMargin`) |
+| **D. Contact hardening** (`ContactHardening` on or `LampSize` 4-6 units), built | Sharp where a caster touches, softer further away: hides the big texels exactly where they are biggest (far from the caster). Looks like real lamps | 5 extra reads a lamp (blocker search) | 0.5 to tune (after A, so the wide penumbra is smooth) | With today's 4 taps a wide penumbra shows the stacked copies more (why it stays off); fine after A |
+| E. Lamp screen-space contact shadows (`[Main] ContactShadows`, built, 0) | Pixel-exact shadows of thin detail touching surfaces (pipes on walls, cables, table legs) the map is too coarse for | A short depth march per lamp; not measured | 0.5 to test and tune | Halos on thin depth edges; only what is on screen |
+| F. RT lamp shadows (built: `[ShadowsInteriors.RT]`, ShadowDenoiser, PhysicalLampSize; DXVK fork + RT GPU) | Exact silhouettes and physical penumbrae, no texels at all; the deferred shadow passes already read it for a pixel's first 16 lamps | Several ms (trace + denoiser); RT hardware only | 0 to switch on; tuning was done in Nov | Not for every player; the owner has it off |
+| G. Normal offset tied to the filter (receiver-plane bias as the sun has, push = A's radius) | Less light leaking under contact, shadows meet casters | Nil | 0.5 (with A) | Acne if too small |
+| H. Temporal accumulation of the shadow term per lamp | Smoother than A alone | Memory per lamp, history logic | 3+ | Ghosting on moving casters; TAA already does most of it for A |
+| I. ESM/EVSM/MSM filterable maps | Prefiltered soft shadows | 2-8x atlas memory | 3+ | Light bleeding; removed before for the sun. Not recommended |
+
+### Sun options (lower priority: the sun is already good)
+- `CascadeResolution = 2` (2048 per cascade): 1.8x the texels for about 1.8x the cascade memory and draw fill; `SmoothFilter` (4x4 cubic,
+  16 compares instead of 9); `FitToDepth` (cascades fitted to what is on screen, about 0.05 ms). All built and off; each 0-0.5 session.
+- Blend the cascade hand-over band (both lookups lerped, as the NVR_NO_SM3_LIMITS build does) instead of the dither, on the Vulkan path.
+- RT sun shadows (`[ShadowsExteriors.RT]`, built, off): exact, for RT GPUs only.
+
+### Recommendation (top 3, best look per ms)
+1. **A, the disc filter** for lamp shadows, D3D9 shadow passes and the Vulkan DeferredLamps pass. Fixes the fringe and most of the
+   staircase. 1-2 sessions, about +0.2-0.8 ms in busy rooms (believed). Interim with no code: `Quality = 3`.
+2. **C, `NearCubeSize = 1024` by default** (needs a settings-version migration, as it changes a saved default). Halves the steps of the
+   8 nearest lamps. 0.5 session, about 200-400 MB of video memory, little frame time for static lamps (believed).
+3. **D, contact hardening on** once A is in: sharp at contact, soft away from it, which is where the texels are largest. 0.5 session.
+Then E (lamp contact shadows) for thin detail touching surfaces. Sun: no change needed for this complaint.
+
+### Bench A/B (queued 2026-11-26)
+Job `F:\NVR-bench\work\bench\deep-roadmap\multirun\jobs\lampq.txt`, list `lists/lampq-1.txt`, tree VS-sheen (= test36), scene v-saloon
+(Prospector Saloon, 17:13), four views x {Quality 1 (owner), Quality 3, MagnifiedSoftness 0}, at the owner's toml and with NearCubeSize
+1024. Queued in away mode because the owner's own game was running. Result: not run yet.
+
+### Proven / believed / not run
+- Proven (code + toml): which pass draws the shadow, cube 512 -> atlas copy, tile sizes, the 4-tap + MagnifiedSoftness filter, the
+  bias terms, that TexelFilter has no atlas form, that the screen-space mask is not doubled over it; the sun's cascade setup.
+- Believed: the texel-to-pixel ratio in the screenshot; the fringe = the 4-tap quantisation; the cost estimates for A-E.
+- Not run: any frame-time measurement; any prototype of A.
