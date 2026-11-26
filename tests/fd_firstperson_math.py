@@ -114,15 +114,19 @@ def step(l, inp, dt, speed):
     if inp["underwater"]: wet += t * 2.0
     elif rain > 0.01: wet += t * rain / 20.0
     else: wet -= t * (1 / 180.0 if out else 1 / 90.0)
+    rinse = 1 / 10.0  # (2026-11-26 rain fix) falling rain rinses the dry layers off and stops them building
     snow = clamp01(inp["snow"]) if out else 0.0
-    if snow > 0.01: frost += t * snow / 60.0
-    else: frost -= t * (1 / 5.0 if inp["underwater"] else 1 / 45.0 if not inp["exterior"] else 1 / 30.0 if rain > 0.01 else 1 / 240.0)
+    if rain > 0.01: frost -= t * rinse
+    elif snow > 0.01: frost += t * snow / 60.0
+    else: frost -= t * (1 / 5.0 if inp["underwater"] else 1 / 45.0 if not inp["exterior"] else 1 / 240.0)
     storm = clamp01(inp["storm"]) if out else 0.0
     dust = clamp01((inp["wind"] - 0.5) * 2.0) if out and rain <= 0.01 else 0.0
-    if storm > 0.01 or dust > 0.01: sand += t * (storm / 30.0 + dust / 180.0)
-    else: sand -= t * (1 / 5.0 if inp["underwater"] else 1 / 40.0 if rain > 0.01 else 1 / 600.0 if not inp["exterior"] else 1 / 300.0)
+    if rain > 0.01: sand -= t * rinse
+    elif storm > 0.01 or dust > 0.01: sand += t * (storm / 30.0 + dust / 180.0)
+    else: sand -= t * (1 / 5.0 if inp["underwater"] else 1 / 600.0 if not inp["exterior"] else 1 / 300.0)
     splash = clamp01(inp["ground"]) * clamp01(inp["moving"]) if out else 0.0
-    if splash > 0.01: mud += t * splash / 45.0
+    if rain > 0.01: mud -= t * rinse
+    elif splash > 0.01: mud += t * splash / 45.0
     else: mud -= t * (1 / 5.0 if inp["underwater"] else 1 / 360.0 if not inp["exterior"] else 1 / 600.0)
     return (clamp01(wet), clamp01(frost), clamp01(sand), clamp01(mud))
 
@@ -143,13 +147,14 @@ cases = [  # (name, start, inputs, layer, target, documented seconds)
     ("frost: up in a snow weather", (0, 0, 0, 0), base(snow=1.0), 1, 1, 60),
     ("frost: melts indoors", (0, 1, 0, 0), base(exterior=False), 1, 0, 45),
     ("frost: melts outdoors without snow", (0, 1, 0, 0), base(), 1, 0, 240),
-    ("frost: melts in rain", (0, 1, 0, 0), base(rain=1.0), 1, 0, 30),
+    ("frost: rain rinses it", (0, 1, 0, 0), base(rain=1.0), 1, 0, 10),
     ("sand: up in a full storm", (0, 0, 0, 0), base(storm=1.0), 2, 1, 30),
     ("sand: up in full dry wind alone", (0, 0, 0, 0), base(wind=1.0), 2, 1, 180),
     ("sand: fades outdoors", (0, 0, 1, 0), base(), 2, 0, 300),
     ("sand: fades indoors", (0, 0, 1, 0), base(exterior=False), 2, 0, 600),
-    ("sand: rain washes it", (0, 0, 1, 0), base(rain=1.0), 2, 0, 40),
-    ("mud: up running through the wet", (0, 0, 0, 0), base(rain=1.0, ground=1.0, moving=1.0), 3, 1, 45),
+    ("sand: rain rinses it", (0, 0, 1, 0), base(rain=1.0), 2, 0, 10),
+    ("mud: up running through the puddles after the rain", (0, 0, 0, 0), base(ground=1.0, moving=1.0), 3, 1, 45),
+    ("mud: rain rinses it, running or not", (0, 0, 0, 1), base(rain=1.0, ground=1.0, moving=1.0), 3, 0, 10),
     ("mud: dries outdoors", (0, 0, 0, 1), base(), 3, 0, 600),
     ("mud: dries indoors", (0, 0, 0, 1), base(exterior=False), 3, 0, 360),
     ("underwater washes the mud", (0, 0, 0, 1), base(underwater=True), 3, 0, 5),

@@ -34,6 +34,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [Exposure](#exposure) | true | yes | 3 | 4 | Exposure.cpp, Exposure.h | Exposure is Vegas Shaders' automatic brightness correction. It measures how bright the frame is (through the AvgLuma result) and darkens or brightens the whole  |
 | [FXAA](../src/effects/FXAA/) | - | - | 3 | 0 | FXAA.cpp, FXAA.h |  |
 | [Flashlight](#flashlight) | true | yes | 3 | 4 | Flashlight.cpp, Flashlight.h |  |
+| [GearWeather](#gearweather) | - | yes | 0 | 0 | (no folder) | Weather on the player's first-person gear (gun, hands, sleeves) in the deferred path: rain wets it, snow frosts it, sandstorms and dry wind dust it, running thr |
 | [GodRays](#godrays) | true | yes | 1 | 3 | GodRays.cpp, GodRays.h | When the sun is up in an exterior and bright sky (or the sun's own disc and glare) sits near or beside the view, soft shafts of light fan out from the sun's scr |
 | [GpuParticles](../src/effects/GpuParticles/) | - | - | 6 | 1 | GpuParticles.cpp, GpuParticles.h |  |
 | [Grass](#grass) | true | yes | 0 | 8 | GpuGrass.cpp, GpuGrass.h, Grass.cpp, Grass.h |  |
@@ -2214,6 +2215,56 @@ there). Checks: DebugView 1 / 2 here, `[Shaders.Reflections.RT] Enabled = false`
 Under PTRealtime / PTReplace the path tracer lights the picture itself; the flashlight is passed to it as lamp 0 with its cone
 (core/RtPathTrace.cpp Lamps, Compute/Rt/RtPathTrace.comp LampSpot; docs/next/RT-PATH-TRACING.md (not in this repo) section 53). Before, it showed only on
 the few pixels where the path-traced picture falls back to the game's frame.
+
+## GearWeather
+
+Code: `src/core/GearWeather.h` (no folder in `src/effects`; called from `src/core/DeferredFirstPerson.h`), shader
+`src/hlsl/NewVegas/Shaders/GearWeather.hlsl` (loaded at startup by `GearWeather::Load`, no template). Settings `[Main.Main.Quality]`
+GearWeather* in `resource/defaults/Core.toml`. Test only; needs `DeferredFirstPerson` at startup. The header comments of both files are the
+full reference (the id stencil, the gear-local pattern, the cost design); this section is the summary.
+
+### 1. Purpose
+Weather on the player's first-person gear (gun, hands, sleeves) in the deferred path: rain wets it, snow frosts it, sandstorms and dry wind
+dust it, running through puddles muddies it. Deferred: the pass changes the view model's G-buffer (albedo, roughness, metal, shading normal)
+after the first-person records and before the first-person sun and lamp passes, so every light shades the changed surface.
+
+### 2. Layers and timing (`GearWeather::Step`, mirrored by `tests/fd_firstperson_math.py` section 4)
+- wet: up in about 20 s of full rain (or at once under water); dries in about 3 min outdoors, 90 s indoors.
+- frost: up in about 60 s of a snow weather; melts in 45 s indoors, 4 min outdoors.
+- sand: up in about 30 s of a full sandstorm, slowly in a strong dry wind; fades over 5 min outdoors, 10 min indoors.
+- mud: up in about 45 s of running through wet ground once the rain has stopped (the puddles); dries over 10 min (6 min indoors).
+- Rain (2026-11-26 rain fix): while rain falls outdoors, frost, sand and mud do not build and are rinsed off in about 10 s, so wet gear shows
+  the wet layer alone. Under water all three wash off in about 5 s.
+
+### 3. Look (the shader)
+- Frost, sand and mud lie in blotches of `GearWeatherScale` units (value noise in the part's own space).
+- Wet (2026-11-26 rain fix) is one even film: albedo x 0.55 (porous) to x 0.95 (metal), roughness down to 0.28 (skin 0.3) and never raised,
+  the normal leaning 0.35 toward the smooth one. Small beads sit on it: at most one drop per 0.4-unit cell of the part's space (0.1-0.22
+  units across, the same size whatever `GearWeatherScale`), in up to 60 % of the cells at full wet (30 % on skin); inside a drop the
+  roughness goes to 0.1 and the normal bulges outward from its middle (tilt up to 0.45 at the rim). Skinned parts read the beads from
+  their nearest bone.
+- Why (2026-11-26, proven on the bench): each dry layer's cover added a noise term that did not scale with its level, so mud, sand and
+  frost at level 0 still covered the spots where the noise is high. The pass runs only while some layer is above 0, so dry gear looked
+  clean, but rain (wet > 0) switched the pass on and those spots showed as big pale tan and grey camo blotches (bench run
+  20261126-145648-slotA, `GearWeatherForce 1`: the blotches with wet alone). Fix: each dry layer's cover x saturate(level x 4). The old wet
+  layer also followed the 3-unit noise with roughness 0.07 (mirror glints in patches), and sand faded slowly in rain (40 s); both changed
+  as above.
+- Brightness: the pass never touches COLOR0 (the record's ambient and sky light), so under sky light wet gear is exactly as bright as dry.
+  The sun's and the lamps' diffuse only lose light (darker albedo; at a lower roughness a smaller diffuse keep and more Fresnel); their
+  highlight gathers the same light into a tighter lobe (a sheen at 0.28, small glints on the beads), so a highlight can be brighter than
+  the dry one where it lands, nowhere else.
+
+### 4. Settings
+GearWeather (off), GearWeatherStrength, GearWeatherWet / Frost / Sand / Mud (each layer's strength), GearWeatherSpeed (rates),
+GearWeatherSkin (bare skin's share of the dry layers), GearWeatherScale (dry blotch size, 3 units), GearWeatherForce (test: 0 auto, 1 wet,
+2 frost, 3 sand, 4 mud, 5 all at 0.6), GearWeatherDebug (1: the covers as colours: red mud, green sand, blue frost, grey wet, white beads).
+
+### 5. Checking it
+- Offline: `tests/fd_firstperson_compile.py` + `template_compile --flow --device --batch` (GearWeather native and DXVK define lists);
+  `tests/fd_firstperson_math.py` (the timings above).
+- Bench / in game: `GearWeatherForce 1` outdoors on an overcast day: the gun and gloves evenly darker with a soft sheen and small bright
+  drops, no pale patches; `GearWeatherDebug 1`: an even grey over the parts with small white dots. `GearWeatherForce 5`: the dry layers'
+  blotches over the film. With the F10 GPU timers the log's `GEAR WEATHER` line gives the amounts and inputs every 240 frames.
 
 ## GodRays
 

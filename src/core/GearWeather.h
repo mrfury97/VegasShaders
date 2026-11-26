@@ -4,16 +4,18 @@
 //
 // Four layers, each an amount 0-1 that builds up while its weather lasts and fades when it is over (Step, once a frame, real seconds):
 //   wet   - rain falling on the player outdoors (RainState: the rain amount, after RainState::Tick), or the player in water. Up in about
-//           20 s of full rain; dries in about 3 min outdoors, 90 s indoors.
+//           20 s of full rain; dries in about 3 min outdoors, 90 s indoors. In the pass an even darker film with a soft sheen and small
+//           fixed-size beads (2026-11-26: no blotches; the shader's wet block says why).
 //   frost - a snow weather outdoors (GameState.isSnow, ForceSnow included). Up in about 60 s; melts in about 45 s indoors, 4 min outdoors
-//           without snow, 30 s in rain.
+//           without snow.
 //   sand  - a sandstorm (the Sandstorm effect's eased intensity) outdoors, and slowly in a strong dry wind (the weather's wind speed
-//           past half, no rain): desert dust. Up in about 30 s of a full storm; fades over 5 min outdoors (blown off), 10 min indoors;
-//           rain washes it off in about 40 s.
-//   mud   - CHOSEN TRIGGER: moving over wet ground outdoors. The ground is wet while it rains or puddles stand (RainState's factor:
-//           max(rain, puddles)), and mud is thrown up only while the player moves (walking 0.5, running 1: the player's speed / 250 units
-//           a second). Up in about 45 s of running through the wet; dries and flakes off over 10 min (6 min indoors). Standing in the
-//           rain does not make mud; walking a dry road after the rain still does while the puddles last.
+//           past half, no rain): desert dust. Up in about 30 s of a full storm; fades over 5 min outdoors (blown off), 10 min indoors.
+//   mud   - CHOSEN TRIGGER: moving over wet ground outdoors once the rain has stopped (the puddles: RainState's factor, max(rain, puddles),
+//           while no rain falls); mud is thrown up only while the player moves (walking 0.5, running 1: the player's speed / 250 units
+//           a second). Up in about 45 s of running through the puddles; dries and flakes off over 10 min (6 min indoors). Standing still
+//           does not make mud.
+// Rain (2026-11-26 rain fix): while rain falls outdoors, frost, sand and mud do not build and are rinsed off in about 10 s, so wet gear
+// shows the wet layer alone (they lie in coarse blotches of GearWeatherScale units; under rain they read as pale or dark camo patches).
 // Water (the camera under water) washes sand, mud and frost off in about 5 s and soaks the gear.
 // All rates x [Main.Main.Quality] GearWeatherSpeed; what the pass gets is the amount x GearWeatherStrength x the layer's own strength
 // (GearWeatherWet / Frost / Sand / Mud, advanced keys). GearWeatherForce (test only, live) holds the amounts for the bench: 0 auto,
@@ -67,18 +69,24 @@ namespace GearWeather {
 		if (in.underwater) l.wet += t * 2.0f;
 		else if (rain > 0.01f) l.wet += t * rain / 20.0f;
 		else l.wet -= t * (out ? 1.0f / 180.0f : 1.0f / 90.0f);
+		// (2026-11-26 rain fix) falling rain rinses the three dry layers off in about 10 s and stops them building: wet gear shows the wet
+		// layer alone (frost, sand and mud lie in coarse blotches, and a pale or muddy blotch under the wet film read as camo patches)
+		const float rinse = 1.0f / 10.0f;
 		// frost
 		const float snow = out ? Clamp01(in.snow) : 0.0f;
-		if (snow > 0.01f) l.frost += t * snow / 60.0f;
-		else l.frost -= t * (in.underwater ? 1.0f / 5.0f : !in.exterior ? 1.0f / 45.0f : rain > 0.01f ? 1.0f / 30.0f : 1.0f / 240.0f);
+		if (rain > 0.01f) l.frost -= t * rinse;
+		else if (snow > 0.01f) l.frost += t * snow / 60.0f;
+		else l.frost -= t * (in.underwater ? 1.0f / 5.0f : !in.exterior ? 1.0f / 45.0f : 1.0f / 240.0f);
 		// sand / dust
 		const float storm = out ? Clamp01(in.storm) : 0.0f;
 		const float dust = out && rain <= 0.01f ? Clamp01((in.wind - 0.5f) * 2.0f) : 0.0f;
-		if (storm > 0.01f || dust > 0.01f) l.sand += t * (storm / 30.0f + dust / 180.0f);
-		else l.sand -= t * (in.underwater ? 1.0f / 5.0f : rain > 0.01f ? 1.0f / 40.0f : !in.exterior ? 1.0f / 600.0f : 1.0f / 300.0f);
-		// mud
+		if (rain > 0.01f) l.sand -= t * rinse;
+		else if (storm > 0.01f || dust > 0.01f) l.sand += t * (storm / 30.0f + dust / 180.0f);
+		else l.sand -= t * (in.underwater ? 1.0f / 5.0f : !in.exterior ? 1.0f / 600.0f : 1.0f / 300.0f);
+		// mud (from the wet ground once the rain has stopped: the puddles)
 		const float splash = out ? Clamp01(in.ground) * Clamp01(in.moving) : 0.0f;
-		if (splash > 0.01f) l.mud += t * splash / 45.0f;
+		if (rain > 0.01f) l.mud -= t * rinse;
+		else if (splash > 0.01f) l.mud += t * splash / 45.0f;
 		else l.mud -= t * (in.underwater ? 1.0f / 5.0f : !in.exterior ? 1.0f / 360.0f : 1.0f / 600.0f);
 		l.wet = Clamp01(l.wet); l.frost = Clamp01(l.frost); l.sand = Clamp01(l.sand); l.mud = Clamp01(l.mud);
 		return l;
