@@ -1214,15 +1214,17 @@ void ReflectionsEffect::UpdateWaterConstants() {
 }
 
 // UNOFFICIAL 2026-10-31 SkyPanorama ([Shaders.Reflections.RT], docs/next/FORK-RT-REFLECTIONS.md "Sky at a miss"): the sky as seen,
-// gathered from this frame's sky pixels into a 128 x 128 hemi-octahedral map (ReflectionsSkyPano.frag), kept for the directions off
-// screen. Outdoors, Vulkan passes only. Started over after a frame without it (indoors, a load, a menu) or a camera cut. The passes
+// gathered from this frame's sky pixels into a kSkyPanoSize x kSkyPanoSize hemi-octahedral map (ReflectionsSkyPano.frag), kept for the directions off
+// screen. (2026-11-26 mirror puddles: 512, was 128 = 1.4 degrees a texel, which a mirror puddle seen from above showed as hard blocks of
+// cloud, bench run 20261126-201458-slotA; 2 x 4 MB.) Outdoors, Vulkan passes only. Started over after a frame without it (indoors, a load, a menu) or a camera cut. The passes
 // after it this frame read it on t_cloudSky (material2.y 2).
+static const UINT kSkyPanoSize = 512;
 void ReflectionsEffect::RenderSkyPano(IDirect3DDevice9* Device) {
 	panoReady = false;
 	if (!Settings.RtSkyPanorama || panoFailed || !TheShaderManager->GameState.isExterior || ExtFailed || !RtPassesWanted()) return;
 	if (!pano[0]) {
 		for (int i = 0; i < 2; i++)
-			if (FAILED(Device->CreateTexture(128, 128, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &pano[i], NULL)) ||
+			if (FAILED(Device->CreateTexture(kSkyPanoSize, kSkyPanoSize, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &pano[i], NULL)) ||
 				FAILED(pano[i]->GetSurfaceLevel(0, &panoSurface[i]))) {
 				Logger::Log("UNOFFICIAL Reflections: the sky panorama could not be created; SkyPanorama is off.");
 				panoFailed = true;
@@ -1233,7 +1235,7 @@ void ReflectionsEffect::RenderSkyPano(IDirect3DDevice9* Device) {
 	const bool reset = panoFrame == 0 || panoFrame + 1 != now || TheShaderManager->GameState.isCameraCut;
 	const int write = panoIndex ^ 1;
 	const D3DXVECTOR4 cube = Constants.Cube;
-	Constants.Cube = D3DXVECTOR4(0.0f, 128.0f, 0.0f, reset ? 1.0f : 0.0f);
+	Constants.Cube = D3DXVECTOR4(0.0f, (float)kSkyPanoSize, 0.0f, reset ? 1.0f : 0.0f);
 	panoDrawing = true;
 	Device->SetRenderTarget(0, panoSurface[write]);
 	const bool drawn = ExtRender(Device, panoSurface[write], panoSurface[write], 10, false, panoSurface[write]);
@@ -1514,8 +1516,14 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	memcpy(&uniforms.shadowOrtho, shadowOrtho, sizeof(D3DXMATRIX));
 	uniforms.reproject = Constants.Reproject;
 	uniforms.reciprocalResolution = *reciprocal;
-	uniforms.skyColor = *skyColor;
-	uniforms.horizonColor = *horizonColor;
+	// (2026-11-26 mirror puddles) the sky colours WITH [Shaders.Sky.Main]'s look (saturation, tint), as the sky is drawn: Sky's copies made
+	// for the fog (Sky.cpp UpdateFogSky; the raw colours while the look is off). The weather's raw TESR_SkyColor / HorizonColor made every
+	// reflected sky the gradient fills (a ray that meets nothing, the panorama's unseen texels) pale grey under a blue sky: bench run
+	// 20261126-194117-slotA, puddle1 noon, the puddle's reflected sky sRGB ~(194, 200, 210) against the drawn sky's (137, 176, 211).
+	const D3DXVECTOR4* lookSky = Registered("TESR_FogSkyColor");
+	const D3DXVECTOR4* lookHorizon = Registered("TESR_FogHorizonColor");
+	uniforms.skyColor = lookSky && lookHorizon ? *lookSky : *skyColor;
+	uniforms.horizonColor = lookSky && lookHorizon ? *lookHorizon : *horizonColor;
 	uniforms.waterSettings = *waterSettings;
 	uniforms.data = Constants.Data;
 	uniforms.data2 = Constants.Data2;
@@ -1632,7 +1640,9 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		const WetnessEffectsShaders* wet = TheShaderManager->Shaders.Wetness;
 		const float rain = wet ? std::clamp(wet->Constants.Data.x * wet->Constants.Params.x, 0.0f, 1.0f) : 0.0f;
 		const float dampRough = pud && pud->Constants.Data.w > 0.5f ? 1.0f + (0.22f - 1.0f) * rain : 0.0f;
-		uniforms.film2 = D3DXVECTOR4(Settings.DampTrace || !CubeWanted() ? 0.0f : 1.0f, standing, dampRough, 0.0f);
+		// w (2026-11-26) mirror puddles: [Shaders.Puddles.Main] Mirror while the Puddles run (Reflections.glsl PuddleMirror)
+		const float mirror = pud && pud->Constants.Data.w > 0.5f ? pud->Settings.Mirror : 0.0f;
+		uniforms.film2 = D3DXVECTOR4(Settings.DampTrace || !CubeWanted() ? 0.0f : 1.0f, standing, dampRough, mirror);
 	}
 	// 2026-11-19 WetnessEffects consolidation + AlbedoBuffer/GBufferV2 F0 parity
 	IDirect3DBaseTexture9* albedoTex = CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f ?

@@ -31,6 +31,7 @@ void PuddlesShaders::UpdateSettings() {
 	Settings.Cavity = std::clamp(TheSettingManager->GetSettingF(main, "Cavity"), 0.0f, 2.0f);
 	Settings.WetRing = std::clamp(TheSettingManager->GetSettingF(main, "WetRing"), 0.0f, 0.5f);
 	Settings.Ripples = std::clamp(TheSettingManager->GetSettingF(main, "Ripples"), 0.0f, 2.0f);
+	Settings.Mirror = std::clamp(TheSettingManager->GetSettingF(main, "Mirror"), 0.0f, 1.0f);
 	Settings.ReflectionPuddles = TheSettingManager->GetSettingI(main, "ReflectionPuddles") != 0;
 	Settings.ObjectPuddles = TheSettingManager->GetSettingI(main, "ObjectPuddles") != 0;
 	Settings.LevelOverride = TheSettingManager->GetSettingF(debug, "LevelOverride");
@@ -95,7 +96,8 @@ void PuddlesShaders::UpdateConstants() {
 	Constants.Look = D3DXVECTOR4(Settings.Roughness, Settings.Darkening, Settings.EdgeSoftness, Settings.Ripples);
 	Constants.Shape = D3DXVECTOR4(Settings.SlopeStart, Settings.SlopeFull, Settings.Cavity, Settings.WetRing);
 	PuddleMap::UpdateConstants();	// 2026-11-12 map mode: the built windows
-	Constants.Streak = D3DXVECTOR4(0.0f, 0.0f, 0.0f, on ? (float)Settings.DebugView : 0.0f);	// (x y z: the removed wall streaks')
+	// x (2026-11-26) Mirror for the D3D9 reflection technique (the surface shaders never read x); y z: the removed wall streaks'
+	Constants.Streak = D3DXVECTOR4(on ? Settings.Mirror : 0.0f, 0.0f, 0.0f, on ? (float)Settings.DebugView : 0.0f);
 }
 
 bool PuddlesShaders::Active() const {

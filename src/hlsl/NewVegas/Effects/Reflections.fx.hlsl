@@ -33,6 +33,8 @@ float4 TESR_ReciprocalResolution;
 float4 TESR_SkyColor;
 float4 TESR_SkyLowColor;
 float4 TESR_HorizonColor;
+float4 TESR_FogSkyColor;              // (2026-11-26 mirror puddles) the sky colours with [Shaders.Sky.Main]'s look in them (Sky.cpp UpdateFogSky), for SkyAlong
+float4 TESR_FogHorizonColor;
 float4 TESR_SunPosition;
 float4 TESR_SkyData;
 float4 TESR_SunAmount;
@@ -58,6 +60,7 @@ float4 TESR_ReflectionsWetFx2;       // x MaxPuddleWetness, y PuddleRoughness, z
 float4 TESR_PuddleData;              // x water level, y Coverage, z 1 / Size, w Quality
 float4 TESR_PuddleShape;             // x slope start, y slope full, z cavity, w wet ring
 float4 TESR_PuddleLook;              // x roughness, y darkening, z edge softness, w ripples
+float4 TESR_PuddleStreak;            // (2026-11-26) x [Shaders.Puddles.Main] Mirror (Compute/Reflections.glsl PuddleMirror), w the surfaces' debug view
 
 // Declared in register order: the effect binds TESR_ samplers by declaration order (a mismatch silently swaps them).
 sampler2D TESR_RenderedBuffer : register(s0) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
@@ -204,6 +207,11 @@ float OpenAbove(float2 uv, float depth) {
 
 static float SurfaceWetGloss = 0.0;
 static float SurfaceWetRough = 1.0;
+// (2026-11-26 mirror puddles: Compute/Reflections.glsl PuddleMirror, the same numbers) the standing-water share of the reflection
+// (no constant branches on it: the GBUFFER variant is at ps_3_0's 16 boolean registers; with Mirror 0 every use below is exactly as before)
+#define PuddleMirror TESR_PuddleStreak.x
+static const float MirrorPuddleShare = 0.8;
+static float SurfaceStanding = 0.0;
 static float SurfaceWetShare = 0.0;  // (2026-11-26 puddle mirror) set by Reflectivity: the reflection's share that is water on the surface (wet film, puddles); kept out of SpecularOcclusion
 
 float3 WetHash33Fx(float3 p3) {
@@ -301,9 +309,12 @@ float3 SmoothViewNormalAt(float2 uv, float3 n) {
 	return n;
 }
 // The film's water at a pixel (0-1, x the strength) and its roughness (at most WetRoughness); 0 where no film was worked out.
+static float FilmStanding = 0.0;
 float FilmWetness(float2 uv, out float roughness) {
 	float4 f = tex2Dlod(NVR_ReflectionsFilm, float4(uv, 0, 0));
 	roughness = min(max(f.g, 0.01), WetRoughness);
+	FilmStanding = f.g > 0.001 ? 1.0 - smoothstep(TESR_PuddleLook.x + 0.02, TESR_PuddleLook.x + 0.12, f.g) : 0.0;   // (2026-11-26 mirror puddles)
+	roughness = lerp(roughness, max(TESR_PuddleLook.x, 0.01), FilmStanding * saturate(PuddleMirror * 1.0e4));
 	return f.g > 0.001 ? saturate(saturate(frac(f.r) / 0.99) * TESR_ReflectionsFilm.w) * TESR_ReflectionsFilm.y : 0.0;
 }
 // How much of the bump the reflection follows: whole up to 0.5 world units per pixel, none from 2.0; damp ground keeps 1 - DampBumpLean of it
@@ -356,10 +367,12 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 	float wetness = Wetness * floorShare;
 #if REFL_GBUFFER_ON
 	float wetRoughness = WetRoughness;   // (2026-11-20 step 2: the film's water, as the Vulkan passes)
+	FilmStanding = 0.0;
 	[branch] if (TESR_ReflectionsFilm.x > 0.5) wetness = floorShare > 0.0 ? FilmWetness(uv, wetRoughness) * floorShare : 0.0;
 	else if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);
 	float amount = dry + wetness;
 	roughness = lerp(roughness, wetRoughness, wetness / max(amount, 1.0e-4));
+	SurfaceStanding = FilmStanding * saturate(wetness / max(amount, 1.0e-4));
 #else
 	// (2026-11-22 upstream 1.1.3 merge: upstream's forward film, ComputeWetFxFilmFx; this variant is the one without UnifiedReflections)
 	float standing = floorShare > 0.0 ? PuddleStandingFx(uv, depth, ViewToWorldDir(ViewNormal(uv)).z) : 0.0;
@@ -369,6 +382,7 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 	float wetTargetRough = TESR_ReflectionsWetFx.x > 0.5 && SurfaceWetGloss > 0.0 ? SurfaceWetRough : WetRoughness;
 	roughness = lerp(roughness, wetTargetRough, wetness / max(amount, 1.0e-4));
 	roughness = lerp(roughness, max(TESR_ReflectionsWetFx2.y, 0.01), standing);
+	SurfaceStanding = saturate(standing);
 #endif
 	SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4));
 	SurfaceMetal = material.g;
@@ -384,6 +398,7 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughness) {
 	roughness = DryRoughness;
 	SurfaceWetShare = 0.0;
+	SurfaceStanding = 0.0;
 	SurfaceWetGloss = 0.0;
 	SurfaceWetRough = 1.0;
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
@@ -421,10 +436,12 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 	float wetness = Wetness;
 #if REFL_GBUFFER_ON
 	float wetRoughness = WetRoughness;   // (2026-11-20 step 2: the film's water, as the Vulkan passes)
+	FilmStanding = 0.0;
 	[branch] if (TESR_ReflectionsFilm.x > 0.5) wetness = FilmWetness(uv, wetRoughness);
 	else if (wetness > 0.0 && RoofMaskOn > 0.5) wetness *= OpenAbove(uv, depth);
 	float amount = DryReflect + wetness;
 	roughness = lerp(dryRoughness, wetRoughness, wetness / max(amount, 1.0e-4));
+	SurfaceStanding = FilmStanding * saturate(wetness / max(amount, 1.0e-4));
 #else
 	// (2026-11-22 upstream 1.1.3 merge: upstream's forward film, ComputeWetFxFilmFx; this variant is the one without UnifiedReflections)
 	float standing = PuddleStandingFx(uv, depth, worldNormal.z);
@@ -434,6 +451,7 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 	float wetTargetRough = TESR_ReflectionsWetFx.x > 0.5 && SurfaceWetGloss > 0.0 ? SurfaceWetRough : WetRoughness;
 	roughness = lerp(dryRoughness, wetTargetRough, wetness / max(amount, 1.0e-4));
 	roughness = lerp(roughness, max(TESR_ReflectionsWetFx2.y, 0.01), standing);
+	SurfaceStanding = saturate(standing);
 #endif
 	SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4));
 	return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
@@ -515,7 +533,8 @@ float3 WetSkyReflectionLinearFx(float3 r) {
 // nothing (the ground there is not on screen, and the sky would light it up).
 float3 SkyAlong(float3 worldDir) {
 	float up = saturate(worldDir.z);
-	return lerp(linearize(TESR_HorizonColor.rgb), linearize(TESR_SkyColor.rgb), sqrt(up)) * smoothstep(0.0, 0.15, worldDir.z);
+	// (2026-11-26 mirror puddles) with the sky look (saturation, tint) as the sky is drawn: Compute/Reflections.glsl's cb.skyColor / horizonColor
+	return lerp(linearize(TESR_FogHorizonColor.rgb), linearize(TESR_FogSkyColor.rgb), sqrt(up)) * smoothstep(0.0, 0.15, worldDir.z);
 }
 
 // Karis's reversible compression for averaging HDR samples: c / (1 + luminance), and back.
@@ -955,6 +974,8 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	float3 share = saturate(amount * EnvironmentFresnel(roughness, NdotV)).xxx * saturate(reflection.a);
 	float nonMetal = 1.0;
 #endif
+	// (2026-11-26 mirror puddles) standing water shows at least MirrorPuddleShare x Mirror of its reflection
+	share = max(share, (MirrorPuddleShare * saturate(PuddleMirror) * SurfaceStanding * saturate(amount) * saturate(reflection.a)).xxx);
 	float3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
 #ifndef REFL_SPECOCC_ON
     #define REFL_SPECOCC_ON 0

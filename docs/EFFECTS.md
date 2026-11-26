@@ -4586,7 +4586,7 @@ The object, parallax and land pixel shaders keep ps_3_0: the new constants fit i
 | c174 | TESR_PuddleData | x water level 0-1 (CPU, section 6), y Coverage, z 1 / Size (game units), w Quality (0 = off: Wetness Effects' old puddles) |
 | c175 | TESR_PuddleLook | x puddle roughness, y depth darkening, z edge softness (field units), w ripple strength in puddles |
 | c165 | TESR_PuddleShape | x slope start (world up of the face), y slope full, z cavity (land height) strength, w wet-ring width |
-| c166 | TESR_PuddleStreak | w debug view (x y z were the wall streaks', removed 2026-11-18: 0) |
+| c166 | TESR_PuddleStreak | w debug view; x (2026-11-26) Mirror, read only by `Effects/Reflections.fx.hlsl` (y z were the wall streaks', removed 2026-11-18: 0) |
 
 c165-c166 are the sun cross-fade's (Shadow.hlsl, SUN_CROSSFADE), which never compiles with Wetness Effects. c174-c175: free in all object pixel shaders (VEGAS_SHADERS.md section 3) and in the land's (c172-c173 lamp RT, c176-c179 blending and macro). Also read by `Effects/WetnessReflections.fx.hlsl`.
 
@@ -4606,7 +4606,7 @@ Two vec4 appended after `renderScale`: `puddle` (= TESR_PuddleData) and `puddle2
 | FillHours | 0.5 | Game hours of steady rain to fill the puddles |
 | DryHours | 3.0 | Game hours of daylight to dry them (night and overcast dry at NightDrying of that speed) |
 | NightDrying | 0.35 | Drying speed at night, share of the day's |
-| Roughness | 0.1* | Water surface roughness |
+| Roughness | 0.02 | Water surface roughness: how sharp the puddles' mirror is (0.1 from 2026-11-21, 0.02 since 2026-11-26, settings step 102) |
 | Darkening | 1.0* | How much deeper water darkens what is under it |
 | EdgeSoftness | 0.108* | Width of the shore, field units |
 | SlopeStart / SlopeFull | 0.92 / 0.97 | World up of a face where puddles start / reach full |
@@ -4614,6 +4614,7 @@ Two vec4 appended after `renderScale`: `puddle` (= TESR_PuddleData) and `puddle2
 | WetRing | 0.12 | Width of the soaked ring round each puddle, field units |
 | Flatten | 1.0 | How much the water hides the material's normal map |
 | Ripples | 2.0* | Rain ripple strength inside puddles |
+| Mirror | 1.0 | (2026-11-26) Mirror puddles: how strongly standing water reflects, at least 0.8 x Mirror at any angle, its blur this Roughness (not WetRoughness); 0 = the plain water Fresnel as before. Reflection passes only (`docs/EFFECTS.md "Reflections"`, "Mirror puddles") |
 | MapMode | true | Restart: the large-scale terms from the puddle map on the NVR DXVK extension (section 6b) |
 | ObjectPuddles | true* | Standing water and soaked rims on objects too (roads, slabs, rocks); never characters or the first-person model |
 | ReflectionPuddles | true | The Vulkan reflection pass (SSR + RT) mirrors the puddles too |
@@ -4760,6 +4761,79 @@ in docs/next/FORK-RT-REFLECTIONS.md (not in this repo)).
   Roughness 0.1 against 0.41 and ReplaceForward made little visible difference there.
 - Fix: `SurfaceWetShare` (Reflectivity: the reflection's share that is water on the surface, the wet film and puddles, not bumpy damp
   ground) is kept out of SpecularOcclusion, in the Vulkan composite and the D3D9 effect. Dry floors keep it.
+
+### Mirror puddles: how close FNV gets to a flooded-street mirror (2026-11-26)
+
+Owner: "see if puddles can be made to be this reflective", with a modded GTA V street after rain as the reference: the flooded road a
+near-perfect, bright mirror of palms, traffic light, cars, sky and player, slightly darkened, barely rippled. Branch `mirror-puddles`.
+
+**What held our puddles back** (the owner's path: DXVK fork, DeferredRenderer 2, DeferredWetness film, UnifiedReflections; RT reflections
+`Enabled` but the RT master switches `RTExteriors` / `RTInteriors` off, so screen-space reflections + the cube + the sky):
+1. *Blur floor* (proven from the code): `Reflections.glsl` FilmWetness held every wet pixel at `WetRoughness` or rougher
+   (`clamp(f.g, WetRoughness, 0.3)`), so standing water reflected at the owner's WetRoughness 0.099 although their Puddles Roughness is
+   0.022. Under 0.03 a pixel is a mirror pixel (exact ray, no spread, no temporal history: ReflectionsRayGen / ReflectionsTrace
+   `mirrorPixel`, RtMirrorJitter); at 0.1 the rays spread and the blur / denoiser smoothed them. The D3D9 technique never had the floor.
+2. *Strength* (the main one): water's Fresnel. F0 is 0.02 (IOR 1.33; the composite uses 0.04 for wet ground); at the 10-30 degrees a
+   standing player looks at the street the split-sum Fresnel is about 3-15 %, so the darkened ground showed through and the puddle read
+   as a faint sheen. The reference is far past physical water (its puddles are mirrors at the player's feet too): an art choice.
+3. *The sky where nothing was hit* (proven, bench): the gradient a missed ray took used the weather's raw sky colours, without
+   `[Shaders.Sky.Main]`'s look (the owner's SaturationDay 1.6, blue tint): the puddle's sky came out pale grey, brighter than the drawn
+   sky (run 20261126-194117-slotA: reflected sRGB ~(194, 200, 210) against the drawn sky's (137, 176, 211)).
+4. *Blocks in the mirrored sky overhead* (proven, bench): the sky panorama was 128 x 128 for the upper hemisphere (1.4 degrees a texel);
+   a puddle seen from above magnifies it into hard blocks of cloud.
+5. Already fixed before: SpecularOcclusion darkening water (the section above).
+6. *Resolution*: the trace / RT rays run at half resolution and the composite upsamples (depth-aware bilinear); MirrorJitter + the
+   denoiser's short mirror history add detail on a still camera (RT only). A full-resolution mirror trace was not built (below).
+
+**Built** (Vulkan passes first, the deferred path's film; the D3D9 technique gets the same rules so DeferredRenderer 0 and native D3D9
+behave alike; the forward templates are unchanged):
+- `[Shaders.Puddles.Main] Mirror` (0-1, default 1.0, live; `cb.film2.w`, D3D9 `TESR_PuddleStreak.x`): the *strength*. The composite gives
+  standing water at least 0.8 x Mirror of its reflection (`MirrorPuddleShare`; `share = max(Fresnel share, floor)` x the trace's coverage
+  x the amount); grazing angles keep the higher Fresnel; the ground under the water is dimmed by the same share. With Mirror above 0,
+  standing water's reflection takes the Puddles `Roughness` itself, not WetRoughness's floor. 0 = exactly as before.
+- `[Shaders.Puddles.Main] Roughness` stays the *sharpness* slider (it is not overridden); its default 0.1 -> 0.02 (settings step 102,
+  moves a saved 0.1 only; the owner's 0.022 stays).
+- Which pixels: the film's standing-water share, read back from its roughness (`FilmStandingShare`: smoothstep(0.85, 0.98) of the share
+  the damp-cube split reads), so the soaked rim (roughness 0.12, share ~0.8) and damp ground keep their old look; the first build's
+  linear share made rims and shores into bright mirrors.
+- Ripples: standing water keeps its G-buffer normal in `BumpKeep` (DeferredWetness flattened the material's bump there, so what is left
+  is the rain's ripple rings: a still mirror in dry weather, rippled while it rains); damp ground still leans to the smooth normal.
+  (Ripples not judged by eye on the bench pictures.)
+- The sky: the reflection passes' `cb.skyColor` / `horizonColor` are Sky's look-applied copies (`TESR_FogSkyColor` / `FogHorizonColor`,
+  made for the fog by Sky.cpp UpdateFogSky); the D3D9 SkyAlong reads them too. `[Shaders.Reflections.RT] SkyPanorama` on by default
+  (settings step 102, false -> true; it also serves the screen-space trace, not only RT), 512 x 512 (2 x 4 MB), and a panorama texel not
+  seen lately takes the sky last seen lower on the same bearing (4 filtered taps) before the gradient. A near-mirror screen-trace ray
+  (roughness < 0.15) that points into open sky (nothing above it in the ortho map at 64-4096 units: `OpenSkyAlong`) takes the panorama
+  before the cube, as Resolve's RT misses already did.
+- Coverage for a "flooded street": the existing `[Shaders.Puddles.Main] Coverage` (default 0.262; the owner runs 0.54). No new key.
+
+**What FNV cannot match, and why**
+- Off screen without RT: screen-space reflections only show what is on screen; a puddle seen from above mirrors what is over the player
+  (a wall, a sign, the tops of trees), which is never on screen. The sky panorama and the cube fill it with the sky and a blurred, coarse
+  copy of what was seen. RT reflections (NVR DXVK fork + RT helper, `RTExteriors` on) do show it (bench run 20261126-195646-slotD: the
+  whole "OPEN 24 HOURS" sign, string lights and porch in the puddle); native D3D9 has no RT.
+- A planar reflection (what the game's water does: the scene drawn a second time, mirrored at the water height) would also show off-screen
+  things without RT, for puddles at about one height near the player. Not built: one more scene draw (the game's water reflection pass
+  costs that much), puddles at other heights would be wrong, and the deferred G-buffer has no second view. Estimated 2-3 working sessions.
+- The player in the mirror: the first-person model is not in the world, so a puddle cannot show the player as the reference does (third
+  person: the actor is drawn and RT has it).
+- Content: GTA V's dense, high-detail city; FNV's sparse low-poly scenes make a plainer mirror. Reflected clouds look as the sky's own
+  clouds do (pixel-stepped in the bench slot).
+- Full-resolution mirrors: the trace, RT ray list, Resolve and denoiser at full resolution on standing water (about 4x the rays there):
+  2-3 working sessions; not built.
+
+**Bench** (slot A/D/E, owner's live settings with the puddles held full: `F:\NVR-bench\tomls\owner-live-1126c-wet.toml` (no rain),
+`-rain.toml` (RainOverride 0.6), `-wet-rt.toml` (RTExteriors on); lists `tour-mirror-day/-night/-rain/-perf`; contact sheet
+`F:\VS-scratch\mirror-puddles-sheet.png`):
+- Before (main 04d9515 = test36): runs 20261126-192241-slotA (puddle1 noon), -193124-slotA (Strip night), -193655-slotE (Goodsprings rain).
+- After (final build): -201835-slotA, -201947-slotA, -202058-slotA; RT on: -195646-slotD. All VERDICT PASS, 0 shader errors in the logs.
+- Look: the saloon puddle mirrors the porch, post, bikes and the neon sign sharply with blue sky; the open puddle the sky, clouds, bush
+  and rocks; the Strip's puddles the robots and lights; in rain the sky and clouds. Damp ground and rims as before.
+- Frame cost (run -202217-slotA, alone on the bench, RTX 4070 Ti SUPER, the owner's settings, ~23 fps): Mirror 1 / 0 / 1 / 0, 1500 frames
+  each: 42.736 / 42.797 / 42.748 / 42.697 ms a frame: no measurable cost (noise about +-0.05 ms). The 512 sky panorama (on in all four)
+  was not timed on its own (one 512 x 512 pass a frame; believed well under 0.1 ms).
+- Settings step 102 proven on the bench: the log line `old defaults saved by an earlier build moved ...: Shaders.Reflections.RT.SkyPanorama
+  false -> true` with the owner's saved file (version 101).
 
 ### Frame (RenderBuffers)
 

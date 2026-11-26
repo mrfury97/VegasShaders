@@ -226,6 +226,11 @@ void main() {
     vec3 worldR = ViewToWorldDir(R);
     float screenShare = confidence, cubeShare = 0.0, gridShare = 0.0, skyShare = 0.0;   // (DebugView 6)
     vec4 grid = vec4(0.0), env = vec4(0.0);
+    // (2026-11-26 mirror puddles, Reflections.glsl OpenSkyShare) a near-mirror ray into open sky: the sky panorama first, as RT misses
+    if (confidence < 1.0) {
+        float open = (1.0 - confidence) * OpenSkyShare(ViewToWorldDir(position), worldR, roughness);
+        if (open > 0.0) { sum += PanoAlong(worldR) * open; confidence += open; skyShare = open; }
+    }
     if (CubeOn > 0.0 && confidence < 1.0) env = EnvAlong(worldR, roughness);
     float gridFirst = smoothstep(0.15, 0.35, roughness);
     bool gridUseful = (gridFirst > 0.0 || env.a < 1.0) && !(SkyFallback > 0.0 && RoofMaskOn < 0.5 && worldR.z >= 0.15);
