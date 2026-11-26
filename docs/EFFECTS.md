@@ -5466,8 +5466,8 @@ Owner: "make it fully deffered one to one port of bottle shaders versions". A on
   their pre-pass); the Vulkan sun pass (`DeferredSun.comp`, `NvrDxvkDeferred`, off by default) has no lookup and stands aside while there
   is a mask.
 - Overlaps: in a frame where the sun pass took the mask, the old contact pass ([ScreenSpace], over the finished picture, ambient included)
-  writes no contact (`EffectChain.cpp`), so the sun is darkened once. The forward Bend port ([ScreenSpace] Bend, section above, off by
-  default) is untouched. RT sun shadows: the mask multiplies the traced shadow too (theirs multiplies whatever sun shadow there is); with
+  writes no contact (`EffectChain.cpp`), so the sun is darkened once. The older forward Bend port (Community Shaders', `[ScreenSpace] Bend`, off by
+  default, far LOD only) was removed 2026-11-27 at the owner's word; this port is the only Bend shader. RT sun shadows: the mask multiplies the traced shadow too (theirs multiplies whatever sun shadow there is); with
   RT on, its own contact march (`[ShadowsExteriors.RT] ContactShadows`) can add to it near the camera (believed; RT is off by default).
   AO and AmbientLight shade the ambient: no overlap. Lamps: theirs has no lamp version, so none here.
 - Look (bench 2026-11-26, tree VS-sss, on vs off live in the same run): outdoors a small, local change (0.2-1.6 % of pixels move by 8+

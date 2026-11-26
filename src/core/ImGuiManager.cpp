@@ -648,8 +648,6 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Main.Main.Performance",                "ShaderWarmUp",       RestartRule::Changed },	// runs once, at the main menu
 	{ "Main.Main.Performance",                "SlimDepthBuffer",    RestartRule::Changed },	// depth texture format (CombineDepth)
 	{ "Shaders.ShadowsExteriors.Main",        "ForwardShadows",     RestartRule::TurnOn },
-	{ "Shaders.ShadowsExteriors.ScreenSpace", "Bend",               RestartRule::TurnOn },	// UNOFFICIAL 2026-11-06 SUN_CONTACT_FORWARD + texture at start
-	{ "Shaders.ShadowsExteriors.ScreenSpace", "InLighting",         RestartRule::TurnOn },
 	{ "Main.Main.Performance",                "NvrDxvkDisplacement", RestartRule::TurnOn },	// land shaders registered as they load ([Shaders.Terrain.Displacement] Enabled is live)
 	{ "Shaders.ShadowsExteriors.SunSmoothing","CrossFade",          RestartRule::Changed },
 	{ "Shaders.ShadowsExteriors.SunSmoothing","DeferredFade",       RestartRule::TurnOn },	// UNOFFICIAL 2026-11-15 fd-smoothsun (compiled into the deferred sun pass at startup)
@@ -2795,8 +2793,6 @@ static const std::unordered_map<std::string, FloatRange> kFloatSliders = {
 	{ "Shaders.Cloth.Interiors.FlutterAmount", { 0.0f, 1.0f, "%.2f" } },
 	{ "Shaders.Cloth.Interiors.RippleAmount", { 0.0f, 1.0f, "%.2f" } },
 	// UNOFFICIAL 2026-11-06 Bend contact shadows: where they start (0 = where the shadow maps end) and how long they fade in
-	{ "Shaders.ShadowsExteriors.ScreenSpace.StartDistance", { 0.0f, 40000.0f, "%.0f" } },
-	{ "Shaders.ShadowsExteriors.ScreenSpace.FadeLength", { 100.0f, 10000.0f, "%.0f" } },
 	// Skin sliders (Width = 28.6 default was nearly immobile at 0.001 drag speed)
 	{ "Shaders.Skin.Main.SpecularStrength", { 0.0f, 2.0f, "%.2f" } },
 	{ "Shaders.Skin.Main.Roughness", { 0.1f, 1.0f, "%.2f" } },
@@ -5336,7 +5332,6 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Main.Main.Quality", "FirstPersonNativeDebug", "First-person native scale" },
 	{ "Main.Main.Quality", "GearWeatherDebug", "Gear weather" },
 	{ "Shaders.ShadowsExteriors.Deferred", "DebugView", "Deferred sun" },
-	{ "Shaders.ShadowsExteriors.ScreenSpace", "BendDebug", "Bend contact shadows" },
 	{ "Shaders.Skin.SSS", "DebugView", "Skin SSS" },
 	{ "Shaders.Puddles.Debug", "DebugView", "Puddles" },
 	{ "Shaders.WetnessEffects.Debug", "ShowCover", "Wetness cover" },
@@ -5903,7 +5898,6 @@ static void RenderDebugSettingsPage() {
 		{ "Shaders.ShadowsExteriors.Deferred", "DebugView", "Deferred sun (DebugView)", DbgKind::IntZero },
 		{ "Shaders.ShadowsExteriors.Main", "FitToDepthDebug", "Sun fit-to-depth (FitToDepthDebug)", DbgKind::IntZero },
 		{ "Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapDebug", "Character shadow map (CharacterShadowMapDebug)", DbgKind::IntZero },
-		{ "Shaders.ShadowsExteriors.ScreenSpace", "BendDebug", "Bend contact shadows (BendDebug)", DbgKind::IntZero },
 		{ "Shaders.ShadowsExteriors.TerrainShadows", "DebugView", "Terrain shadows (DebugView)", DbgKind::IntZero },
 		{ "Shaders.ShadowsExteriors.RT", "DebugView", "RT sun shadows (DebugView)", DbgKind::IntZero },
 		{ "Shaders.ShadowsExteriors.RT", "DenoiserDebugView", "RT sun denoiser (DenoiserDebugView)", DbgKind::IntZero },

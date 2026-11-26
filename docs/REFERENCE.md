@@ -322,10 +322,8 @@ labelled **proven** (the note names the evidence or a fix that worked), **believ
 - **Rule from the owner (2026-10-29/30).** When a feature touches the DXVK fork, also say what the extension (SPIR-V replacement, compute, storage
   images, tessellation) could add; SPIR-V replacement is the real fix for ps_3_0 limits (X4505, instruction slots, no dynamic indexing), with the
   ps_3_0 version kept as the D3D9 fallback. Hair plan of 2026-10-29 (not done in VS): Scheuermann in ps_3_0 first, then SPIR-V, then a reactive mask for FSR/TAA.
-- Bend (Community Shaders screen-space shadows, applied "forward" since 2026-11-06): `Compute/BendContact.comp` runs at effect-chain step 11 and
-  writes `TESR_ContactForward`; `core/BendContact.h` builds `TESR_ContactReproject` next frame; Shadow.hlsl `SunContactForward` multiplies it into
-  `GetSunShadow` when the depth matches. Under upstream 1.1.0's deferred mode Bend has no lookup. Debug: `BendDebug 3` dumps to
-  `<game>\VegasShaders-Logs\BendContact.raw`.
+- Bend (Community Shaders screen-space shadows, applied "forward" from 2026-11-06, off by default): REMOVED 2026-11-27 at the owner's word,
+  replaced by the Bottled Shaders port in the deferred sun (`docs/EFFECTS.md` "ShadowsExteriors" section 12, `core/ScreenSpaceShadows.h`).
 
 ### Benchmark and test traps (vs-rt-gi-review, vs-puddles, offline-renderer)
 - **Proven.** Bench lists that freeze time (`sgtm 0.001`) never test wind-driven noise or ripple motion. The Zone save rolls a different weather per
@@ -347,9 +345,8 @@ labelled **proven** (the note names the evidence or a fix that worked), **believ
   strength was offered, not built). A path-tracer match would be about 1-1.6; do not push the owner back to it. `sungi-vpl` was never merged.
 - **Owner decision** (vs-rt-gi-review, 2026-11-13): proven fixes are always on with NO key; upstream's legacy keys are only hidden through DevOnly,
   never deleted (deleting makes merge conflicts). Recommendation not yet decided: GISpatial 0.
-- **Owner decision** (vs-bend-forward-contact): Bend is LOD-only and hardcoded (TerrainLOD / TerrainFade always, ObjectTemplate only for draws under
-  `BGSTerrainManager::GetRootObjectLODNode`); skin, hair, grass, leaves, parallax and full land do not compile it. StartDistance / FadeLength
-  sliders show only with Advanced on. A side-on-sun guard was removed at the owner's request.
+- **Owner decision** (vs-bend-forward-contact): the forward Bend port was LOD-only; it was removed 2026-11-27 (owner: "take out the older com
+  shader port").
 - **Owner decision** (modern-lighting-room, 2026-11-13): leaf lighting on the object shader is "for another day" (Zone trees are alpha-tested NIFs,
   so Foliage translucency never reaches them): do not start it unasked. `TonemapContrast` stays 1.0 (the STALKER-reference scores worse with more).
 - **Owner decision** (faster-objects-fnv-study, 2026-11-06): build nothing from Faster Objects (Hi-Z overlaps the owner's occlusion-culling plugin;

@@ -1,8 +1,8 @@
 #pragma once
 // UNOFFICIAL: Bend Studio's screen-space shadow dispatch planner (bend_sss_cpu.h, BuildDispatchList), as Community
 // Shaders uses it for its Screen-Space Shadows. Copyright 2023 Sony Interactive Entertainment, Apache License 2.0
-// (http://www.apache.org/licenses/LICENSE-2.0). Unchanged apart from the formatting; Compute/BendContact.comp (core/BendContact.h)
-// is its shader.
+// (http://www.apache.org/licenses/LICENSE-2.0). Unchanged apart from the formatting; Compute/ScreenSpaceShadows.comp (core/ScreenSpaceShadows.h)
+// is its shader (the Bottled Shaders port).
 
 namespace Bend {
 
