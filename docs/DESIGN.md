@@ -1805,6 +1805,21 @@ nearest 8 lamps' cube maps at 1024 (`NearCubeSize`, already built), (3) contact 
 | H. Temporal accumulation of the shadow term per lamp | Smoother than A alone | Memory per lamp, history logic | 3+ | Ghosting on moving casters; TAA already does most of it for A |
 | I. ESM/EVSM/MSM filterable maps | Prefiltered soft shadows | 2-8x atlas memory | 3+ | Light bleeding; removed before for the sun. Not recommended |
 
+### Would "fully deferred" interior shadows help? (owner's question, 2026-11-26)
+They already are deferred for nearly every pixel: the shadow passes (`DL_SHADOW_PASS`, `DeferredLamps.h:48-53`) compute the visibility of a
+pixel's first 16 lamps in screen space, four lamps a pass into four A8R8G8B8 targets, and the lighting pass reads them. What stays
+non-deferred: the shadow maps themselves (each lamp's cube map is drawn from the lamp; only RT avoids that), lamps past a pixel's 16th (a
+cheaper lookup in the lighting pass, or lit), and forward-only surfaces (glass, blended hair, particles, water: the per-draw lookup, 6
+lamps a draw). Moving the rest to deferred would not change the blocky look: that comes from the 512 cube and the 4-tap filter, not from
+where the lookup runs. What the deferred split does buy:
+- Room for a real filter: the shadow passes have the full ps_3_0 register budget, so option A goes there first.
+- On the Vulkan lamp pass (`Compute/DeferredLamps.comp`) no sampler or register limit: it could read the lamps' cube maps directly
+  (no lossy point-sampled copy into the octahedral atlas, which exists because a D3D9 pass has 16 samplers) with as many taps as A needs.
+  Believed 2-3 sessions; needs the cube maps shared with the Vulkan side.
+- Per-lamp screen-space work on the visibility targets: a contact-shadow march per lamp (option E) and a temporal pass on the 16 lamp
+  channels (option H) both fit there. A screen-space blur of the targets alone is not a fix: it is what the old blurred room mask did, and
+  a blurred staircase is still a wavy edge.
+
 ### Sun options (lower priority: the sun is already good)
 - `CascadeResolution = 2` (2048 per cascade): 1.8x the texels for about 1.8x the cascade memory and draw fill; `SmoothFilter` (4x4 cubic,
   16 compares instead of 9); `FitToDepth` (cascades fitted to what is on screen, about 0.05 ms). All built and off; each 0-0.5 session.
