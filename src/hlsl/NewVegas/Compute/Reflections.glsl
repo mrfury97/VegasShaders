@@ -341,6 +341,10 @@ const float DampMaxRoughness = 0.3;
 // ground is rougher (Wetness Effects' lerp(1, 0.22, rain)); the soaked rim (0.12) sits between and blends. SurfaceDamp carries the damp share
 // of the pixel's reflection to the trace passes (0 = traced as before, 1 = cube only). DampTrace (cb.film2.x 0) keeps the old way.
 float SurfaceDamp = 0.0;
+// (2026-11-26 puddle mirror) the share of the pixel's reflection that is water on the surface (the rain's wet film and standing puddles, not
+// bumpy damp ground): the composite leaves it out of SpecularOcclusion, since a puddle is dark from the water darkening the ground, not from
+// lacking light, and the occlusion took the bright sky out of every puddle (dark holes instead of mirrors). Set by Reflectivity.
+float SurfaceWetShare = 0.0;
 float FilmDamp = 0.0;   // FilmWetness's damp share of the film itself (Reflectivity scales it by the wet part of the amount into SurfaceDamp)
 float FilmWetness(vec2 uv, out float roughness) {
     vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
@@ -502,6 +506,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     roughness = mix(roughness, wetRoughness, wetness / max(amount, 1.0e-4));
     roughness = mix(roughness, cb.puddle2.z, standing);
     SurfaceDamp = FilmDamp * wetness / max(amount, 1.0e-4);   // (2026-11-21, FilmWetness)
+    SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4)) * (1.0 - FilmDamp);   // (2026-11-26 puddle mirror)
     SurfaceMetal = material.g;
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * fade;
@@ -611,6 +616,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     roughness = mix(dryRoughness, wetRoughness, wetness / max(amount, 1.0e-4));
     roughness = mix(roughness, cb.puddle2.z, standing);
     SurfaceDamp = FilmDamp * wetness / max(amount, 1.0e-4);   // (2026-11-21, FilmWetness)
+    SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4)) * (1.0 - FilmDamp);   // (2026-11-26 puddle mirror)
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
 
@@ -646,7 +652,7 @@ float NormalVarianceRoughness(vec2 uv, float depth, float roughness) {
 // RoughnessOverrides) get Mirror; the rest reflect as with Mirror 0. SurfaceMirror carries the surface's share to the composite.
 float SurfaceMirror = 0.0;
 float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
-    SurfaceDamp = 0.0; FilmDamp = 0.0;   // (2026-11-21: set again below only on a filmed floor)
+    SurfaceDamp = 0.0; FilmDamp = 0.0; SurfaceWetShare = 0.0;   // (2026-11-21: set again below only on a filmed floor)
     float amount = ReflectivityOwn(uv, depth, viewNormal, roughness);
     float mirror = saturate(abs(cb.grid3.w));
     if (cb.grid3.w < 0.0 && roughness >= 0.05) mirror = 0.0;

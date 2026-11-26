@@ -4751,6 +4751,16 @@ on top where the RT core runs. Half-resolution trace, history and blur into the 
 in the HDR chain (after Specular, before the fog). Started 2026-11-07 (this README did not exist before; the RT path's long history is
 in docs/next/FORK-RT-REFLECTIONS.md (not in this repo)).
 
+### Puddles as mirrors (2026-11-26)
+
+- Cause, proven on the bench (owner's puddle1 save, the owner's settings, puddles held full; runs 20261126-163231-slotD and
+  -163637-slotA): SpecularOcclusion (default 1.0) dims a reflection by the surface's own lit brightness against what it reflects. A puddle
+  is dark because the water darkens the ground (Puddles Darkening, 1.0 since the upstream 1.1.1 merge), so under a bright sky the
+  occlusion removed most of the sky: dark holes instead of mirrors. With SpecularOcclusion 0 the puddles mirror the sky; Puddles
+  Roughness 0.1 against 0.41 and ReplaceForward made little visible difference there.
+- Fix: `SurfaceWetShare` (Reflectivity: the reflection's share that is water on the surface, the wet film and puddles, not bumpy damp
+  ground) is kept out of SpecularOcclusion, in the Vulkan composite and the D3D9 effect. Dry floors keep it.
+
 ### Frame (RenderBuffers)
 
 1. The surroundings cube, the light grid's constants, the sky panorama.

@@ -254,7 +254,8 @@ void main() {
     vec3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
     if (any(isnan(reflected)) || any(isinf(reflected)) || isnan(reflection.a)) { o_color = color; return; }
     // REFL_SPECOCC_ON: SpecularOcclusion (world floor attenuation + mild roughness-aware occlusion on shadowed weapons).
-    float specOcc = pixelWeapon ? cb.data4.w * 0.4 * smoothstep(0.15, 0.65, roughness) : cb.data4.w * (1.0 - SurfaceMirror);
+    // (2026-11-26 puddle mirror) water on the surface (SurfaceWetShare: wet film, puddles) is not occluded: its darkness is the water darkening the ground
+    float specOcc = pixelWeapon ? cb.data4.w * 0.4 * smoothstep(0.15, 0.65, roughness) : cb.data4.w * (1.0 - SurfaceMirror) * (1.0 - SurfaceWetShare);
     if (SpecOccOn && specOcc > 0.0) {
         float surfaceLight = luma(linearize(color.rgb));
         float reflectedLight = max(luma(reflected) * cb.layoutData.z, 1.0e-6);

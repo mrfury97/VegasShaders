@@ -204,6 +204,7 @@ float OpenAbove(float2 uv, float depth) {
 
 static float SurfaceWetGloss = 0.0;
 static float SurfaceWetRough = 1.0;
+static float SurfaceWetShare = 0.0;  // (2026-11-26 puddle mirror) set by Reflectivity: the reflection's share that is water on the surface (wet film, puddles); kept out of SpecularOcclusion
 
 float3 WetHash33Fx(float3 p3) {
 	p3 = frac(p3 * float3(0.1031, 0.1030, 0.0973));
@@ -369,6 +370,7 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 	roughness = lerp(roughness, wetTargetRough, wetness / max(amount, 1.0e-4));
 	roughness = lerp(roughness, max(TESR_ReflectionsWetFx2.y, 0.01), standing);
 #endif
+	SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4));
 	SurfaceMetal = material.g;
 	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
 	return min(amount, 2.0) * fade;
@@ -381,6 +383,7 @@ float MaterialReflectivity(float2 uv, float depth, float floorShare, float4 mate
 #endif
 float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughness) {
 	roughness = DryRoughness;
+	SurfaceWetShare = 0.0;
 	SurfaceWetGloss = 0.0;
 	SurfaceWetRough = 1.0;
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
@@ -432,6 +435,7 @@ float Reflectivity(float2 uv, float depth, float3 viewNormal, out float roughnes
 	roughness = lerp(dryRoughness, wetTargetRough, wetness / max(amount, 1.0e-4));
 	roughness = lerp(roughness, max(TESR_ReflectionsWetFx2.y, 0.01), standing);
 #endif
+	SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4));
 	return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
 #if REFL_GBUFFER_ON
@@ -959,7 +963,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	[branch] if (TESR_ReflectionsData4.w > 0.0) {
 		float surfaceLight = luma(linearize(color.rgb));
 		float reflectedLight = max(luma(reflected) * TESR_ReflectionsLayout.z, 1.0e-6);
-		float occlusion = lerp(1.0, saturate(surfaceLight / reflectedLight), TESR_ReflectionsData4.w);
+		float occlusion = lerp(1.0, saturate(surfaceLight / reflectedLight), TESR_ReflectionsData4.w * (1.0 - SurfaceWetShare));   // (2026-11-26) not on water
 		[branch] if (abs(DebugView - 8.0) < 0.5) return float4(saturate(surfaceLight * 8.0), saturate(reflectedLight * 8.0), occlusion, 1.0);
 		share *= occlusion;
 	}
