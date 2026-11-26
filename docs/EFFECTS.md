@@ -5396,7 +5396,14 @@ Owner: "make it fully deffered one to one port of bottle shaders versions". A on
   default) is untouched. RT sun shadows: the mask multiplies the traced shadow too (theirs multiplies whatever sun shadow there is); with
   RT on, its own contact march (`[ShadowsExteriors.RT] ContactShadows`) can add to it near the camera (believed; RT is off by default).
   AO and AmbientLight shade the ambient: no overlap. Lamps: theirs has no lamp version, so none here.
-- Cost and look: see the bench note below.
+- Look (bench 2026-11-26, tree VS-sss, on vs off live in the same run): outdoors a small, local change (0.2-1.6 % of pixels move by 8+
+  levels): faint contact specks on sand, fence pickets a little cleaner (the old pass no longer darkens their ambient); no halos, no
+  stray shadows of the tessellated ground bumps at 17:30; indoors (v-saloon) nothing changes. Proven on v-desert-noon and v-SunGI2
+  (their hour and 17:30) and v-saloon; the depth was reversed there (handled).
+- Cost: the march's own GPU timer ("Screen-space shadows (compute)") 0.48-0.53 ms a frame at 1920x1080, SampleCount 1 (64 samples a
+  ray, 2-3 dispatches), on the bench's GTX 1070 under the DXVK fork; 0.52-0.53 ms in the last half-minute when no other game ran. The
+  whole-frame difference was not measured cleanly (another room's slot games ran during part of the run; the 60 s HEARTBEAT windows
+  straddle the on / off phases). Shader: +11 ps_3_0 slots in the deferred sun pass.
 
 ## ShadowsInteriors
 
