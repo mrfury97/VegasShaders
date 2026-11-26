@@ -59,7 +59,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 102;  // (102, 2026-11-26 mirror puddles: [Shaders.Reflections.RT] SkyPanorama false -> true, [Shaders.Puddles.Main] Roughness 0.1 -> 0.02; 101: upstream 1.1.4's PTGlassSurface, GIStrengthInterior, GlowGIInterior; 2026-11-26 upstream 1.1.4 merge: 100 = upstream's 96 [Shaders.ShadowsExteriors.Deferred] MatchSunDisc true -> false, 99 = upstream's 95 [Main.Main.RayTracing] ActorFlushPerSpace false -> true; 98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 103;  // (103, 2026-11-27: the removed forward Bend port's ten [ScreenSpace] keys deleted; 102, 2026-11-26 mirror puddles: [Shaders.Reflections.RT] SkyPanorama false -> true, [Shaders.Puddles.Main] Roughness 0.1 -> 0.02; 101: upstream 1.1.4's PTGlassSurface, GIStrengthInterior, GlowGIInterior; 2026-11-26 upstream 1.1.4 merge: 100 = upstream's 96 [Shaders.ShadowsExteriors.Deferred] MatchSunDisc true -> false, 99 = upstream's 95 [Main.Main.RayTracing] ActorFlushPerSpace false -> true; 98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -81,7 +81,10 @@ static bool Retired(const std::string& Name) {
 		"Main.Menu.Style.TitleColumnSize",
 		// (upstream 1.1.1, 2026-11-19: Hi-Z trace and the FFX reflection denoiser's clip retired)
 		"Shaders.AmbientLight.Main.HiZ", "Shaders.Reflections.Main.HiZ", "Shaders.Reflections.Main.HiZSafeCells", "Shaders.Reflections.Main.HiZCheck",
-		"Shaders.Reflections.Main.HiZInteriorsTest", "Shaders.Reflections.RT.DenoiserClip" };
+		"Shaders.Reflections.Main.HiZInteriorsTest", "Shaders.Reflections.RT.DenoiserClip",
+		// (2026-11-27: the older forward Bend port removed; settings step 103 also deletes them from a saved file)
+		"Shaders.ShadowsExteriors.ScreenSpace.Bend", "Shaders.ShadowsExteriors.ScreenSpace.InLighting", "Shaders.ShadowsExteriors.ScreenSpace.SampleMultiplier", "Shaders.ShadowsExteriors.ScreenSpace.SurfaceThickness", "Shaders.ShadowsExteriors.ScreenSpace.BilinearThreshold",
+		"Shaders.ShadowsExteriors.ScreenSpace.ShadowContrast", "Shaders.ShadowsExteriors.ScreenSpace.DepthTolerance", "Shaders.ShadowsExteriors.ScreenSpace.StartDistance", "Shaders.ShadowsExteriors.ScreenSpace.FadeLength", "Shaders.ShadowsExteriors.ScreenSpace.BendDebug" };
 	for (const char* k : kKeys) if (Name == k) return true;
 	for (const char* sec : kSections) {	// the section itself or a key / table under it ("Main.SleepingMode.Main.Enabled"), not a longer name
 		const size_t n = strlen(sec);
@@ -1190,6 +1193,18 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		if (saved && saved->contains("SkyPanorama") && saved->at("SkyPanorama").is_boolean() && !saved->at("SkyPanorama").as_boolean()) {
 			(*saved)["SkyPanorama"] = true;
 			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.Reflections.RT.SkyPanorama false -> true";
+		}
+	}
+	// 103 (2026-11-27): the older forward Bend port (Community Shaders' screen-space shadows in the forward lit shaders) was removed (main
+	// 2480e33; the Bottled Shaders port in the deferred sun replaces it): its ten [Shaders.ShadowsExteriors.ScreenSpace] keys are deleted
+	// from a saved file, so the install check does not call them unknown (they are also on Retired's list, for a file saved by a newer build).
+	if (version < 103) {
+		tomlValue* saved = UserSection("Shaders.ShadowsExteriors.ScreenSpace");
+		if (saved && saved->is_table()) {
+			int removed = 0;
+			for (const char* key : { "Bend", "InLighting", "SampleMultiplier", "SurfaceThickness", "BilinearThreshold", "ShadowContrast", "DepthTolerance", "StartDistance", "FadeLength", "BendDebug" })
+				if (saved->contains(key)) { saved->as_table().erase(key); removed++; }
+			if (removed) changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.ScreenSpace: " + std::to_string(removed) + " keys of the removed Bend port deleted";
 		}
 	}
 	if (!changed.empty())
