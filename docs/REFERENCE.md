@@ -66,6 +66,10 @@ Changes (branch `faster-shader-compile`; same compiler, flags and define lists, 
 2. The shadow and vertex shader jobs go first: they are small and the main thread asks for them first.
 3. A failed job with the clouds' lookup in its source makes its no-clouds build on the same worker right away (`Job::CloudOff`), which the
    no-clouds `LoadShader` then takes.
+4. (branch `fallback-failure-memo`) A record that ran out of temp registers at both flags is not compiled again while its text is the same
+   (`<entry>.hlsl.x4505`, as `.nocloud` does for the clouds' build; `ShaderProgram::KnownOutOfRegisters`, main thread and workers). Room 06
+   found the `NoCloud\` and `NoCloud\PuddlesLean\` builds of `SLS2023/24/26/27.pso` failing so at every start with Wetness Effects, Puddles and
+   Terrain Blending: 8 compiles, 54-59 s of a warm start on the main thread (bench runs 20261126-114414 and -120106).
 
 Result (proven: bench slot A, scene v-SunGI2 + tour-al-out, both runs with an empty shader store, so the slot's cache held only the
 11-20 snapshot's stale entries; runs 20261126-120400 and -121340):
@@ -85,7 +89,7 @@ Not built, ranked by gain:
    entries in the owner's 1.1.0 install), but every later change to a shader's text misses it, and so does every setting that changes a
    define. Making `CacheShipped\` from a default-settings start for each install or release would leave a first start with only the post
    effects (seconds) for players on default settings. Cost: about 71 MB of game-shader cache and 6.5 MB of effects cache in the package.
-   Room 06 is making the bench pre-seed its cache offline; the same output can fill `CacheShipped\`. A release needs the owner's word.
+   Nobody builds it yet (the bench needs no pre-seed: room 06's store keeps each tree's cache). A release needs the owner's word.
 2. Queue the deferred passes (`DeferredLamps` and its skin, land, film, fog and shadow passes, `DeferredSun`, `DeferredWetness`): the 13
    compiles left on the main thread. Now that the CPU is full, about 10-20 s. Their define lists are built in each module's load, so a copy
    in `StartOnce` can drift (as the `LightFreeWet` one did); a list of last start's main-thread compiles, queued first, would not.
