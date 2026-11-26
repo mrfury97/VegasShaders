@@ -251,6 +251,8 @@ void main() {
     else {
         share = saturate(amount * EnvironmentFresnelF0(fresnelRough, NdotV, f0)) * saturate(reflection.a);
     }
+    // (2026-11-26 mirror puddles, Reflections.glsl PuddleMirror) standing water shows at least MirrorPuddleShare x Mirror of its reflection
+    share = max(share, vec3(MirrorPuddleShare * saturate(PuddleMirror) * SurfaceStanding * saturate(amount) * saturate(reflection.a)));
     vec3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
     if (any(isnan(reflected)) || any(isinf(reflected)) || isnan(reflection.a)) { o_color = color; return; }
     // REFL_SPECOCC_ON: SpecularOcclusion (world floor attenuation + mild roughness-aware occlusion on shadowed weapons).

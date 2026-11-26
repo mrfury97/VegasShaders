@@ -8,7 +8,7 @@ Size = 250.0                        # [32-8192] Size of the puddle pattern, in g
 FillHours = 0.5                     # [0.01-48] Game hours of steady rain to fill the puddles (heavier rain fills faster).
 DryHours = 3.0                      # [0.01-96] Game hours for full puddles to dry in sunshine. They shrink from the edges in.
 NightDrying = 0.35                  # [0.0-1.0] How fast puddles dry at night or under cloud, as a share of the sunny speed.
-Roughness = 0.1                     # [0.01-0.5] Roughness of the water's surface: low is a sharp mirror.
+Roughness = 0.02                    # [0.01-0.5] Roughness of the water's surface: how sharp or blurred the puddles' mirror is (and their sun glint). Low is a sharp mirror. (0.1 before 2026-11-26.)
 Darkening = 1.0                     # [0.0-2.0] How much deeper water darkens the ground under it.
 EdgeSoftness = 0.108                # [0.005-0.5] How soft a puddle's shore is.
 SlopeStart = 0.92                   # [0.5-0.999] How flat ground must be for a puddle to start (the up component of its normal).
@@ -16,6 +16,7 @@ SlopeFull = 0.97                    # [0.5-1.0] How flat ground must be for a fu
 Cavity = 1.993                      # [0.0-2.0] How strongly the ground's own relief places the water: hollows, cracks and ruts fill first, bumps stay dry islands (the land's height maps, else the colour texture's dark detail; objects: the colour texture). 0 = the noise pattern alone.
 WetRing = 0.12                      # [0.0-0.5] Width of the soaked, darker, glossy rim round each puddle (it wanders along the shore).
 Ripples = 2.0                       # [0.0-2.0] Strength of the rain ripples on the puddles.
+Mirror = 1.0                        # [0.0-1.0] Mirror puddles: how strongly standing water reflects. It shows at least 80 % x this of the reflection at any angle (and its blur is this section's Roughness, not the wet ground's), so the sky, buildings and lights stand bright in it. 0 = the plain water Fresnel (a faint sheen except at low angles) and the wet ground's blur, as before. Damp ground is not changed.
 MapMode = true                      # Restart. The large-scale puddle terms (the field, the rim wander, the rain cover) in a world-space map built on the NVR DXVK extension (Compute\PuddleMap), so every surface gets the full puddles (no lean or dry fallbacks; 7-layer land gets its rain cover; its seventh layer's normal map is then flat). Without the extension: the in-shader path.
 ObjectPuddles = true                # Standing water and soaked rims on objects too (road pieces, concrete slabs, rocks). Off: only the land gets puddles; objects keep the rain's dampness and wall streaks. Characters and the first-person model never get them.
 ReflectionPuddles = true            # The reflection passes ([Shaders.Reflections], Vulkan: screen-space and ray-traced) mirror the puddles too, also after the rain.

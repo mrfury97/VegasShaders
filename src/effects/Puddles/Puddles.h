@@ -14,6 +14,7 @@ public:
 		float	Coverage, Size, FillHours, DryHours, NightDrying;
 		float	Roughness, Darkening, EdgeSoftness, SlopeStart, SlopeFull, Cavity, WetRing;
 		float	Ripples;	// (2026-11-18: Streaks, StreakWidth, StreakSpeed removed with the wall streaks)
+		float	Mirror;		// (2026-11-26) mirror puddles, 0-1: the reflection passes' standing water (Compute/Reflections.glsl PuddleMirror)
 		bool	ReflectionPuddles;
 		bool	ObjectPuddles;	// false: standing water and soaked rims on the land only
 		float	LevelOverride;	// -1 off
@@ -25,7 +26,7 @@ public:
 		D3DXVECTOR4	Data;		// c174 x level, y Coverage, z 1 / Size, w Quality
 		D3DXVECTOR4	Look;		// c175 x roughness, y depth darkening, z edge softness, w ripples
 		D3DXVECTOR4	Shape;		// c165 x slope start, y slope full, z cavity, w wet ring
-		D3DXVECTOR4	Streak;		// c166 w debug view (x y z were the wall streaks', removed 2026-11-18: 0)
+		D3DXVECTOR4	Streak;		// c166 w debug view; x (2026-11-26) Mirror, read by Effects/Reflections.fx.hlsl only (y z were the wall streaks': 0)
 	};
 	PuddleConstantsStruct	Constants;
 

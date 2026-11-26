@@ -89,7 +89,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
                                 // distance match's share and units (TESR_CapturedNormalsData y, z: core/FdIndirectShaders.h kShadingNormalsPS's)
     vec4 film2;                 // UNOFFICIAL 2026-11-21 damp ground to the cube: x 1 = on ([Shaders.Reflections.Main] DampTrace false),
                                 // y the standing water's roughness in the film ([Shaders.Puddles.Main] Roughness; 0.05 without Puddles),
-                                // z open flat ground's damp roughness now (0 = not known: no Puddles), w 0
+                                // z open flat ground's damp roughness now (0 = not known: no Puddles),
+                                // w (2026-11-26) [Shaders.Puddles.Main] Mirror, 0-1 (0: off, or Puddles off): mirror puddles (PuddleMirror)
     vec4 wetFx;                 // 2026-11-19 WetnessEffects consolidation: x 1 = active (+2 = SkylightingMode 1), y rainWetness, z puddleWetness, w MinRainWetness
     vec4 wetFx2;                // x MaxPuddleWetness, y PuddleMaxAngle, z t_albedo valid (Composite), w t_capNormals GBufferV2 valid (Composite)
     vec4 skySh[9];              // TESR_SkyIrradianceObjects[0..8] (SkylightingMode 0 WetSkyReflection)
@@ -240,12 +241,23 @@ vec3 SmoothViewNormal(vec2 uv) {
 //    crisp, steady wet reflections; the bumps stay in the ground's own shading, on dry shiny surfaces and on partly wet ground.)
 const float BumpFootNear = 0.5, BumpFootFar = 2.0;
 const float DampBumpLean = 1.0;
+// (2026-11-26 mirror puddles) the film's standing-water share, read back from its roughness (FilmWetness's rule): see PuddleMirror below
+float FilmStandingShare(float rough) {
+    float share = cb.film2.z > cb.film2.y + 0.05 ? saturate((cb.film2.z - rough) / (cb.film2.z - cb.film2.y)) :
+        1.0 - smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, rough);
+    // (the soaked rim, roughness 0.12, reads back as share ~0.8 against damp 0.61 / standing 0.02: the first bench run made rims and the
+    // puddles' shores bright mirrors too; smoothstep keeps the mirror to the water itself)
+    return smoothstep(0.85, 0.98, share);
+}
 float BumpKeep(vec2 uv) {
     float footprint = readDepthLod(uv) * 2.0 * cb.reciprocalResolution.x * cb.renderScale.z / cb.projectionTransform[0][0];
     float keep = 1.0 - smoothstep(BumpFootNear, BumpFootFar, footprint);
     if (cb.film.x > 0.5 && keep > 0.0) {
         vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
         float wet = f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) : 0.0;
+        // (2026-11-26 mirror puddles) standing water keeps its normal: DeferredWetness flattened the material's bump there already, so what is
+        // left is the rain's ripples (none in dry weather): the mirror ripples while it rains. Damp ground leans to the smooth normal as before.
+        if (cb.film2.w > 0.0 && f.g > 0.001) wet *= 1.0 - FilmStandingShare(f.g);
         keep *= 1.0 - DampBumpLean * wet;
     }
     return keep;
@@ -346,13 +358,28 @@ float SurfaceDamp = 0.0;
 // lacking light, and the occlusion took the bright sky out of every puddle (dark holes instead of mirrors). Set by Reflectivity.
 float SurfaceWetShare = 0.0;
 float FilmDamp = 0.0;   // FilmWetness's damp share of the film itself (Reflectivity scales it by the wet part of the amount into SurfaceDamp)
+// (2026-11-26 mirror puddles, owner: "see if puddles can be made to be this reflective", a flooded GTA V street as a near-perfect mirror)
+// [Shaders.Puddles.Main] Mirror (cb.film2.w, 0 = off: as before). Two things held standing water back from a mirror:
+//  - its blur: in a frame with DeferredWetness's film, FilmWetness kept every wet pixel at WetRoughness or rougher (the owner's 0.099),
+//    whatever the Puddles Roughness (theirs 0.022): RT and SSR spread their rays over a 0.1 lobe and the denoiser / blur smoothed it.
+//    With Mirror, standing water takes the Puddles Roughness itself (the menu's blur slider; default 0.02 since settings step 102): under
+//    the 0.03 mirror threshold (ReflectionsRayGen / ReflectionsTrace mirrorPixel) the ray is the exact mirror ray and no history smears it;
+//  - its strength: water's Fresnel (F0 0.02-0.04) gives 3-15 % at the angles a standing player sees the street at, so the darkened
+//    ground showed through and the reflection read as a faint sheen. The composite gives standing water at least
+//    MirrorPuddleShare x Mirror of the reflection (more at grazing angles, where the Fresnel is higher anyway): an art choice, not physics,
+//    which is what the reference does.
+// Damp ground and the soaked rim are not touched (SurfaceStanding is the standing share only).
+#define PuddleMirror cb.film2.w
+const float MirrorPuddleShare = 0.8;
+float FilmStanding = 0.0;      // FilmWetness's standing-water share of the film itself
+float SurfaceStanding = 0.0;   // the standing-water share of the pixel's reflection (Reflectivity), for the composite's mirror floor
 float FilmWetness(vec2 uv, out float roughness) {
     vec4 f = textureLod(sampler2D(t_film, POINT_S), uv, 0.0);
     float sharp = clamp(f.g, min(WetRoughness, DampMaxRoughness), DampMaxRoughness);
     // (2026-11-21, slot A/B) the standing share read back from the film's roughness, which Puddles makes lerp(damp, standing, share):
     // a puddle's soft edge (share 0.3-0.6 and more) stays traced, as its core; below that it is damp ground. Without Puddles (z 0): the
     // roughness alone, as the first build.
-    float share = cb.film2.z > cb.film2.y + 0.05 ? saturate((cb.film2.z - f.g) / (cb.film2.z - cb.film2.y)) : 1.0 - smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, f.g);
+    float share = cb.film2.z > cb.film2.y + 0.05 ? saturate((cb.film2.z - f.g) / (cb.film2.z - cb.film2.y)) : 1.0 - smoothstep(cb.film2.y + 0.02, cb.film2.y + 0.12, f.g);   // (FilmStandingShare's, before its smoothstep)
     FilmDamp = cb.film2.x > 0.5 && f.g > 0.001 ? 1.0 - smoothstep(0.25, 0.6, share) : 0.0;
     // (2026-11-21, slot A/B: the Strip's wet asphalt lost its mirror of the robots, benches and lamp posts) only BUMPY damp ground goes to
     // the cube: the speckle needs a bump to bend the ray. How bumpy: the bumped normal's mean bend from the smooth one over five taps two
@@ -373,6 +400,9 @@ float FilmWetness(vec2 uv, out float roughness) {
         FilmDamp *= smoothstep(0.01, 0.04, bend);
     }
     roughness = mix(sharp, max(f.g, 0.01), FilmDamp);
+    // (2026-11-26 mirror puddles) standing water keeps its own roughness, not WetRoughness's floor (PuddleMirror above)
+    FilmStanding = f.g > 0.001 ? FilmStandingShare(f.g) * (1.0 - FilmDamp) : 0.0;
+    if (PuddleMirror > 0.0) roughness = mix(roughness, cb.film2.y, FilmStanding);
     return f.g > 0.001 ? saturate(saturate((f.r - floor(f.r)) / 0.99) * cb.film.w) * cb.film.y : 0.0;
 }
 
@@ -493,7 +523,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     float maxRough = cb.material.y;
     float dry = cb.material.z * (1.0 - smoothstep(0.6 * maxRough, maxRough, material.r));
     float wetness = 0.0, standing = 0.0, wetRoughness = WetRoughness;
-    FilmDamp = 0.0;
+    FilmDamp = 0.0; FilmStanding = 0.0;
     if (FilmOn) { if (floorShare > 0.0) wetness = FilmWetness(uv, wetRoughness) * floorShare; }   // 2026-11-20 the film (above)
     else {
     wetness = Wetness * floorShare;
@@ -507,6 +537,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     roughness = mix(roughness, cb.puddle2.z, standing);
     SurfaceDamp = FilmDamp * wetness / max(amount, 1.0e-4);   // (2026-11-21, FilmWetness)
     SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4)) * (1.0 - FilmDamp);   // (2026-11-26 puddle mirror)
+    SurfaceStanding = saturate(max(FilmStanding * SurfaceWetShare, standing));   // (2026-11-26 mirror puddles)
     SurfaceMetal = material.g;
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * fade;
@@ -617,6 +648,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     roughness = mix(roughness, cb.puddle2.z, standing);
     SurfaceDamp = FilmDamp * wetness / max(amount, 1.0e-4);   // (2026-11-21, FilmWetness)
     SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4)) * (1.0 - FilmDamp);   // (2026-11-26 puddle mirror)
+    SurfaceStanding = saturate(max(FilmStanding * SurfaceWetShare, standing));   // (2026-11-26 mirror puddles)
     return min(amount, 2.0) * floorShare * fade;   // above 1: stronger than a real surface, for taste
 }
 
@@ -653,6 +685,7 @@ float NormalVarianceRoughness(vec2 uv, float depth, float roughness) {
 float SurfaceMirror = 0.0;
 float Reflectivity(vec2 uv, float depth, vec3 viewNormal, out float roughness) {
     SurfaceDamp = 0.0; FilmDamp = 0.0; SurfaceWetShare = 0.0;   // (2026-11-21: set again below only on a filmed floor)
+    FilmStanding = 0.0; SurfaceStanding = 0.0;                  // (2026-11-26 mirror puddles)
     float amount = ReflectivityOwn(uv, depth, viewNormal, roughness);
     float mirror = saturate(abs(cb.grid3.w));
     if (cb.grid3.w < 0.0 && roughness >= 0.05) mirror = 0.0;
@@ -749,6 +782,23 @@ float CoveredAt(vec3 p) {
     vec3 depthAxis = vec3(cb.shadowOrtho[0][2], cb.shadowOrtho[1][2], cb.shadowOrtho[2][2]);
     float perUnit = length(depthAxis) / max(abs(cb.shadowOrtho[3][3]), 1.0e-6);
     return top < m.z - max(RoofMargin * perUnit, 0.0001) ? 1.0 : 0.0;
+}
+
+// (2026-11-26 mirror puddles) the screen trace's ray, from camera-relative start along worldR, goes up into open sky: nothing above it in the
+// top-down ortho map at 64, 256, 1024 and 4096 units out (a building or a tree beside the puddle covers some of those points). Such a
+// near-mirror ray then takes the sky panorama (the sky as drawn) instead of the surroundings cube, as Resolve's RT misses do: the cube is a
+// small copy of the screen and showed the sky overhead as hard blocks of cloud in a mirror puddle (bench run 20261126-200637-slotA: gone
+// while the cube refilled after a reset). Needs the ortho map (RoofMaskOn); without it the cube stays first.
+bool OpenSkyAlong(vec3 start, vec3 worldR) {
+    if (RoofMaskOn < 0.5) return false;
+    for (int k = 0; k < 4; k++)
+        if (CoveredAt(start + worldR * (64.0 * exp2(2.0 * float(k)))) > 0.5) return false;
+    return true;
+}
+// The share of a ray's missing reflection the panorama takes first (0: the old order, cube / grid / sky).
+float OpenSkyShare(vec3 start, vec3 worldR, float roughness) {
+    if (!SkyPanoOn || SkyFallback <= 0.0 || worldR.z < 0.05 || roughness >= 0.15 || !OpenSkyAlong(start, worldR)) return 0.0;
+    return (1.0 - smoothstep(0.05, 0.15, roughness)) * smoothstep(0.05, 0.15, worldR.z);
 }
 
 // UNOFFICIAL 2026-10-30 (RT hit shading, HitAmbientGrid): the light arriving at camera-relative point p on a surface facing worldN, from
