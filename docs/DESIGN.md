@@ -17,6 +17,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [SMP compatibility](#smp-compatibility)
 - [Community Shaders ports](#community-shaders-ports)
 - [Upstream 1.1.1-1.1.3 merge](#upstream-111-113-merge)
+- [Upstream 1.1.5 merge](#upstream-115-merge)
 - [Deferred shadow quality](#deferred-shadow-quality)
 
 ## Deferred vs forward
@@ -1730,6 +1731,100 @@ do not rebuild byte for byte with our Vulkan SDK 1.3.296 (believed: another glsl
   amount in both builds (-7 / -8 luma). Believed: the remaining softer, lighter daylight (+12 luma) is upstream's lighting changes.
 - Not run: HDR (no HDR display on the bench), hair (the Character Kit Remake hair the fix targets is not in the slot), grass under lamps
   (no lamp at these spots at night), frame time.
+
+## Upstream 1.1.5 merge
+
+*Merged 2026-11-27 on branch `upstream-115-port` (merge commit 8179e3f; upstream ae74446 = 1.1.5, base 2bf5110 = 1.1.4; fixes e429835 and e9780e5).*
+
+Mode: full merge (`git merge upstream/main`, conflicts resolved by hand in three groups: shadows and deferred core, reflections and
+shaders, settings and compile). Upstream's code and defaults are taken wherever they do not fight ours.
+
+**From upstream, unchanged (by area):**
+- Deferred: the pipeline completion (DeferredSun compute reads the screen-space shadow mask, DeferredLamps compute refactor), night lamp
+  shadows, first-person deferred (`DeferredFirstPerson`), Material SSS (off), RealSunPath (off), e401def (specular foliage halos, Sun Shadows
+  off with PBR, grass and tree shadow popping), the `c211.w` class stride 8 -> 16.
+- Surfaces: WorldSurface (new effect, `docs/EFFECTS.md` "WorldSurface"), clearcoat and pearlescence (0), the dynamic world cubemap,
+  weapon reflections without RT, metal fixes, the ReplaceForward reprojection fix, EnvLightFade, GearWeather's dry layers.
+- Performance and robustness: BoneMatrixBatch, ConstantMapSort, VA map, lazy effect load, the generic compile-failure memo, DxvkLoader,
+  InstallCheck, Diagnostics, unsaved-setting marks, the RenderScale guard, BlendedLayerFix, Distant Land (off; shelved upstream too).
+- Engine layout fixes: fog, weather colours, land texture count, drawn camera, DoF depth sites.
+
+**Ours, kept:** SunSheen (wet gates), Bottled SSS (upstream took our port: one copy) and lamp SSS, unified reflections, puddle mirror,
+mirror puddles, the tilted-mirror floor fix, `DeferredLandRoughF90`, GearWeather's wet block, the AmbientLight menu fix, our CloudOff and
+LightFreeWet compile jobs, the compute DeferredSun standing aside while the wet film is live, the SunFade s12 fix, `Lamps::MadeThisSpan`,
+README. WetWorld stays removed.
+
+**Seams (where both sides wanted the same slot):**
+
+| Seam | Ours / upstream | Resolution |
+|---|---|---|
+| `DeferredSun.hlsl` c17 | our wet film `DS_WetFilm` / upstream's Material SSS | film stays c17; Material SSS is `DS_MatSSS` c20 |
+| c18 `DS_Sheen` | our puddle gate in .z / upstream's clearcoat in .z | c18 = x strength, y rough, z clearcoat, w pearl; the puddle gate is `DS_SheenGate` c21.x |
+| c19 | our `DS_SSS` (Bottled SSS) / upstream's `DS_BendSSS` | one, ours, c19 |
+| compute flags | upstream bit 22 = SSS mask | bit 22 SSS mask, bit 23 puddle gate (`kFlagSheenPuddleGate`) |
+| world cube binding | upstream set 1 binding 30 / slot 29 | binding 32 / slot 31 (30 and 31 carry our G-buffer COLOR1 / COLOR3 and film); slot 31 is below `NVR_EXT_MAX_SLOTS` |
+| `c168.w` (`TESR_LinearScales`) | our `DeferredLandRoughF90` / upstream's `GlowScale` | ours stays; `GlowScale` is on `TESR_SharpSky.w` (c136), declared in every forward object shader via `SkyAmbient.hlsl` |
+| `c211.w` | upstream stride 16 | encoder (`Render.cpp MaterialWFor`) and decoder (`CapturedNormals.hlsl`) both 16 |
+| forward metal | upstream clearcoat / pearl always compiled | behind `METAL_CLEARCOAT_ON` / `METAL_PEARL_ON` (restart defines, below) |
+| WorldSurface | reads the land's material fraction as metal | leaves the land out while `DEFERRED_WETNESS` is compiled in (`WS_Flags` c21.x = 1) |
+
+c20 and c21 are free in every include (grep by group S) and inside the saved c0-c223 range.
+
+**Restart defines (e429835).** Upstream's forward metal code (pearlescence in `getMetalAmbient`, the clearcoat's candy absorption and coat
+lobe, the BaseMap look-through with its ddx / ddy) cost the 2-lamp object records their room for the water layer: SLS2023 went from wet to
+X4505. `BuildDefines` now sets `METAL_PEARL_ON` / `METAL_CLEARCOAT_ON` only when `[Shaders.PBR.Metal] Pearlescence` / `Clearcoat` is above 0
+at startup (menu: restart to turn on from 0, then live). The deferred sun and lamp passes read both live and are unchanged.
+`template_defines.py` mirrors the two defines.
+
+**WorldSurface and the wet land (e9780e5).** Under `DEFERRED_WETNESS` the land records keep their height for the water layer in the
+material target's fraction. WorldSurface read it as metal and wrote it back capped before DeferredSun read it (lead-architect review). It
+now leaves the land out in that case. Only matters with GBufferV2 on, which is off by default and in the owner's file.
+
+**Settings.** Upstream's steps 97-101 run here as 104-108 (all applied, none parked); step 109 is ours.
+
+| Step | What | Runs for a saved file |
+|---|---|---|
+| 104-108 | upstream 97-101 (metal / env / cube / CloudSky / ExteriorBalance, weapon and DeferredFirstPerson defaults) | each skipped when an upstream-built file already ran its number (`kUpstreamNewest` 96 -> 101) |
+| 109 | `CasterFadeMin` 0.75 -> 0.25, `[Main.Main.RayTracing] ArenaMB` 16 -> 32, `ActorRebuildInterval` 8 -> 16 (upstream changed these without a step; only a value still at the old default moves) | all |
+
+Our 101-103 also run for upstream-built files. `UnofficialSettingsVersion` is 109. Walk-through (proven by reading the code, not run in a
+game): ours at 103 runs 104-109; ours at 98 runs 99-103 then 104-109; upstream at 96 runs 101-103, 104-108, 109; upstream at 101 runs 102,
+103, 109 (104-108 skipped); a fresh file runs nothing and is written at 109.
+
+**Defaults that differ from upstream:**
+- `[Shaders.ShadowsExteriors.Deferred] SunSheen` 0.9 (upstream 0.0).
+- `[Main.Main.RayTracing] HelperWait` 0 (upstream 1).
+- Parked as before: the kParkUpstream91 / 92 / 94 choices from the 1.1.1-1.1.3 merge.
+
+**Upstream defaults that now show in game (taken, by the owner's standing rule to keep upstream's defaults):** WorldSurface (on; has an
+effect only with GBufferV2), `SunColorFromLight`, `DeferredDecals`, `DeferredEnvFade`, `PortalVisibilityCulling`, `DeferredFirstPerson`,
+night lamp shadows with `NightMinDarkness` 0.65, `CubeMode` 2 (the dynamic world cubemap), weapon reflections, the metal defaults,
+`ExteriorBalance` off, `CasterFadeMin` 0.25. Frame cost of the group: not measured.
+
+**Skipped:** upstream's version string (no release naming here); `ForwardLightKill` (test-only); WetWorld (stays removed).
+
+**Forward record compile (`template_compile`, owner toml, DXVK, default record; ps_3_0 slots):**
+- Main 9948b06: SLS2023 wet OK (3140); SLS2024 / 2026 / 2027 X4505, so they load dry (forward dry fallback, ebf1156), about 2400 slots.
+- The merge before e429835 (proven): all four X4505 at full and lean (`Object.hlsl`, the pearl block in `getMetalAmbient`); all four OK dry
+  (2417 / 2445 / 2425 / 2450), so SLS2023 had newly become dry. Forcing `NVR_PEARL_AMBIENT_LEAN` was still X4505 (`SkyAmbient.hlsl:170`).
+- After e429835 (the gate, at the default 0): not run. Believed back at main's numbers, since the gated code is not compiled in at 0.
+- The other 154 Object / Parallax / Env records: same OK / FAILED as main (proven before e429835).
+- GearWeather.hlsl: 1918 slots (main 980, upstream 1737).
+- Sun records (proven, group S): sun record 2246-3150, fade records 3217-3953, flow 0. `fork-v2-rt` / `fork-v2-rtfirst` fade with FD_SKIN is
+  X4505 in main 9948b06 and in upstream ae74446 alike (test-only combos).
+
+**Other checks (proven by the groups):** `compile-compute` for DeferredSun, DeferredLamps, ScreenSpaceShadows and 23 reflection shaders
+(spirv-val OK, `refl-hashes --check` OK); `effect_compile Reflections.fx` in four define sets; the defaults file regenerated with
+`defaults_tool.py merge`, `check` OK, no duplicate key. Not run: any game run; the DLL build at the final commit is room 02's.
+
+**Known gaps:**
+- A LateInteriors (ReleaseAfterCache) parent that hits a known failure releases its source, so its CloudOff job is never made and that
+  record compiles on the main thread, as before the 11-26 compile speed-up.
+- Commit 8179e3f alone does not compile (a brace); e429835 fixes it. Do not bisect through 8179e3f.
+- `tests/stale_preset_values_check.py` still reports the 19 problems main has.
+- `TextureManager.cpp` includes `ScreenSpaceShadows.h` twice (harmless).
+
+Bench: (filled in by room 02)
 
 ## Deferred shadow quality
 

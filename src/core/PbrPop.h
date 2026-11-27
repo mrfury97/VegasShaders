@@ -53,7 +53,7 @@ namespace PbrPop {
 		inline bool Checked = false, Compiled = false, On = false;
 		inline bool FoldCompiled = false;	// UNOFFICIAL 2026-10-21 FoldHighlights (core/FoldHighlights.h) is compiled in: it sends c211.y/z
 		inline float Sent = -1.0f, SentFold = 0.0f, SentVc = 0.0f;
-		inline float MaterialW = 0.0f, SentW = 0.0f;	// UNOFFICIAL 2026-10-31 MaterialBuffer: c211.w (class + 8 x floor(radius), SendMaterial)
+		inline float MaterialW = 0.0f, SentW = 0.0f;	// UNOFFICIAL 2026-10-31 MaterialBuffer: c211.w (class + 16 x floor(radius), stride widened from 8 on 2026-11-25, SendMaterial)
 
 		inline void BeginFrame() {
 			if (!Checked) {

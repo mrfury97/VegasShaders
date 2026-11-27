@@ -64,7 +64,7 @@ namespace MergeCopies {
 	// shader is one of its deferred records (the passes past 0xFC merge only while one is bound: see MergeCopies.cpp "v2").
 	inline int (*DeferredMode)() = nullptr;
 	inline bool (*DeferredPS)(IDirect3DPixelShader9* ps) = nullptr;	// (Render.cpp sets both before the first frame)
-	// UNOFFICIAL 2026-11-15 (batch 3: PS c211.w differed between copies of 10 keys, e.g. 3569 vs 2161: NVR's material class + 8 x the world
+	// UNOFFICIAL 2026-11-15 (batch 3: PS c211.w differed between copies of 10 keys, e.g. 3569 vs 2161: NVR's material class + 16 x the world
 	// bound radius, Render.cpp MaterialForPass): Render.cpp: the value MaterialForPass will send for this pass (false: it sends none), a key part.
 	inline bool (*MaterialWOf)(const void* pass, float& w) = nullptr;
 
