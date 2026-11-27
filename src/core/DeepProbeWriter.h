@@ -32,8 +32,8 @@ namespace DeepProbe { namespace Writer {
 			}();
 			return head;
 		}
-		inline HANDLE Thread = nullptr, Wake = nullptr, Idle = nullptr;
-		inline volatile LONG Pending = 0;		// jobs posted and not yet run (Flush waits for 0)
+		inline HANDLE Thread = nullptr, Wake = nullptr;
+		inline volatile LONG Pending = 0;		// jobs posted and not yet run (Flush waits for 0; an autosave waits for 0)
 
 		inline FrameRec Ring[kRing];
 		inline volatile LONG Head = 0, Tail = 0;	// Head written by the main thread, Tail by the writer
@@ -94,7 +94,6 @@ namespace DeepProbe { namespace Writer {
 				RunJobs();
 				DrainFrames();
 				if (Poll) Poll();
-				if (Pending == 0) SetEvent(Idle);
 			}
 		}
 	}
@@ -104,7 +103,6 @@ namespace DeepProbe { namespace Writer {
 		if (Thread) return true;
 		if (!Jobs()) return false;
 		Wake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
-		Idle = CreateEventW(nullptr, TRUE, TRUE, nullptr);
 		Thread = CreateThread(nullptr, 256 * 1024, &ThreadMain, nullptr, 0, nullptr);
 		if (Thread) SetThreadPriority(Thread, THREAD_PRIORITY_BELOW_NORMAL);
 		return Thread != nullptr;
@@ -120,17 +118,20 @@ namespace DeepProbe { namespace Writer {
 		JobNode* n = new (mem) JobNode();
 		n->fn = std::move(job);
 		InterlockedIncrement(&Pending);
-		ResetEvent(Idle);
 		InterlockedPushEntrySList(Jobs(), &n->entry);
 		SetEvent(Wake);
 	}
 
-	// Waits at most maxMs for the posted jobs to finish (the game's exit only: the final report).
+	// Waits at most maxMs for the posted jobs to finish (the game's exit only: the final report). Pending drops only after a job
+	// has run, so this cannot return early.
 	inline void Flush(DWORD maxMs) {
 		using namespace Detail;
 		if (!Thread) return;
-		SetEvent(Wake);
-		WaitForSingleObject(Idle, maxMs);
+		const ULONGLONG deadline = GetTickCount64() + maxMs;
+		while (Pending > 0 && GetTickCount64() < deadline) {
+			SetEvent(Wake);
+			Sleep(5);
+		}
 	}
 
 	inline void OpenFrames(const std::string& path, unsigned capMB) {

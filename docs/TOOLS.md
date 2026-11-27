@@ -777,10 +777,13 @@ keeps every key with its shipped default).
 RenderHook; MO2 names `tools/deepprobe_mo2.py`). Live mode (2026-11-28) is room 01's Frame Cost Logger 1.2 rewritten here; that logger
 can be retired once this is checked in game.*
 
-Off until started: nothing samples, hooks or counts. Two ways to run it:
+Nothing samples, hooks or counts until the first capture. After it, three things stay for the session: the `ScriptRunner::Run` detour
+(passes straight through), CpuSplit's patches (a stamp at each patched game call, every frame) and the writer thread (wakes 5 times a
+second). Two ways to run it:
 - **Timed capture** ("Start Probe", 5 / 10 / 20 s): stand in the slow spot; the results open by themselves and save to
   `VegasShaders-Logs\DeepProbe_<time>.txt`.
-- **Live mode** ("Start Live", or the LiveKey: Shift+F12 by default): records until stopped by the same key or "Stop Live". The menu's
+- **Live mode** ("Start Live", or the LiveKey: Shift+F12 by default; a shot list or the bench sets LiveRequest): records until stopped by
+  the same key, "Stop Live" or LiveRequest 2. The menu's
   Live tab shows a 1 s / 10 s / session window: frame times, the update / render / present split, the CpuSplit engine stages, DLLs by
   near and own time, scripts by plugin, the last spikes, and the probe's own cost. With the menu closed a LIVE badge (and, with LiveHud,
   four lines: frame times, spikes, probe cost, the top three plugin DLLs) sits in the top-right corner. Reports go to
@@ -816,15 +819,23 @@ Sampler safety rules (after a Frame Cost Logger sampler froze a heavily modded g
 - Return addresses are checked only inside executable sections listed, and checked readable region by region, when the module table was
   built (`ScanModules` / `ParsePeExecSections`, every 2 s on the sampler thread, never while suspended; `AfterCall` keeps a last `__try`
   for a module unloaded since).
-- A watchdog thread resumes a thread held over 20 ms and turns the sampler off for that capture, and notes 4 s with no frame while the game
-  is in front (`WatchThreadMain`). It never logs or allocates: the writer thread logs both (`PERF PROBE WATCHDOG`, `PERF PROBE: no frame`;
-  the STALL lines say where the render thread is).
+- A watchdog thread resumes a thread held over 20 ms and turns the sampler off (before the resume) for that capture (`WatchCheck`,
+  `WatchThreadMain`). Whoever swaps the sample's start time back to 0 resumes, so each suspend gets exactly one resume; the held thread's
+  handle is read before that swap. The sampler thread is made suspended, the watchdog next, then the sampler runs; the watchdog lives
+  until the sampler thread has exited, then makes a last check. It waits 1 ms on a high-resolution timer (no change to the system timer).
+  It notes 4 s with no frame while the game is in front, from a flag the main thread sets (it never calls user32), and never logs or
+  allocates: the writer thread logs both (`PERF PROBE WATCHDOG`, `PERF PROBE: no frame`; the STALL lines say where the render thread is).
 - No profiler lock exists, so the main thread never waits on one. Stopping waits at most 250 ms for both threads; a thread that does not
   stop keeps its state (leaked) and the probe stays off until the game restarts (`StopCapture`).
-- One sampler at a time: one capture at a time, and none while room 01's `FrameCostLogger.dll` is loaded (refused with a message).
+- One sampler at a time: one capture at a time, and none while room 01's `FrameCostLogger.dll` is loaded or the test build's CpuSampler or
+  ArrivalSampler runs (refused with a message; `Render.cpp` OtherStackSampler).
+- Module headers are read under a `__try` (outside any suspension), for a module unloaded between a VirtualQuery and the read.
+- Writer queue: an autosave waits while the writer still has jobs, and AutosaveSeconds is at least 5 (0 = only at stop). At the game's exit
+  the final report gets at most 1 s.
 
 Settings (`[Main.Develop.PerformanceProbe]`, shown with Developer options): LiveKey (DirectInput code, 88 = F12, 0 = none), LiveKeyShift,
-LiveSampleHz (500), NearDepth (8), SpikeMs (33.4), MaxSpikes (200), AutosaveSeconds (60), FrameCsvMaxMB (64), LiveHud (on). The key is
+LiveSampleHz (500), NearDepth (8), SpikeMs (33.4), MaxSpikes (200), AutosaveSeconds (60; 0 or at least 5), FrameCsvMaxMB (64), LiveHud
+(on), LiveRequest (0; 1 starts live mode, 2 stops any capture, read every 120 frames and put back to 0: for shot lists and the bench). The key is
 polled with GetAsyncKeyState like the menu key ([DXVK input](REFERENCE.md#dxvk-input)), only with the game window in front and no text box
 active.
 

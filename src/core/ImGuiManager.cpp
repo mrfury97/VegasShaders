@@ -475,11 +475,12 @@ static void PollProbeKey() {
 			else if (request == 2 && DeepProbe::Active()) DeepProbe::RequestStop();
 		}
 	}
-	static KeyEdge probeKey;
-	if (!vk) { probeKey.Rose(false); return; }
 	HWND front = GetForegroundWindow();
 	DWORD pid = 0;
 	if (front) GetWindowThreadProcessId(front, &pid);
+	DeepProbe::SetGameInFront(pid == GetCurrentProcessId());	// the probe's watchdog reads this instead of calling user32
+	static KeyEdge probeKey;
+	if (!vk) { probeKey.Rose(false); return; }
 	const bool typing = ImGuiManager::IsVisible() && ImGui::GetIO().WantTextInput;
 	const bool down = pid == GetCurrentProcessId() && !typing && KeyHeld(vk) && (!needShift || KeyHeld(VK_SHIFT));
 	if (probeKey.Rose(down)) DeepProbe::ToggleLive();

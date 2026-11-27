@@ -1,7 +1,9 @@
 #pragma once
 
-// Full-game performance probe ("Help > Performance probe..."). Zero cost when idle: nothing samples, patches ScriptRunner::Run,
-// or inspects geometry until the user starts a timed capture (5s / 10s / 20s) or live mode. Combines:
+// Full-game performance probe ("Help > Performance probe..."). Nothing samples, patches ScriptRunner::Run or inspects geometry until
+// the user starts a timed capture (5s / 10s / 20s) or live mode. After the first capture a little stays for the session: the
+// ScriptRunner::Run detour (passes straight through), CpuSplit's patches (a stamp at each patched call every frame) and the writer
+// thread (wakes 5 times a second). Combines:
 //   1. Frame time distribution (0.1 ms histogram) & CPU Update vs Render CPU vs Present/GPU-Wait split
 //   2. CpuSplit per-engine-stage breakdown (Main thread + AI worker threads)
 //   3. Stack-sampling profiler broken down by every loaded DLL (FalloutNV.exe, VegasShaders.dll, every NVSE plugin, wrappers,
@@ -21,8 +23,10 @@
 //   allocation, no exception handling, no module lookup, no other API (TakeSample).
 // - Return addresses are checked only against executable sections listed (and checked readable) when the module table was built
 //   (ScanModules, outside any suspension, with no lock: the probe has none).
-// - A watchdog thread resumes the thread and turns the sampler off when a suspension lasts over 20 ms, and notes when no frame came
-//   for 4 s with the game in front (the writer thread logs both: the watchdog never allocates or logs itself).
+// - A watchdog thread (made before the sampler runs, gone only after it has exited) resumes the thread and turns the sampler off when a
+//   suspension lasts over 20 ms, exactly one resume per suspend, and notes when no frame came for 4 s with the game in front (the
+//   writer thread logs both: the watchdog never allocates, logs or calls user32 itself).
+// - One sampler at a time also means none while the test build's CpuSampler or ArrivalSampler runs.
 // - The main thread never waits on the sampler: there is no lock; stopping waits at most 250 ms for both threads, and a thread that
 //   does not stop leaves the sampler off for the session (its state is leaked, never freed under it).
 // - One sampler at a time: one capture at a time, and none while room 01's FrameCostLogger.dll is loaded.
@@ -603,6 +607,8 @@ namespace DeepProbe {
 		inline std::string ReportPath;
 		inline std::string StatusText = "Idle";
 		inline Summary CachedSummary;
+		inline volatile LONG GameInFront = 1;	// the game window is in front (main thread, PollProbeKey); read by the watchdog
+		inline const char* (*OtherSampler)() = nullptr;	// another stack sampler running (test builds: Render.cpp), or null
 		inline bool SamplerZombie = false;		// a sampler thread did not stop in time: no sampler again this session
 
 		// Notes from the sampler and watchdog threads, logged by the writer thread (they never log or allocate themselves)
@@ -793,29 +799,33 @@ namespace DeepProbe {
 		// The executable sections of a loaded image, split by protection region and kept only where readable now, so the
 		// return-address checks never read memory that can fault. Sampler thread, never while a thread is suspended.
 		inline void ParsePeExecSections(DWORD base, int m, Range* ranges, int& rc) {
-			const UInt8* b = (const UInt8*)(uintptr_t)base;
-			if (!Readable(b, sizeof(IMAGE_DOS_HEADER))) return;
-			const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)b;
-			if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return;
-			const IMAGE_NT_HEADERS32* nt = (const IMAGE_NT_HEADERS32*)(b + dos->e_lfanew);
-			if (!Readable(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE) return;
-			const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
-			const WORD count = nt->FileHeader.NumberOfSections;
-			if (count > 96 || !Readable(s, count * sizeof(*s))) return;
-			for (WORD i = 0; i < count && rc < (int)kMaxRanges; i++) {
-				if (!(s[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
-				DWORD lo = base + s[i].VirtualAddress;
-				const DWORD hi = lo + (std::max)(s[i].Misc.VirtualSize, s[i].SizeOfRawData);
-				while (lo < hi && rc < (int)kMaxRanges) {
-					MEMORY_BASIC_INFORMATION mbi;
-					if (!VirtualQuery((const void*)(uintptr_t)lo, &mbi, sizeof(mbi))) break;
-					const DWORD regionEnd = (DWORD)((uintptr_t)mbi.BaseAddress + mbi.RegionSize);
-					const DWORD end = (std::min)(hi, regionEnd);
-					if (end <= lo) break;
-					if (Readable((const void*)(uintptr_t)lo, 1)) ranges[rc++] = { lo, end, m };
-					lo = end;
+			// Outside any suspension; the __try covers a module unloaded between a VirtualQuery and a header read.
+			__try {
+				const UInt8* b = (const UInt8*)(uintptr_t)base;
+				if (!Readable(b, sizeof(IMAGE_DOS_HEADER))) return;
+				const IMAGE_DOS_HEADER* dos = (const IMAGE_DOS_HEADER*)b;
+				if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 0x1000) return;
+				const IMAGE_NT_HEADERS32* nt = (const IMAGE_NT_HEADERS32*)(b + dos->e_lfanew);
+				if (!Readable(nt, sizeof(*nt)) || nt->Signature != IMAGE_NT_SIGNATURE) return;
+				const IMAGE_SECTION_HEADER* s = IMAGE_FIRST_SECTION(nt);
+				const WORD count = nt->FileHeader.NumberOfSections;
+				if (count > 96 || !Readable(s, count * sizeof(*s))) return;
+				for (WORD i = 0; i < count && rc < (int)kMaxRanges; i++) {
+					if (!(s[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+					DWORD lo = base + s[i].VirtualAddress;
+					const DWORD hi = lo + (std::max)(s[i].Misc.VirtualSize, s[i].SizeOfRawData);
+					while (lo < hi && rc < (int)kMaxRanges) {
+						MEMORY_BASIC_INFORMATION mbi;
+						if (!VirtualQuery((const void*)(uintptr_t)lo, &mbi, sizeof(mbi))) break;
+						const DWORD regionEnd = (DWORD)((uintptr_t)mbi.BaseAddress + mbi.RegionSize);
+						const DWORD end = (std::min)(hi, regionEnd);
+						if (end <= lo) break;
+						if (Readable((const void*)(uintptr_t)lo, 1)) ranges[rc++] = { lo, end, m };
+						lo = end;
+					}
 				}
 			}
+			__except (EXCEPTION_EXECUTE_HANDLER) {}
 		}
 
 		// Sampler thread. A new module's entry is written in full before modCount covers it (the main thread reads the names).
@@ -1071,9 +1081,11 @@ namespace DeepProbe {
 					if (st->curFrame >= 0) FinishFrame(st, st->curFrame);
 					st->curFrame = frame;
 				}
-				if (st->frameCnt[id] < 65535) {
-					if (st->frameCnt[id]++ == 0 && st->touchedN < kTouchedMax) st->touched[st->touchedN++] = (SInt16)id;
+				// a module new to this frame is tallied only while the touched list has room (FinishFrame resets only what it lists)
+				if (st->frameCnt[id] == 0) {
+					if (st->touchedN < kTouchedMax) { st->touched[st->touchedN++] = (SInt16)id; st->frameCnt[id] = 1; }
 				}
+				else if (st->frameCnt[id] < 65535) st->frameCnt[id]++;
 			}
 		}
 
@@ -1104,39 +1116,62 @@ namespace DeepProbe {
 			return 0;
 		}
 
+		// One watchdog round: resumes the thread the sampler holds when that suspension is over kMaxSuspendMs.
+		// Exactly one resume per successful suspend: whoever swaps suspendedSince from the sample's start to 0 resumes. Each
+		// sample's start is a fresh QPC value, and the sampler writes suspendedHandle before it publishes the start and clears the
+		// start before it suspends another thread, so a handle read between reading the start and a successful swap is that
+		// sample's thread. The sampler is turned off before the resume, so it cannot start another sample on a stale decision.
+		inline void WatchCheck(CaptureState* st, double qpcPerMs, bool force) {
+			// Read the start first, then the clock: a sample that starts in between must not look endless.
+			const LONG64 since = InterlockedCompareExchange64(&st->suspendedSince, 0, 0);
+			if (!since) return;
+			const HANDLE held = st->suspendedHandle;
+			const LONGLONG now = QpcNow();
+			if (!force && (now <= since || (now - since) / qpcPerMs <= kMaxSuspendMs)) return;
+			if (InterlockedCompareExchange64(&st->suspendedSince, 0, since) != since) return;	// the sampler resumed it itself
+			InterlockedExchange(&st->samplerOff, 1);
+			ResumeThread(held);
+			InterlockedIncrement(&st->d.watchdogTrips);
+			NoteTripUs = now > since ? (LONG)((now - since) / qpcPerMs * 1000.0) : 0;
+			InterlockedExchange(&NoteTrip, 1);
+		}
+
 		// Resumes a thread the sampler has held suspended over kMaxSuspendMs (and turns the sampler off), and notes a run of 4 s
-		// with no frame while the game is in front. Never allocates, logs or takes a lock: the writer thread logs its notes.
+		// with no frame while the game is in front (GameInFront, published by the main thread). Never allocates, logs, takes a lock
+		// or calls user32: the writer thread logs its notes. Created before the sampler thread and runs until that thread has
+		// exited, so no sample is ever left without it.
 		inline DWORD WINAPI WatchThreadMain(void* param) {
 			CaptureState* st = (CaptureState*)param;
 			SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+			// 1 ms waits without changing the system timer resolution (Sleep would round to the 15.6 ms tick)
+			HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
 			const double qpcPerMs = (double)st->qpcFreq / 1000.0;
 			bool stallNoted = false;
-			while (!st->stopSampler.load(std::memory_order_relaxed)) {
-				Sleep(5);
-				// Read the start first, then the clock: a sample that starts in between must not look endless.
-				const LONG64 since = InterlockedCompareExchange64(&st->suspendedSince, 0, 0);
-				const LONGLONG now = QpcNow();
-				if (since && now > since && (now - since) / qpcPerMs > kMaxSuspendMs &&
-					InterlockedCompareExchange64(&st->suspendedSince, 0, since) == since) {
-					ResumeThread(st->suspendedHandle);
-					InterlockedExchange(&st->samplerOff, 1);
-					InterlockedIncrement(&st->d.watchdogTrips);
-					NoteTripUs = (LONG)((now - since) / qpcPerMs * 1000.0);
-					InterlockedExchange(&NoteTrip, 1);
+			for (;;) {
+				if (timer) {
+					LARGE_INTEGER due; due.QuadPart = -10000;	// 1 ms, relative
+					if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(timer, 20);
+					else Sleep(1);
 				}
+				else Sleep(1);
+				WatchCheck(st, qpcPerMs, false);
+				if (st->stopSampler.load(std::memory_order_relaxed) &&
+					(!st->threadHandle || WaitForSingleObject(st->threadHandle, 0) == WAIT_OBJECT_0)) {
+					WatchCheck(st, qpcPerMs, true);	// the sampler is gone: a start still set would be a thread left held: resume it now
+					break;
+				}
+				const LONGLONG now = QpcNow();
 				const LONG64 last = st->lastFrameQpc;
 				if (!last || st->loading) { stallNoted = false; continue; }
 				const double age = (now - last) / qpcPerMs;
 				if (age < kStallNoteMs) { stallNoted = false; continue; }
-				if (stallNoted) continue;
-				HWND fg = GetForegroundWindow(); DWORD pid = 0;
-				if (fg) GetWindowThreadProcessId(fg, &pid);
-				if (pid != GetCurrentProcessId()) continue;	// alt-tabbed: the game makes no frames
+				if (stallNoted || !GameInFront) continue;	// alt-tabbed: the game makes no frames
 				stallNoted = true;
 				NoteStallMs = (LONG)age;
 				NoteStallSampler = st->samplerOff ? 0 : 1;
 				InterlockedExchange(&NoteStall, 1);
 			}
+			if (timer) CloseHandle(timer);
 			return 0;
 		}
 
@@ -1855,6 +1890,11 @@ namespace DeepProbe {
 				StatusText = "Not started: an earlier sampler thread did not stop in time; the probe stays off until the game restarts.";
 				return false;
 			}
+			if (const char* other = OtherSampler ? OtherSampler() : nullptr) {	// test builds: their own samplers run until the game exits
+				StatusText = std::string("Not started: ") + other + " is running (only one stack sampler may run).";
+				Logger::Log("DEEP PROBE: not started: %s is running (only one stack sampler may run)", other);
+				return false;
+			}
 			if (GetModuleHandleA("FrameCostLogger.dll")) {	// room 01's logger has its own sampler: one at a time
 				StatusText = "Not started: FrameCostLogger.dll is loaded and has its own sampler (only one may run). Disable that mod to use the probe.";
 				Logger::Log("DEEP PROBE: not started: FrameCostLogger.dll is loaded (only one stack sampler may run)");
@@ -1873,6 +1913,7 @@ namespace DeepProbe {
 			if (live) {
 				st->sampleHz = (unsigned)SettingI("LiveSampleHz", 500, 50, 2000);
 				st->autosaveSec = SettingF("AutosaveSeconds", 60.0, 0.0, 3600.0);
+				if (st->autosaveSec > 0.0 && st->autosaveSec < 5.0) st->autosaveSec = 5.0;	// 0 = only at stop; else at least 5 s
 				st->csvMB = (unsigned)SettingI("FrameCsvMaxMB", 64, 1, 4096);
 				st->stackCopyLimit = kLiveStackCopy;
 				st->sampleAI = false;	// live mode samples the main thread only (cheaper; the AI threads' busy share needs them)
@@ -1919,13 +1960,17 @@ namespace DeepProbe {
 
 			st->lastFrameQpc = QpcNow();
 			if (st->threadHandles[0] && st->stackCopy) {
-				st->threadHandle = CreateThread(nullptr, 256 * 1024, &SamplerThreadMain, st, 0, nullptr);
-				st->watchHandle = CreateThread(nullptr, 64 * 1024, &WatchThreadMain, st, 0, nullptr);
-				if (st->threadHandle && !st->watchHandle) {
-					// No watchdog, no sampler: the rule holds even when a thread cannot be made
-					InterlockedExchange(&st->samplerOff, 1);
-					st->stopSampler.store(true, std::memory_order_release);
-					WaitForSingleObject(st->threadHandle, kStopWaitMs);
+				// The sampler is made suspended, the watchdog next (it watches the sampler's handle), then the sampler runs: no
+				// sample is ever taken without a watchdog. No watchdog: the sampler is told to stop before it runs its first line.
+				st->threadHandle = CreateThread(nullptr, 256 * 1024, &SamplerThreadMain, st, CREATE_SUSPENDED, nullptr);
+				if (st->threadHandle) {
+					st->watchHandle = CreateThread(nullptr, 64 * 1024, &WatchThreadMain, st, 0, nullptr);
+					if (!st->watchHandle) {
+						InterlockedExchange(&st->samplerOff, 1);
+						st->stopSampler.store(true, std::memory_order_release);
+					}
+					ResumeThread(st->threadHandle);
+					if (!st->watchHandle) WaitForSingleObject(st->threadHandle, kStopWaitMs);
 				}
 			}
 			if (live) Logger::Log("DEEP PROBE: live mode started (%u Hz, near depth %u, spikes > %.1f ms, autosave %.0f s) -> %s",
@@ -2292,6 +2337,11 @@ namespace DeepProbe {
 	}
 
 	// The menu's and HUD's drawing of probe data (QPC ticks), counted as the probe's own cost while a capture runs.
+	// Main thread (PollProbeKey): the game window is in front; the watchdog's no-frame note needs it and must not call user32.
+	inline void SetGameInFront(bool inFront) { Detail::GameInFront = inFront ? 1 : 0; }
+	// Render.cpp: names another running stack sampler (the test build's CpuSampler / ArrivalSampler), or null.
+	inline void SetOtherSamplerCheck(const char* (*check)()) { Detail::OtherSampler = check; }
+
 	inline void AddUiCost(LONGLONG qpcTicks) { if (Detail::Active) Detail::Active->d.ownQpc += qpcTicks; }
 
 	// The live view for a window of 1 or 10 seconds (0 = the whole session); rebuilt at most 4 times a second.
@@ -2354,7 +2404,8 @@ namespace DeepProbe {
 				st->lastSecondMs = renderStartMs;
 				Detail::TakeSecSnap(st, renderStartMs);
 			}
-			if (st->autosaveSec > 0.0 && renderStartMs - st->lastAutosaveMs >= st->autosaveSec * 1000.0) {
+			// an autosave waits while the writer still has jobs (a slow disk): the queue never grows with autosaves
+			if (st->autosaveSec > 0.0 && renderStartMs - st->lastAutosaveMs >= st->autosaveSec * 1000.0 && Writer::Detail::Pending == 0) {
 				st->lastAutosaveMs = renderStartMs;
 				Detail::PostReport(st, false);
 			}
