@@ -2,7 +2,7 @@
 
 The tools, test benches and asset folders of the repo, one section per folder: the DXVK fork patches (`tools/nvr-dxvk`), the 64-bit DLSS helper
 (`tools/nvr-dlss-helper`), the RT test host and the RT playground, the test kit builders, the generated and contributed textures
-(`resource/Textures`) and the GunFX assets (`GunFX`). Each section keeps the text of the README it replaced. The folders' build scripts and
+(`resource/Textures`), the GunFX assets (`GunFX`) and the in-game Performance probe. Each section keeps the text of the README it replaced. The folders' build scripts and
 source comments name their section here. The file map and runtime names are in [REFERENCE.md](REFERENCE.md).
 
 ## Contents
@@ -14,6 +14,7 @@ source comments name their section here. The file map and runtime names are in [
 - [testkit](#testkit)
 - [Textures](#textures)
 - [GunFX](#gunfx)
+- [Performance probe](#performance-probe)
 
 ## nvr-dxvk
 
@@ -768,3 +769,84 @@ What is left here:
 
 The old `GunFX.vcxproj` and `config/GunFX.ini.defaults` were removed (git history has them; `src/gunfx/GunFXKeys.h`
 keeps every key with its shipped default).
+
+## Performance probe
+
+*In-game tool: Help > Performance probe (`src/core/DeepProbe.h`, writer `src/core/DeepProbeWriter.h`, window and HUD in
+`src/core/ImGuiManager.cpp` DrawDeepProbeWindow / DrawDeepProbeLive / RenderProfilerIndicator, ticks in `src/NewVegas/Hooks/Render.cpp`
+RenderHook; MO2 names `tools/deepprobe_mo2.py`). Live mode (2026-11-28) is room 01's Frame Cost Logger 1.2 rewritten here; that logger
+can be retired once this is checked in game.*
+
+Nothing samples, hooks or counts until the first capture. After it, three things stay for the session: the `ScriptRunner::Run` detour
+(passes straight through), CpuSplit's patches (a stamp at each patched game call, every frame) and the writer thread (wakes 5 times a
+second). Two ways to run it:
+- **Timed capture** ("Start Probe", 5 / 10 / 20 s): stand in the slow spot; the results open by themselves and save to
+  `VegasShaders-Logs\DeepProbe_<time>.txt`.
+- **Live mode** ("Start Live", or the LiveKey: Shift+F12 by default; a shot list or the bench sets LiveRequest): records until stopped by
+  the same key, "Stop Live" or LiveRequest 2. The menu's
+  Live tab shows a 1 s / 10 s / session window: frame times, the update / render / present split, the CpuSplit engine stages, DLLs by
+  near and own time, scripts by plugin, the last spikes, and the probe's own cost. With the menu closed a LIVE badge (and, with LiveHud,
+  four lines: frame times, spikes, probe cost, the top three plugin DLLs) sits in the top-right corner. Reports go to
+  `VegasShaders-Logs\DeepProbe_Live_<time>\` and are rewritten every AutosaveSeconds and at stop (also when the game window closes):
+  `report.txt` (the timed report's sections plus spikes), `modules.csv` (each DLL with its path), `script_plugins.csv`, `scripts.csv`,
+  `spikes.csv`, `frames.csv` (every frame: ms, script ms, probe ms, flags 1 spike / 2 loading; renamed to `frames.1.csv` at FrameCsvMaxMB).
+
+What it measures:
+
+| Part | How | Exact? |
+|---|---|---|
+| Frame times | render start to render start; a 0.1 ms histogram (up to 1 s) gives the percentiles and lows; loading screens and frames of 1 s or more are counted apart | exact (percentiles to 0.1 ms) |
+| DLLs | stack samples of the main thread (timed: 1000 Hz, plus both AI threads; live: LiveSampleHz, main thread only). own = the module the instruction pointer is in (Windows code goes to its caller); near = the first plugin DLL (xNVSE plugins, overlays, Vegas Shaders) among the next NearDepth checked return addresses, else own; incl = anywhere on the copied stack | statistical; near is a heuristic (believed) |
+| Scripts | detour of `ScriptRunner::Run` 0x005E0D20, TSC per call, nested scripts subtracted, by script and by load-order index | exact |
+| Engine stages | CpuSplit (the F10 profiler's game-update split) per frame; p95 from 0.05 ms bins | exact |
+| GPU | Vegas Shaders' GPU timers (all passes while a capture runs) | exact per pass |
+| Spikes | a frame over SpikeMs or 2.5x the 10 s mean (after 120 frames), never a loading frame: its top near DLLs (share of that frame's samples), its top stage (the last CpuSplit frame), its top script plugin; the newest MaxSpikes kept | DLL share statistical |
+| Census | one frame ~1.5 s in: draws by owning plugin and mesh, lights, actors, address space | exact for that frame |
+
+Probe cost (stated live and in every report): sampler = the main thread's time held suspended (each sample ~20-30 us in room 01's offline
+test, believed similar here); script timing = calls x the cost of two clock reads and a map update, measured at start; bookkeeping and
+drawing = the probe's own main-thread time, the window and the HUD included. GPU timer queries are not in the figure (not measured).
+
+Bounded memory: frame and stage histograms, 11 one-second snapshots, at most 8192 scripts, 4096 census meshes, 8192 hot exe addresses,
+MaxSpikes spikes, a 16384-frame ring for frames.csv (full = dropped, never waited for). Reports are made from a copy on the writer thread:
+the main thread copies the counters (about 0.5 MB, once per autosave and at stop) and never waits on the disk.
+
+Sampler safety rules (after a Frame Cost Logger sampler froze a heavily modded game, 2026-11-27; all in `DeepProbe.h`):
+- While a thread is suspended: only GetThreadContext, the thread's TEB and its stack between ESP and StackBase, after ESP >= StackLimit read
+  fresh from the TEB (`TakeSample`). No locks, allocation, SEH, module lookup or other API. Before, the 128 KB copy checked ESP against the
+  stack's reserved bottom (TEB+0xE0C), so a copy could run into the guard page; now it is bounded by StackLimit and by the buffer
+  (128 KB timed, 16 KB live).
+- Return addresses are checked only inside executable sections listed, and checked readable region by region, when the module table was
+  built (`ScanModules` / `ParsePeExecSections`, every 2 s on the sampler thread, never while suspended; `AfterCall` keeps a last `__try`
+  for a module unloaded since).
+- A watchdog thread resumes a thread held over 20 ms and turns the sampler off (before the resume) for that capture (`WatchCheck`,
+  `WatchThreadMain`). Whoever swaps the sample's start time back to 0 resumes, so each suspend gets exactly one resume; the held thread's
+  handle is read before that swap. The sampler thread is made suspended, the watchdog next, then the sampler runs; the watchdog lives
+  until the sampler thread has exited, then makes a last check. It waits 1 ms on a high-resolution timer (no change to the system timer).
+  It notes 4 s with no frame while the game is in front, from a flag the main thread sets (it never calls user32), and never logs or
+  allocates: the writer thread logs both (`PERF PROBE WATCHDOG`, `PERF PROBE: no frame`; the STALL lines say where the render thread is).
+- No profiler lock exists, so the main thread never waits on one. Stopping waits at most 250 ms for both threads; a thread that does not
+  stop keeps its state (leaked) and the probe stays off until the game restarts (`StopCapture`).
+- One sampler at a time: one capture at a time, and none while room 01's `FrameCostLogger.dll` is loaded or the test build's CpuSampler or
+  ArrivalSampler runs (refused with a message; `Render.cpp` OtherStackSampler).
+- Module headers are read under a `__try` (outside any suspension), for a module unloaded between a VirtualQuery and the read.
+- Writer queue: an autosave waits while the writer still has jobs, and AutosaveSeconds is at least 5 (0 = only at stop). At the game's exit
+  the final report gets at most 1 s.
+
+Settings (`[Main.Develop.PerformanceProbe]`, shown with Developer options): LiveKey (DirectInput code, 88 = F12, 0 = none), LiveKeyShift,
+LiveSampleHz (500), NearDepth (8), SpikeMs (33.4), MaxSpikes (200), AutosaveSeconds (60; 0 or at least 5), FrameCsvMaxMB (64), LiveHud
+(on), LiveRequest (0; 1 starts live mode, 2 stops any capture, 3 starts a timed 20 s capture, read every 120 frames and put back to 0: for shot lists and the bench). The key is
+polled with GetAsyncKeyState like the menu key ([DXVK input](REFERENCE.md#dxvk-input)), only with the game window in front and no text box
+active.
+
+MO2 mod names: the report names an MO2 mod only when a DLL's path is a real one inside MO2's `mods` folder (under usvfs it is usually the
+game's virtual path). `py -3.10 -I tools\deepprobe_mo2.py [<report folder>] --mo2 <MO2 folder> [--profile <name>]` (or `VS_MO2`) finds the
+enabled mod that wins each DLL and plugin file and prints near / own / script ms and spike counts per MO2 mod (the newest
+`DeepProbe_Live_*` in the game's `VegasShaders-Logs` when no folder is given).
+
+What it cannot attribute: GPU time per mod (only Vegas Shaders' passes are timed); work on other threads in live mode (only the main
+thread is sampled; the timed capture adds the AI threads); engine code under no plugin and no script ("Game"); wrapper hooks low in the
+call stack beyond NearDepth return addresses; hook trampolines in allocated memory ("code outside any module").
+
+Status: proven = builds (msbuild, 0 errors, 2026-11-28); the MO2 tool ran on a hand-made folder. Not run: in game (timed or live), the
+watchdog, the cost figures, a long live session with Psycho Engine Fixes (the freeze class this replaces).

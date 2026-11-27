@@ -821,6 +821,17 @@ static void PrepareSceneCameras() {
 using RenderMethod = void(__thiscall*)(Main*, BSRenderedTexture*, int, int);
 RenderMethod Render = reinterpret_cast<RenderMethod>(Hooks::Render);
 static bool MaterialWFor(const void* Pass, float& w, bool inSpan);	// UNOFFICIAL 2026-11-15 (below, MaterialForPass): c211.w for MergeCopies' key
+
+// UNOFFICIAL 2026-11-28 (deepprobe-live): the test build's own stack samplers run until the game exits; the Performance probe must not
+// start a second sampler beside them (DeepProbe.h, StartCapture).
+static const char* OtherStackSampler() {
+#if NVR_TEST_TOOLS
+	if (CpuSampler::Started && CpuSampler::Hz > 0) return "the test build's CpuSampler (a shot list's 'sampler' line)";
+	if (ArrivalSampler::Enabled) return "the test build's ArrivalSampler ([Main.Main.Performance] ArrivalSampler)";
+#endif
+	return nullptr;
+}
+
 void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTexture, int Arg2, int Arg3) {
 	SessionLog::StageScope stage("game frame");	// 2026-11-04: the CRASH lines' stage (SessionLog.h)
 	// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h): the lamp-shadow records left out of the start, before anything of this frame
@@ -829,6 +840,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	SessionLog::StallWatch::FrameScope stallFrame;	// UNOFFICIAL 2026-11-07 (perf-ptcost): the STALL watchdog's frame begin / end (SessionLog.h)
 	static CpuTimer gameRenderCpuTimer("Game render (CPU)"), presentCpuTimer("Present (CPU)"), gameUpdateCpuTimer("Game update (CPU)");
 	const double renderStart = CpuTimer::NowMs();
+	DeepProbe::SetOtherSamplerCheck(&OtherStackSampler);
 	const bool probeActive = DeepProbe::TickFrameBegin(TheRenderManager->device, renderStart, FrameSplit::RenderEnd, FrameSplit::PresentMs, FrameSplit::OriginalPresent != nullptr);
 	if (GpuTimer::Enabled || probeActive) {
 		FrameSplit::Install(TheRenderManager->device);
