@@ -5398,6 +5398,25 @@ first person with CubeStrength 0 / 1 / 1.5 / 2 (indoors by a window, outdoors at
 puddles and wet ground looking away from the light. Wrong: a glow or bright rim on the gun in shade, rough dry ground turning glossy,
 dark rooms brightening with CubeStrength, or the cube lagging when you turn.
 
+### The 3D world cube drew nothing outdoors (2026-11-28, branch `cube-keep-capture`)
+- Cause, proven on the bench (Goodsprings porch, scene v-reflection1, owner's toml): every world cube face stayed the clear colour (rgb 0,
+  alpha 0), though the reference walk queued 120-200 casters a face. Read back from the device right before the draws
+  (`[Shaders.Reflections.Main] WorldCubeDump 1` now also logs the device's z test, colour write, cull, clip planes and the queued casters):
+  ZFUNC was GREATEREQUAL (7). The pass asked for LESSEQUAL through the game's render-state cache (`NiDX9RenderState`), which did not reach
+  the device (why is believed, not proven: the cache already held LESSEQUAL while the device had the reversed-depth GREATEREQUAL that
+  `RenderShadowMaps` sets for this game's depth clear of 0). With the face's standard projection and a depth clear of 1, no pixel passed.
+- Fix (`ShadowManager::RenderReflectionCubeFace`): ZFUNC is set and put back on the device directly, round the cache (as the sun layer copy
+  does). After it the log reads func 4 and the faces hold the town, land and sky gaps (runs `F:\NVR-bench\work\bench\autotest\20261128-003150-slotA`,
+  `-005307-slotA`; face sheet `F:\NVR-bench\shots\20261128-005307-slotA\worldcube-faces-sheet.png`). Land colour looks right (sand and rock
+  tones, no normal-map blue). Interiors: not run (believed to have had the same fault; the interior ARK luma change of 11-27 is unexplained).
+- DebugView 3 behind the camera shows the world cube's town only after the capture restarts (bench list `cube-world-proof`: a hop over a
+  cell border): `F:\NVR-bench\shots\20261128-005307-slotA\NeonSelfTest_00-53-25_ab_04_dv3-behind-world.png`.
+- Open, found here (not fixed: CubeStep is the cube-keep-capture change): CubeStep measures the camera's movement from
+  `TheRenderManager->InvViewMatrix` row 4, which is 0 0 0 in this renderer (camera-relative view; logged on the bench), so the distance moved
+  is always 0 and its 1000-unit jump test never fires. Out of view the capture then never hands texels to the world cube while walking;
+  only a restart of the capture cube (a cell change) does. `TheRenderManager->CameraPosition` holds the camera's world position.
+- Frame cost: not measured (the faces now shade pixels where they shaded none; the GPU timer was off in these runs).
+
 ## ShadowsExteriors
 
 *README title: ShadowsExteriors - effect spec*
