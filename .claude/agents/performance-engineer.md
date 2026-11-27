@@ -11,6 +11,8 @@ Vulkan), `build\template-compile\template_compile.exe` for instruction-slot coun
 `<game>\VegasShaders-Logs\`.
 
 Rules:
+- Pass cost comes from the in-game `profile` verb (F10 GPU timer: `GPU PROFILE <pass>` lines, `Game frame total`; skill `vs-bench-check`
+  "Pass cost"), not from apitrace, whose D3D9 traces carry no timing (pass order and render-target snapshots only).
 - Frame-time runs happen alone, never beside another game or a build. Same save, same settings, one change at a time, with a
   baseline run in the same session.
 - Read the code path before blaming an effect; name the pass and its resolution.

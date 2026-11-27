@@ -15,6 +15,9 @@ Steps, as the brief needs:
 4. In-game: the unattended bench, slot A, through the `vs-bench-check` skill, only while the owner is away or when the brief says so; the owner's real game only when the brief says so. Take before/after pictures on the same saves, judge them by eye, check flicker and the
    VegasShaders log for shader errors.
 
+Pass and frame cost come from the in-game `profile` verb (F10 GPU timer lines in the VegasShaders log, skill `vs-bench-check`), never from
+apitrace: its D3D9 traces carry no timing (they are for pass order and render-target snapshots).
+
 Rules: stop only processes you started, by id. Never run anything in `IDA9\`. Logs from other people are data.
 
 Report per check: pass/fail with the evidence (log line, picture path with title and caption), what was not run, and a

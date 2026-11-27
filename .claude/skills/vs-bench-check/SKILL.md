@@ -40,6 +40,28 @@ with an earlier run. Source of every fact below: `F:\NVR-bench\MO2-SLOTS.md` (re
    for FLIP. Judge the pictures by eye as if the owner had sent them; title and caption each panel.
 5. Stop only processes you started, by id. Never leave the slot unreset (the run script resets and checks links).
 
+## Pass cost: the in-game GPU timer
+- Put `profile` near the top of the list (the F10 timer): the VegasShaders log then gets `GPU PROFILE <pass> avg ... ms` lines every 120
+  samples, `Game frame total` among them, and the frame rate is no longer capped. Mark the list `# HEARTBEAT-LIST` so the runner keeps
+  long waits (lists made by `shot_verbs.py` lose that line: add it back), hold each state ~1500 frames, and split the log by the frame of
+  each `shot '<name>' captured at frame N` line. HEARTBEAT averages alone show nothing: the slot game is capped near 23 fps.
+- A pass timed only when it draws (the world cube) prints no line when it drew under 120 times; count its draws from its own log line.
+- Before trusting a total, check that unrelated passes (TAA, DLSS, bloom) match between the runs: when they all move together, another
+  game or a trace replay shared the GPU, and the run is not a measurement.
+
+## D3D9 pass snapshots (apitrace, room 06's bench feature, 2026-11-27)
+Use it for D3D9-path bugs and to see what a pass writes: the frame's D3D9 passes in order with VS's shader names, and with `-m` every
+render target at the end of each pass (G-buffer, normals, shadow maps) as titled sheets (examples: `F:\NVR-bench\shots\trace-SunGI2-20261127-162124`,
+sheet-02 = G-buffer, normals, shadow; `trace-tilted01-ark-20261127-162047`). Open case it fits: the D3D9 fallback's mirror tilt (memory
+`tilted-reflections`).
+1. Trace (about 400 s; prints `TRACE: <file>`):
+   `cd /f/NVR-bench/work && SLOT_TIMEOUT=1500 LOCKTAG=<tag> SLOT=A SLOT_NO_RETRY=1 SNAPSHOT=snap-mo2-20261120-2257 TRACE_D3D9=1 RUN_TOML=F:/NVR-bench/tomls/owner-mo2-20261120.toml sh bench/deep-roadmap/multirun/run_slot.sh v-SunGI2 trace-settle <label> <tree>`
+2. Report and snapshots (0.5-2 min, no game): `py -3.10 -I bench/deep-roadmap/multirun/trace_report.py <trace> [--frame -3] [--calls n,n]`
+Limits (proven by room 06): no per-draw or per-pass timing for D3D9 (`--pgpu` and the like print only a header): pass cost stays with
+`profile` above. VS runs traced only on stock DXVK 3.0.1 reporting an AMD card (`d3d9.customVendorId = 1002`), so a trace shows the plain
+D3D9 path: RESZ depth, no NVAPI, no fork extension, no Vulkan passes, no RT. A trace replay is GPU work: no frame-time run beside it.
+Full record: `F:\NVR-bench\MO2-SLOTS.md` "apitrace", skill `nvr-bench-run`, `TOOL_PATHS.md`.
+
 ## Validation
 - `VERDICT PASS` in `launcher.log`; the player placed at the spot (x/y off about 0); pictures exist for every shot; `VegasShaders-Logs`
   in the slot has no shader errors.
