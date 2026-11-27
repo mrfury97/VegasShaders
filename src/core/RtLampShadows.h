@@ -43,7 +43,6 @@ namespace RtLampShadows {
 	// rays test them too (RtAlpha.glsl, the alpha atlas at binding 12 / 13: a tester, "RT exterior shadows don't have alpha textures");
 	// without it they are not in the scene's tested set and let lamp light through, as before.
 	inline constexpr UINT MaskGlass = 0x04, MaskLampModel = 0x08, MaskAlphaTested = 0x10;
-	inline constexpr const char* kScreenSection = "Shaders.ShadowsInteriors.Capsules";
 
 	// (2026-11-21) SettingsRevision cache: settings read once when SettingsRevision changes instead of 50+ hash lookups per frame.
 	struct CachedSettings {
@@ -56,7 +55,6 @@ namespace RtLampShadows {
 		bool alphaTest = false, skipLampModels = false, skipLampGlass = false, oneSided = false;
 		bool denoiseLampsByCoverage = false, physicalLampSize = false, physicalLampSizeAll = false;
 		bool manyLightsSampleFix = false;
-		bool capsulesEnabled = false, capsules = false, capsulesContact = false;
 		bool forwardEnabled = false;
 		int manyLightsMax = 255, maxLamps = 63, debugView = 0, debugLamp = 0, denoiseLamps = 4;
 		int filter = -1, rays = 1, rankBy = 0, jitter = -1, lampsPerPixel = 3, interleave = 1;
@@ -102,9 +100,6 @@ namespace RtLampShadows {
 			gSettings.physicalLampSize = TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
 			gSettings.physicalLampSizeAll = TheSettingManager->GetSettingI(kSection, "PhysicalLampSizeAll") != 0;
 			gSettings.manyLightsSampleFix = TheSettingManager->GetSettingI(kSection, "ManyLightsSampleFix") != 0;
-			gSettings.capsulesEnabled = TheSettingManager->GetSettingI(kScreenSection, "Enabled") != 0;
-			gSettings.capsules = TheSettingManager->GetSettingI(kScreenSection, "Capsules") != 0;
-			gSettings.capsulesContact = TheSettingManager->GetSettingI(kScreenSection, "Contact") != 0;
 			gSettings.forwardEnabled = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
 			gSettings.manyLightsMax = TheSettingManager->GetSettingI(kSection, "ManyLightsMax");
 			gSettings.maxLamps = TheSettingManager->GetSettingI(kSection, "MaxLamps");
@@ -162,7 +157,7 @@ namespace RtLampShadows {
 	// UNOFFICIAL 2026-11-11 BUG FIX (RTX bench: Enabled switched to 0 while the game ran, the helper's lamp passes kept running every
 	// frame). Enabled was read once, in Initialize (RtEnabled: the shaders' POINT_SHADOW_RT is a startup choice), and the per-frame switch
 	// was Live alone. Now Enabled is also read every frame wherever Live is: off = nothing submitted, Wants false, no trace before the
-	// world, the cube maps drawn and read again (exactly Live false, plus the capsule pass may take the buffer); on again = traced again
+	// world, the cube maps drawn and read again (exactly Live false); on again = traced again
 	// from the next frame. Coming on when it was off at startup still needs the restart (the shaders).
 	// (2026-11-15 RT master switches) and not while RtCore::Gated (RTInteriors / RTExteriors off for this space): exactly Enabled switched off,
 	// indoors and outdoors (Exteriors) alike, without touching the setting
@@ -171,17 +166,12 @@ namespace RtLampShadows {
 
 	inline bool CompiledIn = false;			// POINT_SHADOW_RT in the object shaders (fixed at startup)
 	// UNOFFICIAL 2026-11-15 (docs/next/FD-NATIVEFIX.md): some lit shader's Interior record loaded only without the read (ShaderManager::
-	// LoadShader's last level, POINT_SHADOW_RT 0): its objects see people's lamp shadows only in the maps, so CapsuleShadows::DropActors is held off
+	// LoadShader's last level, POINT_SHADOW_RT 0): its objects see people's lamp shadows only in the maps
 	inline bool ReadDropped = false;
-	// UNOFFICIAL 2026-10-31 CapsuleShadows (core/CapsuleShadows.h): a second writer of the same buffer, a D3D9 pass (people's capsules and
-	// contact shadows), no RT needed. RtEnabled: the RT section on at startup with the RT core's interface (the RT path may trace);
-	// ScreenCompiledIn: [Shaders.ShadowsInteriors.Capsules] Enabled at startup. ScreenSourceFrame: this frame's buffer is the pass's
-	// (set in Submit: the pass is wanted and the RT path is not running).
-	inline bool RtEnabled = false, ScreenCompiledIn = false, ScreenSourceFrame = false;
-	inline bool ScreenWants() {
-		const CachedSettings& s = SyncSettings();
-		return ScreenCompiledIn && !TheShaderManager->GameState.isExterior && (s.capsules || s.capsulesContact);
-	}
+	// RtEnabled: the RT section on at startup with the RT core's interface (the RT path may trace). (2026-11-27, owner: "just remove the
+	// capsule stuff from the code": the capsule shadows' D3D9 pass, the second writer of this buffer, is gone with its ScreenCompiledIn /
+	// ScreenSourceFrame; the buffer is the RT path's alone again.)
+	inline bool RtEnabled = false;
 	inline char Status[200] = "not checked yet";
 
 	// The trace passes' uniform block (RtLampTrace / Many / Restir .comp, std140, 272 bytes); the lamps are in the lamp table image.
@@ -482,12 +472,6 @@ namespace RtLampShadows {
 			strcpy_s(Status, "lamp shaders compiled to read traced lamp shadows (used once the RT helper runs)");
 		}
 		if (cfg.enabled) Logger::Log("UNOFFICIAL RT lamp shadows: %s", Status);
-		// UNOFFICIAL 2026-10-31 CapsuleShadows: the same shader reader (POINT_SHADOW_RT), its buffer from a D3D9 pass (any GPU)
-		ScreenCompiledIn = cfg.capsulesEnabled && cfg.forwardEnabled;
-		if (ScreenCompiledIn) CompiledIn = true;
-		if (cfg.capsulesEnabled)
-			Logger::Log("UNOFFICIAL CapsuleShadows: %s", ScreenCompiledIn ? "lamp shaders compiled to read the capsule and contact shadows (POINT_SHADOW_RT)" :
-				"off: needs the per-object lamp shadows ([Shaders.ShadowsInteriors.Forward] Enabled)");
 	}
 
 	inline const D3DXVECTOR4* Constant(const char* name) {
@@ -520,7 +504,6 @@ namespace RtLampShadows {
 		RefusedCount = 0;
 		ExtraCount = 0;
 		ManyNoting = false;
-		ScreenSourceFrame = false;
 		// UNOFFICIAL 2026-11-15 RT master switches: a result traced before the gate shut is never reprojected after it opens again (another
 		// place, minutes ago): the first frames after use the cube maps until this frame's (SameFrame) or the next trace
 		if (RtCore::Gated()) Traced.valid = false;
@@ -559,10 +542,8 @@ namespace RtLampShadows {
 			ExtraCount = top - 63;
 		}
 		LampsThisFrame = RtEnabled && live;
-		// UNOFFICIAL 2026-10-31 CapsuleShadows: the pass writes the buffer when the RT path is not running (no RT GPU, or RT off)
 		// (2026-11-11: "RT off" also when Enabled was switched off while the game runs)
 		const bool rtSource = RtEnabled && EnabledNow() && RtCore::Running();
-		if (!rtSource && ScreenWants() && count > 0) { ScreenSourceFrame = true; LampsThisFrame = true; }
 		Aim(rtSource);
 	}
 
@@ -570,7 +551,7 @@ namespace RtLampShadows {
 	// and, with SameFrame, TraceBeforeWorld again once this frame's result is recorded (this frame's camera: only the jitter moves it)
 	inline void Aim(bool rtSource) {
 		// The newest result: traced last frame (Record moves Pending to Traced once its copy-out is recorded)
-		if (!Traced.valid || !ResultTexture || !LampsThisFrame || !(rtSource || ScreenSourceFrame)) return;
+		if (!Traced.valid || !ResultTexture || !LampsThisFrame || !rtSource) return;
 		const D3DXMATRIX& v = Traced.view;
 		const D3DXVECTOR3 right(v._11, v._21, v._31), up(v._12, v._22, v._32), forward(v._13, v._23, v._33);
 		const D3DXVECTOR4& camera = TheRenderManager->CameraPosition;
@@ -602,7 +583,7 @@ namespace RtLampShadows {
 		const CachedSettings& cfg = SyncSettings();
 		RtConstant[1] = (std::max)(cfg.depthTolerance, 0.004f);	// at least the depth code's step
 		RtConstant[2] = log2f((std::max)(Traced.farZ, 2.0f)) / 4095.0f;
-		RtConstant[3] = ScreenSourceFrame || ActorsFromCubeMaps() ? 1.0f : 0.0f;	// the capsule / contact buffer: always the darker of it and the lamp's map
+		RtConstant[3] = ActorsFromCubeMaps() ? 1.0f : 0.0f;	// always the darker of the result and the lamp's map
 		// (2026-11-07) + 1 / the result's width: PointShadowTraced's edge search reads the four neighbours one texel away where a silhouette
 		// pixel's own texel holds the other side of the edge (the shaders test w < 0.5 for the flag: the texel stays below 0.5)
 		if (TextureWidth > 2) RtConstant[3] += 1.0f / (float)TextureWidth;
@@ -625,7 +606,7 @@ namespace RtLampShadows {
 	// come from the cube map). ShadowManager's cube loop asks before drawing slot i.
 	inline UInt32 SkippedCubes = 0, SkippedCubesFrames = 0;
 	inline bool KeepCube(int slot, const PointShadowSlotState& last, const PointShadowSlotState& now) {
-		if (!CompiledIn || ScreenSourceFrame || Mode <= 0.0f || slot < 0 || slot >= MapSlots || TracedMap[slot] < 0) return false;	// (the capsule buffer replaces no map)
+		if (!CompiledIn || Mode <= 0.0f || slot < 0 || slot >= MapSlots || TracedMap[slot] < 0) return false;
 		if (!SyncSettings().skipTracedCubes) return false;
 		if (!last.valid || last.light != now.light || last.cell != now.cell || last.texture != now.texture ||
 			last.radius != now.radius) return false;
@@ -675,7 +656,7 @@ namespace RtLampShadows {
 	inline bool Wants() {
 		if (RtPathTrace::StandDownRT()) return false;	// UNOFFICIAL 2026-11-11 PTStandDownRT: the path traced picture has its own lamp shadows
 		// (2026-11-11) EnabledNow: the live switch (LampsThisFrame already holds it from Submit; asked again here for a frame without a Submit)
-		return (RtEnabled && EnabledNow() && !ScreenSourceFrame && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
+		return (RtEnabled && EnabledNow() && !SameFrameTraced() && LampsThisFrame && LampCount > 0 && (!TheShaderManager->GameState.isExterior || ExteriorFrame)) ||
 			FlashWanted();
 	}
 
@@ -1564,7 +1545,7 @@ namespace RtLampShadows {
 	// nothing happens and RtCore::Frame traces after the world as before (the next frame's draws reproject into it).
 	inline void TraceBeforeWorld(IDirect3DDevice9* Device) {
 		if (!CompiledIn || !RtEnabled || !EnabledNow() || SameFrameTraced() || !SameFrameOn()) return;	// (2026-11-11: Enabled read now)
-		if (ScreenSourceFrame || !LampsThisFrame || LampCount <= 0) return;
+		if (!LampsThisFrame || LampCount <= 0) return;
 		if (TheShaderManager->GameState.isExterior && !ExteriorForwardFrame) return;	// the outdoor mask: a screen pass after the world
 		const UInt32 before = FramesTraced;
 		InPrimary = true;

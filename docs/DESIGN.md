@@ -1351,7 +1351,7 @@ most change the look a little, so each needs the owner's word before it is built
   - It replaces AO.Enabled, GTAO, Skylighting, RT.Enabled, SunGI, RoomGI, BounceLight.Enabled, AOLowRes and NvrDxvkAmbientLight.
   - The takeover already makes the passes exclusive (`EffectChain.cpp:599-608`).
   - One gap: with AmbientLight off, BounceLight and RT GI can both run (BELIEVED, no guard found).
-- **Lamp shadows:** capsules -> cube maps -> RT. It replaces Enabled, Live, SkipTracedCubes, ActorsFromCubeMaps, ManyLights,
+- **Lamp shadows:** capsules (removed 2026-11-27) -> cube maps -> RT. It replaces Enabled, Live, SkipTracedCubes, ActorsFromCubeMaps, ManyLights,
   ShadowDenoiser and DenoiseLamps.
 - **Saving:** none in itself; menu clarity, and the double-run gap closed.
 - **Risk:** saved settings need a migration.

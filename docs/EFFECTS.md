@@ -58,7 +58,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [SMAA](../src/effects/SMAA/) | false | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](../src/effects/Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
 | [ShadowsExteriors](#shadowsexteriors) | true | yes | 5 | 12 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
-| [ShadowsInteriors](#shadowsinteriors) | true | yes | 12 | 7 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
+| [ShadowsInteriors](#shadowsinteriors) | true | yes | 12 | 6 | ShadowsInteriors.cpp, ShadowsInteriors.h | Indoors, this effect darkens the parts of the scene that the lamp shadow mask marks as shadowed, so that objects and walls standing between a lamp and a surface |
 | [Sharpening](#sharpening) | false | yes | 3 | 3 | Sharpening.cpp, Sharpening.h | Sharpening makes near surfaces look crisper. CAS adapts per pixel: it measures how much headroom the pixel has before its 3x3 neighbourhood would clip, and shar |
 | [Skin](../src/effects/Skin/) | true | - | 3 | 6 | Skin.cpp, Skin.h |  |
 | [SkinScattering](../src/effects/SkinScattering/) | - | - | 3 | 0 | SkinScattering.cpp, SkinScattering.h |  |
@@ -3914,7 +3914,7 @@ This pass builds one grey mask for the whole screen that says how much of the ne
 ### 2. When it runs
 
 Frame placement (src\core\ShaderManager.cpp, the pre-tonemap chain, function RenderEffectsPreTonemapping):
-- It runs after the depth and normals are built (depth combine, normal reconstruction and smoothing, captured normals, object motion, lamp visibility ranking, the "scene in" capture, the sun depth-fit measurement, the ray tracing core point, capsule shadows and back depth). It runs before the lamp contact pass, the sun contact shadows, and the shadow apply and later effects that read the buffer.
+- It runs after the depth and normals are built (depth combine, normal reconstruction and smoothing, captured normals, object motion, lamp visibility ranking, the "scene in" capture, the sun depth-fit measurement, the ray tracing core point and back depth). It runs before the lamp contact pass, the sun contact shadows, and the shadow apply and later effects that read the buffer.
 - The whole chain is skipped when the main render toggle (RenderEffects) is off, when the player has no parent cell, or when an overlay (terminal, lockpicking) is on while the menu background is ready.
 
 Gates, in order:
@@ -4252,7 +4252,7 @@ composite over the picture.
 ### 2. When it runs
 
 - Only inside the point-shadow block of the pre-tonemapping stage (ShaderManager, RenderEffectsPreTonemapping), after depth and normals
-  exist and after the ray-tracing, capsule and back-depth steps. The order inside the block is: optional lamp mask, the main point-shadow
+  exist and after the ray-tracing and back-depth steps. The order inside the block is: optional lamp mask, the main point-shadow
   pass (PointShadows), the outdoor batches (if ExteriorLightPoints is above 12), then PointShadows2, then the outdoor ray-traced lamp
   mask, then the restore of the fade constant. The indoor lamp-contact pass comes after the whole block.
 - The block runs when the buffer is needed: outdoors when the exterior shadows effect is enabled, indoors when the interior shadows
@@ -5622,6 +5622,12 @@ sun's shader with one change: it writes one channel of an rgba16f mask, read bac
   for it in the slim slots).
 
 ## ShadowsInteriors
+
+Capsule shadows removed (2026-11-27, owner: "just remove the capsule stuff from the code"): the experiment `[Shaders.ShadowsInteriors.Capsules]`
+(people's lamp shadows from capsules round their bones, contact shadows toward 3 lamps, DropActors; off by default, shelved in releases since
+11-16) is gone: `core/CapsuleShadows.h`, its pass, its share of the RT lamp-shadow buffer (`RtLampShadows` ScreenCompiledIn / ScreenSourceFrame),
+its menu rows and defaults. Settings step 110 deletes the section from a saved file; it is on the Retired list. Indoor contact shadows for lamps:
+`[Shaders.ShadowsExteriors.SSShadows] Lamps` (Bend, 2 lamps by default).
 
 REWRITTEN 2026-11-02 (branch claude/rw3-lights): the shaders are new, written from this spec (Effects/ShadowsInteriors.fx.hlsl; Compute/ShadowsInteriorsBlur.frag and ShadowsInteriorsApply.frag). The C++ and the settings are unchanged. Changes from the old file are marked below.
 
