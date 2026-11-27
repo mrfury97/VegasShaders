@@ -1093,7 +1093,7 @@ namespace {
 	volatile LONG StallStop = 0;
 	HANDLE StallThread = nullptr, StallRenderThread = nullptr;
 	DWORD StallRenderThreadId = 0;
-	UINT_PTR StallStackBase = 0;
+	const volatile NT_TIB* StallTeb = nullptr;	// the render thread's TEB (StackBase, StackLimit read fresh while it is suspended)
 	const char* const* StallStageStack = nullptr;	// the render thread's SessionLog::Stages (thread_local: its addresses, read from here)
 	const unsigned* StallStageDepth = nullptr;
 	void (*StallExtra)(char*, unsigned) = nullptr;
@@ -1102,21 +1102,23 @@ namespace {
 	double StallNowMs(LONG64 qpc) { return StallQpcFrequency ? (double)qpc * 1000.0 / (double)StallQpcFrequency : 0.0; }
 
 	// The render thread's instruction pointer and the return addresses on its stack (a scan, as the CRASH lines'), suspended only while
-	// GetThreadContext runs and its stack is copied (no lock, no allocation in between)
+	// GetThreadContext runs and its stack is copied. (2026-11-28, the Performance probe's sampler rules) While it is suspended: no lock,
+	// no allocation, no exception handler (SEH while another thread is frozen was the old risk): its TEB's StackBase and StackLimit are
+	// read fresh and only [ESP, StackBase) with ESP >= StackLimit is copied -- that range is committed, so the copy cannot fault.
 	unsigned StallSample(UINT_PTR& eip, UINT_PTR* out, unsigned max) {
 		static UINT_PTR copy[4096];	// 16 KB of stack (the watchdog thread is the only user)
 		eip = 0;
-		if (!StallRenderThread || SuspendThread(StallRenderThread) == (DWORD)-1) return 0;
+		if (!StallRenderThread || !StallTeb || SuspendThread(StallRenderThread) == (DWORD)-1) return 0;
 		CONTEXT ctx = {};
 		ctx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
 		size_t words = 0;
 		if (GetThreadContext(StallRenderThread, &ctx)) {
 			eip = ctx.Eip;
 			const UINT_PTR start = ctx.Esp;
-			if (start && StallStackBase > start) {
-				words = (std::min)((size_t)((StallStackBase - start) / sizeof(UINT_PTR)), sizeof(copy) / sizeof(copy[0]));
-				__try { memcpy(copy, (const void*)start, words * sizeof(UINT_PTR)); }
-				__except (EXCEPTION_EXECUTE_HANDLER) { words = 0; }
+			const UINT_PTR base = (UINT_PTR)StallTeb->StackBase, limit = (UINT_PTR)StallTeb->StackLimit;
+			if (start && start >= limit && start < base) {
+				words = (std::min)((size_t)((base - start) / sizeof(UINT_PTR)), sizeof(copy) / sizeof(copy[0]));
+				memcpy(copy, (const void*)start, words * sizeof(UINT_PTR));
 			}
 		}
 		ResumeThread(StallRenderThread);
@@ -1358,7 +1360,7 @@ void SessionLog::StallWatch::RenderBegin() {
 		StallRenderThreadId = GetCurrentThreadId();
 		StallExeBase = GetModuleHandleA(nullptr);
 		StallRenderThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, StallRenderThreadId);
-		StallStackBase = (UINT_PTR)((const NT_TIB*)NtCurrentTeb())->StackBase;
+		StallTeb = (const volatile NT_TIB*)NtCurrentTeb();	// on the render thread
 		StallStageStack = SessionLog::Stages::Stack;
 		StallStageDepth = &SessionLog::Stages::Depth;
 		StallThread = CreateThread(nullptr, 64 * 1024, StallMain, nullptr, 0, nullptr);
