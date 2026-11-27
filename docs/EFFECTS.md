@@ -5369,8 +5369,9 @@ CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
 - Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1);
   only a texel out of view goes to the world cube, at `max(CubeFade x 8, 0.03)` (half in ~23 frames: about as stale as the world cube's
   own faces, redrawn every 96 units). Out-of-view texels used to forget what was seen in ~6 frames, now ~23.
-- `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a missing
-  key reads 1 = the look before it). ONE strength for every reader: the Reflections passes (`Reflections.glsl` / .fx `EnvAlong`: the
+- `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a player's
+  file without the key gets the defaults file's 1.5; 1 is the look before it. RT Resolve's bounce miss (`ReflectionsRTResolve.frag` ~52, RT
+  reflections only) still reads the cube at full share whatever k: the one reader k does not scale). ONE strength for every reader: the Reflections passes (`Reflections.glsl` / .fx `EnvAlong`: the
   trace's and RT Resolve's cube share, the weapon branch), metal and the env maps (`TESR_EnvCube`). k up to 1 scales the cube's share
   (EnvAlong's coverage, the metal's and env pass's CubeReflections share) by k; above 1, smooth surfaces read the cube k times sharper
   (`CubeLod` / `LiveCube`: lod x 1/k at roughness 0.2 or less, back to the plain lod in a straight ramp by 0.5, so rough dry ground keeps
