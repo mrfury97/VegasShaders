@@ -293,8 +293,10 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 	// UNOFFICIAL 2026-11-07 (rt-shutdown): the window closing (Alt+F4, the X, Windows logging off) may end the game without xNVSE's
 	// ExitGame messages: the RT helper's shutdown first (RtCore::Shutdown; nothing when RT never ran, ~5 s at most). These arrive
 	// through the game's message pump on its main thread, outside a frame. (A WM_CLOSE the game then ignored leaves RT off.)
-	if (msg == WM_CLOSE || msg == WM_DESTROY || (msg == WM_ENDSESSION && wParam))
+	if (msg == WM_CLOSE || msg == WM_DESTROY || (msg == WM_ENDSESSION && wParam)) {
 		RtCore::Shutdown(msg == WM_CLOSE ? "the game window is closing (WM_CLOSE)" : msg == WM_DESTROY ? "the game window is closing (WM_DESTROY)" : "Windows is ending the session");
+		DeepProbe::OnGameExit();	// UNOFFICIAL 2026-11-28: live mode's final report (the writer gets at most 1 s)
+	}
 
 	if (msg == WM_ACTIVATE && LOWORD(wParam) == WA_INACTIVE) SetOverlayVisible(false);
 
@@ -453,6 +455,28 @@ static void PollMenuKeys() {
 	}
 }
 
+// UNOFFICIAL 2026-11-28 (deepprobe-live): the Performance probe's live-mode key ([Main.Develop.PerformanceProbe] LiveKey, Shift by
+// default) starts live mode or stops any running capture. Polled like the menu key (DXVK swallows key messages), only while the game
+// window is in front and no text box has the keyboard. The settings are read again every ~2 s, not every frame.
+static void PollProbeKey() {
+	if (!TheSettingManager) return;
+	static int vk = 0, frames = 0;
+	static bool needShift = true;
+	if (frames-- <= 0) {
+		frames = 120;
+		vk = VkForScanCode((BYTE)TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveKey"));
+		needShift = TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveKeyShift") != 0;
+	}
+	static KeyEdge probeKey;
+	if (!vk) { probeKey.Rose(false); return; }
+	HWND front = GetForegroundWindow();
+	DWORD pid = 0;
+	if (front) GetWindowThreadProcessId(front, &pid);
+	const bool typing = ImGuiManager::IsVisible() && ImGui::GetIO().WantTextInput;
+	const bool down = pid == GetCurrentProcessId() && !typing && KeyHeld(vk) && (!needShift || KeyHeld(VK_SHIFT));
+	if (probeKey.Rose(down)) DeepProbe::ToggleLive();
+}
+
 // Screenshot mode hands input back to the game (and hides the cursor) until it ends.
 static void FollowScreenshotMode() {
 	static bool wasOn = false;
@@ -587,6 +611,7 @@ void ImGuiManager::NewFrame() {
 	if (gOverlay.open && !InterfaceManager->IsActive(Menu::MenuType::kMenuType_None)) SetOverlayVisible(false);
 
 	PollMenuKeys();
+	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_None) || gOverlay.open) PollProbeKey();	// in game, not in the game's menus
 	if (gOverlay.open) {
 		FollowScreenshotMode();
 		PollInsertKey();
@@ -8493,15 +8518,143 @@ static void RenderProfilerIndicator() {
 	};
 
 	if (prof) drawBadge("PROF", IM_COL32(230, 60, 60, 190));
-	if (probe) {
+	if (probe && !DeepProbe::LiveActive()) {
 		char buf[32];
 		sprintf_s(buf, "PROBE %.1fs", DeepProbe::RemainingSeconds());
 		drawBadge(buf, IM_COL32(245, 175, 45, 220));
 	}
+	if (DeepProbe::LiveActive()) {
+		// UNOFFICIAL 2026-11-28 (deepprobe-live): the badge, and with LiveHud a few lines of the 10 s window while the menu is closed
+		const LARGE_INTEGER t0 = [] { LARGE_INTEGER t; QueryPerformanceCounter(&t); return t; }();
+		const int secs = (int)DeepProbe::LiveSeconds();
+		char buf[64];
+		sprintf_s(buf, "LIVE %d:%02d", secs / 60, secs % 60);
+		drawBadge(buf, IM_COL32(80, 200, 120, 220));
+		static int hudCheck = 0;
+		static bool hud = true;
+		if (hudCheck-- <= 0) { hudCheck = 120; hud = TheSettingManager && TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveHud") != 0; }
+		if (hud && !gOverlay.open) {
+			const DeepProbe::LiveView& v = DeepProbe::Live(10);
+			auto line = [&](const char* text) {
+				const ImVec2 size = ImGui::CalcTextSize(text);
+				const ImVec2 pos(display.x - margin - size.x, y);
+				draw->AddText(ImVec2(pos.x + 1, pos.y + 1), IM_COL32(0, 0, 0, 160), text);
+				draw->AddText(pos, IM_COL32(225, 225, 225, 200), text);
+				y += size.y + 1.0f;
+			};
+			char text[160];
+			sprintf_s(text, "%.1f ms (10 s) | 1 s %.1f | p99 %.1f | worst %.1f", v.avg10Ms, v.avg1Ms, v.p99SessionMs, v.worst10Ms);
+			line(text);
+			sprintf_s(text, "spikes %u | probe %.2f ms/f%s", v.spikes, v.probeMs, v.samplerOff ? " | SAMPLER OFF" : "");
+			line(text);
+			for (size_t i = 0, shown = 0; i < v.dlls.size() && shown < 3; i++) {
+				if (v.dlls[i].role == std::string("Game") || v.dlls[i].role == std::string("OS / CRT") || v.dlls[i].role == std::string("Windows")) continue;
+				sprintf_s(text, "%.40s %.2f ms", v.dlls[i].name.c_str(), v.dlls[i].nearMs);
+				line(text);
+				shown++;
+			}
+		}
+		LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+		DeepProbe::AddUiCost(t1.QuadPart - t0.QuadPart);
+	}
 }
 
+// UNOFFICIAL 2026-11-28 (deepprobe-live): the probe window's Live tab: a 1 s / 10 s / session window over live mode's counters.
+static void DrawDeepProbeLive() {
+	static int window = 10;
+	ImGui::TextUnformatted("Window:");
+	ImGui::SameLine();
+	if (ImGui::RadioButton("1 s", window == 1)) window = 1;
+	ImGui::SameLine();
+	if (ImGui::RadioButton("10 s", window == 10)) window = 10;
+	ImGui::SameLine();
+	if (ImGui::RadioButton("Session", window == 0)) window = 0;
+	const DeepProbe::LiveView& v = DeepProbe::Live(window);
+	if (v.nextAutosaveSec >= 0.0) {
+		ImGui::SameLine();
+		ImGui::TextDisabled("| report folder rewritten in %.0f s: %s", v.nextAutosaveSec, v.folder.c_str());
+	}
+
+	ImGui::Text("Frame: %.2f ms in this window (%.1f fps) | 1 s %.2f | 10 s %.2f | session %.2f, p99 %.1f | worst (10 s) %.1f ms | %u frames, %u spikes",
+		v.windowAvgMs, v.windowAvgMs > 0.0 ? 1000.0 / v.windowAvgMs : 0.0, v.avg1Ms, v.avg10Ms, v.avgSessionMs, v.p99SessionMs, v.worst10Ms, v.frames, v.spikes);
+	ImGui::Text("Split: Game update %.2f ms | Game render CPU %.2f ms | Present / GPU wait %.2f ms", v.updateMs, v.renderMs, v.presentMs);
+	const ImVec4 costColour = v.samplerOff ? ImVec4(1.0f, 0.45f, 0.35f, 1.0f) : ImVec4(0.6f, 0.85f, 1.0f, 1.0f);
+	ImGui::TextColored(costColour, "Probe cost: ~%.3f ms/frame (sampler %.3f: %.1f us x %.0f samples/s; script timing %.3f; bookkeeping + drawing %.3f)%s",
+		v.probeMs, v.probeSamplerMs, v.stallUs, v.samplesPerSec, v.probeScriptMs, v.probeOwnMs,
+		v.samplerOff ? (v.watchdogTrips ? " | SAMPLER OFF: the watchdog stopped it (see the log)" : " | SAMPLER OFF") : "");
+
+	// The last 300 frames
+	float recent[DeepProbe::kRecent];
+	for (unsigned i = 0; i < DeepProbe::kRecent; i++) recent[i] = v.recent[(v.recentHead + i) % DeepProbe::kRecent];
+	ImGui::PlotLines("##probe_recent", recent, (int)DeepProbe::kRecent, 0, "last 300 frames (ms)", 0.0f, (std::max)(34.0f, (float)v.worst10Ms * 1.1f), ImVec2(-1.0f, 60.0f));
+
+	const ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp;
+	if (ImGui::BeginTable("##live_cols", 2, ImGuiTableFlags_SizingStretchSame)) {
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextColored(MenuSkin::Heading(0.25f), "DLLs (main thread, %u samples)", v.windowSamples);
+		if (ImGui::BeginTable("##live_dlls", 4, flags)) {
+			ImGui::TableSetupColumn("Module"); ImGui::TableSetupColumn("Role"); ImGui::TableSetupColumn("Near ms"); ImGui::TableSetupColumn("Own ms");
+			ImGui::TableHeadersRow();
+			for (const auto& d : v.dlls) {
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(d.name.c_str());
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(d.role.c_str());
+				ImGui::TableNextColumn(); ImGui::Text("%.3f", d.nearMs);
+				ImGui::TableNextColumn(); ImGui::Text("%.3f", d.ownMs);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TableNextColumn();
+		ImGui::TextColored(MenuSkin::Heading(0.25f), "Engine stages (CpuSplit, ms/frame)");
+		if (ImGui::BeginTable("##live_stages", 2, flags)) {
+			for (const auto& st : v.stages) {
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(st.name);
+				ImGui::TableNextColumn(); ImGui::Text("%.2f", st.ms);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::TextColored(MenuSkin::Heading(0.25f), "Scripts by plugin (exact, ms/frame)");
+		if (ImGui::BeginTable("##live_scripts", 2, flags)) {
+			for (const auto& m : v.scriptMods) {
+				ImGui::TableNextRow();
+				ImGui::TableNextColumn(); ImGui::TextUnformatted(m.name.c_str());
+				ImGui::TableNextColumn(); ImGui::Text("%.3f", m.ms);
+			}
+			ImGui::EndTable();
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::TextColored(MenuSkin::Heading(0.25f), "Latest spikes (newest first)");
+	if (v.spikesList.empty()) ImGui::TextDisabled("None yet.");
+	else if (ImGui::BeginTable("##live_spikes", 5, flags)) {
+		ImGui::TableSetupColumn("Ago"); ImGui::TableSetupColumn("ms"); ImGui::TableSetupColumn("Top near DLLs (sampled)");
+		ImGui::TableSetupColumn("Top stage"); ImGui::TableSetupColumn("Top script plugin");
+		ImGui::TableHeadersRow();
+		for (const auto& sp : v.spikesList) {
+			ImGui::TableNextRow();
+			ImGui::TableNextColumn(); ImGui::Text("%.0f s", sp.agoSec);
+			ImGui::TableNextColumn(); ImGui::Text("%.1f", sp.ms);
+			ImGui::TableNextColumn(); ImGui::TextUnformatted(sp.dlls.empty() ? "(pending / no sample)" : sp.dlls.c_str());
+			ImGui::TableNextColumn(); ImGui::TextUnformatted(sp.stage.empty() ? "-" : sp.stage.c_str());
+			ImGui::TableNextColumn(); ImGui::TextUnformatted(sp.script.empty() ? "-" : sp.script.c_str());
+		}
+		ImGui::EndTable();
+	}
+}
+
+static void DrawDeepProbeWindowBody();
 static void DrawDeepProbeWindow() {
 	if (!gMenu.deepProbeOpen) return;
+	LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
+	DrawDeepProbeWindowBody();
+	LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+	DeepProbe::AddUiCost(t1.QuadPart - t0.QuadPart);	// counted in the probe's own cost while a capture runs
+}
+
+static void DrawDeepProbeWindowBody() {
 	ImGui::SetNextWindowSize(ImVec2(820.0f, 560.0f), ImGuiCond_FirstUseEver);
 	if (!ImGui::Begin("Performance probe###DeepProbe", &gMenu.deepProbeOpen)) { ImGui::End(); return; }
 
@@ -8510,7 +8663,14 @@ static void DrawDeepProbeWindow() {
 		"every running script and ESP/ESM mod, Vegas Shaders GPU passes, and a 1-frame draw-call / light / actor census.");
 	ImGui::Spacing();
 
-	if (running) {
+	const bool live = DeepProbe::LiveActive();
+	if (running && live) {
+		if (ImGui::Button("Stop Live")) DeepProbe::RequestStop();
+		ImGui::SameLine();
+		const int secs = (int)DeepProbe::LiveSeconds();
+		ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.5f, 1.0f), "Live for %d:%02d (play normally; the key or this button stops it)", secs / 60, secs % 60);
+	}
+	else if (running) {
 		if (ImGui::Button("Stop Now")) DeepProbe::RequestStop();
 		ImGui::SameLine();
 		ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.25f, 1.0f), "Capturing... %.1f s left (play normally in the slow spot)", DeepProbe::RemainingSeconds());
@@ -8528,28 +8688,42 @@ static void DrawDeepProbeWindow() {
 		if (ImGui::RadioButton("20s", gMenu.deepProbeDuration == 20)) gMenu.deepProbeDuration = 20;
 		ImGui::SameLine();
 		ImGui::Checkbox("Auto-close menu", &gMenu.deepProbeAutoClose);
+		// UNOFFICIAL 2026-11-28 (deepprobe-live): live mode runs until stopped
+		if (ImGui::Button("Start Live")) DeepProbe::RequestStartLive();
+		if (ImGui::IsItemHovered())
+			ImGui::SetTooltip("Records until stopped (this button or the LiveKey, Shift+F12 by default): 1 s / 10 s / session windows here,\n"
+				"spike frames with their top DLLs, a small HUD while the menu is closed, and a report folder\n%s\\DeepProbe_Live_<time>\\ rewritten every minute.",
+				Paths::LogsFolder);
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", DeepProbe::LastStatus().c_str());
 	}
 
 	const DeepProbe::Summary& s = DeepProbe::LastSummary();
-	if (s.valid) {
-		ImGui::SameLine();
-		if (ImGui::Button("Copy Full Report")) {
-			ImGui::SetClipboardText(DeepProbe::LastReportText().c_str());
-			gMenu.probeCopiedAt = ImGui::GetTime();
-		}
-		if (gMenu.probeCopiedAt >= 0.0 && ImGui::GetTime() - gMenu.probeCopiedAt < 4.0) {
+	if (s.valid || live) {
+		if (s.valid) {
 			ImGui::SameLine();
-			ImGui::TextColored(MenuSkin::Heading(0.25f), "Copied!");
+			if (ImGui::Button("Copy Full Report")) {
+				ImGui::SetClipboardText(DeepProbe::LastReportText().c_str());
+				gMenu.probeCopiedAt = ImGui::GetTime();
+			}
+			if (gMenu.probeCopiedAt >= 0.0 && ImGui::GetTime() - gMenu.probeCopiedAt < 4.0) {
+				ImGui::SameLine();
+				ImGui::TextColored(MenuSkin::Heading(0.25f), "Copied!");
+			}
+			ImGui::TextDisabled("Saved: %s%s", DeepProbe::LastReportPath().c_str(), s.live && !s.final ? " (autosave)" : "");
+			ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.35f, 1.0f));
+			ImGui::TextWrapped("Verdict: %s", s.verdict.c_str());
+			ImGui::PopStyleColor();
 		}
-		ImGui::TextDisabled("Saved: %s", DeepProbe::LastReportPath().c_str());
-		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.35f, 1.0f));
-		ImGui::TextWrapped("Verdict: %s", s.verdict.c_str());
-		ImGui::PopStyleColor();
 		ImGui::Separator();
 
 		const ImGuiTableFlags tblFlags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
 		if (ImGui::BeginTabBar("##deep_probe_tabs")) {
-			if (ImGui::BeginTabItem("Overview")) {
+			if (live && ImGui::BeginTabItem("Live")) {
+				DrawDeepProbeLive();
+				ImGui::EndTabItem();
+			}
+			if (s.valid && ImGui::BeginTabItem("Overview")) {
 				ImGui::Text("FPS: avg %.1f (%.2f ms) | p50 %.2f | p95 %.2f | p99 %.2f | 1%% low %.1f fps | 0.1%% low %.1f fps | %u frames (%.1fs)",
 					s.avgFps, s.avgMs, s.p50Ms, s.p95Ms, s.p99Ms, s.low1Fps, s.low01Fps, s.frames, s.durationSec);
 				ImGui::Text("CPU Split: Game Update %.2f ms/f | Game Render CPU %.2f ms/f | Present/Wait %.2f ms/f | AI1 %.2f ms | AI2 %.2f ms",
@@ -8594,20 +8768,26 @@ static void DrawDeepProbeWindow() {
 				}
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("DLLs / Plugins")) {
-				ImGui::Text("Main thread 1 kHz samples: %u (AI1: %u, AI2: %u)", s.samplerMainSamples, s.samplerAi1Samples, s.samplerAi2Samples);
-				if (ImGui::BeginTable("##dlls_tbl", 7, tblFlags, ImVec2(0.0f, 260.0f))) {
+			if (s.valid && ImGui::BeginTabItem("DLLs / Plugins")) {
+				ImGui::Text("Main thread samples: %u (AI1: %u, AI2: %u) | probe cost ~%.3f ms/f (sampler %.3f, %.1f us/sample; scripts %.3f; bookkeeping %.3f)%s",
+					s.samplerMainSamples, s.samplerAi1Samples, s.samplerAi2Samples, s.probeMs, s.probeSamplerMs, s.stallUsPerSample, s.probeScriptMs, s.probeOwnMs,
+					s.watchdogTrips ? " | WATCHDOG turned the sampler off" : "");
+				ImGui::TextDisabled("Excl = time in the module itself; Near = the first plugin DLL among the next return addresses (engine work a plugin's hook calls).");
+				if (ImGui::BeginTable("##dlls_tbl", 8, tblFlags, ImVec2(0.0f, 260.0f))) {
 					ImGui::TableSetupColumn("Module"); ImGui::TableSetupColumn("Role");
 					ImGui::TableSetupColumn("Excl ms/f"); ImGui::TableSetupColumn("Excl %");
+					ImGui::TableSetupColumn("Near ms/f");
 					ImGui::TableSetupColumn("Incl ms/f"); ImGui::TableSetupColumn("Wait %");
 					ImGui::TableSetupColumn("Top Stage");
 					ImGui::TableHeadersRow();
 					for (const auto& d : s.dlls) {
 						ImGui::TableNextRow();
 						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.name.c_str());
+						if (!d.mo2Mod.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("MO2 mod: %s", d.mo2Mod.c_str());
 						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.role.c_str());
 						ImGui::TableNextColumn(); ImGui::Text("%.2f", d.exclMs);
 						ImGui::TableNextColumn(); ImGui::Text("%.1f%%", d.exclPct);
+						ImGui::TableNextColumn(); ImGui::Text("%.2f", d.nearMs);
 						ImGui::TableNextColumn(); ImGui::Text("%.2f (%.1f%%)", d.inclMs, d.inclPct);
 						ImGui::TableNextColumn(); ImGui::Text("%.0f%%", d.waitPct);
 						ImGui::TableNextColumn(); ImGui::TextUnformatted(d.topStage.c_str());
@@ -8633,7 +8813,7 @@ static void DrawDeepProbeWindow() {
 				}
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Scripts & Mods")) {
+			if (s.valid && ImGui::BeginTabItem("Scripts & Mods")) {
 				ImGui::Text("Total Script Self Time: %.3f ms/frame across %llu calls (%s)",
 					s.totalScriptSelfMs, s.totalScriptCalls, s.scriptHookOk ? "ScriptRunner hook active" : "hook unavailable");
 				if (ImGui::BeginTable("##smods_tbl", 5, tblFlags, ImVec2(0.0f, 165.0f))) {
@@ -8671,7 +8851,7 @@ static void DrawDeepProbeWindow() {
 				}
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Stages & GPU")) {
+			if (s.valid && ImGui::BeginTabItem("Stages & GPU")) {
 				ImGui::TextColored(MenuSkin::Heading(0.25f), "Engine CPU Stages (CpuSplit)");
 				if (ImGui::BeginTable("##stages_tbl", 6, tblFlags, ImVec2(0.0f, 200.0f))) {
 					ImGui::TableSetupColumn("Stage"); ImGui::TableSetupColumn("Avg ms");
@@ -8707,7 +8887,7 @@ static void DrawDeepProbeWindow() {
 				}
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Scene Census")) {
+			if (s.valid && ImGui::BeginTabItem("Scene Census")) {
 				ImGui::Text("Draws (1 frame): %u total (World %u | 1st-P %u | Refl %u | Other %u) | Skinned: %u | Binds: %u",
 					s.censusTotalDraws, s.censusWorldDraws, s.censusFirstPersonDraws, s.censusReflDraws, s.censusOtherDraws, s.censusSkinnedDraws, s.censusShaderBinds);
 				ImGui::Text("Active Point Lights: %u / %u | Actors (H/MH/ML/L): %u / %u / %u / %u",
@@ -8739,7 +8919,25 @@ static void DrawDeepProbeWindow() {
 				}
 				ImGui::EndTabItem();
 			}
-			if (ImGui::BeginTabItem("Full Report")) {
+			if (s.valid && !s.spikes.empty() && ImGui::BeginTabItem("Spikes")) {
+				ImGui::Text("%u spike frames (over SpikeMs or 2.5x the 10 s mean; loading screens left out); the newest %u:", s.spikesTotal, (unsigned)s.spikes.size());
+				if (ImGui::BeginTable("##spikes_tbl", 5, tblFlags, ImVec2(0.0f, 0.0f))) {
+					ImGui::TableSetupColumn("At s"); ImGui::TableSetupColumn("ms"); ImGui::TableSetupColumn("Top near DLLs (sampled)");
+					ImGui::TableSetupColumn("Top stage"); ImGui::TableSetupColumn("Top script plugin");
+					ImGui::TableHeadersRow();
+					for (const auto& sp : s.spikes) {
+						ImGui::TableNextRow();
+						ImGui::TableNextColumn(); ImGui::Text("%.1f", sp.atSec);
+						ImGui::TableNextColumn(); ImGui::Text("%.1f", sp.ms);
+						ImGui::TableNextColumn(); ImGui::TextUnformatted(sp.dlls.empty() ? "(no sample)" : sp.dlls.c_str());
+						ImGui::TableNextColumn(); if (sp.stage.empty()) ImGui::TextUnformatted("-"); else ImGui::Text("%s %.1f ms", sp.stage.c_str(), sp.stageMs);
+						ImGui::TableNextColumn(); if (sp.script.empty()) ImGui::TextUnformatted("-"); else ImGui::Text("%s %.2f ms", sp.script.c_str(), sp.scriptMs);
+					}
+					ImGui::EndTable();
+				}
+				ImGui::EndTabItem();
+			}
+			if (s.valid && ImGui::BeginTabItem("Full Report")) {
 				ImGui::BeginChild("##probe_full_txt", ImVec2(0.0f, 0.0f), true);
 				const std::string& full = DeepProbe::LastReportText();
 				ImGui::TextUnformatted(full.c_str(), full.c_str() + full.size());
@@ -8752,6 +8950,7 @@ static void DrawDeepProbeWindow() {
 	else if (!running) {
 		ImGui::Separator();
 		ImGui::TextDisabled("Click 'Start Probe' while standing in a laggy spot. Results open automatically when finished and save to %s\\DeepProbe_<time>.txt.", Paths::LogsFolder);
+		ImGui::TextDisabled("'Start Live' (or Shift+F12) records until stopped, with live windows, spike breakdowns and a report folder rewritten every minute.");
 	}
 	ImGui::End();
 }

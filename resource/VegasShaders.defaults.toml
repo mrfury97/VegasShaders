@@ -47,6 +47,17 @@ LogEvery = 0            # UNOFFICIAL DEBUGGING TOOL (2026-10-26): with Enabled, 
 [_Main.Develop.ShaderCounters]
 ReflectionsHiZ = false  # UNOFFICIAL DEBUGGING TOOL (2026-10-26), needs the DXVK fork 1.5-debug and Reflections' HiZ trace running (NvrDxvkPasses, HiZ, outdoors): the trace runs its counting build (Compute\ReflectionsTraceHiZCount.spv) that counts how every reflected ray's walk ended (the DebugView 9 rules), the cells walked and the DebugView 10 skips, plus the values of the pixel inspector's pixel; per-frame averages logged once a second ('SHADER COUNTERS') and shown in the pixel inspector window. Read back without waiting. Costs a little GPU time while on (atomic counters in every trace pixel). Off: the normal trace, nothing created. Applies immediately.
 
+[_Main.Develop.PerformanceProbe]
+LiveKey = 88            # UNOFFICIAL (2026-11-28) Help > Performance probe, live mode: the key that starts live mode, or stops any running capture (DirectInput code, as the menu key: 88 = F12; 0 = no key). Polled like the menu key, so it works under DXVK; only while the game window is in front and no text box has the keyboard.
+LiveKeyShift = true     # UNOFFICIAL (2026-11-28): LiveKey needs Shift held (Shift+F12 by default).
+LiveSampleHz = 500      # UNOFFICIAL (2026-11-28): live mode's main-thread samples per second (50-2000). Each sample stalls the main thread ~20-30 us; the probe window shows the cost live. The timed capture keeps 1000.
+NearDepth = 8           # UNOFFICIAL (2026-11-28): how many checked return addresses the "near" view searches for a plugin DLL (0-16; 0 = near is the own module).
+SpikeMs = 33.4          # UNOFFICIAL (2026-11-28): a frame longer than this (or 2.5x the last 10 s mean) is a spike; loading screens never are. Both the timed capture and live mode.
+MaxSpikes = 200         # UNOFFICIAL (2026-11-28): spike frames kept with their breakdown (the newest; 1-5000).
+AutosaveSeconds = 60.0  # UNOFFICIAL (2026-11-28): live mode rewrites its report folder this often (0 = only at stop).
+FrameCsvMaxMB = 64      # UNOFFICIAL (2026-11-28): live mode's frames.csv is renamed to frames.1.csv at this size (one old file kept).
+LiveHud = true          # UNOFFICIAL (2026-11-28): while live mode runs and the menu is closed, a few lines under the LIVE badge (frame time, spikes, the probe's cost, the top DLLs). Off: only the badge.
+
 [_Main.Transitions.Main]
 TransitionCurvePower = 1.0             # Day/night transition curve exponent. 1.0 = current smoothstep behavior. Higher values sharpen the transition; lower values soften it.
 
