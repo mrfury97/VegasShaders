@@ -105,6 +105,11 @@ D3DXVECTOR2 AmbientOcclusionEffect::SkyTakeComposite() {
 }
 // UNOFFICIAL 2026-10-20 (skyamb): AmbientLight renders this frame (its ShouldRender: on, loaded, not under water) and hosts the sky test
 // (this effect's file loaded: the sky pass and the sky target are this effect's).
+bool AmbientOcclusionEffect::AmbientLightWantsRt() const {
+	AmbientLightEffect* al = TheShaderManager ? TheShaderManager->Effects.AmbientLight : nullptr;
+	return al && al->Enabled && (RtAmbient::Current.Enabled || RtAmbient::Current.GI || RtAmbient::Current.Sky);
+}
+
 bool AmbientOcclusionEffect::SkyHostedByAmbientLight() {
 	AmbientLightEffect* al = TheShaderManager->Effects.AmbientLight;
 	AmbientOcclusionEffect* ao = TheShaderManager->Effects.AmbientOcclusion;
@@ -413,6 +418,10 @@ bool AmbientOcclusionEffect::ExtDedicated(IDirect3DDevice9* Device, IDirect3DSur
 // before ExtConstants and ExtEstimateRT. (2026-11-03: one helper for ExtDedicated and Render's D3D9 loop, which runs the RT estimate in
 // rect frames.) The history is kept only if it was made a moment ago at this AO size and RenderRect scale (rect vs native counts).
 void AmbientOcclusionEffect::RtTemporalSetup(const D3DSURFACE_DESC& AoDesc) {
+	if (rtHistoryTexture[0] != rtHistorySeen) {
+		RtHistoryValid = false;
+		rtHistorySeen = rtHistoryTexture[0];
+	}
 	const double now = TheFrameRateManager->Time;
 	const bool rectSame = RtHistoryScale[0] == RtRectScaleX() && RtHistoryScale[1] == RtRectScaleY() && !RenderRect::ScaleChanged();	// (2026-11-03)
 	const bool continuous = !RtPlaceRestart() && RtHistoryValid && rtHistoryWidth == AoDesc.Width && rtHistoryHeight == AoDesc.Height && now - RtLastTime >= 0.0 &&
@@ -1361,6 +1370,7 @@ bool AmbientOcclusionEffect::ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTe
 		TheTextureManager->InitTexture("NVR_AORTHistory1", &rtHistoryTexture[1], &rtHistorySurface[1], Target.Width, Target.Height, D3DFMT_G16R16F);
 		rtHistoryWidth = Target.Width;
 		rtHistoryHeight = Target.Height;
+		rtHistorySeen = rtHistoryTexture[0];
 		RtHistoryValid = false;
 		RtTemporal.x = 0.0f;
 	}
@@ -1632,6 +1642,7 @@ void AmbientOcclusionEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the four passes as Vulkan passes first (ExtDedicated); false: nothing of the frame was
 	// committed and the D3D9 passes below draw it.
 	if (!ExtFailed && DxvkCompute::PassesOnRect() && ExtDedicated(Device, RenderTarget, RenderedSurface, textures, surfaces, layout, gtaoTechnique, orthoMap, skyVis)) {
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn);
 		if (deferCombine) deferredReady = true;	// nothing was written to the frame; the fog pass applies ResultTexture()
 		reportActive();
 		renderTime = timer.LogTime(deferCombine ? "AmbientOcclusion::Deferred" : "AmbientOcclusion::PackedAO");
@@ -1709,6 +1720,7 @@ void AmbientOcclusionEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 	Device->SetDepthStencilSurface(depthSurface);
 	if (depthSurface) depthSurface->Release();
 	if (SUCCEEDED(result) && deferCombine) {
+		EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn);
 		// Nothing was written to the frame; the fog pass applies ResultTexture().
 		deferredReady = true;
 		reportActive();
@@ -1728,6 +1740,7 @@ void AmbientOcclusionEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9*
 		EffectRecord::Render(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer);
 		return;
 	}
+	EffectStatus::Note(StatusSlot, Name, EffectStatus::Drawn);
 	reportActive();
 	renderTime = timer.LogTime("AmbientOcclusion::PackedAO");
 }

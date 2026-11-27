@@ -481,6 +481,18 @@ float3 EnvironmentFresnelF0(float roughness, float NdotV, float3 F0) {
 	return F0 * ab.x + F90 * ab.y;
 }
 
+float3 MultiScatterMetalBoostFx(float3 f0, float roughness, float NdotV, float metal) {
+	if (metal <= 0.001) return float3(1.0, 1.0, 1.0);
+	const float4 c0 = float4(-1.0, -0.0275, -0.572, 0.022);
+	const float4 c1 = float4(1.0, 0.0425, 1.04, -0.04);
+	float4 r = roughness * c0 + c1;
+	float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+	float2 ab = float2(-1.04, 1.04) * a004 + r.zw;
+	float ess = clamp(ab.x + ab.y, 0.12, 1.0);
+	float3 comp = 1.0 + f0 * (1.0 / ess - 1.0);
+	return lerp(float3(1.0, 1.0, 1.0), min(comp, float3(2.2, 2.2, 2.2)), metal);
+}
+
 float EnvironmentFresnel(float roughness, float NdotV) {
 	return EnvironmentFresnelF0(roughness, NdotV, float3(0.04, 0.04, 0.04)).x;
 }
@@ -488,7 +500,13 @@ float EnvironmentFresnel(float roughness, float NdotV) {
 #if REFL_MATERIAL_ON || REFL_GBUFFER_ON
 // UNOFFICIAL 2026-11-08 (perf-reflfix4) fallback metal F0 when AlbedoBuffer is unavailable.
 float3 ReflMetalF0(float3 colour, float roughness) {
-	return lerp(float3(0.95, 0.95, 0.95), saturate(colour), smoothstep(0.06, 0.15, roughness));
+	float3 c = saturate(colour);
+	float cMax = max(c.r, max(c.g, c.b));
+	float cMin = min(c.r, min(c.g, c.b));
+	float sat = (cMax - cMin) / max(cMax, 1.0e-4);
+	float achromaticOrDark = (1.0 - smoothstep(0.14, 0.36, sat)) * (1.0 - smoothstep(0.40, 0.70, cMax) * 0.5);
+	float toSilver = (1.0 - smoothstep(0.06, 0.15, roughness)) * achromaticOrDark;
+	return lerp(c, float3(0.95, 0.95, 0.95), toSilver);
 }
 #endif
 
@@ -535,10 +553,15 @@ float3 WetSkyReflectionLinearFx(float3 r) {
 
 // The sky along a world direction: the weather's horizon and zenith colours (as Specular reads it). Below the horizon,
 // nothing (the ground there is not on screen, and the sky would light it up).
-float3 SkyAlong(float3 worldDir) {
+// (2026-11-24 review) SkyGradientAlong: the same, not faded at the horizon; shared with the cube's backdrop (CubeBackdropFx).
+float3 SkyGradientAlong(float3 worldDir) {
 	float up = saturate(worldDir.z);
-	// (2026-11-26 mirror puddles) with the sky look (saturation, tint) as the sky is drawn: Compute/Reflections.glsl's cb.skyColor / horizonColor
-	return lerp(linearize(TESR_FogHorizonColor.rgb), linearize(TESR_FogSkyColor.rgb), sqrt(up)) * smoothstep(0.0, 0.15, worldDir.z);
+	// (2026-11-26 mirror puddles) with the sky look (saturation, tint) as the sky is drawn: Compute/Reflections.glsl's cb.skyColor / horizonColor.
+	// (2026-11-27 upstream 1.1.5 merge: upstream's SkyGradientAlong / SkyAlong split, our look colours; the horizon fade moved to SkyAlong.)
+	return lerp(linearize(TESR_FogHorizonColor.rgb), linearize(TESR_FogSkyColor.rgb), sqrt(up));
+}
+float3 SkyAlong(float3 worldDir) {
+	return SkyGradientAlong(worldDir) * smoothstep(0.0, 0.15, worldDir.z);
 }
 
 // Karis's reversible compression for averaging HDR samples: c / (1 + luminance), and back.
@@ -645,11 +668,52 @@ float4 GridAlong(float3 start, float3 worldR) {
 	return float4(radiance, share);
 }
 
+// CubeMode 1 and 2: what a direction the screen has not shown holds (Compute/ReflectionsCapture.frag CubeBackdrop, the same but for
+// its Vulkan-only sky panorama and CloudSky clouds).
+float3 CubeBackdropFx(float3 ndir) {
+	[branch] if (SkyFallback > 0.0) {
+		float3 horizonLin = linearize(TESR_FogHorizonColor.rgb);	// (2026-11-27 merge: the look horizon, as the Vulkan twin's cb.horizonColor)
+		float3 skyCol = SkyGradientAlong(ndir);
+		[branch] if (TESR_SunAmount.x > 0.02 && TESR_SunPosition.z > 0.0) {
+			float3 sunPos = normalize(TESR_SunPosition.xyz);
+			float sunCos = max(dot(ndir, sunPos), 0.0);
+			float corona = pow(sunCos, 48.0) * 0.45 + smoothstep(0.9985, 0.9998, sunCos) * 12.0;
+			skyCol += linearize(TESR_SunDiskColor.rgb) * (corona * saturate(TESR_SunAmount.x * 2.0) * smoothstep(0.0, 0.1, sunPos.z));
+		}
+		float3 groundLin = horizonLin * lerp(0.45, 0.18, saturate(-ndir.z * 2.0));
+		float3 env = lerp(groundLin, skyCol, smoothstep(-0.08, 0.06, ndir.z));
+		[branch] if (GridOn > 0.5) {
+			float4 g = GridAlong(0.0.xxx, ndir);
+			env = lerp(env, g.rgb, saturate(g.a));
+		}
+		return env;
+	}
+	float3 fallbackLin = linearize(TESR_FogHorizonColor.rgb) * 0.15;
+	[branch] if (GridOn > 0.5) {
+		float4 g = GridAlong(0.0.xxx, ndir);
+		return lerp(fallbackLin, g.rgb, saturate(g.a));
+	}
+	return fallbackLin;
+}
+
 // ---- 5: Capture, one cube face per draw ----
 float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float2 st = (vpos + 0.5) / CubeSize * 2.0 - 1.0;
 	float3 dir = FaceDirection(CubeFace, st);
-	float4 result = CubeReset > 0.0 ? 0.0 : texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0)) * (1.0 - CubeFade);
+	float4 result;
+	[branch] if (CubeOn >= 1.5) {
+		float3 ndir = normalize(dir);
+		float3 baseEnv = CubeBackdropFx(ndir);
+		[branch] if (CubeOn > 2.5) {
+			float4 world = texCUBElod(TESR_ReflectionsEnv, float4(ndir, 0.0));
+			baseEnv = lerp(baseEnv, world.rgb, saturate(world.a));
+		}
+		float decay = CubeOn > 2.5 ? max(CubeFade * 20.0, 0.12) : CubeFade;
+		float4 prev = texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0));
+		result = CubeReset > 0.0 ? float4(baseEnv, 1.0) : lerp(prev, float4(baseEnv, 1.0), decay);
+	} else {
+		result = CubeReset > 0.0 ? 0.0 : texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0)) * (1.0 - CubeFade);
+	}
 
 	float3 view = WorldToViewDir(dir);
 	[branch] if (view.z > 0.05) {
@@ -694,10 +758,12 @@ float4 FilterPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	[unroll] for (int y = 0; y < 4; y++) {
 		[unroll] for (int x = 0; x < 4; x++) {
 			float2 offset = (float2(x, y) - 1.5) / 4.0 * 1.5 * texel;
-			sum += texCUBElod(TESR_ReflectionsCaptureNew, float4(FaceDirection(CubeFace, st + offset), 0.0));
+			float4 s = texCUBElod(TESR_ReflectionsCaptureNew, float4(FaceDirection(CubeFace, st + offset), 0.0));
+			sum += float4(Tame(s.rgb), s.a);
 		}
 	}
-	return sum / 16.0;
+	float4 avg = sum / 16.0;
+	return float4(Untame(avg.rgb), avg.a);
 }
 
 // ---- 1: Trace, half resolution ----
@@ -972,7 +1038,7 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 		metalF0 = ReflMetalF0(tint, roughness);   // (perf-reflfix4)
 	}
 	float3 f0 = lerp(0.04.xxx, metalF0, SurfaceMetal);
-	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, NdotV, f0)) * saturate(reflection.a);
+	float3 share = saturate(amount * EnvironmentFresnelF0(roughness, NdotV, f0) * MultiScatterMetalBoostFx(metalF0, roughness, NdotV, SurfaceMetal)) * saturate(reflection.a);
 	float nonMetal = saturate(1.0 - SurfaceMetal);
 #else
 	float3 share = saturate(amount * EnvironmentFresnel(roughness, NdotV)).xxx * saturate(reflection.a);
@@ -1068,8 +1134,7 @@ technique Capture {
 	pass {
 		VertexShader = compile vs_3_0 FrameVS();
 		PixelShader = compile ps_3_0 CapturePS();
-		Texture[9] = <NoTexture>;   // writes the new capture cube; reads last frame's at s8
-		Texture[10] = <NoTexture>;
+		Texture[9] = <NoTexture>;   // writes the new capture cube; reads last frame's at s8 and world cube at s10
 	}
 }
 

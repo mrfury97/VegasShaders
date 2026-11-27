@@ -145,6 +145,15 @@ public:
 	// after it (FSR 2 / DLSS on GameSurface's rect -> the whole of it, depths upsampled and re-resolved, CombineDepth + Normals again
 	// at full size, RenderRect::End). UpscaleAfterEffects is also the fallback for frames whose chain did not run (no-op if nothing pends).
 	bool	UpscalePending() const { return Up.Deferred; }
+	IDirect3DSurface9*	UpscaleTarget() const { return Up.Target; }
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: flush a pending RenderScale v2 frame early before a mid-frame ImageSpaceManager::RenderEffect touches MainTarget
+	void	UpscaleDeferredEarly(IDirect3DSurface9* GameSurface, bool hasViewModel, UInt32 effectId, const char* callerModule, bool latchV2Off);
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: escalation latches & per-frame metadata for Diagnostics seam watchdog
+	static bool	IsDeferredV1Unsafe();
+	static void	ForceRenderScaleV1(const char* reason);
+	static void	ForceRenderScaleNative(const char* reason);
+	static void	ResetRenderScaleGuard();
+	static bool	RenderScaleGuardInfo(UINT& renderW, UINT& renderH, UINT& screenW, UINT& screenH, bool& isV2, float& scale, const char*& upscalerName);
 	// UNOFFICIAL 2026-10-28: the texture mip bias the frame's first world scene was drawn with (SetMipBias in BeginJitter; 0 = none).
 	// The land's tessellation reads it to keep its height lookups at their own detail level ([Shaders.Terrain.Displacement] IgnoreMipBias).
 	float	WorldMipBias() const { return worldMipBias; }
@@ -175,6 +184,8 @@ public:
 	bool				RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);
 	// UNOFFICIAL 2026-11-21: native-resolution DLAA / FSR 3.1 / FSR 2 in 16-bit pre-tonemap HDR (when RR did not run).
 	bool				PreTonemapNativeAA(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);
+	// UNOFFICIAL 2026-11-23: true when RenderScale < 1 is only skipped temporarily (Pip-Boy / menu / scope) so native FSR/DLSS does not reallocate 130+ MB targets.
+	bool				RenderScaleTempSkipped() const;
 
 private:
 	bool		historyValid = false;
@@ -307,7 +318,14 @@ private:
 		UINT		LoggedWidth = 0, LoggedHeight = 0;
 		int			LastSkip = -1;
 		bool		Deferred = false;		// v2: the world (and weapon) drawn small, the upscale waits for the end of the pre-tonemap chain
+		bool		SkippedTempThisFrame = false;	// UNOFFICIAL 2026-11-23: temporary per-frame RenderScale skip (Pip-Boy / menu / scope)
 		bool		V2Logged = false;
+		// UNOFFICIAL 2026-11-23 RenderScaleGuard: snapshot kept through OnFinalPicture after TAAEffect::Render clears Up.Upscaled / Up.AfterEffects
+		UInt32		LastGuardFrame = 0;
+		UINT		LastGuardRenderW = 0, LastGuardRenderH = 0, LastGuardScreenW = 0, LastGuardScreenH = 0;
+		bool		LastGuardV2 = false;
+		float		LastGuardScale = 1.0f;
+		const char*	LastGuardUpscaler = nullptr;
 	};
 	UpscaleStruct	Up;
 	bool	UpscaleBegin(bool firstWorld);		// decides RenderScale for this world scene; sets the camera port; true = active
@@ -316,7 +334,7 @@ private:
 	void	UpscaleReleaseTargets();
 	bool	UpscaleEnsureResources();
 	bool	UpscaleCheckDrawn(IDirect3DDevice9* Device);	// the world really was drawn small (else Failed for the session)
-	bool	UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth = true);	// the upscale itself (UpscaleWorld; v2: UpscaleAfterEffects, depth already resolved)
+	bool	UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth = true, bool hasViewModel = false);	// the upscale itself (UpscaleWorld; v2: UpscaleAfterEffects, depth already resolved)
 	// D3D9: colour + depth into the world's targets. v2: depthSource (default the world's depth) and colour = false (depth only) for
 	// the viewmodel depth; jittered = false reads it at its own pixels (the weapon is not jittered).
 	bool	UpscaleComposite(IDirect3DDevice9* Device, IDirect3DTexture9* fsrOutput, IDirect3DTexture9* depthSource = nullptr, bool colour = true, bool jittered = true);

@@ -101,6 +101,7 @@ namespace GearWeather {
 	inline bool PassFailed = false;
 	inline Levels Now;					// the amounts (auto)
 	inline float Sent[4] = {};			// what the pass gets this frame (x strengths, or forced)
+	inline float Anim[4] = {};			// x real-time clock (s, wrapped 3600), y active snowfall (0-1), z active sandstorm (0-1), w unused
 	inline bool Live = false;			// this frame: the switch on and something to draw
 	inline bool Tagging = false;		// the first-person render is under way and its draws take ids
 	inline UInt32 LastFrame = 0;
@@ -171,12 +172,24 @@ namespace GearWeather {
 		if (force >= 1 && force <= 4) { l = Levels(); (force == 1 ? l.wet : force == 2 ? l.frost : force == 3 ? l.sand : l.mud) = 1.0f; }
 		else if (force == 5) { l.wet = l.frost = l.sand = l.mud = 0.6f; }
 		const float all = (std::max)(TheSettingManager->GetSettingF(kSection, "GearWeatherStrength"), 0.0f);
+		const float frostMult = TheSettingManager->GetSettingF(kSection, "GearWeatherFrost");
+		const float sandMult = TheSettingManager->GetSettingF(kSection, "GearWeatherSand");
 		Sent[0] = Clamp01(l.wet * all * TheSettingManager->GetSettingF(kSection, "GearWeatherWet"));
-		Sent[1] = Clamp01(l.frost * all * TheSettingManager->GetSettingF(kSection, "GearWeatherFrost"));
-		Sent[2] = Clamp01(l.sand * all * TheSettingManager->GetSettingF(kSection, "GearWeatherSand"));
+		Sent[1] = Clamp01(l.frost * all * frostMult);
+		Sent[2] = Clamp01(l.sand * all * sandMult);
 		Sent[3] = Clamp01(l.mud * all * TheSettingManager->GetSettingF(kSection, "GearWeatherMud"));
+		float snowNow = (in.exterior && !in.underwater) ? Clamp01(in.snow) : 0.0f;
+		float stormNow = (in.exterior && !in.underwater) ? Clamp01(in.storm) : 0.0f;
+		if (force == 2) { snowNow = 1.0f; stormNow = 0.0f; }
+		else if (force == 3) { snowNow = 0.0f; stormNow = 1.0f; }
+		else if (force == 5) { snowNow = 0.6f; stormNow = 0.6f; }
+		else if (force == 1 || force == 4) { snowNow = 0.0f; stormNow = 0.0f; }
+		Anim[0] = (float)fmod(now >= 0.0 ? now : 0.0, 3600.0);
+		Anim[1] = Clamp01(snowNow * all * frostMult);
+		Anim[2] = Clamp01(stormNow * all * sandMult);
+		Anim[3] = 0.0f;
 		const bool debug = TheSettingManager->GetSettingI(kSection, "GearWeatherDebug") != 0;
-		Live = fpLive && TheSettingManager->GetSettingI(kSection, "GearWeather") != 0 && (debug || Sent[0] + Sent[1] + Sent[2] + Sent[3] > 0.001f);
+		Live = fpLive && TheSettingManager->GetSettingI(kSection, "GearWeather") != 0 && (debug || Sent[0] + Sent[1] + Sent[2] + Sent[3] + Anim[1] + Anim[2] > 0.001f);
 		if (!GpuTimer::Enabled) { StatFrames = 0; return; }
 		if (++StatFrames < 240) return;
 		const double f = (double)StatFrames;
@@ -223,6 +236,9 @@ namespace GearWeather {
 	inline void DrawBegin(IDirect3DDevice9* d, NiGeometry* geometry, bool wmTagged, DrawState& s) {
 		s = DrawState();
 		if (!Tagging || !d || !geometry) return;
+		DWORD zWrite = TRUE;
+		d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
+		if (!zWrite) return;
 		DWORD enabled = FALSE;
 		d->GetRenderState(D3DRS_STENCILENABLE, &enabled);
 		if (enabled && !wmTagged) { StatUntagged++; return; }	// the draw's own stencil test: left as it is (its pixels get no layer)
@@ -350,12 +366,12 @@ namespace GearWeather {
 	// DeferredFirstPerson::End, after the view-model mark (stencil 0x40) and before the light passes. frame: the first-person camera (DD
 	// layout); eye: its position (FP space); vmBox: the view model's screen box. The device state is DeferredFirstPerson's to put back
 	// (a state block round the whole); the render targets and textures set here are left for it too.
-	inline void Apply(IDirect3DDevice9* d, const D3DXVECTOR4* frame, const D3DXVECTOR3& eye, const RECT& vmBox) {
-		if (!Live || !Pass || PartCount == 0 || !CapturedNormals::AlbedoSurface || !CapturedNormals::MaterialSurface || !CapturedNormals::Texture) { if (Live) StatSkipped++; return; }
+	inline bool Apply(IDirect3DDevice9* d, const D3DXVECTOR4* frame, const D3DXVECTOR3& eye, const RECT& vmBox) {
+		if (!Live || !Pass || PartCount == 0 || !CapturedNormals::AlbedoSurface || !CapturedNormals::MaterialSurface || !CapturedNormals::Texture) { if (Live) StatSkipped++; return false; }
 		D3DSURFACE_DESC t = {};
-		if (FAILED(CapturedNormals::AlbedoSurface->GetDesc(&t)) || !EnsureCopies(d, t)) { StatSkipped++; return; }
+		if (FAILED(CapturedNormals::AlbedoSurface->GetDesc(&t)) || !EnsureCopies(d, t)) { StatSkipped++; return false; }
 		RECT box = vmBox; ClipTo(box, t.Width, t.Height);
-		if (box.right <= box.left || box.bottom <= box.top) { StatSkipped++; return; }
+		if (box.right <= box.left || box.bottom <= box.top) { StatSkipped++; return false; }
 		static GpuTimer timer("First person: gear weather");
 		GpuProfileScope gpu(timer, d);
 		d->StretchRect(CapturedNormals::AlbedoSurface, &box, Copy[0], &box, D3DTEXF_NONE);
@@ -382,6 +398,7 @@ namespace GearWeather {
 		}
 		d->SetPixelShaderConstantF(0, &frame[0].x, 6);
 		d->SetPixelShaderConstantF(6, Sent, 1);
+		d->SetPixelShaderConstantF(76, Anim, 1);
 		const float skinShare = TheSettingManager->GetSettingF(kSection, "GearWeatherSkin");
 		const float scale = TheSettingManager->GetSettingF(kSection, "GearWeatherScale");
 		const float debug = (float)TheSettingManager->GetSettingI(kSection, "GearWeatherDebug");
@@ -409,5 +426,6 @@ namespace GearWeather {
 			StatPixelsBox += (unsigned long long)(r.right - r.left) * (unsigned long long)(r.bottom - r.top);
 		}
 		StatPasses++;
+		return true;
 	}
 }

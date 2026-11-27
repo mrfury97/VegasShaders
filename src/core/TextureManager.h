@@ -40,6 +40,7 @@ public:
 		bool					Mipmaps;
 		EffectRecord*			Owner;		// null: nobody's (a static, or an effect that does not park): only listed
 		bool					Parked;		// the slot holds the stand-in
+		unsigned long long		OffSince;	// P12 fix: per-target off timestamp so sub-targets (e.g. NVR_RTAO*/NVR_RTGI*) keep independent lifetimes
 	};
 	struct EffectSpan { EffectRecord* Effect; const char* Begin; const char* End; unsigned long long OffSince; };
 	std::vector<OwnedTarget>	Targets;
@@ -54,7 +55,7 @@ public:
 	static unsigned long long	TargetBytes(int Width, int Height, D3DFORMAT Format, bool Mipmaps);
 private:
 	EffectSpan*				SpanOf(const void* Slot);
-	bool					OwnerWanted(EffectRecord* Owner);
+	bool					OwnerWanted(EffectRecord* Owner, const char* SamplerName = nullptr);
 	void					ReadTargetSettings();
 	int						SwapTarget(OwnedTarget& Target, bool Park);	// 1 swapped, 0 could not (tried again later), -1 not ours any more
 	unsigned long long		TargetRetryAt = 0;	// after a swap that could not be made: nothing is tried before this tick

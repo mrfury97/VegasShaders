@@ -24,7 +24,7 @@ namespace EffectPrecompile {
 
 	struct Job {
 		std::string Source, Preprocessed, Compiled;
-		D3DXMACRO Macros[10] = {};	// (2026-11-20: was 8 while the copy below takes BuildMacros' 10; REFL_GBUFFER_ON made the ninth define real)
+		D3DXMACRO Macros[10] = {};
 		unsigned long long Size = 0;
 		std::atomic<bool> Done{ false };
 		bool Waited = false;
@@ -34,6 +34,7 @@ namespace EffectPrecompile {
 	inline std::unordered_map<std::string, Job*> ByCompiledPath;
 	inline std::atomic<size_t> NextJob{ 0 };
 	inline std::atomic<unsigned> CompiledCount{ 0 };
+	inline std::atomic<unsigned> WorkerMaxSlots{ 4u };
 	inline bool Started = false;
 	inline unsigned WaitedCount = 0;
 	inline double StartTime = 0.0;
@@ -50,7 +51,12 @@ namespace EffectPrecompile {
 	inline void Run(Job* job) {
 		ID3DXBuffer* source = nullptr;
 		ID3DXBuffer* errors = nullptr;
-		if (FAILED(D3DXPreprocessShaderFromFileA(job->Source.c_str(), job->Macros, NULL, &source, &errors)) || !source) {
+		HRESULT ppHr = E_FAIL;
+		{
+			std::lock_guard<std::mutex> lock(CompileProgress::D3dxPreprocessMutex);
+			ppHr = D3DXPreprocessShaderFromFileA(job->Source.c_str(), job->Macros, NULL, &source, &errors);
+		}
+		if (FAILED(ppHr) || !source) {
 			if (errors) errors->Release();
 			if (source) source->Release();
 			return;	// LoadEffect preprocesses it again and reports the error
@@ -65,6 +71,7 @@ namespace EffectPrecompile {
 			ID3DXBuffer* binary = nullptr;
 			// UNOFFICIAL 2026-10-29 NewEffectCompiler: d3dcompiler_47 first (seconds instead of minutes on the big effects)
 			ID3DXBuffer* newErrors = nullptr;
+			CompileProgress::CompileGate gate(WorkerMaxSlots.load(std::memory_order_relaxed));
 			if (EffectCompiler47::Compile(source, job->Source.c_str(), &binary, &newErrors)) {
 				const std::string portable = EffectCompiler47::CacheText(source);
 				if (WriteFile(job->Compiled, binary->GetBufferPointer(), binary->GetBufferSize()))
@@ -74,16 +81,19 @@ namespace EffectPrecompile {
 				binary->Release();
 				binary = nullptr;
 			}
-			else if (SUCCEEDED(D3DXCreateEffectCompiler((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, NULL, &compiler, &errors)) && compiler) {
-				if (errors) { errors->Release(); errors = nullptr; }
-				if (SUCCEEDED(compiler->CompileEffect(NULL, &binary, &errors)) && binary) {
-					const std::string portable = EffectCompiler47::CacheText(source);
-					if (WriteFile(job->Compiled, binary->GetBufferPointer(), binary->GetBufferSize()))
-						WriteFile(job->Preprocessed, portable.data(), portable.size());
-					CompiledCount++;
-					CompileProgress::EffectsCompiled.fetch_add(1);
+			else {
+				std::lock_guard<std::mutex> d3dxLock(CompileProgress::D3dxPreprocessMutex);
+				if (SUCCEEDED(D3DXCreateEffectCompiler((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, NULL, &compiler, &errors)) && compiler) {
+					if (errors) { errors->Release(); errors = nullptr; }
+					if (SUCCEEDED(compiler->CompileEffect(NULL, &binary, &errors)) && binary) {
+						const std::string portable = EffectCompiler47::CacheText(source);
+						if (WriteFile(job->Compiled, binary->GetBufferPointer(), binary->GetBufferSize()))
+							WriteFile(job->Preprocessed, portable.data(), portable.size());
+						CompiledCount++;
+						CompileProgress::EffectsCompiled.fetch_add(1);
+					}
+					compiler->Release();
 				}
-				compiler->Release();
 			}
 			if (binary) binary->Release();
 			if (errors) errors->Release();
@@ -93,6 +103,10 @@ namespace EffectPrecompile {
 	}
 
 	inline void Worker() {
+		struct WorkerGuard {
+			~WorkerGuard() { CompileProgress::EffectWorkersActive.fetch_sub(1, std::memory_order_release); }
+		} guard;
+		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		for (;;) {
 			const size_t i = NextJob.fetch_add(1);
 			if (i >= Jobs.size()) return;
@@ -100,6 +114,10 @@ namespace EffectPrecompile {
 			Jobs[i]->Done = true;
 			CompileProgress::EffectsDone.fetch_add(1);
 		}
+	}
+
+	inline void Drain() {
+		CompileProgress::DrainEffectWorkers();
 	}
 
 	// ShaderManager, before the first RegisterEffect (main thread): every Effects\*.fx.hlsl, then the workers.
@@ -115,16 +133,20 @@ namespace EffectPrecompile {
 		WIN32_FIND_DATAA find;
 		HANDLE h = FindFirstFileA((std::string(EffectsPath) + "*.fx.hlsl").c_str(), &find);
 		if (h == INVALID_HANDLE_VALUE) return;
+		unsigned lazySkipped = 0;
 		do {
 			std::string file(find.cFileName);
 			if (file.size() <= 8) continue;
 			const std::string name = file.substr(0, file.size() - 8);	// without ".fx.hlsl"
 			if (ShelvedEffects::Name(name.c_str())) continue;	// UNOFFICIAL 2026-11-16 (release builds only; false in development builds)
+			if (name == "SunDepthFit" && TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "FitToDepth") == 0) { lazySkipped++; continue; }
+			if (EffectRecord::IsLazyEligibleName(name.c_str()) && !TheSettingManager->GetMenuShaderEnabled(name.c_str())) { lazySkipped++; continue; }
 			Job* job = new Job();
 			job->Source = std::string(EffectsPath) + file;
 			job->Preprocessed = std::string(EffectsPath) + "Cache\\" + name + ".fx.hlsl";
 			job->Compiled = std::string(EffectsPath) + "Cache\\" + name + ".fx";
 			job->Size = ((unsigned long long)find.nFileSizeHigh << 32) | find.nFileSizeLow;
+			static_assert(sizeof(macros) == sizeof(Job::Macros), "Job::Macros must fit EffectRecord::BuildMacros");
 			std::copy(std::begin(macros), std::end(macros), job->Macros);
 			Jobs.push_back(job);
 			ByCompiledPath[job->Compiled] = job;
@@ -132,12 +154,15 @@ namespace EffectPrecompile {
 		FindClose(h);
 		// Biggest first: the slowest (VolumetricClouds, VolumetricFog) start at once instead of last.
 		std::stable_sort(Jobs.begin(), Jobs.end(), [](const Job* a, const Job* b) { return a->Size > b->Size; });
-		const unsigned cores = std::thread::hardware_concurrency();
-		const unsigned threads = (std::max)(1u, (std::min)(cores > 1 ? cores - 1 : 1u, 12u));
+		SettingManager::Configuration::ConfigNode tNode;
+		const int cfgThreads = TheSettingManager->Config.FillNode(&tNode, "Main.Main.Performance", "ShaderCompileThreads") ? tNode.IntValue : 0;
+		const unsigned threads = CompileProgress::ResolveWorkerThreads(cfgThreads);
+		WorkerMaxSlots.store(threads, std::memory_order_relaxed);
 		CompileProgress::EffectsTotal.store((int)Jobs.size());
 		CompileProgress::Begin();
-		for (unsigned i = 0; i < threads; i++) std::thread(Worker).detach();	// (detached: effects never loaded are compiled and left)
-		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u effects on %u threads (biggest first).", (unsigned)Jobs.size(), threads);
+		CompileProgress::EffectWorkersActive.fetch_add((int)threads, std::memory_order_acq_rel);
+		for (unsigned i = 0; i < threads; i++) CompileProgress::SpawnWorker(Worker);	// (detached 4 MB stack: drained before ShaderPrecompile)
+		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u effects on %u threads (biggest first; skipped %u inactive optional effects for lazy load).", (unsigned)Jobs.size(), threads, lazySkipped);
 	}
 
 	// LoadEffect, before its own preprocess: waits for this effect's job (the first load only); its cache is then fresh.
@@ -146,7 +171,7 @@ namespace EffectPrecompile {
 		auto it = ByCompiledPath.find(CompiledPath);
 		if (it == ByCompiledPath.end() || it->second->Waited) return;
 		Job* job = it->second;
-		while (!job->Done) Sleep(1);
+		CompileProgress::WaitDone(job->Done);
 		job->Waited = true;
 		if (++WaitedCount == 1 || WaitedCount == Jobs.size())
 			Logger::Log("UNOFFICIAL ParallelShaderCompile: %u effect(s) ready, %u compiled so far, %.1f s after the start.", WaitedCount,

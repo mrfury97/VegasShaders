@@ -140,21 +140,12 @@ namespace DeepProbe {
 		if (!out || cap == 0) return;
 		out[0] = 0;
 		if (modIdx == 0xFF) { strcpy_s(out, cap, "[Runtime / xNVSE]"); return; }
-		__try {
-			if (!DataHandler) { strcpy_s(out, cap, "[Unknown]"); return; }
-			const ModList& mods = DataHandler->modList;
-			const unsigned count = mods.loadedModCount;
-			if (modIdx >= count || modIdx >= 0xFF) { sprintf_s(out, cap, "[Mod %02X]", (unsigned)modIdx); return; }
-			const ModInfo* mod = mods.loadedMods[modIdx];
-			if (!mod) { sprintf_s(out, cap, "[Mod %02X]", (unsigned)modIdx); return; }
-			const size_t n = (std::min)(cap - 1, (size_t)0x104);
-			memcpy(out, mod->name, n);
-			out[n] = 0;
-			if (!out[0]) sprintf_s(out, cap, "[Mod %02X]", (unsigned)modIdx);
+		if (DataHandler) {
+			ModInfo* const* table = nullptr;
+			const UInt32 count = DataHandler->modList.SafeLoadedMods(table);
+			if (table && (UInt32)modIdx < count && ModList::SafeCopyName(table[modIdx], out, cap)) return;
 		}
-		__except (EXCEPTION_EXECUTE_HANDLER) {
-			sprintf_s(out, cap, "[Mod %02X]", (unsigned)modIdx);
-		}
+		sprintf_s(out, cap, "[Mod %02X]", (unsigned)modIdx);
 	}
 
 	inline void SafeCopyCellText(char* out, size_t cap) {
@@ -298,8 +289,8 @@ namespace DeepProbe {
 
 	inline void SafeSnapshotWorldStats(unsigned& activeLights, unsigned& totalLights, unsigned& aHigh, unsigned& aMidH, unsigned& aMidL, unsigned& aLow, unsigned& modCount) {
 		activeLights = totalLights = aHigh = aMidH = aMidL = aLow = modCount = 0;
+		if (DataHandler) { ModInfo* const* t = nullptr; modCount = (unsigned)DataHandler->modList.SafeLoadedMods(t); }
 		__try {
-			if (DataHandler) modCount = (unsigned)DataHandler->modList.loadedModCount;
 			if (const ShadowSceneNode* ssn = BSShaderManager::GetShadowSceneNode(BSShaderManager::BSSM_SSN_WORLD)) {
 				unsigned guard = 0;
 				for (NiTList<ShadowSceneLight>::Entry* e = ssn->lights.start; e && guard < 4096; e = e->next, guard++) {

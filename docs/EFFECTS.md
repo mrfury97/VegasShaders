@@ -72,7 +72,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [SunGlare](#sunglare) | false | yes | 1 | 2 | SunGlare.cpp, SunGlare.h | The sun's lens glare: what a camera lens (or the eye, through its lashes) makes of a small, very bright source. Round the sun's place on screen it adds - a tigh |
 | [SunShadows](#sunshadows) | - | yes | 13 | 0 | SunShadows.cpp, SunShadows.h | SunShadows writes the outdoor sun's shadow term into the two-channel buffer `TESR_PointShadowBuffer` (G16R16, 0..1). - Red: sun visibility, 1 = lit. It always h |
 | [TAA](../src/effects/TAA/) | true | - | 8 | 5 | TAA.cpp, TAA.h, TAAFSR.cpp, TAAUpscale.cpp |  |
-| [Terrain](../src/effects/Terrain/) | true | - | 0 | 13 | LandHeights.cpp, LandHeights.h, Terrain.cpp, Terrain.h |  |
+| [Terrain](../src/effects/Terrain/) | true | - | 0 | 13 | LandHeights.cpp, LandHeights.h, LodNifScanner.h, Terrain.cpp, Terrain.h |  |
 | [TerrainShadows](../src/effects/TerrainShadows/) | - | - | 0 | 0 | TerrainShadows.cpp, TerrainShadows.h |  |
 | [Tonemapping](../src/effects/Tonemapping/) | true | - | 0 | 4 | Tonemapping.cpp, Tonemapping.h |  |
 | [Underwater](#underwater) | true | yes | 10 | 1 | Underwater.cpp, Underwater.h | When the camera is under water, or the player is in water, the picture is turned into what water looks like from inside. The colour drains toward the water's de |
@@ -83,6 +83,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [Water](../src/effects/Water/) | true | - | 3 | 4 | Water.cpp, Water.h |  |
 | [WaterLens](#waterlens) | true | yes | 3 | 2 | WaterLens.cpp, WaterLens.h | When the player leaves water, the screen briefly looks as if seen through the surface of a lens: the whole picture wobbles and is refracted by a drifting ripple |
 | [WetnessEffects](#wetnesseffects) | true | yes | 0 | 6 | HudRaindrops.cpp, HudRaindrops.h, WetnessEffects.cpp, WetnessEffects.h, WetnessReflections.cpp, WetnessReflections.h |  |
+| [WorldSurface](#worldsurface) | true | yes | 0 | 0 | (no folder) | A deferred pass that overlays world-space micro-detail on static world objects and terrain: close-range normal relief and roughness variation, settled Mojave du |
 <!-- effects-index:end -->
 
 ## AmbientLight
@@ -2266,6 +2267,13 @@ GearWeatherSkin (bare skin's share of the dry layers), GearWeatherScale (dry blo
   drops, no pale patches; `GearWeatherDebug 1`: an even grey over the parts with small white dots. `GearWeatherForce 5`: the dry layers'
   blotches over the film. With the F10 GPU timers the log's `GEAR WEATHER` line gives the amounts and inputs every 240 frames.
 
+### 6. Upstream 1.1.5 merge (2026-11-27)
+- Upstream's dry layers are taken: an even `float3 GWField`, splatters, grains, ice and flakes, plus the `GW_Anim` constant (c76). Our wet
+  film and beads stay as the wet layer (no mirror look: 88c9108 / 38de485 removed it on purpose). On the upstream mud and sand layers we added
+  `saturate(level x 4)` fades, our 11-26 rain-fix rule (no blotches while the rain rinses them).
+- ps_3_0 slot count of `GearWeather.hlsl`: 1918 (main 980, upstream 1737). Proven offline in the merge; not run in game, so the look of the
+  new layers on gear is unchecked.
+
 ## GodRays
 
 *README title: Effect spec: GodRays*
@@ -3726,6 +3734,22 @@ Trap met while building it: a pixel record's `SetCT` empties all 16 texture stag
 the pass's textures). The eye record's `SetCT` runs inside the draw, so eye records have `ClearSamplers` off and the restore after the
 draw uploads constants only; otherwise the second eye drawn (both share `eyeblue.dds`, so the game does not bind it again) is black.
 Bench pictures and the full write-up: `docs/next/EYES-ENVFLAG-2026-11-09.md` (not in this repo).
+
+### Upstream 1.1.5 merge (2026-11-27)
+- Glow maps: `[Shaders.PBR.Main] DecoupleGlowMaps` (true) and `GlowScale` (1.0, 0-4, live) keep self-lit maps (weapon sights, displays) out of
+  scene lighting. `GlowScale` rides on `TESR_SharpSky.w` (c136) in the forward object shaders, because `TESR_LinearScales.w` (c168.w) is our
+  `DeferredLandRoughF90` (`PBR.cpp UpdateConstants` writes it; `Includes/Object.hlsl` `GlowDecoupleMask` / `GlowScaleFactor` read it). The
+  deferred passes are untouched.
+- Clearcoat and pearlescence: `[Shaders.PBR.Metal] Clearcoat` and `Pearlescence` (both 0.0, 0-1). Clearcoat is a glossy lacquer (F0 0.04,
+  roughness 0.06) over metal; pearlescence a viewing-angle hue shift. The deferred sun and lamp passes read both live (`DS_Sheen` z / w, the
+  lamps' `PBRFull` clearcoat / pearl parameters). The forward object shaders compile the code only when the key is above 0 at startup
+  (`METAL_CLEARCOAT_ON` / `METAL_PEARL_ON`, set by `BuildDefines`, mirrored in `template_defines.py`): turning one on from 0 needs a restart
+  (the menu says so), after that it is live. Why: with both always compiled the 2-lamp object records ran out of room (SLS2023 wet -> X4505,
+  `docs/DESIGN.md "Upstream 1.1.5 merge"`). Not run: a forward compile or a game run after the gate.
+- Metal defaults moved to upstream's (steps 104-108; `GreyMetal` 0.45 and the others): a saved value at the old default moves, a tuned one stays.
+- Land reflectivity: `DeferredLandRoughF90` stays ours (see "Reflectivity under the deferred renderer").
+- Look: with both keys at 0 nothing changes from before. Wrong: a lacquer glint on metal at 0, or forward records dropping to dry after
+  turning either on (the define makes the records bigger; the dry fallback catches it).
 
 ## Particles
 
@@ -5270,6 +5294,25 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
   - Upstream's forward film itself is behind `[Shaders.Reflections.Main] ForwardWetFilm` (hidden, false here): with this fork's
     MaxRainWetness 0.5 its damp roughness (0.5-0.61) is past the trace's 0.35 hand-over, so wet open ground would lose its mirror.
 
+### Upstream 1.1.5 merge (2026-11-27, branch `upstream-115-port`)
+Taken from upstream; the seams are in `docs/DESIGN.md "Upstream 1.1.5 merge"`. Reflections-side facts:
+- Dynamic world cubemap: `[Shaders.Reflections.Main] CubeMode` 2 (default; 0 = legacy screen-filled cube, 1 = also kept up for PBR metal and
+  env maps with Reflections off, with sky, clouds and the light grid for unseen directions, 2 = as 1 plus a staggered 360-degree 3D world
+  cube drawn from the scene, one face per frame), `CubeResolution` 128 (64-256, restart), `CubeDistance` 4096. The world cube is bound at
+  set 1 binding 32 / slot 31 (upstream used 30 / 29, which collided with our G-buffer COLOR1 / COLOR3 and film at 28-31). Cost: not measured
+  (the owner's rule was to bench CubeMode 2 against 1 and 0 before keeping the default; not run).
+- Weapon reflections without RT: the first-person weapon reflects the surroundings through the trace's exact mirror ray (no jitter, no screen
+  march), `[Shaders.Reflections.RT] Weapon` 0.65, `WeaponRoughness` 0.28. Weapon specular occlusion 0.75 (smoothstep 0.08-0.45) plus ours,
+  `(1 - SurfaceWetShare)` on the world (puddle mirror a7116ba). Upstream's technique-0 albedo / COLOR3 pushes were dropped (our bindings 30 / 31
+  carry them).
+- Composite: upstream's tinted, multi-scatter and clearcoat share, with our `fresnelRough` in the tinted Fresnel (the damp film keeps its
+  strength). The clearcoat share is read live here; the forward object shaders' clearcoat is the restart define (`docs/EFFECTS.md` "PBR").
+- Trace / TraceHiZ: upstream's `SurfacePosition` and weapon branch; our damp / `dampOnly` kept, with `H = N` for `dampOnly` inside the
+  non-weapon branch. Ours stay: smooth-normal ground trace, the mirror puddles' sky panorama, the DXT-offset fix.
+- `Reflections.fx.hlsl` (D3D9): upstream's `SkyGradientAlong` / `SkyAlong` split with our `TESR_FogHorizonColor` / `FogSkyColor`; the cube
+  backdrop's horizon uses the Fog colour too, as the Vulkan twin's `cb.horizonColor`.
+- Proven offline: 23 shaders rebuilt (spirv-val OK, `refl-hashes --check` OK), `Reflections.fx` compiles in four define sets. Not run in game.
+
 ## ShadowsExteriors
 
 *README title: ShadowsExteriors - effect spec*
@@ -5478,8 +5521,11 @@ Ported by hand from upstream 1.1.5-test4 (only this term; its MaterialSSS, RealS
   pixel keeps `1 - smoothstep(0, 0.2, film gloss)` of it (the weight the film's own sun highlight takes: wet ground, puddles, wet objects).
   While Puddles' standing water is out with no film this frame, the land's pixels with roughness under 0.08-0.25 drop it (the land record
   writes the water's gloss into its roughness there).
-- Constants: D3D9 `DS_Sheen` c18 (x strength, y roughness, z the land's smooth-roughness gate); compute `cb.dsSheen`, 16-byte slot 72
-  (byte 1152; the block is 73 x 16 bytes, `static_assert` in `DeferredSun.h`).
+- Constants: D3D9 `DS_Sheen` c18 (x strength, y roughness, z clearcoat, w pearlescence: upstream 1.1.5's lanes); our land smooth-roughness
+  (puddle) gate moved to `DS_SheenGate` c21.x (2026-11-27 merge, upstream 1.1.5). Compute: `cb.dsSheen` (z / w = clearcoat / pearl), 16-byte
+  slot 72 (byte 1152; the block is 73 x 16 bytes, `static_assert` in `DeferredSun.h`); the puddle gate is flag bit 23
+  (`kFlagSheenPuddleGate`). The sun-fade record keeps sheen and SSS (upstream drops them there); only the fade record with FD_SKIN drops them
+  (`DS_FADE_LEAN`, X4505 otherwise). Proven offline in the merge: all sun records compile, flow 0; not run in game.
 - Placement: evaluated inside the land and object branches, as upstream. After them (with the wet-film read) the sun-fade record
   (`SUN_CROSSFADE_PASS`, on by default) ran out of temp registers (X4505).
 - Cost (offline, `template_compile`, ps_3_0 slots): the sun record 2206 -> 2358, with the film 2270 -> 2453, the sun-fade record 3364 ->
@@ -5513,8 +5559,11 @@ Owner: "make it fully deffered one to one port of bottle shaders versions". A on
   [0.005-0.05], BilinearThreshold 0.02 [0.02-1], ShadowContrast 1 [0-4]); `Enabled` is live, but the depth copy is made only when it is
   on at start.
 - Not taken by: the first-person pass (`DeferredFirstPerson`): the view model is not in the depth the march read (theirs is, through
-  their pre-pass); the Vulkan sun pass (`DeferredSun.comp`, `NvrDxvkDeferred`, off by default) has no lookup and stands aside while there
-  is a mask.
+  their pre-pass). Since the upstream 1.1.5 merge (2026-11-27) the Vulkan sun pass (`DeferredSun.comp`, `NvrDxvkDeferred`, off by default)
+  reads the mask too (`t_sssMask` binding 10, flag bit 22) and no longer stands aside for it; it still stands aside while the wet film is live.
+  Registers in the D3D9 sun pass after the merge: `DS_SSS` c19 (ours), `DS_MatSSS` c20 (upstream's Material SSS, off), `DS_SheenGate` c21.
+  The mask follows upstream's e401def gate (Sun Shadows off with PBR). Believed a frame-time gain (one fewer fallback to the D3D9 pass);
+  not measured.
 - Overlaps: in a frame where the sun pass took the mask, the old contact pass ([ScreenSpace], over the finished picture, ambient included)
   writes no contact (`EffectChain.cpp`), so the sun is darkened once. The older forward Bend port (Community Shaders', `[ScreenSpace] Bend`, off by
   default, far LOD only) was removed 2026-11-27 at the owner's word; this port is the only Bend shader. RT sun shadows: the mask multiplies the traced shadow too (theirs multiplies whatever sun shadow there is); with
@@ -7618,3 +7667,50 @@ None of its own: the film is in the D3D9 surface shaders; the Vulkan reflection 
 Correct: when rain starts, the ground, roads, rocks, skin and gear darken and gloss together, ripples start on puddles and water, the heat
 haze goes; when it stops, all of them dry within about 10 s except the puddles, which shrink over game hours. Wrong: skin or the land's
 Rain look staying wet while the ground is dry (two clocks), or wet ground under roofs.
+
+## WorldSurface
+
+Code: `src/hlsl/NewVegas/Shaders/WorldSurface.hlsl`, defaults in `resource/defaults/WorldSurface.toml` (no folder in `src/effects`; new in
+upstream 1.1.5, taken whole in the 2026-11-27 merge). Runs in game on this fork (bench, owner's settings, 2026-11-27): about 0.29 ms GPU at
+SunGI2 (1080p, RTX 4070 Ti SUPER, F10 GPU timer "World surface detail").
+
+### 1. Purpose
+A deferred pass that overlays world-space micro-detail on static world objects and terrain: close-range normal relief and roughness variation,
+settled Mojave dust in crevices (aged dust indoors), rust and tarnish on metal, waterline darkening, mud and algae above the water level, and
+patchy moss. It skips characters, clothing, plants, trees and grass. It reads the pre-pass scene, the albedo and material G-buffer targets and
+the smooth normals, so it needs the material target (GBufferV2).
+
+### 2. On by default
+`[Shaders.WorldSurface.Status] Enabled` is true (live, needs `DeferredRenderer` at startup). GBufferV2 is forced on by
+`core/SettingForce.h` whatever the toml says (the owner's file says false; the log says layout v2), so the effect runs for every player with
+the deferred renderer (proven: bench log "UNOFFICIAL WorldSurface: loaded" and its GPU timer).
+
+### 3. Settings (`resource/defaults/WorldSurface.toml`)
+| Key | Default | Range |
+|---|---|---|
+| `[Main] Strength` | 1.0 | 0-2, overall multiplier of every layer |
+| `[Main] Detail` | 0.75 | 0-2, micro-detail relief and roughness |
+| `[Main] Distance` | 2400 | 400-6000 game units, where detail and weathering fade out |
+| `[Main] DebugView` | 0 | 0-1, test only: 1 paints the layer masks (red rust, green moss, blue waterline, yellow dust, grey detail) |
+| `[Dust] Enabled` / `Strength` | true / 0.55 | 0-2 |
+| `[Rust] Enabled` / `Strength` | true / 0.65 | 0-2 |
+| `[Waterline] Enabled` / `Strength` | true / 0.75 | 0-2 |
+| `[Moss] Enabled` / `Strength` | true / 0.30 | 0-2 |
+
+All live. The sections are written `_Shaders.WorldSurface.*` in the fragment.
+
+### 4. Registers and samplers (pixel shader)
+c0-c5 `WS_Cam` (camera axes, tan half-fov, viewport, position, jitter), c6 `WS_World` (camera position, w exterior), c7 `WS_Weights` (detail,
+dust, rust, moss, already times strength), c8 `WS_Water` (water height minus camera z, waterline, rain wetness, DebugView), c9 `WS_Fade`, c10
+`WS_Gamma` (gamma, 1/gamma, linear flag, depth mode), c11 `WS_Ambient`, c12-c20 `WS_SkySH`, **c21 `WS_Flags`** (x = 1: deferred wetness keeps
+the land's height in the material fraction, so the land is left out). Samplers: s0 scene, s1 albedo, s2 material, s3 normals, s4 depth, s5
+the 64^3 `NoiseVolume.dds`.
+
+### 5. The wet land (2026-11-27, e9780e5)
+With `DEFERRED_WETNESS` compiled in, the land records store their height for the water layer in the material target's fraction. The pass read
+that as metal and wrote it back capped before DeferredSun read it (lead-architect review of the merge). `WS_Flags.x` now makes the pass `clip`
+the land. Believed from the code and the commit; not run in game (GBufferV2 is off).
+
+### 6. Checking it
+`DebugView` 1 with GBufferV2 on: the masks should sit on rusty metal, shaded rock, shore lines and upward ledges, nowhere on actors or
+plants. Wrong: rust on skin or clothing, wet ground losing its sheen or turning metal-bright (the land clip failed).

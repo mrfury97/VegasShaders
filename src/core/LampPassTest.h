@@ -87,7 +87,7 @@ namespace LampPassTest {
 		const UInt16 passEnum = *(const UInt16*)((const UInt8*)pass + 0x04);
 		if ((Mode & 1) && IsLampPass(passEnum)) { SkippedLamp++; return true; }
 		if ((Mode & 2) && IsSpecularPass(passEnum)) { SkippedSpecular++; return true; }
-		if ((Mode & 4) && passEnum >= 0x248 && passEnum <= 0x255) return true;	// 2026-10-16: the passes after the highlights (fog 0x252-0x254, additive 0x248/0x24B)
+		if ((Mode & 4) && passEnum >= 0x248 && passEnum <= 0x256) return true;	// 2026-10-16: the passes after the highlights (fog 0x252-0x256, additive 0x248/0x24B)
 		return false;
 	}
 }

@@ -129,6 +129,7 @@ extern "C" {
 			SessionLog::ReassertCrashReport("after every plugin loaded");	// 2026-11-04: a later plugin's crash handler under ours
 			RequirePlugin(L"LODFlickerFix.dll", L"LOD Flicker Fix not found.\nVegas Shaders cannot be used without it, please install it.");
 			RequirePlugin(L"VanillaPlusTerrain.dll", L"Vanilla Plus Terrain not found.\nVegas Shaders cannot be used without it, please install it.");
+			InstallCheck::CheckStartupPluginConflicts();	// UNOFFICIAL 2026-11-23: warn and offer clean exit when incompatible graphics plugins are loaded
 #if NVR_TEST_TOOLS
 			EffectSelfTest::RegisterLink();	// UNOFFICIAL, TEST ONLY: after every plugin is loaded (critic-notes 14)
 #endif
@@ -266,6 +267,10 @@ extern "C" {
 			DxvkLoader::DescriptorHeapOff(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkDescriptorHeapOff") || node.BoolValue);
 			// UNOFFICIAL 2026-11-17 (DxvkLoader.h, docs/next/DXVK-LAUNCHER.md): DXVK names the card as FalloutPrefs.ini does (the launcher loop)
 			DxvkLoader::AdapterNameFromPrefs(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkAdapterNameFromPrefs") || node.BoolValue);
+			// UNOFFICIAL 2026-11-23 (DxvkLoader.h): hide unused integrated Vulkan ICDs before Direct3D/Vulkan init to save 32-bit VA
+			DxvkLoader::SkipUnusedVulkanIcds(!TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkSkipUnusedIcd") || node.BoolValue);
+			// UNOFFICIAL 2026-11-23 (DxvkLoader.h): cap dxvk.numCompilerThreads so DXVK + D3D compile workers do not saturate 32-bit startup
+			DxvkLoader::CapCompilerThreads(TheSettingManager->Config.FillNode(&node, "Main.Main.Misc", "DxvkCompilerThreads") ? node.IntValue : 3);
 		}
 		LoadStep = "reading the presets";
 		PresetManager::Initialize();

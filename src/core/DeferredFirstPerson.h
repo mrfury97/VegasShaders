@@ -1,5 +1,5 @@
 #pragma once
-// UNOFFICIAL 2026-11-15 DeferredFirstPerson ([Main.Main.Quality] DeferredFirstPerson, restart, test only, off; needs DeferredRenderer 1 or 2
+// UNOFFICIAL 2026-11-15 DeferredFirstPerson ([Main.Main.Quality] DeferredFirstPerson, restart, test only, on since 2026-11-24 (settings step 101); needs DeferredRenderer 1 or 2
 // and GBufferV2): the first-person view model (arms, hands, gun, the Pip-Boy on the wrist) through the full deferred renderer
 // (docs/next/FD-FIRSTPERSON-RESULTS.md; plan FULL-DEFERRED-RENDERER-PLAN.md 4.7 "first person"; FD-SKIN-RESULTS.md section 6).
 //
@@ -48,6 +48,8 @@
 #include "FlashlightDeferred.h"
 #include "ViewModelLight.h"
 #include "GearWeather.h"
+#include "RtLightUnits.h"
+#include "ScopeOverlay.h"
 
 namespace DeferredFirstPerson {
 	inline const char* kSection = "Main.Main.Quality";
@@ -95,12 +97,53 @@ namespace DeferredFirstPerson {
 		if (!WantedAtStartup() || ResolvePS || Failed) return;
 		IDirect3DDevice9* d = TheRenderManager ? TheRenderManager->device : nullptr;
 		if (!d) return;
-		// c0: x the stored curve's gamma, y 1 / it, z 1 = the frame is linear now. The deferred lamp pass's copy path, written over the pixel.
+		// c0: x gamma, y 1/gamma, z 1=linear, w 1=GearWeather ambient update; c1: flat ambient + sky scale; c2..c10: sky SH; c11: CopyTex box UVs.
 		static const char* kResolve =
-			"sampler2D F : register(s0); sampler2D L : register(s1); float4 G : register(c0);"
+			"sampler2D F : register(s0); sampler2D L : register(s1);"
+			"sampler2D OA : register(s2); sampler2D OM : register(s3);"
+			"sampler2D NA : register(s4); sampler2D NM : register(s5); sampler2D GN : register(s6);"
+			"float4 G : register(c0); float4 A : register(c1); float4 SH[9] : register(c2); float4 B : register(c11);"
+			"float3 DecN(float2 e) {"
+			"  float3 n = float3(e, 1.0 - abs(e.x) - abs(e.y));"
+			"  float t = saturate(-n.z);"
+			"  n.xy += float2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);"
+			"  return normalize(n);"
+			"}"
 			"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
-			"  float3 s = max(tex2Dlod(F, float4(uv, 0, 0)).rgb, 0.0); float3 l = max(tex2Dlod(L, float4(uv, 0, 0)).rgb, 0.0);"
-			"  return float4(G.z > 0.5 ? s + l : pow(pow(s, G.x) + l, G.y), 1.0); }";
+			"  float4 u = float4(uv, 0, 0);"
+			"  float3 s = max(tex2Dlod(F, u).rgb, 0.0);"
+			"  float3 l = max(tex2Dlod(L, u).rgb, 0.0);"
+			"  float3 sLin = G.z > 0.5 ? s : pow(s, G.x);"
+			"  [branch] if (G.w > 0.5 && uv.x >= B.x && uv.y >= B.y && uv.x <= B.z && uv.y <= B.w) {"
+			"    float4 oa = tex2Dlod(OA, u); float4 om = tex2Dlod(OM, u);"
+			"    float4 na = tex2Dlod(NA, u); float4 nm = tex2Dlod(NM, u);"
+			"    float oMet = saturate((om.r - floor(om.r + 0.004)) / 0.49);"
+			"    float nMet = saturate((nm.r - floor(nm.r + 0.004)) / 0.49);"
+			"    float oRgh = om.b < -1.5 ? -2.0 - om.b : (om.b < 0.0 ? 1.0 : om.b);"
+			"    float nRgh = nm.b < -1.5 ? -2.0 - nm.b : (nm.b < 0.0 ? 1.0 : nm.b);"
+			"    float chg = dot(abs(na.rgb - oa.rgb), 1.0) + abs(nMet - oMet) + abs(nRgh - oRgh);"
+			"    [branch] if (om.r > 0.5 && chg > 1e-4) {"
+			"      float3 N = DecN(tex2Dlod(GN, u).rg);"
+			"      float3 shE = SH[0].rgb + SH[1].rgb * N.y + SH[2].rgb * N.z + SH[3].rgb * N.x"
+			"        + SH[4].rgb * (N.x * N.y) + SH[5].rgb * (N.y * N.z) + SH[6].rgb * (3.0 * N.z * N.z - 1.0)"
+			"        + SH[7].rgb * (N.x * N.z) + SH[8].rgb * (N.x * N.x - N.y * N.y);"
+			"      float3 skyTerm = pow(max(shE, 0.0), G.x * 0.5) * A.w;"
+			"      float3 ambE = A.rgb + skyTerm;"
+			"      float3 oDiff = oa.rgb * (1.0 - oMet);"
+			"      float3 nDiff = na.rgb * (1.0 - nMet);"
+			"      if (max(ambE.r, max(ambE.g, ambE.b)) < 1e-4) {"
+			"        float3 est = sLin / max(oDiff, 0.06);"
+			"        ambE = clamp(est, 0.015, 0.35);"
+			"      }"
+			"      float metFade = oMet > 0.02 ? lerp(1.0, saturate(nMet / oMet), 0.65 * oMet) : 1.0;"
+			"      float glossGain = saturate(oRgh - nRgh) * (1.0 - nRgh);"
+			"      float3 skySheen = skyTerm * (0.14 * glossGain * (0.4 + 0.6 * saturate(N.z)));"
+			"      sLin = max(sLin * metFade + ambE * (nDiff - oDiff), 0.0) + skySheen;"
+			"    }"
+			"  }"
+			"  float3 outLin = sLin + l;"
+			"  return float4(G.z > 0.5 ? outLin : pow(max(outLin, 0.0), G.y), 1.0);"
+			"}";
 		static const char* kNull = "float4 main() : COLOR0 { return 0.0; }";
 		ResolvePS = CapturedNormals::FullScreenShader(d, kResolve, "DeferredFirstPerson resolve", Failed);
 		NullPS = ResolvePS ? CapturedNormals::FullScreenShader(d, kNull, "DeferredFirstPerson mark", Failed) : nullptr;
@@ -153,13 +196,22 @@ namespace DeferredFirstPerson {
 		if (!WantedAtStartup() || Failed || !DeferredRenderer::Live || !d) return;
 		const auto& gs = TheShaderManager->GameState;
 		const char* why = nullptr;
-		if (!Player || !Player->IsFirstPerson() || !Player->firstPersonNiNode || !camera) why = "third person (or no first-person model)";
+		if (!Player || !Player->IsDrawnFirstPerson() || !Player->firstPersonNiNode || !camera) why = "third person (or no first-person model)";
 		else if (nativeLayer) why = "FirstPersonNativeScale draws the view model into its own full-size layer (RenderScale below 1 with FSR / DLSS)";
+		// (2026-11-25 fd-complete, both tried and kept forward: the Pip-Boy open draws no world behind it, so there is no G-buffer, lamp table
+		// or sun this frame to light the arm from (bench 20261125-085930-slotA: with this check off, first person fell back on "the world's
+		// G-buffer was not captured this frame"); VATS targeting and its kill camera draw no view model at all (20261125-090315-slotA: no
+		// view-model span after VATS opened), so there is nothing for the deferred passes to light)
 		else if (InterfaceManager->IsPipBoyOpen() || gs.PipBoyIsOn) why = "the Pip-Boy is open";
 		else if (gs.VATSIsOn) why = "VATS";
-		else if (TheShaderManager->Effects.Bodycam && TheShaderManager->Effects.Bodycam->Enabled) why = "the Bodycam effect is on";
-		else if (Player->process && Player->IsAiming()) why = "aiming: iron sights or a scope (the game moves the first-person camera to the weapon's sight; ScopeFix)";
-		else if (FlashlightDeferred::DrewThisFrame() || FlashlightDeferred::Wanted()) why = "the flashlight is on (the deferred flashlight lights the world only; its game lamp is no lamp pass of a deferred part)";
+		// (2026-11-24 fd-complete batch 2: Bodycam no longer sends first person forward: it only widens the world camera's field of view, which
+		// FrustumWhy / MakeFrame's tangent rescale already handle; [Main.Main.Quality] DeferredFirstPersonBodycam false = forward under it, as before)
+		else if (TheShaderManager->Effects.Bodycam && TheShaderManager->Effects.Bodycam->Enabled && !TheSettingManager->GetSettingI(kSection, "DeferredFirstPersonBodycam")) why = "the Bodycam effect is on";
+		else if (ScopeOverlay::Visible()) why = "the rifle scope overlay is up";
+		// (2026-11-24 fd-complete batch 2: the deferred flashlight lights the view model too (End, FlashlightDeferred::Vm); [Main.Main.Quality]
+		// DeferredFirstPersonFlashlight false = forward while it is on, as before)
+		else if ((FlashlightDeferred::DrewThisFrame() || FlashlightDeferred::Wanted()) && !TheSettingManager->GetSettingI(kSection, "DeferredFirstPersonFlashlight"))
+			why = "the flashlight is on (the deferred flashlight lights the world only; its game lamp is no lamp pass of a deferred part)";
 		else if (!Tes || !Tes->directionalLight) why = "no directional light";
 		else if (CapturedNormals::Data.x <= 0.0f || CapturedNormals::AlbedoData.x <= 0.0f) why = "the world's G-buffer was not captured this frame";
 		else if (CapturedNormals::MsaaSurface || CapturedNormals::AlbedoMsaa) why = "the game's MSAA";
@@ -175,8 +227,13 @@ namespace DeferredFirstPerson {
 			const float dx = eye.x - offset.x - world.x, dy = eye.y - offset.y - world.y, dz = eye.z - offset.z - world.z;
 			const NiMatrix33& r = camera->m_worldTransform.rot;
 			const float turn = r.data[0][0] * TheRenderManager->CameraForward.x + r.data[1][0] * TheRenderManager->CameraForward.y + r.data[2][0] * TheRenderManager->CameraForward.z;
-			if (!_finite(dx) || dx * dx + dy * dy + dz * dz > 4.0f) why = "the first-person eye sits more than 2 units off the world eye (a sight, a scope or a camera mod)";
-			else if (turn < 0.9999f) why = "the first-person camera is turned away from the world camera (a camera mod)";
+			const bool aiming = Player->process && Player->IsAiming();
+			const float maxEyeOffSq = aiming ? 4096.0f : 4.0f;	// iron sights / red dot / optics move the first-person eye onto the sight
+			const float minTurn = aiming ? 0.99f : 0.9999f;
+			if (!_finite(dx) || dx * dx + dy * dy + dz * dz > maxEyeOffSq) why = aiming
+				? "the first-person eye sits more than 64 units off the world eye while aiming"
+				: "the first-person eye sits more than 2 units off the world eye (a sight, a scope or a camera mod)";
+			else if (turn < minTurn) why = "the first-person camera is turned away from the world camera (a camera mod)";
 			else { Eye = D3DXVECTOR3(eye.x, eye.y, eye.z); Offset = D3DXVECTOR3(offset.x, offset.y, offset.z); EyeOff = sqrtf(dx * dx + dy * dy + dz * dz); Turn = turn; }
 		}
 		if (!why) {
@@ -246,6 +303,9 @@ namespace DeferredFirstPerson {
 	inline const char* MakeFrame(const D3DVIEWPORT9& vp, UINT w, UINT h, float proj[2]) {
 		const NiFrustum& f = Camera->Frustum;
 		if (const char* why = FrustumWhy(f)) return why;
+		const NiPoint3& curEye = Camera->m_worldTransform.pos;
+		if (_finite(curEye.x) && _finite(curEye.y) && _finite(curEye.z))
+			Eye = D3DXVECTOR3(curEye.x, curEye.y, curEye.z);
 		const float width = f.Right - f.Left, height = f.Top - f.Bottom;
 		const float tanWX = fabsf(TheRenderManager->InvProjMatrix._11), tanWY = fabsf(TheRenderManager->InvProjMatrix._22);
 		const bool reversed = NiDX9Renderer::GetSingleton()->m_fZClear < 1.0f;
@@ -396,7 +456,7 @@ namespace DeferredFirstPerson {
 				GearWeather::kMark, D3DSTENCILOP_REPLACE, D3DSTENCILOP_ZERO, 0, NullPS);
 		}
 		// 2. the weather on the gear (its own targets: the G-buffer's albedo and material)
-		GearWeather::Apply(d, Frame, Eye, box);
+		const bool gwApplied = GearWeather::Apply(d, Frame, Eye, box);
 		d->SetRenderTarget(1, nullptr);
 		// 3. the light passes into the light target, at the mark only. The target is cleared at the mark (a stencil-tested quad, not the box:
 		// a marked pixel outside the parts' bounds must not keep an old frame's light)
@@ -416,6 +476,18 @@ namespace DeferredFirstPerson {
 		DeferredLamps::SkinSpecSurface = nullptr;
 		DeferredSun::Apply(d);
 		DeferredLamps::Apply(d);
+		// (2026-11-24 fd-complete batch 2) the flashlight's beam on the view model: the same pass, the first-person camera's rays, the light
+		// moved into the view model's space (FlashlightDeferred::ViewModelRun), at the mark, into the light target
+		if (FlashlightDeferred::Wanted() && TheSettingManager->GetSettingI(kSection, "DeferredFirstPersonFlashlight")) {
+			FlashlightDeferred::ViewModelRun& fv = FlashlightDeferred::Vm;
+			for (int k = 0; k < 3; k++) { fv.rows[k][0] = Frame[k].x; fv.rows[k][1] = Frame[k].y; fv.rows[k][2] = Frame[k].z; }
+			fv.rows[0][3] = Frame[0].w; fv.rows[1][3] = Frame[1].w;	// tan(half fov x / y) of the first-person frustum
+			const D3DXVECTOR4& world = TheRenderManager->CameraPosition;
+			fv.shift = D3DXVECTOR3(Eye.x - Offset.x - world.x, Eye.y - Offset.y - world.y, Eye.z - Offset.z - world.z);
+			fv.on = true;
+			FlashlightDeferred::Apply(d);
+			fv.on = false;
+		}
 		DeferredLamps::SkinSpecSurface = skinSpec;
 		DeferredSun::Vm.on = DeferredLamps::Vm.on = false;
 		{	// 4. the resolve over the frame (its copy over the box: a target is not read while bound)
@@ -423,14 +495,39 @@ namespace DeferredFirstPerson {
 			GpuProfileScope gpu(resolveTimer, d);
 			d->StretchRect(target, NULL, FrameSurf, NULL, D3DTEXF_NONE);	// (the whole frame, as the world lamp pass's copy path: no pixel left to the bounds)
 			d->SetRenderTarget(0, target);
+			const bool gwAmb = gwApplied && GearWeather::CopyTex[0] && GearWeather::CopyTex[1]
+				&& CapturedNormals::AlbedoTexture && CapturedNormals::MaterialTexture && CapturedNormals::Texture;
 			d->SetTexture(0, FrameTex); d->SetTexture(1, LightTex);
-			for (DWORD s = 0; s < 2; s++) {
+			if (gwAmb) {
+				d->SetTexture(2, GearWeather::CopyTex[0]);
+				d->SetTexture(3, GearWeather::CopyTex[1]);
+				d->SetTexture(4, CapturedNormals::AlbedoTexture);
+				d->SetTexture(5, CapturedNormals::MaterialTexture);
+				d->SetTexture(6, CapturedNormals::Texture);
+			}
+			const DWORD sampCount = gwAmb ? 7u : 2u;
+			for (DWORD s = 0; s < sampCount; s++) {
 				d->SetSamplerState(s, D3DSAMP_MINFILTER, D3DTEXF_POINT); d->SetSamplerState(s, D3DSAMP_MAGFILTER, D3DTEXF_POINT); d->SetSamplerState(s, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
 				d->SetSamplerState(s, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP); d->SetSamplerState(s, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP); d->SetSamplerState(s, D3DSAMP_SRGBTEXTURE, FALSE);
 			}
 			const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;
-			const float g[4] = { gamma, 1.0f / gamma, LinearScene::Linear ? 1.0f : 0.0f, 0.0f };
+			const float g[4] = { gamma, 1.0f / gamma, LinearScene::Linear ? 1.0f : 0.0f, gwAmb ? 1.0f : 0.0f };
 			d->SetPixelShaderConstantF(0, g, 1);
+			if (gwAmb) {
+				D3DXVECTOR4 sh[9] = {};
+				D3DXVECTOR4 amb = { 0.0f, 0.0f, 0.0f, 0.0f };
+				if (TheShaderManager && TheShaderManager->GameState.isExterior) {
+					const D3DXVECTOR4& sa = TheShaderManager->ShaderConst.sunAmbient;
+					const D3DXVECTOR3 flat = RtLightUnits::DecodeColor(sa.x, sa.y, sa.z, RtLightUnits::AmbientScale());
+					amb = D3DXVECTOR4(flat.x, flat.y, flat.z, RtLightUnits::SkyScale());
+					auto found = TheShaderManager->ConstantsTable.find("TESR_SkyIrradianceObjects");
+					if (found != TheShaderManager->ConstantsTable.end() && found->second) memcpy(sh, found->second, sizeof(sh));
+				}
+				d->SetPixelShaderConstantF(1, &amb.x, 1);
+				d->SetPixelShaderConstantF(2, &sh[0].x, 9);
+				const float b[4] = { (float)box.left / t.Width, (float)box.top / t.Height, (float)box.right / t.Width, (float)box.bottom / t.Height };
+				d->SetPixelShaderConstantF(11, b, 1);
+			}
 			Quad(d, screen, t.Width, t.Height, 0.0f, D3DCMP_ALWAYS, D3DCMP_EQUAL, GearWeather::kMark, GearWeather::kMark, 0, D3DSTENCILOP_KEEP, D3DSTENCILOP_KEEP, 0x7, ResolvePS);
 		}
 		// 5. our stencil bits back to 0 (0x80 is WeaponMask's)

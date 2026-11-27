@@ -34,9 +34,9 @@ void WaterShaders::UpdateConstants() {
 	p.waterSettings.x = d.waterSettings.x;
 	p.waterSettings.z = d.waterSettings.z;
 
-	// distant (LOD) water takes the colour of the worldspace's last water form
+	// distant (LOD) water takes TESWorldSpace::GetLODWaterType (follows parent world & falls back to pDefaultWater)
 	if (TESWorldSpace* worldSpace = Player->GetWorldSpace()) {
-		if (TESWaterForm* lodWater = worldSpace->waterFormLast)
+		if (TESWaterForm* lodWater = ThisStdCall<TESWaterForm*>(0x005860C0, worldSpace))
 			Constants.LODColor = lodWater->GetShallowColor()->toD3DXVECTOR4();
 	}
 

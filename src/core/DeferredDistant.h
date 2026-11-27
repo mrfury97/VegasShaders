@@ -58,14 +58,28 @@ namespace DeferredDistant {
 	// the early draw of this frame: the accumulator whose own group-0 call is to be skipped
 	inline void* SkipAccumulator = nullptr;
 	inline UInt32 SkipFrame = 0xFFFFFFFFu;
+	inline bool ComputeHandlesStoredCurve = false;
 	inline UInt32 FrameNow() { return TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0; }
 
 	// F10 line
 	inline unsigned StatFrames = 0, StatLastFrame = 0xFFFFFFFFu;
 	inline unsigned long long StatEarly = 0, StatSkipped = 0, StatRefused = 0, StatRelinear = 0, StatGameCalls = 0;
 
+	// UNOFFICIAL 2026-11-24 fd-complete (docs/next/FD-COMPLETE.md, decals): the game's RenderDecals (xFNV BSShaderAccumulator::RenderDecals,
+	// called by FinishAccumulating right after the main list and group 0) draws geometry groups 2 (static decals) and 3 (dynamic decals)
+	// through this function with the alpha flag, z-write off and a depth bias: after the deferred light passes, so decals kept the game's
+	// own few lamps (and, with [Shaders.Flashlight.Deferred] GameLight, the flashlight's game lamp) while the wall under them is lit by
+	// every lamp and the deferred flashlight. DeferredTransparents sets this to draw those groups inside its forward+ list scope.
+	inline void (*DecalGroupDraw)(void* accumulator, UInt32 group, bool flag) = nullptr;
+	inline unsigned long long StatGroupCalls[4] = {};	// calls per group 0-3 (DeferredTransparents' F10 line reports 2 and 3)
+
 	// The detour: the game's group-0 call after an early draw of the same accumulator in this frame is skipped; everything else as the game.
 	inline void __fastcall RenderGeometryGroupHook(void* accumulator, void* edx, UInt32 group, bool flag) {
+		if (group < 4) StatGroupCalls[group]++;
+		if ((group == 2 || group == 3) && DecalGroupDraw) {
+			DecalGroupDraw(accumulator, group, flag);
+			return;
+		}
 		if (group == 0) {
 			StatGameCalls++;
 			if (accumulator == SkipAccumulator && SkipFrame == FrameNow()) {
@@ -81,6 +95,7 @@ namespace DeferredDistant {
 	inline void Attach() {
 		if (!WantedAtStartup()) return;
 		if (!CapturedNormals::CompiledIn()) { Logger::Log("UNOFFICIAL DeferredDistant: on, but CapturedNormals is off: nothing to write into (the far world as before)"); return; }
+		NoteHookSite(kRenderGeometryGroup, 8, "DeferredDistant");
 		const UInt8* code = (const UInt8*)kRenderGeometryGroup;
 		const LONG attached = DetourAttach(&(PVOID&)RenderGeometryGroup, (PVOID)&RenderGeometryGroupHook);
 		Installed = attached == NO_ERROR;
@@ -114,8 +129,9 @@ namespace DeferredDistant {
 		SkipAccumulator = accumulator;
 		SkipFrame = frame;
 		StatEarly++;
-		// the deferred passes find the frame in the space the main list left it in (the distant trees are drawn in the stored curve)
-		if (wasLinear && LinearScene::InSpan && LinearScene::Live && !LinearScene::Linear && LinearScene::SpanTarget &&
+		// the deferred passes find the frame in the space the main list left it in (the distant trees are drawn in the stored curve),
+		// unless Vulkan compute deferred passes handle stored-curve inputs directly in registers.
+		if (!ComputeHandlesStoredCurve && wasLinear && LinearScene::InSpan && LinearScene::Live && !LinearScene::Linear && LinearScene::SpanTarget &&
 			LinearScene::Convert(d, LinearScene::SpanTarget, true)) StatRelinear++;
 		static bool told = false;
 		if (!told) { told = true; Logger::Log("UNOFFICIAL DeferredDistant: geometry group 0 (the far world) drawn inside the main list's G-buffer span (first time; frame %u)", frame); }

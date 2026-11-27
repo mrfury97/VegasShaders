@@ -67,13 +67,35 @@ namespace FdIndirectShaders {
 		"  float b = m.b < -1.99f && m.b > -3.01f ? -2.0f - m.b : m.b; clip(b);"
 		"  return float4(saturate(b), metal, spec > 0.5f && model < 3.5f ? 1.0f : 0.5f, 0.0f); }";
 
-	// AmbientLight's albedo (NVR_ALAlbedo, s12 of its Apply and balance passes): COLOR1 x (1 - metal) x the gain (c0.x). A metal has no
-	// diffuse colour: the bounce it receives goes into its reflection, not into a diffuse colour (the DLSS RR guides split it the same way).
-	// Alpha (the "written" mark AmbientLight tests with step(0.5, a)) as COLOR1's. s0 COLOR1, s1 COLOR2.
+	// AmbientLight's albedo (NVR_ALAlbedo, s12 of its Apply and balance passes): validates COLOR1 against TESR_DepthBuffer
+	// (via COLOR3.b camera distance and COLOR3.a written flag) so non-recording foreground geometry (corn stalks, foliage,
+	// hair, transparent overlays) never inherits background terrain/building albedo, and splits diffuse by (1 - metal) * gain when requested.
+	// s0 COLOR1, s1 COLOR2, s2 COLOR3, s3 TESR_DepthBuffer, s4 TESR_DepthBufferViewModel.
 	inline const char* kALAlbedoPS =
-		"sampler2D A : register(s0); sampler2D M : register(s1); float4 G : register(c0);"
+		"sampler2D A : register(s0); sampler2D M : register(s1); sampler2D C : register(s2); sampler2D D : register(s3); sampler2D VM : register(s4);"
+		"float4 G : register(c0); float4 P : register(c1); float4 R : register(c2);"
 		"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
-		"  float4 a = tex2D(A, uv); float4 m = tex2D(M, uv);"
-		"  float metal = m.r > 0.5f ? saturate(frac(m.r) / 0.49f) : 0.0f;"
-		"  return float4(max(a.rgb, 0.0f) * (1.0f - metal) * G.x, a.a); }";
+		"  float4 a = tex2D(A, uv);"
+		"  if (a.a < 0.5f) return float4(0.0f, 0.0f, 0.0f, 0.0f);"
+		"  if (R.w > 0.5f) {"
+		"    float4 c = tex2D(C, uv);"
+		"    float z = tex2D(D, uv).x * P.w;"
+		"    float vmRaw = abs(P.z) > 1.0e-5f ? tex2Dlod(VM, float4(uv, 0.0f, 0.0f)).x : (R.z > 0.5f ? 0.0f : 1.0f);"
+		"    bool vm = abs(P.z) > 1.0e-5f && (R.z > 0.5f ? vmRaw > 0.0f : vmRaw < 0.99999f);"
+		"    if (vm && P.z < 0.0f) return float4(0.0f, 0.0f, 0.0f, 0.0f);"
+		"    float2 s = uv * R.xy;"
+		"    float3 vp = float3((s.x * 2.0f - 1.0f) * P.x, (1.0f - s.y * 2.0f) * P.y, 1.0f) * z;"
+		"    if (vm) vp.xy *= P.z;"
+		"    float d = length(vp);"
+		"    float distTol = vm ? (d * max(G.z, 0.12f) + max(G.w, 4.0f)) : (d * max(G.z, 0.04f) + max(G.w, 4.0f));"
+		"    if (c.a <= 0.99f || abs(c.b - d) > distTol || z >= P.w * 0.99f)"
+		"      return float4(0.0f, 0.0f, 0.0f, 0.0f);"
+		"  }"
+		"  float metal = 0.0f;"
+		"  if (G.y > 0.5f) {"
+		"    float4 m = tex2D(M, uv);"
+		"    metal = m.r > 0.5f ? saturate(frac(m.r) / 0.49f) : 0.0f;"
+		"  }"
+		"  float gain = G.y > 0.5f ? G.x : 1.0f;"
+		"  return float4(max(a.rgb, 0.0f) * (1.0f - metal) * gain, a.a); }";
 }

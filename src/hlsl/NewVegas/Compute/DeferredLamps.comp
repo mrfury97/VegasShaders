@@ -62,6 +62,10 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  rtParams;           // 36: NVR_PointShadowRT (x mode, y tol, z depthUnit, w actors+edgeTexel)
     vec4  rtSlot[2];          // 37..38: NVR_PointShadowRTSlot[0..1] ([1].w = PackingInverse)
     vec4  spare;              // 39: reserved
+    vec4  intDirSun;          // 40: interior directional toSun.xyz, has
+    vec4  intDirColor;        // 41: interior directional sunColor.rgb, 0
+    vec4  intDirVis;          // 42: LandCrackShadow, AuthoredHighlight, specFadeStart, specFadeInvRange
+    vec4  skyIrradiance[9];   // 43..51: TESR_SkyIrradianceObjects[0..8]
 } cb;
 
 // Flag bit definitions (must match DeferredLamps.h)
@@ -82,6 +86,11 @@ const uint kFlagSmithCorrelated  = 1u << 13u;
 const uint kFlagSmithCorrTest    = 1u << 14u;
 const uint kFlagDiffuseKeep      = 1u << 15u;
 const uint kFlagLightFree        = 1u << 16u;
+const uint kFlagInteriorDirLight = 1u << 17u;
+const uint kFlagHairEnabled      = 1u << 18u;
+const uint kFlagIntHasBinds      = 1u << 19u;
+const uint kFlagFoliageEnabled   = 1u << 20u;
+const uint kFlagMaterialSSS      = 1u << 21u;
 
 bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
 
@@ -168,6 +177,57 @@ vec3 Fresnel(vec3 f0, vec3 f90, float cosT) {
     return f0 + (f90 - f0) * (omc2 * omc2 * omc);
 }
 
+vec3 MultiScatterMetalBoost(vec3 f0, float r, float NdotV, float metal) {
+    if (metal <= 0.001) return vec3(1.0);
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 mixed = r * c0 + c1;
+    float a004 = min(mixed.x * mixed.x, exp2(-9.28 * NdotV)) * mixed.x + mixed.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + mixed.zw;
+    float ess = clamp(ab.x + ab.y, 0.12, 1.0);
+    vec3 comp = 1.0 + f0 * (1.0 / ess - 1.0);
+    return mix(vec3(1.0), min(comp, vec3(2.2)), metal);
+}
+
+vec3 HueShift(vec3 c, float angle) {
+    const vec3 k = vec3(0.57735027);
+    return c * cos(angle) + cross(k, c) * sin(angle) + k * dot(k, c) * (1.0 - cos(angle));
+}
+
+vec3 ApplyPearlescence(vec3 col, float NdotV, float pearl, float metal) {
+    if (pearl <= 0.001 || metal <= 0.05) return col;
+    vec3 c = clamp(col, vec3(0.0), vec3(1.0));
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
+    float satMask = smoothstep(0.10, 0.40, sat);
+    float omv = clamp(1.0 - NdotV, 0.0, 1.0);
+    float graze = pow(omv, 1.15);
+    vec3 hueShifted = HueShift(c, -0.95 * pearl * (0.20 + 0.80 * graze));
+    vec3 filmWave = 0.50 + 0.50 * cos(omv * 5.2 + vec3(0.0, 2.094395, 4.18879));
+    float lum = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.14);
+    vec3 thinFilm = mix(c, lum * (0.35 + 1.15 * filmWave), clamp(0.22 + 0.78 * graze, 0.0, 1.0));
+    vec3 pearlCol = mix(thinFilm, hueShifted, satMask);
+    return mix(col, clamp(pearlCol, vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal));
+}
+vec3 PearlF90Tint(vec3 metalCol, float pearl, float metal) {
+    if (pearl <= 0.001 || metal <= 0.05) return vec3(1.0);
+    float pTop = max(metalCol.r, max(metalCol.g, metalCol.b));
+    return mix(vec3(1.0), clamp(metalCol / max(pTop, 0.25), vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal) * 0.75);
+}
+vec3 CandyCoatAbsorption(vec3 metalCol, float NdotV, float coatAmt, float metal) {
+    if (coatAmt <= 0.001 || metal <= 0.05) return vec3(1.0);
+    vec3 c = clamp(metalCol, vec3(0.0), vec3(1.0));
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
+    float satMask = smoothstep(0.14, 0.45, sat);
+    vec3 tCol = mix(vec3(1.0), c / max(fMax, 1.0e-4), satMask);
+    float pathLen = (1.0 / max(NdotV, 0.28) - 1.0) * 0.55;
+    float metalMask = smoothstep(0.05, 0.40, metal);
+    return exp(-(vec3(1.0) - tCol) * (1.85 * clamp(coatAmt, 0.0, 1.0) * satMask * metalMask * pathLen));
+}
+
 float GGXPi(float nh, float r) {
     float r2 = r * r;
     float aSq = r2 * r2;
@@ -229,19 +289,99 @@ vec3 PBRDiffuse(float metal, vec3 baseColor, vec3 N, vec3 L, vec3 radiance) {
     return (1.0 - metal) * baseColor * (NdotL * radiance);
 }
 
+// UNOFFICIAL 2026-11-25 MaterialSSS: point-lamp & interior directional rough diffuse, cloth sheen, and backlit transmission
+// Always gated by lamp shadow / sunVis at call sites so walls never leak light.
+vec3 EvalLampMaterialSSS(float model, float rough, float metal, vec3 albedo, vec3 N, vec3 V, vec3 L, vec3 radiance) {
+    if (!HasFlag(kFlagMaterialSSS) || metal > 0.25) return vec3(0.0);
+    if (abs(model - 4.0) < 0.5 || (model > 5.5 && model < 6.5) || (model > 7.5 && model < 10.5)) return vec3(0.0);
+
+    const float rawNdotL = dot(N, L);
+    const float NdotL = max(rawNdotL, 0.0);
+    const float NdotV = max(dot(N, V), 0.0);
+    vec3 outSss = vec3(0.0);
+
+    // Subtle Chan-style rough diffuse terminator/grazing lift for matte non-metal surfaces
+    const float rWeight = clamp((rough - 0.35) * (1.0 / 0.65), 0.0, 1.0) * (1.0 - metal);
+    if (rWeight > 0.01 && NdotL > 0.0) {
+        const float edgeSoft = mix(0.06, 0.14, rWeight) * pow(1.0 - NdotV * 0.75, 1.5);
+        outSss += albedo * radiance * (NdotL * edgeSoft);
+    }
+
+    const bool isCloth  = abs(model - 3.0) < 0.5;
+    const bool isPlant  = abs(model - 5.0) < 0.5;
+    const bool isGrass  = abs(model - 7.0) < 0.5;
+    const bool isWax    = abs(model - 11.0) < 0.5;
+    const bool isMarble = abs(model - 12.0) < 0.5;
+    const bool isSnow   = abs(model - 13.0) < 0.5;
+    const bool isFood   = abs(model - 14.0) < 0.5;
+    if (!(isCloth || isPlant || isGrass || isWax || isMarble || isSnow || isFood)) return outSss;
+
+    vec3 scatterTint = vec3(0.0);
+    float wrap = 0.0;
+    float sheenStr = 0.0;
+    float backScale = 0.0;
+    float power = 3.0;
+    if (isCloth) {
+        scatterTint = vec3(0.90, 0.85, 0.78); wrap = 0.25; sheenStr = 0.24; backScale = 0.16; power = 3.0;
+    } else if (isPlant || isGrass) {
+        scatterTint = isPlant ? vec3(0.75, 1.00, 0.30) : vec3(0.85, 0.95, 0.35);
+        wrap = 0.30; sheenStr = isPlant ? 0.08 : 0.0; backScale = 0.28; power = 3.5;
+    } else if (isWax) {
+        scatterTint = vec3(1.00, 0.45, 0.14); wrap = 0.35; backScale = 0.24; power = 3.0;
+    } else if (isMarble) {
+        scatterTint = vec3(0.95, 0.78, 0.62); wrap = 0.15; backScale = 0.12; power = 3.0;
+    } else if (isSnow) {
+        scatterTint = vec3(0.42, 0.72, 1.00); wrap = 0.25; sheenStr = 0.10; backScale = 0.20; power = 3.0;
+    } else {
+        scatterTint = vec3(1.00, 0.26, 0.10); wrap = 0.35; backScale = 0.22; power = 3.0;
+    }
+
+    if (wrap > 0.0) {
+        const float wrapTerm = max((rawNdotL + wrap) / ((1.0 + wrap) * (1.0 + wrap)) - NdotL, 0.0);
+        outSss += albedo * mix(vec3(1.0), scatterTint, 0.55) * radiance * (wrapTerm * 0.55);
+    }
+    if (sheenStr > 0.0 && NdotL > 0.0) {
+        const float fresSheen = pow(1.0 - NdotV, 4.0) * (0.35 + 0.65 * NdotL);
+        outSss += mix(albedo, vec3(1.0), 0.30) * radiance * (fresSheen * sheenStr);
+    }
+    if (backScale > 0.0) {
+        const vec3 Hback = normalize(L + N * 0.40);
+        const float VdotH = pow(clamp(dot(V, -Hback), 0.0, 1.0), power);
+        const float wrapBack = clamp((-rawNdotL + wrap) / (1.0 + wrap), 0.0, 1.0);
+        outSss += albedo * scatterTint * radiance * ((VdotH * 0.7 + wrapBack * 0.3) * backScale);
+    }
+    return outSss;
+}
+
 // landF90 (UNOFFICIAL 2026-11-26 DeferredLandRoughF90 false, the default: cb.linearScales.w > 0.5; the land only): the forward land's F90 (saturate(Reflectivity),
-// Includes/Terrain.hlsl), as DeferredLamps.hlsl's land pass; false = the damped F90 exactly, as before.
-vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, bool landF90) {
-    const vec3 f0Base = ReflectivityF0(mix(vec3(0.04), baseColor, metal));
-    const vec3 halfV = normalize(V + L);
-    const float NdotL = max(shades(N, L), 0.00001);
+// Includes/Terrain.hlsl), as DeferredLamps.hlsl's land pass; false = upstream's F90 (damped, x the pearl tint). (2026-11-27 upstream 1.1.5 merge:
+// upstream's clearcoat / pearl arguments and ours both kept.)
+vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, float clearcoat, float pearl, bool landF90) {
+    const float rawNdotL = shades(N, L);
+    const float NdotL = max(rawNdotL, 0.00001);
     const float NdotV = max(shades(N, V), 0.00001);
+    const vec3 halfV = normalize(V + L);
     const float NdotH = shades(N, halfV);
     const float LdotH = shades(L, halfV);
-    const vec3 fres = Fresnel(f0Base, landF90 ? vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0)) : RoughReflectivityF90(f0Base, r, metal), LdotH);
+    const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
+    const vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
+    const vec3 f0Base = ReflectivityF0(mix(vec3(0.04), metalCol, metal));
+    const vec3 fres = Fresnel(f0Base, landF90 ? vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0)) : max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
-    const vec3 specOut = BRDFPi(r, fres, NdotV, NdotL, NdotH, allowSmith);
-    return (diff + specOut) * (NdotL * radiance);
+    vec3 specOut = BRDFPi(r, fres, NdotV, NdotL, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+    if (clearcoat > 0.001 && metal > 0.05) {
+        specOut *= CandyCoatAbsorption(metalCol, NdotV, clearcoat, metal);
+    }
+    vec3 total = (diff + specOut) * (rawNdotL * radiance);
+    if (clearcoat > 0.001 && metal > 0.05 && rawNdotL > 0.0) {
+        const float coatW = clearcoat * metal;
+        const float omc = 1.0 - LdotH;
+        const float omc2 = omc * omc;
+        const float Fc = 0.04 + 0.96 * (omc2 * omc2 * omc);
+        const float coatSpec = BRDFPi(0.06, vec3(Fc), NdotV, NdotL, NdotH, allowSmith).x * rawNdotL;
+        total = total * (1.0 - 0.25 * coatW * Fc) + radiance * (coatSpec * coatW);
+    }
+    return total;
 }
 
 // Deferred Skin helpers (Includes/SkinDeferred.hlsl + Includes/Skin.hlsl exact math)
@@ -334,6 +474,218 @@ void SkinLampBoth(vec3 albedo, vec3 N, vec3 Ngeo, vec3 Nsoft, vec3 V, vec3 L, ve
     const vec3 fres = Fresnel(vec3(kSkinF0), vec3(1.0), LdotH);
     const vec3 lobes = mix(BRDFPi(r0, fres, NdotV, NdotL, NdotH, false), BRDFPi(r1, fres, NdotV, NdotL, NdotH, false), kSkinLobeMix);
     outSpec = lobes * (NdotL * skinSpecScale * vanillaMatch) * radiance;
+}
+
+// Interior directional fill helpers (ported from DeferredSun.comp)
+const float kSunRadius = 0.00918043;
+const float kFdFoliageLeafBase = 16.0;
+const float kFdFoliageGrassBase = 32.0;
+const float kFdFoliageGrassTop = 1024.0;
+const float kFoliageSunCode = 2.0;
+const float kFoliageHighlightMax = 1.0;
+
+vec3 LinColor(vec3 c) {
+    if (HasFlag(kFlagLinearLighting) && cb.linearLighting.x > 1.0) return pow(max(c, vec3(0.0)), vec3(cb.linearLighting.x));
+    return c;
+}
+float LinScale(float s) {
+    if (HasFlag(kFlagLinearLighting) && cb.linearLighting.x > 1.0) return pow(max(s, 0.0), cb.linearLighting.x);
+    return s;
+}
+float FDModel(float r) {
+    const float m = floor(r + 0.01);
+    if (HasFlag(kFlagGBufferV2)) return m >= 15.5 ? m - 16.0 : m;
+    return m;
+}
+bool FDSunDeferredPixel(float a, float r) {
+    if (HasFlag(kFlagGBufferV2)) {
+        const float model = FDModel(r);
+        if (HasFlag(kFlagHairEnabled)) return a > 1.0001 && a < 2.0005 && (model < 8.5 || model > 10.5);
+        return a > 1.0001 && a < 2.0005 && (model < 7.5 || model > 10.5);
+    }
+    return a > 2.5 && a < 6.5;
+}
+float FDSunSpecular(float a, float r) {
+    if (HasFlag(kFlagGBufferV2)) return floor(r + 0.01) >= 15.5 ? 1.0 : 0.0;
+    return a < 4.5 ? 1.0 : 0.0;
+}
+float FDLightFreeKeep(float a) {
+    if (HasFlag(kFlagGBufferV2)) return saturate(a > 2.5 ? a - 3.0 : a - 1.0);
+    const float base = a < 4.5 ? 3.0 : a < 6.5 ? 5.0 : 7.0;
+    return saturate(a - base);
+}
+void FDSunVisDecode(float a, out float vis, out float f0) {
+    const float q = (a > 0.99 && a < 2.005) ? floor(abs(a - (a > 1.5 ? 2.0 : 1.0)) * 1024.0 + 0.5) : 0.0;
+    const float s = floor((q + 0.5) / 48.0);
+    vis = 1.0 - (q - 48.0 * s) / 47.0;
+    f0 = s > 0.5 ? (s - 1.0) * 0.01 : 0.04;
+}
+float FDFoliageIsGrass(float g) { return (g > kFdFoliageGrassBase - 0.01 && g < kFdFoliageGrassTop) ? 1.0 : 0.0; }
+float FDFoliageGrassIndex(float g) {
+    const float o = (g >= 63.99 ? 1.0 : 0.0) + (g >= 127.99 ? 1.0 : 0.0) + (g >= 255.99 ? 1.0 : 0.0) + (g >= 511.99 ? 1.0 : 0.0);
+    const float p = kFdFoliageGrassBase * (o > 0.5 ? 2.0 : 1.0) * (o > 1.5 ? 2.0 : 1.0) * (o > 2.5 ? 2.0 : 1.0) * (o > 3.5 ? 2.0 : 1.0);
+    return 1024.0 * o + floor((g / p - 1.0) * 1024.0 + 0.5);
+}
+float FDFoliageKeep(float g) {
+    return g < kFdFoliageGrassBase - 0.01 ? saturate(floor((g - kFdFoliageLeafBase) * 64.0 + 0.5) / 1023.0)
+                                          : floor(FDFoliageGrassIndex(g) / 40.0 + 1.0e-3) / 127.0;
+}
+float FDFoliageHighlightEnc(float g) {
+    const float i = FDFoliageGrassIndex(g);
+    return (i - 40.0 * floor(i / 40.0 + 1.0e-3)) / 39.0;
+}
+float FoliageSunWeightOf(float b) { return LinColor(vec3(max(b - kFoliageSunCode, 0.0))).x; }
+float FoliageHighlightOf(float enc) { return kFoliageHighlightMax * LinColor(vec3(saturate(enc))).x; }
+
+vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl) {
+    const float dielDiff = min(specF0Diel, 0.04);
+    const vec3 nrm = normalize(N);
+    const vec3 viewV = normalize(V);
+    const vec3 toLight = normalize(L);
+    const vec3 mirrorDir = reflect(-viewV, nrm);
+    const float discSin = sin(kSunRadius);
+    const float discCos = cos(kSunRadius);
+    const float LdotR = dot(toLight, mirrorDir);
+    const vec3 offAxis = mirrorDir - LdotR * toLight;
+    const vec3 offAxisDir = dot(offAxis, offAxis) > 1.0e-12 ? normalize(offAxis) : vec3(0.0);
+    const vec3 sunDirV = LdotR < discCos ? normalize(discCos * toLight + offAxisDir * discSin) : mirrorDir;
+
+    const vec3 halfV = normalize(viewV + sunDirV);
+    const float rawNdotS = shades(nrm, sunDirV);
+    const float NdotS = max(rawNdotS, 0.00001);
+    const float NdotV = max(shades(nrm, viewV), 0.00001);
+    const float NdotH = shades(nrm, halfV);
+    const float NdotL = shades(nrm, toLight);
+    const float LdotH = shades(toLight, halfV);
+
+    const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
+    const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), metalCol, metal));
+    const vec3 fres = Fresnel(f0Base, RoughReflectivityF90(f0Base, r, metal), LdotH);
+    const float diffKeep = DiffuseEnergyKeep(NdotV, r);
+    const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
+
+    vec3 fresSpec = fres;
+    if (specF0Diel != dielDiff) {
+        const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), metalCol, metal));
+        fresSpec = Fresnel(f0Spec, RoughReflectivityF90(f0Spec, r, metal), LdotH);
+    }
+    vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+    if (clearcoat > 0.001 && metal > 0.05) {
+        specOut *= CandyCoatAbsorption(metalCol, NdotV, clearcoat, metal);
+    }
+    vec3 total = (diff * NdotL + specOut * rawNdotS) * radiance;
+    if (clearcoat > 0.001 && metal > 0.05 && rawNdotS > 0.0) {
+        const float coatW = clearcoat * metal;
+        const float omc = 1.0 - LdotH;
+        const float omc2 = omc * omc;
+        const float Fc = 0.04 + 0.96 * (omc2 * omc2 * omc);
+        const float coatSpec = BRDFPi(0.06, vec3(Fc), NdotV, NdotS, NdotH, allowSmith).x * rawNdotS;
+        total = total * (1.0 - 0.25 * coatW * Fc) + radiance * (coatSpec * coatW);
+    }
+    return total;
+}
+vec3 GetSunLightingModel(float specular, vec3 toSun, vec3 radiance, vec3 toEye, vec3 N, vec3 baseColor, float r, float metal, float specF0Diel, float specFade) {
+    const vec3 scaled = radiance * LinScale(cb.pbrData.z);
+    const vec3 graded = mix(vec3(luma(baseColor)), baseColor, cb.pbrExtraData.x);
+    if (specular > 0.5) {
+        const vec3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled, specF0Diel, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0));
+        if (specFade < 0.9999) {
+            return mix((1.0 - metal) * graded * shades(normalize(N), normalize(toSun)) * scaled, sunLit, specFade);
+        }
+        return sunLit;
+    }
+    return (1.0 - metal) * graded * (shades(normalize(N), normalize(toSun)) * scaled);
+}
+vec3 SkinSunTransmitTintColor(vec3 c) { return LinColor(sqrt(max(c, vec3(0.0)))); }
+vec3 SkinSunSpecularDir(vec3 N, vec3 V, vec3 L) {
+    const vec3 r = reflect(-V, N);
+    const vec3 centerToRay = dot(L, r) * r - L;
+    return normalize(L + centerToRay * clamp(kSunRadius / max(length(centerToRay), 1.0e-5), 0.0, 1.0));
+}
+float SkinSunNormalization(float roughness) {
+    const float alpha = roughness * roughness;
+    const float ratio = alpha / clamp(alpha + kSunRadius * 0.5, 0.0, 1.0);
+    return ratio * ratio;
+}
+vec3 SkinSpecularSun(vec3 N, vec3 V, vec3 L, vec3 light, float skinRough, float skinSpecScale) {
+    const float r0 = clamp(skinRough * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(skinRough * kSkinLobe1, 0.04, 1.0);
+    L = SkinSunSpecularDir(N, V, L);
+    const float n0 = SkinSunNormalization(r0);
+    const float n1 = SkinSunNormalization(r1);
+    const vec3 H = normalize(V + L);
+    const float NdotL = max(shades(N, L), 0.00001);
+    const float NdotV = max(shades(N, V), 0.00001);
+    const float NdotH = shades(N, H);
+    const float LdotH = shades(L, H);
+    const vec3 fres = Fresnel(vec3(kSkinF0), vec3(1.0), LdotH);
+    const vec3 lobes = mix(BRDFPi(r0, fres, NdotV, NdotL, NdotH, false) * n0,
+                           BRDFPi(r1, fres, NdotV, NdotL, NdotH, false) * n1, kSkinLobeMix);
+    return lobes * (NdotL * skinSpecScale * SkinVanillaMatch()) * light;
+}
+vec3 SkinSunLight(vec3 albedo, vec3 N, vec3 Ngeo, vec3 Nsoft, vec3 V, vec3 L, vec3 light, float shadow,
+                  float skinRough, float skinSpecScale, float skinThinness, float skinCurvature, out vec3 specular) {
+    L = normalize(L);
+    const float geometricNdotL = dot(Ngeo, L);
+    const vec3 scattered = SkinDiffusion(N, Nsoft, L, skinCurvature);
+    const vec3 direct = min(scattered, vec3(clamp(dot(N, L), 0.0, 1.0)));
+    const vec3 wrapped = scattered - direct;
+    float selfShadowed = clamp((0.05 - geometricNdotL) / 0.15, 0.0, 1.0);
+    selfShadowed = selfShadowed * selfShadowed * (3.0 - 2.0 * selfShadowed) * clamp(cb.skinLook.z, 0.0, 1.0);
+    const vec3 shadowColor = SkinShadow(shadow);
+    const vec3 diffuse = albedo * (direct * shadowColor + wrapped * mix(shadowColor, vec3(1.0), selfShadowed));
+    const float thin = smoothstep(0.3, 0.9, skinThinness);
+    const float farSide = clamp(0.3 - geometricNdotL, 0.0, 1.0);
+    const vec3 transmitDir = normalize(L + Nsoft * kSkinTransmitDistortion);
+    const float back = pow(clamp(dot(V, -transmitDir), 0.0, 1.0), kSkinTransmitPower);
+    const vec3 transmitted = albedo * SkinSunTransmitTintColor(kSkinTransmitTint) * (back * thin * farSide * cb.skinMaterial.w * shadow);
+    specular = SkinSpecularSun(N, V, L, light, skinRough, skinSpecScale) * shadow;
+    return (diffuse + transmitted) * light;
+}
+vec3 SkyAmbientRadianceSH(vec3 N) {
+    vec3 E = cb.skyIrradiance[0].rgb
+         + cb.skyIrradiance[1].rgb * N.y
+         + cb.skyIrradiance[2].rgb * N.z
+         + cb.skyIrradiance[3].rgb * N.x
+         + cb.skyIrradiance[4].rgb * (N.x * N.y)
+         + cb.skyIrradiance[5].rgb * (N.y * N.z)
+         + cb.skyIrradiance[6].rgb * (3.0 * N.z * N.z - 1.0)
+         + cb.skyIrradiance[7].rgb * (N.x * N.z)
+         + cb.skyIrradiance[8].rgb * (N.x * N.x - N.y * N.y);
+    return sqrt(max(E, vec3(0.0)));
+}
+vec3 SkyAmbientSharpSH(vec3 dir) {
+    vec3 radiance = cb.skyIrradiance[0].rgb
+         + 1.5 * (cb.skyIrradiance[1].rgb * dir.y + cb.skyIrradiance[2].rgb * dir.z + cb.skyIrradiance[3].rgb * dir.x)
+         + 4.0 * (cb.skyIrradiance[4].rgb * (dir.x * dir.y) + cb.skyIrradiance[5].rgb * (dir.y * dir.z)
+                + cb.skyIrradiance[6].rgb * (3.0 * dir.z * dir.z - 1.0) + cb.skyIrradiance[7].rgb * (dir.x * dir.z)
+                + cb.skyIrradiance[8].rgb * (dir.x * dir.x - dir.y * dir.y));
+    return sqrt(max(radiance, vec3(0.0)));
+}
+vec3 EnvBRDFApprox(vec3 f0, float roughness, float NdotV) {
+    const vec4 k0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 k1 = vec4( 1.0,  0.0425,  1.040, -0.040);
+    vec4 mixed = roughness * k0 + k1;
+    float bias0 = min(mixed.x * mixed.x, exp2(-9.28 * NdotV)) * mixed.x + mixed.y;
+    vec2 scaleBias = vec2(-1.04, 1.04) * bias0 + mixed.zw;
+    return f0 * scaleBias.x + scaleBias.y;
+}
+vec3 SkinSkyReflection(vec3 V, vec3 geometricNormal, vec3 N, float skinRough, float skinSpecScale) {
+    const vec3 r = reflect(-V, N);
+    const float NdotV = clamp(dot(N, V), 0.0, 1.0);
+    float horizon = clamp(1.0 + 1.2 * dot(r, geometricNormal), 0.0, 1.0);
+    horizon *= horizon;
+    const float r0 = clamp(skinRough * kSkinLobe0, 0.04, 1.0);
+    const float r1 = clamp(skinRough * kSkinLobe1, 0.04, 1.0);
+    const float response = mix(EnvBRDFApprox(vec3(kSkinF0), r0, NdotV), EnvBRDFApprox(vec3(kSkinF0), r1, NdotV), kSkinLobeMix).x;
+    const float weight = response * horizon * skinSpecScale * cb.skinLook.x;
+    const vec3 plain = SkyAmbientRadianceSH(r);
+    vec3 sharp = SkyAmbientSharpSH(r);
+    sharp = mix(sharp, max(sharp, plain), clamp(-r.z, 0.0, 1.0));
+    const vec3 rad0 = mix(sharp, plain, r0);
+    const vec3 rad1 = mix(sharp, plain, r1);
+    const vec3 radiance = mix(rad0, rad1, kSkinLobeMix);
+    return LinColor(radiance) * (LinScale(cb.pbrExtraData.y) * weight);
 }
 
 // Point shadow helpers (PointShadowForward.hlsl FIT 0 + TruePCF + EvenTaps + RT)
@@ -605,22 +957,19 @@ void main() {
     const vec4 mat4v = texelFetch(t_material, px, 0);
     const vec4 norm4 = texelFetch(t_normals, px, 0);
 
-    // Deferred pixel clip (DL_DEFERRED_CLIP)
+    // Deferred pixel clip (DL_DEFERRED_CLIP) + optional InteriorDirLight pixel clip
     const bool v2 = HasFlag(kFlagGBufferV2);
+    bool lampDeferredOk;
     if (v2) {
-        if (albedo4.a <= 1.0001) return;
+        lampDeferredOk = albedo4.a > 1.0001;
     } else {
         const bool oldCode = mat4v.a > 1.005 && mat4v.a < 1.995;
-        if (HasFlag(kFlagLightFree)) {
-            if (!(albedo4.a > 2.5 || oldCode)) return;
-        } else {
-            if (!oldCode) return;
-        }
+        lampDeferredOk = HasFlag(kFlagLightFree) ? (albedo4.a > 2.5 || oldCode) : oldCode;
     }
 
     // Actor clip (DL_ACTOR_CLIP): skip forward skin/gear (1.5..3.5), allow deferred skin (> 3.5) when FD_SKIN
-    const bool isDeferredSkin = HasFlag(kFlagSkinEnabled) && abs(floor(mat4v.r + 0.01) - 6.0) < 0.5 && norm4.a > kFdSkinCodeMin;
-    if (norm4.a >= 1.5 && !(HasFlag(kFlagSkinEnabled) && norm4.a > kFdSkinCodeMin)) return;
+    const bool isDeferredSkin = HasFlag(kFlagSkinEnabled) && abs(FDModel(mat4v.r) - 6.0) < 0.5 && norm4.a > kFdSkinCodeMin;
+    const bool lampActorOk = norm4.a < 1.5 || (HasFlag(kFlagSkinEnabled) && norm4.a > kFdSkinCodeMin);
 
     // Keep = 1 - fog (FDAddedLightKeep)
     float keep;
@@ -634,7 +983,29 @@ void main() {
             keep = albedo4.a;
         }
     }
-    if (keep <= 1.0e-4) return;
+
+    const bool wantLamps = HasFlag(kFlagIntHasBinds) && lampDeferredOk && lampActorOk && (keep > 1.0e-4);
+
+    bool wantIntDir = false;
+    bool intFoliage = false;
+    if (HasFlag(kFlagInteriorDirLight)) {
+        if (HasFlag(kFlagFoliageEnabled)) {
+            intFoliage = mat4v.r > 0.5 && mat4v.b > 1.5 && albedo4.a > 0.5 && albedo4.a < 1.0005;
+        }
+        if (FDSunDeferredPixel(albedo4.a, mat4v.r) || intFoliage) {
+            const bool intActorOk = HasFlag(kFlagSkinEnabled)
+                ? !(norm4.a > 2.02 && norm4.a < kFdSkinCodeMin)
+                : (norm4.a <= 2.02);
+            if (intActorOk) {
+                const float intKeep = intFoliage ? FDFoliageKeep(mat4v.g) : FDLightFreeKeep(albedo4.a);
+                if (intKeep > 1.0e-4 || (isDeferredSkin && HasFlag(kFlagSkinSpecActive))) {
+                    keep = intKeep;
+                    wantIntDir = true;
+                }
+            }
+        }
+    }
+    if (!wantLamps && !wantIntDir) return;
 
     // Pixel view ray & depth test against scene depth buffer (replaces hardware D3DRS_ZENABLE depth clip for hair/non-G-buffer draws)
     const vec2 local = (vec2(localPx) + 0.5) * cb.dlView.xy;
@@ -672,11 +1043,15 @@ void main() {
     const vec3 shadowPos = surfacePos + smoothFacingN * (norm4.b * cb.dlShadow.z);
 
     // Froxel lamp list lookup (exact integer coords)
-    const float viewZ = dot(shadowPos, cb.dlFwd.xyz);
-    const vec2 tileF = min(floor(clamp(local, 0.0, 1.0) * cb.dlDebug.zw), cb.dlGrid.xy - 1.0);
-    const int slice = viewZ < 64.0 ? 0 : min(7, int(floor(log2(viewZ))) - 5);
-    const int base = (slice * int(cb.dlGrid.x + 0.5) * int(cb.dlGrid.y + 0.5) + int(tileF.y) * int(cb.dlGrid.x + 0.5) + int(tileF.x)) * 16;
-    const int count = cb.dlGrid.z > 0.5 ? min(int(ListTexel(base).x + 0.5), 63) : 0;
+    int base = 0;
+    int count = 0;
+    if (wantLamps && cb.dlGrid.z > 0.5) {
+        const float viewZ = dot(shadowPos, cb.dlFwd.xyz);
+        const vec2 tileF = min(floor(clamp(local, 0.0, 1.0) * cb.dlDebug.zw), cb.dlGrid.xy - 1.0);
+        const int slice = viewZ < 64.0 ? 0 : min(7, int(floor(log2(viewZ))) - 5);
+        base = (slice * int(cb.dlGrid.x + 0.5) * int(cb.dlGrid.y + 0.5) + int(tileF.y) * int(cb.dlGrid.x + 0.5) + int(tileF.x)) * 16;
+        count = min(int(ListTexel(base).x + 0.5), 63);
+    }
 
     // Decode shading normal & material ONCE per pixel
     vec3 N;
@@ -753,6 +1128,7 @@ void main() {
         const float toLampLen2 = dot(toLamp, toLamp);
         if (!(toLampLen2 > 1.0e-10)) continue;
         const vec3 L = toLamp * inversesqrt(toLampLen2);
+        const float geomHorizon = smoothstep(-0.15, 0.05, dot(smoothFacingN, L));
 
         if (dbg1) {
             const float fAtt = (isLand || isDeferredSkin) ? EvalLampAtt(att, fp.shaped, fp.expOther) : EvalLampAtt(att, fp.shaped, fp.expObj);
@@ -766,15 +1142,50 @@ void main() {
         } else if (isLand) {
             const vec3 rad = color * EvalLampAtt(att, fp.shaped, fp.expOther);
             vec3 lit;
-            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, cb.linearScales.w > 0.5));
+            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, 0.0, 0.0, cb.linearScales.w > 0.5));
             else lit = albedo4.rgb * (shades(N, L) * rad);
-            light += lit * sh;
+            light += lit * (sh * geomHorizon);
         } else if (isDiffuseOnly) {
             const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
-            light += PBRDiffuse(metal, gradedAlbedo, N, L, color * (linScaleLight * fAtt)) * sh;
+            const vec3 rad = color * (linScaleLight * fAtt);
+            light += (PBRDiffuse(metal, gradedAlbedo, N, L, rad) + EvalLampMaterialSSS(FDModel(mat4v.r), rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
         } else {
             const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
-            light += PBRFull(metal, rough, gradedAlbedo, N, V, L, color * (linScaleLight * fAtt), diffKeep, true, false) * sh;
+            const vec3 rad = color * (linScaleLight * fAtt);
+            light += (PBRFull(metal, rough, gradedAlbedo, N, V, L, rad, diffKeep, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0), false) + EvalLampMaterialSSS(FDModel(mat4v.r), rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
+        }
+    }
+
+    // Interior directional fill (folded from DeferredSun indoors: no cascades/clouds)
+    if (wantIntDir) {
+        const float model = FDModel(mat4v.r);
+        const bool sunLand = abs(model - 4.0) < 0.5;
+        const vec3 Lsun = cb.intDirSun.xyz;
+        const vec3 sunLin = LinColor(cb.intDirColor.rgb) * cb.intDirSun.w;
+        float sunVis, specF0;
+        FDSunVisDecode(norm4.a, sunVis, specF0);
+        sunVis = (sunLand && cb.intDirVis.x < 0.5) ? 1.0 : sunVis;
+        const float dsSpecF0 = (cb.intDirVis.y > 0.5 && !sunLand) ? specF0 : 0.04;
+        const float dsSpecFade = cb.intDirVis.w > 0.0 ? clamp(1.0 - (length(surfacePos) - cb.intDirVis.z) * cb.intDirVis.w, 0.0, 1.0) : 1.0;
+
+        if (isDeferredSkin) {
+            const vec3 skinSun = sunLin * LinScale(cb.pbrData.z);
+            vec3 skinSpecular;
+            light += SkinSunLight(albedo4.rgb, N, smoothN, skinNsoft, V, Lsun, skinSun, 1.0, rough, skinSpecScale, skinThin, skinCurv, skinSpecular);
+            light += skinSpecular;
+            if (HasFlag(kFlagSkinSpecActive)) {
+                skinSpecSum += skinSpecular + SkinSkyReflection(V, smoothN, N, rough, skinSpecScale);
+            }
+        } else if (intFoliage) {
+            const vec3 hueF = sunLin / max(dot(sunLin, vec3(0.2126, 0.7152, 0.0722)), 1.0e-8);
+            const bool grassF = FDFoliageIsGrass(mat4v.g) > 0.5;
+            light += albedo4.rgb * hueF * FoliageSunWeightOf(mat4v.b) + (grassF ? hueF * FoliageHighlightOf(FDFoliageHighlightEnc(mat4v.g)) : vec3(0.0));
+        } else if (sunLand) {
+            light += albedo4.rgb * shades(N, Lsun) * sunLin * sunVis;
+        } else {
+            const vec3 intRad = sunLin * LinScale(cb.pbrData.z);
+            light += (GetSunLightingModel(FDSunSpecular(albedo4.a, mat4v.r), Lsun, sunLin, V, N, albedo4.rgb, rough, metal, dsSpecF0, dsSpecFade) +
+                      EvalLampMaterialSSS(model, rough, metal, albedo4.rgb, N, V, Lsun, intRad)) * sunVis;
         }
     }
 

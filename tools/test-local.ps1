@@ -47,3 +47,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Flash rule tests failed.' }
 if ($LASTEXITCODE -ne 0) { throw 'Setting changes test build failed.' }
 & "$repo\build\settings-test\setting_changes.exe"
 if ($LASTEXITCODE -ne 0) { throw 'Setting changes (SETTING batch rule) tests failed.' }
+& "$vs\MSBuild\Current\Bin\MSBuild.exe" "$repo\tests\unsaved_settings.vcxproj" /p:Configuration=Release /p:Platform=Win32 /nologo /v:minimal
+if ($LASTEXITCODE -ne 0) { throw 'Unsaved settings test build failed.' }
+& "$repo\build\unsaved-test\unsaved_settings.exe"
+if ($LASTEXITCODE -ne 0) { throw 'Unsaved settings (menu marks) tests failed.' }

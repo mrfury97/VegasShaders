@@ -42,6 +42,7 @@ namespace ShaderPrecompile {
 	struct Job {
 		std::string Name, Source, Preprocessed, Compiled;
 		ShaderTemplate Template = {};
+		std::vector<std::string> OwnedDefineValues;	// UNOFFICIAL 2026-11-23: owns dynamic define strings built on main thread so workers never race static char[] buffers in BuildDefines
 		std::string Log;
 		ID3DXBuffer* SourceBuffer = nullptr;
 		ID3DXBuffer* ShaderBuffer = nullptr;
@@ -50,6 +51,8 @@ namespace ShaderPrecompile {
 		bool CompileFailed = false;
 		std::atomic<bool> Done{ false };
 		bool Taken = false;
+		bool ReleaseAfterCache = false;	// UNOFFICIAL 2026-11-23: LateInteriors jobs release buffers right after caching to disk to save 32-bit VA at main menu
+		bool BuffersReleased = false;
 		std::string DefineKey;	// UNOFFICIAL 2026-11-16 fast-restart: the define list the job was built with (Take compares the load's)
 		// UNOFFICIAL 2026-11-26 faster-shader-compile: the record's build without the clouds' lookup (Cache\NoCloud\..., FORWARD_CLOUD_SHADOWS 0),
 		// made by the same worker right after this job failed, the build ShaderRecord::LoadShader's ForwardCloudShadows retry asks for next.
@@ -63,7 +66,7 @@ namespace ShaderPrecompile {
 	// UNOFFICIAL 2026-11-16 fast-restart: a define list as one string (names and values in order), for Take's check.
 	inline std::string KeyOf(const D3DXMACRO* defines) {
 		std::string key;
-		for (int d = 0; d < 64 && defines && defines[d].Name; d++) { key += defines[d].Name; key += '='; key += defines[d].Definition ? defines[d].Definition : ""; key += ';'; }
+		for (int d = 0; d < ShaderTemplate::kMaxDefines && defines && defines[d].Name; d++) { key += defines[d].Name; key += '='; key += defines[d].Definition ? defines[d].Definition : ""; key += ';'; }
 		return key;
 	}
 
@@ -72,6 +75,18 @@ namespace ShaderPrecompile {
 	inline std::atomic<size_t> NextJob{ 0 };
 	inline bool Started = false;
 	inline double StartTime = 0.0;
+	inline std::atomic<unsigned> WorkerMaxSlots{ 4u };
+
+	// UNOFFICIAL 2026-11-23: [Main.Main.Performance] ShaderCompileThreads (0 = auto, up to 4 on 32-bit; 1..12 explicit).
+	inline unsigned ThreadCount() {
+		SettingManager::Configuration::ConfigNode node;
+		const int cfg = TheSettingManager->Config.FillNode(&node, "Main.Main.Performance", "ShaderCompileThreads") ? node.IntValue : 0;
+		return CompileProgress::ResolveWorkerThreads(cfg);
+	}
+
+	inline unsigned long long UsedVaMB() {
+		return CompileProgress::UsedVaMB();
+	}
 
 	// The paths ShaderRecord::LoadShader builds (kept the same here).
 	inline void Paths(const char* Name, const char* SubPath, const char* CacheSubPath, const char* TemplateName, Job* job) {
@@ -98,7 +113,11 @@ namespace ShaderPrecompile {
 	// One shader on a worker thread: as LoadShader's preprocess, cache check and compile.
 	inline void RunOne(Job* job) {
 		ID3DXBuffer* errors = nullptr;
-		HRESULT prepass = D3DXPreprocessShaderFromFileA(job->Source.c_str(), &job->Template.Defines[0], NULL, &job->SourceBuffer, &errors);
+		HRESULT prepass = E_FAIL;
+		{
+			std::lock_guard<std::mutex> lock(CompileProgress::D3dxPreprocessMutex);
+			prepass = D3DXPreprocessShaderFromFileA(job->Source.c_str(), &job->Template.Defines[0], NULL, &job->SourceBuffer, &errors);
+		}
 		if (prepass != D3D_OK) {
 			if (errors) { job->Log += (char*)errors->GetBufferPointer(); errors->Release(); }
 			return;
@@ -109,60 +128,111 @@ namespace ShaderPrecompile {
 		if (!fresh) fresh = ShaderProgram::SeedFromShipped(job->Preprocessed.c_str(), job->Compiled.c_str(), ShaderProgram::PortableSource(job->SourceBuffer));	// UNOFFICIAL 2026-11-10 shipped cache
 		// UNOFFICIAL 2026-11-17 fast-restart (ShaderRecord.cpp KnownCloudFailure): this exact text did not compile with the clouds' lookup at an
 		// earlier start: not compiled again (LoadShader makes the build without the lookup)
-		if (!fresh && ShaderProgram::KnownCloudFailure(job->Preprocessed, job->SourceBuffer)) { job->CompileFailed = true; return; }
-		// (2026-11-26, ShaderRecord.cpp KnownOutOfRegisters) this exact text ran out of temp registers at both flags at an earlier start: the
-		// same failure without the compile ("X4505" in the log: Take passes it on as TakenOutOfRegisters)
-		if (!fresh && ShaderProgram::KnownOutOfRegisters(job->Preprocessed, job->SourceBuffer)) {
+		if (!fresh && ShaderProgram::KnownCloudFailure(job->Preprocessed, job->SourceBuffer)) {
 			job->CompileFailed = true;
-			job->Log += "UNOFFICIAL " + job->Name + ": out of temp registers (X4505) at both flags with this exact text at an earlier start: not compiled again\n";
+			if (job->ReleaseAfterCache && job->SourceBuffer) {
+				job->SourceBuffer->Release();
+				job->SourceBuffer = nullptr;
+				job->BuffersReleased = true;
+			}
 			return;
 		}
+		// UNOFFICIAL 2026-11-24 fd-complete (ShaderRecord.h KnownFailure): this exact text failed to compile at an earlier start: not again
+		if (!fresh) {
+			const int known = ShaderProgram::KnownFailure(job->Preprocessed, job->SourceBuffer);
+			if (known) {
+				job->CompileFailed = true;
+				job->Log += known == 2 ? "error X4505 known from an earlier start (out of temp registers): not compiled again\n" : "a compiler error known from an earlier start: not compiled again\n";
+				if (job->ReleaseAfterCache && job->SourceBuffer) {
+					job->SourceBuffer->Release();
+					job->SourceBuffer = nullptr;
+					job->BuffersReleased = true;
+				}
+				return;
+			}
+		}
 		if (fresh) {
-			FILE* f = nullptr;
-			if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {
-				fseek(f, 0, SEEK_END);
-				long size = ftell(f);
-				fseek(f, 0, SEEK_SET);
-				if (size > 0 && SUCCEEDED(D3DXCreateBuffer(size, &job->ShaderBuffer)))
-					if (fread(job->ShaderBuffer->GetBufferPointer(), 1, size, f) != (size_t)size) { job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr; }
-				fclose(f);
+			if (job->ReleaseAfterCache) {
+				// Cache on disk is already valid; release SourceBuffer immediately instead of reading binary into VA.
+				FILE* f = nullptr;
+				bool validBinary = false;
+				if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {
+					fseek(f, 0, SEEK_END);
+					const long size = ftell(f);
+					if (size >= 8 && !(size & 3)) {
+						DWORD first = 0, last = 0;
+						fseek(f, 0, SEEK_SET);
+						if (fread(&first, 4, 1, f) == 1) {
+							fseek(f, size - 4, SEEK_SET);
+							if (fread(&last, 4, 1, f) == 1)
+								validBinary = ((first >> 16) == 0xFFFF || (first >> 16) == 0xFFFE) && last == 0x0000FFFF;
+						}
+					}
+					fclose(f);
+				}
+				if (validBinary) {
+					if (job->SourceBuffer) { job->SourceBuffer->Release(); job->SourceBuffer = nullptr; }
+					job->BuffersReleased = true;
+					return;
+				}
 			}
-			if (job->ShaderBuffer && !BinaryShape(job->ShaderBuffer->GetBufferPointer(), job->ShaderBuffer->GetBufferSize())) {
-				job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr;	// (2026-11-17: compiled again below)
+			else {
+				FILE* f = nullptr;
+				if (!fopen_s(&f, job->Compiled.c_str(), "rb") && f) {
+					fseek(f, 0, SEEK_END);
+					long size = ftell(f);
+					fseek(f, 0, SEEK_SET);
+					if (size > 0 && SUCCEEDED(D3DXCreateBuffer(size, &job->ShaderBuffer)))
+						if (fread(job->ShaderBuffer->GetBufferPointer(), 1, size, f) != (size_t)size) { job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr; }
+					fclose(f);
+				}
+				if (job->ShaderBuffer && !BinaryShape(job->ShaderBuffer->GetBufferPointer(), job->ShaderBuffer->GetBufferSize())) {
+					job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr;	// (2026-11-17: compiled again below)
+				}
+				if (job->ShaderBuffer) return;
 			}
-			if (job->ShaderBuffer) return;
 		}
 		CompileProgress::NoteCurrent(job->Name.c_str());
 		const char* profile = strstr(job->Name.c_str(), ".vso") ? "vs_3_0" : "ps_3_0";
 		ID3DXConstantTable* table = nullptr;
 		const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (LogCompileTimes)
-		D3DXCompileShader((const char*)job->SourceBuffer->GetBufferPointer(), job->SourceBuffer->GetBufferSize(), NULL, NULL, "main",
-			profile, NULL, &job->ShaderBuffer, &errors, &table);
-		// UNOFFICIAL 2026-10-29: out of temp registers (X4505): again with PREFER_FLOW_CONTROL, as ShaderRecord::LoadShader (see there)
-		if (!job->ShaderBuffer && errors && strstr((const char*)errors->GetBufferPointer(), "X4505")) {
-			job->Log += "out of temp registers at the default flags; compiled again with PREFER_FLOW_CONTROL\n";
-			errors->Release(); errors = nullptr;
-			if (table) { table->Release(); table = nullptr; }
+		{
+			CompileProgress::CompileGate vaGate(WorkerMaxSlots.load(std::memory_order_relaxed));
 			D3DXCompileShader((const char*)job->SourceBuffer->GetBufferPointer(), job->SourceBuffer->GetBufferSize(), NULL, NULL, "main",
-				profile, D3DXSHADER_PREFER_FLOW_CONTROL, &job->ShaderBuffer, &errors, &table);
+				profile, NULL, &job->ShaderBuffer, &errors, &table);
+			// UNOFFICIAL 2026-10-29: out of temp registers (X4505): again with PREFER_FLOW_CONTROL, as ShaderRecord::LoadShader (see there)
+			if (!job->ShaderBuffer && errors && strstr((const char*)errors->GetBufferPointer(), "X4505")) {
+				job->Log += "out of temp registers at the default flags; compiled again with PREFER_FLOW_CONTROL\n";
+				errors->Release(); errors = nullptr;
+				if (table) { table->Release(); table = nullptr; }
+				D3DXCompileShader((const char*)job->SourceBuffer->GetBufferPointer(), job->SourceBuffer->GetBufferSize(), NULL, NULL, "main",
+					profile, D3DXSHADER_PREFER_FLOW_CONTROL, &job->ShaderBuffer, &errors, &table);
+			}
 		}
 		if (table) table->Release();
 		job->CompileMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count();
 		job->CompileFailed = !job->ShaderBuffer;
+		if (job->CompileFailed && errors) ShaderProgram::NoteFailure(job->Preprocessed, job->SourceBuffer, (const char*)errors->GetBufferPointer());	// (2026-11-24 fd-complete)
 		if (errors) { job->Log += (char*)errors->GetBufferPointer(); errors->Release(); }
 		if (job->ShaderBuffer) {
+			bool wroteBin = false, wroteSrc = false;
 			FILE* f = nullptr;
 			if (!fopen_s(&f, job->Compiled.c_str(), "wb") && f) {
-				fwrite(job->ShaderBuffer->GetBufferPointer(), 1, job->ShaderBuffer->GetBufferSize(), f);
+				wroteBin = fwrite(job->ShaderBuffer->GetBufferPointer(), 1, job->ShaderBuffer->GetBufferSize(), f) == job->ShaderBuffer->GetBufferSize();
 				fclose(f);
 			}
 			const std::string portable = ShaderProgram::PortableSource(job->SourceBuffer);
 			if (!fopen_s(&f, job->Preprocessed.c_str(), "wb") && f) {
-				fwrite(portable.data(), 1, portable.size(), f);
+				wroteSrc = fwrite(portable.data(), 1, portable.size(), f) == portable.size();
 				fclose(f);
 			}
 			job->Log += "Shader compiled (parallel): " + job->Compiled;
 			CompileProgress::ShadersCompiled.fetch_add(1);
+			if (job->ReleaseAfterCache && wroteBin && wroteSrc) {
+				job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr;
+				if (job->SourceBuffer) { job->SourceBuffer->Release(); job->SourceBuffer = nullptr; }
+				job->BuffersReleased = true;
+			}
 		}
 	}
 
@@ -186,8 +256,10 @@ namespace ShaderPrecompile {
 		for (Job* job : Jobs) if (!job->Done) n++;
 		return n;
 	}
+	inline size_t TotalJobs() { return Jobs.size(); }
 
 	inline void Worker() {
+		SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
 		for (;;) {
 			const size_t i = NextJob.fetch_add(1);
 			if (i >= Jobs.size()) return;
@@ -197,13 +269,23 @@ namespace ShaderPrecompile {
 		}
 	}
 
-	inline void Add(const char* Name, const char* SubPath, const char* CacheSubPath, ShaderTemplate Template, const D3DXMACRO* Overrides) {
+	inline Job* Add(const char* Name, const char* SubPath, const char* CacheSubPath, ShaderTemplate Template, const D3DXMACRO* Overrides) {
 		Job* job = new Job();
 		job->Name = Name;
 		Paths(Name, SubPath, CacheSubPath, Template.Name, job);
-		if (!ShaderProgram::FileExists(job->Source.c_str()) || ByCompiledPath.count(job->Compiled)) { delete job; return; }
+		if (!ShaderProgram::FileExists(job->Source.c_str()) || ByCompiledPath.count(job->Compiled)) { delete job; return nullptr; }
 		job->Template = Template;
 		ShaderRecord::BuildDefines(job->Template, Overrides);
+		int defCount = 0;
+		for (int d = 0; d < ShaderTemplate::kMaxDefines && job->Template.Defines[d].Name; d++)
+			if (job->Template.Defines[d].Definition) defCount++;
+		job->OwnedDefineValues.reserve(defCount);
+		for (int d = 0; d < ShaderTemplate::kMaxDefines && job->Template.Defines[d].Name; d++) {
+			if (job->Template.Defines[d].Definition) {
+				job->OwnedDefineValues.emplace_back(job->Template.Defines[d].Definition);
+				job->Template.Defines[d].Definition = job->OwnedDefineValues.back().c_str();
+			}
+		}
 		job->DefineKey = KeyOf(&job->Template.Defines[0]);
 		Jobs.push_back(job);
 		ByCompiledPath[job->Compiled] = job;
@@ -219,17 +301,26 @@ namespace ShaderPrecompile {
 			off->Source = base + (Template.Name ? Template.Name : Name) + ".hlsl";
 			off->Preprocessed = cache + Name + ".hlsl";
 			off->Compiled = cache + Name;
-			if (CloudOffByPath.count(off->Compiled)) { delete off; return; }
+			if (CloudOffByPath.count(off->Compiled)) { delete off; return job; }
 			std::vector<D3DXMACRO> cloudOff;
 			for (const D3DXMACRO* o = Overrides; o && o->Name; o++) cloudOff.push_back(*o);
 			cloudOff.push_back({ "FORWARD_CLOUD_SHADOWS", "0" });
 			cloudOff.push_back({ NULL, NULL });
 			off->Template = Template;
 			ShaderRecord::BuildDefines(off->Template, cloudOff.data());	// (copies the names and values, which are static strings, not the list)
+			// (2026-11-27 upstream 1.1.5 merge) the same own copy of the define strings as above, so a worker never reads BuildDefines' static char arrays
+			off->OwnedDefineValues.reserve(ShaderTemplate::kMaxDefines);	// (reserved first: a reallocation would move short strings and their c_str pointers)
+			for (int d = 0; d < ShaderTemplate::kMaxDefines && off->Template.Defines[d].Name; d++) {
+				if (off->Template.Defines[d].Definition) {
+					off->OwnedDefineValues.emplace_back(off->Template.Defines[d].Definition);
+					off->Template.Defines[d].Definition = off->OwnedDefineValues.back().c_str();
+				}
+			}
 			off->DefineKey = KeyOf(&off->Template.Defines[0]);
 			job->CloudOff = off;
 			CloudOffByPath[off->Compiled] = off;
 		}
+		return job;
 	}
 
 	// From the first ShaderRecord::LoadShader (main thread): the job list, then the workers.
@@ -238,6 +329,7 @@ namespace ShaderPrecompile {
 		if (!TheShaderManager || TheShaderManager->ShaderNames.empty()) return;	// not set up yet: try again on the next shader
 		Started = true;
 		if (!TheSettingManager->GetSettingI("Main.Main.Performance", "ParallelShaderCompile")) return;
+		CompileProgress::DrainEffectWorkers();	// UNOFFICIAL 2026-11-23: never run effect & game-shader worker pools simultaneously in 32-bit VA
 		StartTime = (double)GetTickCount64();
 		static D3DXMACRO interior[] = { { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" },
 			{ "CONTACT_HARDENING", "0" }, { NULL, NULL }, { NULL, NULL } };
@@ -374,15 +466,16 @@ namespace ShaderPrecompile {
 			return j->Source.find("\\Shadows\\") != std::string::npos || (j->Name.size() > 4 && !j->Name.compare(j->Name.size() - 4, 4, ".vso"));
 		});
 		for (const auto& [name, tmpl] : lateJobs) addLampRecords(name, tmpl);
+		for (size_t j = lateFrom; j < Jobs.size(); j++) Jobs[j]->ReleaseAfterCache = true;
 		std::stable_sort(Jobs.begin() + lateFrom, Jobs.end(), [](const Job* a, const Job* b) {
 			auto weight = [](const Job* j) { const char* n = j->Name.c_str(); return !strncmp(n, "SLS203", 6) && n[6] >= '4' && n[6] <= '6' ? 2 : !strncmp(n, "SLS20", 5) || !strncmp(n, "SKIN", 4) ? 1 : 0; };
 			return weight(a) > weight(b);
 		});
-		const unsigned cores = std::thread::hardware_concurrency();
-		const unsigned threads = (std::max)(1u, (std::min)(cores > 1 ? cores - 1 : 1u, 12u));
+		const unsigned threads = ThreadCount();
+		WorkerMaxSlots.store(threads, std::memory_order_relaxed);
 		CompileProgress::ShadersTotal.store((int)(late ? lateFrom : Jobs.size()));
 		CompileProgress::Begin();
-		for (unsigned i = 0; i < threads; i++) std::thread(Worker).detach();	// (detached: shaders the game never asks for are compiled and left)
+		for (unsigned i = 0; i < threads; i++) CompileProgress::SpawnWorker(Worker);	// (detached 4 MB stack: shaders the game never asks for are compiled and left)
 		Logger::Log("UNOFFICIAL ParallelShaderCompile: %u shaders on %u threads%s.", (unsigned)Jobs.size(), threads,
 			late ? " (the lamp-shadow records' last: made after the start, core/LateInteriors.h)" : "");
 	}
@@ -401,11 +494,11 @@ namespace ShaderPrecompile {
 			auto off = CloudOffByPath.find(CompiledPath);
 			if (off == CloudOffByPath.end()) return false;
 			job = off->second;
-			while (!job->Parent->Done) Sleep(1);
+			CompileProgress::WaitDone(job->Parent->Done);
 			if (!job->Done) return false;	// (not made: the record compiled with the lookup, and the device refused it)
 		}
 		if (job->Taken) return false;
-		while (!job->Done) Sleep(1);
+		CompileProgress::WaitDone(job->Done);
 		job->Taken = true;
 		if (Defines && KeyOf(Defines) != job->DefineKey) {
 			Logger::Log("UNOFFICIAL ParallelShaderCompile: %s was queued with other defines than its load has now (a feature dropped since the start): made at its load instead", CompiledPath);
@@ -415,7 +508,11 @@ namespace ShaderPrecompile {
 			return false;
 		}
 		if (!job->Log.empty()) { Logger::Log("%s", job->Log.c_str()); RegisterClash::Check(job->Name.c_str(), job->Log.c_str()); }	// UNOFFICIAL 2026-10-31 (X4500)
-		if (!job->Preprocessed_ok) { if (job->SourceBuffer) job->SourceBuffer->Release(); return false; }
+		if (job->BuffersReleased) {
+			TakenOutOfRegisters = job->CompileFailed && job->Log.find("X4505") != std::string::npos;
+			return false;	// LoadShader takes the cache hit cleanly (or handles cloud failure) without keeping VA tied up in worker buffers
+		}
+		if (!job->Preprocessed_ok) { if (job->SourceBuffer) job->SourceBuffer->Release(); job->SourceBuffer = nullptr; return false; }
 		TakenOutOfRegisters = job->CompileFailed && job->Log.find("X4505") != std::string::npos;
 		*Source = job->SourceBuffer;
 		*Shader = job->ShaderBuffer;
@@ -427,6 +524,23 @@ namespace ShaderPrecompile {
 		return true;
 	}
 
+	inline void ReleaseUntakenStartupBuffers() {
+		unsigned released = 0;
+		auto release = [&](Job* job) {
+			if (!job->ReleaseAfterCache && !job->Taken && !job->BuffersReleased && job->Done.load(std::memory_order_acquire)) {
+				if (job->SourceBuffer || job->ShaderBuffer) released++;
+				if (job->SourceBuffer) { job->SourceBuffer->Release(); job->SourceBuffer = nullptr; }
+				if (job->ShaderBuffer) { job->ShaderBuffer->Release(); job->ShaderBuffer = nullptr; }
+				job->BuffersReleased = true;
+			}
+		};
+		for (Job* job : Jobs) {
+			release(job);
+			if (job->CloudOff) release(job->CloudOff);	// (2026-11-27 upstream 1.1.5 merge: an untaken CloudOff build keeps its VA otherwise)
+		}
+		if (released) Logger::Log("UNOFFICIAL ParallelShaderCompile: released buffers of %u untaken startup shaders.", released);
+	}
+
 	// UNOFFICIAL 2026-11-11 (docs/next/SHADER-COMPILE-TIMES-2026-11-11.md) log only: the start's game-shader compiles, slowest first. MainCompiles:
 	// ShaderRecord::LoadShader's own compiles (main thread only). LogCompileTimes: once, from ImGuiManager::Initialize (main thread); a job
 	// is read only once Done, as Take does.
@@ -435,6 +549,7 @@ namespace ShaderPrecompile {
 		static bool logged = false;
 		if (logged) return;
 		logged = true;
+		ReleaseUntakenStartupBuffers();
 		std::vector<std::pair<double, std::string>> all;
 		double workerMs = 0.0, mainMs = 0.0;
 		unsigned workerCount = 0, running = 0;

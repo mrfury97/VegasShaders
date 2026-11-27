@@ -63,15 +63,20 @@ public:
 	// preprocessed text (<cache entry>.hlsl.nocloud), so the next start goes straight to its build without the lookup.
 	static bool				KnownCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
 	static void				NoteCloudFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
-	// UNOFFICIAL 2026-11-26: the same for any record out of temp registers (X4505) at both flags (<cache entry>.hlsl.x4505)
-	static bool				KnownOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source);
-	static void				NoteOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source);
+	// UNOFFICIAL 2026-11-24 fd-complete (docs/next/FD-COMPLETE.md P3): any record whose compile FAILED with a compiler error is remembered the
+	// same way (<cache entry>.hlsl.failed: a header line, then the exact text), so the next start does not spend seconds compiling the same
+	// text again (players: the outdoor glass records' NoCloud builds, 5 s each at every start). 0 = not known, 1 = failed, 2 = failed out of
+	// temp registers (X4505: the fallback ladders read that). Any change to the text (a setting, a new build) compiles it again.
+	static int				KnownFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source);
+	static void				NoteFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source, const char* Messages);
 
 	// Drops the cached IDirect3DTexture9* for a named sampler so that SetCT re-resolves it
 	// on the next draw. MUST be called on every consumer of a texture that is released and
 	// recreated -- see ShaderManager::ClearShaderSamplers. Lives on ShaderProgram rather
 	// than EffectRecord because game shaders need it too.
 	void					ClearSampler(const char* SamplerName, size_t NameLength);
+	static void				ClearAllSamplers(const char* SamplerName, size_t NameLength);
+	static void				ForgetAllTexture(IDirect3DBaseTexture9* Texture);
 
 	// Tables built by CreateCT: an array and its length for each kind.
 	ShaderFloatValue*		FloatShaderValues;		UInt32 FloatShaderValuesCount;

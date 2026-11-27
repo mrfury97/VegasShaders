@@ -383,6 +383,7 @@ bool VolumetricCloudsEffect::MoonPlace(Sky* sky, D3DXVECTOR3& direction, float& 
 }
 
 void VolumetricCloudsEffect::UpdateConstants() {
+	Textures.HistoryRead = Textures.HistoryTexture[read];
 	Sky* sky = Tes ? Tes->sky : nullptr;
 	// UNOFFICIAL 2026-10-13: once a frame, at the tuned rate (FrameClock.h: UpdateConstants runs twice a frame).
 	static double lastFrameTime = -1.0;
@@ -601,6 +602,12 @@ static bool PrefilterOn(VolumetricCloudsEffect* clouds) {
 
 void VolumetricCloudsEffect::RenderClouds(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 	IDirect3DSurface9* RenderedSurface, IDirect3DSurface9* SourceSurface) {
+	static IDirect3DTexture9* lastHist0 = nullptr;
+	if (Textures.HistoryTexture[0] != lastHist0) {
+		lastRenderTime = -1.0;
+		lastHist0 = Textures.HistoryTexture[0];
+	}
+	Textures.HistoryRead = Textures.HistoryTexture[read];
 	// The history is kept only across consecutive frames in the same place: after a cell change (a door, fast travel)
 	// or a pause in the clouds (indoors, a menu), it starts over from this frame's march.
 	// (UNOFFICIAL 2026-10-27: the march and its history are full size in every frame now -- see below -- so another RenderScale, or
@@ -703,7 +710,7 @@ void VolumetricCloudsEffect::RenderClouds(IDirect3DDevice9* Device, IDirect3DSur
 	lastRenderTime = now;
 	// UNOFFICIAL 2026-10-30: the cloud sky probe, when reflections want it (before frame++, with this frame's constants).
 	ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections;
-	if (reflections && reflections->Enabled && reflections->Settings.CloudSky) RenderSkyProbe(Device);
+	if (reflections && reflections->CubeWanted() && reflections->Settings.CloudSky) RenderSkyProbe(Device);
 	frame++;
 }
 

@@ -232,6 +232,16 @@ bool SpecularEffect::FillUniforms(SpecularUniforms& u) {
 	copy("TESR_ShadowMiddleCenter", u.shadowMiddleCenter, sizeof(u.shadowMiddleCenter));
 	copy("TESR_ShadowFarCenter", u.shadowFarCenter, sizeof(u.shadowFarCenter));
 	copy("TESR_ShadowLodCenter", u.shadowLodCenter, sizeof(u.shadowLodCenter));
+	auto copyOptional = [&](const char* name, void* dst, size_t bytes) -> bool {
+		if (const void* value = ConstantValue(name)) { memcpy(dst, value, bytes); return true; }
+		auto tbl = TheShaderManager->ConstantsTable.find(name);
+		if (tbl != TheShaderManager->ConstantsTable.end() && tbl->second) { memcpy(dst, tbl->second, bytes); return true; }
+		return false;
+	};
+	copyOptional("TESR_FogData", u.fogData, sizeof(u.fogData));
+	if (!copyOptional("TESR_RenderScale", u.renderScale, sizeof(u.renderScale))) {
+		u.renderScale[0] = u.renderScale[1] = u.renderScale[2] = u.renderScale[3] = 1.0f;
+	}
 	if (!found) {
 		static bool reported = false;
 		if (!reported) {

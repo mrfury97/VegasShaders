@@ -248,7 +248,7 @@ float FallbackCap() { return cb.alFlags.z > 0.5 && cb.alReach.z > 0.0 ? cb.alRea
 vec3 SurfaceAlbedo(texture2D albedoTex, vec2 uv, vec3 lin) {
     vec4 a = pointLod(albedoTex, uv);
     float take = step(0.5, cb.alFlags.z) * step(0.5, a.a);
-    return mix(SurfaceColourCap(lin, FallbackCap()), max(a.rgb, vec3(0.0)), take);
+    return mix(SurfaceColourCap(lin, FallbackCap()), clamp(a.rgb, vec3(0.0), vec3(0.85)), take);
 }
 vec3 MultiBounceAO(float v, vec3 albedo) {
     vec3 a =  2.0404 * albedo - 0.3324;

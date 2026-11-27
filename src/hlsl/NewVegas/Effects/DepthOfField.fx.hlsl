@@ -19,7 +19,7 @@ sampler2D TESR_AvgLumaBuffer : register(s3) = sampler_state { ADDRESSU = CLAMP; 
 #include "Includes/Helpers.hlsl"
 #include "Includes/Depth.hlsl"
 
-static const bool distantOn = bool(TESR_DepthOfFieldBlur.x);
+static const float distantStrength = max(TESR_DepthOfFieldBlur.x, 0.0f);
 static const float blurFrom = TESR_DepthOfFieldBlur.y;
 static const float blurTo = TESR_DepthOfFieldBlur.z;
 static const float baseRadius = TESR_DepthOfFieldBlur.w;
@@ -109,7 +109,7 @@ float4 DoF(VSOUT IN) : COLOR0
 	float farB = invlerps(farP, farP * 2, depth) * 0.8;
 
 	nearB *= 0.5 * smoothstep(nearCut/2, 0, depth) + smoothstep(nearCut/2, nearCut, depth); // attenuate near blur to reveal gun
-	farB = saturate(farB + invlerps(blurFrom, blurTo, depth) * distantOn * invlerps(100000, 5000, worldP.z)); // add in distance constant blur but exclude sky
+	farB = saturate(farB + invlerps(blurFrom, blurTo, depth) * distantStrength * invlerps(100000, 5000, worldP.z)); // add in distance constant blur but exclude sky
 
 	return float4(nearB, farB, 1, 1);
 }
@@ -212,7 +212,8 @@ float4 DistantOnly(VSOUT IN) : COLOR0
 	float depth = readDepth(uv - TESR_DepthOfFieldJitter.xy);	// UNOFFICIAL 2026-11-01 JitterFix
 	float3 cameraVector = toWorld(uv) * depth;
 	float worldHeight = TESR_CameraPosition.z + cameraVector.z;
-	float blur = saturate(invlerps(blurFrom, blurTo, depth) * distantOn * invlerps(100000, 5000, worldHeight));
+	float distRamp = invlerps(blurFrom, blurTo, depth) * invlerps(100000, 5000, worldHeight);
+	float blur = saturate(distRamp * min(distantStrength, 1.0f));
 	// Reads the current image (TESR_RenderedBuffer), not TESR_SourceBuffer: this pass never writes to
 	// the texture it reads, and it lets the caller skip the full-resolution SourceBuffer copy.
 	float4 center = tex2D(TESR_RenderedBuffer, uv);
@@ -224,7 +225,7 @@ float4 DistantOnly(VSOUT IN) : COLOR0
 	// Only neighbours at about the same distance are mixed in (full weight within ~7% of this pixel's depth, none beyond
 	// ~22%): blurring the sky with a thin pole, branch or wire in front of it drew a dark halo round them that flickered
 	// as they moved. Where the four are at the same distance this is the plain average it always was.
-	float2 radius = TESR_ReciprocalResolution.xy * baseRadius * (1.0 + blur);
+	float2 radius = TESR_ReciprocalResolution.xy * baseRadius * max(distantStrength, 1.0f) * (1.0 + blur);
 	const float2 corners[4] = { float2(-1, -1), float2(1, -1), float2(-1, 1), float2(1, 1) };
 	float4 blurred = 0;
 	float weights = 0;

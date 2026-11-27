@@ -10,6 +10,7 @@
 #include "MenuTools.h"
 #include "MenuWidgets.h"
 #include "MenuLayout.h"	// 2026-11-10: the effects list's folders, the player's own arrangement
+#include "UnsavedSettings.h"	// 2026-11-25 (unsaved marks): the settings not saved yet, marked in bold with " *"
 #include "Branding.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
 #include "InstallCheck.h"	// 2026-11-03: the install self-check (main-menu notice, Help > Install check, Copy bug report)
@@ -26,6 +27,7 @@
 #include "../effects/AmbientOcclusion/AmbientOcclusion.h"
 #include "../effects/AmbientLight/AmbientLight.h"
 #include <sstream>
+#include <functional>	// 2026-11-26 (unsaved marks): ModeOf
 #include <array>
 #include <iomanip>
 #include <ctime>
@@ -37,6 +39,9 @@
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: shelved effects have no page, row or search entry in a release build
 #include "SettingForce.h"	// UNOFFICIAL 2026-11-16: keys the deferred renderer sets (on or off) show greyed, at the value in effect
 #include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: close startup shader-compile overlay once the first frame arrives
+#include "DistantLandProto.h"	// UNOFFICIAL 2026-11-25 device reset release
+#include "DistantLandTerrain.h"	// UNOFFICIAL 2026-11-25 device reset release
+#include "MaterialSSSProto.h"	// UNOFFICIAL 2026-11-25 device reset release
 #include "DxvkLoader.h"
 
 // The settings overlay (ImGui on the game's D3D9 device). Layout, top to bottom: a menu bar (File / View / Tools and the
@@ -243,12 +248,21 @@ static void SyncShaderSwitches() {
 	}
 }
 
-// File > Revert: every value seen since the menu opened goes back to what it was then.
+// File > Revert: every unsaved change goes back to its saved value.
+// 2026-11-26 (user: "the Revert button does nothing": AA SMAA -> FXAA, Revert, still FXAA): it went back only through the
+// values the number rows had drawn since the menu opened (SessionValue), so a mode picker, a switch or a list never went back. Now it
+// takes every setting on the unsaved list (UnsavedSettings: the value each had at the last Save) back to that value, so the bold
+// " *" marks, the "Unsaved" and the amber Save go off with it. An effect's switch goes through the effect (it loads what it needs),
+// a LUT name loads its file. A key this build does not know has no saved value and stays.
+static void SetShaderEnabled(const char* shader, bool wantOn);	// with the category pages
+static std::string EffectSwitchSection(const std::string& effect);
 static void RevertSessionValues() {
 	static const char* const kLutKeys[] = { "DayLUT", "NightLUT", "InteriorLUT" };	// LUT slots 0, 1, 2
 	LUTEffect* lut = TheShaderManager->Effects.LUT;
-	for (const auto& [section, values] : gMenu.sessionValues) {
+	const UnsavedSettings::Table unsaved = UnsavedSettings::All();	// a copy: every write below takes its setting off the list
+	for (const auto& [section, values] : unsaved) {
 		for (const auto& [key, text] : values) {
+			if (text == UnsavedSettings::kNoValue) continue;
 			// A LUT name has to load its file: LUTEffect::UpdateSettings never re-reads the names, so writing it is not enough
 			int slot = -1;
 			if (lut && section == "Shaders.LUT.Main")
@@ -257,11 +271,15 @@ static void RevertSessionValues() {
 				lut->LoadLUT(slot, text.c_str());
 				continue;
 			}
-			TheSettingManager->SetSettingS(section.c_str(), key.c_str(), text.c_str());
+			const size_t dot = section.rfind('.');
+			const std::string effect = section.compare(0, 8, "Shaders.") == 0 && dot != std::string::npos && dot > 8 ? section.substr(8, dot - 8) : std::string();
+			if (key == "Enabled" && !effect.empty() && EffectSwitchSection(effect) == section) SetShaderEnabled(effect.c_str(), text == "true");
+			else TheSettingManager->SetSettingS(section.c_str(), key.c_str(), text.c_str());
 		}
 	}
 	TheSettingManager->LoadSettings();
 	SyncShaderSwitches();
+	gMenu.sessionValues.clear();	// the ~ buttons start again from these values
 	gMenu.resetWheels = true;
 	gMenu.page.clear();
 }
@@ -319,7 +337,6 @@ void ImGuiManager::Initialize() {
 	}
 	gOverlay.window = window;
 
-	NewPatchRebuild();	// UNOFFICIAL 2026-10-18: the "New in this patch" list, once (it logs its size)
 	CaptureStartupValues();	// UNOFFICIAL 2026-10-19: the restart-only settings as the game started
 
 	IMGUI_CHECKVERSION();
@@ -544,7 +561,12 @@ static void FeedMouseAndStepKeys() {
 static bool FollowDeviceState() {
 	const HRESULT state = TheRenderManager->device->TestCooperativeLevel();
 	if (state == D3DERR_DEVICELOST || state == D3DERR_DEVICENOTRESET) {
-		if (!gOverlay.deviceLost) ImGui_ImplDX9_InvalidateDeviceObjects();
+		if (!gOverlay.deviceLost) {
+			ImGui_ImplDX9_InvalidateDeviceObjects();
+			DistantLandTerrain::OnDeviceLost();
+			DistantLandProto::ReleaseDefaultPool();
+			MaterialSSSProto::ReleaseDefaultPool();
+		}
 		gOverlay.deviceLost = true;
 		return false;
 	}
@@ -615,6 +637,141 @@ static bool ShouldHideKey(const char* key) {
 	return kRowless.count(key) != 0;
 }
 
+// ---- Unsaved marks (2026-11-25) -----------------------------------------------------------------------------------------
+// A row, heading or sidebar entry that holds a setting changed since the last Save (or Revert) is drawn in bold with " *"
+// (MenuWidgets' marked flags and MarkLastItem; UnsavedSettings.h keeps the list). A setting's row is marked by its own key. A
+// control that shows or writes several keys (a mode picker, a master switch) is marked by its SCOPE, the keys behind the value it
+// shows, written as a comma-separated list of:
+//   "Section:Key"  that one key
+//   "Section"      every key of the section and of the sections under it
+//   "@Effect"      the effect's own on/off switch (the one beside it in the sidebar)
+// The sidebar's entries are marked from the same facts further down ("Unsaved marks: the sidebar").
+
+// The section of an effect's own on/off switch (its key is "Enabled"), as SettingManager::SetMenuShaderEnabled writes it; empty
+// for an effect with no switch.
+static std::string EffectSwitchSection(const std::string& effect) {
+	if (effect == "HudRaindrops") return "Shaders.WetnessEffects.HudRaindrops";
+	const SettingManager::MenuSwitch kind = TheSettingManager->GetMenuShaderSwitch(effect.c_str());
+	if (kind == SettingManager::MenuSwitch::None) return std::string();
+	return "Shaders." + effect + (kind == SettingManager::MenuSwitch::MainEnabled ? ".Main" : ".Status");
+}
+
+static bool EffectSwitchMarked(const std::string& effect) {
+	const std::string section = EffectSwitchSection(effect);
+	return !section.empty() && UnsavedSettings::Key(section.c_str(), "Enabled");
+}
+
+// One of the section's rows is unsaved. A key that is no row (ShouldHideKey; the RT master switches, drawn at the top of the Ray
+// tracing page) is marked where it is drawn instead.
+static bool SectionRowsMarked(const char* section) {
+	const UnsavedSettings::Table& all = UnsavedSettings::All();
+	const auto sec = all.find(section);
+	if (sec == all.end()) return false;
+	for (const auto& key : sec->second) if (!ShouldHideKey(key.first.c_str())) return true;
+	return false;
+}
+
+// Whether [section] key is one of the scope's keys.
+static bool ScopeHas(const char* scope, const std::string& section, const std::string& key) {
+	for (const char* p = scope; *p; ) {
+		while (*p == ' ' || *p == ',') p++;
+		const char* end = p;
+		while (*end && *end != ',') end++;
+		std::string item(p, end);
+		item.erase(item.find_last_not_of(' ') + 1);
+		p = end;
+		if (item.empty()) continue;
+		if (item[0] == '@') {
+			if (key == "Enabled" && section == EffectSwitchSection(item.substr(1))) return true;
+			continue;
+		}
+		const size_t colon = item.find(':');
+		if (colon != std::string::npos) {
+			if (section == item.substr(0, colon) && key == item.substr(colon + 1)) return true;
+		}
+		else if (section.compare(0, item.size(), item) == 0 && (section.size() == item.size() || section[item.size()] == '.')) return true;
+	}
+	return false;
+}
+
+// Whether one of the scope's keys is unsaved.
+static bool ScopeMarked(const char* scope) {
+	for (const auto& section : UnsavedSettings::All())
+		for (const auto& key : section.second)
+			if (ScopeHas(scope, section.first, key.first)) return true;
+	return false;
+}
+
+// The scopes of the rows that pick a mode or switch several keys at once (the pickers are further down; the Quick settings,
+// AO & bounce light and category pages share them, and the sidebar marks those pages' entries from them too).
+// ---- Unsaved marks: controls that write more than they show (2026-11-26) ----------------------------------------------------
+// A mode picker (AO / sky occlusion / bounce light, anti-aliasing, reflections, sun / cloud / lamp shadows, fog, wetness, exposure)
+// or a switch that turns another one off (FSR / DLSS) writes more settings than the one it shows. The user's report: Ambient
+// occlusion on turned Bounce light on with it, and with both off again Bounce light kept its "*" (ComputeGI and the two grid
+// values were left changed underneath). So:
+// - while such a control writes, PickerWrites names it the writer (UnsavedSettings::Owners keeps which control changed what);
+// - when it is done and what it shows is what it showed when last saved (SavedMode: the same mode with the saved values), the
+//   settings it changed go back to their saved values (Settle), and nothing is left unsaved underneath. A setting changed by hand
+//   afterwards is no longer the control's and stays;
+// - its row is marked when its mode differs from the saved one (ModeMarked), not by the settings underneath.
+typedef std::function<int()> ModeOf;
+static void SetShaderEnabled(const char* shader, bool wantOn);	// with the category pages
+
+// What the mode was when last saved: worked out with the unsaved settings put back to their saved values for a moment.
+static int SavedMode(const ModeOf& mode) {
+	const auto live = TheSettingManager->PeekSavedBegin();
+	const int saved = mode();
+	TheSettingManager->PeekSavedEnd(live);
+	return saved;
+}
+
+// The same, kept until the unsaved list changes (the rows ask every frame).
+static int SavedModeCached(const char* id, const ModeOf& mode) {
+	static std::map<std::string, std::pair<unsigned, int>> cache;	// id -> (UnsavedSettings::Revision() + 1, the saved mode)
+	std::pair<unsigned, int>& c = cache[id];
+	if (c.first != UnsavedSettings::Revision() + 1) c = std::make_pair(UnsavedSettings::Revision() + 1, SavedMode(mode));
+	return c.second;
+}
+
+static bool ModeMarked(const char* id, const ModeOf& mode) { return UnsavedSettings::Any() && mode() != SavedModeCached(id, mode); }
+
+// The control is back where it was saved: what it changed goes back to the saved values (an effect's switch through the effect).
+static void Settle(const std::string& group, const ModeOf& mode) {
+	if (!UnsavedSettings::Any() || mode() != SavedMode(mode)) return;
+	std::vector<std::pair<std::string, std::string>> mine;
+	for (const auto& owner : UnsavedSettings::Owners()) if (owner.second == group) mine.push_back(owner.first);
+	if (mine.empty()) return;
+	for (const auto& k : mine) {
+		const auto sec = UnsavedSettings::All().find(k.first);
+		if (sec == UnsavedSettings::All().end()) continue;
+		const auto it = sec->second.find(k.second);
+		if (it == sec->second.end() || it->second == UnsavedSettings::kNoValue) continue;
+		const std::string saved = it->second;
+		const size_t dot = k.first.rfind('.');
+		const std::string effect = k.first.compare(0, 8, "Shaders.") == 0 && dot != std::string::npos && dot > 8 ? k.first.substr(8, dot - 8) : std::string();
+		if (k.second == "Enabled" && !effect.empty() && EffectSwitchSection(effect) == k.first) SetShaderEnabled(effect.c_str(), saved == "true");
+		else TheSettingManager->SetSettingS(k.first.c_str(), k.second.c_str(), saved.c_str());
+	}
+	TheSettingManager->LoadSettings();
+}
+
+// Put around a control's writes: { PickerWrites writes("group", Mode); ...SetSetting... }
+struct PickerWrites {
+	std::string Group;
+	ModeOf Mode;
+	PickerWrites(std::string group, ModeOf mode) : Group(std::move(group)), Mode(std::move(mode)) { UnsavedSettings::Writer() = Group; }
+	~PickerWrites() { UnsavedSettings::Writer().clear(); Settle(Group, Mode); }
+};
+
+static const char* const kScopeAllEffects = "Main.Main.Misc:RenderEffects";
+static const char* const kScopeMaxQuality = "Main.Main.Quality:MaxQuality";
+static const char* const kScopeAoMode = "@AmbientLight, @AmbientOcclusion, Shaders.AmbientOcclusion.RT:Enabled, Shaders.AmbientOcclusion.RT:OcclusionOnD3D9, "
+	"Shaders.AmbientOcclusion.GTAO:Enabled";
+static const char* const kScopeSkyMode = "Shaders.AmbientOcclusion.Skylighting:Enabled, Shaders.AmbientOcclusion.RT:Sky";
+static const char* const kScopeGiMode = "@AmbientLight, @BounceLight, Shaders.AmbientLight.Main:ComputeGI, Shaders.AmbientOcclusion.RT:GI, "
+	"Shaders.AmbientLight.Main:GridBounce, Shaders.AmbientLight.Main:GridLamps";
+static const char* const kScopeAaMode = "Main.Main.ReducedQuality:FXAA, @SMAA, @TAA, Shaders.TAA.FSR:Enabled, Shaders.TAA.DLSS:Enabled";
+
 // Kept in the file for old setups but read by nothing (the code that read them is commented out): drawn greyed, not hidden.
 static bool IsInertSetting(const char* section, const char* key) {
 	const bool shadowMaps = !strcmp(section, "Shaders.ShadowsExteriors.ShadowMaps");
@@ -648,6 +805,7 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Main.Main.Performance",                "ShaderWarmUp",       RestartRule::Changed },	// runs once, at the main menu
 	{ "Main.Main.Performance",                "SlimDepthBuffer",    RestartRule::Changed },	// depth texture format (CombineDepth)
 	{ "Shaders.ShadowsExteriors.Main",        "ForwardShadows",     RestartRule::TurnOn },
+	{ "Shaders.ShadowsExteriors.SSShadows",   "Enabled",            RestartRule::TurnOn },	// UNOFFICIAL 2026-11-26 Bottled Shaders / Bend SSS texture at start
 	{ "Main.Main.Performance",                "NvrDxvkDisplacement", RestartRule::TurnOn },	// land shaders registered as they load ([Shaders.Terrain.Displacement] Enabled is live)
 	{ "Shaders.ShadowsExteriors.SunSmoothing","CrossFade",          RestartRule::Changed },
 	{ "Shaders.ShadowsExteriors.SunSmoothing","DeferredFade",       RestartRule::TurnOn },	// UNOFFICIAL 2026-11-15 fd-smoothsun (compiled into the deferred sun pass at startup)
@@ -671,10 +829,13 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.PBR.Main",                     "SkylightingMode",    RestartRule::Changed },
 	{ "Shaders.PBR.Metal",                    "CubeReflections",    RestartRule::TurnOn },	// LIVE_CUBE: either above 0 at start
 	{ "Shaders.PBR.EnvMaps",                  "CubeReflections",    RestartRule::TurnOn },
+	{ "Shaders.PBR.Metal",                    "Clearcoat",          RestartRule::TurnOn },	// METAL_CLEARCOAT_ON: above 0 at start (2026-11-27)
+	{ "Shaders.PBR.Metal",                    "Pearlescence",       RestartRule::TurnOn },	// METAL_PEARL_ON: above 0 at start (2026-11-27)
 	{ "Shaders.PBR.MaterialRules",            "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.PBR.Rmaos",                    "Enabled",            RestartRule::Changed },
 	{ "Shaders.PBR.Rmaos",                    "SpecularFromMap",    RestartRule::Changed },	// RMAOS_SPEC_OFF (2026-11-02)
 	{ "Shaders.Reflections.Main",             "MaterialAware",      RestartRule::TurnOn },	// REFL_MATERIAL_ON (core/ReflMaterial.h)
+	{ "Shaders.Reflections.Main",             "CubeResolution",     RestartRule::Changed },	// live cube textures made at start (Reflections.cpp)
 	{ "Shaders.Reflections.Main",             "ReflectAdd",         RestartRule::TurnOn },	// REFL_ADD_ON (Reflections.fx.hlsl)
 	{ "Shaders.Reflections.Main",             "SpecularOcclusion",  RestartRule::TurnOn },	// REFL_SPECOCC_ON (Reflections.fx.hlsl)
 	{ "Shaders.PBR.Linear",                   "Enabled",            RestartRule::TurnOn },	// off at runtime = Gamma 1
@@ -976,6 +1137,17 @@ static const char* InactiveReason(const char* section, const char* key) {
 				return "Only used while GearWeather is on.";
 		}
 	}
+	if (sec.rfind("Shaders.WorldSurface.", 0) == 0) {
+		const bool defOff = NumericSetting("Main.Main.Quality", "DeferredRenderer") < 1.0f ||
+			NumericSetting("Main.Main.Misc", "ForceMSAA") != 0.0f;
+		if (defOff)
+			return "Requires DeferredRenderer to be enabled (and ForceMSAA off; restart).";
+		if (sec != "Shaders.WorldSurface.Status" && NumericSetting("Shaders.WorldSurface.Status", "Enabled") == 0.0f)
+			return "Only used while WorldSurface is enabled.";
+		if (sec != "Shaders.WorldSurface.Main" && sec != "Shaders.WorldSurface.Status" &&
+			strcmp(key, "Enabled") != 0 && NumericSetting(sec.c_str(), "Enabled") == 0.0f)
+			return "Only used while this layer is enabled.";
+	}
 
 	// Skin: ScreenSpace blur takes over from per-pixel Scattering; Main/Scattering apply outdoors, Interiors applies indoors
 	const bool isExt = TheShaderManager && TheShaderManager->GameState.isExterior;
@@ -1091,7 +1263,7 @@ static bool RainWetnessDeadKey(const std::string& section, const std::string& ke
 }
 
 static bool InternalHidden(const std::string& section, const std::string& key) {
-	if (ShelvedEffects::Section(section)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only), whatever ShowInternal says
+	if (ShelvedEffects::Key(section, key)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect or key (release builds only), whatever ShowInternal says
 	if (UnifiedReflectionsHides(section, key)) return true;	// (2026-11-20)
 	if (section == "Shaders.Puddles.Main" && key == "ReflectionPuddles" && TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
 	if (RainWetnessDeadKey(section, key)) return true;	// (2026-11-20)
@@ -1338,13 +1510,15 @@ static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, 
 		atOpen[c] = &SessionValue(rgb[c]->Section, rgb[c]->Key, rgb[c]->Value);
 		moved |= *atOpen[c] != rgb[c]->Value;
 	}
+	bool unsaved = false;	// 2026-11-25 (unsaved marks): the three keys are one item, marked on its title
+	for (int c = 0; c < 3; c++) unsaved = unsaved || UnsavedSettings::Key(rgb[c]->Section, rgb[c]->Key);
 
 	ImGui::PushID(prefix.c_str());
 	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y));
 
 	// Title line: the name in the skin's heading colour, then ~ (back to the values at menu open) while they differ
 	ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
-	MenuWidgets::Title(title.c_str(), 1.15f);
+	MenuWidgets::Title(title.c_str(), 1.15f, unsaved);
 	ImGui::PopStyleColor();
 	const bool titleHovered = ImGui::IsItemHovered();
 	if (moved) {
@@ -1422,6 +1596,8 @@ static const char* const kFsrVersions[] = { "0 - FSR 2.2.1", "1 - FSR 3.1" };	//
 static const char* const kPtLevels[] = { "0 - Quality", "1 - Balanced", "2 - Performance" };	// UNOFFICIAL 2026-11-11 PTRealtimeLevel
 static const char* const kDeferredModes[] = { "0 - Off (vanilla forward)", "1 - Indoors only", "2 - Full (outdoors + indoors)" };
 static const char* const kDeferredSkinSSSModes[] = { "0 - Off", "1 - Classic blur", "2 - Burley SSS (sharp highlights)" };
+static const char* const kMaterialSSSModes[] = { "0 - Off", "1 - In-pass scatter & transmission", "2 - In-pass + Burley screen scatter" };
+static const char* const kRealSunPathModes[] = { "0 - Vanilla overhead arc", "1 - Physical tilted arc", "2 - Seasonal calendar tilt" };
 static const char* const kSmokeTests[] = {
 	"0 - Normal", "1 - Smoke in green", "2 - No muzzle flash light", "3 - Smoke not drawn", "4 - Nothing drawn at all",
 };
@@ -1449,6 +1625,8 @@ static const Choices* ChoicesFor(const char* section, const char* key) {
 		{ "Main.Main.RayTracing.PTRealtimeLevel", NAMES(kPtLevels) },	// UNOFFICIAL 2026-11-11 (the Advanced view's row; the simple view: "Path tracing preset")
 		{ "Main.Main.Quality.DeferredRenderer", NAMES(kDeferredModes) },
 		{ "Main.Main.Quality.DeferredSkinSSS", NAMES(kDeferredSkinSSSModes) },
+		{ "Main.Main.Quality.MaterialSSS", NAMES(kMaterialSSSModes) },
+		{ "Shaders.ShadowsExteriors.Deferred.RealSunPath", NAMES(kRealSunPathModes) },
 	};
 	#undef NAMES
 	const auto found = kBySetting.find(std::string(section) + "." + key);
@@ -1537,6 +1715,8 @@ static const ConflictRule kConflictRules[] = {
 		"SMAA is on too: both smooth the edges, which costs more and softens the picture. Turn one of them off." },
 	{ "Shaders.SMAA.Status", "Enabled", "true", []() { return SettingOn("Main.Main.ReducedQuality", "FXAA"); },
 		"FXAA is on too: both smooth the edges, which costs more and softens the picture. Turn one of them off." },
+	{ "Shaders.HDR.Main", "Enabled", "true", nullptr,
+		"HDR output currently causes freezes for some players. A fix is being researched." },
 };
 
 static bool SameValue(const char* a, const std::string& b) {
@@ -1658,7 +1838,7 @@ static const SimpleRow kSimpleRows[] = {
 		"Shiny only: MaxRoughness=0.35 | Shiny and satin: MaxRoughness=0.5 | Most surfaces: MaxRoughness=0.75",
 		"How rough a surface can be and still get ray-traced reflections; rougher ones keep the screen-space reflections. Wet ground counts "
 		"by Reflections' WetRoughness: if it is rougher than this, puddles get no rays." },
-	{ "Shaders.Reflections.RT", "Weapon", "Weapon reflections", nullptr, "Your gun reflects the world around it: lamps, signs, the sky. Strongest on metal parts." },
+	{ "Shaders.Reflections.RT", "Weapon", "Weapon reflections", nullptr, "Your first-person weapon reflects its surroundings (the live 360-degree cube on all DXVK GPUs, or ray-traced hits when RT reflections are on). Strongest on metal parts." },
 	{ "Shaders.Reflections.RT", "WeaponHands", "Hands and arms reflect too", nullptr, "Off: only the gun reflects. On: your hands, gloves and arms reflect like the gun (the whole first-person model)." },
 	{ "Shaders.Reflections.RT", "Water", "Ray-traced water reflections", nullptr, "Water reflects the world with rays instead of the old reflection map." },
 	// Light shafts and fog (UNOFFICIAL 2026-11-07 ptaaa-fog)
@@ -1820,6 +2000,8 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.PBR.Main", "Saturation", "Colour saturation", nullptr, "How vivid the colours of lit objects are." },
 	{ "Shaders.PBR.Main", "SkylightingScale", "Sky colour in shade", nullptr, "Adds the colour of the sky to shaded areas. 0 turns it off." },
 	{ "Shaders.PBR.Main", "SkylightingSaturation", "Sky colour strength in shade", nullptr, "How vivid the sky colour in shaded areas is. 0 is grey, 1 matches the sky." },
+	{ "Shaders.PBR.Main", "DecoupleGlowMaps", "Decouple glow maps from lighting", nullptr, "Prevents sun and ambient scales from washing out emissive glow maps like weapon sights." },
+	{ "Shaders.PBR.Main", "GlowScale", "Glow map brightness", nullptr, "Adjusts brightness of self-illuminated glow maps when decoupled from lighting." },
 	// PBR (Rain)
 	{ "Shaders.PBR.Rain", "Roughness", "Surface roughness", nullptr, "Lower gives small bright highlights and clear reflections; higher gives a broad faint sheen." },
 	{ "Shaders.PBR.Rain", "AmbientScale", "Ambient light strength", nullptr, "How bright the general ambient light is on objects." },
@@ -1903,6 +2085,9 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Reflections.Main", nullptr, "Quality",
 		"Low: Steps=12 | Medium: Steps=24 | High: Steps=40",
 		"Higher gives steadier reflections with fewer gaps, and costs more." },
+	{ "Shaders.Reflections.Main", "CubeMode", "Environment reflections mode", nullptr, "How the live surroundings cube fills: 0 captures screen view only while Reflections is on, 1 keeps it updated for PBR metal/chrome too and fills unseen directions with sky and light grid, 2 (default) also renders a staggered 3D world cubemap so weapons, metal, and glass reflect overhead and behind you." },
+	{ "Shaders.Reflections.Main", "CubeResolution", "Environment cube resolution", nullptr, "Resolution per face for the live surroundings cubemap (64, 128, or 256). Higher gives sharper reflections on chrome and glossy surfaces. Needs a restart." },
+	{ "Shaders.Reflections.Main", "CubeDistance", "Environment cube distance", nullptr, "Maximum capture distance for 3D objects and point lamps in world-cubemap mode (mode 2)." },
 	// Sun shadows (Main)
 	{ "Shaders.ShadowsExteriors.Main", "Enabled", "Sun shadows", nullptr, "Turns the shadows cast by the sun on or off outdoors." },
 	{ "Shaders.ShadowsExteriors.Main", "Darkness", "Shadow darkness", nullptr, "How dark sun shadows are. Lower gives pale shadows, higher gives near-black ones." },
@@ -1922,6 +2107,12 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.ShadowsExteriors.ScreenSpace", "Intensity", "Contact shadow strength", nullptr, "How dark the small contact shadows are." },
 	{ "Shaders.ShadowsExteriors.ScreenSpace", "BlurRadius", "Contact shadow softness", nullptr, "How soft contact shadows are. Keep it low, or they look blocky." },
 	{ "Shaders.ShadowsExteriors.ScreenSpace", "Sharp", "Sharper, steadier contact shadows", nullptr, "Crisper contact shadows that shimmer less. Costs a little more frame rate." },
+	// Sun shadows (Screen-Space Shadows, Bottled Shaders / Bend Studio port)
+	{ "Shaders.ShadowsExteriors.SSShadows", "Enabled", "Bend screen-space shadows (deferred)", nullptr, "Fine screen-space contact shadows of the sun (Bottled Shaders / Bend Studio port) applied to sun light only in deferred mode. Needs a restart to turn on from off." },
+	{ "Shaders.ShadowsExteriors.SSShadows", "SampleCount", "Bend shadow reach (samples)", nullptr, "How far each screen-space sun shadow marches across the screen (1-4 x 60 samples at 1080p). Higher costs more GPU." },
+	{ "Shaders.ShadowsExteriors.SSShadows", "SurfaceThickness", "Bend surface thickness", nullptr, "How thick surfaces are assumed to be behind the depth buffer. Lower gives sharper, more precise contact shadows." },
+	{ "Shaders.ShadowsExteriors.SSShadows", "BilinearThreshold", "Bend edge sharpness threshold", nullptr, "Depth steps above this relative threshold read sharp instead of bilinear, preventing foreground edges from bleeding." },
+	{ "Shaders.ShadowsExteriors.SSShadows", "ShadowContrast", "Bend shadow contrast", nullptr, "Contrast of the screen-space sun shadows (1.0 is default; higher is darker/harder)." },
 	// Sun shadows (Shadow maps)
 	{ "Shaders.ShadowsExteriors.ShadowMaps", nullptr, "Shadow quality",
 		"Low: CascadeResolution=0 Distance=4000 | Medium: CascadeResolution=1 Distance=6000 | High: CascadeResolution=2 Distance=8000 | Very high: CascadeResolution=4 Distance=10000",
@@ -2051,19 +2242,23 @@ static const SimpleRow kSimpleRows[] = {
 		"Current: LegacyFog=false ClassicLook=0 | Classic: LegacyFog=false ClassicLook=1 | Legacy: LegacyFog=true ClassicLook=0",
 		"Current: this version's fog. Classic: the original mod's look. Legacy: the older fog, for presets made for it." },
 	{ "Shaders.VolumetricFog.Main", "Amount", "Fog strength", nullptr, "How strong the fog is outdoors." },
+	{ "Shaders.VolumetricFog.Main", "StartDistance", "Nearest distance with fog", nullptr, "Distance from you (game units, 70 = 1 m) where fog begins outdoors. Zero starts right at you." },
 	{ "Shaders.VolumetricFog.Main", "BaseDensity", "Fog thickness", nullptr, "How thick the fog is, whatever the weather. Higher hides the distance sooner." },
 	{ "Shaders.VolumetricFog.Main", "FogSaturation", "Fog colour richness", nullptr, "How rich the fog's colour is. Lower is greyer." },
 	{ "Shaders.VolumetricFog.Main", "NoiseStrength", "Fog patchiness", nullptr, "How patchy the fog is. Zero is an even haze, higher gives drifting banks." },
 	{ "Shaders.VolumetricFog.Main", "WindSpeed", "Fog drift speed", nullptr, "How fast the fog patches drift." },
 	{ "Shaders.VolumetricFog.Main", "SunGlow", "Glow round the sun", nullptr, "The bright glow in the fog round the sun, strongest at sunrise and sunset." },
+	{ "Shaders.VolumetricFog.Main", "DistantFogStart", "Distant haze start distance", nullptr, "Distance from you (game units) where distant horizon haze starts. -1 uses DistantFogRange." },
 	{ "Shaders.VolumetricFog.Main", "DistantFogBlend", "Haze on distant hills", nullptr, "How strongly far hills and terrain fade into the sky near the horizon." },
 	// VolumetricFog (Night)
 	{ "Shaders.VolumetricFog.Night", "AmountScale", "Fog strength at night", nullptr, "Fog strength at night compared with the day. Below 1 is thinner, above 1 is stronger." },
+	{ "Shaders.VolumetricFog.Night", "StartDistance", "Nearest distance with fog at night", nullptr, "Distance from you (game units) where fog begins at night. -1 uses the daytime distance." },
 	{ "Shaders.VolumetricFog.Night", "DensityScale", "Fog thickness at night", nullptr, "Fog thickness at night compared with the day." },
 	{ "Shaders.VolumetricFog.Night", "InscatteringScale", "Fog brightness at night", nullptr, "How bright and glowing the fog looks at night. Lower is darker." },
 	{ "Shaders.VolumetricFog.Night", "TintR", "Fog colour at night", nullptr, "Tints the fog at night. White leaves it as it is." },
 	// VolumetricFog (Interiors)
 	{ "Shaders.VolumetricFog.Interiors", "Amount", "Fog strength", nullptr, "How strong the fog is indoors." },
+	{ "Shaders.VolumetricFog.Interiors", "StartDistance", "Nearest distance with fog", nullptr, "Distance from you (game units, 70 = 1 m) where fog begins indoors. Zero starts right at you." },
 	{ "Shaders.VolumetricFog.Interiors", "BaseDensity", "Fog thickness", nullptr, "How thick the fog is indoors." },
 	{ "Shaders.VolumetricFog.Interiors", "FogSaturation", "Fog colour richness", nullptr, "How rich the fog's colour is indoors. Lower is greyer." },
 	{ "Shaders.VolumetricFog.Interiors", "NoiseStrength", "Fog patchiness", nullptr, "How patchy the indoor fog is. Zero is an even haze." },
@@ -2350,7 +2545,7 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.LocalExposure.Main", "Interiors", "Also indoors", nullptr, "Also applies the effect indoors." },
 	{ "Shaders.LocalExposure.Main", "Exteriors", "Also outdoors", nullptr, "Also applies the effect outdoors." },
 	// HDR (Main)
-	{ "Shaders.HDR.Main", "Enabled", "HDR output", nullptr, "Sends a true HDR picture to your display, with brighter highlights. Needs an HDR screen with HDR on in Windows and the DXVK fork." },
+	{ "Shaders.HDR.Main", "Enabled", "HDR output", nullptr, "Sends a true HDR picture to your display, with brighter highlights. Needs an HDR screen with HDR on in Windows and the DXVK fork. Warning: currently causes freezes for some players; a fix is being researched." },
 	{ "Shaders.HDR.Main", nullptr, "HDR format",
 		"HDR10: Mode=1 | scRGB: Mode=2",
 		"HDR10 is what most HDR games use. Try the other only if HDR10 looks wrong." },
@@ -2471,6 +2666,8 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.DepthOfField.FirstPersonView", "Enabled", "Depth of field (background blur)", nullptr, "Blurs things in front of and behind what you look at." },
 	{ "Shaders.DepthOfField.FirstPersonView", "BaseBlurRadius", "Blur strength", nullptr, "How strong the blur is." },
 	{ "Shaders.DepthOfField.FirstPersonView", "Radius", "Blur size", nullptr, "How large the blur is." },
+	{ "Shaders.DepthOfField.FirstPersonView", "DistantBlur", "Distant blur", nullptr, "Softens the far distance and mountain horizons to hide LOD edges." },
+	{ "Shaders.DepthOfField.FirstPersonView", "DistantBlurStrength", "Distant blur strength", nullptr, "How strong the distant blur is (0 = off, 1 = default)." },
 	{ "Shaders.DepthOfField.FirstPersonView", nullptr, "When it applies",
 		"Always: Mode=0 | Not in dialogue: Mode=1 | Only in dialogue: Mode=2",
 		"Whether the blur also applies while you talk to someone." },
@@ -2478,6 +2675,8 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.DepthOfField.ThirdPersonView", "Enabled", "Depth of field (background blur)", nullptr, "Blurs things in front of and behind what you look at." },
 	{ "Shaders.DepthOfField.ThirdPersonView", "BaseBlurRadius", "Blur strength", nullptr, "How strong the blur is." },
 	{ "Shaders.DepthOfField.ThirdPersonView", "Radius", "Blur size", nullptr, "How large the blur is." },
+	{ "Shaders.DepthOfField.ThirdPersonView", "DistantBlur", "Distant blur", nullptr, "Softens the far distance and mountain horizons to hide LOD edges." },
+	{ "Shaders.DepthOfField.ThirdPersonView", "DistantBlurStrength", "Distant blur strength", nullptr, "How strong the distant blur is (0 = off, 1 = default)." },
 	{ "Shaders.DepthOfField.ThirdPersonView", nullptr, "When it applies",
 		"Always: Mode=0 | Not in dialogue: Mode=1 | Only in dialogue: Mode=2",
 		"Whether the blur also applies while you talk to someone." },
@@ -2485,6 +2684,8 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.DepthOfField.VanityView", "Enabled", "Depth of field (background blur)", nullptr, "Blurs things in front of and behind what you look at." },
 	{ "Shaders.DepthOfField.VanityView", "BaseBlurRadius", "Blur strength", nullptr, "How strong the blur is." },
 	{ "Shaders.DepthOfField.VanityView", "Radius", "Blur size", nullptr, "How large the blur is." },
+	{ "Shaders.DepthOfField.VanityView", "DistantBlur", "Distant blur", nullptr, "Softens the far distance and mountain horizons to hide LOD edges." },
+	{ "Shaders.DepthOfField.VanityView", "DistantBlurStrength", "Distant blur strength", nullptr, "How strong the distant blur is (0 = off, 1 = default)." },
 	{ "Shaders.DepthOfField.VanityView", nullptr, "When it applies",
 		"Always: Mode=0 | Not in dialogue: Mode=1 | Only in dialogue: Mode=2",
 		"Whether the blur also applies while you talk to someone." },
@@ -2607,6 +2808,29 @@ static const SimpleRow kSimpleRows[] = {
 		"Low: Steps=12 MaxDistance=800.0 | Medium: Steps=24 MaxDistance=1500.0 | High: Steps=40 MaxDistance=2500.0",
 		"Higher finds more distant things and looks finer, but costs more frame rate." },
 	{ "Shaders.WetnessEffects.Reflections", "MaxCameraDistance", "Reflection range", nullptr, "Wet surfaces farther away than this show no scene reflections." },
+	// First-person gear weather (Main.Main.Quality)
+	{ "Main.Main.Quality", "DeferredFirstPerson", "Deferred 1st-person viewmodel", nullptr, "Routes 1st-person hands and weapons through the deferred renderer (required for First-person gear weather; restart)." },
+	{ "Main.Main.Quality", "GearWeather", "Gear weather enabled", nullptr, "Accumulates snow/frost, animated melting snowflakes, sandstorm dust/grit, rain wetness, and mud on your 1st-person weapon, hands, and arms." },
+	{ "Main.Main.Quality", "GearWeatherStrength", "Strength", nullptr, "Overall strength of all first-person gear weather effects." },
+	{ "Main.Main.Quality", "GearWeatherFrost", "Frost & snowflakes", nullptr, "Strength of cold metal frost rime and animated melting snowflakes in snow." },
+	{ "Main.Main.Quality", "GearWeatherSand", "Sandstorm dust & grit", nullptr, "Strength of sandstorm dust and fine sand particles across weapon, hands, and sleeves." },
+	{ "Main.Main.Quality", "GearWeatherWet", "Rain wetness", nullptr, "Strength of the rain wetness film on arms and weapons." },
+	{ "Main.Main.Quality", "GearWeatherMud", "Mud splash", nullptr, "Strength of mud splashed while moving over wet ground." },
+	{ "Main.Main.Quality", "GearWeatherSpeed", "Buildup / fade speed", nullptr, "How fast weather effects build up outdoors and melt, dry, or wear off." },
+	{ "Main.Main.Quality", "GearWeatherSkin", "Bare skin share", nullptr, "How strongly frost, snowflakes, sand dust, and mud cling to bare skin." },
+	{ "Main.Main.Quality", "GearWeatherScale", "Pattern scale", nullptr, "Blotch size in game units for broad frost, sand, and mud layers." },
+	// World surface detail & weathering (Shaders.WorldSurface.*)
+	{ "Shaders.WorldSurface.Main", "Strength", "Overall strength", nullptr, "Overall multiplier for all World surface detail & weathering layers." },
+	{ "Shaders.WorldSurface.Main", "Detail", "Micro-detail grain", nullptr, "High-frequency surface bump and roughness variation on close-up concrete, stone, metal, and terrain." },
+	{ "Shaders.WorldSurface.Main", "Distance", "Fade distance", nullptr, "Distance from the camera (game units) at which world surface overlays fade out." },
+	{ "Shaders.WorldSurface.Dust", "Enabled", "Enabled", nullptr, "Enables settled Mojave silt outdoors and aged crevice dust indoors." },
+	{ "Shaders.WorldSurface.Dust", "Strength", "Dust strength", nullptr, "Settled Mojave silt outdoors and aged crevice dust indoors in seams and on upward ledges." },
+	{ "Shaders.WorldSurface.Rust", "Enabled", "Enabled", nullptr, "Enables exposed metal tarnish patina and patchy iron-oxide rust." },
+	{ "Shaders.WorldSurface.Rust", "Strength", "Rust strength", nullptr, "Patchy oxidation and matte iron-oxide rust along crevices and exposed faces of metallic objects." },
+	{ "Shaders.WorldSurface.Waterline", "Enabled", "Enabled", nullptr, "Enables capillary water darkening, shoreline mud, and damp algae just above water level." },
+	{ "Shaders.WorldSurface.Waterline", "Strength", "Waterline strength", nullptr, "Dark capillary water wicking, glossy wet rims, mud, and algae just above water level." },
+	{ "Shaders.WorldSurface.Moss", "Enabled", "Enabled", nullptr, "Enables patchy green moss and lichen on shaded rocks, ruins, and damp stone outdoors." },
+	{ "Shaders.WorldSurface.Moss", "Strength", "Moss strength", nullptr, "Patchy green moss and lichen on shaded/upward rocks, ruins, and damp stone outdoors." },
 };
 
 static const char* SimpleTip(const char* section, const char* key) {
@@ -2673,9 +2897,12 @@ static void DrawSimpleChoice(const SimpleRow& r) {
 			if (!why) why = InactiveReason(r.Section, kv.first.c_str());
 		}
 	}
+	bool unsaved = false;	// 2026-11-25 (unsaved marks): one of the keys the options write
+	if (!options.empty())
+		for (const auto& kv : options[0].Values) unsaved = unsaved || UnsavedSettings::Key(r.Section, kv.first.c_str());
 	ImGui::PushID(r.Label);
 	if (why) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
-	const float ctrlW = MenuWidgets::RowBegin(r.Label, MenuWidgets::ResetSlotWidth() + RestartNoteWidth(restart));
+	const float ctrlW = MenuWidgets::RowBegin(r.Label, MenuWidgets::ResetSlotWidth() + RestartNoteWidth(restart), unsaved);
 	ImGui::SetNextItemWidth(ctrlW);
 	if (ImGui::BeginCombo("##choice", current >= 0 ? options[current].Name.c_str() : "Custom (set in Advanced)")) {
 		for (int i = 0; i < (int)options.size(); i++) {
@@ -2792,7 +3019,18 @@ static const std::unordered_map<std::string, FloatRange> kFloatSliders = {
 	{ "Shaders.Cloth.Interiors.FlutterSpeed", { 0.0f, 6.0f, "%.2f" } },
 	{ "Shaders.Cloth.Interiors.FlutterAmount", { 0.0f, 1.0f, "%.2f" } },
 	{ "Shaders.Cloth.Interiors.RippleAmount", { 0.0f, 1.0f, "%.2f" } },
-	// UNOFFICIAL 2026-11-06 Bend contact shadows: where they start (0 = where the shadow maps end) and how long they fade in
+	// UNOFFICIAL 2026-11-26 Bottled Shaders / Bend Screen-Space Shadows sliders
+	{ "Shaders.ShadowsExteriors.SSShadows.SurfaceThickness", { 0.005f, 0.05f, "%.3f" } },
+	{ "Shaders.ShadowsExteriors.SSShadows.BilinearThreshold", { 0.02f, 1.0f, "%.2f" } },
+	{ "Shaders.ShadowsExteriors.SSShadows.ShadowContrast", { 0.0f, 4.0f, "%.2f" } },
+	// VolumetricFog hard start-distance sliders (game units, 70 = 1 m; -1 = use existing range/weather start)
+	{ "Shaders.VolumetricFog.Main.StartDistance", { 0.0f, 100000.0f, "%.0f" } },
+	{ "Shaders.VolumetricFog.Main.DistantFogStart", { -1.0f, 150000.0f, "%.0f" } },
+	{ "Shaders.VolumetricFog.Main.AerialStartDistance", { -1.0f, 150000.0f, "%.0f" } },
+	{ "Shaders.VolumetricFog.Main.GameFogStart", { -1.0f, 100000.0f, "%.0f" } },
+	{ "Shaders.VolumetricFog.Night.StartDistance", { -1.0f, 100000.0f, "%.0f" } },
+	{ "Shaders.VolumetricFog.Interiors.StartDistance", { 0.0f, 15000.0f, "%.0f" } },
+	{ "Shaders.VolumetricFog.Interiors.GameFogStart", { -1.0f, 15000.0f, "%.0f" } },
 	// Skin sliders (Width = 28.6 default was nearly immobile at 0.001 drag speed)
 	{ "Shaders.Skin.Main.SpecularStrength", { 0.0f, 2.0f, "%.2f" } },
 	{ "Shaders.Skin.Main.Roughness", { 0.1f, 1.0f, "%.2f" } },
@@ -2809,6 +3047,10 @@ static const std::unordered_map<std::string, FloatRange> kFloatSliders = {
 	{ "Shaders.Skin.Interiors.AlbedoDetail", { 0.0f, 1.0f, "%.2f" } },
 	{ "Shaders.Skin.Scattering.Width", { 0.0f, 80.0f, "%.1f" } },
 	{ "Shaders.Skin.Scattering.AlbedoDetail", { 0.0f, 1.0f, "%.2f" } },
+	{ "Shaders.ShadowsExteriors.Deferred.SunNoonElevation", { 20.0f, 75.0f, "%.1f" } },
+	{ "Shaders.ShadowsExteriors.Deferred.SunAzimuthOffset", { -180.0f, 180.0f, "%.0f" } },
+	{ "Shaders.ShadowsExteriors.Deferred.SunSheen", { 0.0f, 2.0f, "%.2f" } },
+	{ "Shaders.ShadowsExteriors.Deferred.SunSheenRoughness", { 0.45f, 0.95f, "%.2f" } },
 };
 
 // ---- Setting rows ------------------------------------------------------------------------------------------------------------
@@ -2884,6 +3126,8 @@ static bool DrawBoolSetting(SettingRow& row) {
 	SettingManager::Configuration::ConfigNode& node = row.node;
 	bool on = !strcmp(node.Value, "1") || !_stricmp(node.Value, "true");
 	if (MenuWidgets::Toggle("##v", &on) && (!on || ConfirmChange(node.Section, node.Key, "true"))) {	// (2026-11-05: conflicts ask first)
+		const std::string section = node.Section, key = node.Key;	// 2026-11-26 (unsaved marks): it may write other settings too
+		PickerWrites writes("row " + section + ":" + key, [section, key]() { return TheSettingManager->GetSettingI(section.c_str(), key.c_str()); });
 		TheSettingManager->SetSetting(node.Section, node.Key, on);
 		if (on && !strcmp(node.Key, "Enabled")) SwitchOffOtherUpscaler(node);
 		if (on && !strcmp(node.Section, "Shaders.VolumetricClouds.Main") && !strcmp(node.Key, "PhysicalShadows") &&
@@ -3070,7 +3314,8 @@ static void RenderSetting(SettingManager::Configuration::ConfigNode& stored, boo
 		tints++;
 	}
 
-	row.controlW = MenuWidgets::RowBegin(labelOverride ? labelOverride : MenuKeyLabel(node.Section, node.Key), TrailingWidth(row, isShader));
+	row.controlW = MenuWidgets::RowBegin(labelOverride ? labelOverride : MenuKeyLabel(node.Section, node.Key), TrailingWidth(row, isShader),
+		UnsavedSettings::Key(stored.Section, stored.Key));	// 2026-11-25 (unsaved marks)
 	const bool controlDisabled = row.forced || (!strcmp(node.Section, "Shaders.VolumetricClouds.Main") && !strcmp(node.Key, "Shadows") && row.why != nullptr);
 	// A forced / overridden row is disabled after its name, so hovering the name still shows the note (ImGui does not hover disabled items)
 	if (controlDisabled) ImGui::BeginDisabled();
@@ -3292,7 +3537,7 @@ static void NewWalk(const tomlValue& table, const std::string& path, NewWalkCont
 		if (status && !(path.compare(0, 8, "Shaders.") == 0 && name == "Enabled")) continue;	// Status sections are hidden in the menu; only a shader's own switch has a place
 		if (ShouldHideKey(name.c_str())) continue;
 		if (IsInternalSetting(path, name)) continue;	// UNOFFICIAL 2026-11-12: never in this tab (with ShowInternal: on its own page and in the search)
-		if (ShelvedEffects::Section(path)) continue;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only; not in IsInternalSetting, so "Reset test and internal settings" leaves its saved keys alone)
+		if (ShelvedEffects::Key(path, name)) continue;	// UNOFFICIAL 2026-11-16: a shelved effect (release builds only; not in IsInternalSetting, so "Reset test and internal settings" leaves its saved keys alone)
 
 		std::string description;
 		for (const std::string& c : value.comments()) { description += c; description += ' '; }
@@ -3378,7 +3623,8 @@ static void NewShaderSwitchRow(const NewEntry& e) {
 	bool on = TheSettingManager->GetMenuShaderEnabled(shader);
 	ImGui::PushID(e.Key.c_str());
 	ImGui::BeginDisabled(TheSettingManager->IsShaderForced(shader));
-	MenuWidgets::RowBegin((e.ShaderName + " (shader on / off)").c_str(), MenuWidgets::ResetSlotWidth());
+	MenuWidgets::RowBegin((e.ShaderName + " (shader on / off)").c_str(), MenuWidgets::ResetSlotWidth(),
+		UnsavedSettings::Key(e.Section.c_str(), e.Key.c_str()));	// 2026-11-25 (unsaved marks)
 	const bool flipped = MenuWidgets::Toggle("##v", &on);
 	ImGui::EndDisabled();
 	if (flipped) {
@@ -3426,12 +3672,19 @@ static void NewRenderRun(std::vector<NewEntry>& entries, const NewGroup& group) 
 	}
 }
 
+// 2026-11-25 (unsaved marks): whether one of the group's settings is unsaved
+static bool NewGroupMarked(const std::vector<NewEntry>& entries, const NewGroup& group) {
+	for (size_t i = group.Begin; i < group.End && i < entries.size(); i++)
+		if (UnsavedSettings::Key(entries[i].Section.c_str(), entries[i].Key.c_str())) return true;
+	return false;
+}
+
 // Each group under its section's name: a folding heading, or (the diagnostics) a plain grey line with the rows indented.
 static void NewRenderGroups(std::vector<NewEntry>& entries, const std::vector<NewGroup>& groups, bool diagnostics) {
 	for (const NewGroup& group : groups) {
 		ImGui::PushID(group.Section.c_str());
 		if (!diagnostics) {
-			if (MenuWidgets::SubHeader((group.Display + "##newgroup").c_str(), true)) NewRenderRun(entries, group);
+			if (MenuWidgets::SubHeader((group.Display + "##newgroup").c_str(), true, NewGroupMarked(entries, group))) NewRenderRun(entries, group);
 		}
 		else {
 			ImGui::TextDisabled("%s", group.Display.c_str());
@@ -3486,7 +3739,7 @@ static void RenderNewInPatch() {
 	}
 	else {
 		const std::string header = "Diagnostics (" + std::to_string(s_newDiag.size()) + ")##newdiag";
-		if (MenuWidgets::SubHeader(header.c_str(), false)) {
+		if (MenuWidgets::SubHeader(header.c_str(), false, NewGroupMarked(s_newDiag, { std::string(), std::string(), 0, s_newDiag.size() }))) {
 			ImGui::TextDisabled("Test switches for development builds; leave them at their defaults when playing.");
 			NewRenderGroups(s_newDiag, s_newDiagGroups, true);
 		}
@@ -3645,6 +3898,7 @@ static void RenderSearchSidebar() {
 		const std::string label = g.Display + (isSwitch ? std::string(" (on / off)") : " (" + std::to_string(g.End - g.Begin) + ")");
 		ImGui::PushID(g.Section.c_str());
 		const bool clicked = ImGui::Selectable(label.c_str(), false);
+		MenuWidgets::MarkLastItem(label.c_str(), NewGroupMarked(s_searchResults, g));	// 2026-11-25 (unsaved marks)
 		if (clicked && !isSwitch) {
 			gMenu.page = g.Section;
 			s_searchBuf[0] = '\0';
@@ -3693,6 +3947,12 @@ static FogType ActiveFog() {
 	return FogType::Current;
 }
 
+// 2026-11-26 (unsaved marks): the fog picker's mode, and a fog type's own row (on now, or on when saved)
+static int FogMode() { return (int)ActiveFog(); }
+static bool FogTypeMarked(FogType type) {
+	return UnsavedSettings::Any() && (ActiveFog() == type) != ((FogType)SavedModeCached("fog", FogMode) == type);
+}
+
 static void SetFogType(FogType type, bool on) {
 	const int classic = TheSettingManager->GetSettingI(kFogMain, "ClassicLook");
 	if (classic > 0) s_classicMode = classic > 2 ? 2 : classic;
@@ -3711,8 +3971,11 @@ static void FogSwitch(FogType type) {
 	static const char* const labels[] = { "Use the current fog", "Use the classic fog", "Use the legacy fog" };
 	bool on = ActiveFog() == type;
 	ImGui::BeginDisabled(TheSettingManager->IsShaderForced("VolumetricFog"));
-	MenuWidgets::RowBegin(labels[(int)type], MenuWidgets::ResetSlotWidth());
-	if (MenuWidgets::Toggle("##fogtype", &on)) SetFogType(type, on);
+	MenuWidgets::RowBegin(labels[(int)type], MenuWidgets::ResetSlotWidth(), FogTypeMarked(type));	// 2026-11-25 (unsaved marks)
+	if (MenuWidgets::Toggle("##fogtype", &on)) {
+		PickerWrites writes("fog", FogMode);	// 2026-11-26 (unsaved marks)
+		SetFogType(type, on);
+	}
 	ImGui::EndDisabled();
 	if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) || MenuWidgets::RowLabelHovered())
 		ImGui::SetTooltip("One fog type draws at a time: switching this one on turns the other two off.\n"
@@ -3752,9 +4015,17 @@ static const GroupSwitch kGT7ExposureSwitch = { "Use eye adaptation",
 	"on the Main, Night and Interiors pages. Made to go with the Perceptual tone mapper (Tonemapping: TonemappingMode 11). After "
 	"Polyphony Digital's SIGGRAPH 2025 paper for Gran Turismo 7.", GT7ExposureGet, GT7ExposureSet };
 
+// 2026-11-25 (unsaved marks): the key behind each group switch (its Get and Set above)
+static const char* GroupSwitchScope(const GroupSwitch& sw) {
+	if (&sw == &kLampHazeSwitch) return "Shaders.VolumetricFog.Interiors:LampHazeEnabled";
+	if (&sw == &kNightShiftSwitch) return "Shaders.Tonemapping.Main:NightShiftEnabled";
+	if (&sw == &kGT7ExposureSwitch) return "Shaders.Exposure.Main:Mode";
+	return "";
+}
+
 static void DrawGroupSwitch(const GroupSwitch& sw) {
 	bool on = sw.Get();
-	MenuWidgets::RowBegin(sw.Label, MenuWidgets::ResetSlotWidth());
+	MenuWidgets::RowBegin(sw.Label, MenuWidgets::ResetSlotWidth(), ScopeMarked(GroupSwitchScope(sw)));	// 2026-11-25 (unsaved marks)
 	if (MenuWidgets::Toggle("##groupswitch", &on)) {
 		sw.Set(on);
 		TheSettingManager->LoadSettings();
@@ -3775,15 +4046,15 @@ struct MenuGroup {
 
 static const MenuGroup kMenuGroups[] = {
 	{ kFogMain, "Shared by every fog type",
-		"Amount, FogSaturation, WeatherImpact, Extinction, Inscattering, DistantFogRange, DistantFogBlend, DistantFogHeight",
+		"Amount, StartDistance, FogSaturation, WeatherImpact, Extinction, Inscattering, DistantFogStart, DistantFogRange, DistantFogBlend, DistantFogHeight",
 		FogType::None, true, "How strong the fog is, its colour and the distant haze: the current, classic and legacy fog all use these.", nullptr },
 	{ kFogMain, "Current fog",
-		"FogVolume, BaseDensity, GameFogFloor, WeatherFogColor, MorningFogDip, SunriseSunsetBoost, HeightLayer, LayerBase, LayerThickness, LayerFollowsCamera, "
+		"FogVolume, BaseDensity, GameFogFloor, GameFogStart, WeatherFogColor, MorningFogDip, SunriseSunsetBoost, HeightLayer, LayerBase, LayerThickness, LayerFollowsCamera, "
 		"HeightFalloff, MaxHeight, HeightInfluence, "
 		"WindAngle, WindSpeed, NoiseScale, NoiseStrength, PhaseAsymmetry, SunGlow, ShadowStrength, RainyDisablesSkyFilter, CloudyDisablesSkyFilter, "
-		"AerialStrength, AerialRangeStart, AerialTintBlend, AerialDayFadeStart, AerialTintR, AerialTintG, AerialTintB, EdgeAA, MinDensityFloor",
+		"AerialStrength, AerialRangeStart, AerialStartDistance, AerialTintBlend, AerialDayFadeStart, AerialTintR, AerialTintG, AerialTintB, EdgeAA, MinDensityFloor",
 		FogType::Current, false, "This build's fog: drifting patches that sit in the air, darker where the sun's shadow falls. The classic fog uses "
-		"these settings too, except FogVolume, SunGlow, GameFogFloor, WeatherFogColor and the height layer.", nullptr },
+		"these settings too, except FogVolume, SunGlow, GameFogFloor, GameFogStart, WeatherFogColor and the height layer.", nullptr },
 	{ kFogMain, "Classic fog (the original look)", "ClassicLook",
 		FogType::Classic, false, "The fog as the original mod drew it: patches painted on the surfaces and the game's own sky colour. "
 		"ClassicLook 1 = at half resolution (faster), 2 = every pixel at full resolution, as the original did (slower). Its density, "
@@ -3794,10 +4065,10 @@ static const MenuGroup kMenuGroups[] = {
 		FogType::Legacy, false, "The fog from before this build's fog rewrite (a simple fog plus a height fog), for presets made for it "
 		"(Uranium Haze and others). It also uses the shared settings above.", nullptr },
 
-	{ "Shaders.VolumetricFog.Interiors", "Shared by every fog type", "Amount, FogSaturation, WeatherImpact, Extinction, Inscattering",
+	{ "Shaders.VolumetricFog.Interiors", "Shared by every fog type", "Amount, StartDistance, FogSaturation, WeatherImpact, Extinction, Inscattering",
 		FogType::None, true, "Indoors: how strong the fog is and its colour, for all three fog types.", nullptr },
 	{ "Shaders.VolumetricFog.Interiors", "Current fog",
-		"BaseDensity, HeightFalloff, MaxHeight, HeightInfluence, WindAngle, WindSpeed, NoiseScale, NoiseStrength, RainyDisablesSkyFilter, CloudyDisablesSkyFilter",
+		"BaseDensity, GameFogFloor, GameFogStart, HeightFalloff, MaxHeight, HeightInfluence, WindAngle, WindSpeed, NoiseScale, NoiseStrength, RainyDisablesSkyFilter, CloudyDisablesSkyFilter",
 		FogType::Current, false, "Indoors, for the current fog (the classic fog uses them too).", nullptr },
 	{ "Shaders.VolumetricFog.Interiors", "Classic fog (the original look)", "",
 		FogType::Classic, false, "Indoors the classic fog uses the current fog's settings above; its mode (ClassicLook) is on the Main page.", nullptr },
@@ -4024,7 +4295,7 @@ static const MenuGroup kMenuGroups[] = {
 		"VisibleNormals, RayReuse, ReuseRoughness, ContactSharpness, ContactSpread, RoughShare, RoughReach",
 		FogType::None, false, "Blurred reflections on worn tiles, satin metal and wet stone: how sharp they stay and how cheap they are.", nullptr },
 	{ "Shaders.Reflections.RT", "Weapon", "Weapon, WeaponHands, WeaponMetal, WeaponRoughness",
-		FogType::None, false, "Your first-person weapon reflects the ray traced scene.", nullptr },
+		FogType::None, false, "Your first-person weapon reflects the live surroundings cube (or the ray-traced scene when RT is on).", nullptr },
 	{ "Shaders.Reflections.RT", "Water", "Water, WaterSkipPlanar, WaterPlanarRefresh, WaterRoughness",
 		FogType::None, false, "Water reflects the ray traced scene instead of the game's own water reflection.", nullptr },
 
@@ -4324,12 +4595,18 @@ static void RenderPageHeader(const std::string& section) {
 	for (char c : section) path += c == '.' ? std::string(" > ") : std::string(1, c);
 
 	ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
-	MenuWidgets::Title(title.c_str());
+	MenuWidgets::Title(title.c_str(), 1.3f, !shader.empty() && EffectSwitchMarked(shader));	// 2026-11-25 (unsaved marks): the title names the switch beside it
 	ImGui::PopStyleColor();
 	if (!shader.empty()) RenderShaderHeaderSwitch(shader);
 	ImGui::TextDisabled("%s", path.c_str());
 	ImGui::Separator();
 	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
+	if (section == "Shaders.HDR.Main") {
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextColored(kRestartOrange, "Warning: HDR output currently causes freezes for some players. A fix is being researched.");
+		ImGui::PopTextWrapPos();
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.4f));
+	}
 	DrawPtNote(section);	// UNOFFICIAL 2026-11-12: what this effect does while path tracing replaces the scene (nothing otherwise)
 }
 
@@ -4341,7 +4618,7 @@ static void RenderLutPicker(LUTEffect* lut, const char* label, const char* key, 
 	const std::string& atOpen = SessionValue("Shaders.LUT.Main", key, lut->LUTFiles[index].c_str());
 	const bool changed = lut->LUTFiles[index] != atOpen;
 	ImGui::PushID(key);
-	const float width = MenuWidgets::RowBegin(label, MenuWidgets::ResetSlotWidth());
+	const float width = MenuWidgets::RowBegin(label, MenuWidgets::ResetSlotWidth(), UnsavedSettings::Key("Shaders.LUT.Main", key));	// 2026-11-25 (unsaved marks)
 	int step = 0;
 	ImGui::BeginGroup();
 	if (ImGui::ArrowButton("##prev", ImGuiDir_Left)) step = -1;
@@ -4545,7 +4822,11 @@ static void RenderSettingsList(SettingManager::Configuration::SettingList& setti
 		}
 		const bool active = (g.Fog != FogType::None && ActiveFog() == g.Fog) || (g.Switch && g.Switch->Get());
 		const std::string header = std::string(g.Header) + (active ? "   (on)" : "") + "###group" + g.Header;
-		if (!MenuWidgets::SubHeader(header.c_str(), g.Open || active)) {
+		// 2026-11-25 (unsaved marks): one of the group's rows, or its switch, is unsaved
+		bool unsaved = (g.Switch && ScopeMarked(GroupSwitchScope(*g.Switch))) || (g.Fog != FogType::None && !s_keySubset && FogTypeMarked(g.Fog));
+		for (size_t i = 0; i < settings.size() && !unsaved; i++)
+			unsaved = facts[i].group == &g && !facts[i].hidden && UnsavedSettings::Key(settings[i].Section, settings[i].Key);
+		if (!MenuWidgets::SubHeader(header.c_str(), g.Open || active, unsaved)) {
 			for (size_t i = 0; i < settings.size(); i++)
 				if (facts[i].group == &g && !facts[i].hidden && !devShown && facts[i].test) testHidden++;
 			continue;
@@ -4608,6 +4889,7 @@ static bool IsMovedShaderEntry(const std::string& name) {
 // UNOFFICIAL 2026-10-27: the menu name of a Shaders entry where its internal name (its settings sections, kept for the users'
 // settings files) says less than it does (user: "change the taa menu to say taa / fsr / dlss"). The ## part keeps ImGui's ID the name.
 static std::string MenuEntryLabel(const std::string& name) {
+	if (name == "HDR") return "HDR (freeze warning)##HDR";
 	if (name == "TAA") return "TAA / FSR / DLSS##TAA";
 	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the one switch for rain wetness (RainWetnessLinked)
 	if (name == "WetnessEffects" && TheSettingManager->RainWetnessOneSwitch()) return "Rain wetness##WetnessEffects";
@@ -4617,6 +4899,7 @@ static std::string MenuEntryLabel(const std::string& name) {
 	// ShadowsExteriors the sun's; the sections keep their names in the settings files
 	if (name == "ShadowsInteriors") return "Lamp shadows (ShadowsInteriors)##ShadowsInteriors";
 	if (name == "ShadowsExteriors") return "Sun shadows (ShadowsExteriors)##ShadowsExteriors";
+	if (name == "WorldSurface") return "World surface detail##WorldSurface";
 	return name;
 }
 // The same for a page in the sidebar (by its full path; the section keeps its name in the settings files).
@@ -4679,6 +4962,9 @@ static RtStatusLine RtSunLine() {
 	if (!RtOn(s, "Enabled")) return { RtState::Off, "off", detail };
 	if (!RtCore::Running()) return RtNotRunningLine(detail);
 	if (!TheShaderManager->GameState.isExterior) return { RtState::Off, "indoors: the sun is traced outdoors only", detail };
+	ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+	if (!shadows || !shadows->Enabled || !shadows->Settings.Exteriors.Enabled)
+		return { RtState::Off, "off: sun shadows are disabled", detail };
 	return { RtState::Running, TheSettingManager->GetSettingI(s, "Mode") == 1 ? "running (replaces the shadow maps near you)" :
 		"running (combined with the shadow maps)", detail };
 }
@@ -4841,9 +5127,15 @@ static bool RtAnyOn() {
 	return false;
 }
 
+// 2026-11-25 (unsaved marks): one of the keys the switch writes is unsaved
+static bool RtMasterMarked() {
+	for (const RtMasterKey& k : kRtMasterKeys) if (UnsavedSettings::Key(k.Section, k.Key)) return true;
+	return false;
+}
+
 static void DrawRtMasterSwitch() {
 	bool on = RtAnyOn();
-	MenuWidgets::RowBegin("All ray tracing", MenuWidgets::ResetSlotWidth());
+	MenuWidgets::RowBegin("All ray tracing", MenuWidgets::ResetSlotWidth(), RtMasterMarked());	// 2026-11-25 (unsaved marks)
 	if (MenuWidgets::Toggle("##rtmaster", &on)) {
 		if (!on) {
 			for (size_t i = 0; i < _countof(kRtMasterKeys); i++) {
@@ -4875,7 +5167,7 @@ static bool RtSpaceSwitchOn(const char* key) {
 static void DrawRtSpaceSwitch(const char* label, const char* key, const char* tip) {
 	bool on = RtSpaceSwitchOn(key);
 	ImGui::PushID(key);
-	MenuWidgets::RowBegin(label, MenuWidgets::ResetSlotWidth());
+	MenuWidgets::RowBegin(label, MenuWidgets::ResetSlotWidth(), UnsavedSettings::Key("Main.Main.RayTracing", key));	// 2026-11-25 (unsaved marks)
 	if (MenuWidgets::Toggle("##rtspace", &on)) TheSettingManager->SetSetting("Main.Main.RayTracing", key, on);
 	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered()) WrappedTooltip(tip);
 	ImGui::PopID();
@@ -4921,7 +5213,9 @@ static int RtCurrentDebugView() {	// the picker's entry, -1 when the DebugViews 
 
 static void DrawRtDebugPicker() {
 	const int current = RtCurrentDebugView();
-	MenuWidgets::RowBegin("Debug view", MenuWidgets::ResetSlotWidth());
+	bool unsaved = false;	// 2026-11-25 (unsaved marks): one of the DebugView keys the picker writes
+	for (const char* section : kRtDebugSections) unsaved = unsaved || UnsavedSettings::Key(section, "DebugView");
+	MenuWidgets::RowBegin("Debug view", MenuWidgets::ResetSlotWidth(), unsaved);
 	ImGui::SetNextItemWidth(-FLT_MIN);
 	if (ImGui::BeginCombo("##rtdebug", current >= 0 ? kRtDebugViews[current].Label : "Other (set in the sections below)")) {
 		for (int i = 0; i < (int)_countof(kRtDebugViews); i++) {
@@ -4937,6 +5231,7 @@ static void DrawRtDebugPicker() {
 }
 
 static void DrawRtSharedBlocksOnRtPage(const char* rtSection);	// 2026-11-09: below
+static bool RtSharedBlocksMarked(const char* rtSection);	// 2026-11-25 (unsaved marks): below, with them
 
 static void RenderRayTracingPage() {
 	PageTitle("Ray tracing", "Every ray-traced effect in one place. Needs the DXVK fork, NvrRtHelper.exe and a GPU with ray tracing.");
@@ -4966,7 +5261,8 @@ static void RenderRayTracingPage() {
 	const std::string page = gMenu.page;
 	for (const RtSection& section : kRtSections) {
 		const std::string header = std::string(section.Title) + "###rtsection" + section.Section;
-		if (!MenuWidgets::SubHeader(header.c_str(), false)) continue;
+		const bool unsaved = SectionRowsMarked(section.Section) || RtSharedBlocksMarked(section.Section);	// 2026-11-25 (unsaved marks)
+		if (!MenuWidgets::SubHeader(header.c_str(), false, unsaved)) continue;
 		SettingManager::Configuration::SettingList rows;
 		TheSettingManager->FillMenuSettings(&rows, section.Section);
 		ImGui::PushID(section.Section);
@@ -4998,7 +5294,7 @@ static void RenderAttachedSections(const std::string& host) {
 	for (const PageAttach& a : kPageAttaches) {
 		if (host != a.Host) continue;
 		const std::string header = std::string(a.Title) + "###attached" + a.Section;
-		if (!MenuWidgets::SubHeader(header.c_str(), false)) continue;
+		if (!MenuWidgets::SubHeader(header.c_str(), false, UnsavedSettings::Section(a.Section))) continue;	// 2026-11-25 (unsaved marks)
 		SettingManager::Configuration::SettingList rows;
 		TheSettingManager->FillMenuSettings(&rows, a.Section);
 		ImGui::PushID(a.Section);
@@ -5031,7 +5327,7 @@ static void RenderSimpleCard(const std::string& section) {
 	TheSettingManager->FillMenuSettings(&rows, section.c_str());
 	ImGui::PushID(section.c_str());
 	ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
-	MenuWidgets::Title(SimplePageTitle(section.substr(section.rfind('.') + 1)).c_str(), 1.1f);
+	MenuWidgets::Title(SimplePageTitle(section.substr(section.rfind('.') + 1)).c_str(), 1.1f, UnsavedSettings::Section(section.c_str()));	// 2026-11-25 (unsaved marks)
 	ImGui::PopStyleColor();
 	ImGui::Separator();
 	const std::string page = gMenu.page;
@@ -5090,7 +5386,8 @@ static const VisualFolder kSunSoftFolder = { "Soft edges (contact hardening)", "
 	{ "@effect", "ContactHardening", "Soft edges" },
 	{ "Shaders.ContactHardening.Main", nullptr, nullptr } } };
 static const VisualFolder kSunContactFolder = { "Contact shadows (screen space)", "Small sun shadows where things touch, on top of either.",
-	{ { "Shaders.ShadowsExteriors.ScreenSpace", nullptr, nullptr } } };
+	{ { "Shaders.ShadowsExteriors.ScreenSpace", nullptr, nullptr },
+	{ "Shaders.ShadowsExteriors.SSShadows", nullptr, nullptr } } };
 static const VisualFolder kLampCommonFolder = { "Lamps and what casts shadows", "How many lamps cast shadows, how far, and which objects. Used by both.",
 	{ { "Shaders.ShadowsInteriors.Main", nullptr, nullptr } } };
 static const VisualFolder kLampCapsuleFolder = { "People's lamp shadows (capsules)", "Soft lamp shadows of people from simple shapes round their bones, "
@@ -5115,6 +5412,25 @@ static bool VisualKeyWanted(const char* keys, const char* section, const char* k
 	return KeyInList(keys, key);
 }
 
+// 2026-11-25 (unsaved marks): whether [section] key is one of the item's rows (its switch, for an "@effect" item), and whether
+// one of them is unsaved; a folder is marked by its items.
+static bool VisualItemHas(const VisualItem& item, const std::string& section, const std::string& key) {
+	if (!strcmp(item.Section, "@effect")) return key == "Enabled" && section == EffectSwitchSection(item.Keys);
+	return section == item.Section && VisualKeyWanted(item.Keys, item.Section, key.c_str());
+}
+
+static bool VisualItemMarked(const VisualItem& item) {
+	for (const auto& section : UnsavedSettings::All())
+		for (const auto& key : section.second)
+			if (VisualItemHas(item, section.first, key.first)) return true;
+	return false;
+}
+
+static bool VisualItemsMarked(const std::vector<VisualItem>& items) {
+	for (const VisualItem& item : items) if (VisualItemMarked(item)) return true;
+	return false;
+}
+
 // An effect's on/off switch as a row (the sidebar's switch: the same "Heads up" when it clashes with another).
 static void DrawVisualEffectSwitch(const char* shader, const char* label) {
 	const SettingManager::MenuSwitch kind = TheSettingManager->GetMenuShaderSwitch(shader);
@@ -5124,7 +5440,7 @@ static void DrawVisualEffectSwitch(const char* shader, const char* label) {
 	const std::string name = std::string(label ? label : shader) + " (effect on/off)";
 	ImGui::PushID("@effect");
 	ImGui::PushID(shader);
-	MenuWidgets::RowBegin(name.c_str(), MenuWidgets::ResetSlotWidth());
+	MenuWidgets::RowBegin(name.c_str(), MenuWidgets::ResetSlotWidth(), EffectSwitchMarked(shader));	// 2026-11-25 (unsaved marks)
 	ImGui::BeginDisabled(forced);
 	if (MenuWidgets::Toggle("##fx", &on) && (!on || ConfirmEffectOn(shader))) {
 		TheShaderManager->SwitchShaderStatus(shader);
@@ -5156,6 +5472,7 @@ static void DrawVisualItem(const VisualItem& item, bool titled) {
 		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.25f));
 		ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.4f));
 		ImGui::TextUnformatted(item.Title);
+		MenuWidgets::MarkLastItem(item.Title, VisualItemMarked(item));	// 2026-11-25 (unsaved marks)
 		ImGui::PopStyleColor();
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("[%s]", item.Section);
 	}
@@ -5211,7 +5528,7 @@ static void DrawRtSharedBlock(const RtSharedBlock& b) {
 	const VisualFolder& f = *b.Source;
 	if (!VisualFolderHasVisibleItems(f)) return;
 	const std::string header = std::string("Also used here: ") + f.Title + "###rtshared/page/" + b.Rt + "/" + f.Title;
-	if (!MenuWidgets::SubHeader(header.c_str(), false)) return;
+	if (!MenuWidgets::SubHeader(header.c_str(), false, VisualItemsMarked(f.Items))) return;	// 2026-11-25 (unsaved marks)
 	ImGui::PushID(f.Title);
 	ImGui::Indent(ImGui::GetFontSize() * 0.75f);
 	ImGui::PushTextWrapPos(0.0f);
@@ -5229,6 +5546,13 @@ static void DrawRtSharedBlock(const RtSharedBlock& b) {
 static void DrawRtSharedBlocksOnRtPage(const char* rtSection) {
 	for (const RtSharedBlock& b : kRtSharedBlocks)
 		if (!strcmp(b.Rt, rtSection)) DrawRtSharedBlock(b);
+}
+
+// 2026-11-25 (unsaved marks): one of the rows shown again under that section is unsaved
+static bool RtSharedBlocksMarked(const char* rtSection) {
+	for (const RtSharedBlock& b : kRtSharedBlocks)
+		if (!strcmp(b.Rt, rtSection) && VisualItemsMarked(b.Source->Items)) return true;
+	return false;
 }
 
 // ---- The Gun effects page (2026-11-16, gunfx-builtin) ---------------------------------------------------------------------------
@@ -5261,7 +5585,7 @@ static bool RenderGunPage() {
 	for (const GunFolder& f : kGunFolders) {
 		if (f.AdvancedOnly && !AdvancedShown()) continue;
 		const std::string header = std::string(f.Title) + "###gunfx/" + f.Id;
-		if (!MenuWidgets::SubHeader(header.c_str(), false)) continue;
+		if (!MenuWidgets::SubHeader(header.c_str(), false, VisualItemsMarked(f.Items))) continue;	// 2026-11-25 (unsaved marks)
 		ImGui::PushID(f.Id);
 		ImGui::Indent(ImGui::GetFontSize() * 0.75f);
 		for (const VisualItem& item : f.Items) DrawVisualItem(item, item.Title != nullptr);
@@ -5331,6 +5655,7 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Main.Main.Quality", "GBufferView", "G-buffer" },
 	{ "Main.Main.Quality", "FirstPersonNativeDebug", "First-person native scale" },
 	{ "Main.Main.Quality", "GearWeatherDebug", "Gear weather" },
+	{ "Shaders.WorldSurface.Main", "DebugView", "World surface detail" },
 	{ "Shaders.ShadowsExteriors.Deferred", "DebugView", "Deferred sun" },
 	{ "Shaders.Skin.SSS", "DebugView", "Skin SSS" },
 	{ "Shaders.Puddles.Debug", "DebugView", "Puddles" },
@@ -5530,6 +5855,9 @@ static const char* const kBounceModeNames[] = {
 	"Standalone BounceLight (legacy)"
 };
 
+// 2026-11-26 (unsaved marks): the three pickers write into each other's settings (AO's Ambient Light hosts the bounce light): one group
+static int IndirectModes() { return DetectAoMode() | DetectSkyOcclusionMode() << 4 | DetectBounceLightMode() << 8; }
+
 static void DrawIndirectLightingPickers() {
 	const int aoMode = DetectAoMode();
 	const int skyMode = DetectSkyOcclusionMode();
@@ -5537,7 +5865,7 @@ static void DrawIndirectLightingPickers() {
 
 	// 1. Ambient Occlusion mode
 	ImGui::PushID("ao_mode");
-	const float w1 = MenuWidgets::RowBegin("Ambient occlusion", MenuWidgets::ResetSlotWidth());
+	const float w1 = MenuWidgets::RowBegin("Ambient occlusion", MenuWidgets::ResetSlotWidth(), ModeMarked("ao", DetectAoMode));	// 2026-11-25 (unsaved marks)
 	ImGui::SetNextItemWidth(w1);
 	const int pickedAo = NamePicker("##aomode", kAoModeNames[aoMode], kAoModeNames, 5, aoMode);
 	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
@@ -5547,6 +5875,7 @@ static void DrawIndirectLightingPickers() {
 			"Ray-traced AO: traced occlusion with zero screen-edge halos (requires RTX + DXVK fork).");
 	ImGui::PopID();
 	if (pickedAo >= 0 && pickedAo != aoMode) {
+		PickerWrites writes("il", IndirectModes);	// 2026-11-26 (unsaved marks)
 		if (pickedAo == 0) {
 			SetShaderEnabled("AmbientLight", false);
 			SetShaderEnabled("AmbientOcclusion", false);
@@ -5578,7 +5907,7 @@ static void DrawIndirectLightingPickers() {
 
 	// 2. Sky Occlusion mode
 	ImGui::PushID("sky_mode");
-	const float w2 = MenuWidgets::RowBegin("Sky occlusion", MenuWidgets::ResetSlotWidth());
+	const float w2 = MenuWidgets::RowBegin("Sky occlusion", MenuWidgets::ResetSlotWidth(), ModeMarked("sky", DetectSkyOcclusionMode));	// 2026-11-25 (unsaved marks)
 	ImGui::SetNextItemWidth(w2);
 	const int pickedSky = NamePicker("##skymode", kSkyModeNames[skyMode], kSkyModeNames, 3, skyMode);
 	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
@@ -5586,6 +5915,7 @@ static void DrawIndirectLightingPickers() {
 			"Top-down sky map is fast and works on every GPU. Ray-traced sky occlusion uses rays for exact multi-story cover.");
 	ImGui::PopID();
 	if (pickedSky >= 0 && pickedSky != skyMode) {
+		PickerWrites writes("il", IndirectModes);	// 2026-11-26 (unsaved marks)
 		if (pickedSky == 0) {
 			TheSettingManager->SetSetting("Shaders.AmbientOcclusion.Skylighting", "Enabled", false);
 			TheSettingManager->SetSetting("Shaders.AmbientOcclusion.RT", "Sky", false);
@@ -5605,7 +5935,7 @@ static void DrawIndirectLightingPickers() {
 
 	// 3. Bounce Light (GI) mode
 	ImGui::PushID("gi_mode");
-	const float w3 = MenuWidgets::RowBegin("Bounce light (GI)", MenuWidgets::ResetSlotWidth());
+	const float w3 = MenuWidgets::RowBegin("Bounce light (GI)", MenuWidgets::ResetSlotWidth(), ModeMarked("gi", DetectBounceLightMode));	// 2026-11-25 (unsaved marks)
 	ImGui::SetNextItemWidth(w3);
 	const int pickedGi = NamePicker("##gimode", kBounceModeNames[giMode], kBounceModeNames, 5, giMode);
 	if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
@@ -5616,6 +5946,7 @@ static void DrawIndirectLightingPickers() {
 			"Standalone BounceLight: legacy separate effect (disables AmbientLight).");
 	ImGui::PopID();
 	if (pickedGi >= 0 && pickedGi != giMode) {
+		PickerWrites writes("il", IndirectModes);	// 2026-11-26 (unsaved marks)
 		if (pickedGi == 0) {
 			TheSettingManager->SetSetting("Shaders.AmbientLight.Main", "ComputeGI", false);
 			TheSettingManager->SetSetting("Shaders.AmbientOcclusion.RT", "GI", false);
@@ -5821,7 +6152,7 @@ static void RenderDeferredRendererPage() {
 		static const char* const kFpKeys[] = {
 			"DeferredFirstPerson", "GearWeather", "GearWeatherStrength", "GearWeatherWet",
 			"GearWeatherFrost", "GearWeatherSand", "GearWeatherMud", "GearWeatherSpeed",
-			"GearWeatherSkin", "GearWeatherScale"
+			"GearWeatherSkin", "GearWeatherScale", "GearWeatherForce"
 		};
 		for (const char* k : kFpKeys) DrawSettingKey("Main.Main.Quality", k);
 	}
@@ -5882,6 +6213,7 @@ static void RenderDebugSettingsPage() {
 		{ "Main.Main.Quality", "MsaaEdgeDebugView", "MSAA edge fix (MsaaEdgeDebugView)", DbgKind::IntZero },
 		{ "Main.Main.Quality", "FirstPersonNativeDebug", "1st-person native (FirstPersonNativeDebug)", DbgKind::IntZero },
 		{ "Main.Main.Quality", "GearWeatherDebug", "Gear weather (GearWeatherDebug)", DbgKind::IntZero },
+		{ "Shaders.WorldSurface.Main", "DebugView", "World surface detail (DebugView)", DbgKind::IntZero },
 		{ "Main.Main.ReducedQuality", "SunLayersDebug", "Sun layers (SunLayersDebug)", DbgKind::IntZero },
 		{ "Main.Main.Misc", "PassFamilyView", "Pass family (PassFamilyView)", DbgKind::IntZero },
 	};
@@ -6050,7 +6382,10 @@ static void RenderDebugSettingsPage() {
 		if (matched.empty()) continue;
 		shownGroups++;
 		const std::string header = std::string(g.Title) + "###dbggrp_" + g.Title;
-		if (!MenuWidgets::SubHeader(header.c_str(), filtering || hasActive)) continue;
+		bool unsaved = false;	// 2026-11-25 (unsaved marks): one of the views listed under it
+		for (const DbgItem* e : matched)
+			unsaved = unsaved || (!strcmp(e->Section, "@effect") ? EffectSwitchMarked(e->Key) : UnsavedSettings::Key(e->Section, e->Key));
+		if (!MenuWidgets::SubHeader(header.c_str(), filtering || hasActive, unsaved)) continue;
 		ImGui::PushID(g.Title);
 		for (const DbgItem* e : matched) {
 			if (!strcmp(e->Section, "@effect")) {
@@ -6063,6 +6398,119 @@ static void RenderDebugSettingsPage() {
 	}
 	if (shownGroups == 0)
 		ImGui::TextDisabled(dbgActiveOnly ? "No debug views are currently active." : "No debug views match the current filter.");
+}
+
+// ---- Under Development & First-person Gear Weather pages -------------------------------------------------------------------
+static const char* const kUnderDevTabId = "@UnderDevelopment";
+static const char* const kGearWeatherTabId = "@GearWeather";
+static const char* const kScopeGearWeather = "Main.Main.Quality:GearWeather, Main.Main.Quality:GearWeatherStrength, "
+	"Main.Main.Quality:GearWeatherFrost, Main.Main.Quality:GearWeatherSand, Main.Main.Quality:GearWeatherWet, "
+	"Main.Main.Quality:GearWeatherMud, Main.Main.Quality:GearWeatherSpeed, Main.Main.Quality:GearWeatherSkin, "
+	"Main.Main.Quality:GearWeatherScale, Main.Main.Quality:GearWeatherForce";
+static const char* const kScopeUnderDev = "Main.Main.Quality:GearWeather, Main.Main.Quality:GearWeatherStrength, "
+	"Main.Main.Quality:GearWeatherFrost, Main.Main.Quality:GearWeatherSand, Main.Main.Quality:GearWeatherWet, "
+	"Main.Main.Quality:GearWeatherMud, Main.Main.Quality:GearWeatherSpeed, Main.Main.Quality:GearWeatherSkin, "
+	"Main.Main.Quality:GearWeatherScale, Main.Main.Quality:GearWeatherForce, "
+	"Shaders.WorldSurface.Status:Enabled, Shaders.WorldSurface.Main, Shaders.WorldSurface.Dust, "
+	"Shaders.WorldSurface.Rust, Shaders.WorldSurface.Waterline, Shaders.WorldSurface.Moss, "
+	"Main.Main.Quality:MaterialSSS, "
+	"Shaders.ShadowsExteriors.Deferred:RealSunPath, Shaders.ShadowsExteriors.Deferred:SunNoonElevation, "
+	"Shaders.ShadowsExteriors.Deferred:SunAzimuthOffset, Shaders.ShadowsExteriors.Deferred:SunSheen, "
+	"Shaders.ShadowsExteriors.Deferred:SunSheenRoughness";
+
+static void DrawGearWeatherControls() {
+	DrawSettingKey("Main.Main.Quality", "GearWeather", false);
+	{
+		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
+		const bool fpOn = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredFirstPerson") != 0;
+		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
+		if (defMode < 1 || msaa || !fpOn) {
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextColored(kRestartOrange, "Requires DeferredRenderer and DeferredFirstPerson (restart).");
+			ImGui::PopTextWrapPos();
+			DrawSettingKey("Main.Main.Quality", "DeferredFirstPerson", false);
+		}
+	}
+	if (TheSettingManager->GetSettingI("Main.Main.Quality", "GearWeather") != 0) {
+		static const char* const kGwKeys[] = {
+			"GearWeatherStrength", "GearWeatherFrost", "GearWeatherSand",
+			"GearWeatherWet", "GearWeatherMud", "GearWeatherSpeed",
+			"GearWeatherSkin", "GearWeatherScale"
+		};
+		for (const char* k : kGwKeys) DrawSettingKey("Main.Main.Quality", k, false);
+		static const char* const kGwPreview[] = {
+			"Auto (live weather)", "Wet (rain)", "Frost & snowflakes", "Sandstorm dust & grit", "Mud splash", "All layers"
+		};
+		const int forceVal = std::clamp(TheSettingManager->GetSettingI("Main.Main.Quality", "GearWeatherForce"), 0, 5);
+		ImGui::PushID("gw_preview");
+		const float pw = MenuWidgets::RowBegin("Preview mode", MenuWidgets::ResetSlotWidth(), UnsavedSettings::Key("Main.Main.Quality", "GearWeatherForce"));	// 2026-11-25 (unsaved marks)
+		ImGui::SetNextItemWidth(pw);
+		const int pickedPreview = NamePicker("##gw_prev", kGwPreview[forceVal], kGwPreview, 6, forceVal);
+		if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
+			WrappedTooltip("Live preview override for inspecting first-person frost/snowflakes, sandstorm grit, rain wetness, or mud in any weather.");
+		ImGui::PopID();
+		if (pickedPreview >= 0 && pickedPreview != forceVal) {
+			TheSettingManager->SetSetting("Main.Main.Quality", "GearWeatherForce", pickedPreview);
+			TheSettingManager->LoadSettings();
+		}
+	}
+}
+
+static void RenderGearWeatherPage() {
+	PageTitle("Gear weather (1st-person)", "Snow/frost rime, sandstorm grit, rain wetness, and mud splashes on first-person weapons, hands, and sleeves.");
+	ImGui::PushID("gw_page");
+	DrawGearWeatherControls();
+	ImGui::PopID();
+}
+
+static void RenderUnderDevelopmentPage() {
+	PageTitle("Under Development", "Experimental features currently in active development. Changes here edit the same settings as their own sections.");
+
+	if (MenuWidgets::SubHeader("First-person gear weather###underdev_gw", true, ScopeMarked(kScopeGearWeather))) {
+		ImGui::PushID("ud_gw");
+		DrawGearWeatherControls();
+		ImGui::PopID();
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.35f));
+	}
+
+	const bool wsMarked = ScopeMarked("Shaders.WorldSurface.Status:Enabled, Shaders.WorldSurface.Main, Shaders.WorldSurface.Dust, Shaders.WorldSurface.Rust, Shaders.WorldSurface.Waterline, Shaders.WorldSurface.Moss");
+	if (MenuWidgets::SubHeader("World surface detail & weathering###underdev_ws", true, wsMarked)) {
+		DrawVisualEffectSwitch("WorldSurface", "World surface detail & weathering");
+		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
+		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
+		if (defMode < 1 || msaa) {
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextColored(kRestartOrange, "Requires DeferredRenderer (and ForceMSAA off; restart).");
+			ImGui::PopTextWrapPos();
+		}
+		DrawVisualItem({ "Shaders.WorldSurface.Main", nullptr, nullptr }, false);
+		DrawVisualItem({ "Shaders.WorldSurface.Dust", nullptr, "Crevice & seam dust" }, true);
+		DrawVisualItem({ "Shaders.WorldSurface.Rust", nullptr, "Metal oxidation & rust" }, true);
+		DrawVisualItem({ "Shaders.WorldSurface.Waterline", nullptr, "Waterline dampness" }, true);
+		DrawVisualItem({ "Shaders.WorldSurface.Moss", nullptr, "Shaded stone moss" }, true);
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.35f));
+	}
+
+	if (MenuWidgets::SubHeader("Material subsurface scattering (MaterialSSS)###underdev_sss", true, UnsavedSettings::Key("Main.Main.Quality", "MaterialSSS"))) {
+		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
+		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
+		if (defMode < 2 || msaa) {
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextColored(kRestartOrange, "Requires Full DeferredRenderer (mode 2) and ForceMSAA off.");
+			ImGui::PopTextWrapPos();
+		}
+		DrawSettingKey("Main.Main.Quality", "MaterialSSS", false, "Material SSS mode");
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.35f));
+	}
+
+	const bool sunMarked = ScopeMarked("Shaders.ShadowsExteriors.Deferred:RealSunPath, Shaders.ShadowsExteriors.Deferred:SunNoonElevation, Shaders.ShadowsExteriors.Deferred:SunAzimuthOffset, Shaders.ShadowsExteriors.Deferred:SunSheen, Shaders.ShadowsExteriors.Deferred:SunSheenRoughness");
+	if (MenuWidgets::SubHeader("Natural outdoor sunlight (RealSunPath & SunSheen)###underdev_sun", true, sunMarked)) {
+		DrawSettingKey("Shaders.ShadowsExteriors.Deferred", "RealSunPath", false, "Physical sun arc");
+		DrawSettingKey("Shaders.ShadowsExteriors.Deferred", "SunNoonElevation", false, "Solar noon elevation (deg)");
+		DrawSettingKey("Shaders.ShadowsExteriors.Deferred", "SunAzimuthOffset", false, "Compass azimuth offset (deg)");
+		DrawSettingKey("Shaders.ShadowsExteriors.Deferred", "SunSheen", false, "Sunlight micro-rough sheen");
+		DrawSettingKey("Shaders.ShadowsExteriors.Deferred", "SunSheenRoughness", false, "Sun sheen lobe width");
+	}
 }
 
 // ---- Quick Settings & Status landing page --------------------------------------------------------------------------------
@@ -6124,7 +6572,7 @@ static void RenderQuickSettingsPage() {
 	ImGui::Separator();
 	{
 		bool effects = TheSettingManager->SettingsMain.Main.RenderEffects;
-		MenuWidgets::RowBegin("All effects", MenuWidgets::ResetSlotWidth());
+		MenuWidgets::RowBegin("All effects", MenuWidgets::ResetSlotWidth(), ScopeMarked(kScopeAllEffects));	// 2026-11-25 (unsaved marks)
 		if (MenuWidgets::Toggle("##qs_fx", &effects)) {
 			TheSettingManager->SetSetting("Main.Main.Misc", "RenderEffects", effects);
 			TheSettingManager->LoadSettings();
@@ -6146,7 +6594,7 @@ static void RenderQuickSettingsPage() {
 		const int aaCount = DxvkCompute::Available() ? 6 : 4;
 		const int aaMode = (std::min)(DetectAaUpscalerMode(), aaCount - 1);
 		ImGui::PushID("qs_aa");
-		const float aaW = MenuWidgets::RowBegin("Anti-aliasing", MenuWidgets::ResetSlotWidth());
+		const float aaW = MenuWidgets::RowBegin("Anti-aliasing", MenuWidgets::ResetSlotWidth(), ModeMarked("aa", DetectAaUpscalerMode));	// 2026-11-25 (unsaved marks)
 		ImGui::SetNextItemWidth(aaW);
 		const int pickedAa = NamePicker("##aa", kAaNames[aaMode], kAaNames, aaCount, aaMode);
 		if (ImGui::IsItemHovered() || MenuWidgets::RowLabelHovered())
@@ -6155,6 +6603,7 @@ static void RenderQuickSettingsPage() {
 				: "Picks one anti-aliasing method. FSR and DLSS are disabled because the Vegas Shaders DXVK fork is not loaded.");
 		ImGui::PopID();
 		if (pickedAa >= 0 && pickedAa != aaMode) {
+			PickerWrites writes("aa", DetectAaUpscalerMode);	// 2026-11-26 (unsaved marks)
 			TheSettingManager->SetSetting("Main.Main.ReducedQuality", "FXAA", pickedAa == 1);
 			SetShaderEnabled("SMAA", pickedAa == 2);
 			SetShaderEnabled("TAA", pickedAa >= 3);
@@ -6179,7 +6628,7 @@ static void RenderQuickSettingsPage() {
 		const bool asked = TheSettingManager->GetSettingI("Main.Main.Quality", "MaxQuality") != 0;
 		bool maxQuality = asked;
 		if (asked) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.45f, 1.0f));
-		MenuWidgets::RowBegin("Max Quality", MenuWidgets::ResetSlotWidth());
+		MenuWidgets::RowBegin("Max Quality", MenuWidgets::ResetSlotWidth(), ScopeMarked(kScopeMaxQuality));	// 2026-11-25 (unsaved marks)
 		const bool flipped = MenuWidgets::Toggle("##qs_maxquality", &maxQuality);
 		if (asked) ImGui::PopStyleColor();
 		if (flipped) {
@@ -6228,7 +6677,7 @@ static void RenderQuickSettingsPage() {
 // back the full per-shader folder tree in the sidebar (and expands every card's raw settings if kept open).
 static const char* const kCatPrefix = "@Cat.";
 
-static bool DrawCategoryEffectHeader(const char* shader, const char* title, bool& enabledOut) {
+static bool DrawCategoryEffectHeader(const char* shader, const char* title, bool& enabledOut, bool marked = false) {	// marked: 2026-11-25 (unsaved marks)
 	const SettingManager::MenuSwitch kind = TheSettingManager->GetMenuShaderSwitch(shader);
 	const bool hasSwitch = kind != SettingManager::MenuSwitch::None;
 	bool on = hasSwitch ? TheSettingManager->GetMenuShaderEnabled(shader) : true;
@@ -6236,7 +6685,7 @@ static bool DrawCategoryEffectHeader(const char* shader, const char* title, bool
 
 	ImGui::PushID(shader);
 	ImGui::PushStyleColor(ImGuiCol_Text, on ? MenuSkin::Heading(0.25f) : MenuWidgets::MutedText(0.45f));
-	MenuWidgets::Title(title, 1.08f);
+	MenuWidgets::Title(title, 1.08f, marked || EffectSwitchMarked(shader));
 	ImGui::PopStyleColor();
 	if (hasSwitch) {
 		RestartNote note;
@@ -6269,7 +6718,23 @@ static void DrawSimpleEffectCard(const char* shader, const char* title, std::ini
 	if (ShelvedEffects::Section(std::string("Shaders.") + shader)) return;
 	ImGui::PushID(shader);
 	bool on = false;
-	DrawCategoryEffectHeader(shader, title, on);
+	bool cardMarked = false;	// 2026-11-25 (unsaved marks): the card's title, for any of the sections it shows (its switch: the header's own)
+	for (const char* sub : subSections) cardMarked = cardMarked || UnsavedSettings::Section((std::string("Shaders.") + shader + "." + sub).c_str());
+	DrawCategoryEffectHeader(shader, title, on, cardMarked);
+	if (!strcmp(shader, "HDR")) {
+		ImGui::PushTextWrapPos(0.0f);
+		ImGui::TextColored(kRestartOrange, "Warning: HDR currently causes freezes for some players. A fix is being researched.");
+		ImGui::PopTextWrapPos();
+	}
+	if (!strcmp(shader, "WorldSurface")) {
+		const int defMode = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer");
+		const bool msaa = TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") != 0;
+		if (defMode < 1 || msaa) {
+			ImGui::PushTextWrapPos(0.0f);
+			ImGui::TextColored(kRestartOrange, "Requires DeferredRenderer (and ForceMSAA off; restart).");
+			ImGui::PopTextWrapPos();
+		}
+	}
 	if (on) {
 		DrawPtNote(shader);
 		if (embedLut) RenderLutPage();
@@ -6283,7 +6748,7 @@ static void DrawSimpleEffectCard(const char* shader, const char* title, std::ini
 				const bool defOpen = !strcmp(sub, "Main") || !strcmp(sub, "Default") || !strcmp(sub, "Exterior") || !strcmp(sub, "Exteriors") ||
 					!strcmp(sub, "Interiors") || !strcmp(sub, "Scattering") || !strcmp(sub, "Forward") || !strcmp(sub, "GPUGrass") ||
 					!strcmp(sub, "Physical") || !strcmp(sub, "Blending") || !strcmp(sub, "FirstPersonView") || !strcmp(sub, "HudRaindrops");
-				if (!MenuWidgets::SubHeader(subTitle.c_str(), defOpen)) continue;
+				if (!MenuWidgets::SubHeader(subTitle.c_str(), defOpen, UnsavedSettings::Section(sec.c_str()))) continue;	// 2026-11-25 (unsaved marks)
 			}
 			if (sec == "Shaders.Terrain.Displacement" || sec == "Shaders.POM.Displacement") TessellationStatus();
 			DrawVisualItem({ sec.c_str(), nullptr, nullptr }, false);
@@ -6308,12 +6773,15 @@ static void CategoryFooter() {
 }
 
 // 1. Lighting & AO
+static int ReflectionsMode() { return !EffectOn("Reflections") ? 0 : RtOn("Shaders.Reflections.RT", "Enabled") ? 2 : 1; }	// 2026-11-26 (unsaved marks): the picker's mode
+
 static void RenderCatLighting() {
 	PageTitle("Lighting & AO", "Ambient occlusion, sky occlusion, bounce light (GI), reflections, PBR materials, specular highlights, and flashlight.");
 	DrawPtNote("AmbientLight");
 
 	// Competing mode pickers across the top
-	if (MenuWidgets::SubHeader("Ambient occlusion, sky occlusion & bounce light###cat_il_modes", true)) {
+	if (MenuWidgets::SubHeader("Ambient occlusion, sky occlusion & bounce light###cat_il_modes", true,
+			ModeMarked("ao", DetectAoMode) || ModeMarked("sky", DetectSkyOcclusionMode) || ModeMarked("gi", DetectBounceLightMode))) {	// 2026-11-25 (unsaved marks)
 		DrawIndirectLightingPickers();
 		const int aoMode = DetectAoMode(), skyMode = DetectSkyOcclusionMode(), giMode = DetectBounceLightMode();
 		if (giMode == 1 && !DxvkCompute::Available())
@@ -6394,16 +6862,17 @@ static void RenderCatLighting() {
 		// Reflections mode picker + card
 		{
 			static const char* const kReflModes[] = { "Off", "Screen-space reflections (SSR)", "Screen-space + Ray-traced (RTX + DXVK)" };
-			const int reflMode = !EffectOn("Reflections") ? 0 : RtOn("Shaders.Reflections.RT", "Enabled") ? 2 : 1;
+			const int reflMode = ReflectionsMode();	// 2026-11-26 (unsaved marks)
 			ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
 			MenuWidgets::Title("Reflections", 1.08f);
 			ImGui::PopStyleColor(); ImGui::Separator();
 			ImGui::PushID("cat_refl_mode");
-			const float rw = MenuWidgets::RowBegin("Mode", MenuWidgets::ResetSlotWidth());
+			const float rw = MenuWidgets::RowBegin("Mode", MenuWidgets::ResetSlotWidth(), ModeMarked("refl", ReflectionsMode));	// 2026-11-25 (unsaved marks)
 			ImGui::SetNextItemWidth(rw);
 			const int picked = NamePicker("##refl", kReflModes[reflMode], kReflModes, 3, reflMode);
 			ImGui::PopID();
 			if (picked >= 0 && picked != reflMode) {
+				PickerWrites writes("refl", ReflectionsMode);	// 2026-11-26 (unsaved marks)
 				SetShaderEnabled("Reflections", picked > 0);
 				TheSettingManager->SetSetting("Shaders.Reflections.RT", "Enabled", picked == 2);
 				TheSettingManager->LoadSettings();
@@ -6411,7 +6880,10 @@ static void RenderCatLighting() {
 			if (reflMode > 0) {
 				s_inCategoryPage = true;
 				DrawVisualItem({ "Shaders.Reflections.Main", nullptr, nullptr }, false);
-				if (reflMode == 2 && MenuWidgets::SubHeader("Ray-traced reflections###cat_refl_rt", true)) {
+				if (reflMode == 1 && MenuWidgets::SubHeader("Weapon reflections###cat_refl_weapon", true, ScopeMarked("Shaders.Reflections.RT:Weapon, Shaders.Reflections.RT:WeaponHands, Shaders.Reflections.RT:WeaponMetal, Shaders.Reflections.RT:WeaponRoughness"))) {	// 2026-11-25 (unsaved marks)
+					DrawVisualItem({ "Shaders.Reflections.RT", "Weapon, WeaponHands, WeaponMetal, WeaponRoughness", nullptr }, false);
+				}
+				if (reflMode == 2 && MenuWidgets::SubHeader("Ray-traced reflections###cat_refl_rt", true, UnsavedSettings::Section("Shaders.Reflections.RT"))) {
 					DrawRtStatusLine("Status", RtReflectionsLine());
 					DrawVisualItem({ "Shaders.Reflections.RT", nullptr, nullptr }, false);
 				}
@@ -6426,20 +6898,27 @@ static void RenderCatLighting() {
 }
 
 // 2. Shadows
+// 2026-11-26 (unsaved marks): the three shadow pickers' modes
+static int SunShadowsMode() { return !EffectOn("ShadowsExteriors") ? 0 : RtOn("Shaders.ShadowsExteriors.RT", "Enabled") ? 2 : 1; }
+static int CloudShadowsMode() { return CloudsCastShadows() ? 2 : SettingOn("Shaders.CloudShadows.Main", "Enabled") ? 1 : 0; }
+static int LampShadowsMode() { return !EffectOn("ShadowsInteriors") ? 0 : RtOn("Shaders.ShadowsInteriors.RT", "Enabled") ? 2 : 1; }
+
 static void RenderCatShadows() {
 	PageTitle("Shadows", "Sun shadows, contact hardening, cloud shadows, and indoor/night lamp shadows.");
 
 	// Competing mode pickers across the top
-	if (MenuWidgets::SubHeader("Shadow modes###cat_sh_modes", true)) {
+	if (MenuWidgets::SubHeader("Shadow modes###cat_sh_modes", true,
+			ModeMarked("sun", SunShadowsMode) || ModeMarked("cloud", CloudShadowsMode) || ModeMarked("lamp", LampShadowsMode))) {	// 2026-11-25 (unsaved marks)
 		// Sun shadows mode
 		static const char* const kSunModes[] = { "Off", "Shadow maps", "Shadow maps + Ray-traced (RTX + DXVK)" };
-		const int sunMode = !EffectOn("ShadowsExteriors") ? 0 : RtOn("Shaders.ShadowsExteriors.RT", "Enabled") ? 2 : 1;
+		const int sunMode = SunShadowsMode();	// 2026-11-26 (unsaved marks)
 		ImGui::PushID("cat_sun");
-		const float sw = MenuWidgets::RowBegin("Sun shadows", MenuWidgets::ResetSlotWidth());
+		const float sw = MenuWidgets::RowBegin("Sun shadows", MenuWidgets::ResetSlotWidth(), ModeMarked("sun", SunShadowsMode));	// 2026-11-25 (unsaved marks)
 		ImGui::SetNextItemWidth(sw);
 		const int pSun = NamePicker("##sun", kSunModes[sunMode], kSunModes, 3, sunMode);
 		ImGui::PopID();
 		if (pSun >= 0 && pSun != sunMode) {
+			PickerWrites writes("sun", SunShadowsMode);	// 2026-11-26 (unsaved marks)
 			SetShaderEnabled("ShadowsExteriors", pSun > 0);
 			TheSettingManager->SetSetting("Shaders.ShadowsExteriors.RT", "Enabled", pSun == 2);
 			TheSettingManager->LoadSettings();
@@ -6447,13 +6926,14 @@ static void RenderCatShadows() {
 
 		// Cloud shadows mode
 		static const char* const kCloudModes[] = { "Off", "Flat cloud shadows (cheap)", "Volumetric cloud shadows" };
-		const int cloudMode = CloudsCastShadows() ? 2 : SettingOn("Shaders.CloudShadows.Main", "Enabled") ? 1 : 0;
+		const int cloudMode = CloudShadowsMode();	// 2026-11-26 (unsaved marks)
 		ImGui::PushID("cat_cloudsh");
-		const float cw = MenuWidgets::RowBegin("Cloud shadows", MenuWidgets::ResetSlotWidth());
+		const float cw = MenuWidgets::RowBegin("Cloud shadows", MenuWidgets::ResetSlotWidth(), ModeMarked("cloud", CloudShadowsMode));	// 2026-11-25 (unsaved marks)
 		ImGui::SetNextItemWidth(cw);
 		const int pCloud = NamePicker("##cloudsh", kCloudModes[cloudMode], kCloudModes, 3, cloudMode);
 		ImGui::PopID();
 		if (pCloud >= 0 && pCloud != cloudMode) {
+			PickerWrites writes("cloud", CloudShadowsMode);	// 2026-11-26 (unsaved marks)
 			if (pCloud == 0) {
 				TheSettingManager->SetSetting("Shaders.CloudShadows.Main", "Enabled", false);
 				TheSettingManager->SetSetting("Shaders.VolumetricClouds.Main", "Shadows", 0.0f);
@@ -6473,13 +6953,14 @@ static void RenderCatShadows() {
 
 		// Lamp shadows mode
 		static const char* const kLampModes[] = { "Off", "Shadow maps (cube maps)", "Ray-traced lamp shadows (RTX + DXVK, restart)" };
-		const int lampMode = !EffectOn("ShadowsInteriors") ? 0 : RtOn("Shaders.ShadowsInteriors.RT", "Enabled") ? 2 : 1;
+		const int lampMode = LampShadowsMode();	// 2026-11-26 (unsaved marks)
 		ImGui::PushID("cat_lamp");
-		const float lw = MenuWidgets::RowBegin("Lamp shadows", MenuWidgets::ResetSlotWidth());
+		const float lw = MenuWidgets::RowBegin("Lamp shadows", MenuWidgets::ResetSlotWidth(), ModeMarked("lamp", LampShadowsMode));	// 2026-11-25 (unsaved marks)
 		ImGui::SetNextItemWidth(lw);
 		const int pLamp = NamePicker("##lamp", kLampModes[lampMode], kLampModes, 3, lampMode);
 		ImGui::PopID();
 		if (pLamp >= 0 && pLamp != lampMode) {
+			PickerWrites writes("lamp", LampShadowsMode);	// 2026-11-26 (unsaved marks)
 			SetShaderEnabled("ShadowsInteriors", pLamp > 0);
 			TheSettingManager->SetSetting("Shaders.ShadowsInteriors.RT", "Enabled", pLamp == 2);
 			TheSettingManager->LoadSettings();
@@ -6489,10 +6970,10 @@ static void RenderCatShadows() {
 
 	if (BeginCategoryColumns()) {
 		ImGui::TableNextColumn();
-		DrawSimpleEffectCard("ShadowsExteriors", "Sun shadows (outdoors)", { "Main", "ScreenSpace", "TerrainShadows" }, "Sun shadow maps, contact shadows and mountain shadows.");
+		DrawSimpleEffectCard("ShadowsExteriors", "Sun shadows (outdoors)", { "Main", "ScreenSpace", "SSShadows", "TerrainShadows" }, "Sun shadow maps, contact shadows and mountain shadows.");
 		if (RtOn("Shaders.ShadowsExteriors.RT", "Enabled")) {
 			s_inCategoryPage = true;
-			if (MenuWidgets::SubHeader("Ray-traced sun shadows###cat_sun_rt", true)) {
+			if (MenuWidgets::SubHeader("Ray-traced sun shadows###cat_sun_rt", true, UnsavedSettings::Section("Shaders.ShadowsExteriors.RT"))) {
 				DrawRtStatusLine("Status", RtSunLine());
 				DrawVisualItem({ "Shaders.ShadowsExteriors.RT", nullptr, nullptr }, false);
 			}
@@ -6507,7 +6988,7 @@ static void RenderCatShadows() {
 		DrawSimpleEffectCard("ShadowsInteriors", "Lamp shadows (indoors & night)", { "Main", "Forward", "Atlas" }, "Real-time shadows cast by lamps, fires and lights.");
 		if (RtOn("Shaders.ShadowsInteriors.RT", "Enabled")) {
 			s_inCategoryPage = true;
-			if (MenuWidgets::SubHeader("Ray-traced lamp shadows###cat_lamp_rt", true)) {
+			if (MenuWidgets::SubHeader("Ray-traced lamp shadows###cat_lamp_rt", true, UnsavedSettings::Section("Shaders.ShadowsInteriors.RT"))) {
 				DrawRtStatusLine("Status", RtLampLine());
 				DrawVisualItem({ "Shaders.ShadowsInteriors.RT", nullptr, nullptr }, false);
 			}
@@ -6523,16 +7004,17 @@ static void RenderCatSky() {
 	PageTitle("Sky & atmosphere", "Sky, volumetric clouds, fog, sunbeams, god rays, sandstorms, and heat haze.");
 
 	// Competing fog style picker
-	if (MenuWidgets::SubHeader("Fog mode###cat_fog_mode", true)) {
+	if (MenuWidgets::SubHeader("Fog mode###cat_fog_mode", true, ModeMarked("fog", FogMode))) {	// 2026-11-25 (unsaved marks)
 		static const char* const kFogModes[] = { "Off", "Current fog (this build)", "Classic fog (original look)", "Legacy fog (older presets)" };
 		const FogType cur = ActiveFog();
 		const int idx = cur == FogType::None ? 0 : cur == FogType::Current ? 1 : cur == FogType::Classic ? 2 : 3;
 		ImGui::PushID("cat_fog");
-		const float fw = MenuWidgets::RowBegin("Volumetric fog style", MenuWidgets::ResetSlotWidth());
+		const float fw = MenuWidgets::RowBegin("Volumetric fog style", MenuWidgets::ResetSlotWidth(), ModeMarked("fog", FogMode));
 		ImGui::SetNextItemWidth(fw);
 		const int picked = NamePicker("##fog", kFogModes[idx], kFogModes, 4, idx);
 		ImGui::PopID();
 		if (picked >= 0 && picked != idx) {
+			PickerWrites writes("fog", FogMode);	// 2026-11-26 (unsaved marks)
 			if (picked == 0) SetFogType(cur, false);
 			else SetFogType(picked == 1 ? FogType::Current : picked == 2 ? FogType::Classic : FogType::Legacy, true);
 		}
@@ -6558,20 +7040,23 @@ static void RenderCatSky() {
 }
 
 // 4. Weather & water
+static int WetnessMode() { return EffectOn("WetnessEffects") ? 1 : 0; }	// 2026-11-26 (unsaved marks): the picker's mode
+
 static void RenderCatWeather() {
 	PageTitle("Weather & water", "Rain, snow, surface wetness, puddles, and water shaders.");
 
 	// Competing wetness picker
-	if (MenuWidgets::SubHeader("Wetness system###cat_wet_mode", true)) {
+	if (MenuWidgets::SubHeader("Wetness system###cat_wet_mode", true, ModeMarked("wet", WetnessMode))) {	// 2026-11-25 (unsaved marks)
 		// (2026-11-22 upstream 1.1.3 merge: no "Legacy WetWorld" choice; WetWorld was removed 2026-11-21)
 		static const char* const kWetModes[] = { "Off", "WetnessEffects + Puddles (recommended)" };
-		const int wetMode = EffectOn("WetnessEffects") ? 1 : 0;
+		const int wetMode = WetnessMode();	// 2026-11-26 (unsaved marks)
 		ImGui::PushID("cat_wet");
-		const float ww = MenuWidgets::RowBegin("Rain wetness", MenuWidgets::ResetSlotWidth());
+		const float ww = MenuWidgets::RowBegin("Rain wetness", MenuWidgets::ResetSlotWidth(), ModeMarked("wet", WetnessMode));
 		ImGui::SetNextItemWidth(ww);
 		const int picked = NamePicker("##wet", kWetModes[wetMode], kWetModes, 2, wetMode);
 		ImGui::PopID();
 		if (picked >= 0 && picked != wetMode) {
+			PickerWrites writes("wet", WetnessMode);	// 2026-11-26 (unsaved marks)
 			SetShaderEnabled("WetnessEffects", picked == 1);
 			TheSettingManager->LoadSettings();
 		}
@@ -6593,6 +7078,16 @@ static void RenderCatWeather() {
 		DrawSimpleEffectCard("Water", "Water", { "Default", "Interiors", "Placed" }, "Water clarity, waves, caustics and reflections.");
 		DrawSimpleEffectCard("Underwater", "Underwater", {}, "Underwater depth tint and distortion.");
 		DrawSimpleEffectCard("WaterLens", "Water drops on screen", { "Main" }, "Dripping water on the camera when leaving water.");
+
+		ImGui::PushID("GearWeatherCard");
+		ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(0.25f));
+		MenuWidgets::Title("First-person gear weather", 1.08f, ScopeMarked(kScopeGearWeather));
+		ImGui::PopStyleColor();
+		ImGui::Separator();
+		DrawGearWeatherControls();
+		ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.9f));
+		ImGui::PopID();
+
 		ImGui::EndTable();
 	}
 	CategoryFooter();
@@ -6604,6 +7099,7 @@ static void RenderCatGround() {
 	if (BeginCategoryColumns()) {
 		ImGui::TableNextColumn();
 		DrawSimpleEffectCard("Terrain", "Terrain", { "Blending", "Variation", "Macro", "Parallax", "Displacement" }, "Ground blending, anti-tiling and tessellation.");
+		DrawSimpleEffectCard("WorldSurface", "World surface detail & weathering", { "Main", "Dust", "Rust", "Waterline", "Moss" }, "World-space micro-detail grain, crevice dust, metal rust, waterline dampness, and moss.");
 		DrawSimpleEffectCard("POM", "Parallax occlusion & rock tessellation", { "Main", "Displacement" }, "3D depth on stone, brick and cliff textures.");
 
 		ImGui::TableNextColumn();
@@ -6632,19 +7128,22 @@ static void RenderCatCharacters() {
 }
 
 // 7. Camera & colour
+static int ExposureMode() { return !EffectOn("Exposure") ? 0 : TheSettingManager->GetSettingI("Shaders.Exposure.Main", "Mode") == 1 ? 2 : 1; }	// 2026-11-26 (unsaved marks): the picker's mode
+
 static void RenderCatCamera() {
 	PageTitle("Camera & colour", "Tonemapping, exposure, HDR, bloom, LUTs, colour grading, depth of field, motion blur, and camera looks.");
 
 	// Competing exposure picker
-	if (MenuWidgets::SubHeader("Exposure mode###cat_exp_mode", true)) {
+	if (MenuWidgets::SubHeader("Exposure mode###cat_exp_mode", true, ModeMarked("exp", ExposureMode))) {	// 2026-11-25 (unsaved marks)
 		static const char* const kExpModes[] = { "Off", "Classic (screen average)", "Eye adaptation (whole view + white balance)" };
-		const int expMode = !EffectOn("Exposure") ? 0 : TheSettingManager->GetSettingI("Shaders.Exposure.Main", "Mode") == 1 ? 2 : 1;
+		const int expMode = ExposureMode();	// 2026-11-26 (unsaved marks)
 		ImGui::PushID("cat_exp");
-		const float ew = MenuWidgets::RowBegin("Exposure", MenuWidgets::ResetSlotWidth());
+		const float ew = MenuWidgets::RowBegin("Exposure", MenuWidgets::ResetSlotWidth(), ModeMarked("exp", ExposureMode));
 		ImGui::SetNextItemWidth(ew);
 		const int picked = NamePicker("##exp", kExpModes[expMode], kExpModes, 3, expMode);
 		ImGui::PopID();
 		if (picked >= 0 && picked != expMode) {
+			PickerWrites writes("exp", ExposureMode);	// 2026-11-26 (unsaved marks)
 			SetShaderEnabled("Exposure", picked > 0);
 			if (picked > 0) TheSettingManager->SetSetting("Shaders.Exposure.Main", "Mode", picked == 2 ? 1 : 0);
 			TheSettingManager->LoadSettings();
@@ -6658,7 +7157,7 @@ static void RenderCatCamera() {
 		DrawSimpleEffectCard("Exposure", "Exposure", { "Main", "Interiors", "Night" }, "Auto-exposure brightness adaptation.");
 		DrawSimpleEffectCard("LocalExposure", "Local exposure", { "Main" }, "Keeps bright skies and dark corners balanced together.");
 		if (DxvkCompute::Available())
-			DrawSimpleEffectCard("HDR", "HDR output", { "Main" }, "High dynamic range output settings.");
+			DrawSimpleEffectCard("HDR", "HDR output (freeze warning)", { "Main" }, "High dynamic range output settings.");
 		else if (MenuWidgets::SubHeader("HDR output (requires Vegas Shaders DXVK)###cat_hdr_nodxvk", false))
 			ImGui::TextDisabled("HDR output is inactive on native D3D9 / stock DXVK (Windows Auto HDR is controlled in Windows Display settings).");
 		DrawSimpleEffectCard("Bloom", "Bloom", { "Main", "Night", "Interiors" }, "Soft glow around bright lights and skies.");
@@ -6684,7 +7183,8 @@ static void RenderCatCamera() {
 static void RenderCatAA() {
 	PageTitle("Anti-aliasing & sharpening", "Pick one anti-aliasing or upscaling method (FSR / DLSS / TAA / SMAA / FXAA), plus sharpening and de-banding.");
 
-	if (MenuWidgets::SubHeader("Anti-aliasing / Upscaler###cat_aa_mode", true)) {
+	if (MenuWidgets::SubHeader("Anti-aliasing / Upscaler###cat_aa_mode", true,
+			ModeMarked("aa", DetectAaUpscalerMode) || ScopeMarked("Shaders.TAA.FSR:RenderScale, Shaders.TAA.DLSS:RenderScale"))) {	// 2026-11-25 (unsaved marks)
 		static const char* const kAaNames[] = {
 			"Off", "FXAA (fast)", "SMAA (sharp, low cost)",
 			"TAA (temporal anti-aliasing)", "FSR (AMD upscaler / AA)", "DLSS (NVIDIA upscaler / AA)"
@@ -6692,11 +7192,12 @@ static void RenderCatAA() {
 		const int aaCount = DxvkCompute::Available() ? 6 : 4;
 		const int aaMode = (std::min)(DetectAaUpscalerMode(), aaCount - 1);
 		ImGui::PushID("cat_aa");
-		const float aw = MenuWidgets::RowBegin("Method", MenuWidgets::ResetSlotWidth());
+		const float aw = MenuWidgets::RowBegin("Method", MenuWidgets::ResetSlotWidth(), ModeMarked("aa", DetectAaUpscalerMode));	// 2026-11-25 (unsaved marks)
 		ImGui::SetNextItemWidth(aw);
 		const int picked = NamePicker("##aa", kAaNames[aaMode], kAaNames, aaCount, aaMode);
 		ImGui::PopID();
 		if (picked >= 0 && picked != aaMode) {
+			PickerWrites writes("aa", DetectAaUpscalerMode);	// 2026-11-26 (unsaved marks)
 			TheSettingManager->SetSetting("Main.Main.ReducedQuality", "FXAA", picked == 1);
 			SetShaderEnabled("SMAA", picked == 2);
 			SetShaderEnabled("TAA", picked >= 3);
@@ -6728,7 +7229,7 @@ static void RenderCatAA() {
 			if (aaMode == 4) DrawVisualItem({ "Shaders.TAA.FSR", "-Enabled, RenderScale", nullptr }, false);
 			else if (aaMode == 5) DrawVisualItem({ "Shaders.TAA.DLSS", "-Enabled, RenderScale", nullptr }, false);
 			DrawVisualItem({ "Shaders.TAA.Main", nullptr, nullptr }, false);
-			if (MenuWidgets::SubHeader("Smooth foliage & fence cutouts###cat_aa_cut", false))
+			if (MenuWidgets::SubHeader("Smooth foliage & fence cutouts###cat_aa_cut", false, UnsavedSettings::Section("Shaders.TAA.Cutouts")))
 				DrawVisualItem({ "Shaders.TAA.Cutouts", nullptr, nullptr }, false);
 		}
 		else if (aaMode == 2) {
@@ -6768,7 +7269,7 @@ static void RenderCatParticles() {
 		for (const GunFolder& f : kGunFolders) {
 			if (f.AdvancedOnly && !AdvancedShown()) continue;
 			const std::string header = std::string(f.Title) + "###catgun/" + f.Id;
-			if (!MenuWidgets::SubHeader(header.c_str(), false)) continue;
+			if (!MenuWidgets::SubHeader(header.c_str(), false, VisualItemsMarked(f.Items))) continue;	// 2026-11-25 (unsaved marks)
 			ImGui::PushID(f.Id);
 			ImGui::Indent(ImGui::GetFontSize() * 0.75f);
 			for (const VisualItem& item : f.Items) DrawVisualItem(item, item.Title != nullptr);
@@ -6812,14 +7313,18 @@ static bool RenderSimpleCategoryPage() {
 }
 
 static void RtSwitchCount(int& on, int& switches);
+static bool SidebarMarked(const std::string& row);	// 2026-11-25 (unsaved marks): with the sidebar, below
 
 static void DrawSimpleCategoriesSidebar() {
-	MenuWidgets::GroupLabel("Graphics", true);
+	bool anyMarked = false;	// 2026-11-25 (unsaved marks)
+	for (const SimpleCategory& c : kSimpleCategories) anyMarked = anyMarked || SidebarMarked(c.Id);
+	MenuWidgets::GroupLabel("Graphics", true, anyMarked);
 	for (const SimpleCategory& c : kSimpleCategories) {
 		const bool shown = gMenu.page == c.Id;
 		ImGui::PushID(c.Id);
 		ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
 		if (ImGui::Selectable(c.Label, shown)) gMenu.page = c.Id;
+		MenuWidgets::MarkLastItem(c.Label, SidebarMarked(c.Id));	// 2026-11-25 (unsaved marks)
 		ImGui::PopStyleColor();
 		if (ImGui::IsItemHovered() && c.Tip) WrappedTooltip(c.Tip);
 		int on = 0, total = 0;
@@ -6856,7 +7361,8 @@ static void DrawSimpleCategoriesSidebar() {
 static void RenderContent() {
 	if (SearchActive()) return RenderSearchResults();
 	if (gMenu.page == kQuickTabId) return RenderQuickSettingsPage();
-	if (gMenu.page == kNewTabId) return RenderNewInPatch();
+	if (gMenu.page == kUnderDevTabId) return RenderUnderDevelopmentPage();
+	if (gMenu.page == kGearWeatherTabId) return RenderGearWeatherPage();
 	if (gMenu.page == kAoTabId) return RenderIndirectLightingPage();
 	if (gMenu.page == kRtTabId) return RenderRayTracingPage();
 	if (gMenu.page == kDeferredTabId) return RenderDeferredRendererPage();
@@ -6912,7 +7418,9 @@ static void NoteRowRightClick(const std::string& path) {
 static void DrawLeafSection(const std::string& path, const std::string& name) {
 	const bool shown = gMenu.page == path;
 	ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
-	if (ImGui::Selectable(MenuSectionLabel(path, name).c_str(), shown)) gMenu.page = path;
+	const std::string label = MenuSectionLabel(path, name);
+	if (ImGui::Selectable(label.c_str(), shown)) gMenu.page = path;
+	MenuWidgets::MarkLastItem(label.c_str(), SidebarMarked(path));	// 2026-11-25 (unsaved marks)
 	NoteRowRightClick(path);
 	if (shown && gMenu.revealPage) ImGui::SetScrollHereY(0.5f);	// test shots: the page's row in view
 	ImGui::PopStyleColor();
@@ -6944,6 +7452,7 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 	if (kind == SettingManager::MenuSwitch::None) {
 		// UNOFFICIAL 2026-10-19: no on/off setting (Foliage): a name only, not a switch that springs back
 		ImGui::TextUnformatted(label.c_str());
+		MenuWidgets::MarkLastItem(label.c_str(), SidebarMarked(path));	// 2026-11-25 (unsaved marks)
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s has no on/off switch of its own: the settings inside control it.", shader);
 	}
 	else if (RainWetnessLinked(name)) {
@@ -6964,6 +7473,7 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 		ImGui::SameLine();
 		ImGui::PushStyleColor(ImGuiCol_Text, on ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.5f));
 		ImGui::TextUnformatted(label.c_str());
+		MenuWidgets::MarkLastItem(label.c_str(), SidebarMarked(path));	// 2026-11-25 (unsaved marks)
 		ImGui::PopStyleColor();
 		RestartBadge(("Shaders." + name + (kind == SettingManager::MenuSwitch::MainEnabled ? ".Main" : ".Status")).c_str(), "Enabled");
 	}
@@ -6986,6 +7496,7 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 static bool DrawPlainSectionRow(const std::string& path, const std::string& name) {
 	const bool open = FoldingRow(path);
 	ImGui::TextUnformatted(name.c_str());
+	MenuWidgets::MarkLastItem(name.c_str(), SidebarMarked(path));	// 2026-11-25 (unsaved marks)
 	return open;
 }
 
@@ -7080,6 +7591,7 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Camera and colour", "Tonemapping, Exposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF" },
 	{ "Anti-aliasing and sharpening", "TAA, SMAA, Sharpening, DitherBuster, SkyDither" },
 	{ "Particles and gun effects", "Particles, GPUParticles", "Main.GunFX.Main", "Gun effects (smoke, barrel glow)##GunFX" },
+	{ "Under Development", "WorldSurface, @GearWeather" },
 	// "fun" looks that are no part of a normal setup, at the bottom where they stay out of the way (off by default)
 	{ "Extras", "Dream" },
 	{ "Developer", "Debug" },
@@ -7096,6 +7608,7 @@ static const EffectGroup kEffectGroups[] = {
 static const char* const kLayoutRt = "@RayTracing";
 static const char* const kLayoutGun = "@GunFX";
 static const char* const kLayoutAo = "@IndirectLighting";
+static const char* const kLayoutGearWeather = "@GearWeather";
 static bool s_layoutDirty = true;		// entries may be missing from the folders (first use, or after an edit)
 static size_t s_layoutChildren = 0;		// how many effects the list had when the folders were last checked
 static std::string s_layoutEntry, s_layoutFolder;	// what the open right-click menu is about (one of them)
@@ -7170,6 +7683,7 @@ static void LayoutEnsure(const StringList& children) {
 	placed = LayoutPlace(kLayoutAo) || placed;
 	placed = LayoutPlace(kLayoutRt) || placed;
 	placed = LayoutPlace(kLayoutGun) || placed;
+	placed = LayoutPlace(kLayoutGearWeather) || placed;
 	if (placed && layout.custom) MenuLayout::Save();
 }
 
@@ -7218,8 +7732,18 @@ static bool DrawEffectGroupRow(const MenuLayout::Folder& folder, const std::vect
 		reveal = reveal || (gMenu.revealPage && (gMenu.page == kRtTabId || IsRtSection(gMenu.page)));
 	}
 	if (reveal) ImGui::SetNextItemOpen(true);
+	bool marked = false;	// 2026-11-25 (unsaved marks): one of its entries leads to an unsaved setting
+	for (const std::string& e : effects) marked = marked || SidebarMarked("Shaders." + e);
+	const EffectGroup* gun = GunPageGroup();
+	for (const std::string& e : folder.entries) {
+		reveal = reveal || (gMenu.revealPage && e == kLayoutGearWeather && gMenu.page == kGearWeatherTabId);
+		marked = marked || (e == kLayoutRt && SidebarMarked(kRtTabId)) || (e == kLayoutAo && SidebarMarked(kAoTabId)) ||
+			(e == kLayoutGun && gun && SidebarMarked(gun->Page)) || (e == kLayoutGearWeather && SidebarMarked(kGearWeatherTabId));
+	}
 	const ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_SpanAvailWidth | ImGuiTreeNodeFlags_FramePadding;
-	const bool open = ImGui::TreeNodeEx((folder.name + "###effectgroup" + folder.name).c_str(), flags);
+	const std::string label = folder.name + "###effectgroup" + folder.name;
+	const bool open = ImGui::TreeNodeEx(label.c_str(), flags);
+	MenuWidgets::MarkLastItem(label.c_str(), marked);
 	if (ImGui::IsItemHovered() && ImGui::IsMouseReleased(ImGuiMouseButton_Right)) s_ctxFolder = folder.name;
 	if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
 		ImGui::SetDragDropPayload("VSFOLDER", folder.name.c_str(), folder.name.size() + 1);
@@ -7248,7 +7772,9 @@ static void DrawRayTracingRows() {
 	const bool shown = gMenu.page == kRtTabId;
 	ImGui::PushID(kRtTabId);
 	ImGui::PushStyleColor(ImGuiCol_Text, shown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
-	if (ImGui::Selectable("Ray tracing: overview (status, one switch, debug views)", shown)) gMenu.page = kRtTabId;
+	const char* const label = "Ray tracing: overview (status, one switch, debug views)";
+	if (ImGui::Selectable(label, shown)) gMenu.page = kRtTabId;
+	MenuWidgets::MarkLastItem(label, SidebarMarked(kRtTabId));	// 2026-11-25 (unsaved marks)
 	NoteRowRightClick(kRtTabId);
 	ImGui::PopStyleColor();
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Every ray-traced effect in one place: what runs, what stops it, one switch for all and the debug views.");
@@ -7270,6 +7796,7 @@ static void DrawEffectGroups(const StringList& children) {
 		for (const std::string& e : folder.entries) {
 			if (e == kLayoutRt) rayTracing = pages = true;
 			else if (e == kLayoutAo) pages = true;
+			else if (e == kLayoutGearWeather) pages = true;
 			else if (e == kLayoutGun) pages = pages || gun;
 			else if (std::find(children.begin(), children.end(), e) != children.end() && shown(e)) effects.push_back(e);
 		}
@@ -7282,9 +7809,22 @@ static void DrawEffectGroups(const StringList& children) {
 				ImGui::PushID(kAoTabId);
 				ImGui::PushStyleColor(ImGuiCol_Text, isShown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
 				if (ImGui::Selectable("Ambient occlusion & bounce light", isShown)) gMenu.page = kAoTabId;
+				MenuWidgets::MarkLastItem("Ambient occlusion & bounce light", SidebarMarked(kAoTabId));	// 2026-11-25 (unsaved marks)
 				NoteRowRightClick(kAoTabId);
 				ImGui::PopStyleColor();
 				if (ImGui::IsItemHovered()) ImGui::SetTooltip("Unified picker for corner shading (AO), sky occlusion, and bounce light (GI).");
+				ImGui::PopID();
+			}
+			else if (e == kLayoutGearWeather) {
+				const bool isShown = gMenu.page == kGearWeatherTabId;
+				ImGui::PushID(kGearWeatherTabId);
+				ImGui::PushStyleColor(ImGuiCol_Text, isShown ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.35f));
+				const char* const label = "Gear weather (1st-person)";
+				if (ImGui::Selectable(label, isShown)) gMenu.page = kGearWeatherTabId;
+				MenuWidgets::MarkLastItem(label, SidebarMarked(kGearWeatherTabId));
+				NoteRowRightClick(kGearWeatherTabId);
+				ImGui::PopStyleColor();
+				if (ImGui::IsItemHovered()) ImGui::SetTooltip("First-person weapon and sleeve weathering (frost, snowflakes, sandstorm dust, rain wetness, mud).");
 				ImGui::PopID();
 			}
 			else if (e == kLayoutGun) {
@@ -7307,6 +7847,7 @@ static void DrawEffectGroups(const StringList& children) {
 static std::string LayoutEntryOfPath(const std::string& path) {
 	if (path == kRtTabId || IsRtSection(path)) return kLayoutRt;
 	if (path == kAoTabId) return kLayoutAo;
+	if (path == kGearWeatherTabId) return kLayoutGearWeather;
 	const EffectGroup* gun = GunPageGroup();
 	if (gun && path == gun->Page) return kLayoutGun;
 	if (path.compare(0, 8, "Shaders.") != 0) return std::string();
@@ -7317,6 +7858,7 @@ static std::string LayoutEntryOfPath(const std::string& path) {
 static std::string LayoutEntryLabel(const std::string& entry) {
 	if (entry == kLayoutRt) return "Ray tracing pages";
 	if (entry == kLayoutAo) return "Ambient occlusion & bounce light";
+	if (entry == kLayoutGearWeather) return "Gear weather (1st-person)";
 	if (entry == kLayoutGun) return "Gun effects";
 	return ShownText(MenuEntryLabel(entry));
 }
@@ -7329,7 +7871,7 @@ static void LayoutRowDragDrop(const std::string& path) {
 	const std::string entry = LayoutEntryOfPath(path);
 	if (entry.empty()) return;
 	const EffectGroup* gun = GunPageGroup();
-	const bool own = path == "Shaders." + entry || path == kRtTabId || path == kAoTabId || (gun && path == gun->Page);
+	const bool own = path == "Shaders." + entry || path == kRtTabId || path == kAoTabId || path == kGearWeatherTabId || (gun && path == gun->Page);
 	if (own && ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceNoHoldToOpenOthers)) {
 		ImGui::SetDragDropPayload("VSENTRY", entry.c_str(), entry.size() + 1);
 		ImGui::TextUnformatted(LayoutEntryLabel(entry).c_str());
@@ -7434,6 +7976,182 @@ static void LayoutMenu() {
 	if (edited) LayoutEdited();
 }
 
+// ---- Unsaved marks: the sidebar (2026-11-25) ------------------------------------------------------------------------------
+// An entry is marked when what it opens holds an unsaved setting: a page's row by the settings its page shows, a fold (a group label,
+// a section's or an effect's row, a folder) by the entries under it. Once a frame each unsaved key is followed to the entries that lead
+// to it (its trail), by the sidebar's own rules: what HiddenFromSidebar leaves out, the moved and nested entries (kMenuMoves,
+// kMenuNests), the sections drawn inside another page (kPageAttaches), and the pages that gather settings from many sections. Those
+// pages' lists below follow what the pages draw (RenderQuickSettingsPage, RenderIndirectLightingPage, RenderDeferredRendererPage,
+// RenderDebugSettingsPage, RenderCat*): a row added to one of those pages belongs in its list here too.
+// (In Simple mode a card or a category can be marked for a setting only Advanced shows: one changed with Advanced on, not saved yet.)
+
+// The Graphics categories of Simple mode (RenderCat*): their mode pickers and their cards (each card's effect switch and its sections).
+struct CategoryScope { const char* Id; const char* Scope; };
+static const CategoryScope kCategoryScopes[] = {
+	{ "@Cat.Lighting", "@AmbientLight, @AmbientOcclusion, @BounceLight, @PBR, @Specular, @Reflections, @Flashlight, Shaders.AmbientLight.Main, "
+		"Shaders.AmbientOcclusion.Exteriors, Shaders.AmbientOcclusion.Interiors, Shaders.AmbientOcclusion.GTAO, Shaders.AmbientOcclusion.RT, "
+		"Shaders.AmbientOcclusion.Skylighting, Shaders.BounceLight.Main, Shaders.PBR.Main, Shaders.PBR.Metal, Shaders.PBR.Rmaos, Shaders.PBR.Linear, "
+		"Shaders.Specular.Exterior, Shaders.Specular.Rain, Shaders.Reflections.Main, Shaders.Reflections.RT, Shaders.Flashlight.Main, "
+		"Shaders.Flashlight.Deferred" },
+	{ "@Cat.Shadows", "@ShadowsExteriors, @ContactHardening, @CloudShadows, @ShadowsInteriors, @VolumetricClouds, Shaders.VolumetricClouds.Main:Shadows, "
+		"Shaders.ShadowsExteriors.Main, Shaders.ShadowsExteriors.ScreenSpace, Shaders.ShadowsExteriors.SSShadows, Shaders.ShadowsExteriors.TerrainShadows, Shaders.ShadowsExteriors.RT, "
+		"Shaders.ContactHardening.Main, Shaders.CloudShadows.Main, Shaders.ShadowsInteriors.Main, Shaders.ShadowsInteriors.Forward, "
+		"Shaders.ShadowsInteriors.Atlas, Shaders.ShadowsInteriors.RT" },
+	{ "@Cat.Sky", "@Sky, @VolumetricClouds, @VolumetricFog, @VolumetricLight, @GodRays, @SunGlare, @Sandstorm, @HeatHaze, @DustMotes, "
+		"Shaders.Sky.Main, Shaders.Sky.Physical, Shaders.Sky.Clouds, Shaders.VolumetricClouds.Main, Shaders.VolumetricFog.Main, Shaders.VolumetricFog.Night, "
+		"Shaders.VolumetricFog.Interiors, Shaders.VolumetricLight.Main, Shaders.VolumetricLight.Night, Shaders.GodRays.Main, Shaders.GodRays.Coloring, "
+		"Shaders.SunGlare.Main, Shaders.Sandstorm.Main, Shaders.HeatHaze.Main, Shaders.DustMotes.Main" },
+	{ "@Cat.Weather", "@Precipitations, @Snow, @SnowAccumulation, @WetnessEffects, @Puddles, @Water, @Underwater, @WaterLens, "
+		"Shaders.Precipitations.Main, Shaders.Snow.Main, Shaders.SnowAccumulation.Main, Shaders.WetnessEffects.Main, Shaders.WetnessEffects.Raindrops, "
+		"Shaders.WetnessEffects.HudRaindrops, Shaders.Puddles.Main, Shaders.Water.Default, Shaders.Water.Interiors, "
+		"Shaders.Water.Placed, Shaders.WaterLens.Main, Main.Main.Quality:GearWeather, Main.Main.Quality:GearWeatherStrength, "
+		"Main.Main.Quality:GearWeatherFrost, Main.Main.Quality:GearWeatherSand, Main.Main.Quality:GearWeatherWet, Main.Main.Quality:GearWeatherMud, "
+		"Main.Main.Quality:GearWeatherSpeed, Main.Main.Quality:GearWeatherSkin, Main.Main.Quality:GearWeatherScale, Main.Main.Quality:GearWeatherForce" },	// test4: + the gear weather card
+	{ "@Cat.Ground", "@Terrain, @WorldSurface, @POM, @Grass, @Plants, @Foliage, Shaders.WorldSurface.Main, Shaders.WorldSurface.Dust, "
+		"Shaders.WorldSurface.Rust, Shaders.WorldSurface.Waterline, Shaders.WorldSurface.Moss, Shaders.Terrain.Blending, Shaders.Terrain.Variation, Shaders.Terrain.Macro, "
+		"Shaders.Terrain.Parallax, Shaders.Terrain.Displacement, Shaders.POM.Main, Shaders.POM.Displacement, Shaders.Grass.Main, Shaders.Grass.GPUGrass, "
+		"Shaders.Grass.Wind, Shaders.Grass.Interaction, Shaders.Plants.Wind, Shaders.Foliage.Main" },
+	{ "@Cat.Characters", "@Skin, @Cloth, @PipboyFit, @HandBlood, Shaders.Skin.Main, Shaders.Skin.Scattering, Shaders.Skin.Interiors, Shaders.Cloth.Main, "
+		"Shaders.Cloth.Interiors, Shaders.PipboyFit.Main, Shaders.HandBlood.Main" },
+	{ "@Cat.Camera", "@Tonemapping, @Exposure, @LocalExposure, @HDR, @Bloom, @BloomLegacy, @LUT, @Coloring, @ImageAdjust, @Lens, @DepthOfField, "
+		"@MotionBlur, @Cinema, @Bodycam, @LowHF, @Dream, Shaders.Tonemapping.Main, Shaders.Tonemapping.Interiors, Shaders.Tonemapping.Night, "
+		"Shaders.Exposure.Main, Shaders.Exposure.Interiors, Shaders.Exposure.Night, Shaders.LocalExposure.Main, Shaders.HDR.Main, Shaders.Bloom.Main, "
+		"Shaders.Bloom.Night, Shaders.Bloom.Interiors, Shaders.BloomLegacy.Exteriors, Shaders.BloomLegacy.Interiors, Shaders.LUT.Main, "
+		"Shaders.Coloring.Default, Shaders.ImageAdjust.Main, Shaders.ImageAdjust.Night, Shaders.ImageAdjust.Interiors, Shaders.Lens.Main, "
+		"Shaders.Lens.Night, Shaders.Lens.Interiors, Shaders.DepthOfField.FirstPersonView, Shaders.DepthOfField.ThirdPersonView, "
+		"Shaders.MotionBlur.FirstPersonView, Shaders.MotionBlur.ThirdPersonView, Shaders.Cinema.Main, Shaders.Bodycam.Main, Shaders.Bodycam.Night, "
+		"Shaders.Bodycam.Interiors, Shaders.LowHF.Main, Shaders.Dream.Main" },
+	{ "@Cat.AA", "Main.Main.ReducedQuality:FXAA, @SMAA, @TAA, @Sharpening, @DitherBuster, @SkyDither, Shaders.TAA.FSR, Shaders.TAA.DLSS, "
+		"Shaders.TAA.Main, Shaders.TAA.Cutouts, Shaders.SMAA.Main, Shaders.Sharpening.Main, Shaders.Sharpening.Interiors, Shaders.DitherBuster.Main, "
+		"Shaders.SkyDither.Main" },
+	{ "@Cat.Particles", "@Particles, @GPUParticles, Shaders.Particles.Main, Shaders.GPUParticles.Main, Main.GunFX" },
+};	// (the Ray tracing category is the Ray tracing page: kRtTabId)
+
+// Quick settings: its rows besides the AA and AO / sky / bounce light pickers (the ray tracing ones only with the DXVK fork).
+static const char* const kScopeQuickPage = "Main.Main.Misc:RenderEffects, Main.Main.Quality:DeferredRenderer, Main.Main.Quality:MaxQuality, "
+	"Shaders.TAA.FSR:RenderScale, Shaders.TAA.DLSS:RenderScale";
+static const char* const kScopeQuickPageRt = "Main.Main.RayTracing:RTInteriors, Main.Main.RayTracing:RTExteriors, Main.Main.RayTracing:PTRealtime, "
+	"Main.Main.RayTracing:PTRealtimeLevel, Main.Main.RayTracing:PTStandDownRT";
+
+// AO & bounce light: its tuning blocks, all modes together (each mode shows its own).
+static const std::vector<VisualItem> kAoPageItems = {
+	{ "Shaders.AmbientLight.Main", "OcclusionStrength, Radius, DrawDistance, DarkestOcclusion, BrightnessFade, ComputeGIStrength, ComputeGIQuality, "
+		"ComputeGIThickness, ComputeGIThinOcclusion, SunGI, RoomGI, AmbientReplace, AmbientFloor, AmbientReplaceInterior, AmbientFloorInterior, "
+		"GridBounce, GridLamps, GridSpread, GridColour", nullptr },
+	{ "Shaders.AmbientOcclusion.Exteriors", "Enabled, StrengthMultiplier, Range, ClampStrength, LumThreshold", nullptr },
+	{ "Shaders.AmbientOcclusion.Interiors", "Enabled, StrengthMultiplier, Range, ClampStrength, LumThreshold", nullptr },
+	{ "Shaders.AmbientOcclusion.GTAO", "Enabled, MaxRadius", nullptr },
+	{ "Shaders.AmbientOcclusion.RT", "RayCount, Distance, OcclusionOnD3D9, SkyRays, SkyDistance, GIStrength, GIDistance, GISky, SkyMissSH, GIAmbient, "
+		"RadianceCache, CacheExteriors, GIStrengthNight, GIStrengthInterior, GlowGI, GlowDirect", nullptr },
+	{ "Shaders.AmbientOcclusion.Skylighting", "Strength, Distance, Reflections", nullptr },
+	{ "Shaders.BounceLight.Main", "Strength, Radius, BlurRadius, QuarterResolution, Temporal", nullptr },
+};
+
+// Deferred renderer: the deferred sun pass's keys it shows with Developer options (its Main.Main.Quality keys: IsDeferredQualityKey).
+static const VisualItem kDeferredPageSunKeys = { "Shaders.ShadowsExteriors.Deferred",
+	"MatchSunDisc, CanopyShadow, ParallaxShadow, LandCrackShadow, MicroShadow, AuthoredHighlight, HighlightFade, Shadows", nullptr };
+
+// Debug views: every view of kDebugViews but one, and these.
+static const std::vector<VisualItem> kDebugPageExtras = {
+	{ "@effect", "Debug", nullptr },
+	{ "Main.Develop.Main", "DebugMode, GpuDebugLabels, DebugVar1, DebugVar2, DebugVar3, DebugVar4", nullptr },
+	{ "Main.Develop.PixelInspector", "Enabled, X, Y, LogEvery", nullptr },
+	{ "Main.GunFX.Volume", "Debug", nullptr },
+	{ "Main.Main.Misc", "PassFamilyView", nullptr },
+	{ "Shaders.AmbientLight.Main", "DebugGIExposure", nullptr },
+	{ "Shaders.WetnessEffects.Debug", "WetnessOverride, PuddleOverride, RainOverride", nullptr },
+};
+
+static bool DebugPageHas(const std::string& section, const std::string& key) {
+	for (const VisualItem& item : kDebugPageExtras) if (VisualItemHas(item, section, key)) return true;
+	for (const DebugViewKey& v : kDebugViews)
+		if (section == v.Section && key == v.Key) return !(section == "Shaders.Terrain.Blending" && key == "Debug");	// (the one the page leaves out)
+	return false;
+}
+
+static bool NewPageHas(const std::string& section, const std::string& key) {
+	for (const NewEntry& e : s_newMain) if (e.Section == section && e.Key == key) return true;
+	if (DevOptionsShown()) for (const NewEntry& e : s_newDiag) if (e.Section == section && e.Key == key) return true;
+	return false;
+}
+
+// The entries of the sidebar's tree (Main, and Shaders with Advanced on) that lead to where [section] key is drawn, top first; none
+// when the tree does not show it.
+static void TreeTrail(const std::string& section, const std::string& key, std::vector<std::string>& trail) {
+	for (const PageAttach& a : kPageAttaches)	// drawn inside its host's page
+		if (section == a.Section) return TreeTrail(a.Host, key, trail);
+	if (IsRtSection(section)) { trail = { "Shaders", section }; return; }	// a row of the Ray tracing pages (their overview: below)
+	const EffectGroup* gun = GunPageGroup();
+	if (gun && section.compare(0, 11, "Main.GunFX.") == 0) { trail = { "Shaders", gun->Page }; return; }	// the Gun effects page
+	if (section == "Main.Main.Quality" && IsDeferredQualityKey(key.c_str())) { trail = { "Main", "Main.Main", kDeferredTabId }; return; }
+	if (section.compare(0, 8, "Shaders.") == 0) {
+		const size_t dot = section.find('.', 8);
+		const std::string effect = section.substr(8, dot == std::string::npos ? std::string::npos : dot - 8);
+		for (const MenuMove& m : kMenuMoves)
+			if (effect == m.name) { trail = { "Shaders", std::string("Shaders.") + m.under, "Shaders." + effect + ".Main" }; return; }
+		for (const MenuNest& n : kMenuNests)
+			if (effect == n.name) { trail = { "Shaders", std::string("Shaders.") + n.under, "Shaders." + effect }; return; }
+	}
+	// Every section above it, down to its own page. A switch's section (Status) is drawn on its effect's row; a section the sidebar
+	// leaves out takes the whole trail with it.
+	std::vector<std::string> rows;
+	for (size_t from = 0; ; ) {
+		const size_t dot = section.find('.', from);
+		const std::string path = section.substr(0, dot);
+		const std::string name = section.substr(from, dot == std::string::npos ? std::string::npos : dot - from);
+		if (name == "Status") break;
+		if (HiddenFromSidebar(path, name)) return;
+		rows.push_back(path);
+		if (dot == std::string::npos) break;
+		from = dot + 1;
+	}
+	trail.swap(rows);
+}
+
+static std::unordered_set<std::string> s_markedRows;	// this frame's marked entries: a page's or a fold's path, a special page's id
+static int s_markedFrame = -1;
+
+static void MarkSidebarRows() {
+	if (s_markedFrame == ImGui::GetFrameCount()) return;
+	s_markedFrame = ImGui::GetFrameCount();
+	s_markedRows.clear();
+	for (const auto& unsaved : UnsavedSettings::All()) {
+		const std::string& section = unsaved.first;
+		for (const auto& entry : unsaved.second) {
+			const std::string& key = entry.first;
+			// A key with no row is drawn nowhere, but for the LUT pickers and the RT master switches (on the Ray tracing page only)
+			const bool rowless = ShouldHideKey(key.c_str());
+			if (rowless && !KeyInList("DayLUT, NightLUT, InteriorLUT, RTInteriors, RTExteriors", key.c_str())) continue;
+			std::vector<std::string> trail;
+			if (!(rowless && section == "Main.Main.RayTracing")) TreeTrail(section, key, trail);
+			bool rt = IsRtSection(section);
+			for (const RtSharedBlock& b : kRtSharedBlocks)
+				for (const VisualItem& item : b.Source->Items) rt = rt || VisualItemHas(item, section, key);
+			if (rt) trail.insert(trail.end(), { "Shaders", kRtTabId });
+			const bool aoPickers = ScopeHas(kScopeAoMode, section, key) || ScopeHas(kScopeSkyMode, section, key) || ScopeHas(kScopeGiMode, section, key);
+			bool ao = aoPickers;
+			for (const VisualItem& item : kAoPageItems) ao = ao || VisualItemHas(item, section, key);
+			if (ao) trail.insert(trail.end(), { "Shaders", kAoTabId });
+			if (aoPickers || ScopeHas(kScopeAaMode, section, key) || ScopeHas(kScopeQuickPage, section, key) ||
+					(DxvkCompute::Available() && ScopeHas(kScopeQuickPageRt, section, key)))
+				trail.push_back(kQuickTabId);
+			if (DevOptionsShown() && VisualItemHas(kDeferredPageSunKeys, section, key)) trail.insert(trail.end(), { "Main", "Main.Main", kDeferredTabId });
+			if (DebugPageHas(section, key)) trail.insert(trail.end(), { "Main", "Main.Main", kDebugTabId });
+			if (ScopeHas(kScopeUnderDev, section, key)) trail.push_back(kUnderDevTabId);
+			if (ScopeHas(kScopeGearWeather, section, key)) trail.insert(trail.end(), { "Shaders", kGearWeatherTabId });
+			for (const CategoryScope& c : kCategoryScopes) if (ScopeHas(c.Scope, section, key)) trail.push_back(c.Id);
+			for (const std::string& row : trail) s_markedRows.insert(row);
+		}
+	}
+}
+
+// Whether the sidebar entry (a page's or a fold's path, or a special page's id) leads to an unsaved setting.
+static bool SidebarMarked(const std::string& row) {
+	if (!UnsavedSettings::Any()) return false;
+	MarkSidebarRows();
+	return s_markedRows.count(row) != 0;
+}
+
 // "Quick settings" at the top of the sidebar: the default landing page when the menu opens.
 static void DrawQuickSettingsEntry() {
 	if (gMenu.page.empty()) gMenu.page = kQuickTabId;
@@ -7441,25 +8159,23 @@ static void DrawQuickSettingsEntry() {
 	ImGui::PushID(kQuickTabId);
 	ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(shown ? 0.25f : 0.0f));
 	if (ImGui::Selectable("Quick settings", shown)) gMenu.page = kQuickTabId;
+	MenuWidgets::MarkLastItem("Quick settings", SidebarMarked(kQuickTabId));	// 2026-11-25 (unsaved marks)
 	ImGui::PopStyleColor();
 	if (ImGui::IsItemHovered())
 		ImGui::SetTooltip("Runtime status and the main graphics switches in one place.");
 	ImGui::PopID();
 }
 
-// "New in this patch (N)" right below Quick settings.
-static void DrawNewInPatchEntry() {
-	NewPatchEnsure();
-	const size_t shownCount = DevOptionsShown() ? NewPatchCount() : s_newMain.size();
-	if (!shownCount) return;
-	const bool shown = gMenu.page == kNewTabId;
-	const std::string label = "New in this patch (" + std::to_string(shownCount) + ")";
-	ImGui::PushID(kNewTabId);
-	ImGui::PushStyleColor(ImGuiCol_Text, shown ? MenuSkin::Heading(0.25f) : MenuWidgets::MutedText(0.35f));
-	if (ImGui::Selectable(label.c_str(), shown)) gMenu.page = kNewTabId;
+// "Under Development" right below Quick settings.
+static void DrawUnderDevelopmentEntry() {
+	const bool shown = gMenu.page == kUnderDevTabId;
+	ImGui::PushID(kUnderDevTabId);
+	ImGui::PushStyleColor(ImGuiCol_Text, MenuSkin::Heading(shown ? 0.25f : 0.0f));
+	if (ImGui::Selectable("Under Development", shown)) gMenu.page = kUnderDevTabId;
+	MenuWidgets::MarkLastItem("Under Development", SidebarMarked(kUnderDevTabId));
 	ImGui::PopStyleColor();
 	if (ImGui::IsItemHovered())
-		ImGui::SetTooltip("Settings added in this patch, in one place. They are the same settings as in their own menus.");
+		ImGui::SetTooltip("Experimental features currently in active development: GearWeather, WorldSurface, MaterialSSS, and RealSunPath/SunSheen.");
 	ImGui::PopID();
 }
 
@@ -7468,7 +8184,7 @@ static void RenderSidebar() {
 	if (SearchActive()) return RenderSearchSidebar();
 	ImGui::Dummy(ImVec2(0.0f, ImGui::GetStyle().ItemSpacing.y * 0.5f));
 	DrawQuickSettingsEntry();
-	DrawNewInPatchEntry();
+	DrawUnderDevelopmentEntry();
 
 	// The skin's IndentSpacing is 0 (the pages indent their own groups): the sidebar's folds get a small step per level
 	ImGui::PushStyleVar(ImGuiStyleVar_IndentSpacing, ImGui::GetFontSize());
@@ -7482,7 +8198,7 @@ static void RenderSidebar() {
 		TheSettingManager->FillMenuSections(&children, root.c_str());
 		ImGui::PushID(root.c_str());
 		if (children.empty()) DrawLeafSection(root, root);
-		else if (MenuWidgets::GroupLabel(root.c_str(), gMenu.revealPage && LeadsToSelected(root))) DrawChildren(root);
+		else if (MenuWidgets::GroupLabel(root.c_str(), gMenu.revealPage && LeadsToSelected(root), SidebarMarked(root))) DrawChildren(root);	// 2026-11-25 (unsaved marks)
 		ImGui::PopID();
 	}
 	ImGui::PopStyleVar();
@@ -8231,7 +8947,7 @@ static void DrawFileMenu() {
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Writes a dated copy of the settings next to the DLL, named after where you are.");
 	ImGui::Separator();
 	if (ImGui::MenuItem("Revert")) RevertSessionValues();
-	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Revert all settings to values at session start");
+	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Undo every unsaved change (back to the last Save)");	// 2026-11-26
 	if (ImGui::MenuItem("Reload from Disk...")) gMenu.diskConfirm = true;
 	if (ImGui::IsItemHovered()) ImGui::SetTooltip("Reload all settings from saved TOML file");
 	ImGui::EndMenu();

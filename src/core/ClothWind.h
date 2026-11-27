@@ -1472,7 +1472,11 @@ namespace ClothWind {
 		ActiveWeights = nullptr;
 		// 2026-10-19: indoors (no wind) worn clothing still follows its wearer (MotionIndoors); everything else stays still there
 		// (2026-10-21: unless the indoor set is on -- then Exterior is true and all cloth gets its gentle wind)
-		if (!S.On || !geometry || firstPerson || (!Exterior && !S.MotionIndoors)) { ZeroFor(device, shadowPass); return; }
+		if (!S.On || !geometry || firstPerson || (!Exterior && !S.MotionIndoors)) {
+			if (firstPerson) Zero(device);
+			else ZeroFor(device, shadowPass);
+			return;
+		}
 		// 2026-10-19 (P81 'only the player's SHADOW moves'; measured on NVRAutoTest12: the Combat Ranger coat's lit pass skipped 600 of 600
 		// frames, 'not seen by SetShaders'): the game sets no shaders for a pass whose shaders are already bound (the coat follows its
 		// Pip-Boy piece, same shaders), so SetShadersHook never notes it. Such a pass draws with the vertex shader bound now: judge it by

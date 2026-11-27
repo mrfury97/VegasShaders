@@ -81,18 +81,21 @@ float FLShadowTap(float2 uv, float distShare, float bias) {
 
 // The spot map's lit share at a camera-relative point: PCF over a disc of FL_Shadow.w texels (2026-11-04, user: "softer, and higher
 // quality", "they should be using PCF shadows"; was 3 x 3 point taps): 16 bilinear PCF taps on a Vogel spiral (even cover of the disc,
-// no noise: no grain without TAA). 1 outside the map.
-float FLShadow(float3 position, float distShare, out float2 mapUV) {
-    const float4 clip = mul(float4(position, 1.0f), FL_LightViewProj);
+// no noise: no grain without TAA). 1 outside the map. Uses normal-offset shadow coordinates along smoothFacingN to prevent seam/crack leaks.
+float FLShadow(float3 position, float3 smoothFacingN, float ndl, float dist, out float2 mapUV) {
+    const float texelWorld = max(dist * FL_Shadow.y * 1.5f, 0.25f);
+    const float3 shadowPos = position + smoothFacingN * (texelWorld * (0.5f + 1.5f * (1.0f - saturate(ndl))));
+    const float4 clip = mul(float4(shadowPos, 1.0f), FL_LightViewProj);
     mapUV = clip.xy / max(clip.w, 1.0e-4f) * float2(0.5f, -0.5f) + 0.5f;
     [branch] if (FL_Shadow.x < 0.5f || clip.w <= 0.0f || any(mapUV < 0.0f) || any(mapUV > 1.0f)) return 1.0f;
+    const float shadowDistShare = length(FL_Pos.xyz - shadowPos) / FL_Pos.w;
     const float radius = FL_Shadow.y * FL_Shadow.w;
-    const float bias = FL_Shadow.z * (1.0f + 4.0f * distShare);
+    const float bias = FL_Shadow.z * (1.0f + 1.5f * shadowDistShare);
     float2 dir = float2(1.0f, 0.0f);
     const float2x2 golden = float2x2(-0.7373688f, -0.6754904f, 0.6754904f, -0.7373688f);	// a turn by the golden angle (2.39996 rad)
     float lit = 0.0f;
     [unroll] for (int i = 0; i < 16; i++) {
-        lit += FLShadowTap(mapUV + dir * (radius * sqrt((i + 0.5f) / 16.0f)), distShare, bias);
+        lit += FLShadowTap(mapUV + dir * (radius * sqrt((i + 0.5f) / 16.0f)), shadowDistShare, bias);
         dir = mul(golden, dir);
     }
     return lit / 16.0f;
@@ -135,7 +138,8 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     const float3 toLight = FL_Pos.xyz - position;
     const float dist = length(toLight);
     clip(FL_Pos.w - dist);
-    const float coneCos = dot(-toLight / max(dist, 1.0e-3f), FL_Dir.xyz);
+    const float3 lightDir = toLight / max(dist, 1.0e-3f);
+    const float coneCos = dot(-lightDir, FL_Dir.xyz);
     clip(coneCos - FL_Dir.w);
     const float cone = smoothstep(FL_Dir.w, FL_Color.w, coneCos);
     // 2026-11-04 (user: "the reach of the flashlight goes quite far"): Falloff > 0, a windowed inverse square, (1 - d^2/r^2)^2 / (1 + F d^2/r^2):
@@ -148,8 +152,18 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     const float nearFade = FL_Look.w > 0.0f ? smoothstep(0.0f, FL_Look.w, dist) : 1.0f;
     const float att = falloff * cone * cone * nearFade;
 
+    const float4 m = tex2Dlod(FL_Material, uv4);
+    const float3 smoothN = ShadowDecodeNormal(stored.rg);
+    const float3 smoothFacingN = smoothN * (dot(smoothN, position) > 0.0f ? -1.0f : 1.0f);
+#if CAPTURED_NORMALS_ON >= 4
+    const float3 N = abs(m.g) <= 1.001f ? ShadowDecodeNormal(m.ga) : smoothN;
+#else
+    const float3 N = smoothN;
+#endif
+    const float ndl = dot(N, lightDir);
+
     float2 mapUV;
-    const float shadow = FLShadow(position, dist / FL_Pos.w, mapUV);
+    const float shadow = FLShadow(position, smoothFacingN, ndl, dist, mapUV);
     // UNOFFICIAL 2026-11-11 (BUG FIX, a tester: "Cookie just brightens and darkens the light ... at 1 it is invisible"). Two faults: stage 7
     // held no texture (FlashlightDeferred::CookieTexture loads it now; no file = FL_Look.x 0), and the cookie was read at the shadow map's
     // uv, which is only right while the map is drawn (Shadows off, or a frame without it: an old or empty matrix, the whole beam one texel).
@@ -165,12 +179,6 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
         cookie = lerp(1.0f, tex2Dlod(FL_Cookie, float4(cookieUV, 0.0f, 0.0f)).r * 2.0f, saturate(FL_Look.x));
     }
 
-    const float4 m = tex2Dlod(FL_Material, uv4);
-#if CAPTURED_NORMALS_ON >= 4
-    const float3 N = abs(m.g) <= 1.001f ? ShadowDecodeNormal(m.ga) : ShadowDecodeNormal(stored.rg);
-#else
-    const float3 N = ShadowDecodeNormal(stored.rg);
-#endif
     // (2026-11-12 ptbump) b in -3 .. -2: a record coded "the game draws no highlight on this mesh" for the path tracer (Includes/
     // CapturedNormals.hlsl CapturedNoHighlight): the roughness this pass always lit it with is -2 - b. The land's b (-8 .. -6 with its
     // bump recorded, else -1): no roughness, as before.
@@ -196,10 +204,10 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     // all normals, less speckle where the normals scatter): the diffuse's plain Lambert part (PBRDiffuse's: (1 - metal) x colour x N.L x
     // light) swapped for the wrap; the highlight as it is. Off: nothing changes.
     [branch] if (FL_Gamma.y > 0.5f) {
-        const float ndl = dot(N, toLight / max(dist, 1.0e-3f));
         const float wrap = saturate(ndl * 0.5f + 0.5f);
+        const float geomHorizon = smoothstep(-0.25f, 0.1f, dot(smoothFacingN, lightDir));
         const float3 graded = lerp(luma(albedo), albedo, TESR_PBRExtraData.x);
-        lit = max(lit + LampAtt(att) * (1.0f - metal) * graded * FL_Color.rgb * LIN_SCALE_LIGHT * (0.75f * wrap * wrap - saturate(ndl)), 0.0f);
+        lit = max(lit + LampAtt(att) * (1.0f - metal) * graded * FL_Color.rgb * LIN_SCALE_LIGHT * ((0.75f * wrap * wrap - saturate(ndl)) * geomHorizon), 0.0f);
     }
     float3 light = lit * (shadow * cookie * keep);
     // UNOFFICIAL 2026-11-11 HotspotLimit (the old flashlight's Reinhard-style roll-off, s' = s x L / max(L, s), L = 1 / HotspotLimit): the

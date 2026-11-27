@@ -35,15 +35,50 @@ void PBRShaders::RegisterConstants() {
 // after it. Shaders upload their constants when bound, so the one still bound from the world pass gets it directly (c34:
 // TESR_PBRMetal in Object.hlsl).
 void PBRShaders::BeginFirstPerson(IDirect3DDevice9* Device) {
-	Constants.Metal.x = MetalSettings.FirstPerson;
-	Constants.Metal.y = MetalSettings.GreyMetal;
-	if (Device) Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
+	FirstPersonActive = true;
+	FirstPersonWeapon = false;
+	Constants.Metal.x = MetalSettings.World;
+	Constants.Metal.y = MetalSettings.WorldGreyMetal;
+	const float reflectivity = TheShaderManager && TheShaderManager->GameState.isExterior ? ReflectivitySettings.Exterior : ReflectivitySettings.Interior;
+	Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
+	if (Device) {
+		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
+		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+	}
+}
+
+void PBRShaders::SetFirstPersonWeapon(IDirect3DDevice9* Device, bool isWeapon) {
+	if (!FirstPersonActive || isWeapon == FirstPersonWeapon) return;
+	FirstPersonWeapon = isWeapon;
+	const float reflectivity = TheShaderManager && TheShaderManager->GameState.isExterior ? ReflectivitySettings.Exterior : ReflectivitySettings.Interior;
+	if (isWeapon) {
+		Constants.Metal.x = MetalSettings.FirstPerson;
+		Constants.Metal.y = MetalSettings.GreyMetal;
+		const ReflectionsEffect* refl = TheShaderManager ? TheShaderManager->Effects.Reflections : nullptr;
+		const float handoff = refl && refl->WeaponReflectionsActive() ? (1.0f - std::clamp(refl->Settings.RtWeapon * 0.7f, 0.0f, 0.85f)) : 1.0f;
+		Constants.MetalLook.z = MetalSettings.Reflections * reflectivity * handoff;
+	} else {
+		Constants.Metal.x = MetalSettings.World;
+		Constants.Metal.y = MetalSettings.WorldGreyMetal;
+		Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
+	}
+	if (Device) {
+		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
+		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+	}
 }
 
 void PBRShaders::EndFirstPerson(IDirect3DDevice9* Device) {
+	FirstPersonActive = false;
+	FirstPersonWeapon = false;
 	Constants.Metal.x = MetalSettings.World;
 	Constants.Metal.y = MetalSettings.WorldGreyMetal;
-	if (Device) Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
+	const float reflectivity = TheShaderManager && TheShaderManager->GameState.isExterior ? ReflectivitySettings.Exterior : ReflectivitySettings.Interior;
+	Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
+	if (Device) {
+		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
+		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+	}
 }
 
 
@@ -118,6 +153,16 @@ void PBRShaders::UpdateSettings() {
 	// Reflections effect keeps (CubeMap); applied in UpdateConstants only while that cube is kept up.
 	MetalSettings.CubeReflections = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Metal", "CubeReflections"), 0.0f, 1.0f);
 	MetalSettings.EnvCubeReflections = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.EnvMaps", "CubeReflections"), 0.0f, 1.0f);
+	{
+		SettingManager::Configuration::ConfigNode node;
+		MetalSettings.Clearcoat = (metalOn && TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Metal", "Clearcoat"))
+			? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;
+		MetalSettings.Pearlescence = (metalOn && TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Metal", "Pearlescence"))
+			? std::clamp(node.FloatValue, 0.0f, 1.0f) : 0.0f;
+	}
+	Constants.SharpSky.y = MetalSettings.Clearcoat;
+	Constants.SharpSky.z = MetalSettings.Pearlescence;
+	Constants.SharpSky.w = 0.0f;	// GlowScale, filled each frame in UpdateConstants (it needs the frame's gamma)
 
 	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate). Enabled is read at startup
 	// (ShaderRecord::LoadShader compiles it in); Gamma is live, and 1 returns every colour unchanged.
@@ -128,6 +173,11 @@ void PBRShaders::UpdateSettings() {
 	LinearSettings.NightGamma = nightGamma > 0.0f ? std::clamp(nightGamma, 1.0f, 3.0f) : 0.0f;
 	LinearSettings.FalloffMatch = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Linear", "FalloffMatch"), 0.0f, 1.0f);
 	ApplyLinearGamma();
+	{
+		SettingManager::Configuration::ConfigNode node;
+		DecoupleGlowMaps = !TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Main", "DecoupleGlowMaps") || node.BoolValue;
+		GlowScale = std::clamp(RmaosScaleOr1("Shaders.PBR.Main", "GlowScale"), 0.0f, 4.0f);
+	}
 
 	// UNOFFICIAL 2026-10-21 LampFalloff (Includes/LampFalloff.hlsl), live once compiled in (LampFalloffCompiledIn, at startup).
 	{
@@ -299,7 +349,7 @@ void PBRShaders::UpdateConstants() {
 	const ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections;
 	const bool cube = reflections && reflections->CubeReady();
 	Constants.EnvCube = D3DXVECTOR4(cube ? MetalSettings.CubeReflections : 0.0f, cube ? MetalSettings.EnvCubeReflections : 0.0f,
-		(float)(ReflectionsEffect::CubeLevels - 1), 0.0f);
+		(float)(reflections ? (reflections->cubeLevels - 1) : 7), 0.0f);
 
 	// UNOFFICIAL foliage translucency (see UpdateSettings), live.
 	Constants.Translucency.x = FoliageSettings.Translucency;
@@ -351,9 +401,13 @@ void PBRShaders::UpdateConstants() {
 	const float gamma = Constants.Linear.x;
 	auto linScale = [gamma](float s) { return gamma > 1.0f ? powf(s > 0.0f ? s : 0.0f, gamma) : s; };
 	// w (UNOFFICIAL 2026-11-26 DeferredLandRoughF90): 1 (key false, default) = the deferred land takes the forward land's F90 (DeferredSun.hlsl
-	// LandSun, DeferredLamps.hlsl's land pass, Compute/DeferredLamps.comp); 0 (key true) = upstream's roughness-damped F90. A lane nothing else reads (c168.w).
+	// LandSun, DeferredLamps.hlsl's land pass, Compute/DeferredLamps.comp); 0 (key true) = upstream's roughness-damped F90.
 	Constants.LinearScales = D3DXVECTOR4(linScale(Constants.Data.z), linScale(Constants.Data.w), linScale(Constants.ExtraData.y),
 		ReflectivitySettings.DeferredLandRoughF90 ? 0.0f : 1.0f);
+	// DecoupleGlowMaps / GlowScale (Object.hlsl GlowDecoupleMask, GlowScaleFactor): linear GlowScale + 1e-4 when on, 0 = the old additive glow.
+	// (2026-11-27 upstream 1.1.5 merge: upstream sends it in TESR_LinearScales.w, which the deferred passes already read as
+	// DeferredLandRoughF90; moved to the free TESR_SharpSky.w, c136, declared in every forward object shader through SkyAmbient.hlsl.)
+	Constants.SharpSky.w = DecoupleGlowMaps ? (linScale(GlowScale) + 1e-4f) : 0.0f;
 
 	// UNOFFICIAL 2026-10-18 per-weather scales for materials with an _rmaos map (idea from Physically-Based-Reloaded (Balebandro), GPL-3.0,
 	// commit c1415cb8; Object.hlsl RmaosRead): blended over day / night / interiors and rain like the values above. TESR_PBRMath z and w

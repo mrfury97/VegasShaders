@@ -10,6 +10,7 @@
 #include "ImGuiManager.h"	// UNOFFICIAL 2026-11-12: SettingLevel (which changed settings are Developer options / Internal ones)
 #include "PtApplies.h"	// UNOFFICIAL 2026-11-12: the "PT APPLIES" block (what the enabled effects do while path tracing replaces the scene)
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-13: the "RT LIGHT SHAFTS" line (what the traced light shafts do right now)
+#include "VaMemoryMap.h"	// UNOFFICIAL 2026-11-23: 32-bit VA space breakdown (Private/Mapped/Image/Heaps/Threads)
 #include <intrin.h>
 #include <tlhelp32.h>
 #include <cstdarg>
@@ -353,6 +354,7 @@ namespace {
 			char oom[900];	// UNOFFICIAL 2026-11-12 (memleak): a crash inside the game's out-of-memory routine says so in plain words
 			OutOfMemoryText((UINT_PTR)c->Eip, returns, count, oom, sizeof(oom));
 			if (oom[0]) Logger::LogUnbuffered("CRASH cause: %s", oom);
+			if (oom[0] || AddressSpaceMB() >= 2600.0) VaMemoryMap::Log("crash", true, true, false);
 		}
 		Logger::LogUnbuffered("CRASH: please send this whole log file (Fallout New Vegas\\VegasShaders-Logs) with the report.");
 	}
@@ -891,15 +893,13 @@ void SessionLog::OnDeferredInit() {
 
 	// The load order: count, a hash that tells two players' orders apart at a glance, and the names (not personal; one or two lines)
 	if (DataHandler) {
-		const ModList& mods = DataHandler->modList;
-		const unsigned count = (std::min)((unsigned)mods.loadedModCount, 255u);
+		ModInfo* const* table = nullptr;
+		const unsigned count = (unsigned)DataHandler->modList.SafeLoadedMods(table);
 		unsigned hash = 2166136261u;
 		std::vector<std::string> names;
-		for (unsigned i = 0; i < count; i++) {
-			const ModInfo* mod = mods.loadedMods[i];
-			if (!mod) continue;
+		for (unsigned i = 0; table && i < count; i++) {
 			char name[0x105] = {};
-			memcpy(name, mod->name, 0x104);
+			if (!ModList::SafeCopyName(table[i], name, sizeof(name))) continue;
 			for (const char* c = name; *c; c++) { hash ^= (unsigned char)tolower((unsigned char)*c); hash *= 16777619u; }
 			hash ^= '\n'; hash *= 16777619u;
 			names.push_back(name);
@@ -934,9 +934,11 @@ void SessionLog::OnDeferredInit() {
 	}
 	Logger::Log("SESSION xNVSE plugins: %u loaded", (unsigned)plugins.size());
 	LogList("SESSION xNVSE plugins: ", plugins);
+	InstallCheck::OnPlugins(plugins);	// UNOFFICIAL 2026-11-23: flag known conflicting xNVSE plugins (DoF-Fix, VanillaPlusAO, DepthResolve)
 	LogList("SESSION DLLs from the game folder: ", gameFolder);
 	LastEnvironment = SessionLog::Environment();	// UNOFFICIAL 2026-11-01
 	Logger::Log("SESSION environment: %s", LastEnvironment.c_str());
+	VaMemoryMap::Log("startup (main menu)", false, true, true);
 }
 
 void SessionLog::OnSettingChanged(const char* section, const char* key, const char* before, const char* after) {
@@ -1010,6 +1012,7 @@ void SessionLog::OnFrame() {
 					"shadow maps, the buffers of effects that are off, idle ray tracing data); the rest is the game and its mods: fewer or smaller texture "
 					"mods, a heap replacement (NVTF / New Vegas Heap Replacer) and a restart after long sessions help. (Said once a session.)",
 					usedMB, totalMB, LastCell.c_str(), Uptime(now - StartSeconds).c_str());
+				VaMemoryMap::Log("memory warning", false, true, true);
 			}
 		}
 		PtApplies::LogIfChanged();	// UNOFFICIAL 2026-11-12: nothing unless the path traced picture replaces the scene; then once, and when the set changes
@@ -1178,6 +1181,7 @@ namespace {
 		unsigned samples = 0;
 		struct Spot { UINT_PTR eip; unsigned count; } spots[8] = {};
 		bool toldOutOfMemory = false;	// (2026-11-12 memleak) the "STALL cause" line went out for this stall
+		bool dumpedMemMap = false;
 		bool unfocused = false;			// UNOFFICIAL 2026-11-21: window lost focus / overlay over game when stall fired
 		char fgExe[64] = "";
 	};
@@ -1294,6 +1298,10 @@ namespace {
 			char oom[900];
 			OutOfMemoryText(eip, returns, count, oom, sizeof(oom));
 			if (oom[0]) { s.toldOutOfMemory = true; Logger::Log("STALL cause: %s", oom); }
+		}
+		if (!s.dumpedMemMap && (s.toldOutOfMemory || AddressSpaceMB() >= 3000.0)) {
+			s.dumpedMemMap = true;
+			VaMemoryMap::Log("stall", false, false, false);
 		}
 	}
 

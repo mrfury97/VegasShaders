@@ -1242,12 +1242,12 @@ static void ReportRibbon(UInt8* root, ULONGLONG now) {
 	__except (EXCEPTION_EXECUTE_HANDLER) { LogLine("ribbon: report stopped by a fault"); }
 }
 
-// The current visible model is either the first-person model (PlayerCharacter +0x694) or the player's 3D
-// (renderData +0x64 -> niNode +0x14).
+// The current visible model matches PlayerCharacter::GetCurrentNode (0x950BE0 -> IsActually3rdPerson at +0x64B):
+// either the first-person model (PlayerCharacter +0x694) or the player's 3D (renderData +0x64 -> niNode +0x14).
 static UInt8* VisibleRoot() {
 	UInt8* player = (UInt8*)Player();
 	if (!player) return nullptr;
-	if (*(player + 0x64C)) {
+	if (*(player + 0x64B)) {
 		UInt8* renderData = *(UInt8**)(player + 0x64);
 		return renderData ? *(UInt8**)(renderData + 0x14) : nullptr;
 	}
@@ -1466,10 +1466,10 @@ static void UpdateAirAndPlayer(float dt) {
 		if (!(speed >= 0.0f && speed <= 4.0f)) speed = 0.0f;   // not a sane value
 		if (!(raw > -1000.0f && raw < 1000.0f)) raw = 0.0f;
 	}
-	// The direction may be in degrees or radians: above a full turn in radians it is taken as degrees. The heading the
-	// wind blows toward, 0 = north (+Y), clockwise; [Volume] fWindDirectionOffset turns it (180 = the other way).
-	const float radians = (fabsf(raw) > 6.3f ? raw * 0.01745329f : raw) + Settings.volumeWindOffset * 0.01745329f;
-	VolumeWind = NiPoint3{ sinf(radians) * speed * Settings.volumeWind, cosf(radians) * speed * Settings.volumeWind, 0.0f };
+	// Sky::fWindAngle (+0xD0) is always in radians (fed to NiMatrix3::MakeZRotation). Game particle wind
+	// multiplies (0, speed, 0) * Rz(angle) = (-sin a, cos a) * speed; match that convention plus [Volume] fWindDirectionOffset.
+	const float radians = raw + Settings.volumeWindOffset * 0.01745329f;
+	VolumeWind = NiPoint3{ -sinf(radians) * speed * Settings.volumeWind, cosf(radians) * speed * Settings.volumeWind, 0.0f };
 	const float fadeIn = speed * 4.0f < 1.0f ? speed * 4.0f : 1.0f;
 	VolumeWindKeep = expf(-Settings.volumeWindPickup * fadeIn * dt);
 	static int logged = 0;
@@ -3177,8 +3177,8 @@ static void MainLoop() {
 			if (CurrentWeapon != probedGun) {
 				probedGun = CurrentWeapon;
 				UInt8* player = (UInt8*)Player();
-				DebugLine("gun shape probe: the %s model's gun (the game's own third-person switch: %d)",
-					InFirstPersonModel(TrailNode) ? "first-person" : "third-person", player ? (int)*(player + 0x64C) : -1);
+				DebugLine("gun shape probe: the %s model's gun (IsActually3rdPerson: %d)",
+					InFirstPersonModel(TrailNode) ? "first-person" : "third-person", player ? (int)*(player + 0x64B) : -1);
 				if (UInt8* gunRoot = *(UInt8**)(TrailNode + 0x18)) ProbeGunShape(gunRoot, TrailNode);
 			}
 			// The gun's real shape (built in the background when a gun is first seen), and where its model is this frame.
@@ -3507,7 +3507,7 @@ static void OnEject(UInt8* actor, void* weapon, ULONGLONG now) {
 	}
 	if (!port) {
 		if (LoggedEjects < 40) { LoggedEjects++; LogLine("ejection: node %s NOT found on the %s model (no smoke)", Settings.ejectNode,
-			*((UInt8*)Player() + 0x64C) ? "third-person" : "first-person"); }
+			*((UInt8*)Player() + 0x64B) ? "third-person" : "first-person"); }
 		return;
 	}
 	lastEject = now;

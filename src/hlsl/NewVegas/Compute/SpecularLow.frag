@@ -34,15 +34,17 @@ void main() {
     vec3 eyeVector = toWorld(uv) * depth;
     vec3 V = -normalize(eyeVector);
 
-    // The normal over a wide patch (blocks one and three out; those whose depth is off this one's left out)
+    // The normal over a wide patch (blocks one and three out; those whose depth is off this one's down-weighted smoothly)
     vec3 sum = centre.xyz;
     float weight = 1.0;
-    float tolerance = 0.05 * depth + 4.0;
+    float tolerance = 0.03 * depth + 3.0;
     const vec2 ring[16] = vec2[16](vec2(1, 0), vec2(1, 1), vec2(0, 1), vec2(-1, 1), vec2(-1, 0), vec2(-1, -1), vec2(0, -1), vec2(1, -1),
                                    vec2(3, 1), vec2(1, 3), vec2(-1, 3), vec2(-3, 1), vec2(-3, -1), vec2(-1, -3), vec2(1, -3), vec2(3, -1));
     for (int k = 0; k < 16; k++) {
-        vec4 s = sampleLod(t_specularNormals, pc.pointSampler, uv + ring[k] * lowPx);
-        float w = abs(s.a - depth) < tolerance ? 1.0 : 0.0;
+        vec4 s = sampleLod(t_specularNormals, pc.pointSampler, clampToRectIfOn(uv + ring[k] * lowPx, lowPx));
+        float rel = abs(s.a - depth) / tolerance;
+        rel *= rel;
+        float w = 1.0 / (1.0 + rel * rel);
         sum += w * s.xyz;
         weight += w;
     }
@@ -88,6 +90,9 @@ void main() {
     skyAmount *= mix(1.0, mix(cb.specularExtra.y, 1.0, sampleLod(t_skyVis, pc.linearSampler, uv).b), cb.specularExtra.x);
     sunSpec *= mix(1.0, sampleLod(t_sunFar, pc.linearSampler, uv).a, cb.specularExtra.z);
 
-    float fade = 1.0 - smoothstep(0.7 * cb.specularData.w, cb.specularData.w, depth);
+    float fogAmount = cb.fogData.y > cb.fogData.x + 1.0
+        ? pow(1.0 - saturate((cb.fogData.y - length(eyeVector)) / max(cb.fogData.y - cb.fogData.x, 1.0)), max(cb.fogData.w, 0.0001))
+        : 0.0;
+    float fade = (1.0 - smoothstep(0.7 * cb.specularData.w, cb.specularData.w, depth)) * (1.0 - fogAmount);
     o_color = vec4(skyAmount * fade, skyAt, sunSpec * fade, depth);
 }

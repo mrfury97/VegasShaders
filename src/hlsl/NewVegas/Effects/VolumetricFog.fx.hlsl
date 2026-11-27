@@ -73,7 +73,7 @@ float4 TESR_VolumetricFogWind;       // x: WindDirX, y: WindDirY, z: WindSpeed, 
 float4 TESR_VolumetricFogScatter;    // x: PhaseAsymmetry, y: ShadowStrength, z: NoiseStrength, w: HeightInfluence
 float4 TESR_VolumetricFogWeather;    // x: WeatherFilterBlend (animated 0-1), y: isExterior, z: SkyAmbientAvailable, w: FogSaturation
 float4 TESR_VolumetricFogAerial;     // x: AerialStrength, y: AerialRangeStart, z: AerialTintBlend, w: AerialDayFadeStart
-float4 TESR_VolumetricFogAerialTint; // xyz: manual aerial tint override
+float4 TESR_VolumetricFogAerialTint; // xyz: manual aerial tint override, w: StartDistance in game units
 float4 TESR_VolumetricFogDistant;    // x: DistantFogRange, y: DistantFogBlend, z: DistantFogHeight, w: EdgeAA
 float4 TESR_VolumetricFogGlobal;     // x: Amount, y: NightDisableSkyMask, z: MoonVisibility, w: MinDensityFloor
 // Own settings-UI section/tab (Shaders.VolumetricFog.Night), not Main/Interiors-switched, so these
@@ -162,13 +162,14 @@ static const float vfFogSaturation = max(0, TESR_VolumetricFogWeather.w);
 static const float vfAerialStrength = max(0, TESR_VolumetricFogAerial.x);
 static const float vfAerialRangeStart = saturate(TESR_VolumetricFogAerial.y);
 static const float vfAerialTintBlend = saturate(TESR_VolumetricFogAerial.z);
+static const float vfStartDistance = max(0.0, TESR_VolumetricFogAerialTint.w);
 // TESR_SunAmount.x value at which aerial perspective reaches full strength. Wider than
 // isDayTimeFog's own 0.1-0.6 ramp (used for sun-scattering) so aerial stays suppressed through
 // more of the sunrise/sunset transition, not just full night -- that's specifically when direct
 // low-angle sun on distant terrain was reading as too bright/glowy.
 static const float vfAerialDayFadeStart = saturate(TESR_VolumetricFogAerial.w);
 
-static const float vfDistantFogRange = exp(-4 * clamp(TESR_VolumetricFogDistant.x, 0.00000001, 1.0));
+static const float vfDistantFogRange = saturate(TESR_VolumetricFogDistant.x);
 static const float vfDistantFogBlend = TESR_VolumetricFogDistant.y;
 static const float vfDistantFogHeight = TESR_VolumetricFogDistant.z;
 static const float vfEdgeAA = max(0, TESR_VolumetricFogDistant.w);
@@ -691,7 +692,7 @@ static const float LegacyHeightFogInscattering = max(0.0, TESR_VolumetricFogData
 
 static const float LegacyFogSaturation = max(0, TESR_VolumetricFogLow.x);
 static const float LegacyWeatherImpact = max(0, TESR_VolumetricFogLow.y);
-static const float LegacyDistantFogRange = exp(-4 * TESR_VolumetricFogLow.z);
+static const float LegacyDistantFogRange = saturate(TESR_VolumetricFogLow.z);
 static const float LegacySunPower = max(0, TESR_VolumetricFogLow.w);
 
 static const float LegacyHeightFogDensity = max(0, TESR_VolumetricFogHigh.x);
@@ -753,10 +754,13 @@ void LegacyFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	float3 worldP = eyeVec + TESR_CameraPosition.xyz;
 	float pointHeight = worldP.z;
 
-	float nrmDepth = length(eyeVec) / farZ;
+	float dist = length(eyeVec);
+	float nrmDepth = dist / farZ;
 	float fogPw = lerp(1, vfFogPower, saturate(LegacyWeatherImpact)) / lerp(LegacyHeightFogRolloff, 1 / LegacyFogNight, (1 - isDayF) * LegacyIsExterior);
-	float fogD = pows(nrmDepth, fogPw);
-	fogD = fogD * farZ / (LegacyHeightFogDist * lerp(0.005, 1, LegacyIsExterior));
+	float origFogD = pows(nrmDepth, fogPw) * farZ / (LegacyHeightFogDist * lerp(0.005, 1, LegacyIsExterior));
+	float effDist = max(0.0, dist - vfStartDistance);
+	float fogD = pows(effDist / farZ, fogPw) * farZ / (LegacyHeightFogDist * lerp(0.005, 1, LegacyIsExterior));
+	float startFade = (vfStartDistance > 0.0) ? saturate(effDist / max(dist, 0.0001)) : 1.0;
 
 	float strV = pows((saturate(1 - vfFarFog / farZ) + saturate(1 - vfNearFog / farZ)) / 2, 2) / (vfFogPower + 1);
 	strV = LegacyBaseFogStrength + LegacyWeatherImpact * strV + SunsetFog;
@@ -815,8 +819,8 @@ void LegacyFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 
 	// height fog: lerp(color, color * (1 - ext) + fogColor * ins, HeightFogBlend), unclamped linear terms as before
 	float4 heightFogColor = fogTint(skyC, pureFog, strV, LegacyHeightFogSkyColor, sunV, LegacyHeightFogSaturation);
-	float heightFog = strV * LegacyHeightFogDensity * 0.00001 *
-		getLegacyHeightFog(fogD, 1.5 / (fogPw * LegacyHeightFogFalloff) * 0.0001, worldP, LegacyHeightFogHeight);
+	float heightFog = strV * LegacyHeightFogDensity * 0.00001 * startFade *
+		getLegacyHeightFog(origFogD, 1.5 / (fogPw * LegacyHeightFogFalloff) * 0.0001, worldP, LegacyHeightFogHeight);
 	float heightBlend = saturate(LegacyHeightFogBlend);
 	float heightScale = lerp(1.0, saturate(1 - heightFog * extinction), heightBlend);
 	fogMul *= heightScale;
@@ -859,9 +863,11 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	eyeVec *= dpt;
 	float3 worldP = eyeVec + TESR_CameraPosition.xyz;
 
-	float nrmDepth = length(eyeVec) / farZ; // make sure depth is the same at the center and edges of the screen
+	float dist = length(eyeVec);
+	float nrmDepth = dist / farZ; // make sure depth is the same at the center and edges of the screen
 	float fogPw = lerp(1, vfFogPower, saturate(vfWeatherImpact));
-	float fogD = pows(nrmDepth, fogPw) * farZ;
+	float effDist = max(0.0, dist - vfStartDistance);
+	float fogD = pows(effDist / farZ, fogPw) * farZ;
 
 	float isSk = getSky(IN.UVCoord, interior);
 	// getSky's 5-tap test also lights up on pixels bordering the sky depth threshold, so this
@@ -1062,7 +1068,8 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	if (gameFloor && !classic) {
 		float3 layerExt, layerIns;
 		const bool layerOn = TESR_VolumetricFogShape.x < 0.0;
-		getFlatFogTerms(fogD, nExt, nIns, layerOn ? strV * FogLayerMean(TESR_CameraPosition.z, worldP.z) : 0.0, layerExt, layerIns);
+		float layerStartZ = TESR_CameraPosition.z + eyeDirV.z * min(dist, vfStartDistance);
+		getFlatFogTerms(fogD, nExt, nIns, layerOn ? strV * FogLayerMean(layerStartZ, worldP.z) : 0.0, layerExt, layerIns);
 		hExt = layerOn ? layerExt : hExt;
 		hIns = layerOn ? layerIns : hIns;
 	}
@@ -1159,7 +1166,6 @@ void ModernFogTerms(float2 uvV, out float3 fogMul, out float3 fogAdd, out float 
 	// Outdoors as before (vfIsExterior 1: the weather's curve, no fade, never on the sky, the mod's fog colour).
 	[branch] if (gameFloor && !classic && TESR_VolumetricFogSun.z > 0.0) {
 		float gameNear = TESR_VolumetricFogSun.w;
-		float dist = length(eyeVec);
 		float tOut = vfFarFog > gameNear + 1.0 ? saturate((dist - gameNear) / (vfFarFog - gameNear)) : 0.0;
 		float tIn = saturate((dist - gameNear) * TESR_VolumetricFogSun.x);
 		float t = lerp(tIn, tOut, vfIsExterior);
@@ -1800,9 +1806,11 @@ float4 MasterReferenceFog(VSOUT IN) : COLOR0
 	eyeVec *= dpt;
 	float3 worldP = eyeVec + TESR_CameraPosition.xyz;
 
-	float nrmDepth = length(eyeVec) / farZ; // make sure depth is the same at the center and edges of the screen
+	float dist = length(eyeVec);
+	float nrmDepth = dist / farZ; // make sure depth is the same at the center and edges of the screen
 	float fogPw = lerp(1, vfFogPower, saturate(vfWeatherImpact));
-	float fogD = pows(nrmDepth, fogPw) * farZ;
+	float effDist = max(0.0, dist - vfStartDistance);
+	float fogD = pows(effDist / farZ, fogPw) * farZ;
 
 	float isSk = getSky(IN.UVCoord);
 	float skyMaskF = lerp(1.0, 1.0 - isSk, vfWeatherFilterBlend); // weather can disable the sky exclusion so fog blends fully into an overcast sky

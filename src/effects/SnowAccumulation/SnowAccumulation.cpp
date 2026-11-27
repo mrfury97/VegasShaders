@@ -93,6 +93,7 @@ struct SnowAccumulationUniforms {
 	D3DXVECTOR4		lightColor[24];
 	D3DXVECTOR4		capturedData;	// UNOFFICIAL 2026-10-28 TESR_CapturedNormalsData
 	D3DXVECTOR4		snowExtra;		// TESR_SnowAccumulationExtra
+	D3DXVECTOR4		materialData;	// UNOFFICIAL 2026-11-24 TESR_MaterialBufferData (x 1 = this frame's, y 1 = GBufferV2)
 };
 
 // The push block (24 bytes): the blur's direction, the two sampler heap indices (DXVK writes them at their offsets), the pass's mode.
@@ -140,6 +141,7 @@ bool SnowAccumulationEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	if (!depth || !ortho || !normals || !pointShadow || !snowNormal || !blueNoise) return false;
 	// UNOFFICIAL 2026-10-28 CapturedNormals: none made yet (or off) = any texture: the shader reads it only with snowExtra.x and capturedData.x
 	IDirect3DBaseTexture9* captured = CapturedNormals::Texture ? (IDirect3DBaseTexture9*)CapturedNormals::Texture : normals;
+	IDirect3DBaseTexture9* material = CapturedNormals::MaterialTexture ? (IDirect3DBaseTexture9*)CapturedNormals::MaterialTexture : normals;
 
 	// LINEAR/CLAMP for the engine's textures; the trilinear mip sampler of the file textures (WRAP).
 	ID3D9NvrExtSampler* clamp = DxvkCompute::LinearClamp();
@@ -150,9 +152,9 @@ bool SnowAccumulationEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 		extPass.Tried = true;
 		// Textures in the order the shader declares them (set 1, binding i, slot i), the constants (set 2, binding 0), then the two
 		// samplers: their heap indices are at push offsets 8 and 12.
-		NVR_EXT_BINDING_DESC bindings[12] = {};
+		NVR_EXT_BINDING_DESC bindings[13] = {};
 		UINT n = 0;
-		for (UINT i = 0; i < 9; i++) { bindings[n].Set = 1; bindings[n].Binding = i; bindings[n].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[n].Slot = i; bindings[n].ViewType = NVR_EXT_VIEW_2D; n++; }
+		for (UINT i = 0; i < 10; i++) { bindings[n].Set = 1; bindings[n].Binding = i; bindings[n].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[n].Slot = i; bindings[n].ViewType = NVR_EXT_VIEW_2D; n++; }
 		bindings[n].Set = 2; bindings[n].Binding = 0; bindings[n].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[n].Slot = 0; n++;
 		bindings[n].Type = NVR_EXT_BIND_SAMPLER; bindings[n].Slot = 0; bindings[n].PushOffset = 8; n++;
 		bindings[n].Type = NVR_EXT_BIND_SAMPLER; bindings[n].Slot = 1; bindings[n].PushOffset = 12; n++;
@@ -187,17 +189,20 @@ bool SnowAccumulationEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	uniforms.capturedData = CapturedNormals::Data;
 	uniforms.snowExtra = Extra;
 	if (!CapturedNormals::Texture) uniforms.snowExtra.x = 0.0f;
+	uniforms.materialData = CapturedNormals::MaterialData;
+	if (!CapturedNormals::MaterialTexture) uniforms.materialData.x = 0.0f;
+	uniforms.materialData.y = CapturedNormals::V2Compiled ? 1.0f : 0.0f;
 	ID3D9NvrExtBuffer* constants = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!constants) return false;
 
 	// One full-screen pass through the chain. The current image moves on each Commit, so TESR_RenderedBuffer is set per pass.
-	IDirect3DBaseTexture9* textures[9] = { TheTextureManager->RenderedTexture, TheTextureManager->SourceTexture, depth, ortho, normals,
-		pointShadow, snowNormal, blueNoise, captured };
+	IDirect3DBaseTexture9* textures[10] = { TheTextureManager->RenderedTexture, TheTextureManager->SourceTexture, depth, ortho, normals,
+		pointShadow, snowNormal, blueNoise, captured, material };
 	auto drawPass = [&](UINT mode, D3DXVECTOR2 offsetMask, IDirect3DSurface9* source, bool last) {
 		textures[0] = TheTextureManager->RenderedTexture;
-		NVR_EXT_RESOURCE_BINDING resources[12] = {};
+		NVR_EXT_RESOURCE_BINDING resources[13] = {};
 		UINT n = 0;
-		for (UINT i = 0; i < 9; i++) { resources[n].Slot = i; resources[n].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[n].pResource = textures[i]; n++; }
+		for (UINT i = 0; i < 10; i++) { resources[n].Slot = i; resources[n].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[n].pResource = textures[i]; n++; }
 		resources[n].Slot = 0; resources[n].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[n].pResource = constants; n++;
 		resources[n].Slot = 0; resources[n].Type = NVR_EXT_BIND_SAMPLER; resources[n].pResource = clamp; n++;
 		resources[n].Slot = 1; resources[n].Type = NVR_EXT_BIND_SAMPLER; resources[n].pResource = wrap; n++;

@@ -98,25 +98,88 @@ void FDSkinSetup(float a, float roughness) {
 // per colour (Burley: 1 - CDF(t) = 1/4 e^(-t/d) + 3/4 e^(-t/3d), red reaching furthest), on the side turned away from the sun (Jimenez's
 // saturate(0.3 - N.L)), times Translucency. Outside the Near cascade, indoors or with the sun's maps off: none.
 #ifdef FD_SKIN_SUN
-float3 FDSkinSunTransmission(float3 P, float3 Ngeo, float3 L, float3 albedo, float3 light) {
-    [branch] if (TESR_SkinSSS.w < 0.5f || !TESR_ShadowFormatData.z || !TESR_ShadowFade.y || length(P - TESR_ShadowNearCenter.xyz) >= TESR_ShadowNearCenter.w)
+float3 FDSkinThroughTap(float lsZ, float occluder, float worldPerDepth, float tBias, float3 d) {
+    const float t = max(lsZ - occluder, 0.0f) * worldPerDepth;
+    const float entered = smoothstep(tBias, tBias + max(d.r, 0.15f) * 1.5f, t);
+    if (entered <= 0.0f) return 0.0f;
+    return (0.25f * exp(-t / d) + 0.75f * exp(-t / (3.0f * d))) * entered;
+}
+
+float3 FDSkinSunTransmission(float3 P, float3 Ngeo, float3 V, float3 L, float3 albedo, float3 light) {
+    [branch] if (TESR_SkinSSS.w < 0.5f || !TESR_ShadowFormatData.z || !TESR_ShadowFade.y ||
+                 TESR_SkinMaterial.w <= 0.0f || length(P - TESR_ShadowNearCenter.xyz) >= TESR_ShadowNearCenter.w)
         return 0.0f;
-    const float farSide = saturate(0.3f - dot(Ngeo, L));
+    const float sunFade = 1.0f - saturate(TESR_ShadowFade.x);
+    [branch] if (sunFade <= 0.0f) return 0.0f;
+    const float NdotL = dot(Ngeo, L);
+    const float farSide = smoothstep(0.0f, 0.35f, -NdotL);
     [branch] if (farSide <= 0.0f) return 0.0f;
-    float4 ls = mul(float4(P, 1.0f), TESR_ShadowCameraToLightTransformNear);
-    ls.xyz /= ls.w;
-    const float2 uv = float2(ls.x * 0.5f + 0.5f, ls.y * -0.5f + 0.5f) * 0.5f;	// the Near quadrant (0, 0)
-    const float occluder = tex2Dlod(TESR_ShadowAtlas, float4(uv, 0.0f, 0.0f)).x;
-    const float worldPerDepth = 1.0f / length(float3(TESR_ShadowCameraToLightTransformNear[0][2], TESR_ShadowCameraToLightTransformNear[1][2], TESR_ShadowCameraToLightTransformNear[2][2]));
-    const float t = max(ls.z - occluder, 0.0f) * worldPerDepth;
+    const float3 transmitDir = normalize(L + Ngeo * SKIN_TRANSMIT_DISTORTION);
+    const float vDotBack = dot(V, -transmitDir);
+    const float back = smoothstep(-0.15f, 0.45f, vDotBack) * (0.25f + 0.75f * pow(saturate(vDotBack), 2.0f));
+    [branch] if (back <= 0.0f) return 0.0f;
+    const float3 Nperp = Ngeo - L * NdotL;
     const float3 d = max(TESR_SkinSSS.xyz, 1.0e-3f);
-    const float3 through = 0.25f * exp(-t / d) + 0.75f * exp(-t / (3.0f * d));
-    // (2026-11-16 fd-fwdgroups, batch 8's hard orange edge across the backlit scalp) Where the point is itself the nearest surface toward the
-    // sun (t ~ 0: it is lit directly, its light is the diffuse term's), "through" was 1; one texel further round the head the map's nearest
-    // surface jumps to the far side and t to the head's width: full transmission next to none, a hard line. Light comes through only past a
-    // thickness: a ramp over the red scatter distance from t = 0, so both sides of that line meet at 0 (the ear, ~0.5-1 unit thin, keeps it).
-    const float entered = saturate(t / max(d.r, 1.0e-3f));
-    return albedo * through * (entered * farSide * TESR_SkinMaterial.w) * light;
+    bool usedCharMap = false;
+    float3 through = 0.0f;
+#if SHADOW_CHARACTER_MAP
+    [branch] if (TESR_CharShadowData.w > 0.0f) {
+        const float texel = max(TESR_CharShadowData.x, 1.0f / 16384.0f);
+        const float texelWorld = 2.0f * max(TESR_CharShadowCenter.w, 1.0f) * texel;
+        const float shrink = min(1.25f * texelWorld, 0.6f);
+        float4 cs = mul(float4(P - Nperp * shrink, 1.0f), TESR_CharShadowCameraToLight);
+        cs.xyz /= cs.w;
+        [branch] if (max(abs(cs.x), abs(cs.y)) < 0.95f && cs.z > 0.0f && cs.z < 1.0f) {
+            const float2 uv = float2(cs.x * 0.5f + 0.5f, cs.y * -0.5f + 0.5f);
+            const float2 lo = texel * 0.5f;
+            const float2 hi = 1.0f - texel * 0.5f;
+            const float2 p = uv / texel - 0.5f;
+            const float2 base = floor(p);
+            const float2 f = p - base;
+            const float2 uv0 = (base + 0.5f) * texel;
+            const float d00 = tex2Dlod(TESR_CharShadowMap, float4(clamp(uv0, lo, hi), 0.0f, 0.0f)).x;
+            const float d10 = tex2Dlod(TESR_CharShadowMap, float4(clamp(uv0 + float2(texel, 0.0f), lo, hi), 0.0f, 0.0f)).x;
+            const float d01 = tex2Dlod(TESR_CharShadowMap, float4(clamp(uv0 + float2(0.0f, texel), lo, hi), 0.0f, 0.0f)).x;
+            const float d11 = tex2Dlod(TESR_CharShadowMap, float4(clamp(uv0 + texel, lo, hi), 0.0f, 0.0f)).x;
+            if (min(min(d00, d10), min(d01, d11)) < 0.9999f) {
+                const float worldPerDepth = 1.0f / max(length(float3(TESR_CharShadowCameraToLight[0][2], TESR_CharShadowCameraToLight[1][2], TESR_CharShadowCameraToLight[2][2])), 1.0e-6f);
+                const float tBias = clamp(0.5f * texelWorld, 0.12f, 0.40f);
+                const float3 t00 = FDSkinThroughTap(cs.z, d00, worldPerDepth, tBias, d);
+                const float3 t10 = FDSkinThroughTap(cs.z, d10, worldPerDepth, tBias, d);
+                const float3 t01 = FDSkinThroughTap(cs.z, d01, worldPerDepth, tBias, d);
+                const float3 t11 = FDSkinThroughTap(cs.z, d11, worldPerDepth, tBias, d);
+                through = lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y);
+                usedCharMap = true;
+            }
+        }
+    }
+#endif
+    [branch] if (!usedCharMap) {
+        const float texW = max(TESR_ShadowBlur.x, 1.0f / 16384.0f);
+        const float texelWorld = 4.0f * TESR_ShadowNearCenter.w * texW;
+        const float shrink = min(1.25f * texelWorld, 1.0f);
+        float4 ls = mul(float4(P - Nperp * shrink, 1.0f), TESR_ShadowCameraToLightTransformNear);
+        ls.xyz /= ls.w;
+        const float2 uv = float2(ls.x * 0.5f + 0.5f, ls.y * -0.5f + 0.5f) * 0.5f;	// the Near quadrant (0, 0)
+        const float2 lo = texW * 0.5f;
+        const float2 hi = 0.5f - texW * 0.5f;
+        const float2 p = uv / texW - 0.5f;
+        const float2 base = floor(p);
+        const float2 f = p - base;
+        const float2 uv0 = (base + 0.5f) * texW;
+        const float d00 = tex2Dlod(TESR_ShadowAtlas, float4(clamp(uv0, lo, hi), 0.0f, 0.0f)).x;
+        const float d10 = tex2Dlod(TESR_ShadowAtlas, float4(clamp(uv0 + float2(texW, 0.0f), lo, hi), 0.0f, 0.0f)).x;
+        const float d01 = tex2Dlod(TESR_ShadowAtlas, float4(clamp(uv0 + float2(0.0f, texW), lo, hi), 0.0f, 0.0f)).x;
+        const float d11 = tex2Dlod(TESR_ShadowAtlas, float4(clamp(uv0 + texW, lo, hi), 0.0f, 0.0f)).x;
+        const float worldPerDepth = 1.0f / max(length(float3(TESR_ShadowCameraToLightTransformNear[0][2], TESR_ShadowCameraToLightTransformNear[1][2], TESR_ShadowCameraToLightTransformNear[2][2])), 1.0e-6f);
+        const float tBias = clamp(0.35f * texelWorld, 0.18f, 0.55f);
+        const float3 t00 = FDSkinThroughTap(ls.z, d00, worldPerDepth, tBias, d);
+        const float3 t10 = FDSkinThroughTap(ls.z, d10, worldPerDepth, tBias, d);
+        const float3 t01 = FDSkinThroughTap(ls.z, d01, worldPerDepth, tBias, d);
+        const float3 t11 = FDSkinThroughTap(ls.z, d11, worldPerDepth, tBias, d);
+        through = lerp(lerp(t00, t10, f.x), lerp(t01, t11, f.x), f.y);
+    }
+    return albedo * through * (farSide * back * sunFade * TESR_SkinMaterial.w) * light;
 }
 #endif
 

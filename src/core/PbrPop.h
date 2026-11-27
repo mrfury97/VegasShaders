@@ -53,7 +53,7 @@ namespace PbrPop {
 		inline bool Checked = false, Compiled = false, On = false;
 		inline bool FoldCompiled = false;	// UNOFFICIAL 2026-10-21 FoldHighlights (core/FoldHighlights.h) is compiled in: it sends c211.y/z
 		inline float Sent = -1.0f, SentFold = 0.0f, SentVc = 0.0f;
-		inline float MaterialW = 0.0f, SentW = 0.0f;	// UNOFFICIAL 2026-10-31 MaterialBuffer: c211.w (class + 8 x floor(radius), SendMaterial)
+		inline float MaterialW = 0.0f, SentW = 0.0f;	// UNOFFICIAL 2026-10-31 MaterialBuffer: c211.w (class + 16 x floor(radius), stride widened from 8 on 2026-11-25, SendMaterial)
 
 		inline void BeginFrame() {
 			if (!Checked) {
@@ -338,7 +338,7 @@ namespace PbrPop {
 		inline unsigned FrameId = 1, Lines = 0, Frames = 0, Enabled = 0;
 		inline unsigned long long Switches = 0;
 
-		inline bool IsTexture(UInt16 e) { return e >= 0x14A && e <= 0x150; }
+		inline bool IsTexture(UInt16 e) { return e >= 0x14A && e <= 0x153; }
 		inline bool IsOpt(UInt16 e) { return e >= 0xC3 && e <= 0xD6; }
 		inline bool HasTexture(const UInt16* e, unsigned n) { for (unsigned i = 0; i < n; i++) if (IsTexture(e[i])) return true; return false; }
 		inline bool HasHighlight(const UInt16* e, unsigned n) { for (unsigned i = 0; i < n; i++) if (LampsInOnePass::Census::IsHighlightPass(e[i])) return true; return false; }

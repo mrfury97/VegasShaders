@@ -596,15 +596,25 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
             }
         }
         roughness = hasPartRough ? clamp(cb.weapon.w * mix(0.6, 1.5, partRough), 0.02, cb.weapon.w <= 0.025 ? 0.028 : 1.0) : cb.weapon.w;
+        vec3 weaponLit = vec3(0.0);
+        float weaponTop = 0.0;
+        float weaponPMax = 0.0;
+        if (!explicitRmaos) {
+            weaponLit = linearize(textureLod(sampler2D(t_rendered, POINT_S), uv, 0.0).rgb);
+            weaponTop = max(weaponLit.r, max(weaponLit.g, weaponLit.b));
+            weaponPMax = sqrt(saturate(weaponTop));
+            if (cb.weapon.w > 0.05) {
+                float brightMetal = smoothstep(0.22, 0.72, weaponPMax);
+                roughness = mix(max(roughness, 0.34), max(roughness * 0.75, 0.12), brightMetal);
+            }
+        }
         if (cb.material2.w > 0.0) {
             float baseMetal;
             if (explicitRmaos) {
                 baseMetal = partMetal;
             } else {
-                vec3 lit = linearize(textureLod(sampler2D(t_rendered, POINT_S), uv, 0.0).rgb);
-                float top = max(lit.r, max(lit.g, lit.b));
-                float saturation = top > 1.0e-4 ? (top - min(lit.r, min(lit.g, lit.b))) / top : 0.0;
-                float satMetal = 1.0 - smoothstep(0.12, 0.35, saturation);
+                float saturation = weaponTop > 1.0e-4 ? (weaponTop - min(weaponLit.r, min(weaponLit.g, weaponLit.b))) / weaponTop : 0.0;
+                float satMetal = (1.0 - smoothstep(0.12, 0.35, saturation)) * smoothstep(0.06, 0.24, weaponPMax);
                 baseMetal = partMetal >= 0.0 ? max(partMetal, satMetal * 0.75) : satMetal;
             }
             SurfaceMetal = saturate(cb.material2.w * baseMetal);
@@ -732,9 +742,10 @@ vec3 PanoAlong(vec3 worldDir) {
     return textureLod(sampler2D(t_cloudSky, LINEAR_S), vec2(v.x + v.y, v.x - v.y) * 0.5 + 0.5, 0.0).rgb;
 }
 
-// The sky along a world direction (below the horizon, nothing).
-vec3 SkyAlong(vec3 worldDir) {
-    if (SkyPanoOn) return PanoAlong(worldDir) * smoothstep(0.0, 0.15, worldDir.z);   // (2026-10-31: the old fallbacks keep their horizon fade)
+// The sky along a world direction, not faded at the horizon: the sky panorama, or the gradient with the clouds over it.
+// (2026-11-24 review: shared by SkyAlong and the surroundings cube's backdrop, ReflectionsCapture.frag CubeBackdrop.)
+vec3 SkyGradientAlong(vec3 worldDir) {
+    if (SkyPanoOn) return PanoAlong(worldDir);
     float up = saturate(worldDir.z);
     vec3 sky = mix(linearize(cb.horizonColor.rgb), linearize(cb.skyColor.rgb), sqrt(up));
     // UNOFFICIAL 2026-10-30 CloudSky: the clouds over that part of the sky, from the cloud sky probe (hemi-octahedral, z up), laid on as
@@ -744,7 +755,12 @@ vec3 SkyAlong(vec3 worldDir) {
         vec4 clouds = textureLod(sampler2D(t_cloudSky, LINEAR_S), vec2(v.x + v.y, v.x - v.y) * 0.5 + 0.5, 0.0);
         sky = sky * clouds.a + clouds.rgb * cb.material2.z;
     }
-    return sky * smoothstep(0.0, 0.15, worldDir.z);
+    return sky;
+}
+
+// The sky along a world direction (below the horizon, nothing). (2026-10-31: the panorama keeps the old fallbacks' horizon fade.)
+vec3 SkyAlong(vec3 worldDir) {
+    return SkyGradientAlong(worldDir) * smoothstep(0.0, 0.15, worldDir.z);
 }
 
 // Karis's reversible compression for averaging HDR samples: c / (1 + luminance), and back.

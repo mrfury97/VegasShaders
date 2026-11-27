@@ -45,6 +45,7 @@ public:
 	IDirect3DVertexBuffer9*	LevelQuad(int i);				// BloomVertexBuffer[i] outside rect frames; sets the rect viewport inside them
 
 	void	UpdateConstants(), RegisterConstants(), RegisterTextures(), UpdateSettings();
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	bool    SwitchEffect();
 
 	void    RenderPass(IDirect3DDevice9* Device, UINT techniqueIndex, bool ClearRenderTarget);

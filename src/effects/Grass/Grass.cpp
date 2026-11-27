@@ -407,7 +407,11 @@ static bool sTstgHooked = false;
 static HRESULT STDMETHODCALLTYPE TstgDIPHook(IDirect3DDevice9* device, D3DPRIMITIVETYPE type, INT base, UINT minIndex, UINT numVertices, UINT start, UINT count) {
 	if (GrassShaders::PendingTstgRestore && !NewGrass::InDraw && TheRenderManager) {
 		GrassShaders::PendingTstgRestore = false;
-		device->SetVertexShaderConstantF(248, (const float*)&TheRenderManager->InvProjMatrix, 2);
+		if (GrassShaders::BoundGrassVS) {
+			device->SetVertexShaderConstantF(248, (const float*)&TheRenderManager->InvProjMatrix, 2);
+			ClothWind::NonZeroSent = true;
+			ClothWind::GrassInC248 = true;
+		}
 	}
 	return sTstgNextDIP(device, type, base, minIndex, numVertices, start, count);
 }
@@ -437,6 +441,8 @@ static int __fastcall GrassSetupHook(void* Shader, void*, NiGeometry* Geometry, 
 		grass->OnGrassShape(Geometry);
 		if (grass->Enabled && GrassShaders::LastBindNVR) {
 			TheRenderManager->device->SetVertexShaderConstantF(248, (const float*)&TheRenderManager->InvProjMatrix, 2);
+			ClothWind::NonZeroSent = true;
+			ClothWind::GrassInC248 = true;
 			if (GrassShaders::TstgDetected) GrassShaders::PendingTstgRestore = true;
 		}
 	}
@@ -451,11 +457,13 @@ void GrassShaders::InstallHooks() {
 	}
 	if (sGrassSetup) return;
 	void** slot = (void**)(0x10B8980 + 24 * 4);
-	DWORD old;
-	VirtualProtect(slot, 4, PAGE_EXECUTE_READWRITE, &old);
+	if (!*slot) {
+		Logger::Log("[WARN] Grass: TallGrassShader vtable slot is null; per-shape hook not installed");
+		return;
+	}
+	NoteHookSite((SIZE_T)slot, 4, "TallGrassSetup");
 	sGrassSetup = (GrassSetupFn)*slot;
-	*slot = (void*)&GrassSetupHook;
-	VirtualProtect(slot, 4, old, &old);
+	SafeWrite32((SIZE_T)slot, (UInt32)&GrassSetupHook);
 	Logger::Log("Grass: per-shape setup hooked (was %p)", sGrassSetup);
 }
 

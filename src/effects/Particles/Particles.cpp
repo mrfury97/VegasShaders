@@ -1,6 +1,7 @@
 #include "Particles.h"
 #include "../../core/ParticleSize.h"	// UNOFFICIAL 2026-11-04 soft particles
 #include "../../core/SkyCoverage.h"
+#include "../../core/BlendedLayerFix.h"	// UNOFFICIAL 2026-11-23: keep MeshSoftScale off surface-hugging NOLIGHTVCONLY AO shells
 
 void ParticleShaders::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ParticleData", &Constants.Data);
@@ -49,6 +50,17 @@ void ParticleShaders::BeginWorldScene() {
 	SoftDepthState = 1;
 }
 
+void ParticleShaders::CaptureWorldDepthBeforeBlended() {
+	if (SoftDepthState != 1 || !SoftWorldDepth || !TheRenderManager || !TheRenderManager->device || !TheTextureManager || !TheTextureManager->ParticleDepthTexture) return;
+	IDirect3DSurface9* current = nullptr;
+	TheRenderManager->device->GetDepthStencilSurface(&current);
+	const bool mainScene = current && current == SoftWorldDepth;
+	if (current) current->Release();
+	if (!mainScene) return;
+	TheRenderManager->ResolveDepthBuffer(TheTextureManager->ParticleDepthTexture);
+	SoftDepthState = 2;
+}
+
 void ParticleShaders::EndWorldScene() {
 	SoftDepthState = 0;
 	SoftWorldDepth = nullptr;
@@ -58,8 +70,8 @@ void ParticleShaders::EndWorldScene() {
 // Every NoLighting geometry, after the game set its constants and before it draws (Render.cpp NoLightingConstantsHook). For the NoLighting passes (BSSM_NOLIGHTING ..
 // BSSM_NOLIGHTING_STRIP_PSYS_SUBTEX, 0x42-0x57): the vertex shaders' NVR_SoftSize (c41: a mesh's size, and whether it fades; a
 // particle's own size is on its vertices) and the pixel shaders' TESR_ParticleSoft (c175, also kept in Constants for SetCT, which uploads
-// it again when a NOLIGHT pixel shader binds). The world's depth is copied at the scene's first alpha-blended one: by then the opaque
-// scene is drawn (an opaque NoLighting draw can come earlier). Alpha-tested only draws get no fade (it would eat into their cut-out).
+// it again when a NOLIGHT pixel shader binds). The world's depth is copied once before the blended stage (or at the first blended NoLighting draw if earlier):
+// by then the opaque scene is drawn (an opaque NoLighting draw can come earlier). Alpha-tested only draws get no fade (it would eat into their cut-out).
 void ParticleShaders::ForDraw(NiGeometry* geometry, UInt16 passEnum, bool world) {
 	if (passEnum < 0x42 || passEnum > 0x57 || !geometry) return;
 	ParticleShaders* particles = TheShaderManager->Shaders.Particles;
@@ -68,6 +80,7 @@ void ParticleShaders::ForDraw(NiGeometry* geometry, UInt16 passEnum, bool world)
 	const NiAlphaProperty* alpha = (const NiAlphaProperty*)geometry->GetProperty(NiProperty::PropertyType::kType_Alpha);
 	const bool blended = alpha && (alpha->flags & NiAlphaProperty::ALPHA_BLEND_MASK);
 
+	const bool psys = passEnum >= 0x52;
 	float scale = 0.0f;
 	if (world && blended && SoftDepthState != 0 && SoftWorldDepth) {
 		IDirect3DSurface9* current = nullptr;
@@ -81,12 +94,23 @@ void ParticleShaders::ForDraw(NiGeometry* geometry, UInt16 passEnum, bool world)
 				// particles means full alpha on those pixels: a speckled outline of edges through smoke.)
 				SoftDepthState = 2;
 			}
-			// Particle systems (0x52-0x57): their own size, only when it is on their vertices; meshes: their bound radius.
-			const bool psys = passEnum >= 0x52;
-			scale = psys ? (ParticleSize::Installed ? particles->Settings.SoftScale : 0.0f) : particles->Settings.MeshSoftScale;
+			// Particle systems (0x52-0x57): their own size, only when it is on their vertices. Non-PSYS meshes: only fade
+			// volumetric/additive/falloff effects (light beams, rays, flashes), not depth-writing or alpha-blended surface neon/glow cards.
+			if (psys) {
+				scale = ParticleSize::Installed ? particles->Settings.SoftScale : 0.0f;
+			} else {
+				const BSShaderProperty* shade = geometry->propertyState.GetShadeProperty<BSShaderProperty>();
+				const bool zWrite = shade && ((shade->ulFlags[1] & 1u) != 0);
+				const bool hasFalloff = (passEnum >= 0x4A && passEnum <= 0x51) || (shade && ((shade->ulFlags[0] & (1u << 6)) != 0));
+				const bool isAdditive = (((alpha->flags >> 5) & 0xFu) == 0u);
+				const bool surfaceOverlay = BlendedLayerFix::IsEnabled() && BlendedLayerFix::IsNoLightSurfaceOverlay(geometry, passEnum);
+				if (!zWrite && !surfaceOverlay && (hasFalloff || isAdditive))
+					scale = particles->Settings.MeshSoftScale;
+			}
 		}
 	}
-	const float size[4] = { scale > 0.0f ? geometry->GetWorldBoundRadius() : 0.0f, scale > 0.0f ? 1.0f : 0.0f, 0.0f, 0.0f };
+	const float meshRadius = (scale > 0.0f && !psys) ? (std::min)(geometry->GetWorldBoundRadius(), 256.0f) : 0.0f;
+	const float size[4] = { meshRadius, scale > 0.0f ? 1.0f : 0.0f, 0.0f, 0.0f };
 	device->SetVertexShaderConstantF(41, size, 1);
 	particles->Constants.Soft = D3DXVECTOR4(scale, 1.0f / (float)TheRenderManager->width, 1.0f / (float)TheRenderManager->height, 0.0f);
 	device->SetPixelShaderConstantF(175, (const float*)&particles->Constants.Soft, 1);

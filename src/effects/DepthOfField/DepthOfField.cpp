@@ -25,7 +25,8 @@ void DepthOfFieldEffect::UpdateConstants() {
 
 	Constants.Enabled = active;
 
-	Constants.Blur = D3DXVECTOR4(view->DistantBlur, view->DistantBlurStartRange, view->DistantBlurEndRange, view->BaseBlurRadius);
+	const float distantStrength = (view->DistantBlur != 0.0f && view->DistantBlurStrength > 0.0f) ? view->DistantBlurStrength : 0.0f;
+	Constants.Blur = D3DXVECTOR4(distantStrength, view->DistantBlurStartRange, view->DistantBlurEndRange, view->BaseBlurRadius);
 	Constants.Data = D3DXVECTOR4(view->focusDistance * active, view->Radius, view->DiameterRange, view->NearBlurCutOff);
 	// UNOFFICIAL 2026-11-01 JitterFix ([Shaders.DepthOfField.Status]; a tester's report, DLSS / FSR at native size, third person with
 	// DistantBlur: blocks flickering along roofs and the skyline): this effect runs after TAA / FSR / DLSS, whose picture is unjittered,
@@ -40,6 +41,9 @@ void DepthOfFieldEffect::UpdateConstants() {
 static void ReadDofView(const char* section, DepthOfFieldEffect::ValuesStruct& out) {
 	SettingManager* cfg = TheSettingManager;
 	out.DistantBlur = cfg->GetSettingF(section, "DistantBlur");
+	SettingManager::Configuration::ConfigNode strengthNode;
+	const float strength = cfg->Config.FillNode(&strengthNode, section, "DistantBlurStrength") ? strengthNode.FloatValue : 1.0f;
+	out.DistantBlurStrength = max(0.0f, min(strength, 4.0f));
 	out.DistantBlurStartRange = cfg->GetSettingF(section, "DistantBlurStartRange");
 	out.DistantBlurEndRange = cfg->GetSettingF(section, "DistantBlurEndRange");
 	out.BaseBlurRadius = cfg->GetSettingF(section, "BaseBlurRadius");

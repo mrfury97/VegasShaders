@@ -22,7 +22,7 @@ struct PS_INPUT {
     float4 color : COLOR0;
     float4 shadowWorldPos : TEXCOORD1; // from NOLIGHT016/017.vso only
     float4 vertexLight : TEXCOORD2;
-    float2 depthSize : TEXCOORD3;      // x: view depth, y: the particle's size (0: not soft)
+    float4 depthSize : TEXCOORD3;      // x: view depth, y: the particle's size (0: not soft), zw: raw quad UV
     float2 screenPos : VPOS;
 };
 
@@ -33,12 +33,32 @@ struct PS_OUTPUT {
 PS_OUTPUT main(PS_INPUT IN) {
     PS_OUTPUT OUT;
 
+    const float3 dPx = ddx(IN.shadowWorldPos.xyz);
+    const float3 dPy = ddy(IN.shadowWorldPos.xyz);
+    const float2 dQx = ddx(IN.depthSize.zw);
+    const float2 dQy = ddy(IN.depthSize.zw);
+
     float4 base = tex2D(DiffuseMap, IN.uv.xy) * IN.color * MaterialColor;
     // Particles (vertexLight.w 1) always; falloff cards (NOLIGHT006, w 2) only when blended normally -- the glowing
     // ones (muzzle and impact flashes, sparks) are additive, which the game marks with the fade-to-black fog mode.
     const bool normallyBlended = Toggles.x < 0.5f && Toggles.y < 0.5f;
-    [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w) && (IN.vertexLight.w < 1.5f || normallyBlended))
-        base.rgb *= ParticleLight(IN.vertexLight.rgb, IN.shadowWorldPos.xyz);
+    [branch] if (SHADOW_VS_PRESENT(IN.shadowWorldPos.w) && (IN.vertexLight.w < 1.5f || normallyBlended)) {
+        const bool isBillboard = IN.vertexLight.w < 1.5f;
+        float3 shadowPos = IN.shadowWorldPos.xyz;
+        if (isBillboard) {
+            const float det = dQx.x * dQy.y - dQx.y * dQy.x;
+            if (abs(det) > 1.0e-7f) {
+                const float invDet = 1.0f / det;
+                const float3 Eu = (dPx * dQy.y - dPy * dQx.y) * invDet;
+                const float3 Ev = (dPy * dQx.x - dPx * dQy.x) * invDet;
+                const float2 dq = IN.depthSize.zw - 0.5f;
+                const float3 off = dq.x * Eu + dq.y * Ev;
+                const float maxOff = IN.depthSize.y > 0.0f ? max(IN.depthSize.y, 16.0f) * 2.0f : 128.0f;
+                if (dot(off, off) <= maxOff * maxOff) shadowPos -= off;
+            }
+        }
+        base.rgb *= ParticleLight(IN.vertexLight.rgb, IN.shadowWorldPos.xyz, shadowPos, IN.depthSize.y, isBillboard);
+    }
 
     float fog = IN.uv.w;
     float3 fogged = lerp(base.rgb, FogColor.rgb, fog);
@@ -46,6 +66,6 @@ PS_OUTPUT main(PS_INPUT IN) {
     float3 additive = lerp(base.rgb, 1.0f, saturate(fog * 1.5f));
     OUT.color_0.rgb = lerp(lerp(fogged, premultiplied, Toggles.x), additive, Toggles.y);
     OUT.color_0.a = base.a * IN.uv.z;
-    OUT.color_0.a *= SoftParticleFade(IN.screenPos, IN.depthSize);   // UNOFFICIAL 2026-11-04 soft particles
+    OUT.color_0.a *= SoftParticleFade(IN.screenPos, IN.depthSize.xy);   // UNOFFICIAL 2026-11-04 soft particles
     return OUT;
 }

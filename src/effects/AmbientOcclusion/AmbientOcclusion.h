@@ -80,6 +80,18 @@ public:
 	void	RegisterTextures();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	// UNOFFICIAL 2026-11-23 Idle targets: park AO/RT AO/RT GI buffers while off (exclude NVR_SkyVis*, which AmbientLight may host).
+	bool	TargetParkable(const char* SamplerName) override {
+		return strncmp(SamplerName, "NVR_AOBuffer", 12) == 0 || strncmp(SamplerName, "NVR_AORTHistory", 15) == 0 ||
+			strncmp(SamplerName, "NVR_RTAO", 8) == 0 || strncmp(SamplerName, "NVR_RTGI", 8) == 0;
+	}
+	bool	AmbientLightWantsRt() const;
+	// P12 fix: keep NVR_RTAO* and NVR_RTGI* active whenever AmbientLight consumes RT AO/Sky/GI even if standalone AmbientOcclusion is off.
+	bool	TargetWanted(const char* SamplerName) override {
+		if (strncmp(SamplerName, "NVR_RTAO", 8) == 0 || strncmp(SamplerName, "NVR_RTGI", 8) == 0)
+			return Enabled || AmbientLightWantsRt();
+		return TargetsWanted();
+	}
 	void Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 		IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 		IDirect3DSurface9* SourceBuffer) override;
@@ -114,6 +126,7 @@ private:
 	UINT				rtWidth = 0, rtHeight = 0;
 	IDirect3DTexture9*	rtHistoryTexture[2] = {};
 	IDirect3DSurface9*	rtHistorySurface[2] = {};
+	IDirect3DTexture9*	rtHistorySeen = nullptr;
 	UINT				rtHistoryWidth = 0, rtHistoryHeight = 0;
 	int					rtHistoryIndex = 0;
 	bool	ExtEstimateRT(IDirect3DDevice9* Device, IDirect3DTexture9* const* Textures, IDirect3DSurface9* const* Surfaces, const D3DSURFACE_DESC& Target);

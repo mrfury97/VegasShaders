@@ -34,7 +34,14 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 shadowMiddleCenter;          // TESR_ShadowMiddleCenter
     vec4 shadowFarCenter;             // TESR_ShadowFarCenter
     vec4 shadowLodCenter;             // TESR_ShadowLodCenter
+    vec4 fogData;                     // TESR_FogData
+    vec4 renderScale;                 // TESR_RenderScale
 } cb;
+
+vec2 clampToRectIfOn(vec2 uv, vec2 px) {
+    vec2 hi = cb.renderScale.xy - 0.5 * px;
+    return cb.renderScale.x < 0.9999 || cb.renderScale.y < 0.9999 ? clamp(uv, 0.5 * px, max(hi, 0.5 * px)) : uv;
+}
 
 // Helpers.hlsl's PI (Specular.fx.hlsl's own static PI is replaced by it after the include)
 const float PI_HLSL = 3.1415926538;
@@ -216,13 +223,16 @@ bool addSpecular(vec2 uv, float depth, uint pointS, uint linearS, texture2D dept
     vec2 at = (floor(p) + 0.5) * lowPx;
     vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
     vec4 s00 = sampleLod(specularBuffer, pointS, at);
-    vec4 s10 = sampleLod(specularBuffer, pointS, at + vec2(lowPx.x, 0.0));
-    vec4 s01 = sampleLod(specularBuffer, pointS, at + vec2(0.0, lowPx.y));
-    vec4 s11 = sampleLod(specularBuffer, pointS, at + lowPx);
-    vec4 off = abs(vec4(s00.a, s10.a, s01.a, s11.a) - depth) / (0.05 * depth + 4.0);
+    vec4 s10 = sampleLod(specularBuffer, pointS, clampToRectIfOn(at + vec2(lowPx.x, 0.0), lowPx));
+    vec4 s01 = sampleLod(specularBuffer, pointS, clampToRectIfOn(at + vec2(0.0, lowPx.y), lowPx));
+    vec4 s11 = sampleLod(specularBuffer, pointS, clampToRectIfOn(at + lowPx, lowPx));
+    vec4 off = abs(vec4(s00.a, s10.a, s01.a, s11.a) - depth) / (0.035 * depth + 3.0);
     off *= off;
-    w *= 1.0 / (1.0 + off * off) + 0.0001;
-    vec3 light = (s00.rgb * w.x + s10.rgb * w.y + s01.rgb * w.z + s11.rgb * w.w) / dot(w, vec4(1.0));
+    vec4 dw = 1.0 / (1.0 + off * off);
+    w *= dw;
+    float wSum = dot(w, vec4(1.0));
+    vec3 light = wSum > 0.001 ? (s00.rgb * w.x + s10.rgb * w.y + s01.rgb * w.z + s11.rgb * w.w) / wSum : vec3(0.0);
+    light.rb *= saturate(dot(dw, vec4(1.0)) * 2.0);
 
     float shadow = sampleLod(pointShadow, pointS, uv).r;
     float sunUp = 1.0 - cb.shadowFade.x;

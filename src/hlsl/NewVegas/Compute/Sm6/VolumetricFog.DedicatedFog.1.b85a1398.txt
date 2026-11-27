@@ -1,15 +1,16 @@
 nvr-sm6 1
 source VolumetricFog.fx.hlsl technique DedicatedFog pass 1 entry DedicatedFogCombine(false) vs FrameVS
 defines NVR_SM6=1 PHYSICAL_SKY_ON=1
-hash e89b16d4600127fc Effects/VolumetricFog.fx.hlsl
-hash b5d8f72865a0fb69 Effects/Includes/Helpers.hlsl
-hash aef31de36f7957da Effects/Includes/Depth.hlsl
-hash 5d9da31dec872999 Effects/Includes/Shadows.hlsl
-hash eccd0fa62975fa4b Effects/Includes/Sky.hlsl
+hash 887ebb2c49e669ea Effects/VolumetricFog.fx.hlsl
+hash f7533f7fd08f5119 Effects/Includes/Helpers.hlsl
+hash 157512b34669468a Effects/Includes/Depth.hlsl
+hash 8dc813f71e1582da Effects/Includes/RenderRect.hlsl
+hash 86c5fd833e0171af Effects/Includes/Shadows.hlsl
+hash d30fed4c35d4604d Effects/Includes/Sky.hlsl
 hash 949e22a95c815740 Effects/Includes/Normals.hlsl
 hash 7760cb3a937c1287 Effects/Includes/SkyTake.hlsl
 hash 9e95da808ffdbd24 Effects/Includes/InteriorShadowApply.hlsl
-const TESR_FogColor 0 16 float4
+const TESR_FogWeatherColor 0 16 float4
 const TESR_FogData 16 16 float4
 const TESR_ReciprocalResolution 32 16 float4
 const TESR_GameTime 48 16 float4
@@ -18,55 +19,55 @@ const TESR_SunPosition 80 16 float4
 const TESR_SunColor 96 16 float4
 const TESR_SunDiskColor 112 16 float4
 const TESR_SunAmbient 128 16 float4
-const TESR_HorizonColor 144 16 float4
-const TESR_SkyLowColor 160 16 float4
-const TESR_SkyColor 176 16 float4
+const TESR_FogHorizonColor 144 16 float4
+const TESR_FogSkyLowColor 160 16 float4
+const TESR_FogSkyColor 176 16 float4
 const TESR_SkyData 192 16 float4
 const TESR_SunsetColor 208 16 float4
 const TESR_SunAmount 224 16 float4
 const TESR_PBRData 240 16 float4
 const TESR_SkyIrradiance 256 144 float4[9]
 const TESR_SkyIrradianceGame 400 144 float4[9]
-const TESR_FogSkyLook 544 16 float4
-const TESR_SkyLook 560 16 float4
-const TESR_ShadowCameraToLightTransformNear 576 64 float4x4
-const TESR_ShadowCameraToLightTransformMiddle 640 64 float4x4
-const TESR_ShadowCameraToLightTransformFar 704 64 float4x4
-const TESR_ShadowCameraToLightTransformLod 768 64 float4x4
-const TESR_ShadowNearCenter 832 16 float4
-const TESR_ShadowMiddleCenter 848 16 float4
-const TESR_ShadowFarCenter 864 16 float4
-const TESR_ShadowLodCenter 880 16 float4
-const TESR_ShadowFormatData 896 16 float4
-const TESR_ShadowBlur 912 16 float4
-const TESR_ShadowFade 928 16 float4
-const TESR_VolumetricFogDensity 944 16 float4
-const TESR_VolumetricFogShape 960 16 float4
-const TESR_VolumetricFogWind 976 16 float4
-const TESR_VolumetricFogScatter 992 16 float4
-const TESR_VolumetricFogWeather 1008 16 float4
-const TESR_VolumetricFogAerial 1024 16 float4
-const TESR_VolumetricFogAerialTint 1040 16 float4
-const TESR_VolumetricFogDistant 1056 16 float4
-const TESR_VolumetricFogGlobal 1072 16 float4
-const TESR_VolumetricFogNight 1088 16 float4
-const TESR_VolumetricFogNightScatter 1104 16 float4
-const TESR_VolumetricFogSun 1120 16 float4
-const TESR_VolumetricFogNightTint 1136 16 float4
-const TESR_ProjectionTransform 1152 64 float4x4
-const TESR_InvProjectionTransform 1216 64 float4x4
-const TESR_ViewTransform 1280 64 float4x4
-const TESR_InvViewTransform 1344 64 float4x4
-const TESR_DepthConstants 1408 16 float4
-const TESR_CameraData 1424 16 float4
-const TESR_CameraPosition 1440 16 float4
-const TESR_PhysSky 1456 16 float4
-const TESR_PhysSkySun 1472 16 float4
-const NVR_FogGridFlags 1488 16 float4
-const TESR_VolumetricLightData 1504 16 float4
-const TESR_VolumetricLightData2 1520 16 float4
-const TESR_VolumetricLightGridLayout 1536 16 float4
-const TESR_VolumetricLightGridData 1552 16 float4
+const TESR_ShadowCameraToLightTransformNear 544 64 float4x4
+const TESR_ShadowCameraToLightTransformMiddle 608 64 float4x4
+const TESR_ShadowCameraToLightTransformFar 672 64 float4x4
+const TESR_ShadowCameraToLightTransformLod 736 64 float4x4
+const TESR_ShadowNearCenter 800 16 float4
+const TESR_ShadowMiddleCenter 816 16 float4
+const TESR_ShadowFarCenter 832 16 float4
+const TESR_ShadowLodCenter 848 16 float4
+const TESR_ShadowFormatData 864 16 float4
+const TESR_ShadowBlur 880 16 float4
+const TESR_ShadowFade 896 16 float4
+const TESR_VolumetricFogDensity 912 16 float4
+const TESR_VolumetricFogShape 928 16 float4
+const TESR_VolumetricFogWind 944 16 float4
+const TESR_VolumetricFogScatter 960 16 float4
+const TESR_VolumetricFogWeather 976 16 float4
+const TESR_VolumetricFogAerial 992 16 float4
+const TESR_VolumetricFogAerialTint 1008 16 float4
+const TESR_VolumetricFogDistant 1024 16 float4
+const TESR_VolumetricFogGlobal 1040 16 float4
+const TESR_VolumetricFogNight 1056 16 float4
+const TESR_VolumetricFogNightScatter 1072 16 float4
+const TESR_VolumetricFogSun 1088 16 float4
+const TESR_VolumetricFogNightTint 1104 16 float4
+const TESR_RenderScale 1120 16 float4
+const TESR_ProjectionTransform 1136 64 float4x4
+const TESR_InvProjectionTransform 1200 64 float4x4
+const TESR_ViewTransform 1264 64 float4x4
+const TESR_InvViewTransform 1328 64 float4x4
+const TESR_DepthConstants 1392 16 float4
+const TESR_CameraData 1408 16 float4
+const TESR_CameraPosition 1424 16 float4
+const TESR_PhysSky 1440 16 float4
+const TESR_PhysSkySun 1456 16 float4
+const NVR_FogGridFlags 1472 16 float4
+const TESR_VolumetricLightData 1488 16 float4
+const TESR_VolumetricLightData2 1504 16 float4
+const TESR_VolumetricLightGridLayout 1520 16 float4
+const TESR_VolumetricLightGridData 1536 16 float4
+const TESR_VolumetricFogLamps 1552 16 float4
 const TESR_VolumetricFogLow 1568 16 float4
 const TESR_VolumetricFogHigh 1584 16 float4
 const TESR_VolumetricFogSimple 1600 16 float4
@@ -90,12 +91,14 @@ texture NVR_FogNoise 4 3D 2 used
 texture TESR_NormalsBuffer 5 2D 0 used
 texture NVR_FogSkyView 6 2D 3 used
 texture NVR_FogGrid 7 2D 3 used
-texture TESR_PointShadowBuffer 8 2D 0 unused
-texture NVR_FogBuffer 9 2D 1 used
-texture NVR_FogBufferAdd 10 2D 1 used
-texture NVR_AOBuffer 11 2D 3 unused
-texture NVR_SkyVis 12 2D 1 unused
-texture NVR_SunFar 13 2D 1 unused
+texture NVR_FogSkyCoverage 8 2D 1 used
+texture NVR_FogLamps 9 2D 1 used
+texture TESR_PointShadowBuffer 10 2D 0 unused
+texture NVR_FogBuffer 11 2D 1 used
+texture NVR_FogBufferAdd 12 2D 1 used
+texture NVR_AOBuffer 13 2D 3 unused
+texture NVR_SkyVis 14 2D 1 unused
+texture NVR_SunFar 15 2D 1 unused
 sampler 0 LINEAR_MIPMAPS CLAMP
 sampler 1 NEAREST CLAMP
 sampler 2 LINEAR_MIPMAPS WRAP

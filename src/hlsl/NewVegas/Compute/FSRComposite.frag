@@ -15,7 +15,7 @@ layout(push_constant) uniform Push {
     uint pointIndex;            // 0: POINT, CLAMP (the extension writes the heap index)
     float debugView;            // 4
     vec2 size;                  // 8: render size in pixels
-    uint weaponAA;              // 16: bit 0 = 1st-person viewmodel jittered/AA'd (keep t_fsr on weapon); bit 1 = HDR output (no saturate)
+    uint weaponAA;              // 16: bit 0 = 1st-person viewmodel jittered/AA'd (keep t_fsr on weapon); bit 1 = HDR output (no saturate); bit 2 = reversed depth
 } pc;
 
 layout(location = 0) in vec2 uv;
@@ -26,7 +26,9 @@ layout(location = 0) out vec4 o_color;
 void main() {
     ivec2 pixel = ivec2(floor(gl_FragCoord.xy));
     vec4 source = texelFetch(sampler2D(t_source, POINT_S), pixel, 0);
-    bool weapon = ((pc.weaponAA & 1u) == 0u) && texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x > 0.0;
+    float vmRaw = texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x;
+    bool vmPresent = ((pc.weaponAA & 4u) != 0u) ? (vmRaw > 0.0) : (vmRaw < 0.99999);
+    bool weapon = ((pc.weaponAA & 1u) == 0u) && vmPresent;
     vec3 color = weapon ? source.rgb : texelFetch(sampler2D(t_fsr, POINT_S), pixel, 0).rgb;
     if (pc.debugView > 0.5 && pc.debugView < 1.5) {
         vec2 m = texelFetch(sampler2D(t_motion, POINT_S), pixel, 0).xy * pc.size / 16.0;

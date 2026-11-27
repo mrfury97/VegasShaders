@@ -238,7 +238,9 @@ TAAResult ResolveCore(float2 uv)
 	float2 prevUV = Reproject(uv, inFront);
 
 	// The weapon gets real 1st-person motion vectors when WeaponAA is active; otherwise fixed to camera (same pixel).
-	float isViewModel = tex2D(TESR_DepthBufferViewModel, uv).x > 0.0f ? 1.0f : 0.0f;
+	float vmRaw = tex2D(TESR_DepthBufferViewModel, uv).x;
+	bool reversedDepth = TESR_TAAWeapon.z > 0.5f;
+	float isViewModel = (reversedDepth ? (vmRaw > 0.0f) : (vmRaw < 0.99999f)) ? 1.0f : 0.0f;
 	[branch] if (isViewModel > 0.5f && TESR_TAAWeapon.y > 0.5f) {
 		float4 vm = tex2Dlod(TESR_ViewModelMotionBuffer, float4(uv, 0.0f, 0.0f));
 		if (vm.z > 0.5f) {

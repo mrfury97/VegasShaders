@@ -96,9 +96,10 @@ static void MakeStencil(IDirect3DDevice9* Device, IDirect3DSurface9*& Surface, b
  * Render SMAA by performing the three main passes (edge detection, blending weight calculation, and final blending).
  */
 void SMAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
-	if (!Enabled) {
+	if (!Enabled || !Effect) {
+		NoteSkip();
 		renderTime = 0.0f;
-		return; // skip rendering if the effect is disabled
+		return; // skip rendering if the effect is disabled or still queued for lazy load
 	}
 
 	auto timer = TimeLogger();

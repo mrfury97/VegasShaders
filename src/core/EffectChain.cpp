@@ -175,6 +175,7 @@
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer
 #include "Upscaler.h"	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the fallback before the Wetness Effects screen pass
+#include "DistantLandProto.h"
 #include "EffectChain.h"
 
 // Defined in effects\ShadowsExterior.cpp (declared in ShaderManager.cpp as well).
@@ -346,10 +347,12 @@ void ShaderManager::PreStep_ShadowPasses(ChainContext& ctx) {
 	// shadow pass (a full-screen clear and two target switches for a buffer that already held the clear value).
 	static bool shadowBufferClear = false;
 	// render a shadow pass for point lights
+	const bool extShadowPasses = GameState.isExterior && Effects.ShadowsExteriors->Enabled &&
+		(Effects.ShadowsExteriors->Settings.Exteriors.Enabled || Effects.ShadowsExteriors->Constants.ShadowFade.z > 0.0f);
 	if (forwardInterior && !keepDarkening) {
 		if (!shadowBufferClear) { Effects.ShadowsExteriors->clearShadowsBuffer(); shadowBufferClear = true; }
 	}
-	else if ((GameState.isExterior && Effects.ShadowsExteriors->Enabled) || (!GameState.isExterior && Effects.ShadowsInteriors->Enabled)) {
+	else if (extShadowPasses || (!GameState.isExterior && Effects.ShadowsInteriors->Enabled)) {
 		shadowBufferClear = false;	// the passes below write it
 		{
 			GpuProfileScope gpu(pointShadowTimer, Device);
@@ -636,7 +639,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 	// (ceiling gaps, the far plane: the fog's sky test) differing by a few 16-bit steps; everywhere else it matched bit for bit.
 	const bool interiorFoldable = !GameState.isExterior && keepDarkening && forwardInterior &&
 		!Effects.ShadowsExteriors->Settings.Interiors.Forward.DarkeningBlur && TheSettingManager->SettingsMain.Main.InteriorShadowFold &&
-		!(Effects.Reflections->Enabled && Effects.Reflections->Effect && Effects.Reflections->CubeWanted()) &&
+		!Effects.Reflections->CubeStandaloneRunnable() &&
 		Effects.ShadowsInteriors->DedicatedUsable(RenderTarget, TheTextureManager->RenderedSurface) && Fog->CanCompositeInterior() &&
 		(TheSettingManager->SettingsMain.Main.InteriorShadowFoldRound != 0 || Fog->HalfStoreMode(Device) >= 0);	// (measured once)
 	// DIAGNOSTIC InteriorShadowFoldCheck (test builds): on a check frame the old path runs and the fold is compared with it.
@@ -664,7 +667,7 @@ void ShaderManager::PreStep_CompositePlan(ChainContext& ctx) {
 				!forwardInterior ? "off (no forward lamp shadows this frame: the old blurred pass)" :
 				Effects.ShadowsExteriors->Settings.Interiors.Forward.DarkeningBlur ? "off (DarkeningBlur)" :
 				effectsBetween ? "off (an effect between it and the fog reads the picture)" :
-				(Effects.Reflections->Enabled && Effects.Reflections->Effect && Effects.Reflections->CubeWanted()) ? "off (the Reflections surroundings cube reads the picture)" :
+				Effects.Reflections->CubeStandaloneRunnable() ? "off (the Reflections surroundings cube reads the picture)" :
 				"off (the dedicated pass or the fog composite is unavailable, or this GPU's 16-bit rounding is unknown)");
 		}
 	}
@@ -976,8 +979,8 @@ void ShaderManager::PreStep_Reflections(ChainContext& ctx) {
 			{ Effects.Reflections->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, 0, false, SourceSurface); PixelInspector::AfterFrame(Effects.Reflections); }
 			Effects.Reflections->ClearPassTextures();
 		}
-		else if (Effects.Reflections->Enabled && Effects.Reflections->Effect && Effects.Reflections->CubeWanted()) {
-			// No floor reflects now, but metal and the env maps may read the surroundings cube: keep it up.
+		else if (Effects.Reflections->CubeStandaloneRunnable()) {
+			// No floor reflects (or floor SSR is off), but metal and the env maps read the surroundings cube: keep it up.
 			Effects.Reflections->RenderCubeOnly(Device);
 			Device->SetRenderTarget(0, RenderTarget);
 		}
@@ -1077,6 +1080,7 @@ void ShaderManager::PreStep_VolumetricLight(ChainContext& ctx) {
 		}
 		Fog->gridTexture = nullptr;
 	}
+	DistantLandProto::Render(Device, RenderTarget);
 }
 
 void ShaderManager::PreStep_DustMotes(ChainContext& ctx) {

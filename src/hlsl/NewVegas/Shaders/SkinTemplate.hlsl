@@ -251,9 +251,13 @@ VS_OUTPUT main(VS_INPUT vin) {
 // DeferredLamps add them with this file's own SkinLight); 3: the lamps out, the sun kept (DeferredRenderer 1). The ambient, the sky light and
 // reflection and the fog stay; COLOR1-3 hold G-buffer v2 (see SkinDeferred.hlsl) instead of the skin blur's targets. Never made otherwise:
 // every other record compiles exactly as before (SKIN_DEFERRED 0).
+// (2026-11-25 fd-complete batch 4) + the light-only AD family (SKIN2004-2007): COLOR0 keeps the ambient and the sky (the game's TEXTURE pass
+// multiplies it by the texture afterwards, as forward); the G-buffer albedo is that texture (adAlbedo: the FaceGen blend on faces), so the
+// deferred passes' light comes out as the multiplied forward light did. Its added lamp passes (SKIN2008 / 2009) are skipped with the object's
+// mark. No fog in an AD pass (keep 1): its deferred light is not fogged, the objects' AD gap (FD-INTERIORS-RESULTS.md).
 #if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED >= 2
-    #if defined(ONLY_LIGHT) || !defined(CAPTURED_NORMALS_ON) || CAPTURED_NORMALS_ON < 4
-        #error DeferredSkin: a deferred skin record is made for the full and many-lamp families with GBufferV2 only
+    #if defined(DIFFUSE) || !defined(CAPTURED_NORMALS_ON) || CAPTURED_NORMALS_ON < 4
+        #error DeferredSkin: a deferred skin record is made for the full, many-lamp and light-only families with GBufferV2 only
     #endif
     #define SKIN_DEFERRED LAMPS_DEFERRED
     #include "includes/DeferredPixel.hlsl"
@@ -624,11 +628,20 @@ PS_OUTPUT main(PS_INPUT pin) {
     #if SKIN_DEFERRED
         // UNOFFICIAL 2026-11-15 DeferredSkin: G-buffer v2 on COLOR1-3 (Includes/SkinDeferred.hlsl), the core binds the G-buffer's targets for this
         // record (no skin blur's: core/DeferredSkin.h). keep = 1 - the fog this pass lerped COLOR0 with.
-        const float skinKeep = fogOn ? 1.0f - pin.fog.a : 1.0f;
-        #if SKIN_DEFERRED == 2
-            pout.scatter = float4(albedo, FD_LF_CODE(FD_LF_SPEC, skinKeep));	// lighting-free: DeferredSun and DeferredLamps light it
+        #ifdef FOG_COLOR
+            const float skinKeep = fogOn ? 1.0f - pin.fog.a : 1.0f;
         #else
-            pout.scatter = float4(albedo, FD_LAMPS_CODE(skinKeep));	// the sun kept: DeferredLamps lights it
+            const float skinKeep = 1.0f;	// (the AD family: no fog in this pass)
+        #endif
+        #ifdef ONLY_LIGHT
+            const float3 gbAlbedo = LinColor(HudRainAlbedo(adAlbedo));	// (AD: what the game's TEXTURE pass multiplies in; this pass's albedo is 1)
+        #else
+            const float3 gbAlbedo = albedo;
+        #endif
+        #if SKIN_DEFERRED == 2
+            pout.scatter = float4(gbAlbedo, FD_LF_CODE(FD_LF_SPEC, skinKeep));	// lighting-free: DeferredSun and DeferredLamps light it
+        #else
+            pout.scatter = float4(gbAlbedo, FD_LAMPS_CODE(skinKeep));	// the sun kept: DeferredLamps lights it
         #endif
         const float2 skinOct = ShadowEncodeNormal(worldN);
         pout.albedo = float4(6.0f, skinOct.x, skinRoughness, skinOct.y);	// model 6 (skin), no specular bit, metal 0; the bumped normal; roughness

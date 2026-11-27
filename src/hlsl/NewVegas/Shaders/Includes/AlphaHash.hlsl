@@ -23,8 +23,9 @@
 
 bool NVR_AlphaHashDraw : register(b15);	// per draw (AlphaHash::ForPass): an alpha-tested, unblended object of the world scene
 // x mode (0 off, 1 edges, 2 like MSAA; 0 too while the scene is not jittered), y this frame's noise offset (pixels), z edge width (pixels),
-// w FarCoverage: 0 off, else scale + 2 * q, q the world's texture mip bias in quarter mips below 0 (TAA's MipBias, RenderScale)
-float4 TESR_AlphaHash;
+// w FarCoverage: 0 off, else scale + 2 * q, q the world's texture mip bias in quarter mips below 0 (TAA's MipBias, RenderScale).
+// Pinned to c196 (clear across ObjectTemplate, ParallaxTemplate, Grass PS; unpinned, FXC packed it into c0/c1 where game draws overwrote it).
+float4 TESR_AlphaHash : register(c196);
 
 #if defined(NVR_SM4) && NVR_SM4
     #define ALPHA_HASH_VPOS_PARAM , float4 alphaHashVPos4 : VPOS	// the no-limits build: SV_Position, the pixel centre

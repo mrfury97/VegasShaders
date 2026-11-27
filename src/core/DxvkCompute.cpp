@@ -855,7 +855,7 @@ void DxvkCompute::DisplaceBind(unsigned Family) {
 void DxvkCompute::DisplaceLandPass(NiGeometry* Geometry, UInt16 PassEnum, int Context) {
 	bool pieceFar = false;
 	// The land passes drawn with SLS2100.vso (BSSM_LAND<n>O...; 0x93-0x94, BSSM_LANDLO_A, is drawn with SLS2080.vso: never tessellated)
-	if (DisplaceBase.Enable && Geometry && PassEnum >= 0x1EF && PassEnum <= 0x230) {
+	if (DisplaceBase.Enable && Geometry && PassEnum >= 0x1F7 && PassEnum <= 0x22E) {
 		const int context = std::clamp(Context, 0, 2);
 		const NiGeometryBufferData* buffers = Geometry->geomData ? Geometry->geomData->m_pkBuffData : nullptr;
 		const unsigned strips = buffers ? (buffers->IB ? buffers->NumArrays : 1u) : 0u;

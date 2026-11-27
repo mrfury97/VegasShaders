@@ -36,6 +36,7 @@ public:
 	// their own size x SoftScale (a mesh: its bound radius x MeshSoftScale), every alpha-blended NoLighting draw (BSSM_NOLIGHTING* passes). The world's depth is
 	// copied once a world scene, at its first such draw; anywhere else (another depth buffer, outside the world scene) they draw as before.
 	static void	BeginWorldScene();
+	static void	CaptureWorldDepthBeforeBlended();	// UNOFFICIAL 2026-11-23: resolve clean opaque depth before blended overlays/glass run
 	static void	EndWorldScene();
 	static void	ForDraw(NiGeometry* geometry, UInt16 passEnum, bool world);	// every NoLighting geometry, before it draws (Render.cpp NoLightingConstantsHook)
 	static inline int					SoftDepthState = 0;			// 0 outside the world scene, 1 copy still to take, 2 taken

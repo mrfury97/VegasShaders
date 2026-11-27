@@ -60,22 +60,81 @@ float ParticleSunPhase(float3 cameraRelativePos) {
     const float denom = 1.0f + g * g - 2.0f * g * cosTheta;
     return (1.0f - g * g) / (denom * sqrt(denom));
 }
+float ParticleVolumetricShadow(float3 P, float radius, bool isBillboard) {
+#if SHADOW_FIXED_MODE == 3 && FORWARD_SHADOWS && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS)
+    [branch] if (TESR_ShadowForwardData.x || !TESR_ShadowFormatData.z || !TESR_ShadowFade.y || TESR_ShadowFormatData.x != 3.0f)
+        return 1.0f;
+    float cascadeRad;
+    row_major float4x4 lightTransform;
+    float2 quad;
+    if (length(P - TESR_ShadowNearCenter.xyz) < TESR_ShadowNearCenter.w) {
+        cascadeRad = TESR_ShadowNearCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformNear;
+        quad = float2(0.0f, 0.0f);
+    } else if (length(P - TESR_ShadowMiddleCenter.xyz) < TESR_ShadowMiddleCenter.w) {
+        cascadeRad = TESR_ShadowMiddleCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformMiddle;
+        quad = float2(0.5f, 0.0f);
+    } else if (length(P - TESR_ShadowFarCenter.xyz) < TESR_ShadowFarCenter.w) {
+        cascadeRad = TESR_ShadowFarCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformFar;
+        quad = float2(0.0f, 0.5f);
+    } else if (length(P - TESR_ShadowLodCenter.xyz) < TESR_ShadowLodCenter.w) {
+        cascadeRad = TESR_ShadowLodCenter.w;
+        lightTransform = TESR_ShadowCameraToLightTransformLod;
+        quad = float2(0.5f, 0.5f);
+    } else {
+        return 1.0f;
+    }
+    float4 ls = mul(float4(P, 1.0f), lightTransform);
+    ls.xyz /= ls.w;
+    const float2 uv = float2(ls.x * 0.5f + 0.5f, ls.y * -0.5f + 0.5f) * 0.5f + quad;
+    const float texW = max(TESR_ShadowBlur.x, 1.0f / 16384.0f);
+    const float2 uvLo = quad + 0.5f * texW;
+    const float2 uvHi = quad + 0.5f - 0.5f * texW;
+    const float depth = ls.z - 0.0005f;
+    const float uvRad = isBillboard ? clamp(max(radius, 24.0f) * 0.6f, 16.0f, 64.0f) / max(4.0f * cascadeRad, 1.0f) : 2.5f * texW;
+    static const float2 kVolTaps[5] = {
+        float2(0.0f, 0.0f), float2(1.0f, 0.4f), float2(-1.0f, -0.4f), float2(-0.4f, 1.0f), float2(0.4f, -1.0f)
+    };
+    float lit = 0.0f;
+    [unroll] for (int i = 0; i < 5; i++) {
+        lit += depth <= tex2Dlod(TESR_ShadowAtlas, float4(clamp(uv + kVolTaps[i] * uvRad, uvLo, uvHi), 0.0f, 0.0f)).x ? 1.0f : 0.0f;
+    }
+    float sh = lerp(lit * 0.2f, 1.0f, saturate(TESR_ShadowFade.x));
+#if SHADOW_CLOUD_SAMPLE
+    [branch] if (NVR_CloudSun.w > 0.0f) sh *= CloudSunAt(P);
 #endif
+    return sh;
+#else
+    return GetSunShadowMaps(P, normalize(-P));
+#endif
+}
 
-// The multiplier for the colour: the vertex light plus the sun through its shadow, times the brightness, blended in by
-// the strength (0 = 1, the game's unlit look).
+// The multiplier for the colour: the vertex light plus the sun through volumetric multiple-scattered shadow, times the brightness,
+// blended in by the strength (0 = 1, the game's unlit look).
+float3 ParticleLight(float3 vertexLight, float3 cameraRelativePos, float3 shadowPos, float radius, bool isBillboard) {
+    [branch] if (TESR_ParticleData.x <= 0.0f) return 1.0f;
+    float3 light = vertexLight;
+    [branch] if (TESR_ParticleData.w > 0.0f) {
+        const float sh = ParticleVolumetricShadow(shadowPos, radius, isBillboard);
+        const float directPhase = lerp(1.0f, ParticleSunPhase(cameraRelativePos), sh);
+        const float volVis = lerp(0.35f, 1.0f, sh);
+        light += TESR_SunColor.rgb * (volVis * directPhase * TESR_ParticleData.z);
+    }
+    return lerp(1.0f, light * TESR_ParticleData.y, TESR_ParticleData.x);
+}
+#else
+// Crisp direct-light path for surface decals (GDECAL.pso).
 float3 ParticleLight(float3 vertexLight, float3 cameraRelativePos) {
     [branch] if (TESR_ParticleData.x <= 0.0f) return 1.0f;
     float3 light = vertexLight;
     [branch] if (TESR_ParticleData.w > 0.0f) {
         // Facing the camera; only the shadow bias uses it.
-#ifdef PARTICLE_SUN_PHASE
-        light += TESR_SunColor.rgb * GetSunShadowMaps(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z * ParticleSunPhase(cameraRelativePos);
-#else
         light += TESR_SunColor.rgb * GetSunShadowMaps(cameraRelativePos, normalize(-cameraRelativePos)) * TESR_ParticleData.z;
-#endif
     }
     return lerp(1.0f, light * TESR_ParticleData.y, TESR_ParticleData.x);
 }
+#endif
 
 #endif

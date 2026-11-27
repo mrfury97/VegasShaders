@@ -16,8 +16,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfgmgr32.h>	// CM_Get_DevNode_Status (SkipUnusedVulkanIcds)
 #include <cstdint>
 #include <cstring>
+#include <setupapi.h>	// SetupDiGetClassDevsA (SkipUnusedVulkanIcds)
 #include <shlobj.h>	// SHGetFolderPathA (AdapterNameFromPrefs)
 #include <string>
 #include <vector>
@@ -474,5 +476,187 @@ namespace DxvkLoader {
 		SetEnvironmentVariableA("DXVK_CONFIG", value.c_str());
 		Logger::Log("DxvkLoader: DXVK told to name the graphics card \"%s\", as %s does, so the game's graphics-card check does not start the "
 			"launcher (vendor and device ids unchanged; DXVK_CONFIG \"%s\"; [Main.Main.Misc] DxvkAdapterNameFromPrefs)", name.c_str(), from.c_str(), value.c_str());
+	}
+
+	// UNOFFICIAL 2026-11-23 DxvkSkipUnusedIcd ([Main.Main.Misc], default on): on desktop systems with a discrete GPU and a CPU
+	// integrated GPU (e.g. Ryzen 7000/9000 + NVIDIA), vulkan-1.dll loads every registered 32-bit ICD into FalloutNV.exe during
+	// device enumeration and leaves unused drivers (and their memory-mapped shader caches, e.g. amdvlk32.dll + 256 MB .parc) in
+	// the 4 GB 32-bit address space. Hide unused integrated Vulkan ICDs via VK_LOADER_DRIVERS_DISABLE (and AMD's implicit
+	// switchable-graphics layer via DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1=1) unless the user already configured Vulkan/DXVK
+	// adapter selection.
+	inline void SkipUnusedVulkanIcds(bool wanted) {
+		char runtime[MAX_PATH] = {};
+		HMODULE d3d9 = GetModuleHandleA("d3d9.dll");
+		if (!Loaded && !(d3d9 && GetModuleFileNameA(d3d9, runtime, MAX_PATH) && IsDxvk(runtime))) return;
+		if (!wanted) { Logger::Log("DxvkLoader: DxvkSkipUnusedIcd is off: every Vulkan driver stays enabled"); return; }
+
+		for (const char* envKey : { "VK_LOADER_DRIVERS_DISABLE", "VK_DRIVER_FILES", "VK_ICD_FILENAMES", "DXVK_FILTER_DEVICE_NAME" }) {
+			if (GetEnvironmentVariableA(envKey, nullptr, 0) != 0) {
+				Logger::Log("DxvkLoader: %s is already set: Vulkan ICD selection left as configured", envKey);
+				return;
+			}
+		}
+
+		char file[MAX_PATH] = {};
+		if (!GetEnvironmentVariableA("DXVK_CONFIG_FILE", file, MAX_PATH)) strcpy_s(file, "dxvk.conf");
+		std::string conf;
+		if (FILE* f = nullptr; !fopen_s(&f, file, "rb") && f) {
+			char buffer[4096]; size_t n;
+			while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) conf.append(buffer, n);
+			fclose(f);
+		}
+		char line[2048] = {};
+		const DWORD have = GetEnvironmentVariableA("DXVK_CONFIG", line, sizeof(line));
+		const std::string dxvkEnv = have < sizeof(line) ? line : "";
+		for (const char* key : { "dxvk.deviceFilter", "dxvk.hideIntegratedGraphics" }) {
+			if (ConfigSetsKey(conf, key) || ConfigSetsKey(dxvkEnv, key)) {
+				Logger::Log("DxvkLoader: %s is set in %s: Vulkan ICD selection left as configured", key, ConfigSetsKey(conf, key) ? file : "DXVK_CONFIG");
+				return;
+			}
+		}
+
+		char sysDir[MAX_PATH] = {};
+		const UINT sysLen = GetSystemDirectoryA(sysDir, MAX_PATH);
+		HMODULE setupapi = sysLen ? LoadLibraryA((std::string(sysDir) + "\\setupapi.dll").c_str()) : nullptr;
+		HMODULE cfgmgr32 = sysLen ? LoadLibraryA((std::string(sysDir) + "\\cfgmgr32.dll").c_str()) : nullptr;
+		const auto getClassDevs = setupapi ? reinterpret_cast<decltype(&::SetupDiGetClassDevsA)>(GetProcAddress(setupapi, "SetupDiGetClassDevsA")) : nullptr;
+		const auto enumDeviceInfo = setupapi ? reinterpret_cast<decltype(&::SetupDiEnumDeviceInfo)>(GetProcAddress(setupapi, "SetupDiEnumDeviceInfo")) : nullptr;
+		const auto getDevProp = setupapi ? reinterpret_cast<decltype(&::SetupDiGetDeviceRegistryPropertyA)>(GetProcAddress(setupapi, "SetupDiGetDeviceRegistryPropertyA")) : nullptr;
+		const auto destroyDevs = setupapi ? reinterpret_cast<decltype(&::SetupDiDestroyDeviceInfoList)>(GetProcAddress(setupapi, "SetupDiDestroyDeviceInfoList")) : nullptr;
+		const auto cmGetStatus = cfgmgr32 ? reinterpret_cast<decltype(&::CM_Get_DevNode_Status)>(GetProcAddress(cfgmgr32, "CM_Get_DevNode_Status")) : nullptr;
+
+		static const GUID kDisplayClass = { 0x4d36e968, 0xe325, 0x11ce, { 0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18 } };
+		HDEVINFO devs = (getClassDevs && enumDeviceInfo && getDevProp && destroyDevs && cmGetStatus)
+			? getClassDevs(&kDisplayClass, nullptr, nullptr, DIGCF_PRESENT)
+			: INVALID_HANDLE_VALUE;
+		if (devs == INVALID_HANDLE_VALUE) {
+			const DWORD err = GetLastError();
+			if (cfgmgr32) FreeLibrary(cfgmgr32);
+			if (setupapi) FreeLibrary(setupapi);
+			Logger::Log("DxvkLoader: SkipUnusedVulkanIcds skipped (SetupAPI unavailable, err=%lu)", err);
+			return;
+		}
+
+		bool hasDiscreteNvidia = false, hasDiscreteAmd = false, hasIgpuAmd = false, hasDiscreteIntel = false, hasIgpuIntel = false;
+		constexpr unsigned long long kDiscreteFloor = 1536ULL << 20;
+		UINT activeCount = 0;
+
+		SP_DEVINFO_DATA dev = {};
+		dev.cbSize = sizeof(dev);
+		for (DWORD i = 0; enumDeviceInfo(devs, i, &dev); i++) {
+			ULONG status = 0, problem = 0;
+			if (cmGetStatus(&status, &problem, dev.DevInst, 0) != CR_SUCCESS || !(status & DN_STARTED) || problem != 0)
+				continue;
+			activeCount++;
+
+			char hwid[1024] = {};
+			if (!getDevProp(devs, &dev, SPDRP_HARDWAREID, nullptr, reinterpret_cast<PBYTE>(hwid), sizeof(hwid) - 2, nullptr))
+				continue;
+			bool isNvidia = false, isAmd = false, isIntel = false;
+			for (const char* s = hwid; *s; s += strlen(s) + 1) {
+				if (ContainsI(s, "VEN_10DE")) isNvidia = true;
+				if (ContainsI(s, "VEN_1002")) isAmd = true;
+				if (ContainsI(s, "VEN_8086")) isIntel = true;
+			}
+			if (!isNvidia && !isAmd && !isIntel) continue;
+
+			char drv[256] = {};
+			if (!getDevProp(devs, &dev, SPDRP_DRIVER, nullptr, reinterpret_cast<PBYTE>(drv), sizeof(drv) - 1, nullptr) || !drv[0])
+				continue;
+			char regPath[384];
+			sprintf_s(regPath, "SYSTEM\\CurrentControlSet\\Control\\Class\\%s", drv);
+
+			unsigned long long vram = 0;
+			DWORD size = sizeof(vram);
+			if (RegGetValueA(HKEY_LOCAL_MACHINE, regPath, "HardwareInformation.qwMemorySize", RRF_RT_QWORD, nullptr, &vram, &size) != ERROR_SUCCESS) {
+				DWORD vram32 = 0;
+				size = sizeof(vram32);
+				if (RegGetValueA(HKEY_LOCAL_MACHINE, regPath, "HardwareInformation.MemorySize", RRF_RT_DWORD | RRF_RT_REG_BINARY, nullptr, &vram32, &size) == ERROR_SUCCESS)
+					vram = vram32;
+			}
+
+			if (isNvidia && vram >= kDiscreteFloor) hasDiscreteNvidia = true;
+			else if (isAmd) {
+				if (vram >= kDiscreteFloor) hasDiscreteAmd = true;
+				else hasIgpuAmd = true;
+			}
+			else if (isIntel) {
+				if (vram >= kDiscreteFloor) hasDiscreteIntel = true;
+				else hasIgpuIntel = true;
+			}
+		}
+
+		destroyDevs(devs);
+		FreeLibrary(cfgmgr32);
+		FreeLibrary(setupapi);
+
+		const bool hideAmd = (hasDiscreteNvidia || hasDiscreteIntel) && !hasDiscreteAmd && hasIgpuAmd;
+		const bool hideIntel = (hasDiscreteNvidia || hasDiscreteAmd) && !hasDiscreteIntel && hasIgpuIntel;
+
+		std::string disable;
+		auto append = [&](const char* pat) {
+			if (!disable.empty()) disable += ",";
+			disable += pat;
+		};
+		bool amdLayerDisabled = false;
+		if (hideAmd) {
+			append("*amd-vulkan*,*amd_icd*");
+			if (GetEnvironmentVariableA("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", nullptr, 0) == 0) {
+				if (SetEnvironmentVariableA("DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1", "1")) amdLayerDisabled = true;
+			}
+		}
+		if (hideIntel) append("*igvk*");
+		if (disable.empty()) {
+			Logger::Log("DxvkLoader: SkipUnusedVulkanIcds: no unused integrated Vulkan ICD to hide (%u active display adapter(s))", activeCount);
+			return;
+		}
+
+		if (SetEnvironmentVariableA("VK_LOADER_DRIVERS_DISABLE", disable.c_str())) {
+			Logger::Log("DxvkLoader: hiding unused integrated Vulkan ICD(s) to save 32-bit address space (VK_LOADER_DRIVERS_DISABLE=\"%s\"%s; [Main.Main.Misc] DxvkSkipUnusedIcd)",
+				disable.c_str(), amdLayerDisabled ? ", DISABLE_LAYER_AMD_SWITCHABLE_GRAPHICS_1=\"1\"" : "");
+		}
+	}
+
+	// UNOFFICIAL 2026-11-23 DxvkCompilerThreads ([Main.Main.Misc], default 3): DXVK defaults to spawning ~3/4 of CPU hardware
+	// threads for background dxvk-shader compilation (8-12+ threads on modern CPUs). Running those simultaneously with Vegas
+	// Shaders' D3D shader compiler threads inside a 32-bit WOW64 process saturates memory bandwidth/VA and can hang LoadingMenu.
+	inline void CapCompilerThreads(int threads) {
+		static const char* kKey = "dxvk.numCompilerThreads";
+		char runtime[MAX_PATH] = {};
+		HMODULE d3d9 = GetModuleHandleA("d3d9.dll");
+		if (!Loaded && !(d3d9 && GetModuleFileNameA(d3d9, runtime, MAX_PATH) && IsDxvk(runtime))) return;
+		if (threads <= 0) {
+			Logger::Log("DxvkLoader: DxvkCompilerThreads is 0: DXVK chooses its shader compiler thread count itself");
+			return;
+		}
+		if (threads > 16) threads = 16;
+
+		char file[MAX_PATH] = {};
+		if (!GetEnvironmentVariableA("DXVK_CONFIG_FILE", file, MAX_PATH)) strcpy_s(file, "dxvk.conf");
+		std::string conf;
+		if (FILE* f = nullptr; !fopen_s(&f, file, "rb") && f) {
+			char buffer[4096]; size_t n;
+			while ((n = fread(buffer, 1, sizeof(buffer), f)) > 0) conf.append(buffer, n);
+			fclose(f);
+		}
+		char line[2048] = {};
+		const DWORD have = GetEnvironmentVariableA("DXVK_CONFIG", line, sizeof(line));
+		if (have >= sizeof(line)) {
+			Logger::Log("[WARNING] DxvkLoader: DXVK_CONFIG is too long to add to: %s left to DXVK", kKey);
+			return;
+		}
+		if (ConfigSetsKey(conf, kKey) || ConfigSetsKey(line, kKey)) {
+			Logger::Log("DxvkLoader: %s is set in %s: left as the player set it", kKey, ConfigSetsKey(conf, kKey) ? file : "DXVK_CONFIG");
+			return;
+		}
+
+		char entry[64];
+		sprintf_s(entry, "%s = %d", kKey, threads);
+		std::string value = line;
+		if (!value.empty()) value += ";";
+		value += entry;
+		SetEnvironmentVariableA("DXVK_CONFIG", value.c_str());
+		Logger::Log("DxvkLoader: DXVK shader compiler threads capped to %d to prevent 32-bit startup saturation (DXVK_CONFIG \"%s\"; [Main.Main.Misc] DxvkCompilerThreads)",
+			threads, value.c_str());
 	}
 }

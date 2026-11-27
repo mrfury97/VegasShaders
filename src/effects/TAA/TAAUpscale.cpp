@@ -42,6 +42,7 @@
 #include "../../core/ScopeOverlay.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] KeepRenderScale
 #include "../../core/RrRectPlan.h"	// UNOFFICIAL 2026-11-07 (perf-rr) the render size's maths, shared with RR's plan
 #include "../../core/ReShadeIntegration.h"
+#include "../../core/InstallCheck.h"	// UNOFFICIAL 2026-11-23 RenderScaleGuard: surface fallback switches in Help > Install check
 
 D3DXVECTOR4 TAAEffect::RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 
@@ -51,6 +52,11 @@ namespace {
 	// row and v2 is off for the session: the upscale runs right after the world scene (v1, UpscaleWorld), which every frame reaches.
 	UInt32 DroppedInARow = 0;
 	bool V2Off = false;
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: reactive latches against corner-box / sub-rect mismatches
+	UInt32 EarlyFlushInARow = 0;
+	UInt32 V1DroppedInARow = 0;
+	bool GuardV2Off = false;
+	bool GuardNativeOnly = false;
 
 	enum UpscaleSkipReason {
 		SkipSecondWorld, SkipTaaOff, SkipGame, SkipFailed, SkipExtension, SkipResz, SkipPipBoy, SkipCamera, SkipPort, SkipScissor,
@@ -171,6 +177,86 @@ namespace {
 	}
 
 	struct CompositeVertex { float x, y, z, rhw, u, v; };
+
+	bool IsGuardTransientFrame() {
+		HWND fg = GetForegroundWindow();
+		DWORD fgPid = 0;
+		if (!fg || (GetWindowThreadProcessId(fg, &fgPid), fgPid != GetCurrentProcessId()) || IsIconic(fg))
+			return true;
+		if (!Player || !Player->parentCell) return true;
+		if (TESMain::IsMenuBackgroundReady()) return true;
+		if (!InterfaceManager || !InterfaceManager->IsActive(Menu::kMenuType_None)) return true;
+		if (TheShaderManager && TheShaderManager->GameState.OverlayIsOn) return true;
+		return false;
+	}
+}
+
+bool TAAEffect::IsDeferredV1Unsafe() {
+	return TheSettingManager &&
+		TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer") > 0 &&
+		TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") == 0;
+}
+
+void TAAEffect::ForceRenderScaleV1(const char* reason) {
+	const char* why = (reason && reason[0]) ? reason : "mid-frame conflict";
+	if (IsDeferredV1Unsafe()) {
+		Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: RenderScale v1 is incompatible with DeferredRenderer (would mismatch G-buffer size, cause ghosting, and lose upscaling performance); escalating straight to native 1.0x: %s", why);
+		ForceRenderScaleNative(reason);
+		return;
+	}
+	if (GuardV2Off) return;
+	GuardV2Off = true;
+	Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: switching RenderScale from v2 (effects before upscale) to v1 (upscale right after world scene) for this session: %s", why);
+	InstallCheck::Replace(InstallCheck::Level::Warning, "renderscale",
+		std::string("RenderScale switched to compatibility mode (v1): ") + why,
+		"RenderScale v2 conflicted with another plugin or effect; Vegas Shaders switched to v1 automatically so the picture stays full-screen. Remove conflicting post-process plugins (such as DoF-Fix.dll or VanillaPlusAO.dll) to restore v2.");
+}
+
+void TAAEffect::ForceRenderScaleNative(const char* reason) {
+	if (GuardNativeOnly) return;
+	GuardNativeOnly = true;
+	const char* why = (reason && reason[0]) ? reason : "corner-box mismatch persisted in v1";
+	Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: forcing native resolution (1.0x) for this session: %s", why);
+	InstallCheck::Replace(InstallCheck::Level::Warning, "renderscale",
+		std::string("RenderScale disabled for this session (running at native 1.0x): ") + why,
+		"A RenderScale sub-rect mismatch persisted, so Vegas Shaders switched to native resolution (DLAA / FSR Native AA). Check Help > Install check for conflicting plugins and share the log if this happens with no post-process plugins.");
+}
+
+void TAAEffect::ResetRenderScaleGuard() {
+	GuardV2Off = false;
+	GuardNativeOnly = false;
+	EarlyFlushInARow = 0;
+	V1DroppedInARow = 0;
+}
+
+bool TAAEffect::RenderScaleGuardInfo(UINT& renderW, UINT& renderH, UINT& screenW, UINT& screenH, bool& isV2, float& scale, const char*& upscalerName) {
+	TAAEffect* taa = TheShaderManager ? TheShaderManager->Effects.TAA : nullptr;
+	if (!taa || taa->FSRSettings.DebugView != 0 || !TheFrameRateManager) return false;
+	const UpscaleStruct& up = taa->Up;
+	if ((up.Deferred || up.Active) && up.RenderWidth > 0 && up.RenderHeight > 0 && up.RenderWidth < up.Width && up.RenderHeight < up.Height) {
+		renderW = up.RenderWidth;
+		renderH = up.RenderHeight;
+		screenW = up.Width;
+		screenH = up.Height;
+		isV2 = up.Deferred;
+		scale = taa->FSRSettings.RenderScale;
+		Upscaler::IUpscaler* u = Upscaler::Choose(taa->FSRSettings.Upscaler);
+		upscalerName = u ? u->Name() : "Upscaler";
+		return true;
+	}
+	if (TheFrameRateManager->FrameNumber != 0 && up.LastGuardFrame == TheFrameRateManager->FrameNumber &&
+		up.LastGuardRenderW > 0 && up.LastGuardRenderH > 0 &&
+		up.LastGuardRenderW < up.LastGuardScreenW && up.LastGuardRenderH < up.LastGuardScreenH) {
+		renderW = up.LastGuardRenderW;
+		renderH = up.LastGuardRenderH;
+		screenW = up.LastGuardScreenW;
+		screenH = up.LastGuardScreenH;
+		isV2 = up.LastGuardV2;
+		scale = up.LastGuardScale;
+		upscalerName = up.LastGuardUpscaler ? up.LastGuardUpscaler : "Upscaler";
+		return true;
+	}
+	return false;
 }
 
 bool TAAEffect::IsWorldViewport(const D3DVIEWPORT9& port) {
@@ -288,6 +374,12 @@ void TAAEffect::NoteWorldDraw(bool firstPerson) {
 	else up.DrawsOther++;
 }
 
+bool TAAEffect::RenderScaleTempSkipped() const {
+	return FSRSettings.RenderScale < 0.999f && !Up.Failed && !GuardNativeOnly &&
+		(Up.SkippedTempThisFrame || (InterfaceManager && InterfaceManager->IsPipBoyOpen()) ||
+		TheShaderManager->GameState.OverlayIsOn || !Player || !Player->parentCell);
+}
+
 void TAAEffect::UpscaleReleaseTargets() {
 	if (Up.Target) { Up.Target->Release(); Up.Target = nullptr; }
 	if (Up.DepthStencil) { Up.DepthStencil->Release(); Up.DepthStencil = nullptr; }
@@ -311,6 +403,7 @@ void TAAEffect::UpscaleSkip(int reason) {
 }
 
 bool TAAEffect::UpscaleBegin(bool firstWorld) {
+	const bool guardOn = TheSettingManager->GetSettingI("Main.Main.Misc", "RenderScaleGuard") != 0;
 	// UNOFFICIAL 2026-10-27 RenderScale v2: a second world scene while the frame waits for its upscale is drawn as always (constant
 	// 1 for it; UpscaleBeginEffects sets the scale again). A frame whose upscale never ran (no image space after it) is dropped here.
 	if (Up.Deferred) {
@@ -322,10 +415,33 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 		Up.HistoryValid = false;
 		UpscaleReleaseTargets();
 		Logger::Log("UNOFFICIAL RenderScale v2: a frame drawn small was never upscaled (no image space after it); dropped.");
-		if (++DroppedInARow >= 3 && !V2Off) {
-			V2Off = true;
-			Logger::Log("UNOFFICIAL RenderScale v2: %u frames in a row were never upscaled (each was shown small, in the top-left corner); the effects run after the upscale "
-				"for this session: the world is upscaled right after it is drawn, before the weapon and Vegas Shaders' effects.", DroppedInARow);
+		if (IsGuardTransientFrame()) {
+			DroppedInARow = 0;
+		}
+		else if (++DroppedInARow >= 3 && !GuardNativeOnly && (!V2Off || !GuardV2Off || IsDeferredV1Unsafe())) {
+			DroppedInARow = 0;
+			if (guardOn) {
+				if (!IsDeferredV1Unsafe()) V2Off = true;
+				ForceRenderScaleV1("RenderScale v2 frames were never upscaled (shown in top-left corner)");
+			}
+			else if (IsDeferredV1Unsafe()) {
+				GuardNativeOnly = true;
+				Logger::Log("UNOFFICIAL RenderScale v2: 3 frames in a row were never upscaled (each was shown small, in the top-left corner); RenderScale v1 is incompatible with DeferredRenderer, so native 1.0x is used for this session.");
+			}
+			else {
+				V2Off = true;
+				Logger::Log("UNOFFICIAL RenderScale v2: 3 frames in a row were never upscaled (each was shown small, in the top-left corner); the effects run after the upscale "
+					"for this session: the world is upscaled right after it is drawn, before the weapon and Vegas Shaders' effects.");
+			}
+		}
+	}
+	else if (firstWorld && Up.Active) {
+		if (IsGuardTransientFrame()) {
+			V1DroppedInARow = 0;
+		}
+		else if (++V1DroppedInARow >= 3 && guardOn && !GuardNativeOnly) {
+			V1DroppedInARow = 0;
+			ForceRenderScaleNative("RenderScale v1 frames were never upscaled (conflicting plugin hooked the render pipeline)");
 		}
 	}
 	RenderRect::ClearGameRescales();
@@ -337,13 +453,17 @@ bool TAAEffect::UpscaleBegin(bool firstWorld) {
 	// TAA's skip of its resolve) belongs to the first one, so Upscaled is kept.
 	if (!firstWorld) { if (FSRSettings.Enabled && FSRSettings.RenderScale < 0.999f) Up.SkippedFrames++; return false; }
 	Up.Upscaled = false;
+	Up.SkippedTempThisFrame = false;
 	if (!FSRSettings.Enabled || FSRSettings.RenderScale >= 0.999f) { Up.HistoryValid = false; return false; }
-	static bool warnedDofFix = false;
-	if (!warnedDofFix && GetModuleHandleA("DoF-Fix.dll") != nullptr) {
-		warnedDofFix = true;
-		Logger::Log("[WARN] UNOFFICIAL RenderScale: DoF-Fix.dll is loaded alongside RenderScale %.2f; DoF-Fix runs vanilla Depth of Field at 0x00870FBD before RenderScale upscales the frame, which can cause a RenderScale-sized blur box. Remove DoF-Fix.dll or use Vegas Shaders' own DepthOfField when RenderScale < 1.0.", FSRSettings.RenderScale);
-	}
-	auto skip = [this](int reason) { UpscaleSkip(reason); return false; };
+	if (GuardNativeOnly) { Up.HistoryValid = false; return false; }
+	auto skip = [this](int reason) {
+		if (FSRSettings.RenderScale < 0.999f && !Up.Failed && !GuardNativeOnly &&
+			(reason == SkipPipBoy || reason == SkipGame || reason == SkipScissor ||
+			reason == SkipPort || reason == SkipCamera || reason == SkipSecondWorld))
+			Up.SkippedTempThisFrame = true;
+		UpscaleSkip(reason);
+		return false;
+	};
 	if (!Enabled || !Effect || !ShouldRender()) return skip(SkipTaaOff);
 	if (!TheSettingManager->SettingsMain.Main.RenderEffects || !Player || !Player->parentCell || TheShaderManager->GameState.OverlayIsOn) return skip(SkipGame);
 	if (Up.Failed) return skip(SkipFailed);
@@ -564,7 +684,7 @@ bool TAAEffect::UpscaleCheckDrawn(IDirect3DDevice9* Device) {
 	return true;
 }
 
-bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
+bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth, bool hasViewModel) {
 	auto fail = [this](const char* why) {
 		Logger::Log("[ERROR] UNOFFICIAL Vegas Shaders DXVK: RenderScale: %s; the world is drawn at native resolution for the rest of this session.", why);
 		Up.Failed = true;
@@ -622,12 +742,12 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 	// the effects runs before it, and keeps camera motion only)
 	const bool objectMotion = ObjectMotion::Ready();
 	prep.cameraDelta = D3DXVECTOR4(delta.x, delta.y, delta.z, objectMotion ? 1.0f : 0.0f);
-	const bool vmMotion = !resolveDepth && ViewModelMotion::Ready();
+	const bool vmMotion = hasViewModel && ViewModelMotion::Ready();
 	const float weaponFallback = (FSRSettings.Upscaler == 1 && vmMotion) ? Upscaler::DlssWeaponMaskValue() : FSRSettings.WeaponReactive;
 	// w: v2 (the weapon is drawn by now) = its reactive value and FSRPrep.comp's weapon rule; v1 = -1, no weapon test.
-	prep.size = D3DXVECTOR4((float)renderWidth, (float)renderHeight, reset ? 1.0f : 0.0f, resolveDepth ? -1.0f : weaponFallback);
+	prep.size = D3DXVECTOR4((float)renderWidth, (float)renderHeight, reset ? 1.0f : 0.0f, hasViewModel ? weaponFallback : -1.0f);
 	const bool reactive = ReactiveMask::Ready();	// UNOFFICIAL 2026-10-30
-	prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), vmMotion ? 1.0f : 0.0f, 0.0f);
+	prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), vmMotion ? 1.0f : 0.0f, TheRenderManager->IsReversedDepth() ? 1.0f : 0.0f);
 	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(Up.PrepUniforms, &prep, sizeof(prep));
 	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 	if (!prepBuffer || !point) { fail("its constant buffer or sampler could not be made"); return false; }
@@ -662,7 +782,7 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 	in.Motion = Up.Motion.Texture;
 	// UNOFFICIAL 2026-11-01 v2: the weapon is in this picture (FSRUpPrep's weapon rule above): DLSS's bias current colour mask on it
 	// ([Shaders.TAA.DLSS] WeaponMask). v1: none (the weapon is drawn after the upscale, at full resolution).
-	in.ViewModel = (resolveDepth || vmMotion) ? nullptr : TheTextureManager->DepthTextureViewModel;
+	in.ViewModel = (!hasViewModel || vmMotion) ? nullptr : TheTextureManager->DepthTextureViewModel;
 	in.RenderWidth = renderWidth;
 	in.RenderHeight = renderHeight;
 	in.InputWidth = in.DisplayWidth = Up.Width;
@@ -698,7 +818,8 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth) {
 
 	// UNOFFICIAL 2026-11-01 (Diagnostics.h part 5): the state for the log lines, and the history watch's probe of the small picture
 	// (the top-left renderWidth x renderHeight of Up.Input) against the upscaled one
-	Diag.path = resolveDepth ? "RenderScale upscale of the world (v1: before the weapon and the effects)" : "RenderScale upscale after the pre-tonemap effects (v2)";
+	Diag.path = resolveDepth ? "RenderScale upscale of the world (v1: before the weapon and the effects)"
+		: (hasViewModel ? "RenderScale upscale after the pre-tonemap effects (v2)" : "RenderScale early mid-frame upscale (before external ImageSpace effect)");
 	Diag.upscaler = std::string(upscaler->Name()) + ": " + upscaler->DiagText();
 	Diag.reset = in.Reset;
 	Diag.sinceReset = in.Reset ? 0 : Diag.sinceReset + 1;
@@ -741,12 +862,15 @@ void TAAEffect::UpscaleWorld() {
 		// UNOFFICIAL 2026-10-27 RenderScale v2 (LowResEffects): no upscale here; the weapon and NVR's pre-tonemap effects run in the
 		// same top-left rect and UpscaleAfterEffects upscales after them (the targets stay held until then). Needs the pre-tonemap
 		// chain (RenderPreTonemapping); else, or without its resources, v1 below.
-		if (ok && FSRSettings.LowResEffects && !V2Off && TheSettingManager->SettingsMain.Main.RenderPreTonemapping && UpscaleEnsureResources()) {
+		if (ok && FSRSettings.LowResEffects && !V2Off && !GuardV2Off && TheSettingManager->SettingsMain.Main.RenderPreTonemapping && UpscaleEnsureResources()) {
+			// UNOFFICIAL 2026-11-23 RenderScaleGuard: restore full-screen viewport before mid-frame passes between world and first person
+			const D3DVIEWPORT9 full = { 0, 0, Up.Width, Up.Height, 0.0f, 1.0f };
+			device->SetViewport(&full);
 			Up.Active = false;
 			Up.Deferred = true;
 			return;
 		}
-		if (ok) ok = UpscaleRun(device);
+		if (ok) ok = UpscaleRun(device, true, false);
 		// A frame that failed after the world was drawn small: the low-resolution picture stretched (bilinear) and the depth upsampled,
 		// so the frame is whole; the next frames are at native resolution (Failed).
 		if (!ok && !Up.Whole && Up.CompositePS && Up.CompositeStates && Up.Input.Surface) {
@@ -769,11 +893,85 @@ void TAAEffect::UpscaleBeginEffects() {
 	RenderRect::LastRectFrame = TheFrameRateManager->FrameNumber;
 }
 
+// UNOFFICIAL 2026-11-23 RenderScaleGuard: mid-frame ImageSpaceManager::RenderEffect touched Up.Target while RenderScale v2 was pending
+// (e.g., DoF-Fix.dll between world and first person). Flush the upscale early and resolve upsampled depth so the mid-frame pass sees
+// a full-resolution frame cleanly, and switch to v1 if triggered by a foreign module, in-place target overwrite, or 3 frames in a row.
+void TAAEffect::UpscaleDeferredEarly(IDirect3DSurface9* GameSurface, bool hasViewModel, UInt32 effectId, const char* callerModule, bool latchV2Off) {
+	if (!Up.Deferred) return;
+	Up.Deferred = false;
+	DroppedInARow = 0;
+	RenderRect::End();
+	IDirect3DDevice9* device = TheRenderManager->device;
+	RenderRect::RescaleRegistered(device);
+	RenderRect::RescaleGameSurfaces(device);
+	if (GameSurface && GameSurface != Up.Target) {
+		D3DSURFACE_DESC desc = {};
+		if (SUCCEEDED(GameSurface->GetDesc(&desc)) && desc.Width == Up.Width && desc.Height == Up.Height && desc.MultiSampleType == D3DMULTISAMPLE_NONE) {
+			if (Up.Target) Up.Target->Release();
+			Up.Target = GameSurface;
+			Up.Target->AddRef();
+			Up.TargetFormat = desc.Format;
+			Up.Hdr = desc.Format == D3DFMT_A16B16G16R16F || desc.Format == D3DFMT_A32B32G32R32F;
+		}
+	}
+	bool ok = false;
+	{
+		static GpuTimer timer("FSR upscale (RenderScale early flush)");
+		GpuProfileScope gpu(timer, device);
+		ok = UpscaleRun(device, false, hasViewModel);
+		Up.AfterEffects = false;
+		if (!ok && Up.CompositePS && Up.CompositeStates && Up.Input.Surface) {
+			const RECT region = { 0, 0, (LONG)Up.RenderWidth, (LONG)Up.RenderHeight };
+			if (SUCCEEDED(device->StretchRect(Up.Target, &region, Up.Input.Surface, &region, D3DTEXF_NONE)) &&
+				UpscaleComposite(device, nullptr)) {
+				Up.Upscaled = true;
+			}
+		}
+		if (Up.DepthStencil && Up.CompositePS && Up.CompositeStates) {
+			IDirect3DSurface9* oldDepth = nullptr;
+			if (FAILED(device->GetDepthStencilSurface(&oldDepth))) oldDepth = nullptr;
+			device->SetDepthStencilSurface(Up.DepthStencil);
+			TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTexture);
+			if (hasViewModel && UpscaleComposite(device, nullptr, TheTextureManager->DepthTextureViewModel, false, ViewModelMotion::JitteredThisFrame())) {
+				device->SetDepthStencilSurface(Up.DepthStencil);
+				TheRenderManager->ResolveDepthBuffer(TheTextureManager->DepthTextureViewModel);
+			}
+			device->SetDepthStencilSurface(oldDepth);
+			if (oldDepth) oldDepth->Release();
+		}
+	}
+	RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	const D3DVIEWPORT9 full = { 0, 0, Up.Width, Up.Height, 0.0f, 1.0f };
+	device->SetViewport(&full);
+	UpscaleFinish(ok, false);
+
+	static bool loggedEarly = false;
+	const char* modName = (callerModule && callerModule[0]) ? callerModule : "unknown";
+	if (!loggedEarly) {
+		loggedEarly = true;
+		Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: mid-frame ImageSpaceManager::RenderEffect (id=%u, caller=%s, hasViewModel=%d) touched the world target while RenderScale v2 was pending; flushed upscale early.",
+			effectId, modName, hasViewModel ? 1 : 0);
+	}
+	if (IsGuardTransientFrame()) {
+		EarlyFlushInARow = 0;
+	}
+	else {
+		EarlyFlushInARow++;
+		if (TheSettingManager && TheSettingManager->GetSettingI("Main.Main.Misc", "RenderScaleGuard") != 0 &&
+			(latchV2Off || EarlyFlushInARow >= 5)) {
+			char why[256];
+			sprintf_s(why, "mid-frame ImageSpaceManager::RenderEffect from %s (effect id %u)", modName, effectId);
+			ForceRenderScaleV1(why);
+		}
+	}
+}
+
 // UNOFFICIAL 2026-10-27 RenderScale v2: the frame's upscale after NVR's pre-tonemap effects (or, if they did not run, after the weapon).
 void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 	if (!Up.Deferred) return;
 	Up.Deferred = false;
 	DroppedInARow = 0;	// UNOFFICIAL 2026-10-30: this frame's upscale runs
+	EarlyFlushInARow = 0;
 	RenderRect::End();
 	IDirect3DDevice9* device = TheRenderManager->device;
 	RenderRect::RescaleRegistered(device);	// Bloom's top level, read by the game's tonemap and the rain at full size
@@ -808,7 +1006,7 @@ void TAAEffect::UpscaleAfterEffects(IDirect3DSurface9* GameSurface) {
 				Up.Hdr = desc.Format == D3DFMT_A16B16G16R16F || desc.Format == D3DFMT_A32B32G32R32F;
 			}
 		}
-		ok = UpscaleRun(device, false);
+		ok = UpscaleRun(device, false, true);
 		Up.AfterEffects = true;	// UNOFFICIAL 2026-11-01: the effects already ran in the small frame (TAA's SmoothEffects skips)
 		if (!ok && Up.CompositePS && Up.CompositeStates && Up.Input.Surface) {
 			const RECT region = { 0, 0, (LONG)Up.RenderWidth, (LONG)Up.RenderHeight };
@@ -852,6 +1050,7 @@ void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3
 	DroppedInARow = 0;	// (this frame's upscale ran: RR's)
 	RenderRect::End();
 	RenderRect::RescaleRegistered(Device);
+	RenderRect::RescaleGameSurfaces(Device);
 	const bool reshade = ReShadeIntegration::KeepDepthBound();
 	const bool needNormals = TheShaderManager->PostTonemapNeedsNormals();
 	const bool needVmDirect = TheShaderManager->PostTonemapNeedsViewModelDepth();
@@ -901,7 +1100,19 @@ void TAAEffect::UpscaleAfterRayReconstruction(IDirect3DDevice9* Device, IDirect3
 
 void TAAEffect::UpscaleFinish(bool ok, bool v2) {
 	Up.Active = false;
+	V1DroppedInARow = 0;
 	RenderScaleConstant = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	if (!Up.Whole && Up.RenderWidth > 0 && Up.RenderHeight > 0 && Up.RenderWidth < Up.Width && Up.RenderHeight < Up.Height) {
+		Upscaler::IUpscaler* u = Upscaler::Choose(FSRSettings.Upscaler);
+		Up.LastGuardFrame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
+		Up.LastGuardRenderW = Up.RenderWidth;
+		Up.LastGuardRenderH = Up.RenderHeight;
+		Up.LastGuardScreenW = Up.Width;
+		Up.LastGuardScreenH = Up.Height;
+		Up.LastGuardV2 = v2;
+		Up.LastGuardScale = FSRSettings.RenderScale;
+		Up.LastGuardUpscaler = u ? u->Name() : "Upscaler";
+	}
 	UpscaleReleaseTargets();
 	// UNOFFICIAL 2026-10-30 (top-left picture report): [Shaders.TAA.FSR] DebugView is a test view of the upscaled frame for FSR and DLSS alike,
 	// and 1 is exactly a small picture in the top-left corner: said in the log whenever it changes.

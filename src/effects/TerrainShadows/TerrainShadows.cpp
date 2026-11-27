@@ -392,12 +392,13 @@ void TerrainShadowMap::Update(IDirect3DDevice9* Device, const D3DXVECTOR3& SunDi
 		Request.UseHeightMapFile = Settings.UseHeightMapFile;
 		// The load order and the plugin that defines the worldspace, copied here: the worker never touches game data.
 		if (DataHandler) {
-			const ModList& Mods = DataHandler->modList;
-			const UInt32 Count = (std::min)(Mods.loadedModCount, (UInt32)0xFF);
-			for (UInt32 i = 0; i < Count; i++)
-				if (Mods.loadedMods[i]) Request.Plugins.emplace_back(Mods.loadedMods[i]->name);
+			ModInfo* const* Table = nullptr;
+			const UInt32 Count = DataHandler->modList.SafeLoadedMods(Table);
+			char ModName[0x105] = {};
+			for (UInt32 i = 0; Table && i < Count; i++)
+				if (ModList::SafeCopyName(Table[i], ModName, sizeof(ModName))) Request.Plugins.emplace_back(ModName);
 			const UInt32 Index = World->refID >> 24;
-			if (Index < Count && Mods.loadedMods[Index]) Request.DefiningFile = Mods.loadedMods[Index]->name;
+			if (Table && Index < Count && ModList::SafeCopyName(Table[Index], ModName, sizeof(ModName))) Request.DefiningFile = ModName;
 		}
 		if (Map && Map->WorldSpace != World) Map.reset();   // free the old worldspace's heights before reading the next
 		try {

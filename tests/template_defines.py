@@ -196,6 +196,9 @@ def build(settings, template_pairs, overrides, opt):
     if s.i("Main.Main.Performance", "NvrDxvkDisplacement"): d.append("NVR_DISPLACE_DEPTH", "1")
     if opt.displace_objects: d.append("NVR_DISPLACE_OBJECTS", "1")
     if getattr(opt, "rt_sun", False): d.append("RT_SUN_FORWARD", "1")	# (RtSunShadows::ForwardCompiled: RT sun shadows on at startup, the fork)
+    # 2026-11-27 (upstream 1.1.5 merge) the forward clearcoat / pearlescence, compiled in only when above 0 at startup
+    if s.f("Shaders.PBR.Metal", "Clearcoat") > 0.0: d.append("METAL_CLEARCOAT_ON", "1")
+    if s.f("Shaders.PBR.Metal", "Pearlescence") > 0.0: d.append("METAL_PEARL_ON", "1")
     return d
 
 def lamp_falloff_interior_define(s):

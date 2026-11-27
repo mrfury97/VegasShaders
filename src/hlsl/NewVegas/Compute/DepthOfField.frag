@@ -42,8 +42,7 @@ vec3 toWorld(vec2 tex) {
 float invlerps(float a, float b, float t) { return saturate((t - a) / (b - a)); }
 
 void main() {
-    // static const bool DistantBlur = bool(TESR_DepthOfFieldBlur.x): a switch (0 or 1), not the strength
-    const float DistantBlur = pc.blur.x != 0.0 ? 1.0 : 0.0;
+    const float DistantStrength = max(pc.blur.x, 0.0);
     const float DistantStart = pc.blur.y;
     const float DistantEnd = pc.blur.z;
     const float BaseBlurRadius = pc.blur.w;
@@ -51,7 +50,8 @@ void main() {
     float depth = readDepth(uv);
     vec3 cameraVector = toWorld(uv) * depth;
     float worldHeight = pc.cameraPosition.z + cameraVector.z;
-    float blur = saturate(invlerps(DistantStart, DistantEnd, depth) * DistantBlur * invlerps(100000.0, 5000.0, worldHeight));
+    float distRamp = invlerps(DistantStart, DistantEnd, depth) * invlerps(100000.0, 5000.0, worldHeight);
+    float blur = saturate(distRamp * min(DistantStrength, 1.0));
 
     // Reads the current image (TESR_RenderedBuffer), as the D3D9 pass does.
     vec4 center = textureLod(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0);
@@ -60,7 +60,7 @@ void main() {
         return;
     }
 
-    vec2 radius = pc.reciprocalResolution.xy * BaseBlurRadius * (1.0 + blur);
+    vec2 radius = pc.reciprocalResolution.xy * BaseBlurRadius * max(DistantStrength, 1.0) * (1.0 + blur);
     const vec2 corners[4] = vec2[4](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(1.0, 1.0));
     vec4 blurred = vec4(0.0);
     float weights = 0.0;

@@ -262,14 +262,14 @@ namespace ViewModelMotion {
 		if (SceneTarget) { SceneTarget->Release(); SceneTarget = nullptr; }
 		if (ProjTarget) { ProjTarget->Release(); ProjTarget = nullptr; }
 
-		if (HooksInstalled && d && TheRenderManager && Player && Player->IsFirstPerson() &&
+		if (HooksInstalled && d && TheRenderManager && Player && Player->IsDrawnFirstPerson() &&
 			!InterfaceManager->IsPipBoyOpen() && !TheShaderManager->GameState.PipBoyIsOn && !TheShaderManager->GameState.OverlayIsOn) {
 			SavedWorldInvProj = TheRenderManager->InvProjMatrix;
 			if (SUCCEEDED(d->GetRenderTarget(0, &ProjTarget)) && ProjTarget) TrackProj = true;
 		}
 
 		if (Failed || !HooksInstalled || !d || !wantCapture || nativeLayer) return;
-		if (!Player || !Player->IsFirstPerson() || !Player->firstPersonNiNode) return;
+		if (!Player || !Player->IsDrawnFirstPerson() || !Player->firstPersonNiNode) return;
 		if (InterfaceManager->IsPipBoyOpen() || TheShaderManager->GameState.PipBoyIsOn || TheShaderManager->GameState.OverlayIsOn) return;
 
 		IDirect3DSurface9* rt = nullptr;

@@ -417,7 +417,7 @@ technique Copy {
 #endif
 		if (!InterfaceManager) return false;
 		if (InterfaceManager->IsPipBoyOpen()) return true;
-		if (InterfaceManager->currentMode != 2) return false;	// 1 = GameMode, 2 = MenuMode
+		if (InterfaceManager->currentMode == 1) return false;	// InterfaceManager::IsInMenuMode (0x7023A0): currentMode != 1 (1 = GameMode)
 		const bool vats = InterfaceManager->menuStack[0] == Menu::kMenuType_VATS;
 		return !vats || TheSettingManager->SettingsMain.Main.ReShadeMenuGuardVATS;
 	}

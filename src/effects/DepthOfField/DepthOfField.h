@@ -6,7 +6,7 @@ public:
 	DepthOfFieldEffect() : EffectRecord("DepthOfField") {};
 
 	struct ValuesStruct {
-		float DistantBlur, DistantBlurStartRange, DistantBlurEndRange, BaseBlurRadius;
+		float DistantBlur, DistantBlurStrength = 1.0f, DistantBlurStartRange, DistantBlurEndRange, BaseBlurRadius;
 		float focusDistance, Radius, DiameterRange, NearBlurCutOff;
 		int Mode;
 		bool Enabled;

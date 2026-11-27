@@ -28,6 +28,7 @@
 #include "DeferredSun.h"
 #include "DeferredLamps.h"
 #include "TemporalBackbone.h"	// (SSS v2: the disc's turn per frame, SharedNoise)
+#include "DistantLandTerrain.h"	// UNOFFICIAL Phase 1 Distant Land Geo-Clipmap terrain
 
 namespace DeferredSkin {
 	inline const char* kSection = "Main.Main.Quality";
@@ -54,13 +55,15 @@ namespace DeferredSkin {
 	inline void SssLoad();	// (below)
 	inline bool IsHandle(IDirect3DPixelShader9* handle) { return handle && Handles.count(handle) != 0; }
 
-	// The full and many-lamp skin pixel shaders (Skin.h SkinTemplates: not ONLY_LIGHT, not DIFFUSE).
+	// The full, many-lamp and (2026-11-25 fd-complete batch 4) light-only AD skin pixel shaders (Skin.h SkinTemplates: not DIFFUSE, the added
+	// lamp passes, which a deferred skin's object skips). [Main.Main.Quality] DeferredSkinAD (restart, default true) false: the AD family forward.
 	inline bool Eligible(const char* name, const ShaderTemplate& tmpl) {
 		if (!name || !tmpl.Name || strcmp(tmpl.Name, "SkinTemplate")) return false;
 		const size_t length = strlen(name);
 		if (length < 4 || strcmp(name + length - 4, ".pso")) return false;
 		for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++)
-			if (!strcmp(tmpl.Defines[d].Name, "ONLY_LIGHT") || !strcmp(tmpl.Defines[d].Name, "DIFFUSE")) return false;
+			if (!strcmp(tmpl.Defines[d].Name, "DIFFUSE") ||
+				(!strcmp(tmpl.Defines[d].Name, "ONLY_LIGHT") && !TheSettingManager->GetSettingI(kSection, "DeferredSkinAD"))) return false;
 		return true;
 	}
 
@@ -298,9 +301,9 @@ namespace DeferredSkin {
 			"UNOFFICIAL DeferredSkinSSS: the v2 passes loaded (Shaders\\DeferredSkinSSS.hlsl: the Burley profile, 24 taps)");
 	}
 
-	// v2, Kernel 0: the Burley disc over the deferred skin, in linear light, into the frame.
-	inline void BurleyApply(IDirect3DDevice9* d) {
-		if (SssFailed || !SpecThisFrame || !LinearScene::Linear || !CapturedNormals::Texture || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture) return;
+	// v2, Kernel 0: the Burley disc over the deferred skin (and optionally non-skin SSS solids 11..14), in linear light, into the frame.
+	inline void BurleyApply(IDirect3DDevice9* d, bool includeSolids = false) {
+		if (SssFailed || (!SpecThisFrame && !includeSolids) || !LinearScene::Linear || !CapturedNormals::Texture || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture) return;
 		if (!SssPrep || !SssBlur) return;
 		IDirect3DSurface9* target = nullptr;
 		d->GetRenderTarget(0, &target);
@@ -319,6 +322,7 @@ namespace DeferredSkin {
 		for (float& v : dmm) v = (std::max)(0.05f, v) * radius / 14.2857f;
 		float c[3 + kSssTaps][4] = {};
 		c[2 + kSssTaps][0] = (float)TheSettingManager->GetSettingI("Shaders.Skin.SSS", "DebugView");	// (2026-11-16) 1 the prep's light, 2 covered skin red
+		c[2 + kSssTaps][1] = includeSolids ? 1.0f : 0.0f;
 		SssTaps(dmm, &c[2]);
 		const float tanY = fabsf(TheRenderManager->InvProjMatrix._22);
 		const bool turn = TemporalBackbone::Shared() ? TemporalBackbone::TemporalResolve() : false;
@@ -330,10 +334,11 @@ namespace DeferredSkin {
 		c[1][3] = linearZ ? 1.0f : 0.0f;
 		d->SetPixelShaderConstantF(0, &c[0][0], 3 + kSssTaps);
 		ClearAlone(d, LightSurf);
-		IDirect3DBaseTexture9* prepTex[6] = { FrameCopyTex, CapturedNormals::AlbedoTexture, SpecTex, CapturedNormals::Texture, CapturedNormals::MaterialTexture, linearZ ? DeferredDepth::LinearTexture : nullptr };
+		IDirect3DBaseTexture9* specOrDummy = (SpecThisFrame && SpecTex) ? SpecTex : FrameCopyTex;
+		IDirect3DBaseTexture9* prepTex[6] = { FrameCopyTex, CapturedNormals::AlbedoTexture, specOrDummy, CapturedNormals::Texture, CapturedNormals::MaterialTexture, linearZ ? DeferredDepth::LinearTexture : FrameCopyTex };
 		Quad(d, LightSurf, SssPrep->ShaderHandle, prepTex, 6);
-		IDirect3DBaseTexture9* blurTex[4] = { LightTex, FrameCopyTex, CapturedNormals::AlbedoTexture, SpecTex };
-		Quad(d, target, SssBlur->ShaderHandle, blurTex, 4);
+		IDirect3DBaseTexture9* blurTex[5] = { LightTex, FrameCopyTex, CapturedNormals::AlbedoTexture, specOrDummy, CapturedNormals::MaterialTexture };
+		Quad(d, target, SssBlur->ShaderHandle, blurTex, 5);
 		d->SetPixelShaderConstantF(0, &savedC[0][0], 3 + kSssTaps);
 		target->Release();
 		StatSss++;

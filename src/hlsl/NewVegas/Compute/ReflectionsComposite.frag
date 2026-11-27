@@ -13,6 +13,70 @@
 
 float pow5(float x) { float x2 = x * x; return x2 * x2 * x; }
 
+vec3 MultiScatterMetalBoost(vec3 f0, float r, float NdotV, float metal) {
+    if (metal <= 0.001) return vec3(1.0);
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 mixed = r * c0 + c1;
+    float a004 = min(mixed.x * mixed.x, exp2(-9.28 * NdotV)) * mixed.x + mixed.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + mixed.zw;
+    float ess = clamp(ab.x + ab.y, 0.12, 1.0);
+    vec3 comp = 1.0 + f0 * (1.0 / ess - 1.0);
+    return mix(vec3(1.0), min(comp, vec3(2.2)), metal);
+}
+
+vec3 HueShift(vec3 c, float angle) {
+    const vec3 k = vec3(0.57735027);
+    return c * cos(angle) + cross(k, c) * sin(angle) + k * dot(k, c) * (1.0 - cos(angle));
+}
+
+vec3 ApplyPearlescence(vec3 col, float NdotV, float pearl, float metal) {
+    if (pearl <= 0.001 || metal <= 0.05) return col;
+    vec3 c = clamp(col, vec3(0.0), vec3(1.0));
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
+    float satMask = smoothstep(0.10, 0.40, sat);
+    float omv = clamp(1.0 - NdotV, 0.0, 1.0);
+    float graze = pow(omv, 1.15);
+    vec3 hueShifted = HueShift(c, -0.95 * pearl * (0.20 + 0.80 * graze));
+    vec3 filmWave = 0.50 + 0.50 * cos(omv * 5.2 + vec3(0.0, 2.094395, 4.18879));
+    float lum = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.14);
+    vec3 thinFilm = mix(c, lum * (0.35 + 1.15 * filmWave), clamp(0.22 + 0.78 * graze, 0.0, 1.0));
+    vec3 pearlCol = mix(thinFilm, hueShifted, satMask);
+    return mix(col, clamp(pearlCol, vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal));
+}
+
+vec3 PearlF90Tint(vec3 metalCol, float pearl, float metal) {
+    if (pearl <= 0.001 || metal <= 0.05) return vec3(1.0);
+    float pTop = max(metalCol.r, max(metalCol.g, metalCol.b));
+    return mix(vec3(1.0), clamp(metalCol / max(pTop, 0.25), vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal) * 0.75);
+}
+
+vec3 CandyCoatAbsorption(vec3 metalCol, float NdotV, float coatAmt, float metal) {
+    if (coatAmt <= 0.001 || metal <= 0.05) return vec3(1.0);
+    vec3 c = clamp(metalCol, vec3(0.0), vec3(1.0));
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
+    float satMask = smoothstep(0.14, 0.45, sat);
+    vec3 tCol = mix(vec3(1.0), c / max(fMax, 1.0e-4), satMask);
+    float pathLen = (1.0 / max(NdotV, 0.28) - 1.0) * 0.55;
+    float metalMask = smoothstep(0.05, 0.40, metal);
+    return exp(-(vec3(1.0) - tCol) * (1.85 * clamp(coatAmt, 0.0, 1.0) * satMask * metalMask * pathLen));
+}
+
+vec3 EnvironmentFresnelF0Tinted(float roughness, float NdotV, vec3 F0, vec3 f90Scale) {
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 r = roughness * c0 + c1;
+    float a004 = min(r.x * r.x, exp2(-9.28 * NdotV)) * r.x + r.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + r.zw;
+    float f90 = clamp(50.0 * dot(F0, vec3(0.3333)), 0.0, 1.0) * clamp(1.0 - roughness, 0.0, 1.0);
+    vec3 F90 = max(vec3(f90) * f90Scale, F0);
+    return F0 * ab.x + F90 * ab.y;
+}
+
 // Decode GBufferV2's fd-sunvis dielectric specular F0 (Includes/DeferredPixel.hlsl FDSunVisDecode: 0..0.08 in 0.01 steps, 0.04 default).
 float DecodeGBufferF0(vec2 ruv) {
     float f0 = 0.04;
@@ -224,15 +288,22 @@ void main() {
             if (albedoKnown) {
                 vec3 pCol = sqrt(clamp(albedoSample.rgb, vec3(0.0), vec3(1.0)));
                 float pMax = max(pCol.r, max(pCol.g, pCol.b));
+                float pMin = min(pCol.r, min(pCol.g, pCol.b));
+                float sat = (pMax - pMin) / max(pMax, 1.0e-4);
                 vec3 rawHue = pMax > 1.0e-4 ? pCol / pMax : vec3(1.0);
                 vec3 hue = mix(vec3(1.0), rawHue, smoothstep(0.08, 0.35, pMax));
-                weaponTint = hue * mix(0.22, 0.85, pMax);
+                float brightMetal = max(smoothstep(0.22, 0.72, pMax), smoothstep(0.20, 0.50, sat) * smoothstep(0.12, 0.38, pMax));
+                weaponTint = hue * (pMax * mix(0.18, 0.90, brightMetal));
             } else {
                 vec3 litColour = linearize(color.rgb);
                 float top = max(litColour.r, max(litColour.g, litColour.b));
+                float bot = min(litColour.r, min(litColour.g, litColour.b));
                 vec3 rawHue = top > 1.0e-4 ? saturate(litColour / top) : vec3(1.0);
                 vec3 hue = mix(vec3(1.0), rawHue, smoothstep(0.03, 0.20, top));
-                weaponTint = hue * mix(0.25, 0.80, sqrt(saturate(top)));
+                float pMax = sqrt(saturate(top));
+                float sat = (top - bot) / max(top, 1.0e-4);
+                float brightMetal = max(smoothstep(0.22, 0.72, pMax), smoothstep(0.20, 0.50, sat) * smoothstep(0.12, 0.38, pMax));
+                weaponTint = hue * (pMax * mix(0.18, 0.90, brightMetal));
             }
             metalF0 = ReflMetalF0(weaponTint, roughness);
         } else if (albedoKnown) {
@@ -245,8 +316,17 @@ void main() {
             vec3 tint = saturate(litColour / max(max(litColour.r, max(litColour.g, litColour.b)), 1.0e-4));
             metalF0 = ReflMetalF0(tint, roughness);
         }
+        float pearlAmt = clamp(cb.sunDirection.w, 0.0, 1.0);
+        metalF0 = ApplyPearlescence(metalF0, NdotV, pearlAmt, SurfaceMetal);
         f0 = mix(vec3(dielectricF0), metalF0, SurfaceMetal);
-        share = saturate(amount * EnvironmentFresnelF0(fresnelRough, NdotV, f0)) * saturate(reflection.a);
+        // (2026-11-27 upstream 1.1.5 merge: upstream's tinted, multi-scattered base and clear coat, with our fresnelRough, the damp
+        // film's smoother Fresnel, in place of the plain roughness; the multi-scatter boost keeps the metal's own roughness)
+        vec3 baseFres = EnvironmentFresnelF0Tinted(fresnelRough, NdotV, f0, PearlF90Tint(metalF0, pearlAmt, SurfaceMetal)) * MultiScatterMetalBoost(metalF0, roughness, NdotV, SurfaceMetal);
+        float clearcoatAmt = clamp(cb.mirrorLamp.w, 0.0, 1.0) * smoothstep(0.05, 0.45, SurfaceMetal);
+        if (clearcoatAmt > 0.001) baseFres *= CandyCoatAbsorption(metalF0, NdotV, clearcoatAmt, SurfaceMetal);
+        vec3 coatShare = clearcoatAmt > 0.001 ? saturate(amount * EnvironmentFresnelF0(0.06, NdotV, vec3(0.04)) * clearcoatAmt) * saturate(reflection.a) : vec3(0.0);
+        vec3 baseShare = saturate(amount * baseFres) * saturate(reflection.a);
+        share = saturate(baseShare * (1.0 - coatShare) + coatShare);
     }
     else {
         share = saturate(amount * EnvironmentFresnelF0(fresnelRough, NdotV, f0)) * saturate(reflection.a);
@@ -255,9 +335,10 @@ void main() {
     share = max(share, vec3(MirrorPuddleShare * saturate(PuddleMirror) * SurfaceStanding * saturate(amount) * saturate(reflection.a)));
     vec3 reflected = Untame(reflection.rgb / max(reflection.a, 1.0e-4));
     if (any(isnan(reflected)) || any(isinf(reflected)) || isnan(reflection.a)) { o_color = color; return; }
-    // REFL_SPECOCC_ON: SpecularOcclusion (world floor attenuation + mild roughness-aware occlusion on shadowed weapons).
+    // REFL_SPECOCC_ON: SpecularOcclusion (world floor attenuation + roughness-aware occlusion on shadowed weapons).
     // (2026-11-26 puddle mirror) water on the surface (SurfaceWetShare: wet film, puddles) is not occluded: its darkness is the water darkening the ground
-    float specOcc = pixelWeapon ? cb.data4.w * 0.4 * smoothstep(0.15, 0.65, roughness) : cb.data4.w * (1.0 - SurfaceMirror) * (1.0 - SurfaceWetShare);
+    // (2026-11-27 upstream 1.1.5 merge: upstream's weapon term 0.75 x smoothstep(0.08, 0.45), our wet share on the world)
+    float specOcc = pixelWeapon ? cb.data4.w * 0.75 * smoothstep(0.08, 0.45, roughness) : cb.data4.w * (1.0 - SurfaceMirror) * (1.0 - SurfaceWetShare);
     if (SpecOccOn && specOcc > 0.0) {
         float surfaceLight = luma(linearize(color.rgb));
         float reflectedLight = max(luma(reflected) * cb.layoutData.z, 1.0e-6);
@@ -289,7 +370,8 @@ void main() {
     float nonMetal = clamp(1.0 - SurfaceMetal, 0.0, 1.0);
     vec3 diffuseCeiling = albedoKnown ? max(albedoSample.rgb * 2.0, vec3(0.25)) : vec3(1.0);
     vec3 bodyToDim = mix(min(lin, diffuseCeiling), lin, SurfaceMirror);
-    vec3 attenShare = share * mix(nonMetal, 1.0, SurfaceMirror) * (1.0 - reflectAdd);
+    float bodyFactor = pixelWeapon ? max(nonMetal, SurfaceMetal * 0.85) : mix(nonMetal, 1.0, SurfaceMirror);
+    vec3 attenShare = share * bodyFactor * (1.0 - reflectAdd);
     lin = (lin - bodyToDim * attenShare) + reflected * share;
     if (SurfaceMirror > 0.0) lin += FlashlightHighlight(surfPos, N, roughness, f0) * attenShare;
     o_color = vec4(delinearize(lin), color.a);

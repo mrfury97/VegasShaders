@@ -126,6 +126,15 @@ void DustLighting(vec3 dir, out vec3 dustAmbient, out vec3 dustSun) {
         * TESR_SandstormColor.w;
 }
 
+// Isotropic lighting floor for the emissive test so looking away from the sun (low Henyey-Greenstein sunPhase)
+// does not collapse the threshold and let sunlit surfaces or sky pierce the storm.
+vec3 EmissiveDustRef(vec3 dustLight) {
+    float daytime = smoothstep(0.1, 0.6, TESR_SunAmount.x);
+    vec3 ambient = (linearize(TESR_FogColor.rgb) * 0.6 + linearize(TESR_SunAmbient.rgb) * 0.4) * TESR_PBRData.w;
+    vec3 sunLight = linearize(TESR_SunColor.rgb) * TESR_PBRData.z * daytime;
+    return max(dustLight, ambient + sunLight);
+}
+
 // The march's reach and the grid's slices (the .fx's GridEnd, GridDistance, GridUV)
 float GridEnd() { return TESR_SandstormData.z * 1.5; }
 float GridDistance(float s) { s /= 64.0; return GridEnd() * s * s; }

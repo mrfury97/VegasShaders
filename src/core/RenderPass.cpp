@@ -5,10 +5,33 @@
 #include "OrthoProbe.h"	// UNOFFICIAL 2026-10-17 test tools: ortho map caster dump
 #include "SunShadowStats.h"	// UNOFFICIAL 2026-10-21 test tools: where the sun cascades' CPU time goes
 
+// Sets the glow map of a reflection-cube caster at s1 when BindGlow is active. Data.z tells ReflCube.pso whether one was bound.
+// Skips Hair/FaceGen/skin properties whose ppTextures[2] is a tint/layer mask rather than an emissive glow map.
+void RenderPass::BindGlowOf(NiGeometry* caster) {
+	if (!BindGlow) return;
+	ShadowsExteriorEffect::ShadowStruct& shadow = TheShaderManager->Effects.ShadowsExteriors->Constants;
+	shadow.Data.z = 0.0f;
+	BSShaderProperty* shade = (BSShaderProperty*)caster->GetProperty(NiProperty::PropertyType::kType_Shade);
+	if (!shade || !shade->IsLightingProperty()) return;
+	if ((shade->ulFlags[0] & (BSShaderProperty::Hair | BSShaderProperty::FaceGen)) != 0 || shade->uiShaderIndex == 0xE) return;
+	NiSourceTexture** slots = ((BSShaderPPLightingProperty*)shade)->ppTextures[2];
+	NiTexture* tex = slots ? *slots : nullptr;
+	if (!tex || !tex->rendererData || !tex->rendererData->dTexture) return;
+	NiDX9RenderState* state = TheRenderManager->renderState;
+	state->SetTexture(1, tex->rendererData->dTexture);
+	state->SetSamplerState(1, D3DSAMP_ADDRESSU, D3DTADDRESS_WRAP, false);
+	state->SetSamplerState(1, D3DSAMP_ADDRESSV, D3DTADDRESS_WRAP, false);
+	state->SetSamplerState(1, D3DSAMP_MAGFILTER, D3DTEXF_LINEAR, false);
+	state->SetSamplerState(1, D3DSAMP_MINFILTER, D3DTEXF_LINEAR, false);
+	state->SetSamplerState(1, D3DSAMP_MIPFILTER, D3DTEXF_LINEAR, false);
+	shadow.Data.z = 1.0f;
+}
+
 // Sets the diffuse texture of a shadow caster at s0 for the light grid's colour pass. Data.w tells the shader whether one was bound.
 void RenderPass::BindDiffuseOf(NiGeometry* caster) {
 	ShadowsExteriorEffect::ShadowStruct& shadow = TheShaderManager->Effects.ShadowsExteriors->Constants;
 	shadow.Data.w = 0.0f;
+	BindGlowOf(caster);
 	if (!BindDiffuse) return;
 	BSShaderProperty* shade = (BSShaderProperty*)caster->GetProperty(NiProperty::PropertyType::kType_Shade);
 	if (!shade || !shade->IsLightingProperty()) return;
@@ -357,7 +380,11 @@ void AlphaShadowRenderPass::UpdateConstants(NiGeometry* caster) {
 	ShadowsExteriorEffect::ShadowStruct& shadow = TheShaderManager->Effects.ShadowsExteriors->Constants;
 	shadow.Data.x = 0.0f; // Type of geo (0 normal, 1 actors (skinned), 2 speedtree leaves)
 	shadow.Data.y = 0.0f; // Alpha Control
+	// (2026-11-24 review) The colour passes (light grid, reflection world cube) read "a texture is bound" as Data.y or Data.w; this pass
+	// reports its texture with .y, so .w must not keep the previous caster's 1 (a caster without one took that caster's texture at s0).
+	if (BindDiffuse) shadow.Data.w = 0.0f;
 	UpdateShadowWorld(caster);
+	BindGlowOf(caster);
 
 	BSShaderProperty* shade = (BSShaderProperty*)caster->GetProperty(NiProperty::PropertyType::kType_Shade);
 	NiTexture* tex = *((BSShaderPPLightingProperty*)shade)->ppTextures[0];
@@ -533,6 +560,7 @@ void SpeedTreeShadowRenderPass::UpdateConstants(NiGeometry* caster) {
 
 	shadow.Data.x = 2.0f; // Type of geo (0 normal, 1 actors (skinned), 2 speedtree leaves)
 	shadow.Data.y = 0.0f; // Alpha control
+	if (BindGlow) shadow.Data.z = 0.0f;
 	LoadCasterWorld(caster);
 
 	// Bind constant values for leaf transformation

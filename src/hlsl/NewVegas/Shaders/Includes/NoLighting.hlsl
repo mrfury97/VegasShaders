@@ -51,7 +51,7 @@ struct VS_OUTPUT {
 #endif
     float4 shadowWorldPos : TEXCOORD1; // 0: not lit (NOLIGHTTEXVC.pso lights only behind the sentinel of NOLIGHT006/016/017)
     float4 vertexLight : TEXCOORD2;
-    float2 depthSize : TEXCOORD3;      // x: view depth (clip w), y: soft size (0: not soft)
+    float4 depthSize : TEXCOORD3;      // x: view depth (clip w), y: soft size (0: not soft), zw: dummy quad UV
 };
 
 VS_OUTPUT main(VS_INPUT IN) {
@@ -96,9 +96,9 @@ VS_OUTPUT main(VS_INPUT IN) {
     OUT.shadowWorldPos = 0.0f;
     OUT.vertexLight = 0.0f;
 #ifdef PSYS
-    OUT.depthSize = float2(position.w, IN.size * NVR_SoftSize.y);
+    OUT.depthSize = float4(position.w, IN.size * NVR_SoftSize.y, 0.5f, 0.5f);
 #else
-    OUT.depthSize = float2(position.w, NVR_SoftSize.x);
+    OUT.depthSize = float4(position.w, NVR_SoftSize.x, 0.5f, 0.5f);
 #endif
     return OUT;
 }

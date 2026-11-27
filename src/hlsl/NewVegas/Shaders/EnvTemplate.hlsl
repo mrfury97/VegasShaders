@@ -150,11 +150,18 @@ float4 EnvLightFadeExtra[2] : register(c37);
 // effect answered this pixel's reflection last frame (TESR_ReflectionsBuffer's alpha: the screen, the rays, its cube / grid / sky), this
 // pass leaves that share of its cube map out, so the surface shows ONE reflection; where it had no answer (alpha 0: nothing reflects
 // there, or the ray found nothing) the game's cube map stays, as the probe. TESR_ReflReplace (Reflections.cpp UpdateWaterConstants,
-// core/ReflMaterial.h): x the share (0: off, or not the main scene: the branch is not taken and the picture is exactly as before), zw one
-// pixel of the scene target in UV. c36 and s11 are free in this pass (it reads c1, c27-c35, the sky's c136-c145, c190; s0, s1, s3, s10).
-// A build that wants the pass byte for byte as before can define REFL_REPLACE_FORWARD 0 (as LIVE_CUBE).
+// core/ReflMaterial.h): x the share (0: off, or not the main scene: the branch is not taken and the picture is exactly as before); y 0 (the
+// world scene): last frame's pixel is where the surface WAS (TESR_ReflReplaceReproject, camera-relative world -> that frame's clip space,
+// pre-scaled into its RenderScale rect, as the RT water's), zw the largest uv to read (off that frame's picture: its nearest edge); y 1 (the
+// first-person scene, which moves with the camera): the same screen place, zw one pixel of the scene target in UV. 2026-11-24: by the same
+// screen place in the world too, a pan read where last frame a robot or a sign stood (alpha 0) and put the road's whole cube map back:
+// bright copies of every outline trailing across the road (player handoff 2026-11-23). c36, c146-c149 and s11 are free in this pass (it
+// reads c1, c27-c35, c37-c38, the sky's c136-c145, c190; s0, s1, s3, s10). A build that wants the pass byte for byte as before can define
+// REFL_REPLACE_FORWARD 0 (as LIVE_CUBE).
 #if REFL_REPLACE_FORWARD
 float4 TESR_ReflReplace : register(c36);
+row_major float4x4 TESR_ReflReplaceReproject : register(c146);
+float4 TESR_ReflReplaceTexel : register(c150);
 // One line (ShaderTextureValue::GetSamplerStateString reads the states only to the end of the register's line).
 sampler2D TESR_ReflectionsBuffer : register(s11) = sampler_state { ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = LINEAR; MINFILTER = LINEAR; MIPFILTER = NONE; };
 #endif
@@ -171,7 +178,8 @@ float4 main(PS_INPUT pin) : COLOR0 {
     float3 N = normalize(float3(dot(nTS, pin.frameX.xyz), dot(nTS, pin.frameY.xyz), dot(nTS, pin.frameZ.xyz)));
     float3 reflected = 2.0f * dot(N, toEye) * N - toEye * dot(N, N);
     float3 refl = texCUBE(EnvironmentCubeMap, reflected).rgb;
-    refl *= lerp(nmap.a, tex2D(CustomEnvMask, pin.texc).x, EnvToggles.w) * EnvToggles.z * AmbientColor.a;
+    const float envAlpha = (EnvLightFade[0].x < -1.5f) ? EnvLightFade[0].y : AmbientColor.a;
+    refl *= lerp(nmap.a, tex2D(CustomEnvMask, pin.texc).x, EnvToggles.w) * EnvToggles.z * envAlpha;
     refl = EnvToggles.x > 0.0f ? refl * pin.vcolor : refl;
 
     // UNOFFICIAL: by the light round the object -- the ambient light and the sky along the reflected view (cube space is
@@ -190,8 +198,8 @@ float4 main(PS_INPUT pin) : COLOR0 {
     // (includes/LiveCube.hlsl, already lit, so not scaled by the light again) in place of the game's painted cube map, as
     // far as the live cube has seen that direction. Through the same mask and strength.
     [branch] if (TESR_EnvCube.y > 0.0f) {
-        float4 live = LiveCube(reflected, 0.1f);   // a cube read needs no unit direction
-        float3 liveColor = live.rgb * (lerp(nmap.a, tex2Dlod(CustomEnvMask, float4(pin.texc, 0.0f, 0.0f)).x, EnvToggles.w) * EnvToggles.z * AmbientColor.a);
+        float4 live = LiveCube(reflected, 0.0f);   // sharpest mip for _m masks and chrome
+        float3 liveColor = live.rgb * (lerp(nmap.a, tex2Dlod(CustomEnvMask, float4(pin.texc, 0.0f, 0.0f)).x, EnvToggles.w) * EnvToggles.z * envAlpha);
         liveColor = EnvToggles.x > 0.0f ? liveColor * pin.vcolor : liveColor;
         refl = lerp(refl, liveColor, TESR_EnvCube.y * live.a);
     }
@@ -203,8 +211,33 @@ float4 main(PS_INPUT pin) : COLOR0 {
     refl *= 1.0f + TESR_PBREnv.w;  // UNOFFICIAL 2026-10-25 [Shaders.PBR.Main] Reflectivity
     #if REFL_REPLACE_FORWARD
     // UNOFFICIAL 2026-11-12 ReplaceForward (above): less by what the Reflections composite shows here instead (last frame's coverage)
-    [branch] if (TESR_ReflReplace.x > 0.0f)
-        refl *= 1.0f - TESR_ReflReplace.x * saturate(tex2Dlod(TESR_ReflectionsBuffer, float4((pin.vpos + 0.5f) * TESR_ReflReplace.zw, 0.0f, 0.0f)).a);
+    // P3 fix: clamp off-edge reprojected UVs into the previous RenderScale rect and dilate coverage on disocclusions to prevent silhouette ghosting.
+    [branch] if (TESR_ReflReplace.x > 0.0f) {
+        float2 lastUV = (pin.vpos + 0.5f) * TESR_ReflReplace.zw;   // first person: the same screen place
+        float inside = 1.0f;
+        const bool isWorld = TESR_ReflReplace.y < 0.5f;
+        [branch] if (isWorld) {   // the world (2026-11-24): where this surface was last frame
+            const float4 clip = mul(float4(pin.rel, 1.0f), TESR_ReflReplaceReproject);
+            lastUV = clip.xy / max(clip.w, 1.0e-4f) * float2(0.5f, -0.5f) + 0.5f;
+            inside = clip.w > 0.0f ? 1.0f : 0.0f;
+            lastUV = clamp(lastUV, TESR_ReflReplaceTexel.zw, TESR_ReflReplace.zw);
+        }
+        float cov = saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(lastUV, 0.0f, 0.0f)).a);
+        [branch] if (isWorld && inside > 0.5f && cov < 0.99f) {
+            const float2 uvMin = TESR_ReflReplaceTexel.zw, uvMax = TESR_ReflReplace.zw;
+            const float2 step2 = TESR_ReflReplaceTexel.xy * 2.0f;
+            const float2 step6 = TESR_ReflReplaceTexel.xy * 6.0f;
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2( step2.x,  0.0f), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2(-step2.x,  0.0f), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2( 0.0f,  step2.y), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2( 0.0f, -step2.y), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2( step6.x,  step6.y), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2(-step6.x,  step6.y), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2( step6.x, -step6.y), uvMin, uvMax), 0.0f, 0.0f)).a));
+            cov = max(cov, saturate(tex2Dlod(TESR_ReflectionsBuffer, float4(clamp(lastUV + float2(-step6.x, -step6.y), uvMin, uvMax), 0.0f, 0.0f)).a));
+        }
+        refl *= 1.0f - TESR_ReflReplace.x * inside * cov;
+    }
     #endif
     // UNOFFICIAL 2026-11-04 EnvLightFade: the lamp's share per pixel, a smooth fall to its reach (and the flashlight's cone), in place of the
     // game's one value for the whole object (its distance to the object's centre, a straight 1 - d/r)
@@ -227,7 +260,9 @@ float4 main(PS_INPUT pin) : COLOR0 {
             const float w2 = saturate(1.0f - dot(tp2, tp2) / (EnvLightFadeExtra[1].w * EnvLightFadeExtra[1].w));
             lampFade += EnvLightFade[3].w * w2 * w2;
         }
-        refl *= min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 64.0f);
+        refl *= (EnvLightFade[0].x < -1.5f)
+            ? max(EnvLightFade[0].z, lampFade)
+            : min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 64.0f);
     }
     return float4(refl * pin.fog.x, 1.0f);
 }

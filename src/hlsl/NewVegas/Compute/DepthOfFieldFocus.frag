@@ -31,8 +31,7 @@ vec3 toWorld(vec2 tex) {
 void main() {
     vec2 uv = inUV;
 
-    // static const bool DistantBlur = bool(TESR_DepthOfFieldBlur.x): a switch, not the strength
-    const float DistantBlur = pc.blur.x != 0.0 ? 1.0 : 0.0;
+    const float DistantStrength = max(pc.blur.x, 0.0);
     const float DistantStart = pc.blur.y;
     const float DistantEnd = pc.blur.z;
     const float HyperFocalDistance = max(0.0000001, pc.data.x * 1000.0);
@@ -54,7 +53,7 @@ void main() {
     float farBlur = invlerps(farPlane, farPlane * 2.0, depth) * 0.8;
 
     nearblur *= 0.5 * smoothstepHLSL(NearBlurCutoff / 2.0, 0.0, depth) + smoothstepHLSL(NearBlurCutoff / 2.0, NearBlurCutoff, depth); // attenuate near blur to reveal gun
-    farBlur = saturate(farBlur + invlerps(DistantStart, DistantEnd, depth) * DistantBlur * invlerps(100000.0, 5000.0, world_pos.z)); // distance blur, sky excluded
+    farBlur = saturate(farBlur + invlerps(DistantStart, DistantEnd, depth) * DistantStrength * invlerps(100000.0, 5000.0, world_pos.z)); // distance blur, sky excluded
 
     o_color = vec4(nearblur, farBlur, 1.0, 1.0);
 }

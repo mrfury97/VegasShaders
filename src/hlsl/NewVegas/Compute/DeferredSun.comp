@@ -21,6 +21,7 @@ layout(set = 1, binding = 6) uniform texture2D t_cloudShadow;   // TESR_CloudSha
 layout(set = 1, binding = 7) uniform texture2D t_rtSunForward;  // TESR_RtSunForward (stand-in t_depth if unavailable)
 layout(set = 1, binding = 8, rgba16f) uniform image2D i_scene;    // Scene HDR RT0 (unbound from RT0 during dispatch)
 layout(set = 1, binding = 9, rgba16f) uniform image2D i_skinSpec; // DeferredSkin::Spec (or 1x1 dummy when inactive)
+layout(set = 1, binding = 10) uniform texture2D t_sssMask;        // TESR_ScreenSpaceShadows (stand-in t_depth if inactive)
 
 layout(push_constant) uniform Push {
     uint linearSampler;   // 0: LINEAR, CLAMP (cloud shadow)
@@ -74,7 +75,8 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  rtSunRowY;              // 69: TESR_RtSunRowY
     vec4  rtSunRowW;              // 70: TESR_RtSunRowW
     vec4  rtSunData;              // 71: TESR_RtSunData
-    vec4  dsSheen;                // 72: DS_Sheen (2026-11-26 SunSheen: x strength, y roughness, z 1 = the land's smooth-roughness gate)
+    vec4  dsSheen;                // 72: DS_Sheen (x strength, y roughness, z clearcoat, w pearlescence; 2026-11-27 upstream 1.1.5 merge: our
+                                  //     land smooth-roughness gate moved from z to flag bit 23, kFlagSheenPuddleGate, so z / w carry upstream's coat)
 } cb;
 
 // Flag bits (must match DeferredSun.h)
@@ -97,6 +99,11 @@ const uint kFlagSmithCorrTest    = 1u << 15u;
 const uint kFlagDiffuseKeep      = 1u << 16u;
 const uint kFlagCloudSample      = 1u << 17u;
 const uint kFlagSlackCapAll      = 1u << 18u;
+const uint kFlagSceneIsLinear    = 1u << 19u;
+const uint kFlagMaterialSSS      = 1u << 20u;
+const uint kFlagIsExterior       = 1u << 21u;
+const uint kFlagSSShadows        = 1u << 22u;
+const uint kFlagSheenPuddleGate  = 1u << 23u;   // (2026-11-27 upstream 1.1.5 merge) SunSheen: drop it on the land's smooth pixels (was dsSheen.z)
 
 bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
 
@@ -239,6 +246,57 @@ vec3 Fresnel(vec3 f0, vec3 f90, float cosT) {
     float omc2 = omc * omc;
     return f0 + (f90 - f0) * (omc2 * omc2 * omc);
 }
+
+vec3 MultiScatterMetalBoost(vec3 f0, float r, float NdotV, float metal) {
+    if (metal <= 0.001) return vec3(1.0);
+    const vec4 c0 = vec4(-1.0, -0.0275, -0.572, 0.022);
+    const vec4 c1 = vec4(1.0, 0.0425, 1.04, -0.04);
+    vec4 mixed = r * c0 + c1;
+    float a004 = min(mixed.x * mixed.x, exp2(-9.28 * NdotV)) * mixed.x + mixed.y;
+    vec2 ab = vec2(-1.04, 1.04) * a004 + mixed.zw;
+    float ess = clamp(ab.x + ab.y, 0.12, 1.0);
+    vec3 comp = 1.0 + f0 * (1.0 / ess - 1.0);
+    return mix(vec3(1.0), min(comp, vec3(2.2)), metal);
+}
+
+vec3 HueShift(vec3 c, float angle) {
+    const vec3 k = vec3(0.57735027);
+    return c * cos(angle) + cross(k, c) * sin(angle) + k * dot(k, c) * (1.0 - cos(angle));
+}
+
+vec3 ApplyPearlescence(vec3 col, float NdotV, float pearl, float metal) {
+    if (pearl <= 0.001 || metal <= 0.05) return col;
+    vec3 c = clamp(col, vec3(0.0), vec3(1.0));
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
+    float satMask = smoothstep(0.10, 0.40, sat);
+    float omv = clamp(1.0 - NdotV, 0.0, 1.0);
+    float graze = pow(omv, 1.15);
+    vec3 hueShifted = HueShift(c, -0.95 * pearl * (0.20 + 0.80 * graze));
+    vec3 filmWave = 0.50 + 0.50 * cos(omv * 5.2 + vec3(0.0, 2.094395, 4.18879));
+    float lum = max(dot(c, vec3(0.2126, 0.7152, 0.0722)), 0.14);
+    vec3 thinFilm = mix(c, lum * (0.35 + 1.15 * filmWave), clamp(0.22 + 0.78 * graze, 0.0, 1.0));
+    vec3 pearlCol = mix(thinFilm, hueShifted, satMask);
+    return mix(col, clamp(pearlCol, vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal));
+}
+vec3 PearlF90Tint(vec3 metalCol, float pearl, float metal) {
+    if (pearl <= 0.001 || metal <= 0.05) return vec3(1.0);
+    float pTop = max(metalCol.r, max(metalCol.g, metalCol.b));
+    return mix(vec3(1.0), clamp(metalCol / max(pTop, 0.25), vec3(0.0), vec3(1.0)), pearl * smoothstep(0.05, 0.40, metal) * 0.75);
+}
+vec3 CandyCoatAbsorption(vec3 metalCol, float NdotV, float coatAmt, float metal) {
+    if (coatAmt <= 0.001 || metal <= 0.05) return vec3(1.0);
+    vec3 c = clamp(metalCol, vec3(0.0), vec3(1.0));
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4);
+    float satMask = smoothstep(0.14, 0.45, sat);
+    vec3 tCol = mix(vec3(1.0), c / max(fMax, 1.0e-4), satMask);
+    float pathLen = (1.0 / max(NdotV, 0.28) - 1.0) * 0.55;
+    float metalMask = smoothstep(0.05, 0.40, metal);
+    return exp(-(vec3(1.0) - tCol) * (1.85 * clamp(coatAmt, 0.0, 1.0) * satMask * metalMask * pathLen));
+}
 float GGXPi(float nh, float r) {
     float r2 = r * r;
     float aSq = r2 * r2;
@@ -292,13 +350,12 @@ float DiffuseEnergyKeep(float NdotV, float roughness) {
     return cb.pbrMath.x > 0.5 ? 1.0 - bump * (1.0 / 0.95) : 1.0;
 }
 
-vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith) {
+vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl) {
     const float dielDiff = min(specF0Diel, 0.04);
-    const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), baseColor, metal));
     const vec3 nrm = normalize(N);
     const vec3 viewV = normalize(V);
     const vec3 toLight = normalize(L);
-    const vec3 mirrorDir = reflect(toLight, nrm);
+    const vec3 mirrorDir = reflect(-viewV, nrm);
     const float discSin = sin(kSunRadius);
     const float discCos = cos(kSunRadius);
     const float LdotR = dot(toLight, mirrorDir);
@@ -307,30 +364,46 @@ vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 r
     const vec3 sunDirV = LdotR < discCos ? normalize(discCos * toLight + offAxisDir * discSin) : mirrorDir;
 
     const vec3 halfV = normalize(viewV + sunDirV);
-    const float NdotS = max(shades(nrm, sunDirV), 0.00001);
+    const float rawNdotS = shades(nrm, sunDirV);
+    const float NdotS = max(rawNdotS, 0.00001);
     const float NdotV = max(shades(nrm, viewV), 0.00001);
     const float NdotH = shades(nrm, halfV);
     const float NdotL = shades(nrm, toLight);
     const float LdotH = shades(toLight, halfV);
 
-    const vec3 fres = Fresnel(f0Base, RoughReflectivityF90(f0Base, r, metal), LdotH);
+    const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
+    const vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
+    const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), metalCol, metal));
+    const vec3 fres = Fresnel(f0Base, max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
     const float diffKeep = DiffuseEnergyKeep(NdotV, r);
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
 
     vec3 fresSpec = fres;
     if (specF0Diel != dielDiff) {
-        const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), baseColor, metal));
-        fresSpec = Fresnel(f0Spec, RoughReflectivityF90(f0Spec, r, metal), LdotH);
+        const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), metalCol, metal));
+        fresSpec = Fresnel(f0Spec, max(RoughReflectivityF90(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
     }
-    const vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH, allowSmith);
-    return (diff * NdotL + specOut * NdotS) * radiance;
+    vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+    if (clearcoat > 0.001 && metal > 0.05) {
+        specOut *= CandyCoatAbsorption(metalCol, NdotV, clearcoat, metal);
+    }
+    vec3 total = (diff * NdotL + specOut * rawNdotS) * radiance;
+    if (clearcoat > 0.001 && metal > 0.05 && rawNdotS > 0.0) {
+        const float coatW = clearcoat * metal;
+        const float omc = 1.0 - LdotH;
+        const float omc2 = omc * omc;
+        const float Fc = 0.04 + 0.96 * (omc2 * omc2 * omc);
+        const float coatSpec = BRDFPi(0.06, vec3(Fc), NdotV, NdotS, NdotH, allowSmith).x * rawNdotS;
+        total = total * (1.0 - 0.25 * coatW * Fc) + radiance * (coatSpec * coatW);
+    }
+    return total;
 }
 
 vec3 GetSunLightingModel(float specular, vec3 toSun, vec3 radiance, vec3 toEye, vec3 N, vec3 baseColor, float r, float metal, float specF0Diel, float specFade) {
     const vec3 scaled = radiance * LinScale(cb.pbrData.z);
     const vec3 graded = mix(vec3(luma(baseColor)), baseColor, cb.pbrExtraData.x);
     if (specular > 0.5) {
-        const vec3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled, specF0Diel, true);
+        const vec3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled, specF0Diel, true, clamp(cb.dsSheen.z, 0.0, 1.0), clamp(cb.dsSheen.w, 0.0, 1.0));
         if (specFade < 0.9999) {
             return mix((1.0 - metal) * graded * shades(normalize(N), normalize(toSun)) * scaled, sunLit, specFade);
         }
@@ -368,7 +441,7 @@ vec3 EvalSunSheen(vec3 N, vec3 V, vec3 L, vec3 albedo, vec3 sunColor, float r, f
 vec3 LandSun(vec3 L, vec3 sunLin, vec3 V, vec3 N, vec3 albedo, float r) {
     if (cb.terrainExtraData.x != 0.0) {
         const vec3 graded = mix(vec3(luma(albedo)), albedo, cb.terrainExtraData.y);
-        return max(vec3(0.0), PBRSun(clamp(cb.terrainData.x, 0.0, 1.0), r, graded, N, V, L, sunLin * LinScale(cb.terrainData.z), 0.04, false));
+        return max(vec3(0.0), PBRSun(clamp(cb.terrainData.x, 0.0, 1.0), r, graded, N, V, L, sunLin * LinScale(cb.terrainData.z), 0.04, false, 0.0, 0.0));
     }
     return albedo * shades(N, L) * sunLin;
 }
@@ -469,23 +542,86 @@ vec3 SkinSunLight(vec3 albedo, vec3 N, vec3 Ngeo, vec3 Nsoft, vec3 V, vec3 L, ve
     specular = SkinSpecularSun(N, V, L, light, skinRough, skinSpecScale) * shadow;
     return (diffuse + transmitted) * light;
 }
-vec3 FDSkinSunTransmission(vec3 P, vec3 Ngeo, vec3 L, vec3 albedo, vec3 light) {
+vec3 FDSkinThroughTap(float lsZ, float occluder, float worldPerDepth, float tBias, vec3 d) {
+    const float t = max(lsZ - occluder, 0.0) * worldPerDepth;
+    const float entered = smoothstep(tBias, tBias + max(d.r, 0.15) * 1.5, t);
+    if (entered <= 0.0) return vec3(0.0);
+    return (0.25 * exp(-t / d) + 0.75 * exp(-t / (3.0 * d))) * entered;
+}
+vec3 FDSkinSunTransmission(vec3 P, vec3 Ngeo, vec3 V, vec3 L, vec3 albedo, vec3 light) {
     if (cb.skinSSS.w < 0.5 || cb.shadowFormatData.z == 0.0 || cb.shadowFade.y == 0.0 ||
-        length(P - cb.shadowNearCenter.xyz) >= cb.shadowNearCenter.w) {
+        cb.skinMaterial.w <= 0.0 || length(P - cb.shadowNearCenter.xyz) >= cb.shadowNearCenter.w) {
         return vec3(0.0);
     }
-    const float farSide = clamp(0.3 - dot(Ngeo, L), 0.0, 1.0);
+    const float sunFade = 1.0 - clamp(cb.shadowFade.x, 0.0, 1.0);
+    if (sunFade <= 0.0) return vec3(0.0);
+    const float NdotL = dot(Ngeo, L);
+    const float farSide = smoothstep(0.0, 0.35, -NdotL);
     if (farSide <= 0.0) return vec3(0.0);
-    vec4 ls = cb.shadowNear * vec4(P, 1.0);
-    ls.xyz /= ls.w;
-    const vec2 uv = vec2(ls.x * 0.5 + 0.5, ls.y * -0.5 + 0.5) * 0.5;
-    const float occluder = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).x;
-    const float worldPerDepth = 1.0 / length(vec3(cb.shadowNear[0][2], cb.shadowNear[1][2], cb.shadowNear[2][2]));
-    const float t = max(ls.z - occluder, 0.0) * worldPerDepth;
+    const vec3 transmitDir = normalize(L + Ngeo * kSkinTransmitDistortion);
+    const float vDotBack = dot(V, -transmitDir);
+    const float back = smoothstep(-0.15, 0.45, vDotBack) * (0.25 + 0.75 * pow(clamp(vDotBack, 0.0, 1.0), 2.0));
+    if (back <= 0.0) return vec3(0.0);
+    const vec3 Nperp = Ngeo - L * NdotL;
     const vec3 d = max(cb.skinSSS.xyz, vec3(1.0e-3));
-    const vec3 through = 0.25 * exp(-t / d) + 0.75 * exp(-t / (3.0 * d));
-    const float entered = clamp(t / max(d.r, 1.0e-3), 0.0, 1.0);
-    return albedo * through * (entered * farSide * cb.skinMaterial.w) * light;
+    bool usedCharMap = false;
+    vec3 through = vec3(0.0);
+    if (HasFlag(kFlagCharShadowMap) && cb.charShadowData.w > 0.0) {
+        const float texel = max(cb.charShadowData.x, 1.0 / 16384.0);
+        const float texelWorld = 2.0 * max(cb.charShadowCenter.w, 1.0) * texel;
+        const float shrink = min(1.25 * texelWorld, 0.6);
+        vec4 cs = cb.charShadowCameraToLight * vec4(P - Nperp * shrink, 1.0);
+        cs.xyz /= cs.w;
+        if (max(abs(cs.x), abs(cs.y)) < 0.95 && cs.z > 0.0 && cs.z < 1.0) {
+            const vec2 uv = vec2(cs.x * 0.5 + 0.5, cs.y * -0.5 + 0.5);
+            const vec2 lo = vec2(texel * 0.5);
+            const vec2 hi = vec2(1.0 - texel * 0.5);
+            const vec2 p = uv / texel - 0.5;
+            const vec2 base = floor(p);
+            const vec2 f = p - base;
+            const vec2 uv0 = (base + 0.5) * texel;
+            const float d00 = textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), clamp(uv0, lo, hi), 0.0).x;
+            const float d10 = textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texel, 0.0), lo, hi), 0.0).x;
+            const float d01 = textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(0.0, texel), lo, hi), 0.0).x;
+            const float d11 = textureLod(sampler2D(t_charShadowMap, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texel, texel), lo, hi), 0.0).x;
+            if (min(min(d00, d10), min(d01, d11)) < 0.9999) {
+                const float worldPerDepth = 1.0 / max(length(vec3(cb.charShadowCameraToLight[0][2], cb.charShadowCameraToLight[1][2], cb.charShadowCameraToLight[2][2])), 1.0e-6);
+                const float tBias = clamp(0.5 * texelWorld, 0.12, 0.40);
+                const vec3 t00 = FDSkinThroughTap(cs.z, d00, worldPerDepth, tBias, d);
+                const vec3 t10 = FDSkinThroughTap(cs.z, d10, worldPerDepth, tBias, d);
+                const vec3 t01 = FDSkinThroughTap(cs.z, d01, worldPerDepth, tBias, d);
+                const vec3 t11 = FDSkinThroughTap(cs.z, d11, worldPerDepth, tBias, d);
+                through = mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+                usedCharMap = true;
+            }
+        }
+    }
+    if (!usedCharMap) {
+        const float texW = max(cb.shadowBlur.x, 1.0 / 16384.0);
+        const float texelWorld = 4.0 * cb.shadowNearCenter.w * texW;
+        const float shrink = min(1.25 * texelWorld, 1.0);
+        vec4 ls = cb.shadowNear * vec4(P - Nperp * shrink, 1.0);
+        ls.xyz /= ls.w;
+        const vec2 uv = vec2(ls.x * 0.5 + 0.5, ls.y * -0.5 + 0.5) * 0.5;
+        const vec2 lo = vec2(texW * 0.5);
+        const vec2 hi = vec2(0.5 - texW * 0.5);
+        const vec2 p = uv / texW - 0.5;
+        const vec2 base = floor(p);
+        const vec2 f = p - base;
+        const vec2 uv0 = (base + 0.5) * texW;
+        const float d00 = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0, lo, hi), 0.0).x;
+        const float d10 = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texW, 0.0), lo, hi), 0.0).x;
+        const float d01 = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(0.0, texW), lo, hi), 0.0).x;
+        const float d11 = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texW, texW), lo, hi), 0.0).x;
+        const float worldPerDepth = 1.0 / max(length(vec3(cb.shadowNear[0][2], cb.shadowNear[1][2], cb.shadowNear[2][2])), 1.0e-6);
+        const float tBias = clamp(0.35 * texelWorld, 0.18, 0.55);
+        const vec3 t00 = FDSkinThroughTap(ls.z, d00, worldPerDepth, tBias, d);
+        const vec3 t10 = FDSkinThroughTap(ls.z, d10, worldPerDepth, tBias, d);
+        const vec3 t01 = FDSkinThroughTap(ls.z, d01, worldPerDepth, tBias, d);
+        const vec3 t11 = FDSkinThroughTap(ls.z, d11, worldPerDepth, tBias, d);
+        through = mix(mix(t00, t10, f.x), mix(t01, t11, f.x), f.y);
+    }
+    return albedo * through * (farSide * back * sunFade * cb.skinMaterial.w) * light;
 }
 vec3 SkyAmbientRadianceSH(vec3 N) {
     vec3 E = cb.skyIrradiance[0].rgb
@@ -880,24 +1016,66 @@ void main() {
     const float dsSpecF0 = (cb.dsVis.y > 0.5 && !land) ? specF0 : 0.04;
     const float dsSpecFade = cb.dsVis.w > 0.0 ? clamp(1.0 - (length(P) - cb.dsVis.z) * cb.dsVis.w, 0.0, 1.0) : 1.0;
 
+    float sssAmbScalar = 0.0;
     vec3 light;
     if (skinPx) {
         light = sunLin;
-    } else if (foliage) {
-        const vec3 hueF = sunLin / max(dot(sunLin, vec3(0.2126, 0.7152, 0.0722)), 1.0e-8);
-        light = albedo.rgb * hueF * FoliageSunWeightOf(m.b) + (grassF ? hueF * FoliageHighlightOf(FDFoliageHighlightEnc(m.g)) : vec3(0.0));
-    } else if (land) {
-        light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
-        // (2026-11-26 SunSheen) as DeferredSun.hlsl; this pass never runs with DeferredWetness's film live (core/DeferredSun.h), so the
-        // weather's wetness in dsSheen.x and the standing-water gate (z: the land's smooth pixels) are the wet gates here
-        if (cb.dsSheen.x > 0.0001) {
-            const float sheenKeep = cb.dsSheen.z > 0.5 ? smoothstep(0.08, 0.25, r) : 1.0;
-            light += sheenKeep * EvalSunSheen(N, V, Lland, albedo.rgb, sunLand * (cb.terrainExtraData.x != 0.0 ? LinScale(cb.terrainData.z) : 1.0), r, clamp(cb.terrainData.x, 0.0, 1.0), 0.0, cb.dsSheen.x, cb.dsSheen.y);
-        }
     } else {
-        const float isSpec = FDSunSpecular(albedo.a, m.r);
-        light = GetSunLightingModel(isSpec, L, sunLin, V, N, albedo.rgb, r, metal, dsSpecF0, dsSpecFade);
-        if (cb.dsSheen.x > 0.0001) light += EvalSunSheen(N, V, L, albedo.rgb, sunLin * LinScale(cb.pbrData.z), r, metal, isSpec, cb.dsSheen.x, cb.dsSheen.y);
+        if (foliage) {
+            const vec3 hueF = sunLin / max(dot(sunLin, vec3(0.2126, 0.7152, 0.0722)), 1.0e-8);
+            light = albedo.rgb * hueF * FoliageSunWeightOf(m.b) + (grassF ? hueF * FoliageHighlightOf(FDFoliageHighlightEnc(m.g)) : vec3(0.0));
+        } else if (land) {
+            light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
+            // (2026-11-26 SunSheen) as DeferredSun.hlsl; this pass never runs with DeferredWetness's film live (core/DeferredSun.h), so the
+            // weather's wetness in dsSheen.x and the standing-water gate (kFlagSheenPuddleGate: the land's smooth pixels) are the wet gates here
+            if (cb.dsSheen.x > 0.0001) {
+                const float sheenKeep = HasFlag(kFlagSheenPuddleGate) ? smoothstep(0.08, 0.25, r) : 1.0;
+                light += sheenKeep * EvalSunSheen(N, V, Lland, albedo.rgb, sunLand * (cb.terrainExtraData.x != 0.0 ? LinScale(cb.terrainData.z) : 1.0), r, clamp(cb.terrainData.x, 0.0, 1.0), 0.0, cb.dsSheen.x, cb.dsSheen.y);
+            }
+        } else {
+            const float isSpec = FDSunSpecular(albedo.a, m.r);
+            light = GetSunLightingModel(isSpec, L, sunLin, V, N, albedo.rgb, r, metal, dsSpecF0, dsSpecFade);
+            if (cb.dsSheen.x > 0.0001) {
+                light += EvalSunSheen(N, V, L, albedo.rgb, sunLin * LinScale(cb.pbrData.z), r, metal, isSpec, cb.dsSheen.x, cb.dsSheen.y);
+            }
+        }
+        // UNOFFICIAL 2026-11-25 MaterialSSS Phase 2 (parity with DeferredSun.hlsl): fold before GetSunShadow so backlit pixels test cascades accurately.
+        if (HasFlag(kFlagMaterialSSS) && abs(model - 8.0) > 0.5) {
+            const bool isExt = HasFlag(kFlagIsExterior);
+            const vec3 effSun = land ? sunLand : sunLin;
+            const vec3 effL = land ? Lland : L;
+            if (!foliage && !grassF && metal < 0.25 && r > 0.42) {
+                const float nmr = (1.0 - metal) * smoothstep(0.42, 0.88, r);
+                light += albedo.rgb * effSun * (r * r * 0.20 * (0.35 + 0.65 * (1.0 - clamp(dot(N, V), 0.0, 1.0))) * max(dot(N, effL), 0.0) * nmr);
+            }
+            if (isExt && L.z > 0.02 && metal < 0.35) {
+                const float gW = clamp(0.56 - 0.56 * N.z, 0.0, 1.0) * smoothstep(0.02, 0.28, L.z) * (land ? 0.35 : 1.0) * ((foliage || grassF) ? 0.65 : mix(0.25, 1.0, smoothstep(0.35, 0.85, r)));
+                const float bs = dot(effSun, vec3(0.2126, 0.7152, 0.0722)) * 0.36 * gW * (1.0 - metal);
+                light += albedo.rgb * vec3(0.36, 0.25, 0.14) * (bs * 0.70);
+                sssAmbScalar = bs * 0.30 * (foliage ? 1.0 : sunVis);
+            }
+            if (abs(model - 3.0) < 0.5) {
+                light += mix(vec3(1.0), albedo.rgb, 0.55) * sunLin * (0.12 * pow(1.0 - clamp(dot(N, V), 0.0, 1.0), 3.2) * clamp(dot(Nw, L) * 0.65 + 0.35, 0.0, 1.0));
+            }
+            const bool isPlant = (foliage && !grassF) || abs(model - 5.0) < 0.5;
+            const bool isGrass = grassF || abs(model - 7.0) < 0.5;
+            const bool isSolidSss = (model > 10.5 && model < 14.5);
+            if ((isPlant || isGrass || abs(model - 3.0) < 0.5) && isExt && L.z > 0.02) {
+                const float gnl = dot(Nw, L);
+                const float ww = isPlant ? 0.32 : isGrass ? 0.28 : 0.22;
+                const float bp = pow(clamp(dot(-V, normalize(L + Nw * (abs(model - 3.0) < 0.5 ? 0.45 : 0.35))), 0.0, 1.0), isPlant ? 3.2 : 3.0);
+                const float tt = (0.34 * max(0.0, clamp((gnl + ww) / (1.0 + ww), 0.0, 1.0) - clamp(gnl, 0.0, 1.0)) + bp * clamp(0.65 - 0.35 * gnl, 0.0, 1.0)) * (isPlant ? 0.85 : isGrass ? 0.70 : 0.28);
+                const vec3 st = isPlant ? vec3(1.15, 1.32, 0.45) : isGrass ? vec3(1.22, 1.16, 0.52) : vec3(1.05, 0.98, 0.88);
+                light += albedo.rgb * st * sunLin * tt;
+            } else if (isSolidSss) {
+                const float gnl = dot(Nw, L);
+                const float ww = abs(model - 12.0) < 0.5 ? 0.18 : 0.32;
+                const float bp = pow(clamp(dot(-V, normalize(L + Nw * 0.35)), 0.0, 1.0), 3.0);
+                const float tt = (0.34 * max(0.0, clamp((gnl + ww) / (1.0 + ww), 0.0, 1.0) - clamp(gnl, 0.0, 1.0)) + bp * clamp(0.65 - 0.35 * gnl, 0.0, 1.0)) * 0.44;
+                const vec3 st = (model < 11.5) ? vec3(1.22, 0.58, 0.20) : (model < 12.5) ? vec3(0.95, 0.90, 0.82) : (model < 13.5) ? vec3(0.58, 0.86, 1.22) : vec3(1.22, 0.36, 0.16);
+                light += albedo.rgb * st * sunLin * tt;
+            }
+        }
     }
 
     float shadow = 1.0;
@@ -908,6 +1086,8 @@ void main() {
             const float cloudStrength = foliage ? max(cb.dsSunColor.w, 0.0) : cloudPlant;
             if (cloudStrength > 0.0) shadow *= DSCloudSunAt(P, cloudStrength);
         }
+        // UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders' Lighting.hlsl, DEFERRED: outdoors, N.L >= 0)
+        if (HasFlag(kFlagSSShadows) && dot(N, L) >= 0.0) shadow *= texelFetch(t_sssMask, px, 0).r;
     }
 
     if (skinPx) {
@@ -922,7 +1102,7 @@ void main() {
         vec3 skinSpecular;
         light = SkinSunLight(albedo.rgb, N, Nw, skinNsoft, V, L, skinSun, shadow, r, skinSpecScale, skinThin, skinCurvature, skinSpecular);
         light += skinSpecular;
-        light += FDSkinSunTransmission(P, Nw, L, albedo.rgb, skinSun);
+        light += FDSkinSunTransmission(P, Nw, V, L, albedo.rgb, skinSun);
         if (HasFlag(kFlagSkinSpecActive)) {
             const vec3 specTotal = skinSpecular + SkinSkyReflection(V, Nw, N, r, skinSpecScale);
             if (dot(specTotal, vec3(1.0)) > 0.0) {
@@ -932,6 +1112,7 @@ void main() {
         }
     } else {
         light *= shadow * (foliage ? 1.0 : sunVis);
+        light += albedo.rgb * vec3(0.36, 0.25, 0.14) * sssAmbScalar;
     }
 
     if (land && cb.terrainParallaxIso.z > 0.0 && FDFarLand(m.r) < 0.5) {
@@ -959,10 +1140,15 @@ void main() {
 
     const vec4 dst = imageLoad(i_scene, px);
     vec3 outRgb;
+    const float sceneLinear = HasFlag(kFlagSceneIsLinear) ? 1.0 : 0.0;
     if (HasFlag(kFlagLinearLighting) && cb.dsFog.w > 0.5 && keep < 0.9999) {
-        outRgb = dst.rgb + FDAddFogged(dst.rgb, light, keep, cb.dsFog.rgb, cb.linearLighting.x, 1.0);
-    } else {
+        outRgb = dst.rgb + FDAddFogged(dst.rgb, light, keep, cb.dsFog.rgb, cb.linearLighting.x, sceneLinear);
+    } else if (sceneLinear > 0.5 || !HasFlag(kFlagLinearLighting)) {
         outRgb = dst.rgb + light * keep;
+    } else {
+        const float gamma = cb.linearLighting.x > 1.0 ? cb.linearLighting.x : 2.2;
+        const vec3 stored = max(dst.rgb, vec3(0.0));
+        outRgb = pow(pow(stored, vec3(gamma)) + light * keep, vec3(1.0 / gamma));
     }
     imageStore(i_scene, px, vec4(outRgb, dst.a));
 }

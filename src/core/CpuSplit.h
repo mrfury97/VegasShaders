@@ -462,7 +462,9 @@ namespace CpuSplit {
 			}
 			else { refused++; if (refusedText.size() < 900) { refusedText += " "; refusedText += note; } }
 		}
-		Logger::Log("CPU SPLIT: %s call sites timed: %u (%u through another plugin's hook:%s), left alone: %u%s%s", ai ? "AI thread" : "main thread",
+		// (2026-11-25 hook cleanup: "a hook already there" can be VS's own, e.g. Menu3DGuard 008703BC and DoFDepthGuard 00870ED0: the
+		// module after "via" says whose.)
+		Logger::Log("CPU SPLIT: %s call sites timed: %u (%u through a hook already there:%s), left alone: %u%s%s", ai ? "AI thread" : "main thread",
 			done, chained, chainedText.c_str(), refused, refused ? " -" : "", refusedText.c_str());
 	}
 

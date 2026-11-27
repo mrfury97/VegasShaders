@@ -47,22 +47,29 @@ void main() {
     // cube / grid / sky along the plain mirror direction at the film's own roughness. Standing water traces as before.
     float damp = SurfaceDamp;
     bool dampOnly = damp > 0.999;
-    vec3 position = ViewPosition(pixelUV, depth);
+    vec3 position = SurfacePosition(pixelUV, depth);   // (2026-11-27 upstream 1.1.5 merge: upstream's SurfacePosition, our damp share above)
     vec3 V = normalize(position);   // eye -> surface
-
-    // Spread the reflected direction by the roughness: a GGX half vector round the normal, a new one every frame.
-    float a = roughness * roughness;
-    float u1 = GradientNoise(vpos), u2 = GradientNoise(vpos + vec2(37.0, 17.0));
-    float cosTheta = sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1));
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-    float phi = 6.2831853 * u2;
-    vec3 tangent = normalize(abs(N.z) < 0.999 ? cross(N, vec3(0, 0, 1)) : cross(N, vec3(1, 0, 0)));
-    vec3 bitangent = cross(N, tangent);
-    vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
-    if (dampOnly) H = N;
-    vec3 R = reflect(V, H);
-    if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
-    R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
+    bool weapon = WeaponAt(pixelUV);
+    vec3 R;
+    if (weapon) {
+        // Weapons read the pre-filtered 360-degree surroundings cubemap by roughness (EnvAlong),
+        // so use the exact normal-mapped mirror direction instead of jittered GGX / AboveSurface.
+        R = reflect(V, N);
+    } else {
+        // Spread the reflected direction by the roughness: a GGX half vector round the normal, a new one every frame.
+        float a = roughness * roughness;
+        float u1 = GradientNoise(vpos), u2 = GradientNoise(vpos + vec2(37.0, 17.0));
+        float cosTheta = sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1));
+        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+        float phi = 6.2831853 * u2;
+        vec3 tangent = normalize(abs(N.z) < 0.999 ? cross(N, vec3(0, 0, 1)) : cross(N, vec3(1, 0, 0)));
+        vec3 bitangent = cross(N, tangent);
+        vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
+        if (dampOnly) H = N;   // (2026-11-21) damp ground: the plain mirror direction. (2026-11-27 upstream 1.1.5 merge: inside upstream's non-weapon branch)
+        R = reflect(V, H);
+        if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
+        R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
+    }
 
     // ---- The hierarchical march ----
     vec2 fullSize = 1.0 / cb.reciprocalResolution.xy;
@@ -75,7 +82,7 @@ void main() {
     int endRule = 5;   // 5 not started (behind the near plane at once, or the start off the screen)
     float nFacing = 0.0, nPlane = 0.0, nThick = 0.0;
     int cellsWalked = 0;   // (shader counters)
-    if (tEnd > tStart) {
+    if (!weapon && tEnd > tStart) {
         vec3 P0 = position + R * tStart, P1 = position + R * tEnd;
         float k0 = 1.0 / P0.z, k1 = 1.0 / P1.z;   // 1/z is linear in screen space
         vec3 Q0 = P0 * k0, Q1 = P1 * k1;

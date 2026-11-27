@@ -281,6 +281,7 @@ bool TAAEffect::ExtDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 	const bool vmMotion = ViewModelMotion::Ready();	// UNOFFICIAL 2026-11-21: weapon.y = TAA.glsl's switch for t_vmmotion
 	uniforms.weapon = Constants.Weapon;
 	uniforms.weapon.y = vmMotion ? 1.0f : 0.0f;
+	uniforms.weapon.z = TheRenderManager->IsReversedDepth() ? 1.0f : 0.0f;
 	uniforms.sharpen = Constants.Sharpen;
 	ID3D9NvrExtBuffer* buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!buffer) return false;
@@ -579,7 +580,7 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 
 	// UNOFFICIAL 2026-10-26 (NVR DXVK): FSR 2 as the resolve when [Shaders.TAA.FSR] Enabled and the extension is there. Each path
 	// keeps its own history, so switching between them starts from scratch.
-	const bool useFSR = !afterUpscale && FSRWanted();	// (SmoothEffects: TAA's own resolve, the upscaler already ran)
+	const bool useFSR = !afterUpscale && !RenderScaleTempSkipped() && FSRWanted();	// (SmoothEffects / temporary RenderScale skip: TAA's own resolve avoids reallocating native FSR buffers)
 	const bool hadHistory = historyValid;	// UNOFFICIAL 2026-11-01 (Diag)
 	if (useFSR != lastPathFSR || lastPathPreTonemap) { if (historyValid) SessionLog::HistoryReset("TAA", "path switch (TAA / FSR)"); historyValid = false; }
 
@@ -602,6 +603,7 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 	Constants.CameraDelta = D3DXVECTOR4(delta.x, delta.y, delta.z, 0.0f);
 	Constants.Data.z = historyValid ? 1.0f : 0.0f;
 	Constants.Weapon.y = ViewModelMotion::Ready() ? 1.0f : 0.0f;
+	Constants.Weapon.z = TheRenderManager->IsReversedDepth() ? 1.0f : 0.0f;
 
 	if (SourceBuffer) Device->StretchRect(RenderTarget, NULL, SourceBuffer, NULL, D3DTEXF_NONE);
 

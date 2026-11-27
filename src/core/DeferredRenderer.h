@@ -43,6 +43,21 @@ namespace DeferredRenderer {
 	inline const char* kCache = "Deferred\\All\\";	// mode 1's records (LAMPS_DEFERRED 3), their own cache folder
 
 	inline int Mode() { return SettingForce::Mode(); }
+	// UNOFFICIAL 2026-11-24 fd-complete DeferredSheen ([Main.Main.Quality] DeferredSheen, restart, the roughness floor 0.05-1, 0 off): read once,
+	// at the first record's defines. Compiled in: every deferred object writes the specular bit (Includes/CapturedNormals.hlsl), so the game's
+	// own highlight passes of a deferred object are skipped too (Skip): the passes draw its highlight.
+	inline int SheenState = -1;
+	inline float SheenFloor = 0.0f;
+	inline bool SheenCompiled() {
+		if (SheenState < 0 && TheSettingManager) {
+			const float v = TheSettingManager->GetSettingF("Main.Main.Quality", "DeferredSheen");
+			SheenFloor = v < 0.05f ? 0.0f : (v > 1.0f ? 1.0f : v);
+			SheenState = SheenFloor > 0.0f && Mode() > 0 && CapturedNormals::V2CompiledIn() ? 1 : 0;
+			Logger::Log("UNOFFICIAL DeferredSheen: %s", SheenState ? "on: the deferred objects without a highlight get one (roughness floor below), the game's highlight passes of deferred objects skipped" : "off");
+			if (SheenState) Logger::Log("UNOFFICIAL DeferredSheen: roughness floor %.3f (where no _rmaos map or FoldHighlights' shiny mark gave one)", SheenFloor);
+		}
+		return SheenState == 1;
+	}
 	inline bool On() { return Mode() > 0; }
 
 	// Mode 2's sun (DeferredSun): live only while its pass can run; mode 1 never forces it (its records keep the sun).
@@ -260,7 +275,7 @@ namespace DeferredRenderer {
 		// WITHOUT SPECULAR (the light-only AD records, the plain ones) writes "no specular", so its object's highlight passes are KEPT (drawn
 		// forward, exactly as today) while its lamps' diffuse comes from the pass; a SPECULAR base's highlight passes are skipped (the pass adds
 		// the highlight). Counted apart.
-		if (kind == PassSums::Highlights && GBufferV2() && *PlainOf) { StatKeptHighlights++; return false; }
+		if (kind == PassSums::Highlights && GBufferV2() && *PlainOf && !SheenCompiled()) { StatKeptHighlights++; return false; }	// (2026-11-24 DeferredSheen: skipped too)
 		if (kind == PassSums::Lamps) StatSkippedLamps++; else StatSkippedHighlights++;
 		return true;
 	}

@@ -285,7 +285,9 @@
     <ClInclude Include="..\src\core\Diagnostics.h" />
     <ClInclude Include="..\src\core\EffectStatus.h" />
     <ClInclude Include="..\src\core\FlashRule.h" />
+    <ClInclude Include="..\src\core\RenderScaleGuardRule.h" />
     <ClInclude Include="..\src\core\SettingChanges.h" />
+    <ClInclude Include="..\src\core\UnsavedSettings.h" />
     <ClInclude Include="..\src\base\PluginVersion.h" />
     <ClInclude Include="..\src\base\SafeWrite.h" />
     <ClInclude Include="..\src\base\Types.h" />
@@ -330,9 +332,14 @@
     <ClInclude Include="..\src\core\ShaderCounters.h" />
     <ClInclude Include="..\src\core\NvrDxvkExt.h" />
     <ClInclude Include="..\src\core\GpuProfiler.h" />
+    <ClInclude Include="..\src\core\ScreenSpaceShadows.h" />
+    <ClInclude Include="..\src\core\BendDispatch.h" />
     <ClInclude Include="..\src\core\ImGuiManager.h" />
     <ClInclude Include="..\src\core\Hooks\FormsCommon.h" />
     <ClInclude Include="..\src\core\Hooks\GameCommon.h" />
+    <ClInclude Include="..\src\core\BoneMatrixBatch.h" />
+    <ClInclude Include="..\src\core\ConstantMapSort.h" />
+    <ClInclude Include="..\src\core\PortalVisibility.h" />
     <ClInclude Include="..\src\core\PresetManager.h" />
     <ClInclude Include="..\src\core\RenderManager.h" />
     <ClInclude Include="..\src\core\RenderPass.h" />
@@ -391,7 +398,11 @@
     <ClInclude Include="..\src\effects\Sandstorm\Sandstorm.h" />
     <ClInclude Include="..\src\effects\VolumetricLight\VolumetricLight.h" />
     <ClInclude Include="..\src\effects\SkyDither\SkyDither.h" />
+    <ClInclude Include="..\src\core\DistantLandLightStore.h" />
+    <ClInclude Include="..\src\core\DistantLandRocks.h" />
+    <ClInclude Include="..\src\core\DistantLandTier2.h" />
     <ClInclude Include="..\src\effects\Terrain\LandHeights.h" />
+    <ClInclude Include="..\src\effects\Terrain\LodNifScanner.h" />
     <ClInclude Include="..\src\effects\TerrainShadows\TerrainShadows.h" />
     <ClInclude Include="..\src\effects\SunFar\SunFar.h" />
     <ClInclude Include="..\src\effects\Bodycam\Bodycam.h" />

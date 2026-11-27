@@ -1618,17 +1618,33 @@ namespace {
 			bool cpuWait = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "HelperWait") && node.IntValue != 0;
 			if (const char* e = getenv("NVR_RT_HELPER_WAIT")) cpuWait = !strcmp(e, "cpu");	// (bench A/B without touching the settings file: cpu / gpu)
 			cmdLine += cpuWait ? L" --wait cpu" : L" --wait gpu";
-			if (const char* e = getenv("NVR_RT_HELPER_PRIORITY")) if (!strcmp(e, "high")) cmdLine += L" --gpu-priority high";	// (bench only, 2026-11-10)
+			// UNOFFICIAL 2026-11-24 [Main.Main.RayTracing] HelperGpuPriority (read at each helper start; a missing key: 1, as [Shaders.TAA.DLSS]
+			// HelperGpuPriority): 1 = the helper's queue and process at the high GPU priority (NvrRtHelper.cpp --gpu-priority high), and the
+			// helper's and the game's timer resolution at 1 ms (--timer-1ms; timeBeginPeriod here, once). Player handoff 2026-11-23 (RTX 5090,
+			// 4K DLAA, standing still): with the helper at normal priority and the 15.6 ms system timer, every 2-5 s one "RT exchange" round
+			// trip took 25-45 ms (each FRAME SPIKE lined up with one) while the DLSS helper, already at high priority, never stalled; the
+			// bench switches below (then env-only) took the worst spike 94.8 -> 34.8 ms and 48.7 -> 52.6 fps. 0 = normal priority and the
+			// system's timer, as before. The NVR_ environment switches still override it for bench A/B runs.
+			SettingManager::Configuration::ConfigNode priorityNode;
+			bool highPriority = TheSettingManager->Config.FillNode(&priorityNode, "Main.Main.RayTracing", "HelperGpuPriority") ? priorityNode.IntValue != 0 : true;
+			if (const char* e = getenv("NVR_RT_HELPER_PRIORITY")) highPriority = !strcmp(e, "high");	// (bench: high / normal)
+			cmdLine += highPriority ? L" --gpu-priority high" : L" --gpu-priority normal";
+			bool helperTimer = highPriority, gameTimer = highPriority;
+			if (const char* e = getenv("NVR_RT_HELPER_TIMER")) helperTimer = strcmp(e, "0") != 0;	// (bench: 0 = off, anything else on)
+			if (const char* e = getenv("NVR_GAME_TIMER")) gameTimer = strcmp(e, "0") != 0;
+			if (helperTimer) cmdLine += L" --timer-1ms";
 			if (getenv("NVR_RT_HELPER_MEASURE")) cmdLine += L" --measure";
 			if (const char* e = getenv("NVR_RT_HELPER_SIGNAL")) if (!strcmp(e, "cpu")) cmdLine += L" --signal cpu";	// (bench only, 2026-11-10; with --wait cpu)
-			if (getenv("NVR_RT_HELPER_TIMER")) cmdLine += L" --timer-1ms";	// (bench only, 2026-11-10: the helper process's timer resolution 1 ms)
-			if (getenv("NVR_GAME_TIMER")) {	// (bench only: the game process's too; the DXVK submission thread's and the driver's waits tick on it)
+			static bool gameTimerSet = false;	// (once a session: timeBeginPeriod counts its calls, and the helper can start again)
+			if (gameTimer && !gameTimerSet) {	// the game process's timer: the DXVK submission thread's and the driver's waits tick on it
 				typedef UINT(WINAPI* TimeBegin)(UINT);
 				const HMODULE winmm = LoadLibraryW(L"winmm.dll");
 				const TimeBegin begin = winmm ? (TimeBegin)GetProcAddress(winmm, "timeBeginPeriod") : nullptr;
-				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: NVR_GAME_TIMER: the game process's timer resolution 1 ms: %s", begin && begin(1) == 0 ? "set" : "not set");
-			}	// (bench only: the helper's hand-over timing lines, needs --wait cpu)
-			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper start option HelperWait %d (%s)", cpuWait ? 1 : 0, cpuWait ? "the helper waits on the CPU" : "the GPU waits");
+				gameTimerSet = begin && begin(1) == 0;
+				Logger::Log("UNOFFICIAL Vegas Shaders DXVK: the game process's timer resolution 1 ms (HelperGpuPriority): %s", gameTimerSet ? "set" : "not set");
+			}
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: RT helper start options HelperWait %d (%s), HelperGpuPriority %d (GPU priority %s, helper timer %s)",
+				cpuWait ? 1 : 0, cpuWait ? "the helper waits on the CPU" : "the GPU waits", highPriority ? 1 : 0, highPriority ? "high" : "normal", helperTimer ? "1 ms" : "the system's");
 		}
 		STARTUPINFOW si = { sizeof(si) };
 		PROCESS_INFORMATION pi = {};
@@ -2917,7 +2933,7 @@ namespace {
 			bool pending = false, anyTexture = false;
 			if (land) {
 				NiSourceTexture** textures = lighting->ppTextures[0];
-				layers = (std::min)((uint32_t)lighting->usLandscapeTextures, 7u);
+				layers = (std::min)((uint32_t)lighting->GetLandscapeLayerCount(), 7u);
 				if (!textures || !layers) { entry.dispState = 3; dispNever++; return; }
 				for (uint32_t i = 0; i < layers; i++) {
 					NiSourceTexture* t = textures[i];
@@ -3653,7 +3669,7 @@ namespace {
 		// frozen behind them (which cast a black self-shadow onto the player's back/weapon while running away from the sun).
 		if (actorsOn && rtSkin && Player && Player->GetNode()) {
 			walkingPlayer = true;
-			playerHidden = !Player->isThirdPerson;	// (2026-11-07) first person: the body is traced (FirstPersonBody) but not drawn
+			playerHidden = Player->IsDrawnFirstPerson();	// (2026-11-07) first person: the body is traced (FirstPersonBody) but not drawn
 			const UInt32 before = record->instanceCount;
 			Walk(Player->GetNode(), false);
 			playerInstances += record->instanceCount - before;	// (2026-10-30) the scene log: is the body traced in first person?
@@ -3837,34 +3853,65 @@ bool RtCore::CopyIn(int Image, IUnknown* Source, const RECT* Rect) {
 			Rect = &active;
 		}
 	}
-	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, Rect));
+	const HRESULT hr = TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, Rect);
+	if (FAILED(hr)) {
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			Logger::Log("[ERROR] UNOFFICIAL RT Core: CopyToShared (CopyIn image %d) failed (%s; logged once)", Image, HrText(hr).c_str());
+		}
+		return false;
+	}
+	return true;
 }
 
 bool RtCore::CopyInActiveRect(int Image, IDirect3DBaseTexture9* Source) {
 	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Source) return false;
+	const RECT* srcRect = nullptr;
+	RECT active = {};
 	if (RenderRect::Active() && Source->GetType() == D3DRTYPE_TEXTURE) {
 		D3DSURFACE_DESC desc = {};
 		UINT cw = 0, ch = 0;
 		if (SUCCEEDED(static_cast<IDirect3DTexture9*>(Source)->GetLevelDesc(0, &desc)) &&
 			ResolveActiveSubRect(Image, desc.Width, desc.Height, true, cw, ch)) {
-			const RECT active = { 0, 0, (LONG)cw, (LONG)ch };
-			return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, &active));
+			active = { 0, 0, (LONG)cw, (LONG)ch };
+			srcRect = &active;
 		}
 	}
-	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, nullptr));
+	const HRESULT hr = TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, srcRect);
+	if (FAILED(hr)) {
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			Logger::Log("[ERROR] UNOFFICIAL RT Core: CopyToShared (CopyInActiveRect tex image %d) failed (%s; logged once)", Image, HrText(hr).c_str());
+		}
+		return false;
+	}
+	return true;
 }
 
 bool RtCore::CopyInActiveRect(int Image, IDirect3DSurface9* Source) {
 	if (!TheCore.recording || Image <= 0 || Image >= (int)TheCore.images.size() || !Source) return false;
+	const RECT* srcRect = nullptr;
+	RECT active = {};
 	if (RenderRect::Active()) {
 		D3DSURFACE_DESC desc = {};
 		UINT cw = 0, ch = 0;
 		if (SUCCEEDED(Source->GetDesc(&desc)) && ResolveActiveSubRect(Image, desc.Width, desc.Height, true, cw, ch)) {
-			const RECT active = { 0, 0, (LONG)cw, (LONG)ch };
-			return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, &active));
+			active = { 0, 0, (LONG)cw, (LONG)ch };
+			srcRect = &active;
 		}
 	}
-	return SUCCEEDED(TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, nullptr));
+	const HRESULT hr = TheCore.share->CopyToShared(TheCore.images[Image], 0, 0, Source, srcRect);
+	if (FAILED(hr)) {
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			Logger::Log("[ERROR] UNOFFICIAL RT Core: CopyToShared (CopyInActiveRect surf image %d) failed (%s; logged once)", Image, HrText(hr).c_str());
+		}
+		return false;
+	}
+	return true;
 }
 
 UINT RtCore::PassesLeft() {	// UNOFFICIAL 2026-11-07
@@ -4170,7 +4217,14 @@ namespace {
 			for (const PendingCopy& copy : c.copiesOut) {
 				const RECT used = { 0, 0, (LONG)(copy.width ? copy.width : c.imageSizes[copy.image].first),
 					(LONG)(copy.height ? copy.height : c.imageSizes[copy.image].second) };
-				c.share->CopyFromShared(copy.target, 0, 0, c.images[copy.image], &used);
+				const HRESULT hr = c.share->CopyFromShared(copy.target, 0, 0, c.images[copy.image], &used);
+				if (FAILED(hr)) {
+					static bool logged = false;
+					if (!logged) {
+						logged = true;
+						Logger::Log("[ERROR] UNOFFICIAL RT Core: CopyFromShared (image %d) failed (%s; logged once)", copy.image, HrText(hr).c_str());
+					}
+				}
 			}
 			if (timedOut) timerOut.End();
 			if (!only && recorded) {
@@ -4253,7 +4307,7 @@ namespace {
 			if (c.actorsOn && Player) {	// (2026-10-30) the player in the traced scene: the third-person body (walked always), the view model (never)
 				const NiNode* body = Player->GetNode();
 				Logger::Log("RT CORE: player: %s person; body node %s; %.1f body instances a frame; first-person node %s (not traced)",
-					Player->isThirdPerson ? "third" : "first", !body ? "none" : (body->m_flags & NiAVObject::NiFlags::APP_CULLED) ? "CULLED" : "drawn",
+					Player->IsDrawnThirdPerson() ? "third" : "first", !body ? "none" : (body->m_flags & NiAVObject::NiFlags::APP_CULLED) ? "CULLED" : "drawn",
 					c.playerInstances / (float)(n == 60 ? 60 : n == 600 ? 540 : 600), !Player->firstPersonNiNode ? "none" :
 					(Player->firstPersonNiNode->m_flags & NiAVObject::NiFlags::APP_CULLED) ? "culled" : "drawn");
 			}
@@ -4507,7 +4561,14 @@ namespace {
 		for (const PendingCopy& copy : pendingOut) {
 			const RECT used = { 0, 0, (LONG)(copy.width ? copy.width : imageSizes[copy.image].first),
 				(LONG)(copy.height ? copy.height : imageSizes[copy.image].second) };
-			share->CopyFromShared(copy.target, 0, 0, images[copy.image], &used);
+			const HRESULT hr = share->CopyFromShared(copy.target, 0, 0, images[copy.image], &used);
+			if (FAILED(hr)) {
+				static bool logged = false;
+				if (!logged) {
+					logged = true;
+					Logger::Log("[ERROR] UNOFFICIAL RT Core: CopyFromShared (early image %d) failed (%s; logged once)", copy.image, HrText(hr).c_str());
+				}
+			}
 		}
 		if (overlapped && hasPendingCamera) {
 			lateView = pendingView;

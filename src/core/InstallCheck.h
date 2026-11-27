@@ -23,6 +23,9 @@ namespace InstallCheck {
 
 	// NVSEPlugin_Load, after Paths::LogChoice and the twin-DLL check: the plugin folder, the shader folders, the required textures
 	void OnPluginLoad(unsigned nvseVersion, unsigned gameVersion);
+	// kMessage_PostLoad, after all xNVSE plugins have loaded and settings are read, before Direct3D9 init:
+	// warns and offers to exit cleanly when genuinely incompatible xNVSE graphics plugins are loaded
+	void CheckStartupPluginConflicts();
 	// SettingManager::Configuration::Init, after the user's toml is read and BEFORE UpdateOldDefaults marks it with this build's
 	// version: fileFound = the file was there and read; unknown = settings this build does not know (section.key)
 	void OnSettingsRead(bool fileFound, const std::string& fileName, int settingsVersion, int currentVersion, const std::vector<std::string>& unknown);
@@ -30,11 +33,15 @@ namespace InstallCheck {
 	void OnDevice(const std::string& gpuWindows, const std::string& gpuGame, bool dxvk, const std::string& d3d9Version, const std::string& nvrDxvk);
 	// SessionLog::OnDeferredInit: the load order (plugin names), for weather / lighting mods
 	void OnLoadOrder(const std::vector<std::string>& plugins, unsigned hash);
+	// SessionLog::OnDeferredInit: loaded xNVSE plugin DLL names (flags known RenderScale / DXVK conflicts)
+	void OnPlugins(const std::vector<std::string>& plugins);
 
 	const std::vector<Result>& Results();
 	int Count(Level level);
 	// UNOFFICIAL 2026-11-13 a result found later, while the game runs (core/GameShaderPairs.h: shader files of two mods that do not fit)
 	void Note(Level level, const char* group, const std::string& title, const std::string& fix);
+	// UNOFFICIAL 2026-11-23: replace all existing results in a group (e.g. runtime guard escalations without duplicate entries)
+	void Replace(Level level, const char* group, const std::string& title, const std::string& fix);
 	const char* LevelName(Level level);
 
 	// The whole report, scrubbed, ready for the clipboard

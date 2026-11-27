@@ -58,12 +58,19 @@ using ProcessImageSpaceShadersFn = void(__cdecl*)(NiDX9Renderer*, BSRenderedText
 extern ProcessImageSpaceShadersFn ProcessImageSpaceShaders;
 void __cdecl ProcessImageSpaceShadersHook(NiDX9Renderer*, BSRenderedTexture* Source, BSRenderedTexture* Destination);
 
+// UNOFFICIAL 2026-11-23 RenderScaleGuard: ImageSpaceManager::RenderEffect (0x00B97550, __thiscall, 6 args / ret 0x18).
+using RenderImageSpaceEffectFn = UInt32(__thiscall*)(void*, UInt32, NiDX9Renderer*, BSRenderedTexture*, BSRenderedTexture*, void*, bool);
+extern RenderImageSpaceEffectFn RenderImageSpaceEffect;
+UInt32 __fastcall RenderImageSpaceEffectHook(void* This, UInt32 edx, UInt32 aeEffectID, NiDX9Renderer* apRenderer,
+	BSRenderedTexture* apSourceTarget, BSRenderedTexture* apDestTarget, void* apParam, bool abEndFrame);
+
 using ShowDetectorWindowFn = void*(__thiscall*)(DetectorWindow*, HWND, HINSTANCE, NiNode*, char*, int, int, int, int);
 extern ShowDetectorWindowFn ShowDetectorWindow;
 void* __fastcall ShowDetectorWindowHook(DetectorWindow*, UInt32, HWND, HINSTANCE, NiNode* Root, char* Caption, int Left, int Top, int Width, int Height);
 
 using CreateBSRenderedTextureFn = BSRenderedTexture*(__cdecl*)(BSString*, const UInt32, const UInt32, NiTexture::FormatPrefs*, UInt32, bool, NiDepthStencilBuffer*, UInt32, UInt32);
 extern CreateBSRenderedTextureFn CreateBSRenderedTexture;
+extern CallDetour kSaveTextureDetour;	// 2026-11-25 hook cleanup: the save-screenshot call at 0x879061 and its previous target
 BSRenderedTexture* __cdecl CreateSaveTextureHook(BSString* Name, const UInt32 Width, const UInt32 Height, NiTexture::FormatPrefs* Prefs,
 	UInt32 MSAA, bool UseDepthStencil, NiDepthStencilBuffer* DepthStencil, UInt32 Unknown7, UInt32 BackgroundColor);
 
@@ -80,14 +87,18 @@ void DetectorWindowCreateTreeViewHook();
 void DetectorWindowDumpAttributesHook();
 void DetectorWindowConsoleCommandHook();
 
+extern CallDetour kMuzzleFlashDetour;	// 2026-11-24 hook cleanup: the call at 0x9BB158 and what it called before
 void __fastcall MuzzleLightCullingFix(MuzzleFlash*);
 
 BSFogProperty* __cdecl ShadowSceneNode__GetFogPropertyEx(UInt32 FogType);
 NiPoint2* __fastcall WaterFogRemover(NiPoint2* Out, void*, float X, float Y);
 
+extern VirtFuncDetour kEndFrameDetour;	// 2026-11-24 hook cleanup: NiDX9Renderer vtable slot 0x10EE63C and its previous entry
 bool __fastcall NiDX9Renderer__Do_EndFrame(NiDX9Renderer* Renderer, void*);
 
 void AttachGrassFirstRenderPassHook();	// UNOFFICIAL 2026-10-17 GrassFirst ([Shaders.Grass.Main] DrawFirst), inside the Detours transaction
+void ClearGrassFirstInstalled();
+void ClearScopeCameraHooks();
 void InstallGrassFirstHooks();			// after it
 void InstallMaterialDrawHooks();		// UNOFFICIAL 2026-11-07 perf-mirrorfix2: MaterialAware's alpha + the RT hair tint at every object draw (after the cloth hooks)
 void InstallSoftParticleHook();			// UNOFFICIAL 2026-11-05 soft particles: BSShaderNoLighting::SetupGeometryConstants

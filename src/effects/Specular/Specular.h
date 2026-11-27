@@ -15,6 +15,7 @@ struct SpecularUniforms {
 	float depthConstants[4], cameraData[4], cameraPosition[4];
 	float smoothedSunDir[4], shadowFormatData[4], shadowBlur[4];
 	float shadowNearCenter[4], shadowMiddleCenter[4], shadowFarCenter[4], shadowLodCenter[4];
+	float fogData[4], renderScale[4];
 };
 
 // Push data of the Specular passes: the heap indices of the point (offset 0) and the linear (offset 4) sampler.

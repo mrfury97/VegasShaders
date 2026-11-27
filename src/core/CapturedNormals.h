@@ -211,7 +211,7 @@ namespace CapturedNormals {
 	inline IDirect3DTexture9* MaterialTexture = nullptr;  inline IDirect3DSurface9* MaterialSurface = nullptr;  inline IDirect3DSurface9* MaterialMsaa = nullptr;
 	inline D3DXVECTOR4 MaterialData = { 0.0f, 0.0f, 0.0f, 0.0f };	// TESR_MaterialBufferData: x 1 = holds this frame's
 	inline std::unordered_set<IDirect3DPixelShader9*> MaterialWriters;
-	inline bool LastMaterialWriter = false, MaterialBound = false, MaterialDrawn = false;
+	inline bool LastMaterialWriter = false, MaterialBound = false, MaterialDrawn = false, ForwardSkinDrawn = false, VmForwardSkinDrawn = false;
 	inline UInt32 MaterialWrites = 0, MaterialBusy = 0;	// draws that wrote it; writer draws that found stage 2 taken
 	// UNOFFICIAL 2026-10-29 ShadowContrast for the game's passes (ROOTPLAN round 6 step 17; ObjectTemplate.hlsl ShadowContrast): the added
 	// lamp passes (DIFFUSE) of the object shader add the light their shadows took to MaterialBuffer's alpha (written 1 by the opaque
@@ -686,15 +686,18 @@ namespace CapturedNormals {
 	// with a check soon after, 3 tries in all ([Main.Main.Misc] RetryFailedEffects false: off for the session, as before). A target the driver
 	// really drops fails every check, so it is still switched off within kStrikes x kRecheckFrames frames.
 	inline IDirect3DSurface9* CheckTarget = nullptr;  inline IDirect3DSurface9* CheckCopy = nullptr;
+	inline IDirect3DSurface9* CheckCopyClear = nullptr;  inline IDirect3DSurface9* CheckCopyList = nullptr;
 	inline UInt32 LiveFrames = 0, CheckFailures = 0;
-	inline bool CheckThisFrame = false, CheckReported = false;
+	inline bool CheckThisFrame = false, CheckReported = false, CheckThisFrameDiag = false;
 	constexpr int kStrikes = 3;
 	constexpr UInt32 kRecheckFrames = 30;
 	inline int ClearStrikes = 0, ListStrikes = 0;	// WRONG in a row, per half
 	inline UInt32 RecheckAt = 0;					// a LiveFrames to check again on (0 none)
+	inline UInt32 PendingCheckFrame = 0, PendingReadAt = 0;
+	inline bool PendingCheckHasClear = false, PendingCheckHasList = false;
 	inline FailOnce::Latch CheckFail{ "CapturedNormals self-check" };
 
-	inline bool IsCheckFrame(UInt32 f) { return f == 60 || f == 300 || f == 1200 || (f > 1200 && f % 18000 == 0) || (RecheckAt && f == RecheckAt); }
+	inline bool IsCheckFrame(UInt32 f) { return f == 60 || (RecheckAt && f == RecheckAt); }
 
 	inline const RECT* ActiveCheckRect(IDirect3DSurface9* src, RECT& out) {
 		if (!src || !RenderRect::Active()) return nullptr;
@@ -706,14 +709,49 @@ namespace CapturedNormals {
 		return &out;
 	}
 
+	inline bool EnsureCheckSurfaces(IDirect3DDevice9* d, bool needDiagCopy = false) {
+		if (!CheckTarget && FAILED(d->CreateRenderTarget(64, 64, D3DFMT_A16B16G16R16F, D3DMULTISAMPLE_NONE, 0, FALSE, &CheckTarget, NULL))) return false;
+		if (!CheckCopyClear && FAILED(d->CreateOffscreenPlainSurface(64, 64, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &CheckCopyClear, NULL))) {
+			if (CheckTarget) { CheckTarget->Release(); CheckTarget = nullptr; }
+			return false;
+		}
+		if (!CheckCopyList && FAILED(d->CreateOffscreenPlainSurface(64, 64, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &CheckCopyList, NULL))) {
+			if (CheckCopyClear) { CheckCopyClear->Release(); CheckCopyClear = nullptr; }
+			if (CheckTarget) { CheckTarget->Release(); CheckTarget = nullptr; }
+			return false;
+		}
+		if (needDiagCopy && !CheckCopy && FAILED(d->CreateOffscreenPlainSurface(64, 64, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &CheckCopy, NULL))) return false;
+		return true;
+	}
+
+	inline bool QueueCheckCopy(IDirect3DDevice9* d, bool afterList) {
+		if (!TextureSurface || !EnsureCheckSurfaces(d)) return false;
+		IDirect3DSurface9* copy = afterList ? CheckCopyList : CheckCopyClear;
+		if (!copy) return false;
+		RECT sub = {};
+		return SUCCEEDED(d->StretchRect(TextureSurface, ActiveCheckRect(TextureSurface, sub), CheckTarget, NULL, D3DTEXF_POINT)) &&
+			SUCCEEDED(d->GetRenderTargetData(CheckTarget, copy));
+	}
+
+	inline int CountCopySurface(IDirect3DSurface9* copy, bool& stillDrawing) {
+		if (!copy) return -1;
+		D3DLOCKED_RECT r = {};
+		const HRESULT hr = copy->LockRect(&r, NULL, D3DLOCK_READONLY | D3DLOCK_DONOTWAIT);
+		if (hr == D3DERR_WASSTILLDRAWING) { stillDrawing = true; return -1; }
+		if (FAILED(hr)) return -1;
+		int written = 0;
+		for (int y = 0; y < 64; y++) {
+			const UInt16* row = (const UInt16*)((const char*)r.pBits + y * r.Pitch);
+			for (int x = 0; x < 64; x++) { const UInt16 a = row[x * 4 + 3]; if (a >= 0x3C00 && a <= 0x4000) written++; }
+		}
+		copy->UnlockRect();
+		return written;
+	}
+
 	// Texels written by a record (alpha 1 .. 2: the world's and the actors' / gear's codes) in a 64 x 64 point-sampled copy of the target;
 	// -1 if it could not be read.
 	inline int CountWritten(IDirect3DDevice9* d) {
-		if (!CheckTarget && (FAILED(d->CreateRenderTarget(64, 64, D3DFMT_A16B16G16R16F, D3DMULTISAMPLE_NONE, 0, FALSE, &CheckTarget, NULL)) ||
-			FAILED(d->CreateOffscreenPlainSurface(64, 64, D3DFMT_A16B16G16R16F, D3DPOOL_SYSTEMMEM, &CheckCopy, NULL)))) {
-			if (CheckTarget) { CheckTarget->Release(); CheckTarget = nullptr; }
-			return -1;
-		}
+		if (!EnsureCheckSurfaces(d, true)) return -1;
 		RECT sub = {};
 		if (FAILED(d->StretchRect(TextureSurface, ActiveCheckRect(TextureSurface, sub), CheckTarget, NULL, D3DTEXF_POINT)) || FAILED(d->GetRenderTargetData(CheckTarget, CheckCopy))) return -1;
 		D3DLOCKED_RECT r = {};
@@ -733,13 +771,13 @@ namespace CapturedNormals {
 	}
 
 	// afterList: the second half (templates drew, so something must be written), else the first (the clear must have emptied it)
-	inline void CheckResult(bool ok, const char* what, int count, bool afterList) {
+	inline void CheckResult(bool ok, const char* what, int count, bool afterList, UInt32 atFrame = LiveFrames) {
 		// (2026-11-16 fd-batchB, test only) DebugVar4 904: this after-list check reads WRONG once; 905: every one while it stays set
 		if (afterList && ok && (FdTestFault::Broken || FdTestFault::Take(904))) {
-			Logger::Log("CapturedNormals: self-check at captured frame %u, %s: %d of 4096 texels written, read as WRONG by test fault %d (DebugVar4)", LiveFrames, what, count, FdTestFault::Broken ? 905 : 904);
+			Logger::Log("CapturedNormals: self-check at captured frame %u, %s: %d of 4096 texels written, read as WRONG by test fault %d (DebugVar4)", atFrame, what, count, FdTestFault::Broken ? 905 : 904);
 			ok = false;
 		}
-		else Logger::Log("CapturedNormals: self-check at captured frame %u, %s: %d of 4096 texels written -> %s", LiveFrames, what, count, ok ? "ok" : "WRONG");
+		else Logger::Log("CapturedNormals: self-check at captured frame %u, %s: %d of 4096 texels written -> %s", atFrame, what, count, ok ? "ok" : "WRONG");
 		int& strikes = afterList ? ListStrikes : ClearStrikes;
 		if (ok) {
 			if (strikes) Logger::Log("CapturedNormals: self-check %s right again after %d WRONG: the capture stays on", what, strikes);
@@ -758,6 +796,30 @@ namespace CapturedNormals {
 		RecheckAt = 0;
 		Failed = true;
 		CheckFail.Set(afterList ? "the target holds nothing after the main list (3 checks in a row)" : "the target is not cleared (3 checks in a row)");
+	}
+
+	inline void PollPendingCheck() {
+		if (!PendingCheckFrame || LiveFrames < PendingReadAt) return;
+		bool still = false;
+		int nClear = -1, nList = -1;
+		if (PendingCheckHasClear) nClear = CountCopySurface(CheckCopyClear, still);
+		if (!still && PendingCheckHasList) nList = CountCopySurface(CheckCopyList, still);
+		if (still) {
+			if (LiveFrames < PendingCheckFrame + 16) return;
+			PendingCheckFrame = PendingReadAt = 0;
+			PendingCheckHasClear = PendingCheckHasList = false;
+			if (!CheckReported) { CheckReported = true; Logger::Log("CapturedNormals: self-check could not read the target back without waiting (skipped)"); }
+			return;
+		}
+		const UInt32 atFrame = PendingCheckFrame;
+		const bool hasClear = PendingCheckHasClear, hasList = PendingCheckHasList;
+		PendingCheckFrame = PendingReadAt = 0;
+		PendingCheckHasClear = PendingCheckHasList = false;
+		if (hasClear) {
+			if (nClear < 0) { if (!CheckReported) { CheckReported = true; Logger::Log("CapturedNormals: self-check could not read the target back (skipped)"); } }
+			else CheckResult(nClear == 0, "after the clear", nClear, false, atFrame);
+		}
+		if (!Failed && hasList && nList >= 0) CheckResult(nList > 0, "after the main list", nList, true, atFrame);
 	}
 
 	// 64 x 64 point copy of a target as floats (4096 x 4); false if it could not be read (CheckTarget is CountWritten's).
@@ -992,6 +1054,12 @@ namespace CapturedNormals {
 		if (AlbedoMsaa) { AlbedoMsaa->Release(); AlbedoMsaa = nullptr; }	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		if (AlbedoSurface) { AlbedoSurface->Release(); AlbedoSurface = nullptr; }
 		if (AlbedoTexture) { AlbedoTexture->Release(); AlbedoTexture = nullptr; }
+		if (CheckCopyClear) { CheckCopyClear->Release(); CheckCopyClear = nullptr; }
+		if (CheckCopyList) { CheckCopyList->Release(); CheckCopyList = nullptr; }
+		if (CheckCopy) { CheckCopy->Release(); CheckCopy = nullptr; }
+		if (CheckTarget) { CheckTarget->Release(); CheckTarget = nullptr; }
+		PendingCheckFrame = PendingReadAt = 0;
+		PendingCheckHasClear = PendingCheckHasList = false;
 		Made = {};
 		GrassArmed = GrassLateOk = GrassLateBound = false; GrassLateTarget = nullptr;	// UNOFFICIAL 2026-11-12 (the late grass binds: gone with the targets)
 		GrassOwnOk = false; GrassOwnTarget = nullptr;	// (PTGrassOwnPixel)
@@ -1448,10 +1516,10 @@ namespace CapturedNormals {
 		if (EyeDrawNow && BeamNow) { BeamEyes++; if (write) BeamEyesRecorded++; }	// UNOFFICIAL 2026-11-12 HairAndEyes (the log's counts)
 		bool contrast = false;	// UNOFFICIAL ShadowContrast: an added lamp pass that gives its lost light to MaterialBuffer's alpha
 		if (write) {
-			const DWORD mask = StateNow(d, D3DRS_COLORWRITEENABLE, 0xF), blend = StateNow(d, D3DRS_ALPHABLENDENABLE, FALSE);
+			const DWORD mask = StateNow(d, D3DRS_COLORWRITEENABLE, 0xF), blend = StateNow(d, D3DRS_ALPHABLENDENABLE, FALSE), zWrite = StateNow(d, D3DRS_ZWRITEENABLE, TRUE);
 			const DWORD src = blend ? StateNow(d, D3DRS_SRCBLEND, D3DBLEND_ONE) : D3DBLEND_ONE, dst = blend ? StateNow(d, D3DRS_DESTBLEND, D3DBLEND_ZERO) : D3DBLEND_ZERO;
-			// opaque, or a SRCALPHA / INVSRCALPHA fade (the land over objects): the templates write alpha 1 there, a plain replace
-			write = (mask & 7) && (!blend || (src == D3DBLEND_SRCALPHA && dst == D3DBLEND_INVSRCALPHA));
+			// opaque, or a SRCALPHA / INVSRCALPHA fade (the land over objects): non-depth-writing blended draws (decals, fade cards, foliage overlays) keep out of the G-buffer
+			write = (mask & 7) && zWrite && (!blend || (src == D3DBLEND_SRCALPHA && dst == D3DBLEND_INVSRCALPHA));
 			// UNOFFICIAL 2026-11-21 (NPC transparent/dark skin under Flashlight): forward skin (writers not in MaterialWriters/AlbedoWriters)
 			// must not write RT3 under alpha blend (its COLOR3.a = 2.05..2.45 extrapolates FP16 RT3 as 2.25*skin - 1.25*bg, corrupting/clipping depth)
 			// or when SkinScattering did not bind SkinAlbedo (otherwise RT3 writes face depth & disables FlashlightLamp while AlbedoSurface still holds
@@ -1490,6 +1558,10 @@ namespace CapturedNormals {
 			SetMask(d, D3DRS_COLORWRITEENABLE3, 0xF);
 			Writes++;
 			Drawn = true;
+			if (!LastMaterialWriter && !LastAlbedoWriter) {
+				if (VmSpan) VmForwardSkinDrawn = true;
+				else ForwardSkinDrawn = true;
+			}
 			// UNOFFICIAL 2026-11-04: the light pass lights this object (core/FlashlightLamp.h). (2026-11-07 ptaaa-firstperson) not the view
 			// model's draws (VmSpan): the deferred flashlight ran before them, so marking them "lit already" would take the light off the gun
 			// (2026-11-12) nor the grass and the leaves: they keep their own beam / the game lamp (their records are only for the path tracer)
@@ -1907,7 +1979,7 @@ namespace CapturedNormals {
 		LastClearedH = activeH;
 		ClearSurface(d, DrawSurface(), t.Width, t.Height, D3DCOLOR_ARGB(0, 0, 0, 0), forceFullClear);	// "nothing here": readers keep the depth-rebuilt normal
 		if (MaterialTexture && MaterialCompiled) ClearSurface(d, MaterialDrawSurface(), t.Width, t.Height, D3DCOLOR_ARGB(0, 0, 0, 0), forceFullClear);	// UNOFFICIAL MaterialBuffer: class 0
-		MaterialDrawn = MaterialBound = false;
+		MaterialDrawn = MaterialBound = ForwardSkinDrawn = false;
 		if (AlbedoTexture && AlbedoCompiled) ClearSurface(d, AlbedoDrawSurface(), t.Width, t.Height, D3DCOLOR_ARGB(0, 0, 0, 0), forceFullClear);	// UNOFFICIAL 2026-10-31 AlbedoBuffer: unwritten
 		AlbedoDrawn = AlbedoBound = false;
 		SkinAlbedoTex = nullptr; SkinAlbedoMsaa = nullptr; SkinAlbedoSurface = nullptr;	// (noted again by the skin draws of this span)
@@ -1917,18 +1989,23 @@ namespace CapturedNormals {
 			BlendedAlphaOn = !TheSettingManager->Config.FillNode(&node, "Main.Main.Quality", "CapturedBlendedAlpha") || node.BoolValue;
 			if (LiveFrames % 1800 == 2) { Logger::Log("CapturedNormals: CapturedBlendedAlpha %s: %u blended writer draws since the last line had the targets' alpha written (the scene's alpha blend ZERO / ONE kept it before: such pixels counted as unwritten)", BlendedAlphaOn ? "on" : "off", BlendedAlphaDraws); BlendedAlphaDraws = 0; }
 		}
-		CheckThisFrame = IsCheckFrame(++LiveFrames);
+		++LiveFrames;
+		PollPendingCheck();
+		if (Failed) { SpanTarget = nullptr; rt0->Release(); return; }
+		CheckThisFrame = IsCheckFrame(LiveFrames);
+		CheckThisFrameDiag = false;
 		{	// UNOFFICIAL 2026-10-31 [Main.Main.Quality] MaterialBufferCheckEvery (live, 0 off): the self-check every that many frames too (a test aid)
 			const int every = TheSettingManager->GetSettingI("Main.Main.Quality", "MaterialBufferCheckEvery");
-			if (every > 0 && LiveFrames % (UInt32)every == 0) CheckThisFrame = true;
+			if (every > 0 && LiveFrames % (UInt32)every == 0) { CheckThisFrame = true; CheckThisFrameDiag = true; }
 		}
-		if (CheckThisFrame) {	// the self-check's first half: the clear must have emptied it
+		if (!PendingCheckFrame && (FdTestFault::Broken || FdTestFault::Armed == 904)) CheckThisFrame = true;
+		if (CheckThisFrame && !PendingCheckFrame) {	// the self-check's first half: queue clear copy without stalling the GPU
 			if (MsaaSurface) d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);
-			const int n = CountWritten(d);
-			if (n < 0) { CheckThisFrame = false; if (!CheckReported) { CheckReported = true; Logger::Log("CapturedNormals: self-check could not read the target back (skipped)"); } }
-			else CheckResult(n == 0, "after the clear", n, false);
-			if (Failed) { SpanTarget = nullptr; rt0->Release(); return; }
+			PendingCheckHasClear = QueueCheckCopy(d, false);
+			if (!PendingCheckHasClear) { CheckThisFrame = false; if (!CheckReported) { CheckReported = true; Logger::Log("CapturedNormals: self-check could not read the target back (skipped)"); } }
+			else { PendingCheckFrame = LiveFrames; PendingCheckHasList = false; PendingReadAt = LiveFrames + 4; }
 		}
+		else CheckThisFrame = false;
 		InSpan = true;
 		Bound = false;
 		Drawn = false;
@@ -1950,8 +2027,8 @@ namespace CapturedNormals {
 		if (AlbedoMsaa && AlbedoSurface) d->StretchRect(AlbedoMsaa, NULL, AlbedoSurface, NULL, D3DTEXF_NONE);	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		if (ContrastDrawn && ContrastLive()) ApplyContrast(d, SpanTarget);	// UNOFFICIAL ShadowContrast (the game's lamp passes; 2026-11-16 ContrastLive: item 23)
 		ContrastDrawn = false;
-		if (MaterialDrawn && !Failed && Drawn) SkinFill(d);	// UNOFFICIAL 2026-10-31 MaterialBufferSkin (after the contrast step: it reads the alpha)
-		if (AlbedoDrawn && !Failed && Drawn) SkinAlbedoFill(d);	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo from the skin blur's target
+		if (MaterialDrawn && !Failed && Drawn && ForwardSkinDrawn) SkinFill(d);	// UNOFFICIAL 2026-10-31 MaterialBufferSkin (after the contrast step: it reads the alpha)
+		if (AlbedoDrawn && !Failed && Drawn && ForwardSkinDrawn && SkinAlbedoTex) SkinAlbedoFill(d);	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo from the skin blur's target
 		// UNOFFICIAL 2026-11-12 grass records: the grass drawn after this list writes into the same targets (GrassLateDraw), this scene target only
 		GrassLateTarget = SpanTarget;
 		GrassLateOk = GrassLateWanted && !Failed && SpanTarget && AlbedoDrawn && MaterialDrawn && Drawn;	// (2026-11-14: GrassNow before DeferredFoliage; the same value without it)
@@ -1960,42 +2037,49 @@ namespace CapturedNormals {
 		if (SpanTarget) { SpanTarget->Release(); SpanTarget = nullptr; }
 		MaterialData.x = MaterialDrawn && !Failed ? 1.0f : 0.0f;
 		AlbedoData.x = AlbedoDrawn && !Failed ? 1.0f : 0.0f;	// UNOFFICIAL 2026-10-31 AlbedoBuffer
-		if (CheckThisFrame && Drawn) {	// the self-check's second half: templates drew, so something must be written
-			const int n = CountWritten(d);
-			if (n >= 0) CheckResult(n > 0, "after the main list", n, true);
-			// UNOFFICIAL 2026-10-29 MaterialBuffer: what it holds on these frames too (64 x 64 point copy): written texels by class, and the
-			// thickness / roughness ranges seen (a log line only; nothing is switched off by it)
+		if (CheckThisFrame && Drawn) {	// the self-check's second half: queue list copy without stalling the GPU
+			if (PendingCheckFrame == LiveFrames) {
+				PendingCheckHasList = QueueCheckCopy(d, true);
+				if (!PendingCheckHasClear && !PendingCheckHasList) PendingCheckFrame = 0;
+				else PendingReadAt = LiveFrames + 4;
+			}
+			// UNOFFICIAL 2026-10-29 MaterialBuffer: heavy per-texel summary only when MaterialBufferCheckEvery > 0
 			D3DLOCKED_RECT r = {};
 			RECT matSub = {};
-			if (MaterialDrawn && MaterialSurface && CheckTarget && SUCCEEDED(d->StretchRect(MaterialSurface, ActiveCheckRect(MaterialSurface, matSub), CheckTarget, NULL, D3DTEXF_POINT)) &&
-				SUCCEEDED(d->GetRenderTargetData(CheckTarget, CheckCopy)) && SUCCEEDED(CheckCopy->LockRect(&r, NULL, D3DLOCK_READONLY))) {
-				int byClass[8] = {}, metalTexels = 0; float thickMax = 0.0f, roughMin = 2.0f, roughMax = -2.0f, metalMax = 0.0f;	// (7: 2026-11-12 CapturedGrass, grass)
-				int v2Specular = 0, v2Normals = 0, v2NoNormal = 0, v2ByModel[8] = {};	// UNOFFICIAL 2026-11-14 GBufferV2 (8 hair, 9 eye, 10 unlit, the rest)
-				for (int y = 0; y < 64; y++) {
-					const D3DXFLOAT16* row = (const D3DXFLOAT16*)((const char*)r.pBits + y * r.Pitch);
-					for (int x = 0; x < 64; x++) {
-						float v[4]; D3DXFloat16To32Array(v, row + x * 4, 4);
-						if (!MaterialWritten(v)) continue;	// (2026-11-14 GBufferV2: either layout)
-						{ const int cls = MaterialClass(v); if (cls <= 7) byClass[(std::max)(cls, 0)]++; }	// 2026-10-31: r = class + 0.49 x metal
-						const float metal = (std::max)(v[0] - floorf(v[0] + 0.004f), 0.0f) / 0.49f;
-						if (metal > 0.02f) { metalTexels++; metalMax = (std::max)(metalMax, metal); }
-						if (V2Compiled) { if (v[0] >= 15.99f) v2Specular++; if (fabsf(v[1]) <= 1.001f) v2Normals++; else v2NoNormal++; if (MaterialClass(v) > 7) v2ByModel[(std::min)(MaterialClass(v), 15) - 8]++; }
-						else thickMax = (std::max)(thickMax, v[1]);
-						if (v[2] >= 0.0f) { roughMin = (std::min)(roughMin, v[2]); roughMax = (std::max)(roughMax, v[2]); }
+			if (CheckThisFrameDiag && EnsureCheckSurfaces(d, true)) {
+				if (MaterialDrawn && MaterialSurface && CheckTarget && SUCCEEDED(d->StretchRect(MaterialSurface, ActiveCheckRect(MaterialSurface, matSub), CheckTarget, NULL, D3DTEXF_POINT)) &&
+					SUCCEEDED(d->GetRenderTargetData(CheckTarget, CheckCopy)) && SUCCEEDED(CheckCopy->LockRect(&r, NULL, D3DLOCK_READONLY))) {
+					int byClass[8] = {}, metalTexels = 0; float thickMax = 0.0f, roughMin = 2.0f, roughMax = -2.0f, metalMax = 0.0f;	// (7: 2026-11-12 CapturedGrass, grass)
+					int v2Specular = 0, v2Normals = 0, v2NoNormal = 0, v2ByModel[8] = {};	// UNOFFICIAL 2026-11-14 GBufferV2 (8 hair, 9 eye, 10 unlit, the rest)
+					for (int y = 0; y < 64; y++) {
+						const D3DXFLOAT16* row = (const D3DXFLOAT16*)((const char*)r.pBits + y * r.Pitch);
+						for (int x = 0; x < 64; x++) {
+							float v[4]; D3DXFloat16To32Array(v, row + x * 4, 4);
+							if (!MaterialWritten(v)) continue;	// (2026-11-14 GBufferV2: either layout)
+							{ const int cls = MaterialClass(v); if (cls <= 7) byClass[(std::max)(cls, 0)]++; }	// 2026-10-31: r = class + 0.49 x metal
+							const float metal = (std::max)(v[0] - floorf(v[0] + 0.004f), 0.0f) / 0.49f;
+							if (metal > 0.02f) { metalTexels++; metalMax = (std::max)(metalMax, metal); }
+							if (V2Compiled) { if (v[0] >= 15.99f) v2Specular++; if (fabsf(v[1]) <= 1.001f) v2Normals++; else v2NoNormal++; if (MaterialClass(v) > 7) v2ByModel[(std::min)(MaterialClass(v), 15) - 8]++; }
+							else thickMax = (std::max)(thickMax, v[1]);
+							if (v[2] >= 0.0f) { roughMin = (std::min)(roughMin, v[2]); roughMax = (std::max)(roughMax, v[2]); }
+						}
 					}
+					CheckCopy->UnlockRect();
+					Logger::Log("MaterialBuffer: self-check at captured frame %u: texels by class 0:%d object:%d gear:%d cloth:%d land:%d plant:%d skin:%d grass:%d of 4096; largest thickness %.0f; roughness %.2f-%.2f; metal on %d texels (up to %.2f); skin fills so far %u",
+						LiveFrames, byClass[0], byClass[1], byClass[2], byClass[3], byClass[4], byClass[5], byClass[6], byClass[7], thickMax, roughMin, roughMax, metalTexels, metalMax, SkinFills);
+					// UNOFFICIAL 2026-11-14 GBufferV2: the layout's own channels (the thickness above is not in it: 0)
+					if (V2Compiled)
+						Logger::Log("GBufferV2: self-check at captured frame %u: of the written texels %d with a shading normal, %d without (g 4+: skin fill, foliage, blended draws, light passes), %d with the specular bit; hair:%d eye:%d unlit:%d other:%d",
+							LiveFrames, v2Normals, v2NoNormal, v2Specular, v2ByModel[0], v2ByModel[1], v2ByModel[2], v2ByModel[3] + v2ByModel[4] + v2ByModel[5] + v2ByModel[6] + v2ByModel[7]);
 				}
-				CheckCopy->UnlockRect();
-				Logger::Log("MaterialBuffer: self-check at captured frame %u: texels by class 0:%d object:%d gear:%d cloth:%d land:%d plant:%d skin:%d grass:%d of 4096; largest thickness %.0f; roughness %.2f-%.2f; metal on %d texels (up to %.2f); skin fills so far %u",
-					LiveFrames, byClass[0], byClass[1], byClass[2], byClass[3], byClass[4], byClass[5], byClass[6], byClass[7], thickMax, roughMin, roughMax, metalTexels, metalMax, SkinFills);
-				// UNOFFICIAL 2026-11-14 GBufferV2: the layout's own channels (the thickness above is not in it: 0)
-				if (V2Compiled)
-					Logger::Log("GBufferV2: self-check at captured frame %u: of the written texels %d with a shading normal, %d without (g 4+: skin fill, foliage, blended draws, light passes), %d with the specular bit; hair:%d eye:%d unlit:%d other:%d",
-						LiveFrames, v2Normals, v2NoNormal, v2Specular, v2ByModel[0], v2ByModel[1], v2ByModel[2], v2ByModel[3] + v2ByModel[4] + v2ByModel[5] + v2ByModel[6] + v2ByModel[7]);
+				if (AlbedoDrawn && AlbedoSurface && CheckTarget) AlbedoCheck(d);	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 			}
-			if (AlbedoDrawn && AlbedoSurface && CheckTarget) AlbedoCheck(d);	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		}
-		if (CheckThisFrame && !Drawn && ListStrikes) RecheckAt = LiveFrames + kRecheckFrames;	// (2026-11-16 a recheck with no template draw: again later)
-		CheckThisFrame = false;
+		else if (CheckThisFrame && !Drawn) {
+			if (PendingCheckFrame == LiveFrames && !PendingCheckHasClear) PendingCheckFrame = 0;
+			if (ListStrikes) RecheckAt = LiveFrames + kRecheckFrames;	// (2026-11-16 a recheck with no template draw: again later)
+		}
+		CheckThisFrame = CheckThisFrameDiag = false;
 		Data.x = Drawn && !Failed ? 1.0f : 0.0f;
 	}
 
@@ -2072,7 +2156,7 @@ namespace CapturedNormals {
 		VmSpan = true;
 		Bound = false;
 		LastPS = nullptr;
-		VmSkinDrawn = false;
+		VmSkinDrawn = VmForwardSkinDrawn = false;
 		VmWritesBefore = Writes;
 		SharedDrawState::Valid = Lean();
 	}
@@ -2093,7 +2177,7 @@ namespace CapturedNormals {
 		ContrastStrength = VmContrastSaved;
 		ContrastDrawn = false;
 		if (Writes != VmWritesBefore && !Failed) {
-			if (MaterialTexture && MaterialCompiled) SkinFill(d);	// the hands' material (class 6) from their captured normals' alpha (the world's again: the same values)
+			if (MaterialTexture && MaterialCompiled && VmForwardSkinDrawn) SkinFill(d);	// the hands' material (class 6) from their captured normals' alpha (the world's again: the same values)
 			if (VmSkinDrawn) VmSkinFill(d);
 			VmFrame = frame;
 			if (VmWanted && VmCaptures++ % 3600 == 0)	// (2026-11-15: the path tracer's line, not DeferredFirstPerson's)

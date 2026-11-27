@@ -15,6 +15,13 @@
 #include "includes/Helpers.hlsl"
 #include "includes/PBRScale.hlsl"
 #include "includes/PointShadowForward.hlsl"  // UNOFFICIAL forward point-light shadows (INTERIOR_SHADOWS, interiors)
+// UNOFFICIAL 2026-11-25 fd-complete batch 6 DeferredDecals (Includes/DecalForwardPlus.hlsl): the forward+ record (DECAL_FORWARD_PLUS 1):
+// the sun pair kept, the game's lamps replaced by every lamp of the pixel's froxel. Without the define: as before, byte for byte.
+#if defined(DECAL_FORWARD_PLUS) && DECAL_FORWARD_PLUS
+    #define DECAL_FP 1
+#else
+    #define DECAL_FP 0
+#endif
 
 uniform float4 AmbientColor    : register(c0);
 uniform float4 EyePosition     : register(c1);
@@ -26,6 +33,9 @@ uniform float4 LightData[8]    : register(c21);   // (colour, position+radius) x
 uniform sampler2D BaseMap   : register(s0);
 uniform sampler2D NormalMap : register(s1);
 uniform sampler2D HeightMap : register(s4);
+#if DECAL_FP
+    #include "includes/DecalForwardPlus.hlsl"
+#endif
 
 struct VtxAttrs {
     float2 f_uv             : TEXCOORD0;
@@ -87,6 +97,9 @@ VtxVaryings main(VtxAttrs pa) {
 
     // ddx/ddy must stay at top level, outside dynamic flow control.
     float3 shadow_normal = GetShadowGeometricNormal(pa.f_shadow_world_pos.xyz);
+#if DECAL_FP
+    decalFpN = DecalFPWorldNormal(pa.f_shadow_world_pos.xyz, pa.f_uv, shadow_normal, N);	// (top level: derivatives)
+#endif
 #if FORWARD_SHADOWS
     float sun_shadow = SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w)
                     ? GetSunShadow(pa.f_shadow_world_pos.xyz, shadow_normal)
@@ -96,7 +109,7 @@ VtxVaryings main(VtxAttrs pa) {
 #endif
 
     bool has_sun = ToggleNumLights.x > 0.0f;
-#if INTERIOR_SHADOWS
+#if INTERIOR_SHADOWS && !DECAL_FP
     // UNOFFICIAL forward point-light shadows (Includes/PointShadowForward.hlsl). Light i of the draw is LightData pair i;
     // the DLL leaves a directional light 0 without a shadow. Attenuation as in the loop below.
     float3 ptWorldPos = pa.f_shadow_world_pos.xyz;
@@ -113,7 +126,11 @@ VtxVaryings main(VtxAttrs pa) {
     #undef SM3_POINT_ATT
 #endif
 
+#if DECAL_FP
+    int num_lights = has_sun ? 1 : 0;	// the sun pair only: the lamps come from the table below
+#else
     int num_lights = (int)min(ToggleNumLights.x + ToggleNumLights.y, 4.0f);
+#endif
 
     float3 lambert = 0.0f;
     float3 spec_c = 0.0f;
@@ -123,7 +140,7 @@ VtxVaryings main(VtxAttrs pa) {
         if (i >= num_lights) break;
 
         float3 light_color = PBRLight(LightData[i * 2].rgb);
-#if INTERIOR_SHADOWS
+#if INTERIOR_SHADOWS && !DECAL_FP
         light_color *= ptShadow[i];   // all of this light's terms
 #endif
         float4 light_vec   = LightData[i * 2 + 1];
@@ -151,6 +168,11 @@ VtxVaryings main(VtxAttrs pa) {
         float spec_strength = pow(saturate(dot(half_vec, N)), ToggleNumLights.z);
         spec_c += light_color * (spec_strength * ToggleNumLights.w * att);
     }
+
+#if DECAL_FP
+    lambert += FPLampSum(pa.f_shadow_world_pos.xyz, decalFpN, SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w) ? 1.0f : 0.0f, 0.0f, 1.0f, 0.0f);
+    lambert += DecalFPBeam(pa.f_shadow_world_pos.xyz, SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w) ? 1.0f : 0.0f);
+#endif
 
     // shadowNormal is the geometric WORLD normal; N above is tangent space.
     float3 amb_rgb = PBRAmbient(AmbientColor.rgb) + SkyAmbient(shadow_normal, SHADOW_VS_PRESENT(pa.f_shadow_world_pos.w) ? 1.0f : 0.0f);

@@ -905,7 +905,7 @@ float FallbackCap() { return NVR_ALFlags.z > 0.5f && NVR_ALReach.z > 0.0f ? NVR_
 float3 SurfaceAlbedo(float2 uv, float3 lin) {
 	float4 a = tex2Dlod(NVR_ALAlbedo, float4(uv, 0.0f, 0.0f));
 	float take = step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a);
-	return lerp(SurfaceColourCap(lin, FallbackCap()), max(a.rgb, 0.0f), take);
+	return lerp(SurfaceColourCap(lin, FallbackCap()), clamp(a.rgb, 0.0f, 0.85f), take);
 }
 float3 MultiBounceAO(float v, float3 albedo) {
 	float3 a =  2.0404f * albedo - 0.3324f;
@@ -1157,7 +1157,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 		float detail = clamp(luma(c0) / max(luma(localLin), 1.0e-4f), 0.0f, 2.0f);
 		float3 guess = SurfaceColourCap(localLin * shade, FallbackCap()) * detail;	// (2026-11-10 AlbedoFallbackCap)
 		float4 a = tex2Dlod(NVR_ALAlbedo, float4(IN.UVCoord, 0.0f, 0.0f));
-		lin += giLight * lerp(guess, max(a.rgb, 0.0f), step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a));
+		lin += giLight * lerp(guess, clamp(a.rgb, 0.0f, 0.85f), step(0.5f, NVR_ALFlags.z) * step(0.5f, a.a));
 	}
 	return delinearize(float4(lin, color.a));
 }

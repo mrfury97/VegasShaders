@@ -124,7 +124,7 @@ void TextureManager::InitTexture(const char* samplerName, IDirect3DTexture9** ta
 	if (Targets.empty() && EffectSpans.empty()) ReadTargetSettings();	// (start-up: before the first frame's TargetsFrame)
 	EffectSpan* span = SpanOf(target);
 	EffectRecord* owner = span && span->Effect->TargetParkable(samplerName) ? span->Effect : nullptr;
-	const bool parked = owner && TargetReleaseSeconds > 0.0f && !OwnerWanted(owner);
+	const bool parked = owner && TargetReleaseSeconds > 0.0f && !OwnerWanted(owner, samplerName);
 	const HRESULT result = TheRenderManager->device->CreateTexture(parked ? 1 : w, parked ? 1 : h, levels, usage, fmt, D3DPOOL_DEFAULT, target, NULL);
 	if (FAILED(result)) {
 		Logger::Log("[ERROR] : Failed to init texture %s", samplerName);
@@ -138,7 +138,7 @@ void TextureManager::InitTexture(const char* samplerName, IDirect3DTexture9** ta
 
 	// (memleak) noted, by its slot: a slot made again (another size) replaces its old note
 	if (parked && *topSurface) TheRenderManager->device->ColorFill(*topSurface, NULL, 0);
-	OwnedTarget note = { samplerName, target, topSurface, w, h, fmt, mipmaps, owner, parked };
+	OwnedTarget note = { samplerName, target, topSurface, w, h, fmt, mipmaps, owner, parked, 0ull };
 	const unsigned long long bytes = TargetBytes(w, h, fmt, mipmaps);
 	bool known = false;
 	for (OwnedTarget& t : Targets) if (t.Texture == target) {
@@ -190,9 +190,9 @@ TextureManager::EffectSpan* TextureManager::SpanOf(const void* Slot) {
 	return nullptr;
 }
 
-bool TextureManager::OwnerWanted(EffectRecord* Owner) {
-	if (Owner == StartingEffect) return StartingWanted;	// start-up: Enabled is set by LoadEffect, after RegisterTextures
-	return Owner->TargetsWanted();
+bool TextureManager::OwnerWanted(EffectRecord* Owner, const char* SamplerName) {
+	if (Owner == StartingEffect) return StartingWanted || (SamplerName && Owner->TargetWanted(SamplerName));	// start-up: Enabled is set by LoadEffect, after RegisterTextures
+	return SamplerName ? Owner->TargetWanted(SamplerName) : Owner->TargetsWanted();
 }
 
 // Nothing may keep the old texture's address past the swap (this code base has crashed that way: a game shader kept a texture the
@@ -211,24 +211,7 @@ void TextureManager::ForgetTarget(const std::string& Name, IDirect3DBaseTexture9
 	if (TheShaderManager) {
 		if (!Name.empty())
 			TheShaderManager->ClearShaderSamplers(Name.c_str(), Name.size() + 1);	// (+ 1: the whole name, not names that start with it)
-		if (Texture) {
-			auto forget = [&](ShaderProgram* program) {
-				if (!program) return;
-				for (UInt32 i = 0; i < program->TextureShaderValuesCount; i++) {
-					TextureRecord* record = program->TextureShaderValues[i].Texture;
-					if (record && record->Texture == Texture) record->Texture = nullptr;
-				}
-			};
-			for (const auto& named : TheShaderManager->EffectsNames) forget(named.second ? *named.second : nullptr);
-			for (const auto& named : TheShaderManager->ShaderNames) {
-				ShaderCollection* collection = named.second ? *named.second : nullptr;
-				if (!collection) continue;
-				for (auto& vertex : collection->VertexShaderList)
-					for (int kind = 0; vertex && kind < 3; kind++) forget(vertex->ShaderProg[kind]);	// Default / Exterior / Interior
-				for (auto& pixel : collection->PixelShaderList)
-					for (int kind = 0; pixel && kind < 3; kind++) forget(pixel->ShaderProg[kind]);
-			}
-		}
+		if (Texture) ShaderProgram::ForgetAllTexture(Texture);
 	}
 	if (device && Texture) {
 		for (DWORD stage = 0; stage < 16; stage++) {
@@ -300,6 +283,14 @@ int TextureManager::SwapTarget(OwnedTarget& Target, bool Park) {
 	ForgetTarget(Target.Name, old, oldSurface);
 	*Target.Texture = made;
 	*Target.Surface = madeSurface;
+	// Keep registered alias slots (e.g., TESR_CloudHistory -> HistoryRead) from holding the freed texture.
+	for (auto& named : TextureNames) {
+		if (named.second && *named.second == old) {
+			*named.second = made;
+			if (TheShaderManager)
+				TheShaderManager->ClearShaderSamplers(named.first.c_str(), named.first.size() + 1);
+		}
+	}
 	oldSurface->Release();
 	old->Release();
 	Target.Parked = Park;
@@ -321,6 +312,11 @@ void TextureManager::TargetsFrame() {
 		if (span.Effect->TargetsWanted()) span.OffSince = 0;
 		else if (!span.OffSince) span.OffSince = now;
 	}
+	for (OwnedTarget& t : Targets) {
+		if (!t.Owner) continue;
+		if (t.Owner->TargetWanted(t.Name.c_str())) t.OffSince = 0;
+		else if (!t.OffSince) t.OffSince = now;
+	}
 	static bool toldStart = false;
 	if (!toldStart) {	// what start-up made, once
 		toldStart = true;
@@ -339,27 +335,31 @@ void TextureManager::TargetsFrame() {
 	}
 	if (now < TargetRetryAt) return;
 	const unsigned long long grace = (unsigned long long)(TargetReleaseSeconds * 1000.0f);
-	EffectRecord* told = nullptr;	// one line an effect and frame
+	EffectRecord* toldPark = nullptr;
+	EffectRecord* toldUnpark = nullptr;	// one line per effect, direction, and frame
 	for (size_t i = 0; i < Targets.size(); i++) {
 		OwnedTarget& t = Targets[i];
 		if (!t.Owner || !*t.Texture || !*t.Surface) continue;
-		EffectSpan* span = SpanOf(t.Texture);
-		if (!span) continue;
-		const bool wanted = span->OffSince == 0;
+		const bool wanted = t.OffSince == 0;
 		const bool unpark = t.Parked && (wanted || TargetReleaseSeconds <= 0.0f);
-		const bool park = !t.Parked && !wanted && TargetReleaseSeconds > 0.0f && now - span->OffSince >= grace;
+		const bool park = !t.Parked && !wanted && TargetReleaseSeconds > 0.0f && now - t.OffSince >= grace;
+		EffectRecord*& told = park ? toldPark : toldUnpark;
 		if ((!unpark && !park) || t.Owner == told) continue;
-		// every target of this effect in the same state, in one go (one log line, one time)
+		// every target of this effect in the same direction, in one go (one log line, one time)
 		told = t.Owner;
 		LARGE_INTEGER t0, t1, freq;
 		QueryPerformanceCounter(&t0);
 		unsigned count = 0, failed = 0;
 		unsigned long long bytes = 0;
 		EffectRecord* const owner = t.Owner;	// (a swap may take the note's owner away)
-		const bool wasParked = t.Parked;
+		const unsigned long long offSince = t.OffSince;
 		for (size_t k = i; k < Targets.size(); k++) {
 			OwnedTarget& u = Targets[k];
-			if (u.Owner != owner || u.Parked != wasParked || !*u.Texture || !*u.Surface) continue;
+			if (u.Owner != owner || !*u.Texture || !*u.Surface) continue;
+			const bool uWanted = u.OffSince == 0;
+			const bool uMatch = park ? (!u.Parked && !uWanted && TargetReleaseSeconds > 0.0f && now - u.OffSince >= grace)
+			                         : (u.Parked && (uWanted || TargetReleaseSeconds <= 0.0f));
+			if (!uMatch) continue;
 			const int swapped = SwapTarget(u, park);
 			if (swapped > 0) { count++; bytes += TargetBytes(u.Width, u.Height, u.Format, u.Mipmaps); }
 			else if (swapped == 0) failed++;
@@ -370,7 +370,7 @@ void TextureManager::TargetsFrame() {
 		if (failed) TargetRetryAt = now + 5000;	// (video memory short, most likely: not every frame)
 		if (!count && !failed) continue;
 		if (park) Logger::Log("TARGETS: %s has been off for %.0f s: %u of its buffers released, %.1f MB given back (%.2f ms%s); %.0f MB of buffers released in all now",
-			owner->Name, (now - span->OffSince) / 1000.0, count, bytes / 1048576.0, ms, failed ? "; some could not be swapped and stay" : "", TargetBytesParked / 1048576.0);
+			owner->Name, (now - offSince) / 1000.0, count, bytes / 1048576.0, ms, failed ? "; some could not be swapped and stay" : "", TargetBytesParked / 1048576.0);
 		else Logger::Log("TARGETS: %s is on again: %u buffers made again, %.1f MB, in %.2f ms%s", owner->Name, count, bytes / 1048576.0, ms,
 			failed ? " ([ERROR] some could not be made: the effect draws into 1 x 1 stand-ins until they can; tried again in 5 s)" : "");
 	}
@@ -416,8 +416,9 @@ IDirect3DBaseTexture9* TextureManager::GetTextureByName(std::string& samplerName
 
 // Loads a texture file of the given kind once; later calls (also after a failure) get the cached result.
 IDirect3DBaseTexture9* TextureManager::GetFileTexture(std::string TexturePath, TextureRecord::TextureRecordType Kind) {
-	IDirect3DBaseTexture9* loaded = GetCachedTexture(TexturePath);
-	if (loaded) return loaded;
+	auto cached = TextureCache.find(TexturePath);
+	if (cached != TextureCache.end()) return cached->second;
+	IDirect3DBaseTexture9* loaded = nullptr;
 
 	IDirect3DDevice9* dev = TheRenderManager->device;
 	const char* file = TexturePath.data();

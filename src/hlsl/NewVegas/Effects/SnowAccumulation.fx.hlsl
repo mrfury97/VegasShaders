@@ -51,6 +51,10 @@ uniform sampler2D TESR_SnowNoiseSampler : register(s10) < string ResourceName = 
 // UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the surfaces' own smooth normals, point sampled.
 uniform sampler2D TESR_CapturedNormalsBuffer : register(s11) = sampler_state {
     ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+// UNOFFICIAL 2026-11-24 MaterialBuffer: worn gear (2), skin (6), hair (8), eyes (9) for actor snow exclusion.
+uniform sampler2D TESR_MaterialBuffer : register(s12) = sampler_state {
+    ADDRESSU = CLAMP; ADDRESSV = CLAMP; MAGFILTER = POINT; MINFILTER = POINT; MIPFILTER = NONE; };
+uniform float4 TESR_MaterialBufferData;
 #include "includes/CoverMap.hlsl"
 
 static const int KernelSize = 24;
@@ -117,6 +121,28 @@ float4 SnowCapturedView(float2 uv, float flat_dist)
 	if (TESR_SnowAccumulationExtra.y > 1.5f) return captured_v && dot(sn_n, rebuilt_v) <= TESR_CapturedNormalsData.w ? float4(1.0f, 0.0f, 0.0f, 1.0f) : float4((captured_v ? saturate(1.0f - dot(sn_n, rebuilt_v)) : 0.0f).xxx, 1.0f);
 	captured_v = captured_v && dot(sn_n, rebuilt_v) > TESR_CapturedNormalsData.w;
 	return float4(captured_v ? sn_n * 0.5f + 0.5f : (rebuilt_v * 0.5f + 0.5f) * 0.3f, 1.0f);
+}
+
+// UNOFFICIAL 2026-11-24: exclude actors, plants/trees, and grass (skin alpha > 1.5 plus classes 2, 5, 6, 7, 8, 9 in TESR_MaterialBuffer).
+bool SnowIsActor(float2 uv, float flat_dist)
+{
+	[branch] if (TESR_CapturedNormalsData.x <= 0.0f) return false;
+	float4 cap = tex2Dlod(TESR_CapturedNormalsBuffer, float4(uv, 0.0f, 0.0f));
+	if (cap.a <= 0.99f || abs(cap.b - flat_dist) > flat_dist * TESR_CapturedNormalsData.y + TESR_CapturedNormalsData.z) return false;
+	bool actor = cap.a > 1.5f;
+	[branch] if (!actor && TESR_MaterialBufferData.x > 0.5f) {
+		float4 mat = tex2Dlod(TESR_MaterialBuffer, float4(uv, 0.0f, 0.0f));
+#ifdef GBUFFER_V2
+		float kind = floor(mat.r + 0.01f);
+		kind -= 16.0f * step(15.5f, kind);
+		actor = mat.r > 0.5f && (kind == 2.0f || kind == 5.0f || kind == 6.0f || kind == 7.0f || kind == 8.0f || kind == 9.0f);
+#else
+		float share = clamp(mat.a, 0.5f, 1.0f);
+		float kind = floor(mat.r / share + 0.01f);
+		actor = mat.a > 0.5f && mat.r > 0.5f && (kind == 2.0f || kind == 5.0f || kind == 6.0f);
+#endif
+	}
+	return actor;
 }
 
 float GetOrtho(float4 sn_wpos){
@@ -313,8 +339,8 @@ float4 Snow( VSOUT px, uniform bool persist_v ) : COLOR0
 	[branch] if (TESR_SnowAccumulationExtra.y > 0.5f) return SnowCapturedView(px.UVCoord, length(sn_cam_v));	// UNOFFICIAL 2026-10-28
 	// UNOFFICIAL 2026-10-28 (user: "standing next to a rock the snow seems to become visible through my character"; much more with Look 1):
 	// the coverage is found at a quarter of the resolution and blurred, so beside a snowy rock it spread onto the character in front of it.
-	// Actors' pixels (CapturedNormals: the skin and skinned armour and clothes write alpha 2) get no snow, as the ortho test meant.
-	[branch] if (CapturedActor(px.UVCoord, length(sn_cam_v))) return sn_col;
+	// Actors' pixels (skin alpha 2 plus worn gear/creatures/hair/eyes via TESR_MaterialBuffer) get no snow, as the ortho test meant.
+	[branch] if (SnowIsActor(px.UVCoord, length(sn_cam_v))) return sn_col;
 
 	float sn_ort = tex2D(TESR_RenderedBuffer, px.UVCoord).x;
 	float3 sn_norm = GetWorldNormal(px.UVCoord);
@@ -832,7 +858,7 @@ float4 SA5_Snow(VSOUT px, uniform bool persist_v) : COLOR0 {
     // Persistent data uses the same camera-relative coordinates as version (4).
     float3 sn_cam_v = sn_world * sn_depth;
     [branch] if (TESR_SnowAccumulationExtra.y > 0.5f) return SnowCapturedView(px.UVCoord, length(sn_cam_v));	// UNOFFICIAL 2026-10-28
-    [branch] if (CapturedActor(px.UVCoord, length(sn_cam_v))) return sn_col;	// UNOFFICIAL 2026-10-28: no snow on actors (see Look 0)
+    [branch] if (SnowIsActor(px.UVCoord, length(sn_cam_v))) return sn_col;	// UNOFFICIAL 2026-10-28/11-24: no snow on actors (see Look 0)
     float4 cover_v = float4(0, 0, 0, 0);
     float trodden_v = 0.0f;
     float2 footprint_relief = float2(0, 0);

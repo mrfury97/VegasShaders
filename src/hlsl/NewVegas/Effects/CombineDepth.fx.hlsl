@@ -50,7 +50,7 @@ float CombinedViewZ(float2 uv)
     float far_z = TESR_CameraData.y;
     float view_z = ViewZFromRaw(tex2D(TESR_DepthBufferWorld, uv).x, near_z, far_z);
     float view_raw = tex2D(TESR_DepthBufferViewModel, uv).x;
-    if (view_raw > 0.0f)
+    if (TESR_DepthConstants.z > 0.5f ? (view_raw > 0.0f) : (view_raw < 0.99999f))
         view_z = ViewZFromRaw(view_raw, max(TESR_DepthConstants.x, 1.0e-4), far_z);
     return view_z;
 }

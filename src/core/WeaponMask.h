@@ -36,7 +36,7 @@ namespace WeaponMask {
 	inline IDirect3DPixelShader9* BlackPS = nullptr;
 	inline IDirect3DStateBlock9* State = nullptr;
 	inline D3DSURFACE_DESC Made = {};
-	inline UInt32 PassWeaponDraws = 0, PassOtherDraws = 0, Passes = 0, LoggedPasses = 0;
+	inline UInt32 PassWeaponDraws = 0, PassOtherDraws = 0, PassSeeThroughDraws = 0, Passes = 0, LoggedPasses = 0;
 	inline UInt32 LastWeaponDraws = 0xFFFFFFFFu, LastOtherDraws = 0xFFFFFFFFu, LoggedChanges = 0;	// (a line whenever a pass's counts differ from the last one's, at most 12)
 	inline constexpr DWORD kBit = 0x80;		// the stencil bit (the game's own are left alone: the writes and the clear take this one only)
 
@@ -161,7 +161,7 @@ namespace WeaponMask {
 			if (!s.ok) return;
 			s.Quad(D3DCMP_ALWAYS, 0, 0xFF, kBit, D3DSTENCILOP_REPLACE, 0, BlackPS);	// ref 0 into the bit, everywhere; nothing else written
 		}
-		PassWeaponDraws = PassOtherDraws = 0;
+		PassWeaponDraws = PassOtherDraws = PassSeeThroughDraws = 0;
 		Tagging = true;
 	}
 
@@ -176,14 +176,32 @@ namespace WeaponMask {
 		return false;
 	}
 
-	// The first draws of the session, by geometry, named in the log (at most 48 lines): which ones went for the weapon, which for the rest. A report
-	// that the hands still reflect, or the gun does not, starts here.
+	// (2026-11-24 / P9 fix) Only depth-writing opaque/weapon draws tag the weapon mask: draws without depth write (sun glare quads,
+	// muzzle flashes, particles) or non-weapon alpha-blended overlays keep the weapon/hand tags underneath intact.
+	struct DrawKind { bool depthWrite, blended; };
+	inline DrawKind KindOf(IDirect3DDevice9* d, NiGeometry* geometry) {
+		DWORD zEnable = D3DZB_TRUE, zWrite = TRUE, blend = FALSE;
+		d->GetRenderState(D3DRS_ZENABLE, &zEnable);
+		d->GetRenderState(D3DRS_ZWRITEENABLE, &zWrite);
+		d->GetRenderState(D3DRS_ALPHABLENDENABLE, &blend);
+		const NiAlphaProperty* alpha = geometry ? geometry->propertyState.m_spAlphaProperty : nullptr;
+		DrawKind k;
+		k.depthWrite = zEnable != D3DZB_FALSE && zWrite != FALSE;	// (D3D9 writes no depth with the depth test off)
+		k.blended = blend != FALSE || (alpha && (alpha->flags & NiAlphaProperty::ALPHA_BLEND_MASK));
+		return k;
+	}
+
+	inline bool Tags(bool weapon, const DrawKind& k) { return k.depthWrite && (weapon || !k.blended); }
+
+	// The first draws of the session, by geometry, named in the log (at most 48 lines): which ones went for the weapon, which for the rest, which
+	// were left out (no depth write). A report that the hands still reflect, or the gun does not, starts here.
 	inline std::unordered_set<const void*> NamedGeometry;
-	inline void NameDraw(NiGeometry* geometry, bool weapon) {
+	inline void NameDraw(NiGeometry* geometry, bool weapon, const DrawKind& k) {
 		if (!geometry || NamedGeometry.size() >= 48 || !NamedGeometry.insert(geometry).second) return;
 		NiNode* parent = geometry->m_parent;
-		Logger::Log("UNOFFICIAL WeaponMask: %s draw: '%s' under '%s' (%s)", weapon ? "WEAPON" : "rest", geometry->m_pcName ? geometry->m_pcName : "",
-			parent && parent->m_pcName ? parent->m_pcName : "", geometry->skinInstance ? "skinned" : "still");
+		Logger::Log("UNOFFICIAL WeaponMask: %s draw: '%s' under '%s' (%s; %s%s)", weapon ? "WEAPON" : Tags(weapon, k) ? "rest" : "see-through, not tagged",
+			geometry->m_pcName ? geometry->m_pcName : "", parent && parent->m_pcName ? parent->m_pcName : "", geometry->skinInstance ? "skinned" : "still",
+			k.depthWrite ? "writes depth" : "no depth write", k.blended ? ", blended" : "");
 	}
 
 	inline void DrawBegin(IDirect3DDevice9* d, NiGeometry* geometry, DrawState& s) {
@@ -192,7 +210,9 @@ namespace WeaponMask {
 		DWORD enabled = TRUE;
 		if (FAILED(d->GetRenderState(D3DRS_STENCILENABLE, &enabled)) || enabled) return;	// the draw's own stencil test: left as it is
 		const bool weapon = InWeapon(geometry);
-		NameDraw(geometry, weapon);
+		const DrawKind kind = KindOf(d, geometry);
+		NameDraw(geometry, weapon, kind);
+		if (!Tags(weapon, kind)) { PassSeeThroughDraws++; return; }	// see-through: leaves the tags under it as they are
 		d->GetRenderState(D3DRS_STENCILFUNC, &s.func);
 		d->GetRenderState(D3DRS_STENCILPASS, &s.pass);
 		d->GetRenderState(D3DRS_STENCILFAIL, &s.fail);
@@ -257,8 +277,8 @@ namespace WeaponMask {
 		if (LoggedPasses < 4 || (Passes % 3600) == 0 || (changed && LoggedChanges < 12)) {
 			if (LoggedPasses >= 4 && changed && (Passes % 3600) != 0) LoggedChanges++;
 			LoggedPasses++;
-			Logger::Log("UNOFFICIAL WeaponMask: first-person pass %u: weapon node %s, %u draws tagged as the weapon, %u as the rest (hands, arms, Pip-Boy)",
-				Passes, WeaponNode ? "found" : "none (nothing held)", PassWeaponDraws, PassOtherDraws);
+			Logger::Log("UNOFFICIAL WeaponMask: first-person pass %u: weapon node %s, %u draws tagged as the weapon, %u as the rest (hands, arms, Pip-Boy), %u see-through left out",
+				Passes, WeaponNode ? "found" : "none (nothing held)", PassWeaponDraws, PassOtherDraws, PassSeeThroughDraws);
 		}
 		LastWeaponDraws = PassWeaponDraws;
 		LastOtherDraws = PassOtherDraws;

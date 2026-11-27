@@ -26,7 +26,7 @@ struct VS_OUTPUT {
     float4 color : COLOR0;
     float4 shadowWorldPos : TEXCOORD1; // xyz: camera-relative world position, w: SHADOW_VS_SENTINEL
     float4 vertexLight : TEXCOORD2;    // rgb: ambient + point lights (ParticleLight.hlsl)
-    float2 depthSize : TEXCOORD3;      // UNOFFICIAL 2026-11-04 soft particles: x: view depth (clip w), y: the particle's size
+    float4 depthSize : TEXCOORD3;      // UNOFFICIAL 2026-11-04 soft particles: x: view depth (clip w), y: the particle's size, zw: raw quad UV
 };
 
 VS_OUTPUT main(VS_INPUT IN) {
@@ -50,6 +50,6 @@ VS_OUTPUT main(VS_INPUT IN) {
     float3 worldPos = GetShadowWorldPos(position);
     OUT.shadowWorldPos = float4(worldPos, SHADOW_VS_SENTINEL);
     OUT.vertexLight = float4(ParticleVertexLight(worldPos), 1.0f);
-    OUT.depthSize = float2(position.w, IN.size * NVR_SoftSize.y);
+    OUT.depthSize = float4(position.w, IN.size * NVR_SoftSize.y, IN.uv.xy);
     return OUT;
 }
