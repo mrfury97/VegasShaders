@@ -348,8 +348,12 @@ void PBRShaders::UpdateConstants() {
 	// without it), so the shaders never read a stale or missing cube.
 	const ReflectionsEffect* reflections = TheShaderManager->Effects.Reflections;
 	const bool cube = reflections && reflections->CubeReady();
-	Constants.EnvCube = D3DXVECTOR4(cube ? MetalSettings.CubeReflections : 0.0f, cube ? MetalSettings.EnvCubeReflections : 0.0f,
-		(float)(reflections ? (reflections->cubeLevels - 1) : 7), 0.0f);
+	// (2026-11-27 cube-visible) [Shaders.Reflections.Main] CubeStrength k: the shares times min(k, 1); w = 1 / max(k, 1) (LiveCube.hlsl:
+	// above 1 the blur on smooth metal cut by k; Object.hlsl: the metal's dimming to the local light eased by k). 1 while the cube is not kept up.
+	const float cubeStrength = cube ? reflections->Settings.CubeStrength : 1.0f;
+	const float cubeShare = (std::min)(cubeStrength, 1.0f);
+	Constants.EnvCube = D3DXVECTOR4(cube ? MetalSettings.CubeReflections * cubeShare : 0.0f, cube ? MetalSettings.EnvCubeReflections * cubeShare : 0.0f,
+		(float)(reflections ? (reflections->cubeLevels - 1) : 7), 1.0f / (std::max)(cubeStrength, 1.0f));
 
 	// UNOFFICIAL foliage translucency (see UpdateSettings), live.
 	Constants.Translucency.x = FoliageSettings.Translucency;

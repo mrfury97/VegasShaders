@@ -55,7 +55,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 layoutData;            // TESR_ReflectionsLayout
     vec4 cube2;                 // TESR_ReflectionsCube2
     vec4 grid;                  // TESR_ReflectionsGrid
-    vec4 grid2;                 // TESR_ReflectionsGrid2
+    vec4 grid2;                 // TESR_ReflectionsGrid2 (w: CubeStrength, 2026-11-27 cube-visible)
     vec4 grid3;                 // TESR_ReflectionsGrid3
     vec4 material;              // TESR_ReflectionsMaterial
     vec4 depthConstants;        // TESR_DepthConstants
@@ -145,6 +145,9 @@ layout(location = 0) out vec4 o_color;
 #define CubeLastMip cb.cube2.z
 #define CubeOn cb.cube2.w
 #define GridOn cb.grid2.x
+// UNOFFICIAL 2026-11-27 cube-visible: [Shaders.Reflections.Main] CubeStrength (0-2): how much the surroundings cube shows wherever it
+// is read (EnvAlong): its share min(k, 1); above 1 its blur on smooth surfaces cut by k (CubeLod). Reflections.fx.hlsl's twin.
+#define CubeStrength cb.grid2.w
 const int RefineSteps = 5;
 const float BrightestReflection = 16.0;   // linear: a lamp's core reflected in one texel cannot flash the whole puddle
 
@@ -784,12 +787,20 @@ vec3 FaceDirection(float face, vec2 st) {
 vec3 WorldToViewDir(vec3 w) { return (cb.viewTransform * vec4(w, 0.0)).xyz; }
 
 // The reflection cube along a world direction, blurred for the roughness: rgb colour, a how much of it was ever seen.
+// (2026-11-27 cube-visible) the mip for a roughness: with CubeStrength k above 1, smooth surfaces (up to roughness 0.2) read k times
+// sharper, back to the plain lod in a straight ramp by 0.5, so rough dry ground keeps its blur (Includes/LiveCube.hlsl the same rule).
+// The share (EnvAlong's a) is never above the cube's own.
+float CubeLod(float roughness) {
+    float sharpen = 1.0 / max(CubeStrength, 1.0);
+    return roughness * CubeLastMip * mix(sharpen, 1.0, saturate((roughness - 0.2) / 0.3));
+}
+
 vec4 EnvAlong(vec3 worldDir, float roughness) {
-    float lod = roughness * CubeLastMip;
+    float lod = CubeLod(roughness);
     vec4 sharp = textureLod(samplerCube(t_env, MIP_S), worldDir, lod);
     vec4 coarse = textureLod(samplerCube(t_env, MIP_S), worldDir, min(lod + 2.0, CubeLastMip));
     vec4 m = sharp + coarse * (1.0 - saturate(sharp.a));
-    return vec4(m.rgb / max(m.a, 1.0e-4), saturate(m.a));
+    return vec4(m.rgb / max(m.a, 1.0e-4), saturate(m.a) * saturate(CubeStrength));
 }
 
 // ---- The light grid (AmbientLight's GridBounce) as the far / off-screen fallback ----

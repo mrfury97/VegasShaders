@@ -45,6 +45,7 @@ public:
 		bool	CubeLean;			// leave actors, clutter (misc items, books, apparatus) and small objects out of the cube's draw
 		float	CubeCapture;	// how much of the cube each frame's view replaces
 		float	CubeFade;		// how much of what is off screen fades each frame
+		float	CubeStrength;	// UNOFFICIAL 2026-11-27 cube-visible: how much the surroundings cube shows wherever it is read (0-2; share min(k, 1), above 1 sharper on smooth surfaces)
 		int		DebugView;		// 1: the reflection alone, 2: where it found something, 3: the surroundings cube (4-6: see the .fx)
 		bool	GridFallback;	// UNOFFICIAL 2026-10-19: rays that find nothing on screen also take AmbientLight's light grid
 		float	GridBrightness;	// its brightness

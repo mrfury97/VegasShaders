@@ -100,6 +100,13 @@ void ReflectionsEffect::UpdateSettings() {
 	}
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);
+	// UNOFFICIAL 2026-11-27 cube-visible (owner: the surroundings cube must show clearly): ONE strength for every reader of the cube
+	// (Reflections.glsl / .fx EnvAlong, LiveCube.hlsl for metal and the env maps through PBR.cpp's TESR_EnvCube). Live. A missing key
+	// is 1, the look before the key.
+	{
+		SettingManager::Configuration::ConfigNode strengthNode;
+		Settings.CubeStrength = TheSettingManager->Config.FillNode(&strengthNode, section, "CubeStrength") ? std::clamp(strengthNode.FloatValue, 0.0f, 2.0f) : 1.0f;
+	}
 	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 12);	// 12: UNOFFICIAL 2026-11-20 the bend and the roughness (ReflectionsComposite.frag)	// 11: UNOFFICIAL 2026-11-09 the weapon mask (ReflectionsComposite.frag)	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
 	Settings.GridFallback = TheSettingManager->GetSettingI(section, "GridFallback") != 0;
 	Settings.GridBrightness = std::clamp(TheSettingManager->GetSettingF(section, "GridBrightness"), 0.0f, 4.0f);
@@ -387,8 +394,8 @@ static void LogReflShaderFiles() {
 	// (2026-11-24) written by tools\nvr-dxvk\refl-hashes.py, which compile-compute.sh runs after every build: by hand it went stale (1.1.3 and
 	// 1.1.4 shipped 10 of these 11 old, so every log called the build's own files OLD and Install check showed 1 to fix). Edit the names only.
 	static const Want wants[] = {
-		{ "ReflectionsComposite", 0x1831B847u }, { "ReflectionsRTResolve", 0xA34CC237u }, { "ReflectionsRayGen", 0xA7EFF08Du }, { "ReflectionsTemporal", 0xE7EC248Cu },
-		{ "ReflectionsCapture", 0xDD099931u }, { "ReflectionsFilter", 0xDDA9D66Cu },
+		{ "ReflectionsComposite", 0xDAC05D79u }, { "ReflectionsRTResolve", 0x9B1D51E2u }, { "ReflectionsRayGen", 0xA7EFF08Du }, { "ReflectionsTemporal", 0xE7EC248Cu },
+		{ "ReflectionsCapture", 0x52A2B140u }, { "ReflectionsFilter", 0xDDA9D66Cu },
 		{ "RtReflDenoiseOursReproject", 0x7955BB76u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
 		{ "Rt\\ReflectionsRTAlpha", 0xDE40151Fu }, { "Rt\\ReflectionsRTTex", 0x5B941841u }, { "Rt\\ReflectionsRTTexGlow", 0xCADF2215u },
 		{ "Rt\\ReflectionsRTAlphaTex", 0xC3195738u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x77E8EF1Bu },
@@ -767,7 +774,7 @@ void ReflectionsEffect::GridStep() {
 	}
 	GridLightSlot = light;
 	GridColorSlot = colour;
-	Constants.Grid2 = D3DXVECTOR4(use ? 1.0f : 0.0f, Settings.GridBrightness, colour ? 1.0f : 0.0f, 0.0f);
+	Constants.Grid2 = D3DXVECTOR4(use ? 1.0f : 0.0f, Settings.GridBrightness, colour ? 1.0f : 0.0f, Settings.CubeStrength);	// w: CubeStrength (EnvAlong; a lane nothing else reads)
 	if (!use) return;
 	const NiPoint3 camera = WorldSceneGraph->camera->m_worldTransform.pos;
 	Constants.Grid = D3DXVECTOR4((float)(ambient->gridOrigin[0] - camera.x), (float)(ambient->gridOrigin[1] - camera.y),

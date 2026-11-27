@@ -712,7 +712,9 @@ float3 getMetalAmbient(float3 ambient, float3 f0, float roughness, float NdotV, 
         float3 liveLin = LinSky(live.rgb);
         float localLum = dot(localEnv, float3(0.2126f, 0.7152f, 0.0722f));
         float liveLum = dot(liveLin, float3(0.2126f, 0.7152f, 0.0722f));
-        float occ = lerp(1.0f, saturate((localLum * 2.5f) / max(liveLum, 1.0e-4f)), 0.65f);
+        // (2026-11-27 cube-visible) at most 2.5 x the local light, eased to 2.5 x CubeStrength above 1 (TESR_EnvCube.w = 1 / max(k, 1)):
+        // a metal in shade keeps from glowing with a bright cube, but bright windows and lamps in it stay visible.
+        float occ = lerp(1.0f, saturate((localLum * 2.5f) / max(liveLum * TESR_EnvCube.w, 1.0e-4f)), 0.65f);
         env = lerp(localEnv, liveLin * occ, TESR_EnvCube.x * live.a);
     }
     #endif
@@ -746,7 +748,7 @@ float3 getMetalAmbient(float3 ambient, float3 f0, float roughness, float NdotV, 
                     float3 coatLin = LinSky(coatLive.rgb);
                     float coatLocLum = dot(coatLocalEnv, float3(0.2126f, 0.7152f, 0.0722f));
                     float coatLiveLum = dot(coatLin, float3(0.2126f, 0.7152f, 0.0722f));
-                    float coatOcc = lerp(1.0f, saturate((coatLocLum * 2.5f) / max(coatLiveLum, 1.0e-4f)), 0.65f);
+                    float coatOcc = lerp(1.0f, saturate((coatLocLum * 2.5f) / max(coatLiveLum * TESR_EnvCube.w, 1.0e-4f)), 0.65f);
                     coatEnv = lerp(coatLocalEnv, coatLin * coatOcc, TESR_EnvCube.x * coatLive.a);
                 }
                 #endif

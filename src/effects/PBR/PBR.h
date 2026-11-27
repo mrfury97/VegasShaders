@@ -144,7 +144,7 @@ public:
 		D3DXVECTOR4		LampPassTrim;	// UNOFFICIAL TESR_LampPassTrim (ObjectTemplate.hlsl lamp passes): x TrimLampPasses on
 		D3DXVECTOR4		Translucency = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_Translucency (Grass23x00*.vso, STLEAF00*.vso): x Translucency, y Power, z SunGate; zero is off
 		D3DXVECTOR4		SharpSky = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_SharpSky (SkyAmbient.hlsl, c136): x SharpSky, y Clearcoat, z Pearlescence (forward Object.hlsl getMetalAmbient), w GlowScale (Object.hlsl GlowScaleFactor)
-		D3DXVECTOR4		EnvCube = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_EnvCube (Includes/LiveCube.hlsl): x metal's, y the env-map pass's share of the live cube (0 while it is not kept up), z its last mip
+		D3DXVECTOR4		EnvCube = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_EnvCube (Includes/LiveCube.hlsl): x metal's, y the env-map pass's share of the live cube (0 while it is not kept up; times min(CubeStrength, 1)), z its last mip, w 1 / max([Shaders.Reflections.Main] CubeStrength, 1) (2026-11-27)
 		D3DXVECTOR4		Linear = D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_LinearLighting (Includes/LinearLight.hlsl): x gamma (1 = off), y 1 / x
 		D3DXVECTOR4		ShadowContrast = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-10-29 TESR_ShadowContrast (ObjectTemplate.hlsl, c93): x strength indoors
 		D3DXVECTOR4		LampFalloff = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-10-21 TESR_LampFalloff (Includes/LampFalloff.hlsl, c205): x shape on, y 1 / Falloff^2, z strength, w MatchEverywhere
