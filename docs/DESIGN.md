@@ -1692,7 +1692,7 @@ at 91 / 92 is recognised by its missing `[Shaders.WetWorld]`); files that only h
 | `[Shaders.PBR.Rmaos] MetalFromMap` | false | true | owner's question |
 | `[Shaders.PBR.Main] VanillaBridgeDielectricMax` | 0.08 | 0.04 | owner's question |
 | `[Main.Main.Quality] DeferredBumpedNormals` | false | true | owner's question |
-| `[Main.Main.Performance] NvrDxvkDeferred` | false | true | frame-cost change, owner's question |
+| `[Main.Main.Performance] NvrDxvkDeferred` | true (since 2026-11-27, step 111) | true | was parked (frame-cost change); owner 2026-11-27: the deferred sun runs in Vulkan (EFFECTS.md "ShadowsExteriors" 14) |
 | `[Shaders.AmbientOcclusion.RT] Sky` | false | false | independent of RT AO now; true would start sky rays nobody asked for |
 
 **Mistakes caught:** the merged defaults had `DeferredStandalone` twice (both sides added it) and the game refused the whole file (slot
