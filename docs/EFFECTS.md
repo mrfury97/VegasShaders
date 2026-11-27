@@ -5359,9 +5359,11 @@ CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
   `WithMetal` (owner 0.6) where the metal look is on; both sources are about equally bright, so the swap shows as pattern, not level.
 - *Deferred* (is it lost?): no. The lighting-free records (`LAMPS_DEFERRED 2`) keep the metal's ambient, cube included, in COLOR0;
   the deferred sun and lamp passes add no cube term; other deferred surfaces see the cube only through the Reflections composite.
-- *The gun*: the owner's file has `[Shaders.Reflections.RT] Weapon = 0.0` (default 0.65): `Reflectivity` returns 0 on the weapon, so the
-  1.1.5 weapon branch (the exact mirror ray, the cube only, x Fresnel x Weapon) never runs; the gun shows the cube only through the metal
-  ambient and its env pass (above). Proven from the toml and the code; the owner's value is left as it is.
+- *The gun*: with `[Shaders.Reflections.RT] Weapon = 0` `Reflectivity` returns 0 on the weapon, so the 1.1.5 weapon branch (the exact
+  mirror ray, the cube only, x Fresnel x Weapon) never runs and the gun shows the cube only through the metal ambient and its env pass
+  (above). At the default 0.65 the branch runs. The bench toml (`F:\NVR-bench\tomls\owner-mo2-20261127.toml`, copied from the owner's
+  file of 2026-11-27 10:47) had 0.0, so the bench gun numbers above are for Weapon 0, except the one shot that set 0.65 (about the same
+  as 1.5 without it); the owner's live file has 0.65 since a later edit that day. Gun pictures at the owner's 0.65 with `CubeStrength`: not run.
 - *Floors*: the trace's order is screen hit, then (mirror rays into open sky) the panorama, then the cube / grid, then the sky; indoors
   the screen answers almost every ray, outdoors open-sky mirror rays take the panorama: the cube fills only what is left. By design.
 
