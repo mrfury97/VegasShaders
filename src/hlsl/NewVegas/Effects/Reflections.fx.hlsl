@@ -712,7 +712,8 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float3 dir = FaceDirection(CubeFace, st);
 	float3 view = WorldToViewDir(dir);
 	// (2026-11-27 cube-visible, as ReflectionsCapture.frag) a texel on screen this frame fades at CubeFade, not 12 % a frame toward the
-	// world cube's hazy render; out of view it goes to the world cube at max(CubeFade x 8, 0.03).
+	// world cube's hazy render; out of view too, giving way to the world cube only as the camera moves (2026-11-27 cube-keep-capture:
+	// -CubeReset, the distance moved this frame over 2 x CubeMoveThreshold; it was max(CubeFade x 8, 0.03), gone a second after looking away).
 	float2 onSuv = rectToScreen(ToScreen(view));
 	bool onScreen = view.z > 0.05 && all(onSuv > 0.005) && all(onSuv < 0.995);
 	float4 result;
@@ -723,7 +724,7 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 			float4 world = texCUBElod(TESR_ReflectionsEnv, float4(ndir, 0.0));
 			baseEnv = lerp(baseEnv, world.rgb, saturate(world.a));
 		}
-		float decay = (CubeOn > 2.5 && !onScreen) ? max(CubeFade * 8.0, 0.03) : CubeFade;
+		float decay = (CubeOn > 2.5 && !onScreen) ? max(CubeFade, -min(CubeReset, 0.0)) : CubeFade;
 		float4 prev = texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0));
 		result = CubeReset > 0.0 ? float4(baseEnv, 1.0) : lerp(prev, float4(baseEnv, 1.0), decay);
 	} else {

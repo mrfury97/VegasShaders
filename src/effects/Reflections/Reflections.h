@@ -329,5 +329,5 @@ private:
 	UINT		gridFrames = 0, gridUsedFrames = 0;	// for the log: frames drawn with GridFallback on, and of them with a grid to read
 	void	GridStep();							// the light grid's constants and textures for this frame's trace
 	void	CubeStep(IDirect3DDevice9* Device);
-	void	RenderCube(IDirect3DDevice9* Device, bool reset);
+	void	RenderCube(IDirect3DDevice9* Device, bool reset, float movedDecay);
 };

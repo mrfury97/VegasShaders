@@ -5371,6 +5371,11 @@ CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
 - Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1);
   only a texel out of view goes to the world cube, at `max(CubeFade x 8, 0.03)` (half in ~23 frames: about as stale as the world cube's
   own faces, redrawn every 96 units). Out-of-view texels used to forget what was seen in ~6 frames, now ~23.
+  - (2026-11-27 cube-keep-capture, owner: a window's reflection "gone as soon as i look away from the angle") out of view a texel now
+    keeps what the screen showed, fading at CubeFade as on screen, and gives way to the world cube only as the camera MOVES: the distance
+    moved this frame / (2 x CubeMoveThreshold), passed as minus `TESR_ReflectionsCube.w` (Capture reads only w > 0 as a reset; CubeStep).
+    Turning on the spot keeps the capture; after walking 2 x CubeMoveThreshold (192 units) about a third of it is left. The world cube still
+    fills directions never seen (a reset starts every texel from it).
 - `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a player's
   file without the key gets the defaults file's 1.5; 1 is the look before it. RT Resolve's bounce miss (`ReflectionsRTResolve.frag` ~52, RT
   reflections only) still reads the cube at full share whatever k: the one reader k does not scale). ONE strength for every reader: the Reflections passes (`Reflections.glsl` / .fx `EnvAlong`: the

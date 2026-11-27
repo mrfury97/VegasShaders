@@ -42,8 +42,10 @@ void main() {
     // (2026-11-27 cube-visible) on screen this frame, the screen's picture is the truth. CubeMode 2 pulled EVERY texel, these too, 12 %
     // a frame toward the world cube's cheap render (no shadows, flat light, 128 a face) while the screen put back only CubeCapture (0.25
     // default, 0.02 in the owner's file): where the screen showed the real thing the cube held 26-85 % of the hazy world render, the
-    // bluish ghost over the crisp capture. Now a texel on screen fades at CubeFade as in CubeMode 1; one out of view goes to the world
-    // cube at max(CubeFade x 8, 0.03) (half in ~23 frames: about as stale as the world cube's own faces, redrawn every 96 units).
+    // bluish ghost over the crisp capture. Now a texel on screen fades at CubeFade as in CubeMode 1. (2026-11-27 cube-keep-capture) Out of
+    // view too: it went to the world cube at max(CubeFade x 8, 0.03), half in ~23 frames, so what the screen had just shown was gone a
+    // second after looking away (the owner's window). It now gives way only as the camera moves: -CubeReset, the distance moved this
+    // frame over 2 x CubeMoveThreshold (Reflections.cpp CubeStep), 0 while turning on the spot.
     vec2 onSuv = rectToScreen(ToScreen(view));
     bool onScreen = view.z > 0.05 && all(greaterThan(onSuv, vec2(0.005))) && all(lessThan(onSuv, vec2(0.995)));
     vec4 result;
@@ -54,7 +56,7 @@ void main() {
             vec4 world = textureLod(samplerCube(t_worldCube, LINEAR_S), ndir, 0.0);
             baseEnv = mix(baseEnv, world.rgb, clamp(world.a, 0.0, 1.0));
         }
-        float decay = (CubeOn > 2.5 && !onScreen) ? max(CubeFade * 8.0, 0.03) : CubeFade;
+        float decay = (CubeOn > 2.5 && !onScreen) ? max(CubeFade, -min(CubeReset, 0.0)) : CubeFade;
         vec4 prev = textureLod(samplerCube(t_capture, POINT_S), dir, 0.0);
         result = CubeReset > 0.0 ? vec4(baseEnv, 1.0) : mix(prev, vec4(baseEnv, 1.0), decay);
     } else {
