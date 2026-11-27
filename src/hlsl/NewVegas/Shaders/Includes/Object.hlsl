@@ -675,7 +675,7 @@ float3 getMetalAmbient(float3 ambient, float3 f0, float roughness, float NdotV, 
             metalF0 = hue * (pMax * lerp(0.18f, 0.90f, brightMetal));
             metalRough = lerp(max(roughness, 0.34f), min(roughness, 0.18f), brightMetal);
         }
-        #if !defined(NVR_PEARL_AMBIENT_LEAN)
+        #if defined(METAL_PEARL_ON) && !defined(NVR_PEARL_AMBIENT_LEAN)	// (2026-11-27: Pearlescence > 0 at startup, ObjectTemplate.hlsl)
         [branch] if (TESR_SharpSky.z > 0.001f) {
             float pearl = saturate(TESR_SharpSky.z);
             float omv = saturate(1.0f - NdotV);
@@ -723,6 +723,7 @@ float3 getMetalAmbient(float3 ambient, float3 f0, float roughness, float NdotV, 
         float bias0 = min(mixed.x * mixed.x, exp2(-9.28f * NdotV)) * mixed.x + mixed.y;
         float2 scaleBias = float2(-1.04f, 1.04f) * bias0 + mixed.zw;
         float3 totalRefl = (metalF0 * scaleBias.x + pearlF90 * scaleBias.y) * env;
+        #ifdef METAL_CLEARCOAT_ON	// (2026-11-27: Clearcoat > 0 at startup, ObjectTemplate.hlsl)
         [branch] if (TESR_SharpSky.y > 0.001f) {
             totalRefl *= CandyCoatAbsorption(metalF0, coatNdotV, TESR_SharpSky.y, 1.0f);
             float coatO = 1.0f - saturate(coatNdotV);
@@ -754,6 +755,7 @@ float3 getMetalAmbient(float3 ambient, float3 f0, float roughness, float NdotV, 
                 totalRefl = totalRefl * (1.0f - coatF) + env * (coatF * 1.15f);
             #endif
         }
+        #endif
         return totalRefl * TESR_PBRMetalLook.z * getMaterialReflections() * RmaosAmbient();
     #else
         return EnvBRDFApprox(metalF0, metalRough, NdotV) * env * TESR_PBRMetalLook.z * getMaterialReflections() * RmaosAmbient();

@@ -424,6 +424,10 @@
         #define NVR_PEARL_AMBIENT_LEAN 1
     #endif
 #endif
+// UNOFFICIAL 2026-11-27 (upstream 1.1.5 merge): the forward clearcoat (candy absorption, the coat lobe, the BaseMap look-through below)
+// and pearlescence are compiled in only when [Shaders.PBR.Metal] Clearcoat / Pearlescence is above 0 at startup (ShaderRecord
+// BuildDefines METAL_CLEARCOAT_ON / METAL_PEARL_ON). At 0 they add exactly 0, and the 2-lamp records (SLS2023 etc.) keep their room
+// for the water layer. The deferred sun and lamp passes take both live, whatever these say.
 #include "includes/Object.hlsl"
 // UNOFFICIAL 2026-11-09 the eye variant (open report "eyes of default races black"; [Shaders.PBR.Main] GameShaderEyes, EyeShaderOld; the
 // records are made by Render.cpp GameEyes::RecordFor, from this file with NVR_EYE and no sun / lamp shadow code, and put on the device
@@ -1613,7 +1617,7 @@ PS_OUTPUT main(PS_INPUT IN) {
     #ifdef RMAOS
         RmaosRead(IN.uv.xy);	// UNOFFICIAL _rmaos map (Object.hlsl): read once, here at top level
     #endif
-    #if defined(METAL) && defined(RMAOS) && defined(OBJ_AMBIENT) && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(DIFFUSE) && !defined(NVR_SLOT_TIGHT) && !defined(NVR_PEARL_AMBIENT_LEAN)
+    #if defined(METAL_CLEARCOAT_ON) && defined(METAL) && defined(RMAOS) && defined(OBJ_AMBIENT) && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(DIFFUSE) && !defined(NVR_SLOT_TIGHT) && !defined(NVR_PEARL_AMBIENT_LEAN)
         const float2 coatUvDx = ddx(IN.uv.xy);
         const float2 coatUvDy = ddy(IN.uv.xy);
     #endif
@@ -1914,7 +1918,7 @@ PS_OUTPUT main(PS_INPUT IN) {
         [branch] if (getMetalStrength() > 0.0f) {
             // Faded out with distance (getMetalFade); at full without the position (a vanilla vertex shader ran).
             metallic = HAND_BLOOD_METAL(getDerivedMetallic(normal.a, albedoStored) * (skyValid > 0.0f ? getMetalFade(IN.shadowWorldPos.xyz) : 1.0f));
-            #if defined(RMAOS) && defined(OBJ_AMBIENT) && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(DIFFUSE) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR) && !defined(NVR_PEARL_AMBIENT_LEAN)
+            #if defined(METAL_CLEARCOAT_ON) && defined(RMAOS) && defined(OBJ_AMBIENT) && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(DIFFUSE) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR) && !defined(NVR_PEARL_AMBIENT_LEAN)
                 [branch] if (TESR_SharpSky.y > 0.001f && RMAOS_ACTIVE && metallic > 0.55f) {
                     float3 vTan = normalize(IN.viewDir.xyz);
                     float2 coatUvOff = -(vTan.xy / max(vTan.z, 0.35f)) * (0.0018f * saturate(TESR_SharpSky.y));
@@ -2569,7 +2573,7 @@ PS_OUTPUT main(PS_INPUT IN) {
     #ifdef RMAOS
         RmaosRead(IN.uv.xy);	// UNOFFICIAL _rmaos map (Object.hlsl): read once, here at top level
     #endif
-    #if defined(METAL) && defined(RMAOS) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR)
+    #if defined(METAL_CLEARCOAT_ON) && defined(METAL) && defined(RMAOS) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR)
         const float2 coatUvDx4 = ddx(IN.uv.xy);
         const float2 coatUvDy4 = ddy(IN.uv.xy);
     #endif
@@ -2605,7 +2609,7 @@ PS_OUTPUT main(PS_INPUT IN) {
         [branch] if (getMetalStrength() > 0.0f)
             metallic = HAND_BLOOD_METAL(getDerivedMetallic(normal.a, albedoStored) * (SHADOW_WP_VALID(IN) ? getMetalFade(SHADOW_WP_LOAD(IN)) : 1.0f));
         float lightRoughness = lerp(roughness, metalRoughness, metallic);
-        #if defined(RMAOS) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR)
+        #if defined(METAL_CLEARCOAT_ON) && defined(RMAOS) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR)
             [branch] if (TESR_SharpSky.y > 0.001f && RMAOS_ACTIVE && metallic > 0.55f) {
                 float3 vTan4 = normalize(viewDir);
                 float2 coatUvOff4 = -(vTan4.xy / max(vTan4.z, 0.35f)) * (0.0018f * saturate(TESR_SharpSky.y));

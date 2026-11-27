@@ -704,6 +704,12 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// the traced visibility in Mode 1. Only with RT sun shadows on at startup on the DXVK fork. Defined only when on, and last, as above.
 	if (RtSunShadows::ForwardCompiled())
 		AppendDefine("RT_SUN_FORWARD", "1");
+	// UNOFFICIAL 2026-11-27 (upstream 1.1.5 merge) [Shaders.PBR.Metal] Clearcoat / Pearlescence (ObjectTemplate.hlsl, Includes/Object.hlsl
+	// getMetalAmbient): the forward object shaders' clearcoat (candy absorption, the coat lobe, the BaseMap look-through) and pearlescence,
+	// compiled in only when above 0 at startup. At 0 (the default) they add nothing, and the 2-lamp records (SLS2023 etc.) keep the room
+	// the water layer needs. The deferred sun and lamp passes read both live. Defined only when on, and last, as above.
+	if (TheSettingManager->GetSettingF("Shaders.PBR.Metal", "Clearcoat") > 0.0f) AppendDefine("METAL_CLEARCOAT_ON", "1");
+	if (TheSettingManager->GetSettingF("Shaders.PBR.Metal", "Pearlescence") > 0.0f) AppendDefine("METAL_PEARL_ON", "1");
 
 }
 
@@ -917,7 +923,7 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			for (int d = 0; d < 63 && Template.Defines[d].Name; d++)
 				definesFile << Template.Defines[d].Name << "=" << (Template.Defines[d].Definition ? Template.Defines[d].Definition : "") << "\r\n";
 		}
-		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); DeleteFileA((preprocessedPath + ".failed").c_str());	// (2026-11-27 merge: was .x4505) }
+		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); DeleteFileA((preprocessedPath + ".failed").c_str()); }	// (2026-11-27 merge: was .x4505)
 
 		const HRESULT tableResult = function ? D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table) : E_FAIL;
 		if (function && FAILED(tableResult)) {

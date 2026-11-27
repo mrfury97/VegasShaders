@@ -829,6 +829,8 @@ static const RestartSetting kRestartSettings[] = {
 	{ "Shaders.PBR.Main",                     "SkylightingMode",    RestartRule::Changed },
 	{ "Shaders.PBR.Metal",                    "CubeReflections",    RestartRule::TurnOn },	// LIVE_CUBE: either above 0 at start
 	{ "Shaders.PBR.EnvMaps",                  "CubeReflections",    RestartRule::TurnOn },
+	{ "Shaders.PBR.Metal",                    "Clearcoat",          RestartRule::TurnOn },	// METAL_CLEARCOAT_ON: above 0 at start (2026-11-27)
+	{ "Shaders.PBR.Metal",                    "Pearlescence",       RestartRule::TurnOn },	// METAL_PEARL_ON: above 0 at start (2026-11-27)
 	{ "Shaders.PBR.MaterialRules",            "Enabled",            RestartRule::TurnOn },
 	{ "Shaders.PBR.Rmaos",                    "Enabled",            RestartRule::Changed },
 	{ "Shaders.PBR.Rmaos",                    "SpecularFromMap",    RestartRule::Changed },	// RMAOS_SPEC_OFF (2026-11-02)
