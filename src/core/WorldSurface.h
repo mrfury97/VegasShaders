@@ -13,6 +13,7 @@
 #include "CapturedNormals.h"
 #include "DeferredDepth.h"
 #include "DeferredRenderer.h"
+#include "DeferredWetness.h"	// (2026-11-27 upstream 1.1.5 merge) the land's height code in the material target
 #include "LinearScene.h"
 #include "PassSums.h"
 #include "RtLightUnits.h"
@@ -298,6 +299,11 @@ namespace WorldSurface {
 		}
 		d->SetPixelShaderConstantF(11, &amb.x, 1);
 		d->SetPixelShaderConstantF(12, &sh[0].x, 9);
+		// (2026-11-27 upstream 1.1.5 merge, lead-architect review) with deferred wetness compiled in, the land records keep their height for the
+		// water layer in the material target's fraction (TerrainTemplate.hlsl DEFERRED_WETNESS), which this pass would read as metal and
+		// write back capped and changed before DeferredSun reads it: land is left out then.
+		const float flags[4] = { DeferredWetness::CompiledIn() ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f };
+		d->SetPixelShaderConstantF(21, flags, 1);
 
 		const float x0 = (float)box.left - 0.5f, y0 = (float)box.top - 0.5f;
 		const float x1 = (float)box.right - 0.5f, y1 = (float)box.bottom - 0.5f;

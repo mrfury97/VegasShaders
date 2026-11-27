@@ -14,6 +14,7 @@ float4 WS_Fade     : register(c9);	// x = fadeStart, y = fadeEnd, z = detailEnd,
 float4 WS_Gamma    : register(c10);	// x = gamma, y = 1/gamma, z = isLinear (1/0), w = depthMode (0=normals.b, 1=linear view Z, 2=raw INTZ)
 float4 WS_Ambient  : register(c11);	// xyz = flat outdoor ambient (linear * AmbientScale), w = skyScale
 float4 WS_SkySH[9] : register(c12);	// TESR_SkyIrradianceObjects[0..8] (zeroed indoors)
+float4 WS_Flags    : register(c21);	// x = 1: deferred wetness keeps the land's height in the material fraction (land left out; 2026-11-27 merge)
 
 sampler2D WS_Scene    : register(s0);	// CopyTex[0]: pre-pass COLOR0 scene (baked ambient + emissive)
 sampler2D WS_Albedo   : register(s1);	// CopyTex[1]: pre-pass COLOR1 G-buffer albedo
@@ -60,6 +61,7 @@ PS_OUT main(PS_IN IN) {
     model -= specular;
     const bool isStatic = abs(model - 1.0f) < 0.5f;
     const bool isLand = abs(model - 4.0f) < 0.5f;
+    clip(isLand && WS_Flags.x > 0.5f ? -1.0f : 1.0f);	// (2026-11-27 merge) the wet land's height code is not a metal value
     clip((isStatic || isLand) ? 1.0f : -1.0f);
 
     const float3 ray = DD_CAMERA_RELATIVE_Z(WS_Cam, IN.vpos, 1.0f);
