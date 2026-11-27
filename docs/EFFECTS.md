@@ -7671,7 +7671,8 @@ Rain look staying wet while the ground is dry (two clocks), or wet ground under 
 ## WorldSurface
 
 Code: `src/hlsl/NewVegas/Shaders/WorldSurface.hlsl`, defaults in `resource/defaults/WorldSurface.toml` (no folder in `src/effects`; new in
-upstream 1.1.5, taken whole in the 2026-11-27 merge). Not run in game on this fork; frame cost not measured.
+upstream 1.1.5, taken whole in the 2026-11-27 merge). Runs in game on this fork (bench, owner's settings, 2026-11-27): about 0.29 ms GPU at
+SunGI2 (1080p, RTX 4070 Ti SUPER, F10 GPU timer "World surface detail").
 
 ### 1. Purpose
 A deferred pass that overlays world-space micro-detail on static world objects and terrain: close-range normal relief and roughness variation,
@@ -7679,9 +7680,10 @@ settled Mojave dust in crevices (aged dust indoors), rust and tarnish on metal, 
 patchy moss. It skips characters, clothing, plants, trees and grass. It reads the pre-pass scene, the albedo and material G-buffer targets and
 the smooth normals, so it needs the material target (GBufferV2).
 
-### 2. On by default, but only with GBufferV2
-`[Shaders.WorldSurface.Status] Enabled` is true (live, needs `DeferredRenderer` at startup). GBufferV2 is off by default here and in the owner's
-file, so by default the effect does nothing. With GBufferV2 on, it changes the picture (a visible upstream default).
+### 2. On by default
+`[Shaders.WorldSurface.Status] Enabled` is true (live, needs `DeferredRenderer` at startup). GBufferV2 is forced on by
+`core/SettingForce.h` whatever the toml says (the owner's file says false; the log says layout v2), so the effect runs for every player with
+the deferred renderer (proven: bench log "UNOFFICIAL WorldSurface: loaded" and its GPU timer).
 
 ### 3. Settings (`resource/defaults/WorldSurface.toml`)
 | Key | Default | Range |

@@ -1778,7 +1778,8 @@ at startup (menu: restart to turn on from 0, then live). The deferred sun and la
 
 **WorldSurface and the wet land (e9780e5).** Under `DEFERRED_WETNESS` the land records keep their height for the water layer in the
 material target's fraction. WorldSurface read it as metal and wrote it back capped before DeferredSun read it (lead-architect review). It
-now leaves the land out in that case. Only matters with GBufferV2 on, which is off by default and in the owner's file.
+now leaves the land out in that case. It matters for every player: `core/SettingForce.h` forces GBufferV2 on (the owner's toml says false,
+the log says layout v2), and Wetness Effects is on by default.
 
 **Settings.** Upstream's steps 97-101 run here as 104-108 (all applied, none parked); step 109 is ours.
 
@@ -1796,10 +1797,9 @@ game): ours at 103 runs 104-109; ours at 98 runs 99-103 then 104-109; upstream a
 - `[Main.Main.RayTracing] HelperWait` 0 (upstream 1).
 - Parked as before: the kParkUpstream91 / 92 / 94 choices from the 1.1.1-1.1.3 merge.
 
-**Upstream defaults that now show in game (taken, by the owner's standing rule to keep upstream's defaults):** WorldSurface (on; has an
-effect only with GBufferV2), `SunColorFromLight`, `DeferredDecals`, `DeferredEnvFade`, `PortalVisibilityCulling`, `DeferredFirstPerson`,
+**Upstream defaults that now show in game (taken, by the owner's standing rule to keep upstream's defaults):** WorldSurface (on; GBufferV2 is forced), `SunColorFromLight`, `DeferredDecals`, `DeferredEnvFade`, `PortalVisibilityCulling`, `DeferredFirstPerson`,
 night lamp shadows with `NightMinDarkness` 0.65, `CubeMode` 2 (the dynamic world cubemap), weapon reflections, the metal defaults,
-`ExteriorBalance` off, `CasterFadeMin` 0.25. Frame cost of the group: not measured.
+`ExteriorBalance` off, `CasterFadeMin` 0.25. Frame cost: see Bench below.
 
 **Skipped:** upstream's version string (no release naming here); `ForwardLightKill` (test-only); WetWorld (stays removed).
 
@@ -1807,7 +1807,10 @@ night lamp shadows with `NightMinDarkness` 0.65, `CubeMode` 2 (the dynamic world
 - Main 9948b06: SLS2023 wet OK (3140); SLS2024 / 2026 / 2027 X4505, so they load dry (forward dry fallback, ebf1156), about 2400 slots.
 - The merge before e429835 (proven): all four X4505 at full and lean (`Object.hlsl`, the pearl block in `getMetalAmbient`); all four OK dry
   (2417 / 2445 / 2425 / 2450), so SLS2023 had newly become dry. Forcing `NVR_PEARL_AMBIENT_LEAN` was still X4505 (`SkyAmbient.hlsl:170`).
-- After e429835 (the gate, at the default 0): not run. Believed back at main's numbers, since the gated code is not compiled in at 0.
+- After e429835 (proven, `template_compile` with `--flow`, WETNESS_EFFECTS 1): at the default 0 all four compile wet (2996 / 3020 / 2997 / 3021)
+  and dry (2260 / 2285 / 2268 / 2286), below main. At WETNESS_EFFECTS 3 (what the game builds with Puddles on) SLS2023 fails wet on main too, so
+  in game it already loaded dry: the branch matches main. Both defines on: the four fail wet again (upstream's code). 211 Object / Parallax /
+  Env records: no pass/fail regression against main; SLS2034 / 2036 now pass at 3 where main failed (upstream's restructure).
 - The other 154 Object / Parallax / Env records: same OK / FAILED as main (proven before e429835).
 - GearWeather.hlsl: 1918 slots (main 980, upstream 1737).
 - Sun records (proven, group S): sun record 2246-3150, fade records 3217-3953, flow 0. `fork-v2-rt` / `fork-v2-rtfirst` fade with FD_SKIN is
@@ -1824,7 +1827,25 @@ night lamp shadows with `NightMinDarkness` 0.65, `CubeMode` 2 (the dynamic world
 - `tests/stale_preset_values_check.py` still reports the 19 problems main has.
 - `TextureManager.cpp` includes `ScreenSpaceShadows.h` twice (harmless).
 
-Bench: (filled in by room 02)
+Bench (slot A, test build of the branch vs main 9948b06, owner's toml of 2026-11-27, picture waits 10; sheets in
+`F:\NVR-bench\shots\u115\`):
+- SunGI2 / SunGI4 (runs 20261127-130129 / -130356 before, -132142 / -132848 after): same scene, mean luma +0.7 to +3.7; shadows a little less
+  purple (upstream's SunColorFromLight / ExteriorBalance off), more grass and shrubs drawn at distance. Nothing broken.
+- puddle1 held wet (`owner-b-wet-r01.toml`; -114900 before, -135909 after with the WorldSurface fix): mirrors cleaner (fewer white specks), sky
+  reflection intact, luma within 1.
+- v-tilted01 (-114243 before, -133751 after): the floor mirror stays level (our tilt fix kept); in the test-only sharp-mirror shots the
+  reflected far wall is darker and grainier (missed rays now fall back to upstream's live world cubemap); the default view -1.5 luma.
+- Saloon (-125637 before, -133029 after): lamp globes and the jukebox neon are clearly dimmer and the neon's green floor reflection is gone.
+  Proven upstream's own look: upstream ae74446 built as is shows the same (-142843-slotE). Not caused by DecoupleGlowMaps (off in the toml from
+  start: unchanged, -141928), GlowScale 2, PortalVisibilityCulling, DeferredEnvFade, DeferredDecals, BlendedLayerFix, CubeMode 1/0, Reflections
+  off, FastConstantMapSort, BatchBoneUploads, RenderScaleGuard or the old EnvMaps values (live toggles, -141320 / -141522). Cause not found.
+- Logs: no shader falls back to the game's own; fewer X4505 retries than main (572 vs 859 lines at puddle1); settings steps 102-109 ran on the
+  owner's file (version 103).
+- GPU frame time (F10 timer "Game frame total", SunGI2, 1080p, RTX 4070 Ti SUPER, uncapped while profiling; runs -141109 before, -140437
+  after): before 10.1 ms; after 12.2 ms with CubeMode 2 (default), 11.2 ms with CubeMode 1, 10.8 ms with CubeMode 0. So the merge costs about
+  +2.1 ms here, of which the live world cubemap is about 1.0 ms. Per pass in the after run: world cubemap 1.18 ms, WorldSurface 0.29 ms, a new
+  "Light grid sun map" and game water reflections higher. The slot's frame rate itself is capped (~23 fps), so HEARTBEAT averages show no change.
+- Not run: CubeMode 2 indoors cost, night lamp shadows outdoors, HDR, cold-start time.
 
 ## Deferred shadow quality
 
