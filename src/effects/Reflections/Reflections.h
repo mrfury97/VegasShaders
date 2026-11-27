@@ -37,6 +37,12 @@ public:
 		int		CubeMode;		// 0: screen capture only, 1: screen + sky/grid fill, 2: native staggered 3D world cube + screen
 		int		CubeResolution;	// face resolution (64, 128, or 256; requires restart)
 		float	CubeDistance;	// world-cube capture cull distance in game units
+		// UNOFFICIAL 2026-11-27 cheaper world cube (owner: "do the first 3 for the live cubemap"): a complete cube redraws a face only when
+		// something it shows changed, at most one face every CubeFaceInterval frames, and (CubeLean) without actors and clutter.
+		int		CubeFaceInterval;	// frames between face redraws once the cube is complete (1: every frame, as upstream)
+		float	CubeMoveThreshold;	// game units the camera moves before a face drawn there counts as stale (0: always stale, as upstream)
+		float	CubeRefreshSeconds;	// a face older than this is redrawn anyway (0: never), for what the checks miss (doors, moving lamps)
+		bool	CubeLean;			// leave actors, clutter (misc items, books, apparatus) and small objects out of the cube's draw
 		float	CubeCapture;	// how much of the cube each frame's view replaces
 		float	CubeFade;		// how much of what is off screen fades each frame
 		int		DebugView;		// 1: the reflection alone, 2: where it found something, 3: the surroundings cube (4-6: see the .fx)
@@ -180,7 +186,10 @@ public:
 	bool	CubeStandaloneRunnable();					// safe to step the cube alone when floor SSR is disabled or suppressed
 	bool	WorldCubeWanted();							// native 3D world-cube pass should render faces this frame
 	bool	WorldCubeReady() const;						// all 6 world-cube faces are valid for the current cell/viewpoint
-	int		BeginWorldCubeFaces(int outFaces[2]);		// returns 0..2 staggered face indices to render this frame
+	// UNOFFICIAL 2026-11-27: what lights the world cube this frame (ShadowManager::RenderReflectionCubeFace); a face drawn under a
+	// different light is stale. Sun direction, the brightness of the sun, ambient, sky and fog colours, and the cube's lamps.
+	struct WorldCubeLight { D3DXVECTOR3 sunDir; float lum[4]; UInt32 lampSet; float lampLum; };
+	int		BeginWorldCubeFaces(int outFaces[2], const WorldCubeLight& now);	// returns 0..2 face indices to render this frame
 	void	MarkWorldCubeFaceRendered(int face);		// records a rendered face (0..5) in worldCubeMask
 	void	RenderCubeOnly(IDirect3DDevice9* Device);	// the cube alone, on a frame RenderBuffers does not run
 	bool	CubeReady() const;							// the cube was kept up last frame (what the object shaders read now)
@@ -304,6 +313,15 @@ private:
 	UINT		worldCubeMask = 0;		// bitmask of valid world-cube faces (0x3F when all 6 populated)
 	void*		worldCubeSpace = nullptr;// the interior cell, or the worldspace outdoors, the world cube's faces were drawn in
 	D3DXVECTOR3	worldCubePos = { 0.0f, 0.0f, 0.0f };
+	// UNOFFICIAL 2026-11-27 cheaper world cube: what each face was drawn with, the light of this frame's draw (stored by
+	// MarkWorldCubeFaceRendered), faces marked stale by a cell change, the frame of the last draw, and counters for the log.
+	struct WorldCubeFace { D3DXVECTOR3 pos; WorldCubeLight light; DWORD tick; };
+	WorldCubeFace	worldCubeFace[6] = {};
+	WorldCubeLight	worldCubeLightNow = {};
+	UINT		worldCubeStale = 0;		// faces to redraw whatever the checks say (a cell change)
+	UINT		worldCubeLastDraw = 0;	// FrameNumber of the last face drawn
+	UINT		worldCubeLogFrames = 0, worldCubeLogFaces = 0, worldCubeLogIdle = 0;
+	bool	WorldCubeFaceStale(int face, const D3DXVECTOR3& pos, const WorldCubeLight& now, DWORD tick) const;
 	bool		cubeOnly = false;		// RenderCubeOnly is drawing (ShouldRender lets its passes through)
 	bool		materialOnly = false;	// CaptureMaterial is drawing
 	bool		materialFilled = false;	// the material buffer was filled this frame

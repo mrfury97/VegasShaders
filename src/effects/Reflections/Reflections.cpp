@@ -85,6 +85,18 @@ void ReflectionsEffect::UpdateSettings() {
 		const int rawRes = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeResolution") ? cubeNode.IntValue : 128;
 		Settings.CubeResolution = rawRes < 96 ? 64 : (rawRes >= 192 ? 256 : 128);
 		Settings.CubeDistance = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeDistance") ? std::clamp(cubeNode.FloatValue, 1024.0f, 16384.0f) : 4096.0f;
+		// UNOFFICIAL 2026-11-27 cheaper world cube (missing keys: as upstream draws it, a face every frame with everything in it)
+		Settings.CubeFaceInterval = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeFaceInterval") ? std::clamp(cubeNode.IntValue, 1, 8) : 1;
+		Settings.CubeMoveThreshold = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMoveThreshold") ? std::clamp(cubeNode.FloatValue, 0.0f, 1000.0f) : 0.0f;
+		Settings.CubeRefreshSeconds = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeRefreshSeconds") ? std::clamp(cubeNode.FloatValue, 0.0f, 600.0f) : 0.0f;
+		Settings.CubeLean = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeLean") && cubeNode.BoolValue;
+		// (review) what the faces hold changed: every face is redrawn in turn. Only on a real change of these two (a settings reload
+		// happens for any key, and the bench reloads them at every shot).
+		static bool lastLean = Settings.CubeLean;
+		static float lastDistance = Settings.CubeDistance;
+		if (lastLean != Settings.CubeLean || lastDistance != Settings.CubeDistance) worldCubeStale = 0x3Fu;
+		lastLean = Settings.CubeLean;
+		lastDistance = Settings.CubeDistance;
 	}
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);
@@ -1341,8 +1353,28 @@ bool ReflectionsEffect::WorldCubeReady() const {
 	return Cubes.World && Settings.CubeMode >= 2 && (worldCubeMask == 0x3Fu);
 }
 
-int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2]) {
+// UNOFFICIAL 2026-11-27 cheaper world cube: a face shows the world around the camera point it was drawn at, axis-aligned (turning
+// never changes it), lit by that moment's sun, sky and lamps. It is stale when the camera has moved CubeMoveThreshold units since, when
+// that light changed (sun direction over ~2 degrees, a colour's brightness over 8 %, another set of lamps or their total over 15 %),
+// when it is older than CubeRefreshSeconds, or after a cell change. Standing still in a steady scene, no face is stale: nothing draws.
+bool ReflectionsEffect::WorldCubeFaceStale(int face, const D3DXVECTOR3& pos, const WorldCubeLight& now, DWORD tick) const {
+	if (worldCubeStale & (1u << face)) return true;
+	const WorldCubeFace& f = worldCubeFace[face];
+	const float move = Settings.CubeMoveThreshold;
+	if (move <= 0.0f) return true;	// as upstream: every face is redrawn in turn
+	const float dx = pos.x - f.pos.x, dy = pos.y - f.pos.y, dz = pos.z - f.pos.z;
+	if (dx * dx + dy * dy + dz * dz > move * move) return true;
+	if (Settings.CubeRefreshSeconds > 0.0f && tick - f.tick > (DWORD)(Settings.CubeRefreshSeconds * 1000.0f)) return true;
+	if (D3DXVec3Dot(&now.sunDir, &f.light.sunDir) < 0.99939f) return true;	// cos 2 degrees
+	auto changed = [](float a, float b, float share) { return fabsf(a - b) > share * (std::max)(a, b) + 0.002f; };
+	for (int i = 0; i < 4; i++) if (changed(now.lum[i], f.light.lum[i], 0.08f)) return true;
+	if (now.lampSet != f.light.lampSet || changed(now.lampLum, f.light.lampLum, 0.15f)) return true;
+	return false;
+}
+
+int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2], const WorldCubeLight& now) {
 	if (!WorldCubeWanted()) return 0;
+	worldCubeLightNow = now;
 	// (2026-11-24 review) Started over in another interior or worldspace, or after a jump: NOT at every exterior cell border (every 4096
 	// units outdoors), where the faces are still right and starting over dropped the world cube from the capture for 3+ frames.
 	TESObjectCELL* cell = Player ? Player->parentCell : nullptr;
@@ -1353,18 +1385,48 @@ int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2]) {
 		worldCubeMask = 0;
 		worldCubeNextFace = 0;
 		worldCubeSpace = space;
+		worldCubeStale = 0;
 	}
 	worldCubePos = pos;
-	const int count = (worldCubeMask != 0x3Fu) ? 2 : 1;
-	for (int i = 0; i < count; i++) {
-		outFaces[i] = worldCubeNextFace;
-		worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+	// (2026-11-27) another exterior cell: every face is redrawn in turn (the old ones show until then; a new place resets above)
+	if (TheShaderManager->GameState.isCellChanged) worldCubeStale = 0x3Fu;
+	const UINT frame = TheFrameRateManager->FrameNumber;
+	if (++worldCubeLogFrames >= 600) {
+		Logger::Log("UNOFFICIAL Reflections world cube: %u faces drawn in the last 600 frames, %u frames with the cube complete and nothing stale (interval %d, move %.0f, refresh %.0f s, lean %d)",
+			worldCubeLogFaces, worldCubeLogIdle, Settings.CubeFaceInterval, Settings.CubeMoveThreshold, Settings.CubeRefreshSeconds, Settings.CubeLean ? 1 : 0);
+		worldCubeLogFrames = worldCubeLogFaces = worldCubeLogIdle = 0;
 	}
-	return count;
+	if (worldCubeMask != 0x3Fu) {	// filling (a new place): two faces a frame, as upstream, until all six are there
+		int count = 0;
+		for (int tries = 0; tries < 6 && count < 2; tries++) {
+			const int f = worldCubeNextFace;
+			worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+			if (!(worldCubeMask & (1u << f))) outFaces[count++] = f;
+		}
+		worldCubeLastDraw = frame;
+		worldCubeLogFaces += count;
+		return count;
+	}
+	if (frame - worldCubeLastDraw < (UINT)Settings.CubeFaceInterval) return 0;
+	const DWORD tick = GetTickCount();
+	for (int tries = 0; tries < 6; tries++) {
+		const int f = worldCubeNextFace;
+		worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+		if (!WorldCubeFaceStale(f, pos, now, tick)) continue;
+		outFaces[0] = f;
+		worldCubeLastDraw = frame;
+		worldCubeLogFaces++;
+		return 1;
+	}
+	worldCubeLogIdle++;
+	return 0;
 }
 
 void ReflectionsEffect::MarkWorldCubeFaceRendered(int face) {
-	if (face >= 0 && face < 6) worldCubeMask |= (1u << face);
+	if (face < 0 || face >= 6) return;
+	worldCubeMask |= (1u << face);
+	worldCubeStale &= ~(1u << face);
+	worldCubeFace[face] = { worldCubePos, worldCubeLightNow, GetTickCount() };	// (2026-11-27) what it was drawn with
 }
 
 bool ReflectionsEffect::CubeReady() const {

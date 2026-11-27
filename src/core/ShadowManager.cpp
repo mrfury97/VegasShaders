@@ -4432,14 +4432,63 @@ void ShadowManager::RenderReflectionCubeAlone(ShadowSceneLight** castLamps, NiPo
 void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPointLight** nearLamps) {
 	ReflectionsEffect* refl = TheShaderManager->Effects.Reflections;
 	if (!refl || !ReflCubeVertex || !ReflCubePixel || !Player || !Player->parentCell) return;
-	int faces[2] = {};
-	const int faceCount = refl->BeginWorldCubeFaces(faces);
-	if (faceCount <= 0) return;
-
 	IDirect3DDevice9* dev = TheRenderManager->device;
 	NiDX9RenderState* rs = TheRenderManager->renderState;
 	ShadowsExteriorEffect* fx = TheShaderManager->Effects.ShadowsExteriors;
 	if (!dev || !rs || !fx) return;
+
+	// (2026-11-27 cheaper world cube) the lamps are picked first: with the sun and sky they are the light a face is drawn under, and
+	// BeginWorldCubeFaces redraws a face only when that light (or the camera's place) changed since.
+	const ShaderConstants& sc = TheShaderManager->ShaderConst;
+	struct LampCand { float key; NiPointLight* light; float lod; };
+	LampCand bestLamps[4] = {};
+	int lampCount = 0;
+	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
+	const float cullDist = refl->Settings.CubeDistance;
+	auto tryLamp = [&](NiPointLight* light, float lod) {
+		if (!light || light->Spec.r <= 1.0f) return;
+		if ((light->Diff.r + light->Diff.g + light->Diff.b) * light->Dimmer <= 5.0f / 255.0f) return;
+		if (FlashlightLamp::Is(light)) return;
+		for (int i = 0; i < lampCount; i++) if (bestLamps[i].light == light) return;
+		const NiPoint3& p = light->m_worldTransform.pos;
+		const float dx = p.x - camPos.x, dy = p.y - camPos.y, dz = p.z - camPos.z;
+		const float key = sqrtf(dx * dx + dy * dy + dz * dz) - light->Spec.r;
+		if (key > cullDist) return;
+		int at = lampCount < 4 ? lampCount++ : 4;
+		if (at == 4) { if (key >= bestLamps[3].key) return; at = 3; }
+		while (at > 0 && bestLamps[at - 1].key > key) { bestLamps[at] = bestLamps[at - 1]; at--; }
+		bestLamps[at] = { key, light, lod };
+	};
+	if (castLamps) {
+		for (int i = 0; i < ShadowCubeMapsMax; i++)
+			if (castLamps[i] && castLamps[i]->sourceLight) tryLamp(castLamps[i]->sourceLight, castLamps[i]->fLODDimmer);
+	}
+	if (nearLamps) {
+		for (int i = 0; i < TrackedLightsMax; i++)
+			if (nearLamps[i]) tryLamp(nearLamps[i], 1.0f);
+	}
+
+	D3DXVECTOR3 sunDir(sc.SunDir.x, sc.SunDir.y, sc.SunDir.z);
+	if (D3DXVec3LengthSq(&sunDir) > 1.0e-4f) D3DXVec3Normalize(&sunDir, &sunDir);
+	else sunDir = D3DXVECTOR3(0.0f, 0.0f, 1.0f);
+	ReflectionsEffect::WorldCubeLight lightNow = {};
+	{
+		auto lum = [](const D3DXVECTOR4& c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; };
+		lightNow.sunDir = sunDir;
+		lightNow.lum[0] = lum(sc.sunColor); lightNow.lum[1] = lum(sc.sunAmbient);
+		lightNow.lum[2] = lum(sc.skyColor); lightNow.lum[3] = lum(sc.fogColor);
+		UInt32 set = 0;	// the lamps' addresses, each mixed, summed: the same set in any order (their order is by distance)
+		for (int i = 0; i < lampCount; i++) {
+			const NiPointLight* l = bestLamps[i].light;
+			set += (((UInt32)(uintptr_t)l ^ 2166136261u) * 16777619u) ^ 0x9E3779B9u;
+			// (review) without Dimmer: candles, fires and barrels flicker through it every few frames; a lamp switched off leaves the set
+			lightNow.lampLum += (0.2126f * l->Diff.r + 0.7152f * l->Diff.g + 0.0722f * l->Diff.b) * bestLamps[i].lod;
+		}
+		lightNow.lampSet = set;
+	}
+	int faces[2] = {};
+	const int faceCount = refl->BeginWorldCubeFaces(faces, lightNow);
+	if (faceCount <= 0) return;
 	static GpuTimer reflCubeTimer("Reflection world cubemap");	// (2026-11-24 review: here, so both callers report under one name)
 	GpuProfileScope gpu(reflCubeTimer, dev);
 
@@ -4538,7 +4587,6 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	rs->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE, RenderStateArgs);
 
 	const bool exterior = TheShaderManager->GameState.isExterior;
-	const ShaderConstants& sc = TheShaderManager->ShaderConst;
 	const PBRShaders* pbr = TheShaderManager->Shaders.PBR;
 	const float G = (pbr && pbr->Constants.Linear.x > 1.0f) ? pbr->Constants.Linear.x : 2.2f;
 	const float linLight = pbr ? pbr->Constants.LinearScales.x : 1.0f;
@@ -4546,42 +4594,11 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	const float linSky = exterior ? (pbr ? pbr->Constants.LinearScales.z : 1.0f) : 0.0f;
 	auto decodeLin = [G](float v) { return powf((std::max)(v, 0.0f), G); };
 
-	D3DXVECTOR3 sunDir(sc.SunDir.x, sc.SunDir.y, sc.SunDir.z);
-	if (D3DXVec3LengthSq(&sunDir) > 1.0e-4f) D3DXVec3Normalize(&sunDir, &sunDir);
-	else sunDir = D3DXVECTOR3(0.0f, 0.0f, 1.0f);
 	RecalculateBillboardVectors(&sunDir);
 
 	const float fogStart = (std::max)(sc.fogData.x, 0.0f);
 	const float fogEnd = sc.fogData.y > fogStart + 100.0f ? sc.fogData.y : fogStart + 32768.0f;
 	const float invFogRange = 1.0f / (fogEnd - fogStart);
-
-	struct LampCand { float key; NiPointLight* light; float lod; };
-	LampCand bestLamps[4] = {};
-	int lampCount = 0;
-	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
-	const float cullDist = refl->Settings.CubeDistance;
-	auto tryLamp = [&](NiPointLight* light, float lod) {
-		if (!light || light->Spec.r <= 1.0f) return;
-		if ((light->Diff.r + light->Diff.g + light->Diff.b) * light->Dimmer <= 5.0f / 255.0f) return;
-		if (FlashlightLamp::Is(light)) return;
-		for (int i = 0; i < lampCount; i++) if (bestLamps[i].light == light) return;
-		const NiPoint3& p = light->m_worldTransform.pos;
-		const float dx = p.x - camPos.x, dy = p.y - camPos.y, dz = p.z - camPos.z;
-		const float key = sqrtf(dx * dx + dy * dy + dz * dz) - light->Spec.r;
-		if (key > cullDist) return;
-		int at = lampCount < 4 ? lampCount++ : 4;
-		if (at == 4) { if (key >= bestLamps[3].key) return; at = 3; }
-		while (at > 0 && bestLamps[at - 1].key > key) { bestLamps[at] = bestLamps[at - 1]; at--; }
-		bestLamps[at] = { key, light, lod };
-	};
-	if (castLamps) {
-		for (int i = 0; i < ShadowCubeMapsMax; i++)
-			if (castLamps[i] && castLamps[i]->sourceLight) tryLamp(castLamps[i]->sourceLight, castLamps[i]->fLODDimmer);
-	}
-	if (nearLamps) {
-		for (int i = 0; i < TrackedLightsMax; i++)
-			if (nearLamps[i]) tryLamp(nearLamps[i], 1.0f);
-	}
 
 	const bool hdr = *(const bool*)0x011F941E;
 	D3DXVECTOR4 psConsts[13] = {};
@@ -4628,20 +4645,24 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	const D3DXVECTOR3 zero(0.0f, 0.0f, 0.0f);
 
 	ShadowsExteriorEffect::FormsStruct reflForms = {};
+	// (2026-11-27 cheaper world cube) CubeLean: no actors (they move, and redraw nothing anyway between faces), no clutter (misc items,
+	// books, apparatus) and nothing small; buildings, statics, trees, furniture, doors, terrain and LOD stay. At 128 texels a face and
+	// the reflections' blur, what goes is a few texels.
+	const bool lean = refl->Settings.CubeLean;
 	reflForms.AlphaEnabled = true;
 	reflForms.Activators = true;
-	reflForms.Actors = true;
-	reflForms.Apparatus = true;
-	reflForms.Books = true;
+	reflForms.Actors = !lean;
+	reflForms.Apparatus = !lean;
+	reflForms.Books = !lean;
 	reflForms.Containers = true;
 	reflForms.Doors = true;
 	reflForms.Furniture = true;
-	reflForms.Misc = true;
+	reflForms.Misc = !lean;
 	reflForms.Statics = true;
 	reflForms.Terrain = true;
 	reflForms.Trees = true;
 	reflForms.Lod = exterior;
-	reflForms.MinRadius = exterior ? 12.0f : 6.0f;
+	reflForms.MinRadius = lean ? (exterior ? 48.0f : 24.0f) : (exterior ? 12.0f : 6.0f);
 	reflForms.OrigMinRadius = reflForms.MinRadius;
 
 	NiAVObject* const playerBody = Player->GetNode();
