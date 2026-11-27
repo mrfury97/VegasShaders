@@ -19,6 +19,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [Upstream 1.1.1-1.1.3 merge](#upstream-111-113-merge)
 - [Upstream 1.1.5 merge](#upstream-115-merge)
 - [Deferred shadow quality](#deferred-shadow-quality)
+- [The Astral Shaders study](#the-astral-shaders-study)
 
 ## Deferred vs forward
 
@@ -1965,3 +1966,89 @@ Job `F:\NVR-bench\work\bench\deep-roadmap\multirun\jobs\lampq.txt`, list `lists/
   bias terms, that TexelFilter has no atlas form, that the screen-space mask is not doubled over it; the sun's cascade setup.
 - Believed: the texel-to-pixel ratio in the screenshot; the fringe = the 4-tap quantisation; the cost estimates for A-E.
 - Not run: any frame-time measurement; any prototype of A; the A/B at a magnified thin-caster spot (the Saloon run did not show the problem).
+
+## The Astral Shaders study
+
+Written 2026-11-27 (room 02, read only). Source: github.com/Alaxouche/The-Astral-Shaders, cloned at `F:\Claude-refs\refs\The-Astral-Shaders`,
+HEAD 00ae9471f (2026-11-22). Owner's ask: what in this Bottled Shaders fork is useful to us.
+
+### What it is
+- A **Skyrim SE/AE** plugin (SKSE, Direct3D 11, compute shaders), not FNV: Community Shaders -> Bottled Shaders (InTheBottle's
+  `Bottle-Compendium` branch) -> Astral. Nothing in it runs in FNV; anything we take is a rewrite for D3D9 / ps_3_0 (or a Vulkan
+  pass through our DXVK fork).
+- Not a GitHub fork: its history contains Bottled's own commits and it merges Bottled every few days (last: Bottled 5c2f2d3d9,
+  2026-11-21). Astral's own work is 146 commits by Alaxouche since 2026-09-26 ("minimal fork on Bottle f1ec4a225"), many
+  co-authored with Claude; some are ports of Open Shaders (`OS #nnn`) and Community Shaders pull requests.
+- Everything Astral adds over Bottled = `git diff 5c2f2d3d9 HEAD`: 253 files, +22.9k lines, most of it in Upscaling
+  (Neural Rendering, DLSS-G), Living Windows and Caustic Light.
+- Licence: GPL-3.0 (`COPYING.txt`) with the same Modding and Linking exceptions as Community Shaders (`EXCEPTIONS.md`), so
+  compatible with ours as in [Community Shaders ports](#community-shaders-ports). Caustic Light's model and atlases are from
+  qtuna's CausticLight, **GPL-3.0-only** (fine: the combined work is then GPL-3.0); its atlas generator came from ScottieFox's
+  caustic-volume (MIT). Living Windows' atlases are PIXL Renderer's (GPL-3.0, image-model generated, medieval Nordic art).
+
+### What Astral adds over Bottled, and whether Vegas Shaders has it
+
+| Astral feature | What it does | In Vegas Shaders? |
+| --- | --- | --- |
+| Caustic Light | Light reflected off rippling water onto walls, ceilings, bridge undersides; refracted streaks on pool floors. Sun, moon and every clustered lamp, with shadows. Deferred compute pass, G-buffer albedo and normal. | **No.** Ours is underwater only (`[Shaders.Water]` causticsStrength: "Caustics seen from above water not currently supported"). |
+| Living Windows | Parallax room interiors behind window panes (rooms, curtains, occupants on depth layers), lit on per-window night schedules, old-glass grime and reflections, rain beading, frost; sun shafts through windows into interiors. | **No** interior mapping. Lit windows exist only as glow maps (RT reads them, `GlowTextures`). |
+| Volumetric Mists | Wind-driven mist pockets near the camera inside the froxel height fog (noise shape, warp, detail). | **Mostly yes**: `[Shaders.VolumetricFog]` has froxel fog patches (`FogVolume`), wind drift (`WindAngle`, `WindSpeed`), a height layer. Astral's pockets are a look refinement. |
+| Interior eye adaptation | Own exposure values indoors (for ENB presets in Effects11). | **Yes**: `[Shaders.Exposure.Interiors]`, also tonemapping and fog interiors. |
+| DLSS Frame Generation (DLSS-G) | Frame generation on RTX 40+ via a D3D11-to-D3D12 proxy swap chain (Bottled's code, Open Shaders design); FSR3 FG on the same chain. | **No.** We upscale only (DLSS helper, FSR 2.2/3.1 without FG); players use driver Smooth Motion or Lossless Scaling. |
+| DLSS Neural Rendering | NVIDIA NGX feature 18 (`nvngx_dlssnr.dll` 310.8.x, not shipped) run before upscaling. | No. Vendor preview DLL, D3D12 interop, hardware-gated, untested even by its author. |
+| Fur Shells additions | Fur on skin and khajiit bodies, touch interactors from body capsules, inertia spring. | No Fur Shells at all (that is a Bottled feature). |
+| Grass Wet Darkening | Caps rain darkening of grass (default 0.3 porosity) so grass is not near black in a downpour. Plus a simple tree wetness permutation. | Not checked in game. Our deferred wetness has no grass-specific cap that I found. |
+| Snow trails, snow print shading | Smoother snow deformation trails. | Not relevant (no snow in FNV). |
+| Seam Probe | Debug tool for render-rectangle seams with upscalers. | We have the pixel inspector; not needed. |
+| Skyrim-only pieces | Unified Water incremental caches, Tree LOD Wind (Windswept), ENB helper loading, Vel'dun theme and logo, Swedish strings, RaceMenu pass skip, light list search vectorised, Hitch Hunter sun poll. | Not applicable. |
+
+### Ranked for us
+
+1. **Caustic Light (worth a port).**
+   - Player sees: moving light ripples on rock and concrete beside water in sun or lamplight (Hoover Dam, Lake Mead shore,
+     Goodsprings pond, Vault pools, sewers, Lake Las Vegas), and bright streaks on shallow pool floors.
+   - Path: deferred. A full-screen pixel pass after the deferred sun and lamp passes, reading the COLOR2 normal, the distance and
+     the albedo, adding light x albedo. No compute in D3D9: a pixel shader (or a Vulkan pass through the DXVK fork).
+   - Needs: where the water is. Astral gathers the engine's water objects and the land height on the CPU into a small top-down
+     mask. We have the current water height (`TESR_WaterSettings`); cells with several water planes need a gather like theirs.
+   - Cost: believed 0.3-0.8 ms at 1440p (one pass, lamps x pattern taps, only pixels within Reach of water). Not measured.
+   - Effort: 3-4 sessions (water mask, pass, lamp list, tuning); 1 more for the pool-floor refraction.
+   - Licence: GPL-3.0-only model and atlases; port by writing fresh from the description, credit qtuna, ship the six atlases
+     with their notice.
+   - Risk: ripples on walls far from water if the water mask is wrong; the ps_3_0 instruction limit with many lamps (cap lamps
+     per pixel as they do, 12); interiors with water at several heights.
+2. **Living Windows interiors (good idea, art-bound).**
+   - Player sees: Strip and Freeside windows that look into lit rooms with curtains and figures at night, rooms that shift with
+     the viewing angle, dirty old glass, rain running down the panes.
+   - Path: deferred for the opaque static window meshes (the room colour goes into the pane pixels' albedo and glow in the
+     G-buffer); forward only for glass that stays forward. Windows found by texture path rules plus a rule file for mods.
+   - Cost: believed small (only window pixels, a few atlas taps). Their window sun shafts add a half-res march; FNV interiors
+     have no sun, so skip the shafts.
+   - Effort: 4-6 sessions of code, plus new atlases: theirs are medieval Nordic rooms and would look wrong in FNV. Room 04
+     would need to make FNV rooms (diners, casino rooms, apartments, ruins).
+   - Licence: code GPL-3.0; atlases GPL-3.0 but the wrong look.
+   - Risk: false windows (signs, glass cases, boarded panes); many FNV windows are broken or dark by design.
+3. **Wet grass darkening cap (tiny check).** Look at grass in heavy rain with our wetness on; if it goes near black, a cap like
+   theirs is one setting. Under 1 session. Not run.
+4. **Volumetric mist pockets (look polish).** We already have froxel fog with wind; their near-camera pockets would add drifting
+   mist for mornings at the lake or in Zion. Fog pass, not tied to deferred. 1-2 sessions, cost believed under 0.2 ms on top
+   of the froxels. Low priority.
+5. **Frame generation (big, park).** Useful for a CPU-bound game, but it needs a Vulkan present path for DLSS-G or FSR3 FG
+   through our DXVK fork, HUD and menu handling, and vendor SDK terms. 6+ sessions, high risk. Driver Smooth Motion already
+   covers part of it.
+
+### Skip
+Interior eye adaptation (we have it), DLSS Neural Rendering (vendor preview, no way to test), Fur Shells (needs Bottled's whole
+Fur Shells first; skinned, forward; few furry FNV creatures), snow work, Seam Probe, and every Skyrim-only piece listed above.
+
+### Not covered here
+Bottled's own features that Astral inherits (Physical Sky, Rainbows, Procedural Lightning, Rain Refraction, Heat Haze, Night Sky,
+Footstep Particles, HiZ Occlusion, Terrain Shadows, ...). They are not Astral's work; a separate Bottled feature study would
+compare them with Vegas Shaders.
+
+### Proven / believed / not run
+- Proven (from the source): the target game and API, the licence files, the list of Astral-only features (the diff against
+  Bottled 5c2f2d3d9), what Caustic Light and Living Windows read and how; our gaps by grep of `VegasShaders.defaults.toml` and
+  `docs\EFFECTS.md` (underwater-only caustics, interior exposure present, froxel fog with wind present, no frame generation).
+- Believed: the frame costs and session counts above; that our G-buffer carries what Caustic Light needs.
+- Not run: nothing of Astral was built or run (it cannot run in FNV); no in-game look at grass in rain.
