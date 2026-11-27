@@ -5368,9 +5368,8 @@ CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
   the screen answers almost every ray, outdoors open-sky mirror rays take the panorama: the cube fills only what is left. By design.
 
 **Fixes**
-- Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1);
-  only a texel out of view goes to the world cube, at `max(CubeFade x 8, 0.03)` (half in ~23 frames: about as stale as the world cube's
-  own faces, redrawn every 96 units). Out-of-view texels used to forget what was seen in ~6 frames, now ~23.
+- Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1).
+  (Superseded 2026-11-28, next bullet: out of view a texel went to the world cube at `max(CubeFade x 8, 0.03)`, half in ~23 frames.)
   - (2026-11-27 cube-keep-capture, owner: a window's reflection "gone as soon as i look away from the angle") out of view a texel now
     keeps what the screen showed, fading at CubeFade as on screen, and gives way to the world cube only as the camera MOVES: the distance
     moved this frame (the camera's world position, `CameraPosition`) / (2 x CubeMoveThreshold), passed as minus `TESR_ReflectionsCube.w` (Capture reads only w > 0 as a reset; CubeStep). CubeStep used to read the view matrix's translation, always 0 here (camera relative), so its 1000-unit jump test never fired either; both now use `CameraPosition`.
@@ -5411,10 +5410,11 @@ dark rooms brightening with CubeStrength, or the cube lagging when you turn.
   tones, no normal-map blue). Interiors: not run (believed to have had the same fault; the interior ARK luma change of 11-27 is unexplained).
 - DebugView 3 behind the camera shows the world cube's town only after the capture restarts (bench list `cube-world-proof`: a hop over a
   cell border): `F:\NVR-bench\shots\20261128-005307-slotA\NeonSelfTest_00-53-25_ab_04_dv3-behind-world.png`.
-- Open, found here (not fixed: CubeStep is the cube-keep-capture change): CubeStep measures the camera's movement from
-  `TheRenderManager->InvViewMatrix` row 4, which is 0 0 0 in this renderer (camera-relative view; logged on the bench), so the distance moved
-  is always 0 and its 1000-unit jump test never fires. Out of view the capture then never hands texels to the world cube while walking;
-  only a restart of the capture cube (a cell change) does. `TheRenderManager->CameraPosition` holds the camera's world position.
+- Found here and fixed on the same branch (commit aae08b5; the Capture bullet under "Fixes" above): CubeStep measured the camera's
+  movement from `TheRenderManager->InvViewMatrix` row 4, 0 0 0 in this renderer (camera-relative view; logged on the bench), so the
+  distance moved was always 0 and the 1000-unit jump test never fired. It now reads `TheRenderManager->CameraPosition`.
+- Review (2026-11-28): the depth, blend and stencil states of the face pass are written to the cache and the device both (this file's
+  idiom for a stale cache), and put back on both by the StateGuard; the dump log also records ZWRITE, alpha blend and stencil.
 - Frame cost: not measured (the faces now shade pixels where they shaded none; the GPU timer was off in these runs).
 
 ## ShadowsExteriors
