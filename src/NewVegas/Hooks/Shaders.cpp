@@ -139,6 +139,13 @@ void* __fastcall SkinShader__PrepareGeometryForRendering(void* apThis, void*, vo
     return Result;
 }
 
+void RestoreSkinHighlightMuteIfLeaked() {
+    if (!sSkinHighlightMuted) return;
+    if (TheRenderManager && TheRenderManager->device)
+        TheRenderManager->device->SetRenderState(D3DRS_COLORWRITEENABLE, sSkinSavedWriteMask);
+    sSkinHighlightMuted = false;
+}
+
 void __fastcall SkinShader__PostGeometry(void* apThis, void*, void* apProperties) {
     ThisCall(kSkinPostGeometryDetour.GetOverwrittenAddr(), apThis, apProperties);
     if (TheShaderManager && TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->Unbind();
@@ -146,11 +153,7 @@ void __fastcall SkinShader__PostGeometry(void* apThis, void*, void* apProperties
         *(void**)((UInt8*)sFaceGenStage2 + 0x08) = nullptr;   // NiD3DTextureStage::m_pkTexture
         sFaceGenStage2 = nullptr;
     }
-    if (sSkinHighlightMuted) {
-        if (TheRenderManager && TheRenderManager->device)
-            TheRenderManager->device->SetRenderState(D3DRS_COLORWRITEENABLE, sSkinSavedWriteMask);
-        sSkinHighlightMuted = false;
-    }
+    RestoreSkinHighlightMuteIfLeaked();
 }
 
 // UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded) the Pip-Boy's screen: once the game has rendered the menu into the screen's

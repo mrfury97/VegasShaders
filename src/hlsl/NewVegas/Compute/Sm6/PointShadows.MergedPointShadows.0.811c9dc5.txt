@@ -1,11 +1,12 @@
 nvr-sm6 1
 source PointShadows.fx.hlsl technique MergedPointShadows pass 0 entry Shadow(false) vs FrameVS
 defines NVR_SM6=1
-hash a0d6a5d0d4a768c3 Effects/PointShadows.fx.hlsl
-hash b5d8f72865a0fb69 Effects/Includes/Helpers.hlsl
-hash aef31de36f7957da Effects/Includes/Depth.hlsl
+hash ff1473ea91d2041e Effects/PointShadows.fx.hlsl
+hash f7533f7fd08f5119 Effects/Includes/Helpers.hlsl
+hash 157512b34669468a Effects/Includes/Depth.hlsl
+hash 8dc813f71e1582da Effects/Includes/RenderRect.hlsl
 hash 949e22a95c815740 Effects/Includes/Normals.hlsl
-hash 5d9da31dec872999 Effects/Includes/Shadows.hlsl
+hash 86c5fd833e0171af Effects/Includes/Shadows.hlsl
 const TESR_ShadowLightPosition 0 192 float4[12]
 const TESR_LightPosition 192 192 float4[12]
 const TESR_LightColor 384 384 float4[24]
@@ -20,14 +21,15 @@ const TESR_LampContactFade 1120 16 float4
 const TESR_LampContactBias 1136 16 float4
 const TESR_LampContactNoise 1152 16 float4
 const TESR_ReciprocalResolution 1168 16 float4
-const TESR_ProjectionTransform 1184 64 float4x4
-const TESR_InvProjectionTransform 1248 64 float4x4
-const TESR_ViewTransform 1312 64 float4x4
-const TESR_InvViewTransform 1376 64 float4x4
-const TESR_DepthConstants 1440 16 float4
-const TESR_CameraData 1456 16 float4
-const TESR_CameraPosition 1472 16 float4
-ubo 2 0 1488
+const TESR_RenderScale 1184 16 float4
+const TESR_ProjectionTransform 1200 64 float4x4
+const TESR_InvProjectionTransform 1264 64 float4x4
+const TESR_ViewTransform 1328 64 float4x4
+const TESR_InvViewTransform 1392 64 float4x4
+const TESR_DepthConstants 1456 16 float4
+const TESR_CameraData 1472 16 float4
+const TESR_CameraPosition 1488 16 float4
+ubo 2 0 1504
 texture TESR_DepthBuffer 0 2D 0 used
 texture TESR_NormalsBuffer 1 2D 1 used
 texture TESR_ShadowCubeMapBuffer0 2 CUBE 0 used

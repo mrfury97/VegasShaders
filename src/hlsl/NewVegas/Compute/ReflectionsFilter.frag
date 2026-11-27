@@ -14,8 +14,10 @@ void main() {
     for (int y = 0; y < 4; y++) {
         for (int x = 0; x < 4; x++) {
             vec2 offset = (vec2(x, y) - 1.5) / 4.0 * 1.5 * texel;
-            sum += textureLod(samplerCube(t_captureNew, LINEAR_S), FaceDirection(CubeFace, st + offset), 0.0);
+            vec4 s = textureLod(samplerCube(t_captureNew, LINEAR_S), FaceDirection(CubeFace, st + offset), 0.0);
+            sum += vec4(Tame(s.rgb), s.a);
         }
     }
-    o_color = sum / 16.0;
+    vec4 avg = sum / 16.0;
+    o_color = vec4(Untame(avg.rgb), avg.a);
 }

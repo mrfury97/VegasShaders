@@ -223,6 +223,15 @@ float3 PointGlow(float4 light, float4 color, float3 camera, float3 dir, float di
     return linearize(color.rgb) * color.w * light.w * light.w * swept * through;
 }
 
+// Isotropic lighting floor for the emissive test so looking away from the sun (low Henyey-Greenstein sunPhase)
+// does not collapse the threshold and let sunlit surfaces or sky pierce the storm.
+float3 EmissiveDustRef(float3 dustLight) {
+	float daytime = smoothstep(0.1f, 0.6f, TESR_SunAmount.x);
+	float3 ambient = (linearize(TESR_FogColor.rgb) * 0.6f + linearize(TESR_SunAmbient.rgb) * 0.4f) * TESR_PBRData.w;
+	float3 sunLight = linearize(TESR_SunColor.rgb) * TESR_PBRData.z * daytime;
+	return max(dustLight, ambient + sunLight);
+}
+
 
 float4 SandstormPS(VSOUT IN) : COLOR0
 {
@@ -380,8 +389,10 @@ float4 SandstormPS(VSOUT IN) : COLOR0
 	bool skyBehind = rawDepth / farZ >= 0.9961f;
 	float emissive = 0.0f;
 	[branch] if (TESR_SandstormEmissive.x > 0.0f) {
-		float dustLuma = max(dot(dustLight, float3(0.2126f, 0.7152f, 0.0722f)), 1e-4f) * TESR_SandstormEmissive.x * (skyBehind ? 2.0f : 1.0f);
+		float3 refLight = EmissiveDustRef(dustLight);
+		float dustLuma = max(dot(refLight, float3(0.2126f, 0.7152f, 0.0722f)), 1e-4f) * TESR_SandstormEmissive.x * (skyBehind ? 2.0f : 1.0f);
 		emissive = saturate((dot(color.rgb, float3(0.2126f, 0.7152f, 0.0722f)) - dustLuma) / dustLuma);
+		if (skyBehind) emissive *= 1.0f - smoothstep(0.02f, 0.25f, TESR_SunAmount.x);
 		float3 nearResult = color.rgb * nearTransmittance + nearScattered + (scattered - dustScattered);
 		result = lerp(result, nearResult, emissive);
 	}
@@ -718,8 +729,10 @@ float4 CompositePS(VSOUT IN) : COLOR0 {
 	// Emissive (as SandstormPS): the dust within EmissiveDistance only -- the grid read there.
 	bool skyBehind = rawDepth / farZ >= 0.9961f;
 	[branch] if (TESR_SandstormEmissive.x > 0.0f) {
-		float dustLuma = max(dot(dustLight, float3(0.2126f, 0.7152f, 0.0722f)), 1e-4f) * TESR_SandstormEmissive.x * (skyBehind ? 2.0f : 1.0f);
+		float3 refLight = EmissiveDustRef(dustLight);
+		float dustLuma = max(dot(refLight, float3(0.2126f, 0.7152f, 0.0722f)), 1e-4f) * TESR_SandstormEmissive.x * (skyBehind ? 2.0f : 1.0f);
 		float emissive = saturate((dot(color.rgb, float3(0.2126f, 0.7152f, 0.0722f)) - dustLuma) / dustLuma);
+		if (skyBehind) emissive *= 1.0f - smoothstep(0.02f, 0.25f, TESR_SunAmount.x);
 		[branch] if (emissive > 0.0f) {
 			float4 near = DustAt(uv, min(TESR_SandstormEmissive.y, marchEnd));
 			float3 nearResult = color.rgb * exp(-near.a) + near.rgb + (scattered - dustScattered);

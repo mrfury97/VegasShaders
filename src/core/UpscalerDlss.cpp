@@ -899,7 +899,7 @@ namespace {
 				{ 1, 2, NVR_EXT_BIND_STORAGE_IMAGE, 2, NVR_EXT_VIEW_2D, TRUE, 0 },
 				{ 0, 0, NVR_EXT_BIND_SAMPLER, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
 			};
-			maskPipeline = DxvkCompute::CreatePipeline("DlssBiasMask", bindings, _countof(bindings), 16, true);
+			maskPipeline = DxvkCompute::CreatePipeline("DlssBiasMask", bindings, _countof(bindings), 20, true);
 		}
 		if (!maskPipeline) return no("its pass could not be made (Compute\\DlssBiasMask.spv missing or refused)");
 		TheTextureManager->InitTexture("TESR_DlssBiasMask", &maskTex.Texture, &maskTex.Surface, In.InputWidth, In.InputHeight, D3DFMT_R16F);
@@ -926,7 +926,8 @@ namespace {
 		b[1].Slot = 1; b[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; b[1].pResource = In.ViewModel ? In.ViewModel : In.Depth;	// (a placeholder without the weapon)
 		b[2].Slot = 2; b[2].Type = NVR_EXT_BIND_STORAGE_IMAGE; b[2].pResource = maskTex.Texture;
 		b[3].Slot = 0; b[3].Type = NVR_EXT_BIND_SAMPLER; b[3].pResource = point;
-		struct { UInt32 pointIndex, width, height; float weapon; } push = { 0, In.RenderWidth, In.RenderHeight, In.ViewModel ? weaponMask : -1.0f };
+		const UInt32 rev = (TheRenderManager && TheRenderManager->IsReversedDepth()) ? 1u : 0u;
+		struct { UInt32 pointIndex, width, height; float weapon; UInt32 reversedDepth; } push = { 0, In.RenderWidth, In.RenderHeight, In.ViewModel ? weaponMask : -1.0f, rev };
 		NVR_EXT_DISPATCH_DESC dispatch = {};
 		dispatch.pPipeline = maskPipeline;
 		dispatch.BindingCount = _countof(b);

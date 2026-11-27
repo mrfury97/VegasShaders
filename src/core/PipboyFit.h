@@ -142,6 +142,12 @@ namespace PipboyFit {
 		if (!sd || !si->BoneObjects) return;
 		const std::string name = Lower(geometry->m_pcName);
 		for (const std::string& w : S.Exclude) if (name.find(w) != std::string::npos) return;
+		if (firstPerson && Player && Player->firstPersonSkinInfo && Player->firstPersonSkinInfo->WeaponNode) {
+			const NiAVObject* weaponRoot = Player->firstPersonSkinInfo->WeaponNode;
+			const NiAVObject* node = geometry;
+			for (int depth = 0; node && depth < 64; depth++, node = node->m_parent)
+				if (node == weaponRoot) return;
+		}
 		// the player's own forearm nodes, compared by pointer (2026-11-18 crash fix: a skin's bone slot is never read through)
 		if (!PlayerBoneCount[0]) return;	// no forearm in the player's skeletons this frame
 		int found[3] = { -1, -1, -1 };
@@ -213,6 +219,12 @@ namespace PipboyFit {
 		NodeXf(si->BoneObjects[ActiveBone[0]], F);
 		Mul(T, F, M);
 		if (!Invert(M, L)) { Off(device); return; }
+		const double s2 = L[0][0] * L[0][0] + L[0][1] * L[0][1] + L[0][2] * L[0][2];
+		bool lOk = std::isfinite(s2) && s2 >= 0.01 && s2 <= 100.0;
+		for (int r = 0; r < 3 && lOk; r++)
+			for (int q = 0; q < 4 && lOk; q++)
+				if (!std::isfinite(L[r][q])) lOk = false;
+		if (!lOk) { Off(device); return; }
 		// the capsule frame: x along the forearm (the Axis setting), the ellipse centre on y = z = 0
 		const int ax[3] = { S.Axis, (S.Axis + 1) % 3, (S.Axis + 2) % 3 };
 		float k[24] = {};

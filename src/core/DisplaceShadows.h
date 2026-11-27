@@ -218,7 +218,7 @@ namespace DisplaceShadows {
 		const float reach = Reach + bound->Radius;
 		if (dx * dx + dy * dy + dz * dz > reach * reach) return false;	// past FadeEnd: no bumps, the flat caster as before
 		BSShaderProperty* property = (BSShaderProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Shade);
-		return property && property->IsLightingProperty() && ((BSShaderPPLightingProperty*)property)->usLandscapeTextures > 0;
+		return property && property->IsLightingProperty() && ((BSShaderPPLightingProperty*)property)->GetLandscapeLayerCount() > 0;
 	}
 
 	// This land piece's capture, when it is still the same land: the base maps it was drawn with are the piece's own layers, in order.
@@ -240,8 +240,10 @@ namespace DisplaceShadows {
 		}
 		const Capture& capture = found->second;
 		BSShaderPPLightingProperty* property = (BSShaderPPLightingProperty*)geo->GetProperty(NiProperty::PropertyType::kType_Shade);
-		NiSourceTexture** textures = property && property->IsLightingProperty() ? property->ppTextures[0] : nullptr;
-		bool same = textures && capture.layers >= 1 && capture.layers <= 7 && property->usLandscapeTextures >= capture.layers;
+		const bool isLighting = property && property->IsLightingProperty();
+		NiSourceTexture** textures = isLighting ? property->ppTextures[0] : nullptr;
+		const UInt32 propLayers = isLighting ? property->GetLandscapeLayerCount() : 0u;
+		bool same = textures && capture.layers >= 1 && capture.layers <= 7 && propLayers >= (UInt32)capture.layers;
 		for (int i = 0; same && i < capture.layers; i++) {
 			NiSourceTexture* texture = textures[i];
 			IDirect3DBaseTexture9* d3d = texture && texture->rendererData ? texture->rendererData->dTexture : nullptr;
@@ -254,7 +256,7 @@ namespace DisplaceShadows {
 				logged++;
 				NiSourceTexture* first = textures ? textures[0] : nullptr;
 				Logger::Log("NVR TESS shadows: land piece whose textures differ from its noted draw: %d layers noted, %u on the piece, s0 noted %p, the piece's first %p",
-					capture.layers, property ? (unsigned)property->usLandscapeTextures : 0u, (void*)capture.textures[0],
+					capture.layers, (unsigned)propLayers, (void*)capture.textures[0],
 					first && first->rendererData ? (void*)first->rendererData->dTexture : nullptr);
 			}
 			return nullptr;

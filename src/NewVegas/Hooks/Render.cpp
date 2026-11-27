@@ -17,6 +17,7 @@
 #include "../../core/PointShadowForward.h"
 #include "../../core/ShaderWarmUp.h"
 #include "../../core/GlassMask.h"	// UNOFFICIAL 2026-10-29 glass reflections (RenderBlendedHook)
+#include "../../core/BlendedLayerFix.h"	// UNOFFICIAL 2026-11-23 BlendedLayerFix: draw surface-hugging AO/decal overlays before smoke/particles (RenderBlendedHook)
 #include "../../core/WaterMask.h"	// UNOFFICIAL 2026-11-12 PTWaterMask: the game's water pixels for the path tracer (RenderPassStandardHook)
 #include "../../core/ShaderWarmUp2.h"
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds)
@@ -24,6 +25,8 @@
 #include "../../core/CpuSplit.h"	// UNOFFICIAL 2026-10-21: game update split (F10 profiling only)
 #include "../../core/DeepProbe.h"	// UNOFFICIAL 2026-11-21: Help > Performance probe... (full DLL/script/draw census)
 #include "../../core/ConstantFilter.h"
+#include "../../core/BoneMatrixBatch.h"	// UNOFFICIAL 2026-11-24 batched bone-matrix uploads
+#include "../../core/ConstantMapSort.h"	// UNOFFICIAL 2026-11-24 refcount-free constant-map partition
 #include "../../core/HiddenObjectCulling.h"
 #include "../../core/LampScissor.h"
 #include "../../core/LampPassTest.h"
@@ -49,6 +52,7 @@
 #include "../../core/DeferredRenderer.h"	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2 ([Main.Main.Quality] DeferredRenderer)
 #include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 phase 4 skin (DeferredSkinBlur's fill after the light passes)
 #include "../../core/DeferredFirstPerson.h"	// UNOFFICIAL 2026-11-15 the first-person view model through the deferred renderer (+ GearWeather)
+#include "../../core/WorldSurface.h"	// UNOFFICIAL 2026-11-24 world-space detail & weathering over deferred world surfaces
 #include "../../core/DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list ([Main.Main.Quality] DeferredTransparents)
 #include "../../core/DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDepth: the world depth for the deferred passes
 #include "../../core/LampScreenShadows.h"	// UNOFFICIAL 2026-11-27 the lamps' screen-space shadows (their march at the deferred span's end)
@@ -160,8 +164,8 @@ void InstallMenu3DGuardHook() {
 	Logger::Log("UNOFFICIAL Menu3DGuard: hooked TESMain::DrawWorldMenu3D (%08X -> %08X)", site, target);
 }
 
-// UNOFFICIAL 2026-11-22: track vanilla DepthOfField::DoDepth / Add1stPersonToDepthBuffer calls so any screen-shaped
-// DoF depth buffer written inside a RenderScale sub-rect gets rescaled before ProcessImageSpaceShaders.
+// UNOFFICIAL 2026-11-22/24: track vanilla DrawWorld_DoDepth (0x00870FBD -> 0x00875E40) / Add1stPersonToDepthBuffer (0x00870ED0)
+// calls so any screen-shaped DoF depth buffer written inside a RenderScale sub-rect gets rescaled before ProcessImageSpaceShaders.
 static volatile LONG gInDoFDepthDepth = 0;
 
 bool IsInVanillaDoFDepthPass() {
@@ -181,20 +185,16 @@ bool IsInVanillaDoFDepthPass() {
 
 DEFINE_DOF_DEPTH_STUB(0)
 DEFINE_DOF_DEPTH_STUB(1)
-DEFINE_DOF_DEPTH_STUB(2)
-DEFINE_DOF_DEPTH_STUB(3)
 #undef DEFINE_DOF_DEPTH_STUB
 
 void InstallDoFDepthGuardHooks() {
 	struct SiteDesc { UInt32 site; UInt32 expected; UInt32* targetSlot; UInt32 stub; const char* label; };
-	const SiteDesc kSites[4] = {
-		{ 0x008732C5, 0x00871220, &gDoFDepthTarget0, (UInt32)&DoFDepthCallHook0, "DrawScene/DepthOfField::DoDepth" },
-		{ 0x0087330C, 0x00871220, &gDoFDepthTarget1, (UInt32)&DoFDepthCallHook1, "DrawScene/DepthOfField::DoDepth (b)" },
-		{ 0x00870E4F, 0x00871220, &gDoFDepthTarget2, (UInt32)&DoFDepthCallHook2, "DrawWorld/DepthOfField::DoDepth" },
-		{ 0x00870ED0, 0x008746D0, &gDoFDepthTarget3, (UInt32)&DoFDepthCallHook3, "DrawWorld/Add1stPersonToDepthBuffer" },
+	const SiteDesc kSites[2] = {
+		{ 0x00870FBD, 0x00875E40, &gDoFDepthTarget0, (UInt32)&DoFDepthCallHook0, "DrawWorldStandard/DrawWorld_DoDepth" },
+		{ 0x00870ED0, 0x008746D0, &gDoFDepthTarget1, (UInt32)&DoFDepthCallHook1, "DrawWorld/Add1stPersonToDepthBuffer" },
 	};
 	unsigned hooked = 0;
-	for (int i = 0; i < 4; ++i) {
+	for (int i = 0; i < 2; ++i) {
 		const SiteDesc& s = kSites[i];
 		const UInt8* code = (const UInt8*)s.site;
 		if (code[0] != 0xE8) {
@@ -222,7 +222,7 @@ void InstallDoFDepthGuardHooks() {
 		FlushInstructionCache(GetCurrentProcess(), (LPCVOID)s.site, 5);
 		hooked++;
 	}
-	Logger::Log("UNOFFICIAL DoFDepthGuard: hooked %u of 4 vanilla DoF depth call sites", hooked);
+	Logger::Log("UNOFFICIAL DoFDepthGuard: hooked %u of 2 vanilla DoF depth call sites", hooked);
 }
 
 // ---- F10: the game's own draws split by shader family; first shader uses; shader-bind cost ----
@@ -241,7 +241,7 @@ namespace ShaderSplit {
 	// it as "other", exactly as before; OnBind counts it as Outside; the rules for draws outside the passes ask NotAPass().
 	enum Context : unsigned char { World, Reflections, FirstPerson, ContextCount, Outside = ContextCount, ExtraCamera };
 	static const char* const ContextNames[ContextCount + 1] = { "world scene", "reflections", "first person", "other" };
-	static const unsigned MaxLabels = 32; // label 0: from the start of the pass to its first shader bind
+	static const unsigned MaxLabels = 42; // label 0: from the start of the pass to its first shader bind
 	static_assert(ContextCount * MaxLabels * 2 <= GpuTimeline::KeyCount, "split keys do not fit the timeline");
 
 	static char LabelNames[MaxLabels][16] = { "(pass setup)" };
@@ -431,6 +431,14 @@ namespace ShaderSplit {
 		LightsReadFailures = 0;
 	}
 
+	static unsigned char FindOrAddLabel(const char* name) {
+		for (unsigned i = 1; i < LabelCount; ++i)
+			if (!strcmp(LabelNames[i], name)) return (unsigned char)i;
+		if (LabelCount < MaxLabels - 1) { strcpy_s(LabelNames[LabelCount], name); return (unsigned char)LabelCount++; }
+		strcpy_s(LabelNames[MaxLabels - 1], "(more)");
+		return MaxLabels - 1;
+	}
+
 	// Family of a game pixel shader: the terrain templates by name, the lit-object variant groups (SlsGroup),
 	// otherwise the leading letters of the shader name (PAR = parallax objects, SKIN, SM3 = hair and eyes, STLEAF =
 	// tree leaves, GRASS, SKY, WATER, ...). Worked out once per shader.
@@ -458,13 +466,7 @@ namespace ShaderSplit {
 			while (n < sizeof(name) - 1 && source[n] >= 'A' && source[n] <= 'Z') { name[n] = source[n]; n++; }
 			if (!n) strcpy_s(name, "(other)");
 		}
-		unsigned char label = 0;
-		for (unsigned i = 1; i < LabelCount; ++i)
-			if (!strcmp(LabelNames[i], name)) { label = (unsigned char)i; break; }
-		if (!label) {
-			if (LabelCount < MaxLabels - 1) { strcpy_s(LabelNames[LabelCount], name); label = (unsigned char)LabelCount++; }
-			else { label = MaxLabels - 1; strcpy_s(LabelNames[label], "(more)"); }
-		}
+		const unsigned char label = FindOrAddLabel(name);
 		LabelOfShader[shader] = label;
 		return label;
 	}
@@ -647,6 +649,16 @@ namespace ShaderSplit {
 		Frame.HookMs += now - start;
 		LastBindEnd = now;
 	}
+
+	static void MarkStage(const char* name) {
+		if (!FrameProfiled || CurrentContext >= ContextCount || !Timeline.InFrame()) return;
+		const unsigned char label = FindOrAddLabel(name);
+		const unsigned char key = KeyOf(CurrentContext, label, true);
+		if (key != CurrentKey) {
+			Timeline.Mark(key);
+			CurrentKey = key;
+		}
+	}
 }
 
 // ---- Which of the game's render entry points ran this frame ----
@@ -813,7 +825,7 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	SessionLog::StageScope stage("game frame");	// 2026-11-04: the CRASH lines' stage (SessionLog.h)
 	// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h): the lamp-shadow records left out of the start, before anything of this frame
 	// draws: as soon as their compiles are done, and at the latest when a game is loaded (waiting for them then)
-	if (LateInteriors::Any()) { SessionLog::StageScope late("lamp-shadow records"); LateInteriors::Tick(Player && Player->parentCell); }
+	if (LateInteriors::Any()) { SessionLog::StageScope late("lamp-shadow records"); LateInteriors::Tick(Player && Player->parentCell && Player->parentCell->IsInterior()); }
 	SessionLog::StallWatch::FrameScope stallFrame;	// UNOFFICIAL 2026-11-07 (perf-ptcost): the STALL watchdog's frame begin / end (SessionLog.h)
 	static CpuTimer gameRenderCpuTimer("Game render (CPU)"), presentCpuTimer("Present (CPU)"), gameUpdateCpuTimer("Game update (CPU)");
 	const double renderStart = CpuTimer::NowMs();
@@ -866,6 +878,8 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	TerrainProbe::NewFrame();	// UNOFFICIAL 2026-10-17 terrain study, diagnostic
 	FrameWorldArgsKnown = false;
 	ConstantFilter::BeginFrame(TheRenderManager->device);	// UNOFFICIAL: SkipRedundantConstants
+	BoneMatrixBatch::Enabled = TheSettingManager->SettingsMain.Main.BatchBoneUploads;
+	ConstantMapSort::Enabled = TheSettingManager->SettingsMain.Main.FastConstantMapSort;
 	HiddenObjectCulling::BeginFrame(TheRenderManager->device);	// UNOFFICIAL: HiddenObjectCulling
 	LampScissor::BeginFrame();	// UNOFFICIAL: LampScissor
 	OnePassDepth::BeginFrame(TheRenderManager->device);	// UNOFFICIAL 2026-10-26 LampsDepthFirst
@@ -952,6 +966,8 @@ void __fastcall RenderHook(Main* This, UInt32 edx, BSRenderedTexture* RenderedTe
 	ScopeOverlay::EndWorld();
 	SkyProjection::Join();	// UNOFFICIAL 2026-11-03 SkyOnWorker: never past the frame it was started in
 	ManyLamps::FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread: the lamp table never stays locked past the frame's render call
+	BoneMatrixBatch::OnFrameEnd(GpuTimer::Enabled);
+	ConstantMapSort::OnFrameEnd(GpuTimer::Enabled);
 	ShaderSplit::EndFrame();
 	EndPreSceneTimer();
 	ReportWorldRender(RenderedTexture, Arg2, Arg3);
@@ -1912,6 +1928,13 @@ namespace MaterialRulesDraw {
 		return rule;
 	}
 
+	static int SssModelFor(NiGeometry* geometry) {
+		if (!geometry) return 0;
+		if (!Loaded) Load();
+		const int rule = RuleFor(geometry, false);
+		return rule ? MaterialRules::SssModelId(Table.Get(rule).Sss) : 0;
+	}
+
 	// One object about to be drawn (RenderPassStandard/Skinned hooks).
 	static void ForObject(const PointShadowForward::RenderPassView* pass) {
 		PBRShaders* pbr = TheShaderManager->Shaders.PBR;
@@ -2016,6 +2039,9 @@ namespace RmaosDraw {
 	static unsigned BudgetDraws = 0;			// draws with a map since Upload
 	static int BudgetMB = 512;					// [Shaders.PBR.Rmaos] BudgetMB (0 = no limit), read once a second
 	static float KeepSeconds = 30.0f;			// [Shaders.PBR.Rmaos] KeepSeconds
+	static int EffectiveBudgetMB = 512;			// UNOFFICIAL 2026-11-23: tightened dynamically when 32-bit VA is tight
+	static float EffectiveKeepSeconds = 30.0f;
+	static int VaPressureTier = 0;
 	static bool Trimming = false, ToldBudget = false, ToldAllInUse = false;
 	static int Converted = 0;	// UNOFFICIAL 2026-11-18 DdsTranscode: maps converted so far (a line each for the first 40)
 	static double SettingsAtMs = -1.0e30, ScanAtMs = 0.0, CountAtMs = 0.0;
@@ -2192,16 +2218,47 @@ namespace RmaosDraw {
 			const int budget = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Rmaos", "BudgetMB") ? std::clamp(node.IntValue, 0, 4096) : 512;
 			KeepSeconds = TheSettingManager->Config.FillNode(&node, "Shaders.PBR.Rmaos", "KeepSeconds") ? std::clamp(node.FloatValue, 1.0f, 3600.0f) : 30.0f;
 			if (budget != BudgetMB) { BudgetMB = budget; Trimming = false; ToldBudget = false; ToldAllInUse = false; }	// a new budget: its lines again
+			if (BudgetMB > 0) {
+				MEMORYSTATUSEX ms = { sizeof(ms) };
+				const double usedMB = GlobalMemoryStatusEx(&ms) ? (ms.ullTotalVirtual - ms.ullAvailVirtual) / 1048576.0 : 0.0;
+				int nextTier = VaPressureTier;
+				if (usedMB >= 3400.0) nextTier = 2;
+				else if (VaPressureTier >= 2) {
+					if (usedMB < 2900.0) nextTier = 0;
+					else if (usedMB < 3300.0) nextTier = 1;
+				}
+				else if (usedMB >= 3000.0) nextTier = 1;
+				else if (VaPressureTier == 1 && usedMB < 2900.0) nextTier = 0;
+
+				const int effBudget = nextTier >= 2 ? (std::min)(BudgetMB, 192) : nextTier == 1 ? (std::min)(BudgetMB, 256) : BudgetMB;
+				const float effKeep = nextTier >= 2 ? (std::min)(KeepSeconds, 8.0f) : nextTier == 1 ? (std::min)(KeepSeconds, 15.0f) : KeepSeconds;
+				if (nextTier != VaPressureTier) {
+					Logger::Log(nextTier > 0
+						? "UNOFFICIAL Rmaos budget: 32-bit address space %.0f MB -> working set tightened to %d MB / %.0f s"
+						: "UNOFFICIAL Rmaos budget: 32-bit address space %.0f MB -> working set restored to %d MB / %.0f s",
+						usedMB, effBudget, effKeep);
+					ToldAllInUse = false;
+					if (effBudget < EffectiveBudgetMB) { Trimming = false; ScanAtMs = 0.0; }
+					VaPressureTier = nextTier;
+				}
+				EffectiveBudgetMB = effBudget;
+				EffectiveKeepSeconds = effKeep;
+			}
+			else {
+				VaPressureTier = 0;
+				EffectiveBudgetMB = 0;
+				EffectiveKeepSeconds = KeepSeconds;
+			}
 		}
 		const double mb = 1.0 / (1024.0 * 1024.0);
 		if (Released != ReleasedTold && FrameNowMs >= CountAtMs) {	// a count now and then, not a line per release
 			Logger::Log("UNOFFICIAL Rmaos budget: %llu maps released so far (%llu since the last line, %.0f MB in all); now %u loaded, %.0f of %d MB",
-				Released, Released - ReleasedTold, ReleasedBytes * mb, (unsigned)Held.size(), HeldBytes * mb, BudgetMB);
+				Released, Released - ReleasedTold, ReleasedBytes * mb, (unsigned)Held.size(), HeldBytes * mb, EffectiveBudgetMB);
 			ReleasedTold = Released;
 			CountAtMs = FrameNowMs + 60000.0;
 		}
-		if (BudgetMB <= 0) { Trimming = false; return; }
-		const unsigned long long budget = (unsigned long long)BudgetMB << 20, target = budget / 100 * 85;
+		if (EffectiveBudgetMB <= 0) { Trimming = false; return; }
+		const unsigned long long budget = (unsigned long long)EffectiveBudgetMB << 20, target = budget / 100 * 85;
 		if (!Trimming) {
 			if (HeldBytes <= budget) return;
 			Trimming = true;
@@ -2210,25 +2267,25 @@ namespace RmaosDraw {
 				ToldBudget = true;
 				CountAtMs = FrameNowMs + 10000.0;
 				Logger::Log("UNOFFICIAL Rmaos budget: %u maps loaded, %.0f MB, over the budget of %d MB: maps not drawn for %.0f s are released from now on, "
-					"the longest unseen first (they load again when drawn; [Shaders.PBR.Rmaos] BudgetMB, KeepSeconds)", (unsigned)Held.size(), HeldBytes * mb, BudgetMB, KeepSeconds);
+					"the longest unseen first (they load again when drawn; [Shaders.PBR.Rmaos] BudgetMB, KeepSeconds)", (unsigned)Held.size(), HeldBytes * mb, EffectiveBudgetMB, EffectiveKeepSeconds);
 			}
 		}
 		if (HeldBytes <= target) { Trimming = false; return; }
 		if (FrameNowMs < ScanAtMs) return;
 		static std::vector<Map*> unseen;
 		unseen.clear();
-		const double before = BudgetClockMs - 1000.0 * KeepSeconds;
+		const double before = BudgetClockMs - 1000.0 * EffectiveKeepSeconds;
 		for (Map* map : Held) if (map->LastDrawMs <= before) unseen.push_back(map);
 		if (unseen.empty()) {
 			ScanAtMs = FrameNowMs + 1000.0;	// nothing old enough: looked at again in a second, not every frame
 			if (HeldBytes > budget && !ToldAllInUse) {
 				ToldAllInUse = true;
 				Logger::Log("UNOFFICIAL Rmaos budget: %u maps loaded, %.0f MB, over the budget of %d MB, but every one was drawn in the last %.0f s: "
-					"this place needs more than the budget, nothing is released (said once)", (unsigned)Held.size(), HeldBytes * mb, BudgetMB, KeepSeconds);
+					"this place needs more than the budget, nothing is released (said once)", (unsigned)Held.size(), HeldBytes * mb, EffectiveBudgetMB, EffectiveKeepSeconds);
 			}
 			return;
 		}
-		const size_t count = (std::min)(unseen.size(), kPerFrame);
+		const size_t count = (std::min)(unseen.size(), VaPressureTier >= 2 ? (size_t)16 : kPerFrame);
 		std::partial_sort(unseen.begin(), unseen.begin() + count, unseen.end(), [](const Map* a, const Map* b) { return a->LastDrawMs < b->LastDrawMs; });
 		Stages stages;
 		for (size_t i = 0; i < count && HeldBytes > target; i++) Drop(*unseen[i], stages);
@@ -3200,25 +3257,39 @@ namespace GrassFirst {
 		// UNOFFICIAL 2026-10-30 ReactiveMask (core/ReactiveMask.h): the colour as the main opaque list leaves it. Declared first so it runs
 		// last, after LinearScene has encoded the target back (its span ends at this function's end too).
 		struct ReactiveSpan { bool on; ReactiveSpan(bool main) : on(main && ShaderSplit::CurrentContext == ShaderSplit::World) {}
-			~ReactiveSpan() { if (on) ReactiveMask::NoteOpaque(TheRenderManager->device); } } reactiveSpan(first == 1 && last == 0x25B && group < 0);
+			~ReactiveSpan() { if (on) { ShaderSplit::MarkStage("REACTIVE OPQ"); ReactiveMask::NoteOpaque(TheRenderManager->device); ShaderSplit::MarkStage("(post-main)"); } } } reactiveSpan(first == 1 && last == 0x25B && group < 0);
 #if NVR_TEST_TOOLS
 		struct CensusMain { bool was; CensusMain() : was(LinearSceneCensus::InMain) { LinearSceneCensus::InMain = true; } ~CensusMain() { LinearSceneCensus::InMain = was; } } censusMain;	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 		// UNOFFICIAL 2026-10-28 LinearScene: the world's main list in linear light, left encoded at its end (core/LinearScene.h).
 		struct LinearSpan { bool on; LinearSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) LinearScene::BeginSpan(TheRenderManager->device); }
-			~LinearSpan() { if (on) LinearScene::EndSpan(TheRenderManager->device); } } linearSpan;
+			~LinearSpan() { if (on) { ShaderSplit::MarkStage("LINEAR END"); LinearScene::EndSpan(TheRenderManager->device); } } } linearSpan;
 		// (UNOFFICIAL 2026-11-14 DeferredDepth, core/DeferredDepth.h: the world depth copied for the deferred passes first, off by default)
 		// UNOFFICIAL 2026-10-31 DeferredLamps (core/DeferredLamps.h): declared between LinearSpan and the CaptureSpans, so its end runs after
 		// CapturedNormals::EndSpan (the G-buffer resolved) and before LinearScene::EndSpan (the encode): the lamps of the deferred pixels.
 		struct DeferredSpan { bool on; DeferredSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) {}
-			~DeferredSpan() { if (on) { IDirect3DDevice9* dev = TheRenderManager->device; DeferredDepth::AtSpanEnd(dev); ScreenSpaceShadows::Produce(dev); LampScreenShadows::Produce(dev); DeferredRenderer::AtSpanEnd(dev); DeferredSkin::BeforePasses(dev); DeferredSun::Apply(dev); DeferredLamps::Apply(dev); FlashlightDeferred::Apply(dev); DeferredSkin::AfterPasses(dev); if (DeferredDepth::SharedWithWorld && DeferredDepth::Ready() && CapturedNormals::Hooked) { SharedDrawState::DepthWrittenSinceCopy = false; SharedDrawState::WatchingDepth = true; } } } } deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight; 2026-11-26 + the screen-space shadows' march (ScreenSpaceShadows::Produce) before the sun pass
+			~DeferredSpan() {
+				if (!on) return;
+				IDirect3DDevice9* dev = TheRenderManager->device;
+				ShaderSplit::MarkStage("DISTANT LAND"); DistantLandTerrain::Render(dev);
+				// (2026-11-27 upstream 1.1.5 merge: upstream's layout; our lamps' screen-space shadows march right after the sun's, from the same depth)
+				ShaderSplit::MarkStage("DFR DEPTH"); DeferredDepth::AtSpanEnd(dev); ScreenSpaceShadows::Produce(dev); LampScreenShadows::Produce(dev); DeferredRenderer::AtSpanEnd(dev);
+				ShaderSplit::MarkStage("DFR SKIN PRE"); DeferredSkin::BeforePasses(dev);
+				ShaderSplit::MarkStage("WORLD SURF"); WorldSurface::Apply(dev);
+				ShaderSplit::MarkStage("DFR SUN"); DeferredSun::Apply(dev);
+				ShaderSplit::MarkStage("DFR LAMPS"); DeferredLamps::Apply(dev);
+				ShaderSplit::MarkStage("DFR FLASH"); FlashlightDeferred::Apply(dev);
+				ShaderSplit::MarkStage("DFR SKIN SSS"); DeferredSkin::AfterPasses(dev);
+				if (DeferredDepth::SharedWithWorld && DeferredDepth::Ready() && CapturedNormals::Hooked) { SharedDrawState::DepthWrittenSinceCopy = false; SharedDrawState::WatchingDepth = true; }
+			}
+		} deferredSpan;	// UNOFFICIAL 2026-11-04 + the deferred flashlight; 2026-11-26 + the screen-space shadows' march (ScreenSpaceShadows::Produce) before the sun pass
 		ActiveAccumulator = nullptr;
 		// UNOFFICIAL 2026-10-28 CapturedNormals (core/CapturedNormals.h): the normal target bound around the game's own call only (the early
 		// grass part above it draws grass and the grass shadows, which write none).
 		// (UNOFFICIAL 2026-11-12 HairAndEyes: the flashlight's beam for the hair and eye shaders starts with this span, and its marks
 		// end with it; the beam stays for the rest of the world's pass: core/FlashlightDeferred.h BeamBegin)
 		struct CaptureSpan { bool on; CaptureSpan() : on(ShaderSplit::CurrentContext == ShaderSplit::World) { if (on) { CapturedNormals::BeginSpan(TheRenderManager->device); FlashlightDeferred::BeamBegin(); } }
-			~CaptureSpan() { if (on) { FlashlightDeferred::BeamSpanEnd(); CapturedNormals::EndSpan(TheRenderManager->device); } } };
+			~CaptureSpan() { if (on) { ShaderSplit::MarkStage("GBUF END"); FlashlightDeferred::BeamSpanEnd(); CapturedNormals::EndSpan(TheRenderManager->device); } } };
 		if (first == 1 && last == 0x25B && group < 0) { GBufferCensus::SpanScope census(GBufferCensus::SpanDepthFirst); DepthFirst(accumulator, arg3, group); }	// UNOFFICIAL 2026-10-26 LampsDepthFirst
 		if (first == 1 && last == 0x25B && group < 0 && Allowed(accumulator)) {
 			if (GpuGrass::DiagEveryFrame()) DiagBefore = CountGrassGroups(accumulator);	// UNOFFICIAL 2026-11-17 grass-cull diagnostic
@@ -3501,9 +3572,14 @@ void InstallGrassFirstHooks() {
 
 // Inside AttachHooks' Detours transaction.
 void AttachGrassFirstRenderPassHook() {
+	NoteHookSite(GrassFirst::kRenderPassImmediately, 8, "GrassFirst");
 	const UInt8* code = (const UInt8*)GrassFirst::kRenderPassImmediately;
 	if (code[0] == 0x56 && code[1] == 0x8B && code[2] == 0x74 && code[3] == 0x24 && code[4] == 0x08)	// PUSH ESI; MOV ESI,[ESP+8]
 		GrassFirst::Installed = DetourAttach(&(PVOID&)GrassFirst::RenderPassImmediately, &GrassFirst::RenderPassImmediatelyHook) == NO_ERROR;
+}
+
+void ClearGrassFirstInstalled() {
+	GrassFirst::Installed = false;
 }
 
 // UNOFFICIAL 2026-10-27 / 2026-10-28 [Shaders.PBR.Main] GameShaderEyes: an eyeball's draw uses the game's own shaders (see SetShadersHook).
@@ -3585,12 +3661,20 @@ namespace GameEyes {
 	// in practice one or two shaders, SLS2031 above all). Only ObjectTemplate shaders have one; nullptr = none (another template, or it did
 	// not compile: those eyes keep the old way, logged once).
 	static std::unordered_map<const void*, ShaderRecordPixel*> EyeRecords;
+	// UNOFFICIAL 2026-11-25 fd-complete batch 4 ([Main.Main.Quality] DeferredEyes, live, test only, default false: at noon the lids and brow shadow the whole eyeball, bench 2026-11-25): the eye's LIGHTING-FREE record (the same
+	// source + LAMPS_DEFERRED 2, ObjectTemplate.hlsl NVR_LIGHT_DEFERRED: no sun, lamp or beam term; the ambient and the G-buffer stay, class 9),
+	// chosen when the eye's bind chose its base shader's deferred record (DeferredRenderer::BoundDeferred: the main list's span, not blended):
+	// DeferredSun / DeferredLamps / FlashlightDeferred light the eyeball from the G-buffer like any non-specular object, and the eye counts as
+	// drawn deferred (its added lamp passes skipped). The game's eye env pass (the shine) stays. Otherwise, or if it does not load: as before.
+	static std::unordered_map<const void*, ShaderRecordPixel*> EyeDeferredRecords;
+	static unsigned long long EyeDeferredDraws = 0;
 	static NiD3DPixelShaderEx* EyePS = nullptr;
 	static unsigned long long EyeDrawCount = 0;
 
-	static ShaderRecordPixel* RecordFor(NiD3DPixelShaderEx* ps) {
-		auto known = EyeRecords.find(ps);
-		if (known != EyeRecords.end()) return known->second;
+	static ShaderRecordPixel* RecordFor(NiD3DPixelShaderEx* ps, bool deferred = false) {
+		std::unordered_map<const void*, ShaderRecordPixel*>& records = deferred ? EyeDeferredRecords : EyeRecords;
+		auto known = records.find(ps);
+		if (known != records.end()) return known->second;
 		ShaderRecordPixel* record = nullptr;
 		ShaderCollection* family = ps->Name ? TheShaderManager->GetShaderCollection(ps->Name) : nullptr;
 		if (family) {
@@ -3598,16 +3682,19 @@ namespace GameEyes {
 			if (tmpl.Name && !strcmp(tmpl.Name, "ObjectTemplate")) {
 				static D3DXMACRO eye[] = { { "NVR_EYE", "1" }, { "INTERIOR_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" },
 					{ "CONTACT_HARDENING", "0" }, { NULL, NULL } };
+				static D3DXMACRO eyeDeferred[] = { { "LAMPS_DEFERRED", "2" }, { "NVR_EYE", "1" }, { "INTERIOR_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" },
+					{ "CONTACT_HARDENING", "0" }, { NULL, NULL } };
 				const double start = CpuTimer::NowMs();
-				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(ps->Name, NULL, tmpl, "Eyes\\", eye);
+				record = (ShaderRecordPixel*)ShaderRecord::LoadShader(ps->Name, NULL, tmpl, deferred ? "EyesDeferred\\" : "Eyes\\", deferred ? eyeDeferred : eye);
 				// its SetCT runs inside the draw, after the game bound the pass's textures: it must not empty the stages (a pixel record's
 				// SetCT clears all 16 at a normal bind). The second eye drawn had no colour texture, so came out black (warm slot, 11-09).
 				if (record) record->ClearSamplers = false;
-				Logger::Log("UNOFFICIAL eye variant: %s %s (%.0f ms)", ps->Name, record ? "has its eye record (eyes: ambient + wrapped diffuse, offset sun shadow, no metal)" :
+				Logger::Log("UNOFFICIAL eye variant: %s %s (%.0f ms)", ps->Name, deferred ? (record ? "has its lighting-free eye record (DeferredEyes: the deferred passes light the eye)" :
+					"did not load a lighting-free eye record: its eyes keep the forward eye record") : record ? "has its eye record (eyes: ambient + wrapped diffuse, offset sun shadow, no metal)" :
 					"did not load an eye record: its eyes keep the old way", CpuTimer::NowMs() - start);
 			}
 		}
-		EyeRecords[ps] = record;
+		records[ps] = record;
 		return record;
 	}
 
@@ -3615,12 +3702,25 @@ namespace GameEyes {
 	// shader's own record's). false: not an NVR-replaced shader, or no record.
 	static bool ApplyEye(NiD3DPixelShaderEx* ps) {
 		if (!ps || !ps->ShaderHandleBackup || ps->ShaderHandle == ps->ShaderHandleBackup) return false;
-		ShaderRecordPixel* record = RecordFor(ps);
+		// (2026-11-25 fd-complete batch 4) the lighting-free eye record when the bind chose the deferred record (DeferredEyes, see EyeDeferredRecords)
+		ShaderRecordPixel* record = nullptr;
+		bool deferred = false;
+		if (DeferredRenderer::BoundDeferred && CapturedNormals::InSpan && DeferredRenderer::Mode() >= 2 && CapturedNormals::V2CompiledIn() &&
+			TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredEyes") != 0) {
+			record = RecordFor(ps, true);
+			deferred = record && record->ShaderHandle;
+		}
+		if (!deferred) record = RecordFor(ps);
 		if (!record || !record->ShaderHandle) return false;
 		record->SetCT();
 		TheRenderManager->device->SetPixelShader(record->ShaderHandle);
 		EyePS = ps;
 		Eye = true;
+		if (deferred) {	// drawn deferred: BoundDeferred stays (AfterDraw marks it, its lamp passes are skipped); no beam of its own (the pass lights it)
+			if (++EyeDeferredDraws == 1) Logger::Log("UNOFFICIAL eye variant: the first eye drawn with its lighting-free record (%s)", ps->Name ? ps->Name : "?");
+			CapturedNormals::EyeDrawNow = true;
+			return true;
+		}
 		// UNOFFICIAL 2026-11-15 (full deferred renderer phase 4, docs/next/FD-SKIN-RESULTS.md "Eyes") the eye draws FORWARD with its own record (model 9,
 		// a forward code: no light pass lights it), so it is not "an object drawn deferred": its added lamp passes stay (DeferredRenderer::AfterDraw
 		// marks only while BoundDeferred; the bind chose the base shader's deferred record). Put back in After. Nothing while the renderer is off.
@@ -3724,7 +3824,7 @@ namespace GameEyes {
 }
 
 // (ShaderManager::ReloadShaders, the warm slot's reloadshaders) the eye records are made again from the .hlsl on their next use
-void GameEyesForgetRecords() { GameEyes::EyeRecords.clear(); }
+void GameEyesForgetRecords() { GameEyes::EyeRecords.clear(); GameEyes::EyeDeferredRecords.clear(); }
 
 // UNOFFICIAL 2026-11-12 HairAndEyes (core/FlashlightDeferred.h BeamBegin), for the log's counts only: a hair shader bound in the world's
 // pass while the flashlight's beam is in it: in the main list (before the light pass: its draws mark their pixels) or after it (the
@@ -3736,6 +3836,7 @@ static void HairBeamBind(NiD3DPixelShaderEx* ps) {
 }
 
 void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
+	RestoreSkinHighlightMuteIfLeaked();
 	BarrelHeat::Clear();
 	const bool profiling = ShaderSplit::FrameProfiled;
 	const double bindStart = profiling ? CpuTimer::NowMs() : 0.0;
@@ -3770,6 +3871,8 @@ void __fastcall SetShadersHook(BSShader* This, UInt32 edx, UInt32 PassIndex) {
 		Logger::Log("Error getting vertex shader for pass %s", Pointers::Functions::GetPassDescription(PassIndex));
 	// UNOFFICIAL cloth wind: which objects drew with a vanilla vertex shader (they must not get cloth: see ClothWind.h SAFETY)
 	ClothWind::NoteVertexShader(VertexShader ? VertexShader->Name : nullptr);
+	GrassShaders::BoundGrassVS = VertexShader && VertexShader->Name && !memcmp(VertexShader->Name, "GRASS", 5);
+	if (!GrassShaders::BoundGrassVS) GrassShaders::PendingTstgRestore = false;
 	ClothWind::NoteShaders(ClothWind::PassGeometry ? ClothWind::PassGeometry : Geometry, VertexShader && VertexShader->ShaderHandleBackup && VertexShader->ShaderHandle != VertexShader->ShaderHandleBackup &&
 		ClothWind::CapableName(VertexShader->Name), VertexShader ? VertexShader->Name : nullptr);
 	// UNOFFICIAL 2026-11-14 phase 3 foliage (core/DeferredFoliage.h): GrassFirst's early grass opens the G-buffer span at its bind
@@ -4350,6 +4453,8 @@ void AttachScopeCameraHooks() {
 		Logger::Log("UNOFFICIAL Scope Detect: off at startup: the extra-camera hooks are not installed; a scope's picture is recognised by its viewport, as before (restart to change).");
 		return;
 	}
+	NoteHookSite(Hooks::AccumulateScene, 8, "ScopeAccumulate");
+	NoteHookSite(Hooks::RenderScene, 8, "ScopeRender");
 	const UInt8* accumulate = (const UInt8*)Hooks::AccumulateScene;
 	const UInt8* render = (const UInt8*)Hooks::RenderScene;
 	const bool accumulateKnown = (accumulate[0] == 0x6A && accumulate[1] == 0xFF && accumulate[2] == 0x68) || accumulate[0] == 0xE9;	// PUSH -1; PUSH handler
@@ -4365,6 +4470,10 @@ void AttachScopeCameraHooks() {
 	Logger::Log("UNOFFICIAL Scope Detect: BSShaderUtil::AccumulateScene / RenderScene %s (%ld, %ld)%s: a plugin's extra camera drawing the world (B42 Optics' picture-in-picture scope) %s.",
 		ScopeCamera::HooksIn ? "hooked" : "NOT hooked", first, second, accumulate[0] == 0xE9 || render[0] == 0xE9 ? ", through another plugin's hook" : "",
 		ScopeCamera::HooksIn ? "is recognised exactly ([Main.Main.Scope])" : "is recognised by its viewport, as before");
+}
+
+void ClearScopeCameraHooks() {
+	ScopeCamera::HooksIn = false;
 }
 
 // UNOFFICIAL, diagnostic (2026-10-13, with [Shaders.ShadowsInteriors.Forward] LogLamps): how many lamps the game gives each
@@ -4522,6 +4631,37 @@ static bool PlantPass(NiGeometry* geometry) {
 	return plant->second.second;
 }
 
+// UNOFFICIAL 2026-11-24: static tree/bush foliage meshes (pine needles, branches, fronds) get plant class 5 for SnowAccumulation exclusion.
+static bool TreeFoliagePass(const NiSourceTexture* diffuse) {
+	if (!diffuse || !diffuse->ddsPath1) return false;
+	static std::unordered_map<const void*, std::pair<std::string, bool>> byTexture;
+	auto it = byTexture.find(diffuse);
+	if (it != byTexture.end() && it->second.first != diffuse->ddsPath1) { byTexture.erase(it); it = byTexture.end(); }
+	if (it != byTexture.end()) return it->second.second;
+	if (byTexture.size() >= 4096) byTexture.clear();
+	const std::string p = ClothWind::Norm(diffuse->ddsPath1);
+	bool isFoliage = false;
+	static const char* const kExcludes[] = {
+		"stump", "log", "fallen", "deadwood", "bark", "trunk", "plank", "board", "crate", "sign",
+		"bench", "fence", "bridge", "roof", "wall", "door", "floor", "cabin", "house", "lodge",
+		"clutter", "furniture", "billboard", "ground", "dirt", "mud", "rock", "stone", "snow",
+		"road", "rubble", "debris"
+	};
+	bool excluded = false;
+	for (const char* ex : kExcludes) if (p.find(ex) != std::string::npos) { excluded = true; break; }
+	if (!excluded) {
+		static const char* const kIncludes[] = {
+			"\\trees\\", "\\flora\\", "\\foliage\\", "\\plants\\", "\\vegetation\\",
+			"treeevergreen", "treepine", "treeleaf", "treebranch", "treefrond", "treecanopy",
+			"pinetree", "pinebranch", "pineneedle", "evergreen", "foliage", "spruce", "cedar",
+			"fern", "shrub", "bush"
+		};
+		for (const char* inc : kIncludes) if (p.find(inc) != std::string::npos) { isFoliage = true; break; }
+	}
+	byTexture.emplace(diffuse, std::make_pair(std::string(diffuse->ddsPath1), isFoliage));
+	return isFoliage;
+}
+
 // UNOFFICIAL 2026-11-15 (MergeCopies batch 3: c211.w differed between merged copies) the value MaterialForPass sends, in one place: false when
 // it sends nothing for this pass (then c211.w keeps what the last pass left).
 // MergeCopies plans before the G-buffer span opens (its world draws are all inside it): it asks with inSpan = true.
@@ -4541,8 +4681,12 @@ static bool MaterialWFor(const void* Pass, float& w, bool inSpan) {
 		if (diffuse) {
 			auto cloth = ClothWind::ByTexture.find(diffuse);
 			if (cloth != ClothWind::ByTexture.end() && cloth->second.second) materialClass = 3.0f;
-			else if (PlantPass(geometry)) materialClass = 5.0f;
+			else if (!geometry->skinInstance && (PlantPass(geometry) || TreeFoliagePass(diffuse))) materialClass = 5.0f;
 		}
+	}
+	if (materialClass < 2.5f) {
+		const int sssModel = MaterialRulesDraw::SssModelFor(geometry);
+		if (sssModel > 0) materialClass = (float)sssModel;
 	}
 	const float radius = geometry->m_kWorldBound ? std::clamp(geometry->m_kWorldBound->Radius, 0.0f, 1.0e6f) : 0.0f;
 	// UNOFFICIAL 2026-11-12 (ptbump; core/CapturedNormals.h NoHighlightFlag, Includes/CapturedNormals.hlsl CapturedNoHighlight): while the
@@ -4553,14 +4697,15 @@ static bool MaterialWFor(const void* Pass, float& w, bool inSpan) {
 	constexpr UInt32 kEnvMapped = (1u << BSSP_ENVIRONMENT_MAPPING) | (1u << BSSP_EYE_ENVIRONMENT_MAPPING) | (1u << BSSP_WINDOW_ENVIRONMENT_MAPPING);
 	const bool noHighlight = CapturedNormals::NoHighlightFlag && CapturedNormals::PtCodesCompiled && property && property->IsLightingProperty() &&
 		!(property->ulFlags[0] & (BSShaderProperty::Specular | kEnvMapped));
-	w = (noHighlight ? -1.0f : 1.0f) * (materialClass + 8.0f * floorf(radius));
+	// UNOFFICIAL 2026-11-25 MaterialSSS Phase 2: stride widened 8 -> 16 so c211.w carries models 1..15 (11..14 SSS).
+	w = (noHighlight ? -1.0f : 1.0f) * (materialClass + 16.0f * floorf(radius));
 	return true;
 }
 
 static void ForwardShadowsForPass(void* Pass) {
 	// UNOFFICIAL 2026-11-04 the flashlight's game lamp for this draw (core/FlashlightLamp.h), first: everything below reads the lamps' dimmers
 	FlashlightLamp::ForPass(Pass, ShaderSplit::CurrentContext == ShaderSplit::World && CapturedNormals::InSpan);
-	EnvLightFade::ForPass(Pass, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson);	// UNOFFICIAL 2026-11-04/20 (1st-person kLightingOffset + multi-lamp crossblend)
+	EnvLightFade::ForPass(Pass, ShaderSplit::CurrentContext == ShaderSplit::FirstPerson, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-04/20 (1st-person kLightingOffset + multi-lamp crossblend)
 	if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) ShadowManager::ViewModelLogDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry);	// UNOFFICIAL 2026-11-04 CharacterShadowMapLog
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) MaterialForPass(Pass);	// UNOFFICIAL 2026-10-29 MaterialBuffer
 	// UNOFFICIAL 2026-11-12/20: always send the 1st-person viewmodel's own material class whenever VmSpan is open so G-buffer v2 records
@@ -4704,6 +4849,21 @@ namespace WaterMaskDraw {
 	};
 }
 
+// UNOFFICIAL: scope first-person weapon metal parameters to geometry under the player's WeaponNode
+// so 1st-person hands, gloves, sleeves, and the Pip-Boy keep 3rd-person world defaults.
+static bool IsFirstPersonWeaponGeometry(const NiAVObject* geo) {
+	if (!geo || !Player || !Player->firstPersonSkinInfo) return false;
+	const NiAVObject* weapon = (const NiAVObject*)Player->firstPersonSkinInfo->WeaponNode;
+	if (!weapon) return false;
+	const NiAVObject* prev = nullptr;
+	for (int depth = 0; geo && geo != prev && depth < 32; ++depth) {
+		if (geo == weapon) return true;
+		prev = geo;
+		geo = geo->m_parent;
+	}
+	return false;
+}
+
 void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 Arg4) {
 	OnePassDepth::HookSeen = true;
 	if (OnePassDepth::InDepth) { DepthOnlyStandard(Pass, Arg2, Arg3, Arg4); return; }	// UNOFFICIAL LampsDepthFirst, step 1
@@ -4732,6 +4892,10 @@ void __cdecl RenderPassStandardHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) { BeatSeries::Add(BeatSeries::WorldPasses); if (HiddenObjectCulling::BoundLamp) BeatSeries::Add(BeatSeries::LampPasses); }	// UNOFFICIAL 2026-11-11 BeatSeries (the pass is drawn)
 	ReflectionProbe::OnObject(Pass, false);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
+	if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) {
+		if (PBRShaders* pbr = TheShaderManager->Shaders.PBR)
+			pbr->SetFirstPersonWeapon(TheRenderManager->device, IsFirstPersonWeaponGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry));
+	}
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
 	{	// UNOFFICIAL SpecularFade, and FoldHighlights' switches for this draw (same constant)
 		float fold = 0.0f, foldVertexColor = 0.0f;
@@ -4838,6 +5002,10 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (ShaderSplit::CurrentContext == ShaderSplit::World) { BeatSeries::Add(BeatSeries::WorldPasses); if (HiddenObjectCulling::BoundLamp) BeatSeries::Add(BeatSeries::LampPasses); }	// UNOFFICIAL 2026-11-11 BeatSeries (the pass is drawn)
 	ReflectionProbe::OnObject(Pass, true);
 	MaterialRulesDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL material rules
+	if (ShaderSplit::CurrentContext == ShaderSplit::FirstPerson) {
+		if (PBRShaders* pbr = TheShaderManager->Shaders.PBR)
+			pbr->SetFirstPersonWeapon(TheRenderManager->device, IsFirstPersonWeaponGeometry(((const PointShadowForward::RenderPassView*)Pass)->geometry));
+	}
 	RmaosDraw::ForObject((const PointShadowForward::RenderPassView*)Pass);	// UNOFFICIAL _rmaos maps
 	{	// UNOFFICIAL SpecularFade, and FoldHighlights' switches for this draw (same constant)
 		float fold = 0.0f, foldVertexColor = 0.0f;
@@ -4869,6 +5037,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	if (DeferredRenderer::SwappedFrom) RmaosDraw::AfterBind();
 	if (DeepProbe::CensusActive()) DeepProbe::NoteDraw(((const PointShadowForward::RenderPassView*)Pass)->geometry, true, (int)ShaderSplit::CurrentContext);
 	RenderPassSkinned(Pass, Arg2, Arg3, Arg4);
+	RestoreSkinHighlightMuteIfLeaked();	// UNOFFICIAL: guard against early return on null continuation partition buffer skipping PostGeometry
 	DeferredRenderer::AfterDraw(Pass, (ShaderSplit::CurrentContext == ShaderSplit::World || DeferredRenderer::ViewModelRoot));	// UNOFFICIAL 2026-11-14 full deferred renderer: mark / count
 	DeferredTransparents::AfterDraw(Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// UNOFFICIAL 2026-11-15 forward+: mark / count
 	RmaosDraw::AfterObject();	// UNOFFICIAL 2026-11-09 FromGameData: nothing inherited by the next draw
@@ -4891,6 +5060,7 @@ void __cdecl RenderPassSkinnedHook(void* Pass, UInt32 Arg2, UInt32 Arg3, UInt32 
 	CasterView::After(TheRenderManager->device);	// UNOFFICIAL 2026-10-28, diagnostic
 #endif
 	ClothWind::PassGeometry = nullptr;
+	PipboyFit::AfterDraw();
 	ClothWind::AfterDraw(TheRenderManager->device);	// UNOFFICIAL 2026-10-19: no cloth values left behind for other draws
 	HiddenObjectCulling::After();
 	PointShadowForward::NoteDraw((const PointShadowForward::RenderPassView*)Pass, ShaderSplit::CurrentContext == ShaderSplit::World);	// LogLamps diagnostic
@@ -4953,6 +5123,10 @@ namespace SandstormGlass {
 		Device->GetRenderState(D3DRS_ALPHATESTENABLE, &test);
 		Device->GetRenderState(D3DRS_ALPHAREF, &reference);
 		if (test && reference >= 32) return false;   // a cut-out (some glass tests at a near-zero reference)
+		DWORD srcBlend = D3DBLEND_ONE, dstBlend = D3DBLEND_ZERO;
+		Device->GetRenderState(D3DRS_SRCBLEND, &srcBlend);
+		Device->GetRenderState(D3DRS_DESTBLEND, &dstBlend);
+		if (srcBlend != D3DBLEND_SRCALPHA || dstBlend != D3DBLEND_INVSRCALPHA) return false;
 		void* pass = *(void**)0x011F91E0;   // BSShaderManager::pCurrentRenderPass; its first member is the geometry
 		NiGeometry* geometry = pass ? *(NiGeometry**)pass : nullptr;
 		SandstormEffect* sandstorm = TheShaderManager->Effects.Sandstorm;
@@ -4969,9 +5143,58 @@ namespace SandstormGlass {
 		}
 		// Water keeps its depth, the water effects read its surface; except from underwater, where the world above is seen
 		// through it as through glass and must get the dust of its own distance.
-		if (geometry && !(sandstorm && sandstorm->Underwater))
-			if (NiShadeProperty* shade = (NiShadeProperty*)geometry->GetProperty(NiProperty::kType_Shade))
-				if (shade->m_eShaderType == NiShadeProperty::kProp_Water) return false;
+		NiShadeProperty* shade = geometry ? (NiShadeProperty*)geometry->GetProperty(NiProperty::kType_Shade) : nullptr;
+		if (shade && shade->m_eShaderType == NiShadeProperty::kProp_Water)
+			return !glassMask && sandstorm && sandstorm->Underwater;
+		if (geometry) {
+			NiAlphaProperty* alphaProp = geometry->propertyState.m_spAlphaProperty;
+			if (!alphaProp || !(alphaProp->flags & NiAlphaProperty::ALPHA_BLEND_MASK)) return false;
+			NiMaterialProperty* mat = geometry->propertyState.m_spMaterialProperty;
+			bool hasAlpha = (mat && mat->fAlpha < 0.99f);
+			BSShaderProperty* bss = (BSShaderProperty*)shade;
+			if (bss && bss->fAlpha < 0.99f) hasAlpha = true;
+			if (!hasAlpha && bss && (bss->ulFlags[1] & BSShaderProperty::Vertex_Colors) &&
+				geometry->geomData && geometry->geomData->m_pkColor && geometry->geomData->m_usVertices > 0) {
+				const UInt16 n = geometry->geomData->m_usVertices;
+				const UInt16 step = n <= 8 ? 1 : (UInt16)(n / 8);
+				for (UInt16 i = 0; i < n; i += step) {
+					if (geometry->geomData->m_pkColor[i].a < 0.99f) { hasAlpha = true; break; }
+				}
+			}
+			if (!hasAlpha) {
+				IDirect3DBaseTexture9* d3dTex = nullptr;
+				IDirect3DBaseTexture9* boundTex = nullptr;
+				if (bss && bss->IsLightingProperty()) {
+					NiSourceTexture** slots = ((BSShaderPPLightingProperty*)bss)->ppTextures[0];
+					NiTexture* niTex = slots ? *slots : nullptr;
+					if (niTex && niTex->rendererData) d3dTex = niTex->rendererData->dTexture;
+				}
+				if (!d3dTex && SUCCEEDED(Device->GetTexture(0, &boundTex))) d3dTex = boundTex;
+				bool opaqueFmt = false;
+				if (d3dTex && d3dTex->GetType() == D3DRTYPE_TEXTURE) {
+					D3DSURFACE_DESC desc = {};
+					if (SUCCEEDED(static_cast<IDirect3DTexture9*>(d3dTex)->GetLevelDesc(0, &desc))) {
+						switch (desc.Format) {
+						case D3DFMT_DXT1:
+						case D3DFMT_X8R8G8B8:
+						case D3DFMT_R8G8B8:
+						case D3DFMT_R5G6B5:
+						case D3DFMT_X1R5G5B5:
+						case D3DFMT_X4R4G4B4:
+						case D3DFMT_X8B8G8R8:
+						case D3DFMT_L8:
+						case D3DFMT_L16:
+							opaqueFmt = true;
+							break;
+						default:
+							break;
+						}
+					}
+				}
+				if (boundTex) boundTex->Release();
+				if (opaqueFmt) return false;
+			}
+		}
 		return true;
 	}
 
@@ -5110,6 +5333,8 @@ void __fastcall RenderBlendedHook(void* This, UInt32 edx, UInt32 Arg) {
 	struct BlendedListScope { BlendedListScope() { ReflMaterial::InBlendedList = true; } ~BlendedListScope() { ReflMaterial::InBlendedList = false; } } blendedList;
 	GBufferCensus::SpanScope census(GBufferCensus::SpanBlended);	// UNOFFICIAL 2026-11-14 GBufferCensus
 	DeferredTransparents::ListScope forwardPlus;	// UNOFFICIAL 2026-11-15 DeferredTransparents: the table finished and checked for this list (off: nothing)
+	if (SandstormGlass::InWorldScene) ParticleShaders::CaptureWorldDepthBeforeBlended();	// UNOFFICIAL 2026-11-23: capture opaque depth before blended overlays/glass run
+	BlendedLayerFix::Scope layerFix(This, Arg, SandstormGlass::InWorldScene);	// UNOFFICIAL 2026-11-23: draw surface-hugging AO/decals before smoke/particles and keep their z-write off across RenderBlended
 	using namespace SandstormGlass;
 	bool hide = false, glass = false;
 	if (InWorldScene && (WorldDepth || GlassDepth)) {
@@ -5235,8 +5460,8 @@ namespace FirstPersonNative {
 		if (!Wanted()) return false;
 		TAAEffect* taa = TheShaderManager->Effects.TAA;
 		if (RtPathTrace::Replacing()) { Note(0, "path tracing replaces the picture; the first-person pass is drawn where it was"); return false; }
-		if (ReflectionsEffect* refl = TheShaderManager->Effects.Reflections; refl && refl->Enabled && refl->Settings.RtEnabled && refl->Settings.RtWeapon > 0.0f && RtCore::Running()) {
-			Note(0, "RT weapon reflections are on; the first-person pass stays in the main depth/G-buffer so weapon reflections work at RenderScale < 1");
+		if (ReflectionsEffect* refl = TheShaderManager->Effects.Reflections; refl && refl->WeaponReflectionsActive()) {
+			Note(0, "Weapon reflections are on; the first-person pass stays in the main depth/G-buffer so weapon reflections run");
 			return false;
 		}
 		if (!taa || !taa->UpscalePending()) {
@@ -5631,7 +5856,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	bool viewModelShadows = false;
 	D3DXMATRIX savedCharacterCameraToLight;
 	D3DXVECTOR4 savedCharacterCenter, savedCharacterData;
-	if (shadows && Player && Player->firstPersonNiNode && Player->IsFirstPerson()) {
+	if (shadows && Player && Player->firstPersonNiNode && Player->IsDrawnFirstPerson()) {
 		savedCharacterCameraToLight = shadows->Constants.CharacterCameraToLight;
 		savedCharacterCenter = shadows->Constants.CharacterCenter;
 		savedCharacterData = shadows->Constants.CharacterData;
@@ -5666,7 +5891,7 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 	ReflectionsEffect* reflEff = TheShaderManager->Effects.Reflections;
 	ReflMaterial::BeginFirstPerson(TheRenderManager->renderState, TheRenderManager->device,
 		ReflMaterial::CompiledIn() && TheSettingManager->GetSettingI("Shaders.Reflections.Main", "MaterialAware") > 0,
-		reflEff && reflEff->RtWeaponActive());
+		reflEff && reflEff->WeaponReflectionsActive());
 	{
 		bool vmCapture = false, vmJitter = false;
 		float vmJx = 0.0f, vmJy = 0.0f;
@@ -5701,8 +5926,15 @@ void __fastcall RenderFirstPersonHook(Main* This, UInt32 edx, NiDX9Renderer* Ren
 			}
 		}
 	}
-	if (TheRenderManager) ClothWind::ForceZero(TheRenderManager->device);
+	GrassShaders::PendingTstgRestore = false;
+	GrassShaders::BoundGrassVS = false;
+	PipboyFit::AfterDraw();
+	if (TheRenderManager) {
+		ClothWind::ForceZero(TheRenderManager->device);
+		if (PipboyFit::S.CompiledIn) PipboyFit::Off(TheRenderManager->device);
+	}
 	RenderFirstPerson(This, Renderer, Geo, SkySun, RenderedTexture);
+	PipboyFit::AfterDraw();
 	if (swappedFpInvProj) {
 		TheRenderManager->InvProjMatrix = savedInvProj;
 		TheRenderManager->device->SetVertexShaderConstantF(100, (const float*)&savedInvProj, 4);
@@ -5849,6 +6081,34 @@ bool __fastcall IsWaterNodeVisibleHook(void* This, UInt32 edx, void* Ref, void* 
 
 bool renderedSkipToggle = false;
 bool lockpickSkipToggle = false;
+
+// UNOFFICIAL 2026-11-23 RenderScaleGuard: external post-process plugins (such as DoF-Fix.dll) can invoke ImageSpaceManager::RenderEffect
+// between RenderWorldSceneGraph and ProcessImageSpaceShaders while RenderScale v2 is still pending in the top-left sub-rect. Flush the
+// upscale before the effect reads/writes MainTarget so it never double-squeezes or corrupts the world corner.
+RenderImageSpaceEffectFn RenderImageSpaceEffect = reinterpret_cast<RenderImageSpaceEffectFn>(Hooks::RenderImageSpaceEffect);
+UInt32 __fastcall RenderImageSpaceEffectHook(void* This, UInt32 edx, UInt32 aeEffectID, NiDX9Renderer* apRenderer,
+	BSRenderedTexture* apSourceTarget, BSRenderedTexture* apDestTarget, void* apParam, bool abEndFrame) {
+	if (gInImageSpaceDepth == 0 && TheShaderManager && TheShaderManager->Effects.TAA && TheShaderManager->Effects.TAA->UpscalePending()) {
+		TAAEffect* taa = TheShaderManager->Effects.TAA;
+		IDirect3DSurface9* worldTarget = taa->UpscaleTarget();
+		IDirect3DSurface9* srcSurf = nullptr;
+		IDirect3DSurface9* dstSurf = nullptr;
+		if (apSourceTarget && apSourceTarget->GetD3DTexture(0)) apSourceTarget->GetD3DTexture(0)->GetSurfaceLevel(0, &srcSurf);
+		if (apDestTarget && apDestTarget->GetD3DTexture(0)) apDestTarget->GetD3DTexture(0)->GetSurfaceLevel(0, &dstSurf);
+		const bool touchesWorld = worldTarget && (srcSurf == worldTarget || dstSurf == worldTarget);
+		if (touchesWorld) {
+			const UInt32 caller = (UInt32)_ReturnAddress();
+			char mod[MAX_PATH] = {};
+			CpuSplit::ModuleName(caller, mod, sizeof(mod));
+			const bool hasViewModel = FrameFirstPersonCalls > 0;
+			taa->UpscaleDeferredEarly(worldTarget, hasViewModel, aeEffectID, mod[0] ? mod : "unknown", false);
+			if (hasViewModel) FirstPersonNative::Flush(worldTarget);
+		}
+		if (srcSurf) srcSurf->Release();
+		if (dstSurf) dstSurf->Release();
+	}
+	return RenderImageSpaceEffect(This, aeEffectID, apRenderer, apSourceTarget, apDestTarget, apParam, abEndFrame);
+}
 
 // UNOFFICIAL 2026-10-27 RenderScale v2: a frame drawn small (world + weapon) is upscaled before the game's image space, also on the
 // paths below that skip NVR's effects. Surface: the scene target when the caller has it, else the game's source target's.
@@ -6058,7 +6318,7 @@ void __fastcall RenderInterfaceHook(void* apThis, void*, void* apCuller, bool ab
 	SessionLog::StageScope stage("the interface");
 	// UNOFFICIAL 2026-11-16 fast-restart (core/LateInteriors.h): at the main menu the lamp-shadow records are made once the workers finish them;
 	// the warm-ups (native D3D9) wait for that, so they draw those records too, as before
-	if (LateInteriors::Any()) { SessionLog::StageScope late("lamp-shadow records"); LateInteriors::Tick(Player && Player->parentCell); }
+	if (LateInteriors::Any()) { SessionLog::StageScope late("lamp-shadow records"); LateInteriors::Tick(Player && Player->parentCell && Player->parentCell->IsInterior()); }
 	if (!LateInteriors::Any()) {
 		{ SessionLog::StageScope warm("shader warm-up"); ShaderWarmUp::OnInterfaceFrame(); }	// UNOFFICIAL: at the main menu, draw the shaders used in play once (ShaderWarmUp.h)
 		{ SessionLog::StageScope warm("shader warm-up 2"); ShaderWarmUp2::OnInterfaceFrame(); }	// UNOFFICIAL: at the main menu, draw the recorded drawing setups once (ShaderWarmUp2.h)
@@ -6180,12 +6440,13 @@ __declspec(naked) void DetectorWindowConsoleCommandHook() {
 }
 
 // Enables culling of muzzle flashes so they don't stay after firing
+CallDetour kMuzzleFlashDetour;
 void __fastcall MuzzleLightCullingFix(MuzzleFlash* This) {
 	if (auto* light = This->light) {
 		if (This->bEnabled) light->m_flags &= ~1;
 		else light->m_flags |= 1;
 	}
-	ThisCall(0x9BB8A0, This);
+	ThisCall(kMuzzleFlashDetour.GetOverwrittenAddr(), This);	// the game's 0x9BB8A0, or another plugin's hook on that call
 }
 
 BSFogProperty* __cdecl ShadowSceneNode__GetFogPropertyEx(UInt32 aeType) {
@@ -6210,7 +6471,8 @@ NiPoint2* __fastcall WaterFogRemover(NiPoint2* point, void*, float x, float y)
 using FormatUpgradeSwitch = bool(__cdecl*)();
 
 BSRenderedTexture* (__cdecl* CreateBSRenderedTexture)(BSString*, const UInt32, const UInt32, NiTexture::FormatPrefs*, UInt32, bool, NiDepthStencilBuffer*, UInt32, UInt32) = (BSRenderedTexture * (__cdecl*)(BSString*, const UInt32, const UInt32, NiTexture::FormatPrefs*, UInt32, bool, NiDepthStencilBuffer*, UInt32, UInt32))Hooks::CreateRenderedTexture;
-BSRenderedTexture* __cdecl CreateSaveTextureHook(BSString* apName, const UInt32 uiWidth, const UInt32 uiHeight, NiTexture::FormatPrefs* kPrefs, 
+CallDetour kSaveTextureDetour;	// 2026-11-25 hook cleanup: the call at 0x879061 and what it called before (BSRenderedTexture::Create or a plugin's hook)
+BSRenderedTexture* __cdecl CreateSaveTextureHook(BSString* apName, const UInt32 uiWidth, const UInt32 uiHeight, NiTexture::FormatPrefs* kPrefs,
 	UInt32 eMSAAPref, bool bUseDepthStencil, NiDepthStencilBuffer* pkDSBuffer, UInt32 a7, UInt32 uiBackgroundColor) {
 		HMODULE d3d9 = DxvkLoader::Runtime();
 	FormatUpgradeSwitch disable = reinterpret_cast<FormatUpgradeSwitch>(GetProcAddress(d3d9, "DXVK_D3D9_HDR_DisableRenderTargetUpgrade"));
@@ -6218,16 +6480,18 @@ BSRenderedTexture* __cdecl CreateSaveTextureHook(BSString* apName, const UInt32 
 
 	if (disable)
 		disable();	// the texture is made without the format upgrade
-	BSRenderedTexture* texture = CreateBSRenderedTexture(apName, uiWidth, uiHeight, kPrefs, eMSAAPref, bUseDepthStencil, pkDSBuffer, a7, uiBackgroundColor);
+	const CreateBSRenderedTextureFn create = kSaveTextureDetour.GetOverwrittenAddr() ? (CreateBSRenderedTextureFn)kSaveTextureDetour.GetOverwrittenAddr() : CreateBSRenderedTexture;
+	BSRenderedTexture* texture = create(apName, uiWidth, uiHeight, kPrefs, eMSAAPref, bUseDepthStencil, pkDSBuffer, a7, uiBackgroundColor);
 	if (enable)
 		enable();	// the format upgrade is back on
 
 	return texture;
 }
 
-// 0xE69660
+// NiDX9Renderer::Do_EndFrame (0xE69660), through the vtable slot's previous entry (another plugin's hook stays in the chain)
+VirtFuncDetour kEndFrameDetour;
 bool __fastcall NiDX9Renderer__Do_EndFrame(NiDX9Renderer* apThis, void*) {
-	const bool result = ThisStdCall<bool>(0xE69660, apThis);
+	const bool result = ThisStdCall<bool>(kEndFrameDetour.GetOverwrittenAddr(), apThis);
 
 	// Reload effects if queued.
 	ShaderManager* shaders = TheShaderManager;
@@ -6238,6 +6502,10 @@ bool __fastcall NiDX9Renderer__Do_EndFrame(NiDX9Renderer* apThis, void*) {
 	if (shaders && shaders->EffectReloadQueued) {
 		shaders->ReloadEffects();
 		shaders->EffectReloadQueued = false;
+	}
+	if (shaders && shaders->LazyEffectLoadQueued) {
+		shaders->LazyEffectLoadQueued = false;
+		shaders->ProcessLazyEffectLoads();
 	}
 
 	return result;

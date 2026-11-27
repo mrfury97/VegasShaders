@@ -65,7 +65,7 @@
     // 2026-10-31: r = class + 0.49 x metal (the share of the pixel lit as metal, [Shaders.PBR.Metal]): class = floor(r), metal =
     // frac(r) / 0.49. Readers that test r > 0.5 for "written" stay right. Skin is filled in after the list (class 6, core/CapturedNormals.h).
     #if CAPTURED_NORMALS_ON >= 2
-        // 2026-10-31: the draw's class and bound radius ride in NVR_SpecFade.w (c211, Includes/PBR.hlsl: class + 8 x floor(radius), set per draw
+        // 2026-10-31: the draw's class and bound radius ride in NVR_SpecFade.w (c211, Includes/PBR.hlsl: class + 16 x floor(radius) since 2026-11-25, set per draw
         // by Render.cpp MaterialForPass through core/PbrPop.h). They were on c217 until then, which the RT lamp shadows' NVR_PointShadowRTSlot[2]
         // (c216-c217) also holds: every interior lamp-shadow shader with POINT_SHADOW_RT failed to compile with MaterialBuffer on.
         // UNOFFICIAL 2026-11-12 (ptbump; core/CapturedNormals.h NoHighlightFlag, ShaderRecord's CAPTURED_PT: the DXVK fork with the AlbedoBuffer
@@ -82,8 +82,9 @@
         #else
             #define NVR_MATERIAL_W NVR_SpecFade.w
         #endif
-        #define NVR_MATERIAL_RADIUS floor(NVR_MATERIAL_W * 0.125f)
-        #define NVR_MATERIAL_CLASS (NVR_MATERIAL_W - 8.0f * NVR_MATERIAL_RADIUS)
+        // 2026-11-25 MaterialSSS Phase 2: widened class stride from 8 to 16 so NVR_SpecFade.w carries models 1..15 (11..14 SSS).
+        #define NVR_MATERIAL_RADIUS floor(NVR_MATERIAL_W * 0.0625f)
+        #define NVR_MATERIAL_CLASS (NVR_MATERIAL_W - 16.0f * NVR_MATERIAL_RADIUS)
         #if CAPTURED_NORMALS_ON >= 4
         // UNOFFICIAL 2026-11-14 GBufferV2 ([Main.Main.Quality] GBufferV2, restart; CAPTURED_NORMALS_ON 4; docs/next/FULL-DEFERRED-RENDERER-PLAN.md
         // 4.2, docs/next/FD-GBUFFER-RESULTS.md). COLOR2 becomes:
@@ -103,14 +104,31 @@
             #else
                 #define GBV2_CLASS NVR_MATERIAL_CLASS
             #endif
+            // UNOFFICIAL 2026-11-24 fd-complete (owner: "real surfaces all have some sheen"; [Main.Main.Quality] DeferredSheen, restart, the
+            // value is the roughness floor, 0 off; core/ShaderRecord.cpp defines DEFERRED_SHEEN for the Object and Parallax templates): the
+            // lighting-free records of the meshes the game draws without a highlight write the specular bit too, so the deferred sun, lamp
+            // and flashlight passes light them with the full PBR model (GGX highlight, the diffuse less its Fresnel share) instead of
+            // PBRDiffuse. Their roughness: as written where an _rmaos map gave it (RMAOS_ACTIVE) or FoldHighlights marked the object shiny
+            // (NVR_SpecFade.y), else DEFERRED_SHEEN itself: a mesh the game draws without a highlight has no gloss of its own (its normal map's
+            // alpha reads 1, a mirror, on DXT1 maps and 0, fully matte, on others: bench 2026-11-24, a floor alone changed nothing).
+            // Hair and eyes keep their own models; forward records are unchanged.
             #if defined(SPECULAR)
                 #define GBV2_SPEC GBV2_SPEC_BIT
+                #define GBV2_ROUGH(r) (r)
+            #elif defined(DEFERRED_SHEEN) && defined(LAMPS_DEFERRED) && LAMPS_DEFERRED == 2 && !defined(HAIR) && !defined(NVR_EYE)
+                #define GBV2_SPEC GBV2_SPEC_BIT
+                #ifdef RMAOS
+                    #define GBV2_ROUGH(r) ((RMAOS_ACTIVE || NVR_SpecFade.y > 0.5f) ? (r) : DEFERRED_SHEEN)
+                #else
+                    #define GBV2_ROUGH(r) (NVR_SpecFade.y > 0.5f ? (r) : DEFERRED_SHEEN)
+                #endif
             #else
                 #define GBV2_SPEC 0.0f
+                #define GBV2_ROUGH(r) (r)
             #endif
-            #define CapturedMaterialOut(roughness) float4(GBV2_CLASS + GBV2_SPEC, GBV2_NO_NORMAL, (roughness), 1.0f)
-            #define CapturedMaterialOutClass(materialClass, roughness) float4((materialClass) + GBV2_SPEC, GBV2_NO_NORMAL, (roughness), 1.0f)
-            #define CapturedMaterialOutMetal(roughness, metal) float4(GBV2_CLASS + GBV2_SPEC + 0.49f * saturate(metal), GBV2_NO_NORMAL, (roughness), 1.0f)
+            #define CapturedMaterialOut(roughness) float4(GBV2_CLASS + GBV2_SPEC, GBV2_NO_NORMAL, GBV2_ROUGH(roughness), 1.0f)
+            #define CapturedMaterialOutClass(materialClass, roughness) float4((materialClass) + GBV2_SPEC, GBV2_NO_NORMAL, GBV2_ROUGH(roughness), 1.0f)
+            #define CapturedMaterialOutMetal(roughness, metal) float4(GBV2_CLASS + GBV2_SPEC + 0.49f * saturate(metal), GBV2_NO_NORMAL, GBV2_ROUGH(roughness), 1.0f)
             // The shading normal into a record made above: n in world axes, any length (0: none). A draw the hook marked as blended
             // (CapturedCoverage's mark in NVR_SpecFade.z: 3 or -1) keeps a = 1 and records no shading normal: under the SRCALPHA blend the
             // record's alpha is the blend weight of its rgb, so it must stay 1 (or 0, CapturedCoverage) there.

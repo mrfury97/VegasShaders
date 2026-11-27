@@ -16,6 +16,8 @@ public:
 	// the frame
 	static const UInt32 Render = 0x008706B0, RenderWorldSceneGraph = 0x00873200, RenderFirstPerson = 0x00875110;
 	static const UInt32 RenderReflections = 0x004E1BC0, RenderPipboy = 0x008761E0, ProcessImageSpaceShaders = 0x00B55AC0;
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: ImageSpaceManager::RenderEffect (called mid-frame by plugins like DoF-Fix.dll)
+	static const UInt32 RenderImageSpaceEffect = 0x00B97550;
 	static const UInt32 RenderPassStandard = 0x00B98E80, RenderPassSkinned = 0x00B99110;	// BSBatchRenderer::RenderPassImmediately_* (cdecl)
 	static const UInt32 RenderBlended = 0x00B650C0;		// BSShaderAccumulator, blended stage (back to front, after the opaque groups)
 	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene): BSShaderUtil's scene walk and scene draw (both cdecl), which a
@@ -39,7 +41,6 @@ public:
 	};
 	struct RenderInterface { static const UInt32 Hook = 0x007144D3; };
 	struct Shadows {	// shadow caster selection
-		static const UInt32 RenderShadowMap1Hook = 0x0087084E;	// (patch currently disabled)
 		static const UInt32 LeavesNodeNameHook = 0x0066A112, LeavesNodeNameReturn = 0x0066A11E;
 	};
 	struct SetTileShaderConstants { static const UInt32 Hook = 0x00BCAAD7, Return = 0x00BCAADE; };

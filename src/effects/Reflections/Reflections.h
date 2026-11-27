@@ -34,6 +34,9 @@ public:
 		float	DrawDistance;	// surfaces farther than this do not reflect
 		bool	SkyFallback;	// outdoors: rays that find nothing take the sky
 		bool	CubeMap;		// rays that find nothing take the surroundings cube
+		int		CubeMode;		// 0: screen capture only, 1: screen + sky/grid fill, 2: native staggered 3D world cube + screen
+		int		CubeResolution;	// face resolution (64, 128, or 256; requires restart)
+		float	CubeDistance;	// world-cube capture cull distance in game units
 		float	CubeCapture;	// how much of the cube each frame's view replaces
 		float	CubeFade;		// how much of what is off screen fades each frame
 		int		DebugView;		// 1: the reflection alone, 2: where it found something, 3: the surroundings cube (4-6: see the .fx)
@@ -125,19 +128,25 @@ public:
 								// passes' cb.gbuffer): x 1 = the material is the G-buffer's this frame, y z COLOR3's distance match (share, units)
 		D3DXVECTOR4	Film;		// UNOFFICIAL 2026-11-20 unified reflections step 2 (TESR_ReflectionsFilm, the D3D9 technique with REFL_GBUFFER_ON): x 1 =
 								// the film on stage 7, y the wet strength, w 1 / MaxRainWetness (as the Vulkan passes' cb.film)
+		D3DXMATRIX	ReplaceReproject;	// (2026-11-24) TESR_ReflReplaceReproject (ReplaceForward, EnvTemplate.hlsl): the same, into the frame Buffer holds
 	};
 	ConstantsStruct	Constants;
 	IDirect3DBaseTexture9*	GridLightSlot = nullptr;	// AmbientLight's finished grid this frame (TextureManager slots)
 	IDirect3DBaseTexture9*	GridColorSlot = nullptr;
 
-	// The surroundings cube: two capture cubes (this frame's, last frame's) and the blurred reflection cube with mips.
-	static const UINT CubeSize = 64;
-	static const UINT CubeLevels = 7;	// 64 .. 1
+	// The surroundings cube: two capture cubes (this frame's, last frame's), the blurred reflection cube with mips,
+	// and (when CubeMode >= 2) a staggered 3D world-geometry cubemap rendered by ShadowManager.
+	static const UINT MaxCubeLevels = 9;	// up to 256 .. 1
+	UINT cubeSize = 128;
+	UINT cubeLevels = 8;					// 7 for 64, 8 for 128, 9 for 256
 	struct CubesStruct {
 		IDirect3DCubeTexture9*	Capture[2] = { nullptr, nullptr };
 		IDirect3DSurface9*		CaptureFace[2][6] = {};
 		IDirect3DCubeTexture9*	Env = nullptr;
-		IDirect3DSurface9*		EnvFace[CubeLevels][6] = {};
+		IDirect3DSurface9*		EnvFace[MaxCubeLevels][6] = {};
+		IDirect3DCubeTexture9*	World = nullptr;
+		IDirect3DSurface9*		WorldFace[6] = {};
+		IDirect3DSurface9*		WorldDepth = nullptr;
 		IDirect3DBaseTexture9*	CaptureLastSlot = nullptr;	// what the effect's samplers read (TextureManager slots)
 		IDirect3DBaseTexture9*	CaptureNewSlot = nullptr;
 		IDirect3DBaseTexture9*	EnvSlot = nullptr;
@@ -166,7 +175,13 @@ public:
 	void	RenderBuffers(IDirect3DDevice9* Device);	// trace, history, blur: everything before the composite
 	void	UpdateWaterConstants();						// UNOFFICIAL 2026-10-31 RT water: every frame, the effect on or off (ShaderManager)
 	bool	WaterSkipsPlanar() const { return Constants.WaterData.y > 0.5f; }	// the planar water reflection pass is skipped this frame
+	bool	PbrWantsCube() const;						// PBR metal / env-map shaders sample TESR_ReflectionsEnv even when floor SSR is off
 	bool	CubeWanted();								// the cube is kept up even when no floor reflects (metal, env maps)
+	bool	CubeStandaloneRunnable();					// safe to step the cube alone when floor SSR is disabled or suppressed
+	bool	WorldCubeWanted();							// native 3D world-cube pass should render faces this frame
+	bool	WorldCubeReady() const;						// all 6 world-cube faces are valid for the current cell/viewpoint
+	int		BeginWorldCubeFaces(int outFaces[2]);		// returns 0..2 staggered face indices to render this frame
+	void	MarkWorldCubeFaceRendered(int face);		// records a rendered face (0..5) in worldCubeMask
 	void	RenderCubeOnly(IDirect3DDevice9* Device);	// the cube alone, on a frame RenderBuffers does not run
 	bool	CubeReady() const;							// the cube was kept up last frame (what the object shaders read now)
 	void	CaptureMaterial(IDirect3DDevice9* Device);	// UNOFFICIAL 2026-10-20 MaterialAware: the scene's alpha into the material buffer, before any effect draws
@@ -218,7 +233,9 @@ public:	// (the RT core user in Reflections.cpp reads the images)
 	std::string			RtStatusText() const;	// UNOFFICIAL 2026-11-01: the RT trace's state as of its last frame, for the REPORT block
 	bool				NothingReflects() const { return nothingReflects; }	// UNOFFICIAL 2026-11-05: ShouldRender found no reflecting surface (the Ray tracing page)
 	bool				RtWeaponActive() const { return Enabled && Settings.RtEnabled && Settings.RtWeapon > 0.0f && RtWanted(); }	// UNOFFICIAL 2026-11-20: only replace forward env map on 1st-person when RT weapon reflections are actually active
+	bool				WeaponReflectionsActive() const;	// UNOFFICIAL 2026-11-24: active for RT OR non-RT Vulkan weapon reflections
 private:
+	bool				NonRtWeaponActive() const;
 	bool				nothingReflects = false;	// dry, GroundSheen / InteriorFloors 0, no material reflections (ShouldRender, last asked)
 	bool				PuddlesActive = false;	// 2026-11-08 Puddles: standing water left outdoors (the passes run for it after the rain)
 	bool				rtRays = false;		// this frame's RayGen casts rays (the helper is up; false in SplitTest)
@@ -283,6 +300,10 @@ private:
 	void*		cubeCell = nullptr;		// the cell the cube was captured in
 	UINT		cubeFrame = 0;			// FrameNumber of the last cube update
 	D3DXMATRIX	cubeInvView;			// the camera at the last cube update (for the jump test)
+	int			worldCubeNextFace = 0;	// next staggered cubemap face (0..5) for CubeMode >= 2
+	UINT		worldCubeMask = 0;		// bitmask of valid world-cube faces (0x3F when all 6 populated)
+	void*		worldCubeSpace = nullptr;// the interior cell, or the worldspace outdoors, the world cube's faces were drawn in
+	D3DXVECTOR3	worldCubePos = { 0.0f, 0.0f, 0.0f };
 	bool		cubeOnly = false;		// RenderCubeOnly is drawing (ShouldRender lets its passes through)
 	bool		materialOnly = false;	// CaptureMaterial is drawing
 	bool		materialFilled = false;	// the material buffer was filled this frame

@@ -27,6 +27,34 @@
 namespace MaterialRules {
 
 	enum Metal { MetalGuess = 0, MetalMask = 1, MetalFull = 2, MetalOff = 3 };
+	enum SssProfile {
+		SssNone = 0, SssLeaf = 1, SssCloth = 2, SssWax = 3,
+		SssMarble = 4, SssSnow = 5, SssFlesh = 6, SssPlastic = 7
+	};
+
+	inline int SssModelId(int sss) {
+		switch (sss) {
+			case SssLeaf:    return 5;
+			case SssCloth:   return 3;
+			case SssWax:
+			case SssPlastic: return 11;
+			case SssMarble:  return 12;
+			case SssSnow:    return 13;
+			case SssFlesh:   return 14;
+			default:         return 0;
+		}
+	}
+
+	inline int InferSssFromClass(const std::string& name) {
+		if (name.find("plant") != std::string::npos || name.find("leaf") != std::string::npos || name.find("foliage") != std::string::npos) return SssLeaf;
+		if (name.find("cloth") != std::string::npos || name == "soft") return SssCloth;
+		if (name.find("wax") != std::string::npos || name.find("candle") != std::string::npos) return SssWax;
+		if (name.find("plastic") != std::string::npos) return SssPlastic;
+		if (name.find("marble") != std::string::npos || name.find("jade") != std::string::npos) return SssMarble;
+		if (name.find("snow") != std::string::npos || name.find("ice") != std::string::npos) return SssSnow;
+		if (name.find("food") != std::string::npos || name.find("flesh") != std::string::npos || name.find("meat") != std::string::npos || name.find("creature") != std::string::npos) return SssFlesh;
+		return SssNone;
+	}
 
 	struct Rule {
 		std::string	Name;
@@ -37,6 +65,7 @@ namespace MaterialRules {
 		float		Reflections = 1.0f;		// metal's surroundings reflection, times [Shaders.PBR.Metal] Reflections
 		float		Tint[3] = { 0.5f, 0.5f, 0.5f };	// DebugView colour
 		bool		ReplaceAuthored = false;	// UNOFFICIAL 2026-11-05 authored=replace: the rule's roughness over the vanilla highlight data (Object.hlsl BridgeSetup)
+		int			Sss = SssNone;			// UNOFFICIAL 2026-11-24 MaterialSSS Phase 1 profile (sss=<none|leaf|cloth|wax|marble|snow|flesh|plastic>)
 	};
 
 	// "Data\Textures\Weapons\Foo.DDS" -> "textures\weapons\foo.dds"
@@ -162,6 +191,7 @@ namespace MaterialRules {
 				Rule rule;
 				rule.Name = Lower(words[1]);
 				if (rule.Name == "default") { error = "\"default\" is the built-in no-rule class"; return false; }
+				bool explicitSss = false;
 				for (size_t i = 2; i < words.size(); ++i) {
 					const std::string w = Lower(words[i]);
 					const size_t eq = w.find('=');
@@ -173,6 +203,18 @@ namespace MaterialRules {
 						else if (value == "mask") rule.Metal = MetalMask;
 						else if (value == "full") rule.Metal = MetalFull;
 						else { error = "metal must be off, guess, mask or full"; return false; }
+					}
+					else if (key == "sss") {
+						explicitSss = true;
+						if (value == "none" || value == "off") rule.Sss = SssNone;
+						else if (value == "leaf" || value == "plant" || value == "foliage") rule.Sss = SssLeaf;
+						else if (value == "cloth") rule.Sss = SssCloth;
+						else if (value == "wax") rule.Sss = SssWax;
+						else if (value == "marble") rule.Sss = SssMarble;
+						else if (value == "snow" || value == "ice") rule.Sss = SssSnow;
+						else if (value == "flesh" || value == "food") rule.Sss = SssFlesh;
+						else if (value == "plastic") rule.Sss = SssPlastic;
+						else { error = "sss must be none, leaf, cloth, wax, marble, snow, flesh or plastic"; return false; }
 					}
 					else if (key == "strength") { if (!Number(value, rule.Strength)) { error = "bad strength"; return false; } }
 					else if (key == "reflections") { if (!Number(value, rule.Reflections)) { error = "bad reflections"; return false; } }
@@ -203,6 +245,7 @@ namespace MaterialRules {
 					rule.RoughMin = std::clamp(rule.RoughMin, 0.02f, 1.0f);
 					rule.RoughMax = std::clamp(rule.RoughMax, rule.RoughMin, 1.0f);
 				}
+				if (!explicitSss) rule.Sss = InferSssFromClass(rule.Name);
 				const int existing = Find(rule.Name);
 				if (existing >= 0) Rules[existing] = rule;
 				else Rules.push_back(rule);

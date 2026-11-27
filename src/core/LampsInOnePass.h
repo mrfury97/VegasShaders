@@ -435,8 +435,8 @@ namespace LampsInOnePass {
 			const PassView* pass = (const PassView*)passPtr;
 			const UInt16 e = pass->passEnum;
 			WorldDraws++;
-			if (e >= 0x14A && e <= 0x150) { TexturePasses++; return; }
-			if (e >= 0x252 && e <= 0x255) { FogPasses++; return; }
+			if (e >= 0x14A && e <= 0x153) { TexturePasses++; return; }
+			if (e >= 0x252 && e <= 0x256) { FogPasses++; return; }
 			NiGeometry* geometry = pass->geometry;
 			const BSShaderProperty* property = geometry ? (const BSShaderProperty*)geometry->propertyState.m_spShadeProperty : nullptr;
 			if (IsOptPass(e)) {

@@ -54,7 +54,10 @@ namespace PassSort {
 		const UInt8* shade = (const UInt8*)((NiGeometry*)geometry)->GetProperty(NiProperty::PropertyType::kType_Shade);
 		if (!shade) return 0;
 		const UInt32 vtable = *(const UInt32*)shade;
-		if (vtable == 0x10AE0D0 || vtable == 0x10B9910) return *(const UInt32*)(shade + 0xAC);	// BSShaderPPLightingProperty, Lighting30ShaderProperty
+		if (vtable == 0x10AE0D0 || vtable == 0x10B9910) {
+			const UInt32* texArr = *(const UInt32* const*)(shade + 0xAC);	// BSShaderPPLightingProperty, Lighting30ShaderProperty -> ppTextures[0]
+			return texArr ? texArr[0] : 0;
+		}
 		return (UInt32)shade;
 	}
 

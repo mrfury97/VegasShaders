@@ -55,7 +55,8 @@ void main() {
 
     float linear01 = texelFetch(sampler2D(t_depth, POINT_S), pixel, 0).x;
     float vmRaw = texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x;
-    bool weapon = vmRaw > 0.0;
+    bool reversedDepth = cb.extra.w > 0.5;
+    bool weapon = reversedDepth ? (vmRaw > 0.0) : (vmRaw < 0.99999);
 
     // TAA.glsl Reproject, line for line.
     vec3 cameraVector = toWorld(uv) * (linear01 * farZ);
@@ -87,7 +88,7 @@ void main() {
 
     float z = max(linear01 * farZ, nearZ);
     float device = clamp(farZ / (farZ - nearZ) * (1.0 - nearZ / z), 0.0, 1.0);
-    float vmDepth = (1.0 - clamp(vmRaw, 0.0, 1.0)) * 0.001;
+    float vmDepth = (reversedDepth ? (1.0 - clamp(vmRaw, 0.0, 1.0)) : clamp(vmRaw, 0.0, 1.0)) * 0.001;
     float outDepth = weapon ? (cb.extra.z > 0.5 ? vmDepth : 0.0) : device;
 
     imageStore(o_motion, pixel, vec4(motion, 0.0, 0.0));

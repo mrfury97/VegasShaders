@@ -19,6 +19,8 @@ namespace {
 	unsigned gNvse = 0, gGame = 0;
 	std::string gGpuWindows, gGpuGame, gD3d9, gNvrDxvk, gLoadOrder;
 	bool gDxvk = false, gDeviceSeen = false;
+	std::vector<std::string> gLoadedPlugins;
+	bool gPluginsSeen = false;
 
 	// The textures the effects load from loose files (TextureManager reads them with D3DX: a BSA does not count). The release zip's
 	// Textures folder (resource\Textures) has exactly these; missing ones mean the Textures folder was not copied into Data.
@@ -57,16 +59,130 @@ namespace {
 		std::stable_sort(gResults.begin(), gResults.end(), [](const InstallCheck::Result& a, const InstallCheck::Result& b) { return (int)a.level > (int)b.level; });
 		Logger::Log("INSTALL %s: %s%s%s", InstallCheck::LevelName(level), title.c_str(), fix.empty() ? "" : " | ", fix.c_str());
 	}
+
+	struct ConflictSpec {
+		const char* dll;
+		bool requireVsdxvk;
+		const char* summary;
+		const char* title;
+		const char* fix;
+	};
+	// UNOFFICIAL 2026-11-23: authoritative list of genuinely incompatible xNVSE graphics/shader plugins shared by the
+	// startup prompt (CheckStartupPluginConflicts) and Help > Install check (CheckPluginConflicts).
+	static const ConflictSpec kConflicts[] = {
+		{ "DoF-Fix.dll", false,
+			"Hooks mid-frame Depth of Field and fights RenderScale / Vegas Shaders DoF (use Vegas Shaders' built-in DepthOfField instead).",
+			"Conflicting xNVSE plugin loaded: DoF-Fix.dll",
+			"DoF-Fix hooks mid-frame Depth of Field and conflicts with RenderScale v2 (use Vegas Shaders' built-in DepthOfField instead). Remove DoF-Fix.dll from Data\\NVSE\\Plugins." },
+		{ "VanillaPlusAO.dll", false,
+			"Injects standalone AO outside Vegas Shaders' pipeline and causes RenderScale corner boxes (use Vegas Shaders' built-in AmbientLight instead).",
+			"Conflicting xNVSE plugin loaded: VanillaPlusAO.dll",
+			"VanillaPlusAO injects standalone AO outside Vegas Shaders' pipeline and causes RenderScale corner boxes (use Vegas Shaders' built-in AmbientLight instead). Remove VanillaPlusAO.dll from Data\\NVSE\\Plugins." },
+		{ "DepthResolve.dll", true,
+			"Conflicts with Vegas Shaders' bundled DXVK depth resolver.",
+			"Conflicting xNVSE plugin loaded: DepthResolve.dll (with Vegas Shaders DXVK)",
+			"Vegas Shaders' bundled DXVK already resolves the depth buffer natively; DepthResolve.dll conflicts with it and should be removed." },
+		{ "FNVReShadeHelper.dll", false,
+			"Duplicates and fights Vegas Shaders' built-in ReShade integration.",
+			"Conflicting xNVSE plugin loaded: FNVReShadeHelper.dll",
+			"Vegas Shaders has built-in ReShade integration; FNVReShadeHelper.dll duplicates and fights it. Remove FNVReShadeHelper.dll." },
+		{ "HighResBloom.dll", false,
+			"Hooks HDR bloom alongside Vegas Shaders' Bloom and breaks post-processing / RenderScale.",
+			"Conflicting xNVSE plugin loaded: HighResBloom.dll",
+			"HighResBloom hooks HDR bloom alongside Vegas Shaders' Bloom and can break post-processing or sub-rect scaling. Remove HighResBloom.dll." },
+		{ "CloudUpgrade.dll", false,
+			"Hooks exterior cloud passes alongside Vegas Shaders' Sky / VolumetricClouds.",
+			"Conflicting xNVSE plugin loaded: CloudUpgrade.dll",
+			"CloudUpgrade hooks exterior cloud passes alongside Vegas Shaders' Sky / VolumetricClouds. Remove CloudUpgrade.dll." },
+		{ "HighResWaterDepth.dll", false,
+			"Hooks water depth rendering alongside Vegas Shaders' Water shaders.",
+			"Conflicting xNVSE plugin loaded: HighResWaterDepth.dll",
+			"HighResWaterDepth hooks water depth rendering alongside Vegas Shaders' Water shaders. Remove HighResWaterDepth.dll." },
+		{ "DynamicReflections.dll", false,
+			"Injects extra cubemap reflection passes alongside Vegas Shaders' Reflections.",
+			"Conflicting xNVSE plugin loaded: DynamicReflections.dll",
+			"DynamicReflections injects extra cubemap reflection passes alongside Vegas Shaders' Reflections. Remove DynamicReflections.dll." },
+	};
+
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: surface known conflicting xNVSE graphical/shader plugins in Help > Install check
+	void CheckPluginConflicts() {
+		if (!gPluginsSeen) return;
+		Clear("plugins");
+		bool flagged[_countof(kConflicts)] = {};
+		const bool vsDxvk = gDeviceSeen && gDxvk && !gNvrDxvk.empty();
+		for (const std::string& p : gLoadedPlugins) {
+			const std::string low = Lower(p);
+			for (size_t i = 0; i < _countof(kConflicts); i++) {
+				if (flagged[i] || low != Lower(kConflicts[i].dll)) continue;
+				if (kConflicts[i].requireVsdxvk && !vsDxvk) continue;
+				flagged[i] = true;
+				Add(InstallCheck::Level::Warning, "plugins", kConflicts[i].title, kConflicts[i].fix);
+				break;
+			}
+		}
+	}
 }
 
 const char* InstallCheck::LevelName(Level level) { return level == Level::Problem ? "PROBLEM" : level == Level::Warning ? "warning" : "info"; }
 const std::vector<InstallCheck::Result>& InstallCheck::Results() { return gResults; }
 void InstallCheck::Note(Level level, const char* group, const std::string& title, const std::string& fix) { Add(level, group, title, fix); }	// UNOFFICIAL 2026-11-13
+void InstallCheck::Replace(Level level, const char* group, const std::string& title, const std::string& fix) { Clear(group); Add(level, group, title, fix); }	// UNOFFICIAL 2026-11-23
 
 int InstallCheck::Count(Level level) {
 	int n = 0;
 	for (const Result& r : gResults) if (r.level == level) n++;
 	return n;
+}
+
+void InstallCheck::CheckStartupPluginConflicts() {
+	HMODULE rootD3d9 = GetModuleHandleA("d3d9.dll");
+	char rootPath[MAX_PATH] = {};
+	const bool vsDxvk = (DxvkLoader::Loaded != nullptr) ||
+		(rootD3d9 && GetModuleFileNameA(rootD3d9, rootPath, MAX_PATH) && DxvkLoader::IsDxvk(rootPath, rootD3d9));
+
+	std::vector<const ConflictSpec*> found;
+	std::string list;
+	for (const ConflictSpec& c : kConflicts) {
+		if (c.requireVsdxvk && !vsDxvk) continue;
+		if (GetModuleHandleA(c.dll) != nullptr) {
+			found.push_back(&c);
+			if (!list.empty()) list += ", ";
+			list += c.dll;
+		}
+	}
+	if (found.empty()) return;
+
+	Logger::Log("[WARN] INSTALL startup conflict check: incompatible xNVSE graphics plugin(s) detected: %s", list.c_str());
+
+	const bool autoTest = GetModuleHandleA("zNVRAutoTest.dll") != nullptr || GetModuleHandleA("NVRAutoTest.dll") != nullptr;
+	const bool ignored = TheSettingManager && TheSettingManager->GetSettingI("Main.Main.Misc", "IgnorePluginConflicts") != 0;
+	if (autoTest || ignored) {
+		Logger::Log("INSTALL startup conflict check: skipping startup dialog (%s)",
+			autoTest ? "automated test plugin loaded" : "[Main.Main.Misc] IgnorePluginConflicts = true");
+		return;
+	}
+
+	std::string body = "Vegas Shaders detected incompatible xNVSE graphics plugin(s) in Data\\NVSE\\Plugins:\n\n";
+	for (const ConflictSpec* c : found) {
+		body += "  - ";
+		body += c->dll;
+		body += ": ";
+		body += c->summary;
+		body += "\n";
+	}
+	body += "\nHow to fix:\n"
+		"  Disable or remove these plugins in Mod Organizer 2 / Vortex (or remove them from Data\\NVSE\\Plugins) before playing.\n\n"
+		"Exit Fallout: New Vegas now so you can disable them? (Recommended)\n"
+		"Choose No to continue anyway - upscaling, shadows, or post-effects may break.\n"
+		"(To silence this prompt, set IgnorePluginConflicts = true under [Main.Main.Misc] in VegasShaders.toml.)";
+
+	const int choice = MessageBoxA(nullptr, body.c_str(), "Vegas Shaders - Incompatible Plugins Detected",
+		MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON1 | MB_SETFOREGROUND | MB_TOPMOST);
+	if (choice == IDYES) {
+		Logger::Log("INSTALL startup conflict check: user chose to exit cleanly to disable: %s", list.c_str());
+		ExitProcess(0);
+	}
+	Logger::Log("[WARN] INSTALL startup conflict check: user chose to continue anyway with incompatible plugin(s): %s", list.c_str());
 }
 
 void InstallCheck::OnPluginLoad(unsigned nvseVersion, unsigned gameVersion) {
@@ -198,6 +314,13 @@ void InstallCheck::OnDevice(const std::string& gpuWindows, const std::string& gp
 	else {
 		DxvkLoader::ActiveNonForkDxvk.clear();
 	}
+	CheckPluginConflicts();
+}
+
+void InstallCheck::OnPlugins(const std::vector<std::string>& plugins) {
+	gLoadedPlugins = plugins;
+	gPluginsSeen = true;
+	CheckPluginConflicts();
 }
 
 void InstallCheck::OnLoadOrder(const std::vector<std::string>& plugins, unsigned hash) {

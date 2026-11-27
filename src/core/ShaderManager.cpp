@@ -8,6 +8,7 @@
 #include "AlphaHash.h"	// UNOFFICIAL 2026-11-03 SmoothCutouts (TESR_AlphaHash)
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01 the report burst's VL stages (Diagnostics::VLCapturing)
 #include "LampVisibility.h"	// UNOFFICIAL 2026-10-30 VisibleRanking
+#include "PortalVisibility.h"	// UNOFFICIAL 2026-11-24 PortalVisibility (zero-cost visible-room lamp ranking)
 #include "BeatSeries.h"	// UNOFFICIAL 2026-11-11 the beat detector's per-frame series
 #include "FlickerWatch.h"	// UNOFFICIAL 2026-10-23 test only
 #include "GpuProfiler.h"
@@ -22,6 +23,7 @@
 #include "DeferredRenderer.h"	// UNOFFICIAL 2026-11-14 full deferred renderer phase 2
 #include "DeferredSkin.h"	// UNOFFICIAL 2026-11-15 full deferred renderer phase 4 skin
 #include "DeferredFirstPerson.h"	// UNOFFICIAL 2026-11-15 first person through the deferred renderer (+ GearWeather)
+#include "WorldSurface.h"	// UNOFFICIAL 2026-11-24 world-space detail & weathering over deferred objects & terrain
 #include "DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list
 #include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows (INTERIOR-SHADOWS-MODERN steps 2-3)
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth (ROOT-ASSUMPTIONS-PLAN B3)
@@ -164,6 +166,9 @@ void ShaderManager::Initialize() {
 	Logger::Log("%s", ShelvedEffects::LogLine());
 	TheSettingManager->GetSettingI(ShelvedEffects::kSettingSections[0], "Enabled");	// (reads as 0; notes whether the saved file had it on)
 	if (ShelvedEffects::SavedOn) Logger::Log("Capsule shadows ([Shaders.ShadowsInteriors.Capsules] Enabled) are not part of this release (work in progress): left off although your settings file has them on; the setting is kept as it is.");
+	TheSettingManager->GetSettingI("Main.Main.Quality", "DistantLand");
+	TheSettingManager->GetSettingI("Main.Main.Quality", "DistantLandSuppressVanilla");
+	if (ShelvedEffects::DistantLandSavedOn) Logger::Log("Distant Land ([Main.Main.Quality] DistantLand) is shelved for this release: left off although your settings file has it on; the setting is kept as it is.");
 #endif
 
 	EnrollCollection<TonemappingShaders>(sm, sm->Shaders.Tonemapping);
@@ -245,6 +250,7 @@ void ShaderManager::Initialize() {
 	DeferredDepth::LoadShaders();	// UNOFFICIAL 2026-11-14 DeferredDepth: its linear pass and the probe, at startup (nothing when off)
 	DeferredSun::LoadShaders();	// UNOFFICIAL 2026-11-14 DeferredSun: the sun pass, at startup (only with the lighting-free records)
 	DeferredFirstPerson::Load();	// UNOFFICIAL 2026-11-15 DeferredFirstPerson / GearWeather: their passes, at startup (nothing when off)
+	WorldSurface::Load();	// UNOFFICIAL 2026-11-24 WorldSurface: world-space surface detail & weathering pass
 	startClock.LogTime("ShaderManager::Initialize");
 }
 
@@ -447,11 +453,17 @@ template <typename T> void ShaderManager::RegisterEffect(T** slot) {
 
 	EffectsNames[made->Name] = (EffectRecord**)slot;
 	// UNOFFICIAL 2026-11-12 (memleak) idle targets (TextureManager.h): the effect's object and its switch, before it makes its targets
-	TheTextureManager->NoteEffect(made, sizeof(T), TheSettingManager->GetMenuShaderEnabled(made->Name));
+	const bool wantOn = TheSettingManager->GetMenuShaderEnabled(made->Name);
+	TheTextureManager->NoteEffect(made, sizeof(T), wantOn);
 	made->UpdateSettings();
 	made->RegisterConstants();
 	made->RegisterTextures();
-	made->LoadEffect();
+	if (!wantOn && made->LazyLoadAllowed()) {
+		made->PendingLazyLoad = true;
+		made->Enabled = false;
+	} else {
+		made->LoadEffect();
+	}
 	TheTextureManager->StartingEffect = nullptr;
 }
 
@@ -476,19 +488,7 @@ template <typename T> void ShaderManager::RegisterShaderCollection(T** slot) {
  * the last contents that were rendered into it.
  */
 void ShaderManager::ClearShaderSamplers(const char* textureName, size_t byteCount) {
-	for (const auto& Named : ShaderNames) {
-		ShaderCollection* collection = Named.second ? *Named.second : nullptr;
-		if (!collection) continue;
-
-		for (auto& vertex : collection->VertexShaderList) {
-			for (int slot = 0; slot < 3; slot++)  // Default / Exterior / Interior
-				if (vertex->ShaderProg[slot]) vertex->ShaderProg[slot]->ClearSampler(textureName, byteCount);
-		}
-		for (auto& pixel : collection->PixelShaderList) {
-			for (int slot = 0; slot < 3; slot++)
-				if (pixel->ShaderProg[slot]) pixel->ShaderProg[slot]->ClearSampler(textureName, byteCount);
-		}
-	}
+	ShaderProgram::ClearAllSamplers(textureName, byteCount);
 }
 
 
@@ -834,7 +834,61 @@ void ShaderManager::UpdateConstants() {
 
 	D3DXVECTOR4& sunPos = ShaderConst.SunPosition;
 	D3DXVECTOR4& sunDir = ShaderConst.SunDir;
-	sunPos = sunNode->m_localTransform.pos.toD3DXVEC4();
+
+	// UNOFFICIAL 2026-11-25 RealSunPath ([Shaders.ShadowsExteriors.Deferred]): save/restore vanilla sun node & directional light
+	// so switching RealSunPath 1/2 <-> 0 or entering interiors/night reverts cleanly without stale coordinates.
+	static UInt32 sunPathRev = ~0u;
+	static int realSunPathCfg = 0;
+	static float sunNoonElevCfg = 45.0f, sunAzimuthOffCfg = 0.0f;
+	if (TheSettingManager && sunPathRev != TheSettingManager->SettingsRevision) {
+		sunPathRev = TheSettingManager->SettingsRevision;
+		realSunPathCfg = TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Deferred", "RealSunPath");
+		sunNoonElevCfg = TheSettingManager->GetSettingF("Shaders.ShadowsExteriors.Deferred", "SunNoonElevation");
+		sunAzimuthOffCfg = TheSettingManager->GetSettingF("Shaders.ShadowsExteriors.Deferred", "SunAzimuthOffset");
+	}
+	static NiPoint3 gameSunPos = {}, writtenSunPos = {};
+	static bool haveWrittenSunPos = false;
+	if (!haveWrittenSunPos || sunNode->m_localTransform.pos.x != writtenSunPos.x ||
+		sunNode->m_localTransform.pos.y != writtenSunPos.y || sunNode->m_localTransform.pos.z != writtenSunPos.z) {
+		gameSunPos = sunNode->m_localTransform.pos;
+	}
+	auto shiftSunVisualPos = [](NiAVObject* obj, const NiPoint3& delta) {
+		if (!obj) return;
+		obj->m_worldTransform.pos.x += delta.x;
+		obj->m_worldTransform.pos.y += delta.y;
+		obj->m_worldTransform.pos.z += delta.z;
+		if (obj->m_kWorldBound) {
+			obj->m_kWorldBound->Center.x += delta.x;
+			obj->m_kWorldBound->Center.y += delta.y;
+			obj->m_kWorldBound->Center.z += delta.z;
+		}
+	};
+	auto applySunNodePos = [&](const NiPoint3& newPos) {
+		Sun* const sunObj = theSky->sun;
+		const NiPoint3 dRoot = {
+			newPos.x - sunNode->m_localTransform.pos.x,
+			newPos.y - sunNode->m_localTransform.pos.y,
+			newPos.z - sunNode->m_localTransform.pos.z
+		};
+		sunNode->m_localTransform.pos = newPos;
+		shiftSunVisualPos(sunNode, dRoot);
+		if (sunObj) {
+			shiftSunVisualPos(sunObj->sunBaseNode, dRoot);
+			shiftSunVisualPos(sunObj->sunBase, dRoot);
+			if (sunObj->sunGlareNode) {
+				const NiPoint3 dGlare = {
+					newPos.x - sunObj->sunGlareNode->m_localTransform.pos.x,
+					newPos.y - sunObj->sunGlareNode->m_localTransform.pos.y,
+					newPos.z - sunObj->sunGlareNode->m_localTransform.pos.z
+				};
+				sunObj->sunGlareNode->m_localTransform.pos = newPos;
+				shiftSunVisualPos(sunObj->sunGlareNode, dGlare);
+				shiftSunVisualPos(sunObj->sunGlare, dGlare);
+			}
+		}
+	};
+
+	sunPos = gameSunPos.toD3DXVEC4();
 	sunPos.w = 0.0f;
 	// SunRoot (the sun disc's NiNode) is only positioned by the game's own sky-dome rendering, which only runs while an exterior sky is
 	// drawn. On a cold load into an interior save it sits at a zero vector, and normalising that gives NaN, which poisons every consumer
@@ -844,13 +898,100 @@ void ShaderManager::UpdateConstants() {
 	sunPos.w = 1.0f;
 
 	// The direction light comes from: the reverse of the game's directional light, normalised in xyz.
-	sunDir = Tes->directionalLight->direction.toD3DXVEC4() * -1.0f;
-	sunDir.w = 0.0f;
-	D3DXVec4Normalize(&sunDir, &sunDir);
-	sunDir.w = 1.0f;
+	// Outdoors at night, follow the moon disc (masserMoon) with a minimum elevation floor so moonlight casts natural shadows
+	// matching the sky, while saving/restoring the engine's directionalLight vector cleanly outside that window.
+	static NiPoint3 gameLightDir = {}, writtenLightDir = {};
+	static bool haveWrittenLightDir = false;
+	NiDirectionalLight* dirLight = Tes->directionalLight;
+	if (!haveWrittenLightDir || dirLight->direction.x != writtenLightDir.x ||
+		dirLight->direction.y != writtenLightDir.y || dirLight->direction.z != writtenLightDir.z) {
+		gameLightDir = dirLight->direction;
+	}
+	D3DXVECTOR3 moonDir;
+	float moonDist = 0.0f, moonRad = 0.0f;
+	const bool followMoonDisc = GameState.isExterior && GameState.dayLight <= 0.5f &&
+		VolumetricCloudsEffect::MoonPlace(theSky, moonDir, moonDist, moonRad) && moonDir.z > 0.05f;
+	const bool realSunActive = !followMoonDisc && realSunPathCfg > 0 && GameState.isExterior && GameState.dayLight > 0.45f;
+	if (!realSunActive && haveWrittenSunPos) {
+		applySunNodePos(gameSunPos);
+		haveWrittenSunPos = false;
+	}
+	if (followMoonDisc) {
+		if (moonDir.z < 0.22f) {
+			moonDir.z = 0.22f;
+			D3DXVec3Normalize(&moonDir, &moonDir);
+		}
+		sunDir = D3DXVECTOR4(moonDir.x, moonDir.y, moonDir.z, 1.0f);
+		writtenLightDir = NiPoint3(-moonDir.x, -moonDir.y, -moonDir.z);
+		dirLight->direction = writtenLightDir;
+		haveWrittenLightDir = true;
+	}
+	else if (realSunActive) {
+		const float riseMid = 0.5f * (riseStart + riseEnd);
+		const float setMid = 0.5f * (setStart + setEnd);
+		const float daySpan = (setMid - riseMid) > 1.0f ? (setMid - riseMid) : 1.0f;
+		float u = (gameHour - riseMid) / daySpan;
+		u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+		float noonDeg = sunNoonElevCfg < 20.0f ? 20.0f : (sunNoonElevCfg > 75.0f ? 75.0f : sunNoonElevCfg);
+		if (realSunPathCfg >= 2) {
+			TimeGlobals* tg = TimeGlobals::Get();
+			if (tg && tg->GameMonth && tg->GameDay) {
+				const float dayOfYear = tg->GameMonth->data * 30.4375f + tg->GameDay->data;
+				const float decl = -23.44f * cosf(2.0f * 3.14159265f * (dayOfYear + 10.0f) / 365.25f);
+				noonDeg += decl * 0.55f;
+				noonDeg = noonDeg < 22.0f ? 22.0f : (noonDeg > 75.0f ? 75.0f : noonDeg);
+			}
+		}
+		const float theta = (u - 0.5f) * 3.14159265f;
+		const float maxEl = noonDeg * (3.14159265f / 180.0f);
+		const float rawSinEl = cosf(theta) * sinf(maxEl);
+		const float sinEl = rawSinEl > 0.08f ? rawSinEl : 0.08f;
+		const float cosEl = sqrtf((1.0f - sinEl * sinEl) > 1.0e-5f ? (1.0f - sinEl * sinEl) : 1.0e-5f);
+		const float east = -sinf(theta);
+		const float south = -cosf(theta) * cosf(maxEl);
+		const float hLen = sqrtf(east * east + south * south);
+		float hx = hLen > 1.0e-5f ? (east / hLen) : 0.0f;
+		float hy = hLen > 1.0e-5f ? (south / hLen) : -1.0f;
+		if (sunAzimuthOffCfg != 0.0f) {
+			const float azRad = sunAzimuthOffCfg * (3.14159265f / 180.0f);
+			const float cAz = cosf(azRad), sAz = sinf(azRad);
+			const float rx = hx * cAz - hy * sAz;
+			const float ry = hx * sAz + hy * cAz;
+			hx = rx; hy = ry;
+		}
+		D3DXVECTOR3 realSun(hx * cosEl, hy * cosEl, sinEl);
+		D3DXVec3Normalize(&realSun, &realSun);
+		const float dayBlend = step(0.45f, 0.65f, GameState.dayLight);
+		D3DXVECTOR3 blendedSun(sunPos.x * (1.0f - dayBlend) + realSun.x * dayBlend,
+			sunPos.y * (1.0f - dayBlend) + realSun.y * dayBlend,
+			sunPos.z * (1.0f - dayBlend) + realSun.z * dayBlend);
+		D3DXVec3Normalize(&blendedSun, &blendedSun);
 
-	// Outdoors by day the sun disc's position is followed instead (the moon's light at night); otherwise the
-	// position is mirrored below the horizon.
+		const float rawLenSq = gameSunPos.x * gameSunPos.x + gameSunPos.y * gameSunPos.y + gameSunPos.z * gameSunPos.z;
+		const float discRadius = rawLenSq > 100.0f ? sqrtf(rawLenSq) : 400.0f;
+		const NiPoint3 newSunPos = { blendedSun.x * discRadius, blendedSun.y * discRadius, blendedSun.z * discRadius };
+		applySunNodePos(newSunPos);
+		writtenSunPos = newSunPos;
+		haveWrittenSunPos = true;
+
+		sunPos = D3DXVECTOR4(blendedSun.x, blendedSun.y, blendedSun.z, 1.0f);
+		sunDir = sunPos;
+		writtenLightDir = NiPoint3(-blendedSun.x, -blendedSun.y, -blendedSun.z);
+		dirLight->direction = writtenLightDir;
+		haveWrittenLightDir = true;
+	}
+	else {
+		if (haveWrittenLightDir) {
+			dirLight->direction = gameLightDir;
+			haveWrittenLightDir = false;
+		}
+		sunDir = dirLight->direction.toD3DXVEC4() * -1.0f;
+		sunDir.w = 0.0f;
+		D3DXVec4Normalize(&sunDir, &sunDir);
+		sunDir.w = 1.0f;
+	}
+
+	// Outdoors by day the sun disc's position is followed instead; otherwise the position is mirrored below the horizon.
 	const bool followSunDisc = GameState.isExterior && GameState.dayLight > 0.5;
 	if (followSunDisc) sunDir = sunPos;
 	else sunPos.z = -sunPos.z;
@@ -926,6 +1067,7 @@ void ShaderManager::UpdateConstants() {
 	for (const auto& entry : EffectsNames) {
 		EffectRecord* record = *entry.second;
 		if (!record->Enabled) { record->constantUpdateTime = 0; continue; }
+		if (!record->Effect && record->PendingLazyLoad) record->LoadEffect();
 		record->UpdateConstants();
 		record->constantUpdateTime = updateClock.LogTime(record->Name);
 	}
@@ -950,7 +1092,7 @@ void ShaderManager::UpdateConstants() {
 	WaterShaders* const water = Shaders.Water;
 	if (Effects.Underwater->Enabled && !water->Enabled) water->UpdateConstants();
 	ShadowsExteriorEffect* const sunShadows = Effects.ShadowsExteriors;
-	if (!sunShadows->Enabled && Effects.ShadowsInteriors->Enabled) sunShadows->UpdateConstants();
+	if (sunShadows && !sunShadows->Enabled) sunShadows->UpdateConstants();
 
 	TheSettingManager->SettingsChanged = false;	// handled for this frame
 	updateClock.LogTime("ShaderManager::UpdateConstants");
@@ -999,8 +1141,29 @@ ShaderCollection* ShaderManager::GetShaderCollection(const char* shaderName) {
 void ShaderManager::ReloadEffects() {
 	for (const auto& entry : EffectsNames) {
 		EffectRecord* record = *entry.second;
+		const bool wantReload = record->Enabled || TheSettingManager->GetMenuShaderEnabled(record->Name);
 		record->DisposeEffect();
-		record->LoadEffect();
+		record->LazyLoadQueued = false;
+		if (!wantReload && record->LazyLoadAllowed()) record->PendingLazyLoad = true;
+		else record->LoadEffect();
+	}
+}
+
+void ShaderManager::ProcessLazyEffectLoads() {
+	for (const auto& entry : EffectsNames) {
+		EffectRecord* effect = entry.second ? *entry.second : nullptr;
+		if (!effect || !effect->Enabled || effect->IsLoaded() || !effect->PendingLazyLoad) continue;
+		effect->DisposeEffect();
+		const bool ok = effect->LoadEffect() && effect->IsLoaded();
+		effect->LazyLoadQueued = false;
+		effect->Enabled = ok;
+		if (!ok) {
+			TheSettingManager->SetMenuShaderEnabled(effect->Name, false);
+			char failure[256];
+			snprintf(failure, sizeof(failure), "Error: Couldn't enable effect %s", effect->Name);
+			InterfaceManager->ShowMessage(failure);
+			Logger::Log("%s", failure);
+		}
 	}
 }
 
@@ -1381,6 +1544,9 @@ namespace LateInteriors {
 		if (Pending.empty()) { Attached = true; return; }
 		const auto t0 = std::chrono::steady_clock::now();
 		const unsigned running = ShaderPrecompile::Running();
+		if (running > 0) {
+			CompileProgress::BeginLate("Vegas Shaders - Finishing Interior Shaders", (int)ShaderPrecompile::TotalJobs());
+		}
 		std::vector<Entry> list;
 		list.swap(Pending);
 		Attached = true;
@@ -1389,16 +1555,19 @@ namespace LateInteriors {
 			LoadLampShadowRecords(e.shader, e.tmpl);
 			FixForwardPartners(e.shader);
 		}
+		if (running > 0) {
+			CompileProgress::Finish();
+		}
 		Made += (unsigned)list.size();
 		const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 		Logger::Log("UNOFFICIAL lamp-shadow records: the Interior records of %u lit shaders made at %s (%d loaded; %u compiles were still running then, "
 			"%.1f s spent here)%s", (unsigned)list.size(), where, PointShadowForward::CompiledCount - countBefore, running, ms / 1000.0,
 			running ? ": the start no longer waits for them, this was the one wait" : "");
 	}
-	void Tick(bool gameLoaded) {
+	void Tick(bool inInterior) {
 		if (Pending.empty()) return;
-		if (gameLoaded) Attach("the first world frame");
-		else if (ShaderPrecompile::Running() == 0) Attach("the main menu (their compiles had finished)");
+		if (inInterior) Attach("the first interior frame");
+		else if (ShaderPrecompile::Running() == 0) Attach("the main menu / outdoors (their compiles had finished)");
 	}
 }
 
@@ -1525,6 +1694,7 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 	DeferredFoliage::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-14 phase 3 foliage ([Main.Main.Quality] DeferredFoliage; off: nothing)
 	DeferredSkin::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-15 phase 4 skin ([Main.Main.Quality] DeferredSkin; off: nothing)
 	DeferredTransparents::Hair::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-16 the game's blended hair's forward+ record ([Main.Main.Quality] DeferredHair; off: nothing)
+	DeferredTransparents::Decals::Load(pixel, pixel->Name, tmpl);	// UNOFFICIAL 2026-11-25 fd-complete batch 6: bullet holes / blood forward+ ([Main.Main.Quality] DeferredDecals)
 	pixel->Enabled = familyOn;
 
 	if (HasAnyRecord(pixel)) {
@@ -1627,6 +1797,8 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 	static std::vector<const void*> aliveLamps;
 	aliveLamps.clear();
 	const bool collectAlive = indoorsForward && lampCfg->Forward.FadeOut > 0.0f;
+	const bool portalRank = !GameState.isExterior && PortalVisibility::Active(SceneNode);
+	if (TheFrameRateManager) PortalVisibility::OnFrame((UInt32)TheFrameRateManager->FrameNumber);
 
 	// Creating list of lights in order of distance to the player
 	while (node) {
@@ -1670,6 +1842,12 @@ void ShaderManager::GetNearbyLights(ShadowSceneLight* ShadowLightsList[], NiPoin
 			if (lampRanking) {
 				const float brightness = (std::max)(0.0f, (lamp->Diff.r + lamp->Diff.g + lamp->Diff.b) / 3.0f * lamp->Dimmer);
 				key = -brightness * lamp->Spec.r / (std::max)(lampDistance, 0.25f * lamp->Spec.r + 1.0f) * (incumbent ? 1.0f + switchMargin : 1.0f);
+			}
+			if (portalRank) {
+				const int tier = PortalVisibility::LightTier(SceneNode, node->data);
+				PortalVisibility::NoteShadowRank(tier);
+				if (tier == 1) key += 1.0e5f;
+				else if (tier >= 2) key += 1.0e6f;
 			}
 			rankedLamps.insert({ key, node->data });
 			note(node->data, 0, lampDistance, key, lamp);
@@ -2760,10 +2938,24 @@ void ShaderManager::SwitchShaderStatus(const char* shaderName) {
 	IsMenuSwitch = true;	// (true only while the switch is made)
 
 	// An effect or a family flips itself (loading what it needs); its new state is stored as the menu's.
+	const bool wasMenuOn = TheSettingManager->GetMenuShaderEnabled(shaderName);
 	bool nowOn;
-	if (EffectRecord* effect = GetEffectByName(shaderName)) nowOn = effect->SwitchEffect();
+	if (EffectRecord* effect = GetEffectByName(shaderName)) {
+		if (effect->Enabled != wasMenuOn) {
+			if (wasMenuOn) {
+				effect->Enabled = false;
+				if (!effect->IsLoaded()) effect->LazyLoadQueued = false;
+				nowOn = false;
+			}
+			else {
+				effect->Enabled = false;
+				nowOn = effect->SwitchEffect();
+			}
+		}
+		else nowOn = effect->SwitchEffect();
+	}
 	else if (ShaderCollection* family = GetShaderCollectionByName(shaderName)) nowOn = family->SwitchShader();
-	else nowOn = !TheSettingManager->GetMenuShaderEnabled(shaderName);
+	else nowOn = !wasMenuOn;
 
 	// UNOFFICIAL: a menu entry with only settings (Shaders.<Name>.Status Enabled, e.g. ContactHardening, which
 	// ShadowManager reads each frame) just flips its setting.

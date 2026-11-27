@@ -10,21 +10,22 @@ namespace MenuWidgets {
 	float ToggleWidth();
 
 	// A small, dim, upper-case heading for a group of sidebar rows. Clicking it folds the group; returns whether it is open
-	// (open the first time; forceOpen opens it, as SetNextItemOpen would).
-	bool GroupLabel(const char* text, bool forceOpen = false);
+	// (open the first time; forceOpen opens it, as SetNextItemOpen would). marked: see "Unsaved marks" below.
+	bool GroupLabel(const char* text, bool forceOpen = false, bool marked = false);
 
 	// A quiet collapsible heading inside a page: a small arrow, the text, and a thin rule to the right edge. label may carry
 	// a "###id" part, as with ImGui::CollapsingHeader; defaultOpen applies the first time only. Returns whether it is open.
-	bool SubHeader(const char* label, bool defaultOpen);
+	bool SubHeader(const char* label, bool defaultOpen, bool marked = false);
 
 	// A page title: the text at a larger size.
-	void Title(const char* text, float scale = 1.3f);
+	void Title(const char* text, float scale = 1.3f, bool marked = false);
 
 	// Settings rows: the name in a fixed-width column on the left, the control filling the rest of the row on the right, and
 	// a slot at the far end for the reset button. RowBegin draws the name (cut with "..." if it does not fit) and leaves the
 	// cursor at the control column; trailing is the width kept free after the control (reset slot included). The control's
-	// width is returned. RowLabelHovered says whether the mouse was over the name.
-	float RowBegin(const char* name, float trailing);
+	// width is returned. RowLabelHovered says whether the mouse was over the name. A marked name keeps its " *" in view
+	// when it is cut.
+	float RowBegin(const char* name, float trailing, bool marked = false);
 	bool  RowLabelHovered();
 	bool  RowLabelClipped();
 	float RowNameWidth();
@@ -39,4 +40,14 @@ namespace MenuWidgets {
 
 	// A colour between the style's text and disabled-text colours (0 = text, 1 = disabled): rows that are not selected.
 	ImVec4 MutedText(float t);
+
+	// ---- Unsaved marks (2026-11-25) ----
+	// A row or heading that holds a setting not saved yet is drawn in bold with " *" after its text (UnsavedSettings.h says
+	// what counts). The menu font has no bold face: bold is the text drawn a second time, a pixel to the right. The widgets
+	// above take a marked flag. For a plain ImGui item that shows its label as one line of text (Selectable, TreeNodeEx
+	// without a frame, TextUnformatted), call MarkLastItem right after it, with the same label, while the colour the item's
+	// text was drawn in is still pushed. The item keeps its ID, size and clicks; an item placed after it with SameLine moves
+	// over to make room for the " *". Nothing is drawn or moved when marked is false.
+	void  MarkLastItem(const char* label, bool marked);
+	float MarkWidth();	// the room the mark takes after a text (" *" and the bold pixel)
 }

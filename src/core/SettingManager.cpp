@@ -5,6 +5,7 @@
 #include "SettingForce.h"	// UNOFFICIAL 2026-11-14 full deferred renderer: its prerequisites read as forced
 #include "StalePresetValues.h"	// UNOFFICIAL 2026-11-18: settings step 90 moves the old defaults presets and scripts saved
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: a release build reads [Shaders.ShadowsInteriors.Capsules] Enabled as off
+#include "UnsavedSettings.h"	// 2026-11-25 (unsaved marks): which settings the menu marks as not saved yet
 
 // A settings file in <game>\Data\NVSE\Plugins (the game folder is read once, Paths::GameRoot: common-dialog calls can change the
 // current directory later). 2026-11-02 Vegas Shaders: forWrite gives the new name (VegasShaders.toml...); a read takes the new
@@ -59,7 +60,7 @@ template <> std::string SettingManager::ToString<int>(const int number) {
 }
 
 // The user config's [_Unofficial] SettingsVersion this build brings it up to (UpdateOldDefaults, below).
-static const int UnofficialSettingsVersion = 103;  // (103, 2026-11-27: the removed forward Bend port's ten [ScreenSpace] keys deleted; 102, 2026-11-26 mirror puddles: [Shaders.Reflections.RT] SkyPanorama false -> true, [Shaders.Puddles.Main] Roughness 0.1 -> 0.02; 101: upstream 1.1.4's PTGlassSurface, GIStrengthInterior, GlowGIInterior; 2026-11-26 upstream 1.1.4 merge: 100 = upstream's 96 [Shaders.ShadowsExteriors.Deferred] MatchSunDisc true -> false, 99 = upstream's 95 [Main.Main.RayTracing] ActorFlushPerSpace false -> true; 98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
+static const int UnofficialSettingsVersion = 109;  // (109, 2026-11-27 upstream 1.1.5 merge: CasterFadeMin 0.75 -> 0.25, ArenaMB 16 -> 32, ActorRebuildInterval 8 -> 16, which upstream changed without a step; 104-108 are upstream 1.1.5's 97-101: 108 DeferredFirstPerson on, 107 and 106 weapon metal and RT weapon reflection defaults, 105 PBR metal, env-map, cube-capture look and AmbientLight ExteriorBalance off, 104 NightMinDarkness 0.65 + UsePointShadowsNight on; 103, 2026-11-27: the removed forward Bend port's ten [ScreenSpace] keys deleted; 102, 2026-11-26 mirror puddles: [Shaders.Reflections.RT] SkyPanorama false -> true, [Shaders.Puddles.Main] Roughness 0.1 -> 0.02; 101: upstream 1.1.4's PTGlassSurface, GIStrengthInterior, GlowGIInterior; 2026-11-26 upstream 1.1.4 merge: 100 = upstream's 96 [Shaders.ShadowsExteriors.Deferred] MatchSunDisc true -> false, 99 = upstream's 95 [Main.Main.RayTracing] ActorFlushPerSpace false -> true; 98, 2026-11-26: Reflections ReplaceForward + RT FollowRenderScale on, upstream's defaults, owner's word; 2026-11-22 upstream 1.1.3 merge: 90-94 are upstream's steps, ours renumbered 90-92 -> 95-97. 97: HDR Gamma22 on (upstream 1.1.2); 96, 2026-11-21: WetWorld removed, Wetness Effects + Puddles on with the owner's look, the cover map's keys moved to SnowAccumulation; 95, 2026-11-18: Sharpening is CAS only, Strength 0.75 -> 0.5, the CAS switch removed; 94 (upstream): VanillaBridgeDielectricMax, parked; 93 (upstream): a New Vegas Reloaded settings file's fog and shadow forms; 92 (upstream): RT helper wait and RT reflection flips, parked; 91 (upstream): MetalFromMap, parked; 90 (upstream): old defaults left by presets; 89, 2026-11-17: DeferredTransparents on (glass; the silver-bottle fix is in); 88, 2026-11-16: DeferredSkin (+ SSS 2), DeferredHair on (DeferredTransparents held off on 11-17, on again in 89); 87, 2026-11-16: [Shaders.TAA.Cutouts] Enabled on (Smooth Cutouts with TAA); 86: SMAA and DitherBuster off; 85, 2026-11-15: DeferredRenderer 0 -> 2, the deferred renderer on by default; 84: FlashDetect, BeatDetect, HistoryWatch off; 83: RT sun shadows Mode 1 (replace) + RT grass on; 82: GameShaderPairRepair on; 81: CapturedGrass on, for path tracing; 80: the daylight look, only where it was never touched; 79: rain LightingScale; 78: RT defaults replaced since 1.0.5 now reach saved configs; 77: ptaaa-firstperson, FirstPersonBody on again) 53 was an enhanced-water step, since removed
 
 // UNOFFICIAL 2026-10-30: a setting is read only when the defaults file lists it (FillNode), so a line in the user's toml that
 // this build does not know (a key from a newer or an older build, a typo) silently did nothing. Each one is logged once per
@@ -926,10 +927,11 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	constexpr bool kParkUpstream91 = true, kParkUpstream92 = true, kParkUpstream94 = true;
 	// (2026-11-26, upstream 1.1.4 merge) upstream's builds now count to 96: a file at 95 or 96 WITH [Shaders.WetWorld] is upstream's (it ran
 	// upstream's 95 / 96, now our 99 / 100, and none of ours); one without it is ours (our 95-98).
+	// (2026-11-27 upstream 1.1.5 merge) upstream now counts to 101: its 97-101 run here as 104-108, each skipped for an upstream-built file that already ran it.
 	const bool upstreamFile = UserSection("Shaders.WetWorld") != nullptr;
 	const bool ourHistory = (version == 91 || version == 92) && !upstreamFile;
 	const int ours = version >= 95 && !upstreamFile ? version - 5 : ourHistory ? version : 89;
-	constexpr int kUpstreamNewest = 96;	// the newest settings number upstream's builds write (1.1.4): bump it on the next upstream merge
+	constexpr int kUpstreamNewest = 101;	// the newest settings number upstream's builds write (1.1.5): bump it on the next upstream merge
 	auto upstreamRan = [&](int step) { return upstreamFile && version >= step && version <= kUpstreamNewest; };
 	// 90 (2026-11-18, owner: players switching from NVR keep their Cartographer / Atlas presets): those mods replay every value they
 	// captured through NVRSetSetting, which went into this table, and the menu's Save wrote it to the file after the steps above had run,
@@ -1176,10 +1178,12 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.Deferred.MatchSunDisc true -> false";
 		}
 	}
+	// (2026-11-27 upstream 1.1.5 merge: 101-103 are this fork's own steps; an upstream-built file at 101 never ran them, and each only moves an exact
+	// old value or deletes retired keys, so they also run for any upstream file.)
 	// 101 (2026-11-26, upstream 1.1.4's defaults, owner: take upstream's): [Main.Main.RayTracing] PTGlassSurface 0 -> 1,
 	// [Shaders.AmbientOcclusion.RT] GIStrengthInterior -1 -> 2 and GlowGIInterior -1 -> 1.5. Upstream changed them without a step, so a
 	// menu save of any earlier build (theirs or ours) holds the old values: each moves once from exactly its old default.
-	if (version < 101) {
+	if (version < 101 || upstreamFile) {
 		replace("Main.Main.RayTracing", "PTGlassSurface", 0.0, 1.0, false);
 		replace("Shaders.AmbientOcclusion.RT", "GIStrengthInterior", -1.0, 2.0, false);
 		replace("Shaders.AmbientOcclusion.RT", "GlowGIInterior", -1.0, 1.5, false);
@@ -1187,7 +1191,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	// 102 (2026-11-26, mirror puddles; docs/EFFECTS.md "Reflections" "Mirror puddles"): [Shaders.Reflections.RT] SkyPanorama false -> true (mirror
 	// puddles show the sky at full strength, and the plain gradient a missed ray took was paler than the drawn sky) and [Shaders.Puddles.Main]
 	// Roughness 0.1 -> 0.02 (the mirror's blur; under 0.03 the reflection is the exact mirror ray). A menu save holds the old values.
-	if (version < 102) {
+	if (version < 102 || upstreamFile) {
 		replace("Shaders.Puddles.Main", "Roughness", 0.1, 0.02, false);
 		tomlValue* saved = UserSection("Shaders.Reflections.RT");
 		if (saved && saved->contains("SkyPanorama") && saved->at("SkyPanorama").is_boolean() && !saved->at("SkyPanorama").as_boolean()) {
@@ -1198,7 +1202,7 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 	// 103 (2026-11-27): the older forward Bend port (Community Shaders' screen-space shadows in the forward lit shaders) was removed (main
 	// 2480e33; the Bottled Shaders port in the deferred sun replaces it): its ten [Shaders.ShadowsExteriors.ScreenSpace] keys are deleted
 	// from a saved file, so the install check does not call them unknown (they are also on Retired's list, for a file saved by a newer build).
-	if (version < 103) {
+	if (version < 103 || upstreamFile) {
 		tomlValue* saved = UserSection("Shaders.ShadowsExteriors.ScreenSpace");
 		if (saved && saved->is_table()) {
 			int removed = 0;
@@ -1206,6 +1210,95 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 				if (saved->contains(key)) { saved->as_table().erase(key); removed++; }
 			if (removed) changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.ScreenSpace: " + std::to_string(removed) + " keys of the removed Bend port deleted";
 		}
+	}
+	// 104, upstream 1.1.5's 97 (2026-11-23): [Shaders.ShadowsExteriors.Main] NightMinDarkness 0.35 -> 0.65 and UsePointShadowsNight false -> true
+	// (strengthens moonlight shadows and enables deferred outdoor night lamp shadows on existing configs).
+	if (version < 104 && !upstreamRan(97)) {
+		replace("Shaders.ShadowsExteriors.Main", "NightMinDarkness", 0.35, 0.65, false);
+		tomlValue* saved = UserSection("Shaders.ShadowsExteriors.Main");
+		if (saved && saved->contains("UsePointShadowsNight") && saved->at("UsePointShadowsNight").is_boolean() && !saved->at("UsePointShadowsNight").as_boolean()) {
+			(*saved)["UsePointShadowsNight"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.ShadowsExteriors.Main.UsePointShadowsNight false -> true";
+		}
+	}
+	// 105, upstream 1.1.5's 98 (2026-11-24, the dynamic-reflections upgrade & AmbientLight defaults; review: the menu's Save writes every key, so without this step a
+	// saved file kept the old values while a fresh install got the new ones). [Shaders.PBR.Metal] PolishedRoughness 0.65 -> 0.18 is a FIX
+	// (the painted shininess mask made metal rougher than bare metal: inverted), also in StalePresetValues.h; the others are the look:
+	// [Shaders.PBR.Metal] Roughness 0.3 -> 0.35, [Shaders.PBR.EnvMaps] Lighting 0.5 -> 0.45, Strength 1.5 -> 1.8, WithMetal 0.6 -> 0.85,
+	// [Shaders.Reflections.Main] CubeCapture 0.02 -> 0.25, CubeFade 0.005 -> 0.001, CloudSky false -> true,
+	// [Shaders.AmbientLight.Main] ExteriorBalance true -> false.
+	if (version < 105 && !upstreamRan(98)) {
+		replace("Shaders.PBR.Metal", "PolishedRoughness", 0.65, 0.18, false);
+		replace("Shaders.PBR.Metal", "Roughness", 0.3, 0.35, false);
+		replace("Shaders.PBR.EnvMaps", "Lighting", 0.5, 0.45, false);
+		replace("Shaders.PBR.EnvMaps", "Strength", 1.5, 1.8, false);
+		replace("Shaders.PBR.EnvMaps", "WithMetal", 0.6, 0.85, false);
+		replace("Shaders.Reflections.Main", "CubeCapture", 0.02, 0.25, false);
+		replace("Shaders.Reflections.Main", "CubeFade", 0.005, 0.001, false);
+		tomlValue* saved = UserSection("Shaders.Reflections.Main");
+		if (saved && saved->contains("CloudSky") && saved->at("CloudSky").is_boolean() && !saved->at("CloudSky").as_boolean()) {
+			(*saved)["CloudSky"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.Reflections.Main.CloudSky false -> true";
+		}
+		tomlValue* al = UserSection("Shaders.AmbientLight.Main");
+		if (al && al->contains("ExteriorBalance") && al->at("ExteriorBalance").is_boolean() && al->at("ExteriorBalance").as_boolean()) {
+			(*al)["ExteriorBalance"] = false;
+			changed += std::string(changed.empty() ? "" : ", ") + "Shaders.AmbientLight.Main.ExteriorBalance true -> false";
+		}
+	}
+	// 106, upstream 1.1.5's 99 (2026-11-24, weapon reflections for all users): tuned PBR metal weapon defaults and enabled non-RT + RT weapon reflections.
+	if (version < 106 && !upstreamRan(99)) {
+		replace("Shaders.PBR.Metal", "GreyMetal", 0.5, 0.75, false);
+		replace("Shaders.PBR.Metal", "Roughness", 0.35, 0.28, false);
+		replace("Shaders.PBR.Metal", "Reflections", 0.6, 1.0, false);
+		tomlValue* metal = UserSection("Shaders.PBR.Metal");
+		if (metal && metal->contains("PolishedRoughness")) {
+			const tomlValue& pr = metal->at("PolishedRoughness");
+			if (pr.is_floating() && pr.as_floating() == 0.18) {
+				(*metal)["PolishedRoughness"] = 0.14;
+				changed += std::string(changed.empty() ? "" : ", ") + "Shaders.PBR.Metal.PolishedRoughness 0.18 -> 0.14";
+			}
+		}
+		replace("Shaders.Reflections.RT", "Weapon", 0.0, 0.85, false);
+		replace("Shaders.Reflections.RT", "WeaponRoughness", 0.3, 0.22, false);
+	}
+	// 107, upstream 1.1.5's 100 (2026-11-24, weapon reflection refinement): move step 99's over-reflective defaults onto balanced gunmetal vs nickel values.
+	if (version < 107 && !upstreamRan(100)) {
+		auto moveFloat = [&](const char* section, const char* key, double oldVal, double newVal) {
+			tomlValue* saved = UserSection(section);
+			if (!saved || !saved->contains(key)) return;
+			const tomlValue& cur = saved->at(key);
+			const double v = cur.is_floating() ? cur.as_floating() : cur.is_integer() ? (double)cur.as_integer() : -1.0e9;
+			if (fabs(v - oldVal) < 1e-4) {
+				(*saved)[key] = newVal;
+				changed += std::string(changed.empty() ? "" : ", ") + section + "." + key;
+			}
+		};
+		moveFloat("Shaders.PBR.Metal", "GreyMetal", 0.75, 0.45);
+		moveFloat("Shaders.PBR.Metal", "Roughness", 0.28, 0.36);
+		moveFloat("Shaders.PBR.Metal", "PolishedRoughness", 0.14, 0.16);
+		moveFloat("Shaders.PBR.Metal", "Reflections", 1.0, 0.75);
+		moveFloat("Shaders.Reflections.RT", "Weapon", 0.85, 0.65);
+		moveFloat("Shaders.Reflections.RT", "WeaponRoughness", 0.22, 0.28);
+	}
+	// 108, upstream 1.1.5's 101 (2026-11-24, claude/fd-complete batch 2, docs/next/FD-COMPLETE.md; the owner's and Conor's definition of a complete deferred renderer):
+	// [Main.Main.Quality] DeferredFirstPerson false -> true: the gun and hands are lit by the deferred passes (sun, every lamp, the flashlight's
+	// beam) instead of the game's forward lights. A saved false (the default until now; a test key, so only a menu save holds it) moves once;
+	// a restart key, read when the shaders are first compiled, which is after this step.
+	if (version < 108 && !upstreamRan(101)) {
+		tomlValue* saved = UserSection("Main.Main.Quality");
+		if (saved && saved->contains("DeferredFirstPerson") && saved->at("DeferredFirstPerson").is_boolean() && !saved->at("DeferredFirstPerson").as_boolean()) {
+			(*saved)["DeferredFirstPerson"] = true;
+			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Quality.DeferredFirstPerson false -> true (the gun and hands through the deferred renderer, settings step 108)";
+		}
+	}
+	// 109 (2026-11-27 upstream 1.1.5 merge): upstream changed three defaults without a step, so a menu save of any earlier build (theirs or ours)
+	// holds the old value: [Shaders.ShadowsExteriors.ShadowMaps] CasterFadeMin 0.75 -> 0.25 (visible: shadow casters fade out further away),
+	// [Main.Main.RayTracing] ArenaMB 16 -> 32 and ActorRebuildInterval 8 -> 16. Each moves once, only from exactly its old default.
+	if (version < 109) {
+		replace("Shaders.ShadowsExteriors.ShadowMaps", "CasterFadeMin", 0.75, 0.25, false);
+		replace("Main.Main.RayTracing", "ArenaMB", 16.0, 32.0, true);
+		replace("Main.Main.RayTracing", "ActorRebuildInterval", 8.0, 16.0, true);
 	}
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "
@@ -1417,6 +1510,8 @@ void SettingManager::LoadSettings() {
 	SettingsMain.Main.CubeFaceViewCull = boolSetting(performance, "CubeFaceViewCull", true);
 	SettingsMain.Main.SlimDepthBuffer = boolSetting(performance, "SlimDepthBuffer", true);
 	SettingsMain.Main.SkipRedundantConstants = boolSetting(performance, "SkipRedundantConstants", true);
+	SettingsMain.Main.BatchBoneUploads = boolSetting(performance, "BatchBoneUploads", true);
+	SettingsMain.Main.FastConstantMapSort = boolSetting(performance, "FastConstantMapSort", true);
 	SettingsMain.Main.SkinnedShadowFaceTest = boolSetting(performance, "SkinnedShadowFaceTest", true);
 	SettingsMain.Main.ShaderWarmUp = boolSetting(performance, "ShaderWarmUp", false);
 	SettingsMain.Main.HiddenObjectCulling = boolSetting(performance, "HiddenObjectCulling", false);
@@ -1580,13 +1675,18 @@ void SettingManager::LoadSettings() {
 			char colorKey[12];
 			sprintf(colorKey, "Color%i", colorType);
 			SplitString(GetSettingS(colorsPath.c_str(), colorKey, text), " ", &colorTriples);
-			for (int when = 0; when < TESWeather::kNumTimeOfDay; ++when) {
+			const int loadedTimes = (int)(std::min)(colorTriples.size(), (size_t)TESWeather::kNumTimeOfDay);
+			SE.ColorTimeCount[colorType] = (UInt8)loadedTimes;
+			for (int when = 0; when < loadedTimes; ++when) {
 				rgb[0] = rgb[1] = rgb[2] = 0;
-				if (when < (int)colorTriples.size()) FillFromString(colorTriples[when].c_str(), ",", rgb);	// (2026-11-17: a short list read past its end)
+				FillFromString(colorTriples[when].c_str(), ",", rgb);
 				auto& color = SE.Colors[colorType].colors[when];
 				color.r = rgb[0];
 				color.g = rgb[1];
 				color.b = rgb[2];
+			}
+			for (int when = loadedTimes; when < TESWeather::kNumTimeOfDay; ++when) {
+				SE.Colors[colorType].colors[when] = RGBA{};
 			}
 		}
 		FillFromString(GetSettingS((weatherPath + ".HDR").c_str(), "HDR", text), " ", SE.HDR);
@@ -1708,6 +1808,7 @@ void SettingManager::SaveSettings() {
 	}
 
 	hasUnsavedChanges = false;
+	UnsavedSettings::Clear();	// 2026-11-25 (unsaved marks)
 	SessionLog::OnEvent("Vegas Shaders settings saved to the toml");	// UNOFFICIAL 2026-11-01
 }
 
@@ -1730,6 +1831,7 @@ void SettingManager::RevertSettings() {
 	}
 
 	hasUnsavedChanges = false;	// what is live is what is on disk again
+	UnsavedSettings::Clear();	// 2026-11-25 (unsaved marks)
 }
 
 void SettingManager::SaveSettingsTo(const char* path) {
@@ -1946,11 +2048,26 @@ static std::string LogValue(const SettingNode& node) {
 	}
 }
 
+// 2026-11-25 (unsaved marks): a node's whole value as text (LogValue cuts long strings and rounds floats), so UnsavedSettings can
+// tell a setting that is back at its saved value from one that is not
+static tomlValue s_peekMaxQuality, s_peekMaxQualityUser;	// 2026-11-26 (unsaved marks): PeekSavedBegin's copies
+static bool s_peekMaxQualityChanged = false;
+
+static std::string WholeValue(const SettingNode& node) {
+	typedef SettingManager::Configuration::NodeType Type;
+	char text[32];
+	switch (node.Type) {
+	case Type::Boolean: return node.BoolValue ? "true" : "false";
+	case Type::Integer: sprintf_s(text, "%d", node.IntValue); return text;
+	case Type::Float: sprintf_s(text, "%.9g", node.FloatValue); return text;
+	default: return node.LongValue.empty() ? std::string(node.Value) : node.LongValue;
+	}
+}
+
 /*
 * Stores a node's value in the settings (the user's table, or Max Quality's layer).
 */
 void SettingManager::SetSetting(Configuration::ConfigNode* node) {
-	hasUnsavedChanges = true;
 	SettingsRevision++;
 
 	// UNOFFICIAL 2026-11-01: every change goes to the log as old -> new (SessionLog: coalesced while a slider is dragged, rate-limited)
@@ -1958,6 +2075,58 @@ void SettingManager::SetSetting(Configuration::ConfigNode* node) {
 	const bool known = Config.FillNode(&before, node->Section, node->Key);
 	Config.SetValue(node);
 	if (known) SessionLog::OnSettingChanged(node->Section, node->Key, LogValue(before).c_str(), LogValue(*node).c_str());
+	if (known) UnsavedSettings::Changed(node->Section, node->Key, WholeValue(before), WholeValue(*node));	// 2026-11-25 (unsaved marks)
+	else UnsavedSettings::Changed(node->Section, node->Key, UnsavedSettings::kNoValue, WholeValue(*node));	// 2026-11-25: not a setting of this build: unsaved until Save
+	// 2026-11-25: was "true" on every change, so a setting changed and changed back (nothing to save) kept the menu bar's "Unsaved",
+	// the amber Save and the status bar's "Unsaved changes" until Save. Now they say what the unsaved list says.
+	hasUnsavedChanges = UnsavedSettings::Any();
+}
+
+// 2026-11-26 (unsaved marks): the unsaved settings at their saved values, written straight into the tables (Config.SetValue, as
+// SetSetting does, but with no log, no revision and no unsaved list), so the menu can ask a mode picker what it showed when last
+// saved. Max Quality's two tables and its changed flag are kept as they were (SetValue writes into both while it is on).
+std::vector<SettingManager::Configuration::ConfigNode> SettingManager::PeekSavedBegin() {
+	using Kind = Configuration::NodeType;
+	std::vector<SettingNode> live;
+	for (const auto& section : UnsavedSettings::All())
+		for (const auto& key : section.second) {
+			if (key.second == UnsavedSettings::kNoValue) continue;
+			SettingNode now;
+			if (!Config.FillNode(&now, section.first.c_str(), key.first.c_str())) continue;
+			live.push_back(now);
+		}
+	if (live.empty()) return live;
+	if (Config.MaxQualityActive) {	// put back by PeekSavedEnd
+		s_peekMaxQuality = Config.MaxQualityConfig;
+		s_peekMaxQualityUser = Config.MaxQualityUser;
+		s_peekMaxQualityChanged = Config.MaxQualityUserChanged;
+	}
+	SettingsRevision++;	// 2026-11-26: GetSetting* keep what they read until this changes (SettingsCache): read the saved values
+	for (const SettingNode& now : live) {
+		SettingNode saved = now;
+		const std::string& text = UnsavedSettings::All()[now.Section][now.Key];
+		PutNodeText(saved.Value, text.c_str());
+		if (saved.Type == Kind::String) saved.LongValue = text;
+		else if (saved.Type == Kind::Integer) saved.IntValue = atoi(text.c_str());
+		else if (saved.Type == Kind::Float) saved.FloatValue = (float)atof(text.c_str());
+		else if (saved.Type == Kind::Boolean) saved.BoolValue = text == "true";
+		Config.SetValue(&saved);
+	}
+	return live;
+}
+
+void SettingManager::PeekSavedEnd(const std::vector<Configuration::ConfigNode>& live) {
+	if (live.empty()) return;
+	for (const SettingNode& now : live) {
+		SettingNode node = now;
+		Config.SetValue(&node);
+	}
+	if (Config.MaxQualityActive) {
+		Config.MaxQualityConfig = s_peekMaxQuality;
+		Config.MaxQualityUser = s_peekMaxQualityUser;
+		Config.MaxQualityUserChanged = s_peekMaxQualityChanged;
+	}
+	SettingsRevision++;	// and the live ones again
 }
 
 // Increment and Decrement share one step: +1 (Increment) or -1 (Decrement) for the setting's type. A boolean goes only to the side
@@ -2044,7 +2213,8 @@ void SettingManager::SetSettingWeather(const char* section, const char* key, flo
 		attribute[0] = NULL;
 		for (UInt32 type = 0; type < TESWeather::kNumColorTypes; ++type) {
 			if (part != WeatherColorTypes[type]) continue;
-			for (UInt32 when = 0; when < TESWeather::kNumTimeOfDay; ++when) {
+			const UInt32 count = weather->ColorTimeCount[type] > 4 ? TESWeather::kNumTimeOfDay : 4;
+			for (UInt32 when = 0; when < count; ++when) {
 				const auto& rgb = weather->Colors[type].colors[when];
 				if (!strstr(key, WeatherTimesOfDay[when])) {
 					appendValue(rgb.r); append(","); appendValue(rgb.g); append(","); appendValue(rgb.b);
@@ -2058,7 +2228,7 @@ void SettingManager::SetSettingWeather(const char* section, const char* key, flo
 						appendValue(channel == 'B' ? value : (float)rgb.b);
 					}
 				}
-				if (when < TESWeather::kNumTimeOfDay - 1) append(" ");
+				if (when < count - 1) append(" ");
 			}
 			sprintf(colorSection, "%s.%s.Colors", pieces[0].c_str(), pieces[1].c_str());
 			sprintf(colorNode, "Color%i", type);
@@ -2358,8 +2528,13 @@ void SettingManager::SetSettingsWeather(TESWeather* weather) {
 		ex->SetFogDayFar(saved->FogFarDay);
 		ex->SetFogNightNear(saved->FogNearNight);
 		ex->SetFogNightFar(saved->FogFarNight);
-		memcpy(ex->colors, saved->Colors, TESWeather::kNumColorTypes * TESWeather::kNumTimeOfDay * 4);
-		memcpy(ex->colorsb, saved->Colors, TESWeather::kNumColorTypes * TESWeather::kNumTimeOfDay * 4);
+		for (int c = 0; c < TESWeather::kNumColorTypes; ++c) {
+			const int count = (std::min)((int)saved->ColorTimeCount[c], (int)TESWeather::kNumTimeOfDay);
+			for (int t = 0; t < count; ++t) {
+				ex->colors[c].colors[t] = saved->Colors[c].colors[t];
+				ex->colorsb[c].colors[t] = saved->Colors[c].colors[t];
+			}
+		}
 	}
 
 	// the lighting, fog and sun colours are the source copy (colorsb) times the Main coefficients; the source is never written

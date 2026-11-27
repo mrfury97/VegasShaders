@@ -3,6 +3,12 @@
 // Patching the game's code in memory: plain writes (the page is made writable just for the write), 5-byte relative
 // jumps and calls, and two small helpers that remember what a patched call or vtable slot pointed to before.
 
+// 2026-11-24 hook inventory (docs/next/HOOK-INVENTORY.md): the first time VS writes a site in the game's code or read-only data,
+// one "HOOKSITE" log line with the bytes found there before the write; a call/jmp found there is decoded and the module it goes
+// into named (another plugin got there first). Every helper below calls it; Hooks.cpp's AttachOne calls it for Detours hooks.
+// Later writes of the same site (per-frame toggles) are not logged again. Never changes anything.
+void NoteHookSite(SIZE_T address, SIZE_T count, const char* label = nullptr);
+
 DECLSPEC_NOINLINE void __fastcall SafeWrite8(SIZE_T address, SIZE_T value);
 DECLSPEC_NOINLINE void __fastcall SafeWrite16(SIZE_T address, SIZE_T value);
 DECLSPEC_NOINLINE void __fastcall SafeWrite32(SIZE_T address, SIZE_T value);

@@ -878,12 +878,6 @@ PS_OUTPUT main(PS_INPUT pin)
                 litSum = getVanillaLighting(pin.lightDir.xyz, pin.lightDir.w, PSLightColor[0].rgb, pin.viewDir.xyz, nmap.xyz, albedoPx.rgb, nmap.a, glossPower);
         #endif
     
-        // Self emmitance.
-        #ifdef SI	// self-illuminated: glow map
-            float3 glow = tex2D(GlowMap, pin.texc.xy).rgb;
-            litSum += albedoPx.rgb * LinColor(glow.rgb * EmittanceColor.rgb);
-        #endif
-    
         #ifdef PAR_AMBIENT
             if (PAR_SELF_SHADOW)
                 litSum += getAmbientLighting(AmbientColor.rgb, albedoPx.rgb, sunShadowNormal, shadowWorldPosValid);
@@ -937,7 +931,14 @@ PS_OUTPUT main(PS_INPUT pin)
                 litSum += getVanillaLighting(pin.light3Dir.xyz, pin.light3Dir.w, PSLightColor[2].rgb, pin.viewDir.xyz, nmap.xyz, albedoPx.rgb, nmap.a, glossPower);
         #endif
     #endif
-    
+
+    // UNOFFICIAL 2026-11-23 DecoupleGlowMaps: attenuate scene lighting on glowing texels so ambient/light scales don't wash out glow maps.
+    #ifdef SI
+        float3 glowRaw = tex2D(GlowMap, pin.texc.xy).rgb * EmittanceColor.rgb;
+        float glowDecouple = GlowDecoupleMask(glowRaw);
+        litSum = litSum * (1.0f - glowDecouple) + albedoPx.rgb * LinColor(glowRaw) * GlowScaleFactor();
+    #endif
+
     float3 outCol = LinEncode(litSum.rgb);	// UNOFFICIAL linear litSum: back to the stored (gamma) space, before the fog
     #ifdef ONLY_LIGHT	// light-only pass
         // UNOFFICIAL 2026-10-25 ExactPassSums (core/PassSums.h): while NVR redirects this run of added passes into its own buffer, the pass
@@ -992,20 +993,33 @@ PS_OUTPUT main(PS_INPUT pin)
         // where that pass multiplies it (the draw's flag in NVR_SpecFade.z: 1, or the blended mark 3) and the factor this pass scaled its own
         // light by (albedoPx.rgb is 1 here times the wet darkening's ratio and the rain drops': audit item 26), so the light the passes add is
         // what this pass's light would have been on the wet, tinted surface.
-        #ifdef PAR_AD_GBUFFER
-            po.capturedPad1 = CapturedAlbedoOut(LinColor(parAdTexture * (NVR_SpecFade.z > 0.5f ? pin.adExtra.rgb : 1.0f)) * albedoPx.rgb);
+        #ifdef SI
+            const float parGlowKeep = 1.0f - glowDecouple;
         #else
-            po.capturedPad1 = CapturedAlbedoOut(LinColor(parAdTexture));
+            const float parGlowKeep = 1.0f;
+        #endif
+        #ifdef PAR_AD_GBUFFER
+            po.capturedPad1 = CapturedAlbedoOut(LinColor(parAdTexture * (NVR_SpecFade.z > 0.5f ? pin.adExtra.rgb : 1.0f)) * albedoPx.rgb * parGlowKeep);
+        #else
+            po.capturedPad1 = CapturedAlbedoOut(LinColor(parAdTexture) * parGlowKeep);
         #endif
     #elif defined(ONLY_LIGHT)
         po.capturedPad1 = CAPTURED_ALBEDO_NONE;
     #else
-        po.capturedPad1 = CapturedAlbedoOut(albedoPx.rgb);
+        #ifdef SI
+            po.capturedPad1 = CapturedAlbedoOut(albedoPx.rgb * (1.0f - glowDecouple));
+        #else
+            po.capturedPad1 = CapturedAlbedoOut(albedoPx.rgb);
+        #endif
     #endif
     #ifndef PAR_LIT
         po.capturedPad2 = CapturedMaterialOut(-1.0f);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it; no litSum, no rough)
     #else
-        po.capturedPad2 = CapturedMaterialOutNoHighlight(rough);	// UNOFFICIAL 2026-10-31: the rough it was lit with (no metal path here); 2026-11-12 ptbump: coded where the game draws the mesh with no highlight (Includes/CapturedNormals.hlsl)
+        #ifdef SI
+            po.capturedPad2 = CapturedMaterialOutNoHighlight(lerp(rough, 1.0f, glowDecouple));
+        #else
+            po.capturedPad2 = CapturedMaterialOutNoHighlight(rough);	// UNOFFICIAL 2026-10-31: the rough it was lit with (no metal path here); 2026-11-12 ptbump: coded where the game draws the mesh with no highlight (Includes/CapturedNormals.hlsl)
+        #endif
     #endif
     #if CAPTURED_NORMALS_ON >= 4 && defined(PAR_LIT) && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)
         po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, gbShadingNormal);	// UNOFFICIAL 2026-11-14 GBufferV2: g / a
@@ -1027,8 +1041,13 @@ PS_OUTPUT main(PS_INPUT pin)
         #else
             #define FD_SV_CANOPY 1.0f
         #endif
+        #ifdef SI
+            const float parGlowF0 = FD_SV_F0 * (1.0f - glowDecouple);
+        #else
+            const float parGlowF0 = FD_SV_F0;
+        #endif
         po.capturedNormal.a = FDSunVisCode(po.capturedNormal.a, FDSunVisCanopy(FD_SV_CANOPY) * FDSunVisSelf(parSelfShadow) * FDSunVisMicro(nmap.xyz, pin.lightDir.xyz),
-            FD_SV_F0, NVR_SpecFade.z);
+            parGlowF0, NVR_SpecFade.z);
         #undef FD_SV_CANOPY
     #endif
     #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 3 && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)

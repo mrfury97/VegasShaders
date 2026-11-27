@@ -9,6 +9,7 @@
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-11-18 next-111: the blur in the rect frame (ShouldRender)
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the skin's albedo target is its skin source (NoteSkinAlbedo)
 #include "../../core/DeferredSkin.h"	// UNOFFICIAL 2026-11-15 DeferredSkin: its records write the G-buffer, not these targets; DeferredSkinBlur fills them
+#include "../../core/MaterialSSSProto.h"
 #include "../../core/RtPathTrace.h"
 
 static const float SkinScatterMMPerUnit = 14.2857f;   // one game unit is 1/70 m
@@ -482,9 +483,23 @@ void SkinScatteringEffect::FillFromDeferredSkin() {
 }
 
 void DeferredSkin::AfterPasses(IDirect3DDevice9* d) {
-	if (DrawnThisSpan) {
-		if (BurleyWanted()) BurleyApply(d);	// (2026-11-15 SSS v2, Kernel 0: the Burley disc, Shaders\DeferredSkinSSS.hlsl)
-		else if (BlurWanted() && TheShaderManager->Effects.SkinScattering) TheShaderManager->Effects.SkinScattering->FillFromDeferredSkin();
+	const int matMode = MaterialSSSProto::EffectiveMode();
+	const bool unifySolidsInBurley = (matMode == 2) && BurleyWanted() && !SssFailed && SssPrep && SssBlur && !CapturedNormals::VmSpan;
+	if ((DrawnThisSpan && BurleyWanted()) || unifySolidsInBurley) {
+		if (!LinearScene::Linear && LinearScene::InSpan && LinearScene::SpanTarget) {
+			IDirect3DSurface9* cur = nullptr;
+			if (SUCCEEDED(d->GetRenderTarget(0, &cur)) && cur) {
+				if (cur == LinearScene::SpanTarget) LinearScene::Convert(d, cur, true);
+				cur->Release();
+			}
+		}
+		BurleyApply(d, matMode == 2);	// (2026-11-15 SSS v2 + 2026-11-25 unified solids scatter, Shaders\DeferredSkinSSS.hlsl)
+	}
+	else if (DrawnThisSpan && BlurWanted() && TheShaderManager->Effects.SkinScattering) {
+		TheShaderManager->Effects.SkinScattering->FillFromDeferredSkin();
+	}
+	if (!unifySolidsInBurley) {
+		MaterialSSSProto::Apply(d);
 	}
 	DrawnThisSpan = false;
 	DeferredLamps::SkinSpecSurface = nullptr;

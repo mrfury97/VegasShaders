@@ -143,7 +143,7 @@ public:
 		D3DXVECTOR4		LinearScales = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 0.0f);	// UNOFFICIAL TESR_LinearScales (Object.hlsl, c168): LinearPreDecode
 		D3DXVECTOR4		LampPassTrim;	// UNOFFICIAL TESR_LampPassTrim (ObjectTemplate.hlsl lamp passes): x TrimLampPasses on
 		D3DXVECTOR4		Translucency = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_Translucency (Grass23x00*.vso, STLEAF00*.vso): x Translucency, y Power, z SunGate; zero is off
-		D3DXVECTOR4		SharpSky;	// UNOFFICIAL TESR_SharpSky (SkyAmbient.hlsl): x [Shaders.PBR.Metal] SharpSky, 0 = the plain sky
+		D3DXVECTOR4		SharpSky = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_SharpSky (SkyAmbient.hlsl, c136): x SharpSky, y Clearcoat, z Pearlescence (forward Object.hlsl getMetalAmbient), w GlowScale (Object.hlsl GlowScaleFactor)
 		D3DXVECTOR4		EnvCube = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_EnvCube (Includes/LiveCube.hlsl): x metal's, y the env-map pass's share of the live cube (0 while it is not kept up), z its last mip
 		D3DXVECTOR4		Linear = D3DXVECTOR4(1.0f, 1.0f, 0.0f, 0.0f);	// UNOFFICIAL TESR_LinearLighting (Includes/LinearLight.hlsl): x gamma (1 = off), y 1 / x
 		D3DXVECTOR4		ShadowContrast = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-10-29 TESR_ShadowContrast (ObjectTemplate.hlsl, c93): x strength indoors
@@ -172,6 +172,8 @@ public:
 		float CubeReflections = 0.0f;	// UNOFFICIAL [Shaders.PBR.Metal] CubeReflections: share of the live surroundings cube
 		float EnvCubeReflections = 0.0f;	// UNOFFICIAL [Shaders.PBR.EnvMaps] CubeReflections: the same for the env-map pass
 		float Reflections = 0.0f;	// [Shaders.PBR.Metal] Reflections, before Reflectivity (UpdateConstants)
+		float Clearcoat = 0.0f;		// [Shaders.PBR.Metal] Clearcoat (2026-11-26): transparent lacquer over metal
+		float Pearlescence = 0.0f;	// [Shaders.PBR.Metal] Pearlescence (2026-11-26): view-angle hue shift on metal
 	};
 	MetalSettingsStruct	MetalSettings;
 
@@ -210,7 +212,10 @@ public:
 	D3DXVECTOR4	MaterialRough = D3DXVECTOR4(-1.0f, -1.0f, 0.0f, 0.0f);	// TESR_MaterialRough (c198): z DebugView
 	D3DXVECTOR4	MaterialTint = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);		// TESR_MaterialTint (c199)
 
+	bool	FirstPersonActive = false;
+	bool	FirstPersonWeapon = false;
 	void	BeginFirstPerson(IDirect3DDevice9* Device);
+	void	SetFirstPersonWeapon(IDirect3DDevice9* Device, bool isWeapon);
 	void	EndFirstPerson(IDirect3DDevice9* Device);
 	// UNOFFICIAL: the current SkylightingSaturation (day/night/interior and rain blended like the other values);
 	// SkyShaders::UpdateConstants applies it to the skylight's spherical-harmonic coefficients.
@@ -231,6 +236,8 @@ public:
 		float Gamma = 1.0f, NightGamma = 0.0f, FalloffMatch = 1.0f;
 	};
 	LinearSettingsStruct	LinearSettings;
+	bool		DecoupleGlowMaps = true;	// UNOFFICIAL 2026-11-23 [Shaders.PBR.Main] DecoupleGlowMaps (TESR_SharpSky.w; 2026-11-27 merge: c168.w is DeferredLandRoughF90)
+	float		GlowScale = 1.0f;			// UNOFFICIAL 2026-11-23 [Shaders.PBR.Main] GlowScale
 	void	ApplyLinearGamma();
 
 	// UNOFFICIAL 2026-10-21 [Shaders.PBR.LampFalloff] (Includes/LampFalloff.hlsl): the lamps' physically shaped falloff (Exterior outdoors,

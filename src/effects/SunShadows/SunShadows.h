@@ -17,6 +17,8 @@ public:
 
 	void	SetCT();
 	void	RegisterTextures();
+	bool	TargetParkable(const char* SamplerName) override { return true; }
+	bool	TargetsWanted() override;
 
 	void	UpdateConstants() {};
 	void	RegisterConstants() {};

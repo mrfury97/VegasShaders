@@ -177,7 +177,7 @@ void FlashlightEffect::UpdateConstants() {
 	const bool aiming = frameTime < aimingHoldUntil;
 	const bool rideWeapon = (Settings.attachToWeapon || aiming) && !meleeWeapon && Player->process->IsWeaponOut();
 
-	if (Player->isThirdPerson) {
+	if (Player->IsDrawnThirdPerson()) {
 		if (rideWeapon && Player->ActorSkinInfo && Player->ActorSkinInfo->WeaponNode) {
 			weaponPos = Player->ActorSkinInfo->WeaponNode->m_worldTransform.pos;
 			weaponRot = Player->ActorSkinInfo->WeaponNode->m_worldTransform.rot;

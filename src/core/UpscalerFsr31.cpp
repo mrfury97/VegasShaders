@@ -325,7 +325,7 @@ namespace {
 			In.RenderHeight > In.InputHeight || !In.DisplayWidth || !In.DisplayHeight) return Fail("an input is missing");
 		if (!MakePipelines(false)) return false;
 		if (In.Hdr && !MakePipelines(true)) return false;
-		if (!EnsureResources(In.InputWidth, In.InputHeight, In.DisplayWidth, In.DisplayHeight)) return Fail("its textures could not be made");
+		if (!EnsureResources(In.RenderWidth, In.RenderHeight, In.DisplayWidth, In.DisplayHeight)) return Fail("its textures could not be made");
 
 		ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
 		ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
@@ -357,8 +357,8 @@ namespace {
 		c.previousFrameRenderSize[1] = c.renderSize[1];
 		c.renderSize[0] = renderW;
 		c.renderSize[1] = renderH;
-		c.maxRenderSize[0] = (INT32)In.InputWidth;
-		c.maxRenderSize[1] = (INT32)In.InputHeight;
+		c.maxRenderSize[0] = renderW;
+		c.maxRenderSize[1] = renderH;
 		c.tanHalfFOV = In.TanHalfFovX;
 		c.viewSpaceToMetersFactor = 1.0f / In.UnitsPerMetre;
 		// setupDeviceDepthToViewSpaceDepthParams for a standard (not inverted, finite) projection with the inputs' near and far: the

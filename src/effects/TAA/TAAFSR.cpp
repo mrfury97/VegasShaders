@@ -113,7 +113,7 @@ namespace {
 		prep.prevProjection = prevProjection;
 		prep.cameraDelta = D3DXVECTOR4(camDelta.x, camDelta.y, camDelta.z, objectMotion ? 1.0f : 0.0f);
 		prep.size = D3DXVECTOR4((float)width, (float)height, reset ? 1.0f : 0.0f, weaponFallback);
-		prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), vmMotion ? 1.0f : 0.0f, 0.0f);
+		prep.extra = D3DXVECTOR4(reactive ? 1.0f : 0.0f, ReactiveMask::MaxDistance(), vmMotion ? 1.0f : 0.0f, TheRenderManager->IsReversedDepth() ? 1.0f : 0.0f);
 	}
 
 	Upscaler::IUpscaler* EvaluateNativeUpscaler(IDirect3DDevice9* Device, int upscalerId, IDirect3DBaseTexture9* color,
@@ -318,7 +318,10 @@ bool TAAEffect::FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 	{
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, upscaler->Output()), Image(1, source), Image(2, viewModel), Image(3, fsrMotion.Texture),
 			Image(4, fsrDepth.Texture), Sampler(0, point) };
-		struct { UInt32 pointIndex; float debugView; float w, h; UInt32 weaponAA; } compositePush = { 0, (float)Settings.DebugView, (float)width, (float)height, vmJittered ? 1u : 0u };
+		struct { UInt32 pointIndex; float debugView; float w, h; UInt32 weaponAA; } compositePush = {
+			0, (float)Settings.DebugView, (float)width, (float)height,
+			(vmJittered ? 1u : 0u) | (TheRenderManager->IsReversedDepth() ? 4u : 0u)
+		};
 		static_assert(sizeof(compositePush) == 20, "FSRComposite.frag's push block");
 		static GpuTimer compositeTimer("  FSR composite (NVR)");
 		GpuProfileScope gpu(compositeTimer, Device);
@@ -336,6 +339,7 @@ bool TAAEffect::PreTonemapNativeAA(IDirect3DDevice9* Device, IDirect3DSurface9* 
 	if (!FSRSettings.PreTonemapHDR || !Enabled || !Effect || !ShouldRender()) return false;
 	if (!TheSettingManager->SettingsMain.Main.RenderPreTonemapping) return false;
 	if (Up.Upscaled || Up.Deferred || RenderRect::Active() || rrRanThisFrame) return false;
+	if (RenderScaleTempSkipped()) return false;
 	if (!FSRWanted()) return false;
 	FrameChain& chain = TheShaderManager->Chain;
 	if (!chain.Owns(RenderTarget, TheTextureManager->RenderedSurface)) return false;
@@ -425,7 +429,8 @@ bool TAAEffect::PreTonemapNativeAA(IDirect3DDevice9* Device, IDirect3DSurface9* 
 		NVR_EXT_RESOURCE_BINDING b[] = { Image(0, upscaler->Output()), Image(1, color), Image(2, viewModel), Image(3, fsrMotion.Texture),
 			Image(4, fsrDepth.Texture), Sampler(0, point) };
 		struct { UInt32 pointIndex; float debugView; float w, h; UInt32 weaponAA; } compositePush = {
-			0, (float)Settings.DebugView, (float)width, (float)height, (vmJittered ? 1u : 0u) | 2u
+			0, (float)Settings.DebugView, (float)width, (float)height,
+			(vmJittered ? 1u : 0u) | 2u | (TheRenderManager->IsReversedDepth() ? 4u : 0u)
 		};
 		static_assert(sizeof(compositePush) == 20, "FSRComposite.frag's push block");
 		static GpuTimer compositeTimer("  FSR composite (NVR)");
@@ -764,7 +769,7 @@ bool TAAEffect::RayReconstruct(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	const bool vmJittered = ViewModelMotion::JitteredThisFrame();
 	// (perf-rr) the render size: in a rect frame the rect of the screen-size depth / weapon depth, motion in uv of the render picture
 	prep.size = D3DXVECTOR4((float)rw, (float)rh, reset ? 1.0f : 0.0f, vmMotion ? Upscaler::DlssWeaponMaskValue() : FSRSettings.WeaponReactive);
-	prep.extra = D3DXVECTOR4(0.0f, 0.0f, vmMotion ? 1.0f : 0.0f, 0.0f);
+	prep.extra = D3DXVECTOR4(0.0f, 0.0f, vmMotion ? 1.0f : 0.0f, TheRenderManager->IsReversedDepth() ? 1.0f : 0.0f);
 	ID3D9NvrExtBuffer* prepBuffer = ExtUniforms(rrPrepUniforms, &prep, sizeof(prep));
 	if (!prepBuffer) return fail("its constant buffers could not be written");
 	{

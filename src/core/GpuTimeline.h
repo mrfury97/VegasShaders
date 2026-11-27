@@ -30,7 +30,7 @@ inline bool ChargeTimelineIntervals(const UINT64* ticks, const unsigned char* ke
 // not back yet is simply collected later; a frame is skipped when all slots are still in flight.
 class GpuTimeline {
 public:
-	static constexpr unsigned KeyCount = 192;
+	static constexpr unsigned KeyCount = 252;
 	static constexpr unsigned char NoKey = 255;
 	static constexpr unsigned FramesInFlight = 6;
 	static constexpr unsigned MaxMarks = 1024;	// per frame; a frame with more is dropped (counted)

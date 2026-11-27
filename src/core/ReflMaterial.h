@@ -66,15 +66,22 @@ namespace ReflMaterial {
 	inline bool FirstPersonLive = false;		// the first-person scene writes alpha (BeginFirstPerson)
 	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"): TESR_ReflReplace as
 	// the game's env-map pass (EnvTemplate.hlsl) reads it: x the share of last frame's reflection coverage taken out of the env map (0: off,
-	// the pass is exactly as before), zw one pixel of the scene target in UV. The Reflections effect makes the frame's value once
-	// (UpdateWaterConstants); it is LIVE only inside the frame's first world scene and the first-person scene. Any other scene the game
-	// draws (the planar water reflection, a second world pass) has another camera or target, where a lookup by screen place would read
-	// someone else's pixels: there the pass gets 0. With the key off everything here stays 0 (the calls below copy four zeros).
+	// the pass is exactly as before), y how the pass finds last frame's pixel: 0 (the world scene, 2026-11-24) where the surface was then
+	// (TESR_ReflReplaceReproject), zw the largest uv it may read; 1 (the first-person scene: it moves with the camera) at the same screen
+	// place, zw one pixel of the scene target in UV. The Reflections effect makes the frame's values once (UpdateWaterConstants); they are
+	// LIVE only inside the frame's first world scene and the first-person scene. Any other scene the game draws (the planar water
+	// reflection, a second world pass) has another camera or target, where the lookup would read someone else's pixels: there the pass
+	// gets 0. With the key off everything here stays 0 (the calls below copy four zeros).
 	inline float ForwardReplace[4] = { 0.0f, 0.0f, 0.0f, 0.0f };		// the registered constant: what a shader bound now is sent
-	inline float ForwardReplaceFrame[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// this frame's value (zeros: off, or not usable this frame)
+	inline float ForwardReplaceFrame[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// this frame's value for the world scene (zeros: off, or not usable this frame)
+	inline float ForwardReplaceScreen[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// (2026-11-24) the same for the first-person scene (y 1: by screen place)
+	inline float ForwardReplaceTexel[4] = { 0.0f, 0.0f, 0.0f, 0.0f };	// P3 fix: half-res texel step (xy) and min UV clamp (zw) for edge/disocclusion fallback
 	inline bool ForwardReplaceWorldUsed = false;						// this frame's first world scene has taken it
 	inline bool ForwardReplaceInWorld = false;							// inside that world scene (a first-person scene nested in it hands it back)
-	inline void ForwardReplaceLive(bool live) { for (int i = 0; i < 4; i++) ForwardReplace[i] = live ? ForwardReplaceFrame[i] : 0.0f; }
+	inline void ForwardReplaceLive(bool live, bool firstPerson = false) {
+		const float* value = firstPerson ? ForwardReplaceScreen : ForwardReplaceFrame;
+		for (int i = 0; i < 4; i++) ForwardReplace[i] = live ? value[i] : 0.0f;
+	}
 	inline int NeutralDepth = 0;				// NeutralBegin calls open (the dispatcher's round the pass hook's: the outer one decides)
 	inline ReflMaterialRule::Write NeutralWrite = ReflMaterialRule::Keep;
 	inline bool NeutralAlphaAdded = false, NeutralBlendChanged = false;
@@ -196,13 +203,15 @@ namespace ReflMaterial {
 	// the effects copy the material out (the arms and gun over a mirror kept its material: a chrome gun). No material passes here; every
 	// pass that replaces the colour writes its own alpha (Own), under the same separate alpha blend as the world scene.
 	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live, bool replaceForward = false) {
-		ForwardReplaceLive(replaceForward);	// UNOFFICIAL 2026-11-20: only subtract last frame's reflection coverage from the gun's env map when RT weapon reflections are active (otherwise world reflections behind the gun cut holes out of it)
+		ForwardReplaceLive(replaceForward, true);	// UNOFFICIAL 2026-11-20: only subtract last frame's reflection coverage from the gun's env map when RT weapon reflections are active (otherwise world reflections behind the gun cut holes out of it)
+		if (device) device->SetPixelShaderConstantF(36, ForwardReplace, 1);
 		FirstPersonLive = CompiledIn() && live && state && device && !StatesSet;
 		NeutralDepth = 0;
 		if (FirstPersonLive) SetSceneStates(state, device);
 	}
 	inline void EndFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device) {
 		ForwardReplaceLive(ForwardReplaceInWorld);	// UNOFFICIAL 2026-11-12 ReplaceForward
+		if (device) device->SetPixelShaderConstantF(36, ForwardReplace, 1);
 		if (FirstPersonLive) RestoreSceneStates(state, device, "first-person");
 		FirstPersonLive = false;
 	}

@@ -87,8 +87,8 @@ namespace CasterView {
 	inline bool Skip(const void* passPtr, bool world) {
 		if (!Mode || !world || !passPtr || !TheShaderManager->GameState.isExterior) return false;
 		const UInt16 e = ((const PointShadowForward::RenderPassView*)passPtr)->passEnum;
-		return LampsInOnePass::Census::IsLampPass(e) || LampsInOnePass::Census::IsHighlightPass(e) || (e >= 0x14A && e <= 0x150) ||
-			(e >= 0x248 && e <= 0x255);
+		return LampsInOnePass::Census::IsLampPass(e) || LampsInOnePass::Census::IsHighlightPass(e) || (e >= 0x14A && e <= 0x153) ||
+			(e >= 0x248 && e <= 0x256);
 	}
 
 	inline Kind Classify(const NiGeometry* g, int& cascade, float& distance, float& fade, bool& lod) {

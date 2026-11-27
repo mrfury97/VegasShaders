@@ -48,6 +48,9 @@ namespace ParticleSize {
 	}
 
 	// 0xE69790 (hParticleVertexDecls[1], with frames) and 0xE696A0 ([0]).
+	using GetDeclFn = IDirect3DVertexDeclaration9* (__thiscall*)(void*);
+	inline GetDeclFn GetDeclFramesOrig = (GetDeclFn)0x00E69790;
+	inline GetDeclFn GetDeclPlainOrig = (GetDeclFn)0x00E696A0;
 	inline IDirect3DVertexDeclaration9* __fastcall GetDeclFrames(void* renderer, void*) { return MakeDecl(renderer, 0x284, true); }
 	inline IDirect3DVertexDeclaration9* __fastcall GetDeclPlain(void* renderer, void*) { return MakeDecl(renderer, 0x280, false); }
 
@@ -174,8 +177,17 @@ namespace ParticleSize {
 			Logger::Log("ParticleSize: the game's particle vertex packing is already patched (another plugin?): soft particles stay off");
 			return;
 		}
-		WriteRelJump(0xE69790, &GetDeclFrames);
-		WriteRelJump(0xE696A0, &GetDeclPlain);
+		NoteHookSite(0x00E69790, 8, "GetDecl_Particles");
+		NoteHookSite(0x00E696A0, 8, "GetDecl_ParticlesSub");
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+		const LONG a = DetourAttach(&(PVOID&)GetDeclFramesOrig, (PVOID)&GetDeclFrames);
+		const LONG b = a == NO_ERROR ? DetourAttach(&(PVOID&)GetDeclPlainOrig, (PVOID)&GetDeclPlain) : a;
+		const LONG committed = b == NO_ERROR ? DetourTransactionCommit() : (DetourTransactionAbort(), b);
+		if (committed != NO_ERROR) {
+			Logger::Log("[WARN] ParticleSize: Detours attach failed for GetDecl_Particles / GetDecl_ParticlesSub (%ld); soft particles stay off", committed);
+			return;
+		}
 		ReplaceCall(0xE70560, (SIZE_T)&PackPoints);
 		ReplaceCall(0xE705FE, (SIZE_T)&PackPointsPlain);
 		ReplaceCall(0xE70AE1, (SIZE_T)&PackStrips);

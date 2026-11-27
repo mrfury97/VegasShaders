@@ -45,8 +45,9 @@ layout(push_constant) uniform Push {
 #define farZ cb.cameraData.y
 
 // CombineDepth.frag toVS: the game's depth buffer to view space z.
-float toVS(float depth) {
-    return nearZ * farZ / (nearZ + depth * (farZ - nearZ));
+float toVS(float depth, bool reversed) {
+    return reversed ? nearZ * farZ / (nearZ + depth * (farZ - nearZ))
+                    : nearZ * farZ / (farZ - depth * (farZ - nearZ));
 }
 
 vec3 toWorld(vec2 tex) {
@@ -61,10 +62,11 @@ void main() {
     if (any(greaterThanEqual(pixel, ivec2(cb.size.xy)))) return;
     vec2 uv = (vec2(pixel) + 0.5) / cb.size.xy;
 
-    float viewZ0 = toVS(texelFetch(sampler2D(t_worldDepth, POINT_S), pixel, 0).x);
+    bool reversedDepth = cb.extra.w > 0.5;
+    float viewZ0 = toVS(texelFetch(sampler2D(t_worldDepth, POINT_S), pixel, 0).x, reversedDepth);
     float linear01 = viewZ0 / farZ;
-    float vmRaw = cb.size.w >= 0.0 ? texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x : 0.0;
-    bool weapon = cb.size.w >= 0.0 && vmRaw > 0.0;
+    float vmRaw = cb.size.w >= 0.0 ? texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x : (reversedDepth ? 0.0 : 1.0);
+    bool weapon = cb.size.w >= 0.0 && (reversedDepth ? (vmRaw > 0.0) : (vmRaw < 0.99999));
 
     // TAA.glsl Reproject, line for line (as FSRPrep.comp).
     vec3 cameraVector = toWorld(uv) * (linear01 * farZ);
@@ -96,7 +98,7 @@ void main() {
 
     float z = max(linear01 * farZ, nearZ);
     float device = clamp(farZ / (farZ - nearZ) * (1.0 - nearZ / z), 0.0, 1.0);
-    float vmDepth = (1.0 - clamp(vmRaw, 0.0, 1.0)) * 0.001;
+    float vmDepth = (reversedDepth ? (1.0 - clamp(vmRaw, 0.0, 1.0)) : clamp(vmRaw, 0.0, 1.0)) * 0.001;
     float outDepth = weapon ? (cb.extra.z > 0.5 ? vmDepth : 0.0) : device;
 
     imageStore(o_motion, pixel, vec4(motion, 0.0, 0.0));

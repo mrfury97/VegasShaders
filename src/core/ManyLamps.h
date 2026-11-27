@@ -6,6 +6,7 @@
 #include "LampTableCore.h"	// UNOFFICIAL 2026-11-14 LampTableFast (the table's data work, shared with tests/lamp_table_bench.cpp)
 #include "LampTableThread.h"	// UNOFFICIAL 2026-11-14 LampTableThread (the binning on FrameWorker's thread, shared with the bench)
 #include "ForwardPlusHeader.h"	// UNOFFICIAL 2026-11-15 DeferredTransparents (the forward+ records' header texels; nothing while it is off)
+#include "PortalVisibility.h"	// UNOFFICIAL 2026-11-24 PortalVisibility (culls hidden-room lamps from froxel table indoors)
 #include <unordered_map>
 
 // Ported 2026-10-28 from Conor (mrfury97)'s fork onto P84 v3 (github.com/mrfury97/NVR-Unofficial-Optimized pull request 1, branch
@@ -469,6 +470,8 @@ namespace ManyLamps {
 		order.clear();
 		if (SceneLamps.size() != (size_t)TableLamps) SceneLamps.resize(TableLamps);
 		ActiveIndex.clear();
+		const bool portalCull = WorldDraw && TheShaderManager && !TheShaderManager->GameState.isExterior && PortalVisibility::Active(SceneNode);
+		if (TheFrameRateManager) PortalVisibility::OnFrame((UInt32)TheFrameRateManager->FrameNumber);
 		int n = 0;
 		for (NiTList<ShadowSceneLight>::Entry* e = SceneNode ? SceneNode->lights.start : nullptr; e && n < TableLamps; e = e->next) {
 			const ShadowSceneLight* light = e->data;
@@ -487,7 +490,15 @@ namespace ManyLamps {
 			const UInt8* raw8 = (const UInt8*)light;
 			l.hidden = (((const UInt8*)source)[0x30] & 1) != 0;	// (2026-11-07) AllLamps: not hidden
 			l.active = *(const UInt16*)(raw8 + 0x110) != 0xFF && !l.hidden && !raw8[0xEC];
-			if (l.active) ActiveIndex.push_back(n);
+			bool binInFroxels = l.active;
+			if (portalCull && binInFroxels) {
+				PortalVisibility::NoteFroxelTest();
+				if (!PortalVisibility::IsLightVisibleNow(SceneNode, light)) {
+					binInFroxels = false;
+					PortalVisibility::NoteFroxelCulled();
+				}
+			}
+			if (binInFroxels) ActiveIndex.push_back(n);
 			order.push_back(light);
 			n++;
 		}

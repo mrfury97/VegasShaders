@@ -70,9 +70,10 @@ namespace AlphaHash {
 		SentSize = -1;
 		const bool hashIn = CompiledIn(), coverIn = CoverageCompiledIn();
 		if (!hashIn && !coverIn) { Live = HashLive = CoverLive = false; return; }
-		const int mode = hashIn ? TheSettingManager->GetSettingI(kSection, "Mode") : 0;
+		const bool hashOn = hashIn && (TheSettingManager->GetSettingI(kSection, "Enabled") != 0);
+		const int mode = hashOn ? TheSettingManager->GetSettingI(kSection, "Mode") : 0;
 		const float scale = coverIn ? (std::clamp)(TheSettingManager->GetSettingF(kSection, "FarCoverageScale"), 0.0f, 0.5f) : 0.0f;
-		HashLive = hashIn && jittered && mode > 0;
+		HashLive = hashOn && jittered && mode > 0;
 		CoverLive = scale > 0.0f;
 		Live = HashLive || CoverLive;
 		if (firstWorld) {
@@ -96,7 +97,7 @@ namespace AlphaHash {
 		// through 8 stratified values (bit-reversed eighths: the jitter cycle's length); 2 still. z carries the style above the edge width.
 		// (2026-11-16 round 3 decision) -1 = auto: 3 under TAA's own resolve (native D3D9, or the fork without FSR / DLSS: its exponential history
 		// never settles a per-frame hash, the still-camera fizz), 0 under an upscaler (FSR 3.1 / DLSS accumulate it steadily, and 0 is the softest).
-		const int asked = hashIn ? TheSettingManager->GetSettingI(kSection, "HashStyle") : 0;
+		const int asked = hashOn ? TheSettingManager->GetSettingI(kSection, "HashStyle") : 0;
 		const int style = asked < 0 ? (upscaler ? 0 : 3) : (std::min)(asked, 6);
 		static int loggedStyle = -2;
 		if (HashLive && style != loggedStyle) {
@@ -105,7 +106,7 @@ namespace AlphaHash {
 		}
 		static const float kEighths[8] = { 0.0f, 4.0f, 2.0f, 6.0f, 1.0f, 5.0f, 3.0f, 7.0f };
 		Constant.y = style == 0 ? 5.588238f * (float)(Frame % 64) : (style == 2 || style == 4) ? 0.0f : (kEighths[Frame % 8] + 0.5f) / 8.0f;
-		Constant.z = (hashIn ? (std::clamp)(TheSettingManager->GetSettingF(kSection, "EdgeWidth"), 0.25f, 4.0f) : 1.0f) + 16.0f * (float)style;
+		Constant.z = (hashOn ? (std::clamp)(TheSettingManager->GetSettingF(kSection, "EdgeWidth"), 0.25f, 4.0f) : 1.0f) + 16.0f * (float)style;
 		const float q = std::floor((std::clamp)(-mipBias, 0.0f, 3.0f) * 4.0f + 0.5f);	// quarter mips, 0-12
 		Constant.w = CoverLive ? scale + 2.0f * q : 0.0f;
 	}

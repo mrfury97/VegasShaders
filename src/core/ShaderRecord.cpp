@@ -69,11 +69,32 @@ void logCompilerMessages(ID3DXBuffer* messages, const char* shaderName) {
 	Logger::Log("%s", (char*)messages->GetBufferPointer());	// (2026-11-17: as text, not as the format: the messages quote the shader file)
 	RegisterClash::Check(shaderName, (const char*)messages->GetBufferPointer());
 }
+
+// Tracks every live ShaderProgram (game collections, standalone deferred/forward+ records, and effects)
+// so texture parking/recreation clears every raw cached pointer, not only ShaderCollection::ShaderProg[0..2].
+struct ProgramRegistry {
+	std::mutex mtx;
+	std::unordered_set<ShaderProgram*> live;
+};
+ProgramRegistry& livePrograms() {
+	static ProgramRegistry* reg = new ProgramRegistry();
+	return *reg;
+}
 }
 
-ShaderProgram::ShaderProgram() : FloatShaderValues(nullptr), FloatShaderValuesCount(0), TextureShaderValues(nullptr), TextureShaderValuesCount(0) {}
+ShaderProgram::ShaderProgram() : FloatShaderValues(nullptr), FloatShaderValuesCount(0), TextureShaderValues(nullptr), TextureShaderValuesCount(0) {
+	std::lock_guard<std::mutex> lock(livePrograms().mtx);
+	livePrograms().live.insert(this);
+}
 
-ShaderProgram::~ShaderProgram() { freeArray(FloatShaderValues); freeArray(TextureShaderValues); }
+ShaderProgram::~ShaderProgram() {
+	{
+		std::lock_guard<std::mutex> lock(livePrograms().mtx);
+		livePrograms().live.erase(this);
+	}
+	freeArray(FloatShaderValues);
+	freeArray(TextureShaderValues);
+}
 
 
 ShaderRecord::ShaderRecord() : HasRenderedBuffer(false), HasDepthBuffer(false), ClearSamplers(true) {}
@@ -93,6 +114,25 @@ void ShaderProgram::ClearSampler(const char* SamplerName, size_t NameLength) {
 		// unrecognised, so this can legitimately be null.
 		if (!slot.Texture) continue;
 		if (memcmp(slot.Name, SamplerName, NameLength) == 0 && slot.Texture->Texture) slot.Texture->Texture = nullptr;
+	}
+}
+
+void ShaderProgram::ClearAllSamplers(const char* SamplerName, size_t NameLength) {
+	if (!SamplerName || !NameLength) return;
+	std::lock_guard<std::mutex> lock(livePrograms().mtx);
+	for (ShaderProgram* program : livePrograms().live)
+		if (program) program->ClearSampler(SamplerName, NameLength);
+}
+
+void ShaderProgram::ForgetAllTexture(IDirect3DBaseTexture9* Texture) {
+	if (!Texture) return;
+	std::lock_guard<std::mutex> lock(livePrograms().mtx);
+	for (ShaderProgram* program : livePrograms().live) {
+		if (!program) continue;
+		for (UInt32 i = 0; i < program->TextureShaderValuesCount; i++) {
+			TextureRecord* record = program->TextureShaderValues[i].Texture;
+			if (record && record->Texture == Texture) record->Texture = nullptr;
+		}
 	}
 }
 
@@ -132,17 +172,27 @@ void ShaderProgram::NoteCloudFailure(const std::string& PreprocessedPath, ID3DXB
 	const std::string portable = PortableSource(Source);
 	file.write(portable.data(), portable.size());
 }
-// UNOFFICIAL 2026-11-26 faster-shader-compile (room 06's warm bench starts): the same for any record that ran out of temp registers (X4505) at
-// both flags. With Wetness Effects, Puddles and Terrain Blending the NoCloud and NoCloud\PuddlesLean builds of SLS2023/24/26/27.pso failed so at
-// EVERY start, 6-8 s each on the main thread (54-59 s of a warm start), because only the build with the clouds' lookup remembered its
-// failure. The text D3DX was given is written as <entry>.hlsl.x4505 (portable, as the cache); while the record's text is exactly that, it is
-// not compiled again and fails as it would have. The same compiler and flags always give the same result for the same text; any change to
-// the text (a setting, a new build) compiles it again, and a later successful build removes the marker.
-bool ShaderProgram::KnownOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
-	return CheckPreprocessResult((PreprocessedPath + ".x4505").c_str(), Source);
+// (2026-11-27 upstream 1.1.5 merge: our .x4505 memo of 2026-11-26 is replaced by the generic .failed one below, which also remembers X4505)
+// UNOFFICIAL 2026-11-24 fd-complete (ShaderRecord.h): a failed compile remembered by its exact text. Only a real compiler error is
+// remembered ("error X...": not an empty message, as an out-of-memory D3DX call in a crowded 32-bit address space can give), never the
+// register clash X4500 (RegisterClash handles that one at every start).
+static const char* const kFailHeader[3] = { nullptr, "VSFAIL 1\n", "VSFAIL 2\n" };
+int ShaderProgram::KnownFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
+	if (!Source) return 0;
+	std::ifstream file(PreprocessedPath + ".failed", std::ios::in | std::ios::binary);
+	if (!file.is_open()) return 0;
+	const std::string cached((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+	for (int kind = 1; kind <= 2; kind++) {
+		const size_t n = strlen(kFailHeader[kind]);
+		if (cached.size() > n && !cached.compare(0, n, kFailHeader[kind]) && !cached.compare(n, std::string::npos, PortableSource(Source))) return kind;
+	}
+	return 0;
 }
-void ShaderProgram::NoteOutOfRegisters(const std::string& PreprocessedPath, ID3DXBuffer* Source) {
-	std::ofstream file(PreprocessedPath + ".x4505", std::ios::out | std::ios::binary);
+void ShaderProgram::NoteFailure(const std::string& PreprocessedPath, ID3DXBuffer* Source, const char* Messages) {
+	if (!Source || !Messages || !strstr(Messages, "error X") || strstr(Messages, "X4500")) return;
+	const int kind = strstr(Messages, "X4505") ? 2 : 1;
+	std::ofstream file(PreprocessedPath + ".failed", std::ios::out | std::ios::binary);
+	file << kFailHeader[kind];
 	const std::string portable = PortableSource(Source);
 	file.write(portable.data(), portable.size());
 }
@@ -263,7 +313,7 @@ static void FallbackPrepareFamily(const char* TemplateName) {
 				const auto startJob = ShaderPrecompile::ByCompiledPath.find(job->Compiled);
 				if (startJob != ShaderPrecompile::ByCompiledPath.end() && !startJob->second->Taken) {
 					ShaderPrecompile::Job* stale = startJob->second;
-					while (!stale->Done) Sleep(1);
+					CompileProgress::WaitDone(stale->Done);
 					if (stale->SourceBuffer) stale->SourceBuffer->Release();
 					if (stale->ShaderBuffer) stale->ShaderBuffer->Release();
 					stale->SourceBuffer = stale->ShaderBuffer = nullptr;
@@ -275,11 +325,25 @@ static void FallbackPrepareFamily(const char* TemplateName) {
 			}
 		}
 		std::atomic<size_t> next{ 0 };
-		const unsigned cores = std::thread::hardware_concurrency();
-		const unsigned threadCount = (std::max)(1u, (std::min)((std::min)(cores > 1 ? cores - 1 : 1u, 12u), (unsigned)jobs.size()));
+		const unsigned threadCount = (std::max)(1u, (std::min)(ShaderPrecompile::ThreadCount(), (unsigned)jobs.size()));
+		struct FallbackCtx { std::vector<ShaderPrecompile::Job*>* jobs; std::atomic<size_t>* next; } ctx = { &jobs, &next };
+		struct FallbackEntry {
+			static void Run(FallbackCtx* c) {
+				for (size_t at; (at = c->next->fetch_add(1)) < c->jobs->size(); ) ShaderPrecompile::Run((*c->jobs)[at]);
+			}
+			static unsigned __stdcall ThreadProc(void* p) { Run(static_cast<FallbackCtx*>(p)); return 0; }
+		};
+		std::vector<HANDLE> handles;
 		std::vector<std::thread> threads;
-		for (unsigned i = 0; i < threadCount; i++)
-			threads.emplace_back([&jobs, &next] { for (size_t at; (at = next.fetch_add(1)) < jobs.size(); ) ShaderPrecompile::Run(jobs[at]); });
+		for (unsigned i = 0; i < threadCount; i++) {
+			HANDLE h = CompileProgress::SpawnJoinableWorker(&FallbackEntry::ThreadProc, &ctx);
+			if (h) handles.push_back(h);
+			else threads.emplace_back(&FallbackEntry::Run, &ctx);
+		}
+		if (!handles.empty()) {
+			WaitForMultipleObjects((DWORD)handles.size(), handles.data(), TRUE, INFINITE);
+			for (HANDLE h : handles) CloseHandle(h);
+		}
 		for (std::thread& thread : threads) thread.join();
 
 		unsigned longest = 0, over = 0, failed = 0;
@@ -439,6 +503,13 @@ void ShaderRecord::BuildDefines(ShaderTemplate& Template, const D3DXMACRO* Overr
 	// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h, TerrainLODTemplate.hlsl): the far land writes the G-buffer. Defined for that
 	// template only and only with the switch on at startup, so that otherwise every define list (and the shader cache's keys) is as before.
 	if (Template.Name && !strcmp(Template.Name, "TerrainLODTemplate") && DeferredDistant::CompiledIn()) AppendDefine("DISTANT_GBUFFER", "1");
+	// UNOFFICIAL 2026-11-24 fd-complete DeferredSheen ([Main.Main.Quality] DeferredSheen, restart; the roughness floor, 0 off;
+	// Includes/CapturedNormals.hlsl GBV2_SPEC / GBV2_ROUGH): the Object and Parallax templates' lighting-free records give every surface a highlight.
+	if (Template.Name && (!strcmp(Template.Name, "ObjectTemplate") || !strcmp(Template.Name, "ParallaxTemplate")) && DeferredRenderer::SheenCompiled()) {
+		static char sheen[16] = {};
+		if (!sheen[0]) snprintf(sheen, sizeof(sheen), "%.3f", DeferredRenderer::SheenFloor);
+		AppendDefine("DEFERRED_SHEEN", sheen);
+	}
 	// UNOFFICIAL 2026-10-28 [Main.Main.Quality] CapturedNormals also gives the land and parallax templates their smooth vertex normal for
 	// the sun lookup and the sky ambient (TerrainTemplate / ParallaxTemplate CAPTURED_NORMALS_FORWARD), as SmoothObjectNormals did for objects.
 	if (CapturedNormals::MergeWanted()) AppendDefine("CAPTURED_NORMALS_FORWARD", "1");
@@ -717,7 +788,11 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 
 	// UNOFFICIAL 2026-10-14 ParallelShaderCompile (ShaderPrecompile.h): the result a worker thread already made for this shader.
 	const bool precompiled = ShaderPrecompile::Take(binaryPath.c_str(), &source, &binary, macros);	// (2026-11-16: only with the same defines)
-	const HRESULT preprocess = precompiled ? D3D_OK : D3DXPreprocessShaderFromFileA(sourcePath.c_str(), macros, NULL, &source, &messages);
+	HRESULT preprocess = D3D_OK;
+	if (!precompiled) {
+		std::lock_guard<std::mutex> lock(CompileProgress::D3dxPreprocessMutex);
+		preprocess = D3DXPreprocessShaderFromFileA(sourcePath.c_str(), macros, NULL, &source, &messages);
+	}
 	if (preprocess != D3D_OK) {
 		logCompilerMessages(messages, Name);
 	}
@@ -762,44 +837,49 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 		// (2026-11-17 fast-restart) this exact text did not compile with the clouds' lookup before: straight to the build without it (below)
 		const bool knownCloudFailure = !precompiled && (recompile || !function) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS") && KnownCloudFailure(preprocessedPath, source);
 		if (knownCloudFailure) cloudRetry = compileFailed = true;
-		// (2026-11-26 faster-shader-compile) this exact text ran out of temp registers at both flags before (KnownOutOfRegisters): not compiled
-		// again, the same failure as if it had been (the fall-back chain below runs as it would after the compile)
-		const bool knownOutOfRegisters = !precompiled && (recompile || !function) && !knownCloudFailure && KnownOutOfRegisters(preprocessedPath, source);
-		if (knownOutOfRegisters) Logger::Log("UNOFFICIAL %s: out of temp registers (X4505) at both flags with this exact text at an earlier start: not compiled again", Name);
-		if (!precompiled && (recompile || !function) && !knownCloudFailure) {
+		// (2026-11-24 fd-complete) this exact text failed to compile at an earlier start: not compiled again (the fallbacks below act as then)
+		const int knownFailure = !precompiled && (recompile || !function) && !knownCloudFailure ? KnownFailure(preprocessedPath, source) : 0;
+		if (knownFailure) {
+			compileFailed = true;
+			CompileOutOfRegisters = outOfRegisters = knownFailure == 2;
+			EffectStatus::ShaderLoaded(EffectStatus::CompileFailed);
+			Logger::Log("UNOFFICIAL %s%s: this exact text did not compile at an earlier start (%s): not compiled again (any change to it compiles it again)",
+				SubPath ? SubPath : "", Name, knownFailure == 2 ? "X4505, out of temp registers" : "a compiler error");
+		}
+		if (!precompiled && (recompile || !function) && !knownCloudFailure && !knownFailure) {
 			// compile if option was enabled or compiled version not found
 			CompileProgress::Begin();
 			CompileProgress::NoteCurrent(Name);
 			const auto compileStart = std::chrono::steady_clock::now();	// UNOFFICIAL 2026-11-11 (ShaderPrecompile::LogCompileTimes)
-			if (!knownOutOfRegisters) {
+			{
+				CompileProgress::CompileGate vaGate(ShaderPrecompile::ThreadCount());
 				D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile, NULL, &binary, &messages, &table);
-			}
-			// UNOFFICIAL 2026-10-29: D3DX ran out of ps_3_0 temp registers (X4505). Measured: the 6-layer land shaders SLS2132-2138 with terrain
-			// blending and captured normals both on fail in Includes/Parallax.hlsl at flags 0 while 5 and 7 layers compile -- an allocation
-			// quirk, not a real budget. Compiled again with D3DXSHADER_PREFER_FLOW_CONTROL, which keeps the same branches and fits (all 256
-			// combinations of the land options at 6 layers: scratch terrain_sweep.py). Only after such a failure: every shader that compiles
-			// at flags 0 keeps exactly that bytecode.
-			if (!binary && messages && strstr((const char*)messages->GetBufferPointer(), "X4505")) {
-				Logger::Log("UNOFFICIAL %s: out of temp registers at the default flags; compiling again with PREFER_FLOW_CONTROL", Name);
-				EffectStatus::ShaderLoaded(EffectStatus::FlowControlRetry);	// UNOFFICIAL 2026-11-01
-				EffectStatus::Level(Name, "compiled with PREFER_FLOW_CONTROL (X4505 at the default flags)", false);
-				messages->Release(); messages = nullptr;
-				if (table) { table->Release(); table = nullptr; }
-				D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile,
-					D3DXSHADER_PREFER_FLOW_CONTROL, &binary, &messages, &table);
+				// UNOFFICIAL 2026-10-29: D3DX ran out of ps_3_0 temp registers (X4505). Measured: the 6-layer land shaders SLS2132-2138 with terrain
+				// blending and captured normals both on fail in Includes/Parallax.hlsl at flags 0 while 5 and 7 layers compile -- an allocation
+				// quirk, not a real budget. Compiled again with D3DXSHADER_PREFER_FLOW_CONTROL, which keeps the same branches and fits (all 256
+				// combinations of the land options at 6 layers: scratch terrain_sweep.py). Only after such a failure: every shader that compiles
+				// at flags 0 keeps exactly that bytecode.
+				if (!binary && messages && strstr((const char*)messages->GetBufferPointer(), "X4505")) {
+					Logger::Log("UNOFFICIAL %s: out of temp registers at the default flags; compiling again with PREFER_FLOW_CONTROL", Name);
+					EffectStatus::ShaderLoaded(EffectStatus::FlowControlRetry);	// UNOFFICIAL 2026-11-01
+					EffectStatus::Level(Name, "compiled with PREFER_FLOW_CONTROL (X4505 at the default flags)", false);
+					messages->Release(); messages = nullptr;
+					if (table) { table->Release(); table = nullptr; }
+					D3DXCompileShader((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, "main", profile,
+						D3DXSHADER_PREFER_FLOW_CONTROL, &binary, &messages, &table);
+				}
 			}
 			if (binary) CompileProgress::ShadersCompiled.fetch_add(1);
-			if (!knownOutOfRegisters) {
-				ShaderPrecompile::MainCompiles.emplace_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count(),
-					binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
-			}
+			ShaderPrecompile::MainCompiles.emplace_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - compileStart).count(),
+				binaryPath + (binary ? "" : " FAILED"));	// UNOFFICIAL 2026-11-11
 			logCompilerMessages(messages, Name);
 			EffectStatus::ShaderLoaded(binary ? EffectStatus::Compiled : EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
 			if (!binary) {	// (2026-11-18)
 				compileFailed = true;
-				CompileOutOfRegisters = outOfRegisters = knownOutOfRegisters || (messages && strstr((const char*)messages->GetBufferPointer(), "X4505") != nullptr);
+				CompileOutOfRegisters = outOfRegisters = messages && strstr((const char*)messages->GetBufferPointer(), "X4505") != nullptr;
 				registerClash = messages && strstr((const char*)messages->GetBufferPointer(), "X4500") != nullptr;
 			}
+			if (!binary && !registerClash) NoteFailure(preprocessedPath, source, messages ? (const char*)messages->GetBufferPointer() : nullptr);	// (2026-11-24 fd-complete)
 			if (!binary && !registerClash) cloudRetry = cloudCodeIn(source) && !overridesName(Overrides, "FORWARD_CLOUD_SHADOWS");	// (2026-11-16 fast-restart)
 			if (cloudRetry) NoteCloudFailure(preprocessedPath, source);	// (2026-11-17: not compiled again at the next start)
 			if (!binary && !cloudRetry) EffectStatus::Level(Name, "FAILED to compile (the game's own shader draws instead)", false);
@@ -836,9 +916,8 @@ ShaderRecord* ShaderRecord::LoadShader(const char* Name, const char* SubPath, Sh
 			std::ofstream definesFile(failedDefinesPath, std::ios::out | std::ios::binary);
 			for (int d = 0; d < 63 && Template.Defines[d].Name; d++)
 				definesFile << Template.Defines[d].Name << "=" << (Template.Defines[d].Definition ? Template.Defines[d].Definition : "") << "\r\n";
-			if (outOfRegisters && !registerClash) NoteOutOfRegisters(preprocessedPath, source);	// (2026-11-26: here or on a worker; not compiled again at the next start)
 		}
-		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); DeleteFileA((preprocessedPath + ".x4505").c_str()); }
+		else if (function) { DeleteFileA(failedPath.c_str()); DeleteFileA(failedDefinesPath.c_str()); DeleteFileA((preprocessedPath + ".failed").c_str());	// (2026-11-27 merge: was .x4505) }
 
 		const HRESULT tableResult = function ? D3DXGetShaderConstantTableEx((const DWORD*)function, D3DXCONSTTABLE_LARGEADDRESSAWARE, &table) : E_FAIL;
 		if (function && FAILED(tableResult)) {
@@ -1272,14 +1351,16 @@ void ShaderRecord::SetCT() {
 		// 2026-11-17: a sampler without a record (no valid type), or a register past the 16 stages (only a hand-made cached binary
 		// can carry one): not bound. The game's own state arrays have 16 entries.
 		if (!tex || slot.RegisterIndex >= 16) continue;
-		if (tex->Texture == nullptr) {
-			// UNOFFICIAL 2026-10-17: a texture that is registered but empty for now (TESR_ReflectionsEnv while the Reflections
-			// cube is off -- the shader never reads it then) is re-read from its slot, not looked up by name on every draw.
-			if (tex->TextureRef) tex->Texture = *tex->TextureRef;
-			else tex->BindTexture(slot.Name);
-
+		if (tex->TextureRef) {
+			// Always follow registered TextureManager slots (as EffectRecord::SetCT does), so a parked/swapped target
+			// can never leave a dangling raw texture pointer even in standalone records.
+			const bool wasNull = (tex->Texture == nullptr);
+			tex->Texture = *tex->TextureRef;
+			if (wasNull && tex->Texture) Logger::Log("%s : Texture %s Successfully bound", Name, slot.Name);
+		}
+		else if (tex->Texture == nullptr) {
+			tex->BindTexture(slot.Name);
 			if (tex->Texture) Logger::Log("%s : Texture %s Successfully bound", Name, slot.Name);
-			//else Logger::Log("[ERROR] : Could not bind texture %s for shader %s", slot.Name, Name);
 		}
 
 		if (tex->Texture != nullptr) {

@@ -194,7 +194,7 @@ vec4 Apply(vec2 uv, bool sky) {
     vec3 guess = SurfaceColourCap(localLin * shade, FallbackCap()) * detail;
     vec4 a = pointLod(t_albedo, ruv);
     float hasAlbedo = step(0.5, cb.alFlags.z) * step(0.5, a.a);
-    lin += giLight * mix(guess, max(a.rgb, vec3(0.0)), hasAlbedo);
+    lin += giLight * mix(guess, clamp(a.rgb, vec3(0.0), vec3(0.85)), hasAlbedo);
 #endif
     return delinearize(vec4(lin, color.a));
 }

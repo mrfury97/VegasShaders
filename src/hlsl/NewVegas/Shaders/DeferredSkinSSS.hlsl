@@ -25,7 +25,7 @@
 float4 SSS_View : register(c0);	// xy 1 / target size, z pixels per world unit at view z 1 (height / (2 tan(fov y / 2))), w the disc's angle this frame
 float4 SSS_Ctrl : register(c1);	// x the reference scatter distance d (red, world units), y DepthFollow, z AlbedoDetail, w 1 = the exact view z on s5
 float4 SSS_Taps[SSS_TAPS] : register(c2);	// x the tap's radius / d_red, yzw its weight per colour (R_c / R_red), from DeferredSkin::SssTaps
-float4 SSS_Debug : register(c26);	// (2026-11-16) x [Shaders.Skin.SSS] DebugView: 1 the prep's light L (x 0.25), 2 the pixels left out red (covered), the rest as drawn
+float4 SSS_Debug : register(c26);	// (2026-11-16) x [Shaders.Skin.SSS] DebugView: 1 the prep's light L (x 0.25), 2 the pixels left out red (covered), y 1 = include non-skin solids (models 11..14)
 
 #ifdef SSS_PREP
 sampler2D SSS_Frame    : register(s0);	// the frame's copy, linear
@@ -45,20 +45,21 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0 {
     const float4 uv4 = float4(uv, 0.0f, 0.0f);
     const float4 n = tex2Dlod(SSS_Normals, uv4);
     const float4 m = tex2Dlod(SSS_Material, uv4);
-    clip(n.a > 3.5f && abs(FDModel(m.r) - 6.0f) < 0.5f ? 1.0f : -1.0f);
+    const float model = FDModel(m.r);
+    const bool isSkin = (n.a > 3.5f && abs(model - 6.0f) < 0.5f);
     const float4 a = tex2Dlod(SSS_Albedo, uv4);
     const float keep = saturate(FDAddedLightKeep(a.a));
+    const bool isSolid = (!isSkin && SSS_Debug.y > 0.5f && model >= 10.5f && model <= 14.5f && a.a > 1.0001f && keep > 1.0e-4f);
+    clip(isSkin || isSolid ? 1.0f : -1.0f);
     const float3 frame = tex2Dlod(SSS_Frame, uv4).rgb;
+    const float z = SSS_Ctrl.w > 0.5f ? tex2Dlod(SSS_LinearZ, uv4).x : n.b;
+    if (isSolid) {
+        return float4(min(max(frame, 0.0f) * Participation(a.rgb) / AlbedoFactor(a.rgb), 4096.0f), max(z, 1.0e-3f));
+    }
     const float3 spec = tex2Dlod(SSS_Spec, uv4).rgb * keep;
-    // (2026-11-16 bench audit, fwg-native-face-dark: after the weighting fix the disc still put a black blob under the moustache's shaded
-    // half, larger with Radius 2, while no scattering and the separable kernel were clean.) A pixel whose frame holds LESS light than the
-    // skin's own highlights there is not the skin the passes lit: something drawn over it in the span (the moustache, a beard, brows) left
-    // its own colour in the frame while the G-buffer still holds the skin under it. Its "diffuse" (frame - highlights) was 0 at full weight:
-    // a black source the disc spread round. Such a pixel neither gives nor takes: a = 0 (not skin), the blur leaves it as drawn.
     const float3 over = spec - frame;
     clip(max(over.r, max(over.g, over.b)) > 1.0e-4f ? -1.0f : 1.0f);
     const float3 diffuse = max(frame - spec, 0.0f);
-    const float z = SSS_Ctrl.w > 0.5f ? tex2Dlod(SSS_LinearZ, uv4).x : n.b;
     // (2026-11-16, the black patch under a moustache, second round) A surface drawn over the skin in the span without writing the G-buffer
     // (the game's hair, brows and beards drawn in the main list: the G-buffer under them still says "skin", GBufferView 6 showed it) left its
     // own colour and DEPTH; the disc took that colour as the skin's light and wrote the blurred skin over it: under a moustache in shade, the
@@ -76,10 +77,11 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0 {
     return float4(min(diffuse * Participation(a.rgb) / AlbedoFactor(a.rgb), 4096.0f), max(z, 1.0e-3f));
 }
 #else	// SSS_BLUR
-sampler2D SSS_Light  : register(s0);	// SSS_PREP's target
-sampler2D SSS_Frame  : register(s1);	// the frame's copy, linear
-sampler2D SSS_Albedo : register(s2);
-sampler2D SSS_Spec   : register(s3);
+sampler2D SSS_Light    : register(s0);	// SSS_PREP's target
+sampler2D SSS_Frame    : register(s1);	// the frame's copy, linear
+sampler2D SSS_Albedo   : register(s2);
+sampler2D SSS_Spec     : register(s3);
+sampler2D SSS_Material : register(s4);	// COLOR2: r the model (for same-model isolation)
 
 
 float3 Participation(float3 a) { return smoothstep(0.01f, 0.04f, pow(max(a, 0.0f), 1.0f / 2.2f)); }	// (as SSS_PREP)
@@ -100,9 +102,43 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0 {
     clip(c.a - 1.0e-4f);	// not deferred skin (or covered: a -1)
     [branch] if (SSS_Debug.x > 0.5f && SSS_Debug.x < 1.5f) return float4(c.rgb * 0.25f, 1.0f);	// DebugView 1: the prep's light
     const float z0 = c.a;
-    const float pxPerD = SSS_Ctrl.x * SSS_View.z / z0;	// the reference distance d in pixels here
+    const float centerModel = FDModel(tex2Dlod(SSS_Material, float4(uv, 0.0f, 0.0f)).r);
+    const bool isSolid = (SSS_Debug.y > 0.5f && centerModel >= 10.5f && centerModel <= 14.5f);
     const float turn = SSS_View.w + 6.2831853f * IGN(floor(uv / SSS_View.xy));
     float3 sum = 0.0f, weight = 0.0f;
+    [branch] if (isSolid) {
+        const float pxPerD = min(SSS_Ctrl.x * SSS_View.z / z0, 14.0f);
+        const bool isWax    = abs(centerModel - 11.0f) < 0.5f;
+        const bool isMarble = abs(centerModel - 12.0f) < 0.5f;
+        const bool isSnow   = abs(centerModel - 13.0f) < 0.5f;
+        const float3 tint = isWax    ? float3(1.00f, 0.48f, 0.16f)
+                          : isMarble ? float3(0.95f, 0.80f, 0.64f)
+                          : isSnow   ? float3(0.45f, 0.74f, 1.00f)
+                                     : float3(1.00f, 0.30f, 0.14f);
+        const float rScale = isWax ? 1.20f : isMarble ? 0.65f : isSnow ? 1.30f : 1.00f;
+        [loop] for (int i = 0; i < 8; i++) {
+            const float4 tap = SSS_Taps[i * 3 + 1];
+            float s, co;
+            sincos(turn + 2.39996323f * (float)i, s, co);
+            const float4 at = float4(uv + float2(co, s) * (tap.x * rScale * pxPerD) * SSS_View.xy, 0.0f, 0.0f);
+            const float4 t = tex2Dlod(SSS_Light, at);
+            const float tapModel = FDModel(tex2Dlod(SSS_Material, at).r);
+            const float sameModel = abs(tapModel - centerModel) < 0.5f ? 1.0f : 0.0f;
+            const float reach = tap.x * rScale * SSS_Ctrl.x * 2.0f / max(SSS_Ctrl.y, 0.1f) + 0.05f;
+            const float depthW = (t.a > 0.0f ? saturate(1.0f - abs(t.a - z0) / reach) : 0.0f) * sameModel;
+            const float3 w = tint * depthW * Participation(tex2Dlod(SSS_Albedo, at).rgb);
+            sum += t.rgb * (tint * depthW);
+            weight += w;
+        }
+        const float4 a = tex2Dlod(SSS_Albedo, float4(uv, 0.0f, 0.0f));
+        const float3 part = Participation(a.rgb);
+        const float4 frame4 = tex2Dlod(SSS_Frame, float4(uv, 0.0f, 0.0f));
+        const float3 diffuse = max(frame4.rgb, 0.0f);
+        const float3 own = diffuse / AlbedoFactor(a.rgb);
+        const float3 blurred = float3(weight.r > 1.0e-5f ? sum.r / weight.r : own.r, weight.g > 1.0e-5f ? sum.g / weight.g : own.g, weight.b > 1.0e-5f ? sum.b / weight.b : own.b);
+        return float4(diffuse * (1.0f - part) + part * lerp(diffuse, blurred * AlbedoFactor(a.rgb), 0.72f), frame4.a);
+    }
+    const float pxPerD = SSS_Ctrl.x * SSS_View.z / z0;	// the reference distance d in pixels here
     [unroll] for (int i = 0; i < SSS_TAPS; i++) {
         const float4 tap = SSS_Taps[i];
         float s, co;
@@ -111,8 +147,9 @@ float4 main(float2 uv : TEXCOORD0) : COLOR0 {
         const float4 t = tex2Dlod(SSS_Light, at);
         // depth-aware: the tap is the same surface only within about its own radius in depth (DepthFollow stricter); not skin: a = 0
         const float reach = tap.x * SSS_Ctrl.x * 2.0f / max(SSS_Ctrl.y, 0.1f) + 0.05f;
-        const float3 w = tap.yzw * (t.a > 0.0f ? saturate(1.0f - abs(t.a - z0) / reach) : 0.0f) * Participation(tex2Dlod(SSS_Albedo, at).rgb);
-        sum += t.rgb * tap.yzw * (t.a > 0.0f ? saturate(1.0f - abs(t.a - z0) / reach) : 0.0f);	// (t.rgb is already L x p)
+        const float sameSkin = (SSS_Debug.y < 0.5f || abs(FDModel(tex2Dlod(SSS_Material, at).r) - 6.0f) < 0.5f) ? 1.0f : 0.0f;
+        const float3 w = tap.yzw * (t.a > 0.0f ? saturate(1.0f - abs(t.a - z0) / reach) : 0.0f) * sameSkin * Participation(tex2Dlod(SSS_Albedo, at).rgb);
+        sum += t.rgb * tap.yzw * ((t.a > 0.0f ? saturate(1.0f - abs(t.a - z0) / reach) : 0.0f) * sameSkin);	// (t.rgb is already L x p)
         weight += w;
     }
     const float4 a = tex2Dlod(SSS_Albedo, float4(uv, 0.0f, 0.0f));

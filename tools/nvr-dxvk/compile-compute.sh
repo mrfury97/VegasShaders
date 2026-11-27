@@ -72,3 +72,9 @@ while read -r frag suffix defs; do
   v=$((v+1))
 done < <(tr -d '\r' < variants.txt)
 echo "compiled $n shaders, $v variants"
+# (2026-11-24) the Reflections shader-file check's hashes (Reflections.cpp LogReflShaderFiles) follow the files just built; kept by hand they
+# went stale and every log called the build's own files OLD. Rebuild the DLL after it changes the table.
+py=""
+for c in python python3; do command -v "$c" >/dev/null 2>&1 && "$c" -c "" >/dev/null 2>&1 && { py="$c"; break; }; done	# (Windows: python3 may be the Store stub)
+if [ -n "$py" ]; then "$py" -I ../../../../tools/nvr-dxvk/refl-hashes.py
+else echo "NOTE: no python: run tools/nvr-dxvk/refl-hashes.py by hand (Reflections.cpp's shader-file hashes)" >&2; fi

@@ -144,29 +144,46 @@ namespace FdIndirect {
 	inline Target ALAlbedoTarget;
 	inline IDirect3DPixelShader9* ALPS = nullptr;  inline bool ALPSFailed = false;  inline float ALLoggedGain = -1.0f;
 	inline UInt32 ALFrame = 0xFFFFFFFFu;  inline bool ALMade = false;
-	// Returns the texture AmbientLight binds as NVR_ALAlbedo this frame: the metal-split one, or CapturedNormals::AlbedoTexture (switch off,
-	// renderer off, or it could not be made).
-	inline IDirect3DBaseTexture9* ALAlbedo(IDirect3DDevice9* d) {
+	// Returns the texture AmbientLight binds as NVR_ALAlbedo this frame: depth-validated against TESR_DepthBuffer (and metal-split
+	// when ALAlbedoOn() is true), or CapturedNormals::AlbedoTexture if depth validation & ALAlbedoOn are unavailable.
+	inline IDirect3DBaseTexture9* ALAlbedo(IDirect3DDevice9* d, IDirect3DBaseTexture9* depth = nullptr) {
 		IDirect3DBaseTexture9* plain = CapturedNormals::AlbedoTexture;
-		if (!d || !plain || ALPSFailed || !ALAlbedoOn()) return plain;
+		const bool metalSplit = ALAlbedoOn();
+		const bool depthValidate = depth && CapturedNormals::Texture && CapturedNormals::Data.x > 0.0f;
+		if (!d || !plain || ALPSFailed || (!metalSplit && !depthValidate)) return plain;
 		const UInt32 frame = TheFrameRateManager->FrameNumber;
 		if (frame == ALFrame) return ALMade ? (IDirect3DBaseTexture9*)ALAlbedoTarget.Texture : plain;
 		ALFrame = frame; ALMade = false;
 		D3DSURFACE_DESC desc = {};
 		if (!TextureDesc(plain, desc) || !ALAlbedoTarget.Ensure(d, desc.Width, desc.Height, D3DFMT_A16B16G16R16F, "DeferredALAlbedo")) return plain;
 		if (!ALPS && !(ALPS = CapturedNormals::FullScreenShader(d, FdIndirectShaders::kALAlbedoPS, "UNOFFICIAL DeferredALAlbedo", ALPSFailed))) return plain;
-		float gain = TheSettingManager->GetSettingF(kSection, "DeferredALAlbedoGain");
-		gain = gain < 0.25f ? 0.25f : gain > 3.0f ? 3.0f : gain;
+		float gain = metalSplit ? TheSettingManager->GetSettingF(kSection, "DeferredALAlbedoGain") : 1.0f;
+		if (metalSplit) gain = gain < 0.25f ? 0.25f : gain > 3.0f ? 3.0f : gain;
 		static GpuTimer timer("FD AL albedo");
 		GpuProfileScope gpu(timer, d);
-		float saved[4] = {};
-		d->GetPixelShaderConstantF(0, saved, 1);
-		const float g[4] = { gain, 0.0f, 0.0f, 0.0f };
-		d->SetPixelShaderConstantF(0, g, 1);
-		CapturedNormals::FullScreenPass(d, ALAlbedoTarget.Surface, ALPS, plain, false, D3DBLEND_ONE, D3DBLEND_ZERO, CapturedNormals::MaterialTexture);
-		d->SetPixelShaderConstantF(0, saved, 1);
+		const D3DXMATRIX* proj = (const D3DXMATRIX*)Constant("TESR_ProjectionTransform");
+		const D3DXVECTOR4* camera = Constant("TESR_CameraData");
+		const D3DXVECTOR4* scale = Constant("TESR_RenderScale");
+		const bool canValidate = depthValidate && proj && camera && fabs(proj->_11) > 1.0e-6f && fabs(proj->_22) > 1.0e-6f;
+		IDirect3DBaseTexture9* vmDepth = canValidate ? CapturedNormals::ViewModelDepthTexture() : nullptr;
+		const bool vmCaptured = vmDepth && CapturedNormals::VmCapturedThisFrame(frame);
+		const float vmScale = vmDepth ? (1.0f / CapturedNormals::ViewModelFovScale()) * (vmCaptured ? 1.0f : -1.0f) : 0.0f;
+		float saved[3][4] = {};
+		d->GetPixelShaderConstantF(0, &saved[0][0], 3);
+		const float c[3][4] = {
+			{ gain, metalSplit ? 1.0f : 0.0f, CapturedNormals::Data.y, CapturedNormals::Data.z },
+			{ proj ? 1.0f / proj->_11 : 1.0f, proj ? 1.0f / proj->_22 : 1.0f, vmScale, camera ? camera->y : 1.0f },
+			{ scale ? scale->z : 1.0f, scale ? scale->w : 1.0f, CapturedNormals::DepthReversed() ? 1.0f : 0.0f, canValidate ? 1.0f : 0.0f }
+		};
+		d->SetPixelShaderConstantF(0, &c[0][0], 3);
+		CapturedNormals::FullScreenPass(d, ALAlbedoTarget.Surface, ALPS, plain, false, D3DBLEND_ONE, D3DBLEND_ZERO,
+			CapturedNormals::MaterialTexture ? CapturedNormals::MaterialTexture : plain,
+			CapturedNormals::Texture ? CapturedNormals::Texture : plain,
+			depth ? depth : plain,
+			vmDepth);
+		d->SetPixelShaderConstantF(0, &saved[0][0], 3);
 		ALMade = true;
-		if (gain != ALLoggedGain) { ALLoggedGain = gain; Logger::Log("UNOFFICIAL DeferredALAlbedo: AmbientLight's bounce takes the G-buffer's albedo x (1 - metal) x %.2f (DeferredALAlbedoGain)", gain); }
+		if (metalSplit && gain != ALLoggedGain) { ALLoggedGain = gain; Logger::Log("UNOFFICIAL DeferredALAlbedo: AmbientLight's bounce takes the G-buffer's albedo x (1 - metal) x %.2f (DeferredALAlbedoGain)", gain); }
 		return ALAlbedoTarget.Texture;
 	}
 }

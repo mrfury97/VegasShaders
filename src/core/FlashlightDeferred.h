@@ -197,6 +197,17 @@ namespace FlashlightDeferred {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-24 fd-complete batch 2 (docs/next/FD-COMPLETE.md): the view model's run. DeferredFirstPerson::End draws the light
+	// passes a second time for the view model (its own G-buffer span, the first-person camera, a linear light target, the stencil mark bound
+	// with STENCILFUNC EQUAL); with this set, Apply draws the beam there too, so first person no longer has to go forward while the flashlight
+	// is on. rows: the first-person camera's right / up / forward with tan(half fov x / y) in w (DeferredFirstPerson::Frame[0..2]); shift: the
+	// first-person eye minus kLightingOffset minus the world camera (a world-camera-relative point - shift = the same point relative to the
+	// first-person eye, where the view model's G-buffer distances start). No depth test (the mark selects the view model's pixels) and no shadow
+	// map (the player's own body and weapon never cast in it; the map is the world camera's).
+	struct ViewModelRun { bool on = false; float rows[3][4] = {}; D3DXVECTOR3 shift = D3DXVECTOR3(0.0f, 0.0f, 0.0f); };
+	inline ViewModelRun Vm;
+	inline unsigned long long StatViewModel = 0;
+
 	// The pass: after CapturedNormals::EndSpan (G-buffer unbound and resolved), before LinearScene::EndSpan (Render.cpp DeferredSpan).
 	inline void Apply(IDirect3DDevice9* d) {
 		FlashlightEffect* f = TheShaderManager->Effects.Flashlight;
@@ -218,8 +229,8 @@ namespace FlashlightDeferred {
 		if (!target) { StatSkipped++; return; }
 		D3DSURFACE_DESC t = {};
 		target->GetDesc(&t);
-		const bool linear = LinearScene::Linear;
-		const int debugView = f->Deferred.DebugView;
+		const bool linear = Vm.on || LinearScene::Linear;	// (the view model's light target is linear)
+		const int debugView = Vm.on ? 0 : f->Deferred.DebugView;
 		if (!linear || debugView) {	// the copy path: the frame's copy for enc(dec(v) + L) (and the debug views, written over the frame)
 			if (!CopyTex || CopyMade.Width != t.Width || CopyMade.Height != t.Height || CopyMade.Format != t.Format) {
 				if (Copy) { Copy->Release(); Copy = nullptr; }
@@ -256,8 +267,8 @@ namespace FlashlightDeferred {
 			D3DRS_SCISSORTESTENABLE, D3DRS_SRGBWRITEENABLE, D3DRS_COLORWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_SRCBLEND, D3DRS_DESTBLEND,
 			D3DRS_BLENDOP, D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_FOGENABLE };
 		const bool add = !debugView;	// 2026-11-04 the copy path adds too (the difference its light makes: FlashlightDeferred.hlsl); the debug views write over
-		const DWORD want[] = { D3DZB_TRUE, FALSE, zFunc, FALSE, D3DCULL_NONE, FALSE, FALSE, FALSE, 0x7, add ? (DWORD)TRUE : (DWORD)FALSE, D3DBLEND_ONE, D3DBLEND_ONE,
-			D3DBLENDOP_ADD, FALSE, FALSE };
+		const DWORD want[] = { Vm.on ? (DWORD)D3DZB_FALSE : (DWORD)D3DZB_TRUE, FALSE, zFunc, FALSE, D3DCULL_NONE, Vm.on ? (DWORD)TRUE : (DWORD)FALSE, FALSE, FALSE, 0x7,
+			add ? (DWORD)TRUE : (DWORD)FALSE, D3DBLEND_ONE, D3DBLEND_ONE, D3DBLENDOP_ADD, FALSE, FALSE };
 		static_assert(sizeof(kRS) / sizeof(kRS[0]) == sizeof(want) / sizeof(want[0]), "one value per state");
 		DWORD savedRS[sizeof(kRS) / sizeof(kRS[0])];
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) { if (FAILED(d->GetRenderState(kRS[i], &savedRS[i]))) savedRS[i] = want[i]; if (savedRS[i] != want[i]) d->SetRenderState(kRS[i], want[i]); }
@@ -283,7 +294,7 @@ namespace FlashlightDeferred {
 		// the light: camera-relative, its axis, the cone (outer edge, full strength from half its angle in), the colour (LightParams)
 		const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;
 		// the shadow map: drawn this frame by ShadowManager (FlashlightEffect::WantsShadowMap)
-		IDirect3DTexture9* map = ShadowMap();
+		IDirect3DTexture9* map = Vm.on ? nullptr : ShadowMap();
 		const bool shadowed = map != nullptr;
 		{	// UNOFFICIAL 2026-11-11 (a tester: "flashlight not casting shadows", no log line said which case): each change, a few times a session
 			static int told = 0, last = -1;
@@ -325,6 +336,34 @@ namespace FlashlightDeferred {
 			{ f->Settings.HotspotLimit, f->Settings.softEdges ? 1.0f : 0.0f, gamma, 1.0f / gamma },
 			{ shadowed ? 1.0f : 0.0f, mapDesc.Width ? 1.0f / (float)mapDesc.Width : 0.0f, f->Deferred.ShadowBias, SoftnessTexels(mapDesc.Width) },
 			{ cookieStrength, (float)debugView, f->Deferred.Falloff, f->Settings.NearFade } };	// (w: UNOFFICIAL 2026-11-11 NearFade, was 0)
+		if (Vm.on) {	// (2026-11-24 fd-complete batch 2) the first-person camera's rays, the light in the view model's space
+			float vmRows[3][4];
+			memcpy(vmRows, Vm.rows, sizeof(vmRows));
+			vmRows[2][3] = 1.0f;	// FL_Fwd.w: linear
+			// Where the beam lights the gun from: [Shaders.Flashlight.Deferred] ViewModelFromEye (live, default true) = 16 units behind the
+			// first-person eye, so the held gun and hands are lit evenly from the viewer's side, as forward's flat look and most shooters do
+			// (bench fdc-fp2: from the light's real place, the Pip-Boy light low on the left, the beam skimmed the gun and lit the scope's
+			// inner far wall and the barrel's edges); false = the light's real place (moved into the view model's space).
+			const bool fromEye = TheSettingManager->GetSettingI("Shaders.Flashlight.Deferred", "ViewModelFromEye") != 0;
+			const float pos[4] = { fromEye ? -16.0f * Vm.rows[2][0] : params[0].x - Vm.shift.x, fromEye ? -16.0f * Vm.rows[2][1] : params[0].y - Vm.shift.y,
+				fromEye ? -16.0f * Vm.rows[2][2] : params[0].z - Vm.shift.z, params[0].w };
+			d->SetPixelShaderConstantF(0, own[0], 2);
+			d->SetPixelShaderConstantF(2, &vmRows[0][0], 3);
+			d->SetPixelShaderConstantF(5, pos, 1);
+			// The gun and hands sit beside and under the light, outside its cone and inside NearFade: the first bench run (fdc-fp, 21:46) lit only
+			// a rim of the barrel. Forward lit them with the flashlight's game lamp (GameLight: an omni point lamp at the beam's position); the
+			// view model takes the beam the same way: no cone (the outer edge at cos -1, full strength from -0.999: smoothstep needs two edges),
+			// no near fade, no cookie (the cookie is the cone's pattern).
+			float rest[5][4];
+			memcpy(rest, own[6], sizeof(rest));
+			rest[0][3] = -1.0f;		// FL_Dir.w: the cone's outer edge
+			rest[1][3] = -0.999f;	// FL_Color.w: the full-strength edge
+			rest[4][0] = 0.0f;		// FL_Look.x: no cookie
+			rest[4][3] = 0.0f;		// FL_Look.w: no NearFade
+			d->SetPixelShaderConstantF(6, &rest[0][0], 5);
+			StatViewModel++;
+		}
+		else
 		d->SetPixelShaderConstantF(0, own[0], 11);
 		d->SetPixelShaderConstantF(11, (const float*)&TheShaderManager->SpotLightWorldToLightMatrix[0], 4);	// row_major in the pass
 		// UNOFFICIAL 2026-11-16 fd-batchA item 6 ([Shaders.Flashlight.Deferred] SpecularBit, live; FlashlightDeferred.hlsl FL_Model): the record's
@@ -345,8 +384,10 @@ namespace FlashlightDeferred {
 		const float u0 = (float)vp.X / t.Width, v0 = (float)vp.Y / t.Height, u1 = (float)(vp.X + vp.Width) / t.Width, v1 = (float)(vp.Y + vp.Height) / t.Height;
 		const float quad[4][6] = { { x0, y0, 0, 1, u0, v0 }, { x1, y0, 0, 1, u1, v0 }, { x0, y1, 0, 1, u0, v1 }, { x1, y1, 0, 1, u1, v1 } };
 		d->DrawPrimitiveUP(D3DPT_TRIANGLESTRIP, 2, quad, sizeof(quad[0]));
+		if (!Vm.on) {
 		StatPasses++;
 		DrewFrame = (unsigned)TheFrameRateManager->FrameNumber;
+		}
 
 		for (int s = 0; s < 6; s++) {
 			for (unsigned i = 0; i < sizeof(kSS) / sizeof(kSS[0]); i++) d->SetSamplerState(kStages[s], kSS[i], savedSS[s][i]);

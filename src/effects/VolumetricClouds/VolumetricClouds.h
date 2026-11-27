@@ -112,6 +112,7 @@ public:
 	void	RegisterTextures();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	bool	TargetParkable(const char* SamplerName) override { return strcmp(SamplerName, "NVR_CloudProbe") != 0; }
 	// March, temporal, then the composite into the frame chain.
 	void	RenderClouds(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface,
 		IDirect3DSurface9* SourceSurface);

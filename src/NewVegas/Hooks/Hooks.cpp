@@ -4,6 +4,10 @@
 #include "../../core/ParticleSize.h"	// UNOFFICIAL 2026-11-04 soft particles
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds, GrassTiming key)
 #include "../../core/DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the RenderGeometryGroup detour (only with the switch on at startup)
+#include "../../core/ForwardLightKill.h"	// UNOFFICIAL 2026-11-24 fd-complete: the measure of done (test only)
+#include "../../core/BoneMatrixBatch.h"	// UNOFFICIAL 2026-11-24 batched bone-matrix uploads
+#include "../../core/ConstantMapSort.h"	// UNOFFICIAL 2026-11-24 refcount-free constant-map partition
+#include "../../core/DistantLandTier2.h"	// UNOFFICIAL 2026-11-25 Phase 4 Distant Land Tier-2 load suppression
 
 void AttachScopeCameraHooks();	// Render.cpp (UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect: a plugin's extra-camera scene of the world)
 
@@ -22,6 +26,7 @@ namespace {
 	// TheRenderManager / TheShaderManager null while raw WriteRelCall / vtable hooks still ran and crashed.
 	bool AttachOne(const Redirection& r) {
 		const PVOID target = *r.original;
+		NoteHookSite((SIZE_T)target, 8, r.name);	// 2026-11-24 hook inventory: what the function's first bytes were before VS
 		DetourTransactionBegin();
 		DetourUpdateThread(GetCurrentThread());
 		const LONG attached = DetourAttach(r.original, r.replacement);
@@ -71,11 +76,71 @@ namespace {
 		}
 	}
 
-	// Every place the renderer asks the shadow scene node for its fog: NVR's version answers instead (removes the vanilla fog).
+	// 2026-11-25 hook cleanup batch 2 (docs/next/HOOK-INVENTORY.md): patches in the middle of game functions are checked first. The
+	// game's own bytes at each site come from the HOOKSITE log of 2026-11-24 (a bench slot with JIP, NVTF, Johnny Guitar and Stewie's
+	// Tweaks loaded before VS) or, for sites that run did not write, from the dumped exe. A site that holds neither the game's bytes
+	// nor VS's own (written already) was changed by another plugin: a fix every player has keeps being written, with a warning
+	// (IfChanged::WriteAnyway, as before this check); an optional or debug patch is left out (IfChanged::Skip), so the other
+	// plugin's code keeps working.
+	enum class IfChanged { WriteAnyway, Skip };
+
+	bool SiteIs(UInt32 site, std::initializer_list<UInt8> game, const UInt8* ours, size_t oursCount, const char* what, IfChanged mode) {
+		const UInt8* now = (const UInt8*)site;
+		if (!memcmp(now, game.begin(), game.size())) return true;
+		if (ours && !memcmp(now, ours, oursCount)) return true;	// VS's own patch is already there
+		char found[3 * 8 + 1] = {};
+		for (size_t i = 0; i < 8; ++i) sprintf_s(found + 3 * i, 4, "%02X ", now[i]);
+		Logger::Log("[WARN] AttachHooks: %s at %08X is not the game's code (found %s; another plugin?): %s", what, site, found,
+			mode == IfChanged::Skip ? "left alone, this VS patch is off" : "VS's patch is written anyway (as VS always did)");
+		return mode == IfChanged::WriteAnyway;
+	}
+
+	// A call or jump written over `game` (its first 5 bytes or fewer) only after the check.
+	void PatchChecked(const CodePatch& p, std::initializer_list<UInt8> game, const char* what, IfChanged mode) {
+		UInt8 ours[5] = { UInt8(p.kind == Branch::Call ? 0xE8 : 0xE9) };
+		const UInt32 rel = p.target - (p.site + 5);
+		memcpy(ours + 1, &rel, 4);
+		if (SiteIs(p.site, game, ours, 5, what, mode)) Patch({ p });
+	}
+
+	void Write8Checked(UInt32 site, UInt8 game, UInt8 value, const char* what, IfChanged mode) {
+		if (SiteIs(site, { game }, &value, 1, what, mode)) SafeWrite8(site, value);
+	}
+
+	void Write16Checked(UInt32 site, std::initializer_list<UInt8> game, UInt16 value, const char* what, IfChanged mode) {
+		if (SiteIs(site, game, (const UInt8*)&value, 2, what, mode)) SafeWrite16(site, value);
+	}
+
+	// An existing call retargeted: only over a call instruction.
+	void CallChecked(UInt32 site, UInt32 target, const char* what) {
+		if (*(const UInt8*)site == 0xE8) WriteRelCall(site, target);
+		else Logger::Log("[WARN] AttachHooks: %s at %08X is not a call (byte %02X; another plugin?): left alone, this VS patch is off", what, site, *(const UInt8*)site);
+	}
+
+	// BSShaderManager::GetFogProperty (0x00B55520, cdecl, 18 bytes): the fog the renderer and Atmosphere::Update ask for. VS's
+	// version (ShadowSceneNode__GetFogPropertyEx) answers instead: no game fog while VolumetricFog draws the fog. 2026-11-24 hook
+	// cleanup: one Detours hook on the function instead of rewriting its 14 calls inside 9 shader functions (they are all its
+	// callers in the exe; a plugin calling it now gets the same answer). The calls stay as the fallback if the hook fails.
+	BSFogProperty* (__cdecl* GetFogProperty)(UInt32) = (BSFogProperty* (__cdecl*)(UInt32))0x00B55520;
 	const UInt32 kFogPropertyCallers[] = {
 		0x6335EE, 0xB795FA, 0xB7AE86, 0xB7B539, 0xB7C3AB, 0xB86738, 0xBAA43B,
 		0xBB1B5B, 0xBB1FA5, 0xBB670E, 0xBBDF26, 0xBBE3EC, 0xBC6E33, 0xBD4BED,
 	};
+
+	// 2026-11-24 hook cleanup: the game allocates VS's bigger versions of some objects (the size is the imm32 of the `push` before
+	// the allocation call). Never shrink: if another plugin already asks for more, keep its size and say so.
+	void GrowAllocation(UInt32 operand, UInt32 size, const char* what) {
+		const UInt32 found = *(const UInt32*)operand;
+		if (*(const UInt8*)(operand - 1) != 0x68) {
+			Logger::Log("[WARN] AttachHooks: %s size at %08X is not a push imm32 (byte %02X); not changed", what, operand, *(const UInt8*)(operand - 1));
+			return;
+		}
+		if (found >= size) {
+			Logger::Log("UNOFFICIAL AttachHooks: %s size at %08X is already 0x%X (VS needs 0x%X; another plugin?); kept", what, operand, found, size);
+			return;
+		}
+		SafeWrite32(operand, size);
+	}
 }
 
 void AttachHooks() {
@@ -93,29 +158,29 @@ void AttachHooks() {
 		NVR_REDIRECT(NewMainDataHandler), NVR_REDIRECT(NewMenuInterfaceManager), NVR_REDIRECT(NewQueuedModelLoader),
 		NVR_REDIRECT(CreateVertexShader), NVR_REDIRECT(CreatePixelShader), NVR_REDIRECT(SetShaderPackage),	// shader loading
 		NVR_REDIRECT(Render), NVR_REDIRECT(ProcessImageSpaceShaders), NVR_REDIRECT(RenderWorldSceneGraph),	// the frame
+		NVR_REDIRECT(RenderShadowMap),
 		NVR_REDIRECT(RenderBlended),   // UNOFFICIAL sandport: glass writes no depth in a sandstorm (ThroughBlended)
 		NVR_REDIRECT(RenderFirstPerson), NVR_REDIRECT(SetShaders), NVR_REDIRECT(SetSamplerState),
 	});
-	RunDetourGroup("GrassFirst", [] { AttachGrassFirstRenderPassHook(); });	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless DrawFirst is on
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: catch mid-frame ImageSpaceManager::RenderEffect calls (e.g. DoF-Fix.dll) while RenderScale v2 is pending
+	if (!AttachOne(NVR_REDIRECT(RenderImageSpaceEffect))) {
+		Logger::Log("[WARN] AttachHooks: RenderImageSpaceEffect (0x00B97550) could not be hooked; mid-frame ImageSpace guard inactive");
+	}
+	if (!RunDetourGroup("GrassFirst", [] { AttachGrassFirstRenderPassHook(); })) ClearGrassFirstInstalled();	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless DrawFirst is on
 	if (!RunDetourGroup("DeferredDistant", [] { DeferredDistant::Attach(); })) DeferredDistant::Installed = false;	// UNOFFICIAL 2026-11-14 [Main.Main.Quality] DeferredDistant
-	RunDetourGroup("ScopeCamera", [] { AttachScopeCameraHooks(); });	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene)
+	if (!RunDetourGroup("DistantLandTier2", [] { DistantLandTier2::Attach(); })) DistantLandTier2::Installed = false;	// UNOFFICIAL 2026-11-25 [Main.Main.Quality] DistantLandSuppressVanilla
+	if (!RunDetourGroup("ForwardLightKill", [] { ForwardLightKill::Attach(); })) ForwardLightKill::Installed = false;	// UNOFFICIAL 2026-11-24 fd-complete: [Main.Main.Misc] ForwardLightKill (test only)
+	if (!RunDetourGroup("ScopeCamera", [] { AttachScopeCameraHooks(); })) ClearScopeCameraHooks();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene)
 	LampReachMargin = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.Misc", "LampReachMargin"));
 	if (LampReachMargin > 0.0f) {	// UNOFFICIAL, Render.cpp
 		const bool ok = AttachOne(NVR_REDIRECT(BoundWithinLightRadius));
 		Logger::Log("UNOFFICIAL LampReachMargin %.0f: hook %s, first bytes %02X %02X %02X", LampReachMargin, ok ? "attached" : "FAILED",
 			((const UInt8*)0x00B9DAE0)[0], ((const UInt8*)0x00B9DAE0)[1], ((const UInt8*)0x00B9DAE0)[2]);
 	}
-	// UNOFFICIAL interior forward shadows: each object's own lamps (PointShadowForward.h).
-	// (Also for ScopeFix outdoors, HiddenObjectCulling, LampScissor and the material rules, which work on the same per-object call; their
-	// switches are live only while this hook is in, i.e. with any of these on at startup.)
-	if (TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") ||
-		TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "ScopeFix") ||
-		settings->Main.HiddenObjectCulling || settings->Main.LampScissor ||
-		TheSettingManager->GetSettingI("Shaders.PBR.MaterialRules", "Enabled") ||
-		TheSettingManager->GetSettingI("Main.Main.Misc", "LampsDepthFirst") ||	// UNOFFICIAL 2026-10-26 LampsDepthFirst draws its depth step there
-		TheSettingManager->GetSettingI("Shaders.TAA.FSR", "Enabled")) {			// UNOFFICIAL 2026-11-22: RenderScale viewport & vanilla DoF depth tracking
-		Redirect({ NVR_REDIRECT(RenderPassStandard), NVR_REDIRECT(RenderPassSkinned) });
-	}
+	// UNOFFICIAL per-object pass hooks: always installed (no gate gap for DeferredRenderer, DeferredTransparents, RmaosDraw,
+	// WaterMaskDraw, GameEyes, BarrelHeat, FlashlightLamp, EnvLightFade, NpcCharacterMaps, LampsInOnePass, FoldFog, FoldHighlights,
+	// ManyLamps, Cloth, Plants, PipboyFit, ShadowsInteriors, HiddenObjectCulling, LampScissor, MaterialRules, LampsDepthFirst, TAA).
+	Redirect({ NVR_REDIRECT(RenderPassStandard), NVR_REDIRECT(RenderPassSkinned) });
 	Redirect({
 		NVR_REDIRECT(GetWaterHeightLOD),
 		NVR_REDIRECT(IsWaterNodeVisible),   // always: water with no child nodes (crash in the reflection pass; ported from Balebandro/Physically-Based-Reloaded 1ce5d62)
@@ -196,15 +261,15 @@ void AttachHooks() {
 	InstallMaterialDrawHooks();
 
 	// --- engine patches ---
-	Patch({
-		{ Branch::Call, 0xBE0B73, (UInt32)&NiD3DVertexShaderEx::Free },	// NVR's shader records are freed with the game's shaders
-		{ Branch::Call, 0xBE0AF3, (UInt32)&NiD3DPixelShaderEx::Free },
-	});
+	PatchChecked({ Branch::Call, 0xBE0B73, (UInt32)&NiD3DVertexShaderEx::Free },
+		{ 0xE8, 0xF8, 0x8F, 0x2A, 0x00 }, "vertex shader free (NiD3DVertexShader)", IfChanged::WriteAnyway);
+	PatchChecked({ Branch::Call, 0xBE0AF3, (UInt32)&NiD3DPixelShaderEx::Free },
+		{ 0xE8, 0x78, 0x8E, 0x2A, 0x00 }, "pixel shader free (NiD3DPixelShader)", IfChanged::WriteAnyway);
 	// the game allocates NVR's bigger versions of these objects
-	SafeWrite32(0x00E7624D, sizeof(RenderManager));
-	SafeWrite32(0x00466606, sizeof(TESWeatherEx));
-	SafeWrite32(0x0046CF9B, sizeof(TESWeatherEx));
-	SafeWrite8(0xB575AA, 0x75);			// the shader package is never destroyed
+	GrowAllocation(0x00E7624D, sizeof(RenderManager), "RenderManager (NiDX9Renderer::Create)");
+	GrowAllocation(0x00466606, sizeof(TESWeatherEx), "TESWeather (CreateFormFromID)");
+	GrowAllocation(0x0046CF9B, sizeof(TESWeatherEx), "TESWeather (GenerateDefaultObjects)");
+	Write8Checked(0xB575AA, 0x74, 0x75, "shader package kept (BSShaderManager::Initialize)", IfChanged::WriteAnyway);	// the shader package is never destroyed
 
 	// UNOFFICIAL MoreLampsPerObject (2026-10-13): BSShaderPPLightingProperty::AddPass_Opt (0x00BDE9B0) gives a specular
 	// many-lamp pass (0xD0, 0xD1: most lit surfaces indoors) at most 3-4 entries, the first light and 2-3 lamps (ADD ECX,2 at
@@ -220,53 +285,82 @@ void AttachHooks() {
 		}
 		else Logger::Log("UNOFFICIAL MoreLampsPerObject: the game's code at 00BDEA3D is not as expected (another plugin?); not changed");
 	}
-	SafeWrite8(0x008751C0, 0);				// first-person rendering keeps the depth buffer (no clear)
-	SafeWrite16(0x0086A170, 0x9090);		// no pause on ALT-TAB
+	Write8Checked(0x008751C0, 0x04, 0x00, "first-person depth keep (DrawWorld_MTRender1stPerson)", IfChanged::WriteAnyway);
+	// no pause on ALT-TAB: WinProc's WA_INACTIVE branch (je) is skipped. Not the game's bAlwaysActive: that one still opens the pause menu.
+	Write16Checked(0x0086A170, { 0x74, 0x57 }, 0x9090, "no pause on Alt-Tab (WinProc)", IfChanged::WriteAnyway);
 
-	Patch({
-		{ Branch::Jump, Jumpers::DetectorWindow::CreateTreeViewHook, (UInt32)&DetectorWindowCreateTreeViewHook },	// the detector window (debug scene tree)
-		{ Branch::Jump, Jumpers::DetectorWindow::DumpAttributesHook, (UInt32)&DetectorWindowDumpAttributesHook },
-		{ Branch::Jump, Jumpers::DetectorWindow::ConsoleCommandHook, (UInt32)&DetectorWindowConsoleCommandHook },
-		{ Branch::Call, Jumpers::DetectorWindow::SetNodeName, (UInt32)&DetectorWindowSetNodeName },
-	});
+	// the detector window (debug scene tree): debug only, so left out if another plugin changed these places
+	PatchChecked({ Branch::Jump, Jumpers::DetectorWindow::CreateTreeViewHook, (UInt32)&DetectorWindowCreateTreeViewHook },
+		{ 0x8B, 0x4D, 0xB8, 0x89, 0x41 }, "detector window (NiTreeCtrl::CreateWindows)", IfChanged::Skip);
+	PatchChecked({ Branch::Jump, Jumpers::DetectorWindow::DumpAttributesHook, (UInt32)&DetectorWindowDumpAttributesHook },
+		{ 0xFF, 0x15, 0x8C, 0xF2, 0xFD }, "detector window (NiTreeCtrl::CreateTreeRecursive)", IfChanged::Skip);
+	PatchChecked({ Branch::Jump, Jumpers::DetectorWindow::ConsoleCommandHook, (UInt32)&DetectorWindowConsoleCommandHook },
+		{ 0xC6, 0x05, 0xC1, 0x9F, 0x1F }, "detector window (DrawWorld_Init)", IfChanged::Skip);
+	CallChecked(Jumpers::DetectorWindow::SetNodeName, (UInt32)&DetectorWindowSetNodeName, "detector window node names");
 	kRenderInterfaceDetour.ReplaceCall(Jumpers::RenderInterface::Hook, RenderInterfaceHook);
 	InstallMenu3DGuardHook();
 	InstallDoFDepthGuardHooks();
-	Patch({
-		{ Branch::Jump, 0x871290, (UInt32)&RenderShadowMapHook },
-		{ Branch::Jump, Jumpers::Shadows::LeavesNodeNameHook, (UInt32)&LeavesNodeNameHook },
-		{ Branch::Jump, 0x004E4C3B, 0x004E4C42 },	// reflections where the cell's water height differs from the worldspace's
-		{ Branch::Jump, 0x004E4DA4, 0x004E4DAC },	// reflections on distant water
-		{ Branch::Call, 0x00875B86, 0x00710AB0 },	// the world field of view is set again after first-person rendering (2 sites)
-		{ Branch::Call, 0x00875B9D, 0x00710AB0 },
-		{ Branch::Jump, 0x00C03F49, 0x00C03F5A },	// image space effects rendered wrong
-		{ Branch::Call, 0x9BB158, (UInt32)&MuzzleLightCullingFix },
-		{ Branch::Call, 0x879061, (UInt32)&CreateSaveTextureHook },	// save screenshots corrupted under DXVK with the HDR mod
-	});
+	BoneMatrixBatch::Enabled = settings->Main.BatchBoneUploads;
+	BoneMatrixBatch::Install();
+	ConstantMapSort::Enabled = settings->Main.FastConstantMapSort;
+	ConstantMapSort::Install();
+	PatchChecked({ Branch::Jump, Jumpers::Shadows::LeavesNodeNameHook, (UInt32)&LeavesNodeNameHook },
+		{ 0x89, 0x45, 0x90, 0xEB, 0x07 }, "tree leaves node name (BSTreeModel::CreateArt)", IfChanged::WriteAnyway);
+	PatchChecked({ Branch::Call, 0x00875B86, 0x00710AB0 },
+		{ 0xE8, 0x75, 0xED, 0xFF, 0xFF }, "world FOV restore 1 (DrawWorld_MTRender1stPerson)", IfChanged::WriteAnyway);
+	PatchChecked({ Branch::Call, 0x00875B9D, 0x00710AB0 },
+		{ 0xE8, 0x5E, 0xED, 0xFF, 0xFF }, "world FOV restore 2 (DrawWorld_MTRender1stPerson)", IfChanged::WriteAnyway);
+	PatchChecked({ Branch::Jump, 0x004E4C3B, 0x004E4C42 }, { 0x0F, 0xB6, 0xD0, 0x85, 0xD2 },	// reflections where the cell's water height differs from the worldspace's
+		"water reflections (TESWaterSystem::AddPlaceableWater)", IfChanged::WriteAnyway);
+	PatchChecked({ Branch::Jump, 0x004E4DA4, 0x004E4DAC }, { 0x0F, 0xB6, 0x4D, 0x18, 0x85 },	// reflections on distant water
+		"distant water reflections (TESWaterSystem::AddLODWater)", IfChanged::WriteAnyway);
+	// ImageSpaceShader::Render's own SetupPassShaders call is skipped: RenderPassImmediately binds the same shaders again right after
+	// (always, for image space), and this early call is the only one that would hand SetShadersHook a stale BSShaderManager::
+	// pCurrentRenderPass (xFNV ImageSpaceShader::Render; audit hooks.md C1). SetShadersHook relies on it: never drop.
+	PatchChecked({ Branch::Jump, 0x00C03F49, 0x00C03F5A }, { 0x8B, 0x06, 0x8B, 0x90, 0xF4 }, "image space shader bind (ImageSpaceShader::Render)", IfChanged::WriteAnyway);
+	// save screenshots corrupted under DXVK with the HDR mod: the save's texture is made without the format upgrade. 2026-11-25: the hook
+	// calls what the call called before (BSRenderedTexture::Create, or another plugin's hook there).
+	if (*(const UInt8*)0x00879061 == 0xE8) kSaveTextureDetour.ReplaceCall(0x00879061, CreateSaveTextureHook);
+	else Logger::Log("[WARN] AttachHooks: 00879061 is not a call (byte %02X; another plugin?): save screenshot fix not hooked", *(const UInt8*)0x00879061);
+	// Muzzle flash lights culled with the flash (MuzzleFlash::Update's call at 0x9BB158). 2026-11-24 hook cleanup: only if it is a
+	// call, and the hook calls whatever it called before (the game's 0x9BB8A0 or another plugin's hook) instead of a fixed address.
+	if (*(const UInt8*)0x009BB158 == 0xE8) kMuzzleFlashDetour.ReplaceCall(0x009BB158, MuzzleLightCullingFix);
+	else Logger::Log("[WARN] AttachHooks: 009BB158 is not a call (byte %02X; another plugin?); muzzle flash light fix not hooked", *(const UInt8*)0x009BB158);
 
 	// The old project's own intro, menu video and menu music only with ReplaceIntro (off by default): otherwise the game's own
 	// (2026-11-02: the music redirect used to be patched in always, so the menu played NVRMainMenu.mp3 even with it off).
-	if (settings->Main.ReplaceIntro)
-		Patch({ { Branch::Jump, Jumpers::SetTileShaderConstants::Hook, (UInt32)&SetTileShaderConstantsHook },
-			{ Branch::Call, Jumpers::MainMenuMusic::Fix1, (UInt32)&MainMenuMusicFix },
-			{ Branch::Call, Jumpers::MainMenuMusic::Fix2, (UInt32)&MainMenuMusicFix } });
+	if (settings->Main.ReplaceIntro) {
+		PatchChecked({ Branch::Jump, Jumpers::SetTileShaderConstants::Hook, (UInt32)&SetTileShaderConstantsHook },
+			{ 0x80, 0xBE, 0xAC, 0x00, 0x00 }, "ReplaceIntro menu video (TileShader::SetupGeometryConstants)", IfChanged::Skip);
+		CallChecked(Jumpers::MainMenuMusic::Fix1, (UInt32)&MainMenuMusicFix, "ReplaceIntro menu music (1)");
+		CallChecked(Jumpers::MainMenuMusic::Fix2, (UInt32)&MainMenuMusicFix, "ReplaceIntro menu music (2)");
+	}
 
-	if (settings->Main.RemovePrecipitations)
-		Patch({ { Branch::Jump, 0x0063AFC4, 0x0063AFD8 }, { Branch::Jump, 0x0063A5CB, 0x0063A5DE } });
+	if (settings->Main.RemovePrecipitations) {
+		PatchChecked({ Branch::Jump, 0x0063AFC4, 0x0063AFD8 }, { 0x74, 0x12, 0x51, 0xD9, 0x45 }, "RemovePrecipitations (Sky::Update)", IfChanged::Skip);
+		PatchChecked({ Branch::Jump, 0x0063A5CB, 0x0063A5DE }, { 0x74, 0x11, 0x51, 0xD9, 0xEE }, "RemovePrecipitations (Sky::SetMode)", IfChanged::Skip);
+	}
 
-	for (UInt32 caller : kFogPropertyCallers) WriteRelCall(caller, (UInt32)&ShadowSceneNode__GetFogPropertyEx);
+	if (!AttachOne(Redirection{ "GetFogProperty", &(PVOID&)GetFogProperty, (PVOID)&ShadowSceneNode__GetFogPropertyEx })) {
+		Logger::Log("[WARN] AttachHooks: GetFogProperty (00B55520) could not be hooked; patching its 14 calls instead");
+		for (UInt32 caller : kFogPropertyCallers) WriteRelCall(caller, (UInt32)&ShadowSceneNode__GetFogPropertyEx);
+	}
 
-	SafeWrite32(0x10EE63C, reinterpret_cast<UInt32>(&NiDX9Renderer__Do_EndFrame));	// end of frame: queued effect reloads run here
+	// End of frame: queued effect reloads run here. 2026-11-24 hook cleanup: the slot's previous entry is kept and called (the game's
+	// Do_EndFrame 0xE69660, or another plugin's hook) instead of a fixed address that would cut another plugin off.
+	kEndFrameDetour.ReplaceVirtualFunc(0x10EE63C, NiDX9Renderer__Do_EndFrame);
 
-	if (settings->Main.RemoveUnderwater)
-		WriteRelCall(0x4EC8EE, (UInt32)&WaterFogRemover);
+	if (settings->Main.RemoveUnderwater)	// the underwater fog's NiPoint2 is made (0, 0): only over the game's call
+		PatchChecked({ Branch::Call, 0x4EC8EE, (UInt32)&WaterFogRemover }, { 0xE8, 0xCD, 0x64, 0xF6, 0xFF }, "RemoveUnderwater", IfChanged::Skip);
 
-	if (settings->FlyCam.Enabled) {
-		Patch({
-			{ Branch::Jump, Jumpers::FlyCam::UpdateForwardFlyCamHook, (UInt32)&UpdateForwardFlyCamHook },
-			{ Branch::Jump, Jumpers::FlyCam::UpdateBackwardFlyCamHook, (UInt32)&UpdateBackwardFlyCamHook },
-			{ Branch::Jump, Jumpers::FlyCam::UpdateRightFlyCamHook, (UInt32)&UpdateRightFlyCamHook },
-			{ Branch::Jump, Jumpers::FlyCam::UpdateLeftFlyCamHook, (UInt32)&UpdateLeftFlyCamHook },
-		});
+	if (settings->FlyCam.Enabled) {	// tfc movement keys: optional, left out if another plugin changed the movement code
+		PatchChecked({ Branch::Jump, Jumpers::FlyCam::UpdateForwardFlyCamHook, (UInt32)&UpdateForwardFlyCamHook },
+			{ 0xD9, 0x45, 0x80, 0xDC, 0x05 }, "FlyCam forward", IfChanged::Skip);
+		PatchChecked({ Branch::Jump, Jumpers::FlyCam::UpdateBackwardFlyCamHook, (UInt32)&UpdateBackwardFlyCamHook },
+			{ 0xD9, 0x45, 0x80, 0xDC, 0x25 }, "FlyCam backward", IfChanged::Skip);
+		PatchChecked({ Branch::Jump, Jumpers::FlyCam::UpdateRightFlyCamHook, (UInt32)&UpdateRightFlyCamHook },
+			{ 0xD9, 0x85, 0x7C, 0xFF, 0xFF }, "FlyCam right", IfChanged::Skip);
+		PatchChecked({ Branch::Jump, Jumpers::FlyCam::UpdateLeftFlyCamHook, (UInt32)&UpdateLeftFlyCamHook },
+			{ 0xD9, 0x85, 0x7C, 0xFF, 0xFF }, "FlyCam left", IfChanged::Skip);
 	}
 }

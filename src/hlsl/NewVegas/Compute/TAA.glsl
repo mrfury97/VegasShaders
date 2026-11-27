@@ -166,7 +166,9 @@ TAAResult ResolveCore(vec2 p) {
     vec2 prevUV = Reproject(p, inFront);
 
     // The weapon gets real 1st-person motion vectors when WeaponAA is active; otherwise fixed to camera (same pixel).
-    float isViewModel = textureLod(sampler2D(t_viewmodel, POINT_S), p, 0.0).x > 0.0 ? 1.0 : 0.0;
+    float vmRaw = textureLod(sampler2D(t_viewmodel, POINT_S), p, 0.0).x;
+    bool reversedDepth = cb.weapon.z > 0.5;
+    float isViewModel = (reversedDepth ? (vmRaw > 0.0) : (vmRaw < 0.99999)) ? 1.0 : 0.0;
     if (isViewModel > 0.5 && cb.weapon.y > 0.5) {
         vec4 vm = textureLod(sampler2D(t_vmmotion, POINT_S), p, 0.0);
         if (vm.z > 0.5) {

@@ -111,7 +111,7 @@ namespace FoldHighlights {
 		if (!On || !world || !passPtr) return false;
 		const PointShadowForward::RenderPassView* pass = (const PointShadowForward::RenderPassView*)passPtr;
 #if NVR_TEST_TOOLS
-		if (pass->passEnum >= 0x14A && pass->passEnum <= 0x150) {	// diagnostic: does the vertex colour flag match the texture pass the game picked?
+		if (pass->passEnum >= 0x14A && pass->passEnum <= 0x153) {	// diagnostic: does the vertex colour flag match the texture pass the game picked?
 			const UInt8* state = Slot(pass->geometry, false);
 			if (state && *state == 1) {
 				const BSShaderProperty* property = PbrPop::LitProperty(pass->geometry);

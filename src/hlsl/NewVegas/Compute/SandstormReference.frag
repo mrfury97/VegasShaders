@@ -152,8 +152,10 @@ void main() {
     float rawDepth = readDepth(uv);
     bool skyBehind = rawDepth / farZ >= 0.9961;
     if (TESR_SandstormEmissive.x > 0.0) {
-        float dustLuma = max(dot(dustLight, vec3(0.2126, 0.7152, 0.0722)), 1e-4) * TESR_SandstormEmissive.x * (skyBehind ? 2.0 : 1.0);
+        vec3 refLight = EmissiveDustRef(dustLight);
+        float dustLuma = max(dot(refLight, vec3(0.2126, 0.7152, 0.0722)), 1e-4) * TESR_SandstormEmissive.x * (skyBehind ? 2.0 : 1.0);
         float emissive = saturate((dot(color.rgb, vec3(0.2126, 0.7152, 0.0722)) - dustLuma) / dustLuma);
+        if (skyBehind) emissive *= 1.0 - smoothstep(0.02, 0.25, TESR_SunAmount.x);
         vec3 nearResult = color.rgb * nearTransmittance + nearScattered + (scattered - dustScattered);
         result = mix(result, nearResult, emissive);
     }

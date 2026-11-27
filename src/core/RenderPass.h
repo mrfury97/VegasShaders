@@ -20,6 +20,9 @@ public:
 	// UNOFFICIAL 2026-10-14: while the light grid's sun map is drawn (ShadowManager, ShadowGridColor.pso), each caster's diffuse
 	// texture is bound at s0 so the map records its colour; TESR_ShadowData.w says whether one was bound.
 	static inline bool BindDiffuse = false;
+	// UNOFFICIAL 2026-11-24: while the reflection world cubemap is drawn (ShadowManager::RenderReflectionCubeFace, ReflCube.pso),
+	// each non-Hair/non-FaceGen caster's glow map (ppTextures[2]) is bound at s1; TESR_ShadowData.z says whether one was bound.
+	static inline bool BindGlow = false;
 	// UNOFFICIAL 2026-10-17 (TB-1, terrain blending shadow band): while Terrain Blending is on, the land is drawn into the sun
 	// shadow maps LandDrop game units lower than it is (ShadowManager::RenderShadowMap sets it to BlendDistance * ShadowDrop;
 	// 0 = off, nothing changes). The land fades away over the part of an object it covers by less than BlendDistance; with the
@@ -46,6 +49,7 @@ public:
 	static inline unsigned LayerHeldBack = 0;	// casters left out of static layers (stats)
 	static void UpdateShadowWorld(NiGeometry* Geo);
 	static void BindDiffuseOf(NiGeometry* Geo);
+	static void BindGlowOf(NiGeometry* Geo);
 
 	std::stack<NiGeometry*>	GeometryList;	// collected casters, drawn and emptied by RenderAccum
 

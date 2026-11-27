@@ -27,6 +27,7 @@ public:
 	static inline unsigned	BindSerial = 0;			// UNOFFICIAL 2026-10-28: grass binds so far (GrassFirst trusts LastBindNVR only for a bind of its own run)
 	static inline const char*	LastBindName = nullptr;	// the vertex shader of that bind (GrassFirst's log)
 	static inline bool	PendingTstgRestore = false;
+	static inline bool	BoundGrassVS = false;
 	static inline bool	TstgDetected = false;
 	static inline bool	TstgChecked = false;
 	static void	CheckTstg(IDirect3DDevice9* device);

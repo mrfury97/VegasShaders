@@ -14,8 +14,9 @@ other things:
   - nvngx_dlss.dll and nvngx_dlssd.dll must not be modified, and NVIDIA's development nvngx_dlss.dll (lib\dev, with the on-screen overlay) must never be
     part of a public release;
   - no reverse engineering of the SDK; it may not be distributed on its own or made subject to an open-source licence;
-  - NVIDIA must be notified before a commercial release; a public release must credit NVIDIA's DLSS SDK (splash/about/credits), and
-    any use of NVIDIA's names or marks needs NVIDIA's prior written approval (send samples at least two weeks ahead);
+  - an application that uses the DLSS SDK must credit it, with NVIDIA's marks, on its splash screen, in its about box (if any) and in
+    its credits; the licence grants that use of the marks. Combining NVIDIA's marks with other content needs NVIDIA's prior written
+    approval, and NVIDIA must be notified before a commercial release (licence v. 2024-03-14, exhibit 7.1(b), 7.3(b), supplement 4);
   - the third-party notices in section 9.5/9.6 of NVIDIA's DLSS Programming Guide must be included in the public documentation.
 No NVIDIA logo is used anywhere in New Vegas Reloaded.
 

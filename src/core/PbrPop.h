@@ -338,7 +338,7 @@ namespace PbrPop {
 		inline unsigned FrameId = 1, Lines = 0, Frames = 0, Enabled = 0;
 		inline unsigned long long Switches = 0;
 
-		inline bool IsTexture(UInt16 e) { return e >= 0x14A && e <= 0x150; }
+		inline bool IsTexture(UInt16 e) { return e >= 0x14A && e <= 0x153; }
 		inline bool IsOpt(UInt16 e) { return e >= 0xC3 && e <= 0xD6; }
 		inline bool HasTexture(const UInt16* e, unsigned n) { for (unsigned i = 0; i < n; i++) if (IsTexture(e[i])) return true; return false; }
 		inline bool HasHighlight(const UInt16* e, unsigned n) { for (unsigned i = 0; i < n; i++) if (LampsInOnePass::Census::IsHighlightPass(e[i])) return true; return false; }

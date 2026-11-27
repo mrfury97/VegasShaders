@@ -132,8 +132,8 @@ namespace PassFamilyView {
 	inline bool Skip(const void* passPtr, bool world) {
 		if (!Mode || !world || !passPtr) return false;
 		const UInt16 e = ((const PointShadowForward::RenderPassView*)passPtr)->passEnum;
-		return LampsInOnePass::Census::IsLampPass(e) || LampsInOnePass::Census::IsHighlightPass(e) || (e >= 0x14A && e <= 0x150) ||
-			(e >= 0x248 && e <= 0x255);
+		return LampsInOnePass::Census::IsLampPass(e) || LampsInOnePass::Census::IsHighlightPass(e) || (e >= 0x14A && e <= 0x153) ||
+			(e >= 0x248 && e <= 0x256);
 	}
 
 	// Right before the game draws the pass (nothing can skip it after this): note the object, colour it if no new bind follows.

@@ -183,11 +183,14 @@ void main() {
         vec3 cMean = cM1 / cCount;
         vec3 cSigma = sqrt(max(cM2 / cCount - cMean * cMean, vec3(0.0)));
         vec3 histC = max(history.rgb / history.a, vec3(0.0));
-        if (s.roughness < 0.03) histC = clamp(histC, max(cMean - 1.25 * cSigma, vec3(0.0)), cMean + 1.25 * cSigma);
+        const float roughT = smoothstep(0.03, 0.5, s.roughness);
+        const float clampK = mix(1.25, 3.0, roughT);
+        histC = clamp(histC, max(cMean - clampK * cSigma, vec3(0.0)), cMean + clampK * cSigma);
         float hl = dot(histC, lumaW);
         float maxTameL = 16.0 / 17.0;
         if (hl > maxTameL) histC *= maxTameL / hl;
-        float histA = s.roughness < 0.03 ? clamp(history.a, aMin, aMax) : history.a;
+        const float aMargin = mix(0.0, 0.25, roughT);
+        float histA = clamp(history.a, max(aMin - aMargin, 0.0), min(aMax + aMargin, 1.0));
         history = vec4(histC * histA, histA);
     } else {
         history = vec4(0.0);

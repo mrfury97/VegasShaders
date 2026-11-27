@@ -20,7 +20,8 @@ class NiNode; class NiTimeController; class NiProperty; class NiAlphaProperty; c
 class NiMaterialProperty; class NiStencilProperty; class NiGeometryData; class NiTexture; class NiGeometry;
 class NiFrustumPlanes; class NiTriStrips; class NiD3DShader; class NiDX9Renderer; class NiDX9RenderState;
 class NiDepthStencilBuffer; class NiRenderTargetGroup; class BSFadeNode; class BSMultiBoundNode;
-class BSMultiBoundShape; class BSFogProperty; class ShadowSceneNode; class ShaderRecord;
+class BSMultiBoundShape; class BSMultiBoundRoom; class BSPortal; class BSPortalGraph;
+class BSFogProperty; class ShadowSceneLight; class ShadowSceneNode; class ShaderRecord;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Run-time type info and the game's allocator
@@ -258,6 +259,14 @@ public:
 	UInt32	numItems;	// +0x08
 };
 
+template <typename T> class BSSimpleArray {	// 0x10 bytes
+public:
+	void*	vtbl;			// +0x00
+	T*		pBuffer;		// +0x04
+	UInt32	iSize;			// +0x08
+	UInt32	iReservedSize;	// +0x0C
+};
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Scene graph
 // ---------------------------------------------------------------------------------------------------------------------
@@ -361,16 +370,55 @@ public:
 
 class BSMultiBoundShape : public NiObject {	// 0xC bytes
 public:
+	enum CullResult : SInt32 {
+		kCull_Untested = 0,
+		kCull_Visible = 1,
+		kCull_Culled = 2,
+		kCull_Occluded = 3,
+	};
+
 	NVR_VSLOT(35); NVR_VSLOT(36); NVR_VSLOT(37); NVR_VSLOT(38);
 	virtual bool WithinFrustum(NiFrustumPlanes& planes) const;	// 39
 
-	UInt32 pad08;
+	SInt32 kCullResult;	// +0x08
 };
 
 class BSMultiBoundNode : public NiNode {	// 0xB4 bytes
 public:
 	BSMultiBound*	spMultiBound;	// +0xAC
 	UInt32			padB0;
+};
+
+class BSPortal : public NiObject {	// 0x108 bytes (inherits BSOcclusionPlane)
+public:
+	UInt8				pad08[0x38];			// +0x08..0x40
+	SInt32				kCullResult;			// +0x40
+	UInt8				pad44[0xB8];			// +0x44..0xFC
+	BSMultiBoundRoom*	pMultiBoundRoom[2];		// +0xFC
+	NiNode*				spSharedGeometry;		// +0x104
+};
+
+class BSMultiBoundRoom : public BSMultiBoundNode {	// 0xEC bytes
+public:
+	NiTList<BSPortal>				kPortalList;			// +0xB4
+	NiTList<void>					lOccluderList;			// +0xC0
+	void*							pCompoundFrustum;		// +0xCC
+	NiTList<BSMultiBound>			kJoinedMultiBoundList;	// +0xD0
+	BSSimpleArray<ShadowSceneLight*> kLights;				// +0xDC
+};
+
+class BSPortalGraph : public NiRefObject {	// 0x78 bytes
+public:
+	NiTList<void>				lOccluderList;				// +0x08
+	NiTList<BSPortal>			lPortalList;				// +0x14
+	NiTList<BSMultiBoundRoom>	lMultiBoundRoomList;		// +0x20
+	NiObject*					spMultiBoundRoomRoot;		// +0x2C
+	NiTList<BSMultiBoundRoom>	lMultiBoundRoomAccumList;	// +0x30
+	NiTArray<NiAVObject*>		m_kAlwaysRenderChildren;	// +0x3C
+	NiNode*						spPortalNodeRoot;			// +0x4C
+	NiTList<NiAVObject>			kAttachAlwaysRenderQueue;	// +0x50
+	NiTList<NiAVObject>			kDetachAlwaysRenderQueue;	// +0x5C
+	BSSimpleArray<NiNode*>		kUnboundNodes;				// +0x68
 };
 
 class NiSwitchNode : public NiNode {	// 0xCC bytes
@@ -1083,19 +1131,32 @@ public:
 	UInt8					padF5[3];
 	NiPointLight*			sourceLight;	// +0xF8
 	UInt32					padFC[5];
-	UInt16					bIsEnabled;		// +0x110 not an "enabled" flag: the game's usFrustumCull, set by ShadowSceneLight::TestFrustumCull
-											// (0x00B9E970); 0xFF = culled for this view, else in view (0 = every face). Name kept for the callers.
-	UInt16					pad112;
-	UInt32					pad114[79];
+	UInt16								bIsEnabled;			// +0x110 not an "enabled" flag: the game's usFrustumCull, set by
+																// ShadowSceneLight::TestFrustumCull (0x00B9E970); 0xFF = culled for this view,
+																// else in view (0 = every face). Name kept for the callers.
+	UInt16								pad112;
+	UInt32								pad114[63];			// +0x114..0x210
+	BSSimpleArray<BSMultiBoundNode*>	kMultiboundRooms;	// +0x210
+	BSSimpleArray<BSPortal*>			kPortals;			// +0x220
+	BSSimpleArray<NiNode*>				kProcessedNodes;	// +0x230
+	BSPortalGraph*						pPortalGraph;		// +0x240
+	UInt32								pad244[3];			// +0x244..0x250
 };
 
 class ShadowSceneNode : public NiNode {	// 0x200 bytes
 public:
 	UInt32						padAC[2];
-	NiTList<ShadowSceneLight>	lights;				// +0xB4
+	NiTList<ShadowSceneLight>	lights;					// +0xB4
 	UInt32						padC0[8];
-	ShadowSceneLight*			directionalLight;	// +0xE0
+	ShadowSceneLight*			directionalLight;		// +0xE0
 	UInt32						padE4[20];
-	BSFogProperty*				fogProperty;		// +0x134
-	UInt32						pad138[50];
+	BSFogProperty*				fogProperty;			// +0x134
+	UInt32						pad138[41];				// +0x138..0x1DC (BSCompoundFrustum)
+	UInt8						bVisibleUnboundSpace;	// +0x1DC
+	UInt8						pad1DD[3];
+	BSPortalGraph*				pBSPortalGraph;			// +0x1E0
+	NiPoint3					kLightingOffset;		// +0x1E4
+	NiPoint3					kEyePosition;			// +0x1F0
+	UInt8						bAllowLightRemoveQueues;// +0x1FC
+	UInt8						pad1FD[3];
 };

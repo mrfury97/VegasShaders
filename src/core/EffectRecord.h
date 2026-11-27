@@ -30,6 +30,8 @@ public:
 	virtual bool			TargetParkable(const char* SamplerName) { return false; }
 	// ... and whether the effect needs its targets now. Enabled, unless it is on but stands aside (SMAA while TAA runs).
 	virtual bool			TargetsWanted() { return Enabled; }
+	// P12 fix: per-target wanted check so shared RT AO/GI targets stay alive while AmbientLight uses them.
+	virtual bool			TargetWanted(const char* SamplerName) { (void)SamplerName; return TargetsWanted(); }
 	virtual void			BeforeDraw(IDirect3DDevice9* Device) {};	// UNOFFICIAL 2026-10-22: right before each pass's draw (legacy path; SunFar's HazardLog)
 	virtual bool			SwitchEffect();			// flips the menu switch, loads or disposes accordingly
 	virtual void			Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source);
@@ -98,6 +100,21 @@ public:
 	bool					Sm6Covers(UINT techniqueIndex);
 
 	bool					IsLoaded();	// an ID3DXEffect is there
+	bool					PendingLazyLoad = false;	// UNOFFICIAL 2026-11-23 Lazy legacy shader compilation: deferred until first enable
+	bool					LazyLoadQueued = false;		// UNOFFICIAL 2026-11-23: load queued for end-of-frame outside BeginScene/ImGui
+	static bool IsLazyEligibleName(const char* name) {
+		if (!name) return false;
+		static const char* const kEligible[] = {
+			"BloomLegacy", "Coloring", "LUT", "Cinema", "DepthOfField", "Debug", "GodRays",
+			"ImageAdjust", "Lens", "SunGlare", "LowHF", "MotionBlur", "Precipitations",
+			"Sharpening", "BounceLight", "PointShadows2", "Specular", "Snow", "WaterLens",
+			"HeatHaze", "Sandstorm", "VolumetricLight", "SkyDither", "Bodycam", "Dream",
+			"DitherBuster", "SMAA", "FXAA", "DustMotes"
+		};
+		for (const char* k : kEligible) if (strcmp(name, k) == 0) return true;
+		return false;
+	}
+	virtual bool			LazyLoadAllowed() const { return IsLazyEligibleName(Name); }
 	bool					Enabled;	// the effect's menu switch
 	bool					usesSourceBuffer = true; // false when the effect declares no TESR_SourceBuffer sampler
 	// True when a pass can leave destination pixels unwritten or depends on their contents

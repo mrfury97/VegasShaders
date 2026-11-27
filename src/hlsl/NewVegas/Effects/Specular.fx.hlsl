@@ -19,6 +19,7 @@ float4 TESR_SkyColor;
 float4 TESR_HorizonColor;
 float4 TESR_WaterSettings;      // x: water height
 float4 TESR_ShadowFade;         // x: 1 when the sun is down (sunrise/sunset fade)
+float4 TESR_FogData;            // x: fog near, y: fog far, z: sun glare, w: fog power
 float4 NVR_BounceData;          // SpecularBounce: the bounce light's TESR_BounceLightData (x: strength, z: draw distance)
 float4 NVR_BounceLayout;        // SpecularBounce: zw: 1 / the size of its buffer (BounceLight.fx.hlsl's NVR_BounceLayout)
 
@@ -116,12 +117,14 @@ float4 SpecularLowPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	// facets into the gentle curve the game lights them with.
 	float3 sum = centre.xyz;
 	float weight = 1.0;
-	float tolerance = 0.05 * depth + 4.0;
+	float tolerance = 0.03 * depth + 3.0;
 	const float2 ring[16] = { float2(1, 0), float2(1, 1), float2(0, 1), float2(-1, 1), float2(-1, 0), float2(-1, -1), float2(0, -1), float2(1, -1),
 	                          float2(3, 1), float2(1, 3), float2(-1, 3), float2(-3, 1), float2(-3, -1), float2(-1, -3), float2(1, -3), float2(3, -1) };
 	[unroll] for (int k = 0; k < 16; k++) {
 		float4 s = tex2Dlod(TESR_SpecularNormals, float4(clampToRectIfOn(uv + ring[k] * lowPx, lowPx), 0, 0));	// UNOFFICIAL 2026-10-27 RenderScale v2: not past the drawn part
-		float w = abs(s.a - depth) < tolerance ? 1.0 : 0.0;
+		float rel = abs(s.a - depth) / tolerance;
+		rel *= rel;
+		float w = 1.0 / (1.0 + rel * rel);
 		sum += w * s.xyz;
 		weight += w;
 	}
@@ -173,7 +176,10 @@ float4 SpecularLowPS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	skyAmount *= lerp(1.0, lerp(NVR_SpecularExtra.y, 1.0, tex2Dlod(NVR_SpecularSkyVis, float4(uv, 0, 0)).b), NVR_SpecularExtra.x);
 	sunSpec *= lerp(1.0, tex2Dlod(NVR_SpecularSunFar, float4(uv, 0, 0)).a, NVR_SpecularExtra.z);
 
-	float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
+	float fogAmount = TESR_FogData.y > TESR_FogData.x + 1.0
+		? pow(1.0 - saturate((TESR_FogData.y - length(eyeVector)) / max(TESR_FogData.y - TESR_FogData.x, 1.0)), max(TESR_FogData.w, 0.0001))
+		: 0.0;
+	float fade = (1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth)) * (1.0 - fogAmount);
 	return float4(skyAmount * fade, skyAt, sunSpec * fade, depth);
 }
 
@@ -205,10 +211,13 @@ bool AddSpecular(float2 uv, float depth, inout float3 lin) {
 	float4 s10 = tex2Dlod(TESR_SpecularBuffer, float4(clampToRectIfOn(at + float2(lowPx.x, 0.0), lowPx), 0, 0));
 	float4 s01 = tex2Dlod(TESR_SpecularBuffer, float4(clampToRectIfOn(at + float2(0.0, lowPx.y), lowPx), 0, 0));
 	float4 s11 = tex2Dlod(TESR_SpecularBuffer, float4(clampToRectIfOn(at + lowPx, lowPx), 0, 0));
-	float4 off = abs(float4(s00.a, s10.a, s01.a, s11.a) - depth) / (0.05 * depth + 4.0);
+	float4 off = abs(float4(s00.a, s10.a, s01.a, s11.a) - depth) / (0.035 * depth + 3.0);
 	off *= off;
-	w *= 1.0 / (1.0 + off * off) + 0.0001;
-	float3 light = (s00.rgb * w.x + s10.rgb * w.y + s01.rgb * w.z + s11.rgb * w.w) / dot(w, 1.0);
+	float4 dw = 1.0 / (1.0 + off * off);
+	w *= dw;
+	float wSum = dot(w, 1.0);
+	float3 light = wSum > 0.001 ? (s00.rgb * w.x + s10.rgb * w.y + s01.rgb * w.z + s11.rgb * w.w) / wSum : 0.0;
+	light.rb *= saturate(dot(dw, 1.0) * 2.0);
 
 	float shadow = tex2Dlod(TESR_PointShadowBuffer, float4(uv, 0, 0)).r;
 	float sunUp = 1.0 - TESR_ShadowFade.x;

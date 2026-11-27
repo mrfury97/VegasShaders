@@ -56,25 +56,54 @@ namespace ShadowAtlas {
 		}
 		Size = (UINT)size;
 		d->ColorFill(Surface, NULL, D3DCOLOR_ARGB(255, 255, 255, 255));	// 1 = nothing recorded (lit)
-		static const char* kPS =
-			"samplerCUBE C : register(s0); float4 K : register(c0);"	// K.x tile texels
-			"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
-			"  float2 v = (uv * K.x - 0.5f) / (K.x - 1.0f) * 2.0f - 1.0f;"
-			"  float3 n = float3(v.x, v.y, 1.0f - abs(v.x) - abs(v.y));"
-			"  float t = saturate(-n.z);"
-			"  n.xy += float2(n.x >= 0.0f ? -t : t, n.y >= 0.0f ? -t : t);"
-			"  return texCUBElod(C, float4(normalize(n), 0.0f)).r; }";
-		ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
-		const bool ok = SUCCEEDED(D3DXCompileShader(kPS, (UINT)strlen(kPS), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) && code &&
-			SUCCEEDED(d->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &PS));
-		if (!ok) Logger::Log("[ERROR] ShadowAtlas: the conversion shader failed (%s): off for the session", errors ? (const char*)errors->GetBufferPointer() : "?");
-		if (code) code->Release();
-		if (errors) errors->Release();
-		if (!ok) { Failed = true; return false; }
+		if (!PS) {
+			static const char* kPS =
+				"samplerCUBE C : register(s0); float4 K : register(c0);"	// K.x tile texels
+				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
+				"  float2 v = (uv * K.x - 0.5f) / (K.x - 1.0f) * 2.0f - 1.0f;"
+				"  float3 n = float3(v.x, v.y, 1.0f - abs(v.x) - abs(v.y));"
+				"  float t = saturate(-n.z);"
+				"  n.xy += float2(n.x >= 0.0f ? -t : t, n.y >= 0.0f ? -t : t);"
+				"  return texCUBElod(C, float4(normalize(n), 0.0f)).r; }";
+			ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
+			const bool ok = SUCCEEDED(D3DXCompileShader(kPS, (UINT)strlen(kPS), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) && code &&
+				SUCCEEDED(d->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &PS));
+			if (!ok) Logger::Log("[ERROR] ShadowAtlas: the conversion shader failed (%s): off for the session", errors ? (const char*)errors->GetBufferPointer() : "?");
+			if (code) code->Release();
+			if (errors) errors->Release();
+			if (!ok) { Failed = true; return false; }
+		}
 		Logger::Log("ShadowAtlas: %ux%u R16F atlas made (%.0f MB); D3D9 available texture memory %u -> %u MB (%s runtime)", Size, Size, Size * (double)Size * 2.0 / 1048576.0,
 			memBefore / 1048576u, d->GetAvailableTextureMem() / 1048576u, TheRenderManager ? TheRenderManager->D3D9RuntimeDescription() : "?");
 		PointShadowForward::AtlasTexture = Texture;
 		return true;
+	}
+
+	inline double ExteriorSince = 0.0;
+
+	inline void Release() {
+		if (!Texture && !Surface) return;
+		PointShadowForward::AtlasTexture = nullptr;
+		if (Surface) { Surface->Release(); Surface = nullptr; }
+		if (Texture) { Texture->Release(); Texture = nullptr; }
+		Size = 0;
+		LastLiveSlots = 0;
+		memset(LiveTiles, 0, sizeof(LiveTiles));
+		memset(PoolTiles, 0, sizeof(PoolTiles));
+		memset(LiveRedrawn, 0, sizeof(LiveRedrawn));
+		Logger::Log("ShadowAtlas: released idle interior atlas while outdoors (will recreate on next interior)");
+	}
+
+	inline void TickExterior(bool isExterior) {
+		if (!isExterior || !Texture) { ExteriorSince = 0.0; return; }
+		const float waitSec = TheSettingManager ? TheSettingManager->GetSettingF("Main.Main.Performance", "TargetReleaseSeconds") : 0.0f;
+		if (waitSec <= 0.0f) { ExteriorSince = 0.0; return; }
+		const double now = (double)GetTickCount64() / 1000.0;
+		if (ExteriorSince <= 0.0) { ExteriorSince = now; return; }
+		if (now - ExteriorSince >= (double)waitSec) {
+			Release();
+			ExteriorSince = 0.0;
+		}
 	}
 
 	// UNOFFICIAL 2026-10-31 NearTiles ([Shaders.ShadowsInteriors.Atlas], restart, 0 or 8; user report: interior shadows blocky with the atlas on):

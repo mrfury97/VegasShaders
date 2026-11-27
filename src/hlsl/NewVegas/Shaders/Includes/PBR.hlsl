@@ -259,6 +259,63 @@ float3 PBRDiffuse(float metal, float r, float3 baseColor, float3 N, float3 V, fl
     return (1.0f - metal) * baseColor * (NdotL * radiance);
 }
 
+// UNOFFICIAL 2026-11-26 CandyCoat: Beer-Lambert optical-path absorption through tinted candy lacquer (only on saturated metals; neutral steel/chrome unaffected)
+float3 CandyCoatAbsorption(float3 metalCol, float NdotV, float coatAmt, float metal) {
+    if (coatAmt <= 0.001f || metal <= 0.05f) return 1.0f.xxx;
+    float3 c = saturate(metalCol);
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float sat = (fMax - fMin) / max(fMax, 1.0e-4f);
+    float satMask = smoothstep(0.14f, 0.45f, sat);
+    float3 tCol = lerp(1.0f.xxx, c / max(fMax, 1.0e-4f), satMask);
+    float pathLen = (1.0f / max(NdotV, 0.28f) - 1.0f) * 0.55f;
+    float metalMask = smoothstep(0.05f, 0.40f, metal);
+    return exp(-(1.0f.xxx - tCol) * (1.85f * saturate(coatAmt) * satMask * metalMask * pathLen));
+}
+
+#ifndef PBR_MULTI_SCATTER
+    #define PBR_MULTI_SCATTER 0
+#endif
+#if PBR_MULTI_SCATTER
+float3 MultiScatterMetalBoost(float3 f0, float r, float NdotV, float metal) {
+    if (metal <= 0.001f) return 1.0f;
+    const float4 k0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+    const float4 k1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+    float4 mixed = r * k0 + k1;
+    float bias0 = min(mixed.x * mixed.x, exp2(-9.28f * NdotV)) * mixed.x + mixed.y;
+    float2 scaleBias = float2(-1.04f, 1.04f) * bias0 + mixed.zw;
+    float ess = clamp(scaleBias.x + scaleBias.y, 0.12f, 1.0f);
+    float3 comp = 1.0f + f0 * (1.0f / ess - 1.0f);
+    return lerp(1.0f.xxx, min(comp, 2.2f.xxx), metal);
+}
+
+float3 HueShift(float3 c, float angle) {
+    const float3 k = 0.57735027f.xxx;
+    return c * cos(angle) + cross(k, c) * sin(angle) + k * dot(k, c) * (1.0f - cos(angle));
+}
+
+float3 ApplyPearlescence(float3 col, float NdotV, float pearl, float metal) {
+    if (pearl <= 0.001f || metal <= 0.05f) return col;
+    float3 c = saturate(col);
+    float fMax = max(c.r, max(c.g, c.b));
+    float fMin = min(c.r, min(c.g, c.b));
+    float satMask = saturate(((fMax - fMin) / max(fMax, 1.0e-4f) - 0.10f) * 3.3333f);
+    float omv = saturate(1.0f - NdotV);
+    float3 hueShifted = HueShift(c, -0.95f * pearl * (0.20f + 0.80f * omv));
+    float3 filmWave = 0.50f + 0.50f * cos(omv * 5.2f + float3(0.0f, 2.094395f, 4.18879f));
+    float lum = max(dot(c, float3(0.2126f, 0.7152f, 0.0722f)), 0.14f);
+    float3 thinFilm = lerp(c, lum * (0.35f + 1.15f * filmWave), saturate(0.22f + 0.78f * omv));
+    float3 pearlCol = lerp(thinFilm, hueShifted, satMask);
+    return lerp(col, saturate(pearlCol), pearl * saturate((metal - 0.05f) * 2.857f));
+}
+
+float3 PearlF90Tint(float3 metalCol, float pearl, float metal) {
+    if (pearl <= 0.001f || metal <= 0.05f) return 1.0f.xxx;
+    float pTop = max(metalCol.r, max(metalCol.g, metalCol.b));
+    return lerp(1.0f.xxx, saturate(metalCol / max(pTop, 0.25f)), pearl * saturate((metal - 0.05f) * 2.857f) * 0.75f);
+}
+#endif
+
 float3 PBRSpecular(float metal, float r, float3 baseColor, float3 N, float3 V, float3 L, float3 radiance) {
     const float3 f0Base = ReflectivityF0(lerp(PBR_DIELECTRIC_F0, baseColor, metal));
 
@@ -275,6 +332,9 @@ float3 PBRSpecular(float metal, float r, float3 baseColor, float3 N, float3 V, f
     const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
 
     float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotL, NdotH);
+#if PBR_MULTI_SCATTER
+    specOut *= MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+#endif
 #ifdef PBR_SPEC_FADE
     specOut *= NVR_SpecFade.x;	// UNOFFICIAL SpecularFade (above)
 #endif
@@ -301,6 +361,9 @@ float3 PBR(float metal, float r, float3 baseColor, float3 N, float3 V, float3 L,
     float3 diff = (1.0f - metal) * (1.0f - fres) * baseColor * PBRDiffuseKeep;
 
     float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotL, NdotH);
+#if PBR_MULTI_SCATTER
+    specOut *= MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+#endif
 #ifdef PBR_SPEC_FADE
     // UNOFFICIAL SpecularFade (above): the highlight out, the diffuse light towards PBRDiffuse's plain form.
     #ifndef PBR_SPEC_FADE_HIGHLIGHT_ONLY
@@ -322,7 +385,7 @@ float3 PBRSunSpecular(float metal, float r, float3 baseColor, float3 N, float3 V
     float3 viewV = normalize(V);
     float3 toLight = normalize(L);
 
-    const float3 mirrorDir = reflect(toLight, nrm);
+    const float3 mirrorDir = reflect(-viewV, nrm);
 
     const float discSin = sin(SUN_RADIUS);
     const float discCos = cos(SUN_RADIUS);
@@ -335,7 +398,8 @@ float3 PBRSunSpecular(float metal, float r, float3 baseColor, float3 N, float3 V
     const float3 sunDirV = LdotR < discCos ? normalize(discCos * toLight + offAxisDir * discSin) : mirrorDir;
 
     const float3 halfV = normalize(viewV + sunDirV);
-    const float NdotS = max(shades(nrm, sunDirV), 0.00001);
+    const float rawNdotS = shades(nrm, sunDirV);
+    const float NdotS = max(rawNdotS, 0.00001);
     const float NdotV = max(shades(nrm, viewV), 0.00001);
     const float NdotH = shades(nrm, halfV);
     const float NdotL = shades(nrm, toLight);
@@ -344,22 +408,23 @@ float3 PBRSunSpecular(float metal, float r, float3 baseColor, float3 N, float3 V
     const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
 
     float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotS, NdotH);
+#if PBR_MULTI_SCATTER
+    specOut *= MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+#endif
 #ifdef PBR_SPEC_FADE
     specOut *= NVR_SpecFade.x;	// UNOFFICIAL SpecularFade (above)
 #endif
 
-    return specOut * (NdotS * radiance);
+    return specOut * (rawNdotS * radiance);
 }
 
 // Sun: diffuse plus the disc specular, in one call.
 float3 PBRSun(float metal, float r, float3 baseColor, float3 N, float3 V, float3 L, float3 radiance) {
-    const float3 f0Base = ReflectivityF0(lerp(PBR_DIELECTRIC_F0, baseColor, metal));
-
     float3 nrm = normalize(N);
     float3 viewV = normalize(V);
     float3 toLight = normalize(L);
 
-    const float3 mirrorDir = reflect(toLight, nrm);
+    const float3 mirrorDir = reflect(-viewV, nrm);
 
     const float discSin = sin(SUN_RADIUS);
     const float discCos = cos(SUN_RADIUS);
@@ -372,17 +437,49 @@ float3 PBRSun(float metal, float r, float3 baseColor, float3 N, float3 V, float3
     const float3 sunDirV = LdotR < discCos ? normalize(discCos * toLight + offAxisDir * discSin) : mirrorDir;
 
     const float3 halfV = normalize(viewV + sunDirV);
-    const float NdotS = max(shades(nrm, sunDirV), 0.00001);
+    const float rawNdotS = shades(nrm, sunDirV);
+    const float NdotS = max(rawNdotS, 0.00001);
     const float NdotV = max(shades(nrm, viewV), 0.00001);
     const float NdotH = shades(nrm, halfV);
     const float NdotL = shades(nrm, toLight);
     const float LdotH = shades(toLight, halfV);
 
+#if PBR_MULTI_SCATTER && defined(PBR_PEARL_AMT)
+    float3 metalCol = baseColor;
+    float3 pearlF90Tint = 1.0f.xxx;
+    [branch] if (PBR_PEARL_AMT > 0.001f && metal > 0.05f) {
+        metalCol = ApplyPearlescence(baseColor, NdotV, PBR_PEARL_AMT, metal);
+        pearlF90Tint = PearlF90Tint(metalCol, PBR_PEARL_AMT, metal);
+    }
+    const float3 f0Base = ReflectivityF0(lerp(PBR_DIELECTRIC_F0, metalCol, metal));
+    const float3 fres = Fresnel(f0Base, max(PBR_F90_FOR(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
+#else
+    const float3 metalCol = baseColor;
+    const float3 f0Base = ReflectivityF0(lerp(PBR_DIELECTRIC_F0, metalCol, metal));
     const float3 fres = Fresnel(f0Base, PBR_F90_FOR(f0Base, r, metal), LdotH);
+#endif
 
     float3 diff = (1.0f - metal) * (1.0f - fres) * baseColor * PBRDiffuseKeep;
 
-    float3 specOut = BRDFPi(r, PBR_SPEC_FRESNEL(fres, baseColor, r, metal, LdotH), NdotV, NdotS, NdotH);
+#ifdef PBR_SPEC_F0
+    const float3 f0Spec = ReflectivityF0(PBR_SPEC_F0(metalCol, metal));
+    #if PBR_MULTI_SCATTER && defined(PBR_PEARL_AMT)
+    const float3 fresSpec = Fresnel(f0Spec, max(PBR_F90_FOR(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
+    #else
+    const float3 fresSpec = Fresnel(f0Spec, PBR_F90_FOR(f0Spec, r, metal), LdotH);
+    #endif
+#else
+    const float3 fresSpec = fres;
+#endif
+    float3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH);
+#if PBR_MULTI_SCATTER
+    specOut *= MultiScatterMetalBoost(f0Base, r, NdotV, metal);
+#endif
+#if PBR_MULTI_SCATTER && defined(PBR_CLEARCOAT_AMT)
+    [branch] if (PBR_CLEARCOAT_AMT > 0.001f && metal > 0.05f) {
+        specOut *= CandyCoatAbsorption(metalCol, NdotV, PBR_CLEARCOAT_AMT, metal);
+    }
+#endif
 #ifdef PBR_SPEC_FADE
     // UNOFFICIAL SpecularFade (above): the highlight out, the diffuse light towards PBRDiffuse's plain form.
     #ifndef PBR_SPEC_FADE_HIGHLIGHT_ONLY
@@ -391,5 +488,16 @@ float3 PBRSun(float metal, float r, float3 baseColor, float3 N, float3 V, float3
     specOut *= NVR_SpecFade.x;
 #endif
 
-    return (diff * NdotL + specOut * NdotS) * radiance;
+    float3 total = (diff * NdotL + specOut * rawNdotS) * radiance;
+#if PBR_MULTI_SCATTER && defined(PBR_CLEARCOAT_AMT)
+    const float coatW = PBR_CLEARCOAT_AMT * metal;
+    [branch] if (coatW > 0.001f && metal > 0.05f && rawNdotS > 0.0f) {
+        const float omc = 1.0f - LdotH;
+        const float omc2 = omc * omc;
+        const float Fc = 0.04f + 0.96f * (omc2 * omc2 * omc);
+        const float coatSpec = BRDFPi(0.06f, Fc.xxx, NdotV, NdotS, NdotH).x * rawNdotS;
+        total = total * (1.0f - 0.25f * coatW * Fc) + radiance * (coatSpec * coatW);
+    }
+#endif
+    return total;
 }

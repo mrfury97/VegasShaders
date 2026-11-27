@@ -64,6 +64,7 @@ void EffectRecord::DisposeEffect() {
  * result (even if the binary then failed to load -- the caller checks IsLoaded).
  */
 bool EffectRecord::LoadEffect() {
+	PendingLazyLoad = false;
 	TimeLogger loadClock;
 	bool usable = false;	// what the call returns: a cache or compile result was there
 
@@ -99,7 +100,11 @@ bool EffectRecord::LoadEffect() {
 		return usable;
 	};
 
-	const HRESULT ppHr = D3DXPreprocessShaderFromFileA(sourcePath.c_str(), macros, NULL, &source, &messages);
+	HRESULT ppHr = E_FAIL;
+	{
+		std::lock_guard<std::mutex> lock(CompileProgress::D3dxPreprocessMutex);
+		ppHr = D3DXPreprocessShaderFromFileA(sourcePath.c_str(), macros, NULL, &source, &messages);
+	}
 	if (ppHr != D3D_OK) {
 		ReportError(ppHr);
 		logMessages(messages, sourcePath.c_str());
@@ -127,17 +132,33 @@ bool EffectRecord::LoadEffect() {
 		// D3DX below when it is off, missing or refuses this effect.
 		if (stale || !hasBinary || !built) {
 			bool viaNew = false;
+			HRESULT stepHr = E_FAIL;
 			{
-				ID3DXBuffer* newMessages = nullptr;
-				viaNew = EffectCompiler47::Compile(source, Name, &binary, &newMessages);
-				if (!viaNew && EffectCompiler47::Use)
-					Logger::Log("UNOFFICIAL NewEffectCompiler: %s refused by d3dcompiler_47, compiled with D3DX as before: %s", Name,
-						newMessages ? (const char*)newMessages->GetBufferPointer() : "(no message)");
-				dropHeld(newMessages);
-			}
+				CompileProgress::CompileGate vaGate;
+				{
+					ID3DXBuffer* newMessages = nullptr;
+					viaNew = EffectCompiler47::Compile(source, Name, &binary, &newMessages);
+					if (!viaNew && EffectCompiler47::Use.load(std::memory_order_acquire))
+						Logger::Log("UNOFFICIAL NewEffectCompiler: %s refused by d3dcompiler_47, compiled with D3DX as before: %s", Name,
+							newMessages ? (const char*)newMessages->GetBufferPointer() : "(no message)");
+					dropHeld(newMessages);
+				}
 
-			HRESULT stepHr = viaNew ? D3D_OK
-				: D3DXCreateEffectCompiler((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, NULL, &compiler, &messages);
+				if (!viaNew) {
+					std::lock_guard<std::mutex> d3dxLock(CompileProgress::D3dxPreprocessMutex);
+					stepHr = D3DXCreateEffectCompiler((const char*)source->GetBufferPointer(), source->GetBufferSize(), NULL, NULL, NULL, &compiler, &messages);
+					logMessages(messages, sourcePath.c_str());
+					dropHeld(messages);
+					if (SUCCEEDED(stepHr) && compiler) {
+						stepHr = compiler->CompileEffect(NULL, &binary, &messages);
+						logMessages(messages, sourcePath.c_str());
+						dropHeld(messages);
+					}
+				}
+				else {
+					stepHr = D3D_OK;
+				}
+			}
 			if (FAILED(stepHr)) {
 				ReportError(stepHr);
 				EffectStatus::ShaderLoaded(EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
@@ -145,20 +166,6 @@ bool EffectRecord::LoadEffect() {
 				logMessages(messages, sourcePath.c_str());
 				return refuse();
 			}
-			// The compiler's creation messages are logged here and dropped before the next call fills the buffer again.
-			logMessages(messages, sourcePath.c_str());
-			dropHeld(messages);
-
-			if (!viaNew) stepHr = compiler->CompileEffect(NULL, &binary, &messages);
-			if (FAILED(stepHr)) {
-				ReportError(stepHr);
-				EffectStatus::ShaderLoaded(EffectStatus::CompileFailed);	// UNOFFICIAL 2026-11-01
-				EffectStatus::Level(Name, "effect FAILED to compile (off)", false);
-				logMessages(messages, sourcePath.c_str());
-				return refuse();
-			}
-			logMessages(messages, sourcePath.c_str());
-			dropHeld(messages);
 
 			if (binary) {
 				std::ofstream binaryFile(compiledPath, std::ios::out | std::ios::binary);
@@ -402,21 +409,19 @@ void EffectRecord::SetCT() {
 }
 
 /*
- * Enable or Disable Effect, with loading if not loaded
+ * Enable or Disable Effect, deferring lazy compile to Do_EndFrame outside BeginScene/ImGui
  */
 bool EffectRecord::SwitchEffect() {
-	// Turning on an effect that is not loaded loads it first; the switch flips only when that worked.
+	// Never compile or call InterfaceManager->ShowMessage() synchronously inside ImGuiManager::Render() (BeginScene).
 	if (!Enabled && !IsLoaded()) {
-		Logger::Log("Effect %s is not loaded", Name);
-		DisposeEffect();
-		if (!LoadEffect()) {
-			char failure[256];
-			snprintf(failure, sizeof(failure), "Error: Couldn't enable effect %s", Name);
-			InterfaceManager->ShowMessage(failure);
-			Logger::Log(failure);
-			return Enabled;
-		}
+		Logger::Log("Effect %s is not loaded; queuing lazy load for end of frame", Name);
+		PendingLazyLoad = true;
+		LazyLoadQueued = true;
+		Enabled = true;
+		if (TheShaderManager) TheShaderManager->LazyEffectLoadQueued = true;
+		return Enabled;
 	}
+	if (Enabled && !IsLoaded()) LazyLoadQueued = false;
 	Enabled = !Enabled;
 	return Enabled;
 }
@@ -468,6 +473,13 @@ void EffectRecord::RebindSlotTextures() {
 * else straight into the target with the copies the effect's samplers need.
 */
 void EffectRecord::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	if (Enabled && !Effect && PendingLazyLoad) {
+		LazyLoadQueued = true;
+		if (TheShaderManager) TheShaderManager->LazyEffectLoadQueued = true;
+		NoteSkip("queued for lazy load");
+		renderTime = 0.0f;
+		return;
+	}
 	// Off, not loaded or not wanted this frame: nothing drawn, no time.
 	if (!Enabled || !Effect || !ShouldRender()) {
 		// UNOFFICIAL 2026-11-01 (core/EffectStatus.h): why it did not draw, for the FLASH / REPORT dumps and the HEARTBEAT counts

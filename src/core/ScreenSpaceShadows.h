@@ -11,7 +11,8 @@
 //   - the depth pre-pass -> the main opaque list's depth at the deferred span's end (core/DeferredDepth.h's copy, which DeferredRenderer 2
 //     always makes: SettingForce forces DeferredDepth 2);
 //   - D3D11 compute -> the NVR DXVK extension's Vulkan compute (Compute/ScreenSpaceShadows.comp); native D3D9 has no compute: off there;
-//   - their deferred Lighting.hlsl -> Shaders/DeferredSun.hlsl (DS_SSS c19, TESR_ScreenSpaceShadows s13), the deferred sun pass only;
+//   - their deferred Lighting.hlsl -> Shaders/DeferredSun.hlsl (DS_SSS c19, TESR_ScreenSpaceShadows s13) and Compute/DeferredSun.comp
+//     (t_sssMask; 2026-11-27 upstream 1.1.5 merge: the compute sun reads the mask too, so it no longer falls back to the D3D9 pass);
 //   - full sky (Sky::Mode::kFull) -> outdoors (GameState.isExterior); the sun light's direction -> ShaderConst.SunDir (the shadow maps');
 //   - their JSON settings -> [Shaders.ShadowsExteriors.SSShadows] with their defaults and ranges (Enabled, SampleCount,
 //     SurfaceThickness, BilinearThreshold, ShadowContrast);
@@ -47,8 +48,9 @@ namespace ScreenSpaceShadows {
 	inline UINT Frames = 0;
 
 	inline UINT Now() { return TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0; }
-	// This span's mask exists (DeferredSun::Apply runs right after Produce in the same span)
+	// This span's mask exists (DeferredSun::Apply / TryApplyCompute runs right after Produce in the same span)
 	inline bool MadeThisSpan() { return Texture && MadeFrame == Now() && MadeSpan == SpanCounter; }
+	inline void MarkUsed() { UsedFrame = Now(); }
 	inline bool UsedThisFrame() { return UsedFrame == Now(); }
 
 	struct Push {
@@ -88,7 +90,9 @@ namespace ScreenSpaceShadows {
 	inline bool Produce(IDirect3DDevice9* Device) {
 		SpanCounter++;
 		if (!Texture || Failed || !DeferredDepth::Ready() || !DxvkCompute::Available()) return false;
-		if (!TheShaderManager->GameState.isExterior || TheSettingManager->GetSettingI(kSection, "Enabled") == 0) return false;
+		ShadowsExteriorEffect* shadows = TheShaderManager ? TheShaderManager->Effects.ShadowsExteriors : nullptr;
+		if (!TheShaderManager->GameState.isExterior || !shadows || !shadows->Enabled || !shadows->Settings.Exteriors.Enabled ||
+			TheSettingManager->GetSettingI(kSection, "Enabled") == 0) return false;
 		if (!Pipeline) {
 			if (Tried) return false;
 			Tried = true;

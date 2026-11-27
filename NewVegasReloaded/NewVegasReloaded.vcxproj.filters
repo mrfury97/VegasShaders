@@ -331,6 +331,15 @@
     <ClInclude Include="..\src\core\RenderPass.h">
       <Filter>Core</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\core\BoneMatrixBatch.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\core\ConstantMapSort.h">
+      <Filter>Core</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\core\PortalVisibility.h">
+      <Filter>Core</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\core\PresetManager.h">
       <Filter>Core</Filter>
     </ClInclude>

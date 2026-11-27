@@ -22,6 +22,7 @@ layout(push_constant) uniform Push {
     uint width;                 // the render size
     uint height;
     float weapon;               // the weapon's value [0, 1]; < 0: no weapon test
+    uint reversedDepth;         // P8 fix: 1 = INTZ depth reversed (weapon > 0.0), 0 = standard (weapon < 0.99999)
 } pc;
 
 #define POINT_S NVR_SAMPLER(pc.pointIndex)
@@ -30,6 +31,7 @@ void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
     if (pixel.x >= int(pc.width) || pixel.y >= int(pc.height)) return;
     float reactive = texelFetch(sampler2D(t_fsrDepth, POINT_S), pixel, 0).y;
-    bool weapon = pc.weapon >= 0.0 && texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x > 0.0;
+    float vmRaw = pc.weapon >= 0.0 ? texelFetch(sampler2D(t_viewmodel, POINT_S), pixel, 0).x : (pc.reversedDepth != 0u ? 0.0 : 1.0);
+    bool weapon = pc.weapon >= 0.0 && (pc.reversedDepth != 0u ? (vmRaw > 0.0) : (vmRaw < 0.99999));
     imageStore(o_mask, pixel, vec4(clamp(weapon ? pc.weapon : reactive, 0.0, 1.0), 0.0, 0.0, 0.0));
 }

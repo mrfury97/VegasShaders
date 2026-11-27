@@ -18,6 +18,7 @@ layout(set = 1, binding = 5) uniform texture2D t_pointShadow;  // TESR_PointShad
 layout(set = 1, binding = 6) uniform texture2D t_snowNorm;     // Precipitations\snow_NRM.dds (LINEAR mips, WRAP)
 layout(set = 1, binding = 7) uniform texture2D t_blueNoise;    // Effects\bluenoise256.dds (LINEAR mips, WRAP)
 layout(set = 1, binding = 8) uniform texture2D t_captured;     // UNOFFICIAL 2026-10-28 TESR_CapturedNormalsBuffer (read texel by texel)
+layout(set = 1, binding = 9) uniform texture2D t_material;     // UNOFFICIAL 2026-11-24 TESR_MaterialBuffer (read texel by texel)
 
 layout(set = 2, binding = 0, std140) uniform Consts {
     mat4 shadowToLight;             // TESR_ShadowCameraToLightTransformOrtho
@@ -42,6 +43,7 @@ layout(set = 2, binding = 0, std140) uniform Consts {
     vec4 lightColor[24];            // TESR_LightColor
     vec4 capturedData;              // UNOFFICIAL 2026-10-28 TESR_CapturedNormalsData (x 1 = this frame's, y z the distance match, w least cosine)
     vec4 snowExtra;                 // TESR_SnowAccumulationExtra (x CapturedNormals, y CapturedNormalsDebugView)
+    vec4 materialData;              // UNOFFICIAL 2026-11-24 TESR_MaterialBufferData (x 1 = this frame's, y 1 = GBufferV2)
 } c;
 
 layout(push_constant) uniform Push {
@@ -305,6 +307,29 @@ bool capturedActor(vec2 coord, float dist) {	// Effects/Includes/CapturedNormals
     vec4 v = texelFetch(sampler2D(t_captured, NVR_SAMPLER(pc.sClamp)), texel, 0);
     return v.a > 1.5 && abs(v.b - dist) <= dist * c.capturedData.y + c.capturedData.z;
 }
+bool snowIsActor(vec2 coord, float dist) {
+    if (c.capturedData.x <= 0.0) return false;
+    ivec2 size = textureSize(sampler2D(t_captured, NVR_SAMPLER(pc.sClamp)), 0);
+    ivec2 texel = clamp(ivec2(coord * vec2(size)), ivec2(0), size - 1);
+    vec4 cap = texelFetch(sampler2D(t_captured, NVR_SAMPLER(pc.sClamp)), texel, 0);
+    if (cap.a <= 0.99 || abs(cap.b - dist) > dist * c.capturedData.y + c.capturedData.z) return false;
+    if (cap.a > 1.5) return true;
+    if (c.materialData.x > 0.5) {
+        ivec2 mSize = textureSize(sampler2D(t_material, NVR_SAMPLER(pc.sClamp)), 0);
+        ivec2 mTexel = clamp(ivec2(coord * vec2(mSize)), ivec2(0), mSize - 1);
+        vec4 mat = texelFetch(sampler2D(t_material, NVR_SAMPLER(pc.sClamp)), mTexel, 0);
+        if (c.materialData.y > 0.5) {
+            float kind = floor(mat.r + 0.01);
+            kind -= 16.0 * step(15.5, kind);
+            return mat.r > 0.5 && (kind == 2.0 || kind == 5.0 || kind == 6.0 || kind == 7.0 || kind == 8.0 || kind == 9.0);
+        } else {
+            float share = clamp(mat.a, 0.5, 1.0);
+            float kind = floor(mat.r / share + 0.01);
+            return mat.a > 0.5 && mat.r > 0.5 && (kind == 2.0 || kind == 5.0 || kind == 6.0);
+        }
+    }
+    return false;
+}
 bool snowCapturedNormal(vec2 coord, float dist, vec3 rebuilt, out vec3 n) {
     n = vec3(0.0, 0.0, 1.0);
     if (c.snowExtra.x <= 0.0) return false;
@@ -330,7 +355,7 @@ vec4 snowPass(vec2 coordIn) {
     vec4 worldPos = vec4(c.cameraPosition.xyz + cameraVector, 1.0);
 
     if (c.snowExtra.y > 0.5) return snowCapturedView(coordIn, length(cameraVector));	// UNOFFICIAL 2026-10-28
-    if (capturedActor(coordIn, length(cameraVector))) return color;	// UNOFFICIAL 2026-10-28: no snow on actors (SnowAccumulation.fx.hlsl)
+    if (snowIsActor(coordIn, length(cameraVector))) return color;	// UNOFFICIAL 2026-10-28/11-24: no snow on actors (SnowAccumulation.fx.hlsl)
 
     float ortho = texture(SAMP_CLAMP(t_rendered), coordIn).x;
     vec3 norm = getWorldNormal(coordIn);

@@ -18,6 +18,7 @@
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-20 the land's wet film (the land pass's DL_WET_FILM)
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-11-19 (Phase 2B): Vulkan Compute DeferredLamps pass
 #include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-27 the lamps' screen-space shadow mask (core/LampScreenShadows.h makes it)
+#include "MaterialSSSProto.h"	// UNOFFICIAL 2026-11-25 MaterialSSS point-lamp & interior-dir SSS
 
 namespace DeferredLamps {
 	inline const char* kSection = "Shaders.ShadowsInteriors.Deferred";
@@ -78,7 +79,7 @@ namespace DeferredLamps {
 	// do (PointShadowForward::BoundThisFrame), so the screen-space lamp shadows are left out the same way
 	inline bool LampShadowsDrawn() { return ShadowedThisFrame && ReplaceScreenShadows; }
 	inline UInt32 Frame = 0;
-	inline unsigned long long StatFrames = 0, StatBinds = 0, StatPasses = 0, StatCopies = 0, StatRestored = 0, StatSkipped = 0, StatLinearZ = 0;	// (StatLinearZ: 2026-11-14 DL_LINEAR_DEPTH)
+	inline unsigned long long StatFrames = 0, StatBinds = 0, StatPasses = 0, StatCopies = 0, StatRestored = 0, StatSkipped = 0, StatLinearZ = 0, StatZeroLamps = 0;	// (StatLinearZ: 2026-11-14 DL_LINEAR_DEPTH)
 	inline unsigned DeferredBindsThisSpan = 0;
 	inline const char* LampFalloffOverride = nullptr;	// the Interior records' LAMP_FALLOFF_ON override (ShaderManager.cpp), compiled into the pass too
 	inline IDirect3DTexture9* CopyTex = nullptr;
@@ -103,6 +104,19 @@ namespace DeferredLamps {
 	inline bool ComputeTried = false;
 	inline bool ComputeFailed = false;
 	inline unsigned long long StatCompute = 0;
+	// UNOFFICIAL 2026-11-23 Interior DeferredSun fold: indoors when DeferredLamps compute is live, DeferredSun::Apply
+	// deposits the directional light params here so DeferredLamps.comp evaluates both the interior directional fill
+	// and froxel lamps in one dispatch (eliminates the separate DeferredSun compute pass indoors).
+	struct InteriorDirData {
+		bool  active = false;
+		bool  hairDeferred = false;
+		bool  foliageCompiled = false;
+		float sun[4] = {};            // toSun.xyz, has
+		float color[4] = {};          // sunColor.rgb, 0
+		float vis[4] = {};            // LandCrackShadow, AuthoredHighlight, specFadeStart, specFadeInvRange
+		float skyIrradiance[9][4] = {};
+	};
+	inline InteriorDirData InteriorDir;
 	// UNOFFICIAL 2026-11-16 fd-batchA item 2, DIAGNOSTIC (F10 profile only): which forward lamp-shadow shader keeps
 	// PointShadowForward::BoundThisFrame set, and how often the screen-space lamp shadows still ran indoors
 	inline char ForwardBinder[64] = {};		// the first forward lamp-shadow shader bound this frame ("" none)
@@ -229,6 +243,7 @@ namespace DeferredLamps {
 	inline void BeginFrame() {
 		Frame++;
 		ShadowedThisFrame = false;	// (fd-batchA item 2)
+		InteriorDir.active = false;
 		ForwardBinder[0] = 0; ForwardBindsFrame = 0;
 		if (!WantedAtStartup()) { Live = false; return; }
 		const bool renderer = SettingForce::Mode() > 0;	// UNOFFICIAL 2026-11-14 (above): the renderer's live switch, any runtime, outdoors only when it says so
@@ -262,10 +277,10 @@ namespace DeferredLamps {
 		if (!GpuTimer::Enabled) { StatFrames = 0; return; }
 		if (++StatFrames < 240) return;
 		const double f = (double)StatFrames;
-		Logger::Log("DEFERRED LAMPS %u frames: deferred binds %.1f a frame, the pass %.2f a frame (compute %.2f, copy path %.2f), land pass %.2f a frame (%s), skipped (no G-buffer / not linear-capable) %.2f, deferred shaders left bound at the span's end and restored %.2f%s",
-			(unsigned)StatFrames, StatBinds / f, StatPasses / f, StatCompute / f, StatCopies / f, StatLand / f, LandCompiled ? (LandLampModel ? "the land's own lamp model" : "LandLampModel off") : "not loaded", StatSkipped / f, StatRestored / f,
+		Logger::Log("DEFERRED LAMPS %u frames: deferred binds %.1f a frame, the pass %.2f a frame (compute %.2f, copy path %.2f), land pass %.2f a frame (%s), zero-lamp skipped %.2f, skipped (no G-buffer / not linear-capable) %.2f, deferred shaders left bound at the span's end and restored %.2f%s",
+			(unsigned)StatFrames, StatBinds / f, StatPasses / f, StatCompute / f, StatCopies / f, StatLand / f, LandCompiled ? (LandLampModel ? "the land's own lamp model" : "LandLampModel off") : "not loaded", StatZeroLamps / f, StatSkipped / f, StatRestored / f,
 			DeferredDistant::CompiledIn() ? (StatLinearZ ? ", positions from the exact linear view z (DeferredDistant)" : ", positions from the half-float distance (DeferredDepth 2 made no linear view z)") : "");
-		StatFrames = 0; StatBinds = StatPasses = StatCompute = StatCopies = StatRestored = StatSkipped = StatLinearZ = StatLand = 0;
+		StatFrames = 0; StatBinds = StatPasses = StatCompute = StatCopies = StatRestored = StatSkipped = StatLinearZ = StatLand = StatZeroLamps = 0;
 		if (StatIntFrames) {	// (fd-batchA item 2 diagnostic)
 			Logger::Log("DEFERRED LAMPS screen shadows %llu interior frames: forward lamp-shadow shaders bound in %llu (%s), the pass's own atlas shadows in %llu, the screen-space lamp shadows ran in %llu",
 				StatIntFrames, StatFwdBound, ForwardBinderWindow.empty() ? "none" : ForwardBinderWindow.c_str(), StatOwnShadows, StatScreenRan);
@@ -462,67 +477,61 @@ namespace DeferredLamps {
 		return true;
 	}
 
-	// UNOFFICIAL 2026-11-19 (Phase 2B): Single-pass Vulkan Compute DeferredLamps (Compute\DeferredLamps.spv).
-	// Replaces up to 8 D3D9 ps_3_0 passes (4x shadow + lamps + land + skin + fog resolve) with one 8x8 compute dispatch
-	// that reads G-buffer once per pixel, runs full FIT 0 + contact hardening + RT shadows for all 0..62 lamps, handles
-	// land/skin/SSS-v2/exact-fog inline, and RMWs directly into the FP16 scene RT0 (no VisTex, CopyTex, or LightTex).
-	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t) {
+	struct ComputePush {
+		UINT linearSampler;
+		UINT pointSampler;
+		UINT flags;
+		UINT pad;
+	};
+	struct ComputeConstants {
+		int   viewport[4];         // 0
+		float dlGrid[4];           // 1
+		float dlView[4];           // 2
+		float dlRight[4];          // 3
+		float dlUp[4];             // 4
+		float dlFwd[4];            // 5
+		float dlRows[3][4];        // 6..8
+		float dlTable[4];          // 9
+		float dlDebug[4];          // 10
+		float dlShadow[4];         // 11
+		float dlDepth[4];          // 12
+		float dlFog[4];            // 13
+		float dlLand[4];           // 14
+		float pbrData[4];          // 15
+		float pbrExtraData[4];     // 16
+		float pbrMetal[4];         // 17
+		float pbrMetalLook[4];     // 18
+		float debugVar[4];         // 19
+		float linearScales[4];     // 20
+		float linearLighting[4];   // 21
+		float lampFalloff[4];      // 22
+		float pbrMath[4];          // 23
+		float skinMaterial[4];     // 24
+		float skinLook[4];         // 25
+		float skinDebug[4];        // 26
+		float skinSSS[4];          // 27
+		float psParams[4];         // 28
+		float psDebug[4];          // 29
+		float psFocus[4];          // 30
+		float psSoft[4];           // 31
+		float rtReproject[4][4];   // 32..35
+		float rtParams[4];         // 36
+		float rtSlot[2][4];        // 37..38
+		float spare[4];            // 39
+		float intDirSun[4];        // 40: toSun.xyz, has
+		float intDirColor[4];      // 41: sunColor.rgb, 0
+		float intDirVis[4];        // 42: LandCrackShadow, AuthoredHighlight, specFadeStart, specFadeInvRange
+		float skyIrradiance[9][4]; // 43..51: TESR_SkyIrradianceObjects[0..8]
+	};
+	static_assert(sizeof(ComputeConstants) == 52 * 16, "DeferredLamps ComputeConstants layout mismatch");
+
+	inline bool EnsureComputeReady(IDirect3DDevice9* d) {
 		if (ComputeFailed || Vm.on) return false;
 		// (2026-11-27) Compute\DeferredLamps.comp has no lamp screen-space shadows: with this span's mask the D3D9 passes draw
 		if (ScreenSpaceShadows::Lamps::MadeThisSpan()) return false;
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredLamps")) return false;
 		if (TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferred") == 0) return false;
 		if (ManyLamps::ListTexelsNow() != 16) return false;
-		// Storage image RMW requires single-sample FP16 (identity RGBA swizzle in DXVK NVR ext)
-		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
-		const bool depthIsLinear = DeferredDepth::LinearReady();
-		IDirect3DTexture9* depthTex = depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr);
-		if (!depthTex) return false;
-
-		struct ComputePush {
-			UINT linearSampler;
-			UINT pointSampler;
-			UINT flags;
-			UINT pad;
-		};
-		struct ComputeConstants {
-			int   viewport[4];       // 0
-			float dlGrid[4];         // 1
-			float dlView[4];         // 2
-			float dlRight[4];        // 3
-			float dlUp[4];           // 4
-			float dlFwd[4];          // 5
-			float dlRows[3][4];      // 6..8
-			float dlTable[4];        // 9
-			float dlDebug[4];        // 10
-			float dlShadow[4];       // 11
-			float dlDepth[4];        // 12
-			float dlFog[4];          // 13
-			float dlLand[4];         // 14
-			float pbrData[4];        // 15
-			float pbrExtraData[4];   // 16
-			float pbrMetal[4];       // 17
-			float pbrMetalLook[4];   // 18
-			float debugVar[4];       // 19
-			float linearScales[4];   // 20
-			float linearLighting[4]; // 21
-			float lampFalloff[4];    // 22
-			float pbrMath[4];        // 23
-			float skinMaterial[4];   // 24
-			float skinLook[4];       // 25
-			float skinDebug[4];      // 26
-			float skinSSS[4];        // 27
-			float psParams[4];       // 28
-			float psDebug[4];        // 29
-			float psFocus[4];        // 30
-			float psSoft[4];         // 31
-			float rtReproject[4][4]; // 32..35
-			float rtParams[4];       // 36
-			float rtSlot[2][4];      // 37..38
-			float spare[4];          // 39
-		};
-		static_assert(sizeof(ComputeConstants) == 40 * 16, "DeferredLamps ComputeConstants layout mismatch");
-
 		if (!ComputePipeline) {
 			if (ComputeTried) return false;
 			ComputeTried = true;
@@ -565,6 +574,32 @@ namespace DeferredLamps {
 				return false;
 			}
 		}
+		return true;
+	}
+
+	inline bool CanFoldInteriorDir(IDirect3DDevice9* d, const D3DSURFACE_DESC& t) {
+		if (!Live || DebugView != 0) return false;
+		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture) return false;
+		if (!ManyLamps::Table || !EnsurePass()) return false;
+		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
+		if (!DeferredDepth::LinearReady() && !DeferredDepth::Ready()) return false;
+		if (!EnsureComputeReady(d)) return false;
+		D3DVIEWPORT9 vp = {};
+		d->GetViewport(&vp);
+		return vp.Width > 0 && vp.Height > 0;
+	}
+
+	// UNOFFICIAL 2026-11-19 (Phase 2B): Single-pass Vulkan Compute DeferredLamps (Compute\DeferredLamps.spv).
+	// Replaces up to 8 D3D9 ps_3_0 passes (4x shadow + lamps + land + skin + fog resolve) with one 8x8 compute dispatch
+	// that reads G-buffer once per pixel, runs full FIT 0 + contact hardening + RT shadows for all 0..62 lamps, handles
+	// land/skin/SSS-v2/exact-fog inline, and RMWs directly into the FP16 scene RT0 (no VisTex, CopyTex, or LightTex).
+	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool hasLampBinds, const InteriorDirData& intDir) {
+		if (!EnsureComputeReady(d)) return false;
+		// Storage image RMW requires single-sample FP16 (identity RGBA swizzle in DXVK NVR ext)
+		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
+		const bool depthIsLinear = DeferredDepth::LinearReady();
+		IDirect3DTexture9* depthTex = depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr);
+		if (!depthTex) return false;
 
 		D3DVIEWPORT9 vp = {};
 		d->GetViewport(&vp);
@@ -682,6 +717,24 @@ namespace DeferredLamps {
 		else if (smith == 2) flags |= 1u << 14u;
 		else flags |= 1u << 15u;
 		if (LightFreeRecords::WantedAtStartup()) flags |= 1u << 16u;
+		if (intDir.active) {
+			memcpy(cb.intDirSun, intDir.sun, 16);
+			memcpy(cb.intDirColor, intDir.color, 16);
+			memcpy(cb.intDirVis, intDir.vis, 16);
+			memcpy(cb.skyIrradiance, intDir.skyIrradiance, sizeof(cb.skyIrradiance));
+			flags |= 1u << 17u;
+			if (intDir.hairDeferred) flags |= 1u << 18u;
+			if (intDir.foliageCompiled) flags |= 1u << 20u;
+		}
+		if (hasLampBinds) flags |= 1u << 19u;
+		{
+			const int sssMode = MaterialSSSProto::EffectiveMode();
+			if (sssMode >= 1 && sssMode <= 3) flags |= 1u << 21u;
+		}
+		if (TheShaderManager && TheShaderManager->Shaders.PBR) {
+			cb.spare[0] = TheShaderManager->Shaders.PBR->MetalSettings.Clearcoat;
+			cb.spare[1] = TheShaderManager->Shaders.PBR->MetalSettings.Pearlescence;
+		}
 
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (FAILED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(cb), &cb))) return false;
@@ -739,7 +792,9 @@ namespace DeferredLamps {
 		ManyLamps::FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread: the lists complete and the table unlocked before the pass reads it
 		const unsigned binds = DeferredBindsThisSpan;
 		DeferredBindsThisSpan = 0;
-		if (!binds) return;
+		const InteriorDirData intDir = InteriorDir;
+		InteriorDir.active = false;
+		if (!binds && !intDir.active) return;
 		const bool skipDraw = DebugView == 6;	// the records' tangent-frame view ([Shaders.ShadowsInteriors.Forward] DebugView 6): no lamps over it
 		// any deferred handle still bound goes back to its forward one (draws after the list must light their lamps)
 		IDirect3DPixelShader9* bound = nullptr;
@@ -757,12 +812,19 @@ namespace DeferredLamps {
 		// lamp pass (buildings, terrain, skin). Outdoors PutTiles writes no tiles (sTile.z == 0), so stage 8 is never sampled.
 		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture ||
 			!ManyLamps::Table || !EnsurePass() || skipDraw) { StatSkipped++; return; }
+		if (!intDir.active && !Vm.on && DebugView == 0 && ManyLamps::TableFrame == ManyLamps::FrameId &&
+			ManyLamps::ListsFrame == ManyLamps::FrameId && ManyLamps::ActiveLamps.empty()) {
+			if (Shadows) ShadowedThisFrame = true;
+			StatZeroLamps++;
+			return;
+		}
 		IDirect3DSurface9* target = nullptr;
 		d->GetRenderTarget(0, &target);
 		if (!target) { StatSkipped++; return; }
 		D3DSURFACE_DESC t = {};
 		target->GetDesc(&t);
-		if (TryApplyCompute(d, target, t)) { target->Release(); return; }
+		if (TryApplyCompute(d, target, t, binds != 0, intDir)) { target->Release(); return; }
+		if (!binds) { target->Release(); return; }
 		if (DeferredDistant::CompiledIn() && !Vm.on) DeferredDepth::EnsureLinear(d);
 		const bool linear = LinearScene::Linear || Vm.on;	// (DeferredFirstPerson: the light target, added ONE / ONE)
 		// UNOFFICIAL 2026-11-14 the stored-curve fog (core/DeferredFog.h; DeferredLamps.hlsl DL_FOG_EXACT, compiled in with the lighting-free

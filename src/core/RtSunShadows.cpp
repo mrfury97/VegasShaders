@@ -118,6 +118,10 @@ namespace {
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		return shadows && shadows->Settings.Exteriors.ForwardShadows;
 	}
+	bool SunShadowsOn() {
+		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
+		return shadows && shadows->Enabled && shadows->Settings.Exteriors.Enabled;
+	}
 	// Mode 1 the old way (the forward lookups off, the deferred apply): the key off, or no forward lookups to carry the traced shadow
 	bool OldReplace() { return !S.forwardLookup || !ForwardShadowsSetting(); }
 
@@ -172,10 +176,9 @@ namespace {
 
 	bool Wants() {
 		ReadSettings();
-		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		if (S.enabled && HitView()) return true;	// 2026-10-30: the hit texture / glow checks run indoors too (the neon is in casinos)
 		if (RtPathTrace::StandDownRT()) return false;	// UNOFFICIAL 2026-11-20: path tracing replaces the scene and owns sun shadows (+ frees RtShadowDenoise mode 0)
-		return S.enabled && TheShaderManager->GameState.isExterior && shadows && shadows->Enabled && shadows->Settings.Exteriors.Enabled;
+		return S.enabled && TheShaderManager->GameState.isExterior && SunShadowsOn();
 	}
 
 	void Setup() {
@@ -769,7 +772,7 @@ namespace RtSunShadows {
 	bool CloudsApplied() { return cloudsAppliedFrame == TheFrameRateManager->FrameNumber + 1; }
 
 	// (2026-11-13: the old Mode 1 only with ForwardLookup off or without forward lookups; see ForwardActive)
-	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior && OldReplace(); }
+	bool Replacing() { return S.enabled && S.mode == 1 && S.debugView != 2 && S.debugView < 4 && RtCore::Running() && TheShaderManager->GameState.isExterior && SunShadowsOn() && OldReplace(); }
 
 	// UNOFFICIAL 2026-11-13 ForwardLookup (RtSunShadows.h)
 	void Initialize() {
@@ -798,10 +801,10 @@ namespace RtSunShadows {
 	// UNOFFICIAL 2026-11-16 RealSun (port of mrfury97/VegasShaders fef7c30ba F2): the traced lookup carries the sun shadow this frame
 	// (Mode 1 through the shaders) and RealSun is on: ShadowsExterior's SmoothedSunDir follows the real sun. Not while the deferred renderer's
 	// sun fade holds the sun in steps (SunFadeDeferred::Live: its steps and fades are built on the held sun).
-	bool RealSun() { return S.realSun && S.enabled && S.mode == 1 && forwardCompiled && RtCore::Running() && TheShaderManager->GameState.isExterior && !SunFadeDeferred::Live(); }
+	bool RealSun() { return S.realSun && S.enabled && S.mode == 1 && forwardCompiled && RtCore::Running() && TheShaderManager->GameState.isExterior && SunShadowsOn() && !SunFadeDeferred::Live(); }
 
 	bool ForwardActive() {
-		const bool mode1 = S.enabled && S.mode == 1 && RtCore::Running() && TheShaderManager->GameState.isExterior && !OldReplace();
+		const bool mode1 = S.enabled && S.mode == 1 && RtCore::Running() && TheShaderManager->GameState.isExterior && SunShadowsOn() && !OldReplace();
 		if (mode1 && !forwardCompiled) {
 			static bool told = false;
 			if (!told) {

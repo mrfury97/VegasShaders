@@ -1,0 +1,25 @@
+[_Shaders.WorldSurface.Main]
+Strength = 1.0                      # [0.0-2.0] UNOFFICIAL (2026-11-24), live: overall multiplier for all World surface detail & weathering layers.
+Detail = 0.75                       # [0.0-2.0] UNOFFICIAL (2026-11-24), live: close-range micro-detail normal relief and roughness variation on concrete, rock, metal, and terrain.
+Distance = 2400.0                   # [400.0-6000.0] UNOFFICIAL (2026-11-24), live: world distance (game units) at which surface detail and weathering fade out.
+DebugView = 0                       # [0-1] UNOFFICIAL (2026-11-24), live, test only: 1 paints layer masks over the scene (red rust, green moss, blue waterline, yellow dust, grey detail).
+
+[_Shaders.WorldSurface.Dust]
+Enabled = true                      # UNOFFICIAL (2026-11-24), live: enables settled Mojave crevice dust outdoors and subtle aged dust indoors.
+Strength = 0.55                     # [0.0-2.0] UNOFFICIAL (2026-11-24), live: settled Mojave silt outdoors and aged crevice dust indoors in seams and on upward ledges.
+
+[_Shaders.WorldSurface.Rust]
+Enabled = true                      # UNOFFICIAL (2026-11-24), live: enables exposed metal tarnish patina and pitted iron-oxide rust.
+Strength = 0.65                     # [0.0-2.0] UNOFFICIAL (2026-11-24), live: patchy iron-oxide corrosion on metallic structures, cars, fences, and signs.
+
+[_Shaders.WorldSurface.Waterline]
+Enabled = true                      # UNOFFICIAL (2026-11-24), live: enables capillary water darkening, shoreline mud, and damp algae above water level.
+Strength = 0.75                     # [0.0-2.0] UNOFFICIAL (2026-11-24), live: intensity of waterline darkening, shoreline mud, and damp algae.
+
+[_Shaders.WorldSurface.Moss]
+Enabled = true                      # UNOFFICIAL (2026-11-24), live: enables patchy moss and lichen on shaded rocks, ruins, and crevices outdoors.
+Strength = 0.30                     # [0.0-2.0] UNOFFICIAL (2026-11-24), live: intensity of patchy moss and lichen outdoors.
+
+[_Shaders.WorldSurface.Status]
+Enabled = true                      # UNOFFICIAL (2026-11-24), live, needs DeferredRenderer at startup: overlays world-space micro-detail grain, Mojave crevice dust, exposed metal rust, waterline dampness/mud/algae, and mossy growth onto static world objects and terrain (skips characters, clothing, plants, trees, and grass).
+

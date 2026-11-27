@@ -20,8 +20,8 @@
 # First match wins: file, final folder, keyword, folder. The class "default" means no rule.
 
 # ---- classes --------------------------------------------------------------------------------------------------------
-class gun           metal=mask  strength=1   rough=0.25-0.6  tint=1,0.1,0.1
-class blade         metal=mask  strength=1   rough=0.2-0.5   tint=1,0.4,0.4
+class gun           metal=mask  strength=1   rough=0.18-0.55 reflections=1.0  tint=1,0.1,0.1 authored=replace
+class blade         metal=mask  strength=1   rough=0.14-0.44 reflections=1.15 tint=1,0.4,0.4 authored=replace
 class fist          metal=guess strength=0.4 rough=0.4-0.8   tint=0.7,0.3,0.3
 class ordnance      metal=guess strength=0.6 rough=0.4-0.8   tint=0.8,0.5,0.2
 class vehicle       metal=guess strength=0.6 rough=0.5-0.9   reflections=0.5 tint=0.3,0.3,1
@@ -29,11 +29,11 @@ class building      metal=off                                tint=0.6,0.6,0.6
 class interior      metal=off                                tint=0.5,0.5,0.45
 class interiormetal metal=guess strength=0.5 rough=0.4-0.9   reflections=0.6 tint=0.2,0.6,1
 class ground        metal=off               rough=0.75-1     reflections=0.3 tint=0.55,0.4,0.2 authored=replace
-class plant         metal=off               rough=0.68-1     reflections=0.3 tint=0.1,0.8,0.1 authored=replace
-class clothing      metal=off               rough=0.72-0.98  reflections=0.25 tint=0.8,0.2,0.8 authored=replace
+class plant         metal=off               rough=0.68-1     reflections=0.3 tint=0.1,0.8,0.1 authored=replace sss=foliage
+class clothing      metal=off               rough=0.72-0.98  reflections=0.25 tint=0.8,0.2,0.8 authored=replace sss=cloth
 class armourmetal   metal=guess strength=0.7 rough=0.35-0.8  reflections=0.8 tint=0.5,0.2,1
 class robot         metal=guess strength=0.8 rough=0.3-0.7   tint=0,1,1
-class creature      metal=off                                reflections=0.5 tint=0.9,0.6,0.5
+class creature      metal=off                                reflections=0.5 tint=0.9,0.6,0.5 sss=flesh
 class clutter       metal=guess strength=0.3                 tint=1,1,0.3
 class furniture     metal=off                                tint=0.7,0.5,0.3
 class chrome        metal=full  strength=1   rough=0.05-0.2  tint=1,1,1
@@ -44,11 +44,15 @@ class glass         metal=off               rough=0.02-0.1   reflections=1.5 tin
 class wood          metal=off               rough=0.65-0.95  tint=0.6,0.35,0.1 authored=replace
 class masonry       metal=off               rough=0.78-1     tint=0.75,0.7,0.65 authored=replace
 class rock          metal=off               rough=0.78-1     tint=0.45,0.45,0.4 authored=replace
-class soft          metal=off               rough=0.85-1     tint=1,0.6,0.8 authored=replace
+class soft          metal=off               rough=0.85-1     tint=1,0.6,0.8 authored=replace sss=cloth
 class leather       metal=off               rough=0.45-0.8   tint=0.5,0.25,0.1
 class rubber        metal=off               rough=0.6-0.9    tint=0.15,0.15,0.15
-class stonepolished metal=off               rough=0.3-0.6    tint=0.9,0.9,1
+class stonepolished metal=off               rough=0.3-0.6    tint=0.9,0.9,1 sss=marble
 class sign          metal=off                                tint=1,0,1
+class wax           metal=off               rough=0.35-0.65  tint=1,0.85,0.4 authored=replace sss=wax
+class snow          metal=off               rough=0.65-0.95  tint=0.85,0.95,1 authored=replace sss=snow
+class food          metal=off               rough=0.35-0.75  tint=0.9,0.4,0.3 sss=food
+class plastic       metal=off               rough=0.25-0.55  tint=0.6,0.8,1 sss=wax
 
 # ---- DLC folders hold the same sub-folders as the base game: look through them ---------------------------------------
 strip textures\nvdlc01\
@@ -160,3 +164,12 @@ keyword cardboard soft
 keyword leather   leather
 keyword rubber    rubber
 keyword neon      sign
+keyword candle    wax
+keyword wax       wax
+keyword snow      snow          not=snowglobe
+keyword ice       snow          not=police,juice,device,office,service,sacrifice,price,slice
+keyword meat      food
+keyword apple     food
+keyword fruit     food
+keyword gourd     food
+keyword plastic   plastic

@@ -218,8 +218,9 @@ float hlslAsin(float x) {
 #define AerialRangeStart saturate(cb.fogAerial.y)
 #define AerialTintBlend saturate(cb.fogAerial.z)
 #define AerialDayFadeStart saturate(cb.fogAerial.w)
+#define FogStartDistance max(0.0, cb.fogAerialTint.w)
 
-#define DistantFogRange exp(-4.0 * clamp(cb.fogDistant.x, 0.00000001, 1.0))
+#define DistantFogRange saturate(cb.fogDistant.x)
 #define DistantFogBlend (cb.fogDistant.y)
 #define DistantFogHeight (cb.fogDistant.z)
 #define EdgeAA max(0.0, cb.fogDistant.w)
@@ -232,7 +233,7 @@ float hlslAsin(float x) {
 #define LegacyHeightFogInscattering (max(0.0, cb.fogLegacyData.w) * 0.1)
 #define LegacyFogSaturation max(0.0, cb.fogLow.x)
 #define LegacyWeatherImpact max(0.0, cb.fogLow.y)
-#define LegacyDistantFogRange exp(-4.0 * cb.fogLow.z)
+#define LegacyDistantFogRange saturate(cb.fogLow.z)
 #define LegacySunPower max(0.0, cb.fogLow.w)
 #define LegacyHeightFogDensity max(0.0, cb.fogHigh.x)
 #define LegacyHeightFogFalloff max(0.0, cb.fogHigh.y)
@@ -694,10 +695,13 @@ void LegacyFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nigh
     vec3 worldPos = eyeVector + cb.cameraPosition.xyz;
     float pointHeight = worldPos.z;
 
-    float normalizedDepth = length(eyeVector) / farZ;
+    float dist = length(eyeVector);
+    float normalizedDepth = dist / farZ;
     float fogPower = mix(1.0, FogPower, saturate(LegacyWeatherImpact)) / mix(LegacyHeightFogRolloff, 1.0 / LegacyFogNight, (1.0 - isDayTimeFog) * LegacyIsExterior);
-    float fogDepth = pows(normalizedDepth, fogPower);
-    fogDepth = fogDepth * farZ / (LegacyHeightFogDist * mix(0.005, 1.0, LegacyIsExterior));
+    float origFogDepth = pows(normalizedDepth, fogPower) * farZ / (LegacyHeightFogDist * mix(0.005, 1.0, LegacyIsExterior));
+    float effDist = max(0.0, dist - FogStartDistance);
+    float fogDepth = pows(effDist / farZ, fogPower) * farZ / (LegacyHeightFogDist * mix(0.005, 1.0, LegacyIsExterior));
+    float startFade = (FogStartDistance > 0.0) ? saturate(effDist / max(dist, 0.0001)) : 1.0;
 
     float strength = pows((saturate(1.0 - farFog / farZ) + saturate(1.0 - nearFog / farZ)) / 2.0, 2.0) / (FogPower + 1.0);
     strength = LegacyBaseFogStrength + LegacyWeatherImpact * strength + SunsetFog;
@@ -750,8 +754,8 @@ void LegacyFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nigh
     fogAdd = mix(fogAdd, skyColor.rgb, distantBlend);
 
     vec4 heightFogColor = fogColor(skyColor, pureFogColor, strength, LegacyHeightFogSkyColor, sun, LegacyHeightFogSaturation);
-    float heightFog = strength * LegacyHeightFogDensity * 0.00001 *
-        getLegacyHeightFog(fogDepth, 1.5 / (fogPower * LegacyHeightFogFalloff) * 0.0001, worldPos, LegacyHeightFogHeight);
+    float heightFog = strength * LegacyHeightFogDensity * 0.00001 * startFade *
+        getLegacyHeightFog(origFogDepth, 1.5 / (fogPower * LegacyHeightFogFalloff) * 0.0001, worldPos, LegacyHeightFogHeight);
     float heightBlend = saturate(LegacyHeightFogBlend);
     float heightScale = mix(1.0, saturate(1.0 - heightFog * extinction), heightBlend);
     fogMul *= heightScale;
@@ -775,9 +779,11 @@ void ModernFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nigh
     eyeVector *= depth;
     vec3 worldPos = eyeVector + cb.cameraPosition.xyz;
 
-    float normalizedDepth = length(eyeVector) / farZ;
+    float dist = length(eyeVector);
+    float normalizedDepth = dist / farZ;
     float fogPower = mix(1.0, FogPower, saturate(WeatherImpact));
-    float fogDepth = pows(normalizedDepth, fogPower) * farZ;
+    float effDist = max(0.0, dist - FogStartDistance);
+    float fogDepth = pows(effDist / farZ, fogPower) * farZ;
 
     float isSky = getSky(coord, interior);
     float skyMaskFactor = mix(1.0, 1.0 - isSky, WeatherFilterBlend);
@@ -909,8 +915,10 @@ void ModernFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nigh
     getFlatFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength, flatExt, flatIns);
     float falloffArg = 1.5 / (fogPower * nightHeightFalloff);
     // UNOFFICIAL 2026-11-01 HeightLayer (the .fx line for line)
-    if (!classic && cb.fogShape.x < 0.0)
-        getFlatFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength * FogLayerMean(cb.cameraPosition.z, worldPos.z), heightExt, heightIns);
+    if (!classic && cb.fogShape.x < 0.0) {
+        float layerStartZ = cb.cameraPosition.z + eyeDirection.z * min(dist, FogStartDistance);
+        getFlatFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength * FogLayerMean(layerStartZ, worldPos.z), heightExt, heightIns);
+    }
     else
         getHeightFogTerms(fogDepth, vec3(nightExtinction), vec3(nightInscattering), strength, falloffArg, worldPos, nightMaxHeight, heightExt, heightIns);
 
@@ -952,7 +960,6 @@ void ModernFogTerms(vec2 coord, out vec3 fogMul, out vec3 fogAdd, out float nigh
     // cb.fogSun.x indoors: 1 / (min(fog far, clip) - near), 0 without fog distances (VolumetricFog.cpp UpdateConstants).
     if (!classic && cb.fogSun.z > 0.0) {
         float gameNear = cb.fogSun.w;
-        float dist = length(eyeVector);
         float tOut = farFog > gameNear + 1.0 ? saturate((dist - gameNear) / (farFog - gameNear)) : 0.0;
         float tIn = saturate((dist - gameNear) * cb.fogSun.x);
         float t = mix(tIn, tOut, isExterior);

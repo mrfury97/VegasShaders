@@ -62,12 +62,21 @@ namespace DeferredTransparents {
 		for (int k = 0; k < 3; k++) { out[k][0] = params[k].x; out[k][1] = params[k].y; out[k][2] = params[k].z; out[k][3] = params[k].w; }
 		return true;
 	}
+	inline void DrawDecalGroup(void* accumulator, UInt32 group, bool flag);
 	inline void EnableHeader() {
 		ForwardPlusHeader::Enabled = true;
 		ForwardPlusHeader::Flashlight = &FlashlightRows;
+		DeferredDistant::DecalGroupDraw = &DrawDecalGroup;	// (2026-11-24 fd-complete) the decal groups through the forward+ list scope
 	}
 
 	inline bool Live = false;			// this frame (BeginFrame): on, indoors, the table and its lists possible
+	// (2026-11-24 fd-complete, docs/next/FD-COMPLETE.md) [Main.Main.Quality] DeferredDecals (live, default on): the game's decal groups (2 static,
+	// 3 dynamic: BSShaderAccumulator::RenderDecals, after the deferred light passes) draw inside this forward+ list scope, so a decal on a lit
+	// wall takes the same lamps, lamp shadows and deferred flashlight as the wall instead of the game's few lamps (with GameLight on, the
+	// flashlight's game lamp lit decals a second, different way: over-bright concrete damage, player report 2026-11-23).
+	inline bool DecalsLive = false;		// this frame: glass live and DeferredDecals on
+	inline bool InDecals = false;		// a decal group is drawing (DrawDecalGroup)
+	inline unsigned long long StatDecalGroups = 0, StatDecalBinds = 0, StatDecalGroupsOff = 0;
 	inline bool InList = false;			// the blended list is drawing (ListScope)
 	inline bool ListReady = false;		// ... and this frame's table and lists are there and unlocked (checked at the list's start)
 	inline bool BindWorld = false;		// the bind under way is in the world context (BeforeBind)
@@ -166,6 +175,44 @@ namespace DeferredTransparents {
 		}
 	}
 
+	// UNOFFICIAL 2026-11-25 fd-complete batch 6 ([Main.Main.Quality] DeferredDecals, the same key: compiled at startup while it is on): the game's
+	// lit decals, SM3005 / SM3007.pso (bullet holes, blood, impact marks; Lighting30 shaders, not the Object template, so the glass records never
+	// covered them), get a DECAL_FORWARD_PLUS record (Includes/DecalForwardPlus.hlsl): the game's sun pair kept, its lamps replaced by every lamp
+	// of the pixel's froxel with their atlas shadows, and the deferred flashlight's beam. Chosen in the decal groups' forward+ scope (InDecals),
+	// in the world context, with this frame's table. Bound like the hair's (table s3, atlas s12, c180 / c181: OnBind's "own").
+	namespace Decals {
+		inline std::unordered_map<const void*, ShaderRecordPixel*> Records;
+		inline std::unordered_set<IDirect3DPixelShader9*> Handles;
+		inline unsigned Loaded = 0, Refused = 0;
+		inline bool Live = false;
+		inline unsigned long long StatBinds = 0;
+		inline int Wanted = -1;
+		inline bool WantedAtStartup() {
+			// ([Main.Main.Quality] DeferredBulletHoles, restart, default false since 2026-11-25: under the flashlight the marks took about half the light
+			// of the ground round them, cause not found (FD-COMPLETE.md section 13); with DeferredDecals for the scope)
+			if (Wanted < 0) Wanted = DeferredRenderer::On() && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredDecals") != 0 &&
+				TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredBulletHoles") != 0 ? 1 : 0;
+			return Wanted != 0;
+		}
+		inline bool IsDecal(const char* name) { return name && (!_stricmp(name, "SM3005.pso") || !_stricmp(name, "SM3007.pso")); }
+		// ShaderManager::LoadShader (pixel), after the shader's own records
+		inline void Load(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl) {
+			if (!shader || !IsDecal(name) || !shader->ShaderProg[ShaderRecordType::Default] || !WantedAtStartup() || Records.count(shader)) return;
+			static const D3DXMACRO overrides[2] = { { "DECAL_FORWARD_PLUS", "1" }, { NULL, NULL } };
+			ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, "Deferred\\Decals\\", overrides);
+			if (!record || !record->ShaderHandle) {
+				Refused++;
+				Logger::Log("[WARNING] DEFERRED DECALS forward+ record %s: did not load (see the device's line above): bullet holes and blood keep the game's lamps", name);
+				return;
+			}
+			Records[shader] = record;
+			Handles.insert(record->ShaderHandle);
+			EnableHeader();
+			Loaded++;
+			Logger::Log("DEFERRED DECALS forward+ record %s: loaded (the game's lit decals lit by every lamp of their froxel; %u loaded, %u not)", name, Loaded, Refused);
+		}
+	}
+
 	// Once a frame (Render.cpp, after DeferredRenderer::BeginFrame).
 	inline void BeginFrame() {
 		FrameId++;
@@ -187,6 +234,8 @@ namespace DeferredTransparents {
 		GlassLive = TheSettingManager->GetSettingI(kSection, kKey) != 0 && (!exterior || (DeferredRenderer::Mode() >= 2 && DeferredRenderer::Live && !RecordsExterior.empty())) &&
 			ManyLamps::FroxelRows() && ManyLamps::TileRowsWanted() && !ManyLamps::TableFailed;
 		Live = GlassLive || Hair::Live;
+		DecalsLive = GlassLive && TheSettingManager->GetSettingI(kSection, "DeferredDecals") != 0;
+		Decals::Live = DecalsLive && !Decals::Records.empty();	// (2026-11-25 batch 6)
 		if (!GpuTimer::Enabled) { StatFrames = 0; return; }
 		if (++StatFrames < 240) return;
 		const double f = (double)StatFrames;
@@ -194,6 +243,13 @@ namespace DeferredTransparents {
 			"lamp / highlight passes skipped %.2f, binds left alone outside the world context %.1f; header writes %u (%u with lists); records %u indoor, %u outdoor, %u hair",
 			StatFrames, GlassLive ? "live" : "off", Hair::Live ? "live" : "off", StatLists / f, StatListsRefused / f, StatBinds / f, Hair::StatBinds / f, StatDraws / f, StatSkipped / f, StatOtherContext / f,
 			ForwardPlusHeader::Writes, ForwardPlusHeader::ValidWrites, Loaded, LoadedExterior, Hair::Loaded);
+		Logger::Log("DEFERRED DECALS %u frames, %s: decal groups drawn in the forward+ scope %.2f a frame (%.2f left to the game's lamps: off or no table), forward+ decal binds %.1f "
+			"(bullet holes / blood SM3005 / 3007: %.1f, %u records); RenderGeometryGroup calls a frame: group 0 %.2f, 2 (static decals) %.2f, 3 (dynamic decals) %.2f",
+			StatFrames, DecalsLive ? "live" : "off", StatDecalGroups / f, StatDecalGroupsOff / f, StatDecalBinds / f, Decals::StatBinds / f, Decals::Loaded,
+			DeferredDistant::StatGroupCalls[0] / f, DeferredDistant::StatGroupCalls[2] / f, DeferredDistant::StatGroupCalls[3] / f);
+		StatDecalGroups = StatDecalBinds = StatDecalGroupsOff = 0;
+		Decals::StatBinds = 0;
+		for (unsigned long long& c : DeferredDistant::StatGroupCalls) c = 0;
 		StatFrames = 0; StatBinds = StatDraws = StatLists = StatListsRefused = StatOtherContext = StatSkipped = 0; Hair::StatBinds = 0;
 		ForwardPlusHeader::Writes = ForwardPlusHeader::ValidWrites = 0;
 	}
@@ -230,6 +286,14 @@ namespace DeferredTransparents {
 				return hair->second;
 			}
 		}
+		if (InDecals && Decals::Live) {	// (2026-11-25 batch 6) the game's lit decals
+			auto decal = Decals::Records.find(shader);
+			if (decal != Decals::Records.end()) {
+				if (!BindWorld) { StatOtherContext++; return nullptr; }
+				Decals::StatBinds++;
+				return decal->second;
+			}
+		}
 		if (!GlassLive) return nullptr;
 		const bool exterior = TheShaderManager->GameState.isExterior;
 		const auto& map = exterior ? RecordsExterior : Records;
@@ -237,7 +301,24 @@ namespace DeferredTransparents {
 		if (found == map.end()) return nullptr;
 		if (!BindWorld) { StatOtherContext++; return nullptr; }
 		StatBinds++;
+		if (InDecals) StatDecalBinds++;
 		return found->second;
+	}
+
+	// (2026-11-24 fd-complete) DeferredDistant's RenderGeometryGroup detour, for groups 2 and 3 (the game's RenderDecals): inside the forward+
+	// list scope while DecalsLive (Choose then gives each lit Object decal its forward+ record in the world context, Skip / AfterDraw drop
+	// its own lamp passes), else exactly the game's call.
+	inline void DrawDecalGroup(void* accumulator, UInt32 group, bool flag) {
+		if (!DecalsLive || InList) {
+			if (!InList) StatDecalGroupsOff++;
+			DeferredDistant::RenderGeometryGroup(accumulator, group, flag);
+			return;
+		}
+		ListScope scope;
+		InDecals = true;
+		StatDecalGroups++;
+		DeferredDistant::RenderGeometryGroup(accumulator, group, flag);
+		InDecals = false;
 	}
 
 	// SetShadersHook, after the game's bind: a forward+ record bound gets the table, the atlas and the lamp shadows' parameters.
@@ -245,7 +326,8 @@ namespace DeferredTransparents {
 		BoundOurs = Live && handle && Handles.count(handle) != 0;
 		BoundSpecular = BoundOurs && SpecularHandles.count(handle) != 0;
 		// (2026-11-16) the hair's and the deferred leaves' forward+ records: the atlas on s12 (their s8 is the clouds' shadow)
-		const bool own = handle && ((Hair::Live && Hair::Handles.count(handle) != 0) || (DeferredFoliage::LampsLive && DeferredFoliage::LampHandles.count(handle) != 0));
+		const bool own = handle && ((Hair::Live && Hair::Handles.count(handle) != 0) || (DeferredFoliage::LampsLive && DeferredFoliage::LampHandles.count(handle) != 0) ||
+			(Decals::Live && Decals::Handles.count(handle) != 0));	// (2026-11-25 batch 6: the decals' records bind as the hair's)
 		if (!BoundOurs && !own) return;
 		PointShadowForward::Bind(3, ManyLamps::Table, true, true);
 		// Outdoor forward+ records (RecordsExterior) compile SHADOW_CLOUD_SAMPLE with TESR_CloudShadow on s8 and have no lamp shadow

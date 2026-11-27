@@ -99,8 +99,8 @@ void VolumetricFogEffect::UpdateConstants() {
 	// shader's own nightFactor (isExterior term), so this has no effect regardless.
 	TimeGlobals* clock = TimeGlobals::Get();
 	const float daysPassed = clock->GameDaysPassed ? clock->GameDaysPassed->data : 1.0f;
-	const auto phaseLength = Tes->sky->firstClimate->phaseLength;
-	float phase = (fmod(daysPassed, 8 * phaseLength & 0x3F)) / (phaseLength & 0x3F);	// 0..8 through the moon's cycle
+	const int phaseDays = (Tes->sky && Tes->sky->firstClimate) ? (int)(Tes->sky->firstClimate->phaseLength & 0x3F) : 0;
+	float phase = (phaseDays > 0) ? (fmodf(daysPassed, 8.0f * (float)phaseDays) / (float)phaseDays) : 0.0f;	// 0..8 through the moon's cycle
 	phase = std::lerp(-D3DX_PI, D3DX_PI, phase / 8) - D3DX_PI / 4;
 	Constants.Global.z = std::lerp(0.0f, nightMinDarkness, cosf(phase) * 0.5f + 0.5f);
 
@@ -111,6 +111,7 @@ void VolumetricFogEffect::UpdateConstants() {
 	// fades in as the shader's nightFactor does (1 - smoothstep(0.4, 0.8, sun amount)). w: the weather's own near, as the game fogs
 	// with it (TESR_FogData.x holds 0.17 x far when the weather's near is negative, as most clear ones are: -10).
 	ApplyLayer();	// UNOFFICIAL 2026-11-01 HeightLayer: every frame (the camera moves)
+	ApplyStartDistances();
 
 	// UNOFFICIAL 2026-11-13 (modern lighting) FoggyWeatherImpact: one WeatherImpact for every weather either veils the clear days
 	// (a weather's fog far of 45000 with a power of 0.6 already greys trees at 50 m) or strips the foggy ones. The share follows
@@ -143,7 +144,7 @@ void VolumetricFogEffect::UpdateConstants() {
 			scale *= 1.0f + (gameFogFloorNight - 1.0f) * night;
 		}
 		Constants.Sun.z = scale;
-		Constants.Sun.w = Tes->sky->fogNearPlane;
+		Constants.Sun.w = (gameFogStart >= 0.0f) ? gameFogStart : Tes->sky->fogNearPlane;
 	}
 	else {
 		Constants.Sun.z = 0.0f;
@@ -189,6 +190,34 @@ void VolumetricFogEffect::ApplyLayer() {
 	else {
 		Constants.Shape.x = shapeFalloff;
 		Constants.Shape.y = shapeMaxHeight;
+	}
+}
+
+void VolumetricFogEffect::ApplyStartDistances() {
+	const bool ext = TheShaderManager->GameState.isExterior;
+	const float farZ = (std::max)(TheRenderManager->CameraData.y, 1.0f);
+	float sd = startDistance;
+	if (ext && nightStartDistance >= 0.0f) {
+		const float t = std::clamp((TheShaderManager->ShaderConst.SunAmount.x - 0.4f) / 0.4f, 0.0f, 1.0f);
+		const float night = 1.0f - t * t * (3.0f - 2.0f * t);
+		sd = sd + (nightStartDistance - sd) * night;
+	}
+	Constants.AerialTintColor.w = (std::max)(sd, 0.0f);
+
+	if (ext) {
+		const float distStartNrm = (distantFogStart >= 0.0f)
+			? std::clamp(distantFogStart / farZ, 0.0f, 0.999f)
+			: expf(-4.0f * std::clamp(distantFogRange, 1e-8f, 1.0f));
+		Constants.Distant.x = distStartNrm;
+		if (IsLegacy()) Constants.LegacyLow.z = distStartNrm;
+		Constants.Aerial.y = (aerialStartDistance >= 0.0f)
+			? std::clamp(aerialStartDistance / farZ, 0.0f, 0.999f)
+			: aerialRangeStart;
+	}
+	else {
+		Constants.Distant.x = 0.0f;
+		Constants.Aerial.y = 0.0f;
+		if (IsLegacy()) Constants.LegacyLow.z = 0.0f;
 	}
 }
 
@@ -244,6 +273,14 @@ void VolumetricFogEffect::UpdateSettings(){
 	rainyDisablesSkyFilter = I("RainyDisablesSkyFilter") != 0;
 	cloudyDisablesSkyFilter = I("CloudyDisablesSkyFilter") != 0;
 
+	{
+		SettingManager::Configuration::ConfigNode startNode;
+		startDistance = TheSettingManager->Config.FillNode(&startNode, SettingCategory, "StartDistance")
+			? std::clamp(startNode.FloatValue, 0.0f, 300000.0f) : 0.0f;
+		gameFogStart = TheSettingManager->Config.FillNode(&startNode, SettingCategory, "GameFogStart")
+			? std::clamp(startNode.FloatValue, -1.0f, 300000.0f) : -1.0f;
+	}
+
 	if (exterior) {
 		Constants.Density.z = F("MorningFogDip");
 		Constants.Density.w = F("SunriseSunsetBoost");
@@ -266,7 +303,7 @@ void VolumetricFogEffect::UpdateSettings(){
 		layerFollowsCamera = TheSettingManager->Config.FillNode(&layerNode, SettingCategory, "LayerFollowsCamera") && layerNode.BoolValue;
 
 		Constants.Aerial.x = F("AerialStrength");
-		Constants.Aerial.y = F("AerialRangeStart");
+		Constants.Aerial.y = aerialRangeStart = F("AerialRangeStart");
 		Constants.Aerial.z = F("AerialTintBlend");
 		Constants.Aerial.w = F("AerialDayFadeStart");
 
@@ -274,10 +311,20 @@ void VolumetricFogEffect::UpdateSettings(){
 		Constants.AerialTintColor.y = F("AerialTintG");
 		Constants.AerialTintColor.z = F("AerialTintB");
 
-		Constants.Distant.x = F("DistantFogRange");
+		Constants.Distant.x = distantFogRange = F("DistantFogRange");
 		Constants.Distant.y = F("DistantFogBlend");
 		Constants.Distant.z = F("DistantFogHeight");
 		Constants.Distant.w = F("EdgeAA");
+
+		{
+			SettingManager::Configuration::ConfigNode distStartNode;
+			distantFogStart = TheSettingManager->Config.FillNode(&distStartNode, SettingCategory, "DistantFogStart")
+				? std::clamp(distStartNode.FloatValue, -1.0f, 300000.0f) : -1.0f;
+			aerialStartDistance = TheSettingManager->Config.FillNode(&distStartNode, SettingCategory, "AerialStartDistance")
+				? std::clamp(distStartNode.FloatValue, -1.0f, 300000.0f) : -1.0f;
+			nightStartDistance = TheSettingManager->Config.FillNode(&distStartNode, "Shaders.VolumetricFog.Night", "StartDistance")
+				? std::clamp(distStartNode.FloatValue, -1.0f, 300000.0f) : -1.0f;
+		}
 
 		// shared with ShadowsExterior's own moon-phase shadow fade -- keeps fog's night-ambient
 		// ceiling consistent with the shadow system's, rather than a second, disconnected knob.
@@ -299,6 +346,11 @@ void VolumetricFogEffect::UpdateSettings(){
 		SettingManager::Configuration::ConfigNode fogWallNode;
 		gameFogFloor = TheSettingManager->Config.FillNode(&fogWallNode, SettingCategory, "GameFogFloor") ? std::clamp(fogWallNode.FloatValue, 0.0f, 2.0f) : 1.0f;
 		layerOn = 0.0f;	// UNOFFICIAL 2026-11-01 HeightLayer: outdoors only
+		distantFogRange = 0.0f;
+		distantFogStart = -1.0f;
+		aerialRangeStart = 0.0f;
+		aerialStartDistance = -1.0f;
+		nightStartDistance = -1.0f;
 
 		Constants.Aerial = D3DXVECTOR4(0, 0, 0, 0);
 		Constants.AerialTintColor = D3DXVECTOR4(0, 0, 0, 0);
@@ -351,6 +403,7 @@ void VolumetricFogEffect::UpdateSettings(){
 	// Packed into Global.y (its spare slot) rather than a new vector for one bool -- see the shader's
 	// skyMaskFactor for how it's used.
 	Constants.Global.y = TheSettingManager->GetSettingI("Shaders.VolumetricFog.Night", "DisableSkyMask") ? 1.0f : 0.0f;
+	ApplyStartDistances();
 }
 
 /*
@@ -924,7 +977,7 @@ bool VolumetricFogEffect::RenderDedicated(IDirect3DDevice9* Device, IDirect3DSur
 		// RenderedSurface is only written by the final copy, so it still holds the input.
 		Device->StretchRect(RenderedSurface, NULL, RenderTarget, NULL, D3DTEXF_NONE);
 		dedicatedFogFailed = true;
-		Logger::Log("Dedicated volumetric fog failed (%08lx); using packed path until restart.", result);
+		Logger::Log("Dedicated volumetric fog failed (%08lx); using plain full-resolution path until restart.", result);
 		return false;
 	}
 	compositeApplied = composite;
@@ -1064,67 +1117,13 @@ void VolumetricFogEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 	// The caller must apply deferred shadows/AO before retrying ordinary fog.
 	if (compositeShadow || compositeAO || compositeInteriorShadow) return;
 
-	D3DXHANDLE technique = PackedTechnique();
-	D3DXTECHNIQUE_DESC description = {};
-	D3DVIEWPORT9 original = {};
-	D3DSURFACE_DESC target = {}, scratch = {};
-	if (packedFogFailed || !technique || !RenderedSurface || !SourceBuffer ||
-		FAILED(Effect->GetTechniqueDesc(technique, &description)) || description.Passes != 2 ||
-		FAILED(Device->GetViewport(&original)) || FAILED(RenderTarget->GetDesc(&target)) ||
-		FAILED(RenderedSurface->GetDesc(&scratch)) || original.X || original.Y ||
-		target.MultiSampleType != D3DMULTISAMPLE_NONE || scratch.MultiSampleType != D3DMULTISAMPLE_NONE ||
-		original.Width != target.Width || original.Height != target.Height ||
-		target.Width != scratch.Width || target.Height != scratch.Height ||
-		(target.Width & 1) || (target.Height & 1) ||
-		RenderRect::Active()) {	// UNOFFICIAL 2026-10-27 RenderScale v2: the packed layout assumes the whole screen; the plain pass instead
-		EffectRecord::Render(Device, RenderTarget, RenderedSurface, PlainTechniqueIndex(techniqueIndex), ClearRenderTarget, SourceBuffer);
-		return;
-	}
-
-	auto timer = TimeLogger();
-	TheShaderManager->Chain.Sync(); // the packed path reads the render target itself
-	RenderedSurface = TheTextureManager->RenderedSurface;
-	D3DVIEWPORT9 reduced = original;
-	reduced.Width /= 2;
-	reduced.Height /= 2;
-	RECT packed = {0, 0, (LONG)reduced.Width, (LONG)reduced.Height};
-	HRESULT result = Device->StretchRect(RenderTarget, NULL, SourceBuffer, NULL, D3DTEXF_NONE);
-	if (SUCCEEDED(result)) result = Effect->SetTechnique(technique);
-	if (SUCCEEDED(result)) SetCT();
-	UINT passes = 0;
-	if (SUCCEEDED(result)) result = Effect->Begin(&passes, 0);
-	if (SUCCEEDED(result)) {
-		for (UINT p = 0; p < passes && SUCCEEDED(result); ++p) {
-			const bool combine = p == passes - 1;
-			result = Device->SetViewport(combine ? &original : &reduced);
-			if (FAILED(result)) break;
-			result = Effect->BeginPass(p);
-			if (FAILED(result)) break;
-			result = Device->DrawPrimitive(D3DPT_TRIANGLESTRIP, 0, 2);
-			HRESULT endResult = Effect->EndPass();
-			if (SUCCEEDED(result)) result = endResult;
-			if (SUCCEEDED(result)) result = Device->StretchRect(RenderTarget, combine ? NULL : &packed,
-				RenderedSurface, combine ? NULL : &packed, D3DTEXF_NONE);
-		}
-		Effect->End();
-	}
-	Device->SetViewport(&original);
-
-	if (FAILED(result)) {
-		Device->StretchRect(SourceBuffer, NULL, RenderTarget, NULL, D3DTEXF_NONE);
-		Device->StretchRect(SourceBuffer, NULL, RenderedSurface, NULL, D3DTEXF_NONE);
-		packedFogFailed = true;
-		Logger::Log("Packed volumetric fog failed (%08lx); using legacy path until restart.", result);
-		EffectRecord::Render(Device, RenderTarget, RenderedSurface, PlainTechniqueIndex(techniqueIndex), ClearRenderTarget, SourceBuffer);
-		return;
-	}
-	static bool reported = false;
-	if (!reported) {
-		Logger::Log("UNOFFICIAL packed volumetric fog active: %ux%u -> %ux%u.",
-			original.Width, original.Height, reduced.Width, reduced.Height);
-		reported = true;
-	}
-	renderTime = timer.LogTime("VolumetricFog::PackedRender");
+	// (2026-11-24) The dedicated path declined (ReShade loaded or ReShadeDepthCompat on, or it could not run here): the plain
+	// full-resolution pass, as RenderDedicated's ReShade note always said (EffectRecord::Render: the Vulkan port, VolumetricFogApply mode
+	// 4, when NvrDxvkPasses is on, else the D3D9 technique). The PackedFog / PackedFogLegacy fallback that stood here drew the whole
+	// FINISHED picture into a half-size quarter of the target and stretched it back up (PackedFogEstimate returns the fogged colour, not
+	// fog terms), so with ReShade at RenderScale 1 (DLAA) every frame came out at half resolution: "softer than RenderScale 0.5" (player
+	// handoff 2026-11-23; renaming those techniques away in the shader made it sharp again). A rect frame already took this pass.
+	EffectRecord::Render(Device, RenderTarget, RenderedSurface, PlainTechniqueIndex(techniqueIndex), ClearRenderTarget, SourceBuffer);
 }
 
 // ---- UNOFFICIAL 2026-10-25 (NVR DXVK): the fog as Vulkan passes (see VolumetricFog.h) ----
@@ -1380,8 +1379,8 @@ bool VolumetricFogEffect::ExtShadowAO(IDirect3DDevice9* Device, IDirect3DSurface
 }
 
 /*
-* The full-resolution techniques EffectRecord::Render draws (ClassicLook 2, and the fallback when neither the dedicated nor the
-* packed path can run): VolumetricFog, VolumetricFogLegacy and VolumetricFogClassic, read by name. The rest stay D3D9.
+* The full-resolution techniques EffectRecord::Render draws (ClassicLook 2, and the fallback when the dedicated path declines or fails):
+* VolumetricFog, VolumetricFogLegacy and VolumetricFogClassic, read by name. The rest stay D3D9.
 */
 bool VolumetricFogEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
 	if (ClearRenderTarget || (SourceBuffer && SourceBuffer == RenderTarget)) return false;

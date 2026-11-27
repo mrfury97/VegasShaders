@@ -221,14 +221,23 @@ public:
 
 class TESWeather : public TESForm {	// 0x36C bytes
 public:
-	enum { kNumColorTypes = 10, kNumTimeOfDay = 4 };	// colour kinds, times of day
+	enum { kNumColorTypes = 10, kNumTimeOfDay = 6 };	// colour kinds, times of day
 	enum {
 		eColor_SkyUpper = 0, eColor_Fog = 1, eColor_Sunlight = 4,
 		eColor_Sun = 5, eColor_Lighting = 10,
 	};
 	enum {
 		eTime_Sunrise = 0, eTime_Day = 1, eTime_Sunset = 2,
-		eTime_Night = 3,	// ColorData::colors index
+		eTime_Night = 3, eTime_Noon = 4, eTime_Midnight = 5,	// ColorData::colors index
+	};
+	enum FogData {
+		eFog_NearDay = 0,
+		eFog_FarDay = 1,
+		eFog_NearNight = 2,
+		eFog_FarNight = 3,
+		eFog_PowerDay = 4,
+		eFog_PowerNight = 5,
+		kNumFogData = 6,
 	};
 	enum WeatherType {	// classification flags (weatherType)
 		kType_Cloudy = 0x2, kType_Rainy = 0x4, kType_Snow = 0x8,
@@ -236,11 +245,6 @@ public:
 
 	struct ColorData {	// 0x18 bytes
 		RGBA colors[6];		// by eTime_*
-	};
-	struct FogInfo {	// 0xC bytes
-		float nearFog;		// +0x00
-		float farFog;		// +0x04
-		float power;		// +0x08
 	};
 
 	UInt32			pad18[7];				// image space modifiers
@@ -257,17 +261,18 @@ public:
 	UInt8			padE6[5];				// precipitation and lightning fades
 	UInt8			weatherType;			// +0xEB
 	UInt32			padEC;					// lightning colour
-	FogInfo			fogDay;					// +0xF0
-	FogInfo			fogNight;				// +0xFC
+	float			fogData[kNumFogData];	// +0xF0
 	ColorData		colors[kNumColorTypes];	// +0x108
 	UInt32			pad1F8[2];				// sounds
 	float			hdrInfo[14];			// +0x200
 	UInt32			pad238[77];
 
-	float GetFogDayNear() { return this->fogDay.nearFog; }		// fog planes, day and night
-	float GetFogDayFar() { return this->fogDay.farFog; }
-	float GetFogNightNear() { return this->fogNight.nearFog; }
-	float GetFogNightFar() { return this->fogNight.farFog; }
+	float GetFogDayNear() { return fogData[eFog_NearDay]; }		// fog planes, day and night
+	float GetFogDayFar() { return fogData[eFog_FarDay]; }
+	float GetFogNightNear() { return fogData[eFog_NearNight]; }
+	float GetFogNightFar() { return fogData[eFog_FarNight]; }
+	float GetFogDayPower() { return fogData[eFog_PowerDay]; }
+	float GetFogNightPower() { return fogData[eFog_PowerNight]; }
 	UInt8 GetSunGlare() { return this->sunGlare; }
 	UInt8 GetTransDelta() { return this->transDelta; }
 	UInt8 GetWindSpeed() { return this->windSpeed; }
@@ -277,10 +282,10 @@ public:
 	UInt8 GetCloudSpeedUpper() { return this->cloudSpeedUpper; }
 	float GetHDR(int i) { return hdrInfo[i]; }
 
-	void SetFogDayNear(float v) { fogDay.nearFog = v; }
-	void SetFogDayFar(float v) { fogDay.farFog = v; }
-	void SetFogNightNear(float v) { fogNight.nearFog = v; }
-	void SetFogNightFar(float v) { fogNight.farFog = v; }
+	void SetFogDayNear(float v) { fogData[eFog_NearDay] = v; }
+	void SetFogDayFar(float v) { fogData[eFog_FarDay] = v; }
+	void SetFogNightNear(float v) { fogData[eFog_NearNight] = v; }
+	void SetFogNightFar(float v) { fogData[eFog_FarNight] = v; }
 	void SetSunGlare(UInt8 v) { sunGlare = v; }
 	void SetTransDelta(UInt8 v) { transDelta = v; }
 	void SetWindSpeed(UInt8 v) { windSpeed = v; }
@@ -559,8 +564,11 @@ public:
 
 class PlayerCharacter : public Character {	// 0xE50 bytes
 public:
-	UInt32		pad1C8[289];
-	UInt8		isThirdPerson;			// +0x64C
+	UInt32		pad1C8[288];
+	UInt8		pad648[2];
+	UInt8		is3rdPerson;			// +0x64A (Is3rdPerson 0x4EAF60)
+	UInt8		isActuallyThirdPerson;	// +0x64B (IsActually3rdPerson 0x524D10, written by Show1stPerson; used by GetCurrentNode 0x950BE0)
+	UInt8		isThirdPerson;			// +0x64C (GetWant3rdPerson 0x5737E0)
 	UInt8		pad64D[3];
 	UInt32		pad650[8];
 	float		worldFoV;				// +0x670
@@ -578,6 +586,8 @@ public:
 	TESRegion* GetRegion() { return this->currentRegion; }
 	bool IsAlive() { return GetDead(1) == 0; }
 	bool IsFirstPerson() { return isThirdPerson == 0; }
+	bool IsDrawnFirstPerson() const { return isActuallyThirdPerson == 0; }
+	bool IsDrawnThirdPerson() const { return isActuallyThirdPerson != 0; }
 	bool IsVanity() { return *(bool*)0x011E07B8; }		// vanity (orbiting) camera
 	// Sets the world FoV and both FoV settings (fDefaultWorldFOV 0x1203160, fDefault1stPersonFOV 0x120316C).
 	void SetFoV(float FoV) { worldFoV = *(float*)0x01203160 = *(float*)0x0120316C = FoV; }
@@ -613,7 +623,11 @@ public:
 
 class Sun : public SkyObject {	// 0x2C bytes
 public:
-	UInt32 pad08[9];
+	NiNode*			sunBaseNode;	// +0x08
+	NiNode*			sunGlareNode;	// +0x0C
+	NiAVObject*		sunBase;		// +0x10
+	NiAVObject*		sunGlare;		// +0x14
+	UInt32			pad18[5];
 };
 
 class Stars : public SkyObject {	// 0x10 bytes
@@ -814,6 +828,51 @@ public:
 	UInt32		pad00[2];
 	UInt32		loadedModCount;		// +0x08
 	ModInfo*	loadedMods[0xFF];	// +0x0C
+
+	// Validate layout at runtime before dereferencing: handles both fixed inline tables and relocated pointer+count tables safely.
+	UInt32 SafeLoadedMods(ModInfo* const*& outTable) const {
+		outTable = nullptr;
+		__try {
+			if (loadedModCount > 0 && loadedModCount <= 0xFF) {
+				if (loadedMods[0] && (uintptr_t)loadedMods[0] < 0x10000) return 0;
+				outTable = loadedMods;
+				return loadedModCount;
+			}
+			if (loadedModCount >= 0x10000) {
+				ModInfo* const* table = nullptr;
+				memcpy(&table, &loadedModCount, sizeof(table));
+				const UInt32 count = (UInt32)(uintptr_t)loadedMods[0];
+				if (table && count > 0 && count <= 4096) {
+					const ModInfo* first = table[0];
+					if (first && (uintptr_t)first >= 0x10000 &&
+						(unsigned char)first->name[0] >= 0x20 && (unsigned char)first->name[0] <= 0x7E) {
+						outTable = table;
+						return count;
+					}
+				}
+			}
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			outTable = nullptr;
+		}
+		return 0;
+	}
+
+	static bool SafeCopyName(const ModInfo* mod, char* out, size_t cap) {
+		if (!out || cap == 0) return false;
+		out[0] = 0;
+		if (!mod || (uintptr_t)mod < 0x10000) return false;
+		__try {
+			const size_t n = (cap - 1 < 0x104) ? (cap - 1) : 0x104;
+			memcpy(out, mod->name, n);
+			out[n] = 0;
+			return out[0] != 0;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER) {
+			out[0] = 0;
+			return false;
+		}
+	}
 };
 
 class MainDataHandler {	// 0x63C bytes
@@ -1032,10 +1091,15 @@ public:
 	UInt32				pad60[8];			// light list
 	float				fMorphDistance;		// +0x80
 	UInt32				pad84[9];
-	UInt16				usLandscapeTextures;	// +0xA8
+	UInt16				iTextureCount;		// +0xA8 (FillTextureArray: 10 for land)
 	UInt16				padAA;
 	NiSourceTexture**	ppTextures[6];		// +0xAC
-	UInt32				padC4[16];
+	UInt32				padC4;				// +0xC4
+	UInt16				usLandscapeTextures;	// +0xC8 (leading non-null diffuse slots minus 1, SetLandscapeTextureSet 0xB68660)
+	UInt16				padCA;
+	UInt32				padCC[14];
+
+	UInt32 GetLandscapeLayerCount() const { return (ppTextures[0] && ppTextures[0][0]) ? ((UInt32)usLandscapeTextures + 1u) : 0u; }
 };
 
 class SpeedTreeLeafShaderProperty : public BSShaderProperty {	// 0x8C bytes
@@ -1073,6 +1137,7 @@ class BGSTerrainManager {	// LOD roots
 public:
 	static NiNode* GetRootLandLODNode() { return *(NiNode**)0x11D86A8; }
 	static NiNode* GetRootObjectLODNode() { return *(NiNode**)0x11D8690; }
+	static NiNode* GetRootTreeLODNode() { return *(NiNode**)0x11D86BC; }
 };
 
 class TESMain {	// the main loop's globals

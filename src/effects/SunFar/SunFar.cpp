@@ -94,7 +94,7 @@ void SunFarEffect::UpdateConstants() {
 	// SunFar must not fall back to vanilla's 45-degree-clamped LandLight::Dir (c18), or mid-slopes facing away from
 	// c18 get NdotL = 0 -> factor = 1.0 (bright unshadowed bands) when cloud ForwardShadows is off.
 	const bool deferredMatchSun = DeferredRenderer::Live && DeferredRenderer::Mode() >= 2 &&
-		DeferredSun::MatchSunDisc && TheShaderManager->GameState.isExterior &&
+		(DeferredSun::MatchSunDisc || DeferredSun::RealSunPath > 0) && TheShaderManager->GameState.isExterior &&
 		TheShaderManager->GameState.dayLight > 0.5f && TheShaderManager->ShaderConst.SunDir.z > 0.0f;
 	Constants.Land = (!deferredMatchSun && LandLight::Frame && LandLight::Now - LandLight::Frame < 30) ?
 		D3DXVECTOR4(LandLight::Dir[0], LandLight::Dir[1], LandLight::Dir[2], 1.0f) : D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);

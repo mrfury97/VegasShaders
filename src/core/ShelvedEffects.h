@@ -44,17 +44,33 @@ namespace ShelvedEffects {
 		return false;
 	}
 
+	// True (release builds only) for shelved individual keys (such as DistantLand).
+	inline bool Key(const std::string& section, const std::string& key) {
+		if (Section(section)) return true;
+		if (!Active) return false;
+		if (section == "Main.Main.Quality" && (key == "DistantLand" || key == "DistantLandSuppressVanilla")) return true;
+		return false;
+	}
+
 	// UNOFFICIAL 2026-11-16 (owner: shelve capsule shadows too; docs/next/FD-NATIVEFIX.md: on native D3D9 rooms ~30-38 % darker, cause
 	// not found): shelved SETTINGS, not effects. In a release build their switch reads as off whatever the settings file says (a read-only
 	// overlay in SettingManager::GetSettingI / GetSettingF, as SettingForce.h: nothing is written, Save keeps the player's value), so
 	// CapsuleShadows::CompiledIn and RtLampShadows::ScreenCompiledIn stay false: no capsule shader variant, no pass, no DropActors.
 	// Their section is hidden in the menu (Section above). SavedOn notes a player's file had it on, for one log line (Initialize).
 	inline bool SavedOn = false;
+	inline bool DistantLandSavedOn = false;
 	// True when section / key is a shelved switch (release builds only); value is then what it reads as (0). Under the settings lock.
 	inline bool ForcedOff(const char* section, const char* key, int savedValue) {
-		if (!Active || !section || !key || key[0] != 'E' || strcmp(key, "Enabled") || strcmp(section, kSettingSections[0])) return false;
-		if (savedValue) SavedOn = true;
-		return true;
+		if (!Active || !section || !key) return false;
+		if (!strcmp(key, "Enabled") && !strcmp(section, kSettingSections[0])) {
+			if (savedValue) SavedOn = true;
+			return true;
+		}
+		if (!strcmp(section, "Main.Main.Quality") && (!strcmp(key, "DistantLand") || !strcmp(key, "DistantLandSuppressVanilla"))) {
+			if (savedValue) DistantLandSavedOn = true;
+			return true;
+		}
+		return false;
 	}
 
 	// The one log line of a release build (ShaderManager::Initialize).

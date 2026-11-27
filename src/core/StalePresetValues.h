@@ -92,6 +92,14 @@ namespace StalePresetValues {
 		{ "Shaders.Reflections.RT", "FollowRenderScale", 0.0f, 98 },
 		{ "Shaders.Reflections.Main", "ReplaceForward", 0.0f, 98 },
 		{ "Main.Main.RayTracing", "ActorFlushPerSpace", 0.0f, 99 },
+		// (2026-11-27 upstream 1.1.5 merge) upstream's steps 97-99 here as 104-106: 104 night shadows, 105 the inverted polished finish, 106 weapon metal and RT weapon reflections.
+		{ "Shaders.ShadowsExteriors.Main", "NightMinDarkness", 0.35f, 104 },
+		{ "Shaders.ShadowsExteriors.Main", "UsePointShadowsNight", 0.0f, 104 },
+		{ "Shaders.PBR.Metal", "PolishedRoughness", 0.65f, 105 },	// (the inverted polished finish; step 105's other keys are the look)
+		{ "Shaders.PBR.Metal", "GreyMetal", 0.5f, 106 },
+		{ "Shaders.PBR.Metal", "Reflections", 0.6f, 106 },
+		{ "Shaders.Reflections.RT", "Weapon", 0.0f, 106 },
+		{ "Shaders.Reflections.RT", "WeaponRoughness", 0.3f, 106 },
 	};
 
 	// Keys that moved (UpdateOldDefaults 61 and 67): the value goes to the new key. [Shaders.VolumetricLight.Main] NightStrength (64) has

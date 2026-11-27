@@ -232,12 +232,17 @@ PixResult main(PixVaryings pa, float2 vpos_s : VPOS) {
 #ifdef GRASS_ALPHA_TEST
     pr.f_color.a = base_rgb.a > AlphaTestRef.x ? 1.0f : 0.0f;	// the game's cut (its fade is the dither above, as in the TMS build)
 #ifdef ALPHA_HASH_ON
-    // UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): on a hashed draw the cut takes noise; mode 2 the coverage the
-    // game's transparency multisampling gives grass (its TMS build: alpha x 1.75). The pattern is shifted off the fade dither's.
-    const float grass_width = max(fwidth(base_rgb.a) * (TESR_AlphaHash.z - 16.0f * AlphaHashStyle()), 1.0f / 255.0f);
+    // UNOFFICIAL 2026-11-03 SmoothCutouts (Includes/AlphaHash.hlsl): on a hashed draw the cut takes noise; mode 2 softens the
+    // blade edge around AlphaTestRef while zeroing transparent DXT5 background fringe texels (prevents off-color chroma fireflies).
+    const float grass_style = AlphaHashStyle();
+    const float grass_width = max(fwidth(base_rgb.a) * (TESR_AlphaHash.z - 16.0f * grass_style), 1.0f / 255.0f);
     if (NVR_AlphaHashDraw) {
         if (TESR_AlphaHash.x > 0.5f) {
-            const float coverage = TESR_AlphaHash.x > 1.5f ? saturate(base_rgb.a * 1.75f) : saturate((base_rgb.a - AlphaTestRef.x) / grass_width + 0.5f);
+            const float grass_band = grass_style > 5.5f ? 3.0f : grass_style > 4.5f ? 1.5f : grass_style > 2.5f ? 2.0f : 1.0f;
+            const float grass_soft = saturate((base_rgb.a - AlphaTestRef.x) * grass_band + AlphaTestRef.x);
+            const float coverage = TESR_AlphaHash.x > 1.5f
+                ? (base_rgb.a < AlphaTestRef.x * 0.25f ? 0.0f : grass_soft)
+                : saturate((base_rgb.a - AlphaTestRef.x) / grass_width + 0.5f);
             pr.f_color.a = AlphaHashKeep(coverage, vpos_s, 37.0f) > 0.0f ? 1.0f : 0.0f;
         }
     }

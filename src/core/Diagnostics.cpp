@@ -9,8 +9,12 @@
 #include "RtSunShadows.h"
 #include "RtFogVisibility.h"	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the REPORT block's line
 #include "RtPathTrace.h"	// UNOFFICIAL 2026-11-02 the reference path tracer's state line
+#include "VaMemoryMap.h"	// UNOFFICIAL 2026-11-23: 32-bit VA space breakdown for bug reports
 #include "../effects/Reflections/Reflections.h"
 #include "../effects/AmbientOcclusion/AmbientOcclusion.h"
+#include "RenderScaleGuardRule.h"	// UNOFFICIAL 2026-11-23 RenderScaleGuard
+#include "ScopeOverlay.h"
+#include "../effects/TAA/TAA.h"
 #include <cmath>
 #include <cstdarg>
 #include <ctime>
@@ -349,6 +353,339 @@ namespace {
 		if (!TemporalBackbone::HistoryValid()) return "history reset (cut, jump, gap or size change)";
 		if (turn > 5.0f) return "fast camera turn";
 		return nullptr;
+	}
+
+	// --- UNOFFICIAL 2026-11-23 RenderScaleGuard: runtime corner-box / seam self-check watchdog ---
+	struct RenderScaleGuardState {
+		bool on = true, onRead = false, failed = false, formatWarned = false;
+		D3DFORMAT format = D3DFMT_UNKNOWN;
+		D3DTEXTUREFILTERTYPE filter = D3DTEXF_LINEAR;
+		IDirect3DSurface9* hRt = nullptr;	// 64 x 4 bands straddling y = renderHeight
+		IDirect3DSurface9* vRt = nullptr;	// 4 x 64 bands straddling x = renderWidth
+		struct Slot {
+			IDirect3DSurface9* hSys = nullptr;
+			IDirect3DSurface9* vSys = nullptr;
+			bool pending = false;
+			unsigned frame = 0;
+			UINT rw = 0, rh = 0, sw = 0, sh = 0;
+			UINT probeW = 0, probeH = 0;
+			bool isSq = false;
+			bool isV2 = false;
+			float scale = 1.0f;
+			const char* upscaler = nullptr;
+		};
+		Slot ring[4];
+		int next = 0;
+		unsigned lastSubmitFrame = 0, burstLeft = 20, cooldownUntil = 0, warmupLeft = 5;
+		int confirmStreak = 0;
+		bool probeSqNext = false, lockedSq = false, slowMode = false;
+		UINT lastRw = 0, lastRh = 0;
+		bool lastV2 = false;
+		const void* lastCell = nullptr;
+		const char* lastUpscaler = nullptr;
+		unsigned probes = 0, minuteProbes = 0, minuteLate = 0, tripsV1 = 0, tripsNative = 0;
+		double cost = 0.0, minuteCost = 0.0;
+		unsigned costProbes = 0, minuteCostProbes = 0;
+	} RsGuard;
+
+	void ReleaseRsGuard() {
+		if (RsGuard.hRt) { RsGuard.hRt->Release(); RsGuard.hRt = nullptr; }
+		if (RsGuard.vRt) { RsGuard.vRt->Release(); RsGuard.vRt = nullptr; }
+		for (auto& s : RsGuard.ring) {
+			if (s.hSys) { s.hSys->Release(); s.hSys = nullptr; }
+			if (s.vSys) { s.vSys->Release(); s.vSys = nullptr; }
+			s.pending = false;
+		}
+		RsGuard.format = D3DFMT_UNKNOWN;
+	}
+
+	bool RsFormatOk(D3DFORMAT f) {
+		return f == D3DFMT_A8R8G8B8 || f == D3DFMT_X8R8G8B8 ||
+			f == D3DFMT_A8B8G8R8 || f == D3DFMT_X8B8G8R8 ||
+			f == D3DFMT_A2R10G10B10 || f == D3DFMT_A2B10G10R10 ||
+			f == D3DFMT_A16B16G16R16F;
+	}
+
+	bool EnsureRsGuard(IDirect3DDevice9* device, D3DFORMAT fmt) {
+		if (RsGuard.hRt && RsGuard.vRt && RsGuard.format == fmt) return true;
+		ReleaseRsGuard();
+		if (!RsFormatOk(fmt)) {
+			if (!RsGuard.formatWarned) {
+				RsGuard.formatWarned = true;
+				Logger::Log("UNOFFICIAL RenderScaleGuard: unsupported picture format %d (skipped)", (int)fmt);
+			}
+			return false;
+		}
+		if (FAILED(device->CreateRenderTarget(RenderScaleGuardRule::Samples, 4, fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &RsGuard.hRt, NULL)) ||
+			FAILED(device->CreateRenderTarget(4, RenderScaleGuardRule::Samples, fmt, D3DMULTISAMPLE_NONE, 0, FALSE, &RsGuard.vRt, NULL))) {
+			ReleaseRsGuard();
+			RsGuard.failed = true;
+			Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: off for this session (could not create probe render targets)");
+			return false;
+		}
+		for (auto& s : RsGuard.ring) {
+			if (FAILED(device->CreateOffscreenPlainSurface(RenderScaleGuardRule::Samples, 4, fmt, D3DPOOL_SYSTEMMEM, &s.hSys, NULL)) ||
+				FAILED(device->CreateOffscreenPlainSurface(4, RenderScaleGuardRule::Samples, fmt, D3DPOOL_SYSTEMMEM, &s.vSys, NULL))) {
+				ReleaseRsGuard();
+				RsGuard.failed = true;
+				Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: off for this session (could not create system-memory readback surfaces)");
+				return false;
+			}
+		}
+		RsGuard.format = fmt;
+		RsGuard.filter = D3DTEXF_LINEAR;
+		return true;
+	}
+
+	RenderScaleGuardRule::Rgb RsDecodeRgb(const unsigned char* row, int x, D3DFORMAT fmt) {
+		RenderScaleGuardRule::Rgb out;
+		if (fmt == D3DFMT_A16B16G16R16F) {
+			const unsigned short* p = (const unsigned short*)(row + x * 8);
+			out.r = HalfToFloat(p[0]); out.g = HalfToFloat(p[1]); out.b = HalfToFloat(p[2]);
+		}
+		else if (fmt == D3DFMT_A2R10G10B10 || fmt == D3DFMT_A2B10G10R10) {
+			const UInt32 v = *(const UInt32*)(row + x * 4);
+			const float lo = (v & 1023) / 1023.0f, mid = ((v >> 10) & 1023) / 1023.0f, hi = ((v >> 20) & 1023) / 1023.0f;
+			if (fmt == D3DFMT_A2R10G10B10) { out.b = lo; out.g = mid; out.r = hi; } else { out.r = lo; out.g = mid; out.b = hi; }
+		}
+		else if (fmt == D3DFMT_A8B8G8R8 || fmt == D3DFMT_X8B8G8R8) {
+			const unsigned char* p = row + x * 4;
+			out.r = p[0] / 255.0f; out.g = p[1] / 255.0f; out.b = p[2] / 255.0f;
+		}
+		else {
+			const unsigned char* p = row + x * 4;
+			out.b = p[0] / 255.0f; out.g = p[1] / 255.0f; out.r = p[2] / 255.0f;
+		}
+		return out;
+	}
+
+	HRESULT RsStretch(IDirect3DDevice9* device, IDirect3DSurface9* src, const RECT& srcRect, IDirect3DSurface9* dst, const RECT& dstRect) {
+		HRESULT hr = device->StretchRect(src, &srcRect, dst, &dstRect, RsGuard.filter);
+		if (FAILED(hr) && RsGuard.filter == D3DTEXF_LINEAR) {
+			RsGuard.filter = D3DTEXF_POINT;
+			hr = device->StretchRect(src, &srcRect, dst, &dstRect, RsGuard.filter);
+		}
+		return hr;
+	}
+
+	void RenderScaleGuardFrame(IDirect3DDevice9* device, IDirect3DSurface9* picture, unsigned frame) {
+		if (!RsGuard.on || RsGuard.failed || !device || !picture) return;
+		UINT rw = 0, rh = 0, sw = 0, sh = 0;
+		bool isV2 = false;
+		float scale = 1.0f;
+		const char* upscaler = nullptr;
+		if (!TAAEffect::RenderScaleGuardInfo(rw, rh, sw, sh, isV2, scale, upscaler)) {
+			RsGuard.confirmStreak = 0;
+			return;
+		}
+
+		const void* cell = Player ? Player->parentCell : nullptr;
+		const bool upscalerChanged = (upscaler != RsGuard.lastUpscaler) &&
+			(!upscaler || !RsGuard.lastUpscaler || strcmp(upscaler, RsGuard.lastUpscaler) != 0);
+		if (cell != RsGuard.lastCell || rw != RsGuard.lastRw || rh != RsGuard.lastRh || isV2 != RsGuard.lastV2 || upscalerChanged) {
+			RsGuard.lastCell = cell;
+			RsGuard.lastRw = rw;
+			RsGuard.lastRh = rh;
+			RsGuard.lastV2 = isV2;
+			RsGuard.lastUpscaler = upscaler;
+			RsGuard.confirmStreak = 0;
+			RsGuard.lockedSq = false;
+			RsGuard.probeSqNext = false;
+			RsGuard.burstLeft = 20;
+			for (auto& s : RsGuard.ring) {
+				if (s.pending && (s.rw != rw || s.rh != rh || s.sw != sw || s.sh != sh || s.isV2 != isV2 || upscalerChanged)) s.pending = false;
+			}
+		}
+
+		const double t0 = Seconds();
+		bool didWork = false;
+		HWND fg = GetForegroundWindow();
+		DWORD fgPid = 0;
+		const bool unfocused = !fg || (GetWindowThreadProcessId(fg, &fgPid), fgPid != GetCurrentProcessId()) || IsIconic(fg);
+		const bool quietNow = unfocused || QuietReason(frame, 0.0f) != nullptr || ScopeOverlay::Visible();
+
+		for (auto& slot : RsGuard.ring) {
+			if (!slot.pending) continue;
+			if (frame < slot.frame) { slot.pending = false; continue; }
+			if (frame - slot.frame < 3) continue;
+			if (slot.rw != rw || slot.rh != rh || slot.sw != sw || slot.sh != sh || slot.isV2 != isV2) {
+				slot.pending = false;
+				continue;
+			}
+			if (RsGuard.confirmStreak > 0 && slot.isSq != RsGuard.lockedSq) {
+				slot.pending = false;
+				continue;
+			}
+			didWork = true;
+			D3DLOCKED_RECT hLock = {}, vLock = {};
+			const HRESULT hrH = slot.hSys->LockRect(&hLock, NULL, D3DLOCK_READONLY | D3DLOCK_DONOTWAIT);
+			if (hrH == D3DERR_WASSTILLDRAWING) {
+				RsGuard.minuteLate++;
+				if (frame - slot.frame > 16) slot.pending = false;
+				continue;
+			}
+			if (FAILED(hrH)) {
+				EffectStatus::D3DFail("RenderScaleGuard LockRect H", hrH);
+				slot.pending = false;
+				continue;
+			}
+			const HRESULT hrV = slot.vSys->LockRect(&vLock, NULL, D3DLOCK_READONLY | D3DLOCK_DONOTWAIT);
+			if (hrV == D3DERR_WASSTILLDRAWING) {
+				slot.hSys->UnlockRect();
+				RsGuard.minuteLate++;
+				if (frame - slot.frame > 16) slot.pending = false;
+				continue;
+			}
+			if (FAILED(hrV)) {
+				slot.hSys->UnlockRect();
+				EffectStatus::D3DFail("RenderScaleGuard LockRect V", hrV);
+				slot.pending = false;
+				continue;
+			}
+			RenderScaleGuardRule::Rgb h[4][RenderScaleGuardRule::Samples];
+			RenderScaleGuardRule::Rgb v[4][RenderScaleGuardRule::Samples];
+			for (int band = 0; band < 4; band++) {
+				const unsigned char* hRow = (const unsigned char*)hLock.pBits + (size_t)band * hLock.Pitch;
+				for (int x = 0; x < RenderScaleGuardRule::Samples; x++) h[band][x] = RsDecodeRgb(hRow, x, RsGuard.format);
+			}
+			for (int y = 0; y < RenderScaleGuardRule::Samples; y++) {
+				const unsigned char* vRow = (const unsigned char*)vLock.pBits + (size_t)y * vLock.Pitch;
+				for (int band = 0; band < 4; band++) v[band][y] = RsDecodeRgb(vRow, band, RsGuard.format);
+			}
+			slot.hSys->UnlockRect();
+			slot.vSys->UnlockRect();
+			slot.pending = false;
+
+			if (frame < RsGuard.cooldownUntil || quietNow) continue;
+			RsGuard.probes++;
+			RsGuard.minuteProbes++;
+			const RenderScaleGuardRule::Verdict verdict = RenderScaleGuardRule::Judge(h, v);
+			if (verdict.seam) {
+				if (RsGuard.confirmStreak == 0) RsGuard.lockedSq = slot.isSq;
+				RsGuard.confirmStreak++;
+				if (RsGuard.confirmStreak >= RenderScaleGuardRule::Thresholds().ConfirmNeeded) {
+					for (auto& s : RsGuard.ring) s.pending = false;
+					RsGuard.confirmStreak = 0;
+					RsGuard.lockedSq = false;
+					RsGuard.probeSqNext = false;
+					RsGuard.cooldownUntil = frame + 30;
+					char reason[256];
+					if (slot.isSq) {
+						sprintf_s(reason, "RenderScale scale^2 seam detected at %ux%u (render %ux%u / %ux%u, %s %.2f, H=%d/%d mean=%.2f, V=%d/%d mean=%.2f)",
+							slot.probeW, slot.probeH, slot.rw, slot.rh, slot.sw, slot.sh, slot.upscaler ? slot.upscaler : "Upscaler", slot.scale,
+							verdict.hHits, RenderScaleGuardRule::Samples, verdict.hMean, verdict.vHits, RenderScaleGuardRule::Samples, verdict.vMean);
+					}
+					else {
+						sprintf_s(reason, "RenderScale seam detected at %ux%u/%ux%u (%s %.2f, H=%d/%d mean=%.2f, V=%d/%d mean=%.2f)",
+							slot.probeW, slot.probeH, slot.sw, slot.sh, slot.upscaler ? slot.upscaler : "Upscaler", slot.scale,
+							verdict.hHits, RenderScaleGuardRule::Samples, verdict.hMean, verdict.vHits, RenderScaleGuardRule::Samples, verdict.vMean);
+					}
+					if (slot.isV2 && !TAAEffect::IsDeferredV1Unsafe()) {
+						RsGuard.tripsV1++;
+						RsGuard.burstLeft = 20;
+						Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: %s (f%u, v2) -> switching to v1", reason, slot.frame);
+						TAAEffect::ForceRenderScaleV1(reason);
+					}
+					else {
+						RsGuard.tripsNative++;
+						Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: %s (f%u, %s) -> forcing native 1.0x",
+							reason, slot.frame, slot.isV2 ? "v2, DeferredRenderer active" : "v1");
+						TAAEffect::ForceRenderScaleNative(reason);
+					}
+					break;
+				}
+			}
+			else {
+				RsGuard.confirmStreak = 0;
+				RsGuard.lockedSq = false;
+			}
+		}
+
+		const unsigned steadyInterval = RsGuard.slowMode ? 120u : 60u;
+		const unsigned interval = RsGuard.confirmStreak > 0 ? 5u : (RsGuard.burstLeft > 0 ? 15u : steadyInterval);
+		const bool due = RsGuard.lastSubmitFrame == 0 || frame < RsGuard.lastSubmitFrame || (frame - RsGuard.lastSubmitFrame >= interval);
+		if (due && !quietNow && frame >= RsGuard.cooldownUntil && RsGuard.on && !RsGuard.failed) {
+			uint32_t rw2 = 0, rh2 = 0;
+			const bool canSq = RenderScaleGuardRule::SecondarySeam(rw, rh, sw, sh, rw2, rh2);
+			bool useSq = false;
+			if (RsGuard.confirmStreak > 0) useSq = RsGuard.lockedSq && canSq;
+			else if (canSq) {
+				useSq = RsGuard.probeSqNext;
+				RsGuard.probeSqNext = !RsGuard.probeSqNext;
+			}
+			const UINT pw = useSq ? rw2 : rw;
+			const UINT ph = useSq ? rh2 : rh;
+			D3DSURFACE_DESC d = {};
+			if (SUCCEEDED(picture->GetDesc(&d)) && d.MultiSampleType == D3DMULTISAMPLE_NONE &&
+				d.Width == sw && d.Height == sh &&
+				pw >= 24 && ph >= 24 && pw + 12 < d.Width && ph + 12 < d.Height &&
+				EnsureRsGuard(device, d.Format)) {
+				didWork = true;
+				const LONG mx = (std::min)((LONG)pw - 8, (std::max)(8L, (LONG)(pw / 25)));
+				const LONG my = (std::min)((LONG)ph - 8, (std::max)(8L, (LONG)(ph / 25)));
+				const LONG hDy[4][2] = { { -10, -7 }, { -3, 0 }, { 1, 4 }, { 8, 11 } };
+				const LONG vDx[4][2] = { { -10, -7 }, { -3, 0 }, { 1, 4 }, { 8, 11 } };
+				bool copyOk = true;
+				for (int band = 0; band < 4 && copyOk; band++) {
+					const RECT srcH = { mx, (LONG)ph + hDy[band][0], (LONG)pw - mx, (LONG)ph + hDy[band][1] };
+					const RECT dstH = { 0, band, RenderScaleGuardRule::Samples, band + 1 };
+					const HRESULT hr = RsStretch(device, picture, srcH, RsGuard.hRt, dstH);
+					if (FAILED(hr)) { EffectStatus::D3DFail("RenderScaleGuard StretchRect H", hr); copyOk = false; }
+				}
+				for (int band = 0; band < 4 && copyOk; band++) {
+					const RECT srcV = { (LONG)pw + vDx[band][0], my, (LONG)pw + vDx[band][1], (LONG)ph - my };
+					const RECT dstV = { band, 0, band + 1, RenderScaleGuardRule::Samples };
+					const HRESULT hr = RsStretch(device, picture, srcV, RsGuard.vRt, dstV);
+					if (FAILED(hr)) { EffectStatus::D3DFail("RenderScaleGuard StretchRect V", hr); copyOk = false; }
+				}
+				if (copyOk) {
+					RenderScaleGuardState::Slot& slot = RsGuard.ring[RsGuard.next];
+					const HRESULT hrG1 = device->GetRenderTargetData(RsGuard.hRt, slot.hSys);
+					const HRESULT hrG2 = SUCCEEDED(hrG1) ? device->GetRenderTargetData(RsGuard.vRt, slot.vSys) : hrG1;
+					if (SUCCEEDED(hrG2)) {
+						slot.pending = true;
+						slot.frame = frame;
+						slot.rw = rw; slot.rh = rh; slot.sw = sw; slot.sh = sh;
+						slot.probeW = pw; slot.probeH = ph;
+						slot.isSq = useSq;
+						slot.isV2 = isV2;
+						slot.scale = scale;
+						slot.upscaler = upscaler;
+						RsGuard.next = (RsGuard.next + 1) & 3;
+						RsGuard.lastSubmitFrame = frame;
+						if (RsGuard.burstLeft > 0) RsGuard.burstLeft--;
+					}
+					else {
+						slot.pending = false;
+						EffectStatus::D3DFail("RenderScaleGuard GetRenderTargetData", hrG2);
+					}
+				}
+			}
+		}
+
+		if (didWork) {
+			const double dt = Seconds() - t0;
+			if (RsGuard.warmupLeft > 0) {
+				RsGuard.warmupLeft--;
+			}
+			else {
+				RsGuard.cost += dt;
+				RsGuard.costProbes++;
+				RsGuard.minuteCost += dt;
+				RsGuard.minuteCostProbes++;
+				const double avg = RsGuard.costProbes > 0 ? (RsGuard.cost / RsGuard.costProbes) : 0.0;
+				if (!RsGuard.slowMode && RsGuard.costProbes >= 20 && avg > 0.001) {
+					RsGuard.slowMode = true;
+					Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: probe cost averaged %.3f ms (> 1.0 ms); reducing steady-state probe frequency to every 120 frames", avg * 1000.0);
+				}
+				if (RsGuard.costProbes >= 40 && avg > 0.005) {
+					const double avgMs = avg * 1000.0;
+					RsGuard.failed = true;
+					ReleaseRsGuard();
+					Logger::Log("[WARN] UNOFFICIAL RenderScaleGuard: turned itself off (average probe cost %.3f ms exceeded 5.0 ms)", avgMs);
+				}
+			}
+		}
 	}
 
 	// --- the stage probes (Diagnostics.h part 4; docs/next/FLICKER-ISOLATION-PLAN.md step 1) ---
@@ -2183,6 +2520,7 @@ namespace {
 		Logger::Log("REPORT %u temporal: %s", n, TheShaderManager->Effects.TAA ? TheShaderManager->Effects.TAA->UpscaleDiagText().c_str() : "no TAA effect");
 		Logger::Log("REPORT %u history watch: %s", n, Diagnostics::HistoryWatchText().c_str());
 		Logger::Log("REPORT %u environment: %s", n, SessionLog::Environment().c_str());
+		VaMemoryMap::Log("report", false, true, true);
 		{	// UNOFFICIAL 2026-11-01: every setting that differs from the defaults NOW (a tester's preset, loaded live after the SESSION
 			// header, changed ~190 settings the header never saw): the same list as the header's, from the live values
 			char settingsHead[72];
@@ -2358,6 +2696,13 @@ void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* pi
 		}
 		Wt.onRead = true;
 		Wt.on = watch;
+		const bool rsGuard = TheSettingManager->GetSettingI("Main.Main.Misc", "RenderScaleGuard") != 0;	// UNOFFICIAL 2026-11-23 RenderScaleGuard
+		if (RsGuard.onRead && rsGuard != RsGuard.on) {
+			Logger::Log("UNOFFICIAL RenderScaleGuard %s ([Main.Main.Misc] RenderScaleGuard)", rsGuard ? "on" : "off");
+			if (!rsGuard) { ReleaseRsGuard(); TAAEffect::ResetRenderScaleGuard(); }
+		}
+		RsGuard.onRead = true;
+		RsGuard.on = rsGuard;
 	}
 
 	// 2026-11-05: the report key ([Main.Main.Misc] ReportKey ']', ReportFrames) is gone (user: "doesn't seem like anyone wants to use it";
@@ -2368,6 +2713,7 @@ void Diagnostics::OnFinalPicture(IDirect3DDevice9* device, IDirect3DSurface9* pi
 	SeriesEndFrame(frame, (O.flash && !F.failed) || Bt.on);	// UNOFFICIAL 2026-11-11 BeatSeries: this frame's values kept, the counters back to 0
 	if (device) StagesEndFrame(device, frame);	// UNOFFICIAL 2026-11-01: this frame's stage copies, the ones of 3 frames ago read (before the detector judges that frame)
 	if (O.flash && !F.failed && device && picture) FlashFrame(device, picture, frame);
+	if (RsGuard.on && !RsGuard.failed && device && picture) RenderScaleGuardFrame(device, picture, frame);
 }
 
 // UNOFFICIAL 2026-11-11: what the world is drawn into (the period-3 interior beat appears only with the game's own MSAA so far).
@@ -2488,6 +2834,14 @@ void Diagnostics::Heartbeat() {
 		Logger::Log("HEARTBEAT history watch: %s, cost %.3f ms a probe | %s", Wt.failed ? "turned itself off" : "on", Wt.minuteCostFrames ? Wt.minuteCost / Wt.minuteCostFrames * 1000.0 : 0.0, slots.c_str());
 		Wt.minuteCost = 0.0; Wt.minuteCostFrames = 0;
 	}
+	// UNOFFICIAL 2026-11-23 RenderScaleGuard: probes, readback pressure, and fallback trips
+	if (RsGuard.minuteProbes > 0 || RsGuard.tripsV1 > 0 || RsGuard.tripsNative > 0 || RsGuard.failed)
+		Logger::Log("HEARTBEAT RenderScale guard: %s, %u probes (%u this session), %u late read-backs, trips v1=%u native=%u, cost %.3f ms a probe",
+			RsGuard.failed ? "turned itself off" : (RsGuard.on ? "on" : "off"),
+			RsGuard.minuteProbes, RsGuard.probes, RsGuard.minuteLate, RsGuard.tripsV1, RsGuard.tripsNative,
+			RsGuard.minuteCostProbes ? RsGuard.minuteCost / RsGuard.minuteCostProbes * 1000.0 : 0.0);
+	RsGuard.minuteProbes = RsGuard.minuteLate = 0;
+	RsGuard.minuteCost = 0.0; RsGuard.minuteCostProbes = 0;
 	// The counters when they changed, and the minute's call failures
 	bool changed = false;
 	for (int i = 0; i < 5; i++) if ((unsigned)ShaderCounts[i] != LastShaderCounts[i]) { changed = true; LastShaderCounts[i] = (unsigned)ShaderCounts[i]; }

@@ -40,7 +40,7 @@ static const char* const WeatherColorTypes[TESWeather::kNumColorTypes] = {
 	"SkyUpper", "Fog", "CloudsLower", "Ambient", "Sunlight",
 	"Sun", "Stars", "SkyLower", "Horizon", "CloudsUpper",
 };
-static const char* const WeatherTimesOfDay[TESWeather::kNumTimeOfDay] = { "Sunrise", "Day", "Sunset", "Night" };
+static const char* const WeatherTimesOfDay[TESWeather::kNumTimeOfDay] = { "Sunrise", "Day", "Sunset", "Night", "Noon", "Midnight" };
 static const char* const WeatherHDRTypes[14] = {
 	"EyeAdaptation", "BlurRadius", "BlurPasses", "EmissiveMult", "TargetLUM", "UpperLUMClamp", "BrightScale",
 	"BrightClamp", "LUMRampNoTex", "LUMRampMin", "LUMRampMax", "SunlightDimmer", "GrassDimmer", "TreeDimmer",

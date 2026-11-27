@@ -178,13 +178,13 @@ namespace CapsuleShadows {
 				if (s.distance - s.bound[3] > maxDistance) return;
 				n++;
 			};
-			if (Player && (playerFirst || !((PlayerCharacter*)Player)->IsFirstPerson())) consider((Actor*)Player);
+			if (Player && (playerFirst || !((PlayerCharacter*)Player)->IsDrawnFirstPerson())) consider((Actor*)Player);
 			UInt8* lists = (UInt8*)0x11E0E80;	// ProcessLists (as BloodFlow): the high and middle-high actors
 			Actor** data = *(Actor***)(lists + 0x08);
 			for (int level = 0; data && level < 2; level++) {
 				const UInt32 begin = *(UInt32*)(lists + 0x14 + level * 4), end = *(UInt32*)(lists + 0x24 + level * 4);
 				if (end < begin || end - begin > 4096) continue;
-				for (UInt32 i = begin; i < end; i++) if (data[i] && (TESObjectREFR*)data[i] != (TESObjectREFR*)Player) consider(data[i]);
+				for (UInt32 i = begin; i < end; i++) if (data[i] && data[i]->IsActor() && (TESObjectREFR*)data[i] != (TESObjectREFR*)Player) consider(data[i]);
 			}
 		}
 		__except (EXCEPTION_EXECUTE_HANDLER) {

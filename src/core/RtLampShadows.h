@@ -332,7 +332,7 @@ namespace RtLampShadows {
 	inline bool EyeHeldValid = false;
 	inline UInt32 EyeRecorded = 0, EyeVisFrame = 0, EyeReads = 0;
 	inline std::unordered_map<const void*, float> EyeVis;
-	inline bool EyeWanted() { return Player && Player->IsFirstPerson(); }
+	inline bool EyeWanted() { return Player && Player->IsDrawnFirstPerson(); }
 	// The readbacks two or more frames old: the newest becomes EyeVis (lamp -> how much of it the eye sees)
 	inline void ReadEye() {
 		const UInt32 now = TheFrameRateManager->FrameNumber;

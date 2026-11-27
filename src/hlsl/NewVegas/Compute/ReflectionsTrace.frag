@@ -17,32 +17,40 @@ void main() {
     // cube / grid / sky along the plain mirror direction at the film's own roughness. Standing water traces as before.
     float damp = SurfaceDamp;
     bool dampOnly = damp > 0.999;
-    vec3 position = ViewPosition(pixelUV, depth);
+    vec3 position = SurfacePosition(pixelUV, depth);   // (2026-11-27 upstream 1.1.5 merge: upstream's SurfacePosition, our damp share above)
     vec3 V = normalize(position);   // eye -> surface
-
-    // Spread the reflected direction by the roughness: a GGX half vector round the normal, a new one every frame.
-    float a = roughness * roughness;
-    float u1 = GradientNoise(vpos), u2 = GradientNoise(vpos + vec2(37.0, 17.0));
-    float cosTheta = sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1));
-    float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
-    float phi = 6.2831853 * u2;
-    vec3 tangent = normalize(abs(N.z) < 0.999 ? cross(N, vec3(0, 0, 1)) : cross(N, vec3(1, 0, 0)));
-    vec3 bitangent = cross(N, tangent);
-    vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
-    // (2026-11-06) a mirror (roughness under 0.03) traces the exact mirror ray, the same every frame (no spread, a fixed march offset
-    // below): no noise to average, so ReflectionsTemporal keeps no history there (the history smeared what mirrors show)
+    bool weapon = WeaponAt(pixelUV);
     const bool mirrorPixel = roughness < 0.03;
-    if (mirrorPixel || dampOnly) H = N;
-    vec3 R = reflect(V, H);
-    if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
-    R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
+    vec3 R;
+    if (weapon) {
+        // Weapons read the pre-filtered 360-degree surroundings cubemap by roughness (EnvAlong),
+        // so use the exact normal-mapped mirror direction instead of jittered GGX / AboveSurface.
+        R = reflect(V, N);
+    } else {
+        // Spread the reflected direction by the roughness: a GGX half vector round the normal, a new one every frame.
+        float a = roughness * roughness;
+        float u1 = GradientNoise(vpos), u2 = GradientNoise(vpos + vec2(37.0, 17.0));
+        float cosTheta = sqrt((1.0 - u1) / (1.0 + (a * a - 1.0) * u1));
+        float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+        float phi = 6.2831853 * u2;
+        vec3 tangent = normalize(abs(N.z) < 0.999 ? cross(N, vec3(0, 0, 1)) : cross(N, vec3(1, 0, 0)));
+        vec3 bitangent = cross(N, tangent);
+        vec3 H = normalize(tangent * (sinTheta * cos(phi)) + bitangent * (sinTheta * sin(phi)) + N * cosTheta);
+        // (2026-11-06) a mirror (roughness under 0.03) traces the exact mirror ray, the same every frame (no spread, a fixed march offset
+        // below): no noise to average, so ReflectionsTemporal keeps no history there (the history smeared what mirrors show)
+        // (2026-11-21) damp ground: the plain mirror direction too. (2026-11-27 upstream 1.1.5 merge: kept inside upstream's non-weapon branch)
+        if (mirrorPixel || dampOnly) H = N;
+        R = reflect(V, H);
+        if (dot(R, N) <= 0.0) R = reflect(V, N);   // spread below the surface: the plain mirror direction
+        R = AboveSurface(pixelUV, position, R);   // (2026-11-05) never under the real surface (a tilted normal map at a low angle)
+    }
 
     // March: steps that grow along the ray (fine near the surface, coarse far off), the first one shifted by the noise.
     float jitter = mirrorPixel ? 0.5 : GradientNoise(vpos + vec2(11.0, 71.0));
     float lastT = 0.0;
     float lastZ = position.z;
     float hitT = -1.0;
-    bool searching = true;
+    bool searching = !weapon;
     for (float i = 1.0; i <= Steps && searching; i += 1.0) {
         float s = (i - 1.0 + jitter) / Steps;
         float t = RayLength * s * s + 2.0;

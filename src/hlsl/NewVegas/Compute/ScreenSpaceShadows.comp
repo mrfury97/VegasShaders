@@ -21,7 +21,7 @@
 //
 // Port: Bottled Shaders' Screen-Space Shadows (github.com/InTheBottle/Bottled-Shaders, a Skyrim Community Shaders fork, GPL-3.0:
 // features/Screen-Space Shadows/Shaders/ScreenSpaceShadows/RaymarchCS.hlsl + bend_sss_gpu.hlsli), one to one, to GLSL for the
-// NVR DXVK extension (core/ScreenSpaceShadows.h). Vegas Shaders is GPL-3.0-or-later.
+// NVR DXVK extension (core/ScreenSpaceShadows.h), via mrfury97/VegasShaders@9107a20. Vegas Shaders is GPL-3.0-or-later.
 //
 // UNOFFICIAL 2026-11-26 (room 02, owner: "make it fully deffered one to one port of bottle shaders versions"). The same algorithm,
 // parameters and defaults as theirs. Translations, one line each:

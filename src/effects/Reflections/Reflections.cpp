@@ -79,6 +79,13 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.DrawDistance = std::clamp(TheSettingManager->GetSettingF(section, "DrawDistance"), 500.0f, 50000.0f);
 	Settings.SkyFallback = TheSettingManager->GetSettingI(section, "SkyFallback") != 0;
 	Settings.CubeMap = TheSettingManager->GetSettingI(section, "CubeMap") != 0;
+	{
+		SettingManager::Configuration::ConfigNode cubeNode;
+		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 2;	// a missing key defaults to 2 (tier-2 world cubemap)
+		const int rawRes = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeResolution") ? cubeNode.IntValue : 128;
+		Settings.CubeResolution = rawRes < 96 ? 64 : (rawRes >= 192 ? 256 : 128);
+		Settings.CubeDistance = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeDistance") ? std::clamp(cubeNode.FloatValue, 1024.0f, 16384.0f) : 4096.0f;
+	}
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);
 	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(section, "DebugView"), 0, 12);	// 12: UNOFFICIAL 2026-11-20 the bend and the roughness (ReflectionsComposite.frag)	// 11: UNOFFICIAL 2026-11-09 the weapon mask (ReflectionsComposite.frag)	// 9, 10: UNOFFICIAL 2026-10-26 the Hi-Z walk's end rule / skips (HiZ)	// 8: SpecularOcclusion (diagnostic)	// 4: UNOFFICIAL 2026-10-19 the rain's wet mask; 5, 6 the light grid; 7 the material buffer
@@ -137,7 +144,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.RtWeaponMetal = std::clamp(TheSettingManager->GetSettingF(rt, "WeaponMetal"), 0.0f, 1.0f);
 	// UNOFFICIAL 2026-11-09 WeaponHands (a key missing from an older settings file reads 0: the weapon's own pixels only)
 	Settings.RtWeaponHands = TheSettingManager->GetSettingI(rt, "WeaponHands") != 0;
-	WeaponMask::Wanted = TheSettingManager->GetSettingI(rt, "Enabled") != 0 && Settings.RtWeapon > 0.0f && !Settings.RtWeaponHands;
+	WeaponMask::Wanted = WeaponReflectionsActive() && !Settings.RtWeaponHands;
 	// UNOFFICIAL 2026-11-07 the RT reflection denoiser (docs/next/RT-REFLECTION-DENOISER.md; 2026-11-19: FFX core 1 pruned, mapped to ours = 2)
 	Settings.RtDenoiser = TheSettingManager->GetSettingI(rt, "Denoiser") != 0;
 	{
@@ -365,11 +372,14 @@ static UInt32 ReflFileHash(const char* path, bool& found) {
 }
 static void LogReflShaderFiles() {
 	struct Want { const char* name; UInt32 hash; };
-	static const Want wants[] = {	// (perf-reflfix4 + 2026-11-20 1st-person viewmodel fixes: tools\nvr-dxvk\compile-compute.sh output)
-		{ "ReflectionsComposite", 0x01C60B00u }, { "ReflectionsRTResolve", 0xA93AF357u }, { "ReflectionsRayGen", 0x68A79B97u }, { "ReflectionsTemporal", 0x3CA35521u },
-		{ "RtReflDenoiseOursReproject", 0xF119DEBBu }, { "Rt\\ReflectionsRT", 0xA746E089u },
-		{ "Rt\\ReflectionsRTAlpha", 0x84E26AE6u }, { "Rt\\ReflectionsRTTex", 0xB3E8D775u }, { "Rt\\ReflectionsRTTexGlow", 0xFFB3D4DAu },
-		{ "Rt\\ReflectionsRTAlphaTex", 0x8ECA2AD7u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0xFEF64466u },
+	// (2026-11-24) written by tools\nvr-dxvk\refl-hashes.py, which compile-compute.sh runs after every build: by hand it went stale (1.1.3 and
+	// 1.1.4 shipped 10 of these 11 old, so every log called the build's own files OLD and Install check showed 1 to fix). Edit the names only.
+	static const Want wants[] = {
+		{ "ReflectionsComposite", 0x1831B847u }, { "ReflectionsRTResolve", 0xA34CC237u }, { "ReflectionsRayGen", 0xA7EFF08Du }, { "ReflectionsTemporal", 0xE7EC248Cu },
+		{ "ReflectionsCapture", 0xDD099931u }, { "ReflectionsFilter", 0xDDA9D66Cu },
+		{ "RtReflDenoiseOursReproject", 0x7955BB76u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
+		{ "Rt\\ReflectionsRTAlpha", 0xDE40151Fu }, { "Rt\\ReflectionsRTTex", 0x5B941841u }, { "Rt\\ReflectionsRTTexGlow", 0xCADF2215u },
+		{ "Rt\\ReflectionsRTAlphaTex", 0xC3195738u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x77E8EF1Bu },
 	};
 	char line[1024];
 	int n = sprintf_s(line, "UNOFFICIAL Reflections shader files (perf-reflfix4: silver mirror F0, rough metal's 5 x 5 tent, MirrorJitter; 2026-11-09: weapon mask):");
@@ -652,7 +662,9 @@ void ReflectionsEffect::RegisterConstants() {
 	TheShaderManager->RegisterConstant("TESR_ReflectionsWetFx2", &Constants.WetFx2);
 	TheShaderManager->RegisterConstant("TESR_RTWaterData", &Constants.WaterData);	// UNOFFICIAL 2026-10-31 RT water (the water shaders)
 	TheShaderManager->RegisterConstant("TESR_RTWaterReproject", (D3DXVECTOR4*)&Constants.WaterReproject);
+	TheShaderManager->RegisterConstant("TESR_ReflReplaceReproject", (D3DXVECTOR4*)&Constants.ReplaceReproject);	// (2026-11-24 ReplaceForward, EnvTemplate.hlsl)
 	TheShaderManager->RegisterConstant("TESR_ReflReplace", (D3DXVECTOR4*)ReflMaterial::ForwardReplace);	// UNOFFICIAL 2026-11-12 ReplaceForward (EnvTemplate.hlsl; core/ReflMaterial.h keeps it 0 outside the world scene)
+	TheShaderManager->RegisterConstant("TESR_ReflReplaceTexel", (D3DXVECTOR4*)ReflMaterial::ForwardReplaceTexel);	// P3 fix: half-res texel step & min UV clamp
 }
 
 void ReflectionsEffect::RegisterTextures() {
@@ -672,19 +684,38 @@ void ReflectionsEffect::RegisterTextures() {
 		Textures.MaterialSurface = nullptr;
 	}
 
-	// The surroundings cube (FP16, about 0.6 MB in all). If any part fails, the cube stays off (CubeMap is ignored).
+	// The surroundings cube (FP16). If any part fails, the cube stays off (CubeMap is ignored).
+	cubeSize = Settings.CubeResolution >= 256 ? 256u : (Settings.CubeResolution <= 64 ? 64u : 128u);
+	cubeLevels = cubeSize >= 256 ? 9u : (cubeSize <= 64 ? 7u : 8u);
 	IDirect3DDevice9* device = TheRenderManager->device;
 	bool ok = true;
 	for (int c = 0; c < 2 && ok; c++) {
-		ok = SUCCEEDED(device->CreateCubeTexture(CubeSize, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &Cubes.Capture[c], NULL));
+		ok = SUCCEEDED(device->CreateCubeTexture(cubeSize, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &Cubes.Capture[c], NULL));
 		for (int f = 0; f < 6 && ok; f++) ok = SUCCEEDED(Cubes.Capture[c]->GetCubeMapSurface((D3DCUBEMAP_FACES)f, 0, &Cubes.CaptureFace[c][f]));
 	}
-	if (ok) ok = SUCCEEDED(device->CreateCubeTexture(CubeSize, CubeLevels, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &Cubes.Env, NULL));
-	for (UINT m = 0; m < CubeLevels && ok; m++)
+	if (ok) ok = SUCCEEDED(device->CreateCubeTexture(cubeSize, cubeLevels, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &Cubes.Env, NULL));
+	for (UINT m = 0; m < cubeLevels && ok; m++)
 		for (int f = 0; f < 6 && ok; f++) ok = SUCCEEDED(Cubes.Env->GetCubeMapSurface((D3DCUBEMAP_FACES)f, m, &Cubes.EnvFace[m][f]));
 	if (!ok) {
 		Logger::Log("UNOFFICIAL Reflections: the surroundings cube could not be created; reflections use the sky only.");
 		if (Cubes.Env) { Cubes.Env->Release(); Cubes.Env = nullptr; }
+	}
+	if (ok) {
+		bool worldOk = SUCCEEDED(device->CreateCubeTexture(cubeSize, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &Cubes.World, NULL));
+		for (int f = 0; f < 6 && worldOk; f++)
+			worldOk = SUCCEEDED(Cubes.World->GetCubeMapSurface((D3DCUBEMAP_FACES)f, 0, &Cubes.WorldFace[f]));
+		if (worldOk) {
+			if (FAILED(device->CreateDepthStencilSurface(cubeSize, cubeSize, D3DFMT_D24S8, D3DMULTISAMPLE_NONE, 0, TRUE, &Cubes.WorldDepth, NULL)) &&
+				FAILED(device->CreateDepthStencilSurface(cubeSize, cubeSize, D3DFMT_D16, D3DMULTISAMPLE_NONE, 0, TRUE, &Cubes.WorldDepth, NULL))) {
+				worldOk = false;
+			}
+		}
+		if (!worldOk) {
+			for (int f = 0; f < 6; f++) if (Cubes.WorldFace[f]) { Cubes.WorldFace[f]->Release(); Cubes.WorldFace[f] = nullptr; }
+			if (Cubes.World) { Cubes.World->Release(); Cubes.World = nullptr; }
+			if (Cubes.WorldDepth) { Cubes.WorldDepth->Release(); Cubes.WorldDepth = nullptr; }
+			Logger::Log("UNOFFICIAL Reflections: native 3D world cubemap could not be created; falling back to analytical sky/grid cube.");
+		}
 	}
 	TheTextureManager->RegisterTexture("TESR_ReflectionsCapture", &Cubes.CaptureLastSlot);
 	TheTextureManager->RegisterTexture("TESR_ReflectionsCaptureNew", &Cubes.CaptureNewSlot);
@@ -778,6 +809,17 @@ void ReflectionsEffect::UpdateConstants() {
 	Constants.Layout.w = 0.0f;
 	// UNOFFICIAL 2026-10-20 MaterialAware: x is set again by CaptureMaterial (1 only when the buffer was filled this frame).
 	Constants.Material = D3DXVECTOR4(Settings.MaterialAware == 1 && materialFilled ? 1.0f : 0.0f, Settings.MaterialMaxRoughness, Settings.MaterialReflect * reflectivity, 0.0f);
+	WeaponMask::Wanted = WeaponReflectionsActive() && !Settings.RtWeaponHands;
+}
+
+bool ReflectionsEffect::NonRtWeaponActive() const {
+	return !ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name) && !RenderRect::Active();
+}
+
+bool ReflectionsEffect::WeaponReflectionsActive() const {
+	if (!Enabled || Settings.RtWeapon <= 0.0f || TheShaderManager->GameState.isUnderwater) return false;
+	if (RtWanted() && RtCoreClient::Ready()) return true;
+	return NonRtWeaponActive();
 }
 
 // UNOFFICIAL 2026-10-20 MaterialAware (core/ReflMaterial.h): the world scene left each known material in the scene's alpha; it is
@@ -932,14 +974,14 @@ bool ReflectionsEffect::ShouldRender() {
 	// UNOFFICIAL 2026-11-04 (tester: no RT gun reflection): the first-person weapon's RT reflection is traced inside this pass, so on
 	// dry ground with GroundSheen 0 (nothing else on screen reflects) it was skipped with it. RT Weapon above 0 keeps the pass on while
 	// the weapon rays can run (2026-11-19: supported in RenderRect sub-rect frames too).
-	const bool weapon = Settings.RtWeapon > 0.0f && RtWanted() && RtCoreClient::Ready();
+	const bool weapon = WeaponReflectionsActive();
 	nothingReflects = !surfaces;
 	if (!surfaces && Settings.RtEnabled) {
 		static bool told = false;
 		if (!told) {
 			told = true;
 			Logger::Log("UNOFFICIAL Reflections: RT reflections are on but nothing on screen reflects here (GroundSheen / InteriorFloors 0, "
-				"dry, no material reflections)%s", weapon ? "; the pass runs for the weapon's RT reflection (RT Weapon)" : ": the pass is skipped");
+				"dry, no material reflections)%s", weapon ? "; the pass runs for weapon reflections" : ": the pass is skipped");
 		}
 	}
 	return !TheShaderManager->GameState.isUnderwater && normals && normals->Enabled && (surfaces || weapon) &&
@@ -1050,9 +1092,8 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	// trace's noise moves only while TAA / FSR / DLSS averages frames, else frame 0. Off: FrameNumber % 64 with Temporal or RR, else 0.
 	Constants.Data2.w = RtNoiseFrame(temporal, rrRaw);	// (2026-11-11: the same expression, now a function)
 
-	// The surroundings cube, before the trace reads it; the light grid's constants.
+	// The surroundings cube (which updates GridStep before Capture runs), before the trace reads it.
 	CubeStep(Device);
-	GridStep();
 	RenderSkyPano(Device);	// UNOFFICIAL 2026-10-31 SkyPanorama (before the trace and Resolve read it)
 
 	auto pass = [&](IDirect3DSurface9* target, UINT technique) {
@@ -1083,7 +1124,10 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		static GpuTimer traceTimer("  Reflections trace (half)");
 		GpuProfileScope gpu(traceTimer, Device);
 		IDirect3DSurface9* traceTarget = temporal ? Textures.TraceSurface : Textures.TempSurface;
-		if (!RtTrace(Device, traceTarget)) pass(traceTarget, 1);	// UNOFFICIAL 2026-10-28: RT reflections, or the trace as before
+		if (!RtTrace(Device, traceTarget)) {
+			weaponFrame = Enabled && Settings.RtWeapon > 0.0f && !TheShaderManager->GameState.isUnderwater && NonRtWeaponActive();
+			pass(traceTarget, 1);	// UNOFFICIAL 2026-10-28: RT reflections, or the trace as before
+		}
 	}
 	// UNOFFICIAL 2026-11-07 the RT reflection denoiser in place of Temporal + Blur X / Y (its result into Buffer); not run: the old chain
 	const bool denoised = rtDenoiseFrame && rtResolved &&
@@ -1139,6 +1183,29 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 // pixels hold its RT reflection (the composite leaves them alone), reprojected to this frame's camera. Valid only right after a frame
 // that traced the water, with no camera jump; else 0 and the planar map as before. WaterSkipPlanar then skips the planar pass.
 // Every frame, before the world pass (ShaderManager::UpdateConstants), the effect on or off.
+// ReprojectToFrame: camera-relative world now -> the clip space of an earlier frame whose camera had the view 'view' (its rotation round a
+// camera that has since moved by 'move' = now - then) and the projection 'proj', as RenderBuffers' Reproject. With that frame's RenderScale
+// (sx, sy) below 1 (it drew into the top-left of its targets) pre-scaled so that the shaders' uv = clip.xy / w x (0.5, -0.5) + 0.5 comes out
+// as s x uv (as RT lamp shadows' lookup): column x' = s x + (s - 1) w, y' = s y - (s - 1) w. Native: unchanged. (2026-11-24: shared by the
+// RT water's and ReplaceForward's lookups; the water's maths as it was.)
+static void ReprojectToFrame(D3DXMATRIX& out, const D3DXMATRIX& view, const D3DXMATRIX& proj, const double (&move)[3], float sx, float sy) {
+	D3DXMATRIX toView;
+	for (int i = 0; i < 3; i++) {
+		for (int j = 0; j < 3; j++) toView.m[i][j] = view.m[i][j];
+		toView.m[i][3] = 0.0f;
+	}
+	for (int j = 0; j < 3; j++)
+		toView.m[3][j] = (float)(move[0] * view.m[0][j] + move[1] * view.m[1][j] + move[2] * view.m[2][j]);
+	toView.m[3][3] = 1.0f;
+	D3DXMatrixMultiply(&out, &toView, &proj);
+	if (sx < 1.0f || sy < 1.0f) {
+		for (int r = 0; r < 4; r++) {
+			out.m[r][0] = sx * out.m[r][0] + (sx - 1.0f) * out.m[r][3];
+			out.m[r][1] = sy * out.m[r][1] - (sy - 1.0f) * out.m[r][3];
+		}
+	}
+}
+
 void ReflectionsEffect::UpdateWaterConstants() {
 	const UINT now = TheFrameRateManager->FrameNumber;
 	bool valid = Enabled && Settings.RtWater && rtWaterFrame != 0 && rtWaterFrame + 1 == now && RtWanted() &&
@@ -1147,29 +1214,9 @@ void ReflectionsEffect::UpdateWaterConstants() {
 	const double move[3] = { (double)camPos.x - rtWaterCameraPos.x, (double)camPos.y - rtWaterCameraPos.y,
 		(double)camPos.z - rtWaterCameraPos.z };
 	if (valid) valid = move[0] * move[0] + move[1] * move[1] + move[2] * move[2] < 500.0 * 500.0;
-	if (valid) {
-		// As RenderBuffers' Reproject: camera-relative world now -> that frame's view (its rotation round the camera that moved by
-		// 'move'), then its projection. The water shaders' TEXCOORD0 is camera-relative world (WorldMat; + TESR_CameraPosition = world).
-		D3DXMATRIX toView;
-		for (int i = 0; i < 3; i++) {
-			for (int j = 0; j < 3; j++) toView.m[i][j] = rtWaterView.m[i][j];
-			toView.m[i][3] = 0.0f;
-		}
-		for (int j = 0; j < 3; j++)
-			toView.m[3][j] = (float)(move[0] * rtWaterView.m[0][j] + move[1] * rtWaterView.m[1][j] + move[2] * rtWaterView.m[2][j]);
-		toView.m[3][3] = 1.0f;
-		D3DXMatrixMultiply(&Constants.WaterReproject, &toView, &rtWaterProj);
-		// UNOFFICIAL 2026-11-03 RenderScale < 1: a rect frame traced the water into the top-left of Buffer. The water shader takes
-		// uv = clip.xy / w x (0.5, -0.5) + 0.5; pre-scaled here so that uv comes out as s x uv (as RT lamp shadows' lookup): column x' =
-		// s x + (s - 1) w, y' = s y - (s - 1) w. Its inside test then reads TESR_RTWaterData.w (the scale) as the edge. Native: unchanged.
-		if (rtWaterScaleX < 1.0f || rtWaterScaleY < 1.0f) {
-			D3DXMATRIX& m = Constants.WaterReproject;
-			for (int r = 0; r < 4; r++) {
-				m.m[r][0] = rtWaterScaleX * m.m[r][0] + (rtWaterScaleX - 1.0f) * m.m[r][3];
-				m.m[r][1] = rtWaterScaleY * m.m[r][1] - (rtWaterScaleY - 1.0f) * m.m[r][3];
-			}
-		}
-	}
+	// The water shaders' TEXCOORD0 is camera-relative world (WorldMat; + TESR_CameraPosition = world). UNOFFICIAL 2026-11-03 RenderScale
+	// < 1: a rect frame traced the water into the top-left of Buffer; the water's inside test reads TESR_RTWaterData.w (the scale) as the edge.
+	if (valid) ReprojectToFrame(Constants.WaterReproject, rtWaterView, rtWaterProj, move, rtWaterScaleX, rtWaterScaleY);
 	Constants.WaterData = D3DXVECTOR4(valid ? 1.0f : 0.0f, valid && Settings.RtWaterSkipPlanar ? 1.0f : 0.0f, 1.0f, valid ? rtWaterScaleX : 1.0f);
 
 	// UNOFFICIAL 2026-11-12 [Shaders.Reflections.Main] ReplaceForward (docs/EFFECTS.md "Reflections", "Replace, not add"). The composite lays the reflection over the
@@ -1178,8 +1225,14 @@ void ReflectionsEffect::UpdateWaterConstants() {
 	// scene, before this frame's trace, so (as the water above) it reads LAST frame's Buffer: its alpha is how much of each pixel's
 	// reflection the trace answered (the screen, the rays, the cube / grid / sky fallbacks; 0 where nothing reflects or nothing was found),
 	// and the pass takes that share out of its cube map (EnvTemplate.hlsl). So the traced reflection is THE reflection where there is one
-	// and the game's cube map stays as the probe where there is none. Same screen place, not reprojected (a pixel-wide fringe at outlines
-	// while turning). Usable only right after a frame whose composite drew from that Buffer. Off: not entered, the constant stays 0.
+	// and the game's cube map stays as the probe where there is none. Usable only right after a frame whose composite drew from that Buffer.
+	// Off: not entered, the constant stays 0.
+	// (2026-11-24) Read where the surface WAS in that frame (TESR_ReflReplaceReproject, as the water's), not at the same screen place. The
+	// same place was not "a pixel-wide fringe while turning" as first thought: turning, a pixel of road read the pixel where last frame
+	// something else stood (a robot, a barrier, a sign: no reflection there, alpha 0), so the road there got its whole cube map back on top
+	// of this frame's reflection: a bright copy of every object's outline trailed behind it across the road (player handoff 2026-11-23,
+	// PBR + Reflections: gone with ReplaceForward off). Reprojected, a turn reads the road's own last value; what remains is where a thing
+	// moved itself or the camera's move uncovered something (a few pixels), and the picture's edge (the nearest texel of that frame's).
 	if (Settings.ReplaceForward || ReflMaterial::ForwardReplaceFrame[0] != 0.0f) {
 		static UINT replaceFrame = 0xFFFFFFFF;
 		if (replaceFrame != now) { replaceFrame = now; ReflMaterial::ForwardReplaceWorldUsed = false; }	// (this runs twice a frame)
@@ -1192,15 +1245,27 @@ void ReflectionsEffect::UpdateWaterConstants() {
 		else if (TheShaderManager->GameState.isUnderwater) why = "under water";
 		else if (lastRenderedFrame == 0 || lastRenderedFrame + 1 != now) why = "the reflections were not drawn last frame";
 		else {
-			const D3DXVECTOR4 camPos = TheRenderManager->CameraPosition;
 			const double jump[3] = { (double)camPos.x - lastCameraPos.x, (double)camPos.y - lastCameraPos.y, (double)camPos.z - lastCameraPos.z };
 			if (TheShaderManager->GameState.isCameraCut || jump[0] * jump[0] + jump[1] * jump[1] + jump[2] * jump[2] >= 500.0 * 500.0) why = "the camera jumped";
+			else ReprojectToFrame(Constants.ReplaceReproject, lastView, lastProj, jump, lastDenoiseScaleX, lastDenoiseScaleY);	// (the frame Buffer holds)
 		}
 		const bool on = why == nullptr;
 		ReflMaterial::ForwardReplaceFrame[0] = on ? 1.0f : 0.0f;
 		ReflMaterial::ForwardReplaceFrame[1] = 0.0f;
-		ReflMaterial::ForwardReplaceFrame[2] = on ? 1.0f / (float)TheRenderManager->width : 0.0f;	// one pixel of the scene target (the pass's VPOS -> Buffer's UV; a
-		ReflMaterial::ForwardReplaceFrame[3] = on ? 1.0f / (float)TheRenderManager->height : 0.0f;	// RenderScale rect frame keeps to the same top-left part in both)
+		// zw: the largest uv the lookup may take, the centre of the last texel of that frame's drawn part of Buffer (Buffer is half
+		// resolution, so 0.5 / (width/2) == 1.0f / width): a point off that frame's picture is rejected by the inside test.
+		ReflMaterial::ForwardReplaceFrame[2] = on ? lastDenoiseScaleX - 1.0f / (float)TheRenderManager->width : 0.0f;
+		ReflMaterial::ForwardReplaceFrame[3] = on ? lastDenoiseScaleY - 1.0f / (float)TheRenderManager->height : 0.0f;
+		// The first-person scene's (core/ReflMaterial.h BeginFirstPerson): the arms and gun move with the camera, so last frame's pixel of
+		// them is at the same screen place (y 1), zw one pixel of the scene target (VPOS -> Buffer's UV), as before 2026-11-24.
+		ReflMaterial::ForwardReplaceScreen[0] = on ? 1.0f : 0.0f;
+		ReflMaterial::ForwardReplaceScreen[1] = on ? 1.0f : 0.0f;
+		ReflMaterial::ForwardReplaceScreen[2] = on ? 1.0f / (float)TheRenderManager->width : 0.0f;
+		ReflMaterial::ForwardReplaceScreen[3] = on ? 1.0f / (float)TheRenderManager->height : 0.0f;
+		ReflMaterial::ForwardReplaceTexel[0] = on ? 2.0f / (float)TheRenderManager->width : 0.0f;
+		ReflMaterial::ForwardReplaceTexel[1] = on ? 2.0f / (float)TheRenderManager->height : 0.0f;
+		ReflMaterial::ForwardReplaceTexel[2] = on ? 1.0f / (float)TheRenderManager->width : 0.0f;
+		ReflMaterial::ForwardReplaceTexel[3] = on ? 1.0f / (float)TheRenderManager->height : 0.0f;
 		static const char* told = nullptr;	// one line per change (the literals above: compared by address)
 		static int toldCount = 0;
 		const char* state = on ? "on" : why;
@@ -1252,25 +1317,78 @@ void ReflectionsEffect::RenderSkyPano(IDirect3DDevice9* Device) {
 // The cube is kept up whenever CubeMap is on (and it exists), floors reflecting or not: metal and the env maps read it too
 // ([Shaders.PBR.Metal] / [Shaders.PBR.EnvMaps] CubeReflections). Not under water (what is on screen there is not the
 // surroundings).
+bool ReflectionsEffect::PbrWantsCube() const {
+	const PBRShaders* pbr = TheShaderManager->Shaders.PBR;
+	return pbr && pbr->Enabled && (pbr->MetalSettings.CubeReflections > 0.0f || pbr->MetalSettings.EnvCubeReflections > 0.0f);
+}
+
+// (2026-11-24 review) With the Reflections effect off the cube runs for PBR only from CubeMode 1 up: CubeMode 0 (the default) is the
+// cube exactly as before the decoupling (kept up while Reflections is on). Otherwise every player with the default PBR settings paid
+// for it, and with CubeMode 2 for the world cubemap's scene walk, every frame with Reflections off; not measured yet.
 bool ReflectionsEffect::CubeWanted() {
-	return Settings.CubeMap && Cubes.Env && !TheShaderManager->GameState.isUnderwater;
+	return Settings.CubeMap && Cubes.Env && !TheShaderManager->GameState.isUnderwater && (Enabled || (Settings.CubeMode >= 1 && PbrWantsCube()));
+}
+
+bool ReflectionsEffect::CubeStandaloneRunnable() {
+	return Effect != nullptr && CubeWanted();
+}
+
+bool ReflectionsEffect::WorldCubeWanted() {
+	return CubeWanted() && Settings.CubeMode >= 2 && Cubes.World && Cubes.WorldDepth;
+}
+
+bool ReflectionsEffect::WorldCubeReady() const {
+	return Cubes.World && Settings.CubeMode >= 2 && (worldCubeMask == 0x3Fu);
+}
+
+int ReflectionsEffect::BeginWorldCubeFaces(int outFaces[2]) {
+	if (!WorldCubeWanted()) return 0;
+	// (2026-11-24 review) Started over in another interior or worldspace, or after a jump: NOT at every exterior cell border (every 4096
+	// units outdoors), where the faces are still right and starting over dropped the world cube from the capture for 3+ frames.
+	TESObjectCELL* cell = Player ? Player->parentCell : nullptr;
+	void* space = !cell ? nullptr : cell->IsInterior() ? (void*)cell : (void*)Player->GetWorldSpace();
+	const D3DXVECTOR3 pos(TheRenderManager->CameraPosition.x, TheRenderManager->CameraPosition.y, TheRenderManager->CameraPosition.z);
+	const float dx = pos.x - worldCubePos.x, dy = pos.y - worldCubePos.y, dz = pos.z - worldCubePos.z;
+	if (space != worldCubeSpace || dx * dx + dy * dy + dz * dz > 1000.0f * 1000.0f) {
+		worldCubeMask = 0;
+		worldCubeNextFace = 0;
+		worldCubeSpace = space;
+	}
+	worldCubePos = pos;
+	const int count = (worldCubeMask != 0x3Fu) ? 2 : 1;
+	for (int i = 0; i < count; i++) {
+		outFaces[i] = worldCubeNextFace;
+		worldCubeNextFace = (worldCubeNextFace + 1) % 6;
+	}
+	return count;
+}
+
+void ReflectionsEffect::MarkWorldCubeFaceRendered(int face) {
+	if (face >= 0 && face < 6) worldCubeMask |= (1u << face);
 }
 
 bool ReflectionsEffect::CubeReady() const {
-	return Enabled && cubeValid && TheFrameRateManager->FrameNumber - cubeFrame <= 1;
+	return cubeValid && TheFrameRateManager->FrameNumber - cubeFrame <= 1;
 }
 
 void ReflectionsEffect::RenderCubeOnly(IDirect3DDevice9* Device) {
+	const bool prevEnabled = Enabled;
+	if (!prevEnabled) Constants.Data4.y = 0.0f;
+	Enabled = true;
 	cubeOnly = true;
 	CubeStep(Device);
 	cubeOnly = false;
+	Enabled = prevEnabled;
 }
 
 // One cube update. Emptied first when it was not kept up last frame, in another cell, or after a jump (load, fast travel):
 // what it held belongs somewhere else.
 void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
+	GridStep();
+	Constants.Data3.w = TheShaderManager->GameState.isExterior && Settings.SkyFallback ? 1.0f : 0.0f;
 	const bool cubeOn = CubeWanted();
-	Constants.Cube2 = D3DXVECTOR4(Settings.CubeCapture, Settings.CubeFade, (float)(CubeLevels - 1), cubeOn ? 1.0f : 0.0f);
+	const float cubeModeFlag = !cubeOn ? 0.0f : Settings.CubeMode == 0 ? 1.0f : (Settings.CubeMode >= 2 && WorldCubeReady()) ? 3.0f : 2.0f;
+	Constants.Cube2 = D3DXVECTOR4(Settings.CubeCapture, Settings.CubeFade, (float)(cubeLevels - 1), cubeModeFlag);
 	if (!cubeOn) { cubeValid = false; return; }
 	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
 	const double dx = (double)invView._41 - cubeInvView._41, dy = (double)invView._42 - cubeInvView._42,
@@ -1295,24 +1413,29 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 }
 
 // The surroundings cube (techniques 5 Capture, 6 Filter): each face of the new capture cube from last frame's and the
-// image; then every face of every mip of the reflection cube from the new capture. 6 + 42 small draws. The techniques
+// image; then every face of every mip of the reflection cube from the new capture. The techniques
 // unbind the cube they write (Texture[n] = NoTexture), so a cube is never read and written in the same pass.
 void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset) {
 	const int write = captureIndex ^ 1;
 	Cubes.CaptureLastSlot = Cubes.Capture[captureIndex];
 	Cubes.CaptureNewSlot = Cubes.Capture[write];
 	Cubes.EnvSlot = Cubes.Env;
+	// The world cubemap for Capture (CubeMode 2): the Vulkan pass binds it itself (ExtRender, ReflWorldCubeSlot); the D3D9 technique
+	// reads it through stage 10, TESR_ReflectionsEnv's sampler, which Capture does not otherwise read (Filter, next, gets Env back
+	// there after ClearPassTextures). (2026-11-24 review: no separate TESR_ReflectionsWorldCube slot: nothing sampled it by name.)
+	SetPassTexture(10, Cubes.World ? (IDirect3DBaseTexture9*)Cubes.World : (IDirect3DBaseTexture9*)Cubes.Capture[captureIndex]);
 	for (int f = 0; f < 6; f++) {
 		IDirect3DSurface9* face = Cubes.CaptureFace[write][f];
-		Constants.Cube = D3DXVECTOR4((float)f, (float)CubeSize, 0.0f, reset ? 1.0f : 0.0f);
+		Constants.Cube = D3DXVECTOR4((float)f, (float)cubeSize, 0.0f, reset ? 1.0f : 0.0f);
 		Device->SetRenderTarget(0, face);
 		Render(Device, face, face, 5, false, nullptr);
 	}
+	ClearPassTextures();
 	captureIndex = write;
-	for (UINT m = 0; m < CubeLevels; m++) {
+	for (UINT m = 0; m < cubeLevels; m++) {
 		for (int f = 0; f < 6; f++) {
 			IDirect3DSurface9* face = Cubes.EnvFace[m][f];
-			Constants.Cube = D3DXVECTOR4((float)f, (float)(CubeSize >> m), (float)m, 0.0f);
+			Constants.Cube = D3DXVECTOR4((float)f, (float)(cubeSize >> m), (float)m, 0.0f);
 			Device->SetRenderTarget(0, face);
 			Render(Device, face, face, 6, false, nullptr);
 		}
@@ -1387,6 +1510,10 @@ namespace {
 	const UINT RtBounceSlot = 25;	// UNOFFICIAL 2026-11-07 (perf-reflfix) Rt.Bounce (set 1, binding 26; slots 22-24 are taken)
 	// (2026-11-22 upstream 1.1.3 merge: upstream's composite-only TESR_AlbedoBuffer / COLOR3 bindings 28 / 29 collided with ours above; the
 	// composite reads ours, bindings 30 / 31, the same textures: ReflectionsComposite.frag)
+	// (2026-11-27 upstream 1.1.5 merge: upstream's world cube took set 1 binding 30 / slot 29, which Reflections.glsl's t_gbAlbedo already
+	// holds (Capture includes it); moved to the first free pair, binding 32 / slot 31, also in ReflectionsCapture.frag. Upstream's
+	// technique-0 albedo / COLOR3 pushes stay dropped: bindings 30 / 31 above carry them.)
+	const UINT ReflWorldCubeSlot = 31;	// 2026-11-24 TESR_ReflectionsWorldCube (set 1, binding 32, ReflectionsCapture.frag)
 	const NVR_EXT_BINDING_DESC ReflRtUniformBinding = { 2, 1, NVR_EXT_BIND_UNIFORM_BUFFER, RtUniformSlot, NVR_EXT_VIEW_2D, FALSE, 0 };
 	struct ReflRtUniforms { D3DXVECTOR4 rt, rt2, sunDir, sunColor, rt3, rt4, lamps[24], rt5, sunAmbient; };	// ReflectionsRT.glsl RtConstants (std140)
 	ReflRtUniforms RtUploaded;
@@ -1404,11 +1531,12 @@ namespace {
 }
 
 void ReflectionsEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) {
-	// 2026-11-19 RenderScale < 1: allow Vulkan composite (technique 0) when NvrDxvkPasses is on even in sub-rect frames
-	// (EffectRecord::ExtFullScreen sets the sub-rect viewport, and ReflectionsComposite.frag maps uv via screenToRect).
-	if (techniqueIndex == 0 && RenderRect::Active()) {
+	// 2026-11-19 RenderScale < 1: allow Vulkan composite (technique 0) and surroundings cube (5, 6) when NvrDxvkPasses is on even in sub-rect frames
+	// (EffectRecord::ExtFullScreen sets the sub-rect viewport, and ReflectionsComposite.frag / Capture maps uv via screenToRect).
+	if ((techniqueIndex == 0 || techniqueIndex == 5 || techniqueIndex == 6) && RenderRect::Active()) {
 		if (!Enabled || !Effect || !ShouldRender()) { NoteSkip(); return; }
-		if (!ExtFailed && RtPassesWanted() && !Sm6Covers(0) && ExtRender(Device, Target, Rendered, 0, ClearTarget, Source)) {
+		const bool extOk = techniqueIndex == 0 ? RtPassesWanted() : (DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name));
+		if (!ExtFailed && extOk && !Sm6Covers(techniqueIndex) && ExtRender(Device, Target, Rendered, techniqueIndex, ClearTarget, Source)) {
 			ClearPassTextures();
 			return;
 		}
@@ -1459,6 +1587,12 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 			bindings[_countof(ReflBindings)] = { 1, 22, NVR_EXT_BIND_SAMPLED_IMAGE, ReflTextureCount + 5, NVR_EXT_VIEW_2D, FALSE, 0 };
 			pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(spvNames[techniqueIndex], bindings, _countof(bindings), sizeof(ReflPush), true);
 		}
+		else if (techniqueIndex == 5) {
+			NVR_EXT_BINDING_DESC bindings[_countof(ReflBindings) + 1];
+			memcpy(bindings, ReflBindings, sizeof(ReflBindings));
+			bindings[_countof(ReflBindings)] = { 1, 32, NVR_EXT_BIND_SAMPLED_IMAGE, ReflWorldCubeSlot, NVR_EXT_VIEW_CUBE, FALSE, 0 };
+			pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(spvNames[techniqueIndex], bindings, _countof(bindings), sizeof(ReflPush), true);
+		}
 		else pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(spvNames[techniqueIndex], ReflBindings, _countof(ReflBindings), sizeof(ReflPush), true);
 	}
 	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
@@ -1485,12 +1619,14 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	IDirect3DBaseTexture9* normals = FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections: the shading normals while on)
 	IDirect3DBaseTexture9* viewModel = SlotTexture("TESR_DepthBufferViewModel");
 	IDirect3DBaseTexture9* ortho = SlotTexture("TESR_OrthoMapBuffer");
-	if (!depth || !normals || !viewModel || !TheTextureManager->RenderedTexture || (!ortho && Constants.Data4.y > 0.5f) ||
+	const bool cubePass = (techniqueIndex == 5 || techniqueIndex == 6);
+	if (!depth || (!cubePass && !normals) || !viewModel || !TheTextureManager->RenderedTexture ||
+		(!cubePass && !ortho && Constants.Data4.y > 0.5f) ||
 		!Cubes.Capture[0] || !Cubes.Capture[1] || !Cubes.Env)
 		return false;
 	const bool materialBound = materialFilled && Textures.MaterialTexture != nullptr;	// BindMaterial's test
 	IDirect3DBaseTexture9* textures[ReflTextureCount] = {
-		TheTextureManager->RenderedTexture, depth, normals, viewModel,
+		TheTextureManager->RenderedTexture, depth, normals ? normals : depth, viewModel,
 		Textures.TraceTexture, Textures.BufferTexture, Textures.TempTexture, Textures.HistoryTexture,
 		Cubes.CaptureLastSlot ? Cubes.CaptureLastSlot : Cubes.Capture[0], Cubes.CaptureNewSlot ? Cubes.CaptureNewSlot : Cubes.Capture[1], Cubes.Env,
 		ortho ? ortho : depth, GridLightSlot ? GridLightSlot : depth, GridColorSlot ? GridColorSlot : depth,
@@ -1503,8 +1639,16 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 			if (ObjectMotion::Ready()) textures[11] = ObjectMotion::Texture;	// UNOFFICIAL 2026-10-29 ObjectMotion (push.pass 2 below)
 			break;
 		case 4: textures[5] = depth; break;					// Blur Y -> Buffer
-		case 5: textures[9] = textures[8]; break;			// Capture -> a face of the new capture cube
-		case 6: textures[10] = textures[9]; break;			// Filter -> a face of the reflection cube
+		case 5:												// Capture -> a face of the new capture cube (SSR buffers may be parked when Enabled == false)
+			textures[4] = textures[5] = textures[6] = textures[7] = depth;
+			textures[9] = textures[8];
+			textures[14] = textures[15] = depth;
+			break;
+		case 6:												// Filter -> a face of the reflection cube
+			textures[4] = textures[5] = textures[6] = textures[7] = depth;
+			textures[10] = textures[9];
+			textures[14] = textures[15] = depth;
+			break;
 		case 7: textures[15] = depth; break;				// MaterialCapture -> the material buffer
 		case 10: textures[4] = pano[panoIndex]; break;		// UNOFFICIAL 2026-10-31 SkyPanorama: t_trace = last frame's panorama (-> the other one)
 	}
@@ -1582,8 +1726,8 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	// UNOFFICIAL 2026-10-31 SkyPanorama: the passes after it this frame read the panorama on t_cloudSky (y 2); its own pass reads the probe.
 	IDirect3DBaseTexture9* skySlot = cloudSky;
 	if (panoReady && techniqueIndex != 10) { skySlot = pano[panoIndex]; uniforms.material2.y = 2.0f; }
-	// UNOFFICIAL 2026-10-30 RT weapon reflections: only in a frame the RT trace runs (RayGen, Resolve, temporal, blur, composite agree).
-	const bool weaponOn = weaponFrame && RtWanted();
+	// UNOFFICIAL 2026-10-30/2026-11-24 weapon reflections: in a frame either the RT trace or non-RT Vulkan trace handles weapons.
+	const bool weaponOn = weaponFrame;
 	// UNOFFICIAL 2026-11-09 WeaponMask (core/WeaponMask.h): x 2 = this frame's first-person pass left the weapon's own pixels in TESR_WeaponMask, so the
 	// hands and arms do not reflect (Reflections.glsl WeaponAt); 1 = the whole first-person model (WeaponHands on, or no mask this frame)
 	IDirect3DTexture9* weaponMask = weaponOn && WeaponMask::Wanted && WeaponMask::ReadyThisFrame() ? WeaponMask::Texture : nullptr;
@@ -1613,8 +1757,10 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		const D3DXVECTOR4& sun = TheShaderManager->ShaderConst.SunDir;
 		D3DXVECTOR3 toSun(sun.x, sun.y, sun.z);
 		if (D3DXVec3Length(&toSun) > 1.0e-4f) D3DXVec3Normalize(&toSun, &toSun);
-		uniforms.mirrorLamp = D3DXVECTOR4(1.0f - Settings.MirrorLampHighlight, 12.0f, RtSunAmount() > 0.0f ? 1.0f : 0.0f, 0.0f);
-		uniforms.sunDirection = D3DXVECTOR4(toSun.x, toSun.y, toSun.z, 0.0f);
+		const float clearcoat = (TheShaderManager && TheShaderManager->Shaders.PBR) ? TheShaderManager->Shaders.PBR->MetalSettings.Clearcoat : 0.0f;
+		const float pearlescence = (TheShaderManager && TheShaderManager->Shaders.PBR) ? TheShaderManager->Shaders.PBR->MetalSettings.Pearlescence : 0.0f;
+		uniforms.mirrorLamp = D3DXVECTOR4(1.0f - Settings.MirrorLampHighlight, 12.0f, RtSunAmount() > 0.0f ? 1.0f : 0.0f, clearcoat);
+		uniforms.sunDirection = D3DXVECTOR4(toSun.x, toSun.y, toSun.z, pearlescence);
 	}
 	// 2026-11-08 Puddles: the puddles' field, so the SSR and RT reflections mirror them (zero: off).
 	if (PuddlesShaders* puddles = TheShaderManager->Shaders.Puddles) puddles->ReflectionData(uniforms.puddle, uniforms.puddle2);
@@ -1694,6 +1840,11 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	resources[26].Slot = 29; resources[26].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[26].pResource = gbuffer || albedoTex ? (IUnknown*)CapturedNormals::AlbedoTexture : (IUnknown*)depth;
 	resources[27].Slot = 30; resources[27].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[27].pResource = gbuffer || capNormTex ? (IUnknown*)CapturedNormals::Texture : (IUnknown*)depth;
 	UINT resourceCount = _countof(ReflBindings);
+	if (techniqueIndex == 5) {
+		resources[resourceCount].Slot = ReflWorldCubeSlot; resources[resourceCount].Type = NVR_EXT_BIND_SAMPLED_IMAGE;
+		resources[resourceCount].pResource = Cubes.World ? (IUnknown*)Cubes.World : (IUnknown*)Cubes.Capture[captureIndex];
+		resourceCount++;
+	}
 	if (rtPass) {
 		// UNOFFICIAL 2026-10-28 RT reflections: the RtConstants block (ReflectionsRT.glsl) and the RT images (RayGen: placeholders).
 		const ShaderConstants& sc = TheShaderManager->ShaderConst;

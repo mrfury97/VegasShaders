@@ -363,6 +363,7 @@ public:
 	IDirect3DSurface9* ShadowDynamicSurface = nullptr;
 	IDirect3DSurface9* ShadowDynamicDepthSurface = nullptr;
 	UINT		ShadowDynamicSize = 0;
+	bool		ShadowDynamicNeedsClear = true;
 	D3DXMATRIX	SunFadeMatrix[4];
 	D3DXVECTOR4	SunFadeCenter[4];
 	D3DXVECTOR3	SunFadeCamera[4];

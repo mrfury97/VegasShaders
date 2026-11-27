@@ -44,6 +44,7 @@ public:
 	void	RegisterTextures();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	bool	TargetParkable(const char* SamplerName) override { return true; }
 	// The frame's step (EffectChain.cpp PreStep_LumaExposureBloom, right after the exposure pass): the three passes, and the flag
 	// the tone mapper reads (cleared first, set once the buffer is drawn this frame).
 	void	RenderFrame(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);

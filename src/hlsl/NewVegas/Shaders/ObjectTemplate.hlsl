@@ -416,6 +416,14 @@
 #if defined(PS) && !defined(NVR_SLOT_TIGHT)
     #define PBR_ROUGH_F90 1
 #endif
+// UNOFFICIAL 2026-11-26: keep 2-lamp specular forward shaders (SLS2023/2024/2026/2027) under ps_3_0's 32-temp register limit.
+// Deferred Vulkan compute and 0/1-lamp forward shaders keep full dual-normal clearcoat, pearlescence, and clearcoat parallax.
+#if defined(PS) && defined(SPECULAR) && defined(LIGHTS) && LIGHTS == 2 && !defined(ONLY_SPECULAR) && !defined(ONLY_LIGHT)
+    #define NVR_COAT_LEAN 1
+    #if defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS
+        #define NVR_PEARL_AMBIENT_LEAN 1
+    #endif
+#endif
 #include "includes/Object.hlsl"
 // UNOFFICIAL 2026-11-09 the eye variant (open report "eyes of default races black"; [Shaders.PBR.Main] GameShaderEyes, EyeShaderOld; the
 // records are made by Render.cpp GameEyes::RecordFor, from this file with NVR_EYE and no sun / lamp shadow code, and put on the device
@@ -534,6 +542,9 @@
         #if WETNESS_EFFECTS < 3
             #define PUDDLES_LEAN
         #endif
+    #elif defined(SPECULAR) && defined(LIGHTS) && LIGHTS == 2 && WETNESS_EFFECTS < 3
+        // P6A fix: keep 2-lamp specular variants (SLS2023/2024/2026/2027) cleanly under ps_3_0's 32-temp register limit.
+        #define PUDDLES_LEAN
     #endif
     #define WETNESS_ORTHO_REG s12
     #include "includes/Wetness.hlsl"
@@ -1602,6 +1613,10 @@ PS_OUTPUT main(PS_INPUT IN) {
     #ifdef RMAOS
         RmaosRead(IN.uv.xy);	// UNOFFICIAL _rmaos map (Object.hlsl): read once, here at top level
     #endif
+    #if defined(METAL) && defined(RMAOS) && defined(OBJ_AMBIENT) && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(DIFFUSE) && !defined(NVR_SLOT_TIGHT) && !defined(NVR_PEARL_AMBIENT_LEAN)
+        const float2 coatUvDx = ddx(IN.uv.xy);
+        const float2 coatUvDy = ddy(IN.uv.xy);
+    #endif
     #if defined(NVR_VANILLA_BRIDGE) && defined(OBJ_TOGGLES)
         BridgeSetup(normal.a, Toggles.z);	// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl): the authored highlight, before the roughness
     #endif
@@ -1810,9 +1825,11 @@ PS_OUTPUT main(PS_INPUT IN) {
         #if !defined(DIFFUSE)
             lighting = getSunLightingFull(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, foldAlbedo, foldRough, foldMetal);
             lighting += getAmbientLighting(AmbientColor.rgb, foldAlbedo * (1.0f - foldMetal), faceNormal, foldValid);
-            [branch] if (foldMetal > 0.0f)
-                lighting += foldMetal * getMetalAmbient(AmbientColor.rgb, foldAlbedo, foldRough, saturate(dot(normal.xyz, normalize(IN.viewDir.xyz))),
-                                                        0.0f, 0.0f, IN.shadowWorldPos.xyz, faceNormal);
+            [branch] if (foldMetal > 0.0f) {
+                float3 foldView = normalize(IN.viewDir.xyz);
+                lighting += foldMetal * getMetalAmbient(AmbientColor.rgb, foldAlbedo, foldRough, saturate(dot(normal.xyz, foldView)),
+                                                        0.0f, 0.0f, IN.shadowWorldPos.xyz, faceNormal, faceNormal, saturate(foldView.z));
+            }
             float foldReach = 1.0f;
         #else
             const float foldAtt0 = LAMP_ATT_SQ(IN.lightDistSq.x, IN.lightDir);
@@ -1858,9 +1875,6 @@ PS_OUTPUT main(PS_INPUT IN) {
         // branch: off ([Shaders.PBR.Metal] 0 for this pass) runs the old lighting below exactly. On: how much of the pixel
         // is metal; the metal share has a tinted highlight (F0 = its colour) and no diffuse light, and reflects its
         // surroundings instead of the diffuse ambient (the sky along the reflected view, by world up from the VS).
-        #ifdef SI
-            float3 glowTexel = tex2D(GlowMap, IN.uv.xy).rgb;
-        #endif
         float skyValid = SHADOW_VS_PRESENT(IN.shadowWorldPos.w) ? 1.0f : 0.0f;
         #ifdef OBJ_LAMP2
             float att2 = LAMP_ATT_SQ(IN.lightDistSq.y, IN.light2Dir);
@@ -1895,78 +1909,69 @@ PS_OUTPUT main(PS_INPUT IN) {
                 normal.xyz = normalize(lerp(normal.xyz, float3(0.0f, 0.0f, 1.0f), wet.flatten));
             #endif
         #endif
+        // P6A fix: share the sun/ambient/lamp lighting calls across metal and dielectric paths so 2-lamp specular variants don't double live temp registers.
+        metallic = 0.0f;
         [branch] if (getMetalStrength() > 0.0f) {
             // Faded out with distance (getMetalFade); at full without the position (a vanilla vertex shader ran).
             metallic = HAND_BLOOD_METAL(getDerivedMetallic(normal.a, albedoStored) * (skyValid > 0.0f ? getMetalFade(IN.shadowWorldPos.xyz) : 1.0f));
-            metalRoughness = lerp(rough, metalRoughness, metallic);
-            #ifdef OBJECT_WETNESS
-                surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f - saturate(sqrt(metallic)));	// metals darken less (CS's porosity)
-            #endif
-            lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
-            #ifdef SI
-                lighting += surface.rgb * LinColor(glowTexel.rgb * EmittanceColor.rgb);
-            #endif
-            lighting += getAmbientLighting(AmbientColor.rgb, surface.rgb * (1.0f - metallic), faceNormal, skyValid);
-            [branch] if (metallic > 0.0f) {
-                float3 metalView = normalize(IN.viewDir.xyz);
-                #ifdef OBJ_SMOOTH_NORMAL_W
-                // UNOFFICIAL 2026-10-24: lightDistSq.w / lightDir.w carry the smooth normal now; the reflection's height in world space from it
-                // (camera-relative position: the eye is at the origin; world up is +z), without the normal map's detail.
-                bool upKnown = skyValid > 0.0f;
-                float upReflect = upKnown ? reflect(normalize(IN.shadowWorldPos.xyz), faceNormal).z : 0.0f;
-                #else
-                float3 upTangent = float3(IN.lightDistSq.w, IN.lightDir.w, IN.vertexColor.a * 2.0f - 1.0f);
-                float upLength = length(upTangent);
-                bool upKnown = upLength > 0.5f && skyValid > 0.0f;
-                float upReflect = upKnown ? dot(reflect(-metalView, normal.xyz), upTangent / upLength) : 0.0f;
-                #endif
-                lighting += metallic * getMetalAmbient(AmbientColor.rgb, surface.rgb, metalRoughness, saturate(dot(normal.xyz, metalView)),
-                                                       upReflect, upKnown ? 1.0f : 0.0f,
-                                                       IN.shadowWorldPos.xyz, faceNormal);
-            }
-            #ifdef OBJ_LAMP2
-                LAMP_IF(att2)   // UNOFFICIAL LampReachSkip
-#if SHADOW_CONTRAST_ON
-                    SC_SPLIT(getPointLightLightingAtt(IN.light2Dir.xyz, att2, light2Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic), scShadow2)
-#else
-                    lighting += getPointLightLightingAtt(IN.light2Dir.xyz, att2, light2Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
-#endif
-            #endif
-            #ifdef OBJ_LAMP3
-                LAMP_IF(att3)   // UNOFFICIAL LampReachSkip
-#if SHADOW_CONTRAST_ON
-                    SC_SPLIT(getPointLightLightingAtt(IN.light3Dir.xyz, att3, light3Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic), scShadow3)
-#else
-                    lighting += getPointLightLightingAtt(IN.light3Dir.xyz, att3, light3Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
-#endif
+            #if defined(RMAOS) && defined(OBJ_AMBIENT) && !defined(ONLY_LIGHT) && !defined(ONLY_SPECULAR) && !defined(DIFFUSE) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR) && !defined(NVR_PEARL_AMBIENT_LEAN)
+                [branch] if (TESR_SharpSky.y > 0.001f && RMAOS_ACTIVE && metallic > 0.55f) {
+                    float3 vTan = normalize(IN.viewDir.xyz);
+                    float2 coatUvOff = -(vTan.xy / max(vTan.z, 0.35f)) * (0.0018f * saturate(TESR_SharpSky.y));
+                    float3 subCol = tex2Dgrad(BaseMap, IN.uv.xy + coatUvOff, coatUvDx, coatUvDy).rgb;
+                    #ifdef OBJ_VCOLOR
+                        subCol = OBJ_WITH_VCOLOR(subCol, IN.vertexColor.rgb);
+                    #endif
+                    subCol = LinColor(HudRainAlbedo(HandBloodAlbedo(subCol)));
+                    float subW = smoothstep(0.55f, 0.90f, metallic) * saturate(TESR_SharpSky.y) * 0.72f;
+                    surface.rgb = lerp(surface.rgb, subCol, subW);
+                }
             #endif
         }
-        else {
-            #ifdef OBJECT_WETNESS
-                surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f);
+        metalRoughness = lerp(rough, metalRoughness, metallic);
+        #ifdef OBJECT_WETNESS
+            surface.rgb = ObjectWetAlbedo(surface.rgb, wetDryTexture, wet, 1.0f - saturate(sqrt(metallic)));	// metals darken less (CS's porosity)
+        #endif
+        lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
+        lighting += getAmbientLighting(AmbientColor.rgb, surface.rgb * (1.0f - metallic), faceNormal, skyValid);
+        [branch] if (metallic > 0.0f) {
+            float3 metalView = normalize(IN.viewDir.xyz);
+            #if CAPTURED_NORMALS_ON >= 4 && !defined(ONLY_SPECULAR)
+                float3 metalWorldNormal = dot(gbShadingNormal, gbShadingNormal) > 1.0e-4f ? normalize(gbShadingNormal) : faceNormal;
+            #else
+                float3 metalWorldNormal = faceNormal;
             #endif
-            lighting = getSunLighting(IN.lightDir.xyz, PSLightColor[0].rgb * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
-            #ifdef SI
-                lighting += surface.rgb * LinColor(glowTexel.rgb * EmittanceColor.rgb);
+            #ifdef OBJ_SMOOTH_NORMAL_W
+            // UNOFFICIAL 2026-10-24: lightDistSq.w / lightDir.w carry the smooth normal now; the reflection's height in world space from it
+            // (camera-relative position: the eye is at the origin; world up is +z), with the captured shading normal when available.
+            bool upKnown = skyValid > 0.0f;
+            float upReflect = upKnown ? reflect(normalize(IN.shadowWorldPos.xyz), metalWorldNormal).z : 0.0f;
+            #else
+            float3 upTangent = float3(IN.lightDistSq.w, IN.lightDir.w, IN.vertexColor.a * 2.0f - 1.0f);
+            float upLength = length(upTangent);
+            bool upKnown = upLength > 0.5f && skyValid > 0.0f;
+            float upReflect = upKnown ? dot(reflect(-metalView, normal.xyz), upTangent / upLength) : 0.0f;
             #endif
-            lighting += getAmbientLighting(AmbientColor.rgb, surface.rgb, faceNormal, skyValid);
-            #ifdef OBJ_LAMP2
-                LAMP_IF(att2)   // UNOFFICIAL LampReachSkip
-#if SHADOW_CONTRAST_ON
-                    SC_SPLIT(getPointLightLightingAtt(IN.light2Dir.xyz, att2, light2Color, IN.viewDir.xyz, normal.xyz, surface.rgb, rough), scShadow2)
-#else
-                    lighting += getPointLightLightingAtt(IN.light2Dir.xyz, att2, light2Color, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
-#endif
-            #endif
-            #ifdef OBJ_LAMP3
-                LAMP_IF(att3)   // UNOFFICIAL LampReachSkip
-#if SHADOW_CONTRAST_ON
-                    SC_SPLIT(getPointLightLightingAtt(IN.light3Dir.xyz, att3, light3Color, IN.viewDir.xyz, normal.xyz, surface.rgb, rough), scShadow3)
-#else
-                    lighting += getPointLightLightingAtt(IN.light3Dir.xyz, att3, light3Color, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
-#endif
-            #endif
+            lighting += metallic * getMetalAmbient(AmbientColor.rgb, surface.rgb, metalRoughness, saturate(dot(normal.xyz, metalView)),
+                                                   upReflect, upKnown ? 1.0f : 0.0f,
+                                                   IN.shadowWorldPos.xyz, metalWorldNormal, faceNormal, saturate(metalView.z));
         }
+        #ifdef OBJ_LAMP2
+            LAMP_IF(att2)   // UNOFFICIAL LampReachSkip
+#if SHADOW_CONTRAST_ON
+                SC_SPLIT(getPointLightLightingAtt(IN.light2Dir.xyz, att2, light2Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic), scShadow2)
+#else
+                lighting += getPointLightLightingAtt(IN.light2Dir.xyz, att2, light2Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
+#endif
+        #endif
+        #ifdef OBJ_LAMP3
+            LAMP_IF(att3)   // UNOFFICIAL LampReachSkip
+#if SHADOW_CONTRAST_ON
+                SC_SPLIT(getPointLightLightingAtt(IN.light3Dir.xyz, att3, light3Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic), scShadow3)
+#else
+                lighting += getPointLightLightingAtt(IN.light3Dir.xyz, att3, light3Color, IN.viewDir.xyz, normal.xyz, surface.rgb, metalRoughness, metallic);
+#endif
+        #endif
         #ifdef OBJECT_WETNESS	// the water film: the sun's highlight on it and its reflection, over the material
             [branch] if (wet.gloss > 0.001f)
                 lighting += ObjectWetFilm(wet, IN.shadowWorldPos.xyz, faceNormal, PSLightColor[0].rgb * sunAndProj * LIN_SCALE_LIGHT, wetDryTexture);
@@ -2029,12 +2034,6 @@ PS_OUTPUT main(PS_INPUT IN) {
                 lighting = getPointLightLightingAtt(IN.lightDir.xyz, att0, SHADOWED(PSLightColor[0].rgb, 0, att0) * sunAndProj, IN.viewDir.xyz, normal.xyz, surface.rgb, rough);
 #endif
         #endif
-    #endif
-    
-    // Self emmitance.
-    #ifdef SI
-        float3 glowTexel = tex2D(GlowMap, IN.uv.xy).rgb;
-        lighting += surface.rgb * LinColor(glowTexel.rgb * EmittanceColor.rgb);
     #endif
     
     #ifdef OBJ_AMBIENT
@@ -2116,6 +2115,12 @@ PS_OUTPUT main(PS_INPUT IN) {
 
     #if SHADOW_CONTRAST_ON && !defined(DIFFUSE) && !defined(POINT)
         lighting *= ShadowContrastKeep(lighting, scLost);	// UNOFFICIAL ShadowContrast: a base pass has the ambient: darkened here
+    #endif
+    // UNOFFICIAL 2026-11-23 DecoupleGlowMaps: attenuate scene lighting on glowing texels so ambient/light scales don't wash out glow maps.
+    #ifdef SI
+        float3 glowRaw = tex2D(GlowMap, IN.uv.xy).rgb * EmittanceColor.rgb;
+        float glowDecouple = GlowDecoupleMask(glowRaw);
+        lighting = lighting * (1.0f - glowDecouple) + surface.rgb * LinColor(glowRaw) * GlowScaleFactor();
     #endif
     #if defined(NVR_EYE) && defined(OBJ_AMBIENT) && !defined(NVR_LIGHT_DEFERRED)	// (the lighting-free record: the light pass lights the eye)
         // UNOFFICIAL 2026-11-12 HairAndEyes: the flashlight's beam on the eyeball, once (the pass that adds the ambient), on the colour the
@@ -2250,6 +2255,9 @@ PS_OUTPUT main(PS_INPUT IN) {
                 // pass's light would have been on the wet surface (it was the dry texture's)
                 capBase *= surface.rgb;
             #endif
+            #ifdef SI
+                capBase *= (1.0f - glowDecouple);
+            #endif
             float4 capAlbedo = CapturedAlbedoOut(capBase);
             #ifdef NVR_FOLD
                 pout.capturedPad1 = NVR_SpecFade.y > 0.5f ? capFoldAlbedo : capAlbedo;
@@ -2257,11 +2265,21 @@ PS_OUTPUT main(PS_INPUT IN) {
                 pout.capturedPad1 = capAlbedo;
             #endif
         #else
-            pout.capturedPad1 = CapturedAlbedoOut(surface.rgb);
+            #ifdef SI
+                pout.capturedPad1 = CapturedAlbedoOut(surface.rgb * (1.0f - glowDecouple));
+            #else
+                pout.capturedPad1 = CapturedAlbedoOut(surface.rgb);
+            #endif
         #endif
     #endif
     // (2026-11-12 ptbump: the *NoHighlight forms, Includes/CapturedNormals.hlsl; the same values unless the draw is flagged for the path tracer)
-    #ifdef METAL	// UNOFFICIAL 2026-10-31: the metal share and the finish it was lit with (metalRoughness is lerped where metallic > 0)
+    #ifdef SI
+        #ifdef METAL
+            pout.capturedPad2 = CapturedMaterialOutMetalNoHighlight(lerp(metallic > 0.0f ? metalRoughness : rough, 1.0f, glowDecouple), metallic * (1.0f - glowDecouple));
+        #else
+            pout.capturedPad2 = CapturedMaterialOutNoHighlight(lerp(rough, 1.0f, glowDecouple));
+        #endif
+    #elif defined(METAL)	// UNOFFICIAL 2026-10-31: the metal share and the finish it was lit with (metalRoughness is lerped where metallic > 0)
         pout.capturedPad2 = CapturedMaterialOutMetalNoHighlight(metallic > 0.0f ? metalRoughness : rough, metallic);
     #else
         pout.capturedPad2 = CapturedMaterialOutNoHighlight(rough);	// UNOFFICIAL 2026-10-29 MaterialBuffer (0 without it)
@@ -2304,10 +2322,15 @@ PS_OUTPUT main(PS_INPUT IN) {
     #endif
     #if defined(FD_SV_RECORD) && !defined(DIFFUSE) && !defined(ONLY_SPECULAR) && !defined(NVR_EYE)
         // UNOFFICIAL 2026-11-16 / 2026-11-21 fd-sunvis (Includes/DeferredPixel.hlsl FDSunVisCode): sun vis (besides cascades) and non-metal F0 (OBJ_LAMP_FIRST records F0 with vis 1.0f for DeferredLamps / FlashlightDeferred)
-        #ifdef OBJ_LAMP_FIRST
-            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, 1.0f, FD_SV_F0, NVR_SpecFade.z);
+        #ifdef SI
+            const float fdGlowF0 = FD_SV_F0 * (1.0f - glowDecouple);
         #else
-            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, FDSunVisCanopy(sunAndProj) * FDSunVisMicro(normal.xyz, IN.lightDir.xyz), FD_SV_F0, NVR_SpecFade.z);
+            const float fdGlowF0 = FD_SV_F0;
+        #endif
+        #ifdef OBJ_LAMP_FIRST
+            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, 1.0f, fdGlowF0, NVR_SpecFade.z);
+        #else
+            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, FDSunVisCanopy(sunAndProj) * FDSunVisMicro(normal.xyz, IN.lightDir.xyz), fdGlowF0, NVR_SpecFade.z);
         #endif
     #endif
     #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 3 && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)
@@ -2546,6 +2569,10 @@ PS_OUTPUT main(PS_INPUT IN) {
     #ifdef RMAOS
         RmaosRead(IN.uv.xy);	// UNOFFICIAL _rmaos map (Object.hlsl): read once, here at top level
     #endif
+    #if defined(METAL) && defined(RMAOS) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR)
+        const float2 coatUvDx4 = ddx(IN.uv.xy);
+        const float2 coatUvDy4 = ddy(IN.uv.xy);
+    #endif
     BridgeSetup(normal.a, glossPow);	// UNOFFICIAL 2026-11-05 VanillaBridge (Object.hlsl; nothing without NVR_VANILLA_BRIDGE)
     float roughness = getRoughness(normal.a);
     // UNOFFICIAL 2026-10-13 (user: polished marble walls in the casinos flickered round their lamps): the same geometric
@@ -2578,6 +2605,15 @@ PS_OUTPUT main(PS_INPUT IN) {
         [branch] if (getMetalStrength() > 0.0f)
             metallic = HAND_BLOOD_METAL(getDerivedMetallic(normal.a, albedoStored) * (SHADOW_WP_VALID(IN) ? getMetalFade(SHADOW_WP_LOAD(IN)) : 1.0f));
         float lightRoughness = lerp(roughness, metalRoughness, metallic);
+        #if defined(RMAOS) && !defined(NVR_SLOT_TIGHT) && !defined(HAIR)
+            [branch] if (TESR_SharpSky.y > 0.001f && RMAOS_ACTIVE && metallic > 0.55f) {
+                float3 vTan4 = normalize(viewDir);
+                float2 coatUvOff4 = -(vTan4.xy / max(vTan4.z, 0.35f)) * (0.0018f * saturate(TESR_SharpSky.y));
+                float3 subCol4 = LinColor(HudRainAlbedo(HandBloodAlbedo(OBJ_WITH_VCOLOR(tex2Dgrad(BaseMap, IN.uv.xy + coatUvOff4, coatUvDx4, coatUvDy4).rgb, IN.vertexColor.rgb))));
+                float subW4 = smoothstep(0.55f, 0.90f, metallic) * saturate(TESR_SharpSky.y) * 0.72f;
+                baseColor.rgb = lerp(baseColor.rgb, subCol4, subW4);
+            }
+        #endif
     #endif
 
     float att;
@@ -2719,9 +2755,25 @@ PS_OUTPUT main(PS_INPUT IN) {
         #undef LIGHT_FINISH
         lighting += getAmbientLighting(AmbientColor.rgb, baseColor.rgb * (1.0f - metallic), skyNormal,
                                        SHADOW_WP_VALID(IN) ? 1.0f : 0.0f);
-        lighting += metallic * getMetalAmbient(AmbientColor.rgb, baseColor.rgb, lightRoughness,
-                                               saturate(dot(normal.xyz, normalize(viewDir))), 0.0f, 0.0f,
-                                               (0.0f).xxx, (0.0f).xxx);
+        #if defined(NVR_LIVE_CUBE) && !defined(NVR_SLOT_TIGHT)
+            #if CAPTURED_NORMALS_ON >= 4
+                float3 metalWorldNormal4 = dot(gbShadingNormal, gbShadingNormal) > 1.0e-4f ? normalize(gbShadingNormal) : skyNormal;
+            #else
+                float3 metalWorldNormal4 = skyNormal;
+            #endif
+            float metalWpValid4 = SHADOW_WP_VALID(IN) ? 1.0f : 0.0f;
+            float3 metalWp4 = SHADOW_WP_LOAD(IN);
+            float upReflect4 = metalWpValid4 > 0.0f ? reflect(normalize(metalWp4), metalWorldNormal4).z : 0.0f;
+            float3 viewNorm4 = normalize(viewDir);
+            lighting += metallic * getMetalAmbient(AmbientColor.rgb, baseColor.rgb, lightRoughness,
+                                                   saturate(dot(normal.xyz, viewNorm4)), upReflect4, metalWpValid4,
+                                                   metalWp4, metalWorldNormal4, skyNormal, saturate(viewNorm4.z));
+        #else
+            float3 viewNorm4 = normalize(viewDir);
+            lighting += metallic * getMetalAmbient(AmbientColor.rgb, baseColor.rgb, lightRoughness,
+                                                   saturate(dot(normal.xyz, viewNorm4)), 0.0f, 0.0f,
+                                                   (0.0f).xxx, (0.0f).xxx, (0.0f).xxx, saturate(viewNorm4.z));
+        #endif
     }
     else
     #endif
@@ -2755,9 +2807,11 @@ PS_OUTPUT main(PS_INPUT IN) {
         lighting *= ShadowContrastKeep(lighting, scLost);	// UNOFFICIAL ShadowContrast (see its constant); before the glow, which stays as it is
     #endif
 
-    // UNOFFICIAL ManyLampsGlow: self emittance, as the LIGHTS < 4 variant adds it.
+    // UNOFFICIAL ManyLampsGlow + 2026-11-23 DecoupleGlowMaps: self emittance with scene lighting attenuated on glowing texels.
     #ifdef NVR_MANY_GLOW
-        lighting += baseColor.rgb * LinColor(tex2D(GlowMap, IN.uv.xy).rgb * EmittanceColor.rgb);
+        float3 glowRaw = tex2D(GlowMap, IN.uv.xy).rgb * EmittanceColor.rgb;
+        float glowDecouple = GlowDecoupleMask(glowRaw);
+        lighting = lighting * (1.0f - glowDecouple) + baseColor.rgb * LinColor(glowRaw) * GlowScaleFactor();
     #endif
 
     // UNOFFICIAL 2026-11-12 HairAndEyes (as the LIGHTS < 4 shader): the flashlight's beam on the eyeball. Not in a deferred-lamp record:
@@ -2799,10 +2853,26 @@ PS_OUTPUT main(PS_INPUT IN) {
     #endif
     pout.color.a = ReflMaterialAlpha(OBJ_CUT_OUT(baseColor.a) * AmbientColor.a);	// UNOFFICIAL MaterialAware reflections (Object.hlsl)
 #if CAPTURED_NORMALS_ON
-    pout.capturedPad1 = CapturedAlbedoOut(baseColor.rgb);	// UNOFFICIAL 2026-10-31 AlbedoBuffer (Includes/CapturedNormals.hlsl; the pad's 0 below level 3)
+    #ifdef NVR_MANY_GLOW
+        pout.capturedPad1 = CapturedAlbedoOut(baseColor.rgb * (1.0f - glowDecouple));	// UNOFFICIAL 2026-10-31 AlbedoBuffer (Includes/CapturedNormals.hlsl; the pad's 0 below level 3)
+    #else
+        pout.capturedPad1 = CapturedAlbedoOut(baseColor.rgb);	// UNOFFICIAL 2026-10-31 AlbedoBuffer (Includes/CapturedNormals.hlsl; the pad's 0 below level 3)
+    #endif
     // (2026-11-12 ptbump: the *NoHighlight forms, as in the LIGHTS < 4 variant; not the many-lamp shiny records, whose roughness the
     // DeferredLamps pass reads as it is: they are drawn for meshes with a highlight only)
-    #if defined(MANY_LAMPS)
+    #ifdef NVR_MANY_GLOW
+        #if defined(MANY_LAMPS)
+            #ifdef METAL
+                pout.capturedPad2 = CapturedMaterialOutMetal(lerp(lightRoughness, 1.0f, glowDecouple), metallic * (1.0f - glowDecouple));
+            #else
+                pout.capturedPad2 = CapturedMaterialOut(lerp(roughness, 1.0f, glowDecouple));
+            #endif
+        #elif defined(METAL)
+            pout.capturedPad2 = CapturedMaterialOutMetalNoHighlight(lerp(lightRoughness, 1.0f, glowDecouple), metallic * (1.0f - glowDecouple));
+        #else
+            pout.capturedPad2 = CapturedMaterialOutNoHighlight(lerp(roughness, 1.0f, glowDecouple));
+        #endif
+    #elif defined(MANY_LAMPS)
         #ifdef METAL	// UNOFFICIAL 2026-10-31: the metal share and the finish it was lit with
             pout.capturedPad2 = CapturedMaterialOutMetal(lightRoughness, metallic);
         #else
@@ -2916,10 +2986,15 @@ PS_OUTPUT main(PS_INPUT IN) {
     #endif
     #if defined(FD_SV_RECORD) && !defined(NVR_EYE)
         // UNOFFICIAL 2026-11-16 / 2026-11-21 fd-sunvis (as in the LIGHTS < 4 variant; OPT records F0 with vis 1.0f for DeferredLamps / FlashlightDeferred)
-        #ifdef OPT
-            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, 1.0f, FD_SV_F0, NVR_SpecFade.z);
+        #ifdef NVR_MANY_GLOW
+            const float fdManyGlowF0 = FD_SV_F0 * (1.0f - glowDecouple);
         #else
-            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, FDSunVisMicro(normal.xyz, IN.lightDir.xyz), FD_SV_F0, NVR_SpecFade.z);
+            const float fdManyGlowF0 = FD_SV_F0;
+        #endif
+        #ifdef OPT
+            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, 1.0f, fdManyGlowF0, NVR_SpecFade.z);
+        #else
+            pout.capturedNormal.a = FDSunVisCode(pout.capturedNormal.a, FDSunVisMicro(normal.xyz, IN.lightDir.xyz), fdManyGlowF0, NVR_SpecFade.z);
         #endif
     #endif
     // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl; as in the LIGHTS < 4 variant): x 1 on an opaque draw.

@@ -86,8 +86,10 @@ float4 TESR_PassRedirect : register(c210);	// UNOFFICIAL ExactPassSums (core/Pas
 float4 TESR_PBRExtraData : register(c33);	// x saturation, y sky strength, z sky directionality, w metal fade distance
 // UNOFFICIAL 2026-10-17 LinearPreDecode (ObjectTemplate.hlsl LIN_PREDECODED): the strengths LinScale would decode per pixel, decoded
 // once per frame on the CPU (PBR.cpp); otherwise the same LinScale calls as before.
+// UNOFFICIAL 2026-11-23 DecoupleGlowMaps: TESR_SharpSky.w (SkyAmbient.hlsl, c136) carries linear GlowScale + 1e-4 (> 0 when on; 0 = legacy
+// additive glow at 1.0x). (2026-11-27 upstream 1.1.5 merge: upstream used c168.w, which the deferred passes read as DeferredLandRoughF90.)
+float4 TESR_LinearScales : register(c168); // x LinScale(TESR_PBRData.z), y LinScale(TESR_PBRData.w), z LinScale(TESR_PBRExtraData.y), w deferred only
 #ifdef LIN_PREDECODED
-float4 TESR_LinearScales : register(c168); // x LinScale(TESR_PBRData.z), y LinScale(TESR_PBRData.w), z LinScale(TESR_PBRExtraData.y)
 #define LIN_SCALE_LIGHT TESR_LinearScales.x
 #define LIN_SCALE_AMBIENT TESR_LinearScales.y
 #define LIN_SCALE_SKY TESR_LinearScales.z
@@ -96,6 +98,12 @@ float4 TESR_LinearScales : register(c168); // x LinScale(TESR_PBRData.z), y LinS
 #define LIN_SCALE_AMBIENT LinScale(TESR_PBRData.w)
 #define LIN_SCALE_SKY LinScale(SKY_AMBIENT_STRENGTH)
 #endif
+float GlowDecoupleMask(float3 glowRaw) {
+    return TESR_SharpSky.w > 0.0f ? saturate(max(glowRaw.r, max(glowRaw.g, glowRaw.b))) : 0.0f;
+}
+float GlowScaleFactor() {
+    return TESR_SharpSky.w > 0.0f ? max(TESR_SharpSky.w - 1e-4f, 0.0f) : 1.0f;
+}
 
 // UNOFFICIAL material rules ([Shaders.PBR.MaterialRules], core/MaterialRules.h): the class of the texture being drawn, from
 // the editable table NewVegasReloaded.dll.materials.txt, written by NVR before each object (Render.cpp MaterialRulesDraw).
@@ -584,7 +592,7 @@ float getMetalRoughness(float specMask) {
             roughness = lerp(TESR_MaterialRough.y, TESR_MaterialRough.x, getMetalMask(specMask));
     #endif
     #ifdef NVR_VANILLA_BRIDGE
-        roughness = lerp(roughness, BridgeRough, BridgeT);	// UNOFFICIAL 2026-11-05 VanillaBridge: the authored finish where there is one
+        roughness = lerp(roughness, min(roughness, BridgeRough), BridgeT);	// UNOFFICIAL 2026-11-05 VanillaBridge: never inflate metal roughness past satin/polished range
     #endif
     #ifdef RMAOS
         if (RMAOS_ACTIVE) roughness = RMAOS_FADING ? lerp(roughness, max(RmaosValue.r, 0.02f), NVR_Rmaos.x) : max(RmaosValue.r, 0.02f);	// FadeIn
@@ -647,20 +655,107 @@ float3 getMetalSkyDirection(float3 worldPos, float3 worldNormal, float upReflect
 // the metal's colour (F0) and roughness. getAmbientLighting's terms, with the reflection for the normal.
 // UNOFFICIAL SharpSky: with it on and the sky known, the sky is taken along the reflected direction (getMetalSkyDirection, from
 // worldPos and the geometric worldNormal), blended from the plain sky. Off, this is the plain sky exactly.
+// UNOFFICIAL 2026-11-26 Dual-Normal Clearcoat: the base metallic layer uses perturbed worldNormal / NdotV (tilted glitter facets
+// & smoky marble waves), while the 0.06 top clearcoat lobe uses smooth coatWorldNormal / coatNdotV + Beer-Lambert candy absorption.
 float3 getMetalAmbient(float3 ambient, float3 f0, float roughness, float NdotV, float upReflect, float skyValid,
-                       float3 worldPos, float3 worldNormal) {
+                       float3 worldPos, float3 worldNormal, float3 coatWorldNormal, float coatNdotV) {
+    float3 metalF0 = f0;
+    float metalRough = roughness;
+    float3 pearlF90 = 1.0f.xxx;
+    #if !defined(NVR_SLOT_TIGHT)
+        #ifdef RMAOS
+        if (!RMAOS_ACTIVE)
+        #endif
+        {
+            float3 pCol = sqrt(saturate(f0));
+            float pMax = max(pCol.r, max(pCol.g, pCol.b));
+            float3 rawHue = pMax > 1.0e-4f ? pCol / pMax : (1.0f).xxx;
+            float3 hue = lerp((1.0f).xxx, rawHue, smoothstep(0.08f, 0.35f, pMax));
+            float brightMetal = smoothstep(0.22f, 0.72f, pMax);
+            metalF0 = hue * (pMax * lerp(0.18f, 0.90f, brightMetal));
+            metalRough = lerp(max(roughness, 0.34f), min(roughness, 0.18f), brightMetal);
+        }
+        #if !defined(NVR_PEARL_AMBIENT_LEAN)
+        [branch] if (TESR_SharpSky.z > 0.001f) {
+            float pearl = saturate(TESR_SharpSky.z);
+            float omv = saturate(1.0f - NdotV);
+            float graze = pow(omv, 1.15f);
+            float3 c = saturate(metalF0);
+            float fMax = max(c.r, max(c.g, c.b));
+            float fMin = min(c.r, min(c.g, c.b));
+            float sat = (fMax - fMin) / max(fMax, 1.0e-4f);
+            float satMask = smoothstep(0.10f, 0.40f, sat);
+            float ang = -0.95f * pearl * (0.20f + 0.80f * graze);
+            float ca = cos(ang), sa = sin(ang);
+            const float3 k = 0.57735027f.xxx;
+            float3 hueShifted = c * ca + cross(k, c) * sa + k * dot(k, c) * (1.0f - ca);
+            float3 filmWave = 0.50f + 0.50f * cos(omv * 5.2f + float3(0.0f, 2.094395f, 4.18879f));
+            float lum = max(dot(c, float3(0.2126f, 0.7152f, 0.0722f)), 0.14f);
+            float3 thinFilm = lerp(c, lum * (0.35f + 1.15f * filmWave), saturate(0.22f + 0.78f * graze));
+            metalF0 = lerp(metalF0, saturate(lerp(thinFilm, hueShifted, satMask)), pearl);
+            float pTop = max(metalF0.r, max(metalF0.g, metalF0.b));
+            pearlF90 = lerp(1.0f.xxx, saturate(metalF0 / max(pTop, 0.25f)), pearl * 0.75f);
+        }
+        #endif
+    #endif
     float3 sky = SkyAmbientElevation(upReflect);
     [branch] if (TESR_SharpSky.x > 0.0f && skyValid > 0.0f)
         sky = SkyAmbientSharpened(getMetalSkyDirection(worldPos, worldNormal, upReflect), sky);
-    float3 env = ambient * LIN_SCALE_AMBIENT + LinSky(sky) * LIN_SCALE_SKY * skyValid;
+    float3 localEnv = ambient * LIN_SCALE_AMBIENT + LinSky(sky) * LIN_SCALE_SKY * skyValid;
+    float3 env = localEnv;
     // UNOFFICIAL CubeReflections ([Shaders.PBR.Metal], ObjectTemplate defines NVR_LIVE_CUBE): what the camera saw round it
     // along the reflected view (includes/LiveCube.hlsl) in place of the ambient and sky, as far as the cube has seen that
     // direction. Needs the direction, so only where the sky is known (skyValid).
     #ifdef NVR_LIVE_CUBE
     [branch] if (TESR_EnvCube.x > 0.0f && skyValid > 0.0f) {
-        float4 live = LiveCube(getMetalSkyDirection(worldPos, worldNormal, upReflect), roughness);
-        env = lerp(env, LinSky(live.rgb), TESR_EnvCube.x * live.a);
+        float4 live = LiveCube(getMetalSkyDirection(worldPos, worldNormal, upReflect), metalRough);
+        float3 liveLin = LinSky(live.rgb);
+        float localLum = dot(localEnv, float3(0.2126f, 0.7152f, 0.0722f));
+        float liveLum = dot(liveLin, float3(0.2126f, 0.7152f, 0.0722f));
+        float occ = lerp(1.0f, saturate((localLum * 2.5f) / max(liveLum, 1.0e-4f)), 0.65f);
+        env = lerp(localEnv, liveLin * occ, TESR_EnvCube.x * live.a);
     }
     #endif
-    return EnvBRDFApprox(f0, roughness, NdotV) * env * TESR_PBRMetalLook.z * getMaterialReflections() * RmaosAmbient();
+    #if !defined(NVR_SLOT_TIGHT)
+        const float4 k0 = float4(-1.0f, -0.0275f, -0.572f, 0.022f);
+        const float4 k1 = float4(1.0f, 0.0425f, 1.04f, -0.04f);
+        float4 mixed = metalRough * k0 + k1;
+        float bias0 = min(mixed.x * mixed.x, exp2(-9.28f * NdotV)) * mixed.x + mixed.y;
+        float2 scaleBias = float2(-1.04f, 1.04f) * bias0 + mixed.zw;
+        float3 totalRefl = (metalF0 * scaleBias.x + pearlF90 * scaleBias.y) * env;
+        [branch] if (TESR_SharpSky.y > 0.001f) {
+            totalRefl *= CandyCoatAbsorption(metalF0, coatNdotV, TESR_SharpSky.y, 1.0f);
+            float coatO = 1.0f - saturate(coatNdotV);
+            float coatO2 = coatO * coatO;
+            float coatF = (0.04f + 0.96f * (coatO2 * coatO2 * coatO)) * saturate(TESR_SharpSky.y);
+            #if !defined(NVR_COAT_LEAN)
+                float3 coatLocalEnv = localEnv;
+                float coatUp = upReflect;
+                [branch] if (skyValid > 0.0f) {
+                    coatUp = reflect(normalize(worldPos), coatWorldNormal).z;
+                    float3 coatSky = SkyAmbientElevation(coatUp);
+                    [branch] if (TESR_SharpSky.x > 0.0f)
+                        coatSky = SkyAmbientSharpened(getMetalSkyDirection(worldPos, coatWorldNormal, coatUp), coatSky);
+                    coatLocalEnv = ambient * LIN_SCALE_AMBIENT + LinSky(coatSky) * LIN_SCALE_SKY;
+                }
+                float3 coatEnv = coatLocalEnv;
+                #ifdef NVR_LIVE_CUBE
+                [branch] if (TESR_EnvCube.x > 0.0f && skyValid > 0.0f) {
+                    float4 coatLive = LiveCube(getMetalSkyDirection(worldPos, coatWorldNormal, coatUp), 0.06f);
+                    float3 coatLin = LinSky(coatLive.rgb);
+                    float coatLocLum = dot(coatLocalEnv, float3(0.2126f, 0.7152f, 0.0722f));
+                    float coatLiveLum = dot(coatLin, float3(0.2126f, 0.7152f, 0.0722f));
+                    float coatOcc = lerp(1.0f, saturate((coatLocLum * 2.5f) / max(coatLiveLum, 1.0e-4f)), 0.65f);
+                    coatEnv = lerp(coatLocalEnv, coatLin * coatOcc, TESR_EnvCube.x * coatLive.a);
+                }
+                #endif
+                totalRefl = totalRefl * (1.0f - coatF) + coatEnv * (coatF * 1.15f);
+            #else
+                totalRefl = totalRefl * (1.0f - coatF) + env * (coatF * 1.15f);
+            #endif
+        }
+        return totalRefl * TESR_PBRMetalLook.z * getMaterialReflections() * RmaosAmbient();
+    #else
+        return EnvBRDFApprox(metalF0, metalRough, NdotV) * env * TESR_PBRMetalLook.z * getMaterialReflections() * RmaosAmbient();
+    #endif
 }

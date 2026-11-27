@@ -11,6 +11,12 @@
 #define REFL_METAL_F0_INCLUDED
 const float ReflMirrorSilver = 0.95;
 vec3 ReflMetalF0(vec3 colour, float roughness) {
-    return mix(vec3(ReflMirrorSilver), clamp(colour, vec3(0.0), vec3(1.0)), smoothstep(0.06, 0.15, roughness));
+    vec3 c = clamp(colour, vec3(0.0), vec3(1.0));
+    float cMax = max(c.r, max(c.g, c.b));
+    float cMin = min(c.r, min(c.g, c.b));
+    float sat = (cMax - cMin) / max(cMax, 1.0e-4);
+    float achromaticOrDark = (1.0 - smoothstep(0.14, 0.36, sat)) * (1.0 - smoothstep(0.40, 0.70, cMax) * 0.5);
+    float toSilver = (1.0 - smoothstep(0.06, 0.15, roughness)) * achromaticOrDark;
+    return mix(c, vec3(ReflMirrorSilver), toSilver);
 }
 #endif

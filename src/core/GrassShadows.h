@@ -54,6 +54,7 @@ namespace GrassShadows {
 	inline unsigned SpotFrames = 0;
 	inline bool SpotSavedMinBlend = false;
 	inline const D3DXMATRIX* CameraToLight = nullptr;	// the near cascade's camera-relative world -> shadow map space (Begin)
+	inline D3DXVECTOR3 SunDir = { 0.0f, 0.0f, 1.0f };
 	inline DWORD ZFunc = D3DCMP_LESSEQUAL;
 	inline IDirect3DSurface9* SavedTarget[4] = {};
 	inline IDirect3DSurface9* SavedDepth = nullptr;
@@ -109,12 +110,15 @@ namespace GrassShadows {
 		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
 		if (Cascade > 0) {
 			const float cx = bound->Center.x - cam.x, cy = bound->Center.y - cam.y, cz = bound->Center.z - cam.z;
-			const float limit = Reach + bound->Radius;
+			const float limit = Reach + bound->Radius + 256.0f;
 			if (cx * cx + cy * cy + cz * cz > limit * limit) return false;
 		}
 		const float dx = bound->Center.x - cam.x - NearSphere.x, dy = bound->Center.y - cam.y - NearSphere.y, dz = bound->Center.z - cam.z - NearSphere.z;
 		const float reach = bound->Radius + NearSphere.w;
-		const bool inside = dx * dx + dy * dy + dz * dz <= reach * reach;
+		const float along = dx * SunDir.x + dy * SunDir.y + dz * SunDir.z;
+		if (along < -reach || along > reach + 1024.0f) return false;
+		const float px = dx - along * SunDir.x, py = dy - along * SunDir.y, pz = dz - along * SunDir.z;
+		const bool inside = px * px + py * py + pz * pz <= reach * reach;
 		if (inside && !ProbeSet && CameraToLight) {	// for the log: where the map puts this piece (CPU side, the same transform as the VS)
 			const D3DXVECTOR3 rel(bound->Center.x - cam.x, bound->Center.y - cam.y, bound->Center.z - cam.z);
 			D3DXVec3TransformCoord(&ProbeLight, &rel, CameraToLight);
@@ -167,7 +171,7 @@ namespace GrassShadows {
 		// (preserving GrassWind::Lanes in column 4) and world-space GrassBend in c0-c1.
 		float view[4][4] = {};
 		const bool viewSaved = SUCCEEDED(device->GetVertexShaderConstantF(252, &view[0][0], 4));
-		if (!viewSaved) { StatSkipped++; return D3D_OK; }
+		if (!viewSaved) { GrassShaders::PendingTstgRestore = false; StatSkipped++; return D3D_OK; }
 		float bendSaved[2][4] = {};
 		const bool bendSavedOk = SUCCEEDED(device->GetVertexShaderConstantF(0, &bendSaved[0][0], 2));
 		float bendWorld[4] = { 0.0f, 0.0f, 0.0f, 0.0f }, bendParams[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -313,14 +317,18 @@ namespace GrassShadows {
 
 		const ShadowsExteriorEffect::ShadowMapSettings& map = shadows->ShadowMaps[cascade];
 		if (cascade > ShadowsExteriorEffect::MapNear) {
-			// The cascade only shades past the one before it: nothing to do when that one already reaches past Reach.
+			// Skip only if the previous cascade's actual full-coverage split depth already reaches Reach.
 			const D3DXVECTOR4& inner = shadows->ShadowMaps[cascade - 1].ShadowMapCascadeCenterRadius;
-			const float innerReach = sqrtf(inner.x * inner.x + inner.y * inner.y + inner.z * inner.z) + inner.w;
-			if (innerReach >= Reach) return false;
+			const float innerSplit = ((const float*)&shadows->Constants.ShadowMapRadius)[cascade - 1];
+			const float handover = (std::max)(0.1f * inner.w, (std::min)(shadows->Constants.ForwardData.w, inner.w));
+			if (innerSplit - handover >= Reach) return false;
 		}
 		Cascade = cascade;
 		CameraToLight = &map.ShadowCameraToLight;
 		NearSphere = map.ShadowMapCascadeCenterRadius;
+		const D3DXVECTOR4& sd = shadows->Constants.SmoothedSunDir;
+		const float sLen = sqrtf(sd.x * sd.x + sd.y * sd.y + sd.z * sd.z);
+		SunDir = sLen > 1.0e-4f ? D3DXVECTOR3(sd.x / sLen, sd.y / sLen, sd.z / sLen) : D3DXVECTOR3(0.0f, 0.0f, 1.0f);
 		ProbeSet = false;
 		// The depth test the shadow maps are drawn with (ShadowManager::RenderShadowMaps).
 		ZFunc = (1.0 - NiDX9Renderer::GetSingleton()->m_fZClear) ? D3DCMP_GREATEREQUAL : D3DCMP_LESSEQUAL;
