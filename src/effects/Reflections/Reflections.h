@@ -45,6 +45,7 @@ public:
 		bool	CubeLean;			// leave actors, clutter (misc items, books, apparatus) and small objects out of the cube's draw
 		float	CubeCapture;	// how much of the cube each frame's view replaces
 		float	CubeFade;		// how much of what is off screen fades each frame
+		float	CubeStrength;	// UNOFFICIAL 2026-11-27 cube-visible: how much the surroundings cube shows wherever it is read (0-2; share min(k, 1), above 1 sharper on smooth surfaces)
 		int		DebugView;		// 1: the reflection alone, 2: where it found something, 3: the surroundings cube (4-6: see the .fx)
 		bool	GridFallback;	// UNOFFICIAL 2026-10-19: rays that find nothing on screen also take AmbientLight's light grid
 		float	GridBrightness;	// its brightness
@@ -121,7 +122,7 @@ public:
 		D3DXVECTOR4	Cube;		// x: face being drawn, y: its size, z: mip level, w: 1 = empty the cube
 		D3DXVECTOR4	Cube2;		// x: capture blend, y: fade per frame, z: last mip level, w: 1 = the cube is in use
 		D3DXVECTOR4	Grid;		// xyz: the light grid's corner relative to the camera, w: cell size
-		D3DXVECTOR4	Grid2;		// x: 1 = the grid is in use, y: brightness, z: 1 = it carries colours
+		D3DXVECTOR4	Grid2;		// x: 1 = the grid is in use, y: brightness, z: 1 = it carries colours, w: CubeStrength (2026-11-27)
 		D3DXVECTOR4	Grid3;		// rgb: the light every surface gets here (AmbientLight's, linear)
 		D3DXVECTOR4	Material;	// UNOFFICIAL 2026-10-20 x: 1 = the material buffer is read, y: MaterialMaxRoughness, z: MaterialReflect
 		D3DXVECTOR4	WetFx;		// 2026-11-19 WetnessEffects consolidation: x 1 = active (+2 = SkylightingMode 1), y rainWetness, z puddleWetness, w MinRainWetness

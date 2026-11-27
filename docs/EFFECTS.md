@@ -3748,6 +3748,7 @@ Bench pictures and the full write-up: `docs/next/EYES-ENVFLAG-2026-11-09.md` (no
   `docs/DESIGN.md "Upstream 1.1.5 merge"`). Not run: a forward compile or a game run after the gate.
 - Metal defaults moved to upstream's (steps 104-108; `GreyMetal` 0.45 and the others): a saved value at the old default moves, a tuned one stays.
 - Land reflectivity: `DeferredLandRoughF90` stays ours (see "Reflectivity under the deferred renderer").
+- (2026-11-27, branch `cube-visible`) The live cube on metal and env maps (`Includes/LiveCube.hlsl`, `getMetalAmbient`) follows `[Shaders.Reflections.Main] CubeStrength`: `TESR_EnvCube` x / y times min(k, 1), w = 1 / max(k, 1) (sharper lod on smooth metal, the metal's cap on the cube's light eased). Why and the numbers: the Reflections section, "The surroundings cube made visible".
 - Look: with both keys at 0 nothing changes from before. Wrong: a lacquer glint on metal at 0, or forward records dropping to dry after
   turning either on (the define makes the records bigger; the dry fallback catches it).
 
@@ -5330,6 +5331,65 @@ Taken from upstream; the seams are in `docs/DESIGN.md "Upstream 1.1.5 merge"`. R
 - `Reflections.fx.hlsl` (D3D9): upstream's `SkyGradientAlong` / `SkyAlong` split with our `TESR_FogHorizonColor` / `FogSkyColor`; the cube
   backdrop's horizon uses the Fog colour too, as the Vulkan twin's `cb.horizonColor`.
 - Proven offline: 23 shaders rebuilt (spirv-val OK, `refl-hashes --check` OK), `Reflections.fx` compiles in four define sets. Not run in game.
+
+### The surroundings cube made visible: CubeStrength and the capture's mix (2026-11-27, branch `cube-visible`)
+Owner: the cube's reflections must show clearly on the gun, metal, chrome / glass env maps, wet ground and puddles, without glow, halos,
+washing out dry rough surfaces or lighting dark interiors. Bench facts it starts from (room 02, test48 code, `F:\NVR-bench\shots\u115\cube-*.png`):
+the cube is filled in and out; `[Shaders.PBR.Metal]` / `[Shaders.PBR.EnvMaps] CubeReflections` 0 moved the first-person 10mm by 2-3/255
+mean, forward and deferred alike; floors did not change between CubeMode 2 and 0; CubeMode 2 looked like a bluish haze over the crisp
+CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
+
+**Causes, by reader** (from the code; numbers worked out, not measured):
+- *The haze (CubeMode 2), proven from the code's arithmetic*: Capture (`ReflectionsCapture.frag`, the .fx `CapturePS`) pulled EVERY texel
+  `max(CubeFade x 20, 0.12)` a frame toward the world cube's render, also the texels the screen sees this frame, which the screen then
+  put back at only CubeCapture. Steady state, the screen's share of a texel in view is c / (c + d (1 - c)): the owner's CubeCapture 0.02
+  gives 15 % screen and 85 % world render; the default 0.25 gives 74 % screen. CubeMode 1 decays at CubeFade (owner 0.005: 80 % screen;
+  default 0.001: ~100 %). The world render is cheap (no shadows, no AO, a hemisphere light, 128 a face), so it ghosted over the capture.
+  Checked and not the cause: the units (the screen is `linearize`d, the world cube is written linear with the same `LinearScales` the
+  object shaders light with) and the face orientation (all six `ShadowManager::RenderReflectionCubeFace` look-at frames match
+  `FaceDirection`). Believed, not checked: land drawn into the world cube may have no diffuse bound (`RenderPass::BindDiffuseOf` takes
+  slot 0 of a lighting property), so it would render grey 0.25 lit by the sky term: a bluish ground in the cube's lower half (C++).
+- *Metal* (`Includes/Object.hlsl getMetalAmbient`, forward and the deferred lighting-free records alike): the cube does not add, it
+  REPLACES the ambient + sky (`lerp(localEnv, live, CubeReflections x coverage)`) at the same split-sum weight, so switching it changes the
+  picture only by how the cube differs from the local light. On a dark gun the weight is small: metalF0 ~0.10 (sqrt albedo ~0.35), the
+  metal roughness ~0.31, times the owner's Reflections 2.0 and GreyMetal 0.5: about 11 % of the cube's light. Its mip is roughness x 7
+  (~2.2, 32 texels a face), and the cube's light is held to about 2.5 x the local light (`occ`). With 85 % hazy world render in the cube
+  there was little left to see.
+- *Env maps* (`EnvTemplate.hlsl`): the live cube replaces the game's painted cube through the same mask x fEnvMapScale x alpha, then
+  `WithMetal` (owner 0.6) where the metal look is on; both sources are about equally bright, so the swap shows as pattern, not level.
+- *Deferred* (is it lost?): no. The lighting-free records (`LAMPS_DEFERRED 2`) keep the metal's ambient, cube included, in COLOR0;
+  the deferred sun and lamp passes add no cube term; other deferred surfaces see the cube only through the Reflections composite.
+- *The gun*: the owner's file has `[Shaders.Reflections.RT] Weapon = 0.0` (default 0.65): `Reflectivity` returns 0 on the weapon, so the
+  1.1.5 weapon branch (the exact mirror ray, the cube only, x Fresnel x Weapon) never runs; the gun shows the cube only through the metal
+  ambient and its env pass (above). Proven from the toml and the code; the owner's value is left as it is.
+- *Floors*: the trace's order is screen hit, then (mirror rays into open sky) the panorama, then the cube / grid, then the sky; indoors
+  the screen answers almost every ray, outdoors open-sky mirror rays take the panorama: the cube fills only what is left. By design.
+
+**Fixes**
+- Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1);
+  only a texel out of view goes to the world cube, at `max(CubeFade x 8, 0.03)` (half in ~23 frames: about as stale as the world cube's
+  own faces, redrawn every 96 units). Out-of-view texels used to forget what was seen in ~6 frames, now ~23.
+- `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a player's
+  file without the key gets the defaults file's 1.5; 1 is the look before it. RT Resolve's bounce miss (`ReflectionsRTResolve.frag` ~52, RT
+  reflections only) still reads the cube at full share whatever k: the one reader k does not scale). ONE strength for every reader: the Reflections passes (`Reflections.glsl` / .fx `EnvAlong`: the
+  trace's and RT Resolve's cube share, the weapon branch), metal and the env maps (`TESR_EnvCube`). k up to 1 scales the cube's share
+  (EnvAlong's coverage, the metal's and env pass's CubeReflections share) by k; above 1, smooth surfaces read the cube k times sharper
+  (`CubeLod` / `LiveCube`: lod x 1/k at roughness 0.2 or less, back to the plain lod in a straight ramp by 0.5, so rough dry ground keeps
+  its blur), and the metal's cap on the cube's light against the local light eases from 2.5 x to 2.5 x k. No weight is raised: every
+  reflection stays at most its split-sum / Fresnel weight, and the cube's light is what it holds (dark where the surroundings are dark).
+- Lanes: `TESR_ReflectionsGrid2.w` / `cb.grid2.w` = k (`ReflectionsEffect::GridStep`, a lane nothing else read); `TESR_EnvCube` x / y
+  times min(k, 1), w = 1 / max(k, 1) (`PBRShaders::UpdateConstants`, w 1 while the cube is not kept up).
+- No settings step: no saved key's default moved (CubeStrength is new).
+
+**Checks** (offline): the five Vulkan passes that read the cube rebuilt (Capture, Composite, RTResolve, Trace, TraceHiZ; the other six
+compile to the same bytes; spirv-val OK; `ReflectionsTraceHiZCount.spv`, the develop-only counters build, not rebuilt); `Reflections.fx`
+compiles plain, MaterialAware, G-buffer and both; the forward object, skin and env records with the owner's toml and the deferred
+lighting-free records of the edge shaders compile. Not run in game.
+
+**Bench** (room 02): the owner's settings, CubeMode 2: the cube (DebugView 3) as crisp as CubeMode 1 where you have looked; the 10mm in
+first person with CubeStrength 0 / 1 / 1.5 / 2 (indoors by a window, outdoors at noon, at night by neon); chrome and env-mapped props;
+puddles and wet ground looking away from the light. Wrong: a glow or bright rim on the gun in shade, rough dry ground turning glossy,
+dark rooms brightening with CubeStrength, or the cube lagging when you turn.
 
 ## ShadowsExteriors
 

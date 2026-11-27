@@ -2086,6 +2086,8 @@ static const SimpleRow kSimpleRows[] = {
 		"Low: Steps=12 | Medium: Steps=24 | High: Steps=40",
 		"Higher gives steadier reflections with fewer gaps, and costs more." },
 	{ "Shaders.Reflections.Main", "CubeMode", "Environment reflections mode", nullptr, "How the live surroundings cube fills: 0 captures screen view only while Reflections is on, 1 keeps it updated for PBR metal/chrome too and fills unseen directions with sky and light grid, 2 (default) also renders a staggered 3D world cubemap so weapons, metal, and glass reflect overhead and behind you." },
+	// UNOFFICIAL 2026-11-27 cube-visible
+	{ "Shaders.Reflections.Main", "CubeStrength", "Environment reflections strength", nullptr, "How clearly the live surroundings cube shows in reflections: on your weapon, metal, chrome and glass, wet ground and puddles. 0 none, 1 as blurred as each surface's roughness, up to 2 sharper on smooth metal and mirrors. Never brighter than the surface's own reflectance, and dark where the surroundings are dark." },
 	{ "Shaders.Reflections.Main", "CubeResolution", "Environment cube resolution", nullptr, "Resolution per face for the live surroundings cubemap (64, 128, or 256). Higher gives sharper reflections on chrome and glossy surfaces. Needs a restart." },
 	{ "Shaders.Reflections.Main", "CubeDistance", "Environment cube distance", nullptr, "Maximum capture distance for 3D objects and point lamps in world-cubemap mode (mode 2)." },
 	// UNOFFICIAL 2026-11-27 cheaper world cube
