@@ -12,6 +12,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [Deferred wetness design](#deferred-wetness-design)
 - [Unified reflections design](#unified-reflections-design)
 - [Reflection speckle](#reflection-speckle)
+- [Old fork reflections (NVR-Unofficial-Optimized)](#old-fork-reflections-nvr-unofficial-optimized)
 - [SSFX rain comparison](#ssfx-rain-comparison)
 - [Pipeline audit](#pipeline-audit)
 - [SMP compatibility](#smp-compatibility)
@@ -1053,6 +1054,32 @@ our own. Clone: `F:\VS-scratch\ext\cs` (sparse) and `F:\VS-scratch\ext\cs-files`
   smooth ground, so the sky/ground flips (cause 1), the per-pixel Fresnel swings (cause 2) and rays under the bump (cause 3) are gone on wet
   ground (believed, from the code). Price: bumps no longer bend the wet reflection. The cube path stays for DampTrace = false.
 - Not tried: the bump's variance in the roughness (tier 2), tier 3.
+
+## Old fork reflections (NVR-Unofficial-Optimized)
+
+Read 2026-11-27 (owner: "they seemed better back then"): github.com/mrfury97/NVR-Unofficial-Optimized, main 4acb2504 (P79, 2026-10-13),
+`src/hlsl/NewVegas/Effects/Reflections.fx.hlsl` (411 lines) and `src/effects/Reflections.cpp`; clone `F:\VS-scratch\ext\nvr-unofficial`.
+Separate git history from this repo, but our `Reflections.fx.hlsl` grew from the same design (`Tame`, `BrightestReflection`, the floor rule
+are still in it). Builds P80-P84 sit disabled in MO2 (`NVR-Unofficial-Optimized-P8x...`). No pictures compared yet.
+
+What the old effect did (proven from the code):
+- **Floors only:** a pixel reflects only when its smooth normal faces up (`world z > 0.75`, full at 0.95); walls, vehicles, benches, guns
+  never ran through it. Amount = GroundSheen (dry) + RainWetness, with Roughness 0.4 dry / WetRoughness 0.08 wet.
+- **Dielectric Fresnel only:** split-sum with F0 0.04 (`EnvironmentFresnel`); nothing was treated as metal here.
+- **Smooth normals** (the normals buffer, no normal-map bumps): no speckle, no DXT tilt.
+- **One GGX-sampled ray per half-res pixel**, 24 quadratic steps, 5 binary refine steps; hit rejected on the weapon and back faces;
+  confidence fades at the screen edge and the ray's end.
+- **Misses:** a screen-filled cube (16 taps per texel, brightness clamped at 32, CubeCapture 0.02 / CubeFade 0.005; no world render, as
+  Community Shaders' Dynamic Cubemaps), then the sky gradient for rays pointing up.
+- **Noise control:** `Tame`/`Untame` (luma-compressed accumulation), brightest reflection 16 (mirror) down to 3 (rough); temporal 0.85
+  with a 3x3 neighbourhood clamp; depth-aware separable blur up to 12 half-res pixels, wider when rough.
+- Its metal look on objects was the PBR pass alone (`[Shaders.PBR.Metal] Reflections 0.6`, cube from the screen); `FromGameData` did not
+  exist yet (2026-11-09).
+
+What ours adds that the old one never had (each a believed source of today's harsher look): objects and metal reflect by material
+(MaterialAware / UnifiedReflections, metal F0 = colour), the 3D world cube (CubeMode 2) and panorama, the light-grid fallback, RT rays,
+weapon reflections, normal-mapped normals on some paths, and the upstream 1.1.x layers on top. Not run: an A/B of P84 against the current
+build at the same spots.
 
 ## SSFX rain comparison
 
