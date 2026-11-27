@@ -100,6 +100,7 @@ namespace StalePresetValues {
 		{ "Shaders.PBR.Metal", "Reflections", 0.6f, 106 },
 		{ "Shaders.Reflections.RT", "Weapon", 0.0f, 106 },
 		{ "Shaders.Reflections.RT", "WeaponRoughness", 0.3f, 106 },
+		{ "Main.Main.Performance", "NvrDxvkDeferred", 0.0f, 111 },	// (2026-11-27: the Vulkan sun and lamps; a preset's false brought the SunSheen flicker back)
 	};
 
 	// Keys that moved (UpdateOldDefaults 61 and 67): the value goes to the new key. [Shaders.VolumetricLight.Main] NightStrength (64) has

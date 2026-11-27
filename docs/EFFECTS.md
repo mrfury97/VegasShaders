@@ -5541,7 +5541,7 @@ Ported by hand from upstream 1.1.5-test4 (only this term; its MaterialSSS, RealS
   writes the water's gloss into its roughness there).
 - Constants: D3D9 `DS_Sheen` c18 (x strength, y roughness, z clearcoat, w pearlescence: upstream 1.1.5's lanes); our land smooth-roughness
   (puddle) gate moved to `DS_SheenGate` c21.x (2026-11-27 merge, upstream 1.1.5). Compute: `cb.dsSheen` (z / w = clearcoat / pearl), 16-byte
-  slot 72 (byte 1152; the block is 95 x 16 bytes since 2026-11-27, `static_assert` in `DeferredSun.h`); the puddle gate is flag bit 23
+  slot 72 (byte 1152; the block is 96 x 16 bytes since 2026-11-27, `static_assert` in `DeferredSun.h`); the puddle gate is flag bit 23
   (`kFlagSheenPuddleGate`); with the film live the per-pixel film gate is applied there too (flag bit 26, section 14). The D3D9 sun-fade
   record keeps sheen and SSS (upstream drops them there); only the fade record with FD_SKIN drops them (`DS_FADE_LEAN`, X4505 otherwise;
   tried again 2026-11-27 on the owner's set: still X4505). That lean record made the sheen flicker off for the 2 s of every sun step (bench,
@@ -5645,7 +5645,7 @@ Owner: the deferred sun must run in Vulkan; D3D9 stays only as the fallback for 
     (`1 - smoothstep(0, 0.2, gloss)`, on land and objects, as `DSSheenKeep`). The wet pass still runs before the sun (`DeferredSun::Apply`).
   - everything it did before stays in the fade and wet frames: SunSheen, the screen-space shadows' mask, MaterialSSS, skin, foliage, RT sun.
 - New bindings (set 1): 11 `t_shadowAtlasOld` (`TESR_ShadowAtlasOld`), 12 `t_shadowDynamic` (`TESR_ShadowDynamic`), 13 `t_wetFilm`
-  (`DeferredWetness::FilmTexture`); each a stand-in (the depth) when not in use. UBO slots 73-94 (the block 73 -> 95 x 16 bytes):
+  (`DeferredWetness::FilmTexture`); each a stand-in (the depth) when not in use. UBO slots 73-94 (the block 73 -> 95 x 16 bytes; 96 with the land fix below):
   `shadowOld{Near,Middle,Far,Lod}` (`TESR_ShadowOldCameraToLightTransform*`), `shadowOld*Center`, `shadowCrossFade`, `shadowDynamicData`,
   all copied by name from the ConstantsTable only while fading. Flags: bit 24 `kFlagSunCrossFade` (fading and the kept atlas exists),
   25 `kFlagShadowDynamic` (the movers' atlas drawn this frame), 26 `kFlagWetFilm` (`FilmLive`). Push block unchanged (16 bytes).
@@ -5657,6 +5657,15 @@ Owner: the deferred sun must run in Vulkan; D3D9 stays only as the fallback for 
   screen-space-shadow mask is made, section 13, and with a lamp list not 16 texels), the interior directional light folded into that lamp
   dispatch (`DeferredLamps::CanFoldInteriorDir`), and `DeferredDistant::ComputeHandlesStoredCurve` (the far world's frame is not converted
   to linear light before the deferred passes; the compute passes read the stored curve). It needs `NvrDxvkPasses` and the fork.
+  Known differences of the Vulkan lamp pass, now visible by default: it uses the non-metal F0 0.04, not the record's `DLSpecF0` (see the
+  PBR notes above); and it has no wet film, so on frames with the film live and `DeferredWetLampFilm` on it stands aside for the D3D9
+  passes (the lamps' shadowed streaks on wet ground). `NvrDxvkDeferred` is in `StalePresetValues.h` (step 111): a preset's false is not replayed.
+- Land parity fix (bench 2026-11-27, the owner's `sunsheen` save, frozen time, SunSheen 0: runs 20261127-182332-slotA D3D9 vs
+  20261127-182220-slotA Vulkan): the flicker was gone, but the Vulkan sun lit the land darker (ground mean 96.3 D3D9, 86.9 Vulkan; objects,
+  trees, rocks and sky equal). Cause: the compute land's `PBRSun` took the damped (rough) F90 and the diffuse energy keep, where
+  `DeferredSun.hlsl` `LandSun` takes the forward land's F90 `saturate(Reflectivity)` (`DeferredLandRoughF90` false, the default:
+  `TESR_LinearScales.w`, main 0e3d99c) and no keep (only its object branch calls `SetDiffuseEnergyKeep`). Fixed: UBO slot 95
+  `linearScales` (block 96 x 16 bytes), `PBRSun(..., landF90, diffKeepOn)`; objects unchanged. Not re-benched yet.
 - Checks (offline): `compile-compute.sh DeferredSun` + spirv-val pass; the owner's D3D9 sun records (`owner_sun.py`) compile unchanged;
   the DLL builds. Not run in game: the fade's look, the film's look in compute, the frame cost.
 

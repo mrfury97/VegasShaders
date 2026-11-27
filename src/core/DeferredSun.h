@@ -580,8 +580,9 @@ namespace DeferredSun {
 			float shadowOldLodCenter[4];     // 92
 			float shadowCrossFade[4];        // 93 TESR_ShadowCrossFade (x the old share, yzw the kept maps' sun)
 			float shadowDynamicData[4];      // 94 TESR_ShadowDynamicData (x 1 / the movers' atlas size, 0 = not drawn)
+			float linearScales[4];           // 95 TESR_LinearScales (2026-11-27: w 1 = DeferredLandRoughF90 false, the land's own F90)
 		};
-		static_assert(sizeof(ComputeConstants) == 95 * 16, "DeferredSun ComputeConstants layout mismatch");
+		static_assert(sizeof(ComputeConstants) == 96 * 16, "DeferredSun ComputeConstants layout mismatch");
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -655,6 +656,7 @@ namespace DeferredSun {
 		copyBytes(cb.pbrExtraData, "TESR_PBRExtraData", 16);
 		copyBytes(cb.linearLighting, "TESR_LinearLighting", 16);
 		copyBytes(cb.pbrMath, "TESR_PBRMath", 16);
+		copyBytes(cb.linearScales, "TESR_LinearScales", 16);	// (2026-11-27 sunsheen-fade: DeferredLandRoughF90 in w, as DeferredSun.hlsl LandSun)
 		if (DeferredLamps::SkinCompiledIn()) {
 			copyBytes(cb.skinMaterial, "TESR_SkinMaterial", 16);
 			copyBytes(cb.skinLook, "TESR_SkinLook", 16);

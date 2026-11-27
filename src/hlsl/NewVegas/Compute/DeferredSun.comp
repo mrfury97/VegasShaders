@@ -94,6 +94,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  shadowOldLodCenter;     // 92: TESR_ShadowOldLodCenter
     vec4  shadowCrossFade;        // 93: TESR_ShadowCrossFade (x the old shadows' share, 1 at the step .. 0; yzw the sun the kept maps were drawn for)
     vec4  shadowDynamicData;      // 94: TESR_ShadowDynamicData (x 1 / the movers' atlas size, 0 = not drawn this frame)
+    vec4  linearScales;           // 95: TESR_LinearScales (w 1 = DeferredLandRoughF90 false, the default: the land takes the forward land's F90)
 } cb;
 
 // Flag bits (must match DeferredSun.h)
@@ -370,7 +371,13 @@ float DiffuseEnergyKeep(float NdotV, float roughness) {
     return cb.pbrMath.x > 0.5 ? 1.0 - bump * (1.0 / 0.95) : 1.0;
 }
 
-vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl) {
+// (2026-11-27 sunsheen-fade, bench: the Vulkan sun lit the land darker than the D3D9 pass, ground mean 86.9 vs 96.3) the land's two
+// differences from objects in DeferredSun.hlsl, missing here until now: landF90 (DeferredLandRoughF90 false, the default, cb.linearScales.w
+// > 0.5; DeferredSun.hlsl LandSun's DSLandF90 / PBR_ROUGH_F90_PICK, main 0e3d99c): the forward land's F90 saturate(Reflectivity) for the
+// diffuse's and the highlight's Fresnel, not the damped one; and diffKeepOn false: the land never takes the diffuse energy keep (only
+// the object branch calls SetDiffuseEnergyKeep there). DeferredLamps.comp PBRFull already had the first.
+vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl,
+            bool landF90, bool diffKeepOn) {
     const float dielDiff = min(specF0Diel, 0.04);
     const vec3 nrm = normalize(N);
     const vec3 viewV = normalize(V);
@@ -394,14 +401,15 @@ vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 r
     const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
     const vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
     const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), metalCol, metal));
-    const vec3 fres = Fresnel(f0Base, max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
-    const float diffKeep = DiffuseEnergyKeep(NdotV, r);
+    const vec3 landF90v = vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0));
+    const vec3 fres = Fresnel(f0Base, landF90 ? landF90v : max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
+    const float diffKeep = diffKeepOn ? DiffuseEnergyKeep(NdotV, r) : 1.0;
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
 
     vec3 fresSpec = fres;
     if (specF0Diel != dielDiff) {
         const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), metalCol, metal));
-        fresSpec = Fresnel(f0Spec, max(RoughReflectivityF90(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
+        fresSpec = Fresnel(f0Spec, landF90 ? landF90v : max(RoughReflectivityF90(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
     }
     vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
     if (clearcoat > 0.001 && metal > 0.05) {
@@ -423,7 +431,7 @@ vec3 GetSunLightingModel(float specular, vec3 toSun, vec3 radiance, vec3 toEye, 
     const vec3 scaled = radiance * LinScale(cb.pbrData.z);
     const vec3 graded = mix(vec3(luma(baseColor)), baseColor, cb.pbrExtraData.x);
     if (specular > 0.5) {
-        const vec3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled, specF0Diel, true, clamp(cb.dsSheen.z, 0.0, 1.0), clamp(cb.dsSheen.w, 0.0, 1.0));
+        const vec3 sunLit = PBRSun(metal, r, graded, N, toEye, toSun, scaled, specF0Diel, true, clamp(cb.dsSheen.z, 0.0, 1.0), clamp(cb.dsSheen.w, 0.0, 1.0), false, true);
         if (specFade < 0.9999) {
             return mix((1.0 - metal) * graded * shades(normalize(N), normalize(toSun)) * scaled, sunLit, specFade);
         }
@@ -479,7 +487,8 @@ vec3 WetSpecular(vec3 N, vec3 V, vec3 L, vec3 light, float roughness) {
 vec3 LandSun(vec3 L, vec3 sunLin, vec3 V, vec3 N, vec3 albedo, float r) {
     if (cb.terrainExtraData.x != 0.0) {
         const vec3 graded = mix(vec3(luma(albedo)), albedo, cb.terrainExtraData.y);
-        return max(vec3(0.0), PBRSun(clamp(cb.terrainData.x, 0.0, 1.0), r, graded, N, V, L, sunLin * LinScale(cb.terrainData.z), 0.04, false, 0.0, 0.0));
+        return max(vec3(0.0), PBRSun(clamp(cb.terrainData.x, 0.0, 1.0), r, graded, N, V, L, sunLin * LinScale(cb.terrainData.z), 0.04, false, 0.0, 0.0,
+                                     cb.linearScales.w > 0.5, false));
     }
     return albedo * shades(N, L) * sunLin;
 }

@@ -595,6 +595,11 @@ namespace DeferredLamps {
 	// land/skin/SSS-v2/exact-fog inline, and RMWs directly into the FP16 scene RT0 (no VisTex, CopyTex, or LightTex).
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool hasLampBinds, const InteriorDirData& intDir) {
 		if (!EnsureComputeReady(d)) return false;
+		// (2026-11-27 review, NvrDxvkDeferred on by default) Compute\DeferredLamps.comp has no wet film: with the film live and the land film pass
+		// wanted ([Main.Main.Quality] DeferredWetLampFilm), the D3D9 lamp passes draw so the lamps' shadowed streaks on wet ground stay
+		// (LampFilmDrawn; otherwise the Wetness Effects screen pass falls back to its unshadowed streak).
+		if (LandFilmPass && DeferredWetness::FilmLive && DeferredWetness::FilmTexture && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetLampFilm") != 0)
+			return false;
 		// Storage image RMW requires single-sample FP16 (identity RGBA swizzle in DXVK NVR ext)
 		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
 		const bool depthIsLinear = DeferredDepth::LinearReady();
