@@ -5298,9 +5298,27 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
 Taken from upstream; the seams are in `docs/DESIGN.md "Upstream 1.1.5 merge"`. Reflections-side facts:
 - Dynamic world cubemap: `[Shaders.Reflections.Main] CubeMode` 2 (default; 0 = legacy screen-filled cube, 1 = also kept up for PBR metal and
   env maps with Reflections off, with sky, clouds and the light grid for unseen directions, 2 = as 1 plus a staggered 360-degree 3D world
-  cube drawn from the scene, one face per frame), `CubeResolution` 128 (64-256, restart), `CubeDistance` 4096. The world cube is bound at
-  set 1 binding 32 / slot 31 (upstream used 30 / 29, which collided with our G-buffer COLOR1 / COLOR3 and film at 28-31). Cost: not measured
-  (the owner's rule was to bench CubeMode 2 against 1 and 0 before keeping the default; not run).
+  cube drawn from the scene), `CubeResolution` 128 (64-256, restart), `CubeDistance` 4096. The world cube is bound at set 1 binding 32 /
+  slot 31 (upstream used 30 / 29, which collided with our G-buffer COLOR1 / COLOR3 and film at 28-31). Upstream drew one face every frame:
+  1.0 ms of GPU at SunGI2 (frame total 12.2 ms at CubeMode 2, 11.2 at 1, 10.8 at 0; runs 20261127-140437 / -141109, see DESIGN.md
+  "Upstream 1.1.5 merge").
+- Cheaper world cube (ours, 2026-11-27, owner: "do the first 3 for the live cubemap"; `ShadowManager::RenderReflectionCubeFace`,
+  `ReflectionsEffect::BeginWorldCubeFaces` / `WorldCubeFaceStale`). The cube is axis-aligned around the camera, so turning never needs a
+  redraw. Once all six faces exist, a face is redrawn only when it is stale: the camera moved `CubeMoveThreshold` (96) units since it was
+  drawn; the light it was drawn under changed (sun direction over ~2 degrees; sun, ambient, sky or fog brightness over 8 %; another set of
+  the cube's 4 lamps or their total colour, without Dimmer so flicker does not count, over 15 %); it is older than `CubeRefreshSeconds` (10);
+  the exterior cell changed; or `CubeLean` / `CubeDistance` changed. At most one face every `CubeFaceInterval` (2) frames. A new place (other
+  interior or worldspace, a 1000-unit jump) still empties the cube and fills two faces a frame. `CubeLean` (on) leaves actors, misc items,
+  books, apparatus and anything under radius 48 (outdoors) / 24 (indoors) out of the draw. Missing keys: 1 / 0 / 0 / false = upstream's way.
+  Every 600 frames the log says how many faces were drawn ("UNOFFICIAL Reflections world cube: ...").
+  Bench (2026-11-27, owner's toml, faces from that log line; runs 20261127-154220 SunGI2, -155036 Saloon): standing still 6 faces in 600
+  frames (the 10 s refresh) against 600 before; turning a full circle 2-8 in 600; running 52 in ~280 frames (about one face in five frames)
+  until the player hit a wall; Saloon standing still 12-18 in 600 frames at the slot's ~24 fps (the refresh again). One face cost 0.6-1.2 ms
+  of GPU in the clean runs of 11-27 (0.15-0.26 ms in a later, loaded run), so standing still or turning the cube now costs about 1 % of
+  before and running about a fifth. Frame totals of these runs are not used: room 06's trace replay shared the GPU (every pass, TAA and
+  DLSS included, 2.3 times slower in the Saloon run); the owner accepted the runs as they are. Pictures (sheets `F:\NVR-bench\shots\u115\cube-*.png`):
+  puddle1 mirrors, tilted01 mirrors (|diff| under 1) and a 24-step turn at SunGI2 show no lag or missing object in the reflections.
+  Not measured: CubeLean's saving per face; a long run in the open.
 - Weapon reflections without RT: the first-person weapon reflects the surroundings through the trace's exact mirror ray (no jitter, no screen
   march), `[Shaders.Reflections.RT] Weapon` 0.65, `WeaponRoughness` 0.28. Weapon specular occlusion 0.75 (smoothstep 0.08-0.45) plus ours,
   `(1 - SurfaceWetShare)` on the world (puddle mirror a7116ba). Upstream's technique-0 albedo / COLOR3 pushes were dropped (our bindings 30 / 31
