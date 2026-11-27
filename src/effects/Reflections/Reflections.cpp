@@ -90,6 +90,13 @@ void ReflectionsEffect::UpdateSettings() {
 		Settings.CubeMoveThreshold = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMoveThreshold") ? std::clamp(cubeNode.FloatValue, 0.0f, 1000.0f) : 0.0f;
 		Settings.CubeRefreshSeconds = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeRefreshSeconds") ? std::clamp(cubeNode.FloatValue, 0.0f, 600.0f) : 0.0f;
 		Settings.CubeLean = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeLean") && cubeNode.BoolValue;
+		// (review) what the faces hold changed: every face is redrawn in turn. Only on a real change of these two (a settings reload
+		// happens for any key, and the bench reloads them at every shot).
+		static bool lastLean = Settings.CubeLean;
+		static float lastDistance = Settings.CubeDistance;
+		if (lastLean != Settings.CubeLean || lastDistance != Settings.CubeDistance) worldCubeStale = 0x3Fu;
+		lastLean = Settings.CubeLean;
+		lastDistance = Settings.CubeDistance;
 	}
 	Settings.CubeCapture = std::clamp(TheSettingManager->GetSettingF(section, "CubeCapture"), 0.02f, 1.0f);
 	Settings.CubeFade = std::clamp(TheSettingManager->GetSettingF(section, "CubeFade"), 0.0f, 0.2f);

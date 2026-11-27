@@ -4481,7 +4481,8 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 		for (int i = 0; i < lampCount; i++) {
 			const NiPointLight* l = bestLamps[i].light;
 			set += (((UInt32)(uintptr_t)l ^ 2166136261u) * 16777619u) ^ 0x9E3779B9u;
-			lightNow.lampLum += (0.2126f * l->Diff.r + 0.7152f * l->Diff.g + 0.0722f * l->Diff.b) * l->Dimmer * bestLamps[i].lod;
+			// (review) without Dimmer: candles, fires and barrels flicker through it every few frames; a lamp switched off leaves the set
+			lightNow.lampLum += (0.2126f * l->Diff.r + 0.7152f * l->Diff.g + 0.0722f * l->Diff.b) * bestLamps[i].lod;
 		}
 		lightNow.lampSet = set;
 	}
