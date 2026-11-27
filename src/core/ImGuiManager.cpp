@@ -2088,6 +2088,11 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.Reflections.Main", "CubeMode", "Environment reflections mode", nullptr, "How the live surroundings cube fills: 0 captures screen view only while Reflections is on, 1 keeps it updated for PBR metal/chrome too and fills unseen directions with sky and light grid, 2 (default) also renders a staggered 3D world cubemap so weapons, metal, and glass reflect overhead and behind you." },
 	{ "Shaders.Reflections.Main", "CubeResolution", "Environment cube resolution", nullptr, "Resolution per face for the live surroundings cubemap (64, 128, or 256). Higher gives sharper reflections on chrome and glossy surfaces. Needs a restart." },
 	{ "Shaders.Reflections.Main", "CubeDistance", "Environment cube distance", nullptr, "Maximum capture distance for 3D objects and point lamps in world-cubemap mode (mode 2)." },
+	// UNOFFICIAL 2026-11-27 cheaper world cube
+	{ "Shaders.Reflections.Main", "CubeFaceInterval", "Environment cube update interval", nullptr, "Frames between redraws of one face of the world cube (mode 2) once it is complete. Higher is cheaper while you move; reflections follow a little later." },
+	{ "Shaders.Reflections.Main", "CubeMoveThreshold", "Environment cube move distance", nullptr, "How far you move before the world cube (mode 2) is redrawn around you. Standing still in steady light it costs nothing. 0 redraws all the time." },
+	{ "Shaders.Reflections.Main", "CubeRefreshSeconds", "Environment cube refresh", nullptr, "Seconds after which a world-cube face is redrawn anyway, for doors and moving lamps. 0 never." },
+	{ "Shaders.Reflections.Main", "CubeLean", "Environment cube: big things only", nullptr, "Leaves people, creatures, clutter and small objects out of the world cube (mode 2). Cheaper; hardly visible in blurred reflections." },
 	// Sun shadows (Main)
 	{ "Shaders.ShadowsExteriors.Main", "Enabled", "Sun shadows", nullptr, "Turns the shadows cast by the sun on or off outdoors." },
 	{ "Shaders.ShadowsExteriors.Main", "Darkness", "Shadow darkness", nullptr, "How dark sun shadows are. Lower gives pale shadows, higher gives near-black ones." },
