@@ -1459,9 +1459,10 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 	const float cubeModeFlag = !cubeOn ? 0.0f : Settings.CubeMode == 0 ? 1.0f : (Settings.CubeMode >= 2 && WorldCubeReady()) ? 3.0f : 2.0f;
 	Constants.Cube2 = D3DXVECTOR4(Settings.CubeCapture, Settings.CubeFade, (float)(cubeLevels - 1), cubeModeFlag);
 	if (!cubeOn) { cubeValid = false; return; }
-	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
-	const double dx = (double)invView._41 - cubeInvView._41, dy = (double)invView._42 - cubeInvView._42,
-		dz = (double)invView._43 - cubeInvView._43;
+	// (2026-11-28 cube-keep-capture) the camera's world position: InvViewMatrix's translation is always 0 here (the view is camera
+	// relative; logged on the bench), so the jump test never fired and the distance moved was always 0.
+	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
+	const double dx = (double)camPos.x - cubeCamPos.x, dy = (double)camPos.y - cubeCamPos.y, dz = (double)camPos.z - cubeCamPos.z;
 	void* cell = Player ? Player->parentCell : nullptr;
 	const bool jumped = dx * dx + dy * dy + dz * dz > 1000.0 * 1000.0;
 	// UNOFFICIAL 2026-10-18: FrameNumber, not UpdateConstants calls: with those (two a frame) 'cubeFrame + 1 != frame' was true every
@@ -1483,7 +1484,7 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 	cubeCell = cell;
 	cubeValid = true;
 	cubeFrame = now;
-	cubeInvView = invView;
+	cubeCamPos = D3DXVECTOR3(camPos.x, camPos.y, camPos.z);
 }
 
 // The surroundings cube (techniques 5 Capture, 6 Filter): each face of the new capture cube from last frame's and the

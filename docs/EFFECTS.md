@@ -5373,7 +5373,7 @@ CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
   own faces, redrawn every 96 units). Out-of-view texels used to forget what was seen in ~6 frames, now ~23.
   - (2026-11-27 cube-keep-capture, owner: a window's reflection "gone as soon as i look away from the angle") out of view a texel now
     keeps what the screen showed, fading at CubeFade as on screen, and gives way to the world cube only as the camera MOVES: the distance
-    moved this frame / (2 x CubeMoveThreshold), passed as minus `TESR_ReflectionsCube.w` (Capture reads only w > 0 as a reset; CubeStep).
+    moved this frame (the camera's world position, `CameraPosition`) / (2 x CubeMoveThreshold), passed as minus `TESR_ReflectionsCube.w` (Capture reads only w > 0 as a reset; CubeStep). CubeStep used to read the view matrix's translation, always 0 here (camera relative), so its 1000-unit jump test never fired either; both now use `CameraPosition`.
     Turning on the spot keeps the capture; after walking 2 x CubeMoveThreshold (192 units) about a third of it is left. The world cube still
     fills directions never seen (a reset starts every texel from it).
 - `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a player's

@@ -309,7 +309,7 @@ private:
 	bool		cubeValid = false;
 	void*		cubeCell = nullptr;		// the cell the cube was captured in
 	UINT		cubeFrame = 0;			// FrameNumber of the last cube update
-	D3DXMATRIX	cubeInvView;			// the camera at the last cube update (for the jump test)
+	D3DXVECTOR3	cubeCamPos = D3DXVECTOR3(0.0f, 0.0f, 0.0f);	// the camera's world position at the last cube update (jump test, distance moved)
 	int			worldCubeNextFace = 0;	// next staggered cubemap face (0..5) for CubeMode >= 2
 	UINT		worldCubeMask = 0;		// bitmask of valid world-cube faces (0x3F when all 6 populated)
 	void*		worldCubeSpace = nullptr;// the interior cell, or the worldspace outdoors, the world cube's faces were drawn in
