@@ -466,6 +466,14 @@ static void PollProbeKey() {
 		frames = 120;
 		vk = VkForScanCode((BYTE)TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveKey"));
 		needShift = TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveKeyShift") != 0;
+		// (2026-11-28) LiveRequest 1 starts live mode, 2 stops it, read with the key every 120 frames and put back to 0: a shot list
+		// (the unattended bench) cannot press the key.
+		const int request = TheSettingManager->GetSettingI("Main.Develop.PerformanceProbe", "LiveRequest");
+		if (request != 0) {
+			TheSettingManager->SetSetting("Main.Develop.PerformanceProbe", "LiveRequest", 0);
+			if (request == 1 && !DeepProbe::LiveActive()) DeepProbe::RequestStartLive();
+			else if (request == 2 && DeepProbe::Active()) DeepProbe::RequestStop();
+		}
 	}
 	static KeyEdge probeKey;
 	if (!vk) { probeKey.Rose(false); return; }

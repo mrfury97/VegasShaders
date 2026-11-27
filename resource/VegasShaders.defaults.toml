@@ -56,6 +56,7 @@ SpikeMs = 33.4          # UNOFFICIAL (2026-11-28): a frame longer than this (or 
 MaxSpikes = 200         # UNOFFICIAL (2026-11-28): spike frames kept with their breakdown (the newest; 1-5000).
 AutosaveSeconds = 60.0  # UNOFFICIAL (2026-11-28): live mode rewrites its report folder this often (0 = only at stop).
 FrameCsvMaxMB = 64      # UNOFFICIAL (2026-11-28): live mode's frames.csv is renamed to frames.1.csv at this size (one old file kept).
+LiveRequest = 0         # UNOFFICIAL (2026-11-28), diagnostic, live: 1 starts live mode, 2 stops any running capture (read every 120 frames, then back to 0). For shot lists and the unattended bench, which cannot press LiveKey. 0: nothing.
 LiveHud = true          # UNOFFICIAL (2026-11-28): while live mode runs and the menu is closed, a few lines under the LIVE badge (frame time, spikes, the probe's cost, the top DLLs). Off: only the badge.
 
 [_Main.Transitions.Main]
