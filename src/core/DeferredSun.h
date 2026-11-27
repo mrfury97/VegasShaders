@@ -415,7 +415,7 @@ namespace DeferredSun {
 		LandLight::ReadColor = SettingForce::Mode() >= 2 || cfg.enabled;
 		if (LinearScene::DrawWatch == &LandDrawWatch || LinearScene::DrawWatch == &ObjectDrawWatch) LinearScene::DrawWatch = nullptr;	// (no watch across frames)
 		DebugView = cfg.debugView;
-		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && !ComputeFailed && !SunFadeDeferred::Fading && !SkylightingMode1 &&
+		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && !ComputeFailed && !SkylightingMode1 &&	// (2026-11-27 sunsheen-fade: the fade is the compute pass's too)
 			DxvkCompute::PassesOnRect() && DxvkCompute::Available() && !DxvkCompute::KeptOnD3D9("DeferredSun") &&
 			cfg.nvrDxvkDeferred != 0;
 		Shadows = cfg.shadows;
@@ -502,11 +502,12 @@ namespace DeferredSun {
 	// Eliminates saving/restoring 224 pixel constants, 208 sampler states, 15 render states, DeferredFog::FrameCopy,
 	// and DEPTH output while supporting both full resolution and RenderScale < 1.0 natively.
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool linearDepth, const NiDirectionalLight* sun) {
-		if (ComputeFailed || Vm.on || SunFadeDeferred::Fading || SkylightingMode1 || (!LinearScene::Linear && DebugView != 0)) return false;
-		// (2026-11-26 upstream 1.1.4 merge, review) Compute\DeferredSun.comp has no DS_WET_FILM: with DeferredWetness's film live this
-		// frame the D3D9 pass draws, so the film's sun highlight stays. (2026-11-27 upstream 1.1.5 merge: the compute pass now reads the
-		// screen-space shadows' mask, t_sssMask, so a live mask no longer sends the sun to the D3D9 pass.)
-		if (WetFilmCompiled && DeferredWetness::FilmLive) return false;
+		if (ComputeFailed || Vm.on || SkylightingMode1 || (!LinearScene::Linear && DebugView != 0)) return false;
+		// (2026-11-27 sunsheen-fade, owner: the deferred sun runs in Vulkan) the sun steps' fade (SunFadeDeferred::Fading: the kept atlas, its
+		// cascades, the movers' atlas) and DeferredWetness's film highlight (DS_WET_FILM; the 1.1.4 review's rule: the film's highlight stays)
+		// are the compute pass's too (kFlagSunCrossFade / kFlagShadowDynamic / kFlagWetFilm), so neither sends the sun to the D3D9 pass any
+		// more. Before, every sun step drew the D3D9 fade record, which with DeferredSkin has no room for SunSheen (DS_FADE_LEAN): the sheen
+		// went out for the 2 s of each step. (2026-11-27 upstream 1.1.5 merge: the screen-space shadows' mask is read here too, t_sssMask.)
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSun")) return false;
 		const CachedSettings& cfg = SyncSettings();
 		if (cfg.nvrDxvkDeferred == 0) return false;
@@ -568,8 +569,19 @@ namespace DeferredSun {
 			float rtSunRowW[4];              // 70
 			float rtSunData[4];              // 71
 			float dsSheen[4];                // 72 (2026-11-26 SunSheen: FillSheenConst; Compute\DeferredSun.comp cb.dsSheen; z / w clearcoat, pearl)
+			// (2026-11-27 sunsheen-fade) the sun steps' fade, filled only while SunFadeDeferred::Fading (ShadowsExteriorEffect's, by name)
+			float shadowOldNear[16];         // 73..76 TESR_ShadowOldCameraToLightTransformNear
+			float shadowOldMiddle[16];       // 77..80
+			float shadowOldFar[16];          // 81..84
+			float shadowOldLod[16];          // 85..88
+			float shadowOldNearCenter[4];    // 89 TESR_ShadowOldNearCenter
+			float shadowOldMiddleCenter[4];  // 90
+			float shadowOldFarCenter[4];     // 91
+			float shadowOldLodCenter[4];     // 92
+			float shadowCrossFade[4];        // 93 TESR_ShadowCrossFade (x the old share, yzw the kept maps' sun)
+			float shadowDynamicData[4];      // 94 TESR_ShadowDynamicData (x 1 / the movers' atlas size, 0 = not drawn)
 		};
-		static_assert(sizeof(ComputeConstants) == 73 * 16, "DeferredSun ComputeConstants layout mismatch");
+		static_assert(sizeof(ComputeConstants) == 95 * 16, "DeferredSun ComputeConstants layout mismatch");
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -595,6 +607,9 @@ namespace DeferredSun {
 				{ 1, 8, NVR_EXT_BIND_STORAGE_IMAGE,  8, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_scene
 				{ 1, 9, NVR_EXT_BIND_STORAGE_IMAGE,  9, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_skinSpec
 				{ 1, 10, NVR_EXT_BIND_SAMPLED_IMAGE, 10, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_sssMask
+				{ 1, 11, NVR_EXT_BIND_SAMPLED_IMAGE, 11, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowAtlasOld (2026-11-27 sunsheen-fade)
+				{ 1, 12, NVR_EXT_BIND_SAMPLED_IMAGE, 12, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowDynamic
+				{ 1, 13, NVR_EXT_BIND_SAMPLED_IMAGE, 13, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_wetFilm
 				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // linearSampler
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // pointSampler
@@ -683,6 +698,30 @@ namespace DeferredSun {
 		IDirect3DBaseTexture9* charTex = CharMapCompiled ? namedTex("TESR_CharShadowMap") : nullptr;
 		IDirect3DBaseTexture9* cloudTex = (ForwardShadowsCompiled && ForwardCloudShadows::Active) ? namedTex("TESR_CloudShadow") : nullptr;
 		IDirect3DBaseTexture9* rtSunTex = RtSunCompiled ? namedTex("TESR_RtSunForward") : nullptr;
+		// (2026-11-27 sunsheen-fade) a sun step's fade: the kept atlas and its cascades (Includes/Shadow.hlsl GetOldSunShadowPass's), and the
+		// movers' atlas when ShadowManager drew it this frame (TESR_ShadowDynamicData.x > 0). Without the kept atlas (not made yet, or its copy
+		// failed) the new shadow alone, as in the frames without a fade.
+		IDirect3DBaseTexture9* oldAtlasTex = nullptr;
+		IDirect3DBaseTexture9* dynamicTex = nullptr;
+		if (SunFadeDeferred::Fading && ForwardShadowsCompiled && atlasTex) {
+			copyBytes(cb.shadowCrossFade, "TESR_ShadowCrossFade", 16);
+			oldAtlasTex = cb.shadowCrossFade[0] > 0.0f ? namedTex("TESR_ShadowAtlasOld") : nullptr;
+			if (oldAtlasTex) {
+				copyBytes(cb.shadowOldNear, "TESR_ShadowOldCameraToLightTransformNear", 64);
+				copyBytes(cb.shadowOldMiddle, "TESR_ShadowOldCameraToLightTransformMiddle", 64);
+				copyBytes(cb.shadowOldFar, "TESR_ShadowOldCameraToLightTransformFar", 64);
+				copyBytes(cb.shadowOldLod, "TESR_ShadowOldCameraToLightTransformLod", 64);
+				copyBytes(cb.shadowOldNearCenter, "TESR_ShadowOldNearCenter", 16);
+				copyBytes(cb.shadowOldMiddleCenter, "TESR_ShadowOldMiddleCenter", 16);
+				copyBytes(cb.shadowOldFarCenter, "TESR_ShadowOldFarCenter", 16);
+				copyBytes(cb.shadowOldLodCenter, "TESR_ShadowOldLodCenter", 16);
+				copyBytes(cb.shadowDynamicData, "TESR_ShadowDynamicData", 16);
+				dynamicTex = cb.shadowDynamicData[0] > 0.0f ? namedTex("TESR_ShadowDynamic") : nullptr;
+			}
+		}
+		// (2026-11-27 sunsheen-fade, DS_WET_FILM) DeferredWetness's film target, written this frame by its pass (DeferredSun::Apply runs it first)
+		const bool filmLive = WetFilmCompiled && DeferredWetness::FilmLive && DeferredWetness::FilmTexture;
+		IDirect3DBaseTexture9* filmTex = filmLive ? static_cast<IDirect3DBaseTexture9*>(DeferredWetness::FilmTexture) : nullptr;
 
 		if (cloudTex) {
 			memcpy(cb.cloudSun, ForwardCloudShadows::Data, 16);
@@ -727,8 +766,8 @@ namespace DeferredSun {
 		float fog[4] = {};
 		const bool fogExact = LinearCompiled && DebugView == 0 && DeferredFog::Params(fog);
 		if (fogExact) memcpy(cb.dsFog, fog, 16);
-		bool sheenPuddleGate = false;	// (2026-11-26 SunSheen: this pass never runs for the view model or with the film live, above)
-		FillSheenConst(false, false, cb.dsSheen, sheenPuddleGate);
+		bool sheenPuddleGate = false;	// (2026-11-26 SunSheen: this pass never runs for the view model, above; 2026-11-27: the film's gate is per pixel)
+		FillSheenConst(false, filmLive, cb.dsSheen, sheenPuddleGate);
 
 		UINT flags = 0;
 		if (GBufferV2()) flags |= 1u << 0u;
@@ -759,6 +798,9 @@ namespace DeferredSun {
 			if (sssOn) flags |= 1u << 22u; // UNOFFICIAL 2026-11-26 Bottled Shaders Screen-Space Shadows
 		}
 		if (sheenPuddleGate) flags |= 1u << 23u;	// (2026-11-27 upstream 1.1.5 merge) SunSheen's standing-water gate (was dsSheen.z)
+		if (oldAtlasTex) flags |= 1u << 24u;	// (2026-11-27 sunsheen-fade) kFlagSunCrossFade
+		if (oldAtlasTex && dynamicTex) flags |= 1u << 25u;	// kFlagShadowDynamic
+		if (filmTex) flags |= 1u << 26u;	// kFlagWetFilm
 
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (FAILED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(cb), &cb))) return false;
@@ -777,6 +819,9 @@ namespace DeferredSun {
 			{ 8, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
 			{ 9, NVR_EXT_BIND_STORAGE_IMAGE,  skinSpecTarget,                   0, 0, 0, FALSE },
 			{ 10, NVR_EXT_BIND_SAMPLED_IMAGE, (sssOn && ScreenSpaceShadows::Texture) ? static_cast<IDirect3DBaseTexture9*>(ScreenSpaceShadows::Texture) : depthTex, 0, 0, 0, FALSE },
+			{ 11, NVR_EXT_BIND_SAMPLED_IMAGE, oldAtlasTex ? oldAtlasTex : depthTex, 0, 0, 0, FALSE },
+			{ 12, NVR_EXT_BIND_SAMPLED_IMAGE, dynamicTex ? dynamicTex : depthTex, 0, 0, 0, FALSE },
+			{ 13, NVR_EXT_BIND_SAMPLED_IMAGE, filmTex ? filmTex : depthTex,   0, 0, 0, FALSE },
 			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
 			{ 0, NVR_EXT_BIND_SAMPLER,        DxvkCompute::LinearClamp(),       0, 0, 0, FALSE },
 			{ 1, NVR_EXT_BIND_SAMPLER,        DxvkCompute::PointClamp(),        0, 0, 0, FALSE },
@@ -878,7 +923,8 @@ namespace DeferredSun {
 
 		// UNOFFICIAL 2026-11-23 Interior DeferredSun fold: indoors on Vulkan compute, pass directional fill params to
 		// DeferredLamps so both interior directional lighting and froxel lamps run in a single compute dispatch.
-		// (2026-11-27 upstream 1.1.5 merge: not with DeferredWetness's film live, which only the D3D9 pass lights, as TryApplyCompute.)
+		// (2026-11-27 upstream 1.1.5 merge: not with DeferredWetness's film live, which this fold does not light; TryApplyCompute does since
+		// 2026-11-27 sunsheen-fade.)
 		if (TheShaderManager && !TheShaderManager->GameState.isExterior && !Vm.on && DebugView == 0 &&
 			!SunFadeDeferred::Fading && !SkylightingMode1 && !ComputeFailed && !(WetFilmCompiled && DeferredWetness::FilmLive) &&
 			!DxvkCompute::KeptOnD3D9("DeferredSun") && DeferredLamps::CanFoldInteriorDir(d, t)) {

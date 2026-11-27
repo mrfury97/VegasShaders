@@ -1,8 +1,9 @@
 // UNOFFICIAL 2026-11-21 (Phase 2): Vulkan Compute DeferredSun pass (Compute\DeferredSun.spv).
 // Replaces the D3D9 DeferredSun pixel shader pass + 224-constant/208-sampler save/restore + DeferredFog::FrameCopy
 // StretchRect + DEPTH output (which disables Early-Z). Runs natively at full resolution and RenderScale < 1.0 over
-// [viewport.xy, viewport.xy + viewport.zw). Fallback: Vm.on (DeferredFirstPerson), SunFadeDeferred::Fading,
-// non-PCF shadow modes, and SkylightingMode 1 remain on the D3D9 pass.
+// [viewport.xy, viewport.xy + viewport.zw). Fallback: Vm.on (DeferredFirstPerson), non-PCF shadow modes, and SkylightingMode 1
+// remain on the D3D9 pass. (2026-11-27 sunsheen-fade: the sun steps' cross-fade, SunFadeDeferred::Fading, and DeferredWetness's film
+// highlight, DS_WET_FILM, run here too: kFlagSunCrossFade / kFlagWetFilm below.)
 // Compile: glslangValidator -V --target-env vulkan1.1 -o DeferredSun.spv DeferredSun.comp
 #version 450
 #extension GL_GOOGLE_include_directive : enable
@@ -22,6 +23,11 @@ layout(set = 1, binding = 7) uniform texture2D t_rtSunForward;  // TESR_RtSunFor
 layout(set = 1, binding = 8, rgba16f) uniform image2D i_scene;    // Scene HDR RT0 (unbound from RT0 during dispatch)
 layout(set = 1, binding = 9, rgba16f) uniform image2D i_skinSpec; // DeferredSkin::Spec (or 1x1 dummy when inactive)
 layout(set = 1, binding = 10) uniform texture2D t_sssMask;        // TESR_ScreenSpaceShadows (stand-in t_depth if inactive)
+// UNOFFICIAL 2026-11-27 sunsheen-fade (core/SunFadeDeferred.h; Includes/Shadow.hlsl SUN_CROSSFADE_PASS, the D3D9 fade record's lookups):
+// the atlas kept from before the sun step, the half-size atlas of the movers drawn this frame, and DeferredWetness's film target
+layout(set = 1, binding = 11) uniform texture2D t_shadowAtlasOld; // TESR_ShadowAtlasOld (stand-in t_depth unless fading)
+layout(set = 1, binding = 12) uniform texture2D t_shadowDynamic;  // TESR_ShadowDynamic (stand-in t_depth unless fading with it)
+layout(set = 1, binding = 13) uniform texture2D t_wetFilm;        // DeferredWetness::FilmTexture (stand-in t_depth unless FilmLive)
 
 layout(push_constant) uniform Push {
     uint linearSampler;   // 0: LINEAR, CLAMP (cloud shadow)
@@ -77,6 +83,17 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  rtSunData;              // 71: TESR_RtSunData
     vec4  dsSheen;                // 72: DS_Sheen (x strength, y roughness, z clearcoat, w pearlescence; 2026-11-27 upstream 1.1.5 merge: our
                                   //     land smooth-roughness gate moved from z to flag bit 23, kFlagSheenPuddleGate, so z / w carry upstream's coat)
+    // UNOFFICIAL 2026-11-27 sunsheen-fade: the sun steps' cross-fade (filled only while SunFadeDeferred::Fading; read only with kFlagSunCrossFade)
+    mat4  shadowOldNear;          // 73..76: TESR_ShadowOldCameraToLightTransformNear (the cascades of before the step, camera-relative now)
+    mat4  shadowOldMiddle;        // 77..80: TESR_ShadowOldCameraToLightTransformMiddle
+    mat4  shadowOldFar;           // 81..84: TESR_ShadowOldCameraToLightTransformFar
+    mat4  shadowOldLod;           // 85..88: TESR_ShadowOldCameraToLightTransformLod
+    vec4  shadowOldNearCenter;    // 89: TESR_ShadowOldNearCenter
+    vec4  shadowOldMiddleCenter;  // 90: TESR_ShadowOldMiddleCenter
+    vec4  shadowOldFarCenter;     // 91: TESR_ShadowOldFarCenter
+    vec4  shadowOldLodCenter;     // 92: TESR_ShadowOldLodCenter
+    vec4  shadowCrossFade;        // 93: TESR_ShadowCrossFade (x the old shadows' share, 1 at the step .. 0; yzw the sun the kept maps were drawn for)
+    vec4  shadowDynamicData;      // 94: TESR_ShadowDynamicData (x 1 / the movers' atlas size, 0 = not drawn this frame)
 } cb;
 
 // Flag bits (must match DeferredSun.h)
@@ -104,6 +121,9 @@ const uint kFlagMaterialSSS      = 1u << 20u;
 const uint kFlagIsExterior       = 1u << 21u;
 const uint kFlagSSShadows        = 1u << 22u;
 const uint kFlagSheenPuddleGate  = 1u << 23u;   // (2026-11-27 upstream 1.1.5 merge) SunSheen: drop it on the land's smooth pixels (was dsSheen.z)
+const uint kFlagSunCrossFade     = 1u << 24u;   // (2026-11-27 sunsheen-fade) a sun step's fade runs: t_shadowAtlasOld and cb.shadowOld* are this frame's
+const uint kFlagShadowDynamic    = 1u << 25u;   // (2026-11-27 sunsheen-fade) with it: t_shadowDynamic holds this frame's movers
+const uint kFlagWetFilm          = 1u << 26u;   // (2026-11-27 sunsheen-fade) DeferredWetness's film target holds this frame's film (DS_WET_FILM)
 
 bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
 
@@ -438,6 +458,24 @@ vec3 EvalSunSheen(vec3 N, vec3 V, vec3 L, vec3 albedo, vec3 sunColor, float r, f
     return (glaze + dustSheen) * (strength * dry * roughW);
 }
 
+// UNOFFICIAL 2026-11-27 sunsheen-fade (DS_WET_FILM): Includes/Wetness.hlsl WetSpecular, the water film's highlight from one light (GGX, F0
+// 0.02), N.L included. Keep in step.
+vec3 WetSpecular(vec3 N, vec3 V, vec3 L, vec3 light, float roughness) {
+    const vec3 H = normalize(L + V);
+    const float NdotL = saturate(dot(N, L));
+    const float NdotV = saturate(dot(N, V)) + 1e-4;
+    const float NdotH = saturate(dot(N, H));
+    const float VdotH = saturate(dot(V, H));
+    const float a = roughness * roughness;
+    const float a2 = a * a;
+    const float d = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    const float D = a2 / (3.14159265 * d * d);
+    const float k = a * 0.5;
+    const float vis = 0.25 / ((NdotL * (1.0 - k) + k) * (NdotV * (1.0 - k) + k));
+    const float F = 0.02 + 0.98 * pow(1.0 - VdotH, 5.0);
+    return light * (D * vis * F * NdotL);
+}
+
 vec3 LandSun(vec3 L, vec3 sunLin, vec3 V, vec3 N, vec3 albedo, float r) {
     if (cb.terrainExtraData.x != 0.0) {
         const vec3 graded = mix(vec3(luma(albedo)), albedo, cb.terrainExtraData.y);
@@ -681,7 +719,13 @@ vec3 ShadowAtlasPoint(vec4 clipL, vec2 quad) {
 float ShadowSlack(float n, float slopeBias, float slackCap, bool useCap) {
     return useCap ? min(n * slopeBias, slackCap) : (n * slopeBias);
 }
-float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slackCap, bool useCap) {
+// (2026-11-27 sunsheen-fade) one depth of the live atlas, or of the one kept from before the sun step (old: GetOldSunShadowMaps); old is a
+// constant at every call, so the branch folds away
+float AtlasDepth(bool old, vec2 uv) {
+    if (old) return textureLod(sampler2D(t_shadowAtlasOld, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).x;
+    return textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), uv, 0.0).x;
+}
+float ShadowPCF3x3(bool old, vec2 uv, float depth, vec2 quad, float slopeBias, float slackCap, bool useCap) {
     const float texW = cb.shadowBlur.x;
     const vec2 uvLo = quad + texW * 0.5;
     const vec2 uvHi = quad + 0.5 - texW * 0.5;
@@ -697,7 +741,7 @@ float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slack
         for (int cyi = 0; cyi < 4; cyi++) {
             for (int cxi = 0; cxi < 4; cxi++) {
                 vec2 tapUV = clamp((b + vec2(float(cxi - 1), float(cyi - 1)) + 0.5) * texW, uvLo, uvHi);
-                cubic += (cubicDepth <= textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * cx[cxi] * cy[cyi];
+                cubic += (cubicDepth <= AtlasDepth(old, tapUV) ? 1.0 : 0.0) * cx[cxi] * cy[cyi];
             }
         }
         return cubic;
@@ -711,34 +755,34 @@ float ShadowPCF3x3(vec2 uv, float depth, vec2 quad, float slopeBias, float slack
     for (int y = 0; y < 3; y++) {
         for (int x = 0; x < 3; x++) {
             vec2 tapUV = clamp((c + vec2(float(x - 1), float(y - 1)) + 0.5) * texW, uvLo, uvHi);
-            lit += (depth <= textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * wx[x] * wy[y];
+            lit += (depth <= AtlasDepth(old, tapUV) ? 1.0 : 0.0) * wx[x] * wy[y];
         }
     }
     return lit;
 }
-float ShadowPCF2x2Clamped(vec2 uv, float depth, vec2 uvLo, vec2 uvHi) {
+float ShadowPCF2x2Clamped(bool old, vec2 uv, float depth, vec2 uvLo, vec2 uvHi) {
     const float texW = cb.shadowBlur.x;
     vec2 p = uv / texW - 0.5;
     vec2 base = floor(p);
     vec2 f = p - base;
     vec2 uv0 = (base + 0.5) * texW;
     vec4 d = vec4(
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0, uvLo, uvHi), 0.0).x,
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(texW, 0.0), uvLo, uvHi), 0.0).x,
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + vec2(0.0, texW), uvLo, uvHi), 0.0).x,
-        textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv0 + texW, uvLo, uvHi), 0.0).x
+        AtlasDepth(old, clamp(uv0, uvLo, uvHi)),
+        AtlasDepth(old, clamp(uv0 + vec2(texW, 0.0), uvLo, uvHi)),
+        AtlasDepth(old, clamp(uv0 + vec2(0.0, texW), uvLo, uvHi)),
+        AtlasDepth(old, clamp(uv0 + texW, uvLo, uvHi))
     );
     vec4 lit = vec4(lessThanEqual(vec4(depth), d));
     return mix(mix(lit.x, lit.y, f.x), mix(lit.z, lit.w, f.x), f.y);
 }
-float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float bias, bool contact,
+float SampleShadowAtlasPCSS(bool old, vec3 position, mat4 lightTransform, vec2 quad, float bias, bool contact,
                             float slopeBias, float slackCap, bool useCap, float softnessCap, float minPenumbra) {
     vec4 lightSpace = lightTransform * vec4(position, 1.0);
     lightSpace.xyz /= lightSpace.w;
     vec2 uv = vec2(lightSpace.x * 0.5 + 0.5, lightSpace.y * -0.5 + 0.5) * 0.5 + quad;
     float depth = lightSpace.z - bias;
     if (!HasFlag(kFlagContactHardening)) {
-        return ShadowPCF3x3(uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
+        return ShadowPCF3x3(old, uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
     }
     float worldPerDepth = 1.0 / length(vec3(lightTransform[0][2], lightTransform[1][2], lightTransform[2][2]));
     float uvPerWorld = 0.25 * length(vec3(lightTransform[0][0], lightTransform[1][0], lightTransform[2][0]));
@@ -751,7 +795,7 @@ float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float
         float casterSum = 0.0, casters = 0.0;
         float searchDepth = depth - ShadowSlack(0.73 * cb.contactHardeningData.y * softnessCap + 1.0, slopeBias, slackCap, useCap);
         for (int s = 0; s < 5; s++) {
-            float d = textureLod(sampler2D(t_shadowAtlas, NVR_SAMPLER(pc.pointSampler)), clamp(uv + kContactSearch[s] * maxRadius, uvLo, uvHi), 0.0).x;
+            float d = AtlasDepth(old, clamp(uv + kContactSearch[s] * maxRadius, uvLo, uvHi));
             float blocks = d < searchDepth ? 1.0 : 0.0;
             casterSum += d * blocks;
             casters += blocks;
@@ -764,7 +808,7 @@ float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float
     }
     float w3 = cb.contactHardeningData.z > 0.0 ? saturate(2.0 - radius / texW) : (radius <= texW ? 1.0 : 0.0);
     float lit = 0.0;
-    if (w3 > 0.0) lit = w3 * ShadowPCF3x3(uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
+    if (w3 > 0.0) lit = w3 * ShadowPCF3x3(old, uv, depth - ShadowSlack(1.5, slopeBias, slackCap, useCap), quad, slopeBias, slackCap, useCap);
     if (w3 < 1.0) {
         float discDepth = depth - ShadowSlack(radius / texW + 1.0, slopeBias, slackCap, useCap);
         vec2 turn = vec2(1.0, 0.0);
@@ -772,22 +816,23 @@ float SampleShadowAtlasPCSS(vec3 position, mat4 lightTransform, vec2 quad, float
             float ang = 6.2831853 * fract(52.9829189 * fract(dot(floor(uv / texW * 3.0), vec2(0.06711056, 0.00583715))));
             turn = vec2(cos(ang), sin(ang));
         }
-        float disc = ShadowPCF2x2Clamped(uv, discDepth, uvLo, uvHi);
+        float disc = ShadowPCF2x2Clamped(old, uv, discDepth, uvLo, uvHi);
         for (int i = 0; i < 8; i++) {
             vec2 o = kContactDisc8[i];
-            disc += ShadowPCF2x2Clamped(uv + vec2(o.x * turn.x - o.y * turn.y, o.x * turn.y + o.y * turn.x) * radius, discDepth, uvLo, uvHi);
+            disc += ShadowPCF2x2Clamped(old, uv + vec2(o.x * turn.x - o.y * turn.y, o.x * turn.y + o.y * turn.x) * radius, discDepth, uvLo, uvHi);
         }
         lit += (1.0 - w3) * disc / 9.0;
     }
     return lit;
 }
-float SunCascadeTap(float c, vec3 worldPos, vec3 worldNormal, float offset, float bias,
+float SunCascadeTap(bool old, float c, vec3 worldPos, vec3 worldNormal, float offset, float bias,
                     float slopeBias, float slackCap, bool useCap, float softnessCap, float minPenumbra) {
-    mat4 lightTransform = c < 0.5 ? cb.shadowNear : c < 1.5 ? cb.shadowMiddle : c < 2.5 ? cb.shadowFar : cb.shadowLod;
+    mat4 lightTransform = old ? (c < 0.5 ? cb.shadowOldNear : c < 1.5 ? cb.shadowOldMiddle : c < 2.5 ? cb.shadowOldFar : cb.shadowOldLod)
+                              : (c < 0.5 ? cb.shadowNear : c < 1.5 ? cb.shadowMiddle : c < 2.5 ? cb.shadowFar : cb.shadowLod);
     vec2 quadrant = c < 0.5 ? vec2(0.0, 0.0) : c < 1.5 ? vec2(0.5, 0.0) : c < 2.5 ? vec2(0.0, 0.5) : vec2(0.5, 0.5);
     vec3 position = worldPos + offset * worldNormal;
     bool doContact = HasFlag(kFlagContactHardening) && (c < 1.5) && (cb.contactHardeningData.x > 0.0 || minPenumbra > 0.0);
-    return SampleShadowAtlasPCSS(position, lightTransform, quadrant, bias, doContact, slopeBias, slackCap, useCap, softnessCap, minPenumbra);
+    return SampleShadowAtlasPCSS(old, position, lightTransform, quadrant, bias, doContact, slopeBias, slackCap, useCap, softnessCap, minPenumbra);
 }
 float CharacterMapShadow(vec3 worldPos, vec3 worldNormal, float NdotL, float cascadeShadow) {
     float texel = max(cb.charShadowData.x, 1.0 / 16384.0);
@@ -847,6 +892,96 @@ float DSCloudSunAt(vec3 P, float strength) {
     float inside = saturate(min(edge.x, edge.y) * 10.0);
     return mix(1.0, textureLod(sampler2D(t_cloudShadow, NVR_SAMPLER(pc.linearSampler)), suv, 0.0).r, inside * strength);
 }
+// UNOFFICIAL 2026-11-27 sunsheen-fade (core/SunFadeDeferred.h; the D3D9 fade record's Includes/Shadow.hlsl GetOldSunShadowPass): the shadow
+// from before the sun step. At the step's first frame it must be exactly what this pass showed the frame before, or every step pulses, so
+// it is GetSunShadowMaps below on the kept maps: the same cascade choice, handover blend, normal offset, slacks, contact hardening and
+// caster reach, with the kept cascades (cb.shadowOld*), the kept atlas and the sun they were drawn for (cb.shadowCrossFade.yzw). covered 0:
+// no kept cascade reaches the point (the camera has moved on since the step): the new shadow alone there. Keep in step with it.
+float GetOldSunShadowMaps(vec3 P, vec3 Nw, bool skinPx, out float covered) {
+    float nDL = dot(Nw, cb.shadowCrossFade.yzw);
+    float offS = saturate(1.0 - nDL);
+    vec4 rad = vec4(cb.shadowOldNearCenter.w, cb.shadowOldMiddleCenter.w, cb.shadowOldFarCenter.w, cb.shadowOldLodCenter.w);
+    vec4 tw = 4.0 * rad * max(cb.shadowBlur.x, 1.0 / 16384.0);
+    vec4 offD = offS * 1.5 * tw;
+    float slopeBias = 2.0 * cb.shadowBlur.x * min(sqrt(saturate(1.0 - nDL * nDL)) / max(nDL, 0.05), 5.0);
+    float charReach = (HasFlag(kFlagSlackCapAll) ? cb.shadowBlur.w : (HasFlag(kFlagSkinEnabled) && skinPx ? cb.shadowBlur.w : 0.0));
+    bool useCap = charReach > 0.0;
+    float slackCap = 1.0e9;
+    if (useCap) {
+        offD = min(offD, charReach * rad / max(rad.x, 0.001));
+        slackCap = charReach / (2.0 * max(rad.x, 0.001) * max(nDL, 0.2));
+    }
+    float minPenumbra = (HasFlag(kFlagSkinEnabled) && skinPx) ? cb.shadowForwardData.z : 0.0;
+    float bi = 0.0002 * (1.0 + offS);
+    vec4 st = rad - ShadowCascadeBands(rad);
+    vec4 dst;
+    dst.x = length(P - cb.shadowOldNearCenter.xyz);
+    dst.y = length(P - cb.shadowOldMiddleCenter.xyz);
+    dst.z = length(P - cb.shadowOldFarCenter.xyz);
+    dst.w = length(P - cb.shadowOldLodCenter.xyz);
+
+    float cascade = -1.0, fade = 0.0;
+    if (dst.x < rad.x) { cascade = 0.0; fade = smoothstep(st.x, rad.x, dst.x); }
+    else if (dst.y < rad.y) { cascade = 1.0; fade = smoothstep(st.y, rad.y, dst.y); }
+    else if (dst.z < rad.z) { cascade = 2.0; fade = smoothstep(st.z, rad.z, dst.z); }
+    else if (dst.w < rad.w) { cascade = 3.0; fade = smoothstep(st.w, rad.w, dst.w); }
+    covered = cascade >= 0.0 ? 1.0 : 0.0;
+    float offsetHere = cascade < 0.5 ? mix(offD.x, offD.y, fade) : cascade < 1.5 ? mix(offD.y, offD.z, fade) :
+                       cascade < 2.5 ? mix(offD.z, offD.w, fade) : offD.w;
+    float slackScale = cascade < 0.5 ? mix(rad.x / max(rad.y, 0.001), 1.0, fade) : 1.0;
+
+    float sh = 1.0;
+    if (cascade >= 0.0 && cascade < 3.5) {
+        sh = SunCascadeTap(true, cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
+        if (fade > 0.0) {
+            float next = 1.0;
+            if (cascade < 2.5) {
+                next = SunCascadeTap(true, cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
+            }
+            sh = mix(sh, next, fade);
+        }
+    }
+    return saturate(sh);
+}
+// UNOFFICIAL 2026-11-27 sunsheen-fade (Includes/Shadow.hlsl GetDynamicSunShadowPass, the same expressions: keep in step): the kept atlas
+// holds the static casters only (core/ShadowManager.cpp draws them first and keeps that), so a mover's live shadow would fade in from
+// nothing at every step; the movers are drawn again into a half-size atlas each fading frame and looked up here, on the live cascades.
+// slopeBias / slackCap / useCap: the live lookup's (GetSunShadowMaps).
+float GetDynamicSunShadow(vec3 P, vec3 Nw, float slopeBias, float slackCap, bool useCap) {
+    float d0 = length(P - cb.shadowNearCenter.xyz);
+    float d1 = length(P - cb.shadowMiddleCenter.xyz);
+    float d2 = length(P - cb.shadowFarCenter.xyz);
+    float radC;
+    mat4 lightTransform;
+    vec2 quad;
+    if (d0 < cb.shadowNearCenter.w) { radC = cb.shadowNearCenter.w; lightTransform = cb.shadowNear; quad = vec2(0.0, 0.0); }
+    else if (d1 < cb.shadowMiddleCenter.w) { radC = cb.shadowMiddleCenter.w; lightTransform = cb.shadowMiddle; quad = vec2(0.5, 0.0); }
+    else if (d2 < cb.shadowFarCenter.w) { radC = cb.shadowFarCenter.w; lightTransform = cb.shadowFar; quad = vec2(0.0, 0.5); }
+    else return 1.0;
+    float dynTexW = cb.shadowDynamicData.x;
+    float tw = 4.0 * radC * dynTexW;
+    float nDL = dot(Nw, cb.smoothedSunDir.xyz);
+    float offS = saturate(1.0 - nDL);
+    float offset = offS * 1.5 * tw;
+    float bi = 0.0002 * (1.0 + offS);
+    vec3 at = ShadowAtlasPoint(lightTransform * vec4(P + offset * Nw, 1.0), quad);
+    float depth = at.z - bi - ShadowSlack(3.0, slopeBias, slackCap, useCap);
+    vec2 uvLo = quad + dynTexW * 0.5;
+    vec2 uvHi = quad + 0.5 - dynTexW * 0.5;
+    vec2 p = at.xy / dynTexW - 0.5;
+    vec2 c = floor(p + 0.5);
+    vec2 f = p - c;
+    vec3 wx = vec3(0.5 * (0.5 - f.x) * (0.5 - f.x), 0.75 - f.x * f.x, 0.5 * (0.5 + f.x) * (0.5 + f.x));
+    vec3 wy = vec3(0.5 * (0.5 - f.y) * (0.5 - f.y), 0.75 - f.y * f.y, 0.5 * (0.5 + f.y) * (0.5 + f.y));
+    float lit = 0.0;
+    for (int y = 0; y < 3; y++) {
+        for (int x = 0; x < 3; x++) {
+            vec2 tapUV = clamp((c + vec2(float(x - 1), float(y - 1)) + 0.5) * dynTexW, uvLo, uvHi);
+            lit += (depth <= textureLod(sampler2D(t_shadowDynamic, NVR_SAMPLER(pc.pointSampler)), tapUV, 0.0).x ? 1.0 : 0.0) * wx[x] * wy[y];
+        }
+    }
+    return saturate(lit);
+}
 float GetSunShadowMaps(vec3 P, vec3 Nw, bool skinPx) {
     if (!HasFlag(kFlagForwardShadows) || cb.shadowForwardData.x != 0.0 || cb.shadowFormatData.z == 0.0 ||
         cb.shadowFade.y == 0.0 || cb.shadowFormatData.x != 3.0) {
@@ -886,16 +1021,28 @@ float GetSunShadowMaps(vec3 P, vec3 Nw, bool skinPx) {
     // NVR_NO_SM3_LIMITS smooth handover blend (no temp register limit in Vulkan compute)
     float sh = 1.0;
     if (cascade >= 0.0 && cascade < 3.5) {
-        sh = SunCascadeTap(cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
+        sh = SunCascadeTap(false, cascade, P, Nw, offsetHere, bi, slopeBias, slackCap, useCap, 1.0, minPenumbra);
         if (fade > 0.0) {
             float next = 1.0;
             if (cascade < 2.5) {
-                next = SunCascadeTap(cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
+                next = SunCascadeTap(false, cascade + 1.0, P, Nw, offsetHere, bi, slopeBias * slackScale, slackCap, useCap, slackScale, minPenumbra);
             }
             sh = mix(sh, next, fade);
         }
     }
     sh = saturate(sh);
+    // UNOFFICIAL 2026-11-27 sunsheen-fade: a sun step's cross-fade, part old shadow, part new (Includes/Shadow.hlsl GetSunShadowMaps'
+    // SUN_CROSSFADE_PASS branch, the same order: after the cascades, before the character map and the low sun's fade)
+    if (HasFlag(kFlagSunCrossFade) && cb.shadowCrossFade.x > 0.0) {
+        float covered;
+        const float oldShadow = GetOldSunShadowMaps(P, Nw, skinPx, covered);
+        float blended = mix(sh, oldShadow, cb.shadowCrossFade.x * covered);
+        // the kept atlas has the static casters only: the movers' live shadow where the live one is shadowed and the kept one lit
+        if (HasFlag(kFlagShadowDynamic) && sh < 0.999 && oldShadow > sh + 0.001 && cb.shadowDynamicData.x > 0.0) {
+            blended = min(blended, max(sh, GetDynamicSunShadow(P, Nw, slopeBias, slackCap, useCap)));
+        }
+        sh = blended;
+    }
     if (HasFlag(kFlagCharShadowMap) && cb.charShadowData.w > 0.0) {
         sh = CharacterMapShadow(P, Nw, nDL, sh);
     }
@@ -1016,6 +1163,17 @@ void main() {
     const float dsSpecF0 = (cb.dsVis.y > 0.5 && !land) ? specF0 : 0.04;
     const float dsSpecFade = cb.dsVis.w > 0.0 ? clamp(1.0 - (length(P) - cb.dsVis.z) * cb.dsVis.w, 0.0, 1.0) : 1.0;
 
+    // UNOFFICIAL 2026-11-27 sunsheen-fade (DeferredSun.hlsl DS_WET_FILM): DeferredWetness's film, as its pass (run before this one,
+    // DeferredSun::Apply) left it in the film target this frame: r round(8 murk) + 0.99 gloss, g roughness, b / a the film normal (octahedral)
+    vec4 film = vec4(0.0);
+    float filmGloss = 0.0;
+    if (HasFlag(kFlagWetFilm)) {
+        film = texelFetch(t_wetFilm, px, 0);
+        filmGloss = saturate((film.r - floor(film.r)) / 0.99);
+    }
+    // SunSheen's keep (DeferredSun.hlsl DSSheenKeep): none where the film's own highlight takes over (its weight, smoothstep(0, 0.2, gloss))
+    const float filmSheenKeep = 1.0 - smoothstep(0.0, 0.2, filmGloss);
+
     float sssAmbScalar = 0.0;
     vec3 light;
     if (skinPx) {
@@ -1026,18 +1184,25 @@ void main() {
             light = albedo.rgb * hueF * FoliageSunWeightOf(m.b) + (grassF ? hueF * FoliageHighlightOf(FDFoliageHighlightEnc(m.g)) : vec3(0.0));
         } else if (land) {
             light = LandSun(Lland, sunLand, V, N, albedo.rgb, r);
-            // (2026-11-26 SunSheen) as DeferredSun.hlsl; this pass never runs with DeferredWetness's film live (core/DeferredSun.h), so the
-            // weather's wetness in dsSheen.x and the standing-water gate (kFlagSheenPuddleGate: the land's smooth pixels) are the wet gates here
+            // (2026-11-26 SunSheen) as DeferredSun.hlsl: the weather's wetness in dsSheen.x, the standing-water gate (kFlagSheenPuddleGate: the
+            // land's smooth pixels, only without a live film) and (2026-11-27 sunsheen-fade) the film's gloss are the wet gates here
             if (cb.dsSheen.x > 0.0001) {
-                const float sheenKeep = HasFlag(kFlagSheenPuddleGate) ? smoothstep(0.08, 0.25, r) : 1.0;
+                const float sheenKeep = (HasFlag(kFlagSheenPuddleGate) ? smoothstep(0.08, 0.25, r) : 1.0) * filmSheenKeep;
                 light += sheenKeep * EvalSunSheen(N, V, Lland, albedo.rgb, sunLand * (cb.terrainExtraData.x != 0.0 ? LinScale(cb.terrainData.z) : 1.0), r, clamp(cb.terrainData.x, 0.0, 1.0), 0.0, cb.dsSheen.x, cb.dsSheen.y);
             }
         } else {
             const float isSpec = FDSunSpecular(albedo.a, m.r);
             light = GetSunLightingModel(isSpec, L, sunLin, V, N, albedo.rgb, r, metal, dsSpecF0, dsSpecFade);
             if (cb.dsSheen.x > 0.0001) {
-                light += EvalSunSheen(N, V, L, albedo.rgb, sunLin * LinScale(cb.pbrData.z), r, metal, isSpec, cb.dsSheen.x, cb.dsSheen.y);
+                light += filmSheenKeep * EvalSunSheen(N, V, L, albedo.rgb, sunLin * LinScale(cb.pbrData.z), r, metal, isSpec, cb.dsSheen.x, cb.dsSheen.y);
             }
+        }
+        // (2026-11-27 sunsheen-fade, DeferredSun.hlsl DS_WET_FILM) the wet film's sun highlight where DeferredWetness wrote a film this frame (the
+        // near land, objects and parallax; 0 everywhere else): the land with its own sun x its light scale (TerrainTemplate.hlsl), objects with
+        // the sun x the light scale (ObjectTemplate.hlsl ObjectWetFilm); x the shadow and the recorded share below, as forward's sunMul
+        if (filmGloss > 0.001) {
+            light += WetSpecular(ShadowDecodeNormal(film.ba), V, land ? Lland : L, land ? sunLand * LinScale(cb.terrainData.z) : sunLin * LinScale(cb.pbrData.z),
+                film.g) * smoothstep(0.0, 0.2, filmGloss);
         }
         // UNOFFICIAL 2026-11-25 MaterialSSS Phase 2 (parity with DeferredSun.hlsl): fold before GetSunShadow so backlit pixels test cascades accurately.
         if (HasFlag(kFlagMaterialSSS) && abs(model - 8.0) > 0.5) {

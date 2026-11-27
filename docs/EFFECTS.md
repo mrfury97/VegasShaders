@@ -5518,8 +5518,8 @@ Open: the Vulkan frag (Compute/ShadowsExteriors.frag) is not written; the file i
 - Upstream 1.1.4 (merged 2026-11-26): `[Shaders.ShadowsExteriors.Deferred] MatchSunDisc` is off by default (settings step 100):
   the deferred sun lights surfaces from vanilla FNV's clamped sun direction again, which keeps the land's normal-map and parallax
   relief around midday; on, it follows the true sun disc (as the sky and the shadow cascades). 1.1.4 also adds a Vulkan compute
-  DeferredSun (`Compute/DeferredSun.comp`, behind `[Main.Main.Performance] NvrDxvkDeferred`, off here); it stands aside for the
-  D3D9 pass in frames where DeferredWetness's film is live (it has no film highlight).
+  DeferredSun (`Compute/DeferredSun.comp`, behind `[Main.Main.Performance] NvrDxvkDeferred`). Since 2026-11-27 (section 14) it is on by
+  default and also draws the sun steps' fade and the wet film's highlight, so neither sends the sun to the D3D9 pass any more.
 
 ### 11. Sun sheen (deferred sun, 2026-11-26)
 
@@ -5541,9 +5541,12 @@ Ported by hand from upstream 1.1.5-test4 (only this term; its MaterialSSS, RealS
   writes the water's gloss into its roughness there).
 - Constants: D3D9 `DS_Sheen` c18 (x strength, y roughness, z clearcoat, w pearlescence: upstream 1.1.5's lanes); our land smooth-roughness
   (puddle) gate moved to `DS_SheenGate` c21.x (2026-11-27 merge, upstream 1.1.5). Compute: `cb.dsSheen` (z / w = clearcoat / pearl), 16-byte
-  slot 72 (byte 1152; the block is 73 x 16 bytes, `static_assert` in `DeferredSun.h`); the puddle gate is flag bit 23
-  (`kFlagSheenPuddleGate`). The sun-fade record keeps sheen and SSS (upstream drops them there); only the fade record with FD_SKIN drops them
-  (`DS_FADE_LEAN`, X4505 otherwise). Proven offline in the merge: all sun records compile, flow 0; not run in game.
+  slot 72 (byte 1152; the block is 95 x 16 bytes since 2026-11-27, `static_assert` in `DeferredSun.h`); the puddle gate is flag bit 23
+  (`kFlagSheenPuddleGate`); with the film live the per-pixel film gate is applied there too (flag bit 26, section 14). The D3D9 sun-fade
+  record keeps sheen and SSS (upstream drops them there); only the fade record with FD_SKIN drops them (`DS_FADE_LEAN`, X4505 otherwise;
+  tried again 2026-11-27 on the owner's set: still X4505). That lean record made the sheen flicker off for the 2 s of every sun step (bench,
+  the owner's save `sunsheen`); since 2026-11-27 the fade frames are the Vulkan pass's (section 14), which keeps the sheen, and the lean
+  record is only the fallback without the DXVK fork. Proven offline in the merge: all sun records compile, flow 0; not run in game.
 - Placement: evaluated inside the land and object branches, as upstream. After them (with the wet-film read) the sun-fade record
   (`SUN_CROSSFADE_PASS`, on by default) ran out of temp registers (X4505).
 - Cost (offline, `template_compile`, ps_3_0 slots): the sun record 2206 -> 2358, with the film 2270 -> 2453, the sun-fade record 3364 ->
@@ -5577,8 +5580,9 @@ Owner: "make it fully deffered one to one port of bottle shaders versions". A on
   [0.005-0.05], BilinearThreshold 0.02 [0.02-1], ShadowContrast 1 [0-4]); `Enabled` is live, but the depth copy is made only when it is
   on at start.
 - Not taken by: the first-person pass (`DeferredFirstPerson`): the view model is not in the depth the march read (theirs is, through
-  their pre-pass). Since the upstream 1.1.5 merge (2026-11-27) the Vulkan sun pass (`DeferredSun.comp`, `NvrDxvkDeferred`, off by default)
-  reads the mask too (`t_sssMask` binding 10, flag bit 22) and no longer stands aside for it; it still stands aside while the wet film is live.
+  their pre-pass). Since the upstream 1.1.5 merge (2026-11-27) the Vulkan sun pass (`DeferredSun.comp`, `NvrDxvkDeferred`, on by default
+  since 2026-11-27) reads the mask too (`t_sssMask` binding 10, flag bit 22) and no longer stands aside for it, nor (section 14) for the
+  wet film or a sun step's fade.
   Registers in the D3D9 sun pass after the merge: `DS_SSS` c19 (ours), `DS_MatSSS` c20 (upstream's Material SSS, off), `DS_SheenGate` c21.
   The mask follows upstream's e401def gate (Sun Shadows off with PBR). Believed a frame-time gain (one fewer fallback to the D3D9 pass);
   not measured.
@@ -5614,12 +5618,47 @@ sun's shader with one change: it writes one channel of an rgba16f mask, read bac
   faded out by camera distance. +106-112 ps_3_0 slots in the shadow pass, every FIT level and the RT variant compiled offline.
 - Off: in the first-person run, while RT lamp shadows run their own contact march (`RtLampShadows::EnabledNow` and
   `[ShadowsInteriors.RT] ContactShadows` > 0), on native D3D9, with the deferred renderer off. The Vulkan lamp pass (`DeferredLamps.comp`,
-  `NvrDxvkDeferred`, off by default) stands aside while there is a mask.
+  `NvrDxvkDeferred`, on by default since 2026-11-27) stands aside while there is a mask.
 - Bench 2026-11-27 (tree VS-lampsss, 4 lamps, on vs off live, 600-frame settle; no other game ran): Prospector Saloon: small contact
   shadows on and under the stools and table legs; Vault 21: faint ones on the railings, chairs and ceiling struts; nothing wrong seen.
   GPU timer "Screen-space shadows, lamps (compute)": 2.5 ms for four lamps filling the Saloon's view, 0.47 ms for four in Vault 21
   (about 0.6 ms a lamp whose light fills the screen): hence 2 lamps by default. Not run: the owner's pipe-on-a-wall spot (no bench save
   for it in the slim slots).
+
+### 14. The deferred sun in Vulkan: the sun steps' fade and the wet film (2026-11-27, branch sunsheen-fade)
+
+Owner: the deferred sun must run in Vulkan; D3D9 stays only as the fallback for players without the DXVK fork.
+- The bug (proven on the bench, the owner's save `sunsheen`): SunSheen went out for 2 s and came back, over and over. The deferred sun's
+  shadow maps step by 0.5 degree and each step is cross-faded over 2 s (`core/SunFadeDeferred.h`); every fading frame drew the D3D9 fade
+  record (`DeferredSun.hlsl` with `SUN_CROSSFADE` + `SUN_CROSSFADE_PASS`), which with DeferredSkin (`FD_SKIN`) leaves the sheen and the
+  screen-space shadows' mask out (`DS_FADE_LEAN`, X4505 otherwise). The Vulkan pass never ran for the owner: `NvrDxvkDeferred` was false
+  here, and `TryApplyCompute` refused while `SunFadeDeferred::Fading` and while DeferredWetness's film was live.
+- What `Compute/DeferredSun.comp` now draws as well (deferred path only; no forward template changed):
+  - the sun steps' fade: `GetOldSunShadowMaps`, the pass's own cascade lookup (the smooth handover blend, normal offset, slacks, contact
+    hardening, caster reach) on the kept atlas and the kept cascades with the sun they were drawn for, blended in by
+    `TESR_ShadowCrossFade.x` where a kept cascade covers the point, after the cascades and before the character map and the low sun's fade
+    (the D3D9 fade's order); and the movers' half-size atlas (`GetDynamicSunShadow`, `Includes/Shadow.hlsl GetDynamicSunShadowPass`'s
+    expressions) where the live shadow is darker than the kept, static-only one. The old shadow mirrors the compute pass's own live lookup
+    (not the D3D9 record's dithered one), so a step's first frame matches the frame before it in the same pass;
+  - DeferredWetness's film highlight (`DS_WET_FILM`): `WetSpecular` from the film target (land with its own sun x its light scale, other
+    pixels with the sun x the light scale), x the shadow and the recorded share, before MaterialSSS; and SunSheen's per-pixel film gate
+    (`1 - smoothstep(0, 0.2, gloss)`, on land and objects, as `DSSheenKeep`). The wet pass still runs before the sun (`DeferredSun::Apply`).
+  - everything it did before stays in the fade and wet frames: SunSheen, the screen-space shadows' mask, MaterialSSS, skin, foliage, RT sun.
+- New bindings (set 1): 11 `t_shadowAtlasOld` (`TESR_ShadowAtlasOld`), 12 `t_shadowDynamic` (`TESR_ShadowDynamic`), 13 `t_wetFilm`
+  (`DeferredWetness::FilmTexture`); each a stand-in (the depth) when not in use. UBO slots 73-94 (the block 73 -> 95 x 16 bytes):
+  `shadowOld{Near,Middle,Far,Lod}` (`TESR_ShadowOldCameraToLightTransform*`), `shadowOld*Center`, `shadowCrossFade`, `shadowDynamicData`,
+  all copied by name from the ConstantsTable only while fading. Flags: bit 24 `kFlagSunCrossFade` (fading and the kept atlas exists),
+  25 `kFlagShadowDynamic` (the movers' atlas drawn this frame), 26 `kFlagWetFilm` (`FilmLive`). Push block unchanged (16 bytes).
+- Still on D3D9: the first-person pass (`Vm.on`; SunSheen is 0 there anyway), `SkylightingMode` 1, a non-PCF shadow mode, a target that
+  is not single-sample FP16, DebugView on a stored-curve frame, `DxvkCompute::KeptOnD3D9("DeferredSun")`, a failed set-up or dispatch,
+  and every frame without the DXVK fork (stock DXVK, native D3D9). The D3D9 fade record stays lean with FD_SKIN.
+- `[Main.Main.Performance] NvrDxvkDeferred` true by default (settings step 111 moves a saved false, not in an upstream-built file). It also
+  switches on: the Vulkan lamp pass (`DeferredLamps.comp`, `DeferredLamps::EnsureComputeReady`; it stands aside while a lamp
+  screen-space-shadow mask is made, section 13, and with a lamp list not 16 texels), the interior directional light folded into that lamp
+  dispatch (`DeferredLamps::CanFoldInteriorDir`), and `DeferredDistant::ComputeHandlesStoredCurve` (the far world's frame is not converted
+  to linear light before the deferred passes; the compute passes read the stored curve). It needs `NvrDxvkPasses` and the fork.
+- Checks (offline): `compile-compute.sh DeferredSun` + spirv-val pass; the owner's D3D9 sun records (`owner_sun.py`) compile unchanged;
+  the DLL builds. Not run in game: the fade's look, the film's look in compute, the frame cost.
 
 ## ShadowsInteriors
 
