@@ -114,6 +114,7 @@ namespace SettingShots {
 	struct Change { bool effect = false, console = false, coverage = false; std::string section, key, value; };
 	struct Shot { std::string slug; std::vector<Change> changes; std::string menu; bool menuTests = false; int frames = 0; DWORD_PTR affinity = 0; int capture = 0;
 		bool renderdoc = false; std::string renderdocPath; bool keep = false; int landFrames = 0; bool record = false;
+		int stallMs = 0;	// 2026-11-28: 'stall <ms>' blocks the render thread this long when the shot starts (tests the STALL watchdog)
 		bool reload = false; UInt32 aimRef = 0; float aimHeight = 0.0f; UInt32 needRef = 0; float needMargin = 0.1f; bool needDetail = false; bool retried = false;
 		bool parity = false; ParityTest::Spec paritySpec; };	// reload ('reloadshaders'), aim/need*: framing check (2026-10-25, bench warm slot)	// landFrames: 'landflicker' (2026-10-30)	// menu: 2026-10-19; frames: 'wait' (2026-10-21); affinity: cpulimits (2026-10-21); capture: RenderDoc frames (2026-10-26); renderdoc: 2026-10-26; parity: 2026-11-14
 	inline bool ParityStarted = false;	// 2026-11-14: this shot's 'parity' run has been started (it may have ended)
@@ -212,6 +213,10 @@ namespace SettingShots {
 			else if (command == "stage") StageCapture = true;
 			else if (command == "noreload") NoReload = true;
 			else if (command == "keep") { if (List.empty()) { error = "line " + std::to_string(number) + ": 'keep' before any 'shot'"; return false; } List.back().keep = true; }
+			else if (command == "stall") {	// 2026-11-28: the STALL watchdog's sampler, on the bench
+				if (List.empty()) { error = "line " + std::to_string(number) + ": a stall before the first 'shot'"; return false; }
+				words >> List.back().stallMs; List.back().stallMs = std::clamp(List.back().stallMs, 0, 10000);
+			}
 			else if (command == "reloadshaders") {	// 2026-10-25 bench warm slot
 				if (List.empty()) { error = "line " + std::to_string(number) + ": a reloadshaders before the first 'shot'"; return false; }
 				List.back().reload = true;
@@ -390,6 +395,10 @@ namespace SettingShots {
 		Moves = false;
 		FlickerWatch::ShotFrames = 0; FlickerWatch::ShotSpikes = 0; FlickerWatch::ShotMax = 0.0f; FlickerWatch::ShotMaxCell = -1; FlickerWatch::SkipFrames = 10; strncpy_s(FlickerWatch::Label, s.slug.c_str(), _TRUNCATE);	// 2026-10-25
 		if (s.aimRef) AimAt(s.aimRef, s.aimHeight);	// 2026-10-25 framing (the console lines run with this shot's others)
+		if (s.stallMs > 0) {	// 2026-11-28: a frame that does not end, so the STALL watchdog samples this thread (SessionLog StallSample)
+			Logger::Log("SETTING SHOTS %s: shot '%s': the render thread blocks %d ms (stall test)", Run, s.slug.c_str(), s.stallMs);
+			Sleep((DWORD)s.stallMs);
+		}
 		if (s.reload) {	// 2026-10-25: done at this frame's end (Render.cpp NiDX9Renderer__Do_EndFrame)
 			TheShaderManager->ShaderReloadQueued = true;
 			TheShaderManager->EffectReloadQueued = true;
