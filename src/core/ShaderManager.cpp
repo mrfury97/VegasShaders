@@ -25,7 +25,6 @@
 #include "DeferredFirstPerson.h"	// UNOFFICIAL 2026-11-15 first person through the deferred renderer (+ GearWeather)
 #include "WorldSurface.h"	// UNOFFICIAL 2026-11-24 world-space detail & weathering over deferred objects & terrain
 #include "DeferredTransparents.h"	// UNOFFICIAL 2026-11-15 forward+ for the blended list
-#include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows (INTERIOR-SHADOWS-MODERN steps 2-3)
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth (ROOT-ASSUMPTIONS-PLAN B3)
 #include "EffectPrecompile.h"	// UNOFFICIAL 2026-10-28 the effects compiled in parallel at startup
 #include "LampFixtures.h"
@@ -164,8 +163,6 @@ void ShaderManager::Initialize() {
 #if NVR_SHELVED_OUT
 	sm->Effects.DustMotes = nullptr;	// never created: the chain steps and every reader skip a null slot
 	Logger::Log("%s", ShelvedEffects::LogLine());
-	TheSettingManager->GetSettingI(ShelvedEffects::kSettingSections[0], "Enabled");	// (reads as 0; notes whether the saved file had it on)
-	if (ShelvedEffects::SavedOn) Logger::Log("Capsule shadows ([Shaders.ShadowsInteriors.Capsules] Enabled) are not part of this release (work in progress): left off although your settings file has them on; the setting is kept as it is.");
 	TheSettingManager->GetSettingI("Main.Main.Quality", "DistantLand");
 	TheSettingManager->GetSettingI("Main.Main.Quality", "DistantLandSuppressVanilla");
 	if (ShelvedEffects::DistantLandSavedOn) Logger::Log("Distant Land ([Main.Main.Quality] DistantLand) is shelved for this release: left off although your settings file has it on; the setting is kept as it is.");
@@ -1344,11 +1341,11 @@ static void LoadLampShadowRecords(NiD3DPixelShaderEx* pixel, const ShaderTemplat
 		// POINT_SHADOW_FIT, each with its own cache folder; the first is the old one exactly, also what ShaderPrecompile makes), and
 		// PointShadowForward::FitLevel / Refused keep every object to what the shortest one loaded can do.
 		// UNOFFICIAL 2026-11-15 (docs/next/FD-NATIVEFIX.md, bench batch 8) a last level, only with the traced / capsule read compiled in
-		// (RtLampShadows::CompiledIn: CapsuleShadows on native, RT lamp shadows on the fork): the full filter WITHOUT that read (POINT_SHADOW_RT 0;
+		// (RtLampShadows::CompiledIn: RT lamp shadows on the fork): the full filter WITHOUT that read (POINT_SHADOW_RT 0;
 		// POINT_SHADOW_S15_TAKEN: s15 stays the read's, the sixth lamp lit). On native with Capsules the six-lamp shiny records (SLS2034-2036)
 		// did not fit at any level with the read (4,038-5,120 slots, since 1.0.9 at least): the [ERROR] below set Refused, and that turned
 		// every lamp shadow map off for the session (forward AND the deferred passes: 0 atlas tiles). Without the read: 3,117-3,146 slots.
-		// Those objects then take people's lamp shadows from the maps (CapsuleShadows::DropActors is held off: RtLampShadows::ReadDropped).
+		// Those objects then take people's lamp shadows from the maps (RtLampShadows::ReadDropped).
 		static D3DXMACRO overrides[5][8] = {
 			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { NULL, NULL } },
 			{ { "INTERIOR_SHADOWS", "1" }, { "FORWARD_SHADOWS", "0" }, { "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" }, { "POINT_SHADOW_FIT", "1" }, { NULL, NULL } },
@@ -1377,10 +1374,10 @@ static void LoadLampShadowRecords(NiD3DPixelShaderEx* pixel, const ShaderTemplat
 		}
 		if (record) {
 			if (--level == 4) {	// (2026-11-15) the full filter: FitLevel unchanged; the read is gone for this shader only
-				Logger::Log("[WARNING] UNOFFICIAL lamp shadows: %s loaded without the capsule / traced lamp shadow read (its other versions are too long for this GPU): "
-					"its objects keep their lamp shadow maps at the full filter and take people's shadows from the maps; CapsuleShadows' DropActors is held off.", pixel->Name);
+				Logger::Log("[WARNING] UNOFFICIAL lamp shadows: %s loaded without the traced lamp shadow read (its other versions are too long for this GPU): "
+					"its objects keep their lamp shadow maps at the full filter.", pixel->Name);
 				RtLampShadows::ReadDropped = true;
-				EffectStatus::Level((std::string(pixel->Name) + " lamp shadows").c_str(), "no capsule / traced read (DropActors held off)", false);
+				EffectStatus::Level((std::string(pixel->Name) + " lamp shadows").c_str(), "no traced read", false);
 			}
 			else if (level) {
 				Logger::Log("UNOFFICIAL lamp shadows: %s with lamp shadows loaded at the shorter version %d (%s).", pixel->Name, level, what[level]);

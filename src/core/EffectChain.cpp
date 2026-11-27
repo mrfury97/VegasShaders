@@ -25,7 +25,7 @@
 //                                       when: NVR_TEST_TOOLS builds
 //   9  ShadowPlan                       forwardInterior / keepDarkening: forward lamp shadows indoors, and whether their darkening is kept
 //                                       when: always (sets context flags); sets forwardInterior, keepDarkening
-//  10  RtCore                           Ray tracing core point: RT registration once, RtCore::Frame, RT lamp denoise, capsule shadows, back depth
+//  10  RtCore                           Ray tracing core point: RT registration once, RtCore::Frame, RT lamp denoise, back depth
 //                                       when: always (each does nothing unless on)
 //  11  ShadowPasses                     Lamp mask (PointShadows: scissor / half-res / batches / RT exterior mask), lamp contact, sun contact + forward shadows into ShadowPassSurface; or the one-time "no shadow" clear
 //                                       when: shadows on for the cell type; forward interior without KeepDarkening: clear only
@@ -162,7 +162,6 @@
 #include "PointShadowSlots.h"
 #include "PointShadowForward.h"
 #include "DeferredLamps.h"	// UNOFFICIAL 2026-11-16 fd-batchA item 2 (LampShadowsDrawn)
-#include "CapsuleShadows.h"	// UNOFFICIAL 2026-10-31 CapsuleShadows
 #include "BackDepth.h"	// UNOFFICIAL 2026-10-31 BackDepth
 #include "EffectSelfTest.h"
 #include "../effects/GpuParticles/GpuParticles.h"	// UNOFFICIAL 2026-10-26 (NVR DXVK 1.5-particles)
@@ -332,7 +331,6 @@ void ShaderManager::PreStep_RtCore(ChainContext& ctx) {
 		RtCore::Frame(Device);
 		RtPathTrace::Replace(Device);	// UNOFFICIAL 2026-11-03 [Main.Main.RayTracing] PTReplace: the path traced picture into the scene (off)
 		RtLampShadows::Denoise(Device);	// UNOFFICIAL 2026-10-29: the traced lamp shadows through the shared denoiser (Denoise, off)
-		CapsuleShadows::Render(Device);	// UNOFFICIAL 2026-10-31: people's capsules + contact shadows into the same buffer (no RT; off)
 		BackDepth::Render(Device);	// UNOFFICIAL 2026-10-31 BackDepth: the near objects' back faces, for the effects' thickness (off)
 	}
 }

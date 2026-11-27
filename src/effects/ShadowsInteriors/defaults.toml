@@ -120,28 +120,6 @@ LandLampModel = true                 # UNOFFICIAL (2026-11-16), BUG FIX, live (d
 ReplaceScreenShadows = true          # UNOFFICIAL (2026-11-16), BUG FIX, live (docs/next/FD-BATCH-A.md item 2): indoors with the deferred renderer, the lamp pass's own shadows replace the old blurred screen-space lamp shadows in every frame, as the forward lamp shadows do. Before, in a frame with no NPC, weapon or glass on screen, both were drawn: doubled soft shadows and a darker room that flipped back when an NPC or the weapon appeared. false = as before.
 
 
-[_Shaders.ShadowsInteriors.Capsules]
-Enabled = false                      # UNOFFICIAL (2026-10-31), needs a restart, off by default (an EXPERIMENT, docs/next/INTERIOR-SHADOWS-MODERN.md steps 2-3; any GPU, no ray tracing): indoors, people's lamp shadows from capsules round their bones, and small contact shadows (cups, plates, fingers, rims) the shadow maps cannot resolve, for each pixel's three strongest shadow lamps, in one pass. Needs [Shaders.ShadowsInteriors.Forward] Enabled. With the RT lamp shadows running (an RT GPU) those are used instead. Off = the lamp shadow maps as before (the shaders unchanged).
-Capsules = true                      # Live A/B: people's lamp shadows from capsules (soft, sized from LampSize). false = from the lamp shadow maps as before. Applies immediately.
-DropActors = true                    # With Capsules on: people are left out of the lamp shadow maps, so a lamp is not redrawn when someone walks by (the CPU win); their shadows then come from the capsules alone. false = both (the darker). Redraws the maps when switched.
-Contact = true                       # Live A/B: contact shadows, a short ray toward each of the three lamps through the depth buffer. Applies immediately.
-MaxActors = 8                        # [0-16] People with capsules, nearest the camera first (the player in third person). Applies immediately.
-MaxDistance = 2000.0                 # [0-8000] World units from the camera. Applies immediately.
-PlayerFirstPerson = false            # The player's body casts capsules in first person too (its third-person skeleton). Applies immediately.
-RadiusScale = 1.0                    # [0.1-3] Capsule thickness (1 = an average adult). Applies immediately.
-Strength = 1.0                       # [0-1] How dark a capsule shadow gets (1 = blocks the lamp fully where it covers it). Applies immediately.
-SelfMargin = 2.0                     # [0-16] Units round each capsule within which a pixel does not shadow itself with it (the body's own surface). Applies immediately.
-LampSize = 6.0                       # [0-64] Units: the lamp's radius as the capsules see it (the soft edge of people's shadows). Applies immediately.
-InvisibleLightSize = 32.0            # [-1-128] The same for the game's invisible lights (broad fill lights: softer). -1 = LampSize. Applies immediately.
-ContactLength = 20.0                 # [0-128] Units: how far toward the lamp the contact ray looks (about 30 cm). Applies immediately.
-ContactSteps = 12                    # [1-32] Depth tests along it. Applies immediately.
-ContactThickness = 6.0               # [0.5-64] Units: how thick something in front must be at most to block (thicker = a wall the maps already have, or a gap). Applies immediately.
-ContactStrength = 1.0                # [0-1] Applies immediately.
-ContactBias = 0.002                  # [0-0.02] Share of the view distance a depth hit must be in front by (against the surface finding itself). Applies immediately.
-ContactJitter = false                # The ray's start varied every frame (smoother with TAA, noisier without). Applies immediately.
-StartOffset = 0.5                    # [0-16] Units off the surface the tests start. Applies immediately.
-StartOffsetPerUnit = 0.002           # [0-0.02] Plus this x the view distance. Applies immediately.
-RankBy = 0                           # [0-1] How each pixel picks its three lamps: 0 light brought (brightness x falloff x N.L), 1 the game's falloff alone. Applies immediately.
 [_Shaders.ShadowsInteriors.RT]
 Enabled = false                      # UNOFFICIAL (2026-10-28), EXPERIMENTAL, needs a restart to come on (2026-11-11: switching it off applies immediately, and so does on again in a session that started with it on), needs the DXVK fork with the RT core (patch 0028, and NvrRtHelper.exe in Data\NVSE\Plugins\NvrRt) AND a GPU with ray tracing (an AMD RX 6000 / Radeon 680M-780M or newer, an NVIDIA RTX, an Intel Arc; NOT a GTX 10-series: there it stays off and nothing changes): indoor lamp shadows traced against the room's real geometry instead of read from each lamp's shadow cube map, for the per-object lamp shadows ([Shaders.ShadowsInteriors.Forward] Enabled, needed). No cube-map stair-steps, seams or bias speckles; shadows sharp where things touch and softer further away (LampRadius). The tracing runs beside the game (a 64-bit helper) and arrives a frame or so later; where the result does not match what is on screen (something just moved in front, the edge of the screen) the cube map is used, so the cube maps stay as the fallback and the A/B (Live). The log says whether it is on and why not. docs/next/FORK-RT-LAMPS.md.
 Live = true                          # Live A/B: true = the traced shadows, false = the cube maps again (same lamps, same shaders). Applies immediately.

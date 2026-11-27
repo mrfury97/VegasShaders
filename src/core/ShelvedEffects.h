@@ -6,7 +6,7 @@
 // shader compiled, no buffer), their menu pages and search entries do not show, and one log line says so. Their settings stay in
 // the defaults, so a player's saved keys are kept as they are (no unknown-key line, nothing rewritten on Save), and HandBlood
 // still reads [Shaders.BloodFlow.Main] MatchShade. Development builds (no marker): nothing changes.
-// UNOFFICIAL 2026-11-16 later: capsule shadows ([Shaders.ShadowsInteriors.Capsules]) are shelved as a setting (ForcedOff below).
+// (2026-11-27: capsule shadows, shelved here as a setting since 11-16, were removed from the code: owner, "just remove the capsule stuff")
 // To bring one back into releases: take its name out of kNames and its guard lines (docs/next/SHELVED-EFFECTS.md lists them).
 #include <cstring>
 #include <string>
@@ -21,9 +21,6 @@ namespace ShelvedEffects {
 
 	// The shelved effects, by their effect / settings name ([Shaders.<Name>.*]).
 	inline const char* const kNames[] = { "DustMotes" };
-	// Shelved settings sections (their Enabled reads as off; see ForcedOff below).
-	inline const char* const kSettingSections[] = { "Shaders.ShadowsInteriors.Capsules" };
-
 	inline constexpr bool Active = NVR_SHELVED_OUT != 0;
 
 	// True (release builds only) for a shelved effect's name.
@@ -40,7 +37,6 @@ namespace ShelvedEffects {
 			const size_t n = strlen(shelved);
 			if (path.compare(8, n, shelved) == 0 && (path.size() == 8 + n || path[8 + n] == '.')) return true;
 		}
-		if (path == kSettingSections[0]) return true;	// (the shelved settings sections below; one today)
 		return false;
 	}
 
@@ -52,20 +48,12 @@ namespace ShelvedEffects {
 		return false;
 	}
 
-	// UNOFFICIAL 2026-11-16 (owner: shelve capsule shadows too; docs/next/FD-NATIVEFIX.md: on native D3D9 rooms ~30-38 % darker, cause
-	// not found): shelved SETTINGS, not effects. In a release build their switch reads as off whatever the settings file says (a read-only
-	// overlay in SettingManager::GetSettingI / GetSettingF, as SettingForce.h: nothing is written, Save keeps the player's value), so
-	// CapsuleShadows::CompiledIn and RtLampShadows::ScreenCompiledIn stay false: no capsule shader variant, no pass, no DropActors.
-	// Their section is hidden in the menu (Section above). SavedOn notes a player's file had it on, for one log line (Initialize).
-	inline bool SavedOn = false;
+	// Shelved SETTINGS, not effects: in a release build their switch reads as off whatever the settings file says (a read-only overlay in
+	// SettingManager::GetSettingI / GetSettingF, as SettingForce.h: nothing is written, Save keeps the player's value).
 	inline bool DistantLandSavedOn = false;
 	// True when section / key is a shelved switch (release builds only); value is then what it reads as (0). Under the settings lock.
 	inline bool ForcedOff(const char* section, const char* key, int savedValue) {
 		if (!Active || !section || !key) return false;
-		if (!strcmp(key, "Enabled") && !strcmp(section, kSettingSections[0])) {
-			if (savedValue) SavedOn = true;
-			return true;
-		}
 		if (!strcmp(section, "Main.Main.Quality") && (!strcmp(key, "DistantLand") || !strcmp(key, "DistantLandSuppressVanilla"))) {
 			if (savedValue) DistantLandSavedOn = true;
 			return true;

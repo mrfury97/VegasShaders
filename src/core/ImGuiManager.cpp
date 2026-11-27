@@ -4204,14 +4204,6 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.ShadowsInteriors.Forward", "Room darkening", "KeepDarkening, DarkeningBlur, MaskHalfRes",
 		FogType::None, false, "The old darkening of what no shadowed lamp reaches, so rooms keep their mood.", nullptr },
 
-	// Shaders.ShadowsInteriors.Capsules
-	{ "Shaders.ShadowsInteriors.Capsules", "People's shadows",
-		"DropActors, MaxActors, MaxDistance, PlayerFirstPerson, RadiusScale, Strength, SelfMargin, LampSize, InvisibleLightSize, RankBy",
-		FogType::None, true, "Soft lamp shadows of people from simple capsule shapes round their bones.", nullptr },
-	{ "Shaders.ShadowsInteriors.Capsules", "Contact shadows",
-		"ContactLength, ContactSteps, ContactThickness, ContactStrength, ContactBias, ContactJitter, StartOffset, StartOffsetPerUnit",
-		FogType::None, false, "A short ray toward each lamp for the small shadows where things touch.", nullptr },
-
 	// Shaders.ShadowsInteriors.RT
 	{ "Shaders.ShadowsInteriors.RT", "Soft shadows", "Rays, LampRadius, InvisibleLightRadius, Jitter",
 		FogType::None, true, "The size of the lamp the rays aim at, for soft shadow edges.", nullptr },
@@ -5395,8 +5387,6 @@ static const VisualFolder kSunContactFolder = { "Contact shadows (screen space)"
 	{ "Shaders.ShadowsExteriors.SSShadows", nullptr, nullptr } } };
 static const VisualFolder kLampCommonFolder = { "Lamps and what casts shadows", "How many lamps cast shadows, how far, and which objects. Used by both.",
 	{ { "Shaders.ShadowsInteriors.Main", nullptr, nullptr } } };
-static const VisualFolder kLampCapsuleFolder = { "People's lamp shadows (capsules)", "Soft lamp shadows of people from simple shapes round their bones, "
-	"on top of either.", { { "Shaders.ShadowsInteriors.Capsules", nullptr, nullptr } } };
 static const VisualFolder kAmbientLightFolder = { "Ambient light", "Reach, strength and the outline fixes of the all-in-one pass.",
 	{ { "@effect", "AmbientLight", "Ambient light" },
 	{ "Shaders.AmbientLight.Main", "-GridBounce, GridCellSize, GridSteps, GridSpread, GridScreenStrength, GridBlocking, GridWallMemory, GridLamps, GridFine, GridColour, "
@@ -5509,7 +5499,6 @@ static const RtSharedBlock kRtSharedBlocks[] = {
 	{ "Shaders.ShadowsExteriors.RT", &kSunSoftFolder },
 	{ "Shaders.ShadowsExteriors.RT", &kSunContactFolder },
 	{ "Shaders.ShadowsInteriors.RT", &kLampCommonFolder },
-	{ "Shaders.ShadowsInteriors.RT", &kLampCapsuleFolder },
 	{ "Shaders.AmbientOcclusion.RT", &kAmbientLightFolder },
 	{ "Shaders.AmbientOcclusion.RT", &kGridFolder },
 	{ "Shaders.Reflections.RT", &kSsrFolder },
