@@ -395,7 +395,7 @@ static void LogReflShaderFiles() {
 	// 1.1.4 shipped 10 of these 11 old, so every log called the build's own files OLD and Install check showed 1 to fix). Edit the names only.
 	static const Want wants[] = {
 		{ "ReflectionsComposite", 0xDAC05D79u }, { "ReflectionsRTResolve", 0x9B1D51E2u }, { "ReflectionsRayGen", 0xA7EFF08Du }, { "ReflectionsTemporal", 0xE7EC248Cu },
-		{ "ReflectionsCapture", 0x52A2B140u }, { "ReflectionsFilter", 0xDDA9D66Cu },
+		{ "ReflectionsCapture", 0xD1BA8B02u }, { "ReflectionsFilter", 0xDDA9D66Cu },
 		{ "RtReflDenoiseOursReproject", 0x7955BB76u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
 		{ "Rt\\ReflectionsRTAlpha", 0xDE40151Fu }, { "Rt\\ReflectionsRTTex", 0x5B941841u }, { "Rt\\ReflectionsRTTexGlow", 0xCADF2215u },
 		{ "Rt\\ReflectionsRTAlphaTex", 0xC3195738u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x77E8EF1Bu },
@@ -1459,9 +1459,10 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 	const float cubeModeFlag = !cubeOn ? 0.0f : Settings.CubeMode == 0 ? 1.0f : (Settings.CubeMode >= 2 && WorldCubeReady()) ? 3.0f : 2.0f;
 	Constants.Cube2 = D3DXVECTOR4(Settings.CubeCapture, Settings.CubeFade, (float)(cubeLevels - 1), cubeModeFlag);
 	if (!cubeOn) { cubeValid = false; return; }
-	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
-	const double dx = (double)invView._41 - cubeInvView._41, dy = (double)invView._42 - cubeInvView._42,
-		dz = (double)invView._43 - cubeInvView._43;
+	// (2026-11-28 cube-keep-capture) the camera's world position: InvViewMatrix's translation is always 0 here (the view is camera
+	// relative; logged on the bench), so the jump test never fired and the distance moved was always 0.
+	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
+	const double dx = (double)camPos.x - cubeCamPos.x, dy = (double)camPos.y - cubeCamPos.y, dz = (double)camPos.z - cubeCamPos.z;
 	void* cell = Player ? Player->parentCell : nullptr;
 	const bool jumped = dx * dx + dy * dy + dz * dz > 1000.0 * 1000.0;
 	// UNOFFICIAL 2026-10-18: FrameNumber, not UpdateConstants calls: with those (two a frame) 'cubeFrame + 1 != frame' was true every
@@ -1474,17 +1475,22 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 		SessionLog::Count.cubeRestarts++;
 		FRAME_JOURNAL("reflection cube restarted (%s)", cell != cubeCell ? "cell change" : jumped ? "camera jump" : "not stepped last frame");
 	}
-	RenderCube(Device, empty);
+	// (2026-11-27 cube-keep-capture, owner: "its gone as soon as i look away from the angle") CubeMode 2: what the screen showed stays in
+	// the cube out of view, fading at CubeFade as in CubeMode 1, until the camera MOVES: then it gives way to the world cube by the distance
+	// moved (about two thirds gone after 2 x CubeMoveThreshold units). Turning on the spot keeps it; the world cube fills what was never seen.
+	const float moved = empty ? 0.0f : (float)sqrt(dx * dx + dy * dy + dz * dz);
+	const float moveScale = 2.0f * (std::max)(Settings.CubeMoveThreshold, 16.0f);
+	RenderCube(Device, empty, (std::min)(moved / moveScale, 1.0f));
 	cubeCell = cell;
 	cubeValid = true;
 	cubeFrame = now;
-	cubeInvView = invView;
+	cubeCamPos = D3DXVECTOR3(camPos.x, camPos.y, camPos.z);
 }
 
 // The surroundings cube (techniques 5 Capture, 6 Filter): each face of the new capture cube from last frame's and the
 // image; then every face of every mip of the reflection cube from the new capture. The techniques
 // unbind the cube they write (Texture[n] = NoTexture), so a cube is never read and written in the same pass.
-void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset) {
+void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset, float movedDecay) {
 	const int write = captureIndex ^ 1;
 	Cubes.CaptureLastSlot = Cubes.Capture[captureIndex];
 	Cubes.CaptureNewSlot = Cubes.Capture[write];
@@ -1495,7 +1501,9 @@ void ReflectionsEffect::RenderCube(IDirect3DDevice9* Device, bool reset) {
 	SetPassTexture(10, Cubes.World ? (IDirect3DBaseTexture9*)Cubes.World : (IDirect3DBaseTexture9*)Cubes.Capture[captureIndex]);
 	for (int f = 0; f < 6; f++) {
 		IDirect3DSurface9* face = Cubes.CaptureFace[write][f];
-		Constants.Cube = D3DXVECTOR4((float)f, (float)cubeSize, 0.0f, reset ? 1.0f : 0.0f);
+		// w: 1 = reset; otherwise minus the out-of-view decay toward the world cube for the distance moved this frame (0 standing still;
+		// Capture reads only w > 0 as a reset).
+		Constants.Cube = D3DXVECTOR4((float)f, (float)cubeSize, 0.0f, reset ? 1.0f : -movedDecay);
 		Device->SetRenderTarget(0, face);
 		Render(Device, face, face, 5, false, nullptr);
 	}

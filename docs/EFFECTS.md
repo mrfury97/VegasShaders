@@ -5368,9 +5368,13 @@ CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
   the screen answers almost every ray, outdoors open-sky mirror rays take the panorama: the cube fills only what is left. By design.
 
 **Fixes**
-- Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1);
-  only a texel out of view goes to the world cube, at `max(CubeFade x 8, 0.03)` (half in ~23 frames: about as stale as the world cube's
-  own faces, redrawn every 96 units). Out-of-view texels used to forget what was seen in ~6 frames, now ~23.
+- Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1).
+  (Superseded 2026-11-28, next bullet: out of view a texel went to the world cube at `max(CubeFade x 8, 0.03)`, half in ~23 frames.)
+  - (2026-11-27 cube-keep-capture, owner: a window's reflection "gone as soon as i look away from the angle") out of view a texel now
+    keeps what the screen showed, fading at CubeFade as on screen, and gives way to the world cube only as the camera MOVES: the distance
+    moved this frame (the camera's world position, `CameraPosition`) / (2 x CubeMoveThreshold), passed as minus `TESR_ReflectionsCube.w` (Capture reads only w > 0 as a reset; CubeStep). CubeStep used to read the view matrix's translation, always 0 here (camera relative), so its 1000-unit jump test never fired either; both now use `CameraPosition`.
+    Turning on the spot keeps the capture; after walking 2 x CubeMoveThreshold (192 units) about a third of it is left. The world cube still
+    fills directions never seen (a reset starts every texel from it).
 - `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a player's
   file without the key gets the defaults file's 1.5; 1 is the look before it. RT Resolve's bounce miss (`ReflectionsRTResolve.frag` ~52, RT
   reflections only) still reads the cube at full share whatever k: the one reader k does not scale). ONE strength for every reader: the Reflections passes (`Reflections.glsl` / .fx `EnvAlong`: the
@@ -5392,6 +5396,26 @@ lighting-free records of the edge shaders compile. Not run in game.
 first person with CubeStrength 0 / 1 / 1.5 / 2 (indoors by a window, outdoors at noon, at night by neon); chrome and env-mapped props;
 puddles and wet ground looking away from the light. Wrong: a glow or bright rim on the gun in shade, rough dry ground turning glossy,
 dark rooms brightening with CubeStrength, or the cube lagging when you turn.
+
+### The 3D world cube drew nothing outdoors (2026-11-28, branch `cube-keep-capture`)
+- Cause, proven on the bench (Goodsprings porch, scene v-reflection1, owner's toml): every world cube face stayed the clear colour (rgb 0,
+  alpha 0), though the reference walk queued 120-200 casters a face. Read back from the device right before the draws
+  (`[Shaders.Reflections.Main] WorldCubeDump 1` now also logs the device's z test, colour write, cull, clip planes and the queued casters):
+  ZFUNC was GREATEREQUAL (7). The pass asked for LESSEQUAL through the game's render-state cache (`NiDX9RenderState`), which did not reach
+  the device (why is believed, not proven: the cache already held LESSEQUAL while the device had the reversed-depth GREATEREQUAL that
+  `RenderShadowMaps` sets for this game's depth clear of 0). With the face's standard projection and a depth clear of 1, no pixel passed.
+- Fix (`ShadowManager::RenderReflectionCubeFace`): ZFUNC is set and put back on the device directly, round the cache (as the sun layer copy
+  does). After it the log reads func 4 and the faces hold the town, land and sky gaps (runs `F:\NVR-bench\work\bench\autotest\20261128-003150-slotA`,
+  `-005307-slotA`; face sheet `F:\NVR-bench\shots\20261128-005307-slotA\worldcube-faces-sheet.png`). Land colour looks right (sand and rock
+  tones, no normal-map blue). Interiors: not run (believed to have had the same fault; the interior ARK luma change of 11-27 is unexplained).
+- DebugView 3 behind the camera shows the world cube's town only after the capture restarts (bench list `cube-world-proof`: a hop over a
+  cell border): `F:\NVR-bench\shots\20261128-005307-slotA\NeonSelfTest_00-53-25_ab_04_dv3-behind-world.png`.
+- Found here and fixed on the same branch (commit aae08b5; the Capture bullet under "Fixes" above): CubeStep measured the camera's
+  movement from `TheRenderManager->InvViewMatrix` row 4, 0 0 0 in this renderer (camera-relative view; logged on the bench), so the
+  distance moved was always 0 and the 1000-unit jump test never fired. It now reads `TheRenderManager->CameraPosition`.
+- Review (2026-11-28): the depth, blend and stencil states of the face pass are written to the cache and the device both (this file's
+  idiom for a stale cache), and put back on both by the StateGuard; the dump log also records ZWRITE, alpha blend and stencil.
+- Frame cost: not measured (the faces now shade pixels where they shaded none; the GPU timer was off in these runs).
 
 ## ShadowsExteriors
 

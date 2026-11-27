@@ -4537,17 +4537,19 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 			dev->GetRenderState(D3DRS_STENCILENABLE, &stencilEnable);
 			dev->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissorEnable);
 		}
+		void both(D3DRENDERSTATETYPE state, DWORD value) { rs->SetRenderState(state, value, RenderStateArgs); dev->SetRenderState(state, value); }
 		~StateGuard() {
 			rs->SetTexture(0, nullptr);
 			rs->SetTexture(1, nullptr);
 			dev->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
-			rs->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ZENABLE, zEnable, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ZWRITEENABLE, zWrite, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ZFUNC, zFunc, RenderStateArgs);
+			// (2026-11-28 review) the depth, blend and stencil states back on the cache AND the device, as they were set below
+			both(D3DRS_ALPHABLENDENABLE, alphaBlend);
+			both(D3DRS_ALPHATESTENABLE, alphaTest);
+			both(D3DRS_ZENABLE, zEnable);
+			both(D3DRS_ZWRITEENABLE, zWrite);
+			both(D3DRS_ZFUNC, zFunc);
 			rs->SetRenderState(D3DRS_CULLMODE, cullMode, RenderStateArgs);
-			rs->SetRenderState(D3DRS_STENCILENABLE, stencilEnable, RenderStateArgs);
+			both(D3DRS_STENCILENABLE, stencilEnable);
 			rs->SetRenderState(D3DRS_SCISSORTESTENABLE, scissorEnable, RenderStateArgs);
 		}
 	} stateGuard(dev, rs);
@@ -4569,12 +4571,16 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	terrainLODPass->VertexShader = ReflCubeVertex; terrainLODPass->PixelShader = ReflCubePixel;
 
 	dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0F);
-	rs->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ZWRITEENABLE, TRUE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL, RenderStateArgs);
-	rs->SetRenderState(D3DRS_STENCILENABLE, FALSE, RenderStateArgs);
+	// (2026-11-28, world cube drew nothing outdoors) the depth, blend and stencil states go to the game's state cache AND the device:
+	// ZFUNC asked for through the cache alone left the device at GREATEREQUAL (read back on the bench, Goodsprings, the game's
+	// reversed depth), and with this pass's standard projection and a depth clear of 1 no pixel passed: every face stayed the clear
+	// colour. The others are as exposed to a stale cache (this file's idiom for one: cache, then device).
+	stateGuard.both(D3DRS_ALPHABLENDENABLE, FALSE);
+	stateGuard.both(D3DRS_ALPHATESTENABLE, FALSE);
+	stateGuard.both(D3DRS_ZENABLE, D3DZB_TRUE);
+	stateGuard.both(D3DRS_ZWRITEENABLE, TRUE);
+	stateGuard.both(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+	stateGuard.both(D3DRS_STENCILENABLE, FALSE);
 	rs->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE, RenderStateArgs);
 
 	const bool exterior = TheShaderManager->GameState.isExterior;
@@ -4658,6 +4664,13 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 
 	NiAVObject* const playerBody = Player->GetNode();
 	NiAVObject* const playerFP = Player->firstPersonNiNode;
+	// UNOFFICIAL 2026-11-27 (cube-keep-capture, diagnostic; owner: the world cube showed "orange world" where Goodsprings stood)
+	// [Shaders.Reflections.Main] WorldCubeDump 1: each face drawn from now on is saved once to <logs>\VegasShaders_WorldCube_<face>.dds and logged with
+	// what its reference walk kept and dropped; the key goes back to 0 when all six are saved.
+	static int dumpSaved = 0;
+	const bool dumping = TheSettingManager->GetSettingI("Shaders.Reflections.Main", "WorldCubeDump") != 0;
+	if (!dumping) dumpSaved = 0;
+	struct RefCounts { int seen = 0, noNode = 0, hidden = 0, outside = 0, refracting = 0, distant = 0, kept = 0; } refCounts;
 	PortalVisibility::RoomSet portalRooms;
 	if (!exterior) portalRooms.Build(SceneNode);
 
@@ -4692,20 +4705,23 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 			for (TList<TESObjectREFR>::Entry* it = &cell->objectList.First; it != nullptr; it = it->next) {
 				TESObjectREFR* ref = it->item;
 				if (!ref || ref == (TESObjectREFR*)Player) continue;
+				refCounts.seen++;
 				NiNode* refRoot = GetRefNode(ref, &reflForms);
-				if (!refRoot || refRoot == playerBody || refRoot == playerFP) continue;
+				if (!refRoot || refRoot == playerBody || refRoot == playerFP) { refCounts.noNode++; continue; }
 				if (!exterior && portalRooms.active) {
 					const bool hidden = portalRooms.IsNodeHidden(refRoot);
 					PortalVisibility::NoteReflRef(hidden);
-					if (hidden) continue;
+					if (hidden) { refCounts.hidden++; continue; }
 				}
-				if (!refRoot->WithinFrustum(&planes) || IsRefracting(ref)) continue;
+				if (!refRoot->WithinFrustum(&planes)) { refCounts.outside++; continue; }
+				if (IsRefracting(ref)) { refCounts.refracting++; continue; }
 				const NiBound* b = refRoot->GetWorldBound();
 				if (b) {
 					const float dx = b->Center.x - camPos.x, dy = b->Center.y - camPos.y, dz = b->Center.z - camPos.z;
 					const float maxR = cullDist + b->Radius;
-					if (dx * dx + dy * dy + dz * dz > maxR * maxR) continue;
+					if (dx * dx + dy * dy + dz * dz > maxR * maxR) { refCounts.distant++; continue; }
 				}
+				refCounts.kept++;
 				AccumChildren(refRoot, &reflForms, false, false, &planes);
 			}
 		};
@@ -4727,7 +4743,28 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 			accumCellRefs(Player->parentCell);
 		}
 
+		const bool dumpThis = dumping && !(dumpSaved & (1 << f));
+		if (dumpThis) {	// the device's own state the faces are drawn with (the game's state cache can differ: see ZFUNC above)
+			DWORD zEnableNow = 0, zFuncNow = 0, colorWriteNow = 0, cullNow = 0, clipPlanesNow = 0, zWriteNow = 0, blendNow = 0, stencilNow = 0;
+			dev->GetRenderState(D3DRS_ZENABLE, &zEnableNow); dev->GetRenderState(D3DRS_ZFUNC, &zFuncNow); dev->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWriteNow);
+			dev->GetRenderState(D3DRS_CULLMODE, &cullNow); dev->GetRenderState(D3DRS_CLIPPLANEENABLE, &clipPlanesNow);
+			dev->GetRenderState(D3DRS_ZWRITEENABLE, &zWriteNow); dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blendNow); dev->GetRenderState(D3DRS_STENCILENABLE, &stencilNow);
+			Logger::Log("UNOFFICIAL WorldCubeDump face %d device state: z %u func %u write %u, colour write %X, blend %u, stencil %u, cull %u, clip planes %X; queued opaque %u, LOD land %u, alpha %u, skinned %u, tree %u",
+				f, zEnableNow, zFuncNow, zWriteNow, colorWriteNow, blendNow, stencilNow, cullNow, clipPlanesNow, (unsigned)geometryPass->GeometryList.size(), (unsigned)terrainLODPass->GeometryList.size(),
+				(unsigned)alphaPass->GeometryList.size(), (unsigned)skinnedGeoPass->GeometryList.size(), (unsigned)speedTreePass->GeometryList.size());
+		}
 		RenderAccums();
 		refl->MarkWorldCubeFaceRendered(f);
+		if (dumpThis) {
+			// (2026-11-28 review) from the game folder, not the working directory
+			const std::string path = Paths::GameRoot() + "\\" + Paths::LogsFolder + "\\VegasShaders_WorldCube_" + std::to_string(f) + ".dds";
+			const HRESULT hr = D3DXSaveSurfaceToFileA(path.c_str(), D3DXIFF_DDS, refl->Cubes.WorldFace[f], NULL, NULL);
+			Logger::Log("UNOFFICIAL WorldCubeDump face %d (%s): cam %.0f %.0f %.0f, refs seen %d, no node %d, hidden %d, outside %d, refracting %d, beyond CubeDistance %d, kept %d, cube complete %d; %s",
+				f, exterior ? "exterior" : "interior", camPos.x, camPos.y, camPos.z, refCounts.seen, refCounts.noNode, refCounts.hidden, refCounts.outside,
+				refCounts.refracting, refCounts.distant, refCounts.kept, refl->WorldCubeReady() ? 1 : 0, SUCCEEDED(hr) ? path.c_str() : "save failed");
+			dumpSaved |= 1 << f;
+			if (dumpSaved == 0x3F) { TheSettingManager->SetSetting("Shaders.Reflections.Main", "WorldCubeDump", 0); dumpSaved = 0; }
+		}
+		refCounts = RefCounts();
 	}
 }
