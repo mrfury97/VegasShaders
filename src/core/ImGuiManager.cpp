@@ -473,6 +473,7 @@ static void PollProbeKey() {
 			TheSettingManager->SetSetting("Main.Develop.PerformanceProbe", "LiveRequest", 0);
 			if (request == 1 && !DeepProbe::LiveActive()) DeepProbe::RequestStartLive();
 			else if (request == 2 && DeepProbe::Active()) DeepProbe::RequestStop();
+			else if (request == 3 && !DeepProbe::Active()) DeepProbe::RequestStart(20.0, false);	// a timed 20 s capture (the bench)
 		}
 	}
 	HWND front = GetForegroundWindow();

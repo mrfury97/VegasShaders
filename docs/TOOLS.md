@@ -835,7 +835,7 @@ Sampler safety rules (after a Frame Cost Logger sampler froze a heavily modded g
 
 Settings (`[Main.Develop.PerformanceProbe]`, shown with Developer options): LiveKey (DirectInput code, 88 = F12, 0 = none), LiveKeyShift,
 LiveSampleHz (500), NearDepth (8), SpikeMs (33.4), MaxSpikes (200), AutosaveSeconds (60; 0 or at least 5), FrameCsvMaxMB (64), LiveHud
-(on), LiveRequest (0; 1 starts live mode, 2 stops any capture, read every 120 frames and put back to 0: for shot lists and the bench). The key is
+(on), LiveRequest (0; 1 starts live mode, 2 stops any capture, 3 starts a timed 20 s capture, read every 120 frames and put back to 0: for shot lists and the bench). The key is
 polled with GetAsyncKeyState like the menu key ([DXVK input](REFERENCE.md#dxvk-input)), only with the game window in front and no text box
 active.
 
