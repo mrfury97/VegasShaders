@@ -389,7 +389,6 @@ static bool IsDeadSetting(const char* section, const char* key) {
 		{ "Shaders.ShadowsExteriors.Main", "OrthoMapResolution" },	// the ortho map size is [Shaders.ShadowsExteriors.Ortho] Resolution
 		{ "Shaders.ShadowsExteriors.Main", "OrthoRadius" },			// its reach is [Shaders.ShadowsExteriors.Ortho] Distance
 		{ "Shaders.ShadowsInteriors.Main", "Quality" },				// "Not currently used": only Oblivion's ShadowCube.hlsl read it
-		{ "Shaders.ShadowsInteriors.Main", "TorchesCastShadows" },	// its hook (AddCastShadowFlag) is not installed in New Vegas
 		{ "Shaders.ShadowsInteriors.Main", "UseCastShadowFlag" },	// read into Settings.Interiors, never used
 		{ "Shaders.ShadowsInteriors.Main", "PlayerShadowFirstPerson" },	// the same
 		{ "Shaders.ShadowsInteriors.Main", "PlayerShadowThirdPerson" },	// the same
@@ -468,7 +467,10 @@ static const char* InactiveReason(const char* section, const char* key) {
 	// UNOFFICIAL 2026-10-20 MaterialAware (core/ReflMaterial.h): the material comes from the _rmaos maps.
 	if (sec == "Shaders.Reflections.Main" && is({ "MaterialAware", "MaterialReflect", "MaterialMaxRoughness" }) && NumericSetting("Shaders.PBR.Rmaos", "Enabled") == 0.0f)
 		return "Only used with the _rmaos maps on ([Shaders.PBR.Rmaos] Enabled): the materials come from them.";
-	if (sec == "Shaders.Reflections.Main" && is({ "MaterialReflect", "MaterialMaxRoughness" }) && NumericSetting(section, "MaterialAware") != 1.0f)
+	// (2026-11-20: not while UnifiedReflections hides MaterialAware: the G-buffer's materials read both, whatever MaterialAware says)
+	bool UnifiedReflectionsHidesKey(const std::string& section, const std::string& key);
+	if (sec == "Shaders.Reflections.Main" && is({ "MaterialReflect", "MaterialMaxRoughness" }) && NumericSetting(section, "MaterialAware") != 1.0f &&
+		!UnifiedReflectionsHidesKey("Shaders.Reflections.Main", "MaterialAware"))
 		return "Only used with MaterialAware 1.";
 	// UNOFFICIAL 2026-10-21 cloth indoors (core/ClothWind.h BeginFrame): the indoor set is read only while its switch is on; indoors
 	// there is no weather, so the weather's wind is never used there.
@@ -563,9 +565,7 @@ static const char* InactiveReason(const char* section, const char* key) {
 		(!DxvkCompute::Available() || NumericSetting("Main.Main.Performance", "NvrDxvkClouds") == 0.0f))
 		return "Only used when the DXVK fork is loaded and NvrDxvkClouds (Main > Performance > DXVK) is on.";
 
-	// WetWorld vs WetnessEffects & Puddles
-	if (sec == "Shaders.WetWorld.Main" && TheSettingManager->GetMenuShaderEnabled("WetnessEffects"))
-		return "Replaced while WetnessEffects is on (turn WetnessEffects off to use the legacy WetWorld effect).";
+	// Puddles need WetnessEffects (WetWorld was removed 2026-11-21: Wetness Effects and Puddles are the rain wetness)
 	if (sec == "Shaders.Puddles.Main" && !TheSettingManager->GetMenuShaderEnabled("WetnessEffects"))
 		return "Requires WetnessEffects to be enabled (Weather and water > WetnessEffects).";
 
@@ -589,8 +589,49 @@ static bool IsInternalSetting(const std::string& section, const std::string& key
 
 // UNOFFICIAL 2026-11-12: an Internal setting ([Main.Menu.Developer] Internal) while the settings file does not ask for them
 // (ShowInternal): never a row, on its page, in the search or in the simple views, and not counted as a hidden developer setting.
+// UNOFFICIAL 2026-11-20 deferred wetness step 3 (SettingManager::RainWetnessOneSwitch): with DeferredWetness on, Puddles has no switch of its own
+// in the menu (it follows "Rain wetness", Wetness Effects' switch), and the Reflections effect takes the floors' water from the film, so
+// ReflectionPuddles does nothing there: hidden (its saved value stays). WetRoughness stays: it is the wet mirror's blur (2026-11-20,
+// Reflections.glsl FilmWetness). (2026-11-21: WetWorld, whose switch was hidden here too, is removed.)
+static bool RainWetnessLinked(const std::string& shader) {
+	if (!TheSettingManager->RainWetnessOneSwitch()) return false;
+	return shader == "Puddles";
+}
+
+// UNOFFICIAL 2026-11-20 unified reflections (owner: "can we remove the other reflection settings from menu"): while [Main.Main.Quality]
+// UnifiedReflections is on (the renderer is always deferred, 2026-11-28), the Reflections effect takes its material and normals from the
+// G-buffer, so the switches that chose them before are hidden (their saved values stay and still work from the file; the RT weapon still uses
+// MaterialAware). DeferredBumpedNormals stays: it also gives Wetness Effects' wet reflections their bumps. Wetness
+// Effects' reflections, the env-map strengths, metal and Specular stay too: their passes still run (design steps 2-3).
+static bool UnifiedReflectionsHides(const std::string& section, const std::string& key) {
+	const bool listed = (section == "Main.Main.Quality" && key == "DeferredReflections") ||
+		(section == "Shaders.Reflections.Main" && (key == "MaterialAware" || key == "MaterialBufferRoughness"));
+	return listed && TheSettingManager->GetSettingI("Main.Main.Quality", "UnifiedReflections") != 0;
+}
+bool UnifiedReflectionsHidesKey(const std::string& section, const std::string& key) { return UnifiedReflectionsHides(section, key); }	// (the "not used" notes, above it)
+
+// UNOFFICIAL 2026-11-20 (owner: "what can we remove from the menu"): under Rain wetness, settings that no pass reads, hidden (saved values stay).
+// Wetness Effects: with Puddles on (Quality above 0) GetWetness takes the Puddles branch (Includes/Wetness.hlsl PUDDLES_ON, every record, first
+// person included), which replaces the CS noise puddle these five shaped. (2026-11-21: WetWorld's dead keys went with WetWorld.)
+static bool RainWetnessDeadKey(const std::string& section, const std::string& key) {
+	static const char* const kWetnessPuddle[] = { "MaxPuddleWetness", "PuddleRadius", "PuddleMaxAngle", "HeightAwareness", "CreviceFill" };
+	auto listed = [&key](const char* const* names, size_t count) {
+		for (size_t i = 0; i < count; i++) if (key == names[i]) return true;
+		return false;
+	};
+	if (section == "Shaders.WetnessEffects.Main")
+		return listed(kWetnessPuddle, _countof(kWetnessPuddle)) && TheSettingManager->RainWetnessOneSwitch() &&
+			TheSettingManager->GetMenuShaderEnabled("Puddles") && TheSettingManager->GetSettingI("Shaders.Puddles.Main", "Quality") > 0;
+	return false;
+}
+
 static bool InternalHidden(const std::string& section, const std::string& key) {
 	if (ShelvedEffects::Key(section, key)) return true;	// UNOFFICIAL 2026-11-16: a shelved effect or key (release builds only), whatever ShowInternal says
+	if (UnifiedReflectionsHides(section, key)) return true;	// (2026-11-20)
+	if (section == "Shaders.Puddles.Main" && key == "ReflectionPuddles" && TheSettingManager->RainWetnessOneSwitch()) return true;	// (2026-11-20, RainWetnessLinked)
+	if (RainWetnessDeadKey(section, key)) return true;	// (2026-11-20)
+	// (2026-11-20, owner: "what can we remove from the menu") Reflections' Hi-Z walk: measured slower, its other keys test only (defaults.toml)
+	if (section == "Shaders.Reflections.Main" && (key.compare(0, 3, "HiZ") == 0 || key == "DampTrace" || key == "ForwardWetFilm")) return !gMenu.showInternal;	// (2026-11-21: DampTrace, an A/B test key)
 	return !gMenu.showInternal && IsInternalSetting(section, key);
 }
 
@@ -614,7 +655,7 @@ static bool IsOnOffInteger(const SettingManager::Configuration::ConfigNode& node
 		{ "Shaders.DitherBuster.Main", "DebugView" }, { "Shaders.PBR.Metal", "DebugView" },
 		{ "Shaders.ShadowsExteriors.SunSmoothing", "SmoothSun" }, { "Shaders.ShadowsExteriors.SunSmoothing", "QuantizeSun" },
 		{ "Shaders.CloudShadows.Main", "HazardLog" }, { "Shaders.CloudShadows.Main", "FlickerWatch" },
-		{ "Shaders.HandBlood.Main", "DebugView" }, { "Shaders.WetWorld.Main", "HudDebug" },
+		{ "Shaders.HandBlood.Main", "DebugView" },
 	};
 	for (const auto& o : onOff) if (!strcmp(o[0], node.Section) && !strcmp(o[1], node.Key)) return true;
 	return node.Description.compare(0, 5, "[0-1]") == 0;
@@ -888,9 +929,9 @@ static void RenderColorTriple(SettingManager::Configuration::ConfigNode& nodeR, 
 // Whole numbers that pick one of a few modes get a dropdown of names. Keyed by "Section.Key": the key alone repeats ("Mode" is a
 // different thing for Cinema and DepthOfField).
 //
-// Cinema and DepthOfField Mode: the C++ also takes 3 and 4 (Cinema.cpp, DepthOfField.cpp), tests left from the Oblivion code that
-// check for persuasion. New Vegas has no persuasion, so 3 always switches the effect off ("Disabled") and 4 is a copy of 1 or 2 or
-// always off: only 3 is offered.
+// Cinema and DepthOfField Mode: the C++ also takes 3 and 4 (Cinema.cpp, DepthOfField.cpp), once Oblivion's persuasion tests
+// (2026-11-05: removed; New Vegas has no persuasion menu). 3 always switches the effect off ("Disabled"), 4 is Cinema's 2 and
+// DepthOfField's 3: only 3 is offered.
 
 static const char* const kToneMappers[] = {
 	"0 - None (vanilla)",
@@ -1661,10 +1702,6 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.SnowAccumulation.Main", "Persistent", "Snow stays where it fell (spot by spot)", nullptr, "Snow builds up and melts spot by spot, so sheltered ground stays clear. Needs snowfall." },
 	{ "Shaders.SnowAccumulation.Main", "PersistentFootprints", "Footprints in snow", nullptr, "Your steps leave footprints in the snow." },
 	{ "Shaders.SnowAccumulation.Main", "PersistentDrifts", "Snow drifts in hollows", nullptr, "More snow gathers in hollows and against walls, less on ridges." },
-	// WetWorld (Main)
-	{ "Shaders.WetWorld.Main", "Persistent", "Ground stays wet where rain fell", nullptr, "Rain wets only the ground it reaches, so covered spots stay dry and puddles form in the open." },
-	{ "Shaders.WetWorld.Main", "PersistentWetTime", "Hours of rain to wet the ground", nullptr, "Game hours of rain before open ground is fully wet." },
-	{ "Shaders.WetWorld.Main", "PersistentDryTime", "Hours for wet ground to dry", nullptr, "Game hours for wet ground to dry in full sun. Shade takes longer." },
 	// Water (Default)
 	{ "Shaders.Water.Default", "reflectivity", "Reflections", nullptr, "How strongly the water mirrors its surroundings." },
 	{ "Shaders.Water.Default", "choppiness", "Wave sharpness", nullptr, "Higher gives sharper, more defined wave crests." },
@@ -2064,10 +2101,10 @@ static const SimpleRow kSimpleRows[] = {
 	{ "Shaders.SMAA.Main", "Threshold", "Edge sensitivity", nullptr, "How easily edges are found. Lower smooths more of the picture but can soften detail." },
 	// Sharpening (Main)
 	{ "Shaders.Sharpening.Main", "Strength", "Sharpening strength", nullptr, "How much the picture is sharpened." },
-	{ "Shaders.Sharpening.Main", "Offset", "Sharpening width", nullptr, "How wide the sharpening reaches. Wider looks coarser." },
+	{ "Shaders.Sharpening.Main", "Offset", "Sharpening distance", nullptr, "How far from you the sharpening reaches before it fades out (thousands of units). 0 = no sharpening." },
 	// Sharpening (Interiors)
 	{ "Shaders.Sharpening.Interiors", "Strength", "Sharpening strength", nullptr, "How much the picture is sharpened." },
-	{ "Shaders.Sharpening.Interiors", "Offset", "Sharpening width", nullptr, "How wide the sharpening reaches. Wider looks coarser." },
+	{ "Shaders.Sharpening.Interiors", "Offset", "Sharpening distance", nullptr, "How far from you the sharpening reaches before it fades out (thousands of units). 0 = no sharpening." },
 	// DitherBuster (Main)
 	{ "Shaders.DitherBuster.Main", "Strength", "Strength", nullptr, "How strongly the dotted patterns on edges are smoothed out." },
 	{ "Shaders.DitherBuster.Main", "Radius", "Smoothing reach", nullptr, "How far along edges the smoothing reaches." },
@@ -2470,7 +2507,7 @@ static bool DrawFloatSetting(SettingRow& row, bool isShader) {
 		if (range != kFloatSliders.end()) { lo = range->second.Min; hi = range->second.Max; limited = true; }
 		else limited = DocumentedRange(node.Description, lo, hi);
 	}
-	// UNOFFICIAL 2026-11-16: with the deferred renderer on, Gamma <= 1.0 reads as 2.2 (SettingForce::FloorF): show the value in
+	// UNOFFICIAL 2026-11-16: with the deferred renderer on, Gamma <= 1.0 reads as 2.2: show the value in
 	// effect, and the lower end starts above 1.0. Only an edit writes. NightGamma keeps its stored value (0 must stay reachable, and
 	// a drag up from 0 passes through (0, 1.0]); its row's note tells the floor.
 	bool night = false;
@@ -2952,6 +2989,7 @@ static void NewRenderRun(std::vector<NewEntry>& entries, const NewGroup& group) 
 	for (size_t i = group.Begin; i < group.End; i++) {
 		NewEntry& e = entries[i];
 		if (!e.Valid || drawnKeys.count(e.Key)) continue;
+		if (InternalHidden(e.Section, e.Key)) continue;	// UNOFFICIAL 2026-11-20 (review): the hides that come and go (UnifiedReflectionsHides, ReflectionPuddles); the list is cached
 		if (e.Status) {
 			NewShaderSwitchRow(e);
 			continue;

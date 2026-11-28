@@ -97,6 +97,14 @@ static bool DrawShaderEntryRow(const std::string& path, const std::string& name)
 		MenuWidgets::MarkLastItem(label.c_str(), SidebarMarked(path));	// 2026-11-25 (unsaved marks)
 		if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s has no on/off switch of its own: the settings inside control it.", shader);
 	}
+	else if (RainWetnessLinked(name)) {
+		// UNOFFICIAL 2026-11-20 deferred wetness step 3: switched with Rain wetness (Wetness Effects' row), a name only
+		ImGui::PushStyleColor(ImGuiCol_Text, on ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : MenuWidgets::MutedText(0.5f));
+		ImGui::TextUnformatted(label.c_str());
+		ImGui::PopStyleColor();
+		if (ImGui::IsItemHovered()) ImGui::SetTooltip(name == "Puddles" ? "Switched with Rain wetness: puddles come and go with it." :
+			"Only a fallback with Rain wetness on: it draws the rain on screen when the surfaces' own water layer could not be built.");
+	}
 	else {
 		ImGui::BeginDisabled(forced);
 		if (MenuWidgets::Toggle("##on", &on) && (!on || ConfirmEffectOn(name))) {	// (2026-11-05: conflicts ask first)
@@ -219,7 +227,7 @@ static const EffectGroup kEffectGroups[] = {
 	{ "Shadows", "ShadowsExteriors, ShadowsInteriors" },
 	{ "Ray tracing", nullptr },
 	{ "Sky and atmosphere", "Sky, VolumetricClouds, VolumetricFog, VolumetricLight, GodRays, SunGlare, Sandstorm, HeatHaze" },
-	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, Puddles, WetWorld, Water, Underwater, WaterLens" },
+	{ "Weather and water", "Precipitations, Snow, SnowAccumulation, WetnessEffects, Puddles, Water, Underwater, WaterLens" },
 	{ "Ground and plants", "Terrain, POM, Grass, Plants" },
 	{ "Characters", "Skin, Cloth, PipboyFit, HandBlood" },
 	{ "Camera and colour", "Tonemapping, Exposure, HDR, Bloom, BloomLegacy, Lens, LUT, Coloring, ImageAdjust, Cinema, Bodycam, DepthOfField, MotionBlur, LowHF" },
@@ -635,9 +643,9 @@ static const CategoryScope kCategoryScopes[] = {
 		"Shaders.Sky.Main, Shaders.Sky.Physical, Shaders.Sky.Clouds, Shaders.VolumetricClouds.Main, Shaders.VolumetricFog.Main, Shaders.VolumetricFog.Night, "
 		"Shaders.VolumetricFog.Interiors, Shaders.VolumetricLight.Main, Shaders.VolumetricLight.Night, Shaders.GodRays.Main, Shaders.GodRays.Coloring, "
 		"Shaders.SunGlare.Main, Shaders.Sandstorm.Main, Shaders.HeatHaze.Main, Shaders.DustMotes.Main" },
-	{ "@Cat.Weather", "@Precipitations, @Snow, @SnowAccumulation, @WetnessEffects, @Puddles, @WetWorld, @Water, @Underwater, @WaterLens, "
+	{ "@Cat.Weather", "@Precipitations, @Snow, @SnowAccumulation, @WetnessEffects, @Puddles, @Water, @Underwater, @WaterLens, "
 		"Shaders.Precipitations.Main, Shaders.Snow.Main, Shaders.SnowAccumulation.Main, Shaders.WetnessEffects.Main, Shaders.WetnessEffects.Raindrops, "
-		"Shaders.WetnessEffects.HudRaindrops, Shaders.Puddles.Main, Shaders.WetWorld.Main, Shaders.Water.Default, Shaders.Water.Interiors, "
+		"Shaders.WetnessEffects.HudRaindrops, Shaders.Puddles.Main, Shaders.Water.Default, Shaders.Water.Interiors, "
 		"Shaders.Water.Placed, Shaders.WaterLens.Main, Main.Main.Quality:GearWeather, Main.Main.Quality:GearWeatherStrength, "
 		"Main.Main.Quality:GearWeatherFrost, Main.Main.Quality:GearWeatherSand, Main.Main.Quality:GearWeatherWet, Main.Main.Quality:GearWeatherMud, "
 		"Main.Main.Quality:GearWeatherSpeed, Main.Main.Quality:GearWeatherSkin, Main.Main.Quality:GearWeatherScale, Main.Main.Quality:GearWeatherForce" },	// test4: + the gear weather card

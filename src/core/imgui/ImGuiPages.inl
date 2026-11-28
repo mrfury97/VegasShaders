@@ -270,14 +270,6 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.ShadowsInteriors.Forward", "Room darkening", "KeepDarkening, DarkeningBlur, MaskHalfRes",
 		FogType::None, false, "The old darkening of what no shadowed lamp reaches, so rooms keep their mood.", nullptr },
 
-	// Shaders.ShadowsInteriors.Capsules
-	{ "Shaders.ShadowsInteriors.Capsules", "People's shadows",
-		"DropActors, MaxActors, MaxDistance, PlayerFirstPerson, RadiusScale, Strength, SelfMargin, LampSize, InvisibleLightSize, RankBy",
-		FogType::None, true, "Soft lamp shadows of people from simple capsule shapes round their bones.", nullptr },
-	{ "Shaders.ShadowsInteriors.Capsules", "Contact shadows",
-		"ContactLength, ContactSteps, ContactThickness, ContactStrength, ContactBias, ContactJitter, StartOffset, StartOffsetPerUnit",
-		FogType::None, false, "A short ray toward each lamp for the small shadows where things touch.", nullptr },
-
 	// Shaders.ShadowsInteriors.RT
 	{ "Shaders.ShadowsInteriors.RT", "Soft shadows", "Rays, LampRadius, InvisibleLightRadius, Jitter",
 		FogType::None, true, "The size of the lamp the rays aim at, for soft shadow edges.", nullptr },
@@ -404,14 +396,6 @@ static const MenuGroup kMenuGroups[] = {
 	{ "Shaders.AmbientLight.Main", "Screen bounce light",
 		"ComputeGI, ComputeGIStrength, ComputeGIThickness, ComputeGIThinOcclusion, ComputeGIQuality, ComputeGITest",
 		FogType::None, false, "Light bounced from what is on screen (needs the DXVK fork).", nullptr },
-
-	// Shaders.WetWorld.Main
-	{ "Shaders.WetWorld.Main", "Wet ground that lasts",
-		"Persistent, PersistentWetTime, PersistentDryTime, PersistentPuddleFill, PersistentPuddleDry, PersistentShade, PersistentMapSize, "
-		"PersistentMapResolution, PersistentDebugView",
-		FogType::None, false, "Wet ground and puddles are kept spot by spot round you and dry slowly, faster in the sun.", nullptr },
-	{ "Shaders.WetWorld.Main", "Not used", "PuddleCoeff_R, PuddleCoeff_G, PuddleCoeff_B, PuddleSpecularMultiplier",
-		FogType::None, false, "These settings do nothing.", nullptr },
 
 	// Shaders.Grass.GPUGrass
 	{ "Shaders.Grass.GPUGrass", "Distance and detail",
@@ -570,6 +554,7 @@ static void RenderShaderHeaderSwitch(const std::string& shaderName) {
 	const char* shader = shaderName.c_str();
 	const SettingManager::MenuSwitch kind = TheSettingManager->GetMenuShaderSwitch(shader);
 	if (kind == SettingManager::MenuSwitch::None) return;	// UNOFFICIAL 2026-10-19: an entry without a switch gets none
+	if (RainWetnessLinked(shaderName)) return;	// UNOFFICIAL 2026-11-20: switched with Rain wetness
 	bool on = TheSettingManager->GetMenuShaderEnabled(shader);
 	const bool forced = TheSettingManager->IsShaderForced(shader);
 
@@ -969,6 +954,8 @@ static bool IsMovedShaderEntry(const std::string& name) {
 static std::string MenuEntryLabel(const std::string& name) {
 	if (name == "HDR") return "HDR (freeze warning)##HDR";
 	if (name == "TAA") return "TAA / FSR / DLSS##TAA";
+	// UNOFFICIAL 2026-11-20 deferred wetness step 3: the one switch for rain wetness (RainWetnessLinked)
+	if (name == "WetnessEffects" && TheSettingManager->RainWetnessOneSwitch()) return "Rain wetness##WetnessEffects";
 	if (name == "SunFar") return "SunFar (mountain and flat-cloud shadow pass)##SunFar";
 	// UNOFFICIAL 2026-11-07 (user: "why is the exterior setting underneath interior"): the two shadow effects are named after the game's
 	// old split, but ShadowsInteriors is the LAMPS' shadows (indoors and, with its RT section, street lamps outdoors at night) and
@@ -1466,8 +1453,6 @@ static const VisualFolder kSunContactFolder = { "Contact shadows (screen space)"
 	{ "Shaders.ShadowsExteriors.SSShadows", nullptr, nullptr } } };
 static const VisualFolder kLampCommonFolder = { "Lamps and what casts shadows", "How many lamps cast shadows, how far, and which objects. Used by both.",
 	{ { "Shaders.ShadowsInteriors.Main", nullptr, nullptr } } };
-static const VisualFolder kLampCapsuleFolder = { "People's lamp shadows (capsules)", "Soft lamp shadows of people from simple shapes round their bones, "
-	"on top of either.", { { "Shaders.ShadowsInteriors.Capsules", nullptr, nullptr } } };
 static const VisualFolder kAmbientLightFolder = { "Ambient light", "Reach, strength and the outline fixes of the all-in-one pass.",
 	{ { "@effect", "AmbientLight", "Ambient light" },
 	{ "Shaders.AmbientLight.Main", "-GridBounce, GridCellSize, GridSteps, GridSpread, GridScreenStrength, GridBlocking, GridWallMemory, GridLamps, GridFine, GridColour, "
@@ -1580,7 +1565,6 @@ static const RtSharedBlock kRtSharedBlocks[] = {
 	{ "Shaders.ShadowsExteriors.RT", &kSunSoftFolder },
 	{ "Shaders.ShadowsExteriors.RT", &kSunContactFolder },
 	{ "Shaders.ShadowsInteriors.RT", &kLampCommonFolder },
-	{ "Shaders.ShadowsInteriors.RT", &kLampCapsuleFolder },
 	{ "Shaders.AmbientOcclusion.RT", &kAmbientLightFolder },
 	{ "Shaders.AmbientOcclusion.RT", &kGridFolder },
 	{ "Shaders.Reflections.RT", &kSsrFolder },
@@ -1724,7 +1708,7 @@ static const DebugViewKey kDebugViews[] = {
 	{ "Shaders.Terrain.Blending", "DebugView", "Terrain blending" },
 	{ "Shaders.Terrain.Blending", "Debug", "Terrain blending (debug)" },
 	{ "Shaders.Terrain.Displacement", "DebugView", "Terrain displacement" },
-	{ "Shaders.WetWorld.Main", "PersistentDebugView", "Wet world" },
+	{ "Shaders.SnowAccumulation.Main", "PersistentDebugView", "Snow cover map" },
 	{ "Shaders.WetnessEffects.HudRaindrops", "DebugView", "Raindrops on screen" },
 	{ "Shaders.WetnessEffects.Reflections", "DebugView", "Wet reflections" },
 	{ "Main.Main.Quality", "MsaaEdgeDebugView", "MSAA edge fix" },
@@ -2321,7 +2305,7 @@ static void RenderDebugSettingsPage() {
 		{ "Shaders.Grass.GPUGrass", "DebugView", "GPU grass (DebugView)", DbgKind::IntZero },
 		{ "Shaders.Grass.Interaction", "Debug", "Grass interaction (Debug)", DbgKind::BoolFalse },
 		{ "Shaders.SnowAccumulation.Main", "CapturedNormalsDebugView", "Snow normals (CapturedNormalsDebugView)", DbgKind::IntZero },
-		{ "Shaders.WetWorld.Main", "PersistentDebugView", "Wet world persistent (PersistentDebugView)", DbgKind::IntZero },
+		{ "Shaders.SnowAccumulation.Main", "PersistentDebugView", "Wet / snow cover persistent (PersistentDebugView)", DbgKind::IntZero },	// (moved from WetWorld, settings step 96)
 		{ "Shaders.WetnessEffects.Debug", "ShowCover", "Wetness cover (ShowCover)", DbgKind::BoolFalse },
 		{ "Shaders.WetnessEffects.Debug", "WetnessOverride", "Wetness override", DbgKind::FloatNegOne },
 		{ "Shaders.WetnessEffects.Debug", "PuddleOverride", "Puddle override", DbgKind::FloatNegOne },
@@ -3056,24 +3040,24 @@ static void RenderCatSky() {
 }
 
 // 4. Weather & water
-static int WetnessMode() { return EffectOn("WetnessEffects") ? 1 : EffectOn("WetWorld") ? 2 : 0; }	// 2026-11-26 (unsaved marks): the picker's mode
+static int WetnessMode() { return EffectOn("WetnessEffects") ? 1 : 0; }	// 2026-11-26 (unsaved marks): the picker's mode
 
 static void RenderCatWeather() {
 	PageTitle("Weather & water", "Rain, snow, surface wetness, puddles, and water shaders.");
 
 	// Competing wetness picker
 	if (MenuWidgets::SubHeader("Wetness system###cat_wet_mode", true, ModeMarked("wet", WetnessMode))) {	// 2026-11-25 (unsaved marks)
-		static const char* const kWetModes[] = { "Off", "WetnessEffects + Puddles (recommended)", "Legacy WetWorld" };
+		// (2026-11-22 upstream 1.1.3 merge: no "Legacy WetWorld" choice; WetWorld was removed 2026-11-21)
+		static const char* const kWetModes[] = { "Off", "WetnessEffects + Puddles (recommended)" };
 		const int wetMode = WetnessMode();	// 2026-11-26 (unsaved marks)
 		ImGui::PushID("cat_wet");
 		const float ww = MenuWidgets::RowBegin("Rain wetness", MenuWidgets::ResetSlotWidth(), ModeMarked("wet", WetnessMode));
 		ImGui::SetNextItemWidth(ww);
-		const int picked = NamePicker("##wet", kWetModes[wetMode], kWetModes, 3, wetMode);
+		const int picked = NamePicker("##wet", kWetModes[wetMode], kWetModes, 2, wetMode);
 		ImGui::PopID();
 		if (picked >= 0 && picked != wetMode) {
 			PickerWrites writes("wet", WetnessMode);	// 2026-11-26 (unsaved marks)
 			SetShaderEnabled("WetnessEffects", picked == 1);
-			SetShaderEnabled("WetWorld", picked == 2);
 			TheSettingManager->LoadSettings();
 		}
 		RestartBadge("Shaders.WetnessEffects.Status", "Enabled");
@@ -3088,9 +3072,6 @@ static void RenderCatWeather() {
 		if (EffectOn("WetnessEffects")) {
 			DrawSimpleEffectCard("WetnessEffects", "Wetness & raindrops", { "Main", "Raindrops", "HudRaindrops" });
 			DrawSimpleEffectCard("Puddles", "Puddles", { "Main" }, "Dynamic rain puddles with ripples (needs restart to toggle).");
-		}
-		else if (EffectOn("WetWorld")) {
-			DrawSimpleEffectCard("WetWorld", "Legacy WetWorld", { "Main" });
 		}
 
 		ImGui::TableNextColumn();
