@@ -21,6 +21,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [Upstream 1.1.5 merge](#upstream-115-merge)
 - [Deferred shadow quality](#deferred-shadow-quality)
 - [The Astral Shaders study](#the-astral-shaders-study)
+- [The FNVGodot-Bridge study](#the-fnvgodot-bridge-study)
 
 ## Deferred vs forward
 
@@ -2079,3 +2080,82 @@ compare them with Vegas Shaders.
   `docs\EFFECTS.md` (underwater-only caustics, interior exposure present, froxel fog with wind present, no frame generation).
 - Believed: the frame costs and session counts above; that our G-buffer carries what Caustic Light needs.
 - Not run: nothing of Astral was built or run (it cannot run in FNV); no in-game look at grass in rain.
+
+## The FNVGodot-Bridge study
+
+Written 2026-11-28 (room 02, read only). Source: github.com/gidHog/FNVGodot-Bridge, cloned at `F:\VS-scratch\fnvgodot-bridge`, HEAD c36a5b5
+(5 commits, first release 2026-11-28). Owner's ask: "can we study this and see if it's superior in anyway to VS in implementation".
+Paths below are in that clone; nothing was built or run.
+
+### What it is
+- A **replacement renderer**, not a shader mod. A small xNVSE plugin (`GodotBridge.dll`, `plugin\main.cpp` 2.7k lines) mirrors the live
+  world every frame over TCP 127.0.0.1:47800 to a **separate 64-bit Godot 4.7.2 process** (Vulkan Forward+, `godot\project.godot:14`,
+  ~13k lines of GDScript, ~1.1k lines of shaders), whose window is kept on top of the game window (`main.cpp:2249-2278`).
+- The game keeps running gameplay, scripts, Havok, audio and its own D3D9 device. In replace mode the plugin marks the TES world, LOD,
+  water-LOD and sky roots as culled and turns grass off (`main.cpp:249-274`), so the game draws only HUD, menus and first person; its
+  Present is cleared to black and paced to 60 FPS (`plugin\UiCapture.h:126-140`, pacer `:84-124`).
+- Godot loads every NIF and texture itself from the BSAs and loose files in load order (`godot\scripts\fnv_vfs.gd`, `nif_loader.gd`),
+  caches them (`model_cache.gd`), and re-implements each game shader family in Godot shaders (`godot\shaders\fnv_lit.gdshaderinc`).
+  Offline steps: model/texture cache, LOD/HLOD bake, interior VoxelGI bake (~25 min), and an optional AI upscale with generated PBR maps
+  (SeedVR2, CUDA).
+- Maturity: early. `docs\STATUS.md` (2026-11-17) marks most effects "built, not seen in game"; missing: distant trees, decals (blood,
+  bullet holes), beam/Tesla effects, actor effect shaders, fog volumes, DOF, motion blur, image-space modifiers (hit flash, drugs,
+  radiation, VATS), god rays, FaceGen morphs, intro videos, light flicker. README known issues: computers broken, wrong glows, stutter
+  after cell changes. Exit crashes in xNVSE are hidden by `TerminateProcess` (`main.cpp:2597-2605`). About 100 hard-coded 1.4.0.525
+  offsets, read under `__try` (faults are swallowed, not fixed).
+- Licence: GPL-3.0 (`LICENSE`). Vegas Shaders is not GPL (`License.md`), so **no code from it may go into our repo**; ideas only,
+  written fresh.
+
+### Area by area
+
+| Area | FNVGodot-Bridge | Vegas Shaders | Verdict |
+| --- | --- | --- | --- |
+| Hooking | One D3D9 vtable patch (Present, `UiCapture.h:143-155`), the xNVSE main-loop message (`main.cpp:2578-2608`), cull flags on TES roots, three LOD fade floats. | Many hooks inside the game's render passes plus the DXVK fork bridge (`src\NewVegas\Hooks\Render.cpp`). | Simpler, but only because it throws the game's renderer away. **Not comparable.** |
+| Scene capture | Walks every loaded cell's refs each frame on the game's main thread (`main.cpp:481-502`, `:1550-1581`), sends only changed transforms (`:1727-1762`), bones, lights (`:624`), sun and environment, land, UI tiles. Re-implements every material. | Sees exactly what the game draws as it draws it; every game feature (decals, effect shaders, VATS, image-space modifiers, distant trees) keeps working. | **Worse** for coverage: each game feature must be rebuilt in Godot (STATUS.md missing list). |
+| Deferred / G-buffer | None: Godot clustered Forward+. | Deferred G-buffer, sun and lamp passes ("Deferred vs forward"). | **Not comparable**; both shade many lamps. |
+| GI | SDFGI outdoors (6 cascades), baked VoxelGI per interior cell (`godot\scripts\bridge.gd:505-516`, `:546-563`). | AmbientLight (screen space); RT GI unofficial and off (`GI = false`). | **Better on paper** (whole-scene bounce); cost unknown, 25 min bake. |
+| Shadows | Sun atlas 8192, 250 m; up to 16 shadowed lamps (4 cubes, the rest dual paraboloid), atlas 8192 (`graphics_options.gd:54-58`, `bridge.gd:1079-1088`). Contact shadows: 16-step, sun-only compute march (`post_effects.gd:12-140`). | 512 lamp cubes ("Deferred shadow quality"); Bottled SSS for the sun and for 2-4 lamps. | Lamp shadows **better on paper** (count, resolution); contact shadows **equal or worse**. No cost numbers. |
+| Reflections | Godot SSR outdoors only, off indoors on purpose; no reflection probes; water with Fresnel SSR (`bridge.gd:562-566`). | Unified reflections: Hi-Z trace, world cube, sky panorama, puddle mirrors. | **Worse.** |
+| Wetness, rain | One global wetness float, used by grass only (`weather_fx.gd:52-68`); GPU particle rain. | Deferred wetness, puddles, GearWeather, rain on surfaces. | **Worse.** |
+| Post effects | Godot glow, SSAO, SSIL, fog, AgX, FSR 2.2, auto-exposure; a custom desert heat shimmer (`post_effects.gd:219` on). | Full set (EFFECTS.md index), DLSS and FSR, AgX among 11 tonemappers. | **Worse** (many missing), except the desert heat shimmer we lack. |
+| Settings, UI | F10 window with Low-Extreme presets saved as JSON (`graphics_options.gd:311-341`); F3 FPS with 1 % / 0.1 % lows (`perf_overlay.gd`); F6 issue reporter (`issue_reporter.gd`). | toml plus in-game menu, many separate switches. | Presets and the reporter **better**; closer to our rule "one preset beats several switches". |
+| CPU per frame | Game: full simulation, the ref walk and serialisation on the main thread, a UI-only D3D9 frame. World draw submission moves to another process (Godot, its own threads) with instanced far objects and grass (`lod_manager.gd:487-546`). The plugin logs its own cost (`main.cpp:2510-2523`) but publishes no number. | Owner's probe: 6.6 ms CPU a frame on the Strip, +2.6 ms inside DXVK, all on the game's thread. | **Believed better** for the game thread, by not drawing the world in D3D9 at all. Not measured; Godot's own CPU cost unknown. |
+| GPU per frame | Unknown; defaults are heavy (SDFGI, two 8192 atlases, MSAA 4x `project.godot:20`). | Measured per effect. | **Not comparable** (no numbers). |
+| DXVK | Not used or needed; the D3D9 vtable patch is untested under DXVK. | Built on our DXVK fork. | **Not comparable.** |
+| Making shaders | Godot shader language; F8 in-game editor saves overrides, delete the file to revert (`shader_editor.gd:1-12`, `live_overrides.gd:1-12`). | ps_3_0 HLSL limits, or GLSL to SPIR-V; rebuild and restart. | **Better.** |
+| Stability | 5 commits, many items unseen in game, focus and Alt-Tab gaps, image believed at least a frame behind the game (no sync, `main.cpp:2541-2548`), 60 FPS pacing. | Years of use, bench-tested. | **Worse.** |
+
+### Verdict
+Not superior as a whole: it is a different kind of project (a second renderer fed by the game), and early. Where it is ahead: shader
+editing, whole-scene GI and the number of shadowed lamps (both on paper, no cost numbers), and, by design, the game thread no longer
+submits the world's draws, which is the kind of CPU cost the 6.6 ms probe shows. It pays for that by losing everything the game draws
+itself, with a frame of latency and a second process. Nothing in it can replace the deferred path.
+
+### Worth borrowing (ideas, written fresh)
+1. **Cull-the-world CPU probe (diagnostic).** A debug key that sets the cull flag on the TES world roots for a bench run, as the bridge
+   does, to split the 6.6 ms into world draw submission vs. the rest. Decides whether draw-call reduction (item 2) is worth it.
+   0.5 session, low risk (bench only, off by default).
+2. **Instanced far objects and grass.** One instanced draw per model for distant objects (the bridge's MultiMesh batching): D3D9
+   stream-frequency instancing in the G-buffer pass. Engine draw paths, needs room 05 facts. 4-6 sessions, high risk. Only after item 1.
+3. **Light from glowing meshes.** Unshadowed deferred lamps placed on neon signs, marquees and vending machines (bridge: up to 4 per
+   model, 2.6 m clusters, `emissive_lights.gd:9-30`). Pick them by glow map, not by name keywords. Deferred path. 2-3 sessions, medium
+   risk (lamp cost on the Strip, false lights).
+4. **Desert heat shimmer.** Day only, beyond ~40 m, off in rain and interiors (ours exists only around a hot gun barrel). Post pass,
+   1 session, low risk, cost believed under 0.2 ms.
+5. **Issue reporter key.** Writes camera, cell, the object under the crosshair, nearby lights and the live settings to a JSON the bench
+   can replay. 1 session, low risk.
+6. **Quality presets.** One Low-Ultra switch over our many keys (product rule). 1-2 sessions; risk: presets overriding the owner's
+   tuned values (needs a migration).
+7. **Live shader edit.** Recompile a changed shader in game without a restart (check first what our runtime compile already allows).
+   1-2 sessions, low risk.
+
+### Skip
+The two-process design itself, SDFGI and VoxelGI (Godot engine features; our GI route is RT and AmbientLight), AI texture upscaling and
+PN-triangle remeshing (asset work for room 04, not renderer work), the 60 FPS Present pacer, and the sky-dome fill shadow (our AO covers it).
+
+### Proven / believed / not run
+- Proven (read in the source, key lines re-checked by hand): the architecture, the hooks, the world cull, the Present clear and pacer,
+  the per-frame ref walk on the main thread, Forward+, SSR off indoors, the GI and shadow defaults, the licence.
+- Believed: a frame or more of latency; that the game thread gets cheaper; the costs and session counts above. STATUS.md lags the
+  README, so some "missing" items may work by now.
+- Not run: nothing of it was built or run; no CPU or GPU numbers exist for it anywhere in its repo.
