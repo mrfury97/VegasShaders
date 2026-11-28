@@ -33,6 +33,7 @@ layout(set = 1, binding = 13) uniform texture2D t_volume;        // NVR_VolumeCl
 layout(set = 1, binding = 14) uniform texture2D t_water;         // NVR_WaterDepth
 layout(set = 1, binding = 15) uniform texture2D t_scene;         // NVR_Scene (2026-10-25: the world as drawn; POINT)
 layout(set = 1, binding = 16) uniform texture2D t_waterMask;     // WaterMask (2026-11-21: .g > 0.45 strictly on water pixels)
+layout(set = 1, binding = 17) uniform texture2D t_terrainMark;   // (2026-11-28) 1 where the deferred sun put the land's shadow on the sunlight
 
 // The constants the HLSL reads (std140: vec4s and mat4s only, in the order of SunFarUniforms in SunFar.cpp).
 layout(set = 2, binding = 0, std140) uniform Constants {
@@ -77,6 +78,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 projectionTransform;       // TESR_ProjectionTransform
     mat4 viewTransform;             // TESR_ViewTransform
     vec4 renderScale;               // TESR_RenderScale (xy scale, zw 1/scale)
+    vec4 deferredTerrain;           // (2026-11-28) x 1: the deferred sun took the land's shadow off this frame's deferred pixels (core/TerrainShadowBridge.h)
 } cb;
 
 layout(location = 0) in vec2 uv;
@@ -347,8 +349,14 @@ vec4 SunFarPS(vec2 uvc) {
     float terrain = TerrainShadow(world);
     float cloud = CloudShadow(rel) * VolumeCloudShadow(world);
     float blocked = terrain * cloud;
+    // UNOFFICIAL 2026-11-28 mountain shadows in the deferred sun: a pixel it lit has the land's shadow in its sunlight already (before
+    // fog and sky light), so the factor the composites multiply in leaves the land's part out there; a (what reaches the sun, for the
+    // Specular effect's highlight) and the debug views keep it. Grass, water and other forward-drawn pixels: as before.
+    const bool deferredLit = cb.deferredTerrain.x > 0.5 && LOD(t_terrainMark, pc.samplerPoint, ruv, 0.0).r > 0.5;
+    float blockedLit = deferredLit ? cloud : blocked;
     // DebugView 4 (test, 2026-10-25 as the .fx): as a fully clouded sky over the whole screen at Strength 1.
     blocked = cb.sunFarData.y > 3.5 ? 0.0 : blocked;
+    blockedLit = cb.sunFarData.y > 3.5 ? 0.0 : blockedLit;
     // [TerrainShadows] Darkness: in the land's shadow, a share of the ambient and sky light goes too.
     float shade = (1.0 - terrain) * cb.terrainShadowParams.z;
 
@@ -361,7 +369,7 @@ vec4 SunFarPS(vec2 uvc) {
         tint *= mix(vec3(1.0), mix(vec3(1.0), vec3(1.0, 0.15, 0.15), WaterDeep(ruv, rel)), water);
         return vec4(tint, 1.0);
     }
-    if (blocked >= 0.999 && shade <= 0.001) return vec4(1.0);   // most of the screen
+    if (blockedLit >= 0.999 && shade <= 0.001) return vec4(1.0, 1.0, 1.0, blocked);   // most of the screen
     vec3 normal = GetWorldNormalLod(ruv);
 
     // Water is left alone (WaterShadows: shallow water fades in by its depth, the share of deep water is WaterDeepShare).
@@ -387,7 +395,7 @@ vec4 SunFarPS(vec2 uvc) {
     vec3 skyIrr = mix(SkyIrradiance(normal), SkyIrradianceTerrain(normal), terrainWeight);
     vec3 ambientLight = LightColor(cb.shadowAmbientLight.rgb) * LightScale(scales.y) + LightColor(skyIrr) * LightScale(scales.z);
     vec3 litNow = ambientLight + sunLight * cascade;
-    vec3 factor = saturate((ambientLight * (1.0 - shade) + sunLight * (cascade * blocked)) / max(litNow, vec3(0.0001)));
+    vec3 factor = saturate((ambientLight * (1.0 - shade) + sunLight * (cascade * blockedLit)) / max(litNow, vec3(0.0001)));
     factor = keep < 1.0 ? mix(vec3(1.0), factor, keep) : factor;
     // Into the stored space: with linear lighting the shaders encoded their result with 1 / gamma (w; 1 with it off).
     factor = pow(max(factor, vec3(1e-6)), vec3(cb.sunFarData.w));

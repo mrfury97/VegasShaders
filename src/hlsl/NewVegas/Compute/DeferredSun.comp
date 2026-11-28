@@ -28,6 +28,12 @@ layout(set = 1, binding = 10) uniform texture2D t_sssMask;        // TESR_Screen
 layout(set = 1, binding = 11) uniform texture2D t_shadowAtlasOld; // TESR_ShadowAtlasOld (stand-in t_depth unless fading)
 layout(set = 1, binding = 12) uniform texture2D t_shadowDynamic;  // TESR_ShadowDynamic (stand-in t_depth unless fading with it)
 layout(set = 1, binding = 13) uniform texture2D t_wetFilm;        // DeferredWetness::FilmTexture (stand-in t_depth unless FilmLive)
+// UNOFFICIAL 2026-11-28 mountain shadows in the deferred sun (core/TerrainShadowBridge.h, kFlagTerrainShadow): the land's shadow heights
+// and the map's ground, as the SunFar pass reads them (effects/TerrainShadows.h); stand-ins t_depth unless the flag is set.
+layout(set = 1, binding = 14) uniform texture2D t_terrainShadow;  // TESR_TerrainShadowBuffer (G16R16: r upper, g lower shadow height)
+layout(set = 1, binding = 15) uniform texture2D t_terrainGround;  // TESR_TerrainShadowGround (L16: the ground)
+layout(set = 1, binding = 16, rgba16f) uniform image2D i_terrainMark; // (review 2026-11-28) 1 where the land's shadow went on the sunlight
+                                                                  //     here (TerrainShadowBridge::Mark; SunFar leaves it out there)
 
 layout(push_constant) uniform Push {
     uint linearSampler;   // 0: LINEAR, CLAMP (cloud shadow)
@@ -95,6 +101,10 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4  shadowCrossFade;        // 93: TESR_ShadowCrossFade (x the old shadows' share, 1 at the step .. 0; yzw the sun the kept maps were drawn for)
     vec4  shadowDynamicData;      // 94: TESR_ShadowDynamicData (x 1 / the movers' atlas size, 0 = not drawn this frame)
     vec4  linearScales;           // 95: TESR_LinearScales (w 1 = DeferredLandRoughF90 false, the default: the land takes the forward land's F90)
+    vec4  terrainRel;             // 96: (2026-11-28) TESR_TerrainShadowData made camera-relative: x west edge - camera x, y north edge - camera y,
+                                  //     z 1 / width (units), w strength (0: off)
+    vec4  terrainRange;           // 97: TESR_TerrainShadowRange: x lowest encoded height, y encoded range, z bias, w blur
+    vec4  terrainParams;          // 98: x 1 / height (units) (TESR_TerrainShadowParams.x), y camera z (world), z unused, w Contrast
 } cb;
 
 // Flag bits (must match DeferredSun.h)
@@ -125,6 +135,7 @@ const uint kFlagSheenPuddleGate  = 1u << 23u;   // (2026-11-27 upstream 1.1.5 me
 const uint kFlagSunCrossFade     = 1u << 24u;   // (2026-11-27 sunsheen-fade) a sun step's fade runs: t_shadowAtlasOld and cb.shadowOld* are this frame's
 const uint kFlagShadowDynamic    = 1u << 25u;   // (2026-11-27 sunsheen-fade) with it: t_shadowDynamic holds this frame's movers
 const uint kFlagWetFilm          = 1u << 26u;   // (2026-11-27 sunsheen-fade) DeferredWetness's film target holds this frame's film (DS_WET_FILM)
+const uint kFlagTerrainShadow    = 1u << 28u;   // (2026-11-28) the land's shadow on the sunlight (rows 96-98, t_terrainShadow / t_terrainGround)
 const uint kFlagViewModel        = 1u << 27u;   // (2026-11-28 upstream 1.1.6 merge: upstream's bit 24) DeferredFirstPerson's run: t_depth is the
                                                 //     view model's; a pixel at the far plane there is not the view model's
 
@@ -662,6 +673,27 @@ float DSCloudSunAt(vec3 P, float strength) {
     float inside = saturate(min(edge.x, edge.y) * 10.0);
     return mix(1.0, textureLod(sampler2D(t_cloudShadow, NVR_SAMPLER(pc.linearSampler)), suv, 0.0).r, inside * strength);
 }
+// UNOFFICIAL 2026-11-28 the land's shadow (mountains), as the SunFar pass works it out (Effects/SunFar.fx.hlsl TerrainShadow, after Conor's
+// port of Community Shaders' Terrain Shadows): 1 lit, toward 0 where the land between the point and the sun is higher than the light
+// that reaches it; faded out at the map's edge. P is camera-relative, so the map's edges come camera-relative too (precision).
+float DSTerrainShadow(vec3 P) {
+    if (cb.terrainRel.w <= 0.0) return 1.0;
+    const vec2 uv = vec2((P.x - cb.terrainRel.x) * cb.terrainRel.z, (cb.terrainRel.y - P.y) * cb.terrainParams.x);
+    const vec2 edge = min(uv, 1.0 - uv);
+    const float inside = saturate(min(edge.x, edge.y) * 20.0);
+    if (inside <= 0.0) return 1.0;
+    const vec2 shadowEnc = textureLod(sampler2D(t_terrainShadow, NVR_SAMPLER(pc.linearSampler)), uv, 0.0).rg;
+    const float groundEnc = textureLod(sampler2D(t_terrainGround, NVR_SAMPLER(pc.linearSampler)), uv, 0.0).r;
+    const vec3 encoded = vec3(shadowEnc, groundEnc) * cb.terrainRange.y + cb.terrainRange.x;
+    const vec2 heights = encoded.xy - cb.terrainRange.z;
+    // Never below the map's ground: the simplified LOD land dips under it in places and would shadow its own slope.
+    const float z = max(P.z + cb.terrainParams.y, encoded.z);
+    const float lower = heights.y - cb.terrainRange.w;
+    const float transition = heights.x + cb.terrainRange.w - lower;
+    float lit = transition <= 0.0 ? (z >= heights.x ? 1.0 : 0.0) : saturate((z - lower) / transition);
+    lit = saturate((lit - 0.5) * cb.terrainParams.w + 0.5);   // Contrast: a steeper edge
+    return mix(1.0, lit, cb.terrainRel.w * inside);
+}
 // UNOFFICIAL 2026-11-27 sunsheen-fade (core/SunFadeDeferred.h; the D3D9 fade record's Includes/Shadow.hlsl GetOldSunShadowPass): the shadow
 // from before the sun step. At the step's first frame it must be exactly what this pass showed the frame before, or every step pulses, so
 // it is GetSunShadowMaps below on the kept maps: the same cascade choice, handover blend, normal offset, slacks, contact hardening and
@@ -1026,6 +1058,11 @@ void main() {
         }
         // UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders' Lighting.hlsl, DEFERRED: outdoors, N.L >= 0)
         if (HasFlag(kFlagSSShadows) && dot(N, L) >= 0.0) shadow *= texelFetch(t_sssMask, px, 0).r;
+    }
+    // UNOFFICIAL 2026-11-28 mountain shadows: on the sunlight here, before fog and sky light (SunFar leaves this pixel's land part out)
+    if (HasFlag(kFlagTerrainShadow)) {
+        if (dot(light, vec3(1.0)) > 0.0) shadow *= DSTerrainShadow(P);
+        imageStore(i_terrainMark, px, vec4(1.0));   // this pixel's sunlight is done here: SunFar leaves the land's part out
     }
 
     if (skinPx) {

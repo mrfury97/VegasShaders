@@ -40,6 +40,7 @@ public:
 		float	Contrast;          // steepens the shadow's edge (1 as swept)
 		int		DebugView;
 		bool	UseHeightMapFile;  // an installed xLODGen height map first (else only the plugins' own land)
+		bool	Deferred;          // (2026-11-28) the Vulkan deferred sun takes the shadow off its sunlight (core/TerrainShadowBridge.h)
 	};
 	SettingsStruct	Settings = {};
 
@@ -61,6 +62,9 @@ public:
 	// or short, and jump).
 	void	Update(IDirect3DDevice9* Device, const D3DXVECTOR3& SunDir);
 	bool	Active() const { return Constants.Data.w > 0.0f; }
+	// UNOFFICIAL 2026-11-28: this frame's map and constants for the deferred sun (core/TerrainShadowBridge.h); after Update, and where
+	// the shadow maps are off this frame (strength 0 then).
+	void	Publish() const;
 
 private:
 	struct HeightMap {
