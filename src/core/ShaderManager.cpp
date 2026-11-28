@@ -1607,7 +1607,10 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		// UNOFFICIAL 2026-11-28 (1.1.6 merge review): our dry fallback (2026-11-27, below for the other records) here too: a lean record that
 		// does not fit with the water layer is made once more without it (WETNESS_OFF, Deferred\Fallback\Dry), so its reflections, blended
 		// draws and other cameras keep this mod's shader, dry, instead of the game's own. Only the templates that honour WETNESS_OFF.
-		if (!pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name && (!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate")) &&
+		// (2026-11-28 terrain-lean-fit) the land too (TerrainTemplate's water layer is off with WETNESS_OFF): after the 1.1.6 merge its 5-7 layer
+		// lean records (SLS2124-2146) overflowed and drew the game's land in reflections and other cameras; a future overflow loses only the water.
+		if (!pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name &&
+			(!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate") || !strcmp(tmpl.Name, "TerrainTemplate")) &&
 			TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
 			static D3DXMACRO leanDry[16] = {};
 			static const bool built = [] {
@@ -1656,8 +1659,10 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		// with Wetness Effects + Puddles + Terrain Blending: out of temp registers at both flags, with and without the clouds' lookup) is made once
 		// more without the water layer (WETNESS_OFF, Cache\Dry, as the dry lamp-shadow records): its forward draws (reflections, other cameras,
 		// blended draws, DeferredRenderer 0) keep this mod's shader, dry, instead of the game's own. Under the deferred renderer its main-view
-		// pixels take their water from DeferredWetness, not from this record. Only the templates that honour WETNESS_OFF for their water layer.
-		if (!pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name && (!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate")) &&
+		// pixels take their water from DeferredWetness, not from this record. Only the templates that honour WETNESS_OFF for their water layer
+		// (2026-11-28 terrain-lean-fit: the land too, as for the lean record above).
+		if (!pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name &&
+			(!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate") || !strcmp(tmpl.Name, "TerrainTemplate")) &&
 			TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
 			static D3DXMACRO dry[2] = { { "WETNESS_OFF", "1" }, { NULL, NULL } };
 			pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "Dry\\", dry);
