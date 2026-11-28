@@ -1975,6 +1975,29 @@ upstream's split files, keep the D3D9 paths in step with upstream's compute-only
 Not run: any build or in-game test of upstream 1.1.6-test2; the looks of the differing clamps and blends; a settings file saved by
 test1/test2 at 102/103 loading in ours.
 
+### As merged (2026-11-28, branch `upstream-116-merge`)
+
+Owner: "We are going fully deffered, foward is being dropped"; then "do 1-5, drop the Pearl/clearcoat guards", "do 8 and 10", the cache
+clearer removed, "k do hard". Full merge of v1.1.6-test2 (merge commit a53776e, resolutions after it), Sonnet helpers for the split
+files, Opus for the deferred sun and lamps, lead-architect review (approve with changes, applied).
+- Taken: upstream's removal of forward modes 0/1, SettingForce, ForceMSAA, the native-D3D9 paths, FSR 2, HiZ, the old RT denoise passes;
+  its split files (ObjectTemplate -> Includes/Object{Common,Vertex,PixelForward,PixelManyLights}, ImGuiManager -> core/imgui/*.inl,
+  settings migrations -> SettingMigrations.cpp, ShadowManager -> ShadowSunCascades / ShadowCharacterAndRefl); first-person flicker fix,
+  ADS hold, material rules, getSurfaceIBL, view-model sun and lamps in compute, lean fallback records for deferred-managed shaders.
+- Ours kept: world cube binding 32/31, STALL sampler fix, capture clamp 32, cube occlusion 0.65, the eight defaults upstream changed
+  (AvgLumaCompute, NvrDxvkAmbientLight, NvrDxvkClouds false; TargetReleaseSeconds 20; GIDenoiseConfidence 0; GIGrassDenoise 3;
+  EnvMaps Strength 1.8, WithMetal 0.85: the owner's call, tooltips say so), deferred wetness (OBJ_WET_DEFERRED in ObjectCommon),
+  unified reflections, WorldSurface leaving wet land alone (now also in WorldSurface.comp, push `landOut`), DeferredSun bits 23-26 and
+  96 rows (upstream's view-model flag moved to 27), lamp screen shadows and wet-lamp film (the D3D9 lamp pass still draws when compute
+  declines), the dry fallback (also for the lean records: `Deferred\Fallback\Dry`).
+- Dropped: the METAL_PEARL_ON / METAL_CLEARCOAT_ON compile guards (owner); upstream's shader-cache auto-clear (owner: a cached shader is
+  reused only when its whole preprocessed text matches).
+- Settings: our migrations in SettingMigrations.cpp; upstream 102 runs as 112 (NvrDxvkPasses on: the fork is required); upstream 103 not
+  taken (its defaults are the owner's call; taking it later = a new step above the stamped version); version 112, kUpstreamNewest 103.
+- Fixed upstream leftovers: ShaderPrecompile read the retired ShadowsInteriors.Forward.Enabled (interior and lamp records then compiled
+  on the main thread); WetnessReflections called the removed ManyLamps::FinishTable; SessionLog read the retired FSR Version.
+- All Vulkan .spv rebuilt from the merged sources (57 of upstream's differ only by compiler build).
+
 ## Deferred shadow quality
 
 *Study 2026-11-26 (room 02, branch `shadow-quality-study`, main 04d9515 = test36). Owner's question: "what can we do to increase the

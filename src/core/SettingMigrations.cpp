@@ -878,7 +878,9 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 		}
 	}
 	// 112 (2026-11-28 upstream 1.1.6-test2 merge; upstream's step 102): [Main.Main.Performance] NvrDxvkPasses false -> true (the Vulkan
-	// passes on; this fork's default has been true). Not again in a file upstream's builds saved after their own 102.
+	// passes on). Both defaults have been true since 1.0.0, so a saved false is the player's own: moved anyway because the DXVK fork is now
+	// required (owner 2026-11-28: fully deferred) and the renderer needs its Vulkan passes. Not again in a file upstream's builds saved after
+	// their own 102.
 	if (version < 112 && !upstreamRan(102)) {
 		tomlValue* saved = UserSection("Main.Main.Performance");
 		if (saved && saved->contains("NvrDxvkPasses") && saved->at("NvrDxvkPasses").is_boolean() && !saved->at("NvrDxvkPasses").as_boolean()) {
@@ -886,9 +888,10 @@ void SettingManager::Configuration::UpdateOldDefaults() {
 			changed += std::string(changed.empty() ? "" : ", ") + "Main.Main.Performance.NvrDxvkPasses false -> true (Vulkan passes on by default, settings step 112)";
 		}
 	}
-	// 113 (upstream's step 103: NvrDxvkAmbientLight, AvgLumaCompute, NvrDxvkClouds on; TargetReleaseSeconds 20 -> 0; PBR.EnvMaps Strength
-	// 1.8 -> 1.2 and WithMetal 0.85 -> 0.25; retired keys reset) is parked: those are defaults the owner has not taken (docs/DESIGN.md
-	// "Upstream 1.1.6-test2 study"). Taking them = their defaults in the toml fragments and this step's body here, guarded !upstreamRan(103).
+	// Upstream's step 103 (NvrDxvkAmbientLight, AvgLumaCompute, NvrDxvkClouds on; TargetReleaseSeconds 20 -> 0; PBR.EnvMaps Strength
+	// 1.8 -> 1.2 and WithMetal 0.85 -> 0.25; retired keys reset) is not taken: those are defaults the owner has not chosen (docs/DESIGN.md
+	// "Upstream 1.1.6-test2 study"). Taking them later = their defaults in the toml fragments plus a NEW step numbered above the version
+	// this build stamps (113 while this build stamps 112), guarded !upstreamRan(103).
 	if (!changed.empty())
 		Logger::Log("UNOFFICIAL settings: old defaults saved by an earlier build moved to the new defaults: %s. "
 			"Change them in the menu and press Save if you want the old values back.", changed.c_str());

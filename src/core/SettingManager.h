@@ -234,7 +234,7 @@ public:
 		static void		StorageKeys(const char* section, StringList* steps);
 		void			UpdateOldDefaults();	// one-time moves of saved old defaults ([_Unofficial] SettingsVersion)
 		void			ApplyRainWetnessSwitch();	// UNOFFICIAL 2026-11-20: Puddles' switch follows Wetness Effects' while DeferredWetness is on (RainWetnessOneSwitch)
-		static constexpr int UnofficialSettingsVersion = 113;	// user config [_Unofficial] SettingsVersion this build brings it up to	// (113, 2026-11-28 upstream 1.1.6-test2 merge: upstream 102 runs as 112, 103 parked as 113; ours 104-111 before it)
+		static constexpr int UnofficialSettingsVersion = 112;	// user config [_Unofficial] SettingsVersion this build brings it up to	// (112, 2026-11-28 upstream 1.1.6-test2 merge: upstream 102 runs as 112, upstream 103 not taken; ours 104-111 before it)
 
 		tomlValue		TomlConfig;		// the user's settings
 		tomlValue		DefaultConfig;	// the defaults (with their comments)

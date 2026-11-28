@@ -1604,6 +1604,24 @@ bool ShaderManager::LoadShader(NiD3DPixelShader* Shader) {
 		// DeferredRenderer 2 lights opaque world/skin pixels in deferred passes; compile only a lean fallback forward record (stripping
 		// heavy cascade/cloud/wetness bloat to avoid SM 3.0 X4505) plus Forward+ glass records when enabled.
 		pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "Deferred\\Fallback\\", DeferredSkin::LeanFallbackOverrides());
+		// UNOFFICIAL 2026-11-28 (1.1.6 merge review): our dry fallback (2026-11-27, below for the other records) here too: a lean record that
+		// does not fit with the water layer is made once more without it (WETNESS_OFF, Deferred\Fallback\Dry), so its reflections, blended
+		// draws and other cameras keep this mod's shader, dry, instead of the game's own. Only the templates that honour WETNESS_OFF.
+		if (!pixel->ShaderProg[ShaderRecordType::Default] && tmpl.Name && (!strcmp(tmpl.Name, "ObjectTemplate") || !strcmp(tmpl.Name, "ParallaxTemplate")) &&
+			TheSettingManager->GetSettingI("Shaders.WetnessEffects.Status", "Enabled")) {
+			static D3DXMACRO leanDry[16] = {};
+			static const bool built = [] {
+				int n = 0;
+				for (const D3DXMACRO* m = DeferredSkin::LeanFallbackOverrides(); m && m->Name && n < 14; m++) leanDry[n++] = *m;
+				leanDry[n++] = { "WETNESS_OFF", "1" };
+				leanDry[n] = { NULL, NULL };
+				return true;
+			}();
+			(void)built;
+			pixel->ShaderProg[ShaderRecordType::Default] = (ShaderRecordPixel*)ShaderRecord::LoadShader(pixel->Name, NULL, tmpl, "Deferred\\Fallback\\Dry\\", leanDry);
+			if (pixel->ShaderProg[ShaderRecordType::Default])
+				Logger::Log("UNOFFICIAL Wetness Effects: %s's lean fallback record did not fit with the water layer: made without it (WETNESS_OFF), dry.", pixel->Name);
+		}
 		if (PointShadowForward::Eligible(pixel->Name, tmpl))
 			DeferredTransparents::Load(pixel, pixel->Name, tmpl, BaseInteriorOverrides());
 	}
