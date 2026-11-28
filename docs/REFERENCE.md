@@ -257,6 +257,13 @@ design: [Deferred wetness design](DESIGN.md#deferred-wetness-design); reasons be
   temps are separate limits; check both (`template_compile`, see the `vs-build-deploy` skill).
 - ps_3_0 limits (32 temps, instruction slots, no dynamic indexing) do not exist in compute or SPIR-V replacements; the D3D9 path keeps
   the split passes as the fallback.
+- **Proven (2026-11-28, offline, the game's own cached text):** the D3D9 lamp pass (`DeferredLamps.hlsl`, `core/DeferredLamps.h`
+  EnsurePass level 0 with `DL_LAND_SPLIT`) sits at r31 with no spare register, so an unrelated one-line change can tip it over. The
+  upstream 1.1.6 merge (5ebf596) shortened `FDAddedLightKeep` (Includes/DeferredPixel.hlsl: the dead code-5 test dropped); that line alone
+  turned level 0 into X4505 (reverting it in the failed text compiles; applying it to test53's text fails), the land lost its own lamp model
+  and fell to level 1. Fix (branch lamp-land-split-fit): the lamp pass keeps the code-5 test in its own `DLAddedLightKeep` (no record writes
+  5+ any more, so the value is the same; `DeferredLamps.comp` still has it); every pass of the file is byte-identical to test53 again.
+  Check level 0 offline after any change to the includes this pass reads (Object.hlsl, PBR.hlsl, DeferredPixel.hlsl, PointShadowForward.hlsl).
 
 ### Grass writes no G-buffer record
 - **Proven (fix 40acc53, deferred wetness; RT GI review).** Grass draws no lighting-free record, so it writes neither the material

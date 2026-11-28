@@ -378,6 +378,15 @@ float4 TESR_PuddleData : register(c174);
     #define WETNESS_RAINDROPS
     #define WETNESS_HEIGHT      // the land's height maps shape the wetness: water gathers in the crevices
     #include "includes/Wetness.hlsl"
+    // UNOFFICIAL 2026-11-28 (1.1.6 merge fix): the lean puddle records (PUDDLES_LEAN: the deferred renderer's Deferred\Fallback record, the
+    // PuddlesLean and LightFreeLean retries, the lamp-RT record) sat at exactly 32 temps before upstream 1.1.6 carried the layers' height out of
+    // blendDiffuseMaps* (Includes/Terrain.hlsl). Kept live through the normal maps and the parallax self-shadow, that height was the register too
+    // many (X4505, also with PREFER_FLOW_CONTROL): SLS2124-2146 lost their forward record, and their reflections, blended draws and other cameras
+    // drew the game's own land. These records work the height out again just before the water layer reads it, as before the merge (the reads hit
+    // the cache); every other record keeps upstream's carried height.
+    #ifdef PUDDLES_LEAN
+        #define TERRAIN_HEIGHT_LATE
+    #endif
 #endif
 
 
@@ -715,13 +724,32 @@ PS_OUTPUT main(PS_INPUT pin) {
 
     #ifdef TERRAIN_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the albedo darkens before any light sees it (land is porous: full darkening)
         float3 wetWorldNormal = normalize(mul(combinedNormal, tbnMat));	// tangent space -> the land piece's (world-aligned) space
+        #ifdef TERRAIN_HEIGHT_LATE
+        // (the lean records, see TERRAIN_HEIGHT_LATE: the height blendDiffuseMaps* carried is dead here and compiled out) the surface's height
+        // where it is seen, worked out here as before the 1.1.6 merge: the layers' height maps (their diffuse alpha where LandHeight says they
+        // have one, flat 0.5 where not), blended by the same weights as the colour; the textures were just read there (cache hits)
+        surfaceHeight = 0.0f;
+        float heightWeight = 0.0f;
+        [unroll] for (int wh = 0; wh < texLayers; wh++) {
+            surfaceHeight += wts[wh] * (hStat[wh] > 0.0f ? tex2Dgrad(BaseMap[wh], offsetUV, odx, ody).a : 0.5f);
+            heightWeight += wts[wh];
+        }
+        surfaceHeight = heightWeight > 0.0f ? surfaceHeight / heightWeight : 0.5f;
+        #else
         // surfaceHeight was already accumulated from the BaseMap fetches inside blendDiffuseMaps* above.
+        #endif
         #ifdef PUDDLES_COMPILED
         // 2026-11-11 Puddles (user: puddles jumped at the land's quad seams, a wet quad beside a dry one): each layer's height counts
         // against its OWN average (its last mip), so only its cracks and bumps matter, not how high its height map sits overall; a layer
         // without one adds nothing. Only while there is water (the field reads the height only then).
         [branch] if (TESR_PuddleData.x > 0.001f && PUDDLES_ON) {
             float detail = 0.0f;
+        #ifdef TERRAIN_HEIGHT_LATE
+            // (the lean records: the loop as before the 1.1.6 merge, every layer, the weights' sum from above; a layer of weight 0 adds 0 as
+            // in upstream's loop, which skips it)
+            [unroll] for (int wa = 0; wa < texLayers; wa++)
+                if (hStat[wa] > 0.0f) detail += wts[wa] * (tex2Dgrad(BaseMap[wa], offsetUV, odx, ody).a - tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f)).a);
+        #else
             float heightWeight = 0.0f;
             // 2026-11-12: a layer without a height map gives its colour's brightness detail instead (dark cracks and gaps read as low)
             [unroll] for (int wa = 0; wa < texLayers; wa++) {
@@ -737,6 +765,7 @@ PS_OUTPUT main(PS_INPUT pin) {
                 #endif
                 }
             }
+        #endif
             surfaceHeight = saturate(0.5f + (heightWeight > 0.0f ? detail / heightWeight : 0.0f));
         }
         #endif

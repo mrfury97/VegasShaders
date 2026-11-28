@@ -1997,6 +1997,9 @@ files, Opus for the deferred sun and lamps, lead-architect review (approve with 
 - Fixed upstream leftovers: ShaderPrecompile read the retired ShadowsInteriors.Forward.Enabled (interior and lamp records then compiled
   on the main thread); WetnessReflections called the removed ManyLamps::FinishTable; SessionLog read the retired FSR Version.
 - All Vulkan .spv rebuilt from the merged sources (57 of upstream's differ only by compiler build).
+- After the merge (branch terrain-lean-fit): upstream's carried land height pushed the 5-7 layer land's lean records (SLS2124-2146) past
+  32 temps; the `PUDDLES_LEAN` records work the height out late again and the land takes the dry retry (`docs\EFFECTS.md "Puddles"`,
+  "The land's lean records after the 1.1.6 merge").
 
 ## Deferred shadow quality
 

@@ -4741,6 +4741,20 @@ dry lamp record, and 7-layer land had no sampler for the cover map.
   Bench 2026-11-27: with the bench toml all four load dry; with the owner's live wet toml six failed on main (also SLS2034 / SLS2036, the
   many-lamp records) and five now load dry; SLS2024 (skinned) still does not fit dry and stays on the game's shader. Main-view pictures
   (v-desert-noon, the owner's puddle1 save, 900-frame settle) match main 2480e33 by eye.
+  (2026-11-28, branch terrain-lean-fit) the land (TerrainTemplate, which drops its water layer with `WETNESS_OFF`) takes this retry too,
+  for the main record and for the deferred renderer's lean record (`Deferred\Fallback\Dry\`). Offline every land lean record fits dry
+  (SLS2092-2146, 2,105-4,019 slots, no flow-control retry).
+- **The land's lean records after the 1.1.6 merge (2026-11-28, branch terrain-lean-fit):** upstream 1.1.6 carries the layers' height out of
+  `blendDiffuseMaps*` (Includes/Terrain.hlsl `outHeight`) into the water layer. In the records that were already at 32 temps (the deferred
+  renderer's `Deferred\Fallback` record and the `PuddlesLean` retry of the 5-7 layer land, SLS2124-2146) that live height was one register
+  too many: X4505 also with PREFER_FLOW_CONTROL, and with the deferred renderer those land pieces drew the game's own shader in water
+  reflections, other cameras and forward draws (the main view was fine: its LightFreeWet record has no forward water layer). Every record
+  with `PUDDLES_LEAN` (the lean records, the lamp-RT record's lean path) now works the height out just before the water layer, as before
+  the merge (TerrainTemplate.hlsl `TERRAIN_HEIGHT_LATE`); the carried height compiles out there. The difference from upstream's height:
+  with Terrain Variation's stochastic lookups the height is read at the plain coordinates (as test53), not from the varied lookup. The
+  other records keep upstream's carried height: the full forward and LightFreeWet records compile to the same bytes as main b35312c.
+  Offline (template_compile --flow, the game's defines from the cache's `.failed.defines`): the lean records SLS2124-2146 fit again with
+  the flow-control retry, as on test53.
 - **Checking a record the way the game compiles it:** `tools\landc\landcf.exe` (D3DX9 + the PREFER_FLOW_CONTROL retry); the offline
   template tool's newer compiler fits shaders the game's does not. A record that fails in game leaves `<cache>\<name>.failed.hlsl` (the
   exact source) for it.
