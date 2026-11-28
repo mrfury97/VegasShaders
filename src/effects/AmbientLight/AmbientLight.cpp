@@ -800,6 +800,11 @@ bool AmbientLightEffect::RenderPrepare(IDirect3DDevice9* Device) {
 	D3DVIEWPORT9 reduced = original;
 	reduced.Width = half.Width;
 	reduced.Height = half.Height;
+	D3DVIEWPORT9 reducedRect = reduced;
+	if (RenderRect::Active()) {
+		reducedRect.Width = RenderRect::Width(half.Width);
+		reducedRect.Height = RenderRect::Height(half.Height);
+	}
 	D3DXVECTOR4 layout((float)half.Width / original.Width, (float)half.Height / original.Height, 1.0f / half.Width, 1.0f / half.Height);
 	D3DXVECTOR4 edges((float)normalSmoothing, horizonBias * (3.14159265f / 180.0f), normalSmoothingWorld, 0.0f);	// z: 2026-10-24 (charfacets)
 	IDirect3DSurface9* depthSurface = nullptr;
@@ -820,7 +825,7 @@ bool AmbientLightEffect::RenderPrepare(IDirect3DDevice9* Device) {
 	HRESULT result = S_OK;
 	// UNOFFICIAL 2026-10-25 (NVR DXVK) NvrDxvkPasses: Prepare and the smoothing as Vulkan passes (AmbientLightPrepare.frag, AmbientLightSmoothPass.frag).
 	IDirect3DBaseTexture9* prepareTextures[] = { ExtFileTexture("TESR_DepthBuffer"), ExtFileTexture("TESR_NormalsBuffer"), TheTextureManager->DepthTextureViewModel };
-	if (!(ExtOn() && ExtDraw(ExtPrepare, &prepSurface, 1, prepareTextures, 0, reduced))) {
+	if (!(ExtOn() && ExtDraw(ExtPrepare, &prepSurface, 1, prepareTextures, 0, reducedRect))) {
 		result = Device->SetRenderTarget(0, prepSurface);
 		if (SUCCEEDED(result)) result = Device->SetViewport(&reduced);
 		if (SUCCEEDED(result)) result = Effect->Begin(&passes, 0);
@@ -841,7 +846,7 @@ bool AmbientLightEffect::RenderPrepare(IDirect3DDevice9* Device) {
 			for (UINT p = 0; p < 2 && SUCCEEDED(result); ++p) {
 				IDirect3DSurface9* extTarget = p == 0 ? bufferSurface[1] : prepSurface;
 				IDirect3DBaseTexture9* extSource = p == 0 ? prepTexture : bufferTexture[1];
-				if (ExtOn() && ExtDraw(ExtSmooth, &extTarget, 1, &extSource, p, reduced)) continue;	// (NVR DXVK)
+				if (ExtOn() && ExtDraw(ExtSmooth, &extTarget, 1, &extSource, p, reducedRect)) continue;	// (NVR DXVK)
 				// X: prep (stage 5) -> buffer 1 (normal, depth); Y: buffer 1 (stage 6) -> prep (packed again)
 				Device->SetTexture(5, p == 0 ? prepTexture : nullptr);
 				Device->SetTexture(6, p == 1 ? bufferTexture[1] : nullptr);
@@ -1015,19 +1020,13 @@ bool AmbientLightEffect::ExtOn() const {
 	// AmbientLight keeps its D3D9 passes unless [Main.Main.Performance] NvrDxvkAmbientLight is on — or ComputeGI (SSGI) is explicitly
 	// enabled, since ComputeGI only exists as Vulkan passes (2026-11-19: previously ComputeGI silently did nothing while NvrDxvkAmbientLight
 	// stayed at its hidden DevOnly default of false).
-	return !ExtFailed && DxvkCompute::PassesOn() && (TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight || computeGI) && !DxvkCompute::KeptOnD3D9(Name);
-}
-
-// UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 1): ExtOn's rule in a rect frame, where PassesOn is
-// false by design; only the RT estimate (ExtDraw's ExtEstimateRT) uses it: a pass that reads and writes each texel where it is.
-bool AmbientLightEffect::ExtOnRect() const {
-	return !ExtFailed && RenderRect::Active() && RtAmbient::PassesWanted() && TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight && !DxvkCompute::KeptOnD3D9(Name);
+	return !ExtFailed && DxvkCompute::PassesOnRect() && (TheSettingManager->SettingsMain.Main.NvrDxvkAmbientLight || computeGI) && !DxvkCompute::KeptOnD3D9(Name);
 }
 
 // One pass as a Vulkan pass into Targets (1-4 of one size, as the D3D9 pass's render targets 0..n-1) over Viewport (at 0, 0: the D3D9
 // pass's), Textures in the shader's binding order (what the D3D9 pass has on those stages). False: not drawn (the D3D9 pass runs).
 bool AmbientLightEffect::ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Targets, UINT TargetCount, IDirect3DBaseTexture9* const* Textures, UINT Variant, const D3DVIEWPORT9& Viewport) {
-	if (!(ExtOn() || ((Shader == ExtEstimateRT || Shader == ExtApply || Shader == ExtGIApply) && ExtOnRect())) || Shader >= ExtShaderCount || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS || Viewport.X || Viewport.Y || !Viewport.Width || !Viewport.Height) return false;
+	if (!ExtOn() || Shader >= ExtShaderCount || !TargetCount || TargetCount > NVR_EXT_MAX_TARGETS || Viewport.X || Viewport.Y || !Viewport.Width || !Viewport.Height) return false;
 	const ALExtShader& info = ALExtShaders[Shader];
 	if (DxvkCompute::KeptOnD3D9(info.Spv)) return false;	// UNOFFICIAL 2026-10-26 test: NvrDxvkKeepD3D9 can name one pass (e.g. AmbientLightAccumulate)
 	ExtPass& pass = extPasses[Shader][TargetCount - 1];
@@ -1061,8 +1060,9 @@ bool AmbientLightEffect::ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Tar
 		if (D3DXHANDLE handle = ParameterHandle(extHandles[h], ALExtArrays[a])) Effect->GetVectorArray(handle, constants.arrays[a], GridLampsMax);
 	for (UINT tv = 0; tv < _countof(ALExtTailVectors); tv++, h++)
 		if (D3DXHANDLE handle = ParameterHandle(extHandles[h], ALExtTailVectors[tv])) Effect->GetVector(handle, &constants.tailVectors[tv]);
-	if (constants.tailVectors[0].x <= 0.0f || constants.tailVectors[0].y <= 0.0f)
-		constants.tailVectors[0] = D3DXVECTOR4(RenderRect::On ? RenderRect::ScaleX : 1.0f, RenderRect::On ? RenderRect::ScaleY : 1.0f, 1.0f, 1.0f);
+	constants.tailVectors[0] = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* uniforms = ExtUniforms(extUniforms, &constants, sizeof(constants));
 	if (!uniforms) return false;
 	UINT count = info.Textures;
@@ -1092,9 +1092,6 @@ bool AmbientLightEffect::GIActive() {
 	if (!computeGI) state = 0;
 	else if (giFailed) state = 1;
 	else if (!DxvkCompute::Available()) state = 2;
-	// (2026-10-31, tester at RenderScale 0.67: "needs NvrDxvkPasses on" while it was on) In a rect frame the Vulkan passes are off by
-	// design (DxvkCompute::PassesOn): say that, not the setting.
-	else if (!ExtOn() && !ExtFailed && RtAmbient::PassesWanted() && RenderRect::Active()) state = 6;
 	else if (!ExtOn()) state = 3;
 	else {
 		if (giFiles < 0) {
@@ -1120,8 +1117,7 @@ bool AmbientLightEffect::GIActive() {
 		giReported = state;
 		static const char* const says[] = { nullptr, "off for this session (it failed: see above); the usual passes run",
 			"needs the Vegas Shaders DXVK fork (the fork's d3d9.dll): nothing changes", "needs [Main.Main.Performance] NvrDxvkPasses on (AmbientLight's passes as Vulkan passes): nothing changes",
-			"shader files missing (see above): nothing changes", "on (Estimate with a visibility bitmask: one bounce of screen light)",
-			"off at RenderScale below 1 (FSR / DLSS with LowResEffects: the Vegas Shaders DXVK fork's passes do not run in frames drawn small): nothing changes" };
+			"shader files missing (see above): nothing changes", "on (Estimate with a visibility bitmask: one bounce of screen light)" };
 		if (says[state]) Logger::Log("UNOFFICIAL AmbientLight: ComputeGI %s.", says[state]);
 	}
 	return state == 5;
@@ -1230,6 +1226,11 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	D3DVIEWPORT9 reduced = original;
 	reduced.Width = half.Width;
 	reduced.Height = half.Height;
+	D3DVIEWPORT9 reducedRect = reduced;
+	if (RenderRect::Active()) {
+		reducedRect.Width = RenderRect::Width(half.Width);
+		reducedRect.Height = RenderRect::Height(half.Height);
+	}
 	D3DXVECTOR4 layout((float)half.Width / original.Width, (float)half.Height / original.Height, 1.0f / half.Width, 1.0f / half.Height);
 	IDirect3DSurface9* depthSurface = nullptr;
 	Device->GetDepthStencilSurface(&depthSurface);
@@ -1436,8 +1437,11 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 	D3DXHANDLE flagsHandle = ParameterHandle(paramFlags, "NVR_ALFlags");
 	const bool shadow = foldShadow && flagsHandle;
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer: the templates' own base colour for the bounce (NVR_ALAlbedo on s12 in the Apply and balance passes) when
-	// it holds this frame's; those two passes then run as D3D9 passes (their Vulkan twins have no albedo input yet; logged once).
-	const bool albedoOn = albedoBuffer && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
+	// it holds this frame's. Only request FdIndirect::ALAlbedo when a reader actually consumes albedo this frame (bounce, balance, GI, AmbientReplace, or DebugView).
+	const bool albedoNeeded = gridOn || giOn || rtGI != nullptr || interiorMode
+		|| (TheShaderManager->GameState.isExterior && exteriorBalance)
+		|| AmbientReplaceActive() || Constants.Data2.w > 0.5f;
+	const bool albedoOn = albedoBuffer && albedoNeeded && CapturedNormals::AlbedoData.x > 0.5f && CapturedNormals::AlbedoTexture != nullptr;
 	// UNOFFICIAL 2026-11-15 DeferredALAlbedo (core/FdIndirect.h): made here, before any pass begins; depth-validated against TESR_DepthBuffer.
 	IDirect3DBaseTexture9* const albedoTexture = albedoOn ? FdIndirect::ALAlbedo(Device, ExtFileTexture("TESR_DepthBuffer")) : nullptr;
 	if (D3DXHANDLE h = ParameterHandle(paramBump, "NVR_ALBump")) {
@@ -1537,7 +1541,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 			IDirect3DTexture9* rtGIClean = rtGI ? ao->RtDenoisedGI(Device) : nullptr;	// (2026-10-29) RGB, half
 			IDirect3DTexture9* rtGIUsed = rtGIClean ? rtGIClean : rtGI;
 			IDirect3DBaseTexture9* rtTextures[] = { prepTexture, rtVis ? rtVis : rtRaw, rtGIUsed ? (IDirect3DBaseTexture9*)rtGIUsed : (IDirect3DBaseTexture9*)rtRaw };
-			drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reduced);
+			drawn = ExtDraw(ExtEstimateRT, targets, 1, rtTextures, (UINT)RtAmbient::Current.DebugView | (rtGI ? 0x100u : 0u), reducedRect);
 			if (drawn && rtGI) giDrawn = true;	// ComputeGI's accumulate and apply take the bounce light from here
 			giDenoised = drawn && rtGIClean && giSingleHistory;	// UNOFFICIAL 2026-11-11 (sungi) GISingleHistory
 			giNoBlur = drawn && rtGIClean;	// UNOFFICIAL 2026-11-13 (rtgi-review R1)
@@ -1574,7 +1578,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				GpuProfileScope gpu(lightTimer, Device);
 				IDirect3DSurface9* lightTarget = giLightSurface;
 				IDirect3DBaseTexture9* lightTextures[] = { scene };
-				giLightReady = ExtDraw(ExtGILight, &lightTarget, 1, lightTextures, 0, reduced);
+				giLightReady = ExtDraw(ExtGILight, &lightTarget, 1, lightTextures, 0, reducedRect);
 				if (giLightReady && ++giFrames == 1) Logger::Log("UNOFFICIAL AmbientLight: ComputeGI running (%ux%u, quality %d: %d slices x %d taps, thickness %.0f, strength %.2f%s).",
 					half.Width, half.Height, giQuality, giQuality == 0 ? 2 : giQuality == 1 ? 3 : 4, giQuality == 0 ? 8 : giQuality == 1 ? 12 : 16, giThickness, giStrength,
 					giThinOcclusion ? ", thin occlusion" : "");
@@ -1595,22 +1599,7 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				p == 5 ? statsSurface : p == 6 ? balanceSurface[balanceWrite] : bufferSurface[p == 2 ? 1 : 0];
 			// UNOFFICIAL 2026-10-25 (NVR DXVK) NvrDxvkPasses: pass p as a Vulkan pass, into the same target(s), with what the D3D9 pass has on
 			// the stages its shader reads (bound below); not drawn: the D3D9 pass.
-			// UNOFFICIAL 2026-11-03 RT AO at RenderScale < 1 (docs/next/RT-RENDERSCALE.md, phase 1): in a rect frame the Vulkan passes are
-			// off (the D3D9 passes below keep to the rect); the RT estimate alone runs as one (ExtOnRect: the same NvrDxvkAmbientLight rule),
-			// in Estimate's place: a whole-target draw writes each texel in the rect layout (the trace covered the rect, the half-size prep
-			// and NVR_RTAORaw share it). Not drawn: the D3D9 Estimate.
-			if (p == 1 && !ExtOn() && ExtOnRect()) {
-				IDirect3DSurface9* targets[2] = { destination, occlusionHistorySurface[writeIndex] };
-				bool drawn;
-				{
-					GpuProfileScope gpu(passTimers[p], Device);
-					drawn = estimateRT(targets);
-				}
-				static bool logged = false;
-				if (drawn && !logged) { logged = true; Logger::Log("UNOFFICIAL RT AO: AmbientLight's RT estimate runs inside its D3D9 passes (RenderScale rect frame)."); }
-				if (drawn) continue;
-			}
-			if (ExtOn() || (apply && ExtOnRect())) {
+			if (ExtOn()) {
 				IDirect3DBaseTexture9* depth = ExtFileTexture("TESR_DepthBuffer");
 				IDirect3DBaseTexture9* normals = ExtFileTexture("TESR_NormalsBuffer");
 				IDirect3DBaseTexture9* viewModel = TheTextureManager->DepthTextureViewModel;
@@ -1621,17 +1610,17 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				GpuProfileScope gpu(passTimers[p], Device);
 				if (p == 0) {
 					IDirect3DBaseTexture9* textures[] = { depth, normals, viewModel };
-					drawn = ExtDraw(ExtPrepare, targets, 1, textures, 0, reduced);
+					drawn = ExtDraw(ExtPrepare, targets, 1, textures, 0, reducedRect);
 				}
 				else if (p == 1) {
 					IDirect3DBaseTexture9* textures[] = { prepTexture, ExtFileTexture("TESR_BlueNoiseSampler"), giLightTexture };	// (the 3rd: ComputeGI's / optional RT GI's)
 					drawn = estimateRT(targets);
-					if (!drawn && giLightReady) drawn = giDrawn = ExtDraw((ExtShader)(ExtGIEstimate0 + giQuality), targets, 1, textures, 0, reduced);	// (ComputeGI)
+					if (!drawn && giLightReady) drawn = giDrawn = ExtDraw((ExtShader)(ExtGIEstimate0 + giQuality), targets, 1, textures, 0, reducedRect);	// (ComputeGI)
 					if (!drawn) {
 						IDirect3DTexture9* rtGIClean = rtGI && rtAO ? rtAO->RtDenoisedGI(Device) : nullptr;
 						IDirect3DTexture9* rtGIUsed = rtGIClean ? rtGIClean : rtGI;
 						textures[2] = rtGIUsed;
-						drawn = ExtDraw(ExtEstimate, targets, 1, textures, rtGIUsed ? 0x100u : 0u, reduced);	// the first 2 (+ optional RT GI)
+						drawn = ExtDraw(ExtEstimate, targets, 1, textures, rtGIUsed ? 0x100u : 0u, reducedRect);	// the first 2 (+ optional RT GI)
 						if (drawn && rtGIUsed) {
 							giDrawn = true;
 							giDenoised = rtGIClean && giSingleHistory;
@@ -1641,18 +1630,18 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 				}
 				else if (p == 2 || p == 3) {
 					IDirect3DBaseTexture9* textures[] = { depth, bufferTexture[p == 2 ? 0 : 1] };
-					drawn = ExtDraw(ExtBlur, targets, 1, textures, (p == 3 ? 1u : 0u) | (giNoBlur ? 2u : 0u) | (giNoBlur && giGrassBlur ? 4u : 0u), reduced);	// (2026-11-13 rtgi-review R1: bit 1)
+					drawn = ExtDraw(ExtBlur, targets, 1, textures, (p == 3 ? 1u : 0u) | (giNoBlur ? 2u : 0u) | (giNoBlur && giGrassBlur ? 4u : 0u), reducedRect);	// (2026-11-13 rtgi-review R1: bit 1)
 				}
 				else if (p == 4) {
 					if (giDrawn && giTest != 1) {	// (ComputeGI) the bounce light kept from frame to frame too, in the bounce history
 						IDirect3DBaseTexture9* giTextures[] = { bufferTexture[blurred], prepTexture, occlusionHistory[readIndex], historyTexture[readIndex] };
-						drawn = ExtDraw(ExtGIAccumulate, targets, 2, giTextures, giDenoised ? 1u : 0u, reduced);	// UNOFFICIAL 2026-11-11 (sungi) variant bit 0: GISingleHistory
+						drawn = ExtDraw(ExtGIAccumulate, targets, 2, giTextures, giDenoised ? 1u : 0u, reducedRect);	// UNOFFICIAL 2026-11-11 (sungi) variant bit 0: GISingleHistory
 					}
 					if (!drawn) giDrawn = false;	// (ComputeGI) no accumulated light: the plain apply
 					// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer when this frame's is made (variant bit 2), else a stand-in nothing reads
 					const bool objectMotion = ObjectMotion::Ready();
 					IDirect3DBaseTexture9* textures[] = { bufferTexture[blurred], prepTexture, occlusionHistory[readIndex], objectMotion ? (IDirect3DBaseTexture9*)ObjectMotion::Texture : nullptr };
-					if (!drawn) drawn = ExtDraw(ExtAccumulate, targets, 2, textures, objectMotion ? 4u : 0u, reduced);
+					if (!drawn) drawn = ExtDraw(ExtAccumulate, targets, 2, textures, objectMotion ? 4u : 0u, reducedRect);
 				}
 				else if (p == 5) {
 					IDirect3DBaseTexture9* textures[] = { scene, depth, viewModel, occlusionHistory[writeIndex], normals, grid, gridColour };
@@ -1663,7 +1652,6 @@ void AmbientLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 					drawn = ExtDraw(ExtReduce, targets, 1, textures, 0, balanceViewport);
 				}
 				else {
-					if (!ExtOn() && ExtOnRect()) Device->SetRenderTarget(1, nullptr);
 					// Stage 8 (DebugView 8, 12) as below; stage 7 is only read indoors (NVR_ALBalance).
 					IDirect3DBaseTexture9* waveStage = Constants.Data2.w > 11.5f && gridValid ? gridGeometry : gridScreenValid ? gridScreen[gridScreenIndex] : nullptr;
 					IDirect3DBaseTexture9* balance = interiorMode ? balanceTexture[balanceRuns ? balanceWrite : balanceRead] : nullptr;

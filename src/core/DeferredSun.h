@@ -228,7 +228,7 @@ namespace DeferredSun {
 		if (!gSettings.valid || gSettings.revision != rev) {
 			gSettings.revision = rev;
 			gSettings.valid = true;
-			gSettings.enabled = TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
+			gSettings.enabled = true;	// Shaders.ShadowsExteriors.Deferred.Enabled locked on for DeferredRenderer = 2
 			gSettings.debugView = TheSettingManager->GetSettingI(kSection, "DebugView");
 			gSettings.shadows = TheSettingManager->GetSettingI(kSection, "Shadows") != 0;
 			gSettings.landCrackShadow = TheSettingManager->GetSettingI(kSection, "LandCrackShadow") != 0;
@@ -250,7 +250,7 @@ namespace DeferredSun {
 	// light target (linear, no fog), at the stencil's view-model mark: frame is the first-person camera in the DD layout (c0-c5), depth its
 	// projection's _33 / _43 (c9), charM / charCenter / charData the view model's sun map (c206-c209, c213, c214: the light's view x
 	// projection, for the true camera-relative point; charData.w 0 = no map this frame). Off (always without the switch): Apply as before.
-	struct ViewModelPass { bool on = false; float frame[6][4] = {}; float depth[2] = {}; float charM[4][4] = {}; float charCenter[4] = {}; float charData[4] = {}; };
+	struct ViewModelPass { bool on = false; float frame[6][4] = {}; float depth[2] = {}; float charM[4][4] = {}; float charCenter[4] = {}; float charData[4] = {}; IDirect3DTexture9* depthTex = nullptr; };
 	inline ViewModelPass Vm;
 	// A real failure: off for the rest of the cell (the latch logs it and lists it in the status bar). why: a literal.
 	inline void Latch(const char* why) {
@@ -283,8 +283,14 @@ namespace DeferredSun {
 	// Whether the pass is wanted this frame (the setting or the renderer), and can run (compiled).
 	// (2026-11-14 batch 2) and nothing known before the frame stops it: LinearScene live (the pass adds in linear light), the G-buffer's
 	// levels, a directional light, the latch not holding (Fail). DeferredRenderer 2 binds the lighting-free records only while this is true.
+	inline bool ComputeEligible(bool checkVm = false) {
+		(void)checkVm;
+		return !ComputeFailed && !SkylightingMode1 &&
+			DxvkCompute::PassesOnRect() && DxvkCompute::Available() &&
+			!DxvkCompute::KeptOnD3D9("DeferredSun") && SyncSettings().nvrDxvkDeferred != 0;
+	}
 	inline bool Wanted() {
-		return WantedAtStartup() && Pass && !PassFailed && !Fail.Blocked() && (Forced || SyncSettings().enabled) &&
+		return WantedAtStartup() && ((Pass && !PassFailed) || ComputeEligible(false)) && !Fail.Blocked() &&
 			LinearScene::Live && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !CapturedNormals::Failed &&
 			Tes && Tes->directionalLight && !DeferredWetness::Broken();	// (2026-11-19 DeferredWetness: the land's code cannot be put back: forward)
 	}
@@ -293,7 +299,7 @@ namespace DeferredSun {
 	// no directional light yet). DeferredRenderer warns on a reason only.
 	inline const char* Failure() {
 		if (!WantedAtStartup()) return "the lighting-free records are not made (LightFreeRecords off at startup)";
-		if (PassFailed) return "its pass did not load (see its lines)";
+		if (PassFailed && !ComputeEligible(false)) return "its pass did not load (see its lines)";
 		if (LatchFinal()) return Refused;	// (2026-11-16 fd-batchB: a latch that will be tried again is "not ready", not a reason to warn once)
 		if (!CapturedNormals::AlbedoCompiledIn() || !CapturedNormals::MaterialCompiledIn()) return "needs CapturedNormals + MaterialBuffer + AlbedoBuffer (restart)";
 		// (2026-11-16 fd-batchB) the G-buffer's and LinearScene's latches only once they hold for good (out of tries, or RetryFailedEffects off)
@@ -313,7 +319,7 @@ namespace DeferredSun {
 		static D3DXMACRO overrides[] = { { "INTERIOR_SHADOWS", "0" }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL }, { NULL, NULL } };	// (room for the six optional defines + the terminator)
 		int n = 1;
 		// UNOFFICIAL 2026-11-14 foliage (DeferredFoliage.h, which needs this pass and GBufferV2): its branch only with the key on at startup
-		FoliageCompiled = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredFoliage") != 0 && GBufferV2();
+		FoliageCompiled = GBufferV2();	// Main.Main.Quality.DeferredFoliage locked on for DeferredRenderer = 2
 		if (FoliageCompiled) overrides[n++] = { "FD_FOLIAGE", "1" };
 		// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h, DeferredSun.hlsl DS_DEPTH_AGREE): the exact view z only where it is the G-buffer's surface
 		DepthAgreeCompiled = DeferredDistant::CompiledIn();
@@ -330,7 +336,7 @@ namespace DeferredSun {
 		RtSunCompiled = RtSunShadows::ForwardCompiled();
 		SlackCapAllCompiled = TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "CasterReachEverywhere") != 0;
 		SkylightingMode1 = TheSettingManager->GetSettingI("Shaders.PBR.Main", "SkylightingMode") != 0;
-		LinearCompiled = TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0;
+		LinearCompiled = true;	// Shaders.PBR.Linear.Enabled locked on for DeferredRenderer = 2
 		// UNOFFICIAL 2026-11-15 DeferredSkin (core/DeferredSkin.h, DeferredSun.hlsl FD_SKIN): the skin's own sun on the deferred skin's pixels
 		if (DeferredLamps::SkinCompiledIn()) overrides[n++] = { "FD_SKIN", "1" };
 		if (LightFreeRecords::HairDeferred()) overrides[n++] = { "FD_HAIR", "1" };	// UNOFFICIAL 2026-11-15 DeferredHair: model 8 takes the sun here too
@@ -392,7 +398,7 @@ namespace DeferredSun {
 		FdTestFault::BeginFrame();	// (2026-11-16 fd-batchB, test only: DebugVar4)
 		DeferredWetness::BeginFrame();	// (2026-11-19: no film until its pass draws one this frame)
 		Live = Wanted() && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn() && !CapturedNormals::Failed;
-		SunFadeDeferred::PassLive = Live && PassFade;	// (2026-11-15 fd-smoothsun: the sun steps by half a degree while this pass draws it)
+		SunFadeDeferred::PassLive = Live && (PassFade || ComputeEligible(false));	// (2026-11-15 fd-smoothsun: the sun steps by half a degree while this pass draws it)
 		if (!WantedAtStartup()) return;
 		if (HandlesFrom != LightFreeRecords::Records.size()) {	// records are made as the game's shaders load
 			Handles.clear();
@@ -412,12 +418,16 @@ namespace DeferredSun {
 		}
 		const CachedSettings& cfg = SyncSettings();
 		// the land's c3 read-back (core/LandLight.h) only while the pass may use it: the deferred renderer in mode 2 or the pass's own switch
-		LandLight::ReadColor = SettingForce::Mode() >= 2 || cfg.enabled;
+		LandLight::ReadColor = true;
 		if (LinearScene::DrawWatch == &LandDrawWatch || LinearScene::DrawWatch == &ObjectDrawWatch) LinearScene::DrawWatch = nullptr;	// (no watch across frames)
 		DebugView = cfg.debugView;
+<<<<<<< HEAD
 		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && !ComputeFailed && !SkylightingMode1 &&	// (2026-11-27 sunsheen-fade: the fade is the compute pass's too)
 			DxvkCompute::PassesOnRect() && DxvkCompute::Available() && !DxvkCompute::KeptOnD3D9("DeferredSun") &&
 			cfg.nvrDxvkDeferred != 0;
+=======
+		DeferredDistant::ComputeHandlesStoredCurve = Live && DebugView == 0 && ComputeEligible(false);
+>>>>>>> v1.1.6-test2
 		Shadows = cfg.shadows;
 		LandCrackShadow = cfg.landCrackShadow;
 		AuthoredHighlight = cfg.authoredHighlight;
@@ -502,6 +512,7 @@ namespace DeferredSun {
 	// Eliminates saving/restoring 224 pixel constants, 208 sampler states, 15 render states, DeferredFog::FrameCopy,
 	// and DEPTH output while supporting both full resolution and RenderScale < 1.0 natively.
 	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool linearDepth, const NiDirectionalLight* sun) {
+<<<<<<< HEAD
 		if (ComputeFailed || Vm.on || SkylightingMode1 || (!LinearScene::Linear && DebugView != 0)) return false;
 		// (2026-11-27 sunsheen-fade, owner: the deferred sun runs in Vulkan) the sun steps' fade (SunFadeDeferred::Fading: the kept atlas, its
 		// cascades, the movers' atlas) and DeferredWetness's film highlight (DS_WET_FILM; the 1.1.4 review's rule: the film's highlight stays)
@@ -509,12 +520,15 @@ namespace DeferredSun {
 		// more. Before, every sun step drew the D3D9 fade record, which with DeferredSkin has no room for SunSheen (DS_FADE_LEAN): the sheen
 		// went out for the 2 s of each step. (2026-11-27 upstream 1.1.5 merge: the screen-space shadows' mask is read here too, t_sssMask.)
 		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSun")) return false;
+=======
+		if (!ComputeEligible(true) || (!LinearScene::Linear && !Vm.on && DebugView != 0)) return false;
+>>>>>>> v1.1.6-test2
 		const CachedSettings& cfg = SyncSettings();
-		if (cfg.nvrDxvkDeferred == 0) return false;
 		// Storage image RMW requires single-sample FP16 (identity RGBA swizzle in DXVK NVR ext)
 		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
-		const bool depthIsLinear = DeferredDepth::LinearReady();
-		IDirect3DTexture9* depthTex = depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr);
+		const bool depthIsLinear = !Vm.on && DeferredDepth::LinearReady();
+		IDirect3DTexture9* depthTex = Vm.on ? Vm.depthTex :
+			(depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr));
 		if (!depthTex) return false;
 
 		struct ComputePush {
@@ -568,6 +582,7 @@ namespace DeferredSun {
 			float rtSunRowY[4];              // 69
 			float rtSunRowW[4];              // 70
 			float rtSunData[4];              // 71
+<<<<<<< HEAD
 			float dsSheen[4];                // 72 (2026-11-26 SunSheen: FillSheenConst; Compute\DeferredSun.comp cb.dsSheen; z / w clearcoat, pearl)
 			// (2026-11-27 sunsheen-fade) the sun steps' fade, filled only while SunFadeDeferred::Fading (ShadowsExteriorEffect's, by name)
 			float shadowOldNear[16];         // 73..76 TESR_ShadowOldCameraToLightTransformNear
@@ -583,6 +598,21 @@ namespace DeferredSun {
 			float linearScales[4];           // 95 TESR_LinearScales (2026-11-27: w 1 = DeferredLandRoughF90 false, the land's own F90)
 		};
 		static_assert(sizeof(ComputeConstants) == 96 * 16, "DeferredSun ComputeConstants layout mismatch");
+=======
+			float dsSheen[4];                // 72
+			float shadowOldNear[16];         // 73..76
+			float shadowOldMiddle[16];       // 77..80
+			float shadowOldFar[16];          // 81..84
+			float shadowOldLod[16];          // 85..88
+			float shadowOldNearCenter[4];    // 89
+			float shadowOldMiddleCenter[4];  // 90
+			float shadowOldFarCenter[4];     // 91
+			float shadowOldLodCenter[4];     // 92
+			float shadowCrossFade[4];        // 93
+			float shadowDynamicData[4];      // 94
+		};
+		static_assert(sizeof(ComputeConstants) == 95 * 16, "DeferredSun ComputeConstants layout mismatch");
+>>>>>>> v1.1.6-test2
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -608,9 +638,14 @@ namespace DeferredSun {
 				{ 1, 8, NVR_EXT_BIND_STORAGE_IMAGE,  8, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_scene
 				{ 1, 9, NVR_EXT_BIND_STORAGE_IMAGE,  9, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_skinSpec
 				{ 1, 10, NVR_EXT_BIND_SAMPLED_IMAGE, 10, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_sssMask
+<<<<<<< HEAD
 				{ 1, 11, NVR_EXT_BIND_SAMPLED_IMAGE, 11, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowAtlasOld (2026-11-27 sunsheen-fade)
 				{ 1, 12, NVR_EXT_BIND_SAMPLED_IMAGE, 12, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowDynamic
 				{ 1, 13, NVR_EXT_BIND_SAMPLED_IMAGE, 13, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_wetFilm
+=======
+				{ 1, 11, NVR_EXT_BIND_SAMPLED_IMAGE, 11, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowAtlasOld
+				{ 1, 12, NVR_EXT_BIND_SAMPLED_IMAGE, 12, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowDynamic
+>>>>>>> v1.1.6-test2
 				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // linearSampler
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // pointSampler
@@ -647,7 +682,8 @@ namespace DeferredSun {
 
 		ComputeConstants cb = {};
 		cb.viewport[0] = (int)vp.X; cb.viewport[1] = (int)vp.Y; cb.viewport[2] = (int)vp.Width; cb.viewport[3] = (int)vp.Height;
-		memcpy(cb.dd, DeferredDepth::Frame, sizeof(cb.dd));
+		if (Vm.on) memcpy(cb.dd, Vm.frame, sizeof(cb.dd));
+		else memcpy(cb.dd, DeferredDepth::Frame, sizeof(cb.dd));
 
 		copyBytes(cb.terrainData, "TESR_TerrainData", 16);
 		copyBytes(cb.terrainExtraData, "TESR_TerrainExtraData", 16);
@@ -678,7 +714,11 @@ namespace DeferredSun {
 		copyBytes(cb.shadowBlur, "TESR_ShadowBlur", 16);
 		copyBytes(cb.shadowForwardData, "TESR_ShadowForwardData", 16);
 		if (ContactHardeningCompiled) copyBytes(cb.contactHardeningData, "TESR_ContactHardeningData", 16);
-		if (CharMapCompiled) {
+		if (Vm.on) {
+			memcpy(cb.charShadowCameraToLight, Vm.charM, 64);
+			memcpy(cb.charShadowCenter, Vm.charCenter, 16);
+			memcpy(cb.charShadowData, Vm.charData, 16);
+		} else if (CharMapCompiled) {
 			copyBytes(cb.charShadowCameraToLight, "TESR_CharShadowCameraToLight", 64);
 			copyBytes(cb.charShadowCenter, "TESR_CharShadowCenter", 16);
 			copyBytes(cb.charShadowData, "TESR_CharShadowData", 16);
@@ -700,6 +740,7 @@ namespace DeferredSun {
 		IDirect3DBaseTexture9* charTex = CharMapCompiled ? namedTex("TESR_CharShadowMap") : nullptr;
 		IDirect3DBaseTexture9* cloudTex = (ForwardShadowsCompiled && ForwardCloudShadows::Active) ? namedTex("TESR_CloudShadow") : nullptr;
 		IDirect3DBaseTexture9* rtSunTex = RtSunCompiled ? namedTex("TESR_RtSunForward") : nullptr;
+<<<<<<< HEAD
 		// (2026-11-27 sunsheen-fade) a sun step's fade: the kept atlas and its cascades (Includes/Shadow.hlsl GetOldSunShadowPass's), and the
 		// movers' atlas when ShadowManager drew it this frame (TESR_ShadowDynamicData.x > 0). Without the kept atlas (not made yet, or its copy
 		// failed) the new shadow alone, as in the frames without a fade.
@@ -724,6 +765,23 @@ namespace DeferredSun {
 		// (2026-11-27 sunsheen-fade, DS_WET_FILM) DeferredWetness's film target, written this frame by its pass (DeferredSun::Apply runs it first)
 		const bool filmLive = WetFilmCompiled && DeferredWetness::FilmLive && DeferredWetness::FilmTexture;
 		IDirect3DBaseTexture9* filmTex = filmLive ? static_cast<IDirect3DBaseTexture9*>(DeferredWetness::FilmTexture) : nullptr;
+=======
+		IDirect3DBaseTexture9* oldAtlasTex = SunFadeDeferred::Fading ? namedTex("TESR_ShadowAtlasOld") : nullptr;
+		IDirect3DBaseTexture9* dynTex = SunFadeDeferred::Fading ? namedTex("TESR_ShadowDynamic") : nullptr;
+		const bool crossFadeActive = SunFadeDeferred::Fading && ForwardShadowsCompiled && oldAtlasTex != nullptr;
+		if (crossFadeActive) {
+			copyBytes(cb.shadowOldNear, "TESR_ShadowOldCameraToLightTransformNear", 64);
+			copyBytes(cb.shadowOldMiddle, "TESR_ShadowOldCameraToLightTransformMiddle", 64);
+			copyBytes(cb.shadowOldFar, "TESR_ShadowOldCameraToLightTransformFar", 64);
+			copyBytes(cb.shadowOldLod, "TESR_ShadowOldCameraToLightTransformLod", 64);
+			copyBytes(cb.shadowOldNearCenter, "TESR_ShadowOldNearCenter", 16);
+			copyBytes(cb.shadowOldMiddleCenter, "TESR_ShadowOldMiddleCenter", 16);
+			copyBytes(cb.shadowOldFarCenter, "TESR_ShadowOldFarCenter", 16);
+			copyBytes(cb.shadowOldLodCenter, "TESR_ShadowOldLodCenter", 16);
+			copyBytes(cb.shadowCrossFade, "TESR_ShadowCrossFade", 16);
+			if (dynTex) copyBytes(cb.shadowDynamicData, "TESR_ShadowDynamicData", 16);
+		}
+>>>>>>> v1.1.6-test2
 
 		if (cloudTex) {
 			memcpy(cb.cloudSun, ForwardCloudShadows::Data, 16);
@@ -740,10 +798,13 @@ namespace DeferredSun {
 		SunColor(sun, objectFresh, cb.dsSunColor);	// (2026-11-24 fd-complete batch 8: from the light)
 		cb.dsSunColor[3] = foliageW;
 		cb.dsCtrl[0] = (float)DebugView;
-		cb.dsCtrl[1] = linearDepth ? 1.0f : 0.0f;
+		cb.dsCtrl[1] = (!Vm.on && linearDepth) ? 1.0f : 0.0f;
 		cb.dsCtrl[2] = Shadows ? 1.0f : 0.0f;
 		cb.dsCtrl[3] = FoliageCompiled && cfg.grassShadowFix ? 2.0f : 1.0f;
-		cb.dsDepth[0] = proj._33; cb.dsDepth[1] = proj._43; cb.dsDepth[2] = 0.01f; cb.dsDepth[3] = 2.0f;
+		cb.dsDepth[0] = Vm.on ? Vm.depth[0] : proj._33;
+		cb.dsDepth[1] = Vm.on ? Vm.depth[1] : proj._43;
+		cb.dsDepth[2] = 0.01f;
+		cb.dsDepth[3] = 2.0f;
 
 		const UInt32 frameNow = (UInt32)TheFrameRateManager->FrameNumber;
 		const bool landFresh = LandLight::ReadFrame && frameNow - LandLight::ReadFrame <= 4;
@@ -763,13 +824,17 @@ namespace DeferredSun {
 			cb.dsVis[2] = fade ? start : 0.0f;
 			cb.dsVis[3] = fade ? 1.0f / (end - start) : 0.0f;
 		}
-		LogLight(toSun, sun, landFresh);
+		if (!Vm.on) LogLight(toSun, sun, landFresh);
 
 		float fog[4] = {};
-		const bool fogExact = LinearCompiled && DebugView == 0 && DeferredFog::Params(fog);
+		const bool fogExact = !Vm.on && LinearCompiled && DebugView == 0 && DeferredFog::Params(fog);
 		if (fogExact) memcpy(cb.dsFog, fog, 16);
+<<<<<<< HEAD
 		bool sheenPuddleGate = false;	// (2026-11-26 SunSheen: this pass never runs for the view model, above; 2026-11-27: the film's gate is per pixel)
 		FillSheenConst(false, filmLive, cb.dsSheen, sheenPuddleGate);
+=======
+		FillSheenConst(Vm.on, cb.dsSheen);
+>>>>>>> v1.1.6-test2
 
 		UINT flags = 0;
 		if (GBufferV2()) flags |= 1u << 0u;
@@ -791,13 +856,15 @@ namespace DeferredSun {
 		else flags |= 1u << 16u;
 		if (ForwardShadowsCompiled && cloudTex) flags |= 1u << 17u;
 		if (SlackCapAllCompiled) flags |= 1u << 18u;
-		if (LinearScene::Linear) flags |= 1u << 19u;
+		if (LinearScene::Linear || Vm.on) flags |= 1u << 19u;
 		const bool sssOn = !Vm.on && ScreenSpaceShadows::MadeThisSpan();
 		{
 			const int sssMode = MaterialSSSProto::EffectiveMode();
 			if (sssMode >= 1 && sssMode <= 3) flags |= 1u << 20u; // UNOFFICIAL 2026-11-25 MaterialSSS Phase 2
 			if (TheShaderManager && TheShaderManager->GameState.isExterior) flags |= 1u << 21u;
 			if (sssOn) flags |= 1u << 22u; // UNOFFICIAL 2026-11-26 Bottled Shaders Screen-Space Shadows
+			if (crossFadeActive) flags |= 1u << 23u; // UNOFFICIAL 2026-11-27 SunFadeDeferred in compute
+			if (Vm.on) flags |= 1u << 24u;
 		}
 		if (sheenPuddleGate) flags |= 1u << 23u;	// (2026-11-27 upstream 1.1.5 merge) SunSheen's standing-water gate (was dsSheen.z)
 		if (oldAtlasTex) flags |= 1u << 24u;	// (2026-11-27 sunsheen-fade) kFlagSunCrossFade
@@ -821,9 +888,14 @@ namespace DeferredSun {
 			{ 8, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
 			{ 9, NVR_EXT_BIND_STORAGE_IMAGE,  skinSpecTarget,                   0, 0, 0, FALSE },
 			{ 10, NVR_EXT_BIND_SAMPLED_IMAGE, (sssOn && ScreenSpaceShadows::Texture) ? static_cast<IDirect3DBaseTexture9*>(ScreenSpaceShadows::Texture) : depthTex, 0, 0, 0, FALSE },
+<<<<<<< HEAD
 			{ 11, NVR_EXT_BIND_SAMPLED_IMAGE, oldAtlasTex ? oldAtlasTex : depthTex, 0, 0, 0, FALSE },
 			{ 12, NVR_EXT_BIND_SAMPLED_IMAGE, dynamicTex ? dynamicTex : depthTex, 0, 0, 0, FALSE },
 			{ 13, NVR_EXT_BIND_SAMPLED_IMAGE, filmTex ? filmTex : depthTex,   0, 0, 0, FALSE },
+=======
+			{ 11, NVR_EXT_BIND_SAMPLED_IMAGE, crossFadeActive ? oldAtlasTex : depthTex, 0, 0, 0, FALSE },
+			{ 12, NVR_EXT_BIND_SAMPLED_IMAGE, (crossFadeActive && dynTex) ? dynTex : depthTex, 0, 0, 0, FALSE },
+>>>>>>> v1.1.6-test2
 			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
 			{ 0, NVR_EXT_BIND_SAMPLER,        DxvkCompute::LinearClamp(),       0, 0, 0, FALSE },
 			{ 1, NVR_EXT_BIND_SAMPLER,        DxvkCompute::PointClamp(),        0, 0, 0, FALSE },
@@ -839,8 +911,8 @@ namespace DeferredSun {
 		dispatch.GroupsY = (vp.Height + 7u) / 8u;
 		dispatch.GroupsZ = 1u;
 
-		static GpuTimer computeTimer("  Deferred sun (compute)");
-		GpuProfileScope gpu(computeTimer, d);
+		static GpuTimer computeTimer("  Deferred sun (compute)"), vmComputeTimer("  Deferred sun (first person, compute)");
+		GpuProfileScope gpu(Vm.on ? vmComputeTimer : computeTimer, d);
 		DxvkCompute::PreLoad(bindings, _countof(bindings));
 		d->SetRenderTarget(0, ComputeRt0DummySurf);
 		const HRESULT hr = ext->Dispatch(&dispatch);
@@ -855,10 +927,12 @@ namespace DeferredSun {
 		StatPasses++;
 		StatCompute++;
 		if (fogExact) StatFogExact++;
-		if (SkipStreak && SkipLogs <= 21) Logger::Log("UNOFFICIAL DeferredSun: the sun pass drew again after %u skipped frame%s", SkipStreak, SkipStreak == 1 ? "" : "s");
-		SkipStreak = 0;
-		static int latchTold = 0;
-		if (Fail.tries != latchTold) { latchTold = Fail.tries; Logger::Log("UNOFFICIAL DeferredSun: the sun pass draws again after its latch (attempt %d of %d)", Fail.tries + 1, FailOnce::kTries); }
+		if (!Vm.on) {
+			if (SkipStreak && SkipLogs <= 21) Logger::Log("UNOFFICIAL DeferredSun: the sun pass drew again after %u skipped frame%s", SkipStreak, SkipStreak == 1 ? "" : "s");
+			SkipStreak = 0;
+			static int latchTold = 0;
+			if (Fail.tries != latchTold) { latchTold = Fail.tries; Logger::Log("UNOFFICIAL DeferredSun: the sun pass draws again after its latch (attempt %d of %d)", Fail.tries + 1, FailOnce::kTries); }
+		}
 		return true;
 	}
 
@@ -968,6 +1042,15 @@ namespace DeferredSun {
 		static GpuTimer timer("Deferred sun"), vmTimer("Deferred sun (first person)");	// (with the conversion to linear light below, when it runs)
 		GpuProfileScope gpu(Vm.on ? vmTimer : timer, d);
 		if (TryApplyCompute(d, target, t, linearDepth, sun)) { target->Release(); return; }
+		if (!Vm.on) {
+			static bool d3Logged = false;
+			if (!d3Logged) {
+				d3Logged = true;
+				Logger::Log("[D3-FALLBACK] DeferredSun fell back to D3D9 (computeFailed=%d, fmt=%u, linear=%d, dbg=%d)",
+					ComputeFailed ? 1 : 0, (unsigned)t.Format, LinearScene::Linear ? 1 : 0, DebugView);
+			}
+		}
+		if (!Pass || PassFailed) { target->Release(); StatSkipped++; return; }
 		// Compute fallback / D3D9 pass: D3D9 ps_3_0 adds in linear light, so convert now if still on stored curve.
 		if (!toLinear()) return;
 

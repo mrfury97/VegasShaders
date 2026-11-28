@@ -1,8 +1,7 @@
-// UNOFFICIAL 2026-10-26 (NVR DXVK): AMD FidelityFX Super Resolution 2 (FSR 2.2.1) as TAA's resolve, at native resolution.
+// UNOFFICIAL 2026-10-26 (NVR DXVK): AMD FidelityFX Super Resolution 3.1 as TAA's resolve, at native resolution.
 //
-// CREDIT: FSR 2 is AMD's (FidelityFX Super Resolution 2.2.1, GPUOpen, https://github.com/GPUOpen-Effects/FidelityFX-FSR2),
-// MIT licence: src\hlsl\NewVegas\Compute\FSR2\LICENSE-FidelityFX-FSR2.txt. AMD's passes and their CPU side live in
-// core\Upscaler.cpp since 2026-10-27 (shared with RenderScale, effects\TAAUpscale.cpp); this file builds NVR's inputs for them
+// CREDIT: FSR 3.1 is AMD's (FidelityFX SDK 1.1.4, GPUOpen, MIT). AMD's passes and their CPU side live in
+// core\UpscalerFsr31.cpp (shared with RenderScale, effects\TAAUpscale.cpp); this file builds NVR's inputs for them
 // at native resolution and puts the result into the frame.
 //
 // Needs NVR DXVK (compute through the extension). Without it, or after any failure (logged once), TAA's own resolve runs.
@@ -11,7 +10,7 @@
 // Per frame, all at the render (= display) resolution, after TAA's usual inputs are ready (post-tonemap frame in
 // TESR_SourceBuffer, the world jittered by BeginJitter):
 //   FSRPrep        NVR: camera motion vectors from depth (TAA's reprojection) + FSR-style device depth + reactive (weapon)
-//   Upscaler::Fsr2()->Evaluate: FSRLumaMip (NVR), then AMD's FSR2Reconstruct, FSR2DepthClip, FSR2Lock, FSR2Accumulate[Sharpen], FSR2RCAS
+//   Upscaler::Fsr31()->Evaluate: AMD's FSR 3.1 upscaler passes
 //   FSRComposite   NVR: FSR's output into the game target, the first-person weapon put back as rendered
 // What FSR does not get (yet): motion of skinned characters and other moving objects (camera motion only; FSR's depth clip and
 // luma locks handle what they can), a reactive mask for particles/transparencies. Real upscaling: RenderScale (TAAUpscale.cpp).
@@ -144,12 +143,6 @@ namespace {
 		outInputs.Reset = reset;
 		Upscaler::IUpscaler* upscaler = Upscaler::Choose(upscalerId);
 		bool evaluated = upscaler->Evaluate(Device, outInputs);
-		if (!evaluated && upscaler == Upscaler::Fsr31() && upscaler->Failed()) {
-			// UNOFFICIAL 2026-10-28: FSR 3.1 failing (logged by it) hands this frame and the rest of the session to FSR 2.
-			upscaler = Upscaler::Choose(upscalerId);
-			outInputs.Reset = true;
-			evaluated = upscaler->Evaluate(Device, outInputs);
-		}
 		return evaluated ? upscaler : nullptr;
 	}
 }
@@ -178,7 +171,7 @@ bool TAAEffect::FSREnsureResources() {
 	}
 	fsrWidth = width;
 	fsrHeight = height;
-	Logger::Log("UNOFFICIAL Vegas Shaders DXVK: TAA FSR 2 inputs made (%ix%i, about %u MB)", width, height, (UInt32)((UInt64)width * height * 12 / (1024 * 1024)));
+	Logger::Log("UNOFFICIAL Vegas Shaders DXVK: TAA FSR 3.1 inputs made (%ix%i, about %u MB)", width, height, (UInt32)((UInt64)width * height * 12 / (1024 * 1024)));
 	return true;
 }
 
@@ -189,7 +182,7 @@ bool TAAEffect::FSRWanted() {
 		fsrMissingLogged = true;
 		return false;
 	}
-	if (Upscaler::Fsr2()->Failed()) return false;
+	if (Upscaler::Fsr31()->Failed()) return false;
 	return true;
 }
 
@@ -303,7 +296,7 @@ bool TAAEffect::FSRDraw(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarge
 	}
 	EffectStatus::Level("TAA upscaler in use (native)", upscaler->Name(), true);	// UNOFFICIAL 2026-11-01 (the REPORT's path; a fallback shows as its own line)
 	// UNOFFICIAL 2026-11-01 (Diagnostics.h part 5): this frame's state for the log lines (Render adds the frame count and probes the output)
-	Diag.path = FSRSettings.Upscaler == 1 ? "DLSS at native resolution (FSR 2 while the helper cannot run)" : FSRSettings.Upscaler == 2 ? "FSR 3.1 at native resolution" : "FSR 2 at native resolution";
+	Diag.path = FSRSettings.Upscaler == 1 ? "DLSS at native resolution (FSR 3.1 while the helper cannot run)" : "FSR 3.1 at native resolution";
 	Diag.upscaler = std::string(upscaler->Name()) + ": " + upscaler->DiagText();
 	Diag.reset = in.Reset;
 	Diag.jitter = jitterIndex;
@@ -444,8 +437,7 @@ bool TAAEffect::PreTonemapNativeAA(IDirect3DDevice9* Device, IDirect3DSurface9* 
 	chain.Commit();
 
 	EffectStatus::Level("TAA upscaler in use (native)", upscaler->Name(), true);
-	Diag.path = FSRSettings.Upscaler == 1 ? "DLSS at native resolution (pre-tonemap HDR; FSR 2 while the helper cannot run)" :
-		FSRSettings.Upscaler == 2 ? "FSR 3.1 at native resolution (pre-tonemap HDR)" : "FSR 2 at native resolution (pre-tonemap HDR)";
+	Diag.path = FSRSettings.Upscaler == 1 ? "DLSS at native resolution (pre-tonemap HDR; FSR 3.1 while the helper cannot run)" : "FSR 3.1 at native resolution (pre-tonemap HDR)";
 	Diag.upscaler = std::string(upscaler->Name()) + ": " + upscaler->DiagText();
 	Diag.reset = in.Reset;
 	Diag.sinceReset = in.Reset ? 0 : Diag.sinceReset + 1;

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <string>
+#include <vector>
+
 // UNOFFICIAL 2026-11-01 why each effect did what it did, per frame (core/Diagnostics.cpp; docs/UNOFFICIAL-TECHNICAL.md "Diagnostics").
 // A small registry the effects report into with one-line calls where they already decide; nothing is restructured. Kept in memory
 // only (a 16-frame ring per effect, a few bytes each) and written to the log in three places:
@@ -42,6 +45,8 @@ namespace EffectStatus {
 	void	Level(const char* what, const char* chosen, bool isDefault);	// copied (may be called from the compile threads)
 	enum ShaderEvent { CacheHit, Compiled, Precompiled, CompileFailed, FlowControlRetry };
 	void	ShaderLoaded(ShaderEvent what);	// thread-safe counters (ShaderRecord::LoadShader, EffectRecord::LoadEffect)
+	long	CompileFailureCount();
+	std::vector<std::string> CompileFailureItems();
 	void	D3DFail(const char* site, long hr);	// the first one of a site is logged; all counted
 	void	TargetSize(const char* name, unsigned width, unsigned height);	// logged when a name is made at another size than before
 }

@@ -1,3 +1,4 @@
+#include "../../core/DxvkCompute.h"
 #include "CoverMap.h"
 #include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/FrameClock.h"	// UNOFFICIAL 2026-10-28 footprints: the walking speed
@@ -369,6 +370,10 @@ void CoverMapEffect::RenderUpdate(IDirect3DDevice9* Device, IDirect3DSurface9* R
 
 			// One pass into the other pair of maps (it reads the current pair), then they swap.
 			bool drawn = false;
+			if (!ExtFailed && DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name)) {
+				drawn = ExtRenderUpdate(Device);
+			}
+			if (!drawn) {
 			IDirect3DSurface9* depthWas = nullptr;
 			IDirect3DSurface9* target1Was = nullptr;
 			DWORD scissorWas = FALSE, writeWas1 = 0xF;
@@ -404,6 +409,7 @@ void CoverMapEffect::RenderUpdate(IDirect3DDevice9* Device, IDirect3DSurface9* R
 			Device->SetRenderState(D3DRS_COLORWRITEENABLE1, writeWas1);
 			if (depthWas) depthWas->Release();
 			if (target1Was) target1Was->Release();
+			}
 
 			if (drawn) {
 				current = 1 - current;
@@ -430,6 +436,131 @@ void CoverMapEffect::RenderUpdate(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		}
 	}
 	SetReaderConstants();
+}
+
+bool CoverMapEffect::FillExtUniforms(bool needUpdate) {
+	struct CoverMapUniforms {
+		float orthoInverse[16];
+		float shadowOrtho[16];
+		float viewTransform[16];
+		float projectionTransform[16];
+		float update[4], origin[4], shift[4], rates[4], snowRates[4];
+		float sun[4], shade[4], start[4], footA[4], footB[4], debug[4];
+		float data[4], window[4], globalVal[4], trail[4];
+		float reciprocalResolution[4], cameraData[4], renderScale[4];
+	} u = {};
+
+	auto copyOpt = [&](const char* name, void* dst, size_t bytes) -> bool {
+		auto it = TheShaderManager->ConstantsTable.find(name);
+		if (it != TheShaderManager->ConstantsTable.end() && it->second) { memcpy(dst, it->second, bytes); return true; }
+		return false;
+	};
+	memcpy(u.orthoInverse, &Constants.OrthoInverse, sizeof(u.orthoInverse));
+	if (!copyOpt("TESR_ShadowCameraToLightTransformOrtho", u.shadowOrtho, sizeof(u.shadowOrtho)) && needUpdate && Constants.Shade.w > 0.5f) return false;
+	if (!copyOpt("TESR_ViewTransform", u.viewTransform, sizeof(u.viewTransform))) return false;
+	if (!copyOpt("TESR_ProjectionTransform", u.projectionTransform, sizeof(u.projectionTransform))) return false;
+	memcpy(u.update, &Constants.Update, sizeof(u.update));
+	memcpy(u.origin, &Constants.Origin, sizeof(u.origin));
+	memcpy(u.shift, &Constants.Shift, sizeof(u.shift));
+	memcpy(u.rates, &Constants.Rates, sizeof(u.rates));
+	memcpy(u.snowRates, &Constants.SnowRates, sizeof(u.snowRates));
+	memcpy(u.sun, &Constants.Sun, sizeof(u.sun));
+	memcpy(u.shade, &Constants.Shade, sizeof(u.shade));
+	memcpy(u.start, &Constants.Start, sizeof(u.start));
+	memcpy(u.footA, &Constants.FootA, sizeof(u.footA));
+	memcpy(u.footB, &Constants.FootB, sizeof(u.footB));
+	memcpy(u.debug, &Constants.Debug, sizeof(u.debug));
+	memcpy(u.data, &Constants.Data, sizeof(u.data));
+	memcpy(u.window, &Constants.Window, sizeof(u.window));
+	memcpy(u.globalVal, &Constants.Global, sizeof(u.globalVal));
+	memcpy(u.trail, &Constants.Trail, sizeof(u.trail));
+	if (!copyOpt("TESR_ReciprocalResolution", u.reciprocalResolution, sizeof(u.reciprocalResolution))) return false;
+	if (!copyOpt("TESR_CameraData", u.cameraData, sizeof(u.cameraData))) return false;
+	if (!copyOpt("TESR_RenderScale", u.renderScale, sizeof(u.renderScale))) {
+		u.renderScale[0] = u.renderScale[1] = u.renderScale[2] = u.renderScale[3] = 1.0f;
+	}
+	return ExtUniforms(extUniforms, &u, sizeof(u)) != nullptr;
+}
+
+bool CoverMapEffect::ExtRenderUpdate(IDirect3DDevice9* Device) {
+	if (!DxvkCompute::Available() || !mapTexture[current] || !auxTexture[current] ||
+		!mapSurface[1 - current] || !auxSurface[1 - current]) return false;
+	auto namedTex = [](const char* name) -> IDirect3DBaseTexture9* {
+		auto it = TheTextureManager->TextureNames.find(name);
+		return (it != TheTextureManager->TextureNames.end() && it->second) ? *it->second : nullptr;
+	};
+	IDirect3DBaseTexture9* depth = namedTex("TESR_DepthBuffer");
+	IDirect3DBaseTexture9* ortho = namedTex("TESR_OrthoMapBuffer");
+	if (!depth) return false;
+	if (!ortho) ortho = depth;
+	if (!FillExtUniforms(true)) return false;
+
+	ID3D9NvrExtSampler* pWrap = DxvkCompute::PointWrap();
+	ID3D9NvrExtSampler* pClamp = DxvkCompute::PointClamp();
+	if (!pWrap || !pClamp || !extUniforms.Buffer) return false;
+
+	struct Push { UInt32 pointWrap, pointClamp; UInt32 pad[2]; } push = {};
+	if (!extUpdate.Tried) {
+		extUpdate.Tried = true;
+		NVR_EXT_BINDING_DESC bindings[7] = {};
+		for (UINT i = 0; i < 4; i++) {
+			bindings[i].Set = 1; bindings[i].Binding = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].Slot = i; bindings[i].ViewType = NVR_EXT_VIEW_2D;
+		}
+		bindings[4].Set = 2; bindings[4].Binding = 0; bindings[4].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[4].Slot = 0; bindings[4].ViewType = NVR_EXT_VIEW_2D;
+		bindings[5].Type = NVR_EXT_BIND_SAMPLER; bindings[5].Slot = 0; bindings[5].PushOffset = 0;
+		bindings[6].Type = NVR_EXT_BIND_SAMPLER; bindings[6].Slot = 1; bindings[6].PushOffset = 4;
+		extUpdate.Pipeline = DxvkCompute::CreateGraphicsPipeline("CoverMapUpdate", bindings, _countof(bindings), sizeof(push), true, 2);
+	}
+	if (!extUpdate.Pipeline) return false;
+
+	NVR_EXT_RESOURCE_BINDING res[7] = {};
+	res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = mapTexture[current];
+	res[1].Slot = 1; res[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[1].pResource = ortho;
+	res[2].Slot = 2; res[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[2].pResource = depth;
+	res[3].Slot = 3; res[3].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[3].pResource = auxTexture[current];
+	res[4].Slot = 0; res[4].Type = NVR_EXT_BIND_UNIFORM_BUFFER; res[4].pResource = extUniforms.Buffer;
+	res[5].Slot = 0; res[5].Type = NVR_EXT_BIND_SAMPLER; res[5].pResource = pWrap;
+	res[6].Slot = 1; res[6].Type = NVR_EXT_BIND_SAMPLER; res[6].pResource = pClamp;
+	IDirect3DSurface9* targets[2] = { mapSurface[1 - current], auxSurface[1 - current] };
+	return ExtDrawTo(extUpdate.Pipeline, targets, 2, res, _countof(res), &push, sizeof(push), nullptr, ExtUv::ScreenQuad);
+}
+
+bool CoverMapEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	if (techniqueIndex != 1 || ClearRenderTarget || !DxvkCompute::Available()) return false;
+	IDirect3DBaseTexture9* rendered = TheTextureManager->RenderedTexture;
+	IDirect3DBaseTexture9* cover = currentTexture;
+	IDirect3DBaseTexture9* aux = currentAux;
+	auto depthIt = TheTextureManager->TextureNames.find("TESR_DepthBuffer");
+	IDirect3DBaseTexture9* depth = (depthIt != TheTextureManager->TextureNames.end() && depthIt->second) ? *depthIt->second : nullptr;
+	if (!rendered || !cover || !aux || !depth || !FillExtUniforms(false)) return false;
+
+	ID3D9NvrExtSampler* pWrap = DxvkCompute::PointWrap();
+	ID3D9NvrExtSampler* pClamp = DxvkCompute::PointClamp();
+	if (!pWrap || !pClamp || !extUniforms.Buffer) return false;
+
+	struct Push { UInt32 pointWrap, pointClamp; UInt32 pad[2]; } push = {};
+	if (!extDebug.Tried) {
+		extDebug.Tried = true;
+		NVR_EXT_BINDING_DESC bindings[7] = {};
+		for (UINT i = 0; i < 4; i++) {
+			bindings[i].Set = 1; bindings[i].Binding = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].Slot = i; bindings[i].ViewType = NVR_EXT_VIEW_2D;
+		}
+		bindings[4].Set = 2; bindings[4].Binding = 0; bindings[4].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[4].Slot = 0; bindings[4].ViewType = NVR_EXT_VIEW_2D;
+		bindings[5].Type = NVR_EXT_BIND_SAMPLER; bindings[5].Slot = 0; bindings[5].PushOffset = 0;
+		bindings[6].Type = NVR_EXT_BIND_SAMPLER; bindings[6].Slot = 1; bindings[6].PushOffset = 4;
+		extDebug.Pipeline = DxvkCompute::CreateGraphicsPipeline("CoverMapDebug", bindings, _countof(bindings), sizeof(push), true);
+	}
+	if (!extDebug.Pipeline) return false;
+
+	NVR_EXT_RESOURCE_BINDING res[7] = {};
+	res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = rendered;
+	res[1].Slot = 1; res[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[1].pResource = cover;
+	res[2].Slot = 2; res[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[2].pResource = aux;
+	res[3].Slot = 3; res[3].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[3].pResource = depth;
+	res[4].Slot = 0; res[4].Type = NVR_EXT_BIND_UNIFORM_BUFFER; res[4].pResource = extUniforms.Buffer;
+	res[5].Slot = 0; res[5].Type = NVR_EXT_BIND_SAMPLER; res[5].pResource = pWrap;
+	res[6].Slot = 1; res[6].Type = NVR_EXT_BIND_SAMPLER; res[6].pResource = pClamp;
+	return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, extDebug.Pipeline, res, _countof(res), &push, sizeof(push), true);
 }
 
 void CoverMapEffect::RenderDebug(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* SourceSurface) {

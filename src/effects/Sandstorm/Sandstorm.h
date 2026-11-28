@@ -117,6 +117,7 @@ public:
 	// the dust grid, its two sums, the streaks and the glow into the effect's own buffers (ExtDrawTo), the composite and the
 	// reference through the frame chain. The matrices and the lamp arrays go to one uniform buffer (they do not fit push data).
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	bool	ExtSupportsRenderRect() const override { return true; }
 
 	ExtPass				extPasses[7];	// by technique
 	ExtUniformBuffer	extUniforms;

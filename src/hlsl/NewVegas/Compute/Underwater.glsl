@@ -25,6 +25,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 cameraData;             // TESR_CameraData (y far Z)
     mat4 projectionTransform;    // TESR_ProjectionTransform
     mat4 viewTransform;          // TESR_ViewTransform
+    vec4 renderScale;            // RenderRect scale (xy = scale, zw = 1 / scale)
 } cb;
 
 const vec3 up = vec3(0.0, 0.0, 1.0);

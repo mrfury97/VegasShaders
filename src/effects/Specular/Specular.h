@@ -30,6 +30,7 @@ class SpecularEffect : public EffectRecord
 public:
 	// UNOFFICIAL 2026-11-12 (memleak) idle targets (core/TextureManager.h, EffectRecord::TargetParkable): both buffers are drawn and read only by this effect's own passes, all behind its switch (EffectChain's wouldRender, RenderWithBounce)
 	bool	TargetParkable(const char* SamplerName) override { return true; }
+	bool	ExtSupportsRenderRect() const override { return true; }
 	SpecularEffect() : EffectRecord("Specular") {};
 
 	struct SpecularStruct {

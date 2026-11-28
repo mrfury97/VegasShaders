@@ -81,7 +81,7 @@ void ReflectionsEffect::UpdateSettings() {
 	Settings.CubeMap = TheSettingManager->GetSettingI(section, "CubeMap") != 0;
 	{
 		SettingManager::Configuration::ConfigNode cubeNode;
-		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 2;	// a missing key defaults to 2 (tier-2 world cubemap)
+		Settings.CubeMode = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeMode") ? std::clamp(cubeNode.IntValue, 0, 2) : 2;
 		const int rawRes = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeResolution") ? cubeNode.IntValue : 128;
 		Settings.CubeResolution = rawRes < 96 ? 64 : (rawRes >= 192 ? 256 : 128);
 		Settings.CubeDistance = TheSettingManager->Config.FillNode(&cubeNode, section, "CubeDistance") ? std::clamp(cubeNode.FloatValue, 1024.0f, 16384.0f) : 4096.0f;
@@ -394,8 +394,8 @@ static void LogReflShaderFiles() {
 	// (2026-11-24) written by tools\nvr-dxvk\refl-hashes.py, which compile-compute.sh runs after every build: by hand it went stale (1.1.3 and
 	// 1.1.4 shipped 10 of these 11 old, so every log called the build's own files OLD and Install check showed 1 to fix). Edit the names only.
 	static const Want wants[] = {
-		{ "ReflectionsComposite", 0xDAC05D79u }, { "ReflectionsRTResolve", 0x9B1D51E2u }, { "ReflectionsRayGen", 0xA7EFF08Du }, { "ReflectionsTemporal", 0xE7EC248Cu },
-		{ "ReflectionsCapture", 0xD1BA8B02u }, { "ReflectionsFilter", 0xDDA9D66Cu },
+		{ "ReflectionsComposite", 0x0B8DCDADu }, { "ReflectionsRTResolve", 0xF208611Eu }, { "ReflectionsRayGen", 0x7D218D7Cu }, { "ReflectionsTemporal", 0xD5558F06u },
+		{ "ReflectionsCapture", 0xC60E65FCu }, { "ReflectionsFilter", 0x317813F0u },
 		{ "RtReflDenoiseOursReproject", 0x7955BB76u }, { "Rt\\ReflectionsRT", 0x5DB278C7u },
 		{ "Rt\\ReflectionsRTAlpha", 0xDE40151Fu }, { "Rt\\ReflectionsRTTex", 0x5B941841u }, { "Rt\\ReflectionsRTTexGlow", 0xCADF2215u },
 		{ "Rt\\ReflectionsRTAlphaTex", 0xC3195738u }, { "Rt\\ReflectionsRTAlphaTexGlow", 0x77E8EF1Bu },
@@ -832,7 +832,7 @@ void ReflectionsEffect::UpdateConstants() {
 }
 
 bool ReflectionsEffect::NonRtWeaponActive() const {
-	return !ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name) && !RenderRect::Active();
+	return !ExtFailed && DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name);
 }
 
 bool ReflectionsEffect::WeaponReflectionsActive() const {
@@ -926,8 +926,7 @@ bool ReflectionsEffect::GBufferFrame() {
 	const bool vulkan = !ExtFailed && DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9(Name);
 	const char* why = nullptr;
 	if (key) {
-		if (SettingForce::Mode() != 2) why = "the deferred renderer is not in mode 2 (DeferredRenderer 2): MaterialAware stays the material source";
-		else if (!FdIndirect::UnifiedReflectionsOn()) why = "the G-buffer does not hold this frame's records (COLOR1-3)";
+		if (!FdIndirect::UnifiedReflectionsOn()) why = "the G-buffer does not hold this frame's records (COLOR1-3)";
 		// (review 2026-11-20) the chain clears CapturedNormals::Data.x later in such a frame (EffectChain.cpp PreStep_SnowAccumulation): COLOR1-3 are
 		// at the drawn size while the effects see the upscaled frame
 		else if (TAAEffect::UpscaledBeforeEffects()) why = "the frame was upscaled before the effects (RenderScale with LowResEffects off): the G-buffer is at the drawn size";
@@ -1152,6 +1151,8 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	const bool denoised = rtDenoiseFrame && rtResolved &&
 		RunRtDenoiser(Device, temporal ? Textures.TraceTexture : Textures.TempTexture, denoiseHistory ? &reprojectDenoise : nullptr);
 	if (!denoised) RtDenoiseIdle();
+	const RECT halfRect = { 0, 0, (LONG)RenderRect::Width(RtWidth()), (LONG)RenderRect::Height(RtHeight()) };
+	const RECT* halfClip = RenderRect::Active() ? &halfRect : nullptr;
 	if (!denoised && temporal) {
 		// UNOFFICIAL 2026-10-29 ObjectMotion: its buffer on stage 11 for Temporal only (the ortho map's stage; the trace above has read it,
 		// and the composite's SetCT binds the ortho map again). TemporalPS reads it while TESR_ObjectMotionData.x is 1.
@@ -1159,13 +1160,13 @@ void ReflectionsEffect::RenderBuffers(IDirect3DDevice9* Device) {
 		if (Constants.Film.x > 0.0f) SetPassTexture(7, nullptr);	// (2026-11-20 step 2: the history's own stage for Temporal; the film back after)
 		pass(Textures.TempSurface, 3);
 		if (Constants.Film.x > 0.0f) SetPassTexture(7, DeferredWetness::FilmTexture);
-		Device->StretchRect(Textures.TempSurface, NULL, Textures.HistorySurface, NULL, D3DTEXF_NONE);
+		Device->StretchRect(Textures.TempSurface, halfClip, Textures.HistorySurface, halfClip, D3DTEXF_NONE);
 	}
 	if (denoised) {}
 	else if (rrRaw && rtResolved) {
 		// UNOFFICIAL 2026-10-30 DLSS RR (above): the resolve (in Temp, as with Temporal 0) copied into Buffer, what the composite reads.
 		// (Resolve cannot draw into Buffer itself: every pass binds Buffer as an input.)
-		Device->StretchRect(Textures.TempSurface, NULL, Textures.BufferSurface, NULL, D3DTEXF_NONE);
+		Device->StretchRect(Textures.TempSurface, halfClip, Textures.BufferSurface, halfClip, D3DTEXF_NONE);
 		static bool logged = false;
 		if (!logged) { logged = true; Logger::Log("UNOFFICIAL DLSS RR: Reflections: its own denoiser is skipped (RR denoises the raw signal)"); }
 	}
@@ -1626,20 +1627,6 @@ namespace {
 	}
 }
 
-void ReflectionsEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) {
-	// 2026-11-19 RenderScale < 1: allow Vulkan composite (technique 0) and surroundings cube (5, 6) when NvrDxvkPasses is on even in sub-rect frames
-	// (EffectRecord::ExtFullScreen sets the sub-rect viewport, and ReflectionsComposite.frag / Capture maps uv via screenToRect).
-	if ((techniqueIndex == 0 || techniqueIndex == 5 || techniqueIndex == 6) && RenderRect::Active()) {
-		if (!Enabled || !Effect || !ShouldRender()) { NoteSkip(); return; }
-		const bool extOk = techniqueIndex == 0 ? RtPassesWanted() : (DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name));
-		if (!ExtFailed && extOk && !Sm6Covers(techniqueIndex) && ExtRender(Device, Target, Rendered, techniqueIndex, ClearTarget, Source)) {
-			ClearPassTextures();
-			return;
-		}
-	}
-	EffectRecord::Render(Device, Target, Rendered, techniqueIndex, ClearTarget, Source);
-}
-
 bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
 	// (8, 9: UNOFFICIAL 2026-10-28 RT reflections, RayGen and Resolve, drawn only from RtTrace: no D3D9 technique behind them.)
 	// (10: UNOFFICIAL 2026-10-31 the sky panorama, drawn only from RenderSkyPano.)
@@ -1711,11 +1698,11 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 
 	// The textures as SetCT binds them. Those read without a guard must exist; the guarded ones (the light grid, the sky
 	// visibility, the material buffer, the ortho map without the roof test) take the placeholder when absent, which is never read.
+	const bool cubePass = (techniqueIndex == 5 || techniqueIndex == 6);
 	IDirect3DBaseTexture9* depth = SlotTexture("TESR_DepthBuffer");
-	IDirect3DBaseTexture9* normals = FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections: the shading normals while on)
+	IDirect3DBaseTexture9* normals = cubePass ? nullptr : FdReflNormals(Device, SlotTexture("TESR_NormalsBuffer"));	// (2026-11-15 DeferredReflections: the shading normals while on; cube passes only fill unseen sky/world directions)
 	IDirect3DBaseTexture9* viewModel = SlotTexture("TESR_DepthBufferViewModel");
 	IDirect3DBaseTexture9* ortho = SlotTexture("TESR_OrthoMapBuffer");
-	const bool cubePass = (techniqueIndex == 5 || techniqueIndex == 6);
 	if (!depth || (!cubePass && !normals) || !viewModel || !TheTextureManager->RenderedTexture ||
 		(!cubePass && !ortho && Constants.Data4.y > 0.5f) ||
 		!Cubes.Capture[0] || !Cubes.Capture[1] || !Cubes.Env)
@@ -2001,12 +1988,19 @@ bool ReflectionsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* R
 
 	if (techniqueIndex == 0)
 		return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pass.Pipeline, resources, resourceCount, &push, sizeof(push));
+	const RECT halfRect = { 0, 0, (LONG)RenderRect::Width(RtWidth()), (LONG)RenderRect::Height(RtHeight()) };
+	const RECT fullRect = { 0, 0, (LONG)RenderRect::Width(TheRenderManager->width), (LONG)RenderRect::Height(TheRenderManager->height) };
+	const RECT* viewport = !RenderRect::Active() ? nullptr :
+		(techniqueIndex == 7) ? &fullRect :
+		(techniqueIndex == 5 || techniqueIndex == 6 || techniqueIndex == 10) ? nullptr :
+		&halfRect;
+	const ExtUv uvMode = techniqueIndex == 10 ? ExtUv::ScreenQuad : ExtUv::TexelCentre;
 	// (RayGen: its three targets, RtTrace's own; RenderTarget is the first.)
 	IDirect3DSurface9* rayGenTargets[4] = { Rt.MarchSurface, Rt.DirSurface, Rt.RaySurface, Rt.MarchHitSurface };
 	IDirect3DSurface9* resolveTargets[2] = { RenderTarget, Rt.SpreadSurface };
-	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 4, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
-		techniqueIndex == 9 ? ExtDrawTo(pass.Pipeline, resolveTargets, 2, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad) :
-		ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, resourceCount, &push, sizeof(push), nullptr, ExtUv::ScreenQuad);	// FrameVS into a smaller target
+	const bool drawn = techniqueIndex == 8 ? ExtDrawTo(pass.Pipeline, rayGenTargets, 4, resources, resourceCount, &push, sizeof(push), viewport, uvMode) :
+		techniqueIndex == 9 ? ExtDrawTo(pass.Pipeline, resolveTargets, 2, resources, resourceCount, &push, sizeof(push), viewport, uvMode) :
+		ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, resourceCount, &push, sizeof(push), viewport, uvMode);
 	return drawn;
 }
 

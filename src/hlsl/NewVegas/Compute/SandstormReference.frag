@@ -17,7 +17,8 @@ layout(set = 1, binding = 3) uniform texture2D t_atlas;      // TESR_ShadowAtlas
 const int MaxSteps = 12;   // the march loop runs this many times; steps past TESR_SandstormQuality.x are skipped
 
 void main() {
-    vec4 color = linearize(POINT_LOD(t_rendered, uv));
+    vec2 ruv = ClampRectUV(uv * TESR_RenderScale.xy);
+    vec4 color = linearize(POINT_LOD(t_rendered, ruv));
 
     float intensity = TESR_SandstormData.x;
     float density = TESR_SandstormData.y * intensity;
@@ -36,7 +37,7 @@ void main() {
     float centerDist = ViewDistance(uv, visibility);
     float dist = centerDist;
     if (TESR_SandstormQuality.z > 0.5 && centerDist < visibility * 5.99) {
-        vec2 texel = TESR_ReciprocalResolution.xy * 2.0;
+        vec2 texel = TESR_ReciprocalResolution.xy * 2.0 * TESR_RenderScale.zw;
         float centerShown = exp(-centerDist * fullDensity);
         float shown = 0.0;
         for (int y = -1; y <= 1; y++)
@@ -59,10 +60,10 @@ void main() {
             dist = start + visibility * 6.0;
             vec2 spread = TESR_ReciprocalResolution.xy * 3.0;
             const vec3 toLuma = vec3(0.2126, 0.7152, 0.0722);
-            float around = dot(linearize(POINT_LOD(t_rendered, uv + vec2(spread.x, 0.0)).rgb), toLuma)
-                + dot(linearize(POINT_LOD(t_rendered, uv - vec2(spread.x, 0.0)).rgb), toLuma)
-                + dot(linearize(POINT_LOD(t_rendered, uv + vec2(0.0, spread.y)).rgb), toLuma)
-                + dot(linearize(POINT_LOD(t_rendered, uv - vec2(0.0, spread.y)).rgb), toLuma);
+            float around = dot(linearize(POINT_LOD(t_rendered, ClampRectUV(ruv + vec2(spread.x, 0.0))).rgb), toLuma)
+                + dot(linearize(POINT_LOD(t_rendered, ClampRectUV(ruv - vec2(spread.x, 0.0))).rgb), toLuma)
+                + dot(linearize(POINT_LOD(t_rendered, ClampRectUV(ruv + vec2(0.0, spread.y))).rgb), toLuma)
+                + dot(linearize(POINT_LOD(t_rendered, ClampRectUV(ruv - vec2(0.0, spread.y))).rgb), toLuma);
             float difference = dot(color.rgb, toLuma) / max(around * 0.25, 1e-4) - 1.0;
             surfaceDetail = 1.0 + 0.8 * difference * (1.0 - smoothstep(0.12, 0.3, abs(difference)));
         }
@@ -78,7 +79,7 @@ void main() {
 
     // The wind carries the dust; it also rolls slowly upward.
     vec3 drift = vec3(wind * speed * time, -speed * 0.05 * time);
-    float jitter = fract(52.9829189 * fract(dot(uv / TESR_ReciprocalResolution.xy, vec2(0.06711056, 0.00583715))) + time * 7.123);
+    float jitter = fract(52.9829189 * fract(dot((uv * TESR_RenderScale.xy) / TESR_ReciprocalResolution.xy, vec2(0.06711056, 0.00583715))) + time * 7.123);
 
     // Billowing dust, marched through the first stretch of the ray (steps closer together near the camera).
     float marchEnd = min(dist, visibility * 1.5);
@@ -149,7 +150,7 @@ void main() {
     vec3 result = color.rgb * transmittance + scattered;
 
     // Emissive: fire and sparks drawn without depth see only the dust within EmissiveDistance.
-    float rawDepth = readDepth(uv);
+    float rawDepth = readDepth(ruv);
     bool skyBehind = rawDepth / farZ >= 0.9961;
     if (TESR_SandstormEmissive.x > 0.0) {
         vec3 refLight = EmissiveDustRef(dustLight);

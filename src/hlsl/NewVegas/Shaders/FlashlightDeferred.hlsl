@@ -189,7 +189,8 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     SetDiffuseEnergyKeep(N, -ray, roughness);
     const float3 albedo = tex2Dlod(FL_Albedo, uv4).rgb;
 #if CAPTURED_NORMALS_ON >= 4
-    FLSpecF0 = abs(FDModel(m.r) - 4.0f) < 0.5f ? 0.04f : FDSpecF0Decode(stored.a);
+    const bool isSkin = abs(FDModel(m.r) - 6.0f) < 0.5f;
+    FLSpecF0 = isSkin ? 0.028f : (abs(FDModel(m.r) - 4.0f) < 0.5f ? 0.04f : FDSpecF0Decode(stored.a));
 #endif
     float3 lit = getPointLightLightingAtt(toLight, att, FL_Color.rgb, -ray, N, albedo, roughness, metal);
 #if CAPTURED_NORMALS_ON >= 4
@@ -199,6 +200,13 @@ float4 main(PS_IN IN, out float depth : DEPTH) : COLOR0 {
     // left a sharp GGX hot spot on matte walls). FL_Model.x 0: PBR for every pixel, as before.
     [branch] if (FL_Model.x > 0.5f && floor(m.r + 0.01f) < 15.5f)
         lit = LampAtt(att) * MICRO_SHADOW(N, toLight) PBRDiffuse(metal, roughness, lerp(luma(albedo), albedo, TESR_PBRExtraData.x), N, -ray, toLight, FL_Color.rgb * LIN_SCALE_LIGHT);
+    // Soft subsurface wrap lift on skin (model 6) terminators so the spotlight does not create harsh shadow edges or plastic falloff on faces.
+    [branch] if (isSkin) {
+        const float skinWrap = saturate((ndl + 0.35f) / 1.35f);
+        const float terminatorShift = max(skinWrap * skinWrap - saturate(ndl), 0.0f);
+        const float3 gradedSkin = lerp(luma(albedo), albedo, TESR_PBRExtraData.x);
+        lit += LampAtt(att) * gradedSkin * FL_Color.rgb * LIN_SCALE_LIGHT * terminatorShift * float3(1.0f, 0.55f, 0.38f);
+    }
 #endif
     // UNOFFICIAL 2026-11-11 SoftEdges (the old flashlight's wrap: 0.75 x ((N.L + 1) / 2)^2 for the clamped N.L, the same mean light over
     // all normals, less speckle where the normals scatter): the diffuse's plain Lambert part (PBRDiffuse's: (1 - metal) x colour x N.L x

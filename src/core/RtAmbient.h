@@ -109,6 +109,10 @@ namespace RtAmbient {
 		// frames a fast history of 4; where the long one leaves the fast one's window by this many standard errors the bounce light really
 		// changed and the history restarts at 4 frames. 0 = off (as before).
 		float	GIDenoiseAntiLag = 3.0f;
+		// UNOFFICIAL 2026-11-27 RTGI AntiFirefly (wires RtDenoiseFirefly into GetRtGIDenoised):
+		bool	GIDenoiseAntiFirefly = true;
+		float	GIDenoiseFireflyK = 2.0f;
+		int		GIDenoiseFireflySpread = 4;
 		// UNOFFICIAL 2026-11-09 (rtgi-lock; tester: a screen-fixed 45-degree step in the GI that pulses at 8 Hz) BUG FIX, on by default (a missing key, an
 		// older toml: on); RtAOTrace.comp SampleU. The AO and GI rays' two sample numbers were locked together (one spiral of directions for the whole
 		// screen, turning 0.1368 of a turn a frame: the bounce light pulsed every 7.3 frames, half a period apart where the normals' tangent frame
@@ -130,8 +134,8 @@ namespace RtAmbient {
 		// guide worked out once (B2) are simply how it works; GICandidates and GISpatialVisibility were measured useless and are gone.
 		int		GIDenoiseTune = 2;
 		// UNOFFICIAL 2026-11-16 (rtgi-review; user: grass still sparkles in the shade) GIGrassDenoise (0-3, RtDenoisedGI with the guide): RtDenoise Settings.Soft:
-		// 1 = the GI denoiser keeps its history on grass, 2 = its a-trous passes smooth across the blades, 3 = both (default).
-		int		GIGrassDenoise = 3;
+		// 1 = relaxed micro-depth tolerance, 2 = its a-trous passes smooth across the blades/foliage (default), 3 = both.
+		int		GIGrassDenoise = 2;
 		// UNOFFICIAL 2026-11-13 (rtgi-review B3, REVIEW.md R3 / R18) GISamplePoints (default false until benched; a missing key: false): ReSTIR GI with the
 		// sample's geometry (RtAOTrace.comp ReuseGIPoints): cosine at the receiving surface, Jacobian and one visibility ray on spatial reuse. GIValidate
 		// (default true, with GISamplePoints): 1 texel in 8 a frame re-traces the ray to its kept sample point and drops the history when the geometry changed.
@@ -224,6 +228,9 @@ namespace RtAmbient {
 			Current.GIReuseSpread = !TheSettingManager->Config.FillNode(&node, s, "GIReuseSpread") || node.BoolValue;
 			Current.GIReuseShuffle = !TheSettingManager->Config.FillNode(&node, s, "GIReuseShuffle") || node.BoolValue;
 			Current.GIDenoiseAntiLag = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseAntiLag") ? std::clamp(node.FloatValue, 0.0f, 16.0f) : 3.0f;
+			Current.GIDenoiseAntiFirefly = !TheSettingManager->Config.FillNode(&node, s, "GIDenoiseAntiFirefly") || node.BoolValue;
+			Current.GIDenoiseFireflyK = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseFireflyK") ? std::clamp(node.FloatValue, 0.0f, 64.0f) : 2.0f;
+			Current.GIDenoiseFireflySpread = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseFireflySpread") ? std::clamp((int)node.IntValue, 0, 64) : 4;
 			Current.SampleLockFix = !TheSettingManager->Config.FillNode(&node, s, "SampleLockFix") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rtgi-lock)
 			Current.NormalGuard = !TheSettingManager->Config.FillNode(&node, s, "NormalGuard") || node.BoolValue;	// UNOFFICIAL 2026-11-09 (rt-review)
 			Current.GIStrengthNight = TheSettingManager->Config.FillNode(&node, s, "GIStrengthNight") ? std::clamp(node.FloatValue, -1.0f, 20.0f) : -1.0f;	// UNOFFICIAL 2026-11-10
@@ -254,7 +261,7 @@ namespace RtAmbient {
 			Current.GILeafTransmission = TheSettingManager->Config.FillNode(&node, s, "GILeafTransmission") ? std::clamp(node.FloatValue, 0.0f, 0.9f) : 0.0f;
 			// UNOFFICIAL 2026-11-13 (rtgi-review)
 			Current.GIDenoiseTune = TheSettingManager->Config.FillNode(&node, s, "GIDenoiseTune") ? std::clamp((int)node.IntValue, 0, 2) : 2;
-			Current.GIGrassDenoise = TheSettingManager->Config.FillNode(&node, s, "GIGrassDenoise") ? std::clamp((int)node.IntValue, 0, 3) : 3;
+			Current.GIGrassDenoise = TheSettingManager->Config.FillNode(&node, s, "GIGrassDenoise") ? std::clamp((int)node.IntValue, 0, 3) : 2;
 			Current.GISamplePoints = TheSettingManager->Config.FillNode(&node, s, "GISamplePoints") && node.BoolValue;
 			Current.GIScreenAmbientOut = TheSettingManager->Config.FillNode(&node, s, "GIScreenAmbientOut") && node.BoolValue;
 			Current.GIValidate = !TheSettingManager->Config.FillNode(&node, s, "GIValidate") || node.BoolValue;

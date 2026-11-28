@@ -37,7 +37,7 @@ void main() {
     for (int n = 1; n <= 8; n++) {
         float i = float(n);
         float gauss = i <= radius ? exp(falloff * i * i) : 0.0;
-        vec2 ua = uv + axis * i * LowTexel, ub = uv - axis * i * LowTexel;
+        vec2 ua = clampToRect(uv + axis * i * LowTexel, LowTexel), ub = clampToRect(uv - axis * i * LowTexel, LowTexel);
         vec2 pa = ua - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
         vec2 pb = ub - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
         float da = readDepthLod(pa), db = readDepthLod(pb);

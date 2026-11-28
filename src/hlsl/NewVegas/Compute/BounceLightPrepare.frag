@@ -18,16 +18,17 @@ vec3 NormalLod(vec2 coord) {
 }
 
 void main() {
-    float linear01 = POINT_LOD(t_depth, uv).x;
-    vec3 normal = NormalLod(uv);
+    vec2 ruv = ClampFullUV(uv * cb.renderScale.xy);
+    float linear01 = POINT_LOD(t_depth, ruv).x;
+    vec3 normal = NormalLod(ruv);
     if (pc.pass_.x <= 0.5) {
         // Prepare. Capped so small bright glints (specular highlights, lamps) do not spray light around.
-        vec3 light = min(linearize(LINEAR_LOD(t_source, uv).rgb), vec3(1.0));
+        vec3 light = min(linearize(LINEAR_LOD(t_source, ruv).rgb), vec3(1.0));
         o_color = vec4(linear01, Pack2(OctEncode(normal)), Pack2(sqrt(light.rg)), light.b);
         return;
     }
     // PreparePlus: the bounce light this surface showed last frame is light it sends on as well.
-    vec3 scene = linearize(LINEAR_LOD(t_source, uv).rgb);
+    vec3 scene = linearize(LINEAR_LOD(t_source, ruv).rgb);
     vec3 light = min(scene, vec3(1.0));
     if (cb.bounceTemporal.y > 0.0) {
         vec3 position = PositionFromLinear(uv, linear01);

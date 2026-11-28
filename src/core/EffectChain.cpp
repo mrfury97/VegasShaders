@@ -1071,10 +1071,7 @@ void ShaderManager::PreStep_VolumetricLight(ChainContext& ctx) {
 		else if (wouldRender(Effects.VolumetricLight)) {
 			Effects.VolumetricLight->RenderBuffers(Device);
 			Device->SetRenderTarget(0, RenderTarget);
-			// UNOFFICIAL 2026-11-01 the report burst's VL stages (core/Diagnostics.cpp): the frame right before and after the composite
-			if (Diagnostics::VLCapturing) Effects.VolumetricLight->ReportComposite(Device, false);
 			{ Effects.VolumetricLight->Render(Device, RenderTarget, TheTextureManager->RenderedSurface, Effects.VolumetricLight->CompositeTechnique(), false, SourceSurface); PixelInspector::AfterFrame(Effects.VolumetricLight); }
-			if (Diagnostics::VLCapturing) Effects.VolumetricLight->ReportComposite(Device, true);
 		}
 		Fog->gridTexture = nullptr;
 	}

@@ -6,7 +6,7 @@
 
 void main() {
     vec2 vpos = floor(gl_FragCoord.xy);
-    float a = textureLod(sampler2D(t_rendered, LINEAR_S), (vpos + 0.5) * cb.reciprocalResolution.xy, 0.0).a - 2.0;
+    float a = textureLod(sampler2D(t_rendered, POINT_S), (vpos + 0.5) * cb.reciprocalResolution.xy, 0.0).a - 2.0;
     if (a < 0.0 || a >= 1.0) { o_color = vec4(0.0); return; }
     float metal = floor(a * 4.0);
     o_color = vec4(saturate((a - metal * 0.25) / 0.24), metal / 3.0, 1.0, 1.0);

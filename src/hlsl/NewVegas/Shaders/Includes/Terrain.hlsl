@@ -79,12 +79,20 @@ float4 TESR_TerrainSkyData : register(c135);
 // the lookups take explicit gradients: odx/ody = ddx/ddy of the same uv, taken at the top level (what tex2D used implicitly).
 // Harness, real land maps, aniso 15: -12..-14% at 5-7 layers with patchy weights, +0..2% when every layer is present;
 // largest pixel difference 3e-7 (rounding).
-float3 blendDiffuseMaps(float3 tint, float2 uv, float2 odx, float2 ody, int layers, sampler2D maps[7], float weights[7]) {
+float3 blendDiffuseMaps(float3 tint, float2 uv, float2 odx, float2 ody, int layers, sampler2D maps[7], float weights[7], float hasH[7], out float outHeight) {
     float3 sum = 0.0f.xxx;
+    float hSum = 0.0f;
+    float hW = 0.0f;
     [unroll] for (int k = 0; k < layers; k++) {
         bool wanted = weights[k] != 0 || TESR_TerrainParallaxIso.y < 0.5f;
-        [branch] if (wanted) sum += tex2Dgrad(maps[k], uv, odx, ody).xyz * weights[k];
+        [branch] if (wanted) {
+            float4 t = tex2Dgrad(maps[k], uv, odx, ody);
+            sum += t.xyz * weights[k];
+            hSum += weights[k] * (hasH[k] > 0.0f ? t.a : 0.5f);
+            hW += weights[k];
+        }
     }
+    outHeight = hW > 0.0f ? hSum / hW : 0.5f;
     return sum * tint;
 }
 
@@ -93,18 +101,25 @@ float3 blendDiffuseMaps(float3 tint, float2 uv, float2 odx, float2 ody, int laye
 // where the pixel asks for them (stochastic.tap1Weight below 1; the template sets it to 1 nearer than StartDistance). Each such
 // layer's tap weight goes out in tapWeights for its normal map. The i < TERRAIN_VARIATION_LAYERS test is on the unrolled index,
 // so it folds away. (After Conor's blendDiffuseMaps, 66653eea.)
-float3 blendDiffuseMapsVaried(float3 tint, float2 uv, float2 odx, float2 ody, int layers, sampler2D maps[7], float weights[7], StochasticOffsets stochastic, inout float tapWeights[7]) {
+float3 blendDiffuseMapsVaried(float3 tint, float2 uv, float2 odx, float2 ody, int layers, sampler2D maps[7], float weights[7], StochasticOffsets stochastic, inout float tapWeights[7], float hasH[7], out float outHeight) {
     float3 sum = 0.0f.xxx;
+    float hSum = 0.0f;
+    float hW = 0.0f;
     [unroll] for (int k = 0; k < layers; k++) {
         bool wanted = weights[k] != 0 || TESR_TerrainParallaxIso.y < 0.5f;
         [branch] if (wanted) {
+            float4 t;
             if (k < TERRAIN_VARIATION_LAYERS) {
-                [branch] if (stochastic.tap1Weight < 0.999f) sum += StochasticSampleAlbedo(maps[k], uv, odx, ody, stochastic, tapWeights[k]).xyz * weights[k];
-                else { tapWeights[k] = 1.0f; sum += tex2Dgrad(maps[k], uv + stochastic.offset1, odx, ody).xyz * weights[k]; }
+                [branch] if (stochastic.tap1Weight < 0.999f && abs(weights[k]) >= 0.04f) t = StochasticSampleAlbedo(maps[k], uv, odx, ody, stochastic, tapWeights[k]);
+                else { tapWeights[k] = 1.0f; t = tex2Dgrad(maps[k], uv + stochastic.offset1, odx, ody); }
             }
-            else sum += tex2Dgrad(maps[k], uv, odx, ody).xyz * weights[k];
+            else t = tex2Dgrad(maps[k], uv, odx, ody);
+            sum += t.xyz * weights[k];
+            hSum += weights[k] * (hasH[k] > 0.0f ? t.a : 0.5f);
+            hW += weights[k];
         }
     }
+    outHeight = hW > 0.0f ? hSum / hW : 0.5f;
     return sum * tint;
 }
 
@@ -117,7 +132,7 @@ float3 blendNormalMapsVaried(float2 uv, float2 odx, float2 ody, int layers, samp
         bool wanted = weights[k] != 0 || TESR_TerrainParallaxIso.y < 0.5f;
         [branch] if (wanted) {
             if (k < TERRAIN_VARIATION_LAYERS) {
-                [branch] if (stochastic.tap1Weight < 0.999f) texel = StochasticSampleWith(maps[k], uv, odx, ody, stochastic, tapWeights[k]);
+                [branch] if (stochastic.tap1Weight < 0.999f && abs(weights[k]) >= 0.04f) texel = StochasticSampleWith(maps[k], uv, odx, ody, stochastic, tapWeights[k]);
                 else texel = tex2Dgrad(maps[k], uv + stochastic.offset1, odx, ody);
             }
             else texel = tex2Dgrad(maps[k], uv, odx, ody);

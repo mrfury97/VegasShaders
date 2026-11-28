@@ -38,8 +38,7 @@ namespace DeferredSkin {
 	inline bool WantedAtStartup() {
 		if (Wanted < 0) {
 			const bool key = TheSettingManager->GetSettingI(kSection, "DeferredSkin") != 0;
-			Wanted = key && DeferredRenderer::Mode() > 0 && CapturedNormals::V2CompiledIn();
-			if (key && !Wanted) Logger::Log("[WARNING] UNOFFICIAL DeferredSkin: needs [Main.Main.Quality] DeferredRenderer 1 or 2 and GBufferV2 at startup: the skin stays forward");
+			Wanted = key && CapturedNormals::V2CompiledIn();
 		}
 		return Wanted != 0;
 	}
@@ -52,6 +51,7 @@ namespace DeferredSkin {
 	inline bool DrawnThisSpan = false;
 	inline unsigned long long StatFrames = 0, StatBinds = 0, StatBlended = 0, StatFills = 0;
 
+	inline bool ComputeSssPreferred();	// (below)
 	inline void SssLoad();	// (below)
 	inline bool IsHandle(IDirect3DPixelShader9* handle) { return handle && Handles.count(handle) != 0; }
 
@@ -67,14 +67,25 @@ namespace DeferredSkin {
 		return true;
 	}
 
+	inline bool IsOpaqueDeferredManaged(const char* name, const ShaderTemplate& tmpl) {
+		return LightFreeRecords::WantedAtStartup() &&
+			(LightFreeRecords::Eligible(name, tmpl) || (WantedAtStartup() && Eligible(name, tmpl)));
+	}
+	inline const D3DXMACRO* LeanFallbackOverrides() {
+		static const D3DXMACRO overrides[] = {
+			{ "SUN_CROSSFADE", "0" }, { "CONTACT_HARDENING", "0" },
+			{ "PUDDLES_LEAN", "1" }, { "PUDDLES_NOMAP", "1" }, { NULL, NULL }
+		};
+		return overrides;
+	}
+
 	// ShaderManager::LoadShader (pixel), after the shader's own records: the deferred skin record, compiled now (at load, never on the render
-	// thread), from the default overrides + LAMPS_DEFERRED (2 in mode 2, 3 in mode 1: mode 1 is live indoors only, where the default record's
-	// sun code is the interior one: GetSunShadowMaps returns 1 indoors by its own gate). Both light passes are made with it.
+	// thread), from the default overrides + LAMPS_DEFERRED 2. Both light passes are made with it.
 	inline void Load(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl) {
-		if (!shader || !shader->ShaderProg[ShaderRecordType::Default] || !Eligible(name, tmpl) || !WantedAtStartup() || Records.count(shader)) return;
+		const bool standalone = LightFreeRecords::Standalone() && shader && shader->ShaderHandleBackup != nullptr;
+		if (!shader || (!shader->ShaderProg[ShaderRecordType::Default] && !standalone) || !Eligible(name, tmpl) || !WantedAtStartup() || Records.count(shader)) return;
 		static const D3DXMACRO mode2[2] = { { "LAMPS_DEFERRED", "2" }, { NULL, NULL } };
-		static const D3DXMACRO mode1[2] = { { "LAMPS_DEFERRED", "3" }, { NULL, NULL } };
-		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, DeferredRenderer::Mode() >= 2 ? mode2 : mode1);
+		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, mode2);
 		if (!record || !record->ShaderHandle) {
 			Refused++;
 			Logger::Log("[WARNING] UNOFFICIAL DeferredSkin record %s: did not load (see the device's line above): it stays forward; %u loaded, %u not so far", name, Loaded, Refused);
@@ -92,14 +103,22 @@ namespace DeferredSkin {
 		DeferredRenderer::PlainHandles.insert(record->ShaderHandle);
 		DeferredRenderer::Pairs[record->ShaderHandle] = { record, forward && forward->ShaderHandle ? forward : nullptr, outdoor && outdoor->ShaderHandle ? outdoor : nullptr };
 		if (forward && forward->ShaderHandle) DeferredLamps::ForwardOf[record->ShaderHandle] = forward->ShaderHandle;
+		else if (standalone && shader->ShaderHandleBackup) {
+			((IDirect3DPixelShader9*)shader->ShaderHandleBackup)->AddRef();
+			DeferredLamps::ForwardOf[record->ShaderHandle] = (IDirect3DPixelShader9*)shader->ShaderHandleBackup;
+		}
 		if (outdoor && outdoor->ShaderHandle) DeferredLamps::ForwardOfOutdoor[record->ShaderHandle] = outdoor->ShaderHandle;
 		// a lighting-free record's binds open DeferredSun's pass for the span (mode 2; DeferredSun::OnBind counts this set)
-		if (DeferredRenderer::Mode() >= 2) DeferredSun::FoliageHandles.insert(record->ShaderHandle);
+		DeferredSun::FoliageHandles.insert(record->ShaderHandle);
 		DeferredLamps::EnsurePass();
 		DeferredLamps::EnsureShadowShader();
-		SssLoad();	// (2026-11-15 SSS v2: its passes at load, never on the render thread)
+		if (!ComputeSssPreferred()) SssLoad();	// (2026-11-15 SSS v2: its passes at load, never on the render thread; skipped when Vulkan compute SSS handles it)
+		else {
+			static bool loggedSkip = false;
+			if (!loggedSkip) { loggedSkip = true; Logger::Log("UNOFFICIAL DeferredSkinSSS: skipping eager D3D9 SSS shader compile (Vulkan compute path active)"); }
+		}
 		Loaded++;
-		Logger::Log("UNOFFICIAL DeferredSkin record %s: loaded (LAMPS_DEFERRED %s; %u loaded, %u not so far)", name, DeferredRenderer::Mode() >= 2 ? "2" : "3", Loaded, Refused);
+		Logger::Log("UNOFFICIAL DeferredSkin record %s: loaded (LAMPS_DEFERRED 2; %u loaded, %u not so far)", name, Loaded, Refused);
 	}
 
 	// Once a frame, lazily (the first Choose of a frame): live with the renderer, not under the path tracer.
@@ -128,7 +147,7 @@ namespace DeferredSkin {
 		if (found == Records.end()) return nullptr;
 		Refresh();
 		if (!Live || !CapturedNormals::InSpan || (CapturedNormals::VmSpan && !CapturedNormals::VmDeferred)) return nullptr;
-		if (exterior && (DeferredRenderer::Mode() < 2 || !DeferredRenderer::SunRuns())) return nullptr;
+		if (exterior && !DeferredRenderer::SunRuns()) return nullptr;
 		if (DeferredRenderer::BlendedNow) { StatBlended++; return nullptr; }
 		StatBinds++;
 		DrawnThisSpan = true;
@@ -160,6 +179,12 @@ namespace DeferredSkin {
 	inline ShaderRecordPixel* SssPrep = nullptr;  inline ShaderRecordPixel* SssBlur = nullptr;  inline bool SssFailed = false, SssTried = false;
 	inline bool SpecThisFrame = false;
 	inline unsigned long long StatSss = 0;
+	inline ID3D9NvrExtPipeline* ComputePrepPipeline = nullptr;
+	inline ID3D9NvrExtPipeline* ComputeBlurPipeline = nullptr;
+	inline ID3D9NvrExtBuffer*   ComputeSssUbo = nullptr;
+	inline IDirect3DTexture9*   ComputeRt0DummyTex = nullptr;
+	inline IDirect3DSurface9*   ComputeRt0DummySurf = nullptr;
+	inline bool ComputeSssTried = false, ComputeSssFailed = false;
 
 	// A render target texture of the frame's size and format (made again when either changes).
 	inline bool EnsureTarget(IDirect3DDevice9* d, const D3DSURFACE_DESC& t, D3DFORMAT format, IDirect3DTexture9*& tex, IDirect3DSurface9*& surf, D3DSURFACE_DESC& made) {
@@ -288,6 +313,10 @@ namespace DeferredSkin {
 			}
 		}
 	}
+	inline bool ComputeSssPreferred() {
+		return !ComputeSssFailed && DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9("DeferredSkin") &&
+			DxvkCompute::HasSpirv("DeferredSkinSSSPrep") && DxvkCompute::HasSpirv("DeferredSkinSSSBlur");
+	}
 	inline void SssLoad() {
 		if (SssTried) return;
 		SssTried = true;
@@ -301,15 +330,155 @@ namespace DeferredSkin {
 			"UNOFFICIAL DeferredSkinSSS: the v2 passes loaded (Shaders\\DeferredSkinSSS.hlsl: the Burley profile, 24 taps)");
 	}
 
+	struct ComputeSssConstants {
+		int   viewport[4];
+		float invTargetSize[4];
+		float sssView[4];
+		float sssCtrl[4];
+		float sssDebug[4];
+		float sssTaps[kSssTaps][4];
+	};
+	struct ComputeSssPush { UInt32 flags; UInt32 pad[3]; };
+
+	inline bool TryBurleyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t, bool includeSolids) {
+		if (ComputeSssFailed || t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE ||
+			!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredSkin")) return false;
+		if (!ComputePrepPipeline || !ComputeBlurPipeline || !ComputeSssUbo) {
+			if (ComputeSssTried) return false;
+			ComputeSssTried = true;
+			static const NVR_EXT_BINDING_DESC kPrepBindings[] = {
+				{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE,  0, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE,  1, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE,  2, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 3, NVR_EXT_BIND_SAMPLED_IMAGE,  3, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 4, NVR_EXT_BIND_SAMPLED_IMAGE,  4, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 5, NVR_EXT_BIND_STORAGE_IMAGE,  5, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 6, NVR_EXT_BIND_STORAGE_IMAGE,  6, NVR_EXT_VIEW_2D, TRUE,  0 },
+				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
+			};
+			static const NVR_EXT_BINDING_DESC kBlurBindings[] = {
+				{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE,  0, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE,  1, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE,  2, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 3, NVR_EXT_BIND_SAMPLED_IMAGE,  3, NVR_EXT_VIEW_2D, FALSE, 0 },
+				{ 1, 4, NVR_EXT_BIND_STORAGE_IMAGE,  4, NVR_EXT_VIEW_2D, TRUE,  0 },
+				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 },
+			};
+			ComputePrepPipeline = DxvkCompute::CreatePipeline("DeferredSkinSSSPrep", kPrepBindings, _countof(kPrepBindings), sizeof(ComputeSssPush), false);
+			ComputeBlurPipeline = ComputePrepPipeline ? DxvkCompute::CreatePipeline("DeferredSkinSSSBlur", kBlurBindings, _countof(kBlurBindings), sizeof(ComputeSssPush), false) : nullptr;
+			if (ComputeBlurPipeline) ComputeSssUbo = DxvkCompute::CreateBuffer(sizeof(ComputeSssConstants), NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, "DeferredSkinSSS UBO");
+			if (!ComputePrepPipeline || !ComputeBlurPipeline || !ComputeSssUbo) {
+				DxvkCompute::Drop(ComputePrepPipeline);
+				DxvkCompute::Drop(ComputeBlurPipeline);
+				DxvkCompute::Drop(ComputeSssUbo);
+				ComputeSssFailed = true;
+				Logger::Log("[WARNING] UNOFFICIAL DeferredSkinSSS: Compute\\DeferredSkinSSS*.spv could not be set up; using D3D9 pass");
+				return false;
+			}
+			Logger::Log("UNOFFICIAL DeferredSkinSSS: Vulkan compute path ready (Compute\\DeferredSkinSSS*.spv)");
+		}
+		if (!ComputeRt0DummySurf) {
+			if (FAILED(d->CreateTexture(1, 1, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ComputeRt0DummyTex, NULL)) ||
+				FAILED(ComputeRt0DummyTex->GetSurfaceLevel(0, &ComputeRt0DummySurf))) {
+				ComputeSssFailed = true;
+				return false;
+			}
+		}
+		if (!EnsureTarget(d, t, D3DFMT_A16B16G16R16F, LightTex, LightSurf, LightDesc)) return false;
+
+		D3DVIEWPORT9 vp = {};
+		d->GetViewport(&vp);
+		if (vp.Width == 0 || vp.Height == 0) { vp.X = 0; vp.Y = 0; vp.Width = t.Width; vp.Height = t.Height; vp.MinZ = 0.0f; vp.MaxZ = 1.0f; }
+
+		const bool linearZ = DeferredDepth::EnsureLinear(d);
+		const float radius = (std::max)(0.1f, TheSettingManager->GetSettingF("Shaders.Skin.SSS", "Radius"));
+		float dmm[3] = { TheSettingManager->GetSettingF("Shaders.Skin.SSS", "ScatterRed"), TheSettingManager->GetSettingF("Shaders.Skin.SSS", "ScatterGreen"), TheSettingManager->GetSettingF("Shaders.Skin.SSS", "ScatterBlue") };
+		for (float& v : dmm) v = (std::max)(0.05f, v) * radius / 14.2857f;
+
+		ComputeSssConstants cb = {};
+		cb.viewport[0] = (int)vp.X; cb.viewport[1] = (int)vp.Y; cb.viewport[2] = (int)vp.Width; cb.viewport[3] = (int)vp.Height;
+		cb.invTargetSize[0] = 1.0f / (float)t.Width; cb.invTargetSize[1] = 1.0f / (float)t.Height;
+		const float tanY = fabsf(TheRenderManager->InvProjMatrix._22);
+		const bool turn = TemporalBackbone::Shared() ? TemporalBackbone::TemporalResolve() : false;
+		const float angle = turn ? 6.2831853f * fmodf(0.61803399f * (float)((TemporalBackbone::NoiseIndex() + TemporalBackbone::OffsetSkin) % 1024), 1.0f) : 0.0f;
+		cb.sssView[0] = 1.0f / (float)vp.Width; cb.sssView[1] = 1.0f / (float)vp.Height;
+		cb.sssView[2] = 0.5f * (float)vp.Height / (std::max)(tanY, 1.0e-3f); cb.sssView[3] = angle;
+		cb.sssCtrl[0] = dmm[0];
+		cb.sssCtrl[1] = (std::max)(0.1f, TheSettingManager->GetSettingF("Shaders.Skin.SSS", "DepthFollow"));
+		cb.sssCtrl[2] = std::clamp(TheSettingManager->GetSettingF("Shaders.Skin.SSS", "AlbedoDetail"), 0.0f, 1.0f);
+		cb.sssCtrl[3] = linearZ ? 1.0f : 0.0f;
+		cb.sssDebug[0] = (float)TheSettingManager->GetSettingI("Shaders.Skin.SSS", "DebugView");
+		cb.sssDebug[1] = includeSolids ? 1.0f : 0.0f;
+		cb.sssDebug[2] = (SpecThisFrame && SpecTex) ? 1.0f : 0.0f;
+		cb.sssDebug[3] = CapturedNormals::V2CompiledIn() ? 1.0f : 0.0f;
+		SssTaps(dmm, cb.sssTaps);
+
+		ID3D9NvrExt* ext = DxvkCompute::Extension();
+		if (FAILED(ext->UpdateBuffer(ComputeSssUbo, 0, sizeof(cb), &cb))) return false;
+
+		IDirect3DBaseTexture9* specOrDummy = (SpecThisFrame && SpecTex) ? SpecTex : CapturedNormals::Texture;
+		IDirect3DBaseTexture9* linearZTex = (linearZ && DeferredDepth::LinearTexture) ? DeferredDepth::LinearTexture : CapturedNormals::Texture;
+		NVR_EXT_RESOURCE_BINDING prepBindings[] = {
+			{ 0, NVR_EXT_BIND_SAMPLED_IMAGE,  CapturedNormals::AlbedoTexture,   0, 0, 0, FALSE },
+			{ 1, NVR_EXT_BIND_SAMPLED_IMAGE,  specOrDummy,                      0, 0, 0, FALSE },
+			{ 2, NVR_EXT_BIND_SAMPLED_IMAGE,  CapturedNormals::Texture,         0, 0, 0, FALSE },
+			{ 3, NVR_EXT_BIND_SAMPLED_IMAGE,  CapturedNormals::MaterialTexture, 0, 0, 0, FALSE },
+			{ 4, NVR_EXT_BIND_SAMPLED_IMAGE,  linearZTex,                       0, 0, 0, FALSE },
+			{ 5, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
+			{ 6, NVR_EXT_BIND_STORAGE_IMAGE,  LightSurf,                        0, 0, 0, FALSE },
+			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeSssUbo,                    0, 0, sizeof(cb), FALSE },
+		};
+		NVR_EXT_RESOURCE_BINDING blurBindings[] = {
+			{ 0, NVR_EXT_BIND_SAMPLED_IMAGE,  LightTex,                         0, 0, 0, FALSE },
+			{ 1, NVR_EXT_BIND_SAMPLED_IMAGE,  CapturedNormals::AlbedoTexture,   0, 0, 0, FALSE },
+			{ 2, NVR_EXT_BIND_SAMPLED_IMAGE,  specOrDummy,                      0, 0, 0, FALSE },
+			{ 3, NVR_EXT_BIND_SAMPLED_IMAGE,  CapturedNormals::MaterialTexture, 0, 0, 0, FALSE },
+			{ 4, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
+			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeSssUbo,                    0, 0, sizeof(cb), FALSE },
+		};
+		ComputeSssPush push = {};
+		NVR_EXT_DISPATCH_DESC dispatch = {};
+		dispatch.pPipeline = ComputePrepPipeline;
+		dispatch.BindingCount = _countof(prepBindings);
+		dispatch.pBindings = prepBindings;
+		dispatch.pPushData = &push;
+		dispatch.PushDataSize = sizeof(push);
+		dispatch.GroupsX = (vp.Width + 7u) / 8u;
+		dispatch.GroupsY = (vp.Height + 7u) / 8u;
+		dispatch.GroupsZ = 1u;
+
+		static GpuTimer computeTimer("Deferred skin SSS (compute)");
+		GpuProfileScope gpu(computeTimer, d);
+		DxvkCompute::PreLoad(prepBindings, _countof(prepBindings));
+		d->SetRenderTarget(0, ComputeRt0DummySurf);
+		HRESULT hr = ext->Dispatch(&dispatch);
+		if (SUCCEEDED(hr)) {
+			dispatch.pPipeline = ComputeBlurPipeline;
+			dispatch.BindingCount = _countof(blurBindings);
+			dispatch.pBindings = blurBindings;
+			hr = ext->Dispatch(&dispatch);
+		}
+		d->SetRenderTarget(0, target);
+		d->SetViewport(&vp);
+		if (FAILED(hr)) {
+			ComputeSssFailed = true;
+			Logger::Log("[WARNING] UNOFFICIAL DeferredSkinSSS: compute dispatch failed (%08lX); falling back to D3D9 pass", hr);
+			return false;
+		}
+		return true;
+	}
+
 	// v2, Kernel 0: the Burley disc over the deferred skin (and optionally non-skin SSS solids 11..14), in linear light, into the frame.
 	inline void BurleyApply(IDirect3DDevice9* d, bool includeSolids = false) {
-		if (SssFailed || (!SpecThisFrame && !includeSolids) || !LinearScene::Linear || !CapturedNormals::Texture || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture) return;
-		if (!SssPrep || !SssBlur) return;
+		if ((!SpecThisFrame && !includeSolids) || !LinearScene::Linear || !CapturedNormals::Texture || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture) return;
 		IDirect3DSurface9* target = nullptr;
 		d->GetRenderTarget(0, &target);
 		if (!target) return;
 		D3DSURFACE_DESC t = {};
 		target->GetDesc(&t);
+		if (TryBurleyCompute(d, target, t, includeSolids)) { target->Release(); StatSss++; return; }
+		if (!SssTried) SssLoad();
+		if (SssFailed || !SssPrep || !SssBlur) { target->Release(); return; }
 		if (!CopyFrame(d, target) || !EnsureTarget(d, t, D3DFMT_A16B16G16R16F, LightTex, LightSurf, LightDesc)) { target->Release(); return; }
 		static GpuTimer timer("Deferred skin SSS");
 		GpuProfileScope gpu(timer, d);

@@ -9,20 +9,11 @@
 // that day was b30GrassVS, below.) 2026-11-04: [Main.Main.Misc] BlockGameMSAA switched it off for real (default on). 2026-11-05 (user,
 // after merging Balebandro's PR #5: SkyCoverage, ForwardCloudShadows, deferred passes and skin under MSAA): BlockGameMSAA is removed, the
 // INIs' MSAA is used again; the log still says once that it is on, and the on-screen warning is gone.
-// 2026-11-15 (owner decision, docs/next/FULL-DEFERRED-RENDERER-PLAN.md section 7; docs/next/FD-RELEASE-PREP.md): the deferred renderer
-// ships on by default and cannot work with the game's MSAA (no G-buffer on native D3D9; LinearScene, and with it DeferredSun, off under
-// MSAA on DXVK), and FSR / DLSS upscaling skips every multisampled frame ("a frame stays at native resolution: the game's MSAA is on").
-// The game's launcher rewrites FalloutPrefs.ini with iMultiSample 4 after its "graphics card changed" check (the owner, 11-14 and
-// 11-15), which silently turned both off. So, unless [Main.Main.Misc] ForceMSAA is on, the game's MSAA is turned off while either is
-// on, by BlockGameMSAA's tested route (commit 9e45720aa, 2026-11-04, removed 5f4eb941e): iMultiSample and the water reflection's own
-// iWaterMultiSamples read as 0 here, the renderer's own copies set to 0 before the renderer starts (GameMsaaBeforeRenderer:
-// FalloutCustom.ini reaches them past this hook), and neither written back, so the INIs keep the player's values. (The water one as
-// well: the state 9e45720aa tested had both at 0, and a multisampled screen-sized reflection target could trip CapturedNormals'
-// session-long MSAA refusal on native D3D9.)
-#include "../../core/SettingForce.h"
-static int GameMSAAWarned = 0;	// the iMultiSample the INI asks for, when it is on (0: off)
+// 2026-11-15 (owner decision, docs/next/FULL-DEFERRED-RENDERER-PLAN.md section 7; docs/next/FD-RELEASE-PREP.md): DeferredRenderer = 2 is
+// always active and cannot work with the game's MSAA, so Vegas Shaders always turns iMultiSample and iWaterMultiSamples off (0) without
+// modifying the user's INI files.
 static int GameMSAAOff = 0;		// UNOFFICIAL 2026-11-15: the iMultiSample the INIs asked for and that was turned off (0: none)
-D3DXVECTOR4 NvrGameMultisample(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-04 TESR_GameMultisample (ShaderManager): x = iMultiSample as the game reads it
+D3DXVECTOR4 NvrGameMultisample(0.0f, 0.0f, 0.0f, 0.0f);	// UNOFFICIAL 2026-11-04 TESR_GameMultisample (ShaderManager): x = 0 (MSAA disabled)
 void NvrMsaaWarningTick() {}	// (2026-11-05: the on-screen warning is gone with BlockGameMSAA; ShaderManager still calls it)
 
 // The game's INI read/write calls, hooked (Hooks.cpp attaches them). A read lets the game fill the value first and then adjusts the
@@ -52,30 +43,6 @@ namespace {
 	};
 
 	inline bool SameKey(const char* a, const char* b) { return strcmp(a, b) == 0; }
-
-	// UNOFFICIAL 2026-11-15 (header): why the game's MSAA is turned off this session, or null when it is not. Decided at the first
-	// call and kept (the renderer reads its MSAA once, at start): the settings are loaded before the hooks are attached (Main.cpp
-	// NVSEPlugin_Load). The upscaler's condition is the one TAAEffect::UpdateConstants and TAAEffect::UpscaleBegin apply (TAA on;
-	// DLSS wins over FSR; each its own RenderScale, a missing 0 = 1; upscaled below 0.999). Whether the DXVK fork is there (FSR and
-	// DLSS do nothing without it) is not known this early: the settings decide.
-	const char* GameMsaaOffReason() {
-		static int decided = -1;
-		static const char* reason = nullptr;
-		if (decided >= 0) return reason;
-		decided = 1;
-		SettingManager* sm = TheSettingManager;
-		if (!sm || sm->SettingsMain.Main.ForceMSAA) return reason = nullptr;
-		if (SettingForce::Mode() > 0) return reason = "the deferred renderer is on ([Main.Main.Quality] DeferredRenderer)";
-		if (sm->GetSettingI("Shaders.TAA.Status", "Enabled") != 0) {
-			const bool dlss = sm->GetSettingI("Shaders.TAA.DLSS", "Enabled") != 0;
-			if (dlss || sm->GetSettingI("Shaders.TAA.FSR", "Enabled") != 0) {
-				const float scale = sm->GetSettingF(dlss ? "Shaders.TAA.DLSS" : "Shaders.TAA.FSR", "RenderScale");
-				if (scale > 0.0f && scale < 0.999f)
-					reason = dlss ? "DLSS upscaling is on ([Shaders.TAA.DLSS] RenderScale below 1)" : "FSR upscaling is on ([Shaders.TAA.FSR] RenderScale below 1)";
-			}
-		}
-		return reason;
-	}
 }
 
 bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSetting* Setting) {
@@ -107,30 +74,17 @@ bool __fastcall ReadSettingHook(INISettingCollection* This, UInt32 edx, GameSett
 		if (nvr.ReplaceIntro) Setting->pValue = (char*)MainMenuMusic;
 	}
 	else if (SameKey(key, "iMultiSample:Display")) {
-		if (nvr.ForceMSAA) {
-			if (Setting->iValue < 2) Setting->iValue = 2;
+		if (Setting->iValue > 0 && !GameMSAAOff) {
+			GameMSAAOff = Setting->iValue;
+			Logger::Log("UNOFFICIAL the game's own anti-aliasing (iMultiSample %d in the game's INI) is turned OFF for this session: "
+				"the deferred renderer requires MSAA off (TAA, FSR or DLSS smooth edges instead). The INI file is not changed.",
+				Setting->iValue);
 		}
-		else if (const char* why = GameMsaaOffReason()) {	// UNOFFICIAL 2026-11-15 (header)
-			if (Setting->iValue > 0 && !GameMSAAOff) {
-				GameMSAAOff = Setting->iValue;
-				Logger::Log("UNOFFICIAL the game's own anti-aliasing (iMultiSample %d in the game's INI) is turned OFF for this session, because %s: "
-					"with the game's MSAA on, the deferred renderer draws the old way and FSR / DLSS do not upscale. TAA, FSR or DLSS smooth the edges "
-					"instead. The INI file is not changed. To keep the game's MSAA (and lose those): [Main.Main.Misc] ForceMSAA = true, then restart.",
-					Setting->iValue, why);
-			}
-			Setting->iValue = 0;
-		}
-		else if (Setting->iValue > 0) {
-			if (!GameMSAAWarned)
-				Logger::Log("UNOFFICIAL the game's own anti-aliasing is on (iMultiSample %d): the clouds, volumetric light and terrain blending take "
-					"each edge pixel's sky share (SkyCoverage); for cloud shadows without speckled edges turn on [Shaders.CloudShadows.Main] "
-					"ForwardShadows (restart). Effects that read one depth per pixel can still show thin edge seams.", Setting->iValue);
-			GameMSAAWarned = Setting->iValue;
-		}
-		NvrGameMultisample.x = (float)(Setting->iValue > 0 ? Setting->iValue : 0);
+		Setting->iValue = 0;
+		NvrGameMultisample.x = 0.0f;
 	}
 	// UNOFFICIAL 2026-11-15 (header): the water reflection's own MSAA (BSShaderManager::iWaterReflectionMultisample, read once at start)
-	else if (SameKey(key, "iWaterMultiSamples:Display") && !nvr.ForceMSAA && GameMsaaOffReason()) {
+	else if (SameKey(key, "iWaterMultiSamples:Display")) {
 		if (Setting->iValue > 0) Logger::Log("UNOFFICIAL the water reflection's own anti-aliasing (iWaterMultiSamples %d) is turned off too (the INI file is not changed)", Setting->iValue);
 		Setting->iValue = 0;
 	}
@@ -153,18 +107,12 @@ bool __fastcall WriteSettingHook(INISettingCollection* This, UInt32 edx, GameSet
 		if (SameKey(Setting->Name, kept)) return true;	// reported as written, file untouched
 	}
 	// UNOFFICIAL 2026-11-15 (header): the 0 read in above stays in memory; the INI keeps the player's value
-	if ((SameKey(Setting->Name, "iMultiSample:Display") || SameKey(Setting->Name, "iWaterMultiSamples:Display")) && GameMsaaOffReason()) return true;
+	if (SameKey(Setting->Name, "iMultiSample:Display") || SameKey(Setting->Name, "iWaterMultiSamples:Display")) return true;
 	return WriteSetting(This, Setting);
 
 }
 
-// UNOFFICIAL 2026-11-15 (header), part 2, as BlockGameMSAA's (commit 9e45720aa, tested in game 2026-11-04: FalloutCustom.ini
-// iMultiSample 4 gave a back buffer and scene targets at msaa 0): the renderer's own settings (RendererSettingCollection gs_iMultiSample
-// 0x011C73F4, gs_iWaterMultiSamples 0x011C7284), set to 0 just before TESRenderer::Init reads them (InitializeRendererHook, after every
-// INI file is read). FalloutCustom.ini reaches them past the read hook. Each one's name is checked before writing.
 void GameMsaaBeforeRenderer() {
-	const char* why = GameMsaaOffReason();
-	if (!why) return;
 	struct Entry { UInt32 address; const char* name; };
 	const Entry entries[] = { { 0x011C73F4, "iMultiSample:Display" }, { 0x011C7284, "iWaterMultiSamples:Display" } };
 	for (const Entry& e : entries) {
@@ -178,7 +126,7 @@ void GameMsaaBeforeRenderer() {
 		if (main && !GameMSAAOff) {
 			GameMSAAOff = s->iValue;
 			Logger::Log("UNOFFICIAL the game's own anti-aliasing (iMultiSample %d, from the game's INIs, FalloutCustom.ini included) is turned OFF for this "
-				"session, because %s. The INI files are not changed. To keep it: [Main.Main.Misc] ForceMSAA = true, then restart.", s->iValue, why);
+				"session: the deferred renderer requires MSAA off. The INI files are not changed.", s->iValue);
 		}
 		else Logger::Log("UNOFFICIAL the renderer's %s was %d (FalloutCustom.ini?): set to 0 as well", e.name, s->iValue);
 		s->iValue = 0;

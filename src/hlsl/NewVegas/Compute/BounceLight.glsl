@@ -17,6 +17,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 bounceTemporal;           // NVR_BounceTemporal: x history share, y extra bounces, z frame number
     vec4 bounceAmbient;            // NVR_BounceAmbient: rgb ambient light (linear), w off-screen light
     vec4 cameraData;               // TESR_CameraData: x near, y far
+    vec4 renderScale;              // RenderRect scale (xy = scale, zw = 1 / scale)
 } cb;
 
 // Per pass (32 bytes).
@@ -112,15 +113,27 @@ float DepthTolerance(vec3 position, vec3 normal) {
     return position.z * (0.03 + 2.0 * texel * sqrt(1.0 - facing * facing) / facing) + 4.0;
 }
 
+// Clamp rect UVs to the active rendered region so edge taps never read unrendered garbage.
+vec2 ClampFullUV(vec2 ruv) {
+    vec2 px = cb.reciprocalResolution.xy;
+    return clamp(ruv, 0.5 * px, max(cb.renderScale.xy - 0.5 * px, 0.5 * px));
+}
+
+vec2 ClampLowUV(vec2 ruv) {
+    vec2 px = cb.bounceLayout.zw;
+    return clamp(ruv, 0.5 * px, max(cb.renderScale.xy - 0.5 * px, 0.5 * px));
+}
+
 // Last frame's result at a point in NVR_BounceHistory (point sampled): how much of it matched (0: nothing usable).
 float HistoryAt(texture2D historyTex, vec3 last, float tolerance, out vec3 history) {
-    vec2 position = last.xy / cb.bounceLayout.zw - 0.5;
+    vec2 lastUV = last.xy * cb.renderScale.xy;
+    vec2 position = lastUV / cb.bounceLayout.zw - 0.5;
     vec2 base = floor(position);
     vec2 f = position - base;
-    vec4 t00 = POINT_LOD(historyTex, (base + 0.5) * cb.bounceLayout.zw);
-    vec4 t10 = POINT_LOD(historyTex, (base + vec2(1.5, 0.5)) * cb.bounceLayout.zw);
-    vec4 t01 = POINT_LOD(historyTex, (base + vec2(0.5, 1.5)) * cb.bounceLayout.zw);
-    vec4 t11 = POINT_LOD(historyTex, (base + 1.5) * cb.bounceLayout.zw);
+    vec4 t00 = POINT_LOD(historyTex, ClampLowUV((base + 0.5) * cb.bounceLayout.zw));
+    vec4 t10 = POINT_LOD(historyTex, ClampLowUV((base + vec2(1.5, 0.5)) * cb.bounceLayout.zw));
+    vec4 t01 = POINT_LOD(historyTex, ClampLowUV((base + vec2(0.5, 1.5)) * cb.bounceLayout.zw));
+    vec4 t11 = POINT_LOD(historyTex, ClampLowUV((base + 1.5) * cb.bounceLayout.zw));
     vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
     w *= vec4(lessThan(abs(vec4(t00.a, t10.a, t01.a, t11.a) - last.z), vec4(tolerance)));
     float sum = dot(w, vec4(1.0));

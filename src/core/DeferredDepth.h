@@ -69,8 +69,7 @@ namespace DeferredDepth {
 	inline int ReadStartup() {
 		const int probe = TheSettingManager->GetSettingI(kSection, "DeferredDepthProbe");
 		ProbeWanted = probe > 0;
-		Mode = std::clamp(TheSettingManager->GetSettingI(kSection, "DeferredDepth"), 0, 2);
-		if (ProbeWanted) Mode = 2;	// the probe measures both routes
+		Mode = 2;
 		return Mode;
 	}
 

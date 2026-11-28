@@ -38,7 +38,8 @@ vec3 gradeWith(texture2D table, float cells, vec3 c) {
 }
 
 void main() {
-    vec3 original = LUT_SAMPLE(t_rendered, uv).rgb;
+    vec2 ruv = gl_FragCoord.xy / vec2(textureSize(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), 0));
+    vec3 original = LUT_SAMPLE(t_rendered, ruv).rgb;
 
     bool hdr = pc.lutBlend.z > 0.5;
     float scale = hdr ? max(1.0, max(original.r, max(original.g, original.b))) : 1.0;

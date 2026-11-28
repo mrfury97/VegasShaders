@@ -17,8 +17,7 @@ namespace LightFreeRecords {
 	inline const char* kCache = "LightFree\\";	// own cache folder: records of one name and folder overwrite each other
 	inline int Wanted = -1;
 	inline bool WantedAtStartup() {
-		if (Wanted < 0) Wanted = TheSettingManager->GetSettingI(kSection, "LightFreeRecords") != 0;
-		return Wanted != 0;
+		return true;
 	}
 
 	// UNOFFICIAL 2026-11-15 DeferredHair ([Main.Main.Quality] DeferredHair, restart, test only, off; docs/next/FD-SKIN-RESULTS.md): the object

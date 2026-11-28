@@ -381,7 +381,7 @@ namespace ShaderPrecompile {
 		auto addLampRecords = [&](const std::string& name, const ShaderTemplate& tmpl) {	// (the order ShaderManager.cpp LoadLampShadowRecords takes them in)
 			Add(name.c_str(), NULL, "Interiors\\", tmpl, interior);
 			if (glass && DeferredTransparents::Eligible(name.c_str(), tmpl)) {
-				if (DeferredRenderer::Mode() >= 2) Add(name.c_str(), NULL, "Deferred\\GlassExterior\\", tmpl, glassOut);
+				Add(name.c_str(), NULL, "Deferred\\GlassExterior\\", tmpl, glassOut);
 				Add(name.c_str(), NULL, DeferredTransparents::kCache, tmpl, glassIn);
 			}
 			if (exteriorLampRecords) addExteriorLamps(name.c_str(), tmpl);
@@ -393,7 +393,6 @@ namespace ShaderPrecompile {
 		// (2026-11-16 fast-restart) the other deferred records LoadShader made one after another on the main thread at load: the skin's
 		// (DeferredSkin::Load), the grass's and leaves' (DeferredFoliage::Load), the hair's forward+ (DeferredTransparents::Hair::Load)
 		static D3DXMACRO skinDeferred[2] = { { "LAMPS_DEFERRED", "2" }, { NULL, NULL } };
-		static D3DXMACRO skinDeferred1[2] = { { "LAMPS_DEFERRED", "3" }, { NULL, NULL } };
 		static D3DXMACRO foliageDeferred[2] = { { "FOLIAGE_DEFERRED", "1" }, { NULL, NULL } };
 		static D3DXMACRO hairForwardPlus[2] = { { "HAIR_FORWARD_PLUS", "1" }, { NULL, NULL } };
 		// UNOFFICIAL 2026-11-16 fast-restart: the lighting-free records (LightFreeRecords::Load, [Shaders.ShadowsInteriors.Deferred] LightFreeRecords:
@@ -416,16 +415,25 @@ namespace ShaderPrecompile {
 			for (const auto& [Name, Template] : Collection->Templates()) {
 				const std::string name(Name);
 				templated.insert(name);
-				Add(name.c_str(), NULL, NULL, Template, NULL);
-				if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
-				if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
-					addInterior(name, Template);
+				if (DeferredSkin::IsOpaqueDeferredManaged(name.c_str(), Template)) {
+					Add(name.c_str(), NULL, "Deferred\\Fallback\\", Template, DeferredSkin::LeanFallbackOverrides());
+					if (glass && PointShadowForward::Eligible(name.c_str(), Template) && DeferredTransparents::Eligible(name.c_str(), Template)) {
+						Add(name.c_str(), NULL, "Deferred\\GlassExterior\\", Template, glassOut);
+						Add(name.c_str(), NULL, DeferredTransparents::kCache, Template, glassIn);
+					}
+				}
+				else {
+					Add(name.c_str(), NULL, NULL, Template, NULL);
+					if (name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0) addTerrainLamps(name.c_str(), Template);
+					if (interiorShadows && name.size() > 4 && name.compare(name.size() - 4, 4, ".pso") == 0 && PointShadowForward::Eligible(name.c_str(), Template))
+						addInterior(name, Template);
+				}
 				if (lightFree && LightFreeRecords::Eligible(name.c_str(), Template)) {
 					const bool wet = lightFreeWet && lightFreeWetTemplate(Template);
 					Add(name.c_str(), NULL, wet ? LightFreeRecords::kWetCache : LightFreeRecords::kCache, Template, wet ? LightFreeRecords::WetOverrides() : LightFreeRecords::Overrides());
 				}
 				if (DeferredSkin::WantedAtStartup() && DeferredSkin::Eligible(name.c_str(), Template))
-					Add(name.c_str(), NULL, DeferredSkin::kCache, Template, DeferredRenderer::Mode() >= 2 ? skinDeferred : skinDeferred1);
+					Add(name.c_str(), NULL, DeferredSkin::kCache, Template, skinDeferred);
 			}
 		}
 		// The hand-written ones (no template): every Name.hlsl the game's shader names map to a collection.

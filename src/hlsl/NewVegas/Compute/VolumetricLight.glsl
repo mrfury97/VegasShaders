@@ -41,6 +41,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 cameraPosition;           // TESR_CameraPosition
     vec4 gameMultisample;          // TESR_GameMultisample (UNOFFICIAL 2026-11-05: the composites' sky shares, MsaaSkyEdge.glsl)
     vec4 rt;                       // TESR_VolumetricLightRt (UNOFFICIAL 2026-11-07 ptaaa-fog: RT fog visibility, VL_RT below)
+    vec4 renderScale;              // RenderRect scale (xy = scale, zw = 1 / scale)
 } cb;
 
 layout(push_constant) uniform Push {

@@ -16,13 +16,14 @@ layout(location = 0) out vec4 o_color;
 const int SAMPLES = 8;
 
 vec4 Gather() {
-    vec4 center = POINT_LOD(t_prep, uv);
+    vec2 ruv = ClampLowUV(uv * cb.renderScale.xy);
+    vec4 center = POINT_LOD(t_prep, ruv);
     vec3 origin = PositionFromLinear(uv, center.x);
     float fade = smoothstepHlsl(NearFade, NearFade * 2.0, origin.z) * (1.0 - smoothstepHlsl(DrawDistance * 0.7, DrawDistance, origin.z));
     if (fade <= 0.0) return vec4(0.0, 0.0, 0.0, origin.z);
 
     vec3 normal = OctDecode(Unpack2(center.y));
-    vec3 noise = WRAP_LOD(t_noise, uv / (256.0 * cb.bounceLayout.zw)).xyz;
+    vec3 noise = WRAP_LOD(t_noise, (uv * cb.renderScale.xy) / (256.0 * cb.bounceLayout.zw)).xyz;
     vec3 up = abs(normal.z) < 0.99 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
     vec3 tangent = normalize(cross(up, normal));
     vec3 bitangent = cross(normal, tangent);
@@ -37,10 +38,10 @@ vec4 Gather() {
         vec2 sampleUV = projectPosition(p).xy;
         float onScreen = stepHlsl(0.0, sampleUV.x) * stepHlsl(sampleUV.x, 1.0) * stepHlsl(0.0, sampleUV.y) * stepHlsl(sampleUV.y, 1.0);
         // Snapped to the centre of the low-resolution pixel whose depth, normal and colour are read.
-        sampleUV = (floor(clamp(sampleUV, 0.0, 1.0) / cb.bounceLayout.zw) + 0.5) * cb.bounceLayout.zw;
+        vec2 sampleRUV = ClampLowUV((floor(clamp(sampleUV, 0.0, 1.0) * cb.renderScale.xy / cb.bounceLayout.zw) + 0.5) * cb.bounceLayout.zw);
 
-        vec4 texel = POINT_LOD(t_prep, sampleUV);
-        vec3 s = PositionFromLinear(sampleUV, texel.x);
+        vec4 texel = POINT_LOD(t_prep, sampleRUV);
+        vec3 s = PositionFromLinear(sampleRUV * cb.renderScale.zw, texel.x);
         vec3 toSample = s - origin;
         float dist = length(toSample) + 0.001;
         vec3 dir = toSample / dist;
@@ -53,13 +54,14 @@ vec4 Gather() {
 }
 
 vec4 GatherPlus(int samples, bool temporal, float motionPixels) {
-    vec4 center = POINT_LOD(t_prep, uv);
+    vec2 ruv = ClampLowUV(uv * cb.renderScale.xy);
+    vec4 center = POINT_LOD(t_prep, ruv);
     vec3 origin = PositionFromLinear(uv, center.x);
     float fade = smoothstepHlsl(NearFade, NearFade * 2.0, origin.z) * (1.0 - smoothstepHlsl(DrawDistance * 0.7, DrawDistance, origin.z));
     if (fade <= 0.0) return vec4(0.0, 0.0, 0.0, origin.z);
 
     vec3 normal = OctDecode(Unpack2(center.y));
-    vec3 noise = WRAP_LOD(t_noise, uv / (256.0 * cb.bounceLayout.zw)).xyz;
+    vec3 noise = WRAP_LOD(t_noise, (uv * cb.renderScale.xy) / (256.0 * cb.bounceLayout.zw)).xyz;
     // A new pattern every frame (golden-ratio steps keep each frame's pattern blue noise), so the frames average out.
     if (temporal) noise.xy = fract(noise.xy + cb.bounceTemporal.z * vec2(0.618034, 0.754878));
     vec3 up = abs(normal.z) < 0.99 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
@@ -75,10 +77,10 @@ vec4 GatherPlus(int samples, bool temporal, float motionPixels) {
         vec3 p = origin + (tangent * cos(angle) + bitangent * sin(angle)) * r + normal * (r * 0.25);
         vec2 sampleUV = projectPosition(p).xy;
         float onScreen = stepHlsl(0.0, sampleUV.x) * stepHlsl(sampleUV.x, 1.0) * stepHlsl(0.0, sampleUV.y) * stepHlsl(sampleUV.y, 1.0);
-        sampleUV = (floor(clamp(sampleUV, 0.0, 1.0) / cb.bounceLayout.zw) + 0.5) * cb.bounceLayout.zw;
+        vec2 sampleRUV = ClampLowUV((floor(clamp(sampleUV, 0.0, 1.0) * cb.renderScale.xy / cb.bounceLayout.zw) + 0.5) * cb.bounceLayout.zw);
 
-        vec4 texel = POINT_LOD(t_prep, sampleUV);
-        vec3 s = PositionFromLinear(sampleUV, texel.x);
+        vec4 texel = POINT_LOD(t_prep, sampleRUV);
+        vec3 s = PositionFromLinear(sampleRUV * cb.renderScale.zw, texel.x);
         vec3 toSample = s - origin;
         float dist = length(toSample) + 0.001;
         vec3 dir = toSample / dist;
@@ -101,7 +103,7 @@ vec4 GatherPlus(int samples, bool temporal, float motionPixels) {
         vec3 last;
         vec3 where = LastFrame(origin);
         float found = HistoryAt(t_history, where, DepthTolerance(origin, normal), last);
-        float moved = length((where.xy - uv) / cb.bounceLayout.zw);
+        float moved = length((where.xy - uv) * cb.renderScale.xy / cb.bounceLayout.zw);
         result = mix(result, last, cb.bounceTemporal.x / (1.0 + moved / motionPixels) * saturate(found * 2.0));
     }
     return vec4(result, origin.z);

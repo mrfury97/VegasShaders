@@ -32,6 +32,8 @@ public:
 	void	RegisterConstants() override;
 	void	RegisterTextures() override;
 	bool	ShouldRender() override;		// the debug view only (the update is drawn by RenderUpdate)
+	bool	ExtSupportsRenderRect() const override { return true; }
+	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 
 	// The readers. *Active: the effect must keep drawing (something may still be wet / snowy in the map, or it rains / snows) even
 	// when its own single amount is 0. *Technique: the technique to draw with (the persistent one once the map holds data).
@@ -75,6 +77,10 @@ private:
 	double	MinStep() const;
 	float	TrailRange(double texelSize) const;
 	void	SetReaderConstants();
+	bool	FillExtUniforms(bool needUpdate);
+	bool	ExtRenderUpdate(IDirect3DDevice9* Device);
+	ExtPass				extUpdate{}, extDebug{};
+	ExtUniformBuffer	extUniforms{};
 
 	IDirect3DTexture9*	mapTexture[2] = {};			// main: wetness, puddle water, snow, trodden snow (the readers' map)
 	IDirect3DSurface9*	mapSurface[2] = {};

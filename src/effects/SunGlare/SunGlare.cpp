@@ -1,3 +1,4 @@
+#include "../../core/DxvkCompute.h"
 #include "SunGlare.h"
 
 // UNOFFICIAL 2026-11-13 (modern lighting): see SunGlare.h and docs/EFFECTS.md "SunGlare".
@@ -104,11 +105,128 @@ bool SunGlareEffect::RunCover(IDirect3DDevice9* Device) {
 	return SUCCEEDED(result);
 }
 
+struct SunGlareUniforms {
+	float projectionTransform[16];
+	float reciprocalResolution[4];
+	float sunColor[4];
+	float sunsetColor[4];
+	float sunDirection[4];
+	float sunAmount[4];
+	float viewSpaceLightDir[4];
+	float cameraData[4];
+	float renderScale[4];
+	float glareData[4];
+	float glareSpikes[4];
+	float glareStreak[4];
+	float glareSun[4];
+	float glareTurn[4];
+};
+
+struct SunGlarePush {
+	UInt32 linearSampler;
+	UInt32 pointSampler;
+	UInt32 pad[2];
+};
+
+static IDirect3DBaseTexture9* SunGlareNamedTex(const char* name) {
+	auto found = TheTextureManager->TextureNames.find(name);
+	return (found == TheTextureManager->TextureNames.end() || !found->second) ? nullptr : *found->second;
+}
+
+static ID3D9NvrExtPipeline* SunGlarePipeline(EffectRecord::ExtPass& pass, const char* spvName, NVR_EXT_BLEND blend) {
+	if (!pass.Tried) {
+		pass.Tried = true;
+		NVR_EXT_BINDING_DESC bindings[5] = {};
+		bindings[0].Set = 1; bindings[0].Binding = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].Slot = 0; bindings[0].ViewType = NVR_EXT_VIEW_2D;
+		bindings[1].Set = 1; bindings[1].Binding = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].Slot = 1; bindings[1].ViewType = NVR_EXT_VIEW_2D;
+		bindings[2].Set = 2; bindings[2].Binding = 0; bindings[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[2].Slot = 0; bindings[2].ViewType = NVR_EXT_VIEW_2D;
+		bindings[3].Type = NVR_EXT_BIND_SAMPLER; bindings[3].Slot = 0; bindings[3].PushOffset = 0;
+		bindings[4].Type = NVR_EXT_BIND_SAMPLER; bindings[4].Slot = 1; bindings[4].PushOffset = 4;
+		pass.Pipeline = DxvkCompute::CreateGraphicsPipeline(spvName, bindings, _countof(bindings), sizeof(SunGlarePush), true, 1, blend);
+	}
+	return pass.Pipeline;
+}
+
+bool SunGlareEffect::FillUniforms(SunGlareUniforms& u) {
+	memset(&u, 0, sizeof(u));
+	bool ok = true;
+	auto copyConst = [&](const char* name, void* dst, size_t bytes) {
+		auto it = TheShaderManager->ConstantsTable.find(name);
+		if (it != TheShaderManager->ConstantsTable.end() && it->second) memcpy(dst, it->second, bytes);
+		else ok = false;
+	};
+	copyConst("TESR_ProjectionTransform", u.projectionTransform, sizeof(u.projectionTransform));
+	copyConst("TESR_ReciprocalResolution", u.reciprocalResolution, sizeof(u.reciprocalResolution));
+	copyConst("TESR_SunColor", u.sunColor, sizeof(u.sunColor));
+	copyConst("TESR_SunsetColor", u.sunsetColor, sizeof(u.sunsetColor));
+	copyConst("TESR_SunDirection", u.sunDirection, sizeof(u.sunDirection));
+	copyConst("TESR_SunAmount", u.sunAmount, sizeof(u.sunAmount));
+	copyConst("TESR_ViewSpaceLightDir", u.viewSpaceLightDir, sizeof(u.viewSpaceLightDir));
+	copyConst("TESR_CameraData", u.cameraData, sizeof(u.cameraData));
+	auto rs = TheShaderManager->ConstantsTable.find("TESR_RenderScale");
+	if (rs != TheShaderManager->ConstantsTable.end() && rs->second) memcpy(u.renderScale, rs->second, sizeof(u.renderScale));
+	else { u.renderScale[0] = u.renderScale[1] = u.renderScale[2] = u.renderScale[3] = 1.0f; }
+	memcpy(u.glareData, &Constants.Data, sizeof(u.glareData));
+	memcpy(u.glareSpikes, &Constants.Spikes, sizeof(u.glareSpikes));
+	memcpy(u.glareStreak, &Constants.Streak, sizeof(u.glareStreak));
+	memcpy(u.glareSun, &Constants.Sun, sizeof(u.glareSun));
+	memcpy(u.glareTurn, &Constants.Turn, sizeof(u.glareTurn));
+	return ok;
+}
+
+bool SunGlareEffect::ExtRunCover(IDirect3DDevice9* Device) {
+	if (!DxvkCompute::Available() || !coverSurface) return false;
+	IDirect3DBaseTexture9* rendered = TheTextureManager->RenderedTexture;
+	IDirect3DBaseTexture9* depth = SunGlareNamedTex("TESR_DepthBuffer");
+	if (!rendered || !depth) return false;
+	SunGlareUniforms uniforms;
+	if (!FillUniforms(uniforms)) return false;
+	ID3D9NvrExtBuffer* cb = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
+	ID3D9NvrExtPipeline* pipeline = SunGlarePipeline(extCover, "SunGlareCover", NVR_EXT_BLEND_ALPHA);
+	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
+	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+	if (!cb || !pipeline || !linear || !point) return false;
+	const DWORD frame = (DWORD)TheFrameRateManager->FrameNumber;
+	if (frame - coverFrame > 1) Device->ColorFill(coverSurface, NULL, D3DCOLOR_ARGB(0, 0, 0, 0));
+	coverFrame = frame;
+	NVR_EXT_RESOURCE_BINDING resources[5] = {};
+	resources[0].Slot = 0; resources[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[0].pResource = rendered;
+	resources[1].Slot = 1; resources[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[1].pResource = depth;
+	resources[2].Slot = 0; resources[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[2].pResource = cb;
+	resources[3].Slot = 0; resources[3].Type = NVR_EXT_BIND_SAMPLER; resources[3].pResource = linear;
+	resources[4].Slot = 1; resources[4].Type = NVR_EXT_BIND_SAMPLER; resources[4].pResource = point;
+	SunGlarePush push = {};
+	return ExtDrawTo(pipeline, &coverSurface, 1, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad);
+}
+
+bool SunGlareEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	if (techniqueIndex != 0 || ClearRenderTarget || !DxvkCompute::Available()) return false;
+	IDirect3DBaseTexture9* rendered = TheTextureManager->RenderedTexture;
+	if (!rendered || !coverTexture) return false;
+	SunGlareUniforms uniforms;
+	if (!FillUniforms(uniforms)) return false;
+	ID3D9NvrExtBuffer* cb = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
+	ID3D9NvrExtPipeline* pipeline = SunGlarePipeline(extPass, "SunGlare", NVR_EXT_BLEND_NONE);
+	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
+	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+	if (!cb || !pipeline || !linear || !point) return false;
+	NVR_EXT_RESOURCE_BINDING resources[5] = {};
+	resources[0].Slot = 0; resources[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[0].pResource = rendered;
+	resources[1].Slot = 1; resources[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; resources[1].pResource = coverTexture;
+	resources[2].Slot = 0; resources[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[2].pResource = cb;
+	resources[3].Slot = 0; resources[3].Type = NVR_EXT_BIND_SAMPLER; resources[3].pResource = linear;
+	resources[4].Slot = 1; resources[4].Type = NVR_EXT_BIND_SAMPLER; resources[4].pResource = point;
+	SunGlarePush push = {};
+	return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pipeline, resources, _countof(resources), &push, sizeof(push), true);
+}
+
 void SunGlareEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
 	if (Enabled && Effect && ShouldRender()) {
 		static GpuTimer coverTimer("  Sun glare cover");
 		GpuProfileScope gpu(coverTimer, Device);
-		RunCover(Device);
+		if (ExtFailed || !DxvkCompute::PassesOnRect() || DxvkCompute::KeptOnD3D9(Name) || !ExtRunCover(Device)) {
+			RunCover(Device);
+		}
 	}
 	EffectRecord::Render(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer);
 }

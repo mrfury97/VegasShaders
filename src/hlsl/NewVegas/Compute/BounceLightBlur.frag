@@ -20,14 +20,15 @@ const float BlurSteps[cKernelSize] = float[](-6.0, -5.0, -4.0, -3.0, -2.0, -1.0,
 
 void main() {
     vec2 axis = pc.pass_.xy;
-    vec4 center = POINT_LOD(t_bounce, uv);
+    vec2 ruv = ClampLowUV(uv * cb.renderScale.xy);
+    vec4 center = POINT_LOD(t_bounce, ruv);
     float tolerance = max(center.a * 0.03, 2.0);
     vec3 sum = center.rgb * 0.114725602;
     float weights = 0.114725602;
     for (int i = 0; i < cKernelSize; i++) {
         // BlurOffsets are in full-resolution pixels; this buffer is half or quarter resolution.
         vec2 blurOffset = vec2(BlurSteps[i] * cb.reciprocalResolution.x, BlurSteps[i] * cb.reciprocalResolution.y);
-        vec2 tapUV = uv + blurOffset * axis * BlurRadius * (cb.bounceLayout.zw / cb.reciprocalResolution.xy);
+        vec2 tapUV = ClampLowUV(ruv + blurOffset * axis * BlurRadius * (cb.bounceLayout.zw / cb.reciprocalResolution.xy));
         vec4 tap = POINT_LOD(t_bounce, tapUV);
         float weight = BlurWeights[i] * (abs(tap.a - center.a) <= tolerance ? 1.0 : 0.0); // + slope * steps: 0
         sum += tap.rgb * weight;

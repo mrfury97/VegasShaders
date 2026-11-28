@@ -37,7 +37,7 @@ namespace ReflMaterialRule {
 
 	inline Write Decide(const Pass& p) {
 		if (!p.live || !p.hasGeometry) return Keep;
-		if (p.world && p.hasMap && p.firstKind && !p.refused && !p.blendProperty && !p.testProperty) return Material;
+		if (p.hasMap && p.firstKind && !p.refused && !p.blendProperty && !p.testProperty) return Material;
 		if (!p.separateAlpha || !(p.colorWrite & 7u)) return Keep;
 		if (!p.blendProperty) return Own;
 		if (p.skinned && p.firstKind && !p.refused) return Cover;

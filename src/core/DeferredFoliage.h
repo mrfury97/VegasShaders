@@ -30,7 +30,6 @@
 #include "CapturedNormals.h"
 #include "DeferredLamps.h"
 #include "DeferredSun.h"
-#include "SettingForce.h"
 #include "ShaderRecord.h"
 #include <unordered_map>
 #include <unordered_set>
@@ -42,13 +41,11 @@ namespace DeferredFoliage {
 	inline const char* kCache = "Deferred\\Foliage\\";
 
 	inline int Wanted = -1;
-	// At startup: the key (forced on by DeferredRenderer 2), GBufferV2 compiled in, and the sun pass made (it is made with the lighting-free
-	// records: LightFreeRecords, which DeferredRenderer 2 forces too).
+	// At startup: GBufferV2 compiled in, and the sun pass made.
 	inline bool WantedAtStartup() {
 		if (Wanted < 0) {
-			const bool key = TheSettingManager->GetSettingI(kSection, "DeferredFoliage") != 0;
-			Wanted = key && CapturedNormals::V2CompiledIn() && DeferredSun::WantedAtStartup();
-			if (key && !Wanted) Logger::Log("[WARNING] UNOFFICIAL DeferredFoliage: needs GBufferV2 and the DeferredSun pass at startup (DeferredRenderer 2 turns both on): the foliage stays forward");
+			Wanted = CapturedNormals::V2CompiledIn() && DeferredSun::WantedAtStartup() ? 1 : 0;
+			if (!Wanted) Logger::Log("[WARNING] UNOFFICIAL DeferredFoliage: needs GBufferV2 and the DeferredSun pass at startup: the foliage stays forward");
 		}
 		return Wanted != 0;
 	}
@@ -143,8 +140,7 @@ namespace DeferredFoliage {
 		StatBinds++;
 		if (leaf) StatLeafBinds++; else StatGrassBinds++;
 		// (2026-11-16) the twin with the froxel's lamps, only with this frame's table and lists finished (else the plain record)
-		if (leaf && LampsLive && ManyLamps::Table && !ManyLamps::TableFailed && ManyLamps::TableFrame == ManyLamps::FrameId && ManyLamps::ListsFrame == ManyLamps::FrameId &&
-			!ManyLamps::TableJob.pending) {
+		if (leaf && LampsLive && ManyLamps::Table && !ManyLamps::TableFailed && ManyLamps::TableFrame == ManyLamps::FrameId && ManyLamps::ListsFrame == ManyLamps::FrameId) {
 			auto lamps = LampRecords.find(shader);
 			if (lamps != LampRecords.end()) { StatLampBinds++; return lamps->second; }
 		}

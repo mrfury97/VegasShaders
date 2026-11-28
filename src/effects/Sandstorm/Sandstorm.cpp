@@ -282,7 +282,9 @@ namespace {
 		D3DXVECTOR4	LightPosition[12];		// TESR_LightPosition
 		D3DXVECTOR4	ShadowLightPosition[12];	// TESR_ShadowLightPosition
 		D3DXVECTOR4	LightColor[24];			// TESR_LightColor
+		D3DXVECTOR4	RenderScale;			// RenderRect scale (xy = scale, zw = 1 / scale)
 	};
+	static_assert(sizeof(SandstormUniforms) == _countof(SandMatrixNames) * 64 + (_countof(SandVectorNames) + 49) * 16, "SandstormUniforms size mismatch");
 	// The push block: the heap indices of POINT/CLAMP (offset 0) and LINEAR/CLAMP (offset 4), filled in by the extension.
 	struct SandstormPush { UInt32 pointIndex, linearIndex, pad[2]; };
 
@@ -357,6 +359,9 @@ bool SandstormEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		|| !SandCopy(uniforms.ShadowLightPosition, "TESR_ShadowLightPosition", sizeof(uniforms.ShadowLightPosition))
 		|| !SandCopy(uniforms.LightColor, "TESR_LightColor", sizeof(uniforms.LightColor)))
 		return false;
+	uniforms.RenderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* constants = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!constants) return false;
 

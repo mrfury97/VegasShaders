@@ -102,6 +102,10 @@ VS_OUTPUT main(VS_INPUT vin) {
 #elif defined(PS)
 
 #include "includes/SkyAmbient.hlsl"	// shared code
+#if defined(LINEAR_LIGHTING_ON) && LINEAR_LIGHTING_ON
+    #define LINEAR_LIGHTING
+#endif
+#include "includes/LinearLight.hlsl"	// UNOFFICIAL 2026-11-27 LinearSceneOut for linear world blending
 // UNOFFICIAL CubeReflections: compiled in only when one of the CubeReflections settings is above 0 at startup (LIVE_CUBE from
 // ShaderRecord::LoadShader), so that otherwise this pass is exactly what it was. s10 is free here (this pass reads s0, s1, s3).
 #ifndef LIVE_CUBE
@@ -197,9 +201,15 @@ float4 main(PS_INPUT pin) : COLOR0 {
     // UNOFFICIAL CubeReflections ([Shaders.PBR.EnvMaps]): what the camera actually saw round it along the reflected toEye
     // (includes/LiveCube.hlsl, already lit, so not scaled by the light again) in place of the game's painted cube map, as
     // far as the live cube has seen that direction. Through the same mask and strength.
+    const float envMaskVal = lerp(nmap.a, tex2Dlod(CustomEnvMask, float4(pin.texc, 0.0f, 0.0f)).x, EnvToggles.w);
     [branch] if (TESR_EnvCube.y > 0.0f) {
-        float4 live = LiveCube(reflected, 0.0f);   // sharpest mip for _m masks and chrome
-        float3 liveColor = live.rgb * (lerp(nmap.a, tex2Dlod(CustomEnvMask, float4(pin.texc, 0.0f, 0.0f)).x, EnvToggles.w) * EnvToggles.z * envAlpha);
+        float4 live = LiveCube(reflected, lerp(0.42f, 0.06f, saturate(envMaskVal)));
+        float livePeak = max(live.r, max(live.g, live.b));
+        [flatten] if (livePeak > 0.85f) {
+            float excess = livePeak - 0.85f;
+            live.rgb *= (0.85f + 0.40f * (excess / (excess + 0.40f))) / livePeak;
+        }
+        float3 liveColor = live.rgb * (envMaskVal * EnvToggles.z * envAlpha);
         liveColor = EnvToggles.x > 0.0f ? liveColor * pin.vcolor : liveColor;
         refl = lerp(refl, liveColor, TESR_EnvCube.y * live.a);
     }
@@ -264,7 +274,12 @@ float4 main(PS_INPUT pin) : COLOR0 {
             ? max(EnvLightFade[0].z, lampFade)
             : min(max(EnvLightFade[0].z, lampFade) / EnvLightFade[0].y, 64.0f);
     }
-    return float4(refl * pin.fog.x, 1.0f);
+    float reflPeak = max(refl.r, max(refl.g, refl.b));
+    [flatten] if (reflPeak > 1.0f) {
+        float reflExcess = reflPeak - 1.0f;
+        refl *= (1.0f + 0.75f * (reflExcess / (reflExcess + 0.75f))) / reflPeak;
+    }
+    return float4(LinearSceneOut(refl * pin.fog.x), 1.0f);
 }
 
 #endif

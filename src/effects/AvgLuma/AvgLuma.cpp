@@ -101,9 +101,6 @@ bool AvgLumaEffect::RenderCompute(IDirect3DDevice9* Device) {
 		said = true;
 		return false;
 	}
-	// UNOFFICIAL 2026-10-27 RenderScale v2: the compute shaders read the whole screen; a rect frame takes the D3D9 pass (it reads
-	// only the drawn part). Histogram therefore gives the plain average while RenderScale is below 1.
-	if (RenderRect::Active()) return false;
 	if (!Enabled || !ShouldRender()) return false;
 	if (!ComputeReady()) {
 		static bool said = false;
@@ -114,6 +111,13 @@ bool AvgLumaEffect::RenderCompute(IDirect3DDevice9* Device) {
 	const bool histogram = histogramWanted && histogramPipeline && histogramBins;
 	if (histogramWanted && !histogram && !TheSettingManager->SettingsMain.Main.AvgLumaCompute) return false;	// no histogram shader: D3D9 as before
 
+	const bool rectActive = RenderRect::Active();
+	const UINT rw = RenderRect::Width(computeWidth);
+	const UINT rh = RenderRect::Height(computeHeight);
+	const UINT gx = (rw + 15) / 16;
+	const UINT gy = (rh + 15) / 16;
+	if (!rw || !rh || gx > computeGroupsX || gy > computeGroupsY) return false;
+
 	IDirect3DTexture9* color = TheTextureManager->RenderedTexture;		// the chain's current image (what the pass samples as TESR_RenderedBuffer)
 	IDirect3DTexture9* depth = TheShaderManager->Effects.CombineDepth ? TheShaderManager->Effects.CombineDepth->Textures.CombinedDepthTexture : nullptr;
 	if (!color || !depth || !Textures.AvgLumaTexture) return false;
@@ -123,10 +127,12 @@ bool AvgLumaEffect::RenderCompute(IDirect3DDevice9* Device) {
 	ID3D9NvrExtBuffer* stateOut = computeState[computeCurrent ^ 1];
 
 	ComputePush push = {};
-	push.width = computeWidth;
-	push.height = computeHeight;
-	push.groupsX = computeGroupsX;
-	push.groupsY = computeGroupsY;
+	push.width = rw;
+	push.height = rh;
+	push.groupsX = gx;
+	push.groupsY = gy;
+	push.scaleX = rectActive ? RenderRect::ScaleX : 1.0f;
+	push.scaleY = rectActive ? RenderRect::ScaleY : 1.0f;
 	push.motionBlurData = TheShaderManager->Effects.MotionBlur->Constants.Data;
 	push.depthOfFieldData = TheShaderManager->Effects.DepthOfField->Constants.Data;
 	push.gameTime = TheShaderManager->ShaderConst.GameTime;
@@ -153,7 +159,7 @@ bool AvgLumaEffect::RenderCompute(IDirect3DDevice9* Device) {
 	MixCheck::SetPass(Name);	// UNOFFICIAL 2026-10-30 NvrDxvkMixCheck
 	DxvkCompute::PreLoad(bindings, _countof(bindings));	// UNOFFICIAL 2026-10-26 (alflicker): managed textures on the GPU (DxvkCompute.h)
 	push.phase = 0;		// one partial sum (or the histogram counts) per 16x16 tile
-	dispatch.GroupsX = computeGroupsX; dispatch.GroupsY = computeGroupsY; dispatch.GroupsZ = 1;
+	dispatch.GroupsX = gx; dispatch.GroupsY = gy; dispatch.GroupsZ = 1;
 	HRESULT result = histogram ? ext->ClearBuffer(histogramBins, 0, 0, 0) : S_OK;	// the counts start at zero every frame (in order with the dispatches)
 	if (SUCCEEDED(result)) result = ext->Dispatch(&dispatch);
 	if (SUCCEEDED(result)) {

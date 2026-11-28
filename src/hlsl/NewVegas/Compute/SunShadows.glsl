@@ -41,6 +41,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 charShadowCameraToLight; // TESR_CharShadowCameraToLight (2026-10-26, CharacterShadowMap)
     vec4 charShadowCenter;      // TESR_CharShadowCenter
     vec4 charShadowData;        // TESR_CharShadowData
+    vec4 renderScale;           // TESR_RenderScale (xy scale, zw 1/scale)
 } cb;
 
 layout(push_constant) uniform Push {
@@ -78,8 +79,18 @@ float hlslSmoothstep(float a, float b, float x) {
     return t * t * (3.0 - 2.0 * t);
 }
 
+vec2 clampRectUV(vec2 ruv) {
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(cb.renderScale.xy - minUV, minUV);
+    return clamp(ruv, minUV, maxUV);
+}
+
+vec2 toRectUV(vec2 screenUV) {
+    return clampRectUV(screenUV * cb.renderScale.xy);
+}
+
 // The single-level buffers: tex2D and tex2Dlod level 0 read the same texel
-vec4 sampleShadow(vec2 coord) { return textureLod(sampler2D(t_shadow, LINEAR_S), coord, 0.0); }
+vec4 sampleShadow(vec2 ruv) { return textureLod(sampler2D(t_shadow, LINEAR_S), clampRectUV(ruv), 0.0); }
 
 // --- Depth.hlsl ---
 float projectedDepthFromLinear(float linear01) {
@@ -87,18 +98,18 @@ float projectedDepthFromLinear(float linear01) {
     return nearZ * (farZ - viewZ) / (viewZ * (farZ - nearZ));
 }
 
-float readDepth(vec2 coord) {
-    return textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x * farZ;
+float readDepth(vec2 ruv) {
+    return textureLod(sampler2D(t_depth, LINEAR_S), clampRectUV(ruv), 0.0).x * farZ;
 }
 
-float readDepthLod(vec2 coord) {
-    return textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x * farZ;
+float readDepthLod(vec2 ruv) {
+    return textureLod(sampler2D(t_depth, LINEAR_S), clampRectUV(ruv), 0.0).x * farZ;
 }
 
 vec3 reconstructPosition(vec2 coord) {
     float x = coord.x * 2.0 - 1.0;
     float y = (1.0 - coord.y) * 2.0 - 1.0;
-    float z = projectedDepthFromLinear(textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x);
+    float z = projectedDepthFromLinear(textureLod(sampler2D(t_depth, LINEAR_S), toRectUV(coord), 0.0).x);
     vec4 clipSpace = vec4(x, y, z, 1.0);
 
     vec4 viewSpace = cb.invProjectionTransform * clipSpace;
@@ -126,7 +137,7 @@ vec3 toWorld(vec2 tex) {
 }
 
 float getHomogenousDepth(vec2 coord) {
-    float depth = readDepth(coord);
+    float depth = readDepth(toRectUV(coord));
     vec3 camera_vector = toWorld(coord) * depth;
     return length(camera_vector);
 }
@@ -134,7 +145,7 @@ float getHomogenousDepth(vec2 coord) {
 vec4 reconstructWorldPositionLod(vec2 coord, out float viewDepth) {
     float x = coord.x * 2.0 - 1.0;
     float y = (1.0 - coord.y) * 2.0 - 1.0;
-    float z = projectedDepthFromLinear(textureLod(sampler2D(t_depth, LINEAR_S), coord, 0.0).x);
+    float z = projectedDepthFromLinear(textureLod(sampler2D(t_depth, LINEAR_S), toRectUV(coord), 0.0).x);
     vec4 viewSpace = cb.invProjectionTransform * vec4(x, y, z, 1.0);
 
     viewSpace /= viewSpace.w;
@@ -145,12 +156,12 @@ vec4 reconstructWorldPositionLod(vec2 coord, out float viewDepth) {
 }
 
 // --- Normals.hlsl ---
-vec3 GetNormal(vec2 coord) {
-    return textureLod(sampler2D(t_normals, LINEAR_S), coord, 0.0).xyz * 2.0 - 1.0;
+vec3 GetNormal(vec2 ruv) {
+    return textureLod(sampler2D(t_normals, LINEAR_S), clampRectUV(ruv), 0.0).xyz * 2.0 - 1.0;
 }
 
-vec3 GetWorldNormalLod(vec2 coord) {
-    vec4 normal = vec4(textureLod(sampler2D(t_normals, LINEAR_S), coord, 0.0).xyz * 2.0 - 1.0, 1.0);
+vec3 GetWorldNormalLod(vec2 ruv) {
+    vec4 normal = vec4(textureLod(sampler2D(t_normals, LINEAR_S), clampRectUV(ruv), 0.0).xyz * 2.0 - 1.0, 1.0);
     return (normal * cb.viewTransform).xyz;
 }
 
@@ -179,15 +190,16 @@ vec2 BlurOffsets(int i) {
 }
 
 // --- BlurDepth.hlsl DepthBlurKeep (buffer = TESR_PointShadowBuffer, depthDrop 3500, endFade SSS_MAXDEPTH) ---
-vec4 DepthBlurKeep(vec2 coord, vec2 OffsetMask, float blurRadius, float depthDrop, float endFade) {
-    vec4 center = sampleShadow(coord);
-    float depth1 = readDepthLod(coord);
+vec4 DepthBlurKeep(vec2 ruv, vec2 OffsetMask, float blurRadius, float depthDrop, float endFade) {
+    vec2 centerUV = clampRectUV(ruv);
+    vec4 center = sampleShadow(centerUV);
+    float depth1 = readDepthLod(centerUV);
     if (depth1 > endFade) return center;
 
     vec4 taps[cKernelSize];
     vec4 spread = vec4(0.0);
     for (int t = 0; t < cKernelSize; t++) {
-        taps[t] = sampleShadow(coord + (BlurOffsets(t) * OffsetMask) * blurRadius);
+        taps[t] = sampleShadow(clampRectUV(centerUV + (BlurOffsets(t) * OffsetMask) * blurRadius));
         spread = max(spread, abs(taps[t] - center));
     }
     if (max(spread.r, spread.g) < 0.0001) return vec4(center.rgb, 1.0);
@@ -197,7 +209,7 @@ vec4 DepthBlurKeep(vec2 coord, vec2 OffsetMask, float blurRadius, float depthDro
     depthDrop *= (depth1 / farZ);
 
     for (int i = 0; i < cKernelSize; i++) {
-        float depth2 = readDepthLod(coord + (BlurOffsets(i) * OffsetMask) * blurRadius);
+        float depth2 = readDepthLod(clampRectUV(centerUV + (BlurOffsets(i) * OffsetMask) * blurRadius));
         float diff = abs(depth1 - depth2);
 
         float useForBlur = (diff <= depthDrop) ? 1.0 : 0.0;

@@ -52,14 +52,11 @@ namespace FoldFog {
 	}
 
 	inline void BeginFrame() {
-		const bool want = TheSettingManager->GetSettingI("Main.Main.Misc", "FoldFog") != 0;
-		if (want != Applied) {
-			if (Applied) *(UInt32*)kEnabledPasses ^= kRebuildBit;	// off: every object's passes rebuilt (its lit pass without bNoFog again)
-			Applied = want;
-			Logger::Log("UNOFFICIAL FoldFog: %s", want ? "on (opaque env-mapped objects fog in their lit pass; their fog pass is not drawn)" :
-				"off (env-mapped objects drawn with their fog pass, as the game does; every object's passes rebuilt)");
+		if (!Applied) {
+			Applied = true;
+			Logger::Log("UNOFFICIAL FoldFog: on (opaque env-mapped objects fog in their lit pass; their fog pass is not drawn)");
 		}
-		On = want;
+		On = true;
 		FrameId++;
 		if (!GpuTimer::Enabled) { Folded = Skipped = Frames = 0; return; }
 		if (On && ++Frames >= 600) {

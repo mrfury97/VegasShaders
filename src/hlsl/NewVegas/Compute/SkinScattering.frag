@@ -24,7 +24,13 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 cameraData;               // TESR_CameraData: x near, y far
     mat4 projectionTransform;      // TESR_ProjectionTransform
     mat4 viewTransform;            // TESR_ViewTransform
+    vec4 renderScale;              // TESR_RenderScale
 } cb;
+
+vec2 clampToRectIfOn(vec2 coord, vec2 px) {
+    vec2 hi = cb.renderScale.xy - 0.5 * px;
+    return (cb.renderScale.x < 0.9999 || cb.renderScale.y < 0.9999) ? clamp(coord, 0.5 * px, max(hi, 0.5 * px)) : coord;
+}
 
 layout(push_constant) uniform Push {
     uint samplerIndex;             // 0: the point sampler's heap index (filled by the host)
@@ -36,9 +42,10 @@ layout(location = 0) out vec4 o_color;
 
 // Includes/Depth.hlsl toWorld
 vec3 toWorld(vec2 tex) {
+    vec2 s = tex * cb.renderScale.zw;
     vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
-    v += (1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
-    v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
+    v += (1.0 / cb.projectionTransform[0][0] * (2.0 * s.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
+    v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * s.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
     return v;
 }
 
@@ -127,10 +134,11 @@ vec4 SkinBlur(vec2 coord, vec2 dir, bool firstPass) {
 
     // One kernel unit on screen: the projection of scatterData.x game units at this depth.
     vec2 stepUV = dir * vec2(cb.projectionTransform[0][0], cb.projectionTransform[1][1]) * (0.5 * cb.scatterData.x / max(depthM, 1.0));
+    stepUV *= cb.renderScale.xy;
 
     vec3 blurred = lightM * cb.scatterKernel[0].rgb;
     for (int i = 1; i < SAMPLES; i++) {
-        vec2 sampleUV = coord + cb.scatterKernel[i].a * stepUV;
+        vec2 sampleUV = clampToRectIfOn(coord + cb.scatterKernel[i].a * stepUV, cb.reciprocalResolution.xy);
         vec4 color = SAMPLE_LOD(t_rendered, sampleUV);
         vec4 scatter = SAMPLE_LOD(t_scatter, sampleUV);
         vec4 albedo = SAMPLE_LOD(t_albedo, sampleUV);
@@ -171,5 +179,6 @@ vec4 SkinBlur(vec2 coord, vec2 dir, bool firstPass) {
 
 void main() {
     bool firstPass = pc.firstPass != 0u;
-    o_color = SkinBlur(uv, firstPass ? vec2(1.0, 0.0) : vec2(0.0, 1.0), firstPass);
+    vec2 ruv = uv * cb.renderScale.xy;
+    o_color = SkinBlur(ruv, firstPass ? vec2(1.0, 0.0) : vec2(0.0, 1.0), firstPass);
 }

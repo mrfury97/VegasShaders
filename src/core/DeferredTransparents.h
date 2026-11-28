@@ -44,7 +44,7 @@ namespace DeferredTransparents {
 
 	inline int Wanted = -1;
 	inline bool WantedAtStartup() {
-		if (Wanted < 0) Wanted = DeferredRenderer::On() && TheSettingManager->GetSettingI(kSection, kKey) != 0 ? 1 : 0;
+		if (Wanted < 0) Wanted = TheSettingManager->GetSettingI(kSection, kKey) != 0 ? 1 : 0;
 		return Wanted != 0;
 	}
 
@@ -90,7 +90,7 @@ namespace DeferredTransparents {
 	// The Object template's lit base / one-pass records (DeferredRenderer::Eligible's families less the light-only AD passes: their light is
 	// multiplied by the texture pass afterwards, and the census found none blended).
 	inline bool Eligible(const char* name, const ShaderTemplate& tmpl) {
-		if (!tmpl.Name || strcmp(tmpl.Name, "ObjectTemplate") || !DeferredRenderer::Eligible(name, tmpl, 1)) return false;
+		if (!tmpl.Name || strcmp(tmpl.Name, "ObjectTemplate") || !DeferredRenderer::Eligible(name, tmpl)) return false;
 		return !DeferredRenderer::HasDefine(tmpl, "ONLY_LIGHT");
 	}
 
@@ -100,9 +100,8 @@ namespace DeferredTransparents {
 		static D3DXMACRO overrides[14] = {};
 		int n = 0;
 		for (const D3DXMACRO* o = interiorOverrides; o && o->Name && n < 12; o++) overrides[n++] = *o;
-		// (2026-11-16) outdoors: the same from the default record's overrides (none: the sun and its shadows kept), mode 2 only (mode 1 is
-		// interiors only)
-		if (DeferredRenderer::Mode() >= 2 && !RecordsExterior.count(shader)) {
+		// (2026-11-16) outdoors: the same from the default record's overrides (none: the sun and its shadows kept)
+		if (!RecordsExterior.count(shader)) {
 			ShaderRecordPixel* outdoor = nullptr;
 			for (int level = 4; level <= 5 && !outdoor; level++) {
 				static D3DXMACRO o[2] = {};
@@ -152,7 +151,7 @@ namespace DeferredTransparents {
 		inline bool WantedAtStartup() {
 			if (Wanted < 0) {
 				const bool key = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredHair") != 0;
-				Wanted = key && DeferredRenderer::On() && CapturedNormals::V2CompiledIn() ? 1 : 0;
+				Wanted = key && CapturedNormals::V2CompiledIn() ? 1 : 0;
 			}
 			return Wanted != 0;
 		}
@@ -190,7 +189,7 @@ namespace DeferredTransparents {
 		inline bool WantedAtStartup() {
 			// ([Main.Main.Quality] DeferredBulletHoles, restart, default false since 2026-11-25: under the flashlight the marks took about half the light
 			// of the ground round them, cause not found (FD-COMPLETE.md section 13); with DeferredDecals for the scope)
-			if (Wanted < 0) Wanted = DeferredRenderer::On() && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredDecals") != 0 &&
+			if (Wanted < 0) Wanted = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredDecals") != 0 &&
 				TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredBulletHoles") != 0 ? 1 : 0;
 			return Wanted != 0;
 		}
@@ -216,9 +215,8 @@ namespace DeferredTransparents {
 	// Once a frame (Render.cpp, after DeferredRenderer::BeginFrame).
 	inline void BeginFrame() {
 		FrameId++;
-		{	// (2026-11-16) the hair's forward+: with the renderer live (indoors; outdoors in mode 2) and the table's lists and tile rows made
-			const bool exterior = TheShaderManager->GameState.isExterior;
-			Hair::Live = Hair::WantedAtStartup() && !Hair::Records.empty() && DeferredRenderer::Live && (!exterior || DeferredRenderer::Mode() >= 2) &&
+		{	// (2026-11-16) the hair's forward+: with the renderer live and the table's lists and tile rows made
+			Hair::Live = Hair::WantedAtStartup() && !Hair::Records.empty() && DeferredRenderer::Live &&
 				TheSettingManager->GetSettingI(kSection, "DeferredHairLive") != 0 && ManyLamps::FroxelRows() && ManyLamps::TileRowsWanted() && !ManyLamps::TableFailed;
 		}
 		if (!WantedAtStartup() || Records.empty()) { GlassLive = false; Live = Hair::Live; return; }
@@ -229,9 +227,8 @@ namespace DeferredTransparents {
 				Loaded, Unshadowed, Refused, ManyLamps::FroxelRows() ? "with froxel lists" : "WITHOUT froxel lists (nothing to read: off)",
 				ManyLamps::TileRowsWanted() ? "made" : "NOT made (no header: off)", PointShadowForward::AtlasRuns() ? "made" : "not made (unshadowed)");
 		}
-		// (2026-11-16) outdoors too, in mode 2 with the outdoor records (the renderer live: the lamp pass makes the exterior table)
 		const bool exterior = TheShaderManager->GameState.isExterior;
-		GlassLive = TheSettingManager->GetSettingI(kSection, kKey) != 0 && (!exterior || (DeferredRenderer::Mode() >= 2 && DeferredRenderer::Live && !RecordsExterior.empty())) &&
+		GlassLive = TheSettingManager->GetSettingI(kSection, kKey) != 0 && (!exterior || (DeferredRenderer::Live && !RecordsExterior.empty())) &&
 			ManyLamps::FroxelRows() && ManyLamps::TileRowsWanted() && !ManyLamps::TableFailed;
 		Live = GlassLive || Hair::Live;
 		DecalsLive = GlassLive && TheSettingManager->GetSettingI(kSection, "DeferredDecals") != 0;
@@ -263,9 +260,8 @@ namespace DeferredTransparents {
 			InList = true;
 			ListReady = false;
 			if (!Live) return;
-			ManyLamps::FinishTable();
 			ListReady = ManyLamps::Table && !ManyLamps::TableFailed && ManyLamps::TableFrame == ManyLamps::FrameId &&
-				ManyLamps::ListsFrame == ManyLamps::FrameId && !ManyLamps::TableJob.pending;
+				ManyLamps::ListsFrame == ManyLamps::FrameId;
 			StatLists++;
 			if (!ListReady) StatListsRefused++;
 		}

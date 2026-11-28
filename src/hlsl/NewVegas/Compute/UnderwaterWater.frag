@@ -32,15 +32,18 @@ const float ditherMat[16] = float[16](
     0.9412, 0.4706, 0.8235, 0.3259);
 
 void main() {
-    float depth = readDepth(uv, t_depth, pc.linearIndex);
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(cb.renderScale.xy - minUV, minUV);
+    vec2 ruv = clamp(uv * cb.renderScale.xy, minUV, maxUV);
+    float depth = readDepth(ruv, t_depth, pc.linearIndex);
     vec3 eyeVector = toWorld(uv);
     vec3 eyeDirection = normalize(eyeVector);
     vec3 worldPos = cb.cameraPosition.xyz + eyeVector * depth;
     float fogDepth = length(eyeVector * depth); // a depth measure that's at the same distance from the camera at all angles
     float waterDepth = cb.waterSettings.x - worldPos.z;
-    vec3 floorNormal = getWorldNormal(uv, t_normals, pc.pointIndex);
+    vec3 floorNormal = getWorldNormal(ruv, t_normals, pc.pointIndex);
 
-    vec4 color = texture(sampler2D(t_source, NVR_SAMPLER(pc.linearIndex)), uv);
+    vec4 color = texture(sampler2D(t_source, NVR_SAMPLER(pc.linearIndex)), ruv);
     if (aboveWater(cb.cameraPosition.z, worldPos.z, cb.waterSettings.x)) {
         o_color = color;
         return;
@@ -81,7 +84,7 @@ void main() {
     float depthFade = hsmooth(800.0, 0.0, waterDepth);
     float distanceFade = invlerp(6000.0, 0.0, fogDepth);
 
-    vec2 shadows = texture(sampler2D(t_shadow, NVR_SAMPLER(pc.anisoIndex)), uv).rg; // only sample point light shadows
+    vec2 shadows = texture(sampler2D(t_shadow, NVR_SAMPLER(pc.anisoIndex)), ruv).rg; // only sample point light shadows
     float caustics = getCaustics(worldPos, t_caustics, pc.anisoIndex) * shadows.r;
 
     color.rgb += color.rgb * pows(caustics, 2.0) * sunColor * depthFade * floorAngle * distanceFade * sunL * causticsStrength * 100.0;
@@ -96,10 +99,11 @@ void main() {
     color.rgb = mix(color.rgb, fogColor, clamp(scattering * pows(linearFog, fogThickness) * turbidPower, 0.0, 1.0)); // scattering absorption
 
     // blend in godrays
-    color.rgb += texture(sampler2D(t_rendered, NVR_SAMPLER(pc.linearIndex)), uv / 2.0).r * sunColor * godraysStrength * color.rgb;
+    vec2 godraysMaxUV = max(0.5 * cb.renderScale.xy - minUV, minUV);
+    color.rgb += texture(sampler2D(t_rendered, NVR_SAMPLER(pc.linearIndex)), clamp((uv * cb.renderScale.xy) * 0.5, minUV, godraysMaxUV)).r * sunColor * godraysStrength * color.rgb;
 
     // reduce banding
-    vec2 pixel = uv / cb.reciprocalResolution.xy;
+    vec2 pixel = (uv * cb.renderScale.xy) / cb.reciprocalResolution.xy;
     color = delinearize(color);
     int row = int(fmodHLSL(pixel.x, 4.0));
     int column = int(fmodHLSL(pixel.y, 4.0));

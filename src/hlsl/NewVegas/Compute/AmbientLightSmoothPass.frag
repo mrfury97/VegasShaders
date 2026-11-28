@@ -10,7 +10,7 @@ layout(set = 1, binding = 0) uniform texture2D t_source;     // X: NVR_ALPrep, Y
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec2 uv = frameUV();
+    vec2 uv = frameRectUV();
     bool alongY = (pc.variant & 1u) != 0u;
     float viewZ; vec3 normal;
     // (2026-11-09 rt-review) the 16-bit float buffer cannot hold the sky's / the weapon's depth (it came back infinite): X stores at most
@@ -24,13 +24,15 @@ void main() {
         float texelWorld = 2.0 * viewZ * cb.alLayout.z / max(cb.projectionTransform[0][0], 1.0e-3);
         float reach = clamp(cb.alEdges.z / max(texelWorld, 1.0e-4), cb.alEdges.x, 192.0);
         float spacing = reach / 3.0;
+        vec2 scale = renderScaleXY();
+        vec2 maxUV = max(scale - 0.5 * cb.alLayout.zw, 0.5 * cb.alLayout.zw);
         vec3 sum = normal;
         for (int k = -3; k <= 3; k++) {
             if (k == 0) continue;
             float dist = abs(float(k)) * spacing;
             vec2 tapUV = uv + axis * (float(k) * spacing) * cb.alLayout.zw;
-            float onScreen = step(0.0, tapUV.x) * step(tapUV.x, 1.0) * step(0.0, tapUV.y) * step(tapUV.y, 1.0);
-            tapUV = clamp(tapUV, 0.0, 1.0);
+            float onScreen = step(0.0, tapUV.x) * step(tapUV.x, scale.x) * step(0.0, tapUV.y) * step(tapUV.y, scale.y);
+            tapUV = clamp(tapUV, vec2(0.0), maxUV);
             float tapZ; vec3 tapNormal;
             if (alongY) { vec4 t = pointLod(t_source, tapUV); tapNormal = t.xyz; tapZ = t.w >= 64000.0 ? 1.0e6 : t.w; }
             else { vec4 t = pointLod(t_source, tapUV); tapZ = t.x; tapNormal = OctDecode(Unpack2(t.y)); }

@@ -72,7 +72,7 @@ void SunShadowsEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rende
 	}
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the same passes as Vulkan passes when [Main.Main.Performance] NvrDxvkPasses is on.
-	if (!ExtFailed && !ClearRenderTarget && DxvkCompute::PassesOn()) {
+	if (!ExtFailed && !ClearRenderTarget && DxvkCompute::PassesOnRect()) {
 		auto extTimer = TimeLogger();
 		if (ExtPingPong(Device, techniqueIndex, description, shadowTexture, shadowSurface)) {
 			Device->SetRenderTarget(0, RenderTarget);
@@ -144,6 +144,7 @@ namespace {
 					forwardData, center[4], cameraData, flags;
 		D3DXMATRIX	charToLight;		// UNOFFICIAL 2026-10-26 CharacterShadowMap: TESR_CharShadowCameraToLight, TESR_CharShadowCenter, TESR_CharShadowData
 		D3DXVECTOR4	charCenter, charData;
+		D3DXVECTOR4	renderScale;		// TESR_RenderScale (xy scale, zw 1/scale)
 	};
 	struct SunPush { UInt32 linearIndex, noiseIndex, pass, pad; };
 
@@ -267,6 +268,10 @@ bool SunShadowsEffect::ExtPingPong(IDirect3DDevice9* Device, UINT techniqueIndex
 	if (const D3DXVECTOR4* charToLight = SunConstant("TESR_CharShadowCameraToLight")) memcpy(&uniforms.charToLight, charToLight, sizeof(D3DXMATRIX));
 	if (const D3DXVECTOR4* charCenter = SunConstant("TESR_CharShadowCenter")) uniforms.charCenter = *charCenter;
 	if (const D3DXVECTOR4* charData = SunConstant("TESR_CharShadowData")) uniforms.charData = *charData;
+	const bool rectOn = RenderRect::Active();
+	uniforms.renderScale = rectOn
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!buffer) return false;
 
@@ -277,6 +282,11 @@ bool SunShadowsEffect::ExtPingPong(IDirect3DDevice9* Device, UINT techniqueIndex
 	resources[6].Slot = 0; resources[6].Type = NVR_EXT_BIND_UNIFORM_BUFFER; resources[6].pResource = buffer;
 	resources[7].Slot = 0; resources[7].Type = NVR_EXT_BIND_SAMPLER; resources[7].pResource = linear;
 	resources[8].Slot = 1; resources[8].Type = NVR_EXT_BIND_SAMPLER; resources[8].pResource = noiseSampler;
+
+	D3DSURFACE_DESC desc = {};
+	if (rectOn && FAILED(shadowSurface->GetDesc(&desc))) return false;
+	const RECT vp = { 0, 0, (LONG)RenderRect::Width(desc.Width), (LONG)RenderRect::Height(desc.Height) };
+	if (rectOn && (vp.right <= 0 || vp.bottom <= 0)) return false;
 
 	// The passes as Render draws them. The device's own target is moved to each pass's destination first, so a pass never reads the
 	// device's current render target (pass 0 reads the shadow buffer, the caller's target). A failure before the last pass leaves the
@@ -296,7 +306,8 @@ bool SunShadowsEffect::ExtPingPong(IDirect3DDevice9* Device, UINT techniqueIndex
 		resources[3].pResource = source;
 		SunPush push = {};
 		push.pass = kind == SunBlurV ? 1 : kind == SunFinalBlur ? 2 : 0;	// SunShadowsBlur.frag: 0 H, 1 V, 2 FinalContactBlur
-		if (!ExtDrawTo(pipelines[pipelineOf[kind]], &destination, 1, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
+		if (!ExtDrawTo(pipelines[pipelineOf[kind]], &destination, 1, resources, _countof(resources), &push, sizeof(push),
+			rectOn ? &vp : nullptr, rectOn ? ExtUv::TexelCentre : ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
 		source = last ? shadowTexture : scratchTexture[p & 1];
 	}
 	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as Vulkan passes (%u passes).", Name, description.Passes);

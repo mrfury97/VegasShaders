@@ -16,6 +16,7 @@ public:
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): techniques 0 (MergedPointShadows), 1 (AddShadowedLamps), 2 (LampContact), 3 (LampMaskHalf) and
 	// 4 (LampMaskUpsample) as src\hlsl\NewVegas\Compute\PointShadows*.frag (EffectRecord::ExtRender). The D3D9 technique runs where
 	// this returns false: the scissored mask (the passes ignore the device's scissor rectangle), or a texture or constant missing.
+	bool	ExtSupportsRenderRect() const override { return true; }
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 private:
 	// One full-screen draw: the constants block (from the values the D3D9 path uploads), the textures in binding order (the first

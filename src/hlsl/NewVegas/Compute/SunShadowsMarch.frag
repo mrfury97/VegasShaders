@@ -12,15 +12,16 @@ vec3 random(vec2 seed) {
 }
 
 void main() {
-    vec4 color = sampleShadow(uv);
+    vec2 ruv = toRectUV(uv);
+    vec4 color = sampleShadow(ruv);
     if (cb.screenSpaceData.x == 0.0) { o_color = vec4(1.0, color.g, 0.0, 1.0); return; }
     vec3 pos = reconstructPosition(uv);
     float pixelZ = pos.z;   // (2026-11-09 review 7.2.3: the fades go by the pixel's depth, not the marched ray's end)
     bool isFar = pos.z > SSS_MAXDEPTH;
-    float NdotL = dot(GetNormal(uv), normalize(cb.viewSpaceLightDir.xyz));
+    float NdotL = dot(GetNormal(ruv), normalize(cb.viewSpaceLightDir.xyz));
     float facing = saturate(NdotL * 8.0);
     float bias = max(0.01, pos.z * 0.002);
-    vec3 random3 = random(uv);
+    vec3 random3 = random(ruv);
     float rand = mix(min(0.8, pos.z / SSS_MAXDEPTH), 1.0, random3.r);
     float depth = getHomogenousDepth(uv) / farZ;
     vec3 marchStep = pows(depth, 0.6) * (SSS_DIST / float(SSS_STEPNUM)) * cb.viewSpaceLightDir.xyz * rand;
@@ -35,8 +36,8 @@ void main() {
             vec3 pos2 = pos1 + step2 * marchStep;
             vec2 depth = vec2(pos1.z, pos2.z);
             vec2 depthCompare = vec2(
-                readDepthLod(projectPosition(pos1).xy),
-                readDepthLod(projectPosition(pos2).xy));
+                readDepthLod(toRectUV(projectPosition(pos1).xy)),
+                readDepthLod(toRectUV(projectPosition(pos2).xy)));
             vec2 depthDelta = depth - depthCompare;
             occlusion += ((depthDelta.x > bias && depthDelta.x < SSS_THICKNESS) ? 1.0 : 0.0) / step1;
             occlusion += ((depthDelta.y > bias && depthDelta.y < SSS_THICKNESS) ? 1.0 : 0.0) / step2;

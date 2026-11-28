@@ -336,8 +336,9 @@ namespace {
 	};
 	struct BounceUniforms {
 		D3DXMATRIX projection, invProjection, reproject;	// TESR_ProjectionTransform, TESR_InvProjectionTransform, NVR_BounceReproject (as stored)
-		D3DXVECTOR4 data, reciprocalResolution, layout, temporal, ambient, cameraData;
+		D3DXVECTOR4 data, reciprocalResolution, layout, temporal, ambient, cameraData, renderScale;
 	};
+	static_assert(sizeof(BounceUniforms) == 3 * 64 + 7 * 16, "BounceUniforms size mismatch");
 
 	// The constants from the same registered memory the D3D9 path uploads (SetCT).
 	const D3DXVECTOR4* RegisteredConstant(const char* name) {
@@ -420,8 +421,19 @@ bool BounceLightEffect::ExtPasses(IDirect3DDevice9* Device, IDirect3DSurface9* R
 	uniforms.temporal = temporalData;
 	uniforms.ambient = ambientData;
 	uniforms.cameraData = *cameraData;
+	uniforms.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!buffer) return false;
+	RECT lowVp = {};
+	const RECT* pLowVp = nullptr;
+	if (RenderRect::Active()) {
+		D3DSURFACE_DESC lowDesc = {};
+		if (FAILED(prepSurface->GetDesc(&lowDesc))) return false;
+		lowVp = { 0, 0, (LONG)RenderRect::Width(lowDesc.Width), (LONG)RenderRect::Height(lowDesc.Height) };
+		pLowVp = &lowVp;
+	}
 	const bool useHistory = historyTexture != nullptr;
 	NVR_EXT_RESOURCE_BINDING resources[8] = {};
 	BouncePush push = {};
@@ -431,18 +443,18 @@ bool BounceLightEffect::ExtPasses(IDirect3DDevice9* Device, IDirect3DSurface9* R
 		if (p == 0) {	// Prepare: into the packed buffer (PreparePlus also reads last frame's result, low buffer 0)
 			push.pass = D3DXVECTOR4(plus ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
 			IDirect3DBaseTexture9* inputs[4] = { depth, normals, scene, lowTexture[0] };
-			drawn = ExtDrawTo(extPrepare.Pipeline, &prepSurface, 1, resources, Resources(resources, inputs, 4, buffer), &push, sizeof(push));
+			drawn = ExtDrawTo(extPrepare.Pipeline, &prepSurface, 1, resources, Resources(resources, inputs, 4, buffer), &push, sizeof(push), pLowVp, ExtUv::TexelCentre);
 		}
 		else if (p == 1) {	// Gather: into low buffer 0, or with Temporal this frame's history buffer (last frame's read; the packed buffer stands in otherwise)
 			push.pass = gather;
 			IDirect3DBaseTexture9* inputs[3] = { prepTexture, noise, useHistory ? historyTexture[writeIndex ^ 1] : prepTexture };
 			IDirect3DSurface9* target = useHistory ? historySurface[writeIndex] : lowSurface[0];
-			drawn = ExtDrawTo(extGather.Pipeline, &target, 1, resources, Resources(resources, inputs, 3, buffer), &push, sizeof(push));
+			drawn = ExtDrawTo(extGather.Pipeline, &target, 1, resources, Resources(resources, inputs, 3, buffer), &push, sizeof(push), pLowVp, ExtUv::TexelCentre);
 		}
 		else if (p == 2 || p == 3) {	// BlurX: (history or) low 0 -> low 1; BlurY: low 1 -> low 0
 			push.pass = p == 2 ? D3DXVECTOR4(1.0f, 0.0f, 0.0f, 0.0f) : D3DXVECTOR4(0.0f, 1.0f, 0.0f, 0.0f);
 			IDirect3DBaseTexture9* inputs[1] = { p == 3 ? lowTexture[1] : useHistory ? historyTexture[writeIndex] : lowTexture[0] };
-			drawn = ExtDrawTo(extBlur.Pipeline, &lowSurface[p == 2 ? 1 : 0], 1, resources, Resources(resources, inputs, 1, buffer), &push, sizeof(push));
+			drawn = ExtDrawTo(extBlur.Pipeline, &lowSurface[p == 2 ? 1 : 0], 1, resources, Resources(resources, inputs, 1, buffer), &push, sizeof(push), pLowVp, ExtUv::TexelCentre);
 		}
 		else {	// Combine: the frame chain's next image (Commit), as the D3D9 pass into chain.Output()
 			push.pass = D3DXVECTOR4(hard ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
@@ -689,7 +701,7 @@ void BounceLightEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the same passes as Vulkan passes when NvrDxvkPasses is on (not with the retired spill's buffers);
 	// if they cannot draw, this D3D9 loop draws the frame as before.
 	const D3DXHANDLE drawnTechnique = hardEdges || (spill && spillHardEdges > 0.0f) ? spillTechnique : technique;
-	const bool extDrawn = !spill && !debugView && !ExtFailed && DxvkCompute::PassesOn() &&
+	const bool extDrawn = !spill && !debugView && !ExtFailed && DxvkCompute::PassesOnRect() &&
 		ExtPasses(Device, RenderTarget, RenderedSurface, drawnTechnique, firstPass, endPass, scene, lowTexture, lowSurface, prepTexture, prepSurface,
 			historyTexture, historySurface, writeIndex, layout, temporalData, ambientData, reproject, passTimers);
 	HRESULT result = extDrawn ? S_OK : Effect->Begin(&passes, 0);

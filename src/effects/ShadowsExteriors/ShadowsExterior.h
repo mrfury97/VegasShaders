@@ -312,6 +312,7 @@ public:
 	void		clearShadowsBuffer();
 	bool		ShouldRender() override;
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the shadow apply's pass as src\hlsl\NewVegas\Compute\ShadowsExteriors.frag (EffectRecord::ExtRender)
+	bool		ExtSupportsRenderRect() const override { return true; }
 	bool		ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 	ExtPass		extPass;
 	void		UpdateConstants(), UpdateSettings(), RegisterConstants(), RegisterTextures();

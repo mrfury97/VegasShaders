@@ -539,6 +539,7 @@ namespace {
 		D3DXVECTOR4	CameraData;
 		D3DXMATRIX	Projection;
 		D3DXMATRIX	View;
+		D3DXVECTOR4	RenderScale;
 	};
 	// Bindings as SkinScattering.frag declares them (the sampler heap is set 0, binding 0). The sampler's heap index goes to the
 	// push block at offset 0, which DXVK fills in.
@@ -579,6 +580,11 @@ bool SkinScatteringEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9
 	uniforms.CameraData = TheRenderManager->CameraData;
 	uniforms.Projection = TheRenderManager->projMatrix;
 	uniforms.View = TheRenderManager->viewMatrix;
+	{
+		auto tbl = TheShaderManager->ConstantsTable.find("TESR_RenderScale");
+		if (tbl != TheShaderManager->ConstantsTable.end() && tbl->second) memcpy(&uniforms.RenderScale, tbl->second, sizeof(uniforms.RenderScale));
+		else uniforms.RenderScale = D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	}
 	if (FAILED(DxvkCompute::Extension()->UpdateBuffer(extUniforms, 0, sizeof(uniforms), &uniforms))) return false;
 
 	for (UINT pass = 0; pass < 2; pass++) {

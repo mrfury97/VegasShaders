@@ -273,14 +273,14 @@ void main() {
     // instead of letting dark diffuse albedo crush metal reflections down to dielectric 0.04.
     vec4 albedoSample = cb.wetFx2.z > 0.5 ? textureLod(sampler2D(t_albedo, POINT_S), ruv, 0.0) : vec4(0.0);
     bool albedoKnown = albedoSample.a > 0.5;
-    float baseDielectricF0 = !pixelWeapon ? DecodeGBufferF0(ruv) : 0.04;
+    float baseDielectricF0 = DecodeGBufferF0(ruv);
     if (SurfaceWetGloss > 0.0 || Wetness > 0.0) baseDielectricF0 = max(baseDielectricF0, 0.04 * max(SurfaceWetGloss, saturate(Wetness)));
     float dielectricF0 = mix(baseDielectricF0, 1.0, SurfaceMirror);
     vec3 f0 = vec3(dielectricF0);
     vec3 share;
     if (MaterialOn || GBufferOn || (pixelWeapon && SurfaceMetal > 0.0)) {
         vec3 metalF0;
-        if (pixelWeapon) {
+        if (pixelWeapon && !SurfaceRmaos) {
             // Non-PBR weapon diffuse textures paint dark blued steel at linear ~0.03-0.08 (sRGB 0.2-0.3); map perceptual
             // brightness into physical gunmetal conductor F0 [0.30..0.90] so blued steel reflects realistically without
             // turning black guns into chrome, while ReflMetalF0 still ramps smooth mirrors (< 0.06) to 0.95 silver.
@@ -325,7 +325,8 @@ void main() {
         float clearcoatAmt = clamp(cb.mirrorLamp.w, 0.0, 1.0) * smoothstep(0.05, 0.45, SurfaceMetal);
         if (clearcoatAmt > 0.001) baseFres *= CandyCoatAbsorption(metalF0, NdotV, clearcoatAmt, SurfaceMetal);
         vec3 coatShare = clearcoatAmt > 0.001 ? saturate(amount * EnvironmentFresnelF0(0.06, NdotV, vec3(0.04)) * clearcoatAmt) * saturate(reflection.a) : vec3(0.0);
-        vec3 baseShare = saturate(amount * baseFres) * saturate(reflection.a);
+        float weaponRoughFade = pixelWeapon ? (1.0 - smoothstep(0.60, 0.95, roughness)) : 1.0;
+        vec3 baseShare = saturate(amount * baseFres) * weaponRoughFade * saturate(reflection.a);
         share = saturate(baseShare * (1.0 - coatShare) + coatShare);
     }
     else {
@@ -368,9 +369,12 @@ void main() {
     //    dielectrics attenuate only the diffuse body up to diffuseCeiling while keeping direct specular highlights un-dimmed.
     float reflectAdd = AddOn ? clamp(cb.data4.z, 0.0, 1.0) : 0.0;
     float nonMetal = clamp(1.0 - SurfaceMetal, 0.0, 1.0);
-    vec3 diffuseCeiling = albedoKnown ? max(albedoSample.rgb * 2.0, vec3(0.25)) : vec3(1.0);
+    vec3 diffuseCeiling = albedoKnown ? max(albedoSample.rgb * (SurfaceRmaos ? 1.5 : 2.0), vec3(SurfaceRmaos ? 0.15 : 0.25)) : vec3(1.0);
     vec3 bodyToDim = mix(min(lin, diffuseCeiling), lin, SurfaceMirror);
-    float bodyFactor = pixelWeapon ? max(nonMetal, SurfaceMetal * 0.85) : mix(nonMetal, 1.0, SurfaceMirror);
+    float rmaosMetalReplace = (pixelWeapon ? (1.0 - smoothstep(0.40, 0.85, roughness)) * 0.60 : 0.0) * SurfaceMetal;
+    float bodyFactor = SurfaceRmaos
+        ? max(nonMetal, rmaosMetalReplace)
+        : (pixelWeapon ? max(nonMetal, SurfaceMetal * 0.85) : mix(nonMetal, 1.0, SurfaceMirror));
     vec3 attenShare = share * bodyFactor * (1.0 - reflectAdd);
     lin = (lin - bodyToDim * attenShare) + reflected * share;
     if (SurfaceMirror > 0.0) lin += FlashlightHighlight(surfPos, N, roughness, f0) * attenShare;

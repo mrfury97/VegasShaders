@@ -13,6 +13,7 @@
 #include "UnsavedSettings.h"	// 2026-11-25 (unsaved marks): the settings not saved yet, marked in bold with " *"
 #include "Branding.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects: the status bar lists the parts switched off
+#include "EffectStatus.h"
 #include "InstallCheck.h"	// 2026-11-03: the install self-check (main-menu notice, Help > Install check, Copy bug report)
 #include "DeepProbe.h"		// UNOFFICIAL 2026-11-21: Help > Performance probe... (full DLL/script/draw census)
 #include "RtCore.h"			// 2026-11-05: the Ray tracing page's status lines
@@ -37,7 +38,6 @@
 #include "ShaderFallback.h"	// UNOFFICIAL 2026-11-12 ShaderFallback: its notices, shown with the install check's
 #include "SunFadeDeferred.h"	// UNOFFICIAL 2026-11-15 fd-smoothsun (the SunSmoothing notes)
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16: shelved effects have no page, row or search entry in a release build
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-16: keys the deferred renderer sets (on or off) show greyed, at the value in effect
 #include "CompileProgress.h"	// UNOFFICIAL 2026-11-20: close startup shader-compile overlay once the first frame arrives
 #include "DistantLandProto.h"	// UNOFFICIAL 2026-11-25 device reset release
 #include "DistantLandTerrain.h"	// UNOFFICIAL 2026-11-25 device reset release
@@ -647,6 +647,7 @@ void ImGuiManager::Render() {
 	ImGui_ImplDX9_RenderDrawData(ImGui::GetDrawData());
 }
 
+<<<<<<< HEAD
 // ---- What the menu leaves out --------------------------------------------------------------------------------------------
 
 // Sections never listed: the weather mode, the status pages, the New-in-patch data and the developer page (its one switch is
@@ -9140,6 +9141,11 @@ static void DrawTestResetPopup() {
 	ImGui::EndPopup();
 }
 
+=======
+#include "imgui/ImGuiSettingsUI.inl"
+#include "imgui/ImGuiPages.inl"
+#include "imgui/ImGuiSidebarAndTools.inl"
+>>>>>>> v1.1.6-test2
 // ---- Menu bar ------------------------------------------------------------------------------------------------------------
 
 static const ImVec4 kWarnAmber(1.0f, 0.75f, 0.2f, 1.0f);
@@ -9429,6 +9435,21 @@ static void DrawStatusBar() {
 			WrappedTooltip(all.c_str());
 		}
 	}
+	if (const long compileFails = EffectStatus::CompileFailureCount(); compileFails > 0) {
+		static const ImVec4 kErrRed(1.0f, 0.35f, 0.35f, 1.0f);
+		sprintf_s(text, "%ld shader%s failed to compile", compileFails, compileFails == 1 ? "" : "s");
+		StatusItem(&kErrRed, text);
+		if (ImGui::IsItemHovered()) {
+			std::string tip;
+			const std::vector<std::string> items = EffectStatus::CompileFailureItems();
+			const size_t limit = (std::min)(items.size(), (size_t)16);
+			for (size_t i = 0; i < limit; i++) tip += (tip.empty() ? "" : "\n") + items[i];
+			if (items.size() > limit) tip += "\n... (" + std::to_string(items.size() - limit) + " more)";
+			if (!tip.empty()) tip += "\n\n";
+			tip += "Check VegasShaders-Logs for full details.";
+			WrappedTooltip(tip.c_str());
+		}
+	}
 	if (MenuTools::EncabActive()) {
 		static const ImVec4 mint(0.4f, 1.0f, 0.7f, 1.0f);
 		StatusItem(&mint, "[Retro-Encab. active]");
@@ -9499,13 +9520,11 @@ static void DrawMenuFrame() {
 	if (InterfaceManager->IsActive(Menu::MenuType::kMenuType_Main)) {	// the game's main menu: only the hint
 		RenderMainMenuToast();
 		RenderTwinDllWarning(true);
-		RenderDxvkConflictWarning(true);
 		RenderInstallNotice(true);
 		return;
 	}
 	RenderProfilerIndicator();
 	RenderTwinDllWarning(false);
-	RenderDxvkConflictWarning(false);
 	RenderInstallNotice(false);
 	bool reopenProbe = false;
 	if (!InterfaceManager->IsActive(Menu::MenuType::kMenuType_Loading) && DeepProbe::ConsumeJustFinished(reopenProbe)) {

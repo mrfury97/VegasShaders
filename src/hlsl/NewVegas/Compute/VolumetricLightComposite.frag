@@ -24,9 +24,11 @@ vec2 MarchAirAt(vec2 at, float depth) {
     float tolerance = max(depth01 * 0.04, 0.00002);
     vec2 air = vec2(0.0);
     float weights = 1.0e-5;
+    vec2 lo = 0.5 * LowTexel;
+    vec2 hi = max(cb.renderScale.xy - 0.5 * LowTexel, lo);
     for (int y = 0; y < 2; y++) {
         for (int x = 0; x < 2; x++) {
-            vec4 tap = POINT_LOD(t_buffer, (base + vec2(x, y) + 0.5) * LowTexel);
+            vec4 tap = POINT_LOD(t_buffer, clamp((base + vec2(x, y) + 0.5) * LowTexel, lo, hi));
             float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
             weight /= 1.0 + abs(tap.b - depth01) / tolerance;
             air += tap.rg * weight;
@@ -47,10 +49,12 @@ vec2 MsaaAirMix(vec2 at, float depth, vec2 air) {
 }
 
 void main() {
-    vec4 color = POINT_LOD(t_rendered, uv);
-    float depth = readDepthLod(uv);
-    if (MsaaEdgeDebugOn()) { o_color = MsaaEdgeDebug(uv, depth, color.rgb); return; }
-    vec2 air = MarchAirAt(uv, depth);
-    if (MsaaEdgeFixOn()) air = MsaaAirMix(uv, depth, air);
+    vec2 rr = cb.reciprocalResolution.xy;
+    vec2 ruv = clamp(uv * cb.renderScale.xy, 0.5 * rr, max(cb.renderScale.xy - 0.5 * rr, 0.5 * rr));
+    vec4 color = POINT_LOD(t_rendered, ruv);
+    float depth = readDepthLod(ruv);
+    if (MsaaEdgeDebugOn()) { o_color = MsaaEdgeDebug(ruv, depth, color.rgb); return; }
+    vec2 air = MarchAirAt(ruv, depth);
+    if (MsaaEdgeFixOn()) air = MsaaAirMix(ruv, depth, air);
     o_color = CompositeAir(uv, color, air);
 }

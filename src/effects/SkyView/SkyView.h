@@ -29,6 +29,7 @@ public:
 	void	RenderTable(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget);
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): all five techniques as Vulkan passes (src\hlsl\NewVegas\Compute\SkyView*.frag, SkyTrans, SkyMS);
 	// each draws into the surface Render is given (a table), so RenderTable is unchanged. Render calls it first.
+	bool	ExtSupportsRenderRect() const override { return true; }
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 
 	ExtPass	extPass[5];

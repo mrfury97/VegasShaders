@@ -29,6 +29,7 @@ public:
 	void UpdateSettings();
 	void UpdateConstants();
 	// UNOFFICIAL 2026-10-23 (NVR DXVK): the pass as src\hlsl\NewVegas\Compute\LUT.frag (EffectRecord::ExtRender)
+	bool	ExtSupportsRenderRect() const override { return true; }
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 	ExtPass	extPass;
 	bool ShouldRender() override;

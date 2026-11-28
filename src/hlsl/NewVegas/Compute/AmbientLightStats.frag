@@ -16,7 +16,8 @@ layout(location = 0) out vec4 o_color;
 
 const vec2 StatsSize = vec2(16.0, 9.0);
 
-vec3 StatsAt(vec2 uv) {
+vec3 StatsAt(vec2 s01) {
+    vec2 uv = screenToRect(s01);
     vec3 lin = linearize(linearLod(t_source, uv).rgb);
     float depth = readDepthLod(t_depth, uv);
     if (depth < NearFade || depth > DrawDistance || IsViewModel(t_viewModel, uv)) return vec3(luma(lin), 0.0, 0.0);
@@ -24,7 +25,7 @@ vec3 StatsAt(vec2 uv) {
     ao = mix(ao, 1.0, saturate((luma(lin) - BrightFade) * 3.0));
     vec3 albedo = SurfaceColour(lin);
     vec3 normal = normalize(GetWorldNormalLod(t_normals, uv));
-    vec3 bounce = GridBounce(t_gridAccum, t_gridAccumColor, toWorld(uv) * depth, normal) * (cb.gridData.x * ao) * albedo;
+    vec3 bounce = GridBounce(t_gridAccum, t_gridAccumColor, toWorld(s01) * depth, normal) * (cb.gridData.x * ao) * albedo;
     vec3 taken = (1.0 - ao) * min(lin, albedo * cb.alScene.rgb);
     return vec3(luma(lin), luma(taken), luma(bounce));
 }

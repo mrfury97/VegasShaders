@@ -208,8 +208,8 @@ public:
 	float	WetReach();
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): every technique as src\hlsl\NewVegas\Compute\Reflections*.frag (EffectRecord::ExtRender)
-	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* Target, IDirect3DSurface9* Rendered, UINT techniqueIndex, bool ClearTarget, IDirect3DSurface9* Source) override;
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	bool	ExtSupportsRenderRect() const override { return true; }
 
 private:
 	ExtPass				extPasses[8];		// by technique (Blur X and Blur Y share [2])

@@ -1,0 +1,394 @@
+// UNOFFICIAL 2026-11-27 WorldSurface (core/WorldSurface.h): Vulkan compute port of Shaders/WorldSurface.hlsl.
+// Reads t_albedoCopy (single StretchRect copy for +/-2 px neighbor relief), t_normals, t_depth, and 3D t_noise,
+// and RMWs i_scene, i_albedo, i_material in-place (eliminating 2 full-res FP16 copies, the 3-MRT D3D9 pass, and StateBlock).
+// Compile: glslangValidator -V --target-env vulkan1.1 -o WorldSurface.spv WorldSurface.comp
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_albedoCopy; // CopyTex[1]: pre-pass COLOR1 G-buffer albedo (read for +/-2 px neighbors)
+layout(set = 1, binding = 1) uniform texture2D t_normals;    // TESR_CapturedNormalsBuffer: rg smooth normal, b camera distance
+layout(set = 1, binding = 2) uniform texture2D t_depth;      // TESR_DeferredDepthLinear or TESR_DeferredDepth (FP32 exact position)
+layout(set = 1, binding = 3) uniform texture3D t_noise;      // Data\Textures\Effects\NoiseVolume.dds
+layout(set = 1, binding = 4, rgba16f) uniform image2D i_scene;    // Scene HDR RT0 (unbound from RT0 during dispatch)
+layout(set = 1, binding = 5, rgba16f) uniform image2D i_albedo;   // TESR_AlbedoBuffer
+layout(set = 1, binding = 6, rgba16f) uniform image2D i_material; // TESR_MaterialBuffer (GBufferV2)
+
+layout(push_constant) uniform Push {
+    uint pointSampler; // POINT, CLAMP (depth)
+    uint noiseSampler; // LINEAR, MIPMAP_LINEAR, WRAP (3D noise)
+    uint pad0;
+    uint pad1;
+} pc;
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 viewport;   // 0: box.left, box.top, box.w, box.h
+    ivec4 texSize;    // 1: t.Width, t.Height, 0, 0
+    vec4  cam[6];     // 2..7: DeferredDepth::Frame[0..5]
+    vec4  world;      // 8: xyz = camPos, w = isExterior (1/0)
+    vec4  weights;    // 9: x = detail, y = dust, z = rust, w = moss
+    vec4  water;      // 10: x = waterHeight - camPos.z, y = waterline, z = rainWetness, w = DebugView
+    vec4  fade;       // 11: x = fadeStart, y = fadeEnd, z = detailEnd, w = isSnow (1/0)
+    vec4  gamma;      // 12: x = gamma, y = 1/gamma, z = isLinear (1/0), w = depthMode
+    vec4  ambient;    // 13: xyz = flat outdoor ambient, w = skyScale
+    vec4  skySH[9];   // 14..22: TESR_SkyIrradianceObjects[0..8]
+} cb;
+
+vec3 WSDecode(vec2 e) {
+    vec3 n = vec3(e, 1.0 - abs(e.x) - abs(e.y));
+    const float t = clamp(-n.z, 0.0, 1.0);
+    n.xy += vec2(n.x >= 0.0 ? -t : t, n.y >= 0.0 ? -t : t);
+    return normalize(n);
+}
+
+vec2 WSEncode(vec3 n) {
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1.0e-6);
+    vec2 e = n.xy;
+    if (n.z < 0.0) e = (1.0 - abs(n.yx)) * vec2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return e;
+}
+
+vec3 WSCoat(vec3 coatCol, float cLuma, float preserve) {
+    const float coatLuma = max(dot(coatCol, vec3(0.2126, 0.7152, 0.0722)), 0.05);
+    const float det = clamp(cLuma / coatLuma, 0.35, 1.85);
+    return coatCol * mix(1.0, det, preserve);
+}
+
+float DDViewZ(float device, float dd2w, float dd4w) {
+    float den = device - dd2w;
+    den = abs(den) < 1.0e-12 ? (dd4w < 0.0 ? -1.0e-12 : 1.0e-12) : den;
+    return dd4w / den;
+}
+
+vec3 DDRay(vec2 vpos) {
+    const vec2 local = (vpos - cb.cam[3].zw) * cb.cam[3].xy;
+    const vec2 ndc = vec2(local.x * 2.0 - 1.0, 1.0 - local.y * 2.0) - cb.cam[5].xy;
+    return cb.cam[2].xyz + cb.cam[0].xyz * (ndc.x * cb.cam[0].w) + cb.cam[1].xyz * (ndc.y * cb.cam[1].w);
+}
+
+void main() {
+    const ivec2 localPx = ivec2(gl_GlobalInvocationID.xy);
+    if (localPx.x >= cb.viewport.z || localPx.y >= cb.viewport.w) return;
+    const ivec2 px = cb.viewport.xy + localPx;
+
+    const vec4 albedo = texelFetch(t_albedoCopy, px, 0);
+    if (albedo.a <= 1.0001) return; // deferred pixels only (forward/sky keep their own lighting)
+
+    const vec4 m = imageLoad(i_material, px);
+    if (m.r <= 0.5) return; // written G-buffer pixel
+
+    float model = floor(m.r + 0.01);
+    const float specular = model > 15.5 ? 16.0 : 0.0;
+    model -= specular;
+    const bool isStatic = abs(model - 1.0) < 0.5;
+    const bool isLand = abs(model - 4.0) < 0.5;
+    if (!isStatic && !isLand) return;
+
+    const vec4 normals = texelFetch(t_normals, px, 0);
+    const vec2 vpos = vec2(px);
+    const vec3 ray = DDRay(vpos);
+    const float rayInvLen = inversesqrt(max(dot(ray, ray), 1.0e-8));
+    const float storedZ = normals.b * rayInvLen;
+    float viewZ = storedZ;
+    if (cb.gamma.w > 0.5) {
+        const float rawDepth = textureLod(sampler2D(t_depth, NVR_SAMPLER(pc.pointSampler)), (vpos + 0.5) * cb.cam[5].zw, 0.0).x;
+        const float candZ = cb.gamma.w > 1.5 ? DDViewZ(rawDepth, cb.cam[2].w, cb.cam[4].w) : rawDepth;
+        if (abs(candZ - storedZ) <= storedZ * (1.0 / 256.0) + 1.0) viewZ = candZ;
+    }
+
+    const vec3 P = ray * viewZ;
+    const float dist = length(P);
+    if (dist >= cb.fade.y) return;
+    const float distFade = 1.0 - smoothstep(cb.fade.x, cb.fade.y, dist);
+    if (distFade <= 1.0e-4) return;
+    const vec3 W = cb.world.xyz + P;
+
+    const float origMetal = saturate((m.r - floor(m.r + 0.004)) / 0.49);
+    const float origRough = m.b < -1.5 ? -2.0 - m.b : (m.b < 0.0 ? 1.0 : m.b);
+    const bool hasN = abs(m.g) <= 1.001;
+    const vec3 Ns = WSDecode(normals.rg);
+    vec3 N = hasN ? WSDecode(m.ga) : Ns;
+
+    float metal = origMetal;
+    float rough = origRough;
+    vec3 a = albedo.rgb;
+    const vec3 kLumaW = vec3(0.2126, 0.7152, 0.0722);
+    const float cLuma = dot(albedo.rgb, kLumaW);
+
+    // Screen-space 4-tap depth-guarded edge, concavity, and texture relief analysis
+    const ivec2 boxMin = cb.viewport.xy;
+    const ivec2 boxMax = cb.viewport.xy + cb.viewport.zw - ivec2(1);
+    const ivec2 pxL = clamp(px - ivec2(2, 0), boxMin, boxMax);
+    const ivec2 pxR = clamp(px + ivec2(2, 0), boxMin, boxMax);
+    const ivec2 pxU = clamp(px - ivec2(0, 2), boxMin, boxMax);
+    const ivec2 pxD = clamp(px + ivec2(0, 2), boxMin, boxMax);
+
+    const vec4 nL = texelFetch(t_normals, pxL, 0);
+    const vec4 nR = texelFetch(t_normals, pxR, 0);
+    const vec4 nU = texelFetch(t_normals, pxU, 0);
+    const vec4 nD = texelFetch(t_normals, pxD, 0);
+    const vec4 aL = texelFetch(t_albedoCopy, pxL, 0);
+    const vec4 aR = texelFetch(t_albedoCopy, pxR, 0);
+    const vec4 aU = texelFetch(t_albedoCopy, pxU, 0);
+    const vec4 aD = texelFetch(t_albedoCopy, pxD, 0);
+
+    const float zTol = dist * 0.035 + 5.0;
+    const float wL = 1.0 - smoothstep(zTol * 0.5, zTol, abs(nL.b - normals.b));
+    const float wR = 1.0 - smoothstep(zTol * 0.5, zTol, abs(nR.b - normals.b));
+    const float wU = 1.0 - smoothstep(zTol * 0.5, zTol, abs(nU.b - normals.b));
+    const float wD = 1.0 - smoothstep(zTol * 0.5, zTol, abs(nD.b - normals.b));
+    const vec4 wVec = vec4(wL, wR, wU, wD);
+    const float wSum = max(dot(wVec, vec4(1.0)), 1.0e-4);
+
+    const vec4 dzNbr = vec4(normals.b) - vec4(nL.b, nR.b, nU.b, nD.b);
+    const vec4 contactVec = smoothstep(0.6, 6.0, dzNbr) * (1.0 - smoothstep(14.0, 34.0, dzNbr));
+    const float contact = dot(contactVec, vec4(1.0)) * 0.45;
+
+    const vec3 NsL = WSDecode(nL.rg);
+    const vec3 NsR = WSDecode(nR.rg);
+    const vec3 NsU = WSDecode(nU.rg);
+    const vec3 NsD = WSDecode(nD.rg);
+    const float curvX = dot(NsL - NsR, cb.cam[0].xyz) * min(wL, wR);
+    const float curvY = dot(NsD - NsU, cb.cam[1].xyz) * min(wU, wD);
+    const float curv = curvX + curvY;
+    const float geoCrevice = saturate(max(curv * 2.2, 0.0) + contact);
+    const float geoEdge = saturate(-curv * 2.2);
+
+    const vec4 defNbr = vec4(
+        aL.a > 1.0001 ? 1.0 : 0.0,
+        aR.a > 1.0001 ? 1.0 : 0.0,
+        aU.a > 1.0001 ? 1.0 : 0.0,
+        aD.a > 1.0001 ? 1.0 : 0.0);
+    const float validNbr = dot(defNbr, wVec) / wSum;
+    const float boundaryFeather = mix(0.35, 1.0, validNbr);
+
+    const vec4 aDefW = wVec * defNbr;
+    const float aDefSum = dot(aDefW, vec4(1.0));
+    const float avgLuma = aDefSum > 1.0e-4
+        ? (dot(aL.rgb, kLumaW) * aDefW.x + dot(aR.rgb, kLumaW) * aDefW.y + dot(aU.rgb, kLumaW) * aDefW.z + dot(aD.rgb, kLumaW) * aDefW.w) / aDefSum
+        : cLuma;
+    const float relRelief = (avgLuma - cLuma) / max(avgLuma, 0.08);
+    const float localDip = saturate(relRelief * 2.2);
+    const float localHigh = saturate(-relRelief * 2.0);
+
+    const float up = saturate(N.z * 1.25 + 0.10);
+    const float bumpCrev = saturate((1.0 - dot(N, Ns)) * 5.0);
+    const float allCrevice = saturate(max(bumpCrev, geoCrevice) + localDip * 0.45);
+    const float exposedEdge = saturate(geoEdge + localHigh * 0.35);
+
+    // Orthonormal world-space rotations + domain-warped hardware 3D noise
+    const vec3 w1 = vec3(0.80 * W.x - 0.60 * W.y, 0.60 * W.x + 0.80 * W.y, W.z);
+    const vec3 w2 = vec3(0.60 * W.x + 0.48 * W.y - 0.64 * W.z, -0.80 * W.x + 0.36 * W.y - 0.48 * W.z, 0.80 * W.y + 0.60 * W.z);
+    const vec3 w3 = vec3(-0.36 * W.x + 0.80 * W.y + 0.48 * W.z, 0.48 * W.x + 0.60 * W.y - 0.64 * W.z, -0.80 * W.x - 0.60 * W.z);
+
+    const vec4 nWarp  = textureLod(sampler3D(t_noise, NVR_SAMPLER(pc.noiseSampler)), w1 * 0.00115, 0.0);
+    const vec4 nBroad = textureLod(sampler3D(t_noise, NVR_SAMPLER(pc.noiseSampler)), w2 * 0.00240 + (nWarp.rga - 0.5) * 0.16 + vec3(0.17, 0.43, 0.61), 0.0);
+    const vec4 nMid   = textureLod(sampler3D(t_noise, NVR_SAMPLER(pc.noiseSampler)), w3 * 0.00950 + (nBroad.rab - 0.5) * 0.12 + vec3(0.53, 0.11, 0.79), 0.0);
+
+    const float nCoarse = nBroad.g * 0.65 + nWarp.g * 0.35;
+    const float nBillow = nBroad.b * 0.60 + nMid.b * 0.40;
+    const float nMidFbm = nMid.g;
+    const float nFine   = nMid.r * 0.45 + nMid.g * 0.35 + nMid.a * 0.20;
+
+    const float detailFade = (1.0 - smoothstep(cb.fade.z * 0.30, cb.fade.z, dist)) * distFade;
+    vec4 nMicro = vec4(0.5);
+    if (detailFade > 0.01) {
+        const float microLod = clamp(log2(max(dist * 0.0075, 1.0)), 0.0, 3.0);
+        nMicro = textureLod(sampler3D(t_noise, NVR_SAMPLER(pc.noiseSampler)), w1 * 0.052 + (nMid.rga - 0.5) * 0.08 + vec3(0.29, 0.67, 0.41), microLod);
+    }
+    const float g0 = nMicro.g;
+    const float g1 = nMicro.a * 0.55 + nMicro.b * 0.45;
+
+    // 1. High-frequency micro-detail grain & roughness breakup
+    float detailVis = 0.0;
+    if (cb.weights.x > 0.001 && detailFade > 0.01) {
+        const float detailAmt = saturate(cb.weights.x) * detailFade * boundaryFeather;
+        const float normalAmp = detailAmt * (isLand ? 0.26 : mix(0.20, 0.045, metal));
+        N = normalize(N + vec3(g0 - 0.5, g1 - 0.5, (nFine - 0.5) * 0.6) * normalAmp);
+        rough = saturate(rough + (g0 - 0.5) * 0.11 * detailAmt + (nMidFbm - 0.5) * 0.06 * detailAmt - geoEdge * metal * 0.12 * detailAmt);
+        a *= 1.0 + (g1 - 0.5) * mix(0.08, 0.025, metal) * detailAmt;
+        detailVis = detailAmt;
+    }
+
+    // 2. Waterline height-band masks
+    float wetBand = 0.0, mudW = 0.0, algaeW = 0.0, splashZone = 0.0;
+    if (cb.water.y > 0.001 && cb.water.x > -50000.0) {
+        const float hWater = P.z - cb.water.x + (nCoarse - 0.5) * 18.0 + (nMidFbm - 0.5) * 7.0;
+        if (hWater > -25.0 && hWater < 95.0) {
+            const float wScale = saturate(cb.water.y) * distFade;
+            wetBand = smoothstep(-25.0, -2.0, hWater) * (1.0 - smoothstep(10.0, 34.0, hWater)) * wScale;
+            splashZone = smoothstep(0.0, 18.0, hWater) * (1.0 - smoothstep(40.0, 85.0, hWater)) * wScale;
+
+            const float mudBand = smoothstep(6.0, 18.0, hWater) * (1.0 - smoothstep(38.0, 62.0, hWater)) * wScale;
+            mudW = mudBand * smoothstep(0.32, 0.68, nMidFbm * 0.50 + nFine * 0.30 + allCrevice * 0.25) * (1.0 - exposedEdge * 0.45);
+
+            const float algaeBand = smoothstep(14.0, 32.0, hWater) * (1.0 - smoothstep(65.0, 92.0, hWater)) * wScale;
+            const float algaeSeat = saturate(0.18 + 0.50 * up + 0.55 * allCrevice) * (1.0 - exposedEdge * 0.65);
+            algaeW = algaeBand * algaeSeat * smoothstep(0.42, 0.78, nCoarse * 0.34 + nBillow * 0.36 + nMidFbm * 0.30);
+        }
+    }
+
+    // 3. Mojave crevice dust & ledge silt
+    float dustW = 0.0;
+    if (cb.weights.y > 0.001) {
+        const float dustEnv = cb.world.w > 0.5 ? (mix(1.0, 0.35, cb.fade.w) * (isLand ? 0.65 : 0.90)) : 0.45;
+        const float dustSeat = cb.world.w > 0.5 ? max(allCrevice * 1.15, up * 0.70) : (allCrevice * 1.30 + up * 0.25);
+        const float dustBreak = nCoarse * 0.38 + nMidFbm * 0.30 + nFine * 0.20 + g0 * 0.12;
+        const float dustMask = smoothstep(0.46, 0.78, dustBreak + dustSeat * 0.34 - 0.16) * (1.0 - exposedEdge * 0.65);
+        const float metalDustGate = mix(1.0, saturate(0.20 + 0.80 * max(allCrevice, up)), metal);
+        dustW = saturate(cb.weights.y * 0.72) * dustEnv * dustMask * metalDustGate * distFade;
+    }
+
+    // 4. Exposed metal tarnish & pitted rust
+    float tarnishW = 0.0, rustW = 0.0;
+    if (cb.weights.z > 0.001 && isStatic && metal > 0.28) {
+        const float alreadyRusty = smoothstep(0.035, 0.14, albedo.r - albedo.b) * smoothstep(0.015, 0.09, albedo.r - albedo.g * 0.68);
+        const float cleanMetalGate = 1.0 - alreadyRusty * 0.85;
+        const float rustSeat = saturate(allCrevice * 0.78 + geoEdge * 0.32 + up * 0.24 + splashZone * 0.45);
+        const float rustZone = smoothstep(0.40, 0.76, nCoarse * 0.45 + nBillow * 0.25 + nMidFbm * 0.30 + rustSeat * 0.45 - 0.26);
+        const float rustEdge = nFine * 0.44 + g0 * 0.36 + g1 * 0.20;
+        const float rustFlake = smoothstep(0.48, 0.68, rustZone * 0.72 + rustEdge * 0.46 - 0.18);
+        const float rustPit = smoothstep(0.64, 0.80, g0 * 0.55 + g1 * 0.45) * rustZone;
+        const float rustCarrier = saturate(rustFlake * 0.85 + rustPit * 0.45);
+        const float rustGate = smoothstep(0.28, 0.62, metal) * saturate(cb.weights.z) * cleanMetalGate * distFade;
+        tarnishW = rustGate * smoothstep(0.18, 0.65, rustZone);
+        rustW = rustGate * rustCarrier;
+    }
+
+    // 5. Patchy moss & lichen on shaded/upward rocks, ruins, and crevices (outdoors)
+    float mossW = 0.0;
+    if (cb.weights.w > 0.001 && cb.world.w > 0.5) {
+        const float mossSeat = saturate(up * 0.60 + allCrevice * 0.90) * saturate(0.55 - 0.35 * N.y) * (1.0 - metal * 0.90) * (1.0 - exposedEdge * 0.70);
+        const float mossBreak = smoothstep(0.48, 0.78, nBillow * 0.38 + nCoarse * 0.28 + nMidFbm * 0.22 + g0 * 0.12 + mossSeat * 0.25 - 0.22);
+        const float rainBoost = 1.0 + 0.35 * cb.water.z + 0.30 * wetBand;
+        mossW = saturate(cb.weights.w * rainBoost) * mossSeat * mossBreak * distFade;
+    }
+
+    // Cross-effect competition, boundary feathering, and deposit normalization
+    dustW *= (1.0 - wetBand * 0.90) * (1.0 - mossW * 0.85) * (1.0 - mudW * 0.80) * (1.0 - algaeW * 0.85);
+    mossW *= (1.0 - wetBand * 0.50) * (1.0 - rustW * 0.65);
+    rustW *= (1.0 - algaeW * 0.65) * (1.0 - mudW * 0.70);
+
+    dustW *= boundaryFeather;
+    tarnishW *= boundaryFeather;
+    rustW *= boundaryFeather;
+    mossW *= boundaryFeather;
+    mudW *= boundaryFeather;
+    algaeW *= boundaryFeather;
+    wetBand *= boundaryFeather;
+
+    const float totalW = dustW + rustW + mossW + mudW + algaeW;
+    const float invTotal = totalW > 1.0 ? (1.0 / totalW) : 1.0;
+    dustW *= invTotal;
+    rustW *= invTotal;
+    mossW *= invTotal;
+    mudW *= invTotal;
+    algaeW *= invTotal;
+
+    // Composite tarnish patina halo first
+    if (tarnishW > 1.0e-3) {
+        a *= mix(vec3(1.0), vec3(0.84, 0.80, 0.76), tarnishW * 0.45);
+        rough = mix(rough, max(rough, 0.62), tarnishW * 0.55);
+        metal *= 1.0 - tarnishW * 0.30;
+    }
+
+    // Composite normalized weathering deposits
+    if (dustW > 1.0e-3) {
+        const vec3 outDustCol = mix(vec3(0.30, 0.23, 0.15), vec3(0.42, 0.33, 0.22), nFine);
+        const vec3 rawDustCol = cb.world.w > 0.5 ? outDustCol : vec3(0.22, 0.21, 0.19);
+        const vec3 dustCol = WSCoat(rawDustCol, cLuma, 0.45);
+        a = mix(a, dustCol, dustW * 0.42);
+        rough = mix(rough, 0.90, dustW * 0.72);
+        metal *= 1.0 - dustW * 0.65;
+        N = normalize(mix(N, Ns, dustW * 0.25));
+    }
+
+    if (rustW > 1.0e-3) {
+        const vec3 rawRustCol = mix(vec3(0.075, 0.030, 0.014), vec3(0.175, 0.068, 0.024), saturate(g0 * 0.50 + nFine * 0.50));
+        const vec3 rustCol = WSCoat(rawRustCol, cLuma, 0.50);
+        a = mix(a, rustCol, rustW * 0.48);
+        rough = mix(rough, 0.88, rustW * 0.82);
+        metal *= 1.0 - rustW * 0.78;
+        N = normalize(N + vec3(g0 - 0.5, g1 - 0.5, 0.0) * (0.24 * rustW));
+    }
+
+    if (mudW > 1.0e-3) {
+        const vec3 mudCol = WSCoat(vec3(0.055, 0.042, 0.026), cLuma, 0.40);
+        a = mix(a, mudCol, mudW * 0.68);
+        rough = mix(rough, 0.58, mudW * 0.65);
+        metal *= 1.0 - mudW * 0.80;
+    }
+
+    if (algaeW > 1.0e-3) {
+        const vec3 algaeCol = WSCoat(vec3(0.075, 0.125, 0.042), cLuma, 0.45);
+        a = mix(a, algaeCol, algaeW * 0.60);
+        rough = mix(rough, 0.78, algaeW * 0.70);
+        metal *= 1.0 - algaeW * 0.80;
+    }
+
+    if (mossW > 1.0e-3) {
+        const vec3 rawMossCol = mix(vec3(0.08, 0.125, 0.042), vec3(0.16, 0.20, 0.072), nFine);
+        const vec3 mossCol = WSCoat(rawMossCol, cLuma, 0.45);
+        a = mix(a, mossCol, mossW * 0.72);
+        rough = mix(rough, 0.88, mossW * 0.85);
+        metal *= 1.0 - mossW * 0.90;
+        N = normalize(N + vec3(nFine - 0.5, nMidFbm - 0.5, 0.0) * (0.22 * mossW));
+    }
+
+    if (wetBand > 1.0e-3) {
+        a *= mix(1.0, mix(0.48, 0.85, metal), wetBand * 0.90);
+        rough = mix(rough, 0.09, wetBand * 0.90);
+        N = normalize(mix(N, Ns, wetBand * 0.35));
+    }
+
+    const float dust = dustW;
+    const float rust = saturate(rustW + tarnishW * 0.25);
+    const float moss = mossW;
+    const float waterlineVis = saturate(max(wetBand, max(mudW, algaeW)));
+
+    // Ambient re-lighting on i_scene + DebugView
+    const float chg = dot(abs(a - albedo.rgb), vec3(1.0)) + abs(metal - origMetal) + abs(rough - origRough);
+    if (chg <= 1.0e-4 && cb.water.w <= 0.5 && !(hasN && detailVis > 1.0e-4)) return;
+
+    vec4 scene = vec4(0.0);
+    float outSceneChg = 0.0;
+    if (chg > 1.0e-4 || cb.water.w > 0.5) {
+        scene = imageLoad(i_scene, px);
+        vec3 outScene = scene.rgb;
+        if (chg > 1.0e-4) {
+            const vec3 sLin = cb.gamma.z > 0.5 ? max(scene.rgb, vec3(0.0)) : pow(max(scene.rgb, vec3(0.0)), vec3(cb.gamma.x));
+            const vec3 shE = cb.skySH[0].rgb + cb.skySH[1].rgb * Ns.y + cb.skySH[2].rgb * Ns.z + cb.skySH[3].rgb * Ns.x
+                + cb.skySH[4].rgb * (Ns.x * Ns.y) + cb.skySH[5].rgb * (Ns.y * Ns.z) + cb.skySH[6].rgb * (3.0 * Ns.z * Ns.z - 1.0)
+                + cb.skySH[7].rgb * (Ns.x * Ns.z) + cb.skySH[8].rgb * (Ns.x * Ns.x - Ns.y * Ns.y);
+            const vec3 skyTerm = pow(max(shE, vec3(0.0)), vec3(cb.gamma.x * 0.5)) * cb.ambient.w;
+            vec3 ambE = cb.ambient.rgb + skyTerm;
+            const vec3 oDiff = albedo.rgb * (1.0 - origMetal);
+            const vec3 nDiff = a * (1.0 - metal);
+            if (max(ambE.r, max(ambE.g, ambE.b)) < 1.0e-4) {
+                const vec3 est = sLin / max(oDiff, vec3(0.06));
+                ambE = clamp(est, vec3(0.015), vec3(0.35));
+            }
+            const float metFade = origMetal > 0.02 ? mix(1.0, saturate(metal / origMetal), 0.65 * origMetal) : 1.0;
+            const float glossGain = saturate(origRough - rough) * (1.0 - rough);
+            const vec3 skySheen = skyTerm * (0.14 * glossGain * (0.4 + 0.6 * saturate(Ns.z)));
+            const vec3 newLin = max(sLin * metFade + ambE * (nDiff - oDiff), vec3(0.0)) + skySheen;
+            outScene = cb.gamma.z > 0.5 ? newLin : pow(max(newLin, vec3(0.0)), vec3(cb.gamma.y));
+            outSceneChg = 1.0;
+        }
+        if (cb.water.w > 0.5) {
+            const vec3 dbg = vec3(rust + dust * 0.85, moss + dust * 0.72, waterlineVis) + detailVis * 0.14;
+            outScene = mix(scene.rgb * 0.25, dbg, saturate(max(max(rust, moss), max(waterlineVis, max(dust, detailVis * 0.5)))));
+            outSceneChg = 1.0;
+        }
+        if (outSceneChg > 0.5) {
+            imageStore(i_scene, px, vec4(outScene, scene.a));
+        }
+    }
+
+    const vec2 e = hasN ? WSEncode(N) : m.ga;
+    imageStore(i_albedo, px, vec4(a, albedo.a));
+    imageStore(i_material, px, vec4(model + specular + 0.49 * saturate(metal), e.x, saturate(rough), e.y));
+}

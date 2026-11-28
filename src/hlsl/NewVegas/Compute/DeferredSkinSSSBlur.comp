@@ -1,0 +1,144 @@
+// UNOFFICIAL 2026-11-26: Vulkan Compute DeferredSkinSSS blur pass (Shaders/DeferredSkinSSS.hlsl SSS_BLUR).
+// Filters prepared subsurface light from t_light into i_scene in place over [vp.xy, vp.xy + vp.zw).
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_light;      // SSS prep output
+layout(set = 1, binding = 1) uniform texture2D t_albedo;     // COLOR1
+layout(set = 1, binding = 2) uniform texture2D t_spec;       // skin highlight target
+layout(set = 1, binding = 3) uniform texture2D t_material;   // COLOR2: r model
+layout(set = 1, binding = 4, rgba16f) uniform image2D i_scene;   // HDR scene RT0
+
+layout(push_constant) uniform Push {
+    uint flags;
+    uint pad[3];
+} pc;
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 viewport;        // 0: vp.X, vp.Y, vp.Width, vp.Height
+    vec4  invTargetSize;   // 16: 1 / t.Width, 1 / t.Height, 0, 0
+    vec4  sssView;         // 32: 1 / vp.Width, 1 / vp.Height, 0.5 * vp.Height / tanY, disc angle
+    vec4  sssCtrl;         // 48: d_red, DepthFollow, AlbedoDetail, linearZ ? 1 : 0
+    vec4  sssDebug;        // 64: DebugView, includeSolids, hasSpec, gbufferV2
+    vec4  sssTaps[24];     // 80: 24 Burley disc taps
+} cb;
+
+const int SSS_TAPS = 24;
+
+float fdModel(float r) {
+    float mod = floor(r + 0.01);
+    return (cb.sssDebug.w > 0.5 && mod >= 15.5) ? (mod - 16.0) : mod;
+}
+
+float fdAddedLightKeep(float a) {
+    if (cb.sssDebug.w > 0.5) return saturate(a > 2.5 ? a - 3.0 : a - 1.0);
+    float base = a < 4.5 ? 3.0 : a < 6.5 ? 5.0 : 7.0;
+    return saturate(a - base);
+}
+
+vec3 participation(vec3 a) {
+    return smoothstep(0.01, 0.04, pow(max(a, vec3(0.0)), vec3(1.0 / 2.2)));
+}
+
+vec3 albedoFactor(vec3 a) {
+    return pow(max(a, vec3(1.0e-4)), vec3(cb.sssCtrl.z));
+}
+
+float ign(vec2 px) {
+    return fract(52.9829189 * fract(dot(px, vec2(0.06711056, 0.00583715))));
+}
+
+void main() {
+    ivec2 localPx = ivec2(gl_GlobalInvocationID.xy);
+    if (localPx.x >= cb.viewport.z || localPx.y >= cb.viewport.w) return;
+    ivec2 px = cb.viewport.xy + localPx;
+
+    vec4 c = texelFetch(t_light, px, 0);
+    if (cb.sssDebug.x > 1.5 && c.a < 0.0) {
+        imageStore(i_scene, px, vec4(1.0, 0.0, 0.0, 1.0));
+        return;
+    }
+    if (c.a <= 1.0e-4) return;
+    if (cb.sssDebug.x > 0.5 && cb.sssDebug.x < 1.5) {
+        imageStore(i_scene, px, vec4(c.rgb * 0.25, 1.0));
+        return;
+    }
+
+    float z0 = c.a;
+    float centerModel = fdModel(texelFetch(t_material, px, 0).r);
+    bool isSolid = (cb.sssDebug.y > 0.5 && centerModel >= 10.5 && centerModel <= 14.5);
+    float turn = cb.sssView.w + 6.2831853 * ign(vec2(px));
+    vec3 sum = vec3(0.0);
+    vec3 weight = vec3(0.0);
+    ivec2 vpMin = cb.viewport.xy;
+    ivec2 vpMax = cb.viewport.xy + cb.viewport.zw;
+
+    if (isSolid) {
+        float pxPerD = min(cb.sssCtrl.x * cb.sssView.z / z0, 14.0);
+        bool isWax    = abs(centerModel - 11.0) < 0.5;
+        bool isMarble = abs(centerModel - 12.0) < 0.5;
+        bool isSnow   = abs(centerModel - 13.0) < 0.5;
+        vec3 tint = isWax    ? vec3(1.00, 0.48, 0.16)
+                  : isMarble ? vec3(0.95, 0.80, 0.64)
+                  : isSnow   ? vec3(0.45, 0.74, 1.00)
+                             : vec3(1.00, 0.30, 0.14);
+        float rScale = isWax ? 1.20 : isMarble ? 0.65 : isSnow ? 1.30 : 1.00;
+        for (int i = 0; i < 8; i++) {
+            vec4 tap = cb.sssTaps[i * 3 + 1];
+            float ang = turn + 2.39996323 * float(i);
+            vec2 offset = vec2(cos(ang), sin(ang)) * (tap.x * rScale * pxPerD);
+            ivec2 tapPx = clamp(ivec2(floor(vec2(px) + 0.5 + offset)), vpMin, vpMax - 1);
+            vec4 t = texelFetch(t_light, tapPx, 0);
+            float tapModel = fdModel(texelFetch(t_material, tapPx, 0).r);
+            float sameModel = abs(tapModel - centerModel) < 0.5 ? 1.0 : 0.0;
+            float reach = tap.x * rScale * cb.sssCtrl.x * 2.0 / max(cb.sssCtrl.y, 0.1) + 0.05;
+            float depthW = (t.a > 0.0 ? saturate(1.0 - abs(t.a - z0) / reach) : 0.0) * sameModel;
+            vec3 w = tint * depthW * participation(texelFetch(t_albedo, tapPx, 0).rgb);
+            sum += t.rgb * (tint * depthW);
+            weight += w;
+        }
+        vec4 a = texelFetch(t_albedo, px, 0);
+        vec3 part = participation(a.rgb);
+        vec4 frame4 = imageLoad(i_scene, px);
+        vec3 diffuse = max(frame4.rgb, vec3(0.0));
+        vec3 af = albedoFactor(a.rgb);
+        vec3 own = diffuse / af;
+        vec3 blurred = vec3(weight.r > 1.0e-5 ? sum.r / weight.r : own.r,
+                            weight.g > 1.0e-5 ? sum.g / weight.g : own.g,
+                            weight.b > 1.0e-5 ? sum.b / weight.b : own.b);
+        imageStore(i_scene, px, vec4(diffuse * (1.0 - part) + part * mix(diffuse, blurred * af, 0.72), frame4.a));
+        return;
+    }
+
+    float pxPerD = cb.sssCtrl.x * cb.sssView.z / z0;
+    for (int i = 0; i < SSS_TAPS; i++) {
+        vec4 tap = cb.sssTaps[i];
+        float ang = turn + 2.39996323 * float(i);
+        vec2 offset = vec2(cos(ang), sin(ang)) * (tap.x * pxPerD);
+        ivec2 tapPx = clamp(ivec2(floor(vec2(px) + 0.5 + offset)), vpMin, vpMax - 1);
+        vec4 t = texelFetch(t_light, tapPx, 0);
+        float reach = tap.x * cb.sssCtrl.x * 2.0 / max(cb.sssCtrl.y, 0.1) + 0.05;
+        float sameSkin = (cb.sssDebug.y < 0.5 || abs(fdModel(texelFetch(t_material, tapPx, 0).r) - 6.0) < 0.5) ? 1.0 : 0.0;
+        float depthW = (t.a > 0.0 ? saturate(1.0 - abs(t.a - z0) / reach) : 0.0) * sameSkin;
+        vec3 w = tap.yzw * depthW * participation(texelFetch(t_albedo, tapPx, 0).rgb);
+        sum += t.rgb * tap.yzw * depthW;
+        weight += w;
+    }
+
+    vec4 a = texelFetch(t_albedo, px, 0);
+    vec3 part = participation(a.rgb);
+    float keep = fdAddedLightKeep(a.a);
+    vec3 spec = cb.sssDebug.z > 0.5 ? (texelFetch(t_spec, px, 0).rgb * keep) : vec3(0.0);
+    vec4 frame4 = imageLoad(i_scene, px);
+    vec3 diffuse = max(frame4.rgb - spec, vec3(0.0));
+    vec3 af = albedoFactor(a.rgb);
+    vec3 own = diffuse / af;
+    vec3 blurred = vec3(weight.r > 1.0e-5 ? sum.r / weight.r : own.r,
+                        weight.g > 1.0e-5 ? sum.g / weight.g : own.g,
+                        weight.b > 1.0e-5 ? sum.b / weight.b : own.b);
+    imageStore(i_scene, px, vec4(spec + diffuse * (1.0 - part) + part * blurred * af, frame4.a));
+}

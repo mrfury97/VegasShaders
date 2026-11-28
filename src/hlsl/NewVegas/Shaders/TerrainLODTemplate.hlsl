@@ -244,13 +244,6 @@ PS_OUTPUT main(PS_INPUT pin) {
         // FD_FAR_LAND_MARK): still model 4; DeferredSun gives it no ShadowBounce, which this shader's forward record never had
         po.capturedPad2.r += FD_FAR_LAND_MARK;
         #endif
-        #if CAPTURED_NORMALS_ON == 3
-        {
-            const float2 fdOct = ShadowEncodeNormal(normalize(nrm.xyz));
-            po.capturedPad2.g = fdOct.x;
-            po.capturedPad2.a = 1.01f + 0.49f * (fdOct.y + 1.0f);
-        }
-        #endif
     #endif
     // COLOR3: the far land has no vertex normal (its normal map is in world axes): the triangle's face normal, with the camera distance
     po.capturedNormal = CapturedNormalOut(geoNormal, pin.shadowPos);

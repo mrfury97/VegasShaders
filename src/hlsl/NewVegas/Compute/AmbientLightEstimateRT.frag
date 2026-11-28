@@ -24,9 +24,8 @@ vec4 EstimateRT(vec2 uv) {
     // On: both fade out over the last quarter before endFade, whatever DrawDistance is. Off: as before.
     if (cb.sunFarFlags.w > 0.5) fade *= 1.0 - smoothstep(0.75 * endFade, endFade, origin.z);
     if (fade <= 0.0) {
-        // 1st-person viewmodel (Prepare wrote 1.0e6): pass RTGI bounce light through with AO = 1.0 (real sky has t_gi = 0).
-        vec3 vmBounce = (origin.z >= 9.0e5 && (pc.variant & 0x100u) != 0u) ? pointLod(t_gi, uv).rgb : vec3(0.0);
-        return vec4(vmBounce, 1.0);
+        // 1st-person viewmodel and far sky do not receive half-res world RTGI.
+        return vec4(0.0, 0.0, 0.0, 1.0);
     }
     vec4 rt = linearLod(t_rt, uv);
     // (rt-ao-gi) variant bit 8: the RT bounce light into rgb, as ComputeGI's GI pass writes it (linear, x the fade); AmbientLight's GI
@@ -39,4 +38,4 @@ vec4 EstimateRT(vec2 uv) {
     return vec4(bounce, saturate(mix(1.0, visibility, fade)));
 }
 
-void main() { o_color = EstimateRT(frameUV()); }
+void main() { o_color = EstimateRT(frameRectUV()); }

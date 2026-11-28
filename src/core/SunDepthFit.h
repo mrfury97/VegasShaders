@@ -42,6 +42,7 @@
 #ifndef SUNDEPTHFIT_MATH_ONLY
 #include "GpuProfiler.h"	// GpuTimer::Enabled: the F10 profile's statistics line
 #include "RenderRect.h"		// UNOFFICIAL 2026-10-27 RenderScale v2: Measure reads only the drawn part of the depth
+#include "DxvkCompute.h"
 #endif
 
 namespace SunDepthFit {
@@ -178,16 +179,10 @@ namespace SunDepthFit {
 		return pose;
 	}
 
-	// The effect file: not one of ShaderManager's registered effects (no menu switch, never reloaded by it); made on first use.
-	class FitEffect : public EffectRecord {
-	public:
-		FitEffect() : EffectRecord("SunDepthFit") {}
-	};
-	inline FitEffect* FitRecord = nullptr;
-	inline bool EffectTried = false;
-
 	struct QuerySet {
 		IDirect3DQuery9* Query[Queries] = {};
+		ID3D9NvrExtBuffer* ReadbackBuf = nullptr;
+		bool UseReadback = false;
 		float Level[Queries] = {};	// the distance each query counted against (0 for the sky)
 		int FarCount = 0, NearCount = 0;
 		bool Pending = false;
@@ -198,6 +193,14 @@ namespace SunDepthFit {
 	};
 	inline QuerySet Sets[RingSize];
 	inline unsigned IssueOrder = 0;
+	inline ID3D9NvrExtReadback* Readback = nullptr;
+	inline bool ReadbackTried = false;
+	inline ID3D9NvrExtPipeline* ComputePipeline = nullptr;
+	inline ID3D9NvrExtBuffer* ComputeUbo = nullptr;
+	inline ID3D9NvrExtBuffer* CountsGpu = nullptr;
+	inline bool ComputeTried = false, ComputeFailed = false;
+	inline EffectRecord::ExtPass ViewExtPass{};
+	inline EffectRecord::ExtUniformBuffer ViewExtUbo{};
 
 	struct Result {
 		bool Valid = false;
@@ -238,8 +241,17 @@ namespace SunDepthFit {
 	inline void ReleaseResources() {
 		for (QuerySet& set : Sets) {
 			for (IDirect3DQuery9*& query : set.Query) if (query) { query->Release(); query = nullptr; }
+			if (set.ReadbackBuf) { set.ReadbackBuf->Release(); set.ReadbackBuf = nullptr; }
+			set.UseReadback = false;
 			set.Pending = false;
 		}
+		if (CountsGpu) { CountsGpu->Release(); CountsGpu = nullptr; }
+		if (ComputeUbo) { ComputeUbo->Release(); ComputeUbo = nullptr; }
+		if (ComputePipeline) { ComputePipeline->Release(); ComputePipeline = nullptr; }
+		ComputeTried = false;
+		ComputeFailed = false;
+		if (Readback) { Readback->Release(); Readback = nullptr; }
+		ReadbackTried = false;
 		if (BlockSurface) { BlockSurface->Release(); BlockSurface = nullptr; }
 		if (BlockTexture) { BlockTexture->Release(); BlockTexture = nullptr; }
 		if (ScratchSurface) { ScratchSurface->Release(); ScratchSurface = nullptr; }
@@ -248,11 +260,93 @@ namespace SunDepthFit {
 		Latest.Valid = false;
 	}
 
+	// The effect file: not one of ShaderManager's registered effects (no menu switch, never reloaded by it); made on first use.
+	class FitEffect : public EffectRecord {
+	public:
+		FitEffect() : EffectRecord("SunDepthFit") {}
+		bool ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override {
+			if (techniqueIndex != 2 || ClearRenderTarget || !DxvkCompute::Available()) return false;
+			auto findTex = [](const char* name) -> IDirect3DBaseTexture9* {
+				auto it = TheTextureManager->TextureNames.find(name);
+				return (it != TheTextureManager->TextureNames.end() && it->second) ? *it->second : nullptr;
+			};
+			IDirect3DBaseTexture9* rendered = TheTextureManager->RenderedTexture;
+			IDirect3DBaseTexture9* depth = findTex("TESR_DepthBuffer");
+			IDirect3DBaseTexture9* blocks = BlockTexture ? static_cast<IDirect3DBaseTexture9*>(BlockTexture) : depth;
+			if (!rendered || !depth || !blocks) return false;
+
+			struct ViewUniforms {
+				float viewTransform[16];
+				float projectionTransform[16];
+				float reciprocalResolution[4];
+				float cameraData[4];
+				float info[4];
+				float splits[4];
+				float original[4];
+				float shadowNearCenter[4];
+				float shadowMiddleCenter[4];
+				float shadowFarCenter[4];
+				float shadowLodCenter[4];
+				float shadowForwardData[4];
+			} u = {};
+			auto copyReq = [&](const char* name, void* dst, size_t bytes) -> bool {
+				auto it = TheShaderManager->ConstantsTable.find(name);
+				if (it != TheShaderManager->ConstantsTable.end() && it->second) { memcpy(dst, it->second, bytes); return true; }
+				return false;
+			};
+			if (!copyReq("TESR_ViewTransform", u.viewTransform, sizeof(u.viewTransform)) ||
+				!copyReq("TESR_ProjectionTransform", u.projectionTransform, sizeof(u.projectionTransform)) ||
+				!copyReq("TESR_ReciprocalResolution", u.reciprocalResolution, sizeof(u.reciprocalResolution)) ||
+				!copyReq("TESR_CameraData", u.cameraData, sizeof(u.cameraData)) ||
+				!copyReq("TESR_ShadowNearCenter", u.shadowNearCenter, sizeof(u.shadowNearCenter)) ||
+				!copyReq("TESR_ShadowMiddleCenter", u.shadowMiddleCenter, sizeof(u.shadowMiddleCenter)) ||
+				!copyReq("TESR_ShadowFarCenter", u.shadowFarCenter, sizeof(u.shadowFarCenter)) ||
+				!copyReq("TESR_ShadowLodCenter", u.shadowLodCenter, sizeof(u.shadowLodCenter)) ||
+				!copyReq("TESR_ShadowForwardData", u.shadowForwardData, sizeof(u.shadowForwardData))) return false;
+			memcpy(u.info, &Info, sizeof(u.info));
+			memcpy(u.splits, &Splits, sizeof(u.splits));
+			memcpy(u.original, &Original, sizeof(u.original));
+
+			ID3D9NvrExtBuffer* cb = ExtUniforms(ViewExtUbo, &u, sizeof(u));
+			ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+			if (!cb || !point) return false;
+
+			struct Push { UInt32 pointSampler; UInt32 pad[3]; } push = {};
+			if (!ViewExtPass.Tried) {
+				ViewExtPass.Tried = true;
+				NVR_EXT_BINDING_DESC bindings[5] = {};
+				for (UINT i = 0; i < 3; i++) {
+					bindings[i].Set = 1; bindings[i].Binding = i; bindings[i].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[i].Slot = i; bindings[i].ViewType = NVR_EXT_VIEW_2D;
+				}
+				bindings[3].Set = 2; bindings[3].Binding = 0; bindings[3].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[3].Slot = 0; bindings[3].ViewType = NVR_EXT_VIEW_2D;
+				bindings[4].Type = NVR_EXT_BIND_SAMPLER; bindings[4].Slot = 0; bindings[4].PushOffset = 0;
+				ViewExtPass.Pipeline = DxvkCompute::CreateGraphicsPipeline("SunDepthFitCascadeView", bindings, _countof(bindings), sizeof(push), true);
+			}
+			if (!ViewExtPass.Pipeline) return false;
+			NVR_EXT_RESOURCE_BINDING res[5] = {};
+			res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = rendered;
+			res[1].Slot = 1; res[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[1].pResource = depth;
+			res[2].Slot = 2; res[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[2].pResource = blocks;
+			res[3].Slot = 0; res[3].Type = NVR_EXT_BIND_UNIFORM_BUFFER; res[3].pResource = cb;
+			res[4].Slot = 0; res[4].Type = NVR_EXT_BIND_SAMPLER; res[4].pResource = point;
+			return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, ViewExtPass.Pipeline, res, _countof(res), &push, sizeof(push), true);
+		}
+	};
+	inline FitEffect* FitRecord = nullptr;
+	inline bool EffectTried = false;
+
 	inline bool EnsureEffect() {
-		if (FitRecord && FitRecord->Effect) { FitRecord->Enabled = true; return true; }
+		if (FitRecord && (FitRecord->Effect || (DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9("SunDepthFit")))) {
+			FitRecord->Enabled = true;
+			return true;
+		}
 		if (EffectTried) return false;
 		EffectTried = true;
-		FitRecord = new FitEffect();
+		if (!FitRecord) FitRecord = new FitEffect();
+		if (DxvkCompute::PassesOn() && !DxvkCompute::KeptOnD3D9("SunDepthFit")) {
+			FitRecord->Enabled = true;
+			return true;
+		}
 		FitRecord->LoadEffect();
 		ID3DXEffect* fx = FitRecord->Effect;
 		// By name, so an older or edited file can never draw some other pass into the block grid.
@@ -267,14 +361,58 @@ namespace SunDepthFit {
 		return true;
 	}
 
+	inline bool EnsureCompute() {
+		if (ComputeFailed || !DxvkCompute::Available()) return false;
+		if (!Readback && !ReadbackTried) {
+			ReadbackTried = true;
+			if (FAILED(DxvkCompute::Extension()->QueryInterface(__uuidof(ID3D9NvrExtReadback), (void**)&Readback))) Readback = nullptr;
+		}
+		if (!Readback) return false;
+		if (ComputePipeline && ComputeUbo && CountsGpu) return true;
+		if (ComputeTried) return false;
+		ComputeTried = true;
+		static const NVR_EXT_BINDING_DESC kBindings[] = {
+			{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE,  0, NVR_EXT_VIEW_2D,    FALSE, 0 },
+			{ 1, 1, NVR_EXT_BIND_STORAGE_IMAGE,  1, NVR_EXT_VIEW_2D,    TRUE,  0 },
+			{ 1, 2, NVR_EXT_BIND_STORAGE_BUFFER, 2, NVR_EXT_VIEW_2D,    TRUE,  0 },
+			{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D,    FALSE, 0 },
+		};
+		ComputePipeline = DxvkCompute::CreatePipeline("SunDepthFitReduce", kBindings, _countof(kBindings), 0, false);
+		if (ComputePipeline) ComputeUbo = DxvkCompute::CreateBuffer(16 + 16 + 6 * 16, NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, "SunDepthFit UBO");
+		if (ComputeUbo) CountsGpu = DxvkCompute::CreateBuffer(Queries * sizeof(DWORD), NVR_EXT_BUFFER_STORAGE | NVR_EXT_BUFFER_TRANSFER_SRC | NVR_EXT_BUFFER_TRANSFER_DST, "SunDepthFit Counts");
+		if (!ComputePipeline || !ComputeUbo || !CountsGpu) {
+			if (CountsGpu) { CountsGpu->Release(); CountsGpu = nullptr; }
+			if (ComputeUbo) { ComputeUbo->Release(); ComputeUbo = nullptr; }
+			if (ComputePipeline) { ComputePipeline->Release(); ComputePipeline = nullptr; }
+			ComputeFailed = true;
+			return false;
+		}
+		for (QuerySet& set : Sets) {
+			if (!set.ReadbackBuf && FAILED(Readback->CreateReadbackBuffer(Queries * sizeof(DWORD), "SunDepthFit Readback", &set.ReadbackBuf))) {
+				ComputeFailed = true;
+				return false;
+			}
+		}
+		Logger::Log("UNOFFICIAL FitToDepth: Vulkan compute reduce + async readback ready (Compute\\SunDepthFitReduce.spv)");
+		return true;
+	}
+
 	inline bool EnsureResources(IDirect3DDevice9* device) {
 		const UINT w = (TheRenderManager->width + BlockSize - 1) / BlockSize, h = (TheRenderManager->height + BlockSize - 1) / BlockSize;
-		if (w == GridW && h == GridH && (BlockTexture || ResourcesFailed)) return BlockTexture != nullptr;
+		const bool canCompute = DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9("SunDepthFit") && EnsureCompute();
+		if (w == GridW && h == GridH && (BlockTexture || ResourcesFailed)) {
+			if (canCompute) return BlockTexture != nullptr;
+			if (ScratchTexture) return BlockTexture != nullptr;
+		}
 		ReleaseResources();
 		GridW = w; GridH = h;
 		ResourcesFailed = true;
 		HRESULT hr = device->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A32B32G32R32F, D3DPOOL_DEFAULT, &BlockTexture, NULL);
 		if (SUCCEEDED(hr)) hr = BlockTexture->GetSurfaceLevel(0, &BlockSurface);
+		if (SUCCEEDED(hr) && EnsureCompute()) {
+			ResourcesFailed = false;
+			return true;
+		}
 		if (SUCCEEDED(hr)) hr = device->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A8R8G8B8, D3DPOOL_DEFAULT, &ScratchTexture, NULL);
 		if (SUCCEEDED(hr)) hr = ScratchTexture->GetSurfaceLevel(0, &ScratchSurface);
 		for (QuerySet& set : Sets)
@@ -300,10 +438,18 @@ namespace SunDepthFit {
 			Result r;
 			const int used = 1 + oldest->FarCount + oldest->NearCount;
 			bool failed = false;
-			for (int q = 0; q < used; q++) {
-				const HRESULT hr = oldest->Query[q]->GetData(&r.Counts[q], sizeof(DWORD), 0);
-				if (hr == S_FALSE) return;	// not there yet: the later sets are not either
-				if (FAILED(hr)) { failed = true; break; }
+			if (oldest->UseReadback) {
+				if (!Readback || !oldest->ReadbackBuf) { oldest->Pending = false; continue; }
+				const HRESULT hr = Readback->TryReadback(oldest->ReadbackBuf, 0, Queries * sizeof(DWORD), r.Counts);
+				if (hr == S_FALSE) return;
+				if (FAILED(hr)) failed = true;
+			}
+			else {
+				for (int q = 0; q < used; q++) {
+					const HRESULT hr = oldest->Query[q]->GetData(&r.Counts[q], sizeof(DWORD), 0);
+					if (hr == S_FALSE) return;	// not there yet: the later sets are not either
+					if (FAILED(hr)) { failed = true; break; }
+				}
 			}
 			oldest->Pending = false;
 			if (failed) continue;
@@ -327,7 +473,7 @@ namespace SunDepthFit {
 		if (!Wanted() || CurrentMaxZ <= 0.0f) return;
 		ShadowsExteriorEffect* shadows = TheShaderManager->Effects.ShadowsExteriors;
 		if (!shadows || !shadows->Enabled || !shadows->Settings.Exteriors.Enabled) return;
-		if (!EnsureEffect() || !EnsureResources(device)) return;
+		if (!EnsureResources(device)) return;
 		Collect();
 		QuerySet* set = nullptr;
 		for (QuerySet& s : Sets) if (!s.Pending) { set = &s; break; }
@@ -348,7 +494,63 @@ namespace SunDepthFit {
 			set->Level[set->FarCount + set->NearCount] = level;
 		}
 		// UNOFFICIAL 2026-10-27 RenderScale v2: in rect frames only the grid's drawn part holds blocks (ApplyViewport below).
-		set->Blocks = RenderRect::Width(GridW) * RenderRect::Height(GridH);
+		const UINT activeW = RenderRect::Width(GridW), activeH = RenderRect::Height(GridH);
+		set->Blocks = activeW * activeH;
+
+		if (DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9("SunDepthFit") &&
+			Readback && ComputePipeline && ComputeUbo && CountsGpu && set->ReadbackBuf && BlockSurface) {
+			auto depthIt = TheTextureManager->TextureNames.find("TESR_DepthBuffer");
+			IDirect3DBaseTexture9* depth = (depthIt != TheTextureManager->TextureNames.end() && depthIt->second) ? *depthIt->second : nullptr;
+			auto camIt = TheShaderManager->ConstantsTable.find("TESR_CameraData");
+			const float farZ = (camIt != TheShaderManager->ConstantsTable.end() && camIt->second) ? camIt->second->y : 0.0f;
+			if (depth && farZ > 0.0f) {
+				struct ReduceUbo {
+					int dims[4];
+					float meta[4];
+					float levels[6][4];
+				} u = {};
+				const UINT renderW = RenderRect::Width((UINT)TheRenderManager->width);
+				const UINT renderH = RenderRect::Height((UINT)TheRenderManager->height);
+				const int total = 1 + set->FarCount + set->NearCount;
+				u.dims[0] = (int)activeW; u.dims[1] = (int)activeH; u.dims[2] = (int)renderW; u.dims[3] = (int)renderH;
+				u.meta[0] = farZ; u.meta[1] = (float)set->FarCount; u.meta[2] = (float)set->NearCount; u.meta[3] = (float)total;
+				for (int q = 0; q < total; q++) u.levels[q >> 2][q & 3] = set->Level[q];
+
+				ID3D9NvrExt* ext = DxvkCompute::Extension();
+				NVR_EXT_RESOURCE_BINDING bindings[] = {
+					{ 0, NVR_EXT_BIND_SAMPLED_IMAGE,  depth,      0, 0, 0,         FALSE },
+					{ 1, NVR_EXT_BIND_STORAGE_IMAGE,  BlockSurface, 0, 0, 0,       FALSE },
+					{ 2, NVR_EXT_BIND_STORAGE_BUFFER, CountsGpu,  0, 0, Queries * sizeof(DWORD), FALSE },
+					{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo, 0, 0, sizeof(u), FALSE },
+				};
+				NVR_EXT_DISPATCH_DESC dispatch = {};
+				dispatch.pPipeline = ComputePipeline;
+				dispatch.BindingCount = _countof(bindings);
+				dispatch.pBindings = bindings;
+				dispatch.GroupsX = (activeW + 7u) / 8u;
+				dispatch.GroupsY = (activeH + 7u) / 8u;
+				dispatch.GroupsZ = 1u;
+
+				static GpuTimer computeTimer("SunDepthFit reduce (compute)");
+				GpuProfileScope gpu(computeTimer, device);
+				if (SUCCEEDED(ext->ClearBuffer(CountsGpu, 0, Queries * sizeof(DWORD), 0)) &&
+					SUCCEEDED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(u), &u)) &&
+					SUCCEEDED(ext->Dispatch(&dispatch)) &&
+					SUCCEEDED(Readback->CopyToReadback(set->ReadbackBuf, 0, CountsGpu, 0, Queries * sizeof(DWORD)))) {
+					BlocksValid = true;
+					set->UseReadback = true;
+					set->Pending = true;
+					set->Frame = Frame;
+					set->Order = ++IssueOrder;
+					set->Camera = CameraPose();
+					return;
+				}
+			}
+		}
+
+		set->UseReadback = false;
+		if (!EnsureEffect() || !ScratchSurface) return;
+		if (!FitRecord->Effect) return;
 
 		ID3DXEffect* fx = FitRecord->Effect;
 		auto* renderState = TheRenderManager->renderState;

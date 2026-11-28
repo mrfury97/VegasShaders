@@ -44,6 +44,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 TESR_LightPosition[12];
     vec4 TESR_ShadowLightPosition[12];
     vec4 TESR_LightColor[24];
+    vec4 TESR_RenderScale;
 };
 
 layout(push_constant) uniform Push {
@@ -65,6 +66,11 @@ layout(location = 0) out vec4 o_color;
 #define LowTexel (TESR_SandstormLowLayout.xy)                 // static const float2 LowTexel
 #define QuarterTexel (TESR_SandstormLowLayout.zw)             // static const float2 QuarterTexel
 #define SANDFAST_STREAK_SAMPLES 4
+
+vec2 ClampRectUV(vec2 ruv) {
+    vec2 px = TESR_ReciprocalResolution.xy;
+    return clamp(ruv, 0.5 * px, max(TESR_RenderScale.xy - 0.5 * px, 0.5 * px));
+}
 
 // HLSL fmod (the sign of x), not GLSL mod.
 float hlslFmod(float x, float y) { return x - y * trunc(x / y); }
@@ -180,7 +186,7 @@ float readDepthLod(vec2 coord) { return POINT_LOD(t_depth, coord).x * farZ; }
 
 // How far along the view ray a pixel's surface is (SandstormPS's ViewDistance)
 float ViewDistance(vec2 coord, float visibility) {
-    float depth = readDepthLod(coord);   // (LOD 0: the same as tex2D on the depth buffer, and allowed in the soft-edges branch)
+    float depth = readDepthLod(ClampRectUV(coord * TESR_RenderScale.xy));   // (LOD 0: the same as tex2D on the depth buffer, and allowed in the soft-edges branch)
     if (depth / farZ >= 0.9961) return visibility * 6.0;
     return length(toWorld(coord) * depth);
 }

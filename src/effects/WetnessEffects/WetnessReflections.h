@@ -36,5 +36,12 @@ public:
 	void	RegisterConstants();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	bool	ExtSupportsRenderRect() const override { return true; }
+	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 	void	BindShadingNormals(IDirect3DDevice9* Device);	// UNOFFICIAL 2026-11-18 DeferredBumpedNormals: stage 4 for the next Render
+
+private:
+	IDirect3DBaseTexture9*	shadingNormals = nullptr;
+	ExtPass					extPass{};
+	ExtUniformBuffer		extUniforms{};
 };

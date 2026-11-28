@@ -9,7 +9,7 @@
 struct SettingsMainStruct
 {
 	struct MainStruct {	// [Main.Main.*]
-		bool	RemoveUnderwater, ForceMSAA, ForceReflections;	// [Main.Main.Water] / [Main.Main.Misc]
+		bool	RemoveUnderwater, ForceReflections;	// [Main.Main.Water] / [Main.Main.Misc]
 		bool	GameShadersInReflections; // [Main.Main.Water] diagnostic: the reflection pass uses the game's own shaders
 		bool	ReflectionClipFix; // [Main.Main.Water] UNOFFICIAL: the water reflection's clip plane rebuilt by NVR at every draw of the reflection pass
 		bool	RemovePrecipitations;	// [Main.Main.Precipitations]
@@ -47,7 +47,6 @@ struct SettingsMainStruct
         bool    SkipRedundantConstants; // [Main.Main.Performance] SkipRedundantConstants (ConstantFilter.h), live
         bool    BatchBoneUploads; // [Main.Main.Performance] BatchBoneUploads (BoneMatrixBatch.h), live
         bool    FastConstantMapSort; // [Main.Main.Performance] FastConstantMapSort (ConstantMapSort.h), live
-        bool    ShaderWarmUp; // [Main.Main.Performance] ShaderWarmUp (ShaderWarmUp.h: the driver compiles NVR shaders at the main menu)
         bool    SkinnedShadowFaceTest; // [Main.Main.Performance] SkinnedShadowFaceTest (ShadowManager.cpp: skeleton bounds for animated casters in lamp cube maps), live
         bool    HiddenObjectCulling; // [Main.Main.Performance] HiddenObjectCulling (HiddenObjectCulling.h: skip the extra passes of objects hidden a few frames ago), live
         bool    PreDecodeCache; // [Main.Main.Performance] PreDecodeCache (LinearPreDecode.h: powf results kept, decoded copies sent per call; same bits), live
@@ -66,7 +65,6 @@ struct SettingsMainStruct
         bool    LampScissor; // [Main.Main.Performance] LampScissor (LampScissor.h: lamp-only passes drawn only inside their lamps' screen rectangle), live
         bool    LampScissorExact; // [Main.Main.Performance] LampScissorExact (LampScissor.h, 2026-10-21: the exact rectangle, also for lamps near the camera), live
         bool    NeonSpillSelfTest;    // [Shaders.BounceLight.Main] NeonSpillSelfTest (EffectSelfTest.h, DIAGNOSTIC: ticking it runs one in-game A/B test of the neon spill), live
-        int     LampPassTestSkip; // [Main.Main.Performance] LampPassTestSkip (LampPassTest.h, DIAGNOSTIC: skip the passes a merged light pass would replace; 0 off), live
         bool    TrimLampPasses; // [Main.Main.Performance] TrimLampPasses (ObjectTemplate.hlsl: lamp passes drop pixels outside every lamp's reach), live
         bool    GodRaysLowRes; // [Main.Main.ReducedQuality] GodRaysLowRes (quarter instead of half resolution)
         bool    AOLowRes; // [Main.Main.ReducedQuality] AOLowRes (quarter instead of half resolution)
@@ -233,8 +231,10 @@ public:
 		bool			IsMaxQualityKey(const char* Section, const char* Key);	// UNOFFICIAL: Max Quality sets this one (while it is on)
 		static void		MergeTables(tomlValue& Into, const tomlValue& From);	// UNOFFICIAL: From's values over Into's, tables merged
 		tomlValue*		UserSection(const char* section);	// the user's own table for a section, or NULL
+		static void		StorageKeys(const char* section, StringList* steps);
 		void			UpdateOldDefaults();	// one-time moves of saved old defaults ([_Unofficial] SettingsVersion)
 		void			ApplyRainWetnessSwitch();	// UNOFFICIAL 2026-11-20: Puddles' switch follows Wetness Effects' while DeferredWetness is on (RainWetnessOneSwitch)
+		static constexpr int UnofficialSettingsVersion = 113;	// user config [_Unofficial] SettingsVersion this build brings it up to	// (113, 2026-11-28 upstream 1.1.6-test2 merge: upstream 102 runs as 112, 103 parked as 113; ours 104-111 before it)
 
 		tomlValue		TomlConfig;		// the user's settings
 		tomlValue		DefaultConfig;	// the defaults (with their comments)

@@ -26,6 +26,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 shadowFade;                   // TESR_ShadowFade: z 0 turns the cube maps off
     vec4 shadowLightPosition[12];      // TESR_ShadowLightPosition: xyz position, w radius
     vec4 lightColor[24];               // TESR_LightColor: rgb colour, w dimmer
+    vec4 renderScale;                  // TESR_RenderScale (xy scale, zw 1/scale)
 } cb;
 
 layout(push_constant) uniform Push {
@@ -99,12 +100,13 @@ float GetPointLightContribution(vec4 worldPos, vec4 lightPos, vec4 normal) {
 }
 
 void main() {
-    float depth = readDepth(uv);
+    vec2 ruv = clamp(uv * cb.renderScale.xy, vec2(0.0), cb.renderScale.xy);
+    float depth = readDepth(ruv);
     vec3 cameraVector = toWorld(uv) * depth;
     vec4 worldPos = vec4(cb.cameraPosition.xyz + cameraVector, 1.0);
-    vec4 normal = vec4(getWorldNormal(uv), 1.0);
+    vec4 normal = vec4(getWorldNormal(ruv), 1.0);
 
-    float shadow = texture(sampler2D(t_pointShadow, NVR_SAMPLER(pc.samplerIndex)), uv).r;
+    float shadow = texture(sampler2D(t_pointShadow, NVR_SAMPLER(pc.samplerIndex)), ruv).r;
     shadow += GetPointLightAmount(t_cube6, worldPos, cb.shadowLightPosition[6], normal) * luma(cb.lightColor[6].rgb) * cb.lightColor[6].w;
     shadow += GetPointLightAmount(t_cube7, worldPos, cb.shadowLightPosition[7], normal) * luma(cb.lightColor[7].rgb) * cb.lightColor[7].w;
     shadow += GetPointLightAmount(t_cube8, worldPos, cb.shadowLightPosition[8], normal) * luma(cb.lightColor[8].rgb) * cb.lightColor[8].w;

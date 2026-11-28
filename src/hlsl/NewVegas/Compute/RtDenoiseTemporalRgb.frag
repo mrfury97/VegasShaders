@@ -174,7 +174,7 @@ void main() {
             : vec4(textureLod(sampler2D(t_soft, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).a);
         soft = dot(step(written, vec4(0.5)), vec4(1.0)) >= 2.0;
     }
-    const bool fresh = !soft && pc.backbone.y > 0.5 && (halfSize
+    const bool fresh = pc.backbone.y > 0.5 && (halfSize
         ? any(greaterThan(textureGather(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 2), vec4(0.5)))
         : textureLod(sampler2D(t_backbone, NVR_SAMPLER(pc.samplerIndex)), uv, 0.0).b > 0.5);
     if (pc.move.w < 0.5 && viewZ > 0.0 && !fresh) {

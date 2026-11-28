@@ -109,6 +109,8 @@ namespace BackDepth {
 		RenderPass* passes[5] = { sm->geometryPass, sm->alphaPass, sm->skinnedGeoPass, sm->speedTreePass, sm->terrainLODPass };
 		ShaderRecordVertex* savedVS[5];
 		ShaderRecordPixel* savedPS[5];
+		ShaderRecordPixel* const savedSkinnedAlphaPS = sm->skinnedGeoPass->AlphaPixelShader;
+		sm->skinnedGeoPass->AlphaPixelShader = nullptr;
 		for (int p = 0; p < 5; p++) { savedVS[p] = passes[p]->VertexShader; savedPS[p] = passes[p]->PixelShader; passes[p]->VertexShader = sm->ShadowMapVertex; }
 		sm->geometryPass->PixelShader = sm->ShadowMapOpaquePixel;
 		sm->alphaPass->PixelShader = sm->ShadowMapPixel;
@@ -171,6 +173,7 @@ namespace BackDepth {
 		ClothWind::OnVSConstantsRestored(savedVC[248], savedClothNonZero, savedClothGrass);
 		Device->SetPixelShaderConstantF(0, &savedPC[0][0], 224);
 		for (int p = 0; p < 5; p++) { passes[p]->VertexShader = savedVS[p]; passes[p]->PixelShader = savedPS[p]; }
+		sm->skinnedGeoPass->AlphaPixelShader = savedSkinnedAlphaPS;
 		state->SetRenderState(D3DRS_ZFUNC, savedZFunc, RenderStateArgs);
 		Device->SetRenderTarget(0, savedTarget);
 		for (DWORD i = 1; i < 4; i++) if (savedMrt[i - 1]) { Device->SetRenderTarget(i, savedMrt[i - 1]); savedMrt[i - 1]->Release(); }

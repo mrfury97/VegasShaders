@@ -44,6 +44,7 @@ layout(set = 2, binding = 0, std140) uniform Consts {
     vec4 capturedData;              // UNOFFICIAL 2026-10-28 TESR_CapturedNormalsData (x 1 = this frame's, y z the distance match, w least cosine)
     vec4 snowExtra;                 // TESR_SnowAccumulationExtra (x CapturedNormals, y CapturedNormalsDebugView)
     vec4 materialData;              // UNOFFICIAL 2026-11-24 TESR_MaterialBufferData (x 1 = this frame's, y 1 = GBufferV2)
+    vec4 renderScale;               // RenderRect scale (xy = scale, zw = 1 / scale)
 } c;
 
 layout(push_constant) uniform Push {
@@ -84,6 +85,11 @@ float projectedDepthFromLinear(float linear01) {
     return nearZ * (farZ - viewZ) / (viewZ * (farZ - nearZ));
 }
 
+vec2 clampRectUV(vec2 ruv) {
+    vec2 px = c.reciprocalResolution.xy;
+    return clamp(ruv, 0.5 * px, max(c.renderScale.xy - 0.5 * px, 0.5 * px));
+}
+
 float readDepth(vec2 coord) {
     return texture(SAMP_CLAMP(t_depth), coord).x * farZ;
 }
@@ -91,7 +97,7 @@ float readDepth(vec2 coord) {
 vec4 reconstructWorldPosition(vec2 coord, out float viewDepth) {
     float x = coord.x * 2.0 - 1.0;
     float y = (1.0 - coord.y) * 2.0 - 1.0;
-    float z = projectedDepthFromLinear(texture(SAMP_CLAMP(t_depth), coord).x);
+    float z = projectedDepthFromLinear(texture(SAMP_CLAMP(t_depth), clampRectUV(coord * c.renderScale.xy)).x);
     vec4 clipSpace = vec4(x, y, z, 1.0);
 
     vec4 viewSpace = c.invProjection * clipSpace;	// mul(clipSpace, TESR_InvProjectionTransform)
@@ -221,8 +227,10 @@ vec4 snowCoverage(vec2 coordIn) {
 // Scale(TESR_RenderedBuffer, 4): the clip leaves the destination with its input (the current image) where uv >= 1
 vec4 scalePass(vec2 coordIn) {
     vec2 scaled = coordIn / 4.0; // scale the uv by wanted scale
-    if (!(scaled.x < 1.0 && scaled.y < 1.0)) return texture(SAMP_CLAMP(t_rendered), coordIn);
-    return texture(SAMP_CLAMP(t_rendered), scaled);
+    if (!(scaled.x < 1.0 && scaled.y < 1.0)) return texture(SAMP_CLAMP(t_rendered), clampRectUV(coordIn * c.renderScale.xy));
+    vec2 px = c.reciprocalResolution.xy;
+    vec2 quarterMax = max(0.25 * c.renderScale.xy - 0.5 * px, 0.5 * px);
+    return texture(SAMP_CLAMP(t_rendered), clamp(scaled * c.renderScale.xy, 0.5 * px, quarterMax));
 }
 
 // DepthBlur(TESR_RenderedBuffer, offsetMask, TESR_SnowAccumulationParams.y, 3500, TESR_OrthoData.x): clip(endFade - depth1)
@@ -232,10 +240,11 @@ vec4 depthBlur(vec2 coordIn, vec2 offsetMaskIn) {
     const float endFade = c.orthoData.x;
 
     float weightSum = 0.114725602;
-    vec4 center = texture(SAMP_CLAMP(t_rendered), coordIn);
+    vec2 ruv = clampRectUV(coordIn * c.renderScale.xy);
+    vec4 center = texture(SAMP_CLAMP(t_rendered), ruv);
     vec4 color1 = center * weightSum;
 
-    float depth1 = readDepth(coordIn);
+    float depth1 = readDepth(ruv);
     if (depth1 > endFade) return center;
 
     float depthDrop = 3500.0;
@@ -243,7 +252,7 @@ vec4 depthBlur(vec2 coordIn, vec2 offsetMaskIn) {
 
     for (int i = 0; i < 12; i++) {
         vec2 offset = vec2(blurSteps[i] * c.reciprocalResolution.x, blurSteps[i] * c.reciprocalResolution.y);
-        vec2 uv2 = coordIn + (offset * offsetMaskIn) * blurRadius;
+        vec2 uv2 = clampRectUV(ruv + (offset * offsetMaskIn) * blurRadius);
         vec4 color2 = texture(SAMP_CLAMP(t_rendered), uv2);
         float depth2 = readDepth(uv2);
         float diff = abs(depth1 - depth2);
@@ -272,9 +281,10 @@ vec3 snowSmoothNormal(vec2 coord, vec3 center, vec3 norm, float depth) {
         vec2 raw = coord + snowSmoothTaps[i] * radius * perUnit;
         vec2 tap = clamp(raw, 0.0, 1.0);
         float onScreen = (raw == tap) ? 1.0 : 0.0;
-        float tapDepth = textureLod(SAMP_CLAMP(t_depth), tap, 0.0).x * farZ;
+        vec2 rtap = clampRectUV(tap * c.renderScale.xy);
+        float tapDepth = textureLod(SAMP_CLAMP(t_depth), rtap, 0.0).x * farZ;
         vec3 tapPos = toWorld(tap) * tapDepth;
-        vec4 tapNormal = vec4(textureLod(SAMP_CLAMP(t_normals), tap, 0.0).xyz * 2.0 - 1.0, 1.0);
+        vec4 tapNormal = vec4(textureLod(SAMP_CLAMP(t_normals), rtap, 0.0).xyz * 2.0 - 1.0, 1.0);
         vec3 tapWorldNormal = (tapNormal * c.view).xyz;
         float weight = saturate(1.0 - length(tapPos - center) / (2.0 * radius)) * (tapDepth < farZ * 0.99 ? 1.0 : 0.0) * onScreen *
             smoothstep(0.5, 0.85, dot(tapWorldNormal, norm));
@@ -346,21 +356,22 @@ vec4 snowCapturedView(vec2 coord, float dist) {
 
 // Snow (the last pass)
 vec4 snowPass(vec2 coordIn) {
-    vec4 color = texture(SAMP_CLAMP(t_source), coordIn);
+    vec2 ruv = clampRectUV(coordIn * c.renderScale.xy);
+    vec4 color = texture(SAMP_CLAMP(t_source), ruv);
     vec3 world = toWorld(coordIn);
 
-    float depth = readDepth(coordIn);
+    float depth = readDepth(ruv);
     vec3 cameraVector = world * depth;
     vec3 eyeDirection = -1.0 * normalize(world);
     vec4 worldPos = vec4(c.cameraPosition.xyz + cameraVector, 1.0);
 
-    if (c.snowExtra.y > 0.5) return snowCapturedView(coordIn, length(cameraVector));	// UNOFFICIAL 2026-10-28
-    if (snowIsActor(coordIn, length(cameraVector))) return color;	// UNOFFICIAL 2026-10-28/11-24: no snow on actors (SnowAccumulation.fx.hlsl)
+    if (c.snowExtra.y > 0.5) return snowCapturedView(ruv, length(cameraVector));	// UNOFFICIAL 2026-10-28
+    if (snowIsActor(ruv, length(cameraVector))) return color;	// UNOFFICIAL 2026-10-28/11-24: no snow on actors (SnowAccumulation.fx.hlsl)
 
-    float ortho = texture(SAMP_CLAMP(t_rendered), coordIn).x;
-    vec3 norm = getWorldNormal(coordIn);
+    float ortho = texture(SAMP_CLAMP(t_rendered), ruv).x;
+    vec3 norm = getWorldNormal(ruv);
     vec3 capturedNorm;	// UNOFFICIAL 2026-10-28 CapturedNormals
-    bool captured = snowCapturedNormal(coordIn, length(cameraVector), norm, capturedNorm);
+    bool captured = snowCapturedNormal(ruv, length(cameraVector), norm, capturedNorm);
     if (captured) norm = capturedNorm;
 
     // early out for the character gun, water surfaces/areas and surfaces above the ortho map (such as actors)
@@ -384,7 +395,7 @@ vec4 snowPass(vec2 coordIn) {
     vec3 snowSpec = vec3(pows(shadesH(normalize(c.sunDirection.xyz + eyeDirection), surfaceNormal), 20.0) * fresnelCoeff);
 
     vec3 ambient = snowTex * pows(c.sunAmbient.rgb, 2.2); // linearise
-    vec2 shadow = texture(SAMP_CLAMP(t_pointShadow), coordIn).rg;
+    vec2 shadow = texture(SAMP_CLAMP(t_pointShadow), ruv).rg;
     float useShadows = (c.shadowScreenSpaceData.x != 0.0 || c.shadowFade.y != 0.0) ? 1.0 : 0.0;	// TESR_ShadowScreenSpaceData.x || TESR_ShadowFade.y
     shadow.r = lerpH(1.0, shadow.r, useShadows); // disable shadow sampling if shadows are disabled in game
     shadow.r = lerpH(shadow.r, 1.0, c.shadowFade.x);	// fade shadows to light when sun is low

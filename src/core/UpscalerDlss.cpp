@@ -320,11 +320,11 @@ namespace {
 		~DlssUpscaler() override {}	// nothing at DLL unload: the helper exits with the game by itself
 
 		const char* Name() const override {
-			if (state != Running) return "FSR 2.2.1 (DLSS not running)";
+			if (state != Running) return "FSR 3.1 (DLSS not running)";
 			return passThrough ? "DLSS helper pass-through test (no DLSS)" : "NVIDIA DLSS (64-bit helper)";
 		}
-		IDirect3DTexture9*	Output() const override { return usedSelf ? output.Texture : Upscaler::Fsr2()->Output(); }
-		bool				Failed() const override { return state == Running ? false : Upscaler::Fsr2()->Failed(); }
+		IDirect3DTexture9*	Output() const override { return usedSelf ? output.Texture : Upscaler::Fsr31()->Output(); }
+		bool				Failed() const override { return state == Running ? false : Upscaler::Fsr31()->Failed(); }
 		bool				Evaluate(IDirect3DDevice9* Device, const Upscaler::Inputs& In) override;
 		void				ReleaseResources() override {
 			if (state == Idle && !process && !output.Texture && !maskTex.Texture) return;
@@ -335,8 +335,11 @@ namespace {
 		std::string			DiagText() const override {	// UNOFFICIAL 2026-11-01 (the history watch's lines)
 			const char* names[] = { "idle", "starting", "running", "off for the session" };
 			std::string text = std::string("DLSS helper ") + names[state] + (passThrough ? " (pass-through test)" : "") + ", this frame " +
-				(usedSelf ? "the helper's output" : "FSR 2's output in its place");
-			if (!usedSelf) text += " (" + Upscaler::Fsr2()->DiagText() + ")";
+				(usedSelf ? "the helper's output" : "FSR 3.1's output in its place");
+			if (!usedSelf) {
+				const std::string sub = Upscaler::Fsr31()->DiagText();
+				if (!sub.empty()) text += " (" + sub + ")";
+			}
 			return text;
 		}
 
@@ -851,13 +854,13 @@ namespace {
 
 	bool DlssUpscaler::FallBack(IDirect3DDevice9* Device, const Upscaler::Inputs& In) {
 		usedSelf = false;
-		runningFrames = 0;	// (review 2026-10-30) FSR 2 makes its textures again now; DLSS frees them again after 600 frames of its own
+		runningFrames = 0;	// (review 2026-10-30) FSR 3.1 makes its textures again now; DLSS frees them again after 600 frames of its own
 		fsrFreed = false;
 		watch.Gap();
 		Upscaler::Inputs in = In;
 		if (fsrNeedsReset) in.Reset = true;
 		fsrNeedsReset = false;
-		return Upscaler::Fsr2()->Evaluate(Device, in);
+		return Upscaler::Fsr31()->Evaluate(Device, in);
 	}
 
 	// One frame's exchange, recorded in DXVK's stream (no waits). False: nothing was recorded (the caller falls back).
@@ -1072,9 +1075,9 @@ namespace {
 		}
 		if (!fsrFreed && ++runningFrames >= 600) {
 			fsrFreed = true;
-			Upscaler::Fsr2()->ReleaseResources();
-			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS has run 600 frames: FSR 2's own textures (its stand-in while the helper starts, about %u MB here) are freed; "
-				"FSR 2 makes them again if DLSS stops.", (unsigned)(190.0 * In.DisplayWidth * In.DisplayHeight / (1920.0 * 1080.0)));
+			Upscaler::Fsr31()->ReleaseResources();
+			Logger::Log("UNOFFICIAL Vegas Shaders DXVK: DLSS has run 600 frames: FSR 3.1's own textures (its stand-in while the helper starts) are freed; "
+				"FSR 3.1 makes them again if DLSS stops.");
 		}
 
 		// The log: the first three reports at 300 frame steps, then every 3600 frames (every 300 with F10 profiling on).
@@ -1191,23 +1194,17 @@ namespace Upscaler {
 	void RayReconstructionDelivered() { TheDlss.RrDelivered(); }
 
 	IUpscaler* Choose(int setting) {
-		// UNOFFICIAL 2026-10-28 ([Shaders.TAA.FSR] Version 1): FSR 3.1, or FSR 2 once it has failed (logged by it). A switch to or
-		// from FSR 3.1 restarts the history of the one that runs now (the other's frames went by meanwhile) and frees the textures of
-		// the FSR that stopped (both sets would otherwise stay in video memory); FSR 2 / DLSS switches are as before.
 		static IUpscaler* last = nullptr;
 		IUpscaler* chosen;
-		if (setting == 1 && !TheDlss.IsOff()) chosen = &TheDlss;	// it runs FSR 2 itself while the helper starts or when it fails
+		if (setting == 1 && !TheDlss.IsOff()) chosen = &TheDlss;	// runs FSR 3.1 while the helper starts or when it fails
 		else {
 			TheDlss.MarkUnused();
-			chosen = (setting == 2 && !Fsr31()->Failed()) ? Fsr31() : Fsr2();
+			chosen = Fsr31();
 		}
-		// UNOFFICIAL 2026-10-29 (live switching): every change of the one that runs restarts its history (the other one's frames went by;
-		// FSR 2 <-> DLSS too, not only to or from FSR 3.1), frees the textures of an FSR that stopped -- except FSR 2's while DLSS runs,
-		// which falls back on them -- and is logged.
 		if (last && chosen != last) {
 			chosen->RequestReset();
-			if (last == Fsr31() || (last == Fsr2() && chosen != &TheDlss) || last == &TheDlss) last->ReleaseResources();
-			if (last == &TheDlss && chosen == Fsr31()) Fsr2()->ReleaseResources();	// DLSS's fallback textures, unused now
+			if (last == &TheDlss) last->ReleaseResources();
+			// Keep Fsr31() resources when switching FSR 3.1 -> DLSS (DLSS uses FSR 3.1 while starting and frees after 600 frames).
 			Logger::Log("UNOFFICIAL upscaler switched live: %s -> %s (history restarted)", last->Name(), chosen->Name());
 		}
 		last = chosen;

@@ -1,5 +1,5 @@
 #include "DxvkCompute.h"
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-20 NoDxvkFork: disable FSR / DLSS / HDR when DXVK fork is absent
+#include "DxvkLoader.h"
 #include "ShaderTemplate.h"
 #include <unordered_map>
 #include "RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
@@ -23,23 +23,51 @@ void DxvkCompute::Initialize(IDirect3DDevice9* device) {
 
 	ID3D9NvrExt* ext = nullptr;
 	if (FAILED(device->QueryInterface(__uuidof(ID3D9NvrExt), (void**)&ext)) || !ext) {
-		SettingForce::NoDxvkFork = true;
-		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension not present (native D3D9 or stock DXVK): compute paths, FSR, DLSS and HDR output off");
-		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s", StatusText);
+		char runtimePath[MAX_PATH] = {};
+		HMODULE runtime = DxvkLoader::Runtime();
+		const bool gotPath = runtime && GetModuleFileNameA(runtime, runtimePath, MAX_PATH) != 0;
+		std::string body;
+		if (!DxvkLoader::OverridingWrapper.empty()) {
+			body = "A d3d9.dll wrapper in the Fallout New Vegas game folder blocked Vegas Shaders' DXVK runtime:\n  " +
+				DxvkLoader::OverridingWrapper +
+				"\n\nVegas Shaders requires Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll.\n"
+				"Remove or rename d3d9.dll in the game folder and relaunch Fallout New Vegas.";
+			_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK blocked by root d3d9.dll wrapper");
+		}
+		else if (gotPath && DxvkLoader::IsDxvk(runtimePath, runtime)) {
+			body = std::string("Running under stock or non-fork DXVK without the Vegas Shaders DXVK extension:\n  ") +
+				runtimePath +
+				"\n\nVegas Shaders requires its bundled Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll.\n"
+				"Ensure Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll is installed and delete any leftover d3d9.dll or dxvk.conf in the Fallout New Vegas game folder.";
+			_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Stock/non-fork DXVK loaded without Vegas Shaders extension");
+		}
+		else {
+			body = "Vegas Shaders requires its bundled Vulkan/DXVK runtime (Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll) and cannot run on native Direct3D 9.";
+			if (gotPath) body += std::string("\nLoaded Direct3D 9 runtime:\n  ") + runtimePath;
+			body += "\n\nReinstall Vegas Shaders so Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll is present, and remove any conflicting d3d9.dll from the Fallout New Vegas game folder.";
+			_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK runtime not loaded (native D3D9)");
+		}
+		Logger::Log("[ERROR] Vegas Shaders DXVK required: %s", StatusText);
+		MessageBoxA(nullptr, body.c_str(), "Vegas Shaders - DXVK Runtime Required", MB_OK | MB_ICONERROR | MB_TOPMOST);
+		ExitProcess(1);
 		return;
 	}
 
 	ext->GetInfo(&ExtInfo);
 	if (ExtInfo.ExtVersionMajor != NVR_EXT_VERSION_MAJOR) {
-		SettingForce::NoDxvkFork = true;
-		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension %u.%u found but this build of Vegas Shaders needs %u.x: compute paths, FSR, DLSS and HDR output off",
+		char body[512];
+		_snprintf_s(body, sizeof(body), _TRUNCATE,
+			"Vegas Shaders DXVK extension version %u.%u was found, but this build of Vegas Shaders requires %u.x.\n\n"
+			"Update Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll from the matching Vegas Shaders release and relaunch Fallout New Vegas.",
 			ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, (unsigned)NVR_EXT_VERSION_MAJOR);
-		Logger::Log("UNOFFICIAL Vegas Shaders DXVK:%s", StatusText);
+		_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension %u.%u mismatch (needs %u.x)",
+			ExtInfo.ExtVersionMajor, ExtInfo.ExtVersionMinor, (unsigned)NVR_EXT_VERSION_MAJOR);
+		Logger::Log("[ERROR] Vegas Shaders DXVK required: %s", StatusText);
 		ext->Release();
+		MessageBoxA(nullptr, body, "Vegas Shaders - DXVK Version Mismatch", MB_OK | MB_ICONERROR | MB_TOPMOST);
+		ExitProcess(1);
 		return;
 	}
-
-	SettingForce::NoDxvkFork = false;
 
 	Ext = ext;	// keeps a device reference for the session (never disposed, like the managers)
 	_snprintf_s(StatusText, sizeof(StatusText), _TRUNCATE, "Vegas Shaders DXVK extension %u.%u on DXVK %s (push %u bytes, subgroup %u): compute paths available",

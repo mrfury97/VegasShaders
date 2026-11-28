@@ -1,72 +1,87 @@
 # Vegas Shaders material rules ([Shaders.PBR.MaterialRules] Enabled; docs/MATERIAL-RULES-PLAN.md).
-# Picks how the object shaders treat a texture (metal or not, how rough) from its diffuse texture's path. Edit freely;
-# changes apply after a restart. A texture no line covers looks exactly as with the rules off.
+# Picks how the object shaders treat a texture (metal or not, how rough) from its diffuse texture's path and live
+# mesh/shader metadata (env-map flags, _m mask, specular/glossiness, emissive, mesh name). Edit freely; changes apply
+# after a restart. A texture no rule covers looks exactly as with the rules off.
 #
-#   class   <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b> authored=<keep|replace>
-#       metal: off = never metal; guess = the usual colour + highlight-mask guess; mask = the texture's _m environment
-#              mask is the metal map (guess where there is none); full = all metal
+#   class    <name> metal=<off|guess|mask|full> strength=<0-1> rough=<min>-<max> reflections=<x> tint=<r>,<g>,<b> authored=<keep|replace> [sss=...]
+#       metal: off = never metal; guess = colour + highlight-mask guess; mask = _m env mask is metal map (guess if none); full = all metal
 #       strength: how metal it can get (replaces [Shaders.PBR.Metal] World / FirstPerson for these textures)
-#       rough: the roughness range the normal map's highlight mask is spread over (leave out = the global one)
+#       rough: the roughness range the normal map's highlight mask is spread over (leave out = global)
 #       reflections: metal's reflection of its surroundings, times [Shaders.PBR.Metal] Reflections
 #       tint: the class's colour in [Shaders.PBR.MaterialRules] DebugView
-#       authored: keep (default) or replace (2026-11-05, [Shaders.PBR.Main] VanillaBridge). keep: where the game's art has a
-#              highlight (normal map alpha + the mesh's glossiness) the highlight follows it, and rough only fills in where
-#              there is none; replace: rough decides everywhere, as before the bridge
-#   folder  <path prefix> <class> [final]   final = decided before the keywords (the keywords cannot change it)
-#   keyword <word in the file name> <class> [not=<word>,<word>]
-#   file    <full texture path> <class>
-#   strip   <folder>   look through one folder level: with "strip textures\nvdlc01", textures\nvdlc01\clutter\x.dds
-#                      matches as textures\clutter\x.dds
-# First match wins: file, final folder, keyword, folder. The class "default" means no rule.
+#       authored: keep (default) or replace (VanillaBridge). keep follows normal-alpha + mesh glossiness when present;
+#                 replace uses rough= across the whole material
+#   folder   <path prefix> <class> [final|fallback]
+#                final = decided before keywords and protected from mesh-signal overrides
+#                fallback = broad top-level bucket (yields to keywords, specific folders, pathwords, and live mesh signals)
+#   keyword  <word in the file name> <class> [not=<word>,<word>]
+#   pathword <word in a directory segment> <class> [not=<word>,<word>]
+#   file     <full texture path> <class>
+#   strip    <folder>   look through one folder level (e.g. "strip textures\nvdlc01")
+# First match wins: file, final folder, keyword, folder, pathword, fallback folder, then live mesh/shader refinement.
 
 # ---- classes --------------------------------------------------------------------------------------------------------
-class gun           metal=mask  strength=1   rough=0.18-0.55 reflections=1.0  tint=1,0.1,0.1 authored=replace
-class blade         metal=mask  strength=1   rough=0.14-0.44 reflections=1.15 tint=1,0.4,0.4 authored=replace
-class fist          metal=guess strength=0.4 rough=0.4-0.8   tint=0.7,0.3,0.3
-class ordnance      metal=guess strength=0.6 rough=0.4-0.8   tint=0.8,0.5,0.2
-class vehicle       metal=guess strength=0.6 rough=0.5-0.9   reflections=0.5 tint=0.3,0.3,1
-class building      metal=off                                tint=0.6,0.6,0.6
-class interior      metal=off                                tint=0.5,0.5,0.45
-class interiormetal metal=guess strength=0.5 rough=0.4-0.9   reflections=0.6 tint=0.2,0.6,1
-class ground        metal=off               rough=0.75-1     reflections=0.3 tint=0.55,0.4,0.2 authored=replace
-class plant         metal=off               rough=0.68-1     reflections=0.3 tint=0.1,0.8,0.1 authored=replace sss=foliage
-class clothing      metal=off               rough=0.72-0.98  reflections=0.25 tint=0.8,0.2,0.8 authored=replace sss=cloth
-class armourmetal   metal=guess strength=0.7 rough=0.35-0.8  reflections=0.8 tint=0.5,0.2,1
-class robot         metal=guess strength=0.8 rough=0.3-0.7   tint=0,1,1
-class creature      metal=off                                reflections=0.5 tint=0.9,0.6,0.5 sss=flesh
-class clutter       metal=guess strength=0.3                 tint=1,1,0.3
-class furniture     metal=off                                tint=0.7,0.5,0.3
-class chrome        metal=full  strength=1   rough=0.05-0.2  tint=1,1,1
-class metal         metal=guess strength=0.8 rough=0.3-0.8   tint=0.4,0.7,1
-class rustymetal    metal=guess strength=0.4 rough=0.7-1     tint=0.7,0.35,0.1
-class colouredmetal metal=full  strength=1   rough=0.2-0.5   tint=1,0.8,0
-class glass         metal=off               rough=0.02-0.1   reflections=1.5 tint=0.6,1,1
-class wood          metal=off               rough=0.65-0.95  tint=0.6,0.35,0.1 authored=replace
-class masonry       metal=off               rough=0.78-1     tint=0.75,0.7,0.65 authored=replace
-class rock          metal=off               rough=0.78-1     tint=0.45,0.45,0.4 authored=replace
-class soft          metal=off               rough=0.85-1     tint=1,0.6,0.8 authored=replace sss=cloth
-class leather       metal=off               rough=0.45-0.8   tint=0.5,0.25,0.1
-class rubber        metal=off               rough=0.6-0.9    tint=0.15,0.15,0.15
-class stonepolished metal=off               rough=0.3-0.6    tint=0.9,0.9,1 sss=marble
-class sign          metal=off                                tint=1,0,1
-class wax           metal=off               rough=0.35-0.65  tint=1,0.85,0.4 authored=replace sss=wax
-class snow          metal=off               rough=0.65-0.95  tint=0.85,0.95,1 authored=replace sss=snow
-class food          metal=off               rough=0.35-0.75  tint=0.9,0.4,0.3 sss=food
-class plastic       metal=off               rough=0.25-0.55  tint=0.6,0.8,1 sss=wax
+class gun           metal=mask  strength=1     rough=0.18-0.55 reflections=1.00 tint=1,0.1,0.1     authored=replace
+class blade         metal=mask  strength=1     rough=0.14-0.44 reflections=1.15 tint=1,0.4,0.4     authored=replace
+class fist          metal=guess strength=0.45  rough=0.38-0.78 reflections=0.75 tint=0.7,0.3,0.3
+class ordnance      metal=guess strength=0.65  rough=0.36-0.78 reflections=0.80 tint=0.8,0.5,0.2
+class vehicle       metal=guess strength=0.65  rough=0.36-0.82 reflections=0.75 tint=0.3,0.3,1
+class building      metal=off                  rough=0.72-0.96 reflections=0.35 tint=0.6,0.6,0.6
+class interior      metal=off                  rough=0.62-0.92 reflections=0.45 tint=0.5,0.5,0.45
+class interiormetal metal=guess strength=0.60  rough=0.32-0.82 reflections=0.75 tint=0.2,0.6,1
+class ground        metal=off                  rough=0.75-1.00 reflections=0.30 tint=0.55,0.4,0.2  authored=replace
+class plant         metal=off                  rough=0.68-1.00 reflections=0.30 tint=0.1,0.8,0.1   authored=replace sss=foliage
+class clothing      metal=off                  rough=0.72-0.98 reflections=0.25 tint=0.8,0.2,0.8   authored=replace sss=cloth
+class armourmetal   metal=guess strength=0.80  rough=0.26-0.72 reflections=0.95 tint=0.5,0.2,1
+class robot         metal=guess strength=0.85  rough=0.24-0.66 reflections=0.95 tint=0,1,1
+class creature      metal=off                  rough=0.52-0.88 reflections=0.45 tint=0.9,0.6,0.5   sss=flesh
+class clutter       metal=guess strength=0.30  rough=0.45-0.88 reflections=0.55 tint=1,1,0.3
+class furniture     metal=off                  rough=0.42-0.82 reflections=0.55 tint=0.7,0.5,0.3
+class chrome        metal=full  strength=1     rough=0.04-0.18 reflections=1.35 tint=1,1,1         authored=replace
+class metal         metal=guess strength=0.85  rough=0.26-0.70 reflections=1.00 tint=0.4,0.7,1
+class paintedmetal  metal=guess strength=0.48  rough=0.24-0.58 reflections=0.85 tint=0.2,0.85,0.7
+class envmetal      metal=guess strength=0.80  rough=0.18-0.52 reflections=1.05 tint=0.1,0.9,0.9
+class corrugated    metal=guess strength=0.72  rough=0.36-0.76 reflections=0.80 tint=0.5,0.65,0.8
+class rustymetal    metal=guess strength=0.35  rough=0.68-0.98 reflections=0.45 tint=0.7,0.35,0.1  authored=replace
+class colouredmetal metal=full  strength=1     rough=0.16-0.46 reflections=1.15 tint=1,0.8,0
+class glass         metal=off                  rough=0.02-0.10 reflections=1.50 tint=0.6,1,1       authored=replace
+class ceramic       metal=off                  rough=0.12-0.34 reflections=1.15 tint=0.95,0.95,0.85 authored=replace
+class linoleum      metal=off                  rough=0.26-0.54 reflections=0.90 tint=0.8,0.85,0.7
+class polishedwood  metal=off                  rough=0.26-0.56 reflections=0.80 tint=0.75,0.45,0.15
+class wood          metal=off                  rough=0.62-0.94 reflections=0.35 tint=0.6,0.35,0.1  authored=replace
+class masonry       metal=off                  rough=0.80-0.99 reflections=0.25 tint=0.75,0.7,0.65 authored=replace
+class rock          metal=off                  rough=0.80-0.99 reflections=0.25 tint=0.45,0.45,0.4 authored=replace
+class soft          metal=off                  rough=0.86-1.00 reflections=0.18 tint=1,0.6,0.8     authored=replace sss=cloth
+class leather       metal=off                  rough=0.40-0.76 reflections=0.55 tint=0.5,0.25,0.1
+class rubber        metal=off                  rough=0.58-0.88 reflections=0.35 tint=0.15,0.15,0.15
+class stonepolished metal=off                  rough=0.16-0.46 reflections=1.20 tint=0.9,0.9,1     sss=marble
+class sign          metal=off                  rough=0.18-0.48 reflections=0.95 tint=1,0,1
+class wax           metal=off                  rough=0.35-0.65 reflections=0.65 tint=1,0.85,0.4    authored=replace sss=wax
+class snow          metal=off                  rough=0.65-0.95 reflections=0.35 tint=0.85,0.95,1   authored=replace sss=snow
+class food          metal=off                  rough=0.35-0.75 reflections=0.60 tint=0.9,0.4,0.3   sss=food
+class plastic       metal=off                  rough=0.22-0.50 reflections=0.85 tint=0.6,0.8,1     sss=plastic
+class matte         metal=off                  rough=0.82-0.98 reflections=0.22 tint=0.4,0.38,0.35 authored=replace
+class glossy        metal=off                  rough=0.14-0.38 reflections=1.10 tint=0.85,0.75,1
 
-# ---- DLC folders hold the same sub-folders as the base game: look through them ---------------------------------------
+# ---- DLC & major texture pack prefixes: look through one folder level -----------------------------------------------
 strip textures\nvdlc01\
 strip textures\nvdlc02\
 strip textures\nvdlc03\
 strip textures\nvdlc04\
 strip textures\nvdlc05\
+strip textures\dlc01\
+strip textures\dlc02\
 strip textures\dlc03\
 strip textures\dlc04\
 strip textures\dlc05\
 strip textures\dlcanch\
 strip textures\dlcpitt\
+strip textures\ttw\
+strip textures\nmc\
+strip textures\ojobueno\
+strip textures\pocobueno\
 
-# ---- never touched (final: no keyword can change them) ----------------------------------------------------------------
+# ---- never touched (final: no keyword or mesh signal can change them) -------------------------------------------------
 folder textures\interface\    default final
 folder textures\fonts\        default final
 folder textures\sky\          default final
@@ -84,92 +99,298 @@ folder textures\weapons\hand2hand\           fist     final
 folder textures\weapons\1handgrenadethrow\   ordnance final
 folder textures\weapons\1handminedrop\       ordnance final
 
-# ---- folders ---------------------------------------------------------------------------------------------------------
-folder textures\vehicles\              vehicle
-folder textures\architecture\          building
-folder textures\dungeons\              interior
-folder textures\dungeons\vault\        interiormetal
-folder textures\dungeons\vaultruined\  interiormetal
-folder textures\dungeons\enclave\      interiormetal
-folder textures\dungeons\industrial\   interiormetal
-folder textures\dungeons\metro\        interiormetal
-folder textures\dungeons\utility\      interiormetal
-folder textures\landscape\             ground
-folder textures\landscape\lod\         default
-folder textures\landscape\plants\      plant
-folder textures\landscape\trees\       plant
-folder textures\trees\                 plant
-folder textures\plants\                plant
-folder textures\armor\                         clothing
-folder textures\clothes\                       clothing
-folder textures\clothing\                      clothing
-folder textures\outfits\                       clothing
-folder textures\armor\powerarmor\              armourmetal
-folder textures\armor\advancedpowerarmor\      armourmetal
-folder textures\armor\enclavepowerarmor\       armourmetal
-folder textures\armor\ncr_powerarmor\          armourmetal
-folder textures\armor\t-51bpowerarmor\         armourmetal
-folder textures\armor\teslapowerarmor\         armourmetal
-folder textures\armor\teslaekarmor\            armourmetal
-folder textures\armor\advancedteslaekarmor\    armourmetal
-folder textures\creatures\                     creature
-folder textures\creatures\robobrain\           robot
-folder textures\creatures\securitron\          robot
-folder textures\creatures\misterhandy\         robot
-folder textures\creatures\mistergutsy\         robot
-folder textures\creatures\sentrybot\           robot
-folder textures\creatures\protectron\          robot
-folder textures\creatures\eyebot\              robot
-folder textures\creatures\libertyprime\        robot
-folder textures\creatures\sentryturret\        robot
+# ---- specific non-fallback folders (beat pathword & broad fallback buckets) -------------------------------------------
+folder textures\dungeons\vault\               interiormetal
+folder textures\dungeons\vaultruined\         interiormetal
+folder textures\dungeons\enclave\             interiormetal
+folder textures\dungeons\industrial\          interiormetal
+folder textures\dungeons\metro\               interiormetal
+folder textures\dungeons\utility\             interiormetal
+folder textures\dungeons\repconn\             interiormetal
+folder textures\dungeons\hooverdam\           interiormetal
+folder textures\dungeons\helios\              interiormetal
+folder textures\dungeons\silo\                interiormetal
+folder textures\dungeons\bunker\              interiormetal
+folder textures\dungeons\caves\               rock
+folder textures\dungeons\cave\                rock
+folder textures\dungeons\mines\               rock
+folder textures\dungeons\mine\                rock
+folder textures\dungeons\sewers\              masonry
+folder textures\architecture\hooverdam\       masonry
+folder textures\landscape\lod\                default
+folder textures\landscape\plants\             plant
+folder textures\landscape\trees\              plant
+folder textures\trees\                        plant
+folder textures\plants\                       plant
+folder textures\armor\powerarmor\             armourmetal
+folder textures\armor\advancedpowerarmor\     armourmetal
+folder textures\armor\enclavepowerarmor\      armourmetal
+folder textures\armor\ncr_powerarmor\         armourmetal
+folder textures\armor\t-51bpowerarmor\        armourmetal
+folder textures\armor\teslapowerarmor\        armourmetal
+folder textures\armor\teslaekarmor\           armourmetal
+folder textures\armor\advancedteslaekarmor\   armourmetal
+folder textures\armor\combatarmor\            armourmetal
+folder textures\armor\metalarmor\             armourmetal
+folder textures\armor\combatranger\           armourmetal
+folder textures\armor\riotgear\               armourmetal
+folder textures\armor\stealthsuit\            rubber
+folder textures\armor\chinesestealth\         rubber
+folder textures\armor\hazmat\                 rubber
+folder textures\armor\spacesuit\              plastic
+folder textures\creatures\robobrain\          robot
+folder textures\creatures\securitron\         robot
+folder textures\creatures\misterhandy\        robot
+folder textures\creatures\mistergutsy\        robot
+folder textures\creatures\sentrybot\          robot
+folder textures\creatures\protectron\         robot
+folder textures\creatures\eyebot\             robot
+folder textures\creatures\libertyprime\       robot
+folder textures\creatures\sentryturret\       robot
 folder textures\creatures\mountedsentryturret\ robot
-folder textures\clutter\               clutter
-folder textures\furniture\             furniture
-folder textures\terminals\             default    # mostly playing cards, books and paper
+folder textures\clutter\bottles\              glass
+folder textures\clutter\books\                soft
+folder textures\clutter\papers\               soft
+folder textures\clutter\posters\              soft
+folder textures\clutter\food\                 food
+folder textures\clutter\kitchen\              ceramic
+folder textures\clutter\bathroom\             ceramic
+folder textures\clutter\wood\                 wood
+folder textures\clutter\metal\                metal
+folder textures\clutter\signs\                sign
+folder textures\clutter\neon\                 sign
+folder textures\clutter\electronics\          plastic
+folder textures\clutter\computers\            plastic
+folder textures\terminals\                    default    # mostly playing cards, books and paper
 
-# ---- keywords (the file name only; checked before the plain folders) -------------------------------------------------
-keyword chrome    chrome
-keyword brass     colouredmetal
-keyword copper    colouredmetal
-keyword gold      colouredmetal not=goldfinger,golden
-keyword rust      rustymetal    not=crust,trust
-keyword metal     metal
-keyword steel     metal
-keyword iron      metal         not=ironsights,environ
-keyword glass     glass         not=fxglass
-keyword marble    stonepolished
-keyword tile      stonepolished not=projectile,tiler,rooftile
-keyword wood      wood
-keyword plank     wood
-keyword plywood   wood
-keyword maple     wood
-keyword concrete  masonry
-keyword cement    masonry
-keyword brick     masonry
-keyword stone     masonry
-keyword asphalt   masonry
-keyword sidewalk  masonry
-keyword rock      rock          not=rockit,rocket,rocker
-keyword cliff     rock
-keyword boulder   rock
-keyword rubble    rock
-keyword canyon    rock
-keyword cloth     soft
-keyword fabric    soft
-keyword carpet    soft
-keyword curtain   soft
-keyword mattress  soft
-keyword paper     soft
-keyword cardboard soft
-keyword leather   leather
-keyword rubber    rubber
-keyword neon      sign
-keyword candle    wax
-keyword wax       wax
-keyword snow      snow          not=snowglobe
-keyword ice       snow          not=police,juice,device,office,service,sacrifice,price,slice
-keyword meat      food
-keyword apple     food
-keyword fruit     food
-keyword gourd     food
-keyword plastic   plastic
+# ---- broad top-level fallback buckets (yield to keywords, specific folders, pathwords, and live mesh signals) ----------
+folder textures\vehicles\                     vehicle   fallback
+folder textures\architecture\                 building  fallback
+folder textures\dungeons\                     interior  fallback
+folder textures\landscape\                    ground    fallback
+folder textures\armor\                        clothing  fallback
+folder textures\clothes\                      clothing  fallback
+folder textures\clothing\                     clothing  fallback
+folder textures\outfits\                      clothing  fallback
+folder textures\creatures\                    creature  fallback
+folder textures\clutter\                      clutter   fallback
+folder textures\furniture\                    furniture fallback
+
+# ---- keywords (file name & mesh name fallback; ordered specific -> general) -------------------------------------------
+keyword neon       sign
+keyword chrome     chrome
+keyword mirror     chrome
+keyword brass      colouredmetal
+keyword copper     colouredmetal
+keyword bronze     colouredmetal
+keyword gold       colouredmetal not=goldfinger,golden,marigold
+keyword aluminum   metal
+keyword aluminium  metal
+keyword titanium   metal
+keyword tin        metal         not=painting,curtain,satin,latin,bulletin,routing,lighting,setting,sitting,heating,waiting,mountain,fountain,curtains,platinum,martin,dustin,austin
+keyword platinum   chrome
+keyword rust       rustymetal    not=crust,trust,frust
+keyword corrugat   corrugated
+keyword galvan     corrugated
+keyword metal      metal
+keyword steel      metal
+keyword iron       metal         not=ironsights,environ
+keyword pipe       metal         not=pipboy,bagpipe
+keyword girder     metal
+keyword rebar      metal
+keyword grate      metal         not=integrate,migrate
+keyword chainlink  metal
+keyword metalfence metal
+keyword ironfence  metal
+keyword wirefence  metal
+keyword conduit    metal
+keyword dumpster   paintedmetal
+keyword mailbox    paintedmetal
+keyword hydrant    paintedmetal
+keyword locker     paintedmetal
+keyword filecab    paintedmetal
+keyword vent       interiormetal not=event,advent,prevent,invent,convent,solvent,inventory
+keyword duct       interiormetal not=product,conduct,aqueduct,viaduct,deduct,induct
+keyword turbine    metal
+keyword generator  metal
+keyword safe       metal         not=safety
+keyword canister   metal
+keyword propane    paintedmetal
+keyword barrel     metal         not=woodbarrel,oakbarrel
+keyword glass      glass         not=fxglass,hourglass
+keyword window     glass
+keyword windshield glass
+keyword lens       glass
+keyword crystal    glass
+keyword porcelain  ceramic
+keyword ceramic    ceramic
+keyword toilet     ceramic
+keyword sink       ceramic
+keyword urinal     ceramic
+keyword bathtub    ceramic
+keyword teapot     ceramic
+keyword teacup     ceramic
+keyword china      ceramic
+keyword linoleum   linoleum
+keyword vinyl      linoleum
+keyword marble     stonepolished
+keyword granite    stonepolished
+keyword terrazzo   stonepolished
+keyword tile       stonepolished not=projectile,tiler,rooftile
+keyword parquet    polishedwood
+keyword mahogany   polishedwood
+keyword walnut     polishedwood
+keyword hardwood   polishedwood
+keyword wood       wood          not=hollywood,goodwood,hardwood
+keyword timber     wood
+keyword plank      wood
+keyword plywood    wood
+keyword log        wood          not=logo,dialog,catalog,analog,ecology,geology,biology,technology,astrolog
+keyword oak        wood          not=cloak,soak
+keyword pine       wood          not=spine,alpine
+keyword cedar      wood
+keyword bamboo     wood
+keyword maple      wood
+keyword bark       wood
+keyword fence      wood          not=chainlink,metalfence,ironfence,wirefence
+keyword concrete   masonry
+keyword cement     masonry
+keyword brick      masonry
+keyword cinderblock masonry
+keyword mortar     masonry
+keyword stucco     masonry
+keyword plaster    masonry
+keyword drywall    masonry
+keyword asphalt    masonry
+keyword tarmac     masonry
+keyword pavement   masonry
+keyword sidewalk   masonry
+keyword curb       masonry
+keyword rooftile   masonry
+keyword terracotta masonry
+keyword cobblestone masonry
+keyword adobe      masonry
+keyword stone      masonry       not=stonepolished,tombstone,keystone,limestone,sandstone,cobblestone
+keyword sandstone  rock
+keyword limestone  rock
+keyword basalt     rock
+keyword gravel     ground
+keyword dirt       ground
+keyword sand       ground        not=sandbag,sandal,sandwich,thousand
+keyword mud        ground
+keyword dust       ground        not=industrial
+keyword soil       ground
+keyword ash        ground        not=trash,cash,wash,crash,flash,splash,bash,mash,dash,sash,stash,hash
+keyword road       ground        not=railroad,broad
+keyword path       ground        not=empath,sympath,telepath
+keyword crater     ground
+keyword rock       rock          not=rockit,rocket,rocker,bedrock_metal
+keyword cliff      rock
+keyword boulder    rock
+keyword rubble     rock
+keyword canyon     rock
+keyword debris     rock
+keyword cloth      soft
+keyword fabric     soft
+keyword linen      soft
+keyword wool       soft
+keyword burlap     soft
+keyword canvas     soft
+keyword velvet     soft
+keyword cotton     soft
+keyword carpet     soft
+keyword rug        soft          not=drug,shrug
+keyword curtain    soft
+keyword drape      soft
+keyword cushion    soft
+keyword mattress   soft
+keyword pillow     soft
+keyword blanket    soft
+keyword towel      soft
+keyword sandbag    soft
+keyword paper      soft
+keyword newspaper  soft
+keyword magazine   soft
+keyword poster     soft
+keyword cardboard  soft
+keyword parchment  soft
+keyword book       soft          not=jukebox
+keyword leather    leather
+keyword suede      leather
+keyword hide       leather       not=hideout
+keyword rubber     rubber
+keyword tire       rubber        not=entire,retire,attire,satire
+keyword hose       rubber        not=those,chose,whose
+keyword neoprene   rubber
+keyword latex      rubber
+keyword sign       sign          not=design,ensign,assign,resign,consign,signals
+keyword billboard  sign
+keyword marquee    sign
+keyword neon       sign
+keyword jukebox    polishedwood
+keyword candle     wax
+keyword wax        wax
+keyword snow       snow          not=snowglobe
+keyword frost      snow
+keyword ice        snow          not=police,juice,device,office,service,sacrifice,price,slice,spice,dice,mice,nice,rice,twice,notice,practice,justice
+keyword meat       food
+keyword steak      food
+keyword bread      food
+keyword fruit      food
+keyword apple      food
+keyword gourd      food
+keyword agave      plant
+keyword yucca      plant
+keyword frond      plant
+keyword leaf       plant
+keyword leaves     plant
+keyword foliage    plant
+keyword grass      plant         not=grasshopper
+keyword moss       plant
+keyword fern       plant
+keyword bush       plant
+keyword shrub      plant
+keyword cactus     plant
+keyword vine       plant         not=divine,bovine,ravine
+keyword ivy        plant
+keyword plastic    plastic
+keyword bakelite   plastic
+keyword fiberglass plastic
+keyword bottlecap  metal
+keyword bottle     glass         not=bottlecap
+
+# ---- pathwords (directory segment hints for custom/modded subfolders; lose to specific folders & filename keywords) ---
+pathword chrome     chrome
+pathword glass      glass
+pathword window     glass
+pathword marble     stonepolished
+pathword ceramic    ceramic
+pathword porcelain  ceramic
+pathword metal      metal         not=rustymetal,paintedmetal
+pathword steel      metal
+pathword iron       metal
+pathword pipe       metal
+pathword rust       rustymetal
+pathword corrugat   corrugated
+pathword wood       wood
+pathword rock       rock
+pathword stone      masonry
+pathword concrete   masonry
+pathword brick      masonry
+pathword stucco     masonry
+pathword plaster    masonry
+pathword cloth      soft
+pathword fabric     soft
+pathword carpet     soft
+pathword leather    leather
+pathword rubber     rubber
+pathword plastic    plastic
+pathword neon       sign
+pathword sign       sign          not=design
+pathword plant      plant
+pathword tree       plant         not=street
+pathword foliage    plant
+pathword grass      plant
+pathword robot      robot
+pathword powerarmor armourmetal
+pathword car        vehicle       not=card,carpet,cart,scar,cargo,caravan

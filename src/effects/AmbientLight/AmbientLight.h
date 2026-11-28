@@ -229,7 +229,7 @@ public:
 	ExtUniformBuffer	extUniforms;
 	CachedHandle		extHandles[41];
 	bool	ExtOn() const;
-	bool	ExtOnRect() const;	// UNOFFICIAL 2026-11-03: ExtOn's rule in a RenderScale rect frame (the RT estimate only)
+	bool	ExtSupportsRenderRect() const override { return true; }	// UNOFFICIAL 2026-11-27: all AmbientLight Vulkan passes support RenderScale rect frames
 	bool	ExtDraw(ExtShader Shader, IDirect3DSurface9* const* Targets, UINT TargetCount, IDirect3DBaseTexture9* const* Textures, UINT Variant, const D3DVIEWPORT9& Viewport);
 
 	// UNOFFICIAL 2026-10-27 (NVR DXVK, deep/fork2-ssgi) [Shaders.AmbientLight.Main] ComputeGI: needs NVR DXVK with NvrDxvkPasses on (does

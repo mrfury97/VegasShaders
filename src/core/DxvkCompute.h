@@ -17,6 +17,7 @@
 class DxvkCompute {
 public:
 	static void					Initialize(IDirect3DDevice9* device);	// RenderManager::Initialize; logs the outcome
+	static bool					HasExtension() { return Ext != nullptr; }	// true when NVR DXVK extension is loaded (even if one compute pass later failed)
 	static bool					Available() { return Ext != nullptr && !Failed; }
 	static ID3D9NvrExt*			Extension() { return Ext; }
 	static const NVR_EXT_INFO&	Info() { return ExtInfo; }

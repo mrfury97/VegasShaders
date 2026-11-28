@@ -89,15 +89,12 @@ public:
 	// (EffectRecord::ExtRender): the half-resolution and grid passes into the effect's own buffers (ExtDrawTo), the two
 	// composites through the frame chain. The constants go to one uniform buffer (four shadow matrices do not fit push data).
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
-	// UNOFFICIAL 2026-11-01 the report burst's VL stages (core/Diagnostics.cpp): ShaderManager.cpp calls this right before (after = false)
-	// and right after the composite, only while Diagnostics::VLCapturing: the frame before / after it and the path the composite took.
-	void	ReportComposite(IDirect3DDevice9* Device, bool after);
+	bool	ExtSupportsRenderRect() const override { return true; }
 
 	ExtPass				extPasses[9];	// by technique; Blur X and Blur Y share [2]
 	ExtUniformBuffer	extUniforms;
 
 private:
-	bool		extDrew = false;	// UNOFFICIAL 2026-11-01: the last Render's technique drew as its Vulkan pass (ExtRender), for the report burst
 	IDirect3DBaseTexture9*	fogNoise = nullptr;	// Textures\Effects\NoiseVolume.dds, loaded on the grid's first frame (stage 9 while the cells are lit)
 	bool		fogNoiseLoaded = false;
 	D3DXMATRIX	lastView, lastInvView, lastProj;

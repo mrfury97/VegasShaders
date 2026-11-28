@@ -3,8 +3,7 @@
 #include "../../core/ClothWind.h"	// UNOFFICIAL 2026-10-19 cloth round 5: the partition draw hook
 #include "../../core/ParticleSize.h"	// UNOFFICIAL 2026-11-04 soft particles
 #include "../../core/GrassTiming.h"	// UNOFFICIAL 2026-11-09 grass-cache study (test builds, GrassTiming key)
-#include "../../core/DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the RenderGeometryGroup detour (only with the switch on at startup)
-#include "../../core/ForwardLightKill.h"	// UNOFFICIAL 2026-11-24 fd-complete: the measure of done (test only)
+#include "../../core/DeferredDistant.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the RenderGeometryGroup detour
 #include "../../core/BoneMatrixBatch.h"	// UNOFFICIAL 2026-11-24 batched bone-matrix uploads
 #include "../../core/ConstantMapSort.h"	// UNOFFICIAL 2026-11-24 refcount-free constant-map partition
 #include "../../core/DistantLandTier2.h"	// UNOFFICIAL 2026-11-25 Phase 4 Distant Land Tier-2 load suppression
@@ -169,7 +168,6 @@ void AttachHooks() {
 	if (!RunDetourGroup("GrassFirst", [] { AttachGrassFirstRenderPassHook(); })) ClearGrassFirstInstalled();	// UNOFFICIAL 2026-10-17 GrassFirst (Render.cpp): pass-through unless DrawFirst is on
 	if (!RunDetourGroup("DeferredDistant", [] { DeferredDistant::Attach(); })) DeferredDistant::Installed = false;	// UNOFFICIAL 2026-11-14 [Main.Main.Quality] DeferredDistant
 	if (!RunDetourGroup("DistantLandTier2", [] { DistantLandTier2::Attach(); })) DistantLandTier2::Installed = false;	// UNOFFICIAL 2026-11-25 [Main.Main.Quality] DistantLandSuppressVanilla
-	if (!RunDetourGroup("ForwardLightKill", [] { ForwardLightKill::Attach(); })) ForwardLightKill::Installed = false;	// UNOFFICIAL 2026-11-24 fd-complete: [Main.Main.Misc] ForwardLightKill (test only)
 	if (!RunDetourGroup("ScopeCamera", [] { AttachScopeCameraHooks(); })) ClearScopeCameraHooks();	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect (Render.cpp ScopeScene)
 	LampReachMargin = (std::max)(0.0f, TheSettingManager->GetSettingF("Main.Main.Misc", "LampReachMargin"));
 	if (LampReachMargin > 0.0f) {	// UNOFFICIAL, Render.cpp
@@ -204,8 +202,7 @@ void AttachHooks() {
 
 	// UNOFFICIAL KeepLampsInView (PointShadowForward.h): the game's one lamp view test call, with forward shadows, unless another
 	// plugin has taken it.
-	if (TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") ||
-		TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "KeepLampsInView")) {
+	{
 		const UInt32 site = PointShadowForward::kTestFrustumCallSite;
 		if (*(UInt8*)site == 0xE8 && site + 5 + *(SInt32*)(site + 1) == PointShadowForward::kTestFrustumCull) {
 			WriteRelCall(site, (UInt32)&PointShadowForward::TestFrustumCullHook);

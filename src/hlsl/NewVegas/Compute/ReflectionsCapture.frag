@@ -46,8 +46,9 @@ void main() {
     // view too: it went to the world cube at max(CubeFade x 8, 0.03), half in ~23 frames, so what the screen had just shown was gone a
     // second after looking away (the owner's window). It now gives way only as the camera moves: -CubeReset, the distance moved this
     // frame over 2 x CubeMoveThreshold (Reflections.cpp CubeStep), 0 while turning on the spot.
-    vec2 onSuv = rectToScreen(ToScreen(view));
-    bool onScreen = view.z > 0.05 && all(greaterThan(onSuv, vec2(0.005))) && all(lessThan(onSuv, vec2(0.995)));
+    vec2 uv = view.z > 0.05 ? ToScreen(view) : vec2(-1.0);
+    vec2 suv = view.z > 0.05 ? rectToScreen(uv) : vec2(-1.0);
+    bool onScreen = view.z > 0.05 && all(greaterThan(suv, vec2(0.005))) && all(lessThan(suv, vec2(0.995)));
     vec4 result;
     if (CubeOn >= 1.5) {
         vec3 ndir = normalize(dir);
@@ -63,30 +64,26 @@ void main() {
         result = CubeReset > 0.0 ? vec4(0.0) : textureLod(samplerCube(t_capture, POINT_S), dir, 0.0) * (1.0 - CubeFade);
     }
 
-    if (view.z > 0.05) {
-        vec2 uv = ToScreen(view);
-        vec2 suv = rectToScreen(uv);
-        if (all(greaterThan(suv, vec2(0.005))) && all(lessThan(suv, vec2(0.995)))) {
-            // A cube texel covers a patch of many screen pixels: average a 4 x 4 grid of reads across it.
-            vec2 du = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(2.0 / CubeSize, 0.0)))) - uv;
-            vec2 dv = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(0.0, 2.0 / CubeSize)))) - uv;
-            vec3 sum = vec3(0.0);
-            float found = 0.0;
-            for (int y = 0; y < 4; y++) {
-                for (int x = 0; x < 4; x++) {
-                    vec2 at = uv + du * ((float(x) - 1.5) / 4.0) + dv * ((float(y) - 1.5) / 4.0);
-                    bool usable = all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy)) && !IsWeapon(at) && readDepthLod(at) > 40.0;
-                    vec3 c = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
-                    float brightest = max(c.r, max(c.g, c.b));
-                    sum += usable ? c * min(1.0, 32.0 / max(brightest, 1.0e-4)) : vec3(0.0);
-                    found += usable ? 1.0 : 0.0;
-                }
+    if (onScreen) {
+        // A cube texel covers a patch of many screen pixels: average a 4 x 4 grid of reads across it.
+        vec2 du = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(2.0 / CubeSize, 0.0)))) - uv;
+        vec2 dv = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + vec2(0.0, 2.0 / CubeSize)))) - uv;
+        vec3 sum = vec3(0.0);
+        float found = 0.0;
+        for (int y = 0; y < 4; y++) {
+            for (int x = 0; x < 4; x++) {
+                vec2 at = uv + du * ((float(x) - 1.5) / 4.0) + dv * ((float(y) - 1.5) / 4.0);
+                bool usable = all(greaterThan(at, vec2(0.0))) && all(lessThan(at, cb.renderScale.xy)) && !IsWeapon(at) && readDepthLod(at) > 40.0;
+                vec3 c = linearize(textureLod(sampler2D(t_rendered, LINEAR_S), at, 0.0).rgb);
+                float brightest = max(c.r, max(c.g, c.b));
+                sum += usable ? c * min(1.0, 32.0 / max(brightest, 1.0e-4)) : vec3(0.0);   // (upstream 1.1.6: 8; our 32 kept until the owner picks)
+                found += usable ? 1.0 : 0.0;
             }
-            if (found > 0.0) {
-                vec2 edge = min(suv, 1.0 - suv);
-                float blend = CaptureBlend * saturate(min(edge.x, edge.y) * 20.0) * found / 16.0;
-                result = mix(result, vec4(sum / found, 1.0), blend);
-            }
+        }
+        if (found > 0.0) {
+            vec2 edge = min(suv, 1.0 - suv);
+            float blend = CaptureBlend * saturate(min(edge.x, edge.y) * 20.0) * found / 16.0;
+            result = mix(result, vec4(sum / found, 1.0), blend);
         }
     }
     o_color = result;

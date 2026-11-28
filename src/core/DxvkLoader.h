@@ -29,7 +29,6 @@ namespace DxvkLoader {
 	inline std::string BlockedRootDxvk;	// root <game>\d3d9.dll (another DXVK) that VSDxvk bypassed
 	inline std::string OverridingWrapper;	// non-DXVK wrapper (ENB/ReShade/SpecialK) or unbypassable root d3d9.dll preventing VSDxvk
 	inline std::string RootConfIgnored;	// leftover <game>\dxvk.conf ignored because a root DXVK was blocked and VSDxvk ships none
-	inline std::string ActiveNonForkDxvk;	// populated by InstallCheck when running under a non-Vegas-Shaders DXVK
 
 	// The d3d9.dll the game's Direct3D comes from.
 	inline HMODULE Runtime() { return Loaded ? Loaded : GetModuleHandleA("d3d9.dll"); }

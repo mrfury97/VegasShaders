@@ -24,21 +24,23 @@ vec3 contactProject(vec3 r) {
 }
 
 // PointShadows.fx: ContactOpen (how open the way from this pixel toward a lamp is; 1 open, 0 blocked right at the pixel)
-float contactOpen(texture2D depthTex, sampler samp, vec3 r0, vec3 worldPos, vec3 n, vec3 lampWorld, vec2 uv, float pixelDepth) {
+float contactOpen(texture2D depthTex, sampler samp, vec3 r0, vec3 worldPos, vec3 n, vec3 lampWorld, vec2 ruv, float pixelDepth) {
     vec3 toLamp = lampWorld - worldPos;
     float dist = length(toLamp);
     vec3 dir = toLamp / dist;
     if (dot(dir, n) < 0.1) return 1.0;
 
     float len = min(cb.lampContact.y, dist * 0.5);
-    float jitter = mix(0.5, fract(cb.lampContactNoise.z * fract(dot(uv, cb.lampContactNoise.xy))), cb.lampContactNoise.w);
+    float jitter = mix(0.5, fract(cb.lampContactNoise.z * fract(dot(ruv, cb.lampContactNoise.xy))), cb.lampContactNoise.w);
     vec3 start = r0 + n * (cb.lampContact.w + pixelDepth * cb.lampContactBias.z);
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(cb.renderScale.xy - minUV, minUV);
     float occ = 0.0;
     for (int i = 0; i < 6; i++) {
         float t = (float(i) + jitter) / 6.0;
         vec3 s = contactProject(start + dir * (len * t));
         if (s.z < 1.0 || any(lessThan(s.xy, vec2(0.0))) || any(greaterThan(s.xy, vec2(1.0)))) break;
-        float delta = s.z - textureLod(sampler2D(depthTex, samp), s.xy, 0.0).x * cb.cameraData.y;	// (readDepthLod)
+        float delta = s.z - textureLod(sampler2D(depthTex, samp), clamp(s.xy * cb.renderScale.xy, minUV, maxUV), 0.0).x * cb.cameraData.y;	// (readDepthLod)
         occ = max(occ, (delta > cb.lampContactBias.x + s.z * cb.lampContactBias.y && delta < cb.lampContact.z) ? 1.0 - t : 0.0);
     }
     return 1.0 - occ;
@@ -48,7 +50,10 @@ float contactOpen(texture2D depthTex, sampler samp, vec3 r0, vec3 worldPos, vec3
 #define POINT_CLAMP NVR_SAMPLER(pc.pointSampler)
 
 void main() {
-    float depth = readDepthAt(t_depth, LINEAR_CLAMP, uv);
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(cb.renderScale.xy - minUV, minUV);
+    vec2 ruv = clamp(uv * cb.renderScale.xy, minUV, maxUV);
+    float depth = readDepthAt(t_depth, LINEAR_CLAMP, ruv);
     float fade = clamp((depth - cb.lampContactFade.x) * cb.lampContactFade.y, 0.0, 1.0) * clamp((cb.lampContactFade.z - depth) * cb.lampContactFade.w, 0.0, 1.0);
     float keep = 1.0;
     if (fade > 0.0) {
@@ -65,7 +70,7 @@ void main() {
             if (a > b1) { b1 = a; L1 = lp.xyz; }
         }
         if (b1 > cb.lampContactBias.w * total && b1 > 0.0) {
-            float blocked = b1 * (1.0 - contactOpen(t_depth, LINEAR_CLAMP, cameraVector, worldPos, worldNormalAt(t_normals, POINT_CLAMP, uv), L1, uv, depth));
+            float blocked = b1 * (1.0 - contactOpen(t_depth, LINEAR_CLAMP, cameraVector, worldPos, worldNormalAt(t_normals, POINT_CLAMP, ruv), L1, ruv, depth));
             keep = 1.0 - cb.lampContact.x * fade * clamp(blocked / total, 0.0, 1.0);
         }
     }

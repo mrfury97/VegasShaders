@@ -67,8 +67,18 @@ layout(push_constant) uniform Push {
 #define POINT_S  NVR_SAMPLER(pc.pointClamp)
 #define LINEAR_S NVR_SAMPLER(pc.linearClamp)
 
+vec2 renderScaleXY() { return (cb.renderScale.x > 0.0 && cb.renderScale.y > 0.0) ? cb.renderScale.xy : vec2(1.0); }
+vec2 renderScaleZW() { return (cb.renderScale.z > 0.0 && cb.renderScale.w > 0.0) ? cb.renderScale.zw : (1.0 / renderScaleXY()); }
+vec2 rectToScreen(vec2 uv) { return uv * renderScaleZW(); }
+vec2 screenToRect(vec2 s01) { return s01 * renderScaleXY(); }
+vec2 clampToRect(vec2 uv, vec2 texel) {
+    vec2 lo = 0.5 * texel;
+    return clamp(uv, lo, max(renderScaleXY() - lo, lo));
+}
+
 // IN.UVCoord at this pixel (see the top).
 vec2 frameUV() { return floor(gl_FragCoord.xy) * pc.frame.xy + pc.frame.zw; }
+vec2 frameRectUV() { return floor(gl_FragCoord.xy) * (pc.frame.xy * renderScaleXY()) + pc.frame.zw; }
 
 // tex2Dlod(sampler, float4(uv, 0, 0)) through a POINT or LINEAR sampler
 vec4 pointLod(texture2D t, vec2 uv) { return textureLod(sampler2D(t, POINT_S), uv, 0.0); }
@@ -139,12 +149,14 @@ bool IsViewModel(texture2D viewModelTex, vec2 uv) {
 }
 
 vec3 PositionFromLinear(vec2 uv, float linear01) {
+    uv = rectToScreen(uv);
     float z = projectedDepthFromLinear(linear01);
     vec4 viewSpace = cb.invProjectionTransform * vec4(uv.x * 2.0 - 1.0, (1.0 - uv.y) * 2.0 - 1.0, z, 1.0);   // mul(v, TESR_InvProjectionTransform)
     return viewSpace.xyz / viewSpace.w;
 }
 
 vec3 PositionFromViewZ(vec2 uv, float z) {
+    uv = rectToScreen(uv);
     return vec3((uv.x * 2.0 - 1.0) / cb.projectionTransform[0][0], (1.0 - uv.y * 2.0) / cb.projectionTransform[1][1], 1.0) * z;
 }
 

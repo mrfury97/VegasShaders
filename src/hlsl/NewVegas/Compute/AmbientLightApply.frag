@@ -136,7 +136,7 @@ vec4 Apply(vec2 uv, bool sky) {
     }
     float busy = saturate((bendX + bendY) / depth * 20.0 - 0.1);
 #ifdef NVR_GI_APPLY
-    vec3 giLight = ambient.rgb * cb.data.z;
+    vec3 giLight = viewModel ? vec3(0.0) : (ambient.rgb * cb.data.z);
     if (DebugView > 12.5) return delinearize(vec4(giLight, 1.0));   // the light arriving (before the surface colour)
 #endif
     if (DebugView > 11.5) {
@@ -178,23 +178,25 @@ vec4 Apply(vec2 uv, bool sky) {
         lin = lit + gridBounce * albedo;
     }
 #ifdef NVR_GI_APPLY
-    vec3 c0 = linearize(pointLod(t_source, ruv).rgb);
-    vec3 localSum = c0;
-    float localWeight = 1.0;
-    for (int i = 0; i < 4; i++) {
-        vec2 o = vec2((i & 1) != 0 ? 4.0 : -4.0, (i & 2) != 0 ? 4.0 : -4.0) * px;
-        vec2 tap = clamp(ruv + o, minFullUV, maxFullUV);
-        float w = step(abs(readDepthLod(t_depth, tap) - depth), max(depth * 0.02, 1.0));
-        localSum += linearize(pointLod(t_source, tap).rgb) * w;
-        localWeight += w;
+    if (!viewModel) {
+        vec3 c0 = linearize(pointLod(t_source, ruv).rgb);
+        vec3 localSum = c0;
+        float localWeight = 1.0;
+        for (int i = 0; i < 4; i++) {
+            vec2 o = vec2((i & 1) != 0 ? 4.0 : -4.0, (i & 2) != 0 ? 4.0 : -4.0) * px;
+            vec2 tap = clamp(ruv + o, minFullUV, maxFullUV);
+            float w = step(abs(readDepthLod(t_depth, tap) - depth), max(depth * 0.02, 1.0));
+            localSum += linearize(pointLod(t_source, tap).rgb) * w;
+            localWeight += w;
+        }
+        vec3 localLin = localSum / localWeight;
+        float shade = shadedLuma / max(luma(c0), 1.0e-4);
+        float detail = clamp(luma(c0) / max(luma(localLin), 1.0e-4), 0.0, 2.0);
+        vec3 guess = SurfaceColourCap(localLin * shade, FallbackCap()) * detail;
+        vec4 a = pointLod(t_albedo, ruv);
+        float hasAlbedo = step(0.5, cb.alFlags.z) * step(0.5, a.a);
+        lin += giLight * mix(guess, clamp(a.rgb, vec3(0.0), vec3(0.85)), hasAlbedo);
     }
-    vec3 localLin = localSum / localWeight;
-    float shade = shadedLuma / max(luma(c0), 1.0e-4);
-    float detail = clamp(luma(c0) / max(luma(localLin), 1.0e-4), 0.0, 2.0);
-    vec3 guess = SurfaceColourCap(localLin * shade, FallbackCap()) * detail;
-    vec4 a = pointLod(t_albedo, ruv);
-    float hasAlbedo = step(0.5, cb.alFlags.z) * step(0.5, a.a);
-    lin += giLight * mix(guess, clamp(a.rgb, vec3(0.0), vec3(0.85)), hasAlbedo);
 #endif
     return delinearize(vec4(lin, color.a));
 }

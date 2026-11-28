@@ -12,7 +12,7 @@ layout(set = 1, binding = 0) uniform texture2D t_scene;      // the frame (TESR_
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec2 uv = (floor(gl_FragCoord.xy) + 0.5) * pc.frame.xy;   // the texel centre (pc.frame.xy = 1 / this target's size)
+    vec2 uv = (floor(gl_FragCoord.xy) + 0.5) * pc.frame.xy * renderScaleXY();   // the texel centre in the active rect (pc.frame.xy = 1 / reducedRect)
     vec3 light = min(linearize(linearLod(t_scene, uv).rgb), vec3(1.0));
     o_color = vec4(sqrt(max(light, vec3(0.0))), 1.0);
 }

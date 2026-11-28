@@ -29,8 +29,6 @@
 #define FD_LF_SPEC 3.0f
 #define FD_LF_MATTE 5.0f
 #define FD_LF_NOSUN 7.0f
-#define FD_LAMPS_V2_BASE 5.0f	// UNOFFICIAL 2026-11-14 GBufferV2: the "sun kept" records' base (LAMPS_DEFERRED 1 and 3)
-
 
 #if defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 4
     #define FD_GBUFFER_V2 1
@@ -41,10 +39,8 @@
 // Writer side: the albedo alpha of a lighting-free record (base: FD_LF_SPEC, FD_LF_MATTE or FD_LF_NOSUN; keep = 1 - fog).
 #if FD_GBUFFER_V2
     #define FD_LF_CODE(base, keep) (((base) > 6.5f ? 3.0f : 1.0f) + saturate(keep))
-    #define FD_LAMPS_CODE(keep) (FD_LAMPS_V2_BASE + saturate(keep))	// the "sun kept" records (LAMPS_DEFERRED 1 / 3)
 #else
     #define FD_LF_CODE(base, keep) ((base) + saturate(keep))
-    #define FD_LAMPS_CODE(keep) (keep)	// (the older code: the keep alone, the mark in COLOR2.a)
 #endif
 
 // Reader side: a = the resolved COLOR1.a, r = COLOR2.r.
@@ -127,7 +123,7 @@ float3 FDAddFogged(float3 frame, float3 D, float keep, float3 F, float gamma, fl
 // older writers' as they wrote it (v2: a deferred record's 1 + keep; a forward record's 1 = keep 1).
 float FDAddedLightKeep(float a) {
 #if FD_GBUFFER_V2
-    return a > 4.5f ? a - FD_LAMPS_V2_BASE : a > 2.5f ? a - 3.0f : a > 1.0001f ? a - 1.0f : a;	// (2026-11-14: + the "sun kept" records' 5 + keep)
+    return a > 2.5f ? a - 3.0f : a > 1.0001f ? a - 1.0f : a;
 #else
     return a > 2.5f ? FDLightFreeKeep(a) : a;
 #endif

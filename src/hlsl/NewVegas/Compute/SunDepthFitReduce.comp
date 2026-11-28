@@ -1,0 +1,67 @@
+// UNOFFICIAL 2026-11-26: Vulkan Compute SunDepthFit Reduce + Count pass.
+// Replaces SunDepthFit's Reduce draw and all 21 D3D9 occlusion query draws in a single dispatch.
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_depth;
+layout(set = 1, binding = 1, rgba32f) uniform writeonly image2D i_blocks;
+layout(set = 1, binding = 2, std430) buffer CountsBuf {
+    uint counts[21];
+};
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 dims;       // x activeGridW, y activeGridH, z renderW, w renderH
+    vec4  meta;       // x farZ, y farCount, z nearCount, w totalQueries
+    vec4  levels[6];  // up to 21 candidate depths: [0] unused, [1..farCount], [farCount+1..totalQueries-1]
+} cb;
+
+shared uint s_counts[21];
+
+const float SkyDepth = 0.98;
+const float NoSurface = 1.0e9;
+
+void main() {
+    uint tid = gl_LocalInvocationIndex;
+    if (tid < 21u) s_counts[tid] = 0u;
+    barrier();
+
+    ivec2 blk = ivec2(gl_GlobalInvocationID.xy);
+    if (blk.x < cb.dims.x && blk.y < cb.dims.y) {
+        float farthestV = 0.0;
+        float nearestV = 2.0;
+        float sky = 0.0;
+        ivec2 maxPx = cb.dims.zw - 1;
+        ivec2 origin = blk * 8;
+        for (int y = 0; y < 8; y++) {
+            for (int x = 0; x < 8; x++) {
+                ivec2 px = clamp(origin + ivec2(x, y), ivec2(0), maxPx);
+                float d = texelFetch(t_depth, px, 0).x;
+                bool surfaceV = d > 0.0 && d < SkyDepth;
+                if (d >= SkyDepth) sky = 1.0;
+                if (surfaceV) {
+                    farthestV = max(farthestV, d);
+                    nearestV = min(nearestV, d);
+                }
+            }
+        }
+        float blkFar = farthestV * cb.meta.x;
+        float blkNear = nearestV < 1.5 ? nearestV * cb.meta.x : NoSurface;
+        imageStore(i_blocks, blk, vec4(blkFar, blkNear, sky, 1.0));
+
+        int farCount = int(cb.meta.y + 0.5);
+        int total = min(int(cb.meta.w + 0.5), 21);
+        for (int q = 0; q < total; q++) {
+            float lvl = cb.levels[q >> 2][q & 3];
+            float keep = (q == 0) ? (sky - 0.5) : (q <= farCount) ? (blkFar - lvl) : (lvl - blkNear);
+            if (keep >= 0.0) atomicAdd(s_counts[q], 1u);
+        }
+    }
+
+    barrier();
+    if (tid < 21u && s_counts[tid] != 0u) {
+        atomicAdd(counts[tid], s_counts[tid]);
+    }
+}

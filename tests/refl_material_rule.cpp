@@ -71,10 +71,13 @@ int main() {
 	Pass depth = World(false); depth.colorWrite = 0;
 	CHECK(Decide(depth) == Keep, "a depth-only pass gets no alpha writes");
 
-	// 9. the first-person scene: no material passes; the arms and gun write their own alpha
-	Pass gun = World(true); gun.world = false;
-	CHECK(Decide(gun) == Own, "first person, even with a map: own alpha (no material)");
-	CHECK(!IsMaterial(After(Decide(gun), a, 1.0f, mirror, false)), "the gun over the mirror: no material");
+	// 9. the first-person scene: unmapped draws write their own alpha (clearing mirrors); _rmaos maps write their material
+	Pass gunUnmapped = World(false); gunUnmapped.world = false;
+	CHECK(Decide(gunUnmapped) == Own, "first person without _rmaos: own alpha (no material)");
+	CHECK(!IsMaterial(After(Decide(gunUnmapped), a, 1.0f, mirror, false)), "unmapped gun over the mirror: no material");
+	Pass gunMapped = World(true); gunMapped.world = false;
+	CHECK(Decide(gunMapped) == Material, "first person with _rmaos: writes its own material");
+	CHECK(IsMaterial(After(Decide(gunMapped), 1.0f, 1.0f, mirror, false)), "mapped gun writes material into alpha");
 
 	// 10. MaterialAware off / no geometry: nothing changes
 	Pass off = World(true); off.live = false;

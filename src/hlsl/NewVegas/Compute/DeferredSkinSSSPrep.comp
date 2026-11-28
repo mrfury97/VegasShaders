@@ -1,0 +1,98 @@
+// UNOFFICIAL 2026-11-26: Vulkan Compute DeferredSkinSSS prep pass (Shaders/DeferredSkinSSS.hlsl SSS_PREP).
+// Writes per-pixel Burley subsurface light L * participation and view-space depth into i_light (zeroing
+// non-skin/excluded pixels directly, avoiding a frame copy and clear pass).
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_albedo;      // COLOR1: rgb albedo, a keep
+layout(set = 1, binding = 1) uniform texture2D t_spec;        // skin highlight target
+layout(set = 1, binding = 2) uniform texture2D t_normals;     // COLOR3: b camera distance, a skin code
+layout(set = 1, binding = 3) uniform texture2D t_material;    // COLOR2: r model
+layout(set = 1, binding = 4) uniform texture2D t_linearZ;     // DeferredDepth::LinearTexture
+layout(set = 1, binding = 5, rgba16f) uniform readonly image2D i_scene;   // HDR scene RT0
+layout(set = 1, binding = 6, rgba16f) uniform writeonly image2D i_light;  // SSS prep output
+
+layout(push_constant) uniform Push {
+    uint flags;
+    uint pad[3];
+} pc;
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 viewport;        // 0: vp.X, vp.Y, vp.Width, vp.Height
+    vec4  invTargetSize;   // 16: 1 / t.Width, 1 / t.Height, 0, 0
+    vec4  sssView;         // 32: 1 / vp.Width, 1 / vp.Height, 0.5 * vp.Height / tanY, disc angle
+    vec4  sssCtrl;         // 48: d_red, DepthFollow, AlbedoDetail, linearZ ? 1 : 0
+    vec4  sssDebug;        // 64: DebugView, includeSolids, hasSpec, gbufferV2
+    vec4  sssTaps[24];     // 80: 24 Burley disc taps
+} cb;
+
+float fdModel(float r) {
+    float mod = floor(r + 0.01);
+    return (cb.sssDebug.w > 0.5 && mod >= 15.5) ? (mod - 16.0) : mod;
+}
+
+float fdAddedLightKeep(float a) {
+    if (cb.sssDebug.w > 0.5) return saturate(a > 2.5 ? a - 3.0 : a - 1.0);
+    float base = a < 4.5 ? 3.0 : a < 6.5 ? 5.0 : 7.0;
+    return saturate(a - base);
+}
+
+vec3 participation(vec3 a) {
+    return smoothstep(0.01, 0.04, pow(max(a, vec3(0.0)), vec3(1.0 / 2.2)));
+}
+
+vec3 albedoFactor(vec3 a) {
+    return pow(max(a, vec3(1.0e-4)), vec3(cb.sssCtrl.z));
+}
+
+void main() {
+    ivec2 localPx = ivec2(gl_GlobalInvocationID.xy);
+    if (localPx.x >= cb.viewport.z || localPx.y >= cb.viewport.w) return;
+    ivec2 px = cb.viewport.xy + localPx;
+
+    vec4 n = texelFetch(t_normals, px, 0);
+    vec4 m = texelFetch(t_material, px, 0);
+    float model = fdModel(m.r);
+    bool isSkin = (n.a > 3.5 && abs(model - 6.0) < 0.5);
+    vec4 a = texelFetch(t_albedo, px, 0);
+    float keep = fdAddedLightKeep(a.a);
+    bool isSolid = (!isSkin && cb.sssDebug.y > 0.5 && model >= 10.5 && model <= 14.5 && a.a > 1.0001 && keep > 1.0e-4);
+
+    if (!isSkin && !isSolid) {
+        imageStore(i_light, px, vec4(0.0));
+        return;
+    }
+
+    vec3 frame = imageLoad(i_scene, px).rgb;
+    float z = cb.sssCtrl.w > 0.5 ? texelFetch(t_linearZ, px, 0).x : n.b;
+    if (isSolid) {
+        imageStore(i_light, px, vec4(min(max(frame, vec3(0.0)) * participation(a.rgb) / albedoFactor(a.rgb), vec3(4096.0)), max(z, 1.0e-3)));
+        return;
+    }
+
+    vec3 spec = cb.sssDebug.z > 0.5 ? (texelFetch(t_spec, px, 0).rgb * keep) : vec3(0.0);
+    vec3 over = spec - frame;
+    if (max(over.r, max(over.g, over.b)) > 1.0e-4) {
+        imageStore(i_light, px, vec4(0.0));
+        return;
+    }
+
+    vec3 diffuse = max(frame - spec, vec3(0.0));
+    if (cb.sssCtrl.w > 0.5) {
+        vec2 uv = (vec2(localPx) + 0.5) * cb.sssView.xy;
+        float tanY = 0.5 / (cb.sssView.y * cb.sssView.z);
+        float tanX = tanY * cb.sssView.y / cb.sssView.x;
+        vec3 ray = vec3((uv.x * 2.0 - 1.0) * tanX, (1.0 - uv.y * 2.0) * tanY, 1.0);
+        float skinZ = n.b * inversesqrt(dot(ray, ray));
+        if (z < skinZ * 0.99 - 2.0) {
+            imageStore(i_light, px, vec4(0.0, 0.0, 0.0, -1.0));
+            return;
+        }
+    }
+
+    imageStore(i_light, px, vec4(min(diffuse * participation(a.rgb) / albedoFactor(a.rgb), vec3(4096.0)), max(z, 1.0e-3)));
+}

@@ -32,17 +32,22 @@ void main() {
     }
 
     const float blurRadius = 2.0;
+    vec2 ruv = uv * cb.renderScale.xy;
+    vec2 rectMax = scale * cb.renderScale.xy;
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(rectMax - minUV, minUV);
 
     // blur using a gaussian blur
     float weightSum = 0.114725602;
-    vec4 color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv) * weightSum;
+    vec4 color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), clamp(ruv, minUV, maxUV)) * weightSum;
 
     for (int i = 0; i < 12; i++) {
         // Blur.hlsl BlurOffsets: k * TESR_ReciprocalResolution for k = -6..-1, 1..6
         float k = (i < 6) ? float(i - 6) : float(i - 5);
         vec2 uvOff = ((k * cb.reciprocalResolution.xy) * pc.offsetMask) * blurRadius;
-        float isValid = float(((uv.x + uvOff.x) < scale) && ((uv.y + uvOff.y) < scale)); // discard samples outside the screen area
-        color += blurWeights[i] * texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uv + uvOff) * isValid;
+        vec2 tapUV = ruv + uvOff;
+        float isValid = float((tapUV.x >= 0.0) && (tapUV.y >= 0.0) && (tapUV.x < rectMax.x) && (tapUV.y < rectMax.y)); // discard samples outside the screen area
+        color += blurWeights[i] * texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), clamp(tapUV, minUV, maxUV)) * isValid;
         weightSum += blurWeights[i] * isValid;
     }
     color /= weightSum;

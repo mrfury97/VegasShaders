@@ -34,7 +34,7 @@ namespace ScreenSpaceShadows {
 
 	// Startup (TextureManager::Initialize, DeferredDepth::ReadStartup): the switch and the deferred renderer that reads the result
 	inline bool WantedAtStart() {
-		return TheSettingManager->GetSettingI(kSection, "Enabled") != 0 && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer") > 0;
+		return TheSettingManager->GetSettingI(kSection, "Enabled") != 0;
 	}
 
 	inline IDirect3DTexture9* Texture = nullptr;	// TESR_ScreenSpaceShadows (G16R16F, r: 1 lit .. 0 shadowed)
@@ -112,7 +112,10 @@ namespace ScreenSpaceShadows {
 		D3DXVec4Transform(&clip, &view, &TheRenderManager->projMatrix);
 		if (D3DXVec4LengthSq(&view) < 0.25f || !_finite(clip.x) || !_finite(clip.y) || !_finite(clip.z) || !_finite(clip.w)) return false;
 
-		const UINT w = RenderRect::Width(TheRenderManager->width), h = RenderRect::Height(TheRenderManager->height);
+		D3DVIEWPORT9 vp = {};
+		Device->GetViewport(&vp);
+		const UINT w = (vp.Width > 0 && vp.Height > 0) ? vp.Width : RenderRect::Width(TheRenderManager->width);
+		const UINT h = (vp.Width > 0 && vp.Height > 0) ? vp.Height : RenderRect::Height(TheRenderManager->height);
 		const int size[2] = { (int)w, (int)h }, minBounds[2] = { 0, 0 };
 		const float lightProjection[4] = { clip.x, clip.y, clip.z, clip.w };
 		const Bend::DispatchList list = Bend::BuildDispatchList(lightProjection, size, minBounds, size);

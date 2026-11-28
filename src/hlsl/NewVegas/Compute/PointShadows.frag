@@ -44,13 +44,16 @@ layout(location = 0) out vec4 o_color;
 
 void main() {
     // HalfMaskVS: the half-resolution pixel reads the full-resolution texel at its top-left
-    vec2 uvh = uv + (SHADOW_MODE == 2u ? 0.5 * cb.reciprocalResolution.xy : vec2(0.0));
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(cb.renderScale.xy - minUV, minUV);
+    vec2 screenUV = uv + (SHADOW_MODE == 2u ? 0.5 * cb.reciprocalResolution.xy * cb.renderScale.zw : vec2(0.0));
+    vec2 ruv = clamp(uv * cb.renderScale.xy + (SHADOW_MODE == 2u ? 0.5 * cb.reciprocalResolution.xy : vec2(0.0)), minUV, maxUV);
     bool batch = SHADOW_MODE == 1u;
 
-    float depth = readDepthAt(t_depth, LINEAR_CLAMP, uvh);
-    vec3 cameraVector = toWorld(uvh) * depth;
+    float depth = readDepthAt(t_depth, LINEAR_CLAMP, ruv);
+    vec3 cameraVector = toWorld(screenUV) * depth;
     vec3 worldPos = cb.cameraPosition.xyz + cameraVector;
-    vec3 normal = worldNormalAt(t_normals, POINT_CLAMP, uvh);
+    vec3 normal = worldNormalAt(t_normals, POINT_CLAMP, ruv);
 
     // TEST variants (variants.txt PointShadows m0x/m0y/m0z/m0e, chosen live by NvrDxvkTestSuffix): parts left out to see what costs
 #ifdef PS_TEST_EMPTY

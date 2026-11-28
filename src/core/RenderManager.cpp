@@ -277,16 +277,6 @@ bool RenderManager::SetupExtraCamera(NiCamera* cam, D3DXMATRIX* projection) {
 }
 
 // detect if dxvk is present
-// UNOFFICIAL 2026-10-27: see RenderManager::Initialize (stock DXVK on NVIDIA: no world depth). Shown once on screen, the first
-// frame the player is in the world (the interface does not exist yet while the render manager starts).
-static bool NvrDepthMissingUnderDXVK = false;
-void NvrDepthWarningTick() {
-	static bool shown = false;
-	if (!NvrDepthMissingUnderDXVK || shown || !Player || !Player->parentCell || !InterfaceManager) return;
-	shown = true;
-	InterfaceManager->ShowMessage("Vegas Shaders: no depth under this DXVK on NVIDIA. Add d3d9.customVendorId = 1002 to dxvk.conf (see the Vegas Shaders log).");
-}
-
 // True when the d3d9.dll the game's Direct3D comes from has the ProductName "DXVK".
 static bool getDXVKPresent() {
 	char path[MAX_PATH] = {};
@@ -387,15 +377,6 @@ void RenderManager::Initialize() {
 	}
 	else if (NvAPI_Initialize() == NVAPI_OK) {
 		Logger::Log("Depth resolve: NVAPI (NVIDIA driver).");
-		// UNOFFICIAL 2026-10-27: stock DXVK on an NVIDIA card offers no RESZ (only when the adapter reports AMD), and NVAPI cannot reach
-		// DXVK's device: NVR gets no world depth, so AO, fog, shadows, reflections and everything else that reads depth go wrong.
-		// Said once in the log here and once on screen in game (NvrDepthWarningTick); the old path stays as it was.
-		if (getDXVKPresent()) {
-			NvrDepthMissingUnderDXVK = true;
-			Logger::Log("WARNING: this d3d9.dll is DXVK without RESZ on an NVIDIA card: Vegas Shaders gets NO world depth (ambient occlusion, fog, "
-				"shadows, reflections and other depth effects will look wrong). Fix: add the line  d3d9.customVendorId = 1002  to dxvk.conf "
-				"next to d3d9.dll (DXVK then offers RESZ), or use Vegas Shaders DXVK, which offers it on every GPU.");
-		}
 	}
 	else Logger::Log("ERROR: Cannot initialize the render manager. Graphics device not supported.");
 	Logger::Log("D3D9 runtime: %s", D3D9RuntimeDescription());

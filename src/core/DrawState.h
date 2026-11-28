@@ -10,11 +10,6 @@ namespace SharedDrawState {
 	inline TrackedState T = {};
 	inline bool Valid = false;
 	inline bool WatchingDepth = false, DepthWrittenSinceCopy = false;
-	// UNOFFICIAL 2026-11-04 DrawStateTracking (CapturedNormals.h): ConstantFilter's detours of the device's SetPixelShader body and of the
-	// state-block Apply / EndStateBlock / Reset bodies tell the tracker here (null until it is in). Observers: set once, never cleared.
-	inline void (*PixelShaderSet)(IDirect3DPixelShader9*) = nullptr;
-	inline void (*StateLost)() = nullptr;
-	inline bool ObserversLive = false;	// ConstantFilter's detours are in (the tracker relies on them for the pixel shader and state blocks)
 	// UNOFFICIAL 2026-11-11 (the "black stain" on reflecting surfaces under FSR RenderScale < 1): ConstantFilter's pixel hook calls
 	// PixelWriteAfter (ManyLamps / LandLamps: "the game wrote over our lamp registers, put them back") after EVERY pixel-constant upload,
 	// and those two only know which shader the GAME bound last (their Bound flag, set at the game's SetShaders, never cleared). When the

@@ -55,7 +55,7 @@ vec3 getWorldNormalLod(vec2 coord) {
 }
 
 void main() {
-    vec2 uvc = uv;
+    vec2 uvc = gl_FragCoord.xy / vec2(textureSize(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), 0));
     vec4 color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.samplerIndex)), uvc);
     // HLSL lerp(1.0f, tex2Dlod(SunFar).rgb, saturate(SunFarApply.x)): the composites' sun factor (0 or 1)
     color.rgb *= mix(vec3(1.0), textureLod(sampler2D(t_sunFar, NVR_SAMPLER(pc.pointSamplerIndex)), uvc, 0.0).rgb, saturate(pc.sunFarApply.x));
@@ -63,7 +63,7 @@ void main() {
     // Underwater: the water plane itself is not shadowed (the HLSL returns color unchanged there).
     if (pc.waterSettings.z == 1.0) {
         float depth = readDepthLod(uvc);
-        vec3 cameraVector = toWorld(uvc) * depth;
+        vec3 cameraVector = toWorld(uv) * depth;
         vec4 worldPos = vec4(pc.cameraPosition.xyz + cameraVector, 1.0);
         vec3 worldNormal = getWorldNormalLod(uvc);
         if (worldPos.z < (pc.waterSettings.x + 2.0) && worldPos.z > (pc.waterSettings.x - 2.0) && dot(worldNormal, vec3(0.0, 0.0, -1.0)) > 0.999) {

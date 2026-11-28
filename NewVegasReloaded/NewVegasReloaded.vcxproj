@@ -141,11 +141,14 @@
     <ClCompile Include="..\src\core\RenderManager.cpp" />
     <ClCompile Include="..\src\core\RenderPass.cpp" />
     <ClCompile Include="..\src\core\SettingManager.cpp" />
+    <ClCompile Include="..\src\core\SettingMigrations.cpp" />
     <ClCompile Include="..\src\core\ShaderCollection.cpp" />
     <ClCompile Include="..\src\core\ShaderManager.cpp" />
     <ClCompile Include="..\src\core\EffectChain.cpp" />
     <ClCompile Include="..\src\core\ShaderRecord.cpp" />
     <ClCompile Include="..\src\core\ShadowManager.cpp" />
+    <ClCompile Include="..\src\core\ShadowSunCascades.cpp" />
+    <ClCompile Include="..\src\core\ShadowCharacterAndRefl.cpp" />
     <ClCompile Include="..\src\core\TextureManager.cpp" />
     <ClCompile Include="..\src\core\TextureRecord.cpp" />
     <ClCompile Include="..\src\effects\AmbientOcclusion\AmbientOcclusion.cpp" />
@@ -200,7 +203,6 @@
     <ClCompile Include="..\src\effects\TAA\TAA.cpp" />
     <ClCompile Include="..\src\effects\TAA\TAAFSR.cpp" />
     <ClCompile Include="..\src\effects\TAA\TAAUpscale.cpp" />
-    <ClCompile Include="..\src\core\Upscaler.cpp" />
     <ClCompile Include="..\src\core\UpscalerDlss.cpp" />
     <ClCompile Include="..\src\core\UpscalerFsr31.cpp" />
     <ClCompile Include="..\src\core\RtCore.cpp" />
@@ -298,6 +300,7 @@
     <ClInclude Include="..\src\core\Device\Device.h" />
     <ClInclude Include="..\src\core\Device\Hook.h" />
     <ClInclude Include="..\src\core\EffectRecord.h" />
+    <ClInclude Include="..\src\core\ShadowManagerInternal.h" />
     <ClInclude Include="..\src\core\ReShadeIntegration.h" />
     <ClInclude Include="..\src\core\FrameRateManager.h" />
     <ClInclude Include="..\src\core\GameEventManager.h" />
@@ -329,7 +332,6 @@
     <ClInclude Include="..\src\core\Paths.h" />
     <ClInclude Include="..\src\core\DxvkLoader.h" />
     <ClInclude Include="..\src\core\InstallCheck.h" />
-    <ClInclude Include="..\src\core\ShaderCounters.h" />
     <ClInclude Include="..\src\core\NvrDxvkExt.h" />
     <ClInclude Include="..\src\core\GpuProfiler.h" />
     <ClInclude Include="..\src\core\ScreenSpaceShadows.h" />

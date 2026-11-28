@@ -141,19 +141,10 @@ bool VolumetricLightEffect::ShouldRender() {
 // With Temporal on: March -> March buffer, Temporal -> Temp (copied to History for next frame), Blur X -> March,
 // Blur Y -> Buffer. Off: March -> Temp, then the same blurs. The composite (technique 0) then reads Buffer.
 void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
-	// UNOFFICIAL 2026-11-01 the report burst's VL stages (core/Diagnostics.cpp): while a burst captures, this frame's values and each
-	// stage's output (shrunk on the GPU into the burst frame's slot). Outside a burst this is false and nothing of it runs.
-	const bool report = Diagnostics::VLCapturing;
 	// UNOFFICIAL 2026-11-07 (ptaaa-fog) the traced sun visibility in the air (core/RtFogVisibility.h), when the RT core traced it this frame
 	// (x 0: the cascades, as before). Both paths read it: the grid's cells and the march's samples.
 	Constants.Rt = RtFogVisibility::Constant(Constants.Data.w);
 	if (CompositeTechnique() == 8) {
-		if (report) {	// (the grid has no march stages: only that it ran)
-			Diagnostics::VLValues values;
-			values.technique = 8; values.fade = Constants.Data2.z; values.strength = Constants.Data.x; values.darken = Constants.Data.y;
-			values.rect = RenderRect::Active(); values.scaleChanged = RenderRect::ScaleChanged();
-			Diagnostics::VLNote(values);
-		}
 		// UNOFFICIAL 2026-10-14 froxel grid: light the cells, then the two summing passes (techniques 5, 6, 7).
 		static GpuTimer gridTimers[3] = { GpuTimer("  VL grid light"), GpuTimer("  VL grid sum rows"), GpuTimer("  VL grid sum carry") };
 		auto gridPass = [&](IDirect3DSurface9* target, UINT technique) {
@@ -234,18 +225,6 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	// FSR / DLSS averages frames (else frame 0, as before). Off: FrameNumber % 64 with Temporal, 0 without.
 	Constants.Data2.w = sharedNoise ? (float)(temporal ? TemporalBackbone::EffectIndex(TemporalBackbone::OffsetVolumetricLight, 64) : TemporalBackbone::NoiseIndex() % 64) :
 		temporal ? (float)(now % 64) : 0.0f;
-	if (report) {	// UNOFFICIAL 2026-11-01 report burst: the values this frame's passes use (haveHistory etc. before they are updated below)
-		Diagnostics::VLValues values;
-		values.noise = Constants.Data2.w; values.weight = Constants.Data3.x; values.fade = Constants.Data2.z;
-		values.strength = Constants.Data.x; values.darken = Constants.Data.y;
-		values.temporal = temporal; values.usable = usable; values.haveHistory = haveHistory; values.drewLastFrame = drewLastFrame;
-		values.sharedNoise = sharedNoise; values.historyValid = TemporalBackbone::HistoryValid();
-		values.rect = RenderRect::Active(); values.scaleChanged = RenderRect::ScaleChanged();
-		const double mx = (double)camPos.x - lastCameraPos.x, my = (double)camPos.y - lastCameraPos.y, mz = (double)camPos.z - lastCameraPos.z;
-		values.cameraMove = sqrt(mx * mx + my * my + mz * mz);
-		values.technique = CompositeTechnique();
-		Diagnostics::VLNote(values);
-	}
 
 	// UNOFFICIAL 2026-10-13: F10 timers per pass (technique 1 march, 3 temporal, 2 / 4 blur).
 	static GpuTimer passTimers[5] = { GpuTimer("  VL composite"), GpuTimer("  VL march (half)"), GpuTimer("  VL blur X (half)"),
@@ -253,33 +232,30 @@ void VolumetricLightEffect::RenderBuffers(IDirect3DDevice9* Device) {
 	auto pass = [&](IDirect3DSurface9* target, UINT technique) {
 		GpuProfileScope gpuPass(passTimers[technique], Device);
 		Device->SetRenderTarget(0, target);
-		extDrew = false;
 		Render(Device, target, target, technique, false, target);
-		if (report) Diagnostics::VLPass(technique, extDrew);	// UNOFFICIAL 2026-11-01 report burst: its Vulkan pass or its D3D9 technique
 	};
-	// UNOFFICIAL 2026-11-01 report burst: each stage's output right after its pass (the history before this frame's copy replaces it)
 	// The stage probes (EFFECT_PROBE: no-ops unless they run, FlashStages) see the same buffers, so an automatic FLASH lists them too.
 	if (temporal) {
 		pass(Textures.MarchSurface, 1);
-		if (report) {
-			Diagnostics::VLCapture(Device, Diagnostics::VLMarch, Textures.MarchSurface);
-			Diagnostics::VLCapture(Device, Diagnostics::VLHistory, Textures.HistorySurface);
-		}
 		EFFECT_PROBE("VolumetricLight march", Textures.MarchSurface);
 		EFFECT_PROBE("VolumetricLight history", Textures.HistorySurface);
 		pass(Textures.TempSurface, 3);
-		if (report) Diagnostics::VLCapture(Device, Diagnostics::VLTemporal, Textures.TempSurface);
 		EFFECT_PROBE("VolumetricLight temporal", Textures.TempSurface);
-		Device->StretchRect(Textures.TempSurface, NULL, Textures.HistorySurface, NULL, D3DTEXF_NONE);
+		RECT copyRect = {};
+		const RECT* pCopyRect = nullptr;
+		D3DSURFACE_DESC tempDesc = {};
+		if (RenderRect::Active() && SUCCEEDED(Textures.TempSurface->GetDesc(&tempDesc))) {
+			copyRect = { 0, 0, (LONG)RenderRect::Width(tempDesc.Width), (LONG)RenderRect::Height(tempDesc.Height) };
+			pCopyRect = &copyRect;
+		}
+		Device->StretchRect(Textures.TempSurface, pCopyRect, Textures.HistorySurface, pCopyRect, D3DTEXF_NONE);
 	}
 	else {
 		pass(Textures.TempSurface, 1);
-		if (report) Diagnostics::VLCapture(Device, Diagnostics::VLMarch, Textures.TempSurface);
 		EFFECT_PROBE("VolumetricLight march", Textures.TempSurface);
 	}
 	pass(Textures.MarchSurface, 2);
 	pass(Textures.BlurSurface, 4);
-	if (report) Diagnostics::VLCapture(Device, Diagnostics::VLBlur, Textures.BlurSurface);
 	EFFECT_PROBE("VolumetricLight blur", Textures.BlurSurface);
 
 	haveHistory = temporal;
@@ -309,7 +285,9 @@ namespace {
 	struct ExtConstants {
 		D3DXMATRIX	Matrices[_countof(ExtMatrixNames)];
 		D3DXVECTOR4	Vectors[_countof(ExtVectorNames)];
+		D3DXVECTOR4	renderScale;
 	};
+	static_assert(sizeof(ExtConstants) == _countof(ExtMatrixNames) * 64 + (_countof(ExtVectorNames) + 1) * 16, "VolumetricLight ExtConstants size mismatch");
 	// Push block: the samplers' heap indices (POINT/CLAMP, LINEAR/CLAMP, LINEAR/WRAP; filled in by DXVK), then the blur's axis.
 	struct ExtPush { UInt32 pointIndex, linearIndex, wrapIndex, pad; D3DXVECTOR2 axis; UInt32 pad2[2]; };
 
@@ -382,6 +360,9 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 		if (!value) return false;
 		constants.Vectors[i] = *value;
 	}
+	constants.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* uniforms = ExtUniforms(extUniforms, &constants, sizeof(constants));
 	if (!uniforms) return false;
 
@@ -396,15 +377,15 @@ bool VolumetricLightEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface
 	ExtPush push = {};
 	push.axis = techniqueIndex == 2 ? D3DXVECTOR2(1.0f, 0.0f) : D3DXVECTOR2(0.0f, 1.0f);	// BlurXPS, BlurYPS (only the blur reads it)
 
-	// (UNOFFICIAL 2026-11-01: extDrew, which path drew, for the report burst's VL stages)
 	if (frame)
-		return extDrew = ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pass.Pipeline, resources, count + 4, &push, sizeof(push), true);
-	return extDrew = ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, count + 4, &push, sizeof(push));
-}
-
-// UNOFFICIAL 2026-11-01 the report burst's VL stages (core/Diagnostics.cpp; called by ShaderManager.cpp only while Diagnostics::VLCapturing).
-void VolumetricLightEffect::ReportComposite(IDirect3DDevice9* Device, bool after) {
-	if (after) Diagnostics::VLPass(CompositeTechnique(), extDrew);
-	else extDrew = false;
-	Diagnostics::VLFrame(Device, after);
+		return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pass.Pipeline, resources, count + 4, &push, sizeof(push), true);
+	RECT vp = {};
+	const RECT* pVp = nullptr;
+	if (RenderRect::Active() && techniqueIndex >= 1 && techniqueIndex <= 4) {
+		D3DSURFACE_DESC d = {};
+		if (FAILED(RenderTarget->GetDesc(&d))) return false;
+		vp = { 0, 0, (LONG)RenderRect::Width(d.Width), (LONG)RenderRect::Height(d.Height) };
+		pVp = &vp;
+	}
+	return ExtDrawTo(pass.Pipeline, &RenderTarget, 1, resources, count + 4, &push, sizeof(push), pVp, ExtUv::TexelCentre);
 }

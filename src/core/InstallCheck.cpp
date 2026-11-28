@@ -305,14 +305,17 @@ void InstallCheck::OnDevice(const std::string& gpuWindows, const std::string& gp
 	if (dxvk) title += ": d3d9.dll " + (gD3d9.empty() ? std::string("(no version info)") : gD3d9);
 	if (!nvrDxvk.empty()) title += "; Vegas Shaders DXVK: " + nvrDxvk;
 	Add(Level::Info, "device", title);
-	if (dxvk && nvrDxvk.empty()) {
-		DxvkLoader::ActiveNonForkDxvk = gD3d9.empty() ? "DXVK (non-fork)" : gD3d9;
-		Add(Level::Warning, "device",
-			"Non-fork DXVK is active (missing Vegas Shaders DXVK extension): " + DxvkLoader::ActiveNonForkDxvk,
-			"Install Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll and remove any leftover d3d9.dll or dxvk.conf from the Fallout New Vegas game folder.");
-	}
-	else {
-		DxvkLoader::ActiveNonForkDxvk.clear();
+	if (nvrDxvk.empty()) {
+		if (dxvk) {
+			Add(Level::Problem, "device",
+				"Non-fork DXVK is active (missing Vegas Shaders DXVK extension): " + (gD3d9.empty() ? std::string("DXVK (non-fork)") : gD3d9),
+				"Vegas Shaders requires its bundled Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll. Install VSDxvk\\d3d9.dll and delete any leftover d3d9.dll or dxvk.conf from the Fallout New Vegas game folder.");
+		}
+		else {
+			Add(Level::Problem, "device",
+				"Vegas Shaders DXVK is not loaded (running on native Direct3D 9)",
+				"Vegas Shaders requires its bundled Vulkan/DXVK runtime (Data\\NVSE\\Plugins\\VSDxvk\\d3d9.dll). Reinstall Vegas Shaders so VSDxvk\\d3d9.dll is present, and remove any conflicting d3d9.dll from the Fallout New Vegas game folder.");
+		}
 	}
 	CheckPluginConflicts();
 }

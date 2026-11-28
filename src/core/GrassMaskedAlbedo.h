@@ -18,8 +18,9 @@ namespace GrassMaskedAlbedo {
 		"sampler2D A : register(s0); sampler2D M : register(s1); float4 G : register(c0);"
 		"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
 		"  float4 a = tex2D(A, uv); float4 m = tex2D(M, uv);"
-		"  bool grass = m.r > 0.5f && ((abs(m.g - G.x) < 0.1f && (G.y < 0.5f || m.a > 0.5f)) || (G.z > 0.5f && m.g > 31.99f && m.g < 1024.0f));"
-		"  return float4(a.rgb, grass ? 0.0f : a.a); }";
+		"  float cls = floor(m.r + 0.01f); float baseCls = cls >= 16.0f ? cls - 16.0f : cls;"
+		"  bool soft = m.r > 0.5f && ((abs(m.g - G.x) < 0.1f && (G.y < 0.5f || m.a > 0.5f)) || (G.z > 0.5f && m.g > 15.99f && m.g < 1024.0f) || abs(baseCls - 5.0f) < 0.5f);"
+		"  return float4(a.rgb, soft ? 0.0f : a.a); }";
 
 	inline void Release() {
 		if (Surface) { Surface->Release(); Surface = nullptr; }

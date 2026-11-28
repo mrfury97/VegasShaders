@@ -17,6 +17,8 @@
 #include "PipboyFit.h"	// UNOFFICIAL 2026-11-04 ViewModelShadows: its object cleared before the viewmodel map
 #include "NpcCharacterMaps.h"	// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs
 #include "ViewModelLight.h"	// UNOFFICIAL 2026-11-15 DeferredFirstPerson: the view model map's light transform for the first-person deferred sun pass
+#include "ShadowManagerInternal.h"
+using namespace ShadowManagerInternal;
 
 // UNOFFICIAL SkinnedShadowFaceTest ([Main.Main.Performance], default on, 2026-10-07). An animated (skinned) mesh's own
 // world bound is stale, so skinned casters used to be drawn into all six faces of every lamp cube map near them; with a
@@ -167,13 +169,13 @@ static bool RecentlyMoved(NiGeometry* geo, CasterMotion** out = nullptr) {
 	return motion.changed && SkinnedBoundFrame - motion.changed < MovingSettleFrames;
 }
 
-// A caster that moves: skinned geometry (people, creatures), wind-blown SpeedTree leaves (both move without their transform
-// changing), and rigid geometry that moved lately (RecentlyMoved). They make a lamp's caster list dynamic, and
-// RedrawActorsOnly draws them apart from the rest (RenderShadowCubeMap).
+// A caster that moves: skinned geometry (people, creatures), controller-driven vertex animation (NiGeomMorpherController on
+// billowing tents/flags), wind-blown SpeedTree leaves (all move without their transform changing), and rigid geometry that moved
+// lately (RecentlyMoved). RedrawActorsOnly draws them apart from the rest (RenderShadowCubeMap).
 static bool IsMovingCaster(NiGeometry* geo, NiShadeProperty* shade, CasterMotion** motion = nullptr) {
 	if (motion) *motion = nullptr;
 	if (!geo) return false;
-	if (geo->skinInstance || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf)) return true;
+	if (geo->skinInstance || geo->m_controller || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf)) return true;
 	return RecentlyMoved(geo, motion);
 }
 
@@ -225,7 +227,7 @@ static void PointShadowCasterState(ShadowSceneLight* light, UInt64& hash, bool& 
 		CasterMotion* motion = nullptr;
 		bool moving;
 		if (kept && geo) {	// CasterListCache: this lamp's entry for the caster at this place in its list, looked up only when it changed
-			const bool alwaysMoving = geo->skinInstance || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf);	// as IsMovingCaster: no entry
+			const bool alwaysMoving = geo->skinInstance || geo->m_controller || (shade && shade->m_eShaderType == NiShadeProperty::kProp_SpeedTreeLeaf);	// as IsMovingCaster: no entry
 			if (keptAt < kept->casters.size() && kept->casters[keptAt].first == geo) motion = kept->casters[keptAt].second;
 			else {
 				motion = alwaysMoving ? nullptr : &CasterMotions[geo];
@@ -725,60 +727,7 @@ bool ShadowManager::CheckShaderFlags(NiGeometry* Geometry) {
 }
 
 
-// UNOFFICIAL 2026-10-17 (TB-1): true while a cell's land is being accumulated (AccumExteriorCell), so its geometry is noted
-// in RenderPass::LandSet for the Terrain Blending shadow drop.
-static bool AccumulatingLand = false;
-static bool WalkSunIsTree = false;
-
-// UNOFFICIAL 2026-10-31 SunLayers (RenderPass::LayerMode, DrawSunLayer below): the reference being accumulated (its geometry is noted
-// in RenderPass::LayerGeoRef while a static layer is drawn), the references a static layer held back (drawn by the overlay), and
-// whether SpeedTrees count as moving (their leaves sway in the wind).
-static TESObjectREFR* LayerAccumRef = nullptr;
-static const std::unordered_set<const void*>* LayerOverlayRefs = nullptr;
-static bool LayerTreesMoving = true;
-
-// SunLayers: a reference that can move by itself (or be moved): anything not on the still list -- doors, actors, items the physics
-// moves, projectiles, moveable statics, an unknown kind -- and a still kind whose model is animated (a controller on its root: flags,
-// fans, animated activators and lights).
-static bool RefMovesByKind(TESObjectREFR* Ref, NiNode* Node, bool treesMoving) {
-	switch (Ref->baseForm->formType) {
-	case TESForm::FormType::kFormType_Stat:
-	case TESForm::FormType::kFormType_StaticCollection:
-	case TESForm::FormType::kFormType_Container:
-	case TESForm::FormType::kFormType_Furniture:
-	case TESForm::FormType::kFormType_Terminal:
-	case TESForm::FormType::kFormType_Flora:
-	case TESForm::FormType::kFormType_IdleMarker:
-	case TESForm::FormType::kFormType_Grass:
-	case TESForm::FormType::kFormType_PlaceableWater:
-	case TESForm::FormType::kFormType_Activator:
-	case TESForm::FormType::kFormType_TalkingActivator:
-	case TESForm::FormType::kFormType_Light:
-		break;
-	case TESForm::FormType::kFormType_Tree:
-		if (treesMoving) return true;
-		break;
-	default:
-		return true;
-	}
-	return Node->m_controller != nullptr;
-}
-static bool RefMovesByKind(TESObjectREFR* Ref, NiNode* Node) { return RefMovesByKind(Ref, Node, LayerTreesMoving); }
-
-// Hands one geometry to the pass that draws its kind (skinned, tree, LOD land, alpha tested, opaque).
-// UNOFFICIAL 2026-11-20 (exterior ~24m dark circle with Forms.Actors = true): weapon animation mods (e.g. MMP TOZ-34 / TOZ-66)
-// hide sub-meshes like "##CVSHStock:0" by scaling a bone by 1e-9 and counter-scaling the child by 1e+9; on NPCs not playing that
-// animation the child sits at world scale ~1e9 with a ~26-billion-unit world bound, passes frustum tests in every cascade, and is
-// pancaked to depth 0 across 100% of cascades 0..2. Reject any non-land/non-LOD caster with a non-finite or absurd scale/bound.
-static inline bool IsExplodedShadowCaster(const NiGeometry* geo, bool isLandOrLOD = false) {
-	if (!geo || isLandOrLOD) return false;
-	const float s = geo->m_worldTransform.scale;
-	if (!isfinite(s) || fabsf(s) > 1000.0f) return true;
-	const NiBound* b = geo->m_kWorldBound;
-	if (b && (!isfinite(b->Radius) || !isfinite(b->Center.x) || !isfinite(b->Center.y) || !isfinite(b->Center.z) || b->Radius > 1000000.0f))
-		return true;
-	return false;
-}
+// AccumulatingLand, WalkSunIsTree, Layer*, RefMovesByKind, IsExplodedShadowCaster -> ShadowManagerInternal.h
 
 void ShadowManager::AccumObject(NiAVObject* Object, ShadowsExteriorEffect::FormsStruct* Forms, bool isLODLand) {
 	auto* geo = static_cast<NiGeometry*>(Object);
@@ -824,18 +773,7 @@ void ShadowManager::AccumObject(NiAVObject* Object, ShadowsExteriorEffect::Forms
 }
 
 
-// UNOFFICIAL (from Physically-Based-Reloaded, Fable): object LOD inside the loaded cells. Every cascade also walks the
-// loaded cells' references as full models (AccumExteriorCell), so their LOD copy cast a second shadow on top -- and a
-// ghost one where the full object was swapped or disabled (Base Object Swapper), since the baked LOD never changes.
-// The box is BSShaderManager::kLoadedRange (centre x/y, half size z/w), the one terrain LOD is hidden under. A geometry
-// is inside when its bound centre is; a node only when its whole bound is, so a block straddling the edge is walked.
-static bool IsLodInLoadedCells(NiAVObject* Object) {
-	NiBound* Bound = Object->m_kWorldBound;
-	if (!Bound) return false;
-	const float Reach = Object->IsGeometry() ? 0.0f : Bound->Radius;
-	const NiPoint4* Range = BSShaderManager::kLoadedRange;
-	return fabsf(Bound->Center.x - Range->x) + Reach < Range->z && fabsf(Bound->Center.y - Range->y) + Reach < Range->w;
-}
+// IsLodInLoadedCells moved to ShadowManagerInternal.h
 
 // go through the Object children and sort the ones that will be rendered based on their properties
 void ShadowManager::AccumChildren(NiAVObject* Root, ShadowsExteriorEffect::FormsStruct* Forms, bool isLand, bool isLOD, NiFrustumPlanes* Planes) {
@@ -1119,265 +1057,7 @@ void ShadowManager::AccumExteriorCell(TESObjectCELL* Cell, ShadowsExteriorEffect
 // a stack, popped last-in first, geometry taken as met), so every cascade's casters come out in the order its own walk found them:
 // pushed into the passes in that order (PushSunCasters), every cascade draws exactly what and as it did. SunCascadeVerify 1 checks
 // that in game, frame by frame.
-static inline unsigned ForEachSunCascade(unsigned mask, unsigned& bit) {	// lowest set bit index, cleared from mask
-	unsigned long index;
-	_BitScanForward(&index, mask);
-	bit = index;
-	return mask & (mask - 1);
-}
-
-// UNOFFICIAL 2026-11-04 (from Physically-Based-Reloaded ShadowManager::CastsIntoView, per cascade of the one walk) caster culling: the
-// bound swept the way the light travels (a capsule) must reach what the cascade shades, the view inside the cascade's sphere, or
-// nothing it shadows is ever seen. The sweep runs as far as a shadow falls from the bound's top to CasterDrop below its bottom. A
-// capsule wholly behind one of the view's sides, or wholly outside the cascade sphere, is out. Conservative. Covered casters
-// (SkipCoveredCasters): Shadow.hlsl takes a pixel from the first cascade whose sphere holds it and cross-fades into the next over
-// the band (ShadowCascadeBands); a capsule wholly inside an earlier cascade's sphere less its band (less the margin) only shades
-// pixels that cascade answers for, so it is left out of this one. Only the cascades RenderShadowMaps marks (drawn fresh every
-// frame: a kept cascade would show what was left out as the camera turns). Returns the cascades of mask the caster still goes to.
-unsigned ShadowManager::SunCastMask(const NiBound* Bound, unsigned mask) {
-	if (!(mask & SunCastAny) || !Bound || Bound->Radius <= 0.0f) return mask;
-	const D3DXVECTOR3 start(Bound->Center.x - TheRenderManager->CameraPosition.x, Bound->Center.y - TheRenderManager->CameraPosition.y,
-		Bound->Center.z - TheRenderManager->CameraPosition.z);
-	const float r = Bound->Radius;
-	const ShadowsExteriorEffect::ShadowMapStruct& settings = TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps;
-	const float length = (std::min)((2.0f * r + settings.CasterDrop) * SunCastPerHeight, 200000.0f);
-	const D3DXVECTOR3 end = start + SunCastDir * length;
-	for (unsigned rest = mask & SunCastAny, c; rest; ) {
-		rest = ForEachSunCascade(rest, c);
-		bool out = false;
-		for (int k = 0; k < SunCoveringCount[c] && !out; k++) {
-			const D3DXVECTOR3 centre(SunCovering[c][k].x, SunCovering[c][k].y, SunCovering[c][k].z);
-			const float inner = SunCovering[c][k].w - settings.CasterMargin - r;
-			if (inner <= 0.0f) continue;
-			const D3DXVECTOR3 a = start - centre, b = end - centre;
-			if (D3DXVec3LengthSq(&a) <= inner * inner && D3DXVec3LengthSq(&b) <= inner * inner) { SunCastersCovered++; out = true; }
-		}
-		if (!out && (SunCastView & (1u << c))) {
-			const D3DXPLANE* planes = TheShaderManager->Effects.ShadowsExteriors->ShadowMaps[c].CasterPlanes;
-			for (int p = 0; p < 4 && !out; p++)
-				if (D3DXPlaneDotCoord(&planes[p], &start) < -r && D3DXPlaneDotCoord(&planes[p], &end) < -r) out = true;
-			if (!out) {	// the sweep's nearest point to the sphere's centre
-				const D3DXVECTOR3 centre(SunCastSphere[c].x, SunCastSphere[c].y, SunCastSphere[c].z);
-				const D3DXVECTOR3 toCentre = centre - start;
-				const float along = std::clamp(D3DXVec3Dot(&toCentre, &SunCastDir), 0.0f, length);
-				const D3DXVECTOR3 nearest = start + SunCastDir * along - centre;
-				const float reach = SunCastSphere[c].w + r + settings.CasterMargin;
-				out = D3DXVec3LengthSq(&nearest) > reach * reach;
-			}
-			if (out) SunCastersCulled++;
-		}
-		if (out) mask &= ~(1u << c);
-	}
-	return mask;
-}
-
-void ShadowManager::WalkSunCascades(unsigned mask) {
-	for (int c = 0; c < 4; c++) SunCasters[c].clear();
-	WalkSunDynamic = false;
-	if (!mask) return;
-
-	// The LOD sections are walked only when some cascade in the mask uses LOD forms.
-	unsigned lodMask = 0;
-	for (unsigned rest = mask, c; rest; ) { rest = ForEachSunCascade(rest, c); if (SunForms[c]->Lod) lodMask |= 1u << c; }
-	if (lodMask) {
-		WalkSunChildren(BGSTerrainManager::GetRootLandLODNode(), lodMask, true, true);
-		WalkSunChildren(BGSTerrainManager::GetRootObjectLODNode(), lodMask, false, true);
-	}
-	if (!Player->GetWorldSpace()) {
-		WalkSunCell(Player->parentCell, mask);
-		return;
-	}
-	GridCellArray* cellArray = Tes->gridCellArray;
-	const UInt32 cellCount = cellArray->size * cellArray->size;
-	for (UInt32 i = 0; i < cellCount; i++) WalkSunCell(cellArray->GetCell(i), mask);
-}
-
-void ShadowManager::WalkSunCell(TESObjectCELL* Cell, unsigned mask) {
-	if (!Cell || Cell->IsInterior()) return;
-
-	unsigned landMask = 0;
-	for (unsigned rest = mask, c; rest; ) { rest = ForEachSunCascade(rest, c); if (SunForms[c]->Terrain) landMask |= 1u << c; }
-	if (landMask) {
-		AccumulatingLand = true;
-#if NVR_TEST_TOOLS
-		OrthoProbe::CurrentLand = true; OrthoProbe::CurrentRef = nullptr;
-#endif
-		WalkSunChildren(Cell->GetChildNode(TESObjectCELL::kCellNode_Land), landMask, true, false);
-		AccumulatingLand = false;
-#if NVR_TEST_TOOLS
-		OrthoProbe::CurrentLand = false;
-#endif
-	}
-
-	for (TList<TESObjectREFR>::Entry* entry = &Cell->objectList.First; entry; entry = entry->next) {
-		// GetRefNode per cascade: its form filter is the cascade's own (the node, when there is one, is the same).
-		NiNode* refNode = nullptr;
-		unsigned inMask = 0;
-		for (unsigned rest = mask, c; rest; ) {
-			rest = ForEachSunCascade(rest, c);
-			NiNode* node = GetRefNode(entry->item, SunForms[c]);
-			if (!node) continue;
-			refNode = node;
-			if (node->WithinFrustum(SunPlanes[c])) inMask |= 1u << c;
-		}
-		if (inMask && refNode) inMask = SunCastMask(refNode->GetWorldBound(), inMask);	// UNOFFICIAL 2026-11-04 CasterCulling
-		if (!inMask || IsRefracting(entry->item)) continue;
-#if NVR_TEST_TOOLS
-		OrthoProbe::CurrentRef = entry->item;
-#endif
-		WalkSunDynamic = entry->item && entry->item->baseForm ? RefMovesByKind(entry->item, refNode, false) : false;
-		WalkSunIsTree = entry->item && entry->item->baseForm && entry->item->baseForm->formType == TESForm::FormType::kFormType_Tree;
-		WalkSunChildren(refNode, inMask, false, false);
-		WalkSunIsTree = false;
-		WalkSunDynamic = false;
-#if NVR_TEST_TOOLS
-		OrthoProbe::CurrentRef = nullptr;
-#endif
-	}
-}
-
-void ShadowManager::WalkSunChildren(NiAVObject* Root, unsigned mask, bool isLand, bool isLOD) {
-	if (Root == nullptr) return;
-
-	const bool skipLoadedLod = isLOD && !isLand && TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps.LodSkipLoaded;
-	// The cascades of 'm' whose size limit this object's bound reaches (land has none).
-	auto bigEnough = [this, isLand](NiAVObject* object, unsigned m) {
-		if (isLand) return m;
-		const float radius = object->GetWorldBoundRadius();
-		unsigned out = 0;
-		for (unsigned c; m; ) { m = ForEachSunCascade(m, c); if (radius >= SunForms[c]->MinRadius) out |= 1u << c; }
-		return out;
-	};
-
-	std::vector<std::pair<NiAVObject*, unsigned>>& pending = SunContainers;
-	pending.clear();
-	// Geometry is taken at once; a container waits in 'pending' with the cascades still interested in it.
-	auto queueOrTake = [&](NiAVObject* object, unsigned m, bool lodLand) {
-		if (object->IsGeometry()) WalkSunObject(object, m, lodLand);
-		else pending.emplace_back(object, m);
-	};
-	queueOrTake(Root, mask, isLand && isLOD);
-
-	while (!pending.empty()) {
-		NiAVObject* const object = pending.back().first;
-		unsigned m = pending.back().second;
-		pending.pop_back();
-
-		if (object == nullptr) continue;
-		NiNode* node = object->IsNiNode();
-		if (!node || (node->m_flags & NiAVObject::NiFlags::APP_CULLED)) continue; // culling containers
-		m = bigEnough(node, m);
-		if (!m) continue;
-
-		if (node->IsKindOf<NiSwitchNode>()) {
-			// NiSwitchNode - only the active child (if there is one) goes to the shadow map.
-			NiSwitchNode* switchNode = static_cast<NiSwitchNode*>(node);
-			if (switchNode->m_iIndex < 0 || switchNode->m_iIndex >= node->m_children.end)
-				continue;
-
-			NiAVObject* active = node->m_children.data[switchNode->m_iIndex];
-			if (!active || (skipLoadedLod && IsLodInLoadedCells(active)))
-				continue;
-			queueOrTake(active, m, false);
-			continue;
-		}
-
-		for (int i = 0; i < node->m_children.end; i++) {
-			NiAVObject* child = node->m_children.data[i];
-			if (!child || (child->m_flags & NiAVObject::NiFlags::APP_CULLED)) continue; // culling children
-			unsigned cm = bigEnough(child, m);
-			if (!cm) continue;
-
-			// Frustum culling, per cascade.
-			if (isLand || isLOD) {
-				BSMultiBoundNode* mbNode = child->IsMultiBoundNode();
-				if (mbNode) {
-					unsigned in = 0;
-					for (unsigned t = cm, c; t; ) { t = ForEachSunCascade(t, c); if (mbNode->spMultiBound->spShape->WithinFrustum(*SunPlanes[c])) in |= 1u << c; }
-					cm = in;
-				}
-			}
-			else {
-				unsigned in = 0;
-				for (unsigned t = cm, c; t; ) { t = ForEachSunCascade(t, c); if (child->WithinFrustum(SunPlanes[c])) in |= 1u << c; }
-				cm = in;
-			}
-			if (!cm) continue;
-			if (!isLOD) cm = SunCastMask(child->GetWorldBound(), cm);	// UNOFFICIAL 2026-11-04 CasterCulling: skip LOD chunks (distant ridges taller than CasterDrop cast into Near/Middle at low sun)
-			if (!cm) continue;
-
-			if (!WalkSunIsTree && child->IsFadeNode() && static_cast<BSFadeNode*>(child)->FadeAlpha < TheShaderManager->Effects.ShadowsExteriors->Settings.ShadowMaps.CasterFadeMin) { FrameJournal::FadeDrops++; continue; } // stop rendering fadenodes below a certain opacity (UNOFFICIAL 2026-10-28: CasterFadeMin)
-			if (skipLoadedLod && IsLodInLoadedCells(child)) continue; // object LOD inside the loaded cells
-			queueOrTake(child, cm, isLand && isLOD);
-		}
-	}
-}
-
-// AccumObject for the cascades of 'mask': the tests that do not depend on the cascade once, the pass chosen per cascade (its forms
-// decide the terrain LOD and alpha passes), in AccumObject's order.
-void ShadowManager::WalkSunObject(NiAVObject* Object, unsigned mask, bool isLODLand) {
-	auto* geo = static_cast<NiGeometry*>(Object);
-	if (geo->shader == nullptr || !CheckShaderFlags(geo)) return;	// as in AccumObject
-	if (IsExplodedShadowCaster(geo, isLODLand || AccumulatingLand)) return;
-#if NVR_TEST_TOOLS
-	OrthoProbe::NoteGeometry(geo);
-#endif
-	auto add = [this](unsigned m, NiGeometry* g, UInt8 pass, UInt8 dyn) {
-		for (unsigned c; m; ) { m = ForEachSunCascade(m, c); SunCasters[c].push_back({ g, pass, dyn }); }
-	};
-	const int skinned = skinnedGeoPass->TestObject(geo);
-	const UInt8 dyn = (WalkSunDynamic || skinned == 1) ? 1 : 0;
-	if (skinned) { if (skinned == 1) add(mask, geo, kSunSkinned, 1); return; }
-	if (speedTreePass->TestObject(geo)) { add(mask, geo, kSunTree, dyn); return; }
-
-	int lodLand = -1, alpha = -1, opaque = -1;	// -1: not tested yet
-	unsigned lodMask = 0, alphaMask = 0, opaqueMask = 0;
-	for (unsigned m = mask, c; m; ) {
-		m = ForEachSunCascade(m, c);
-		const ShadowsExteriorEffect::FormsStruct* Forms = SunForms[c];
-		if (Forms->Lod && isLODLand) {
-			if (lodLand < 0) lodLand = terrainLODPass->TestObject(geo);
-			if (lodLand) { lodMask |= 1u << c; continue; }
-		}
-		if (Forms->AlphaEnabled) {
-			if (alpha < 0) alpha = alphaPass->TestObject(geo);
-			if (alpha) { alphaMask |= 1u << c; continue; }
-		}
-		if (opaque < 0) opaque = geometryPass->TestObject(geo);
-		if (opaque) opaqueMask |= 1u << c;
-	}
-	// One push per cascade, as AccumObject's (the pass order within a geometry does not matter: one geometry, one pass per cascade).
-	// UNOFFICIAL 2026-10-27: cell land near the camera goes to the displaced land's pass (DisplaceShadows.h) instead of the opaque one.
-	const UInt8 opaquePass = opaqueMask && AccumulatingLand && DisplaceShadows::Takes(geo) ? kSunDisplaceLand : kSunOpaque;
-	for (unsigned m = mask, c; m; ) {
-		m = ForEachSunCascade(m, c);
-		const unsigned bit = 1u << c;
-		if (lodMask & bit) SunCasters[c].push_back({ geo, kSunLodLand, 0 });
-		else if (alphaMask & bit) SunCasters[c].push_back({ geo, kSunAlpha, dyn });
-		else if (opaqueMask & bit) SunCasters[c].push_back({ geo, opaquePass, dyn });
-	}
-	if (opaqueMask && AccumulatingLand && RenderPass::LandDrop > 0.0f) RenderPass::LandSet.insert(geo);
-}
-
-RenderPass* ShadowManager::SunPassOf(UInt8 pass) {
-	switch (pass) {
-	case kSunOpaque: return geometryPass;
-	case kSunLodLand: return terrainLODPass;
-	case kSunAlpha: return alphaPass;
-	case kSunSkinned: return skinnedGeoPass;
-	case kSunDisplaceLand: return &DisplaceShadows::Pass;	// UNOFFICIAL 2026-10-27
-	default: return speedTreePass;
-	}
-}
-
-void ShadowManager::PushSunCasters(int cascade, int dynamicFilter) {
-	for (const SunCaster& caster : SunCasters[cascade]) {
-		if (dynamicFilter == 0 && caster.dynamic) continue;
-		if (dynamicFilter == 1 && !caster.dynamic) continue;
-		SunPassOf(caster.pass)->GeometryList.push(caster.geometry);
-	}
-}
-
+// ForEachSunCascade -> ShadowManagerInternal.h; SunCastMask..PushSunCasters -> ShadowSunCascades.cpp
 // UNOFFICIAL 2026-10-21 (sunshadow) SunCascadeSkipFlat: the cascade's projection maps every point onto one line (or one point): the
 // x or y column of its view-projection is all zero. That happens when the sun is exactly overhead, (0, 0, 1) -- QuantizeSun rounds
 // any sun within half a PitchStepSize of the zenith to that -- because GetCascadeViewProj's view matrix takes (0, 0, 1) as its up
@@ -2018,114 +1698,7 @@ static void FlagPlayerGeometry() {
 	playerFlagCalls = 0;
 }
 
-// Billboard axes that face the sun (SpeedTree leaf cards in the sun maps): right = world up x sun (the x axis when the sun is
-// straight above or below), billboard up = sun x right; both unit length, w = 0.
-void ShadowManager::RecalculateBillboardVectors(D3DXVECTOR3* SunDir) {
-	static const D3DXVECTOR3 zAxis(0.0f, 0.0f, 1.0f);
-	D3DXVECTOR3 right, up;
-	D3DXVec3Cross(&right, &zAxis, SunDir);
-	if (D3DXVec3LengthSq(&right) < 0.0001f)
-		right = D3DXVECTOR3(1.0f, 0.0f, 0.0f);
-	D3DXVec3Normalize(&right, &right);
-	D3DXVec3Cross(&up, SunDir, &right);
-	D3DXVec3Normalize(&up, &up);
-	BillboardRight = NiVector4(right.x, right.y, right.z, 0.0f);
-	BillboardUp = NiVector4(up.x, up.y, up.z, 0.0f);
-}
-
-/*
-* Renders the different shadow maps: Near, Far, Ortho.
-*/
-// CachedDistantShadows: the characters (and the player) in the loaded cells, as world bound spheres.
-void ShadowManager::CollectMovers(const D3DXVECTOR3& SunDir) {
-	FrameMovers.clear();
-	// How far a shadow reaches sideways per unit of height, for the current sun (capped for a sun near the horizon).
-	MoverShadowStretch = min(sqrtf(SunDir.x * SunDir.x + SunDir.y * SunDir.y) / max(SunDir.z, 0.1f), 10.0f);
-	auto add = [this](NiNode* node, const TESObjectREFR* ref) {
-		if (!node || node->m_flags & NiAVObject::APP_CULLED) return;
-		NiBound* bound = node->GetWorldBound();
-		if (bound && isfinite(bound->Radius) && isfinite(bound->Center.x) && isfinite(bound->Center.y) && isfinite(bound->Center.z) && bound->Radius <= 2000.0f)
-			FrameMovers.push_back(D3DXVECTOR4(bound->Center.x, bound->Center.y, bound->Center.z, bound->Radius));
-		else if (ref)	// exploded child bound (e.g. counter-scaled weapon anim node): keep a sane mover sphere at the actor's position
-			FrameMovers.push_back(D3DXVECTOR4(ref->pos.x, ref->pos.y, ref->pos.z + 64.0f, 128.0f));
-	};
-	add(Player->GetNode(), Player);
-	if (!Player->GetWorldSpace() || !Tes || !Tes->gridCellArray) return;
-	GridCellArray* CellArray = Tes->gridCellArray;
-	const UInt32 CellArraySize = CellArray->size * CellArray->size;
-	for (UInt32 c = 0; c < CellArraySize; c++) {
-		TESObjectCELL* Cell = CellArray->GetCell(c);
-		if (!Cell || Cell->IsInterior()) continue;
-		for (TList<TESObjectREFR>::Entry* Entry = &Cell->objectList.First; Entry; Entry = Entry->next) {
-			TESObjectREFR* Ref = Entry->item;
-			if (!Ref || !Ref->baseForm) continue;
-			const UInt8 type = Ref->baseForm->formType;
-			if (type == TESForm::FormType::kFormType_NPC || type == TESForm::FormType::kFormType_Creature ||
-				type == TESForm::FormType::kFormType_LeveledCreature)
-				add(Ref->GetNode(), Ref);
-		}
-	}
-}
-
-// Whether a character's shadow could come from this cascade. The planes are the ones from the cascade's last
-// redraw (world space); the cached picture has moved with the camera since, so the test is widened by that distance.
-// On screen, everything nearer than the previous cascade's end (InnerDepth, view depth) is shaded by the sharper
-// cascades: their selection spheres enclose their slices of the view, and only their outer 10% cross-fades into the
-// next one. So a character whose whole shadow stays nearer than 90% of InnerDepth is never sampled from this cascade
-// and does not count; that keeps the player and anyone close by from forcing a redraw every frame.
-bool ShadowManager::MoversInCascade(int cascade, ShadowsExteriorEffect::ShadowMapSettings* ShadowMap, float InnerDepth) {
-	if (!ShadowMap->Forms.Actors || FrameMovers.empty()) return false;
-	const D3DXVECTOR3 camera = WorldSceneGraph->camera->m_worldTransform.pos.toD3DXVEC3();
-	const D3DXVECTOR3 forward(TheRenderManager->CameraForward.x, TheRenderManager->CameraForward.y, TheRenderManager->CameraForward.z);
-	const D3DXVECTOR3 moved = camera - CascadeRefreshCamera[cascade];
-	const float pad = D3DXVec3Length(&moved) + 64.0f;
-	NiFrustumPlanes* planes = &ShadowMap->ShadowMapFrustumPlanes;
-	for (const D3DXVECTOR4& mover : FrameMovers) {
-		const D3DXVECTOR3 toMover = D3DXVECTOR3(mover.x, mover.y, mover.z) - camera;
-		const float shadowReach = mover.w * (1.0f + 2.0f * MoverShadowStretch) + 64.0f;
-		if (D3DXVec3Dot(&toMover, &forward) + shadowReach < 0.9f * InnerDepth) continue;
-		bool inside = true;
-		for (UInt32 p = 0; p < NiFrustumPlanes::MaxPlanes && inside; p++) {
-			if (!planes->IsPlaneActive(p)) continue;
-			const NiPlane& plane = planes->CullingPlanes[p];
-			const float distance = plane.Normal.x * mover.x + plane.Normal.y * mover.y + plane.Normal.z * mover.z - plane.Constant;
-			if (distance < -(mover.w + pad)) inside = false;
-		}
-		if (inside) return true;
-	}
-	return false;
-}
-
-// With the F10 profile and CachedDistantShadows on: every 240 frames, how often each sun cascade was redrawn on its
-// schedule and how often because of characters.
-void ShadowManager::LogSunShadowStats(bool cachedDistant) {
-	if (!GpuTimer::Enabled || !cachedDistant) { SunStats = {}; return; }
-	SunStats.Characters += (unsigned)FrameMovers.size();
-	if (++SunStats.Frames < 240) return;
-	const float perFrame = 100.0f / SunStats.Frames;
-	Logger::Log("CACHED DISTANT SHADOWS %u frames: redrawn %% of frames (scheduled + for characters): near %.0f, "
-		"middle %.0f + %.0f, far %.0f + %.0f, LOD %.0f + %.0f; characters tracked %.1f",
-		SunStats.Frames, SunStats.Scheduled[MapNear] * perFrame,
-		SunStats.Scheduled[MapMiddle] * perFrame, SunStats.ForCharacters[MapMiddle] * perFrame,
-		SunStats.Scheduled[MapFar] * perFrame, SunStats.ForCharacters[MapFar] * perFrame,
-		SunStats.Scheduled[MapLod] * perFrame, SunStats.ForCharacters[MapLod] * perFrame,
-		SunStats.Characters / (float)SunStats.Frames);
-	SunStats = {};
-	// UNOFFICIAL 2026-10-31 SunCacheByChange: why each cached cascade was redrawn (or kept), % of frames
-	if (TheSettingManager->GetSettingI("Main.Main.ReducedQuality", "SunCacheByChange")) {
-		char text[400]; int used = 0;
-		static const char* const names[4] = { "near", "middle", "far", "LOD" };
-		for (int i = MapMiddle; i <= MapLod; i++) {
-			const unsigned* r = SunCacheReasons[i];
-			const float total = (float)max(r[0] + r[1] + r[2] + r[3] + r[4], 1u);
-			used += sprintf_s(text + used, sizeof(text) - used, " | %s: kept %.0f, age %.0f, sun %.0f, moved %.0f, characters %.0f", names[i],
-				100.0f * r[4] / total, 100.0f * r[0] / total, 100.0f * r[1] / total, 100.0f * r[2] / total, 100.0f * r[3] / total);
-		}
-		Logger::Log("SUN CACHE BY CHANGE (%% of frames)%s", text);
-		memset(SunCacheReasons, 0, sizeof(SunCacheReasons));
-	}
-}
-
+// RecalculateBillboardVectors..LogSunShadowStats -> ShadowSunCascades.cpp
 // UNOFFICIAL 2026-10-31 SunLayers ([Main.Main.ReducedQuality] SunLayers, live, off; root plan A1 done properly, docs/next/ROOT-ASSUMPTIONS-PLAN.md).
 // The middle and far sun cascades in two layers. The static layer holds what never moves (land, statics, object LOD, every still part
 // of a reference) in its own R32F map, SunLayersMargin texels wider on every side than the cascade, with the same texel size and the
@@ -2633,7 +2206,8 @@ void ShadowManager::RenderShadowMaps() {
 		skinnedGeoPass->VertexShader = ShadowMapVertex;
 		// UNOFFICIAL 2026-11-02 SkinnedAlphaTest (RenderPass.h): on, skinned casters take the clip shader (opaque ones never discard).
 		SkinnedGeoShadowRenderPass::AlphaTest = TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "SkinnedAlphaTest") != 0;
-		skinnedGeoPass->PixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowMapPixel : ShadowMapOpaquePixel;
+		skinnedGeoPass->PixelShader = ShadowMapOpaquePixel;
+		skinnedGeoPass->AlphaPixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowMapPixel : nullptr;
 		speedTreePass->VertexShader = ShadowMapVertex;
 		speedTreePass->PixelShader = ShadowMapPixel;
 		terrainLODPass->VertexShader = ShadowMapVertex;
@@ -3311,7 +2885,10 @@ void ShadowManager::RenderShadowMaps() {
 			const bool colour = ShadowGridColorPixel && ambientLight->gridSunColorSurface;
 			RenderPass* passes[] = { geometryPass, alphaPass, skinnedGeoPass, speedTreePass, terrainLODPass };
 			ShaderRecordPixel* saved[5] = {};
+			ShaderRecordPixel* savedSkinnedAlpha = nullptr;
 			if (colour) {
+				savedSkinnedAlpha = skinnedGeoPass->AlphaPixelShader;
+				skinnedGeoPass->AlphaPixelShader = nullptr;
 				for (int i = 0; i < 5; i++) { saved[i] = passes[i]->PixelShader; passes[i]->PixelShader = ShadowGridColorPixel; }
 				dev->SetRenderTarget(1, ambientLight->gridSunColorSurface);
 				RenderPass::BindDiffuse = true;
@@ -3319,6 +2896,7 @@ void ShadowManager::RenderShadowMaps() {
 			RenderShadowMap(&ambientLight->gridSunMap, &fx->Constants.ShadowViewProj);
 			if (colour) {
 				for (int i = 0; i < 5; i++) passes[i]->PixelShader = saved[i];
+				skinnedGeoPass->AlphaPixelShader = savedSkinnedAlpha;
 				dev->SetRenderTarget(1, nullptr);
 				RenderPass::BindDiffuse = false;
 				dataConst->w = 0.0f;
@@ -3342,7 +2920,8 @@ void ShadowManager::RenderShadowMaps() {
 	skinnedGeoPass->VertexShader = ShadowCubeMapVertex;
 	// UNOFFICIAL 2026-11-02 SkinnedAlphaTest (RenderPass.h), lamp cube maps
 	SkinnedGeoShadowRenderPass::AlphaTest = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Main", "SkinnedAlphaTest") != 0;
-	skinnedGeoPass->PixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowCubeMapPixel : ShadowCubeMapOpaquePixel;
+	skinnedGeoPass->PixelShader = ShadowCubeMapOpaquePixel;
+	skinnedGeoPass->AlphaPixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowCubeMapPixel : nullptr;
 	speedTreePass->VertexShader = ShadowCubeMapVertex;
 	speedTreePass->PixelShader = ShadowCubeMapPixel;
 
@@ -3780,514 +3359,7 @@ void ShadowManager::RenderShadowMaps() {
 }
 
 
-// UNOFFICIAL 2026-10-23 CharacterShadowMap (docs/next/CHARACTER-SHADOW-MAP-DESIGN.md). A small sun shadow map (R32F, plain depth
-// whatever the cascades' Mode: TESR_ShadowData.z = 1 makes ShadowMap.pso write depth, as for the ortho map) fitted round the player
-// (ShadowsExteriorEffect::GetCharacterViewProj), drawn every frame the cascades are, with the cascade passes' shaders and states
-// (BeginShadowMap / DrawShadowMap) but its own walk: the player's node alone (and, with CharacterShadowMapOthers, the other actors of
-// the loaded cells whose bound touches the box), not the loaded cells. The lookups (Includes/Shadow.hlsl CharacterMapShadow,
-// SunShadows.fx.hlsl) take the darker of the cascades' shadow and this map's where a pixel is inside the box, fading to the cascades
-// alone over the box's outer band; so the cascades keep drawing the player as before (the player's shadow on the ground, and the
-// shadows of walls and trees on the player, stay theirs), and this map only adds the fine self-shadow the cascades' texels lose.
-// Off, or not compiled in, or in first person: nothing here, CharacterData.w stays 0, every shader skips the lookup.
-// 2026-11-08: the nodes of the actors in the game's process lists (high and middle-high, as CapsuleShadows reads them), the player
-// left out. Its own function: the __try needs a frame without C++ objects to unwind.
-static int CharacterMapActorNodes(NiNode** out, int max) {
-	int n = 0;
-	__try {
-		UInt8* lists = (UInt8*)0x11E0E80;	// ProcessLists
-		Actor** data = *(Actor***)(lists + 0x08);
-		for (int level = 0; data && level < 2; level++) {
-			const UInt32 begin = *(UInt32*)(lists + 0x14 + level * 4), end = *(UInt32*)(lists + 0x24 + level * 4);
-			if (end < begin || end - begin > 4096) continue;
-			for (UInt32 i = begin; i < end && n < max; i++) {
-				Actor* actor = data[i];
-				if (!actor || !actor->IsActor() || (TESObjectREFR*)actor == (TESObjectREFR*)Player || (actor->flags & 0x800) != 0) continue;	// 0x800: disabled
-				if (NiNode* node = actor->GetNode()) out[n++] = node;
-			}
-		}
-	}
-	__except (EXCEPTION_EXECUTE_HANDLER) {
-		static bool logged = false;
-		if (!logged) { logged = true; Logger::Log("[ERROR] CharacterShadowMapOthers: reading the actors failed (once)"); }
-	}
-	return n;
-}
-
-void ShadowManager::RenderCharacterShadowMap(const D3DXVECTOR3& SunDir) {
-	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
-	if (!Shadows->Settings.ShadowMaps.CharacterMap || !Shadows->CharacterMapCompiled) return;
-	if (!Shadows->EnsureCharacterMap()) return;
-	D3DXMATRIX viewProj;
-	if (!Shadows->GetCharacterViewProj(SunDir, viewProj)) return;
-
-	IDirect3DDevice9* Device = TheRenderManager->device;
-	static GpuTimer characterMapTimer("Character shadow map");
-	static CpuTimer characterMapCpuTimer("Character shadow map (CPU)");
-	CpuProfileScope cpu(characterMapCpuTimer);
-	GpuProfileScope gpu(characterMapTimer, Device);
-
-	ShadowsExteriorEffect::ShadowMapSettings* map = &Shadows->CharacterMap;
-	D3DXVECTOR4* ShadowData = &Shadows->Constants.Data;
-	const float zWas = ShadowData->z;
-	ShadowData->z = 1.0f;	// plain depth (as the ortho map), whatever the cascades' Mode
-	Shadows->Constants.ShadowViewProj = viewProj;
-	Device->SetRenderTarget(0, Shadows->CharacterMapSurface);
-	Device->SetDepthStencilSurface(Shadows->CharacterMapDepthSurface);
-
-	BeginShadowMap(map, &viewProj);
-	// Walk the whole player node without per-child frustum popping so swinging arms/melee weapons do not
-	// flicker in and out of the character shadow map mid-animation; skip non-skinned blend-only FX meshes.
-	SkipNonSkinnedBlendOnly = true;
-	NiNode* playerNode = Shadows->CharacterTargetNode ? Shadows->CharacterTargetNode : Player->GetNode();
-	AccumChildren(playerNode, &map->Forms, false, false, nullptr);
-	unsigned others = 0;
-	// 2026-11-08 (tester: "CharacterShadowMapOthers does nothing"): the actors come from the game's process lists (high and
-	// middle-high, as CapsuleShadows and BloodFlow read them), not the loaded cells' object lists: most people are persistent
-	// references that live in the worldspace's persistent cell, so the cell walk found almost nobody.
-	if (Shadows->Settings.ShadowMaps.CharacterMapOthers && Player->GetWorldSpace()) {
-		NiNode* nodes[64];
-		const int count = CharacterMapActorNodes(nodes, 64);
-		for (int i = 0; i < count; i++) {
-			NiNode* node = nodes[i];
-			if (node == playerNode || (node->m_flags & NiAVObject::APP_CULLED) || !node->WithinFrustum(&map->ShadowMapFrustumPlanes)) continue;
-			AccumChildren(node, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
-			others++;
-		}
-	}
-	SkipNonSkinnedBlendOnly = false;
-	const unsigned casters = (unsigned)(geometryPass->GeometryList.size() + alphaPass->GeometryList.size() + skinnedGeoPass->GeometryList.size());
-	DrawShadowMap(map);
-	ShadowData->z = zWas;
-	Shadows->Constants.CharacterData.w = 1.0f + (float)Shadows->Settings.ShadowMaps.CharacterMapDebug;	// the map holds this frame's draw: the lookups read it (2-4: a debug view, Shadow.hlsl)
-
-	if (Shadows->Settings.ShadowMaps.CharacterMapLog) {
-		static DWORD lastLog = 0;
-		if (GetTickCount() - lastLog > 1000) {
-			lastLog = GetTickCount();
-			const float radius = Shadows->Constants.CharacterCenter.w;
-			Logger::Log("CharacterShadowMap: fit %d, half-extent %.0f units (texel %.3f units = %.2f cm), %u casters (%u other actors), sun %.3f %.3f %.3f, bias %.5f, band %.3f",
-				Shadows->Settings.ShadowMaps.CharacterMapFit, radius, 2.0f * radius / map->ShadowMapResolution, 2.0f * radius / map->ShadowMapResolution * 1.428f,
-				casters, others, SunDir.x, SunDir.y, SunDir.z, Shadows->Constants.CharacterData.z, Shadows->Constants.CharacterData.y);
-		}
-	}
-}
-
-// UNOFFICIAL 2026-11-08 CharacterShadowMapNpcs ([Shaders.ShadowsExteriors.ShadowMaps], 0 = off; user: NPC faces look "crusty" up close).
-// The player's map gives only the player (or, with CharacterShadowMapTarget, one NPC in first person) the fine sun self-shadow; every
-// other person keeps the cascades' 4-10 mm texels. Here the nearest CharacterShadowMapNpcs people whose head is within
-// CharacterShadowMapNpcDistance of the camera each get a map of their own, fitted and drawn exactly as the player's (FitCharacterBox,
-// BeginShadowMap / DrawShadowMap, that person's node alone, plus the other people in its box with CharacterShadowMapOthers). The
-// shaders are unchanged: each NPC's own draws are given that NPC's map on s11 and its constants in c206-c214 (NpcCharacterMaps.h),
-// every other draw keeps the player's. Third and first person alike; nothing while the sun cascades are not drawn.
-void ShadowManager::RenderNpcCharacterMaps(const D3DXVECTOR3& SunDir) {
-	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
-	Shadows->CharacterNpcLive = 0;
-	const int wanted = Shadows->CharacterMapCompiled && Shadows->Settings.ShadowMaps.CharacterMap ?
-		std::clamp(TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcs"), 0, (int)ShadowsExteriorEffect::CharacterNpcMax) : 0;
-	const int resolution = std::clamp(TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcResolution"), 256, 4096);
-	if (!Shadows->EnsureCharacterNpcMaps(wanted, (UINT)((resolution + 128) / 256 * 256))) return;
-	Character* npcs[ShadowsExteriorEffect::CharacterNpcMax];
-	const float distance = max(TheSettingManager->GetSettingF("Shaders.ShadowsExteriors.ShadowMaps", "CharacterShadowMapNpcDistance"), 0.0f);
-	const int count = Shadows->PickCharacterNpcs(npcs, wanted, distance, Shadows->CharacterTargetNode);
-	if (count == 0) return;
-
-	IDirect3DDevice9* Device = TheRenderManager->device;
-	NpcCharacterMaps::Reset(Device);	// no NPC map stays bound while it is drawn into
-	static GpuTimer npcMapsTimer("Character shadow maps (NPCs)");
-	static CpuTimer npcMapsCpuTimer("Character shadow maps (NPCs, CPU)");
-	CpuProfileScope cpu(npcMapsCpuTimer);
-	GpuProfileScope gpu(npcMapsTimer, Device);
-
-	ShadowsExteriorEffect::ShadowMapSettings* map = &Shadows->CharacterNpcMap;
-	D3DXVECTOR4* ShadowData = &Shadows->Constants.Data;
-	const float zWas = ShadowData->z;
-	const D3DXMATRIX viewProjWas = Shadows->Constants.ShadowViewProj;
-	ShadowData->z = 1.0f;	// plain depth, as the player's map
-	NiNode* others[64];
-	const int otherCount = Shadows->Settings.ShadowMaps.CharacterMapOthers && Player->GetWorldSpace() ? CharacterMapActorNodes(others, 64) : 0;
-	NiNode* playerNode = Player->GetNode();
-	int live = 0;
-	for (int t = 0; t < count; t++) {
-		ShadowsExteriorEffect::CharacterNpcTile& tile = Shadows->CharacterNpcTiles[live];
-		NiNode* node = npcs[t]->GetNode();
-		D3DXMATRIX viewProj;
-		if (!node || !Shadows->FitCharacterBox(npcs[t], node, SunDir, map->ShadowMapResolution, *map, viewProj, tile.center, tile.data)) continue;
-		tile.node = node;
-		tile.toLight = viewProj;
-		tile.data.w = 1.0f + (float)Shadows->Settings.ShadowMaps.CharacterMapDebug;
-		Shadows->Constants.ShadowViewProj = viewProj;
-		Device->SetRenderTarget(0, Shadows->CharacterNpcSurface[live]);
-		Device->SetDepthStencilSurface(Shadows->CharacterNpcDepthSurface);
-		BeginShadowMap(map, &viewProj);
-		SkipNonSkinnedBlendOnly = true;
-		AccumChildren(node, &map->Forms, false, false, nullptr);
-		// CharacterShadowMapOthers: the people (the player too) standing in this box shade this NPC sharply as well
-		if (otherCount) {
-			if (playerNode && playerNode != node && Player->IsDrawnThirdPerson() && !(playerNode->m_flags & NiAVObject::APP_CULLED) && playerNode->WithinFrustum(&map->ShadowMapFrustumPlanes))
-				AccumChildren(playerNode, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
-			for (int i = 0; i < otherCount; i++) {
-				NiNode* other = others[i];
-				if (other == node || (other->m_flags & NiAVObject::APP_CULLED) || !other->WithinFrustum(&map->ShadowMapFrustumPlanes)) continue;
-				AccumChildren(other, &map->Forms, false, false, &map->ShadowMapFrustumPlanes);
-			}
-		}
-		SkipNonSkinnedBlendOnly = false;
-		DrawShadowMap(map);
-		live++;
-	}
-	ShadowData->z = zWas;
-	Shadows->Constants.ShadowViewProj = viewProjWas;
-	Shadows->CharacterNpcLive = live;
-
-	if (Shadows->Settings.ShadowMaps.CharacterMapLog) {
-		static DWORD lastLog = 0;
-		if (GetTickCount() - lastLog > 1000) {
-			lastLog = GetTickCount();
-			Logger::Log("CharacterShadowMapNpcs: %d of %d NPC maps drawn (%u x %u, within %.0f units), first half-extent %.0f", live, count,
-				Shadows->CharacterNpcSizeCreated, Shadows->CharacterNpcSizeCreated, distance, live ? Shadows->CharacterNpcTiles[0].center.w : 0.0f);
-		}
-	}
-}
-
-// UNOFFICIAL 2026-11-04 ViewModelShadows (from Physically-Based-Reloaded f8b6114a): the first-person arms and weapon casting their sun
-// shadows on themselves. The sun cascades never hold the viewmodel (its own scene graph, posed for the frame only as its render starts),
-// and in first person the character map has nothing to do (or, with CharacterShadowMapTarget, an NPC's draws are done with it by then).
-// So just before the game's first-person render (Render.cpp RenderFirstPersonHook) the viewmodel alone is drawn into the character map
-// with its own light box, an ortho box fitted round its parts in the sun's frame, and the first-person draws read it through
-// CharacterMapShadow with TESR_CharShadowData.w = 0.5 (a 6 x 6 tent PCF there, Includes/Shadow.hlsl); the caller uploads the constants
-// and puts them back after that render. The game draws the viewmodel moved to the origin (0x874C10) and camera-relative to the camera
-// drawing it (NiRenderer::kPosAdjust, set by Do_SetCameraData), here still the world camera's: for this draw both kPosAdjust and NVR's
-// camera position are the first-person camera's, so the map holds what the first-person draw sees and the bone matrices computed now
-// are the ones that draw uses (made with the world camera's, the arms were drawn far off). Called inside the game's scene: the targets,
-// viewport, render states, shaders, buffers, textures and shader constants the draws change are put back after. False when nothing was
-// drawn (the Character* constants are then unchanged).
-
-// The viewmodel's parts as spheres relative to Eye, for the light box: skinned meshes by the bound NiSkinData keeps for each bone's
-// vertices (in that bone's space), rigid ones by their model bound. Walked as AccumChildren walks it; anything far from the camera (the
-// first-person skeleton's lower body) is left out.
-// UNOFFICIAL 2026-11-04 CharacterShadowMapLog: this frame's viewmodel map as drawn, for ViewModelLogDraw (the first-person draws read it).
-static struct {
-	bool valid = false;
-	UInt32 frame = 0;
-	NiPoint3 eye = {};
-	D3DXMATRIX lightView;
-	float cx = 0.0f, cy = 0.0f, half = 0.0f, zNear = 0.0f, zFar = 0.0f;
-	std::unordered_map<const void*, NiPoint3> posAtMap;	// each geometry's world position when the map was drawn
-	int lines = 0;
-} ViewModelLog;
-
-static void ViewModelLogPositions(NiAVObject* Object) {
-	if (!Object) return;
-	if (Object->IsGeometry()) { ViewModelLog.posAtMap[Object] = Object->m_worldTransform.pos; return; }
-	if (NiNode* Node = Object->IsNiNode()) for (int i = 0; i < Node->m_children.end; i++) ViewModelLogPositions(Node->m_children.data[i]);
-}
-
-static void ViewModelSpheres(NiAVObject* Object, const NiPoint3& Eye, std::vector<D3DXVECTOR4>& Spheres);
-
-// Render.cpp ForwardShadowsForPass, every first-person pass: how far the part drawn sits outside the map's box (in the sun's frame, world
-// units; 0 inside), whether it moved since the map was drawn, and the character-map switch the shaders read (w: 0.5 the viewmodel map).
-void ShadowManager::ViewModelLogDraw(NiGeometry* Geometry) {
-	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
-	if (!Geometry || !Shadows || !Shadows->Settings.ShadowMaps.CharacterMapLog || ViewModelLog.lines >= 4000) return;
-	const UInt32 frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u;
-	// Only the draws that could lose the shadow are written, and a summary every 120 frames (all draws would fill the log in two seconds).
-	static UInt32 summaryFrame = 0, draws = 0, flagged = 0;
-	draws++;
-	if (frame >= summaryFrame + 120) {
-		ViewModelLog.lines++;
-		Logger::Log("VIEWMODEL DRAW f%u: summary: %u first-person draws since f%u, %u flagged", frame, draws, summaryFrame, flagged);
-		summaryFrame = frame; draws = 0; flagged = 0;
-	}
-	if (!ViewModelLog.valid || ViewModelLog.frame != frame) {
-		flagged++; ViewModelLog.lines++;
-		Logger::Log("VIEWMODEL DRAW f%u: '%s' with no map this frame (last map f%u) | shaders read w %.2f", frame, Geometry->m_pcName ? Geometry->m_pcName : "?",
-			ViewModelLog.frame, Shadows->Constants.CharacterData.w);
-		return;
-	}
-	static std::vector<D3DXVECTOR4> spheres;
-	spheres.clear();
-	ViewModelSpheres(Geometry, ViewModelLog.eye, spheres);
-	float over = 0.0f;
-	for (const D3DXVECTOR4& s : spheres) {
-		D3DXVECTOR3 v;
-		D3DXVec3TransformCoord(&v, (const D3DXVECTOR3*)&s, &ViewModelLog.lightView);
-		over = max(over, fabsf(v.x - ViewModelLog.cx) + s.w - ViewModelLog.half);
-		over = max(over, fabsf(v.y - ViewModelLog.cy) + s.w - ViewModelLog.half);
-		over = max(over, max(-v.z + s.w - ViewModelLog.zFar, ViewModelLog.zNear - (-v.z - s.w)));
-	}
-	auto at = ViewModelLog.posAtMap.find(Geometry);
-	const NiPoint3& p = Geometry->m_worldTransform.pos;
-	const float moved = at == ViewModelLog.posAtMap.end() ? -1.0f :
-		sqrtf((p.x - at->second.x) * (p.x - at->second.x) + (p.y - at->second.y) * (p.y - at->second.y) + (p.z - at->second.z) * (p.z - at->second.z));
-	const float w = Shadows->Constants.CharacterData.w;
-	if (over <= 0.1f && moved >= 0.0f && moved <= 0.05f && w > 0.49f && w < 0.51f) return;	// (0.1: a texel's snap of the box centre)
-	flagged++; ViewModelLog.lines++;
-	Logger::Log("VIEWMODEL DRAW f%u: '%s' %u spheres | outside the box by %.2f | moved %.2f since the map (-1: not in it) | shaders read w %.2f",
-		frame, Geometry->m_pcName ? Geometry->m_pcName : "?", (unsigned)spheres.size(), max(over, 0.0f), moved, w);
-}
-
-static void ViewModelSpheres(NiAVObject* Object, const NiPoint3& Eye, std::vector<D3DXVECTOR4>& Spheres) {
-	if (!Object || Object->m_flags & NiAVObject::NiFlags::APP_CULLED) return;
-	auto Add = [&](const NiTransform& T, const NiBound& B) {
-		const NiPoint3 c = T.rot * B.Center;
-		const D3DXVECTOR4 s(T.pos.x + c.x * T.scale - Eye.x, T.pos.y + c.y * T.scale - Eye.y, T.pos.z + c.z * T.scale - Eye.z, B.Radius * T.scale);
-		if (s.x * s.x + s.y * s.y + s.z * s.z < 150.0f * 150.0f) Spheres.push_back(s);
-	};
-	if (Object->IsGeometry()) {
-		NiGeometry* Geo = static_cast<NiGeometry*>(Object);
-		NiSkinInstance* Skin = Geo->skinInstance;
-		if (Skin && Skin->SkinData && Skin->SkinData->BoneData && Skin->BoneObjects) {
-			for (UInt32 i = 0; i < Skin->SkinData->Bones; i++)
-				if (SkinBones::Live(Skin->BoneObjects[i]) && Skin->SkinData->BoneData[i].Verts) Add(Skin->BoneObjects[i]->m_worldTransform, Skin->SkinData->BoneData[i].Bound);
-		}
-		else if (Geo->geomData) Add(Geo->m_worldTransform, Geo->geomData->m_kBound);
-		return;
-	}
-	NiNode* Node = Object->IsNiNode();
-	if (!Node) return;
-	if (Node->IsKindOf<NiSwitchNode>()) {
-		NiSwitchNode* SwitchNode = static_cast<NiSwitchNode*>(Node);
-		if (SwitchNode->m_iIndex >= 0 && SwitchNode->m_iIndex < Node->m_children.end) ViewModelSpheres(Node->m_children.data[SwitchNode->m_iIndex], Eye, Spheres);
-		return;
-	}
-	for (int i = 0; i < Node->m_children.end; i++) ViewModelSpheres(Node->m_children.data[i], Eye, Spheres);
-}
-
-bool ShadowManager::RenderViewModelShadowMap(NiCamera* FirstPersonCamera) {
-	ShadowsExteriorEffect* Shadows = TheShaderManager->Effects.ShadowsExteriors;
-	if (!Shadows || !ShadowShadersLoaded || !TheSettingManager->SettingsMain.Main.RenderEffects) return false;
-	// UNOFFICIAL 2026-11-04 [Shaders.ShadowsExteriors.ShadowMaps] CharacterShadowMapLog: each first-person frame, made or why not, and where
-	// (user: the arms' and weapon's shadows flicker in and out on a jump). At most 4000 lines a session.
-	static int viewModelLogLines = 0;
-	const bool logThis = Shadows->Settings.ShadowMaps.CharacterMapLog && viewModelLogLines < 4000;
-	auto skip = [&](const char* why) { if (logThis) { viewModelLogLines++; Logger::Log("VIEWMODEL SHADOW f%u: skipped (%s)", TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u, why); } return false; };
-	if (!Shadows->Settings.ShadowMaps.CharacterMap || !Shadows->CharacterMapCompiled || !Shadows->EnsureCharacterMap()) return skip("character map off or not made");
-	if (!TheShaderManager->GameState.isExterior || !Shadows->Enabled || !Shadows->Settings.Exteriors.Enabled) return skip("indoors or exterior shadows off");
-	if (Shadows->Constants.ShadowFade.y <= 0.0f || Shadows->Constants.ForwardData.x != 0.0f) return skip(Shadows->Constants.ShadowFade.y <= 0.0f ? "sun shadow maps inactive" : "forward sun shadows off this frame");
-	if (!Player || !Player->firstPersonNiNode || !FirstPersonCamera) return skip("no first-person model or camera");
-	// UNOFFICIAL 2026-11-05 (from Bale, PR #6): no map while the weapon is holstered, nothing of the viewmodel is drawn for it to shadow (the world's
-	// shadows dropped out in first person then).
-	if (!Player->process || !Player->process->IsWeaponOut()) return skip("weapon holstered: no viewmodel on screen");
-
-	IDirect3DDevice9* Device = TheRenderManager->device;
-	NiDX9RenderState* RenderState = TheRenderManager->renderState;
-	static GpuTimer viewModelMapTimer("View model shadow map");
-	GpuProfileScope gpu(viewModelMapTimer, Device);
-	IDirect3DSurface9* DepthSurface = NULL;
-	IDirect3DSurface9* RenderSurface = NULL;
-	D3DVIEWPORT9 viewport;
-	Device->GetDepthStencilSurface(&DepthSurface);
-	Device->GetRenderTarget(0, &RenderSurface);
-	Device->GetViewport(&viewport);
-	static const D3DRENDERSTATETYPE kStates[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ZFUNC, D3DRS_CULLMODE, D3DRS_ALPHABLENDENABLE,
-		D3DRS_ALPHATESTENABLE, D3DRS_ALPHAREF, D3DRS_ALPHAFUNC, D3DRS_DEPTHBIAS, D3DRS_SLOPESCALEDEPTHBIAS, D3DRS_STENCILENABLE, D3DRS_STENCILREF,
-		D3DRS_STENCILFUNC, D3DRS_COLORWRITEENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_CLIPPLANEENABLE, D3DRS_NORMALIZENORMALS, D3DRS_POINTSIZE };
-	DWORD saved[_countof(kStates)];
-	for (int i = 0; i < _countof(kStates); i++) Device->GetRenderState(kStates[i], &saved[i]);
-	// The rest of the device state the draws below change, as the flashlight's MaterialPass keeps it (in the middle of the game's own
-	// draws): shaders, vertex layout, buffers, textures and their sampling, and every shader constant (the skinned pass writes bones
-	// from c9, the game sets some of its constants once per pass).
-	static const D3DSAMPLERSTATETYPE kSamplerStates[] = { D3DSAMP_ADDRESSU, D3DSAMP_ADDRESSV, D3DSAMP_MAGFILTER, D3DSAMP_MINFILTER, D3DSAMP_MIPFILTER };
-	IDirect3DVertexShader9* savedVS = NULL; IDirect3DPixelShader9* savedPS = NULL; IDirect3DVertexDeclaration9* savedDecl = NULL;
-	IDirect3DIndexBuffer9* savedIB = NULL; DWORD savedFVF = 0;
-	IDirect3DVertexBuffer9* savedVB[8] = {}; UINT savedOffset[8] = {}, savedStride[8] = {};
-	IDirect3DBaseTexture9* savedTex[16] = {}; DWORD savedSampler[16][_countof(kSamplerStates)];
-	static float savedVSConst[256][4], savedPSConst[224][4];
-	Device->GetVertexShader(&savedVS); Device->GetPixelShader(&savedPS); Device->GetVertexDeclaration(&savedDecl);
-	Device->GetIndices(&savedIB); Device->GetFVF(&savedFVF);
-	for (UINT i = 0; i < 8; i++) Device->GetStreamSource(i, &savedVB[i], &savedOffset[i], &savedStride[i]);
-	for (DWORD i = 0; i < 16; i++) {
-		Device->GetTexture(i, &savedTex[i]);
-		for (int s = 0; s < _countof(kSamplerStates); s++) Device->GetSamplerState(i, kSamplerStates[s], &savedSampler[i][s]);
-	}
-	Device->GetVertexShaderConstantF(0, &savedVSConst[0][0], 256);
-	Device->GetPixelShaderConstantF(0, &savedPSConst[0][0], 224);
-	const bool savedClothNonZero = ClothWind::NonZeroSent, savedClothGrass = ClothWind::GrassInC248;
-	const D3DXVECTOR4 savedData = Shadows->Constants.Data;
-	const D3DXMATRIX savedViewProj = Shadows->Constants.ShadowViewProj;
-	ShadowsExteriorEffect::ShadowMapSettings& map = Shadows->CharacterMap;
-	const float res = map.ShadowMapResolution;
-
-	// Camera-relative to the first-person camera (see above), put back at the end.
-	NiPoint3* PosAdjust = (NiPoint3*)0x011F474C;	// NiRenderer::kPosAdjust
-	const NiPoint3 savedPosAdjust = *PosAdjust;
-	const D3DXVECTOR4 savedCameraPosition = TheRenderManager->CameraPosition;
-	const NiPoint3 eye = FirstPersonCamera->m_worldTransform.pos;
-	*PosAdjust = eye;
-	TheRenderManager->CameraPosition = D3DXVECTOR4(eye.x, eye.y, eye.z, 1.0f);
-
-	// The light transform: an ortho box fitted, in the sun's frame, round the parts drawn (ViewModelSpheres; the viewmodel's root bound
-	// has no size), so the map's texels cover only the arms and weapon. Square, its size in 8-unit steps and its centre snapped to whole
-	// texels: the texel grid holds still while the weapon sways and the shadow edges do not crawl. At least as deep as it is wide
-	// (CharacterMapShadow's receiver-plane slack takes one texel of depth as one texel across).
-	static std::vector<D3DXVECTOR4> spheres;
-	spheres.clear();
-	ViewModelSpheres(Player->firstPersonNiNode, eye, spheres);
-	D3DXVECTOR3 sunDir(Shadows->Constants.SmoothedSunDir.x, Shadows->Constants.SmoothedSunDir.y, Shadows->Constants.SmoothedSunDir.z);
-	D3DXVec3Normalize(&sunDir, &sunDir);
-	const D3DXVECTOR3 origin(0.0f, 0.0f, 0.0f);
-	const D3DXVECTOR3 upDir = fabsf(sunDir.z) > 0.99f ? D3DXVECTOR3(0.0f, 1.0f, 0.0f) : D3DXVECTOR3(0.0f, 0.0f, 1.0f);
-	D3DXMATRIX lightView, lightProj;
-	D3DXMatrixLookAtRH(&lightView, &sunDir, &origin, &upDir);
-	D3DXVECTOR3 lo(FLT_MAX, FLT_MAX, FLT_MAX), hi(-FLT_MAX, -FLT_MAX, -FLT_MAX);
-	for (const D3DXVECTOR4& s : spheres) {
-		D3DXVECTOR3 v;
-		D3DXVec3TransformCoord(&v, (const D3DXVECTOR3*)&s, &lightView);
-		lo.x = min(lo.x, v.x - s.w); lo.y = min(lo.y, v.y - s.w); lo.z = min(lo.z, v.z - s.w);
-		hi.x = max(hi.x, v.x + s.w); hi.y = max(hi.y, v.y + s.w); hi.z = max(hi.z, v.z + s.w);
-	}
-	if (spheres.empty()) { lo = D3DXVECTOR3(-1.0f, -1.0f, -1.0f); hi = D3DXVECTOR3(1.0f, 1.0f, 1.0f); }
-	const float extent = max(8.0f, ceilf(max(hi.x - lo.x, hi.y - lo.y) / 8.0f) * 8.0f);
-	const float texelWorld = extent / res;
-	const float cx = floorf((lo.x + hi.x) * 0.5f / texelWorld) * texelWorld;
-	const float cy = floorf((lo.y + hi.y) * 0.5f / texelWorld) * texelWorld;
-	float zNear = -hi.z - 1.0f, zFar = -lo.z + 1.0f;	// right-handed: in front is -z
-	if (zFar - zNear < extent) { const float grow = 0.5f * (extent - (zFar - zNear)); zNear -= grow; zFar += grow; }
-	D3DXMatrixOrthoOffCenterRH(&lightProj, cx - 0.5f * extent, cx + 0.5f * extent, cy - 0.5f * extent, cy + 0.5f * extent, zNear, zFar);
-	D3DXMATRIX viewProj = lightView * lightProj;
-	ViewModelLight::ViewProj = viewProj;	// UNOFFICIAL 2026-11-15 DeferredFirstPerson (core/ViewModelLight.h): the true camera-relative point's transform
-	ViewModelLight::Frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u;
-
-	// The lookup's space is not the one drawn here: the object and skin shaders rebuild their position from the clip position with NVR's
-	// inverse view and projection (Includes/Shadow.hlsl GetShadowWorldPos), made from the world camera when the world scene began
-	// (RenderManager::SetupSceneCamera), and the viewmodel is projected with the first-person camera's own field of view (by the time of
-	// this call the world camera's frustum already reads the first-person one, so the inverse projection is the only true record of the
-	// world's). Along each view ray at the same view depth, the rebuilt point is the true one with its view x and y scaled by
-	// InvProj._11 * 2 / first-person width (and _22 for y): 1.092 measured at the default FOVs, enough to put every lookup behind the
-	// viewmodel's own surfaces in a box texels of 0.06 units. So the lookup undoes it before the light transform: the inverse view's
-	// translation off, NVR's view rotation, that scale inverted, the first-person camera's inverse view rotation.
-	auto viewRotation = [](NiCamera* camera) {
-		const NiMatrix33& axes = camera->m_worldTransform.rot;
-		D3DXMATRIX m;
-		D3DXMatrixIdentity(&m);
-		for (int r = 0; r < 3; r++) {	// columns side, up, forward (RenderManager::SetupSceneCamera)
-			m.m[r][0] = axes.data[r][2];
-			m.m[r][1] = axes.data[r][1];
-			m.m[r][2] = axes.data[r][0];
-		}
-		return m;
-	};
-	const D3DXMATRIX& invView = TheRenderManager->InvViewMatrix;
-	const D3DXMATRIX& invProj = TheRenderManager->InvProjMatrix;
-	const NiFrustum& f = FirstPersonCamera->Frustum;
-	D3DXMATRIX untranslate, nvrView, scale, firstPersonView, firstPersonInverse;
-	D3DXMatrixTranslation(&untranslate, -invView._41, -invView._42, -invView._43);
-	D3DXMatrixTranspose(&nvrView, &invView);	// the rotation's inverse (the translation row is dropped below)
-	nvrView._14 = nvrView._24 = nvrView._34 = 0.0f;
-	nvrView._41 = nvrView._42 = nvrView._43 = 0.0f;
-	const float scaleX = invProj._11 * 2.0f / max(f.Right - f.Left, 1e-6f), scaleY = invProj._22 * 2.0f / max(f.Top - f.Bottom, 1e-6f);
-	D3DXMatrixScaling(&scale, 1.0f / scaleX, 1.0f / scaleY, 1.0f);
-	firstPersonView = viewRotation(FirstPersonCamera);
-	D3DXMatrixTranspose(&firstPersonInverse, &firstPersonView);
-	const D3DXMATRIX rebuiltToTrue = untranslate * nvrView * scale * firstPersonInverse;
-
-	// The lookup's constants (CharacterMapShadow): w 0.5 = this map, read with the tent; a band of 0.01 (the box is fitted round the
-	// parts, no hand-over at its edge); a depth bias of two texels' worth.
-	Shadows->Constants.CharacterCameraToLight = rebuiltToTrue * viewProj;
-	Shadows->Constants.CharacterCenter = D3DXVECTOR4(cx, cy, 0.0f, 0.5f * extent);
-	Shadows->Constants.CharacterData = D3DXVECTOR4(1.0f / res, 0.01f, max(2.0f * texelWorld, 0.03f) / (zFar - zNear), 
-		Shadows->Settings.ShadowMaps.CharacterMapDebug ? 1.0f + (float)Shadows->Settings.ShadowMaps.CharacterMapDebug : 0.5f);	// (CharacterShadowMapDebug: its views, Shadow.hlsl)
-
-	Shadows->Constants.Data.z = 1.0f;	// plain depth (as RenderCharacterShadowMap)
-	Shadows->Constants.ShadowViewProj = viewProj;
-	if (Shadows->Settings.ShadowMaps.CharacterMapLog) {	// for ViewModelLogDraw
-		ViewModelLog.valid = true;
-		ViewModelLog.frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u;
-		ViewModelLog.eye = eye;
-		ViewModelLog.lightView = lightView;
-		ViewModelLog.cx = cx; ViewModelLog.cy = cy; ViewModelLog.half = 0.5f * extent;
-		ViewModelLog.zNear = zNear; ViewModelLog.zFar = zFar;
-		ViewModelLog.posAtMap.clear();
-		ViewModelLogPositions(Player->firstPersonNiNode);
-	}
-	if (logThis) {
-		viewModelLogLines++;
-		Logger::Log("VIEWMODEL SHADOW f%u: made | eye %.1f %.1f %.1f | world camera %.1f %.1f %.1f (eye - world %.2f %.2f %.2f) | inv view t %.2f %.2f %.2f | "
-			"%u parts, box centre %.2f %.2f, extent %.1f, depth %.1f..%.1f | sun %.3f %.3f %.3f",
-			TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0u, eye.x, eye.y, eye.z, savedCameraPosition.x, savedCameraPosition.y, savedCameraPosition.z,
-			eye.x - savedCameraPosition.x, eye.y - savedCameraPosition.y, eye.z - savedCameraPosition.z, invView._41, invView._42, invView._43,
-			(unsigned)spheres.size(), cx, cy, extent, zNear, zFar, sunDir.x, sunDir.y, sunDir.z);
-	}
-	geometryPass->VertexShader = alphaPass->VertexShader = skinnedGeoPass->VertexShader = ShadowMapVertex;
-	geometryPass->PixelShader = ShadowMapOpaquePixel;
-	alphaPass->PixelShader = ShadowMapPixel;
-	skinnedGeoPass->PixelShader = SkinnedGeoShadowRenderPass::AlphaTest ? ShadowMapPixel : ShadowMapOpaquePixel;
-
-	// Any other targets the game's scene left bound (multiple render targets) would not match the map's size, which drops every draw;
-	// put back at the end.
-	IDirect3DSurface9* savedRT[3] = {};
-	for (DWORD i = 1; i < 4; i++) { Device->GetRenderTarget(i, &savedRT[i - 1]); if (savedRT[i - 1]) Device->SetRenderTarget(i, NULL); }
-	Device->SetRenderTarget(0, Shadows->CharacterMapSurface);
-	Device->SetDepthStencilSurface(Shadows->CharacterMapDepthSurface);
-	// The states RenderShadowMaps draws every map with, on the device as well: the first-person scene arrives with colour writes off,
-	// and NiDX9RenderState may believe it already holds a value the device does not. The depth test is LESSEQUAL whatever the scene's
-	// depth convention: ShadowMap.vso writes plain depth (0 at the light) and DrawShadowMap clears to 1, so nearest wins (with the
-	// reversed scene's GREATEREQUAL set on the device too, every draw failed here: an empty map).
-	const DWORD zFunc = D3DCMP_LESSEQUAL;
-	const struct { D3DRENDERSTATETYPE type; DWORD value; } kMapStates[] = {
-		{ D3DRS_ZFUNC, zFunc }, { D3DRS_STENCILENABLE, 1 }, { D3DRS_STENCILREF, 0 }, { D3DRS_STENCILFUNC, D3DCMP_ALWAYS }, { D3DRS_NORMALIZENORMALS, 1 },
-		{ D3DRS_POINTSIZE, 810365505 }, { D3DRS_COLORWRITEENABLE, 0xF }, { D3DRS_SCISSORTESTENABLE, FALSE }, { D3DRS_CLIPPLANEENABLE, 0 },
-		{ D3DRS_ZENABLE, D3DZB_TRUE }, { D3DRS_ZWRITEENABLE, TRUE } };
-	for (const auto& entry : kMapStates) {
-		RenderState->SetRenderState(entry.type, entry.value, RenderStateArgs);
-		Device->SetRenderState(entry.type, entry.value);
-	}
-
-	// Every part of the viewmodel, however small (fingers and sights), alpha tested parts included.
-	map.Forms = {};
-	map.Forms.Actors = true;
-	map.Forms.AlphaEnabled = true;
-	// The Pip-Boy fit's object is the game's last first-person draw: last frame's here (this map comes before this frame's draws), maybe gone
-	// since (a weapon switch, the Pip-Boy): ClothWind's partition draws read it (crashed in PipboyFit::ForPartition). Off for this map.
-	PipboyFit::Active = nullptr;
-	map.CustomClearRequired = false;
-	BeginShadowMap(&map, &viewProj);
-	AccumChildren(Player->firstPersonNiNode, &map.Forms, false, false, nullptr);
-	RenderPass::FirstPerson = true;
-	DrawShadowMap(&map);
-	RenderPass::FirstPerson = false;
-
-	for (int i = 0; i < _countof(kStates); i++) {
-		RenderState->SetRenderState(kStates[i], saved[i], RenderStateArgs);
-		Device->SetRenderState(kStates[i], saved[i]);	// (the cache may already hold it and skip the device)
-	}
-	*PosAdjust = savedPosAdjust;
-	TheRenderManager->CameraPosition = savedCameraPosition;
-	Shadows->Constants.Data = savedData;
-	Shadows->Constants.ShadowViewProj = savedViewProj;
-	Device->SetDepthStencilSurface(DepthSurface);
-	Device->SetRenderTarget(0, RenderSurface);
-	for (DWORD i = 1; i < 4; i++) if (savedRT[i - 1]) { Device->SetRenderTarget(i, savedRT[i - 1]); savedRT[i - 1]->Release(); }
-	Device->SetViewport(&viewport);
-	if (DepthSurface) DepthSurface->Release();
-	if (RenderSurface) RenderSurface->Release();
-	// (through NiDX9RenderState where it keeps its own idea of the state, so it and the device agree again)
-	RenderState->SetVertexShader(savedVS, false);
-	RenderState->SetPixelShader(savedPS, false);
-	if (savedDecl) RenderState->SetVertexDeclaration(savedDecl, false);
-	else RenderState->SetFVF(savedFVF, false);
-	Device->SetIndices(savedIB);
-	for (UINT i = 0; i < 8; i++) Device->SetStreamSource(i, savedVB[i], savedOffset[i], savedStride[i]);
-	for (DWORD i = 0; i < 16; i++) {
-		RenderState->SetTexture(i, savedTex[i]);
-		Device->SetTexture(i, savedTex[i]);	// (the cache may already hold it and skip the device)
-		for (int s = 0; s < _countof(kSamplerStates); s++) {
-			TheRenderManager->SetSamplerState(i, kSamplerStates[s], savedSampler[i][s]);
-			Device->SetSamplerState(i, kSamplerStates[s], savedSampler[i][s]);
-		}
-	}
-	Device->SetVertexShaderConstantF(0, &savedVSConst[0][0], 256);
-	ClothWind::OnVSConstantsRestored(savedVSConst[248], savedClothNonZero, savedClothGrass);
-	Device->SetPixelShaderConstantF(0, &savedPSConst[0][0], 224);
-	if (savedVS) savedVS->Release();
-	if (savedPS) savedPS->Release();
-	if (savedDecl) savedDecl->Release();
-	if (savedIB) savedIB->Release();
-	for (UINT i = 0; i < 8; i++) if (savedVB[i]) savedVB[i]->Release();
-	for (DWORD i = 0; i < 16; i++) if (savedTex[i]) savedTex[i]->Release();
-	return true;
-}
-
+// CharacterShadowMap / ViewModelShadowMap -> ShadowCharacterAndRefl.cpp
 /*
  * Clear a part of the shadow map atlas based on the shadow mapping mode.
  * 
@@ -4396,6 +3468,7 @@ void ShadowManager::BlurShadowAtlas(unsigned cascadeMask) {
 	state->SetRenderState(D3DRS_ZWRITEENABLE, D3DZB_TRUE, RenderStateArgs);
 }
 
+<<<<<<< HEAD
 // (2026-11-24 review) The world cubemap on a frame without any shadow map: what RenderShadowMaps' setup gives the cube face pass (the
 // camera's place for the camera-relative transforms, a scene, the targets and viewport put back after), and nothing else.
 void ShadowManager::RenderReflectionCubeAlone(ShadowSceneLight** castLamps, NiPointLight** nearLamps) {
@@ -4768,3 +3841,6 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 		refCounts = RefCounts();
 	}
 }
+=======
+// RenderReflectionCubeAlone / RenderReflectionCubeFace -> ShadowCharacterAndRefl.cpp
+>>>>>>> v1.1.6-test2

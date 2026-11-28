@@ -644,6 +644,7 @@ PS_OUTPUT main(PS_INPUT pin) {
     // UNOFFICIAL 2026-10-19 LOD Blending (DisableVertexColors): the near land without its vertex colours, to match far land generated
     // without them (xLODGen's Vertex Color Intensity 0), as Community Shaders' DisableTerrainVertexColors. z is 0 (off): unchanged.
     float3 landVertexColor = lerp(pin.vcol, 1.0f, TESR_LODBlendData.z);
+    float surfaceHeight = 0.5f;
 #if TERRAIN_VARIATION
     // UNOFFICIAL 2026-10-19 Terrain Variation (Includes/TerrainVariation.hlsl; after Conor's port of Community Shaders' Terrain
     // Variation). Keep stochastic.tap1Weight unmodified (0.5 at cell borders) and crossfade between plain and varied lookups
@@ -654,16 +655,19 @@ PS_OUTPUT main(PS_INPUT pin) {
     float tapWeights[7] = { 1, 1, 1, 1, 1, 1, 1 };
     float3 baseColor;
     [branch] if (varFade >= 0.999f)
-        baseColor = LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights));
+        baseColor = LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights, hStat, surfaceHeight));
     else if (varFade <= 0.001f)
-        baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts));
-    else
+        baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, hStat, surfaceHeight));
+    else {
+        float h0 = 0.5f, h1 = 0.5f;
         baseColor = lerp(
-            LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts)),
-            LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights)),
+            LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, hStat, h0)),
+            LinColor(blendDiffuseMapsVaried(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, stochastic, tapWeights, hStat, h1)),
             varFade);
+        surfaceHeight = lerp(h0, h1, varFade);
+    }
 #else
-    float3 baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts));	// UNOFFICIAL linear lighting: decoded
+    float3 baseColor = LinColor(blendDiffuseMaps(landVertexColor, offsetUV, odx, ody, texLayers, BaseMap, wts, hStat, surfaceHeight));	// UNOFFICIAL linear lighting: decoded
 #endif
 #if TERRAIN_MACRO
     baseColor = MacroVary(baseColor, camPos);	// 2026-11-04 macro variation (Includes/TerrainMacro.hlsl)
@@ -711,32 +715,27 @@ PS_OUTPUT main(PS_INPUT pin) {
 
     #ifdef TERRAIN_WETNESS	// UNOFFICIAL 2026-11-04 Wetness Effects: the albedo darkens before any light sees it (land is porous: full darkening)
         float3 wetWorldNormal = normalize(mul(combinedNormal, tbnMat));	// tangent space -> the land piece's (world-aligned) space
-        // The surface's height where it is seen (the parallax's coordinates): the layers' height maps (their diffuse alpha, where
-        // LandHeight says they have one; flat 0.5 where not), blended by the same weights as the colour. The textures were just read
-        // there, so these reads hit the cache.
-        float surfaceHeight = 0.0f;
-        float heightWeight = 0.0f;
-        [unroll] for (int wh = 0; wh < texLayers; wh++) {
-            surfaceHeight += wts[wh] * (hStat[wh] > 0.0f ? tex2Dgrad(BaseMap[wh], offsetUV, odx, ody).a : 0.5f);
-            heightWeight += wts[wh];
-        }
-        surfaceHeight = heightWeight > 0.0f ? surfaceHeight / heightWeight : 0.5f;
+        // surfaceHeight was already accumulated from the BaseMap fetches inside blendDiffuseMaps* above.
         #ifdef PUDDLES_COMPILED
         // 2026-11-11 Puddles (user: puddles jumped at the land's quad seams, a wet quad beside a dry one): each layer's height counts
         // against its OWN average (its last mip), so only its cracks and bumps matter, not how high its height map sits overall; a layer
         // without one adds nothing. Only while there is water (the field reads the height only then).
         [branch] if (TESR_PuddleData.x > 0.001f && PUDDLES_ON) {
             float detail = 0.0f;
+            float heightWeight = 0.0f;
             // 2026-11-12: a layer without a height map gives its colour's brightness detail instead (dark cracks and gaps read as low)
             [unroll] for (int wa = 0; wa < texLayers; wa++) {
-            #ifdef PUDDLES_LEAN	// (the lamp record: height maps only)
-                if (hStat[wa] > 0.0f) detail += wts[wa] * (tex2Dgrad(BaseMap[wa], offsetUV, odx, ody).a - tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f)).a);
-            #else
-                float4 here = tex2Dgrad(BaseMap[wa], offsetUV, odx, ody);
-                float4 mean = tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f));
-                const float3 lumW = float3(0.3f, 0.59f, 0.11f);
-                detail += wts[wa] * (hStat[wa] > 0.0f ? here.a - mean.a : 0.6f * (dot(here.rgb, lumW) - dot(mean.rgb, lumW)));
-            #endif
+                [branch] if (wts[wa] != 0 || TESR_TerrainParallaxIso.y < 0.5f) {
+                    heightWeight += wts[wa];
+                #ifdef PUDDLES_LEAN	// (the lamp record: height maps only)
+                    if (hStat[wa] > 0.0f) detail += wts[wa] * (tex2Dgrad(BaseMap[wa], offsetUV, odx, ody).a - tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f)).a);
+                #else
+                    float4 here = tex2Dgrad(BaseMap[wa], offsetUV, odx, ody);
+                    float4 mean = tex2Dlod(BaseMap[wa], float4(offsetUV, 0.0f, 14.0f));
+                    const float3 lumW = float3(0.3f, 0.59f, 0.11f);
+                    detail += wts[wa] * (hStat[wa] > 0.0f ? here.a - mean.a : 0.6f * (dot(here.rgb, lumW) - dot(mean.rgb, lumW)));
+                #endif
+                }
             }
             surfaceHeight = saturate(0.5f + (heightWeight > 0.0f ? detail / heightWeight : 0.0f));
         }
@@ -883,33 +882,15 @@ PS_OUTPUT main(PS_INPUT pin) {
     // land texel). Not the 6- and 7-layer shaders (no temp register left: see CapturedCoverage's note below): their land stays smooth there.
     #if CAPTURED_NORMALS_ON >= 4
         // UNOFFICIAL 2026-11-14 GBufferV2 (Includes/CapturedNormals.hlsl): the blended layers' normal-mapped normal in world axes (exact: the land
-        // is not rotated, tbnMat is its own frame), in g / a. (CAPTURED_PT 2's land code is not compiled with it: ShaderRecord caps CAPTURED_PT at 1.)
-        // (2026-11-18: one normal for both, the one the forward lighting uses: with the water layer it is combinedNormal AFTER standing
-        // water flattened it (above, Puddles). wetWorldNormal is the normal before that, and the deferred sun, lamps and reflections lit
-        // a puddle with the ground's bumps showing through the water.)
+        // is not rotated, tbnMat is its own frame), in g / a.
         po.capturedPad2 = CapturedShadingNormal(po.capturedPad2, mul(combinedNormal, tbnMat));
-    #elif defined(CAPTURED_PT) && CAPTURED_PT >= 2 && CAPTURED_NORMALS_ON >= 3 && TEX_COUNT <= 5
-        po.capturedPad2 = CapturedLandBumpOut(mul(combinedNormal, tbnMat));	// (2026-11-18: after the standing water's flatten, as above)
     #endif
     #if defined(NVR_LIGHT_DEFERRED) && CAPTURED_NORMALS_ON >= 3
         // UNOFFICIAL 2026-11-14 DeferredSun (Includes/DeferredPixel.hlsl; Shaders/DeferredSun.hlsl's land model): the lighting-free code
         // (the land lights its sun with PBRSun: base 3), and in COLOR2.b the roughness the land's PBR sun takes (Terrain.hlsl getSunLighting:
-        // (1 - the layers' gloss) x RoughnessScale), which the land's record had none of (-1). Without GBufferV2 (which writes it in g / a)
-        // also the layers' normal-mapped normal in world axes, in the older deferred code (g oct.x, a 1.01 + 0.49 (oct.y + 1)).
+        // (1 - the layers' gloss) x RoughnessScale).
         po.capturedPad1.a = FD_LF_CODE(FD_LF_SPEC, 1.0f - fogTerm.a);	// (the lighting-free record's COLOR1.a, its one writer: 1 - fog + the code)
         po.capturedPad2.b = saturate((1.0f - glossV) * TESR_TerrainData.y);
-        #if CAPTURED_NORMALS_ON == 3
-        {
-            const float2 fdOct = ShadowEncodeNormal(normalize(mul(combinedNormal, tbnMat)));
-            po.capturedPad2.g = fdOct.x;
-            po.capturedPad2.a = 1.01f + 0.49f * (fdOct.y + 1.0f);
-        }
-        #endif
-    #endif
-    // (test-after-110 merge) only with the MaterialBuffer's first layout: 3 / 4 (AlbedoBuffer, GBufferV2, the deferred renderer) use a for the normal
-    #if defined(TERRAIN_WETNESS) && defined(PUDDLES_COMPILED) && CAPTURED_NORMALS_ON == 2
-        // 2026-11-12 Puddles: the standing water drawn here, for the SSR/RT reflection pass (Reflections.glsl PuddleStanding: a - 1)
-        po.capturedPad2.a += PuddleStandingOut;
     #endif
     // UNOFFICIAL 2026-10-28 CapturedNormals: the land's interpolated vertex normal (the land is not rotated: object space is world space;
     // with tessellation the normal its evaluation shader passes on), before the layers' normal maps. Alpha 1 also with terrain blending's

@@ -8,6 +8,7 @@
 #include <cstring>
 #include <string>
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-11-04 PlantShadows (TESR_MaterialBuffer's plant class)
 #include "../../core/ForwardCloudShadows.h"	// UNOFFICIAL 2026-11-04 ForwardCloudShadows (Active)
 #include "../../core/WaterMask.h"	// UNOFFICIAL 2026-11-21 water-only mask so dry ground at TESR_WaterSettings.x is never treated as water
@@ -93,7 +94,7 @@ void SunFarEffect::UpdateConstants() {
 	// UNOFFICIAL 2026-11-22 (Issue 2): when DeferredSun aligns terrain lighting to the true sun disc (MatchSunDisc),
 	// SunFar must not fall back to vanilla's 45-degree-clamped LandLight::Dir (c18), or mid-slopes facing away from
 	// c18 get NdotL = 0 -> factor = 1.0 (bright unshadowed bands) when cloud ForwardShadows is off.
-	const bool deferredMatchSun = DeferredRenderer::Live && DeferredRenderer::Mode() >= 2 &&
+	const bool deferredMatchSun = DeferredRenderer::Live &&
 		(DeferredSun::MatchSunDisc || DeferredSun::RealSunPath > 0) && TheShaderManager->GameState.isExterior &&
 		TheShaderManager->GameState.dayLight > 0.5f && TheShaderManager->ShaderConst.SunDir.z > 0.0f;
 	Constants.Land = (!deferredMatchSun && LandLight::Frame && LandLight::Now - LandLight::Frame < 30) ?
@@ -488,7 +489,9 @@ namespace {
 		D3DXMATRIX	shadowToLightLod;
 		D3DXMATRIX	projectionTransform;
 		D3DXMATRIX	viewTransform;
+		D3DXVECTOR4	renderScale;
 	};
+	static_assert(sizeof(SunFarUniforms) == 1216, "SunFarUniforms must match SunFar.frag Constants");
 	// The 16 sampled images (set 1, binding = slot), the constants (set 2, binding 0) and the three samplers (the sampler heap, set 0,
 	// binding 0): DXVK writes each sampler's heap index at its push offset.
 	const NVR_EXT_BINDING_DESC SunFarBindings[] = {
@@ -541,7 +544,6 @@ static IDirect3DBaseTexture9* NamedTexture(const char* name) {
 
 bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
 	if (techniqueIndex != 0 || !Texture || !Surface) return false;
-	if (Settings.JitterFix || Settings.SkipCascadeCheck) return false;	// UNOFFICIAL 2026-10-31: only the D3D9 shader has them
 	if (!extPass.Tried) {
 		extPass.Tried = true;
 		extPass.Pipeline = DxvkCompute::CreateGraphicsPipeline("SunFar", SunFarBindings, _countof(SunFarBindings), sizeof(SunFarPush), true);
@@ -623,6 +625,10 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	copy(&uniforms.projectionTransform, sizeof(uniforms.projectionTransform), "TESR_ProjectionTransform");
 	copy(&uniforms.viewTransform, sizeof(uniforms.viewTransform), "TESR_ViewTransform");
 	if (!registered) return false;
+	const bool rectOn = RenderRect::Active();
+	uniforms.renderScale = rectOn
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* constants = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!constants) return false;
 
@@ -634,7 +640,12 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	resources[20].Slot = 2; resources[20].Type = NVR_EXT_BIND_SAMPLER; resources[20].pResource = mip;
 	SunFarPush push = {};	// the sampler heap indices: DXVK fills them in
 	IDirect3DSurface9* target = Surface;
-	if (!ExtDrawTo(extPass.Pipeline, &target, 1, resources, _countof(resources), &push, sizeof(push), nullptr, ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
+	D3DSURFACE_DESC desc = {};
+	if (rectOn && FAILED(Surface->GetDesc(&desc))) return false;
+	const RECT vp = { 0, 0, (LONG)RenderRect::Width(desc.Width), (LONG)RenderRect::Height(desc.Height) };
+	if (rectOn && (vp.right <= 0 || vp.bottom <= 0)) return false;
+	if (!ExtDrawTo(extPass.Pipeline, &target, 1, resources, _countof(resources), &push, sizeof(push),
+		rectOn ? &vp : nullptr, rectOn ? ExtUv::TexelCentre : ExtUv::ScreenQuad)) return false;	// FrameVS into a smaller target
 	if (++ExtFrames == 1) Logger::Log("UNOFFICIAL Vegas Shaders DXVK: %s runs as a Vulkan pass.", Name);
 	return true;
 }
