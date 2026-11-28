@@ -2132,11 +2132,10 @@ submits the world's draws, which is the kind of CPU cost the 6.6 ms probe shows.
 itself, with a frame of latency and a second process. Nothing in it can replace the deferred path.
 
 ### Worth borrowing (ideas, written fresh)
-1. **Cull-the-world CPU probe (diagnostic).** A debug key that sets the cull flag on the TES world roots for a bench run, as the bridge
-   does, to split the 6.6 ms into world draw submission vs. the rest. Decides whether draw-call reduction (item 2) is worth it.
-   0.5 session, low risk (bench only, off by default).
+1. **Cull-the-world CPU probe: not needed.** Our Performance probe (`src\core\DeepProbe.h`: CPU update / render / Present split,
+   CpuSplit per engine stage, per-DLL sampling, draw-call census) already splits the 6.6 ms; read it there before item 2.
 2. **Instanced far objects and grass.** One instanced draw per model for distant objects (the bridge's MultiMesh batching): D3D9
-   stream-frequency instancing in the G-buffer pass. Engine draw paths, needs room 05 facts. 4-6 sessions, high risk. Only after item 1.
+   stream-frequency instancing in the G-buffer pass. Engine draw paths, needs room 05 facts. 4-6 sessions, high risk. Only if the Performance probe shows world draw submission is the big share.
 3. **Light from glowing meshes.** Unshadowed deferred lamps placed on neon signs, marquees and vending machines (bridge: up to 4 per
    model, 2.6 m clusters, `emissive_lights.gd:9-30`). Pick them by glow map, not by name keywords. Deferred path. 2-3 sessions, medium
    risk (lamp cost on the Strip, false lights).
