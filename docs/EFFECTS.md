@@ -5793,7 +5793,7 @@ Owner: the deferred sun must run in Vulkan; D3D9 stays only as the fallback for 
 - Checks (offline): `compile-compute.sh DeferredSun` + spirv-val pass; the owner's D3D9 sun records (`owner_sun.py`) compile unchanged;
   the DLL builds. Not run in game: the fade's look, the film's look in compute, the frame cost.
 
-### Mountain shadows in the deferred sun (2026-11-28, branch `mountain-shadows-deferred`)
+### Mountain shadows in the deferred sun (2026-11-28, in main 2026-11-29, test56)
 
 Owner: "can it be fully deffered? doesnt seem to blend with fog or the scene too well". `[Shaders.ShadowsExteriors.TerrainShadows]`
 (effects/TerrainShadows) was a screen factor: the SunFar pass rebuilt each pixel's sun / ambient split from the forward lighting model
@@ -5816,6 +5816,13 @@ and the composites (this effect's apply, the fog composite, AmbientLight's) mult
   deferred sun applies it only then and notes the frame it did. Without the fork's passes, or with the D3D9 SunFar: as before.
 - Believed, not proven: a frame where SunFar falls back to D3D9 after the deferred sun applied it shades those pixels twice for that
   frame (the flag is the previous frame's).
+- Bench (2026-11-28/29, slot A/D, owner's settings, never Goodsprings): canyon north (v-SunGI4) and Silver Peak (oc-mojave), free camera
+  2500-16000 units up at 17:00-18:30. Proven: the same land is shaded as before (from 8000+ up nothing is in the cascades, and cutting
+  `[Shaders.ShadowsExteriors.ShadowMaps] Distance` to 300 changed nothing there, so all of it is the height map). Look: the old way greyed
+  the haze over shaded land (cold blue-grey veil, a hard bright wedge where a forward piece missed it); now the haze stays warm over the
+  shadow and the shade matches the cascade shadows next to it; deep shade is a little darker, with less detail (sky light only, as in
+  the cascades' shade). Luma within 1-1.5 of the old way. Cost (one run, Deferred 1/0/1 holds of 1200 frames, slow-clock bench GPU):
+  Deferred sun +0.010 ms, first-person run +0.000, SunFar -0.001, frame total no change beyond noise. Log gate: no new lines.
 
 ## ShadowsInteriors
 
