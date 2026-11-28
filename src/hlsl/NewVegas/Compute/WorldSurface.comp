@@ -20,7 +20,7 @@ layout(set = 1, binding = 6, rgba16f) uniform image2D i_material; // TESR_Materi
 layout(push_constant) uniform Push {
     uint pointSampler; // POINT, CLAMP (depth)
     uint noiseSampler; // LINEAR, MIPMAP_LINEAR, WRAP (3D noise)
-    uint pad0;
+    uint landOut;      // (2026-11-28 1.1.6 merge, our e9780e5) 1: deferred wetness keeps the land's height in the material fraction
     uint pad1;
 } pc;
 
@@ -86,6 +86,7 @@ void main() {
     const bool isStatic = abs(model - 1.0) < 0.5;
     const bool isLand = abs(model - 4.0) < 0.5;
     if (!isStatic && !isLand) return;
+    if (isLand && pc.landOut != 0u) return;   // the wet land's height code is not a metal value: land left out (DeferredSun reads it)
 
     const vec4 normals = texelFetch(t_normals, px, 0);
     const vec2 vpos = vec2(px);

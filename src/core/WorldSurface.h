@@ -45,7 +45,7 @@ namespace WorldSurface {
 	struct ComputePush {
 		UINT pointSampler;
 		UINT noiseSampler;
-		UINT pad0;
+		UINT landOut;	// (2026-11-28 1.1.6 merge) as WS_Flags.x below: land left out while deferred wetness is compiled in (e9780e5)
 		UINT pad1;
 	};
 	struct ComputeConstants {
@@ -163,6 +163,7 @@ namespace WorldSurface {
 			{ 1, NVR_EXT_BIND_SAMPLER,        noiseSamp,                        0, 0, 0, FALSE },
 		};
 		ComputePush push = {};
+		push.landOut = DeferredWetness::CompiledIn() ? 1u : 0u;
 		NVR_EXT_DISPATCH_DESC dispatch = {};
 		dispatch.pPipeline = ComputePipeline;
 		dispatch.BindingCount = _countof(bindings);

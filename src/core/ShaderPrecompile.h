@@ -335,7 +335,9 @@ namespace ShaderPrecompile {
 			{ "CONTACT_HARDENING", "0" }, { NULL, NULL }, { NULL, NULL } };
 		// UNOFFICIAL 2026-10-21 LampFalloff: as ShaderManager::LoadShader's interior records (PBRShaders::LampFalloffInteriorDefine).
 		if (const char* lampFalloff = PBRShaders::LampFalloffInteriorDefine()) interior[4] = { "LAMP_FALLOFF_ON", lampFalloff };
-		const bool interiorShadows = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
+		// (2026-11-28 1.1.6 merge) the key was retired with the forward modes (RtLampShadows locks it on; LoadShader always makes these records):
+		// read here it was missing, so the queue skipped the interior and lamp records and they compiled on the main thread instead.
+		const bool interiorShadows = true;
 		// UNOFFICIAL 2026-11-09 (players: shader compiling takes up to 5 minutes since 1.0.6) the OUTDOOR lamp-shadow records (ShaderManager::LoadShader,
 		// RT lamp shadows + ExteriorForward: one more record per lit pixel shader, Cache\ExteriorLamps\) were never queued here, so ~87 of the
 		// biggest shaders compiled one after another on the main thread: about 130 of the 190 s of a full compile in the 11-08 log (59 s
