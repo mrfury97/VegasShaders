@@ -499,10 +499,11 @@ namespace DeferredLamps {
 	}
 
 	inline bool EnsureComputeReady(IDirect3DDevice9* d) {
-		if (Vm.on) return false;
-		// (2026-11-27) Compute\DeferredLamps.comp has no lamp screen-space shadows: with this span's mask the D3D9 passes draw
-		// (kept in the 1.1.6 merge; follow-up: port the mask into the compute shader or retire this gate)
-		if (ScreenSpaceShadows::Lamps::MadeThisSpan()) return false;
+		// (2026-11-27) Compute\DeferredLamps.comp has no lamp screen-space shadows: with this span's mask the D3D9 passes draw (they are still
+		// compiled at load, DeferredRenderer::Load -> EnsurePass / EnsureShadowShader, and Apply draws them whenever this returns false). The
+		// world's run only: the mask is the world's depth, and the D3D9 passes never apply it to DeferredFirstPerson's run either.
+		// (2026-11-28 upstream 1.1.6 merge: our Vm.on gate dropped, so the first-person run takes upstream's compute path, flag 22.)
+		if (!Vm.on && ScreenSpaceShadows::Lamps::MadeThisSpan()) return false;
 		if (!ComputePossible()) return false;
 		if (!ComputePipeline) {
 			if (ComputeTried) return false;
@@ -570,7 +571,8 @@ namespace DeferredLamps {
 		// (2026-11-27 review, NvrDxvkDeferred on by default) Compute\DeferredLamps.comp has no wet film: with the film live and the land film pass
 		// wanted ([Main.Main.Quality] DeferredWetLampFilm), the D3D9 lamp passes draw so the lamps' shadowed streaks on wet ground stay
 		// (LampFilmDrawn; otherwise the Wetness Effects screen pass falls back to its unshadowed streak).
-		if (LandFilmPass && DeferredWetness::FilmLive && DeferredWetness::FilmTexture && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetLampFilm") != 0)
+		// (2026-11-28 upstream 1.1.6 merge) the world's run only: the land film pass draws only there (!Vm.on in Apply)
+		if (!Vm.on && LandFilmPass && DeferredWetness::FilmLive && DeferredWetness::FilmTexture && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetLampFilm") != 0)
 			return false;
 		// Storage image RMW requires single-sample FP16 (identity RGBA swizzle in DXVK NVR ext)
 		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;

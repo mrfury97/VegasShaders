@@ -227,7 +227,13 @@ float FDFoliageHighlightEnc(float g) {
 float FoliageSunWeightOf(float b) { return LinColor(vec3(max(b - kFoliageSunCode, 0.0))).x; }
 float FoliageHighlightOf(float enc) { return kFoliageHighlightMax * LinColor(vec3(saturate(enc))).x; }
 
-vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl) {
+// UNOFFICIAL 2026-11-27 sunsheen-fade (bench: the Vulkan sun lit the land darker than the D3D9 pass, ground mean 86.9 vs 96.3): the land's two
+// differences from objects in DeferredSun.hlsl LandSun. landF90 (DeferredLandRoughF90 false, the default, cb.linearScales.w > 0.5; DSLandF90 /
+// PBR_ROUGH_F90_PICK, main 0e3d99c): the forward land's F90 saturate(Reflectivity) for the diffuse's and the highlight's Fresnel, not the damped
+// one; diffKeepOn false: the land never takes the diffuse energy keep (only the object branch calls SetDiffuseEnergyKeep there).
+// (2026-11-28 upstream 1.1.6 merge: moved here from DeferredSun.comp; upstream's 11-argument form below is this with false / true, the same math.)
+vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl,
+            bool landF90, bool diffKeepOn) {
     const float dielDiff = min(specF0Diel, 0.04);
     const vec3 nrm = normalize(N);
     const vec3 viewV = normalize(V);
@@ -251,14 +257,15 @@ vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 r
     const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
     const vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
     const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), metalCol, metal));
-    const vec3 fres = Fresnel(f0Base, max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
-    const float diffKeep = DiffuseEnergyKeep(NdotV, r);
+    const vec3 landF90v = vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0));
+    const vec3 fres = Fresnel(f0Base, landF90 ? landF90v : max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
+    const float diffKeep = diffKeepOn ? DiffuseEnergyKeep(NdotV, r) : 1.0;
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
 
     vec3 fresSpec = fres;
     if (specF0Diel != dielDiff) {
         const vec3 f0Spec = ReflectivityF0(mix(vec3(specF0Diel), metalCol, metal));
-        fresSpec = Fresnel(f0Spec, max(RoughReflectivityF90(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
+        fresSpec = Fresnel(f0Spec, landF90 ? landF90v : max(RoughReflectivityF90(f0Spec, r, metal) * pearlF90Tint, f0Spec), LdotH);
     }
     vec3 specOut = BRDFPi(r, fresSpec, NdotV, NdotS, NdotH, allowSmith) * MultiScatterMetalBoost(f0Base, r, NdotV, metal);
     if (clearcoat > 0.001 && metal > 0.05) {
@@ -274,5 +281,9 @@ vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 r
         total = total * (1.0 - 0.25 * coatW * Fc) + radiance * (coatSpec * coatW);
     }
     return total;
+}
+
+vec3 PBRSun(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float specF0Diel, bool allowSmith, float clearcoat, float pearl) {
+    return PBRSun(metal, r, baseColor, N, V, L, radiance, specF0Diel, allowSmith, clearcoat, pearl, false, true);
 }
 #endif

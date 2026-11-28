@@ -218,14 +218,11 @@ vec3 EvalLampMaterialSSS(float model, float rough, float metal, vec3 albedo, vec
     return outSss;
 }
 
-<<<<<<< HEAD
 // landF90 (UNOFFICIAL 2026-11-26 DeferredLandRoughF90 false, the default: cb.linearScales.w > 0.5; the land only): the forward land's F90 (saturate(Reflectivity),
 // Includes/Terrain.hlsl), as DeferredLamps.hlsl's land pass; false = upstream's F90 (damped, x the pearl tint). (2026-11-27 upstream 1.1.5 merge:
-// upstream's clearcoat / pearl arguments and ours both kept.)
-vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, float clearcoat, float pearl, bool landF90) {
-=======
-vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, float clearcoat, float pearl, float specF0Diel) {
->>>>>>> v1.1.6-test2
+// upstream's clearcoat / pearl arguments and ours both kept. 2026-11-28 upstream 1.1.6 merge: upstream's specF0Diel (the G-buffer's dielectric
+// F0) and our landF90 both kept; the land passes 0.04, so its f0 and fres are as before.)
+vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 radiance, float diffKeep, bool allowSmith, float clearcoat, float pearl, float specF0Diel, bool landF90) {
     const float rawNdotL = shades(N, L);
     const float NdotL = max(rawNdotL, 0.00001);
     const float NdotV = max(shades(N, V), 0.00001);
@@ -234,14 +231,9 @@ vec3 PBRFull(float metal, float r, vec3 baseColor, vec3 N, vec3 V, vec3 L, vec3 
     const float LdotH = shades(L, halfV);
     const vec3 metalCol = ApplyPearlescence(baseColor, NdotV, pearl, metal);
     const vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
-<<<<<<< HEAD
-    const vec3 f0Base = ReflectivityF0(mix(vec3(0.04), metalCol, metal));
-    const vec3 fres = Fresnel(f0Base, landF90 ? vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0)) : max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
-=======
     const float dielDiff = min(specF0Diel, 0.04);
     const vec3 f0Base = ReflectivityF0(mix(vec3(dielDiff), metalCol, metal));
-    const vec3 fres = Fresnel(f0Base, max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
->>>>>>> v1.1.6-test2
+    const vec3 fres = Fresnel(f0Base, landF90 ? vec3(clamp(1.0 + cb.pbrMath.y, 0.0, 1.0)) : max(RoughReflectivityF90(f0Base, r, metal) * pearlF90Tint, f0Base), LdotH);
     const vec3 diff = (1.0 - metal) * (1.0 - fres) * baseColor * diffKeep;
     vec3 fresSpec = fres;
     if (specF0Diel != dielDiff) {
@@ -930,11 +922,7 @@ void main() {
         } else if (isLand) {
             const vec3 rad = color * EvalLampAtt(att, fp.shaped, fp.expOther);
             vec3 lit;
-<<<<<<< HEAD
-            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, 0.0, 0.0, cb.linearScales.w > 0.5));
-=======
-            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, 0.0, 0.0, 0.04));
->>>>>>> v1.1.6-test2
+            if (cb.dlLand.y > 0.5) lit = max(vec3(0.0), PBRFull(cb.dlLand.z, rough < 0.0 ? 1.0 : rough, albedo4.rgb, N, V, L, rad * cb.dlLand.w, 1.0, false, 0.0, 0.0, 0.04, cb.linearScales.w > 0.5));
             else lit = albedo4.rgb * (shades(N, L) * rad);
             light += lit * (sh * geomHorizon);
         } else if (isDiffuseOnly) {
@@ -944,11 +932,7 @@ void main() {
         } else {
             const float fAtt = EvalLampAtt(att, fp.shaped, fp.expObj);
             const vec3 rad = color * (linScaleLight * fAtt);
-<<<<<<< HEAD
-            light += (PBRFull(metal, rough, gradedAlbedo, N, V, L, rad, diffKeep, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0), false) + EvalLampMaterialSSS(FDModel(mat4v.r), rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
-=======
-            light += (PBRFull(metal, rough, gradedAlbedo, N, V, L, rad, diffKeep, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0), dlSpecF0) + EvalLampMaterialSSS(objModel, rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
->>>>>>> v1.1.6-test2
+            light += (PBRFull(metal, rough, gradedAlbedo, N, V, L, rad, diffKeep, true, clamp(cb.spare.x, 0.0, 1.0), clamp(cb.spare.y, 0.0, 1.0), dlSpecF0, false) + EvalLampMaterialSSS(objModel, rough, metal, gradedAlbedo, N, V, L, rad)) * (sh * geomHorizon);
         }
     }
 
