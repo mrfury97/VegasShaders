@@ -499,15 +499,6 @@
 #if defined(PS)
     #define SHADOW_CLOUD_IN 1
 #endif
-// (1.0.5) not where the live metal cube holds s10 AND s3 is taken too: the 4+ lamp shaders (lamp table; object LOD, the only draws
-// that take the contact, is never drawn with lamps) and the light-only glow / hair-tint passes (GlowMap on s3). s4-s7 are the game's.
-#if defined(NVR_LIVE_CUBE) && ((defined(LIGHTS) && LIGHTS > 3) || ((defined(SI) || defined(HAIR)) && !defined(ONLY_SPECULAR) && defined(ONLY_LIGHT)) || defined(NVR_FORWARD_PLUS))
-    #define NVR_CONTACT_NO_SAMPLER 1
-#endif
-#if defined(PS) && !defined(NVR_SLOT_TIGHT) && !defined(NVR_CONTACT_NO_SAMPLER) && !defined(NVR_EYE)
-    #define SHADOW_SUN_CONTACT_PERDRAW 1
-    #define SHADOW_SUN_CONTACT_IN 1   // UNOFFICIAL 2026-11-06 forward contact shadows (Includes/Shadow.hlsl; compiled in only with Bend on at start): one lookup
-#endif
 #include "includes/Shadow.hlsl"
 // 2026-11-04 dust on top surfaces ([Shaders.PBR.Dust], Includes/ObjectDust.hlsl): compiled in only when on at startup (DUST_ON).
 #ifndef DUST_ON
@@ -520,7 +511,13 @@
 // passes that light the material's own albedo with the sun get the water layer; lamp-only, highlight-only and lamp-first passes do not,
 // nor the interior records (no rain indoors). Its constants are the sun cross-fade's (c146-c159), so not with SUN_CROSSFADE; s12 is free
 // in every outdoor variant, for the rain cover map.
-#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && FORWARD_SHADOWS && !SUN_CROSSFADE && !defined(NVR_EYE) && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY && WETNESS_EFFECTS >= 2)) && \
+// UNOFFICIAL 2026-11-20 DeferredWetness step 2 ([Main.Main.Quality] DeferredWetness, restart, test only; core/DeferredWetness.h): the lighting-free
+// record made with DEFERRED_WETNESS (core/LightFreeRecords.h) leaves the water layer to that pass, which works it out once per pixel after the
+// G-buffer from this record's G-buffer (OBJ_WET_DEFERRED). Every other record: as before.
+#if defined(DEFERRED_WETNESS) && defined(NVR_LIGHT_DEFERRED)
+    #define OBJ_WET_DEFERRED
+#endif
+#if defined(PS) && defined(WETNESS_EFFECTS) && !defined(WETNESS_OFF) && !defined(OBJ_WET_DEFERRED) && FORWARD_SHADOWS && !SUN_CROSSFADE && !defined(NVR_EYE) && !(defined(INTERIOR_SHADOWS) && INTERIOR_SHADOWS && !(defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY && WETNESS_EFFECTS >= 2)) && \
     !defined(DIFFUSE) && !defined(POINT) && !defined(ONLY_SPECULAR) && !defined(OBJ_LAMP_FIRST)
     #define OBJECT_WETNESS
     #if defined(POINT_SHADOW_RT_ONLY) && POINT_SHADOW_RT_ONLY
