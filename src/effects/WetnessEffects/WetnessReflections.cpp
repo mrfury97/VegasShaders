@@ -82,7 +82,7 @@ void WetnessReflectionsEffect::BindShadingNormals(IDirect3DDevice9* Device) {
 	const bool film = Settings.LampFilm && FdIndirect::Base() && DeferredRenderer::Live && DeferredRenderer::Mode() >= 2 && ManyLamps::Table &&
 		ManyLamps::FroxelRows() && ManyLamps::TileRowsWanted() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f &&
 		CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f;
-	if (film) ManyLamps::FinishTable();	// (the table may still be filled on its worker thread)
+	// (2026-11-28 1.1.6 merge: upstream retired the lamp table's worker thread, LampTableThread: the table is complete here, no FinishTable)
 	Constants.LampFilm = D3DXVECTOR4(film ? 1.0f : 0.0f, (float)ManyLamps::ListTexelsNow(), (float)ManyLamps::TableRowsNow(), (float)ManyLamps::TileRow());
 	// UNOFFICIAL 2026-11-19 DeferredWetness (core/DeferredWetness.h): the film as that pass left it this frame, on s8, read where it wrote one (the
 	// near land, and since 2026-11-20 objects and parallax; the G-buffer on s6 / s7 says which) in place of this pass's own wetness there (y 1)

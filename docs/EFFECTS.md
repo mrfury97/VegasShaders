@@ -54,7 +54,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [PointShadows2](#pointshadows2) | - | yes | 3 | 0 | PointShadows2.cpp, PointShadows2.h | PointShadows2 darkens or lights the scene for point lamps that PointShadows does not handle. It is a screen-space pass over the point-shadow buffer: for every p |
 | [Precipitations](#precipitations) | true | yes | 3 | 2 | Rain.cpp, Rain.h | While it rains outdoors, the picture gets falling rain streaks laid over the view. Drops are drawn in layers at increasing distance from the camera, so near str |
 | [Puddles](#puddles) | true | yes | 6 | 3 | PuddleMap.h, Puddles.cpp, Puddles.h | Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it ra |
-| [Reflections](#reflections) | false | yes | 44 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
+| [Reflections](#reflections) | false | yes | 35 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
 | [SMAA](../src/effects/SMAA/) | false | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](../src/effects/Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
 | [ShadowsExteriors](#shadowsexteriors) | true | yes | 5 | 12 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
