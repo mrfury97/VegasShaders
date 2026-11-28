@@ -45,155 +45,10 @@
 #include "ShelvedEffects.h"	// UNOFFICIAL 2026-11-16 BloodFlow and DustMotes are left out of release builds
 #include "ShaderPrecompile.h"	// UNOFFICIAL 2026-11-16 fast-restart (LateInteriors: the workers' jobs still running)
 #include "LateInteriors.h"	// UNOFFICIAL 2026-11-16 fast-restart
-#include "Branding.h"
 #include "TestTools.h"
 #include <fstream>
 #include <unordered_map>	// UNOFFICIAL 2026-10-27 RenderScale v2 (RenderRect::RescaleRegistered)
 extern D3DXVECTOR4 NvrGameMultisample;	// UNOFFICIAL 2026-11-04 Hooks/Settings.cpp (TESR_GameMultisample)
-extern "C" IMAGE_DOS_HEADER __ImageBase;
-
-// Clears live shader/effect Cache directories once when a new VegasShaders.dll build runs,
-// leaving CacheShipped\ untouched so prebuilt default shaders remain ready.
-static std::string ReadCacheStampTrimmed(const std::string& path) {
-	HANDLE file = CreateFileA(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-		nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (file == INVALID_HANDLE_VALUE) return {};
-	char buf[256] = {};
-	DWORD read = 0;
-	const BOOL ok = ReadFile(file, buf, sizeof(buf) - 1, &read, nullptr);
-	CloseHandle(file);
-	if (!ok || read == 0) return {};
-	std::string text(buf, read);
-	while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' ' || text.back() == '\t'))
-		text.pop_back();
-	return text;
-}
-
-static bool EnsureCacheFolders(const std::string& path) {
-	for (size_t at = path.find_first_of("\\/"); at != std::string::npos; at = path.find_first_of("\\/", at + 1)) {
-		if (at > 0 && path[at - 1] != ':') CreateDirectoryA(path.substr(0, at).c_str(), nullptr);
-	}
-	if (CreateDirectoryA(path.c_str(), nullptr)) return true;
-	const DWORD attr = GetFileAttributesA(path.c_str());
-	return attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-static bool WriteCacheStampVerified(const std::string& path, const char* text) {
-	HANDLE file = CreateFileA(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
-		nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-	if (file == INVALID_HANDLE_VALUE) {
-		Logger::Log("[WARNING] Shader cache: failed to open stamp %s for write (err=%lu)", path.c_str(), GetLastError());
-		return false;
-	}
-	const DWORD len = (DWORD)strlen(text);
-	DWORD written = 0;
-	const BOOL ok = WriteFile(file, text, len, &written, nullptr);
-	const DWORD err = ok ? 0 : GetLastError();
-	CloseHandle(file);
-	if (!ok || written != len) {
-		Logger::Log("[WARNING] Shader cache: failed to write stamp %s (err=%lu)", path.c_str(), err);
-		return false;
-	}
-	if (ReadCacheStampTrimmed(path) != text) {
-		Logger::Log("[WARNING] Shader cache: build stamp read-back mismatch at %s", path.c_str());
-		return false;
-	}
-	return true;
-}
-
-static size_t DeleteDirectoryTreeContents(const std::string& dir, const char* keepFileName) {
-	std::vector<std::string> files;
-	std::vector<std::string> subdirs;
-	WIN32_FIND_DATAA entry = {};
-	const HANDLE search = FindFirstFileA((dir + "\\*").c_str(), &entry);
-	if (search == INVALID_HANDLE_VALUE) return 0;
-	do {
-		const char* name = entry.cFileName;
-		if (!strcmp(name, ".") || !strcmp(name, "..")) continue;
-		if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-			subdirs.emplace_back(dir + "\\" + name);
-		}
-		else if (!keepFileName || _stricmp(name, keepFileName) != 0) {
-			files.emplace_back(dir + "\\" + name);
-		}
-	} while (FindNextFileA(search, &entry));
-	FindClose(search);
-
-	size_t cleared = 0;
-	for (const std::string& file : files) {
-		SetFileAttributesA(file.c_str(), FILE_ATTRIBUTE_NORMAL);
-		if (DeleteFileA(file.c_str())) cleared++;
-	}
-	for (const std::string& sub : subdirs) {
-		cleared += DeleteDirectoryTreeContents(sub, nullptr);
-		SetFileAttributesA(sub.c_str(), FILE_ATTRIBUTE_NORMAL);
-		if (RemoveDirectoryA(sub.c_str())) cleared++;
-	}
-	return cleared;
-}
-
-static std::string AbsoluteCacheDir(const char* baseDir) {
-	std::string s = std::string(baseDir ? baseDir : "") + "Cache";
-	if (s.size() >= 2 && (s[1] == ':' || (s[0] == '\\' && s[1] == '\\'))) return s;
-	return Paths::GameRoot() + "\\" + s;
-}
-
-static void AutoClearStaleShaderCache() {
-	const auto* base = reinterpret_cast<const unsigned char*>(&__ImageBase);
-	const auto* nt = reinterpret_cast<const IMAGE_NT_HEADERS*>(base + __ImageBase.e_lfanew);
-	char stamp[96];
-	snprintf(stamp, sizeof(stamp), "%s_%08X_%08X",
-		Branding::Version,
-		static_cast<unsigned>(nt->FileHeader.TimeDateStamp),
-		static_cast<unsigned>(nt->OptionalHeader.SizeOfImage));
-
-	static const char* const kStampName = "vs_build_stamp.txt";
-	static const char* const kLegacyStampName = ".vs-build-stamp";
-	const std::string backupStampPath = Paths::PluginsDir() + "VegasShaders.cache.stamp";
-	const std::string backupPrev = ReadCacheStampTrimmed(backupStampPath);
-
-	const std::string cacheDirs[2] = {
-		AbsoluteCacheDir(ShadersPath),
-		AbsoluteCacheDir(EffectsPath),
-	};
-	for (const std::string& cacheDir : cacheDirs) {
-		const std::string stampPath = cacheDir + "\\" + kStampName;
-		const std::string legacyStampPath = cacheDir + "\\" + kLegacyStampName;
-		const std::string prev = ReadCacheStampTrimmed(stampPath);
-		if (prev == stamp) {
-			if (GetFileAttributesA(legacyStampPath.c_str()) != INVALID_FILE_ATTRIBUTES)
-				DeleteFileA(legacyStampPath.c_str());
-			continue;
-		}
-		const std::string legacyPrev = prev.empty() ? ReadCacheStampTrimmed(legacyStampPath) : std::string();
-		if (legacyPrev == stamp) {
-			EnsureCacheFolders(cacheDir);
-			WriteCacheStampVerified(stampPath, stamp);
-			DeleteFileA(legacyStampPath.c_str());
-			continue;
-		}
-		if (backupPrev == stamp) {
-			EnsureCacheFolders(cacheDir);
-			WriteCacheStampVerified(stampPath, stamp);
-			Logger::Log("Shader cache: build %s already initialized (restored stamp in %s)", stamp, cacheDir.c_str());
-			continue;
-		}
-
-		const size_t cleared = DeleteDirectoryTreeContents(cacheDir, kStampName);
-		const std::string& oldStamp = !prev.empty() ? prev : !legacyPrev.empty() ? legacyPrev : backupPrev;
-		if (cleared > 0) {
-			Logger::Log("Shader cache: new build detected (%s -> %s); cleared %zu stale entr%s in %s",
-				oldStamp.empty() ? "none" : oldStamp.c_str(), stamp, cleared, cleared == 1 ? "y" : "ies", cacheDir.c_str());
-		}
-		EnsureCacheFolders(cacheDir);
-		WriteCacheStampVerified(stampPath, stamp);
-	}
-
-	if (backupPrev != stamp) {
-		EnsureCacheFolders(Paths::PluginsDir());
-		WriteCacheStampVerified(backupStampPath, stamp);
-	}
-}
 
 /**
 * Initializes the Shader Manager Singleton.
@@ -228,7 +83,8 @@ void ShaderManager::Initialize() {
 	sm->PreviousCell = nullptr;
 	sm->IsMenuSwitch = false;
 
-	if constexpr (!NVR_TEST_TOOLS) AutoClearStaleShaderCache();
+	// (2026-11-28 upstream 1.1.6-test2 merge, owner: removed) upstream wipes the live shader cache on every new DLL build; not here:
+	// a cached shader is reused only when its whole preprocessed text matches, so changed shaders recompile by themselves.
 
 	// Cache folders the shader and effect code writes into, created in this order; a failure is logged and skipped.
 	// The folders are Paths.h's (Data\Shaders\VegasShaders, Data\Textures\VegasShaders, or the old ones of an older install).
