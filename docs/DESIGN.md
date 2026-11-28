@@ -19,6 +19,7 @@ facts) is in [REFERENCE.md](REFERENCE.md); per-effect notes are in [EFFECTS.md](
 - [Community Shaders ports](#community-shaders-ports)
 - [Upstream 1.1.1-1.1.3 merge](#upstream-111-113-merge)
 - [Upstream 1.1.5 merge](#upstream-115-merge)
+- [Upstream 1.1.6-test2 study](#upstream-116-test2-study)
 - [Deferred shadow quality](#deferred-shadow-quality)
 - [The Astral Shaders study](#the-astral-shaders-study)
 - [The FNVGodot-Bridge study](#the-fnvgodot-bridge-study)
@@ -1875,6 +1876,104 @@ Bench (slot A, test build of the branch vs main 9948b06, owner's toml of 2026-11
   +2.1 ms here, of which the live world cubemap is about 1.0 ms. Per pass in the after run: world cubemap 1.18 ms, WorldSurface 0.29 ms, a new
   "Light grid sun map" and game water reflections higher. The slot's frame rate itself is capped (~23 fps), so HEARTBEAT averages show no change.
 - Not run: CubeMode 2 indoors cost, night lamp shadows outdoors, HDR, cold-start time.
+
+## Upstream 1.1.6-test2 study
+
+Study only (2026-11-28, owner via Main brain: "dont do anything code wise, just see what it contains and how hard it will be to
+merge"). Nothing merged, built or installed. Upstream since our 1.1.5 merge (ae74446 -> our 6801791): two squashed commits,
+2a953e2 (1.1.6-test1) and 9a19c35 (1.1.6-test2), 436 files, +23k/-33k lines. Compared with main 43f663c (cube code = 824906e).
+Per-area sorting notes (evidence as commit:path:line) are in the Main brain side-session notes folder: `upstream116-cube-probe.md`,
+`upstream116-pbr-shaders.md`, `upstream116-core-vulkan.md`.
+
+### What it contains
+
+**Ours, taken by upstream (proven, git diff):** the whole world-cube series (76189d1 cheaper faces, fed7f19 CubeStrength 1.5 and
+sharp on-screen capture, 5efa5bb ZFUNC device/cache fix and capture kept behind you, 824906e fill after restarts) and the
+Performance probe live mode (1119d87, 797f756: DeepProbe.h, DeepProbeWriter.h, tools/deepprobe_mo2.py byte-identical). Not taken:
+the STALL watchdog sampler safety (acbc983): upstream's SessionLog still copies the stack under SEH while the render thread is
+suspended. Upstream differs from ours in three places: capture brightness clamp 32 -> 8 (ReflectionsCapture.frag, Reflections.fx),
+metal/coat cube occlusion blend 0.65 -> 0.88 (Object.hlsl), world-cube binding 30 / slot 29 (ours 32 / 31: t_gbAlbedo holds 30).
+Not judged in game which clamp or blend looks better.
+
+**Upstream's own (proven from the diff):**
+- First-person weapon flicker fix: ReflMaterial Begin/EndFirstPerson no longer overwrite c36 (TESR_PBRMetalLook) while a non-env
+  SLS shader is still bound (PBR.cpp, ReflMaterial.h). We lack it.
+- ADS zoom-out hold 0.75 s (DeferredFirstPerson.h AimHoldUntil); view-model motion swaps InvView during the view-model pass.
+- PBR: getMetalAmbient becomes getSurfaceIBL (metal and _rmaos dielectrics get sky + cube specular and (1-kS) diffuse); material
+  rules gain path words, fallback folders and mesh signals (tests/material_rules.cpp); flashlight on skin F0 0.028; env-map peak
+  clamps; Terrain blendDiffuseMaps returns the height; Parallax lightTS.z guard.
+- Vulkan: GodRays as 5 passes; view-model deferred sun and lamps in compute (DeferredCommon.glsl) with [D3-FALLBACK] telemetry;
+  16 pre-tonemap effects on RenderRect under RenderScale; new Vulkan WorldSurface.comp, WetnessReflections.frag, HudRain, CoverMap,
+  Dream, LocalExposure and SunGlare passes; lamps and sun compute-only.
+- Live shader cache cleared when a new DLL build is detected (CacheShipped kept).
+- Code layout: ObjectTemplate.hlsl split into Includes/ObjectCommon, ObjectVertex, ObjectPixelForward, ObjectPixelManyLights (a pure
+  move); ImGuiManager.cpp into core/imgui/*.inl; the settings migrations into SettingMigrations.cpp; ShadowManager into
+  ShadowSunCascades and ShadowCharacterAndRefl.
+- Settings: two new steps, 102 (NvrDxvkPasses on) and 103 (NvrDxvkAmbientLight, AvgLumaCompute, NvrDxvkClouds on;
+  TargetReleaseSeconds 20 -> 0; EnvMaps Strength 1.8 -> 1.2, WithMetal 0.85 -> 0.25; retired-key resets). Version 103.
+- Defaults that differ from ours: EnvMaps Strength 1.2 (ours 1.8), WithMetal 0.25 (0.85), TargetReleaseSeconds 0 (20, our
+  memory-return fix), RT GIDenoiseConfidence 2.5 (0.0), GIGrassDenoise 2 (3), ActorRebuildInterval 8 (16); AvgLumaCompute,
+  NvrDxvkAmbientLight, NvrDxvkClouds true (false); new GIDenoiseAntiFirefly true, FireflyK 2.0, FireflySpread 4,
+  WorldSurface.Main.Interiors false. CubeMode: test1 moved it to 0, test2 put the default back to 2 (no migration left).
+
+**What it removes (proven):** runs only with the DXVK fork (message box and exit without VSDxvk d3d9.dll); DeferredRenderer locked
+at 2 (forward modes 0/1 gone) with ForceMSAA, SettingForce.h, the LAMPS_DEFERRED 1/3 records, the pre-GBufferV2 normal code and about
+37 keys (DeferredRenderer, GBufferV2, CapturedNormals, MaterialBuffer, AlbedoBuffer, Linear.*, forward/atlas shadow keys,
+TAA.FSR.Version); ForwardLightKill, LampPassTest, LinearSceneCensus, OnePassLimit, PassFamilyView, ShaderCounters, ShaderWarmUp,
+Upscaler.cpp, the vendored FSR 2 (FSR 3.1 / DLSS stay), HiZBuild and ReflectionsTraceHiZ, RtReflDenoise Prefilter / Reproject /
+Temporal, ObjectRefractionTemplate. Our C++ loads none of the deleted shaders (they are only listed in Reflections SHADERS.txt; the
+RT denoiser uses the "Ours*" passes on both sides). Upstream never had unified reflections, damp trace or the forward wet film, so
+a merge keeps them.
+
+### How hard the merge is
+
+`git merge-tree main v1.1.6-test2` (read only): 48 conflicting files. 25 are compiled .spv (rebuilt from the merged sources); the
+modify/delete ones are WetWorld files we retired and upstream edited (keep retired) and the HiZ files (take the delete). Content
+conflicts:
+
+| File | Hunks / lines | Why |
+|---|---|---|
+| src/core/ImGuiManager.cpp | 1 / 8499 | split upstream; our ~386 changed lines move into imgui/*.inl |
+| src/hlsl/NewVegas/Shaders/ObjectTemplate.hlsl | 2 / 2910 | split upstream; 7 of our hunks move into the new includes |
+| src/core/SettingManager.cpp | 3 / 978 | migrations moved to SettingMigrations.cpp; ours ~518 lines |
+| src/hlsl/NewVegas/Compute/DeferredSun.comp | 21 / 392 | both built the sun-step fade (our 81a8e3f); flag bits 23-26 clash |
+| src/core/ShadowManager.cpp | 1 / 376 | split upstream; ours ~181 lines (the cube face code is the same) |
+| src/core/DeferredSun.h | 7 / 113 | as DeferredSun.comp; constants 95 rows vs our 96 |
+| src/hlsl/NewVegas/Shaders/Includes/Object.hlsl | 5 / 45 | getSurfaceIBL rewrite vs our pearl/clearcoat guards and GlowScale |
+| ReflectionsCapture.frag, Reflections.glsl, Reflections.fx.hlsl, Reflections.cpp | 2-3 each | clamp 8 vs 32, binding 30 vs 32 |
+| ShaderManager.cpp, ShaderPrecompile.h, StalePresetValues.h | 1 each, 25-39 lines | cache auto-clear, lean fallback records vs our ad22a4e |
+| DeferredLamps.comp/.h, RtLampShadows.h, WorldSurface.h, PBR.h, WetnessReflections.cpp, SettingManager.h | 1-4 each, 5-26 lines | |
+| resource/VegasShaders.defaults.toml, resource/defaults/Core.toml | 2 each | the defaults above |
+
+Beyond the conflicts (believed from reading, not built): our lamp screen-space shadows (550d8c9) live only in the D3D9 lamp pass,
+which upstream retires (DeferredLamps.comp has no mask binding), and our wet-lamp-film route to the D3D9 lamp pass has to be put
+back; our e9780e5 (WorldSurface skips wet land) has to be carried into the new WorldSurface.comp; upstream's equip-weather may
+double up with our GearWeather.h; upstream's cache auto-clear goes against our rule that changed shaders recompile by themselves
+(never delete the cache) and would make every test install a cold start (238 s).
+
+**Full merge, taking the forward-mode removal (believed): 3-4 sessions**, plus a bench pass, frame cost and a cold-start re-measure.
+Our code depends on the forward modes or SettingForce in five small places (FdIndirect.h, WetnessReflections.cpp:79,
+Reflections.cpp:929, DeferredSun.h:316/415, ScreenSpaceShadows.h:37), each reducible to "mode 2". Settings: upstream 102/103 run as
+our 112/113 (guarded `!upstreamRan(n)`), kUpstreamNewest 103, version 113. Risks: the DeferredSun merge (visible: sun sheen, wet
+film, land F90 on the view model); lamp screen shadows and the wet-lamp film lost with the D3D9 lamp pass; a fork feature's hook
+dropped while moving edits into split files; settings numbering.
+
+**Keeping forward mode (believed): about 5-6 sessions,** and every later upstream merge pays again: refuse the deletions
+(SettingForce, the forward records, LAMPS_DEFERRED 1/3, the 37 keys and their menu, the D3D9 lamp/sun records), re-add them around
+upstream's split files, keep the D3D9 paths in step with upstream's compute-only lamps and sun, and keep the start-up without DXVK.
+
+### What players and the owner would see
+
+- Either way: no first-person metal flicker; steadier zoom-out from ADS; god rays and the 16 effects correct under RenderScale.
+- With the lock: nothing changes for the owner (deferred 2 and the DXVK fork already). Players without the fork can no longer start
+  the game. Open items the lock makes moot: the D3D9 fallback mirror tilt without REFL_GBUFFER_ON (see "Tilted reflections" in
+  EFFECTS.md), no wet ground and no reflection film for native D3D9 players, lamp screen shadows off on native D3D9, the forward
+  dry fallback and the SLS2024 register limit for DeferredRenderer 0.
+- Only if upstream's defaults are taken (the owner's word; the owner tuned these): weaker env-map and metal shine (1.8 -> 1.2,
+  0.85 -> 0.25, occlusion 0.65 -> 0.88, capture clamp 32 -> 8); TargetReleaseSeconds 0 drops our memory-return fix.
+
+Not run: any build or in-game test of upstream 1.1.6-test2; the looks of the differing clamps and blends; a settings file saved by
+test1/test2 at 102/103 loading in ours.
 
 ## Deferred shadow quality
 
