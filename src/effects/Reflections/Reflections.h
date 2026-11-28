@@ -310,6 +310,8 @@ private:
 	void*		cubeCell = nullptr;		// the cell the cube was captured in
 	UINT		cubeFrame = 0;			// FrameNumber of the last cube update
 	D3DXVECTOR3	cubeCamPos = D3DXVECTOR3(0.0f, 0.0f, 0.0f);	// the camera's world position at the last cube update (jump test, distance moved)
+	bool		cubeWorldPending = false;	// (2026-11-28) the capture restarted before the world cube was complete: it fills the unseen directions once it is
+	UINT		cubeWorldPendingFrame = 0;	// the frame of that restart (given up after 120 frames: a world cube that comes much later does not wipe the capture)
 	int			worldCubeNextFace = 0;	// next staggered cubemap face (0..5) for CubeMode >= 2
 	UINT		worldCubeMask = 0;		// bitmask of valid world-cube faces (0x3F when all 6 populated)
 	void*		worldCubeSpace = nullptr;// the interior cell, or the worldspace outdoors, the world cube's faces were drawn in

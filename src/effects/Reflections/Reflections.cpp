@@ -1480,7 +1480,26 @@ void ReflectionsEffect::CubeStep(IDirect3DDevice9* Device) {
 	// moved (about two thirds gone after 2 x CubeMoveThreshold units). Turning on the spot keeps it; the world cube fills what was never seen.
 	const float moved = empty ? 0.0f : (float)sqrt(dx * dx + dy * dy + dz * dz);
 	const float moveScale = 2.0f * (std::max)(Settings.CubeMoveThreshold, 16.0f);
-	RenderCube(Device, empty, (std::min)(moved / moveScale, 1.0f));
+	float movedDecay = (std::min)(moved / moveScale, 1.0f);
+	// (2026-11-28, interiors on the bench) a restart (entering a cell, a load, a jump) also starts the world cube over at the new place, and
+	// it takes a few frames (two faces a frame) to draw its six faces: the capture restarted from the backdrop alone, and with the camera standing the world
+	// cube then seeped in at CubeFade (0.1 % a frame): the Saloon showed a blue haze, the ARK room nothing of the room behind. The first
+	// frame the world cube is complete after a restart, what is out of view takes it whole (on screen keeps the screen's picture). Given up
+	// after 120 frames (review: a world cube completed much later, say after a settings change, must not wipe what the capture holds).
+	const bool worldReady = Settings.CubeMode >= 2 && WorldCubeReady();
+	if (empty) {
+		cubeWorldPending = Settings.CubeMode >= 2 && !worldReady;
+		cubeWorldPendingFrame = now;
+		static UINT lastRestartLog = 0;	// (a log line per restart, at most one a second: menus restart it too)
+		if (Settings.CubeMode >= 2 && now - lastRestartLog > 60) { lastRestartLog = now; Logger::Log("UNOFFICIAL Reflections cube restarted (%s), world cube %s", cell != cubeCell ? "cell change" : jumped ? "camera jump" : "not stepped last frame", worldReady ? "complete" : "not complete yet: fills what is out of view once it is"); }
+	}
+	else if (cubeWorldPending && worldReady) {
+		movedDecay = 1.0f;
+		cubeWorldPending = false;
+		Logger::Log("UNOFFICIAL Reflections cube: the world cube filled what is out of view, %u frames after the restart", now - cubeWorldPendingFrame);
+	}
+	if (Settings.CubeMode < 2 || now - cubeWorldPendingFrame > 120) cubeWorldPending = false;
+	RenderCube(Device, empty, movedDecay);
 	cubeCell = cell;
 	cubeValid = true;
 	cubeFrame = now;

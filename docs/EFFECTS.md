@@ -5417,6 +5417,25 @@ dark rooms brightening with CubeStrength, or the cube lagging when you turn.
   idiom for a stale cache), and put back on both by the StateGuard; the dump log also records ZWRITE, alpha blend and stencil.
 - Frame cost: not measured (the faces now shade pixels where they shaded none; the GPU timer was off in these runs).
 
+### The world cube indoors, and behind you after a restart (2026-11-28, branch `cube-world-pending`)
+- Indoors the world cube draws (proven on the bench, owner's toml, scenes v-tilted01 = ARK room and v-saloon; lists `cube-int-proof-*`):
+  the six faces dumped by `WorldCubeDump` hold the room (ARK: walls, ceiling lamps, the computer wall, median 0.4; Saloon: tin ceiling,
+  fan, floor, picture frames, median 0.004, as dark as the hallway on screen). Face sheets `F:\VS-scratch\int-cube-2026-11-28\` (bench runs
+  `20261128-131154-slotA` ARK, `20261128-131317-slotA` Saloon).
+- Fault found there (proven): a capture restart (entering a cell, a load, a fast travel, a jump over 1000 units) also starts the world cube
+  over at the new place, and its six faces take a few frames (two a frame). The capture restarted while it was incomplete, so from the
+  backdrop alone, and with the camera standing the world cube then seeped into what is out of view at CubeFade (0.1 % a frame). Behind the
+  camera the Saloon showed a flat haze (the interior backdrop) and the ARK room a third-strength room for seconds after every entry.
+- Fix (`ReflectionsEffect::CubeStep`): a restart with the world cube incomplete is remembered; the first frame it is complete, what is out of
+  view takes it whole (decay 1 through the existing moved-distance path, `-CubeReset`); on screen keeps the screen's picture. Given up after
+  120 frames (review: a world cube completed much later must not wipe the capture). The log says each restart (at most one line a second)
+  and the fill; on the bench the fill came 2 frames after each restart. Before/after (DebugView 3 behind the camera, 8 frames after a
+  restart; list `cube-int-behind-*`): Saloon haze -> the hallway's wood wall; ARK dim room (mean 35) -> the room (mean 105). Sheet
+  `F:\VS-scratch\int-cube-2026-11-28ehind-sheet.png`.
+- Not changed, noted: the Saloon's backdrop (CubeMode 1, and before the fill) is a blue haze about three times as bright as the room.
+- Bench note: shot lists trim `wait` to 10 frames unless marked `# HEARTBEAT-LIST`; a dump needs about 12 frames, so the lists set
+  `WorldCubeDump 1` in two shots in a row.
+
 ## ShadowsExteriors
 
 *README title: ShadowsExteriors - effect spec*
