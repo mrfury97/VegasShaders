@@ -67,9 +67,20 @@ static float DLSpecF0 = 0.04f;
     #define DL_KEEP_OF(a) FDAddedLightKeep(a)
 #elif defined(CAPTURED_NORMALS_ON) && CAPTURED_NORMALS_ON >= 4
     #include "includes/DeferredPixel.hlsl"
-    #define DL_KEEP_OF(a) FDAddedLightKeep(a)	// GBufferV2: 1 + (1 - fog), or the "sun kept" records' 5 + (1 - fog) (2026-11-14)
+    #define DL_KEEP_OF(a) FDAddedLightKeep(a)	// GBufferV2: 1 + (1 - fog) (a lighting-free record: its base + 1 - fog)
 #else
     #define DL_KEEP_OF(a) (a)
+#endif
+// UNOFFICIAL 2026-11-28 lamp-land-split-fit: under GBufferV2 this pass decodes the keep with the code-5 test it had before the upstream 1.1.6
+// merge (FDAddedLightKeep's "sun kept" records' 5 + keep; DeferredLamps.comp's decode still has it). No record writes 5 or more any more, so
+// the value is the same; the instruction is kept because the lamp pass sits at ps_3_0's 32 temp registers (r31): with FDAddedLightKeep's
+// shorter form the compiler allocated the level-0 pass (DL_LAND_SPLIT, core/DeferredLamps.h EnsurePass) one register over (X4505), and the
+// land lost its own lamp model. With this line every pass of this file compiles to test53's bytecode again (template_compile, the owner's
+// define list; docs\REFERENCE.md "ps_3_0 temp-register wall on land (X4505)"). Do not drop it without compiling level 0 offline.
+#if FD_GBUFFER_V2
+    float DLAddedLightKeep(float a) { return a > 4.5f ? a - 5.0f : FDAddedLightKeep(a); }
+    #undef DL_KEEP_OF
+    #define DL_KEEP_OF(a) DLAddedLightKeep(a)
 #endif
 #define DL_KEEP(uv4) DL_KEEP_OF(tex2Dlod(DL_Albedo, uv4).a)
 // UNOFFICIAL 2026-11-15 DeferredSkin (Includes/SkinDeferred.hlsl; only with [Main.Main.Quality] DeferredSkin at startup): the deferred skin
