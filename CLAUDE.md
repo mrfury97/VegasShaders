@@ -40,12 +40,13 @@ Four docs hold everything; each has a table of contents and one `##` section per
 - A feature that works ships on by default. Changing a default players may have saved needs a migration step and a higher settings
   version (skill `vs-effects-modular`). A key missing from `resource\VegasShaders.defaults.toml` is not read.
 - One switch, preset or quality level beats several separate switches.
-- **Deferred first (set by me 2026-11-18).** Shading and lighting work targets the deferred path first: the G-buffer (COLOR2
-  bumped normal and material, COLOR3 smooth normal and distance), the deferred sun and lamp passes, and effects that read them.
-  Change the forward templates only for geometry that stays forward (water, sky, particles, decals, first person, distant trees,
-  glass, menus), and so that `DeferredRenderer = 0` still renders correctly; it need not gain the feature. Every plan says which
-  path each change uses, and why when it's forward.
-- Many players run under DXVK: never rely on window messages for input (`docs\REFERENCE.md "DXVK input"`). Check xNVSE
+- **Deferred only, DXVK fork required (set by me 2026-11-28, "We are going fully deffered, foward is being dropped"; replaces
+  "Deferred first" of 2026-11-18).** The renderer is deferred (`DeferredRenderer = 2`, as upstream 1.1.6 locks it) and runs only
+  with the Vegas Shaders DXVK fork; forward modes 0/1 and the native D3D9-only paths are gone, so don't keep or fix them. Shading and
+  lighting work targets the G-buffer (COLOR2 bumped normal and material, COLOR3 smooth normal and distance), the deferred sun and
+  lamp passes (Vulkan) and effects that read them. Forward templates change only for geometry that stays forward (water, sky,
+  particles, decals, distant trees, glass, menus). Every plan says which path each change uses, and why when it's forward.
+- Every player runs under DXVK: never rely on window messages for input (`docs\REFERENCE.md "DXVK input"`). Check xNVSE
   (`src\NewVegas\nvse\`) before writing a hook. Runtime files and folders go through `Paths::`.
 - Shader cache: changed shaders recompile by themselves; don't tell me to delete the cache after an install.
 
