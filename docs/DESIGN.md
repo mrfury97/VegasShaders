@@ -2114,7 +2114,7 @@ Paths below are in that clone; nothing was built or run.
 | Scene capture | Walks every loaded cell's refs each frame on the game's main thread (`main.cpp:481-502`, `:1550-1581`), sends only changed transforms (`:1727-1762`), bones, lights (`:624`), sun and environment, land, UI tiles. Re-implements every material. | Sees exactly what the game draws as it draws it; every game feature (decals, effect shaders, VATS, image-space modifiers, distant trees) keeps working. | **Worse** for coverage: each game feature must be rebuilt in Godot (STATUS.md missing list). |
 | Deferred / G-buffer | None: Godot clustered Forward+. | Deferred G-buffer, sun and lamp passes ("Deferred vs forward"). | **Not comparable**; both shade many lamps. |
 | GI | SDFGI outdoors (6 cascades), baked VoxelGI per interior cell (`godot\scripts\bridge.gd:505-516`, `:546-563`). | AmbientLight (screen space); RT GI unofficial and off (`GI = false`). | **Better on paper** (whole-scene bounce); cost unknown, 25 min bake. |
-| Shadows | Sun atlas 8192, 250 m; up to 16 shadowed lamps (4 cubes, the rest dual paraboloid), atlas 8192 (`graphics_options.gd:54-58`, `bridge.gd:1079-1088`). Contact shadows: 16-step, sun-only compute march (`post_effects.gd:12-140`). | 512 lamp cubes ("Deferred shadow quality"); Bottled SSS for the sun and for 2-4 lamps. | Lamp shadows **better on paper** (count, resolution); contact shadows **equal or worse**. No cost numbers. |
+| Shadows | Sun atlas 8192, 250 m; up to 16 shadowed lamps (4 cubes, the rest dual paraboloid), atlas 8192 (`graphics_options.gd:54-58`, `bridge.gd:1079-1088`). Contact shadows: 16-step, sun-only compute march (`post_effects.gd:12-140`). | 24 shadowed lamps by default, up to 64 with the per-object lamp shadows (`src\effects\ShadowsInteriors\defaults.toml:12` LightPoints), 512 per cube face ("Deferred shadow quality"); Bottled SSS for the sun and for 2-4 lamps. | Lamp shadow count **worse** (16 vs our 24); per-lamp resolution believed **better** (shared 8192 atlas vs our 512 faces; its 12 dual-paraboloid lamps are cheaper but seam); contact shadows **equal or worse**. No cost numbers. |
 | Reflections | Godot SSR outdoors only, off indoors on purpose; no reflection probes; water with Fresnel SSR (`bridge.gd:562-566`). | Unified reflections: Hi-Z trace, world cube, sky panorama, puddle mirrors. | **Worse.** |
 | Wetness, rain | One global wetness float, used by grass only (`weather_fx.gd:52-68`); GPU particle rain. | Deferred wetness, puddles, GearWeather, rain on surfaces. | **Worse.** |
 | Post effects | Godot glow, SSAO, SSIL, fog, AgX, FSR 2.2, auto-exposure; a custom desert heat shimmer (`post_effects.gd:219` on). | Full set (EFFECTS.md index), DLSS and FSR, AgX among 11 tonemappers. | **Worse** (many missing), except the desert heat shimmer we lack. |
@@ -2127,7 +2127,7 @@ Paths below are in that clone; nothing was built or run.
 
 ### Verdict
 Not superior as a whole: it is a different kind of project (a second renderer fed by the game), and early. Where it is ahead: shader
-editing, whole-scene GI and the number of shadowed lamps (both on paper, no cost numbers), and, by design, the game thread no longer
+editing, whole-scene GI and lamp shadow resolution (both on paper, no cost numbers; we shadow more lamps, 24 vs 16), and, by design, the game thread no longer
 submits the world's draws, which is the kind of CPU cost the 6.6 ms probe shows. It pays for that by losing everything the game draws
 itself, with a frame of latency and a second process. Nothing in it can replace the deferred path.
 
