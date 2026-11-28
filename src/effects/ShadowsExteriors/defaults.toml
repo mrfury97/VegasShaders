@@ -180,6 +180,7 @@ Darkness = 0.0                       # [0-0.95] (2026-10-19) How much of the sky
 Contrast = 1.5                       # [0.5-8] (2026-10-19) Sharpens the shadow's edge: 1 as worked out, higher a harder line between lit and shaded land.
 UseHeightMapFile = true              # (2026-10-19) Use an xLODGen height map when one is installed (FNVLODGen: Terrain LOD > Height maps, in Data\Textures\Terrain\<Worldspace>\), otherwise the land read from your plugins. Both give the same shape; the file skips the one-second read.
 DebugView = 0                        # (2026-10-19) 1: the land's shadow tinted green (and the clouds' blue) over the picture. 2: also tints the area the height map covers.
+Deferred = true                      # UNOFFICIAL (2026-11-28), live: with the DXVK fork's Vulkan deferred sun, the land's shadow is taken off the sunlight itself as each surface is lit, before fog and sky light, so it sits in the lighting and fogged hills keep their haze. Off: as before, the whole finished pixel is darkened by it afterwards. Grass, water and other forward-drawn things always take the old way.
 
 [_Shaders.ShadowsExteriors.Status]
 Enabled = true                       # Post process sun and pointlights shadows in exteriors.

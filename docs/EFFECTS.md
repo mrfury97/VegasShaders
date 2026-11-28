@@ -5793,6 +5793,25 @@ Owner: the deferred sun must run in Vulkan; D3D9 stays only as the fallback for 
 - Checks (offline): `compile-compute.sh DeferredSun` + spirv-val pass; the owner's D3D9 sun records (`owner_sun.py`) compile unchanged;
   the DLL builds. Not run in game: the fade's look, the film's look in compute, the frame cost.
 
+### Mountain shadows in the deferred sun (2026-11-28, branch `mountain-shadows-deferred`)
+
+Owner: "can it be fully deffered? doesnt seem to blend with fog or the scene too well". `[Shaders.ShadowsExteriors.TerrainShadows]`
+(effects/TerrainShadows) was a screen factor: the SunFar pass rebuilt each pixel's sun / ambient split from the forward lighting model
+and the composites (this effect's apply, the fog composite, AmbientLight's) multiplied it into the finished pixel, fog included.
+- Now (key `Deferred`, default true, live) the Vulkan deferred sun (Compute/DeferredSun.comp `DSTerrainShadow`, kFlagTerrainShadow bit
+  28; rows 96-98 terrainRel / terrainRange / terrainParams, the map's edges camera-relative; bindings 14 t_terrainShadow, 15
+  t_terrainGround) multiplies the sun's shadow by the land's shadow as each surface is lit, before fog and sky light, for the world and the
+  first-person run. Same maths as SunFar's TerrainShadow (Conor's port of Community Shaders' Terrain Shadows).
+- SunFar's Vulkan pass (Compute/SunFar.frag) then leaves the land's part out of the factor's rgb on pixels the G-buffer marks deferred
+  (albedo a > 1; binding 17 t_albedo; constants' new last row `deferredTerrain`, x 1 when the deferred sun took it this frame). The alpha
+  (what reaches the sun: the Specular effect's highlight), Darkness (the ambient share) and the cloud shadows are unchanged; grass, water and
+  other forward-drawn pixels keep the old way.
+- The three meet in core/TerrainShadowBridge.h: TerrainShadowMap::Publish (ShadowManager::RenderShadowMaps) gives the map and constants for
+  the frame; SunFar says whether its Vulkan pass drew (only it can read the mark: the D3D9 technique has all 16 samplers taken), and the
+  deferred sun applies it only then and notes the frame it did. Without the fork's passes, or with the D3D9 SunFar: as before.
+- Believed, not proven: a frame where SunFar falls back to D3D9 after the deferred sun applied it shades those pixels twice for that
+  frame (the flag is the previous frame's).
+
 ## ShadowsInteriors
 
 Capsule shadows removed (2026-11-27, owner: "just remove the capsule stuff from the code"): the experiment `[Shaders.ShadowsInteriors.Capsules]`

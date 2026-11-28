@@ -1,4 +1,5 @@
 #include "TerrainShadows.h"
+#include "../../core/TerrainShadowBridge.h"	// UNOFFICIAL 2026-11-28 the deferred sun takes the shadow (Publish)
 #include "../Terrain/LandHeights.h"
 
 #include <algorithm>
@@ -27,6 +28,7 @@ void TerrainShadowMap::UpdateSettings() {
 	Settings.Contrast = std::clamp(TheSettingManager->GetSettingF(TerrainShadowsSection, "Contrast"), 0.5f, 8.0f);
 	Settings.DebugView = std::clamp(TheSettingManager->GetSettingI(TerrainShadowsSection, "DebugView"), 0, 2);
 	Settings.UseHeightMapFile = TheSettingManager->GetSettingI(TerrainShadowsSection, "UseHeightMapFile") != 0;
+	Settings.Deferred = TheSettingManager->GetSettingI(TerrainShadowsSection, "Deferred") != 0;	// UNOFFICIAL 2026-11-28
 	if (Settings.MaxResolution != OldResolution || Settings.Bias != OldBias || Settings.Softness != OldSoftness)
 		SettingsChangedAt = GetTickCount64();
 }
@@ -345,6 +347,16 @@ TerrainShadowMap::SweepResult TerrainShadowMap::Sweep(std::shared_ptr<const Heig
 		Out.Error = std::string("[ERROR] Terrain shadows: the shadow sweep failed (") + e.what() + ")";
 	}
 	return Out;
+}
+
+void TerrainShadowMap::Publish() const {
+	TerrainShadowBridge::Heights = Texture;
+	TerrainShadowBridge::Ground = GroundTexture;
+	memcpy(TerrainShadowBridge::Data, &Constants.Data, sizeof(TerrainShadowBridge::Data));
+	memcpy(TerrainShadowBridge::Range, &Constants.Range, sizeof(TerrainShadowBridge::Range));
+	memcpy(TerrainShadowBridge::Params, &Constants.Params, sizeof(TerrainShadowBridge::Params));
+	TerrainShadowBridge::DeferredWanted = Settings.Deferred;
+	TerrainShadowBridge::PublishedFrame = TheFrameRateManager->FrameNumber;
 }
 
 void TerrainShadowMap::Update(IDirect3DDevice9* Device, const D3DXVECTOR3& SunDir) {

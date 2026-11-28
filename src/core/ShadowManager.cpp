@@ -2105,6 +2105,7 @@ void ShadowManager::RenderShadowMaps() {
 	fx->Constants.DynamicData = D3DXVECTOR4(0.0f, 0.0f, 0.0f, 0.0f);
 	if (!sunShadowsOn || !ShadowShadersLoaded) {
 		fx->TerrainShadows.Constants.Data.w = 0.0f;
+		fx->TerrainShadows.Publish();	// UNOFFICIAL 2026-11-28 (strength 0: the deferred sun leaves it)
 		SunFadeDeferred::Fading = false;
 		fx->DeferredFading = fx->DeferredHolding = fx->DeferredCapturePending = fx->DeferredCaptureReady = false;
 		fx->Constants.CrossFade.x = 0.0f;
@@ -2907,6 +2908,7 @@ void ShadowManager::RenderShadowMaps() {
 		// UNOFFICIAL 2026-10-19 [ShadowsExteriors.TerrainShadows] (after Conor's port of Community Shaders' Terrain Shadows): the land's
 		// heights loaded and swept toward the sun on worker threads (effects/TerrainShadows.cpp); the SunFar pass applies them.
 		fx->TerrainShadows.Update(dev, D3DXVECTOR3(TheShaderManager->ShaderConst.SunDir));   // the real sun, not the quantized one
+		fx->TerrainShadows.Publish();	// UNOFFICIAL 2026-11-28 for the Vulkan deferred sun (core/TerrainShadowBridge.h)
 	}
 
 	// Render shadow maps for point lights

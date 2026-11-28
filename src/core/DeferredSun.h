@@ -27,6 +27,7 @@
 #include "DeferredWetness.h"	// UNOFFICIAL 2026-11-19 DeferredWetness: the land's water layer, drawn inside Apply; the film's sun highlight
 #include "RainState.h"	// UNOFFICIAL 2026-11-26 SunSheen: no dry sheen on wet ground (FillSheenConst)
 #include "ScreenSpaceShadows.h"	// UNOFFICIAL 2026-11-26 Screen-Space Shadows (Bottled Shaders port): this span's mask (DS_SSS c19, s13; compute t_sssMask)
+#include "TerrainShadowBridge.h"	// UNOFFICIAL 2026-11-28 mountain shadows on the sunlight (compute: kFlagTerrainShadow, rows 96-98)
 #include "MaterialSSSProto.h"	// UNOFFICIAL 2026-11-25 MaterialSSS Phase 2 (upstream 1.1.5; D3D9 DS_MatSSS c20)
 #include <unordered_set>
 
@@ -587,8 +588,11 @@ namespace DeferredSun {
 			float shadowCrossFade[4];        // 93 TESR_ShadowCrossFade (x the old share, yzw the kept maps' sun)
 			float shadowDynamicData[4];      // 94 TESR_ShadowDynamicData (x 1 / the movers' atlas size, 0 = not drawn)
 			float linearScales[4];           // 95 TESR_LinearScales (2026-11-27: w 1 = DeferredLandRoughF90 false, the land's own F90)
+			float terrainRel[4];             // 96 (2026-11-28) TESR_TerrainShadowData, edges camera-relative (xy), z 1 / width, w strength
+			float terrainRange[4];           // 97 TESR_TerrainShadowRange
+			float terrainParams[4];          // 98 x 1 / height, y camera z, z unused, w Contrast
 		};
-		static_assert(sizeof(ComputeConstants) == 96 * 16, "DeferredSun ComputeConstants layout mismatch");
+		static_assert(sizeof(ComputeConstants) == 99 * 16, "DeferredSun ComputeConstants layout mismatch");
 
 		auto copyBytes = [](void* dst, const char* name, size_t bytes) {
 			auto found = TheShaderManager->ConstantsTable.find(name);
@@ -617,6 +621,8 @@ namespace DeferredSun {
 				{ 1, 11, NVR_EXT_BIND_SAMPLED_IMAGE, 11, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowAtlasOld (2026-11-27 sunsheen-fade)
 				{ 1, 12, NVR_EXT_BIND_SAMPLED_IMAGE, 12, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_shadowDynamic
 				{ 1, 13, NVR_EXT_BIND_SAMPLED_IMAGE, 13, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_wetFilm
+				{ 1, 14, NVR_EXT_BIND_SAMPLED_IMAGE, 14, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_terrainShadow (2026-11-28)
+				{ 1, 15, NVR_EXT_BIND_SAMPLED_IMAGE, 15, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_terrainGround
 				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // linearSampler
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // pointSampler
@@ -820,6 +826,24 @@ namespace DeferredSun {
 		if (oldAtlasTex && dynamicTex) flags |= 1u << 25u;	// kFlagShadowDynamic
 		if (filmTex) flags |= 1u << 26u;	// kFlagWetFilm
 		if (Vm.on) flags |= 1u << 27u;	// (2026-11-28 upstream 1.1.6 merge) kFlagViewModel: upstream's bit 24, moved past ours
+		// UNOFFICIAL 2026-11-28 mountain shadows on the sunlight (core/TerrainShadowBridge.h): outdoors, the map live and published this frame,
+		// and SunFar's Vulkan pass running (only it can leave the land's part out on the pixels lit here). The first person too: its
+		// position is near the camera, and SunFar leaves out the pixels the world's G-buffer marks deferred under it.
+		const UInt32 terrainFrame = (UInt32)TheFrameRateManager->FrameNumber;
+		const bool terrainOn = TheShaderManager && TheShaderManager->GameState.isExterior && TerrainShadowBridge::Usable(terrainFrame);
+		if (terrainOn) {
+			const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
+			cb.terrainRel[0] = TerrainShadowBridge::Data[0] - cam.x;
+			cb.terrainRel[1] = TerrainShadowBridge::Data[1] - cam.y;
+			cb.terrainRel[2] = TerrainShadowBridge::Data[2];
+			cb.terrainRel[3] = TerrainShadowBridge::Data[3];
+			memcpy(cb.terrainRange, TerrainShadowBridge::Range, sizeof(cb.terrainRange));
+			cb.terrainParams[0] = TerrainShadowBridge::Params[0];
+			cb.terrainParams[1] = cam.z;
+			cb.terrainParams[2] = 0.0f;
+			cb.terrainParams[3] = TerrainShadowBridge::Params[3];
+			flags |= 1u << 28u;	// kFlagTerrainShadow
+		}
 
 		ID3D9NvrExt* ext = DxvkCompute::Extension();
 		if (FAILED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(cb), &cb))) return false;
@@ -841,6 +865,8 @@ namespace DeferredSun {
 			{ 11, NVR_EXT_BIND_SAMPLED_IMAGE, oldAtlasTex ? oldAtlasTex : depthTex, 0, 0, 0, FALSE },
 			{ 12, NVR_EXT_BIND_SAMPLED_IMAGE, dynamicTex ? dynamicTex : depthTex, 0, 0, 0, FALSE },
 			{ 13, NVR_EXT_BIND_SAMPLED_IMAGE, filmTex ? filmTex : depthTex,   0, 0, 0, FALSE },
+			{ 14, NVR_EXT_BIND_SAMPLED_IMAGE, terrainOn ? static_cast<IDirect3DBaseTexture9*>(TerrainShadowBridge::Heights) : depthTex, 0, 0, 0, FALSE },
+			{ 15, NVR_EXT_BIND_SAMPLED_IMAGE, terrainOn ? static_cast<IDirect3DBaseTexture9*>(TerrainShadowBridge::Ground) : depthTex, 0, 0, 0, FALSE },
 			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
 			{ 0, NVR_EXT_BIND_SAMPLER,        DxvkCompute::LinearClamp(),       0, 0, 0, FALSE },
 			{ 1, NVR_EXT_BIND_SAMPLER,        DxvkCompute::PointClamp(),        0, 0, 0, FALSE },
@@ -869,6 +895,7 @@ namespace DeferredSun {
 			return false;
 		}
 		if (sssOn) ScreenSpaceShadows::MarkUsed();
+		if (terrainOn && !Vm.on) TerrainShadowBridge::AppliedFrame = terrainFrame;	// (2026-11-28) SunFar leaves the land's part out on deferred pixels
 		StatPasses++;
 		StatCompute++;
 		if (fogExact) StatFogExact++;
