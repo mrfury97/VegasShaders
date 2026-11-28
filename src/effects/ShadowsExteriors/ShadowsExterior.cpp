@@ -584,7 +584,10 @@ void ShadowsExteriorEffect::UpdateSettings() {
 	{	// UNOFFICIAL: [Shaders.ShadowsInteriors.Forward], read once per settings change
 		InteriorsStruct::ForwardStruct& forward = interiors.Forward;
 		const char* section = "Shaders.ShadowsInteriors.Forward";
-		forward.Enabled = ShadowSettingI(section, "Enabled") != 0;
+		// (2026-11-28 1.1.6 merge, bench: the Saloon lost its window light shafts) upstream retired this key with the forward modes and locks
+		// it on for the deferred renderer (RtLampShadows); read here it was missing, so it read off: no lamp ranking, switch margin or view
+		// test, and the lamp shadow atlas went unconverted.
+		forward.Enabled = true;
 		forward.KeepDarkening = ShadowSettingI(section, "KeepDarkening") != 0;
 		forward.DarkeningBlur = ShadowSettingI(section, "DarkeningBlur") != 0;
 		forward.FirstPerson = ShadowSettingI(section, "FirstPerson") != 0;
