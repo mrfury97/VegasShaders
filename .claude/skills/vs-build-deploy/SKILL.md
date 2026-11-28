@@ -36,6 +36,14 @@ Turn a source change into a built DLL and checked shaders, put it in the owner's
    - Vulkan pass shaders (`src/hlsl/NewVegas/Compute`, .frag/.comp -> .spv, plus `variants.txt`), from Git Bash:
      `PATH=/f/Tools/VulkanSDK/1.3.296.0/Bin:$PATH bash tools/nvr-dxvk/compile-compute.sh <names>` (reproduces the committed bytes).
    - Settings defaults: `py -3.10 -I tools/defaults_tool.py check .` (see the `vs-effects-modular` skill).
+   - **Runtime shader gate (required before any install, since 2026-11-28).** The offline compiles above only build the define sets typed
+     by hand, and their newer compiler fits shaders the game's D3DX9 rejects; at runtime the DLL quietly drops a feature define (e.g.
+     DL_LAND_SPLIT) and keeps drawing, so a failure is only a log warning (the 1.1.6 merge's DeferredLamps X4505 got past this way). The
+     faithful compile is the game's own first start with the new build: one bench slot run (skill `vs-bench-check`) of a scene with lamps
+     and of an outdoor scene, then `py -3.10 -I tools/log_gate.py <previous build's log> <new build's log> --new-cache <slot>\Data\Shaders\VegasShaders\Shaders\Cache`
+     on each. Any NEW line (did not compile, X4505, made again without, did not load, compiled without it, deferred record only,
+     [D3-FALLBACK]) or new `<binary>.failed.hlsl` in the cache fails the build: fix it, or explain each line as expected before installing.
+     The failed record's exact text and defines are in the slot's cache as `<binary>.failed.hlsl` / `.failed.defines`.
 5. **Install into the owner's game.** Copy only the changed files into
    `E:\Mod Organizer 2 (Archive)-6194-2-1-5 (1)\mods\VegasShaders-1.1.0\` (`NVSE\Plugins\` and `Shaders\VegasShaders\`) with the
    backup script (backs up every replaced file, byte-compares, one-command restore). Backups live in

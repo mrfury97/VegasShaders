@@ -38,7 +38,12 @@ with an earlier run. Source of every fact below: `F:\NVR-bench\MO2-SLOTS.md` (re
 3. Last lines: `WALL: <s> s` and `RESULT: <run folder> <pictures folder>`; pictures in `F:\NVR-bench\shots\<run>`.
 4. Compare: `work/bench/autotest/tools/abcmp.py <runA> <runB>` (mean luma and mean |diff| per shot); `compare_runs.py` / `flipcmp.py`
    for FLIP. Judge the pictures by eye as if the owner had sent them; title and caption each panel.
-5. Stop only processes you started, by id. Never leave the slot unreset (the run script resets and checks links).
+5. **Log gate after every run (required, since 2026-11-28):** `py -3.10 -I "F:/Claude Brain/VS/tools/log_gate.py" <previous build's
+   VegasShaders log, same scene> <this run's VegasShaders log>` (both in `F:\NVR-bench\work\bench\autotest\<run>\`). It lists every
+   compile failure, feature dropped to fit (made again without / compiled without it), record that did not load and [D3-FALLBACK] line the
+   old log did not have; `GATE: FAIL` means each NEW line is fixed or explained in the report before the build goes further. Read every
+   NEW line: a rising error count alone hid the 1.1.6 merge's DeferredLamps X4505 (bench logs 20261128-173012-slotA and later).
+6. Stop only processes you started, by id. Never leave the slot unreset (the run script resets and checks links).
 
 ## Pass cost: the in-game GPU timer
 - Put `profile` near the top of the list (the F10 timer): the VegasShaders log then gets `GPU PROFILE <pass> avg ... ms` lines every 120
@@ -63,8 +68,10 @@ D3D9 path: RESZ depth, no NVAPI, no fork extension, no Vulkan passes, no RT. A t
 Full record: `F:\NVR-bench\MO2-SLOTS.md` "apitrace", skill `nvr-bench-run`, `TOOL_PATHS.md`.
 
 ## Validation
-- `VERDICT PASS` in `launcher.log`; the player placed at the spot (x/y off about 0); pictures exist for every shot; `VegasShaders-Logs`
-  in the slot has no shader errors.
+- `VERDICT PASS` in `launcher.log`; the player placed at the spot (x/y off about 0); pictures exist for every shot; `tools/log_gate.py`
+  against the previous build's log of the same scene says `GATE: PASS` (or every NEW line is explained).
+- Pictures: judge each at full size (crop and brighten dark areas); a small contact sheet hid the Saloon's light shafts (2026-11-28). For
+  any change that could show, take more than one camera view (`cam` / `pan` verbs of `shot_verbs.py`, fixed eye positions).
 - Forced wetness for reflection pictures: `set Shaders.WetnessEffects.Debug WetnessOverride/PuddleOverride/RainOverride` (FalloutNV.esm has
   no rain weather). Do not take pictures with `landflicker` active (its magenta mask frame stays in the Reflections history).
 
