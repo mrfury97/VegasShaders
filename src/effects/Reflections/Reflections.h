@@ -37,8 +37,15 @@ public:
 		int		CubeMode;		// 0: screen capture only, 1: screen + sky/grid fill, 2: native staggered 3D world cube + screen
 		int		CubeResolution;	// face resolution (64, 128, or 256; requires restart)
 		float	CubeDistance;	// world-cube capture cull distance in game units
+		// UNOFFICIAL 2026-11-27 cheaper world cube (owner: "do the first 3 for the live cubemap"): a complete cube redraws a face only when
+		// something it shows changed, at most one face every CubeFaceInterval frames, and (CubeLean) without actors and clutter.
+		int		CubeFaceInterval;	// frames between face redraws once the cube is complete (1: every frame, as upstream)
+		float	CubeMoveThreshold;	// game units the camera moves before a face drawn there counts as stale (0: always stale, as upstream)
+		float	CubeRefreshSeconds;	// a face older than this is redrawn anyway (0: never), for what the checks miss (doors, moving lamps)
+		bool	CubeLean;			// leave actors, clutter (misc items, books, apparatus) and small objects out of the cube's draw
 		float	CubeCapture;	// how much of the cube each frame's view replaces
 		float	CubeFade;		// how much of what is off screen fades each frame
+		float	CubeStrength;	// UNOFFICIAL 2026-11-27 cube-visible: how much the surroundings cube shows wherever it is read (0-2; share min(k, 1), above 1 sharper on smooth surfaces)
 		int		DebugView;		// 1: the reflection alone, 2: where it found something, 3: the surroundings cube (4-6: see the .fx)
 		bool	GridFallback;	// UNOFFICIAL 2026-10-19: rays that find nothing on screen also take AmbientLight's light grid
 		float	GridBrightness;	// its brightness
@@ -115,7 +122,7 @@ public:
 		D3DXVECTOR4	Cube;		// x: face being drawn, y: its size, z: mip level, w: 1 = empty the cube
 		D3DXVECTOR4	Cube2;		// x: capture blend, y: fade per frame, z: last mip level, w: 1 = the cube is in use
 		D3DXVECTOR4	Grid;		// xyz: the light grid's corner relative to the camera, w: cell size
-		D3DXVECTOR4	Grid2;		// x: 1 = the grid is in use, y: brightness, z: 1 = it carries colours
+		D3DXVECTOR4	Grid2;		// x: 1 = the grid is in use, y: brightness, z: 1 = it carries colours, w: CubeStrength (2026-11-27)
 		D3DXVECTOR4	Grid3;		// rgb: the light every surface gets here (AmbientLight's, linear)
 		D3DXVECTOR4	Material;	// UNOFFICIAL 2026-10-20 x: 1 = the material buffer is read, y: MaterialMaxRoughness, z: MaterialReflect
 		D3DXVECTOR4	WetFx;		// 2026-11-19 WetnessEffects consolidation: x 1 = active (+2 = SkylightingMode 1), y rainWetness, z puddleWetness, w MinRainWetness
@@ -180,7 +187,10 @@ public:
 	bool	CubeStandaloneRunnable();					// safe to step the cube alone when floor SSR is disabled or suppressed
 	bool	WorldCubeWanted();							// native 3D world-cube pass should render faces this frame
 	bool	WorldCubeReady() const;						// all 6 world-cube faces are valid for the current cell/viewpoint
-	int		BeginWorldCubeFaces(int outFaces[2]);		// returns 0..2 staggered face indices to render this frame
+	// UNOFFICIAL 2026-11-27: what lights the world cube this frame (ShadowManager::RenderReflectionCubeFace); a face drawn under a
+	// different light is stale. Sun direction, the brightness of the sun, ambient, sky and fog colours, and the cube's lamps.
+	struct WorldCubeLight { D3DXVECTOR3 sunDir; float lum[4]; UInt32 lampSet; float lampLum; };
+	int		BeginWorldCubeFaces(int outFaces[2], const WorldCubeLight& now);	// returns 0..2 face indices to render this frame
 	void	MarkWorldCubeFaceRendered(int face);		// records a rendered face (0..5) in worldCubeMask
 	void	RenderCubeOnly(IDirect3DDevice9* Device);	// the cube alone, on a frame RenderBuffers does not run
 	bool	CubeReady() const;							// the cube was kept up last frame (what the object shaders read now)
@@ -299,16 +309,27 @@ private:
 	bool		cubeValid = false;
 	void*		cubeCell = nullptr;		// the cell the cube was captured in
 	UINT		cubeFrame = 0;			// FrameNumber of the last cube update
-	D3DXMATRIX	cubeInvView;			// the camera at the last cube update (for the jump test)
+	D3DXVECTOR3	cubeCamPos = D3DXVECTOR3(0.0f, 0.0f, 0.0f);	// the camera's world position at the last cube update (jump test, distance moved)
+	bool		cubeWorldPending = false;	// (2026-11-28) the capture restarted before the world cube was complete: it fills the unseen directions once it is
+	UINT		cubeWorldPendingFrame = 0;	// the frame of that restart (given up after 120 frames: a world cube that comes much later does not wipe the capture)
 	int			worldCubeNextFace = 0;	// next staggered cubemap face (0..5) for CubeMode >= 2
 	UINT		worldCubeMask = 0;		// bitmask of valid world-cube faces (0x3F when all 6 populated)
 	void*		worldCubeSpace = nullptr;// the interior cell, or the worldspace outdoors, the world cube's faces were drawn in
 	D3DXVECTOR3	worldCubePos = { 0.0f, 0.0f, 0.0f };
+	// UNOFFICIAL 2026-11-27 cheaper world cube: what each face was drawn with, the light of this frame's draw (stored by
+	// MarkWorldCubeFaceRendered), faces marked stale by a cell change, the frame of the last draw, and counters for the log.
+	struct WorldCubeFace { D3DXVECTOR3 pos; WorldCubeLight light; DWORD tick; };
+	WorldCubeFace	worldCubeFace[6] = {};
+	WorldCubeLight	worldCubeLightNow = {};
+	UINT		worldCubeStale = 0;		// faces to redraw whatever the checks say (a cell change)
+	UINT		worldCubeLastDraw = 0;	// FrameNumber of the last face drawn
+	UINT		worldCubeLogFrames = 0, worldCubeLogFaces = 0, worldCubeLogIdle = 0;
+	bool	WorldCubeFaceStale(int face, const D3DXVECTOR3& pos, const WorldCubeLight& now, DWORD tick) const;
 	bool		cubeOnly = false;		// RenderCubeOnly is drawing (ShouldRender lets its passes through)
 	bool		materialOnly = false;	// CaptureMaterial is drawing
 	bool		materialFilled = false;	// the material buffer was filled this frame
 	UINT		gridFrames = 0, gridUsedFrames = 0;	// for the log: frames drawn with GridFallback on, and of them with a grid to read
 	void	GridStep();							// the light grid's constants and textures for this frame's trace
 	void	CubeStep(IDirect3DDevice9* Device);
-	void	RenderCube(IDirect3DDevice9* Device, bool reset);
+	void	RenderCube(IDirect3DDevice9* Device, bool reset, float movedDecay);
 };

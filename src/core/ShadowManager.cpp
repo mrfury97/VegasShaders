@@ -4432,14 +4432,63 @@ void ShadowManager::RenderReflectionCubeAlone(ShadowSceneLight** castLamps, NiPo
 void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPointLight** nearLamps) {
 	ReflectionsEffect* refl = TheShaderManager->Effects.Reflections;
 	if (!refl || !ReflCubeVertex || !ReflCubePixel || !Player || !Player->parentCell) return;
-	int faces[2] = {};
-	const int faceCount = refl->BeginWorldCubeFaces(faces);
-	if (faceCount <= 0) return;
-
 	IDirect3DDevice9* dev = TheRenderManager->device;
 	NiDX9RenderState* rs = TheRenderManager->renderState;
 	ShadowsExteriorEffect* fx = TheShaderManager->Effects.ShadowsExteriors;
 	if (!dev || !rs || !fx) return;
+
+	// (2026-11-27 cheaper world cube) the lamps are picked first: with the sun and sky they are the light a face is drawn under, and
+	// BeginWorldCubeFaces redraws a face only when that light (or the camera's place) changed since.
+	const ShaderConstants& sc = TheShaderManager->ShaderConst;
+	struct LampCand { float key; NiPointLight* light; float lod; };
+	LampCand bestLamps[4] = {};
+	int lampCount = 0;
+	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
+	const float cullDist = refl->Settings.CubeDistance;
+	auto tryLamp = [&](NiPointLight* light, float lod) {
+		if (!light || light->Spec.r <= 1.0f) return;
+		if ((light->Diff.r + light->Diff.g + light->Diff.b) * light->Dimmer <= 5.0f / 255.0f) return;
+		if (FlashlightLamp::Is(light)) return;
+		for (int i = 0; i < lampCount; i++) if (bestLamps[i].light == light) return;
+		const NiPoint3& p = light->m_worldTransform.pos;
+		const float dx = p.x - camPos.x, dy = p.y - camPos.y, dz = p.z - camPos.z;
+		const float key = sqrtf(dx * dx + dy * dy + dz * dz) - light->Spec.r;
+		if (key > cullDist) return;
+		int at = lampCount < 4 ? lampCount++ : 4;
+		if (at == 4) { if (key >= bestLamps[3].key) return; at = 3; }
+		while (at > 0 && bestLamps[at - 1].key > key) { bestLamps[at] = bestLamps[at - 1]; at--; }
+		bestLamps[at] = { key, light, lod };
+	};
+	if (castLamps) {
+		for (int i = 0; i < ShadowCubeMapsMax; i++)
+			if (castLamps[i] && castLamps[i]->sourceLight) tryLamp(castLamps[i]->sourceLight, castLamps[i]->fLODDimmer);
+	}
+	if (nearLamps) {
+		for (int i = 0; i < TrackedLightsMax; i++)
+			if (nearLamps[i]) tryLamp(nearLamps[i], 1.0f);
+	}
+
+	D3DXVECTOR3 sunDir(sc.SunDir.x, sc.SunDir.y, sc.SunDir.z);
+	if (D3DXVec3LengthSq(&sunDir) > 1.0e-4f) D3DXVec3Normalize(&sunDir, &sunDir);
+	else sunDir = D3DXVECTOR3(0.0f, 0.0f, 1.0f);
+	ReflectionsEffect::WorldCubeLight lightNow = {};
+	{
+		auto lum = [](const D3DXVECTOR4& c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; };
+		lightNow.sunDir = sunDir;
+		lightNow.lum[0] = lum(sc.sunColor); lightNow.lum[1] = lum(sc.sunAmbient);
+		lightNow.lum[2] = lum(sc.skyColor); lightNow.lum[3] = lum(sc.fogColor);
+		UInt32 set = 0;	// the lamps' addresses, each mixed, summed: the same set in any order (their order is by distance)
+		for (int i = 0; i < lampCount; i++) {
+			const NiPointLight* l = bestLamps[i].light;
+			set += (((UInt32)(uintptr_t)l ^ 2166136261u) * 16777619u) ^ 0x9E3779B9u;
+			// (review) without Dimmer: candles, fires and barrels flicker through it every few frames; a lamp switched off leaves the set
+			lightNow.lampLum += (0.2126f * l->Diff.r + 0.7152f * l->Diff.g + 0.0722f * l->Diff.b) * bestLamps[i].lod;
+		}
+		lightNow.lampSet = set;
+	}
+	int faces[2] = {};
+	const int faceCount = refl->BeginWorldCubeFaces(faces, lightNow);
+	if (faceCount <= 0) return;
 	static GpuTimer reflCubeTimer("Reflection world cubemap");	// (2026-11-24 review: here, so both callers report under one name)
 	GpuProfileScope gpu(reflCubeTimer, dev);
 
@@ -4497,17 +4546,19 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 			dev->GetRenderState(D3DRS_STENCILENABLE, &stencilEnable);
 			dev->GetRenderState(D3DRS_SCISSORTESTENABLE, &scissorEnable);
 		}
+		void both(D3DRENDERSTATETYPE state, DWORD value) { rs->SetRenderState(state, value, RenderStateArgs); dev->SetRenderState(state, value); }
 		~StateGuard() {
 			rs->SetTexture(0, nullptr);
 			rs->SetTexture(1, nullptr);
 			dev->SetRenderState(D3DRS_COLORWRITEENABLE, colorWrite);
-			rs->SetRenderState(D3DRS_ALPHABLENDENABLE, alphaBlend, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ALPHATESTENABLE, alphaTest, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ZENABLE, zEnable, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ZWRITEENABLE, zWrite, RenderStateArgs);
-			rs->SetRenderState(D3DRS_ZFUNC, zFunc, RenderStateArgs);
+			// (2026-11-28 review) the depth, blend and stencil states back on the cache AND the device, as they were set below
+			both(D3DRS_ALPHABLENDENABLE, alphaBlend);
+			both(D3DRS_ALPHATESTENABLE, alphaTest);
+			both(D3DRS_ZENABLE, zEnable);
+			both(D3DRS_ZWRITEENABLE, zWrite);
+			both(D3DRS_ZFUNC, zFunc);
 			rs->SetRenderState(D3DRS_CULLMODE, cullMode, RenderStateArgs);
-			rs->SetRenderState(D3DRS_STENCILENABLE, stencilEnable, RenderStateArgs);
+			both(D3DRS_STENCILENABLE, stencilEnable);
 			rs->SetRenderState(D3DRS_SCISSORTESTENABLE, scissorEnable, RenderStateArgs);
 		}
 	} stateGuard(dev, rs);
@@ -4529,16 +4580,19 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	terrainLODPass->VertexShader = ReflCubeVertex; terrainLODPass->PixelShader = ReflCubePixel;
 
 	dev->SetRenderState(D3DRS_COLORWRITEENABLE, 0x0F);
-	rs->SetRenderState(D3DRS_ALPHABLENDENABLE, FALSE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ALPHATESTENABLE, FALSE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ZENABLE, D3DZB_TRUE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ZWRITEENABLE, TRUE, RenderStateArgs);
-	rs->SetRenderState(D3DRS_ZFUNC, D3DCMP_LESSEQUAL, RenderStateArgs);
-	rs->SetRenderState(D3DRS_STENCILENABLE, FALSE, RenderStateArgs);
+	// (2026-11-28, world cube drew nothing outdoors) the depth, blend and stencil states go to the game's state cache AND the device:
+	// ZFUNC asked for through the cache alone left the device at GREATEREQUAL (read back on the bench, Goodsprings, the game's
+	// reversed depth), and with this pass's standard projection and a depth clear of 1 no pixel passed: every face stayed the clear
+	// colour. The others are as exposed to a stale cache (this file's idiom for one: cache, then device).
+	stateGuard.both(D3DRS_ALPHABLENDENABLE, FALSE);
+	stateGuard.both(D3DRS_ALPHATESTENABLE, FALSE);
+	stateGuard.both(D3DRS_ZENABLE, D3DZB_TRUE);
+	stateGuard.both(D3DRS_ZWRITEENABLE, TRUE);
+	stateGuard.both(D3DRS_ZFUNC, D3DCMP_LESSEQUAL);
+	stateGuard.both(D3DRS_STENCILENABLE, FALSE);
 	rs->SetRenderState(D3DRS_SCISSORTESTENABLE, FALSE, RenderStateArgs);
 
 	const bool exterior = TheShaderManager->GameState.isExterior;
-	const ShaderConstants& sc = TheShaderManager->ShaderConst;
 	const PBRShaders* pbr = TheShaderManager->Shaders.PBR;
 	const float G = (pbr && pbr->Constants.Linear.x > 1.0f) ? pbr->Constants.Linear.x : 2.2f;
 	const float linLight = pbr ? pbr->Constants.LinearScales.x : 1.0f;
@@ -4546,42 +4600,11 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	const float linSky = exterior ? (pbr ? pbr->Constants.LinearScales.z : 1.0f) : 0.0f;
 	auto decodeLin = [G](float v) { return powf((std::max)(v, 0.0f), G); };
 
-	D3DXVECTOR3 sunDir(sc.SunDir.x, sc.SunDir.y, sc.SunDir.z);
-	if (D3DXVec3LengthSq(&sunDir) > 1.0e-4f) D3DXVec3Normalize(&sunDir, &sunDir);
-	else sunDir = D3DXVECTOR3(0.0f, 0.0f, 1.0f);
 	RecalculateBillboardVectors(&sunDir);
 
 	const float fogStart = (std::max)(sc.fogData.x, 0.0f);
 	const float fogEnd = sc.fogData.y > fogStart + 100.0f ? sc.fogData.y : fogStart + 32768.0f;
 	const float invFogRange = 1.0f / (fogEnd - fogStart);
-
-	struct LampCand { float key; NiPointLight* light; float lod; };
-	LampCand bestLamps[4] = {};
-	int lampCount = 0;
-	const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
-	const float cullDist = refl->Settings.CubeDistance;
-	auto tryLamp = [&](NiPointLight* light, float lod) {
-		if (!light || light->Spec.r <= 1.0f) return;
-		if ((light->Diff.r + light->Diff.g + light->Diff.b) * light->Dimmer <= 5.0f / 255.0f) return;
-		if (FlashlightLamp::Is(light)) return;
-		for (int i = 0; i < lampCount; i++) if (bestLamps[i].light == light) return;
-		const NiPoint3& p = light->m_worldTransform.pos;
-		const float dx = p.x - camPos.x, dy = p.y - camPos.y, dz = p.z - camPos.z;
-		const float key = sqrtf(dx * dx + dy * dy + dz * dz) - light->Spec.r;
-		if (key > cullDist) return;
-		int at = lampCount < 4 ? lampCount++ : 4;
-		if (at == 4) { if (key >= bestLamps[3].key) return; at = 3; }
-		while (at > 0 && bestLamps[at - 1].key > key) { bestLamps[at] = bestLamps[at - 1]; at--; }
-		bestLamps[at] = { key, light, lod };
-	};
-	if (castLamps) {
-		for (int i = 0; i < ShadowCubeMapsMax; i++)
-			if (castLamps[i] && castLamps[i]->sourceLight) tryLamp(castLamps[i]->sourceLight, castLamps[i]->fLODDimmer);
-	}
-	if (nearLamps) {
-		for (int i = 0; i < TrackedLightsMax; i++)
-			if (nearLamps[i]) tryLamp(nearLamps[i], 1.0f);
-	}
 
 	const bool hdr = *(const bool*)0x011F941E;
 	D3DXVECTOR4 psConsts[13] = {};
@@ -4628,24 +4651,35 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 	const D3DXVECTOR3 zero(0.0f, 0.0f, 0.0f);
 
 	ShadowsExteriorEffect::FormsStruct reflForms = {};
+	// (2026-11-27 cheaper world cube) CubeLean: no actors (they move, and redraw nothing anyway between faces), no clutter (misc items,
+	// books, apparatus) and nothing small; buildings, statics, trees, furniture, doors, terrain and LOD stay. At 128 texels a face and
+	// the reflections' blur, what goes is a few texels.
+	const bool lean = refl->Settings.CubeLean;
 	reflForms.AlphaEnabled = true;
 	reflForms.Activators = true;
-	reflForms.Actors = true;
-	reflForms.Apparatus = true;
-	reflForms.Books = true;
+	reflForms.Actors = !lean;
+	reflForms.Apparatus = !lean;
+	reflForms.Books = !lean;
 	reflForms.Containers = true;
 	reflForms.Doors = true;
 	reflForms.Furniture = true;
-	reflForms.Misc = true;
+	reflForms.Misc = !lean;
 	reflForms.Statics = true;
 	reflForms.Terrain = true;
 	reflForms.Trees = true;
 	reflForms.Lod = exterior;
-	reflForms.MinRadius = exterior ? 12.0f : 6.0f;
+	reflForms.MinRadius = lean ? (exterior ? 48.0f : 24.0f) : (exterior ? 12.0f : 6.0f);
 	reflForms.OrigMinRadius = reflForms.MinRadius;
 
 	NiAVObject* const playerBody = Player->GetNode();
 	NiAVObject* const playerFP = Player->firstPersonNiNode;
+	// UNOFFICIAL 2026-11-27 (cube-keep-capture, diagnostic; owner: the world cube showed "orange world" where Goodsprings stood)
+	// [Shaders.Reflections.Main] WorldCubeDump 1: each face drawn from now on is saved once to <logs>\VegasShaders_WorldCube_<face>.dds and logged with
+	// what its reference walk kept and dropped; the key goes back to 0 when all six are saved.
+	static int dumpSaved = 0;
+	const bool dumping = TheSettingManager->GetSettingI("Shaders.Reflections.Main", "WorldCubeDump") != 0;
+	if (!dumping) dumpSaved = 0;
+	struct RefCounts { int seen = 0, noNode = 0, hidden = 0, outside = 0, refracting = 0, distant = 0, kept = 0; } refCounts;
 	PortalVisibility::RoomSet portalRooms;
 	if (!exterior) portalRooms.Build(SceneNode);
 
@@ -4680,20 +4714,23 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 			for (TList<TESObjectREFR>::Entry* it = &cell->objectList.First; it != nullptr; it = it->next) {
 				TESObjectREFR* ref = it->item;
 				if (!ref || ref == (TESObjectREFR*)Player) continue;
+				refCounts.seen++;
 				NiNode* refRoot = GetRefNode(ref, &reflForms);
-				if (!refRoot || refRoot == playerBody || refRoot == playerFP) continue;
+				if (!refRoot || refRoot == playerBody || refRoot == playerFP) { refCounts.noNode++; continue; }
 				if (!exterior && portalRooms.active) {
 					const bool hidden = portalRooms.IsNodeHidden(refRoot);
 					PortalVisibility::NoteReflRef(hidden);
-					if (hidden) continue;
+					if (hidden) { refCounts.hidden++; continue; }
 				}
-				if (!refRoot->WithinFrustum(&planes) || IsRefracting(ref)) continue;
+				if (!refRoot->WithinFrustum(&planes)) { refCounts.outside++; continue; }
+				if (IsRefracting(ref)) { refCounts.refracting++; continue; }
 				const NiBound* b = refRoot->GetWorldBound();
 				if (b) {
 					const float dx = b->Center.x - camPos.x, dy = b->Center.y - camPos.y, dz = b->Center.z - camPos.z;
 					const float maxR = cullDist + b->Radius;
-					if (dx * dx + dy * dy + dz * dz > maxR * maxR) continue;
+					if (dx * dx + dy * dy + dz * dz > maxR * maxR) { refCounts.distant++; continue; }
 				}
+				refCounts.kept++;
 				AccumChildren(refRoot, &reflForms, false, false, &planes);
 			}
 		};
@@ -4715,7 +4752,28 @@ void ShadowManager::RenderReflectionCubeFace(ShadowSceneLight** castLamps, NiPoi
 			accumCellRefs(Player->parentCell);
 		}
 
+		const bool dumpThis = dumping && !(dumpSaved & (1 << f));
+		if (dumpThis) {	// the device's own state the faces are drawn with (the game's state cache can differ: see ZFUNC above)
+			DWORD zEnableNow = 0, zFuncNow = 0, colorWriteNow = 0, cullNow = 0, clipPlanesNow = 0, zWriteNow = 0, blendNow = 0, stencilNow = 0;
+			dev->GetRenderState(D3DRS_ZENABLE, &zEnableNow); dev->GetRenderState(D3DRS_ZFUNC, &zFuncNow); dev->GetRenderState(D3DRS_COLORWRITEENABLE, &colorWriteNow);
+			dev->GetRenderState(D3DRS_CULLMODE, &cullNow); dev->GetRenderState(D3DRS_CLIPPLANEENABLE, &clipPlanesNow);
+			dev->GetRenderState(D3DRS_ZWRITEENABLE, &zWriteNow); dev->GetRenderState(D3DRS_ALPHABLENDENABLE, &blendNow); dev->GetRenderState(D3DRS_STENCILENABLE, &stencilNow);
+			Logger::Log("UNOFFICIAL WorldCubeDump face %d device state: z %u func %u write %u, colour write %X, blend %u, stencil %u, cull %u, clip planes %X; queued opaque %u, LOD land %u, alpha %u, skinned %u, tree %u",
+				f, zEnableNow, zFuncNow, zWriteNow, colorWriteNow, blendNow, stencilNow, cullNow, clipPlanesNow, (unsigned)geometryPass->GeometryList.size(), (unsigned)terrainLODPass->GeometryList.size(),
+				(unsigned)alphaPass->GeometryList.size(), (unsigned)skinnedGeoPass->GeometryList.size(), (unsigned)speedTreePass->GeometryList.size());
+		}
 		RenderAccums();
 		refl->MarkWorldCubeFaceRendered(f);
+		if (dumpThis) {
+			// (2026-11-28 review) from the game folder, not the working directory
+			const std::string path = Paths::GameRoot() + "\\" + Paths::LogsFolder + "\\VegasShaders_WorldCube_" + std::to_string(f) + ".dds";
+			const HRESULT hr = D3DXSaveSurfaceToFileA(path.c_str(), D3DXIFF_DDS, refl->Cubes.WorldFace[f], NULL, NULL);
+			Logger::Log("UNOFFICIAL WorldCubeDump face %d (%s): cam %.0f %.0f %.0f, refs seen %d, no node %d, hidden %d, outside %d, refracting %d, beyond CubeDistance %d, kept %d, cube complete %d; %s",
+				f, exterior ? "exterior" : "interior", camPos.x, camPos.y, camPos.z, refCounts.seen, refCounts.noNode, refCounts.hidden, refCounts.outside,
+				refCounts.refracting, refCounts.distant, refCounts.kept, refl->WorldCubeReady() ? 1 : 0, SUCCEEDED(hr) ? path.c_str() : "save failed");
+			dumpSaved |= 1 << f;
+			if (dumpSaved == 0x3F) { TheSettingManager->SetSetting("Shaders.Reflections.Main", "WorldCubeDump", 0); dumpSaved = 0; }
+		}
+		refCounts = RefCounts();
 	}
 }

@@ -3748,6 +3748,7 @@ Bench pictures and the full write-up: `docs/next/EYES-ENVFLAG-2026-11-09.md` (no
   `docs/DESIGN.md "Upstream 1.1.5 merge"`). Not run: a forward compile or a game run after the gate.
 - Metal defaults moved to upstream's (steps 104-108; `GreyMetal` 0.45 and the others): a saved value at the old default moves, a tuned one stays.
 - Land reflectivity: `DeferredLandRoughF90` stays ours (see "Reflectivity under the deferred renderer").
+- (2026-11-27, branch `cube-visible`) The live cube on metal and env maps (`Includes/LiveCube.hlsl`, `getMetalAmbient`) follows `[Shaders.Reflections.Main] CubeStrength`: `TESR_EnvCube` x / y times min(k, 1), w = 1 / max(k, 1) (sharper lod on smooth metal, the metal's cap on the cube's light eased). Why and the numbers: the Reflections section, "The surroundings cube made visible".
 - Look: with both keys at 0 nothing changes from before. Wrong: a lacquer glint on metal at 0, or forward records dropping to dry after
   turning either on (the define makes the records bigger; the dry fallback catches it).
 
@@ -5298,9 +5299,27 @@ the copy's). One frame decides once (`ReflectionsEffect::GBufferFrame`), so the 
 Taken from upstream; the seams are in `docs/DESIGN.md "Upstream 1.1.5 merge"`. Reflections-side facts:
 - Dynamic world cubemap: `[Shaders.Reflections.Main] CubeMode` 2 (default; 0 = legacy screen-filled cube, 1 = also kept up for PBR metal and
   env maps with Reflections off, with sky, clouds and the light grid for unseen directions, 2 = as 1 plus a staggered 360-degree 3D world
-  cube drawn from the scene, one face per frame), `CubeResolution` 128 (64-256, restart), `CubeDistance` 4096. The world cube is bound at
-  set 1 binding 32 / slot 31 (upstream used 30 / 29, which collided with our G-buffer COLOR1 / COLOR3 and film at 28-31). Cost: not measured
-  (the owner's rule was to bench CubeMode 2 against 1 and 0 before keeping the default; not run).
+  cube drawn from the scene), `CubeResolution` 128 (64-256, restart), `CubeDistance` 4096. The world cube is bound at set 1 binding 32 /
+  slot 31 (upstream used 30 / 29, which collided with our G-buffer COLOR1 / COLOR3 and film at 28-31). Upstream drew one face every frame:
+  1.0 ms of GPU at SunGI2 (frame total 12.2 ms at CubeMode 2, 11.2 at 1, 10.8 at 0; runs 20261127-140437 / -141109, see DESIGN.md
+  "Upstream 1.1.5 merge").
+- Cheaper world cube (ours, 2026-11-27, owner: "do the first 3 for the live cubemap"; `ShadowManager::RenderReflectionCubeFace`,
+  `ReflectionsEffect::BeginWorldCubeFaces` / `WorldCubeFaceStale`). The cube is axis-aligned around the camera, so turning never needs a
+  redraw. Once all six faces exist, a face is redrawn only when it is stale: the camera moved `CubeMoveThreshold` (96) units since it was
+  drawn; the light it was drawn under changed (sun direction over ~2 degrees; sun, ambient, sky or fog brightness over 8 %; another set of
+  the cube's 4 lamps or their total colour, without Dimmer so flicker does not count, over 15 %); it is older than `CubeRefreshSeconds` (10);
+  the exterior cell changed; or `CubeLean` / `CubeDistance` changed. At most one face every `CubeFaceInterval` (2) frames. A new place (other
+  interior or worldspace, a 1000-unit jump) still empties the cube and fills two faces a frame. `CubeLean` (on) leaves actors, misc items,
+  books, apparatus and anything under radius 48 (outdoors) / 24 (indoors) out of the draw. Missing keys: 1 / 0 / 0 / false = upstream's way.
+  Every 600 frames the log says how many faces were drawn ("UNOFFICIAL Reflections world cube: ...").
+  Bench (2026-11-27, owner's toml, faces from that log line; runs 20261127-154220 SunGI2, -155036 Saloon): standing still 6 faces in 600
+  frames (the 10 s refresh) against 600 before; turning a full circle 2-8 in 600; running 52 in ~280 frames (about one face in five frames)
+  until the player hit a wall; Saloon standing still 12-18 in 600 frames at the slot's ~24 fps (the refresh again). One face cost 0.6-1.2 ms
+  of GPU in the clean runs of 11-27 (0.15-0.26 ms in a later, loaded run), so standing still or turning the cube now costs about 1 % of
+  before and running about a fifth. Frame totals of these runs are not used: room 06's trace replay shared the GPU (every pass, TAA and
+  DLSS included, 2.3 times slower in the Saloon run); the owner accepted the runs as they are. Pictures (sheets `F:\NVR-bench\shots\u115\cube-*.png`):
+  puddle1 mirrors, tilted01 mirrors (|diff| under 1) and a 24-step turn at SunGI2 show no lag or missing object in the reflections.
+  Not measured: CubeLean's saving per face; a long run in the open.
 - Weapon reflections without RT: the first-person weapon reflects the surroundings through the trace's exact mirror ray (no jitter, no screen
   march), `[Shaders.Reflections.RT] Weapon` 0.65, `WeaponRoughness` 0.28. Weapon specular occlusion 0.75 (smoothstep 0.08-0.45) plus ours,
   `(1 - SurfaceWetShare)` on the world (puddle mirror a7116ba). Upstream's technique-0 albedo / COLOR3 pushes were dropped (our bindings 30 / 31
@@ -5312,6 +5331,110 @@ Taken from upstream; the seams are in `docs/DESIGN.md "Upstream 1.1.5 merge"`. R
 - `Reflections.fx.hlsl` (D3D9): upstream's `SkyGradientAlong` / `SkyAlong` split with our `TESR_FogHorizonColor` / `FogSkyColor`; the cube
   backdrop's horizon uses the Fog colour too, as the Vulkan twin's `cb.horizonColor`.
 - Proven offline: 23 shaders rebuilt (spirv-val OK, `refl-hashes --check` OK), `Reflections.fx` compiles in four define sets. Not run in game.
+
+### The surroundings cube made visible: CubeStrength and the capture's mix (2026-11-27, branch `cube-visible`)
+Owner: the cube's reflections must show clearly on the gun, metal, chrome / glass env maps, wet ground and puddles, without glow, halos,
+washing out dry rough surfaces or lighting dark interiors. Bench facts it starts from (room 02, test48 code, `F:\NVR-bench\shots\u115\cube-*.png`):
+the cube is filled in and out; `[Shaders.PBR.Metal]` / `[Shaders.PBR.EnvMaps] CubeReflections` 0 moved the first-person 10mm by 2-3/255
+mean, forward and deferred alike; floors did not change between CubeMode 2 and 0; CubeMode 2 looked like a bluish haze over the crisp
+CubeMode 1 cube (ReflCube.pso's fog and CubeLean ruled out).
+
+**Causes, by reader** (from the code; numbers worked out, not measured):
+- *The haze (CubeMode 2), proven from the code's arithmetic*: Capture (`ReflectionsCapture.frag`, the .fx `CapturePS`) pulled EVERY texel
+  `max(CubeFade x 20, 0.12)` a frame toward the world cube's render, also the texels the screen sees this frame, which the screen then
+  put back at only CubeCapture. Steady state, the screen's share of a texel in view is c / (c + d (1 - c)): the owner's CubeCapture 0.02
+  gives 15 % screen and 85 % world render; the default 0.25 gives 74 % screen. CubeMode 1 decays at CubeFade (owner 0.005: 80 % screen;
+  default 0.001: ~100 %). The world render is cheap (no shadows, no AO, a hemisphere light, 128 a face), so it ghosted over the capture.
+  Checked and not the cause: the units (the screen is `linearize`d, the world cube is written linear with the same `LinearScales` the
+  object shaders light with) and the face orientation (all six `ShadowManager::RenderReflectionCubeFace` look-at frames match
+  `FaceDirection`). Believed, not checked: land drawn into the world cube may have no diffuse bound (`RenderPass::BindDiffuseOf` takes
+  slot 0 of a lighting property), so it would render grey 0.25 lit by the sky term: a bluish ground in the cube's lower half (C++).
+- *Metal* (`Includes/Object.hlsl getMetalAmbient`, forward and the deferred lighting-free records alike): the cube does not add, it
+  REPLACES the ambient + sky (`lerp(localEnv, live, CubeReflections x coverage)`) at the same split-sum weight, so switching it changes the
+  picture only by how the cube differs from the local light. On a dark gun the weight is small: metalF0 ~0.10 (sqrt albedo ~0.35), the
+  metal roughness ~0.31, times the owner's Reflections 2.0 and GreyMetal 0.5: about 11 % of the cube's light. Its mip is roughness x 7
+  (~2.2, 32 texels a face), and the cube's light is held to about 2.5 x the local light (`occ`). With 85 % hazy world render in the cube
+  there was little left to see.
+- *Env maps* (`EnvTemplate.hlsl`): the live cube replaces the game's painted cube through the same mask x fEnvMapScale x alpha, then
+  `WithMetal` (owner 0.6) where the metal look is on; both sources are about equally bright, so the swap shows as pattern, not level.
+- *Deferred* (is it lost?): no. The lighting-free records (`LAMPS_DEFERRED 2`) keep the metal's ambient, cube included, in COLOR0;
+  the deferred sun and lamp passes add no cube term; other deferred surfaces see the cube only through the Reflections composite.
+- *The gun*: with `[Shaders.Reflections.RT] Weapon = 0` `Reflectivity` returns 0 on the weapon, so the 1.1.5 weapon branch (the exact
+  mirror ray, the cube only, x Fresnel x Weapon) never runs and the gun shows the cube only through the metal ambient and its env pass
+  (above). At the default 0.65 the branch runs. The bench toml (`F:\NVR-bench\tomls\owner-mo2-20261127.toml`, copied from the owner's
+  file of 2026-11-27 10:47) had 0.0, so the bench gun numbers above are for Weapon 0, except the one shot that set 0.65 (about the same
+  as 1.5 without it); the owner's live file has 0.65 since a later edit that day. Gun pictures at the owner's 0.65 with `CubeStrength`: not run.
+- *Floors*: the trace's order is screen hit, then (mirror rays into open sky) the panorama, then the cube / grid, then the sky; indoors
+  the screen answers almost every ray, outdoors open-sky mirror rays take the panorama: the cube fills only what is left. By design.
+
+**Fixes**
+- Capture (`ReflectionsCapture.frag`, `Reflections.fx.hlsl CapturePS`): a texel on screen this frame fades at CubeFade (as CubeMode 1).
+  (Superseded 2026-11-28, next bullet: out of view a texel went to the world cube at `max(CubeFade x 8, 0.03)`, half in ~23 frames.)
+  - (2026-11-27 cube-keep-capture, owner: a window's reflection "gone as soon as i look away from the angle") out of view a texel now
+    keeps what the screen showed, fading at CubeFade as on screen, and gives way to the world cube only as the camera MOVES: the distance
+    moved this frame (the camera's world position, `CameraPosition`) / (2 x CubeMoveThreshold), passed as minus `TESR_ReflectionsCube.w` (Capture reads only w > 0 as a reset; CubeStep). CubeStep used to read the view matrix's translation, always 0 here (camera relative), so its 1000-unit jump test never fired either; both now use `CameraPosition`.
+    Turning on the spot keeps the capture; after walking 2 x CubeMoveThreshold (192 units) about a third of it is left. The world cube still
+    fills directions never seen (a reset starts every texel from it).
+- `[Shaders.Reflections.Main] CubeStrength` (new, 0-2, default **1.5**, live, menu row "Environment reflections strength"; a player's
+  file without the key gets the defaults file's 1.5; 1 is the look before it. RT Resolve's bounce miss (`ReflectionsRTResolve.frag` ~52, RT
+  reflections only) still reads the cube at full share whatever k: the one reader k does not scale). ONE strength for every reader: the Reflections passes (`Reflections.glsl` / .fx `EnvAlong`: the
+  trace's and RT Resolve's cube share, the weapon branch), metal and the env maps (`TESR_EnvCube`). k up to 1 scales the cube's share
+  (EnvAlong's coverage, the metal's and env pass's CubeReflections share) by k; above 1, smooth surfaces read the cube k times sharper
+  (`CubeLod` / `LiveCube`: lod x 1/k at roughness 0.2 or less, back to the plain lod in a straight ramp by 0.5, so rough dry ground keeps
+  its blur), and the metal's cap on the cube's light against the local light eases from 2.5 x to 2.5 x k. No weight is raised: every
+  reflection stays at most its split-sum / Fresnel weight, and the cube's light is what it holds (dark where the surroundings are dark).
+- Lanes: `TESR_ReflectionsGrid2.w` / `cb.grid2.w` = k (`ReflectionsEffect::GridStep`, a lane nothing else read); `TESR_EnvCube` x / y
+  times min(k, 1), w = 1 / max(k, 1) (`PBRShaders::UpdateConstants`, w 1 while the cube is not kept up).
+- No settings step: no saved key's default moved (CubeStrength is new).
+
+**Checks** (offline): the five Vulkan passes that read the cube rebuilt (Capture, Composite, RTResolve, Trace, TraceHiZ; the other six
+compile to the same bytes; spirv-val OK; `ReflectionsTraceHiZCount.spv`, the develop-only counters build, not rebuilt); `Reflections.fx`
+compiles plain, MaterialAware, G-buffer and both; the forward object, skin and env records with the owner's toml and the deferred
+lighting-free records of the edge shaders compile. Not run in game.
+
+**Bench** (room 02): the owner's settings, CubeMode 2: the cube (DebugView 3) as crisp as CubeMode 1 where you have looked; the 10mm in
+first person with CubeStrength 0 / 1 / 1.5 / 2 (indoors by a window, outdoors at noon, at night by neon); chrome and env-mapped props;
+puddles and wet ground looking away from the light. Wrong: a glow or bright rim on the gun in shade, rough dry ground turning glossy,
+dark rooms brightening with CubeStrength, or the cube lagging when you turn.
+
+### The 3D world cube drew nothing outdoors (2026-11-28, branch `cube-keep-capture`)
+- Cause, proven on the bench (Goodsprings porch, scene v-reflection1, owner's toml): every world cube face stayed the clear colour (rgb 0,
+  alpha 0), though the reference walk queued 120-200 casters a face. Read back from the device right before the draws
+  (`[Shaders.Reflections.Main] WorldCubeDump 1` now also logs the device's z test, colour write, cull, clip planes and the queued casters):
+  ZFUNC was GREATEREQUAL (7). The pass asked for LESSEQUAL through the game's render-state cache (`NiDX9RenderState`), which did not reach
+  the device (why is believed, not proven: the cache already held LESSEQUAL while the device had the reversed-depth GREATEREQUAL that
+  `RenderShadowMaps` sets for this game's depth clear of 0). With the face's standard projection and a depth clear of 1, no pixel passed.
+- Fix (`ShadowManager::RenderReflectionCubeFace`): ZFUNC is set and put back on the device directly, round the cache (as the sun layer copy
+  does). After it the log reads func 4 and the faces hold the town, land and sky gaps (runs `F:\NVR-bench\work\bench\autotest\20261128-003150-slotA`,
+  `-005307-slotA`; face sheet `F:\NVR-bench\shots\20261128-005307-slotA\worldcube-faces-sheet.png`). Land colour looks right (sand and rock
+  tones, no normal-map blue). Interiors: not run (believed to have had the same fault; the interior ARK luma change of 11-27 is unexplained).
+- DebugView 3 behind the camera shows the world cube's town only after the capture restarts (bench list `cube-world-proof`: a hop over a
+  cell border): `F:\NVR-bench\shots\20261128-005307-slotA\NeonSelfTest_00-53-25_ab_04_dv3-behind-world.png`.
+- Found here and fixed on the same branch (commit aae08b5; the Capture bullet under "Fixes" above): CubeStep measured the camera's
+  movement from `TheRenderManager->InvViewMatrix` row 4, 0 0 0 in this renderer (camera-relative view; logged on the bench), so the
+  distance moved was always 0 and the 1000-unit jump test never fired. It now reads `TheRenderManager->CameraPosition`.
+- Review (2026-11-28): the depth, blend and stencil states of the face pass are written to the cache and the device both (this file's
+  idiom for a stale cache), and put back on both by the StateGuard; the dump log also records ZWRITE, alpha blend and stencil.
+- Frame cost: not measured (the faces now shade pixels where they shaded none; the GPU timer was off in these runs).
+
+### The world cube indoors, and behind you after a restart (2026-11-28, branch `cube-world-pending`)
+- Indoors the world cube draws (proven on the bench, owner's toml, scenes v-tilted01 = ARK room and v-saloon; lists `cube-int-proof-*`):
+  the six faces dumped by `WorldCubeDump` hold the room (ARK: walls, ceiling lamps, the computer wall, median 0.4; Saloon: tin ceiling,
+  fan, floor, picture frames, median 0.004, as dark as the hallway on screen). Face sheets `F:\VS-scratch\int-cube-2026-11-28\` (bench runs
+  `20261128-131154-slotA` ARK, `20261128-131317-slotA` Saloon).
+- Fault found there (proven): a capture restart (entering a cell, a load, a fast travel, a jump over 1000 units) also starts the world cube
+  over at the new place, and its six faces take a few frames (two a frame). The capture restarted while it was incomplete, so from the
+  backdrop alone, and with the camera standing the world cube then seeped into what is out of view at CubeFade (0.1 % a frame). Behind the
+  camera the Saloon showed a flat haze (the interior backdrop) and the ARK room a third-strength room for seconds after every entry.
+- Fix (`ReflectionsEffect::CubeStep`): a restart with the world cube incomplete is remembered; the first frame it is complete, what is out of
+  view takes it whole (decay 1 through the existing moved-distance path, `-CubeReset`); on screen keeps the screen's picture. Given up after
+  120 frames (review: a world cube completed much later must not wipe the capture). The log says each restart (at most one line a second)
+  and the fill; on the bench the fill came 2 frames after each restart. Before/after (DebugView 3 behind the camera, 8 frames after a
+  restart; list `cube-int-behind-*`): Saloon haze -> the hallway's wood wall; ARK dim room (mean 35) -> the room (mean 105). Sheet
+  `F:\VS-scratch\int-cube-2026-11-28ehind-sheet.png`.
+- Not changed, noted: the Saloon's backdrop (CubeMode 1, and before the fill) is a blue haze about three times as bright as the room.
+- Bench note: shot lists trim `wait` to 10 frames unless marked `# HEARTBEAT-LIST`; a dump needs about 12 frames, so the lists set
+  `WorldCubeDump 1` in two shots in a row.
 
 ## ShadowsExteriors
 

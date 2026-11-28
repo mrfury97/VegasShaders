@@ -53,7 +53,7 @@ float4 TESR_ObjectMotionData;        // UNOFFICIAL 2026-10-29 ObjectMotion: x 1 
 float4 TESR_ReflectionsCube;         // x: face being drawn (0-5, D3D order), y: its size in texels, z: mip level, w: 1 = empty the cube
 float4 TESR_ReflectionsCube2;        // x: capture blend, y: fade per frame, z: last mip level, w: 1 = the cube is in use
 float4 TESR_ReflectionsGrid;         // UNOFFICIAL 2026-10-19 GridFallback: xyz the light grid's corner relative to the camera, w: cell size
-float4 TESR_ReflectionsGrid2;        // x: 1 = the grid is in use, y: brightness (GridBrightness), z: 1 = the grid carries colours
+float4 TESR_ReflectionsGrid2;        // x: 1 = the grid is in use, y: brightness (GridBrightness), z: 1 = the grid carries colours, w: CubeStrength (2026-11-27)
 float4 TESR_ReflectionsGrid3;        // rgb: the light every surface gets here (linear: the sky's or the cell's ambient, AmbientLight's)
 float4 TESR_ReflectionsWetFx;        // 2026-11-19 WetnessEffects consolidation: x 1 = active (+2 = SkylightingMode 1), y rainWetness, z puddleWetness, w MinRainWetness
 float4 TESR_ReflectionsWetFx2;       // x MaxPuddleWetness, y PuddleRoughness, z AlbedoBuffer bound on stage 14 for CompositePS, w PuddlesOn
@@ -147,6 +147,9 @@ static const float CubeFade = TESR_ReflectionsCube2.y;
 static const float CubeLastMip = TESR_ReflectionsCube2.z;
 static const float CubeOn = TESR_ReflectionsCube2.w;
 static const float GridOn = TESR_ReflectionsGrid2.x;
+// UNOFFICIAL 2026-11-27 cube-visible: [Shaders.Reflections.Main] CubeStrength (0-2, ReflectionsEffect::GridStep): how much the surroundings
+// cube shows wherever it is read (EnvAlong). Its share is min(k, 1); above 1 its blur on smooth surfaces is cut by k (CubeLod).
+static const float CubeStrength = TESR_ReflectionsGrid2.w;
 static const int RefineSteps = 5;
 static const float BrightestReflection = 16.0;   // linear: a lamp's core reflected in one texel cannot flash the whole puddle
 
@@ -587,12 +590,19 @@ float3 WorldToViewDir(float3 w) { return mul(float4(w, 0.0), TESR_ViewTransform)
 
 // The reflection cube along a world direction, blurred for the roughness: rgb colour, a how much of it was ever seen
 // (0: nothing there yet). A coarser level fills the gaps of the sharper one.
+// (2026-11-27 cube-visible) the mip for a roughness: with CubeStrength k above 1, smooth surfaces (up to roughness 0.2) read k times
+// sharper, back to the plain lod in a straight ramp by 0.5, so rough dry ground keeps its blur (Includes/LiveCube.hlsl the same rule).
+// The share (EnvAlong's a) is never above the cube's own.
+float CubeLod(float roughness) {
+	return roughness * CubeLastMip * lerp(1.0 / max(CubeStrength, 1.0), 1.0, saturate((roughness - 0.2) / 0.3));
+}
+
 float4 EnvAlong(float3 worldDir, float roughness) {
-	float lod = roughness * CubeLastMip;
+	float lod = CubeLod(roughness);
 	float4 sharp = texCUBElod(TESR_ReflectionsEnv, float4(worldDir, lod));
 	float4 coarse = texCUBElod(TESR_ReflectionsEnv, float4(worldDir, min(lod + 2.0, CubeLastMip)));
 	float4 m = sharp + coarse * (1.0 - saturate(sharp.a));
-	return float4(m.rgb / max(m.a, 1.0e-4), saturate(m.a));
+	return float4(m.rgb / max(m.a, 1.0e-4), saturate(m.a) * saturate(CubeStrength));
 }
 
 // ---- The light grid (AmbientLight's GridBounce) as the far / off-screen fallback ----
@@ -700,6 +710,12 @@ float3 CubeBackdropFx(float3 ndir) {
 float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	float2 st = (vpos + 0.5) / CubeSize * 2.0 - 1.0;
 	float3 dir = FaceDirection(CubeFace, st);
+	float3 view = WorldToViewDir(dir);
+	// (2026-11-27 cube-visible, as ReflectionsCapture.frag) a texel on screen this frame fades at CubeFade, not 12 % a frame toward the
+	// world cube's hazy render; out of view too, giving way to the world cube only as the camera moves (2026-11-27 cube-keep-capture:
+	// -CubeReset, the distance moved this frame over 2 x CubeMoveThreshold; it was max(CubeFade x 8, 0.03), gone a second after looking away).
+	float2 onSuv = rectToScreen(ToScreen(view));
+	bool onScreen = view.z > 0.05 && all(onSuv > 0.005) && all(onSuv < 0.995);
 	float4 result;
 	[branch] if (CubeOn >= 1.5) {
 		float3 ndir = normalize(dir);
@@ -708,14 +724,13 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 			float4 world = texCUBElod(TESR_ReflectionsEnv, float4(ndir, 0.0));
 			baseEnv = lerp(baseEnv, world.rgb, saturate(world.a));
 		}
-		float decay = CubeOn > 2.5 ? max(CubeFade * 20.0, 0.12) : CubeFade;
+		float decay = (CubeOn > 2.5 && !onScreen) ? max(CubeFade, -min(CubeReset, 0.0)) : CubeFade;
 		float4 prev = texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0));
 		result = CubeReset > 0.0 ? float4(baseEnv, 1.0) : lerp(prev, float4(baseEnv, 1.0), decay);
 	} else {
 		result = CubeReset > 0.0 ? 0.0 : texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0)) * (1.0 - CubeFade);
 	}
 
-	float3 view = WorldToViewDir(dir);
 	[branch] if (view.z > 0.05) {
 		float2 uv = ToScreen(view);
 		[branch] if (all(rectToScreen(uv) > 0.005) && all(rectToScreen(uv) < 0.995)) {
