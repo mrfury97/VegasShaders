@@ -331,8 +331,10 @@ void SunFarEffect::RenderFactor(IDirect3DDevice9* Device, IDirect3DSurface9* Sce
 	Constants.Apply.x = 0.0f;
 	VolumetricCloudsEffect* volumetric = TheShaderManager->Effects.VolumetricClouds;
 	if (volumetric) volumetric->shadowsViaSunFar = false;
+	// (2026-11-28) set again only if this frame's pass draws through Vulkan (ExtRender); (review) reset also when the pass does not run
+	// at all, so the deferred sun stops taking the land's shadow that nothing would then leave out of the forward pixels
+	TerrainShadowBridge::SunFarVulkan = false;
 	if (!Enabled || !Effect || !ShouldRender()) return;
-	TerrainShadowBridge::SunFarVulkan = false;	// (2026-11-28) set again only if this frame's pass draws through Vulkan (ExtRender)
 	CapturedNormals::SunFarDrew = true;	// UNOFFICIAL 2026-11-17 fast-restart: the grass's own normal for this pass from the next frame (CapturedNormals.h)
 	// UNOFFICIAL 2026-11-21: capture real water draws so dry ground crossing TESR_WaterSettings.x is never skipped as water.
 	const UInt32 frame = TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0;
@@ -515,7 +517,7 @@ namespace {
 		{ 1, 14, NVR_EXT_BIND_SAMPLED_IMAGE, 14, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_water: NVR_WaterDepth
 		{ 1, 15, NVR_EXT_BIND_SAMPLED_IMAGE, 15, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_scene: NVR_Scene (UNOFFICIAL 2026-10-25)
 		{ 1, 16, NVR_EXT_BIND_SAMPLED_IMAGE, 16, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_waterMask: WaterMask (UNOFFICIAL 2026-11-21)
-		{ 1, 17, NVR_EXT_BIND_SAMPLED_IMAGE, 17, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_albedo: the G-buffer's albedo, the deferred mark (UNOFFICIAL 2026-11-28)
+		{ 1, 17, NVR_EXT_BIND_SAMPLED_IMAGE, 17, NVR_EXT_VIEW_2D, FALSE, 0 },	// t_terrainMark: the deferred sun's mark (UNOFFICIAL 2026-11-28)
 		{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 },	// Constants
 		{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 },	// samplerPoint: push offset 0
 		{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 },	// samplerLinear: push offset 4
@@ -582,10 +584,10 @@ bool SunFarEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Render
 	inputs[13] = volume ? volume : depth;
 	inputs[14] = water ? water : depth;
 	inputs[16] = extWaterMask ? extWaterMask : depth;
-	// UNOFFICIAL 2026-11-28 the deferred mark: only while this frame's G-buffer is there and the deferred sun took the land's shadow.
-	const bool albedoNow = CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f;
-	const bool deferredTerrain = albedoNow && TerrainShadowBridge::AppliedFrame == (unsigned)TheFrameRateManager->FrameNumber;
-	inputs[17] = deferredTerrain ? static_cast<IDirect3DBaseTexture9*>(CapturedNormals::AlbedoTexture) : depth;
+	// UNOFFICIAL 2026-11-28 the deferred sun's mark of the pixels it put the land's shadow on (review: exact, unlike the G-buffer's
+	// albedo mark), when it did so this frame.
+	const bool deferredTerrain = TerrainShadowBridge::Mark && TerrainShadowBridge::AppliedFrame == (unsigned)TheFrameRateManager->FrameNumber;
+	inputs[17] = deferredTerrain ? static_cast<IDirect3DBaseTexture9*>(TerrainShadowBridge::Mark) : depth;
 
 	// The constants, as the D3D9 pass uploads them this frame.
 	SunFarUniforms uniforms = {};

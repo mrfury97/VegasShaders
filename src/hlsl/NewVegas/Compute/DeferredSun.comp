@@ -32,6 +32,8 @@ layout(set = 1, binding = 13) uniform texture2D t_wetFilm;        // DeferredWet
 // and the map's ground, as the SunFar pass reads them (effects/TerrainShadows.h); stand-ins t_depth unless the flag is set.
 layout(set = 1, binding = 14) uniform texture2D t_terrainShadow;  // TESR_TerrainShadowBuffer (G16R16: r upper, g lower shadow height)
 layout(set = 1, binding = 15) uniform texture2D t_terrainGround;  // TESR_TerrainShadowGround (L16: the ground)
+layout(set = 1, binding = 16, rgba16f) uniform image2D i_terrainMark; // (review 2026-11-28) 1 where the land's shadow went on the sunlight
+                                                                  //     here (TerrainShadowBridge::Mark; SunFar leaves it out there)
 
 layout(push_constant) uniform Push {
     uint linearSampler;   // 0: LINEAR, CLAMP (cloud shadow)
@@ -1058,7 +1060,10 @@ void main() {
         if (HasFlag(kFlagSSShadows) && dot(N, L) >= 0.0) shadow *= texelFetch(t_sssMask, px, 0).r;
     }
     // UNOFFICIAL 2026-11-28 mountain shadows: on the sunlight here, before fog and sky light (SunFar leaves this pixel's land part out)
-    if (HasFlag(kFlagTerrainShadow) && dot(light, vec3(1.0)) > 0.0) shadow *= DSTerrainShadow(P);
+    if (HasFlag(kFlagTerrainShadow)) {
+        if (dot(light, vec3(1.0)) > 0.0) shadow *= DSTerrainShadow(P);
+        imageStore(i_terrainMark, px, vec4(1.0));   // this pixel's sunlight is done here: SunFar leaves the land's part out
+    }
 
     if (skinPx) {
         float skinMask, skinThin, skinSoft;

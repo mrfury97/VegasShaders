@@ -207,6 +207,9 @@ namespace DeferredSun {
 	inline ID3D9NvrExtBuffer* ComputeUbo = nullptr;
 	inline IDirect3DTexture9* ComputeRt0DummyTex = nullptr;
 	inline IDirect3DSurface9* ComputeRt0DummySurf = nullptr;
+	inline IDirect3DTexture9* TerrainMarkTex = nullptr;	// (review 2026-11-28) i_terrainMark: TerrainShadowBridge::Mark, the target's size
+	inline IDirect3DSurface9* TerrainMarkSurf = nullptr;
+	inline UINT TerrainMarkW = 0, TerrainMarkH = 0, TerrainMarkClearedFrame = ~0u;
 	inline IDirect3DTexture9* ComputeSpecDummyTex = nullptr;
 	inline IDirect3DSurface9* ComputeSpecDummySurf = nullptr;
 	inline bool ComputeTried = false, ComputeFailed = false;
@@ -623,6 +626,7 @@ namespace DeferredSun {
 				{ 1, 13, NVR_EXT_BIND_SAMPLED_IMAGE, 13, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_wetFilm
 				{ 1, 14, NVR_EXT_BIND_SAMPLED_IMAGE, 14, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_terrainShadow (2026-11-28)
 				{ 1, 15, NVR_EXT_BIND_SAMPLED_IMAGE, 15, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_terrainGround
+				{ 1, 16, NVR_EXT_BIND_STORAGE_IMAGE, 16, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_terrainMark (review 2026-11-28)
 				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // linearSampler
 				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // pointSampler
@@ -830,7 +834,25 @@ namespace DeferredSun {
 		// and SunFar's Vulkan pass running (only it can leave the land's part out on the pixels lit here). The first person too: its
 		// position is near the camera, and SunFar leaves out the pixels the world's G-buffer marks deferred under it.
 		const UInt32 terrainFrame = (UInt32)TheFrameRateManager->FrameNumber;
-		const bool terrainOn = TheShaderManager && TheShaderManager->GameState.isExterior && TerrainShadowBridge::Usable(terrainFrame);
+		bool terrainOn = TheShaderManager && TheShaderManager->GameState.isExterior && TerrainShadowBridge::Usable(terrainFrame);
+		// (review 2026-11-28) the mark of the pixels done here, at the target's size, made by the frame's first run (a later run on a
+		// target of another size takes no land shadow, so SunFar keeps it there) and cleared at the frame's first dispatch
+		if (terrainOn && (!TerrainMarkTex || TerrainMarkW != t.Width || TerrainMarkH != t.Height) && TerrainMarkClearedFrame != terrainFrame) {
+			if (TerrainMarkSurf) { TerrainMarkSurf->Release(); TerrainMarkSurf = nullptr; }
+			if (TerrainMarkTex) { TerrainMarkTex->Release(); TerrainMarkTex = nullptr; }
+			TerrainShadowBridge::Mark = nullptr;
+			if (SUCCEEDED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &TerrainMarkTex, NULL)) &&
+				SUCCEEDED(TerrainMarkTex->GetSurfaceLevel(0, &TerrainMarkSurf))) {
+				TerrainMarkW = t.Width; TerrainMarkH = t.Height;
+				TerrainShadowBridge::Mark = TerrainMarkTex;
+			}
+			else if (TerrainMarkTex) { TerrainMarkTex->Release(); TerrainMarkTex = nullptr; }
+		}
+		if (terrainOn && (!TerrainMarkSurf || TerrainMarkW != t.Width || TerrainMarkH != t.Height)) terrainOn = false;
+		if (terrainOn && TerrainMarkClearedFrame != terrainFrame) {
+			TerrainMarkClearedFrame = terrainFrame;
+			if (FAILED(d->ColorFill(TerrainMarkSurf, NULL, D3DCOLOR_ARGB(0, 0, 0, 0)))) terrainOn = false;
+		}
 		if (terrainOn) {
 			const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
 			cb.terrainRel[0] = TerrainShadowBridge::Data[0] - cam.x;
@@ -867,6 +889,7 @@ namespace DeferredSun {
 			{ 13, NVR_EXT_BIND_SAMPLED_IMAGE, filmTex ? filmTex : depthTex,   0, 0, 0, FALSE },
 			{ 14, NVR_EXT_BIND_SAMPLED_IMAGE, terrainOn ? static_cast<IDirect3DBaseTexture9*>(TerrainShadowBridge::Heights) : depthTex, 0, 0, 0, FALSE },
 			{ 15, NVR_EXT_BIND_SAMPLED_IMAGE, terrainOn ? static_cast<IDirect3DBaseTexture9*>(TerrainShadowBridge::Ground) : depthTex, 0, 0, 0, FALSE },
+			{ 16, NVR_EXT_BIND_STORAGE_IMAGE, terrainOn ? TerrainMarkSurf : ComputeSpecDummySurf, 0, 0, 0, FALSE },
 			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
 			{ 0, NVR_EXT_BIND_SAMPLER,        DxvkCompute::LinearClamp(),       0, 0, 0, FALSE },
 			{ 1, NVR_EXT_BIND_SAMPLER,        DxvkCompute::PointClamp(),        0, 0, 0, FALSE },
@@ -895,7 +918,7 @@ namespace DeferredSun {
 			return false;
 		}
 		if (sssOn) ScreenSpaceShadows::MarkUsed();
-		if (terrainOn && !Vm.on) TerrainShadowBridge::AppliedFrame = terrainFrame;	// (2026-11-28) SunFar leaves the land's part out on deferred pixels
+		if (terrainOn) TerrainShadowBridge::AppliedFrame = terrainFrame;	// (2026-11-28) SunFar leaves the land's part out where the mark says
 		StatPasses++;
 		StatCompute++;
 		if (fogExact) StatFogExact++;

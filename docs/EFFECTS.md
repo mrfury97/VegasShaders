@@ -5802,10 +5802,15 @@ and the composites (this effect's apply, the fog composite, AmbientLight's) mult
   28; rows 96-98 terrainRel / terrainRange / terrainParams, the map's edges camera-relative; bindings 14 t_terrainShadow, 15
   t_terrainGround) multiplies the sun's shadow by the land's shadow as each surface is lit, before fog and sky light, for the world and the
   first-person run. Same maths as SunFar's TerrainShadow (Conor's port of Community Shaders' Terrain Shadows).
-- SunFar's Vulkan pass (Compute/SunFar.frag) then leaves the land's part out of the factor's rgb on pixels the G-buffer marks deferred
-  (albedo a > 1; binding 17 t_albedo; constants' new last row `deferredTerrain`, x 1 when the deferred sun took it this frame). The alpha
-  (what reaches the sun: the Specular effect's highlight), Darkness (the ambient share) and the cloud shadows are unchanged; grass, water and
-  other forward-drawn pixels keep the old way.
+- The deferred sun marks exactly the pixels it did this on (binding 16 i_terrainMark, an RGBA16F target of the target's size, cleared at
+  the frame's first dispatch; world and first-person runs). SunFar's Vulkan pass (Compute/SunFar.frag) leaves the land's part out of the
+  factor's rgb where the mark is 1 (binding 17 t_terrainMark; constants' new last row `deferredTerrain`, x 1 when the deferred sun took it
+  this frame). Review (lead-architect, 2026-11-28): the first version used the G-buffer's albedo mark (a > 1), which deferred foliage does
+  not carry (it keeps a = 1): grass and leaves would have taken the shadow twice, darker than shade. The alpha (what reaches the sun: the
+  Specular effect's highlight), Darkness (the ambient share, still on the finished pixel, fog included) and the cloud shadows are
+  unchanged; water and other forward-drawn pixels keep the old way.
+- With `[Shaders.VolumetricClouds.Main] PlantShadows` false (default true) plants now take the land's shadow from the deferred sun (SunFar
+  left them out of everything it takes).
 - The three meet in core/TerrainShadowBridge.h: TerrainShadowMap::Publish (ShadowManager::RenderShadowMaps) gives the map and constants for
   the frame; SunFar says whether its Vulkan pass drew (only it can read the mark: the D3D9 technique has all 16 samplers taken), and the
   deferred sun applies it only then and notes the frame it did. Without the fork's passes, or with the D3D9 SunFar: as before.

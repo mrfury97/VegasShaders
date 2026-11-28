@@ -33,7 +33,7 @@ layout(set = 1, binding = 13) uniform texture2D t_volume;        // NVR_VolumeCl
 layout(set = 1, binding = 14) uniform texture2D t_water;         // NVR_WaterDepth
 layout(set = 1, binding = 15) uniform texture2D t_scene;         // NVR_Scene (2026-10-25: the world as drawn; POINT)
 layout(set = 1, binding = 16) uniform texture2D t_waterMask;     // WaterMask (2026-11-21: .g > 0.45 strictly on water pixels)
-layout(set = 1, binding = 17) uniform texture2D t_albedo;        // (2026-11-28) the G-buffer's albedo: a > 1 = a deferred record's pixel
+layout(set = 1, binding = 17) uniform texture2D t_terrainMark;   // (2026-11-28) 1 where the deferred sun put the land's shadow on the sunlight
 
 // The constants the HLSL reads (std140: vec4s and mat4s only, in the order of SunFarUniforms in SunFar.cpp).
 layout(set = 2, binding = 0, std140) uniform Constants {
@@ -352,7 +352,7 @@ vec4 SunFarPS(vec2 uvc) {
     // UNOFFICIAL 2026-11-28 mountain shadows in the deferred sun: a pixel it lit has the land's shadow in its sunlight already (before
     // fog and sky light), so the factor the composites multiply in leaves the land's part out there; a (what reaches the sun, for the
     // Specular effect's highlight) and the debug views keep it. Grass, water and other forward-drawn pixels: as before.
-    const bool deferredLit = cb.deferredTerrain.x > 0.5 && LOD(t_albedo, pc.samplerPoint, ruv, 0.0).a > 1.0001;
+    const bool deferredLit = cb.deferredTerrain.x > 0.5 && LOD(t_terrainMark, pc.samplerPoint, ruv, 0.0).r > 0.5;
     float blockedLit = deferredLit ? cloud : blocked;
     // DebugView 4 (test, 2026-10-25 as the .fx): as a fully clouded sky over the whole screen at Strength 1.
     blocked = cb.sunFarData.y > 3.5 ? 0.0 : blocked;
