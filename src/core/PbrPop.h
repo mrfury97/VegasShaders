@@ -2,7 +2,6 @@
 #include <algorithm>
 #include <string>
 #include "TestTools.h"
-#include "OnePassLimit.h"	// UNOFFICIAL 2026-11-14 fd-fixes
 
 // UNOFFICIAL 2026-10-18 PBR pop-in (helper pbrpop; bench\deep-roadmap\evidence\pbrpop-LOG.md).
 //
@@ -133,25 +132,6 @@ namespace PbrPop {
 	namespace ActorPasses {
 		inline UInt8 On = 0, FirstPersonNow = 0;
 		inline UInt32 Widened = 0;
-		// UNOFFICIAL 2026-11-14 fd-fixes (DeferredRenderer on native D3D9; docs/next/FD-FIXES-RESULTS.md item 5): the same cave also gives
-		// the objects that may draw FORWARD while the renderer's 23 + f compare is on (LampsInOnePass) the forward shader's own limit back:
-		// 5 + f with MoreLampsPerObject (the game's cap 6 + f = the shader's 6 slots: no lamp lost), else the game's 2 + f. Past it they are
-		// drawn in several passes, which light every lamp (a deferred base with its lamp passes skipped, or a forward base with its lamp
-		// passes). Which objects: the first-person model (FirstPersonNow), and every object seen drawing forward with lamps lost (the game's
-		// cap or the shader's slots: DeferredRenderer::AfterDraw -> Keep), learned per geometry; a new one asks for one pass rebuild (at most
-		// every kRebuildGap frames). The compare is read only when an object's pass list is built (registration), so this is the one place
-		// that can choose per object. Off (OnePassLimit::On 0): the cave runs as before.
-		// (the set, the switch and the counters: OnePassLimit.h, shared with DeferredRenderer.h)
-		inline UInt32 __cdecl DeferredLimit(const void* geometry, UInt32 f, UInt32 limitNow, UInt32 lamps) {
-			// (2026-11-15) the material's emittance x its multiplier (luma), only where OnePassLimit may hold the object for it
-			float emission = 0.0f;
-			if (OnePassLimit::HoldEmissive && geometry && lamps > f + OnePassLimit::ReferenceImm) {
-				const NiMaterialProperty* material = ((const NiGeometry*)geometry)->propertyState.m_spMaterialProperty;
-				if (material && material->fEmitMult > 0.0f)
-					emission = (0.2126f * material->emit.r + 0.7152f * material->emit.g + 0.0722f * material->emit.b) * material->fEmitMult;
-			}
-			return OnePassLimit::Limit(geometry, f, limitNow, lamps, FirstPersonNow != 0, emission);
-		}
 		constexpr UInt32 kSite = 0x00BE00E3;
 		constexpr UInt8 kOld[8] = { 0x3B, 0xC8, 0x0F, 0x8F, 0x90, 0x00, 0x00, 0x00 };
 		constexpr UInt32 kRebuildBit = 0x08000000;
@@ -161,27 +141,8 @@ namespace PbrPop {
 static UInt8* PbrPopActorsOnFlag = &PbrPop::ActorPasses::On;
 static UInt8* PbrPopFirstPersonFlag = &PbrPop::ActorPasses::FirstPersonNow;
 static UInt32* PbrPopWidenedCount = &PbrPop::ActorPasses::Widened;
-static UInt8* PbrPopDeferredLimitFlag = &OnePassLimit::On;
-static void* PbrPopDeferredLimitFn = (void*)&PbrPop::ActorPasses::DeferredLimit;
 static __declspec(naked) void PbrPopActorCave() {
 	__asm {
-		// UNOFFICIAL 2026-11-14 fd-fixes: the deferred renderer's per-object limit first (EAX = the limit, ECX = the lamps)
-		push edx
-		mov edx, PbrPopDeferredLimitFlag
-		cmp byte ptr [edx], 0
-		pop edx
-		je actors
-		pushad								// EAX at [esp+28], ECX at [esp+24]; entry offsets + 32
-		push dword ptr [esp + 24]			// lamps
-		push dword ptr [esp + 32]			// the limit now (EAX)
-		push dword ptr [esp + 0x7C]			// f (local_38: [ESP+0x54] at entry + 32 + 8)
-		push dword ptr [esp + 0xBC]			// the geometry (param_1: [ESP+0x90] at entry + 32 + 12)
-		mov eax, PbrPopDeferredLimitFn
-		call eax
-		add esp, 16
-		mov dword ptr [esp + 28], eax		// EAX after popad: the limit to compare with
-		popad
-	actors:
 		cmp ecx, eax
 		jle fits
 		push edx
@@ -217,24 +178,6 @@ namespace PbrPop {
 	namespace ActorPasses {
 		inline void BeginFrame() {
 			const bool want = TheSettingManager->GetSettingI("Main.Main.Misc", "ActorsInOnePass") != 0;
-			// UNOFFICIAL 2026-11-14 fd-fixes: the cave also serves the deferred renderer's per-object limit (OnePassLimit::On, set by
-			// LampsInOnePass::BeginFrame this frame, before this); a learned object asks for one rebuild, at most every kRebuildGap frames
-			if (OnePassLimit::On && !Installed && !OnePassLimit::Refused) {
-				if (memcmp((const void*)kSite, kOld, sizeof(kOld))) {
-					Logger::Log("[WARNING] UNOFFICIAL DeferredRenderer: the game's code at %08X is not as expected (another plugin?): forward objects keep the 23 + f compare (lamps lost, counted)", kSite);
-					OnePassLimit::Refused = true;
-				}
-				else {
-					WriteRelJump(kSite, (UInt32)&PbrPopActorCave);
-					SafeWrite8(kSite + 5, 0x90); SafeWrite8(kSite + 6, 0x90); SafeWrite8(kSite + 7, 0x90);
-					Installed = true;
-					Logger::Log("UNOFFICIAL DeferredRenderer: the per-object one-pass limit is in (forward objects keep %u + f lamps in one pass)", (unsigned)OnePassLimit::ForwardImm);
-				}
-			}
-			OnePassLimit::CaveIn = Installed;
-			if (Installed && OnePassLimit::RebuildDue()) {
-				*(UInt32*)kEnabledPasses ^= kRebuildBit;	// every object's passes rebuilt: the learned ones take the forward limit
-			}
 			if (want == (On != 0) || Refused) return;
 			if (want && !Installed) {
 				if (memcmp((const void*)kSite, kOld, sizeof(kOld))) {

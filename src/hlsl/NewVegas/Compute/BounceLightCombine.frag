@@ -19,8 +19,8 @@ float readDepthLod(vec2 coord) { return POINT_LOD(t_depth, coord).x * farZ; }
 vec3 UpsampleHardEdges(vec2 coord, float depth, vec2 base, vec2 fraction) {
     float tolerance = max(depth * 0.03, 2.0);
     vec2 px = cb.reciprocalResolution.xy;
-    float left = readDepthLod(coord - vec2(px.x, 0.0)), right = readDepthLod(coord + vec2(px.x, 0.0));
-    float up = readDepthLod(coord - vec2(0.0, px.y)), down = readDepthLod(coord + vec2(0.0, px.y));
+    float left = readDepthLod(ClampFullUV(coord - vec2(px.x, 0.0))), right = readDepthLod(ClampFullUV(coord + vec2(px.x, 0.0)));
+    float up = readDepthLod(ClampFullUV(coord - vec2(0.0, px.y))), down = readDepthLod(ClampFullUV(coord + vec2(0.0, px.y)));
     float slopeX = (depth - left) * (right - depth) > 0.0 ? min(abs(depth - left), abs(right - depth)) : 0.0;
     float slopeY = (depth - up) * (down - depth) > 0.0 ? min(abs(depth - up), abs(down - depth)) : 0.0;
     tolerance += 1.5 * (slopeX + slopeY) / cb.bounceLayout.x;
@@ -28,7 +28,7 @@ vec3 UpsampleHardEdges(vec2 coord, float depth, vec2 base, vec2 fraction) {
     float weights = 1.0e-5;
     for (int y = 0; y < 2; y++) {
         for (int x = 0; x < 2; x++) {
-            vec4 tap = POINT_LOD(t_bounce, (base + vec2(float(x), float(y)) + 0.5) * cb.bounceLayout.zw);
+            vec4 tap = POINT_LOD(t_bounce, ClampLowUV((base + vec2(float(x), float(y)) + 0.5) * cb.bounceLayout.zw));
             float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y) * (abs(tap.a - depth) <= tolerance ? 1.0 : 0.0);
             sum += tap.rgb * weight;
             weights += weight;
@@ -38,23 +38,24 @@ vec3 UpsampleHardEdges(vec2 coord, float depth, vec2 base, vec2 fraction) {
 }
 
 void main() {
-    vec4 color = LINEAR_LOD(t_source, uv);
-    float depth = readDepth(uv);
+    vec2 ruv = ClampFullUV(uv * cb.renderScale.xy);
+    vec4 color = LINEAR_LOD(t_source, ruv);
+    float depth = readDepth(ruv);
     if (depth < NearFade || depth > DrawDistance) { o_color = color; return; }
 
     // Depth-aware bilinear upsample: the four nearest low-resolution texels, the ones at another depth counted less.
-    vec2 position = uv / cb.bounceLayout.zw - 0.5;
+    vec2 position = (uv * cb.renderScale.xy) / cb.bounceLayout.zw - 0.5;
     vec2 base = floor(position);
     vec2 fraction = position - base;
     vec3 indirect;
-    if (pc.pass_.x > 0.5) indirect = UpsampleHardEdges(uv, depth, base, fraction);
+    if (pc.pass_.x > 0.5) indirect = UpsampleHardEdges(ruv, depth, base, fraction);
     else {
         float tolerance = max(depth * 0.03, 2.0);
         vec3 sum = vec3(0.0);
         float weights = 1.0e-5;
         for (int y = 0; y < 2; y++) {
             for (int x = 0; x < 2; x++) {
-                vec4 tap = POINT_LOD(t_bounce, (base + vec2(float(x), float(y)) + 0.5) * cb.bounceLayout.zw);
+                vec4 tap = POINT_LOD(t_bounce, ClampLowUV((base + vec2(float(x), float(y)) + 0.5) * cb.bounceLayout.zw));
                 float weight = (x != 0 ? fraction.x : 1.0 - fraction.x) * (y != 0 ? fraction.y : 1.0 - fraction.y);
                 weight /= 1.0 + abs(tap.a - depth) / tolerance;
                 sum += tap.rgb * weight;

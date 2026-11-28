@@ -202,16 +202,20 @@ namespace ReflMaterial {
 	// UNOFFICIAL 2026-11-07 (perf-mirrorfix) the first-person scene (Render.cpp RenderFirstPersonHook): drawn into the same target before
 	// the effects copy the material out (the arms and gun over a mirror kept its material: a chrome gun). No material passes here; every
 	// pass that replaces the colour writes its own alpha (Own), under the same separate alpha blend as the world scene.
-	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live, bool replaceForward = false) {
+	inline void BeginFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool live, bool replaceForward = false, bool envTemplateBound = false) {
 		ForwardReplaceLive(replaceForward, true);	// UNOFFICIAL 2026-11-20: only subtract last frame's reflection coverage from the gun's env map when RT weapon reflections are active (otherwise world reflections behind the gun cut holes out of it)
-		if (device) device->SetPixelShaderConstantF(36, ForwardReplace, 1);
+		if (device && envTemplateBound) device->SetPixelShaderConstantF(36, ForwardReplace, 1);
 		FirstPersonLive = CompiledIn() && live && state && device && !StatesSet;
 		NeutralDepth = 0;
-		if (FirstPersonLive) SetSceneStates(state, device);
+		if (FirstPersonLive) {
+			Current = -1.0f;
+			SetSceneStates(state, device);
+		}
 	}
-	inline void EndFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device) {
+	inline void EndFirstPerson(NiDX9RenderState* state, IDirect3DDevice9* device, bool envTemplateBound = false) {
 		ForwardReplaceLive(ForwardReplaceInWorld);	// UNOFFICIAL 2026-11-12 ReplaceForward
-		if (device) device->SetPixelShaderConstantF(36, ForwardReplace, 1);
+		if (device && envTemplateBound) device->SetPixelShaderConstantF(36, ForwardReplace, 1);
+		if (device && FirstPersonLive && Current != 0.0f && Current != -1.0f) Send(device, 0.0f);
 		if (FirstPersonLive) RestoreSceneStates(state, device, "first-person");
 		FirstPersonLive = false;
 	}
@@ -399,13 +403,13 @@ namespace ReflMaterial {
 		~NeutralScope() { NeutralEnd(device); }
 	};
 
-	// Before each object pass (Render.cpp RenderPassStandardHook / RenderPassSkinnedHook). world: in the world scene; hasMap: with an
-	// _rmaos map. (2026-11-07 perf-mirrorfix: the decision is ReflMaterialRule::Decide's Material.)
-	inline void ForPass(const void* pass, NiGeometry* geometry, bool world, bool hasMap, IDirect3DDevice9* device) {
+	// Before each object pass (Render.cpp RenderPassStandardHook / RenderPassSkinnedHook). world / firstPerson: ShaderSplit's context;
+	// hasMap: with an _rmaos map. (2026-11-07 perf-mirrorfix: the decision is ReflMaterialRule::Decide's Material.)
+	inline void ForPass(const void* pass, NiGeometry* geometry, bool world, bool firstPerson, bool hasMap, IDirect3DDevice9* device) {
 		LastFlagged = false;
-		if (!Writing || !device) return;
+		if (!(world ? Writing : (firstPerson && FirstPersonLive)) || !device) return;
 		UInt16 e = pass ? *(const UInt16*)((const UInt8*)pass + 0x04) : 0;
-		const bool flag = world && ReflMaterialRule::Decide(PassFacts(pass, geometry, true, hasMap)) == ReflMaterialRule::Material;
+		const bool flag = ReflMaterialRule::Decide(PassFacts(pass, geometry, world, hasMap)) == ReflMaterialRule::Material;
 		Send(device, flag ? 1.0f : 0.0f);
 		if (flag) { FlaggedPasses++; LastFlagged = true; LastFlaggedPass = e; OnShadersBound(device); }
 	}

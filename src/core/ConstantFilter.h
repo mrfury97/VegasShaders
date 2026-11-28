@@ -255,7 +255,6 @@ namespace ConstantFilter {
 		if (GpuTimer::Enabled && LinearPreDecode::Active && !LinearPreDecode::Shaders.empty() && PreDecodeThread()) PreDecodeCheck(self);
 		const HRESULT result = OrigSetPixelShader(self, shader);
 		if (SUCCEEDED(result) && PixelShaderObserver) PixelShaderObserver(shader);
-		if (SUCCEEDED(result) && SharedDrawState::PixelShaderSet) SharedDrawState::PixelShaderSet(shader);	// UNOFFICIAL DrawStateTracking
 		if (SUCCEEDED(result) && !LinearPreDecode::Shaders.empty() && PreDecodeThread()) {
 			ResyncPending = false;	// (2026-10-27) this bind decides Active and refreshes the copies itself
 			LinearPreDecode::Active = LinearPreDecode::Is(shader);
@@ -265,10 +264,10 @@ namespace ConstantFilter {
 	}
 
 	inline HRESULT STDMETHODCALLTYPE HookReset(IDirect3DDevice9* self, D3DPRESENT_PARAMETERS* parameters) {
-		if (GetCurrentThreadId() != Thread) { InterlockedIncrement(&ForeignTick); const HRESULT r = OrigReset(self, parameters); if (StateLostObserver) StateLostObserver(); if (SharedDrawState::StateLost) SharedDrawState::StateLost(); return r; }
+		if (GetCurrentThreadId() != Thread) { InterlockedIncrement(&ForeignTick); const HRESULT r = OrigReset(self, parameters); if (StateLostObserver) StateLostObserver(); return r; }
 		Wipe();
 		const HRESULT result = OrigReset(self, parameters);
-		if (StateLostObserver) StateLostObserver(); if (SharedDrawState::StateLost) SharedDrawState::StateLost();
+		if (StateLostObserver) StateLostObserver();
 		Wipe();
 		DeferResync();	// UNOFFICIAL LinearPreDecode (2026-10-27: at the next constant or shader call, see DeferResync)
 		return result;
@@ -285,7 +284,7 @@ namespace ConstantFilter {
 		if (GetCurrentThreadId() == Thread) Wipe();	// in case the runtime applied what it recorded
 		else InterlockedIncrement(&ForeignTick);
 		const HRESULT result = OrigEndStateBlock(self, block);
-		if (StateLostObserver) StateLostObserver(); if (SharedDrawState::StateLost) SharedDrawState::StateLost();
+		if (StateLostObserver) StateLostObserver();
 		if (GetCurrentThreadId() == Thread) DeferResync();	// UNOFFICIAL LinearPreDecode (2026-10-27: deferred, see DeferResync)
 		return result;
 	}
@@ -294,7 +293,7 @@ namespace ConstantFilter {
 		if (GetCurrentThreadId() == Thread) Wipe();	// it may set any constant without going through the calls above
 		else InterlockedIncrement(&ForeignTick);
 		const HRESULT result = OrigApply(self);
-		if (StateLostObserver) StateLostObserver(); if (SharedDrawState::StateLost) SharedDrawState::StateLost();
+		if (StateLostObserver) StateLostObserver();
 		// UNOFFICIAL LinearPreDecode: it may also have set the pixel shader. 2026-10-27: no device calls in here any more (the native
 		// D3D9 crash): the copies are remade at the next constant or shader call (DeferResync).
 		if (GetCurrentThreadId() == Thread) DeferResync();
@@ -339,7 +338,6 @@ namespace ConstantFilter {
 			return;
 		}
 		Hooked = true;
-		SharedDrawState::ObserversLive = true;	// UNOFFICIAL DrawStateTracking
 		Wipe();
 		Logger::Log("UNOFFICIAL SkipRedundantConstants: shader-constant uploads the device already holds are skipped (setting %s).",
 			TheSettingManager->GetSettingI("Main.Main.Performance", "SkipRedundantConstants") ? "on" : "off");

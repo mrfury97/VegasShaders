@@ -88,7 +88,7 @@ bool SpecularEffect::RenderWithBounce(IDirect3DDevice9* Device, IDirect3DSurface
 	FrameChain& chain = TheShaderManager->Chain;
 	auto timer = TimeLogger();
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): as one Vulkan pass when the passes are on; false (nothing drawn) runs the D3D9 technique below.
-	if (!ExtFailed && DxvkCompute::PassesOn() && chain.Owns(RenderTarget, RenderedSurface) &&
+	if (!ExtFailed && DxvkCompute::PassesOnRect() && chain.Owns(RenderTarget, RenderedSurface) &&
 		ExtRenderBounce(Device, RenderTarget, RenderedSurface, bounce, data, layout)) {
 		Device->SetRenderTarget(0, RenderTarget);
 		renderTime = timer.LogTime("EffectRecord::ExtRender Specular (with bounce light)");
@@ -273,6 +273,14 @@ bool SpecularEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pipeline, resources, count + 3, &push, sizeof(push), true);
 	}
 
+	auto rectViewport = [](IDirect3DSurface9* surf, RECT& storage) -> const RECT* {
+		if (!RenderRect::Active() || !surf) return nullptr;
+		D3DSURFACE_DESC desc = {};
+		if (FAILED(surf->GetDesc(&desc))) return nullptr;
+		storage = { 0, 0, (LONG)RenderRect::Width(desc.Width), (LONG)RenderRect::Height(desc.Height) };
+		return &storage;
+	};
+
 	if (techniqueIndex == 1) {
 		// SpecularPrep.frag: each 4 x 4 block's normal and depth into TESR_SpecularNormals.
 		IDirect3DBaseTexture9* textures[] = { TextureOf("TESR_DepthBuffer"), TextureOf("TESR_NormalsBuffer") };
@@ -283,7 +291,8 @@ bool SpecularEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 		ID3D9NvrExtPipeline* pipeline = SpecularPipeline(extPrep, "SpecularPrep", count);
 		NVR_EXT_RESOURCE_BINDING resources[count + 3] = {};
 		if (!constants || !pipeline || !SpecularResources(resources, textures, count, constants)) return false;
-		return ExtDrawTo(pipeline, &target, 1, resources, count + 3, &push, sizeof(push), nullptr, ExtUv::ScreenQuad);	// FrameVS into a smaller target
+		RECT rectVp = {};
+		return ExtDrawTo(pipeline, &target, 1, resources, count + 3, &push, sizeof(push), rectViewport(target, rectVp), ExtUv::ScreenQuad);	// FrameVS into a smaller target
 	}
 
 	// SpecularLow.frag: the light each block reflects, into TESR_SpecularBuffer. BindExtras set this step's sky visibility and SunFar;
@@ -299,7 +308,8 @@ bool SpecularEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Rend
 	ID3D9NvrExtPipeline* pipeline = SpecularPipeline(extLight, "SpecularLow", count);
 	NVR_EXT_RESOURCE_BINDING resources[count + 3] = {};
 	if (!constants || !pipeline || !SpecularResources(resources, textures, count, constants)) return false;
-	return ExtDrawTo(pipeline, &target, 1, resources, count + 3, &push, sizeof(push), nullptr, ExtUv::ScreenQuad);	// FrameVS into a smaller target
+	RECT rectVp = {};
+	return ExtDrawTo(pipeline, &target, 1, resources, count + 3, &push, sizeof(push), rectViewport(target, rectVp), ExtUv::ScreenQuad);	// FrameVS into a smaller target
 }
 
 // SpecularBounce.frag: BounceLight's combine and the specular in one pass, through the frame chain (RenderWithBounce's pass).

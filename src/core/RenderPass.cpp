@@ -177,9 +177,10 @@ static bool WindMoves(NiGeometry* caster) {
 void RenderPass::RenderAccum() {
 	if (GeometryList.size() == 0) return;	// nothing queued: not even the shaders are set
 
-	// Shaders for the whole pass are set once, here.
+	// Shaders for the whole pass are set once, here (skinned passes with AlphaPixelShader may switch between opaque and clip PS per caster).
 	NiDX9RenderState* state = TheRenderManager->renderState;
-	state->SetPixelShader(PixelShader->ShaderHandle, false);
+	ShaderRecordPixel* currentPS = PixelShader;
+	state->SetPixelShader(currentPS->ShaderHandle, false);
 	state->SetVertexShader(VertexShader->ShaderHandle, false);
 	const bool lean = Lean;
 	VertexRun.valid = PixelRun.valid = false;	// a new pass: its first caster does the full SetCT
@@ -197,11 +198,18 @@ void RenderPass::RenderAccum() {
 #endif
 
 		UpdateConstants(caster);
+		ShaderRecordPixel* const wantedPS = (AlphaPixelShader && TheShaderManager->Effects.ShadowsExteriors->Constants.Data.y > 0.5f)
+			? AlphaPixelShader : PixelShader;
+		if (wantedPS != currentPS) {
+			state->SetPixelShader(wantedPS->ShaderHandle, false);
+			currentPS = wantedPS;
+			PixelRun.valid = false;
+		}
 #if NVR_TEST_TOOLS
 		if (stats) t1 = SunShadowStats::Now();
 #endif
-		if (lean) { SetCTLean(PixelShader, PixelRun); SetCTLean(VertexShader, VertexRun); }
-		else { PixelShader->SetCT(); VertexShader->SetCT(); }	// every constant of both shaders
+		if (lean) { SetCTLean(wantedPS, PixelRun); SetCTLean(VertexShader, VertexRun); }
+		else { wantedPS->SetCT(); VertexShader->SetCT(); }	// every constant of both shaders
 #if NVR_TEST_TOOLS
 		if (stats) t2 = SunShadowStats::Now();
 #endif

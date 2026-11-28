@@ -20,6 +20,15 @@ static void Expect(const MaterialRules::Table& table, const char* path, const ch
 	}
 }
 
+static void ExpectResolved(const MaterialRules::Table& table, const char* path, const MaterialRules::MeshSignals& sig, const char* expected, const char* label) {
+	const char* reason = nullptr;
+	const std::string got = table.Get(table.Resolve(MaterialRules::Normalize(path), sig, &reason)).Name;
+	if (got != expected) {
+		printf("FAIL [%s] %s -> %s (expected %s, reason=%s)\n", label, path, got.c_str(), expected, reason ? reason : "none");
+		++failures;
+	}
+}
+
 static bool IsColourTexture(const std::string& p) {
 	static const char* const suffixes[] = { "_n.dds", "_m.dds", "_g.dds", "_em.dds", "_s.dds", "_h.dds", "_e.dds", "_p.dds", "_sk.dds", "_hl.dds" };
 	for (const char* s : suffixes) {
@@ -67,6 +76,112 @@ int main(int argc, char** argv) {
 	Expect(table, "textures\\effects\\fxglassspray01.dds", "default");
 	Expect(table, "textures\\landscape\\lod\\anything.dds", "default");
 	Expect(table, "textures\\somemod\\unknownthing.dds", "default");
+
+	// Pathword classification on modded/custom paths.
+	Expect(table, "textures\\nmc\\metal\\wall01.dds", "metal");
+	Expect(table, "textures\\ojobueno\\ceramic\\basin01.dds", "ceramic");
+	Expect(table, "textures\\mycustommod\\wood_props\\beam02.dds", "wood");
+	Expect(table, "textures\\architecture\\strip\\glass\\pane01.dds", "glass");
+	Expect(table, "textures\\custom\\carpet_pack\\floor01.dds", "soft");
+
+	// Keyword false-positive guards & new material classes.
+	Expect(table, "textures\\clutter\\painting01.dds", "clutter");
+	Expect(table, "textures\\architecture\\eventhall.dds", "building");
+	Expect(table, "textures\\architecture\\safety01.dds", "building");
+	Expect(table, "textures\\architecture\\hollywood01.dds", "building");
+	Expect(table, "textures\\clutter\\bottlecap01.dds", "metal");
+	Expect(table, "textures\\clutter\\metalplate01.dds", "metal");
+	Expect(table, "textures\\clutter\\woodbarrel01.dds", "wood");
+	Expect(table, "textures\\architecture\\chainlink01.dds", "metal");
+	Expect(table, "textures\\architecture\\corrugatedsiding01.dds", "corrugated");
+	Expect(table, "textures\\architecture\\linoleumtile01.dds", "linoleum");
+	Expect(table, "textures\\furniture\\mahoganydesk01.dds", "polishedwood");
+	Expect(table, "textures\\clutter\\dumpster01.dds", "paintedmetal");
+
+	// Live mesh/shader metadata fusion tests.
+	{
+		MaterialRules::MeshSignals sig;
+		sig.IsWindowEnv = true;
+		ExpectResolved(table, "textures\\architecture\\strip\\curtain_or_pane.dds", sig, "glass", "window-env");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.IsRefraction = true;
+		ExpectResolved(table, "textures\\somemod\\opaque_thing.dds", sig, "glass", "refraction");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.HasEnvMap = true;
+		sig.HasEnvMask = true;
+		sig.EnvMapScale = 0.6f;
+		ExpectResolved(table, "textures\\architecture\\whatever\\panel01.dds", sig, "envmetal", "env-mask");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.HasEnvMap = true;
+		sig.EnvMapScale = 0.45f;
+		ExpectResolved(table, "textures\\somemod\\locker_panel.dds", sig, "paintedmetal", "env-moderate");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.IsFaceGen = true;
+		sig.HasEnvMap = true;
+		sig.EnvMapScale = 1.0f;
+		ExpectResolved(table, "textures\\somemod\\npc_head.dds", sig, "default", "facegen-guard");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.IsHair = true;
+		sig.HasEnvMap = true;
+		sig.EnvMapScale = 1.0f;
+		ExpectResolved(table, "textures\\somemod\\npc_hair.dds", sig, "default", "hair-guard");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.IsEyeEnv = true;
+		sig.HasEnvMap = true;
+		sig.EnvMapScale = 1.0f;
+		ExpectResolved(table, "textures\\somemod\\npc_eye.dds", sig, "default", "eye-guard");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.IsEmissive = true;
+		ExpectResolved(table, "textures\\somemod\\display_panel.dds", sig, "sign", "emissive");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.HasSpecular = false;
+		ExpectResolved(table, "textures\\somemod\\chalk_wall.dds", sig, "matte", "no-spec");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.HasSpecular = true;
+		sig.HasMaterial = true;
+		sig.SpecularLuma = 0.5f;
+		sig.Glossiness = 80.0f;
+		ExpectResolved(table, "textures\\somemod\\lacquer_case.dds", sig, "glossy", "high-gloss");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.MeshName = "ChromeBumper:0";
+		ExpectResolved(table, "textures\\vehicles\\trim01.dds", sig, "chrome", "mesh-chrome");
+	}
+	{
+		MaterialRules::MeshSignals sig;
+		sig.MeshName = "WoodDoor:0";
+		ExpectResolved(table, "textures\\architecture\\door01.dds", sig, "wood", "mesh-wood");
+	}
+	{
+		// Explicit path keyword must NOT be overridden by env-map/gloss metadata.
+		MaterialRules::MeshSignals sig;
+		sig.HasEnvMap = true;
+		sig.HasEnvMask = true;
+		sig.EnvMapScale = 1.0f;
+		sig.HasMaterial = true;
+		sig.Glossiness = 90.0f;
+		sig.SpecularLuma = 0.8f;
+		ExpectResolved(table, "textures\\architecture\\barn\\barnwood01.dds", sig, "wood", "keyword-kept");
+	}
 
 	if (argc >= 3) {
 		std::ifstream list(argv[2]);

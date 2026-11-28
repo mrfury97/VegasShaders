@@ -7,10 +7,13 @@
 class RenderPass {
 public:
 	RenderPass() {}
-	virtual ~RenderPass() { VertexShader = nullptr; PixelShader = nullptr; }
+	virtual ~RenderPass() { VertexShader = nullptr; PixelShader = nullptr; AlphaPixelShader = nullptr; }
 
 	ShaderRecordVertex*	VertexShader;	// the pass's shaders (set by ShadowManager)
 	ShaderRecordPixel*	PixelShader;
+	// UNOFFICIAL 2026-11-27 SkinnedAlphaTest Early-Z: when non-null, per-caster alpha-tested geometries use AlphaPixelShader (discard),
+	// while opaque casters keep PixelShader (hardware Early-Z). Null everywhere except skinnedGeoPass when AlphaTest is active.
+	ShaderRecordPixel*	AlphaPixelShader = nullptr;
 
 	// UNOFFICIAL 2026-10-13: draw every caster double-sided ([Shaders.ShadowsExteriors.Main] TwoSidedCasters, sun shadow maps
 	// only; ShadowManager::RenderShadowMap sets it round its draws). Each object's own cull mode otherwise skips one-sided walls

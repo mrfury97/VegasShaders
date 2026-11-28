@@ -34,6 +34,7 @@ public:
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the ping-pong path's passes as Vulkan passes (Compute\SunShadows*.frag), every technique,
 	// through the same targets in the same order. Called by Render only (the in-place fallback stays D3D9). False: the D3D9 path runs.
+	bool	ExtSupportsRenderRect() const override { return true; }
 	bool	ExtPingPong(IDirect3DDevice9* Device, UINT techniqueIndex, const D3DXTECHNIQUE_DESC& description,
 		IDirect3DTexture9* shadowTexture, IDirect3DSurface9* shadowSurface);
 	ExtPass	extPasses[5];	// march, blur, apply, sharp, sharp finish

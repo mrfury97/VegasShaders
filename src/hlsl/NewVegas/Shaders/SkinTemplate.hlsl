@@ -638,11 +638,7 @@ PS_OUTPUT main(PS_INPUT pin) {
         #else
             const float3 gbAlbedo = albedo;
         #endif
-        #if SKIN_DEFERRED == 2
-            pout.scatter = float4(gbAlbedo, FD_LF_CODE(FD_LF_SPEC, skinKeep));	// lighting-free: DeferredSun and DeferredLamps light it
-        #else
-            pout.scatter = float4(gbAlbedo, FD_LAMPS_CODE(skinKeep));	// the sun kept: DeferredLamps lights it
-        #endif
+        pout.scatter = float4(gbAlbedo, FD_LF_CODE(FD_LF_SPEC, skinKeep));	// lighting-free: DeferredSun and DeferredLamps light it
         const float2 skinOct = ShadowEncodeNormal(worldN);
         pout.albedo = float4(6.0f, skinOct.x, skinRoughness, skinOct.y);	// model 6 (skin), no specular bit, metal 0; the bumped normal; roughness
         pout.capturedNormal.a = FDSkinCode(normalTexel.a, skinThinness, FDSkinSoftness(N, Nsoft));

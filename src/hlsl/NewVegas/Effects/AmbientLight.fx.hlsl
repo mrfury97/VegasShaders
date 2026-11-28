@@ -280,8 +280,7 @@ float4 Estimate(VSOUT IN) : COLOR0 {
 	float3 origin = PositionFromViewZ(uv, center.x);
 	float fade = smoothstep(NearFade, NearFade * 2.0f, origin.z) * (1.0f - smoothstep(DrawDistance * 0.7f, DrawDistance, origin.z));
 	[branch] if (fade <= 0.0f) {
-		float3 vmBounce = (origin.z >= 9.0e5f && NVR_ALGI.x > 0.5f) ? tex2Dlod(NVR_ALRTGI, float4(uv, 0.0f, 0.0f)).rgb : 0.0f;
-		return float4(vmBounce, 1.0f);
+		return float4(0.0f, 0.0f, 0.0f, 1.0f);
 	}
 
 	float3 normal = OctDecode(Unpack2(center.y));
@@ -1077,7 +1076,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	// this depth, as the occlusion), x GIStrength; DebugView 13 shows it alone (before the surface colour), as AmbientLightApply-gi (in
 	// view 12's branch below: one more constant branch here would run out of the 16 boolean registers).
 	float3 giLight = 0.0f;
-	[branch] if (giApply) giLight = (edgeReject > 0.5f && weights < 0.01f ? nearestGI : giSum / weights) * BounceStrength;
+	[branch] if (giApply && !viewModel) giLight = (edgeReject > 0.5f && weights < 0.01f ? nearestGI : giSum / weights) * BounceStrength;
 	// 12 (lightgrid2, diagnostic): the walls the grid knows in the pixel's own cell (r, g, b: cover across x, y, z; the wall memory merged
 	// with the sun map's, as GridPropagate reads it), NVR_GridWave's stage bound to the blocking buffer for it.
 	[branch] if (DebugView > 11.5f) {
@@ -1141,7 +1140,7 @@ float4 Apply(VSOUT IN, uniform bool sky) : COLOR0 {
 	// and the normal map's shading all got one colour and the bounce laid a flat milky layer over them (bench shipfix, demo room: GI High
 	// lifted the floor 28 %, its contrast down 9 %). The guess now takes the cap on a small local average (4 taps 4 px out, same surface
 	// only; the source before the sun shadow, its ratio carried over) and puts each pixel's own detail back on top (at most 2x).
-	[branch] if (giApply) {
+	[branch] if (giApply && !viewModel) {
 		float3 c0 = linearize(tex2Dlod(TESR_SourceBuffer, float4(IN.UVCoord, 0.0f, 0.0f)).rgb);
 		float3 localSum = c0;
 		float localWeight = 1.0f;

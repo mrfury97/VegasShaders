@@ -28,8 +28,10 @@ public:
 	void	RegisterTextures();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	bool	ExtSupportsRenderRect() const override { return true; }
 	// The cover pre-pass (technique SunGlareCover), then the picture pass through EffectRecord::Render.
 	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 
 private:
 	// How much of the sun shows, measured once a frame into one texel and eased over a few frames there (the pass blends into
@@ -39,5 +41,10 @@ private:
 	IDirect3DSurface9*	coverSurface = nullptr;
 	CachedHandle		techCover;
 	DWORD				coverFrame = 0;		// the frame the texel was last written (older than the last frame: cleared first)
+	ExtPass				extPass{};
+	ExtPass				extCover{};
+	ExtUniformBuffer	extUniforms{};
+	bool	FillUniforms(struct SunGlareUniforms& u);
+	bool	ExtRunCover(IDirect3DDevice9* Device);
 	bool	RunCover(IDirect3DDevice9* Device);
 };

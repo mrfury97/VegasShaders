@@ -1,5 +1,6 @@
 [_Shaders.WorldSurface.Main]
 Strength = 1.0                      # [0.0-2.0] UNOFFICIAL (2026-11-24), live: overall multiplier for all World surface detail & weathering layers.
+Interiors = false                   # UNOFFICIAL (2026-11-27), live: also run World surface detail & weathering inside interior cells (false skips indoors to save performance).
 Detail = 0.75                       # [0.0-2.0] UNOFFICIAL (2026-11-24), live: close-range micro-detail normal relief and roughness variation on concrete, rock, metal, and terrain.
 Distance = 2400.0                   # [400.0-6000.0] UNOFFICIAL (2026-11-24), live: world distance (game units) at which surface detail and weathering fade out.
 DebugView = 0                       # [0-1] UNOFFICIAL (2026-11-24), live, test only: 1 paints layer masks over the scene (red rust, green moss, blue waterline, yellow dust, grey detail).

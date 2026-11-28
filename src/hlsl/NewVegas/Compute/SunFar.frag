@@ -76,6 +76,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     mat4 shadowToLightLod;          // TESR_ShadowCameraToLightTransformLod
     mat4 projectionTransform;       // TESR_ProjectionTransform
     mat4 viewTransform;             // TESR_ViewTransform
+    vec4 renderScale;               // TESR_RenderScale (xy scale, zw 1/scale)
 } cb;
 
 layout(location = 0) in vec2 uv;
@@ -336,10 +337,11 @@ float WaterDeep(vec2 uvc, vec3 rel) {
 }
 
 vec4 SunFarPS(vec2 uvc) {
+    vec2 ruv = uvc * cb.renderScale.xy;
     // Not on the sky (at the far plane) nor on nothing at all.
-    float depth = readDepthLod(uvc);
+    float depth = readDepthLod(ruv);
     if (depth <= 0.0 || depth >= farZ * 0.996) return vec4(1.0);
-    vec3 rel = toWorld(uvc) * depth;
+    vec3 rel = toWorld(uvc + cb.sunFarJitter.xy) * depth;
     vec3 world = cb.cameraPosition.xyz + rel;
 
     float terrain = TerrainShadow(world);
@@ -355,23 +357,23 @@ vec4 SunFarPS(vec2 uvc) {
     if (cb.sunFarData.y > 0.5 && cb.sunFarData.y < 3.5) {
         vec3 tint = mix(vec3(1.0), vec3(0.25, 1.0, 0.25), (1.0 - terrain) * 0.8) * mix(vec3(1.0), vec3(0.35, 0.5, 1.0), (1.0 - cloud) * 0.8);
         if (cb.sunFarData.y > 1.5) tint *= mix(vec3(1.0), vec3(0.85, 0.9, 1.0), TerrainShadowCoverage(world));
-        float water = cb.sunFarWater.z * step(2.5, cb.sunFarData.y) * (IsWaterPixel(uvc, world, GetWorldNormalLod(uvc), depth) ? 1.0 : 0.0);
-        tint *= mix(vec3(1.0), mix(vec3(1.0), vec3(1.0, 0.15, 0.15), WaterDeep(uvc, rel)), water);
+        float water = cb.sunFarWater.z * step(2.5, cb.sunFarData.y) * (IsWaterPixel(ruv, world, GetWorldNormalLod(ruv), depth) ? 1.0 : 0.0);
+        tint *= mix(vec3(1.0), mix(vec3(1.0), vec3(1.0, 0.15, 0.15), WaterDeep(ruv, rel)), water);
         return vec4(tint, 1.0);
     }
     if (blocked >= 0.999 && shade <= 0.001) return vec4(1.0);   // most of the screen
-    vec3 normal = GetWorldNormalLod(uvc);
+    vec3 normal = GetWorldNormalLod(ruv);
 
     // Water is left alone (WaterShadows: shallow water fades in by its depth, the share of deep water is WaterDeepShare).
     float keep = 1.0;   // the share of the change this pixel takes (1 off the water)
-    if (IsWaterPixel(uvc, world, normal, depth)) {
-        keep = cb.sunFarWater.x * mix(1.0, cb.sunFarWater.y, WaterDeep(uvc, rel));
+    if (IsWaterPixel(ruv, world, normal, depth)) {
+        keep = cb.sunFarWater.x * mix(1.0, cb.sunFarWater.y, WaterDeep(ruv, rel));
         if (keep <= 0.0) return vec4(1.0, 1.0, 1.0, blocked);
     }
 
     // What the cascades already took (faded as GetSunShadow fades them). Not on water (keep < 1).
     float cascade = 1.0;
-    if (cb.shadowFade.y > 0.0 && keep >= 1.0) cascade = saturate(mix(CascadeLight(rel, normal), 1.0, cb.shadowFade.x));
+    if (cb.shadowFade.y > 0.0 && keep >= 1.0 && cb.sunFarJitter.z < 0.5) cascade = saturate(mix(CascadeLight(rel, normal), 1.0, cb.shadowFade.x));
 
     // Terrain lights with its own scales: surfaces facing up take the terrain scales, walls and objects the PBR ones.
     float terrainWeight = (cb.terrainData.z + cb.terrainData.w > 0.0) ? smoothstep(0.5, 0.8, normal.z) : 0.0;
@@ -392,7 +394,7 @@ vec4 SunFarPS(vec2 uvc) {
     // (2026-10-25, as the .fx) the share of the pixel the shaders filled with the game's fog keeps its brightness (NVR_Scene: the
     // world as drawn). sunFarWater.w 1 (OldSunModel / no scene texture): as before.
     float fogAmount = pow(1.0 - saturate((cb.fogData.y - length(rel)) / max(cb.fogData.y - cb.fogData.x, 1.0)), max(cb.fogData.w, 0.0001));
-    vec3 fogShare = saturate(fogAmount * cb.fogColor.rgb / max(LOD(t_scene, pc.samplerPoint, uvc, 0.0).rgb, vec3(0.0001)));
+    vec3 fogShare = saturate(fogAmount * cb.fogColor.rgb / max(LOD(t_scene, pc.samplerPoint, ruv, 0.0).rgb, vec3(0.0001)));
     factor = cb.sunFarWater.w > 0.5 ? factor : factor + (1.0 - factor) * fogShare;
     // a: what reaches the sun (1 lit).
     return vec4(factor, blocked);

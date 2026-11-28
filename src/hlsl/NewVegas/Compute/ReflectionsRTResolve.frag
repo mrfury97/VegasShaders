@@ -171,16 +171,16 @@ void main() {
             // bilinear rebuild of each direction's picture), so their mean is smooth, and still the same every frame (no test-11 shimmer).
             // The first-hit test widened to 25 % of the distance + 32 units: the hits two texels apart on a sphere seen in a curved metal lie
             // further apart (another thing met first is still told apart by the bounce class, the surface depth and the hit flags).
+            const ivec2 activeTexels = min(textureSize(sampler2D(t_rtRay, POINT_S), 0), ivec2(floor(cb.renderScale.xy / LowTexel + 0.5)));
             const uint bounceClass = (hitFlags & 256u) != 0u ? (hitFlags & 1u) | ((hitFlags >> 1u) & 2u) : 0u;
             if (bounceClass > 0u && !borrowed && !weaponRay) {
                 vec3 total = hitColour * 9.0;
                 float count = 9.0;
-                const ivec2 rayTexels = textureSize(sampler2D(t_rtRay, POINT_S), 0);
                 for (int dy = -2; dy <= 2; dy++) for (int dx = -2; dx <= 2; dx++) {
                     if (dx == 0 && dy == 0) continue;
                     const float w = float((3 - abs(dx)) * (3 - abs(dy)));
                     const ivec2 nb = texel + ivec2(dx, dy);
-                    if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, rayTexels))) continue;   // (off the image: texelFetch is undefined there)
+                    if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, activeTexels))) continue;   // (off the active rect / image: texelFetch is undefined there)
                     const vec2 nRay = texelFetch(sampler2D(t_rtRay, POINT_S), nb, 0).xy;
                     if (nRay.x <= 0.0 || nRay.y < 1.5 || nRay.y > 3.5) continue;          // (no own ray there: a borrower, a weapon pixel, nothing)
                     if (abs(nRay.x - ray.x) > ray.x * 0.05 + 4.0) continue;              // another surface
@@ -218,6 +218,7 @@ void main() {
                     ivec2 o = turn == 0 ? ivec2(k < 2 ? (k == 0 ? 1 : -1) : 0, k < 2 ? 0 : (k == 2 ? 1 : -1))
                                         : ivec2(k == 0 || k == 3 ? 1 : -1, k < 2 ? 1 : -1);
                     ivec2 nb = texel + o * spread;
+                    if (any(lessThan(nb, ivec2(0))) || any(greaterThanEqual(nb, activeTexels))) continue;
                     vec2 nRay = texelFetch(sampler2D(t_rtRay, POINT_S), nb, 0).xy;
                     if (nRay.x <= 0.0 || nRay.y < 1.5 || nRay.y > 3.5) continue;   // no own ray there this frame (or a weapon / borrower)
                     if (abs(nRay.x - ray.x) > ray.x * 0.05 + 4.0) continue;        // another surface (depth stop)

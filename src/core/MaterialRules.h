@@ -18,18 +18,53 @@
 //                                        authored (2026-11-05 VanillaBridge): keep (default) = where the game's own highlight data is
 //                                        (normal map alpha + the mesh's glossiness) the highlight follows it and rough= only fills the
 //                                        gap; replace = rough= decides as before
-//   folder  <prefix> <class> [final]     longest prefix wins; "final" folders are decided before any keyword
-//   keyword <word> <class> [not=<a>,<b>] the file name contains <word> and none of the not= words
-//   file    <path> <class>               one texture, before everything else
-//   strip   <prefix>                     a folder level to look through: "strip textures\nvdlc01" makes
-//                                        textures\nvdlc01\clutter\x.dds match as textures\clutter\x.dds
-// Order: file, final folder, keyword, folder, else no rule (today's look exactly). The class "default" is no rule too.
+//   folder   <prefix> <class> [final|fallback] longest prefix wins; "final" decides before keywords, "fallback" yields to keywords, specific folders, pathwords, and live mesh signals
+//   keyword  <word> <class> [not=<a>,<b>] the file name contains <word> and none of the not= words
+//   pathword <word> <class> [not=<a>,<b>] a folder segment in the texture path contains <word> and none of the not= words
+//   file     <path> <class>               one texture, before everything else
+//   strip    <prefix>                     a folder level to look through: "strip textures\nvdlc01" makes
+//                                         textures\nvdlc01\clutter\x.dds match as textures\clutter\x.dds
+// Order: file, final folder, keyword, folder, pathword, fallback folder, else no rule (today's look). The class "default" is no rule too.
 namespace MaterialRules {
 
 	enum Metal { MetalGuess = 0, MetalMask = 1, MetalFull = 2, MetalOff = 3 };
 	enum SssProfile {
 		SssNone = 0, SssLeaf = 1, SssCloth = 2, SssWax = 3,
 		SssMarble = 4, SssSnow = 5, SssFlesh = 6, SssPlastic = 7
+	};
+
+	enum class MatchKind : int {
+		Exact = 0,     // file <path>
+		Final = 1,     // folder <prefix> <class> final
+		Keyword = 2,   // keyword <word> <class>
+		Folder = 3,    // folder <prefix> <class>
+		PathWord = 4,  // pathword <word> <class> (matches directory segments before last '\')
+		Fallback = 5,  // folder <prefix> <class> fallback (broad top-level bucket)
+		None = 6       // default (rule 0)
+	};
+
+	struct MatchResult {
+		int Rule = 0;
+		MatchKind Kind = MatchKind::None;
+		bool IsBroad() const { return Kind == MatchKind::Fallback || Kind == MatchKind::None; }
+	};
+
+	struct MeshSignals {
+		const char* MeshName = nullptr;
+		bool IsFaceGen = false;
+		bool IsHair = false;
+		bool IsEyeEnv = false;
+		bool IsWindowEnv = false;
+		bool IsRefraction = false;
+		bool IsDecal = false;
+		bool HasEnvMap = false;
+		bool HasEnvMask = false;
+		float EnvMapScale = 0.0f;
+		bool HasSpecular = true;
+		bool HasMaterial = false;
+		float Glossiness = 0.0f;
+		float SpecularLuma = 0.0f;
+		bool IsEmissive = false;
 	};
 
 	inline int SssModelId(int sss) {
@@ -113,46 +148,127 @@ namespace MaterialRules {
 				if (end == text.size()) break;
 			}
 			std::stable_sort(Folders.begin(), Folders.end(), [](const Prefix& a, const Prefix& b) { return a.Path.size() > b.Path.size(); });
+			ClassGlass = FindClass("glass");
+			ClassEnvMetal = FindClass("envmetal");
+			ClassPaintedMetal = FindClass("paintedmetal");
+			ClassSign = FindClass("sign");
+			ClassMatte = FindClass("matte");
+			ClassGlossy = FindClass("glossy");
 			return ok;
 		}
 
-		// The rule for a normalised path (Normalize).
-		int Match(const std::string& path) const {
+		// Detailed match with rule index and specificity kind for a normalised path (Normalize).
+		MatchResult MatchDetailed(const std::string& path) const {
 			auto exact = Files.find(path);
-			if (exact != Files.end()) return exact->second;
+			if (exact != Files.end()) return { exact->second, MatchKind::Exact };
 			for (const std::string& s : Strips)
-				if (path.size() > s.size() && path.compare(0, s.size(), s) == 0) return MatchStripped("textures\\" + path.substr(s.size()));
-			return MatchStripped(path);
+				if (path.size() > s.size() && path.compare(0, s.size(), s) == 0) return MatchStrippedDetailed("textures\\" + path.substr(s.size()));
+			return MatchStrippedDetailed(path);
+		}
+
+		// The rule for a normalised path (Normalize).
+		int Match(const std::string& path) const { return MatchDetailed(path).Rule; }
+
+		int FindClass(const char* name) const {
+			if (!name || !name[0]) return 0;
+			const int idx = Find(Lower(name));
+			return idx > 0 ? idx : 0;
+		}
+
+		int MatchKeywordText(const char* text) const {
+			if (!text || !text[0] || Keywords.empty()) return 0;
+			const std::string low = Lower(text);
+			return MatchWordList(low.c_str(), Keywords);
+		}
+
+		int RefineWithMesh(MatchResult base, const MeshSignals& sig, const char** reasonOut = nullptr, int precomputedMeshRule = -1) const {
+			auto ret = [&](int rule, const char* reason) {
+				if (reasonOut) *reasonOut = reason;
+				return rule;
+			};
+			if (base.Kind == MatchKind::Final || sig.IsFaceGen || sig.IsHair || sig.IsEyeEnv || sig.IsDecal)
+				return ret(base.Rule, nullptr);
+			if ((sig.IsWindowEnv || sig.IsRefraction) && ClassGlass > 0 && base.Rule != ClassGlass)
+				return ret(ClassGlass, "window/refraction");
+			if (!base.IsBroad())
+				return ret(base.Rule, nullptr);
+
+			const int byMesh = precomputedMeshRule >= 0 ? precomputedMeshRule : MatchKeywordText(sig.MeshName);
+			if (byMesh > 0)
+				return ret(byMesh, "mesh-name");
+
+			if (sig.HasEnvMap && sig.EnvMapScale >= 0.20f) {
+				const bool strongEnv = sig.HasEnvMask || sig.EnvMapScale >= 0.85f || (sig.HasMaterial && sig.Glossiness >= 55.0f);
+				if (strongEnv && ClassEnvMetal > 0) return ret(ClassEnvMetal, "env-metal");
+				if (ClassPaintedMetal > 0) return ret(ClassPaintedMetal, "env-painted");
+			}
+			if (sig.IsEmissive && ClassSign > 0)
+				return ret(ClassSign, "emissive");
+
+			const std::string& bn = Get(base.Rule).Name;
+			const bool genericBucket = (base.Rule == 0 || bn == "building" || bn == "interior" || bn == "clutter" || bn == "furniture");
+			if (genericBucket) {
+				if ((!sig.HasSpecular || (sig.HasMaterial && sig.SpecularLuma < 0.04f)) && ClassMatte > 0)
+					return ret(ClassMatte, "no-spec");
+				if (sig.HasMaterial && sig.HasSpecular && sig.SpecularLuma >= 0.15f && sig.Glossiness >= 65.0f && ClassGlossy > 0)
+					return ret(ClassGlossy, "high-gloss");
+				if (sig.HasMaterial && sig.Glossiness > 0.0f && sig.Glossiness <= 14.0f &&
+					(base.Rule == 0 || bn == "building" || bn == "interior") && ClassMatte > 0)
+					return ret(ClassMatte, "low-gloss");
+			}
+			return ret(base.Rule, nullptr);
+		}
+
+		int Resolve(const std::string& path, const MeshSignals& sig, const char** reasonOut = nullptr) const {
+			return RefineWithMesh(MatchDetailed(path), sig, reasonOut);
 		}
 
 		const Rule& Get(int index) const { return Rules[index >= 0 && index < (int)Rules.size() ? index : 0]; }
 		int Count() const { return (int)Rules.size(); }
-		bool Empty() const { return Files.empty() && Folders.empty() && Keywords.empty(); }
+		bool Empty() const { return Files.empty() && Folders.empty() && Keywords.empty() && PathWords.empty(); }
 
 	private:
-		struct Prefix { std::string Path; int RuleIndex; bool Final; };
+		struct Prefix { std::string Path; int RuleIndex; bool Final; bool Fallback; };
 		struct Word { std::string Text; std::vector<std::string> Not; int RuleIndex; };
 
 		std::vector<Rule>						Rules;
 		std::unordered_map<std::string, int>	Files;
 		std::vector<Prefix>						Folders;
 		std::vector<Word>						Keywords;
+		std::vector<Word>						PathWords;
 		std::vector<std::string>				Strips;
+		int ClassGlass = 0, ClassEnvMetal = 0, ClassPaintedMetal = 0, ClassSign = 0, ClassMatte = 0, ClassGlossy = 0;
 
-		int MatchStripped(const std::string& path) const {
-			for (const Prefix& f : Folders)
-				if (f.Final && path.compare(0, f.Path.size(), f.Path) == 0) return f.RuleIndex;
-			const size_t slash = path.rfind('\\');
-			const char* name = path.c_str() + (slash == std::string::npos ? 0 : slash + 1);
-			for (const Word& k : Keywords) {
-				if (!strstr(name, k.Text.c_str())) continue;
+		static int MatchWordList(const char* text, const std::vector<Word>& words) {
+			for (const Word& k : words) {
+				if (!strstr(text, k.Text.c_str())) continue;
 				bool excluded = false;
-				for (const std::string& n : k.Not) if (strstr(name, n.c_str())) { excluded = true; break; }
+				for (const std::string& n : k.Not) if (strstr(text, n.c_str())) { excluded = true; break; }
 				if (!excluded) return k.RuleIndex;
 			}
-			for (const Prefix& f : Folders)
-				if (!f.Final && path.compare(0, f.Path.size(), f.Path) == 0) return f.RuleIndex;
 			return 0;
+		}
+
+		MatchResult MatchStrippedDetailed(const std::string& path) const {
+			for (const Prefix& f : Folders)
+				if (f.Final && path.compare(0, f.Path.size(), f.Path) == 0) return { f.RuleIndex, MatchKind::Final };
+			const size_t slash = path.rfind('\\');
+			const char* name = path.c_str() + (slash == std::string::npos ? 0 : slash + 1);
+			if (const int kw = MatchWordList(name, Keywords))
+				return { kw, MatchKind::Keyword };
+			for (const Prefix& f : Folders)
+				if (!f.Final && !f.Fallback && path.compare(0, f.Path.size(), f.Path) == 0) return { f.RuleIndex, MatchKind::Folder };
+			if (!PathWords.empty() && slash != std::string::npos) {
+				const size_t start = path.compare(0, 9, "textures\\") == 0 ? 9 : 0;
+				if (slash + 1 > start) {
+					const std::string dirPortion = path.substr(start, slash + 1 - start);
+					if (const int pw = MatchWordList(dirPortion.c_str(), PathWords))
+						return { pw, MatchKind::PathWord };
+				}
+			}
+			for (const Prefix& f : Folders)
+				if (f.Fallback && path.compare(0, f.Path.size(), f.Path) == 0) return { f.RuleIndex, MatchKind::Fallback };
+			return { 0, MatchKind::None };
 		}
 
 		static std::vector<std::string> Split(const std::string& line) {
@@ -258,7 +374,7 @@ namespace MaterialRules {
 				Strips.push_back(p);
 				return true;
 			}
-			if (kind == "folder" || kind == "keyword" || kind == "file") {
+			if (kind == "folder" || kind == "keyword" || kind == "pathword" || kind == "file") {
 				if (words.size() < 3) { error = kind + " needs a path or word and a class"; return false; }
 				const std::string className = Lower(words[2]);
 				const int rule = className == "default" ? 0 : Find(className);
@@ -271,12 +387,14 @@ namespace MaterialRules {
 				if (kind == "folder") {
 					std::string p = Normalize(words[1].c_str());
 					if (p.empty() || p.back() != '\\') p += '\\';
-					bool final = false;
+					bool final = false, fallback = false;
 					for (size_t i = 3; i < words.size(); ++i) {
-						if (Lower(words[i]) == "final") final = true;
+						const std::string opt = Lower(words[i]);
+						if (opt == "final") final = true;
+						else if (opt == "fallback") fallback = true;
 						else { error = "unknown folder option " + words[i]; return false; }
 					}
-					Folders.push_back({ p, rule, final });
+					Folders.push_back({ p, rule, final, final ? false : fallback });
 					return true;
 				}
 				Word k;
@@ -284,7 +402,7 @@ namespace MaterialRules {
 				k.RuleIndex = rule;
 				for (size_t i = 3; i < words.size(); ++i) {
 					const std::string w = Lower(words[i]);
-					if (w.compare(0, 4, "not=") != 0) { error = "unknown keyword option " + w; return false; }
+					if (w.compare(0, 4, "not=") != 0) { error = "unknown " + kind + " option " + w; return false; }
 					std::string list = w.substr(4);
 					size_t s = 0;
 					while (s <= list.size()) {
@@ -294,7 +412,8 @@ namespace MaterialRules {
 						s = e + 1;
 					}
 				}
-				Keywords.push_back(k);
+				if (kind == "pathword") PathWords.push_back(std::move(k));
+				else Keywords.push_back(std::move(k));
 				return true;
 			}
 			error = "unknown line type " + words[0];

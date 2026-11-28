@@ -27,6 +27,7 @@ public:
 
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the dedicated path's passes as Vulkan passes (ShadowsInteriorsBlur.frag, ShadowsInteriorsApply.frag):
 	// the two blurs into the scratch targets, the apply into the frame. The generic technique stays D3D9. False: the D3D9 path runs.
+	bool	ExtSupportsRenderRect() const override { return true; }
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface,
 		UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 	ExtPass	extBlur, extApply;

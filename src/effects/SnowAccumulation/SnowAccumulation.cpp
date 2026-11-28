@@ -2,6 +2,7 @@
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
 #include "../CoverMap/CoverMap.h"	// UNOFFICIAL 2026-10-27 Persistent snow
 #include "../../core/CapturedNormals.h"	// UNOFFICIAL 2026-10-28 CapturedNormals
+#include "../../core/RenderRect.h"		// UNOFFICIAL 2026-11-27 RenderScale v2
 
 void SnowAccumulationEffect::UpdateConstants() {
 	Animator& cover = Constants.SnowAccumulationAnimator;
@@ -94,7 +95,9 @@ struct SnowAccumulationUniforms {
 	D3DXVECTOR4		capturedData;	// UNOFFICIAL 2026-10-28 TESR_CapturedNormalsData
 	D3DXVECTOR4		snowExtra;		// TESR_SnowAccumulationExtra
 	D3DXVECTOR4		materialData;	// UNOFFICIAL 2026-11-24 TESR_MaterialBufferData (x 1 = this frame's, y 1 = GBufferV2)
+	D3DXVECTOR4		renderScale;	// RenderRect scale (xy = scale, zw = 1 / scale)
 };
+static_assert(sizeof(SnowAccumulationUniforms) == 5 * 64 + 64 * 16, "SnowAccumulationUniforms size mismatch");
 
 // The push block (24 bytes): the blur's direction, the two sampler heap indices (DXVK writes them at their offsets), the pass's mode.
 struct SnowAccumulationPush {
@@ -192,6 +195,9 @@ bool SnowAccumulationEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurfac
 	uniforms.materialData = CapturedNormals::MaterialData;
 	if (!CapturedNormals::MaterialTexture) uniforms.materialData.x = 0.0f;
 	uniforms.materialData.y = CapturedNormals::V2Compiled ? 1.0f : 0.0f;
+	uniforms.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* constants = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!constants) return false;
 

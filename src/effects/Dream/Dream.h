@@ -38,8 +38,12 @@ public:
 	bool	ShouldRender() override;
 	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex,
 		bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
+	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex,
+		bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 
 private:
+	ExtPass				extMix{}, extPost{};
+	ExtUniformBuffer	extUniforms{};
 	bool	EnsureHistory(IDirect3DDevice9* Device);
 	void	ReleaseHistory();
 	float	Random();	// 0-1

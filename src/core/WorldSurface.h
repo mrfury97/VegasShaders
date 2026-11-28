@@ -14,6 +14,7 @@
 #include "DeferredDepth.h"
 #include "DeferredRenderer.h"
 #include "DeferredWetness.h"	// (2026-11-27 upstream 1.1.5 merge) the land's height code in the material target
+#include "DxvkCompute.h"
 #include "LinearScene.h"
 #include "PassSums.h"
 #include "RtLightUnits.h"
@@ -30,6 +31,162 @@ namespace WorldSurface {
 	inline IDirect3DStateBlock9* State = nullptr;
 	inline float RainWetness = 0.0f;
 	inline double LastTime = -1.0;
+
+	// UNOFFICIAL 2026-11-27: Vulkan Compute WorldSurface (Compute\WorldSurface.spv).
+	// Eliminates 2 of 3 full-res FP16 StretchRect copies (keeping only Copy[1] for +/-2 px Albedo neighbor reads),
+	// the 3-MRT D3D9 pass, and StateBlock capture/restore.
+	inline ID3D9NvrExtPipeline* ComputePipeline = nullptr;
+	inline ID3D9NvrExtBuffer* ComputeUbo = nullptr;
+	inline IDirect3DTexture9* ComputeRt0DummyTex = nullptr;
+	inline IDirect3DSurface9* ComputeRt0DummySurf = nullptr;
+	inline bool ComputeTried = false, ComputeFailed = false;
+	inline unsigned long long StatCompute = 0;
+
+	struct ComputePush {
+		UINT pointSampler;
+		UINT noiseSampler;
+		UINT landOut;	// (2026-11-28 1.1.6 merge) as WS_Flags.x below: land left out while deferred wetness is compiled in (e9780e5)
+		UINT pad1;
+	};
+	struct ComputeConstants {
+		int   viewport[4];   // 0: box.left, box.top, box.w, box.h
+		int   texSize[4];    // 1: t.Width, t.Height, 0, 0
+		float cam[6][4];     // 2..7: DeferredDepth::Frame[0..5]
+		float world[4];      // 8: xyz = camPos, w = isExterior
+		float weights[4];    // 9: detail, dust, rust, moss
+		float water[4];      // 10: waterRelZ, waterline, rainWetness, DebugView
+		float fade[4];       // 11: fadeStart, fadeEnd, detailEnd, isSnow
+		float gamma[4];      // 12: gamma, 1/gamma, isLinear, depthMode
+		float ambient[4];    // 13: flat outdoor ambient, skyScale
+		float skySH[9][4];   // 14..22: TESR_SkyIrradianceObjects[0..8]
+	};
+	static_assert(sizeof(ComputeConstants) == 23 * 16, "WorldSurface ComputeConstants layout mismatch");
+
+	inline void ReleaseCopies() {
+		for (int i = 0; i < 3; i++) {
+			if (Copy[i]) { Copy[i]->Release(); Copy[i] = nullptr; }
+			if (CopyTex[i]) { CopyTex[i]->Release(); CopyTex[i] = nullptr; }
+			CopyFmt[i] = D3DFMT_UNKNOWN;
+		}
+		CopyW = CopyH = 0;
+	}
+
+	inline bool EnsureAlbedoCopy(IDirect3DDevice9* d, UINT w, UINT h, D3DFORMAT fmt) {
+		if (CopyTex[1] && Copy[1] && CopyW == w && CopyH == h && CopyFmt[1] == fmt) return true;
+		ReleaseCopies();
+		if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, fmt, D3DPOOL_DEFAULT, &CopyTex[1], NULL)) ||
+			FAILED(CopyTex[1]->GetSurfaceLevel(0, &Copy[1]))) {
+			ReleaseCopies();
+			Logger::Log("[ERROR] UNOFFICIAL WorldSurface: could not create Albedo copy target (%ux%u)", w, h);
+			return false;
+		}
+		CopyFmt[1] = fmt;
+		CopyW = w; CopyH = h;
+		return true;
+	}
+
+	inline bool EnsureComputeReady(IDirect3DDevice9* d) {
+		if (ComputeFailed) return false;
+		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("WorldSurface")) return false;
+		if (TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferred") == 0) return false;
+		if (!ComputePipeline) {
+			if (ComputeTried) return false;
+			ComputeTried = true;
+			static const NVR_EXT_BINDING_DESC kBindings[] = {
+				{ 1, 0, NVR_EXT_BIND_SAMPLED_IMAGE,  0, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_albedoCopy
+				{ 1, 1, NVR_EXT_BIND_SAMPLED_IMAGE,  1, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_normals
+				{ 1, 2, NVR_EXT_BIND_SAMPLED_IMAGE,  2, NVR_EXT_VIEW_2D, FALSE, 0 }, // t_depth
+				{ 1, 3, NVR_EXT_BIND_SAMPLED_IMAGE,  3, NVR_EXT_VIEW_3D, FALSE, 0 }, // t_noise
+				{ 1, 4, NVR_EXT_BIND_STORAGE_IMAGE,  4, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_scene
+				{ 1, 5, NVR_EXT_BIND_STORAGE_IMAGE,  5, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_albedo
+				{ 1, 6, NVR_EXT_BIND_STORAGE_IMAGE,  6, NVR_EXT_VIEW_2D, TRUE,  0 }, // i_material
+				{ 2, 0, NVR_EXT_BIND_UNIFORM_BUFFER, 0, NVR_EXT_VIEW_2D, FALSE, 0 }, // Constants
+				{ 0, 0, NVR_EXT_BIND_SAMPLER,        0, NVR_EXT_VIEW_2D, FALSE, 0 }, // pointSampler
+				{ 0, 0, NVR_EXT_BIND_SAMPLER,        1, NVR_EXT_VIEW_2D, FALSE, 4 }, // noiseSampler
+			};
+			ComputePipeline = DxvkCompute::CreatePipeline("WorldSurface", kBindings, _countof(kBindings), sizeof(ComputePush), true);
+			if (ComputePipeline) ComputeUbo = DxvkCompute::CreateBuffer(sizeof(ComputeConstants), NVR_EXT_BUFFER_UNIFORM | NVR_EXT_BUFFER_TRANSFER_DST, "WorldSurface UBO");
+			if (!ComputePipeline || !ComputeUbo) {
+				DxvkCompute::Drop(ComputePipeline);
+				DxvkCompute::Drop(ComputeUbo);
+				ComputeFailed = true;
+				Logger::Log("[WARNING] UNOFFICIAL WorldSurface: Compute\\WorldSurface.spv could not be set up; using D3D9 pass");
+				return false;
+			}
+			Logger::Log("UNOFFICIAL WorldSurface: Vulkan compute path ready (Compute\\WorldSurface.spv)");
+		}
+		if (!ComputeRt0DummySurf) {
+			if (FAILED(d->CreateTexture(1, 1, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &ComputeRt0DummyTex, NULL)) ||
+				FAILED(ComputeRt0DummyTex->GetSurfaceLevel(0, &ComputeRt0DummySurf))) {
+				ComputeFailed = true;
+				return false;
+			}
+		}
+		return true;
+	}
+
+	inline bool TryApplyCompute(IDirect3DDevice9* d, IDirect3DSurface9* target, const D3DSURFACE_DESC& t,
+		const D3DSURFACE_DESC& aDesc, const D3DSURFACE_DESC& mDesc, const D3DVIEWPORT9& vp, const RECT& box,
+		IDirect3DTexture9* depthTex, IDirect3DBaseTexture9* noiseVol, const ComputeConstants& cb) {
+		if (t.Format != D3DFMT_A16B16G16R16F || aDesc.Format != D3DFMT_A16B16G16R16F || mDesc.Format != D3DFMT_A16B16G16R16F) return false;
+		if (!EnsureComputeReady(d)) return false;
+		if (!EnsureAlbedoCopy(d, t.Width, t.Height, aDesc.Format)) return false;
+
+		ID3D9NvrExt* ext = DxvkCompute::Extension();
+		ID3D9NvrExtSampler* pointSamp = DxvkCompute::PointClamp();
+		ID3D9NvrExtSampler* noiseSamp = DxvkCompute::MipSampler(false, NVR_EXT_ADDRESS_WRAP);
+		if (!noiseSamp) noiseSamp = DxvkCompute::LinearWrap();
+		if (!ext || !pointSamp || !noiseSamp) return false;
+		if (FAILED(ext->UpdateBuffer(ComputeUbo, 0, sizeof(cb), &cb))) return false;
+
+		const UINT w = (UINT)(box.right - box.left);
+		const UINT h = (UINT)(box.bottom - box.top);
+
+		static GpuTimer computeTimer("World surface detail (compute)");
+		GpuProfileScope gpu(computeTimer, d);
+
+		d->StretchRect(CapturedNormals::AlbedoSurface, &box, Copy[1], &box, D3DTEXF_NONE);
+
+		IDirect3DBaseTexture9* depthBind = depthTex
+			? static_cast<IDirect3DBaseTexture9*>(depthTex)
+			: static_cast<IDirect3DBaseTexture9*>(CapturedNormals::Texture);
+		NVR_EXT_RESOURCE_BINDING bindings[] = {
+			{ 0, NVR_EXT_BIND_SAMPLED_IMAGE,  CopyTex[1],                       0, 0, 0, FALSE },
+			{ 1, NVR_EXT_BIND_SAMPLED_IMAGE,  CapturedNormals::Texture,         0, 0, 0, FALSE },
+			{ 2, NVR_EXT_BIND_SAMPLED_IMAGE,  depthBind,                        0, 0, 0, FALSE },
+			{ 3, NVR_EXT_BIND_SAMPLED_IMAGE,  noiseVol,                         0, 0, 0, FALSE },
+			{ 4, NVR_EXT_BIND_STORAGE_IMAGE,  target,                           0, 0, 0, FALSE },
+			{ 5, NVR_EXT_BIND_STORAGE_IMAGE,  CapturedNormals::AlbedoSurface,   0, 0, 0, FALSE },
+			{ 6, NVR_EXT_BIND_STORAGE_IMAGE,  CapturedNormals::MaterialSurface, 0, 0, 0, FALSE },
+			{ 0, NVR_EXT_BIND_UNIFORM_BUFFER, ComputeUbo,                       0, 0, sizeof(cb), FALSE },
+			{ 0, NVR_EXT_BIND_SAMPLER,        pointSamp,                        0, 0, 0, FALSE },
+			{ 1, NVR_EXT_BIND_SAMPLER,        noiseSamp,                        0, 0, 0, FALSE },
+		};
+		ComputePush push = {};
+		push.landOut = DeferredWetness::CompiledIn() ? 1u : 0u;
+		NVR_EXT_DISPATCH_DESC dispatch = {};
+		dispatch.pPipeline = ComputePipeline;
+		dispatch.BindingCount = _countof(bindings);
+		dispatch.pBindings = bindings;
+		dispatch.pPushData = &push;
+		dispatch.PushDataSize = sizeof(push);
+		dispatch.GroupsX = (w + 7u) / 8u;
+		dispatch.GroupsY = (h + 7u) / 8u;
+		dispatch.GroupsZ = 1u;
+
+		DxvkCompute::PreLoad(bindings, _countof(bindings));
+		d->SetRenderTarget(0, ComputeRt0DummySurf);
+		const HRESULT hr = ext->Dispatch(&dispatch);
+		d->SetRenderTarget(0, target);
+		d->SetViewport(&vp);
+		if (FAILED(hr)) {
+			ComputeFailed = true;
+			Logger::Log("[WARNING] UNOFFICIAL WorldSurface: compute dispatch failed (%08lX); falling back to D3D9 pass", hr);
+			return false;
+		}
+		StatCompute++;
+		return true;
+	}
 
 	inline UINT BitDepth(D3DFORMAT f) {
 		switch (f) {
@@ -51,15 +208,6 @@ namespace WorldSurface {
 		}
 	}
 
-	inline void ReleaseCopies() {
-		for (int i = 0; i < 3; i++) {
-			if (Copy[i]) { Copy[i]->Release(); Copy[i] = nullptr; }
-			if (CopyTex[i]) { CopyTex[i]->Release(); CopyTex[i] = nullptr; }
-			CopyFmt[i] = D3DFMT_UNKNOWN;
-		}
-		CopyW = CopyH = 0;
-	}
-
 	inline bool EnsureCopies(IDirect3DDevice9* d, UINT w, UINT h, const D3DFORMAT fmts[3]) {
 		if (CopyTex[0] && CopyTex[1] && CopyTex[2] && CopyW == w && CopyH == h &&
 			CopyFmt[0] == fmts[0] && CopyFmt[1] == fmts[1] && CopyFmt[2] == fmts[2]) return true;
@@ -79,7 +227,7 @@ namespace WorldSurface {
 	}
 
 	inline void Load() {
-		if (!DeferredRenderer::Mode() || !CapturedNormals::V2CompiledIn() || Pass || PassFailed) return;
+		if (!CapturedNormals::V2CompiledIn() || Pass || PassFailed) return;
 		ShaderTemplate tmpl = {};
 		tmpl.Name = "WorldSurface";
 		static D3DXMACRO overrides[3] = {
@@ -98,11 +246,12 @@ namespace WorldSurface {
 	}
 
 	inline void Apply(IDirect3DDevice9* d) {
-		if (!d || !Pass || PassFailed || !DeferredRenderer::Live || !CapturedNormals::V2Compiled || !CapturedNormals::Drawn) return;
+		if (!d || !DeferredRenderer::Live || !CapturedNormals::V2Compiled || !CapturedNormals::Drawn) return;
 		if (!CapturedNormals::AlbedoSurface || !CapturedNormals::MaterialSurface || !CapturedNormals::Texture) return;
 		if (!TheSettingManager || !TheShaderManager) return;
 
 		if (TheSettingManager->GetSettingI("Shaders.WorldSurface.Status", "Enabled") == 0) return;
+		if (!TheShaderManager->GameState.isExterior && TheSettingManager->GetSettingI("Shaders.WorldSurface.Main", "Interiors") == 0) return;
 
 		const float strength = (std::max)(0.0f, TheSettingManager->GetSettingF("Shaders.WorldSurface.Main", "Strength"));
 		if (strength <= 1.0e-4f) return;
@@ -149,10 +298,6 @@ namespace WorldSurface {
 			return;
 		}
 
-		const D3DFORMAT copyFmts[3] = { t.Format, aDesc.Format, mDesc.Format };
-		if (!EnsureCopies(d, t.Width, t.Height, copyFmts)) { target->Release(); return; }
-		if (!State && FAILED(d->CreateStateBlock(D3DSBT_ALL, &State))) { target->Release(); return; }
-
 		const bool linearDepth = DeferredDepth::EnsureLinear(d);
 		const bool rawDepth = !linearDepth && DeferredDepth::Ready() && DeferredDepth::Texture != nullptr;
 		if (!DeferredDepth::Ready() && !linearDepth) DeferredDepth::FillFrame(d);
@@ -196,6 +341,61 @@ namespace WorldSurface {
 		const auto& gs = TheShaderManager->GameState;
 		if (gs.isExterior && gs.isRainy) RainWetness = (std::min)(1.0f, RainWetness + dt / 15.0f);
 		else RainWetness = (std::max)(0.0f, RainWetness - dt / 45.0f);
+
+		const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
+		const float world[4] = {
+			_finite(camPos.x) ? camPos.x : 0.0f,
+			_finite(camPos.y) ? camPos.y : 0.0f,
+			_finite(camPos.z) ? camPos.z : 0.0f,
+			gs.isExterior ? 1.0f : 0.0f
+		};
+		const float weights[4] = { detail, dust, rust, moss };
+		float waterRelZ = -100000.0f;
+		{
+			auto wIt = TheShaderManager->ConstantsTable.find("TESR_WaterSettings");
+			if (wIt != TheShaderManager->ConstantsTable.end() && wIt->second) {
+				const float wh = wIt->second->x;
+				if (_finite(wh) && fabsf(wh) < 50000.0f && _finite(camPos.z)) waterRelZ = wh - camPos.z;
+			}
+		}
+		const float water[4] = { waterRelZ, waterline, RainWetness, debug ? 1.0f : 0.0f };
+		const float fade[4] = { maxDist * 0.65f, maxDist, (std::min)(maxDist * 0.70f, 1500.0f), gs.isSnow ? 1.0f : 0.0f };
+		const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;
+		const float gammaVec[4] = { gamma, 1.0f / gamma, LinearScene::Linear ? 1.0f : 0.0f, depthMode };
+
+		D3DXVECTOR4 sh[9] = {};
+		D3DXVECTOR4 amb = { 0.0f, 0.0f, 0.0f, 0.0f };
+		if (gs.isExterior) {
+			const D3DXVECTOR4& sa = TheShaderManager->ShaderConst.sunAmbient;
+			const D3DXVECTOR3 flat = RtLightUnits::DecodeColor(sa.x, sa.y, sa.z, RtLightUnits::AmbientScale());
+			amb = D3DXVECTOR4(flat.x, flat.y, flat.z, RtLightUnits::SkyScale());
+			auto found = TheShaderManager->ConstantsTable.find("TESR_SkyIrradianceObjects");
+			if (found != TheShaderManager->ConstantsTable.end() && found->second) memcpy(sh, found->second, sizeof(sh));
+		}
+
+		{
+			ComputeConstants cb = {};
+			cb.viewport[0] = (int)box.left; cb.viewport[1] = (int)box.top;
+			cb.viewport[2] = (int)(box.right - box.left); cb.viewport[3] = (int)(box.bottom - box.top);
+			cb.texSize[0] = (int)t.Width; cb.texSize[1] = (int)t.Height;
+			memcpy(cb.cam, camFrame, sizeof(cb.cam));
+			memcpy(cb.world, world, sizeof(cb.world));
+			memcpy(cb.weights, weights, sizeof(cb.weights));
+			memcpy(cb.water, water, sizeof(cb.water));
+			memcpy(cb.fade, fade, sizeof(cb.fade));
+			memcpy(cb.gamma, gammaVec, sizeof(cb.gamma));
+			memcpy(cb.ambient, &amb.x, sizeof(cb.ambient));
+			memcpy(cb.skySH, sh, sizeof(cb.skySH));
+			if (TryApplyCompute(d, target, t, aDesc, mDesc, vp, box, depthTex, noiseVol, cb)) {
+				target->Release();
+				return;
+			}
+		}
+
+		if (!Pass || PassFailed) { target->Release(); return; }
+		const D3DFORMAT copyFmts[3] = { t.Format, aDesc.Format, mDesc.Format };
+		if (!EnsureCopies(d, t.Width, t.Height, copyFmts)) { target->Release(); return; }
+		if (!State && FAILED(d->CreateStateBlock(D3DSBT_ALL, &State))) { target->Release(); return; }
 
 		static GpuTimer timer("World surface detail");
 		GpuProfileScope gpu(timer, d);
@@ -257,46 +457,11 @@ namespace WorldSurface {
 		d->SetSamplerState(5, D3DSAMP_MIPMAPLODBIAS, 0);
 
 		d->SetPixelShaderConstantF(0, &camFrame[0].x, 6);
-
-		const D3DXVECTOR4& camPos = TheRenderManager->CameraPosition;
-		const float world[4] = {
-			_finite(camPos.x) ? camPos.x : 0.0f,
-			_finite(camPos.y) ? camPos.y : 0.0f,
-			_finite(camPos.z) ? camPos.z : 0.0f,
-			gs.isExterior ? 1.0f : 0.0f
-		};
 		d->SetPixelShaderConstantF(6, world, 1);
-
-		const float weights[4] = { detail, dust, rust, moss };
 		d->SetPixelShaderConstantF(7, weights, 1);
-
-		float waterRelZ = -100000.0f;
-		{
-			auto wIt = TheShaderManager->ConstantsTable.find("TESR_WaterSettings");
-			if (wIt != TheShaderManager->ConstantsTable.end() && wIt->second) {
-				const float wh = wIt->second->x;
-				if (_finite(wh) && fabsf(wh) < 50000.0f && _finite(camPos.z)) waterRelZ = wh - camPos.z;
-			}
-		}
-		const float water[4] = { waterRelZ, waterline, RainWetness, debug ? 1.0f : 0.0f };
 		d->SetPixelShaderConstantF(8, water, 1);
-
-		const float fade[4] = { maxDist * 0.65f, maxDist, (std::min)(maxDist * 0.70f, 1500.0f), gs.isSnow ? 1.0f : 0.0f };
 		d->SetPixelShaderConstantF(9, fade, 1);
-
-		const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;
-		const float gammaVec[4] = { gamma, 1.0f / gamma, LinearScene::Linear ? 1.0f : 0.0f, depthMode };
 		d->SetPixelShaderConstantF(10, gammaVec, 1);
-
-		D3DXVECTOR4 sh[9] = {};
-		D3DXVECTOR4 amb = { 0.0f, 0.0f, 0.0f, 0.0f };
-		if (gs.isExterior) {
-			const D3DXVECTOR4& sa = TheShaderManager->ShaderConst.sunAmbient;
-			const D3DXVECTOR3 flat = RtLightUnits::DecodeColor(sa.x, sa.y, sa.z, RtLightUnits::AmbientScale());
-			amb = D3DXVECTOR4(flat.x, flat.y, flat.z, RtLightUnits::SkyScale());
-			auto found = TheShaderManager->ConstantsTable.find("TESR_SkyIrradianceObjects");
-			if (found != TheShaderManager->ConstantsTable.end() && found->second) memcpy(sh, found->second, sizeof(sh));
-		}
 		d->SetPixelShaderConstantF(11, &amb.x, 1);
 		d->SetPixelShaderConstantF(12, &sh[0].x, 9);
 		// (2026-11-27 upstream 1.1.5 merge, lead-architect review) with deferred wetness compiled in, the land records keep their height for the

@@ -4,6 +4,7 @@
 #include <string>
 #include "PointShadows2.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 
 // The constants the shader reads: the std140 block of PointShadows2.frag. The matrices are copied as the D3D9 path's SetMatrix uploads
 // them (the memory as stored, as Reflections.cpp does); the light arrays as the constant table holds them.
@@ -15,8 +16,9 @@ struct PointShadows2Uniforms {
 	D3DXVECTOR4	shadowFade;											// TESR_ShadowFade
 	D3DXVECTOR4	shadowLightPosition[ShadowCubeMapsScreen];			// TESR_ShadowLightPosition[12]
 	D3DXVECTOR4	lightColor[TrackedLightsMax + ShadowCubeMapsScreen];	// TESR_LightColor[24]
+	D3DXVECTOR4	renderScale;										// TESR_RenderScale (xy scale, zw 1/scale)
 };
-static_assert(sizeof(PointShadows2Uniforms) == 752, "PointShadows2Uniforms must match the std140 block");
+static_assert(sizeof(PointShadows2Uniforms) == 768, "PointShadows2Uniforms must match the std140 block");
 
 // The push block: the sampler heap indices (the extension fills them in at offsets 0 and 4).
 struct PointShadows2Push { UInt32 samplerIndex; UInt32 pointSamplerIndex; };
@@ -98,6 +100,9 @@ bool PointShadows2Effect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9*
 	uniforms.shadowFade = *shadowFade;
 	memcpy(uniforms.shadowLightPosition, shadowLightPosition, sizeof(uniforms.shadowLightPosition));
 	memcpy(uniforms.lightColor, lightColor, sizeof(uniforms.lightColor));
+	uniforms.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 
 	if (!extPass.Tried) {
 		extPass.Tried = true;

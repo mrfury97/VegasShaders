@@ -29,8 +29,6 @@
 #include "DeferredLamps.h"
 #include "LightFreeRecords.h"
 #include "PassSums.h"
-#include "OnePassLimit.h"	// 2026-11-14 fd-fixes: the per-object one-pass limit (Keep)
-#include "SettingForce.h"
 #include <unordered_set>
 // UNOFFICIAL 2026-11-14 DeferredSun (merged from claude/fd-sun, docs/next/FD-SUN-RESULTS.md): mode 2 forces it (DeferredSun::SetForced) and reads
 // whether it runs (DeferredSun::Wanted); its Apply is called in Render.cpp's DeferredSpan, after this file's AtSpanEnd.
@@ -40,9 +38,8 @@
 
 namespace DeferredRenderer {
 	inline const char* kSection = "Main.Main.Quality";
-	inline const char* kCache = "Deferred\\All\\";	// mode 1's records (LAMPS_DEFERRED 3), their own cache folder
 
-	inline int Mode() { return SettingForce::Mode(); }
+	inline int Mode() { return 2; }
 	// UNOFFICIAL 2026-11-24 fd-complete DeferredSheen ([Main.Main.Quality] DeferredSheen, restart, the roughness floor 0.05-1, 0 off): read once,
 	// at the first record's defines. Compiled in: every deferred object writes the specular bit (Includes/CapturedNormals.hlsl), so the game's
 	// own highlight passes of a deferred object are skipped too (Skip): the passes draw its highlight.
@@ -52,18 +49,18 @@ namespace DeferredRenderer {
 		if (SheenState < 0 && TheSettingManager) {
 			const float v = TheSettingManager->GetSettingF("Main.Main.Quality", "DeferredSheen");
 			SheenFloor = v < 0.05f ? 0.0f : (v > 1.0f ? 1.0f : v);
-			SheenState = SheenFloor > 0.0f && Mode() > 0 && CapturedNormals::V2CompiledIn() ? 1 : 0;
+			SheenState = SheenFloor > 0.0f && CapturedNormals::V2CompiledIn() ? 1 : 0;
 			Logger::Log("UNOFFICIAL DeferredSheen: %s", SheenState ? "on: the deferred objects without a highlight get one (roughness floor below), the game's highlight passes of deferred objects skipped" : "off");
 			if (SheenState) Logger::Log("UNOFFICIAL DeferredSheen: roughness floor %.3f (where no _rmaos map or FoldHighlights' shiny mark gave one)", SheenFloor);
 		}
 		return SheenState == 1;
 	}
-	inline bool On() { return Mode() > 0; }
+	inline bool On() { return true; }
 
-	// Mode 2's sun (DeferredSun): live only while its pass can run; mode 1 never forces it (its records keep the sun).
+	// Mode 2's sun (DeferredSun): live only while its pass can run.
 	inline bool SunRuns() { return DeferredSun::Wanted(); }
 	inline void SunForce(bool on) { DeferredSun::SetForced(on); }
-	// G-buffer v2 (forced on by the switch, SettingForce.h): the lamp pass reads each pixel's specular bit (DeferredLamps.hlsl DL_LAMP_LOOP, PBR or PBRDiffuse per pixel).
+	// G-buffer v2: the lamp pass reads each pixel's specular bit (DeferredLamps.hlsl DL_LAMP_LOOP, PBR or PBRDiffuse per pixel).
 	inline bool GBufferV2() { return CapturedNormals::V2CompiledIn(); }
 
 	inline std::unordered_map<const void*, ShaderRecordPixel*> Records;	// NiD3DPixelShaderEx* -> its deferred record
@@ -90,17 +87,14 @@ namespace DeferredRenderer {
 
 	inline bool Live = false;			// this frame
 	inline bool OnePass = false;		// this frame: the one-pass compare patch wanted (LampsInOnePass::BeginFrame)
-	inline int OnePassMode = 1;			// [Main.Main.Quality] DeferredRendererOnePass (live, test only): 0 none, 1 all but emissive objects (OnePassLimit.h), 2 all
 	inline bool BoundDeferred = false;	// the pixel shader bound now is a deferred record (OnBind)
 	inline bool SpanSeen = false;		// a world G-buffer span has run in this session (the one-pass patch waits for it: MSAA known by then)
-	inline bool Native = false;
 	inline UInt32 FrameId = 1;
 
 	// F10 line
 	inline unsigned StatFrames = 0;
 	inline unsigned long long StatBinds = 0, StatFallbacks = 0, StatSwaps = 0, StatSkippedLamps = 0, StatSkippedHighlights = 0, StatKeptHighlights = 0, StatMarked = 0,
-		StatForwardDraws = 0, StatMissedLampDraws = 0, StatMissedLamps = 0, StatLiveFrames = 0, StatBlended = 0, StatBlendedSwaps = 0,
-		StatSlotDrawsIn = 0, StatSlotLampsIn = 0, StatSlotDrawsOut = 0, StatSlotLampsOut = 0;
+		StatForwardDraws = 0, StatLiveFrames = 0, StatBlended = 0, StatBlendedSwaps = 0;
 	inline bool BlendedNow = false;							// this draw: a blended base pass in the span (BeforeDraw .. AfterDraw)
 	// UNOFFICIAL 2026-11-15 DeferredFirstPerson (core/DeferredFirstPerson.h): while its view-model span is open, the player's first-person node;
 	// a draw of that render whose geometry is not under it (the HUD's 3D objects drawn with another camera) takes its forward record, as a
@@ -140,16 +134,16 @@ namespace DeferredRenderer {
 						// counted in StatMarkFailed)
 	}
 
-	// Which pixel shaders get a deferred record (the lit records of the G-buffer templates; mode 2 adds the land).
-	inline bool Eligible(const char* name, const ShaderTemplate& tmpl, int mode) {
+	// Which pixel shaders get a deferred record (the lit records of the G-buffer templates, plus land in mode 2).
+	inline bool Eligible(const char* name, const ShaderTemplate& tmpl) {
 		if (!name || !tmpl.Name) return false;
 		const size_t length = strlen(name);
 		if (length < 4 || strcmp(name + length - 4, ".pso")) return false;
 		const bool object = !strcmp(tmpl.Name, "ObjectTemplate"), parallax = !strcmp(tmpl.Name, "ParallaxTemplate"), land = !strcmp(tmpl.Name, "TerrainTemplate");
-		// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h): the far land too in mode 2, with its G-buffer compiled in (its lighting-free
+		// UNOFFICIAL 2026-11-14 DeferredDistant (core/DeferredDistant.h): the far land too, with its G-buffer compiled in (its lighting-free
 		// record: LightFreeRecords::Eligible); it binds inside the main list's span, where DeferredDistant draws the game's geometry group 0
-		const bool farLand = (!strcmp(tmpl.Name, "TerrainLODTemplate") || !strcmp(tmpl.Name, "TerrainFadeTemplate")) && DeferredDistant::CompiledIn();	// (2026-11-15 DeferredSun: + the hand-over band, its sun taken out with the land's under it)
-		if (!object && !parallax && !(land && mode >= 2) && !(farLand && mode >= 2)) return false;
+		const bool farLand = (!strcmp(tmpl.Name, "TerrainLODTemplate") || !strcmp(tmpl.Name, "TerrainFadeTemplate")) && DeferredDistant::CompiledIn();
+		if (!object && !parallax && !land && !farLand) return false;
 		for (int d = 0; d < ShaderTemplate::kMaxDefines - 1 && tmpl.Defines[d].Name; d++) {
 			const char* define = tmpl.Defines[d].Name;
 			if (!strcmp(define, "DIFFUSE") || !strcmp(define, "ONLY_SPECULAR") || !strcmp(define, "NO_LIGHT") || (!strcmp(define, "HAIR") && !LightFreeRecords::HairDeferred())) return false;	// (2026-11-15 DeferredHair)
@@ -186,43 +180,18 @@ namespace DeferredRenderer {
 		Logger::Log("[WARNING] DEFERRED RENDERER record %s: did not load (see the device's line above): it stays forward; %u loaded, %u not so far", name, Loaded, Refused);
 	}
 
-	// ShaderManager::LoadShader, where a lit shader's level-0 Interior record loaded (overrides: that record's Interior overrides): mode 1's
-	// record from the same overrides + LAMPS_DEFERRED 3. lampFalloff: the Interior records' LAMP_FALLOFF_ON override, for the lamp pass.
-	inline void LoadInterior(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl, const D3DXMACRO* interiorOverrides, ShaderRecordPixel* forward) {
-		if (Mode() != 1 || !Eligible(name, tmpl, 1) || Records.count(shader)) return;
-		static D3DXMACRO overrides[12] = {};
-		int n = 0;
-		for (const D3DXMACRO* o = interiorOverrides; o && o->Name && n < 10; o++) {
-			overrides[n++] = *o;
-			if (!strcmp(o->Name, "LAMP_FALLOFF_ON")) DeferredLamps::LampFalloffOverride = o->Definition;
-		}
-		overrides[n++] = { "LAMPS_DEFERRED", "3" };
-		overrides[n] = { NULL, NULL };
-		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, overrides);
-		if (record) Add(shader, record, forward, name, tmpl); else NoteRefused(shader, name);
-	}
-
-	// ShaderManager::LoadShader, after the shader's own records and LightFreeRecords::Load: mode 2 takes the lighting-free record; mode 1 makes
-	// LAMPS_DEFERRED 3 alone for an eligible name that got no Interior record above. Then both light passes are compiled (at load, never on the
-	// render thread).
+	// ShaderManager::LoadShader, after the shader's own records and LightFreeRecords::Load: takes the lighting-free record (mode 2).
+	// Then both light passes are compiled (at load, never on the render thread).
 	inline void Load(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl) {
-		const int mode = Mode();
-		if (!mode || !Eligible(name, tmpl, mode)) return;
-		// (2026-11-18 DeferredStandalone, LightFreeRecords.h) mode 2 with no forward record: the lighting-free record alone, if one was made
+		if (!Eligible(name, tmpl)) return;
+		// (2026-11-18 DeferredStandalone, LightFreeRecords.h) with no forward record: the lighting-free record alone, if one was made
 		ShaderRecordPixel* forward = (ShaderRecordPixel*)(shader->ShaderProg[ShaderRecordType::Interior] ? shader->ShaderProg[ShaderRecordType::Interior] :
 			shader->ShaderProg[ShaderRecordType::Default] ? shader->ShaderProg[ShaderRecordType::Default] : shader->ShaderProg[ShaderRecordType::Exterior]);
 		const bool forwardLoaded = forward != nullptr;
-		if (!forwardLoaded && !(mode >= 2 && LightFreeRecords::Records.count(shader) && shader->ShaderHandleBackup)) return;
-		if (mode >= 2) {
-			auto found = LightFreeRecords::Records.find(shader);
-			if (found != LightFreeRecords::Records.end()) Add(shader, found->second, forward, name, tmpl, forwardLoaded ? nullptr : (IDirect3DPixelShader9*)shader->ShaderHandleBackup);
-			else NoteRefused(shader, name);
-		}
-		else if (!Records.count(shader)) {
-			static const D3DXMACRO overrides[2] = { { "LAMPS_DEFERRED", "3" }, { NULL, NULL } };
-			ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, kCache, overrides);
-			if (record) Add(shader, record, forward, name, tmpl); else NoteRefused(shader, name);
-		}
+		if (!forwardLoaded && !(LightFreeRecords::Records.count(shader) && shader->ShaderHandleBackup)) return;
+		auto found = LightFreeRecords::Records.find(shader);
+		if (found != LightFreeRecords::Records.end()) Add(shader, found->second, forward, name, tmpl, forwardLoaded ? nullptr : (IDirect3DPixelShader9*)shader->ShaderHandleBackup);
+		else NoteRefused(shader, name);
 		if (Records.count(shader)) { DeferredLamps::EnsurePass(); DeferredLamps::EnsureShadowShader(); }
 	}
 
@@ -242,24 +211,11 @@ namespace DeferredRenderer {
 		return found->second;
 	}
 
-	// 2026-11-14 fd-fixes (item 5): the light slots of the many-lamp object shaders (main light + lamps, ObjectTemplate.hlsl MAX_LIGHTS), as
-	// LampsInOnePass's census reads them (Census::ShaderSlots: SLS2029/2030 6, SLS2031-2033 4, SLS2034-2036 ManyLamps' MaxLamps or 6 / 3 by
-	// MoreLampsPerObject's byte at 0x00BDEA3F). 0 = not one of them (not counted).
-	inline unsigned BoundSlots = 0;
-	inline unsigned SlotsOf(const char* ps) {
-		if (!ps || strncmp(ps, "SLS", 3)) return 0;
-		const int n = atoi(ps + 3);
-		if (n == 2029 || n == 2030) return 6;
-		if (n >= 2031 && n <= 2033) return 4;
-		if (n >= 2034 && n <= 2036) return ManyLamps::Active() ? (unsigned)ManyLamps::MaxLamps : *(const UInt8*)0x00BDEA3F == 0x05 ? 6 : 3;
-		return 0;
-	}
-
 	// Render.cpp's bind hook (SetShadersHook, after the game bound a pass's shaders): is the pixel shader a deferred record?
 	inline void OnBind(IDirect3DPixelShader9* handle, const char* name) {
+		(void)name;
 		BoundDeferred = Live && handle && Handles.count(handle) != 0;
 		BoundPlain = BoundDeferred && PlainHandles.count(handle) != 0;
-		BoundSlots = Live ? SlotsOf(name) : 0;
 	}
 
 	// Render.cpp's pass hooks, early (next to FoldHighlights::Skip): true = do not draw this pass (a lamp or highlight pass of an object whose
@@ -334,31 +290,9 @@ namespace DeferredRenderer {
 			if (BoundDeferred) {
 				if (PassSums::KindOf(pass->passEnum) == PassSums::None && pass->geometry && Marked(pass->geometry, true)) { *PlainOf = BoundPlain; StatMarked++; }
 			}
-			else {
-				// (item 5) the one-pass compare (LampsInOnePass, OnePass) is read when the game builds an object's pass list, at registration
-				// (BSShaderAccumulator::RegisterObject_Standard 0x00B64020 -> the property's GetRenderPasses 0x00B67BE0 -> GetRenderPasses_2x
-				// 0x00BDF790, the compare at 0x00BE00E0), before the main list draws, and the list is kept until the key changes: it cannot follow
-				// the span. So a forward draw of an OPT pass in a frame with the patch on lights only its shader's slots: counted, in the span
-				// (fallbacks, blended draws) and outside it (everything drawn after the main list).
-				// (bench batch 2) Such an object is learned (OnePassLimit::Keep, native only: OnePassLimit::On) and its next pass
-				// list keeps the forward limit, so it is drawn in several passes that light every lamp; the counts here are what is left.
-				const UInt16 e = pass->passEnum;
-				if (OnePass && e >= 0xC3 && e <= 0xD6) {
-					const unsigned used = (e == 0xCA || e == 0xD1) ? (pass->numLights ? pass->numLights - 1u : 0u) : pass->numLights;	// (as the census)
-					const unsigned lost = (pass->maxLights > pass->numLights ? (unsigned)(pass->maxLights - pass->numLights) : 0u) + (BoundSlots && used > BoundSlots ? used - BoundSlots : 0u);
-					if (lost) {
-						if (CapturedNormals::InSpan) { StatSlotDrawsIn++; StatSlotLampsIn += lost; }
-						else { StatSlotDrawsOut++; StatSlotLampsOut += lost; }
-						OnePassLimit::Keep(pass->geometry);
-					}
-				}
-			}
 			if (!BoundDeferred && CapturedNormals::InSpan) {
 				StatForwardDraws++;
 				if (blended) StatBlended++;
-				// (2026-11-15) OPT passes only: the game's several-pass set always holds fewer lamps per pass than the object has (AD 2-3, the
-				// lamp passes the rest, all drawn for an unmarked object), so counting those (batch 3's "capped 25 / unlit 25") was no lost light
-				if (Native && pass->passEnum >= 0xC3 && pass->passEnum <= 0xD6 && pass->maxLights > pass->numLights) { StatMissedLampDraws++; StatMissedLamps += (unsigned)(pass->maxLights - pass->numLights); }
 			}
 		}
 		if (SwappedFrom) {	// the deferred record back on the device for the rest of the run, unless the game bound something else meanwhile
@@ -401,66 +335,39 @@ namespace DeferredRenderer {
 	// Once a frame (Render.cpp, before LampsInOnePass::BeginFrame and DeferredLamps::BeginFrame).
 	inline void BeginFrame() {
 		FrameId++;
-		const int mode = Mode();
-		if (!mode) { Live = OnePass = false; DeferredLamps::RendererLive = false; return; }
 		static bool told = false;
-		Native = TheRenderManager && strncmp(TheRenderManager->D3D9RuntimeDescription(), "DXVK", 4) != 0;
 		if (!told) {
 			told = true;
-			Logger::Log("UNOFFICIAL DeferredRenderer %d (%s): its prerequisites read as on for this session (CapturedNormals, MaterialBuffer, AlbedoBuffer, linear lighting + "
-				"LinearScene, FoldFog, forward lamp shadows + the atlas, LampTableStandalone + LampTableFast, DeferredLamps with UnshadowedLamps 1%s); %u deferred records, "
-				"%u did not load; the lamp pass %s", mode, Native ? "native D3D9" : "DXVK", mode >= 2 ? ", the lighting-free records, DeferredDistant" : "", Loaded, Refused,
-				DeferredLamps::Pass ? "loaded" : "NOT loaded (forward)");
+			Logger::Log("UNOFFICIAL DeferredRenderer 2 (DXVK): %u deferred records, %u did not load; the lamp pass %s",
+				Loaded, Refused, DeferredLamps::Pass ? "loaded" : "NOT loaded (forward)");
 		}
 		const bool exterior = TheShaderManager->GameState.isExterior;
-		if (mode >= 2) SunForce(true);	// fd-sun: its pass on whatever its own Enabled says (it lights only lighting-free pixels: nothing while forward)
+		SunForce(true);
 		bool live = TheSettingManager->GetSettingI(kSection, "DeferredRendererLive") != 0 && !Records.empty() && DeferredLamps::WantedAtStartup() &&
-			!DeferredLamps::PassFailed && !CapturedNormals::Failed && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn();
+			(!DeferredLamps::PassFailed || DeferredLamps::ComputePossible()) && !CapturedNormals::Failed && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn();
 		const char* why = nullptr;
-		if (live && Native && CapturedNormals::MsaaWarned) { live = false; why = "the game's MSAA on native D3D9 (no G-buffer there): forward"; }
-		if (live && exterior && (mode < 2 || !SunRuns())) { live = false; why = mode < 2 ? nullptr : "outdoors: mode 2 needs the DeferredSun pass (claude/fd-sun): forward"; }
+		if (live && exterior && !SunRuns()) { live = false; why = "outdoors: mode 2 needs the DeferredSun pass: forward"; }
 		// Fallback when Menu3DGuard could not be installed: keep overlay 3D menus / lockpick forward.
 		if (live && !Menu3DGuardInstalled && (TheShaderManager->GameState.OverlayIsOn || (LockPickMenu::GetSingleton() && InterfaceManager->IsOpen(Menu::kMenuType_LockPick)))) live = false;
 		if (why) { static const char* lastWhy = nullptr; if (why != lastWhy) { lastWhy = why; Logger::Log("UNOFFICIAL DeferredRenderer: refused, %s (logged once a reason)", why); } }
-		if (mode >= 2 && !SunRuns() && DeferredSun::Failure()) { static bool sunTold = false; if (!sunTold) { sunTold = true; Logger::Log("[WARNING] UNOFFICIAL DeferredRenderer 2: the DeferredSun pass cannot run (%s): mode 2 draws forward", DeferredSun::Failure()); } }	// (2026-11-15: not while it is only not ready yet, frame 1)
-		{	// UNOFFICIAL 2026-11-15 (FD-RELEASE-PREP.md) the linear gamma floor (SettingForce::FloorF): one line whenever the overridden value changes
-			static float gammaLogged = 0.0f, nightLogged = 0.0f;
-			if (SettingForce::GammaWas != gammaLogged || SettingForce::NightGammaWas != nightLogged) {
-				gammaLogged = SettingForce::GammaWas; nightLogged = SettingForce::NightGammaWas;
-				if (gammaLogged > 0.0f) Logger::Log("UNOFFICIAL DeferredRenderer: [Shaders.PBR.Linear] Gamma %.2f reads as 2.2 while the deferred renderer is on (a gamma of 1.0 is the same as linear lighting off, which the renderer needs)", gammaLogged);
-				if (nightLogged > 0.0f) Logger::Log("UNOFFICIAL DeferredRenderer: [Shaders.PBR.Linear] NightGamma %.2f reads as 0 (follow Gamma) while the deferred renderer is on (a gamma of 1.0 is the same as linear lighting off, which the renderer needs)", nightLogged);
-			}
-		}
-		if (mode >= 2 && !SunRuns()) live = false;
+		if (!SunRuns() && DeferredSun::Failure()) { static bool sunTold = false; if (!sunTold) { sunTold = true; Logger::Log("[WARNING] UNOFFICIAL DeferredRenderer 2: the DeferredSun pass cannot run (%s): mode 2 draws forward", DeferredSun::Failure()); } }	// (2026-11-15: not while it is only not ready yet, frame 1)
+		if (!SunRuns()) live = false;
 		if (!DeferredLamps::WantedAtStartup()) { static bool wTold = false; if (!wTold) { wTold = true; Logger::Log("[WARNING] UNOFFICIAL DeferredRenderer: the DeferredLamps pass is not possible (ManyLamps::DeferredAtStartup: the atlas, forward lamp shadows or the lamp table missing): forward"); } }
 		Live = live;
 		DeferredLamps::RendererLive = live;
-		DeferredFoliage::BeginFrame(live && mode >= 2);	// UNOFFICIAL 2026-11-14 (before CapturedNormals::BeginFrame, which reads it)
-		// the one-pass compare (LampsInOnePass): only indoors while live, after a G-buffer span has run (MSAA known by then); a frame late after a
-		// switch, as LampsInOnePass's own limit
-		{	// UNOFFICIAL 2026-11-15 (bench batch 3) DeferredRendererOnePass: a change rebuilds the held set's pass lists (the cave's rebuild bit)
-			int m = TheSettingManager->GetSettingI(kSection, "DeferredRendererOnePass");
-			m = m < 0 ? 0 : m > 2 ? 2 : m;
-			if (m != OnePassMode) { OnePassMode = m; OnePassLimit::RebuildWanted = true; Logger::Log("UNOFFICIAL DeferredRenderer: DeferredRendererOnePass %d (%s)", m,
-				m == 0 ? "no one-pass compare: the game's own pass lists" : m == 1 ? "one pass except emissive objects with more lamps than the game's own one pass takes" : "every shiny object in one pass"); }
-		}
-		OnePass = live && !exterior && SpanSeen && OnePassMode > 0;
+		DeferredFoliage::BeginFrame(live);	// UNOFFICIAL 2026-11-14 (before CapturedNormals::BeginFrame, which reads it)
+		OnePass = live && !exterior && SpanSeen;
 		if (live) StatLiveFrames++;
 		if (!GpuTimer::Enabled) { StatFrames = 0; return; }
 		if (++StatFrames < 240) return;
 		const double f = (double)StatFrames;
-		Logger::Log("DEFERRED RENDERER %u frames (%u live), mode %d, %s, per frame: deferred binds %.1f, forward fallbacks %.2f, deferred handles swapped back at the span's end %.2f | "
-			"objects marked deferred %.1f (marks failed, table full: %llu in these frames), lamp passes skipped %.1f, highlight passes skipped %.1f (kept for a base without SPECULAR %.1f) | forward world draws in the span %.1f, of them blended (fading / alpha-blended: forward record, own lamp passes) %.2f (swapped inside a run %.2f), with lamps capped by the game %.2f (%.2f lamps unlit%s) | one-pass patch %s: forward OPT draws with lamps lost (the game's cap or the shader's slots) in the span %.2f (%.2f lamps), after it %.2f (%.2f lamps); per-object limit %s: objects learned %u, held at the forward limit %.1f, rebuilds %u; DeferredRendererOnePass %d (emittance per object %s), emissive objects held at the game's own one-pass limit %.1f, one-pass draws without the game's emittance %.1f (objects noted %u)",
-			StatFrames, (unsigned)StatLiveFrames, mode, Native ? "native" : "DXVK", StatBinds / f, StatFallbacks / f, StatSwaps / f, StatMarked / f, StatMarkFailed, StatSkippedLamps / f, StatSkippedHighlights / f, StatKeptHighlights / f,
-			StatForwardDraws / f, StatBlended / f, StatBlendedSwaps / f, StatMissedLampDraws / f, StatMissedLamps / f, Native ? "" : ": counted on native only", OnePass ? "on" : "off",
-			StatSlotDrawsIn / f, StatSlotLampsIn / f, StatSlotDrawsOut / f, StatSlotLampsOut / f,
-			OnePassLimit::On ? (OnePassLimit::CaveIn ? "on" : "NOT installed") : "off (DXVK: ManyLamps feeds the forward shaders)",
-			OnePassLimit::Learned, OnePassLimit::Held / f, OnePassLimit::Rebuilds, OnePassMode, OnePassLimit::EmitExact ? "on" : "off", OnePassLimit::HeldEmissive / f, OnePassLimit::EmitDraws / f, OnePassLimit::MultiNoted);
-		OnePassLimit::Held = 0; OnePassLimit::HeldEmissive = 0; OnePassLimit::EmitDraws = 0;
+		Logger::Log("DEFERRED RENDERER %u frames (%u live), mode 2, DXVK, per frame: deferred binds %.1f, forward fallbacks %.2f, deferred handles swapped back at the span's end %.2f | "
+			"objects marked deferred %.1f (marks failed, table full: %llu in these frames), lamp passes skipped %.1f, highlight passes skipped %.1f (kept for a base without SPECULAR %.1f) | forward world draws in the span %.1f, of them blended (fading / alpha-blended: forward record, own lamp passes) %.2f (swapped inside a run %.2f) | one-pass patch %s",
+			StatFrames, (unsigned)StatLiveFrames, StatBinds / f, StatFallbacks / f, StatSwaps / f, StatMarked / f, StatMarkFailed, StatSkippedLamps / f, StatSkippedHighlights / f, StatKeptHighlights / f,
+			StatForwardDraws / f, StatBlended / f, StatBlendedSwaps / f, OnePass ? "on" : "off");
 		if (StatMarkFailed) Logger::Log("[WARNING] UNOFFICIAL DeferredRenderer: %llu objects could not be marked deferred in the last %u frames (the table of %u slots was full there): they were lit twice (their own lamp passes and the lamp pass)", StatMarkFailed, StatFrames, kSlots);
 		StatMarkFailed = 0;
 		StatFrames = 0;
-		StatBinds = StatFallbacks = StatSwaps = StatSkippedLamps = StatSkippedHighlights = StatKeptHighlights = StatMarked = StatForwardDraws = StatMissedLampDraws = StatMissedLamps = StatLiveFrames = StatBlended = StatBlendedSwaps = 0;
-		StatSlotDrawsIn = StatSlotLampsIn = StatSlotDrawsOut = StatSlotLampsOut = 0;
+		StatBinds = StatFallbacks = StatSwaps = StatSkippedLamps = StatSkippedHighlights = StatKeptHighlights = StatMarked = StatForwardDraws = StatLiveFrames = StatBlended = StatBlendedSwaps = 0;
 	}
 }

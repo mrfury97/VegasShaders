@@ -13,7 +13,7 @@ layout(location = 0) out vec4 o_bounce;
 layout(location = 1) out vec4 o_occlusion;
 
 void main() {
-    vec2 uv = frameUV();
+    vec2 uv = frameRectUV();
     vec4 current = pointLod(t_buffer, uv);
     float viewZ = pointLod(t_prep, uv).x;
     o_bounce = vec4(current.rgb, viewZ);
@@ -25,13 +25,14 @@ void main() {
     vec4 clip = cb.reproject * vec4(origin, 1.0);   // mul(float4(origin, 1), NVR_ALReproject)
     float w = max(clip.w, 0.001);
     vec3 last = vec3(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5, clip.w);
-    vec2 position = (last.xy + vec2(cb.alTemporal.w, cb.alEdges.w)) / cb.alLayout.zw - 0.5;   // (UNOFFICIAL 2026-11-01 TemporalJitterFix: the .fx's)
+    vec2 lastUV = screenToRect(last.xy + vec2(cb.alTemporal.w, cb.alEdges.w));   // (UNOFFICIAL 2026-11-01 TemporalJitterFix: the .fx's)
+    vec2 position = lastUV / cb.alLayout.zw - 0.5;
     vec2 base = floor(position);
     vec2 f = position - base;
-    vec2 t00 = pointLod(t_occlusionHistory, (base + 0.5) * cb.alLayout.zw).rg;
-    vec2 t10 = pointLod(t_occlusionHistory, (base + vec2(1.5, 0.5)) * cb.alLayout.zw).rg;
-    vec2 t01 = pointLod(t_occlusionHistory, (base + vec2(0.5, 1.5)) * cb.alLayout.zw).rg;
-    vec2 t11 = pointLod(t_occlusionHistory, (base + 1.5) * cb.alLayout.zw).rg;
+    vec2 t00 = pointLod(t_occlusionHistory, clampToRect((base + 0.5) * cb.alLayout.zw, cb.alLayout.zw)).rg;
+    vec2 t10 = pointLod(t_occlusionHistory, clampToRect((base + vec2(1.5, 0.5)) * cb.alLayout.zw, cb.alLayout.zw)).rg;
+    vec2 t01 = pointLod(t_occlusionHistory, clampToRect((base + vec2(0.5, 1.5)) * cb.alLayout.zw, cb.alLayout.zw)).rg;
+    vec2 t11 = pointLod(t_occlusionHistory, clampToRect((base + 1.5) * cb.alLayout.zw, cb.alLayout.zw)).rg;
     vec4 weight = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
     weight *= vec4(lessThan(abs(vec4(t00.g, t10.g, t01.g, t11.g) - last.z), vec4(max(last.z * 0.05, 4.0))));
     float found = dot(weight, vec4(1.0));
@@ -39,14 +40,14 @@ void main() {
     float low = current.a, high = current.a;
     for (int i = 0; i < 4; i++) {
         vec2 offset = (i < 2 ? vec2(float(i * 2 - 1), 0.0) : vec2(0.0, float(i * 2 - 5))) * cb.alLayout.zw;
-        float n = pointLod(t_buffer, uv + offset).a;
+        float n = pointLod(t_buffer, clampToRect(uv + offset, cb.alLayout.zw)).a;
         low = min(low, n);
         high = max(high, n);
     }
     float margin = (high - low) * 0.25;
     occlusionHistory = clamp(occlusionHistory, low - margin, high + margin);
     float inside = (all(greaterThan(last.xy, vec2(0.0))) && all(lessThan(last.xy, vec2(1.0))) && last.z > NearFade) ? 1.0 : 0.0;
-    float moved = length((last.xy - uv) / cb.alLayout.zw);
+    float moved = length((lastUV - uv) / cb.alLayout.zw);
     float keep = cb.alTemporal.x / (1.0 + moved / cb.alTemporal.y) * saturate(found * 2.0) * inside;
     o_occlusion = vec4(mix(current.a, occlusionHistory, keep), viewZ, 0.0, 1.0);
 }

@@ -714,8 +714,9 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 	// (2026-11-27 cube-visible, as ReflectionsCapture.frag) a texel on screen this frame fades at CubeFade, not 12 % a frame toward the
 	// world cube's hazy render; out of view too, giving way to the world cube only as the camera moves (2026-11-27 cube-keep-capture:
 	// -CubeReset, the distance moved this frame over 2 x CubeMoveThreshold; it was max(CubeFade x 8, 0.03), gone a second after looking away).
-	float2 onSuv = rectToScreen(ToScreen(view));
-	bool onScreen = view.z > 0.05 && all(onSuv > 0.005) && all(onSuv < 0.995);
+	float2 uv = view.z > 0.05 ? ToScreen(view) : -1.0.xx;
+	float2 suv = view.z > 0.05 ? rectToScreen(uv) : -1.0.xx;
+	bool onScreen = view.z > 0.05 && all(suv > 0.005) && all(suv < 0.995);
 	float4 result;
 	[branch] if (CubeOn >= 1.5) {
 		float3 ndir = normalize(dir);
@@ -731,9 +732,8 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 		result = CubeReset > 0.0 ? 0.0 : texCUBElod(TESR_ReflectionsCapture, float4(dir, 0.0)) * (1.0 - CubeFade);
 	}
 
-	[branch] if (view.z > 0.05) {
-		float2 uv = ToScreen(view);
-		[branch] if (all(rectToScreen(uv) > 0.005) && all(rectToScreen(uv) < 0.995)) {
+	[branch] if (onScreen) {
+		{
 			// A cube texel covers a patch of many screen pixels (about 1.4 degrees): average a 4 x 4 grid of reads across
 			// it, so a thin neon tube counts by how much of the patch it fills instead of flickering in and out.
 			float2 du = ToScreen(WorldToViewDir(FaceDirection(CubeFace, st + float2(2.0 / CubeSize, 0.0)))) - uv;
@@ -746,12 +746,12 @@ float4 CapturePS(VSOUT IN, float2 vpos : VPOS) : COLOR0 {
 					bool usable = all(at > 0.0) && all(at < TESR_RenderScale.xy) && !IsWeapon(at) && readDepthLod(at) > 40.0;
 					float3 c = linearize(tex2Dlod(TESR_RenderedBuffer, float4(at, 0, 0)).rgb);
 					float brightest = max(c.r, max(c.g, c.b));
-					sum += usable ? c * min(1.0, 32.0 / max(brightest, 1.0e-4)) : 0.0;
+					sum += usable ? c * min(1.0, 32.0 / max(brightest, 1.0e-4)) : 0.0;	// (upstream 1.1.6: 8; our 32 kept until the owner picks)
 					found += usable ? 1.0 : 0.0;
 				}
 			}
 			[branch] if (found > 0.0) {
-				float2 edge = min(rectToScreen(uv), 1.0 - rectToScreen(uv));
+				float2 edge = min(suv, 1.0 - suv);
 				float blend = CaptureBlend * saturate(min(edge.x, edge.y) * 20.0) * found / 16.0;
 				result = lerp(result, float4(sum / found, 1.0), blend);
 			}

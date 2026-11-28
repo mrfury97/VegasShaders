@@ -120,14 +120,14 @@ public:
 
 	struct PBRSettings {
 		float LightScale, AmbientScale;
-		float Roughness, Metallicness, Saturation;	// Metallicness: read but unused (TESR_PBRData.x carries VanillaBridgeAmount since 2026-11-05)
+		float Roughness, Saturation;
 		float VanillaBridgeAmount = 1.0f;	// UNOFFICIAL 2026-11-05 [Shaders.PBR.Main] VanillaBridgeAmount (only Default's is set: UpdateSettings)
 		float SkylightingScale, SkylightingDirectionality;
 		float SkylightingSaturation; // UNOFFICIAL, applied to the sky irradiance on the CPU (Sky.cpp)
 		// UNOFFICIAL 2026-10-18 for materials with an _rmaos map only (idea from Physically-Based-Reloaded (Balebandro), GPL-3.0, c1415cb8):
 		float RmaosMetalnessScale;	// MetalnessScale 0-1: the map's metal (G) times this
 		float RmaosAOScale;			// AOScale 0-1: share of the map's occlusion (B), times [Shaders.PBR.Rmaos] Occlusion
-		float RmaosRoughnessScale;	// RoughnessScale 1-2: the map's roughness (R) times this, at most 1 (rougher only)
+		float RmaosRoughnessScale;	// RoughnessScale 0.25-2.0: the map's roughness (R) times this, saturated to [0, 1]
 	};
 	struct PBRSettingsStruct {
 		PBRSettings Default, Rain, Night, NightRain, Interiors;

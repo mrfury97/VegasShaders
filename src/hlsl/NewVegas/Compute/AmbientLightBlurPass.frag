@@ -27,7 +27,7 @@ vec4 Blur(vec2 uvIn, vec2 axis) {
     tapDepth[3] = depth;
     [[unroll]] for (int i = 1; i < 4; i++) {   // (2026-10-26: [unroll] as the .fx; glslang keeps loops)
         [[unroll]] for (int side = -1; side <= 1; side += 2) {
-            vec2 tapUV = uvIn + axis * cb.alLayout.zw * (float(i * side) * BlurStep);
+            vec2 tapUV = clampToRect(uvIn + axis * cb.alLayout.zw * (float(i * side) * BlurStep), cb.alLayout.zw);
             tapDepth[3 + i * side] = readDepthLod(t_depth, tapUV);
             float dz = abs(tapDepth[3 + i * side] - depth);
             vec2 w = weights[i] * clamp(1.0 - dz * invTolerance, 0.0, 1.0);
@@ -45,4 +45,4 @@ vec4 Blur(vec2 uvIn, vec2 axis) {
     return vec4((pc.variant & 2u) != 0u ? mix(center.rgb, blurred, busy) : blurred, visibility / total.x);
 }
 
-void main() { o_color = Blur(frameUV(), (pc.variant & 1u) != 0u ? vec2(0.0, 1.0) : vec2(1.0, 0.0)); }
+void main() { o_color = Blur(frameRectUV(), (pc.variant & 1u) != 0u ? vec2(0.0, 1.0) : vec2(1.0, 0.0)); }

@@ -1,15 +1,14 @@
 #pragma once
 
 // UNOFFICIAL 2026-10-27 (NVR DXVK): the temporal upscaler behind TAA's FSR path ([Shaders.TAA.FSR]), as an interface so a
-// second upscaler (NVIDIA DLSS through a 64-bit helper process: core\UpscalerDlss.cpp, docs\next\FORK2-DLSS.md) takes FSR 2's
+// second upscaler (NVIDIA DLSS through a 64-bit helper process: core\UpscalerDlss.cpp, docs\next\FORK2-DLSS.md) takes FSR 3.1's
 // place in the same two calls without touching what feeds it:
 //   - TAA's native AA (effects\TAAFSR.cpp): the post-tonemap frame at the screen's own resolution (render size = display size);
 //   - RenderScale (effects\TAAUpscale.cpp): the world scene drawn at a lower internal resolution, upscaled before NVR's effects.
 // Both build the same inputs (jittered colour, a depth, camera motion vectors, the jitter) and read Output() afterwards.
 //
-// FSR 2 is AMD's (FidelityFX Super Resolution 2.2.1, GPUOpen, MIT; src\hlsl\NewVegas\Compute\FSR2\LICENSE-FidelityFX-FSR2.txt).
-// Everything here needs NVR DXVK (compute passes through the extension). A failure is logged once and the upscaler reports
-// Failed() for the session; its callers then keep their D3D9 paths.
+// FSR 3.1 is AMD's (FidelityFX SDK 1.1.4, GPUOpen, MIT). Everything here needs NVR DXVK (compute passes through the extension).
+// A failure is logged once and the upscaler reports Failed() for the session; its callers then keep their D3D9 paths.
 
 #include "NvrDxvkExt.h"
 #include <string>
@@ -57,16 +56,11 @@ namespace Upscaler {
 		virtual std::string			DiagText() const { return ""; }
 	};
 
-	// AMD FSR 2.2.1 (core\Upscaler.cpp). One shared instance: TAA's native AA and RenderScale use it in turn (each switch
-	// between them is a Reset), so its textures (about 190 MB at 1080p, made on first use) exist once.
-	IUpscaler*	Fsr2();
-
-	// UNOFFICIAL 2026-10-28 ([Shaders.TAA.FSR] Version 1): AMD FSR 3.1's upscaler (core\UpscalerFsr31.cpp; FidelityFX SDK 1.1.4,
-	// MIT), the same inputs as FSR 2. Upscaling only. Its own textures (made on first use); FSR 2's are not made while it runs.
+	// AMD FSR 3.1's upscaler (core\UpscalerFsr31.cpp; FidelityFX SDK 1.1.4, MIT). Upscaling only.
 	IUpscaler*	Fsr31();
 
 	// NVIDIA DLSS through NvrDlssHelper.exe (64-bit; core\UpscalerDlss.cpp, tools\nvr-dlss-helper). No NVIDIA code in NVR's DLL.
-	// It runs FSR 2 itself while the helper starts, and from the first problem on (logged once with the reason).
+	// It runs FSR 3.1 itself while the helper starts, and from the first problem on (logged once with the reason).
 	IUpscaler*	Dlss();
 
 	// [Shaders.TAA.DLSS] HelperTest (the helper's pass-through test: the same exchange, no DLSS) and JitterFlip (bit 0
@@ -88,8 +82,7 @@ namespace Upscaler {
 	void		DlssWeaponMask(float Value);
 	float		DlssWeaponMaskValue();
 
-	// 0 FSR 2 ([Shaders.TAA.FSR] Enabled), 1 DLSS ([Shaders.TAA.DLSS] Enabled) (Dlss(), which falls back to FSR 2 whenever DLSS cannot run),
-	// 2 FSR 3.1 ([Shaders.TAA.FSR] Enabled + Version 1; FSR 2 from its first failure on, logged once).
+	// 0 FSR 3.1 ([Shaders.TAA.FSR] Enabled), 1 DLSS ([Shaders.TAA.DLSS] Enabled) (Dlss(), which falls back to FSR 3.1 whenever DLSS cannot run).
 	IUpscaler*	Choose(int setting);
 
 	// UNOFFICIAL 2026-10-30 DLSS Ray Reconstruction (docs\next\FORK2-DLSS-RR.md; [Shaders.TAA.DLSS] RayReconstruction, off by default):

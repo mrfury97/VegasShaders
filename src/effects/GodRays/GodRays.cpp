@@ -19,10 +19,13 @@ namespace {
 		UInt32 linearSampler;			// 40: LINEAR, CLAMP (filled in by DXVK)
 		UInt32 pointSampler;			// 44: POINT, CLAMP
 	};
+	static_assert(sizeof(GodRaysPush) == 48, "GodRays.glsl push block");
 	struct GodRaysUniforms {
 		D3DXMATRIX projection, invProjection;	// TESR_ProjectionTransform, TESR_InvProjectionTransform (as stored)
 		D3DXVECTOR4 reciprocalResolution, sunColor, ray, rayColor, data, viewSpaceLightDir, sunDirection, sunPosition, sunAmount, sunsetColor, cameraData, layout;
+		D3DXVECTOR4 renderScale;		// xy: RenderRect scale (1 = off), zw: 1 / xy
 	};
+	static_assert(sizeof(GodRaysUniforms) == 336, "GodRays.glsl uniforms");
 
 	// The constants from the same registered memory the D3D9 path uploads (SetCT).
 	const D3DXVECTOR4* RegisteredConstant(const char* name) {
@@ -97,6 +100,9 @@ bool GodRaysEffect::ExtPrepare(const D3DXVECTOR4& layout) {
 	uniforms.sunsetColor = *sunsetColor;
 	uniforms.cameraData = *cameraData;
 	uniforms.layout = layout;
+	uniforms.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	return ExtUniforms(extUniforms, &uniforms, sizeof(uniforms)) != nullptr;
 }
 
@@ -135,7 +141,15 @@ bool GodRaysEffect::ExtDrawPass(IDirect3DDevice9* Device, IDirect3DSurface9* Ren
 		IDirect3DBaseTexture9* inputs[3] = { textures[(pass - 1) & 1], reduced ? (IDirect3DBaseTexture9*)reduced : TheTextureManager->RenderedTexture, DepthTexture() };
 		count = Resources(resources, inputs, 3, uniforms, true);
 	}
-	return ExtDrawTo(pipeline->Pipeline, &surfaces[pass & 1], 1, resources, count, &push, sizeof(push));
+	RECT rect = {};
+	const RECT* pRect = nullptr;
+	if (RenderRect::Active()) {
+		D3DSURFACE_DESC desc = {};
+		if (!surfaces[pass & 1] || FAILED(surfaces[pass & 1]->GetDesc(&desc))) return false;
+		rect = { 0, 0, (LONG)RenderRect::Width(desc.Width), (LONG)RenderRect::Height(desc.Height) };
+		pRect = &rect;
+	}
+	return ExtDrawTo(pipeline->Pipeline, &surfaces[pass & 1], 1, resources, count, &push, sizeof(push), pRect, ExtUv::TexelCentre);
 }
 
 void GodRaysEffect::UpdateConstants() {
@@ -687,7 +701,7 @@ void GodRaysEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTa
 	{
 		auto timer = TimeLogger();
 		// UNOFFICIAL 2026-10-25 (NVR DXVK): the Vulkan passes first (ProbeLog's read-back diagnostics stay on D3D9).
-		bool ext = !ExtFailed && !dedicatedRenderFailed.Blocked() && DxvkCompute::PassesOn();
+		bool ext = !ExtFailed && !dedicatedRenderFailed.Blocked() && DxvkCompute::PassesOnRect();
 #if NVR_TEST_TOOLS
 		if (probeLevel > 0) ext = false;
 #endif

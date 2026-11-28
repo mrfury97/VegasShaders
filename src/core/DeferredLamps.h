@@ -10,7 +10,6 @@
 #include "CapturedNormals.h"
 #include "LinearScene.h"
 #include "ShaderRecord.h"
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-14 full deferred renderer (core/DeferredRenderer.h) drives this pass while it is on
 #include "LightFreeRecords.h"
 #include "DeferredDepth.h"	// UNOFFICIAL 2026-11-14 DeferredDistant: the exact linear view z for the pass (DL_LINEAR_DEPTH)
 #include "DeferredDistant.h"
@@ -24,11 +23,7 @@ namespace DeferredLamps {
 	inline const char* kSection = "Shaders.ShadowsInteriors.Deferred";
 
 	inline bool WantedAtStartup() { return ManyLamps::DeferredAtStartup(); }
-	inline bool IsFamily(const char* name) {	// SLS2034.pso, SLS2035.pso, SLS2036.pso (ManyLamps::IsOurs)
-		return ManyLamps::IsOurs(name);
-	}
 
-	inline std::unordered_map<const void*, ShaderRecordPixel*> Records;	// NiD3DPixelShaderEx* -> its deferred record (the ExteriorRecords pattern)
 	inline std::unordered_map<IDirect3DPixelShader9*, IDirect3DPixelShader9*> ForwardOf;	// deferred handle -> the forward Interior handle
 	inline std::unordered_map<IDirect3DPixelShader9*, IDirect3DPixelShader9*> ForwardOfOutdoor;	// UNOFFICIAL 2026-11-19: deferred handle -> the forward Exterior / Default handle (FORWARD_SHADOWS = 1)
 	inline ShaderRecordPixel* Pass = nullptr;
@@ -43,7 +38,7 @@ namespace DeferredLamps {
 	inline IDirect3DSurface9* SkinSpecSurface = nullptr;
 	inline int SkinWanted = -1;
 	inline bool SkinCompiledIn() {
-		if (SkinWanted < 0) SkinWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredSkin") != 0 && SettingForce::Mode() > 0 && CapturedNormals::V2CompiledIn();
+		if (SkinWanted < 0) SkinWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredSkin") != 0 && CapturedNormals::V2CompiledIn();
 		return SkinWanted != 0;
 	}
 	inline FailOnce::Latch CopyFailed{ "DeferredLamps frame copy" };	// UNOFFICIAL 2026-11-02 RetryFailedEffects
@@ -137,7 +132,7 @@ namespace DeferredLamps {
 	// light target (linear, no fog), at the stencil's view-model mark: c holds c1-c7 (the screen share rescaled to the world camera's tiles,
 	// the first-person axes with the world's tangents, the lamps' rows from kLightingOffset), depth the first-person projection's _33 / _43.
 	// Off (on false, always without the switch): Apply exactly as before.
-	struct ViewModelPass { bool on = false; float c[7][4] = {}; float depth[2] = {}; };
+	struct ViewModelPass { bool on = false; float c[7][4] = {}; float depth[2] = {}; IDirect3DTexture9* depthTex = nullptr; };
 	inline ViewModelPass Vm;
 	inline bool EnsurePass();			// (below)
 	inline bool EnsureShadowShader();	// (below)
@@ -210,35 +205,6 @@ namespace DeferredLamps {
 		}
 	}
 
-	// ShaderManager::LoadShader, after a lit shader's level-0 Interior record loaded: its deferred record, from the same source with the same
-	// overrides + LAMPS_DEFERRED, in its own cache folder.
-	inline void LoadRecord(NiD3DPixelShaderEx* shader, const char* name, ShaderTemplate tmpl, const D3DXMACRO* interiorOverrides, ShaderRecordPixel* forward) {
-		if (!WantedAtStartup() || !IsFamily(name) || !forward) return;
-		if (SettingForce::Mode() > 0) return;	// UNOFFICIAL 2026-11-14 the deferred renderer's own records (DeferredRenderer::LoadInterior)
-		static D3DXMACRO overrides[12] = {};
-		int n = 0;
-		for (const D3DXMACRO* o = interiorOverrides; o && o->Name && n < 10; o++) {
-			overrides[n++] = *o;
-			if (!strcmp(o->Name, "LAMP_FALLOFF_ON")) LampFalloffOverride = o->Definition;
-		}
-		overrides[n++] = { "LAMPS_DEFERRED", "1" };
-		overrides[n] = { NULL, NULL };
-		ShaderRecordPixel* record = (ShaderRecordPixel*)ShaderRecord::LoadShader(name, NULL, tmpl, "Deferred\\", overrides);
-		if (!record) { Logger::Log("[ERROR] UNOFFICIAL DeferredLamps: %s's deferred record did not load: it stays forward", name); return; }
-		Records[shader] = record;
-		ForwardOf[record->ShaderHandle] = forward->ShaderHandle;
-		Logger::Log("UNOFFICIAL DeferredLamps: %s has a deferred record", name);
-		EnsurePass();			// UNOFFICIAL 2026-10-31: both passes compiled now, with the other shaders at load, not on the render thread
-		EnsureShadowShader();	// at the first interior (a black screen while D3DX ran there)
-	}
-
-	// NiD3DPixelShaderEx::SetupShader, before the interior branch: the deferred record while the main list's G-buffer is bound.
-	inline ShaderRecordPixel* Choose(const void* shader) {
-		if (!Live || !CapturedNormals::InSpan || (CapturedNormals::VmSpan && !CapturedNormals::VmDeferred) || Records.empty()) return nullptr;	// (empty while the deferred renderer is on: it chooses)
-		auto found = Records.find(shader);
-		return found == Records.end() ? nullptr : found->second;
-	}
-
 	// Once a frame (Render.cpp, with ManyLamps::BeginFrame).
 	inline void BeginFrame() {
 		Frame++;
@@ -246,7 +212,7 @@ namespace DeferredLamps {
 		InteriorDir.active = false;
 		ForwardBinder[0] = 0; ForwardBindsFrame = 0;
 		if (!WantedAtStartup()) { Live = false; return; }
-		const bool renderer = SettingForce::Mode() > 0;	// UNOFFICIAL 2026-11-14 (above): the renderer's live switch, any runtime, outdoors only when it says so
+		const bool renderer = true;	// UNOFFICIAL 2026-11-14: DeferredRenderer locked to mode 2
 		Live = (renderer ? RendererLive : TheSettingManager->GetSettingI(kSection, "Live") != 0 && ManyLamps::Active() && !TheShaderManager->GameState.isExterior) &&
 			!PassFailed && !CopyFailed.Blocked() && !CapturedNormals::Failed && CapturedNormals::AlbedoCompiledIn() && CapturedNormals::MaterialCompiledIn();
 		// UNOFFICIAL 2026-11-01 / 2026-11-21: per-draw 3D menu isolation (Menu3DGuard + GameShadersInMenus) keeps 3D menus
@@ -267,7 +233,7 @@ namespace DeferredLamps {
 			missingLogged = true;
 			Logger::Log("[WARNING] UNOFFICIAL DeferredLamps: needs [Main.Main.Quality] CapturedNormals + MaterialBuffer + AlbedoBuffer (restart): forward until then");
 		}
-		Unshadowed = TheSettingManager->GetSettingI(kSection, "UnshadowedLamps");
+		Unshadowed = 1;	// Shaders.ShadowsInteriors.Deferred.UnshadowedLamps locked to 1 for DeferredRenderer = 2
 		DebugView = TheSettingManager->GetSettingI(kSection, "DebugView");
 		Shadows = TheSettingManager->GetSettingI(kSection, "Shadows");
 		JitterExact = TheSettingManager->GetSettingI(kSection, "JitterExact") != 0;	// UNOFFICIAL 2026-11-16 fd-batchA (above)
@@ -525,13 +491,20 @@ namespace DeferredLamps {
 	};
 	static_assert(sizeof(ComputeConstants) == 52 * 16, "DeferredLamps ComputeConstants layout mismatch");
 
+	inline bool ComputePossible() {
+		return !ComputeFailed && DxvkCompute::PassesOnRect() && DxvkCompute::Available() &&
+			!DxvkCompute::KeptOnD3D9("DeferredLamps") &&
+			TheSettingManager && TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferred") != 0 &&
+			ManyLamps::ListTexelsNow() == 16;
+	}
+
 	inline bool EnsureComputeReady(IDirect3DDevice9* d) {
-		if (ComputeFailed || Vm.on) return false;
-		// (2026-11-27) Compute\DeferredLamps.comp has no lamp screen-space shadows: with this span's mask the D3D9 passes draw
-		if (ScreenSpaceShadows::Lamps::MadeThisSpan()) return false;
-		if (!DxvkCompute::PassesOnRect() || !DxvkCompute::Available() || DxvkCompute::KeptOnD3D9("DeferredLamps")) return false;
-		if (TheSettingManager->GetSettingI("Main.Main.Performance", "NvrDxvkDeferred") == 0) return false;
-		if (ManyLamps::ListTexelsNow() != 16) return false;
+		// (2026-11-27) Compute\DeferredLamps.comp has no lamp screen-space shadows: with this span's mask the D3D9 passes draw (they are still
+		// compiled at load, DeferredRenderer::Load -> EnsurePass / EnsureShadowShader, and Apply draws them whenever this returns false). The
+		// world's run only: the mask is the world's depth, and the D3D9 passes never apply it to DeferredFirstPerson's run either.
+		// (2026-11-28 upstream 1.1.6 merge: our Vm.on gate dropped, so the first-person run takes upstream's compute path, flag 22.)
+		if (!Vm.on && ScreenSpaceShadows::Lamps::MadeThisSpan()) return false;
+		if (!ComputePossible()) return false;
 		if (!ComputePipeline) {
 			if (ComputeTried) return false;
 			ComputeTried = true;
@@ -578,9 +551,9 @@ namespace DeferredLamps {
 	}
 
 	inline bool CanFoldInteriorDir(IDirect3DDevice9* d, const D3DSURFACE_DESC& t) {
-		if (!Live || DebugView != 0) return false;
+		if (Vm.on || !Live || DebugView != 0) return false;
 		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture) return false;
-		if (!ManyLamps::Table || !EnsurePass()) return false;
+		if (!ManyLamps::Table) return false;
 		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
 		if (!DeferredDepth::LinearReady() && !DeferredDepth::Ready()) return false;
 		if (!EnsureComputeReady(d)) return false;
@@ -598,12 +571,14 @@ namespace DeferredLamps {
 		// (2026-11-27 review, NvrDxvkDeferred on by default) Compute\DeferredLamps.comp has no wet film: with the film live and the land film pass
 		// wanted ([Main.Main.Quality] DeferredWetLampFilm), the D3D9 lamp passes draw so the lamps' shadowed streaks on wet ground stay
 		// (LampFilmDrawn; otherwise the Wetness Effects screen pass falls back to its unshadowed streak).
-		if (LandFilmPass && DeferredWetness::FilmLive && DeferredWetness::FilmTexture && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetLampFilm") != 0)
+		// (2026-11-28 upstream 1.1.6 merge) the world's run only: the land film pass draws only there (!Vm.on in Apply)
+		if (!Vm.on && LandFilmPass && DeferredWetness::FilmLive && DeferredWetness::FilmTexture && TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredWetLampFilm") != 0)
 			return false;
 		// Storage image RMW requires single-sample FP16 (identity RGBA swizzle in DXVK NVR ext)
 		if (t.Format != D3DFMT_A16B16G16R16F || t.MultiSampleType != D3DMULTISAMPLE_NONE) return false;
-		const bool depthIsLinear = DeferredDepth::LinearReady();
-		IDirect3DTexture9* depthTex = depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr);
+		const bool depthIsLinear = !Vm.on && DeferredDepth::LinearReady();
+		IDirect3DTexture9* depthTex = Vm.on ? Vm.depthTex :
+			(depthIsLinear ? DeferredDepth::LinearTexture : (DeferredDepth::Ready() ? DeferredDepth::Texture : nullptr));
 		if (!depthTex) return false;
 
 		D3DVIEWPORT9 vp = {};
@@ -618,7 +593,7 @@ namespace DeferredLamps {
 		ComputeConstants cb = {};
 		cb.viewport[0] = (int)vp.X; cb.viewport[1] = (int)vp.Y; cb.viewport[2] = (int)vp.Width; cb.viewport[3] = (int)vp.Height;
 		const bool lists = ManyLamps::ListsFrame == ManyLamps::FrameId;
-		const bool linear = LinearScene::Linear;
+		const bool linear = LinearScene::Linear || Vm.on;
 		const float gamma = LinearScene::Gamma > 1.0f ? LinearScene::Gamma : 2.2f;
 		const D3DXMATRIX& iv = TheRenderManager->InvViewMatrix;
 		const D3DXVECTOR4& cam = TheRenderManager->CameraPosition;
@@ -627,22 +602,32 @@ namespace DeferredLamps {
 		const float jx = JitterExact ? drawn._31 * tanX : 0.0f, jy = JitterExact ? drawn._32 * tanY : 0.0f;
 
 		cb.dlGrid[0] = (float)ManyLamps::TilesX; cb.dlGrid[1] = (float)ManyLamps::TilesY; cb.dlGrid[2] = lists ? 1.0f : 0.0f; cb.dlGrid[3] = Unshadowed ? 1.0f : 0.0f;
-		cb.dlView[0] = 1.0f / (float)vp.Width; cb.dlView[1] = 1.0f / (float)vp.Height; cb.dlView[2] = (float)vp.X; cb.dlView[3] = (float)vp.Y;
-		cb.dlRight[0] = iv._11; cb.dlRight[1] = iv._12; cb.dlRight[2] = iv._13; cb.dlRight[3] = tanX;
-		cb.dlUp[0] = iv._21; cb.dlUp[1] = iv._22; cb.dlUp[2] = iv._23; cb.dlUp[3] = tanY;
-		cb.dlFwd[0] = iv._31 - iv._11 * jx - iv._21 * jy; cb.dlFwd[1] = iv._32 - iv._12 * jx - iv._22 * jy; cb.dlFwd[2] = iv._33 - iv._13 * jx - iv._23 * jy; cb.dlFwd[3] = linear ? 1.0f : 0.0f;
-		cb.dlRows[0][0] = 1.0f; cb.dlRows[0][3] = -cam.x;
-		cb.dlRows[1][1] = 1.0f; cb.dlRows[1][3] = -cam.y;
-		cb.dlRows[2][2] = 1.0f; cb.dlRows[2][3] = -cam.z;
+		if (Vm.on) {
+			memcpy(cb.dlView, Vm.c[0], 16);
+			memcpy(cb.dlRight, Vm.c[1], 16);
+			memcpy(cb.dlUp, Vm.c[2], 16);
+			memcpy(cb.dlFwd, Vm.c[3], 16);
+			memcpy(cb.dlRows, Vm.c[4], sizeof(cb.dlRows));
+		} else {
+			cb.dlView[0] = 1.0f / (float)vp.Width; cb.dlView[1] = 1.0f / (float)vp.Height; cb.dlView[2] = (float)vp.X; cb.dlView[3] = (float)vp.Y;
+			cb.dlRight[0] = iv._11; cb.dlRight[1] = iv._12; cb.dlRight[2] = iv._13; cb.dlRight[3] = tanX;
+			cb.dlUp[0] = iv._21; cb.dlUp[1] = iv._22; cb.dlUp[2] = iv._23; cb.dlUp[3] = tanY;
+			cb.dlFwd[0] = iv._31 - iv._11 * jx - iv._21 * jy; cb.dlFwd[1] = iv._32 - iv._12 * jx - iv._22 * jy; cb.dlFwd[2] = iv._33 - iv._13 * jx - iv._23 * jy; cb.dlFwd[3] = linear ? 1.0f : 0.0f;
+			cb.dlRows[0][0] = 1.0f; cb.dlRows[0][3] = -cam.x;
+			cb.dlRows[1][1] = 1.0f; cb.dlRows[1][3] = -cam.y;
+			cb.dlRows[2][2] = 1.0f; cb.dlRows[2][3] = -cam.z;
+		}
 		cb.dlTable[0] = (float)ManyLamps::TableRowsNow(); cb.dlTable[1] = (float)ManyLamps::TileRow(); cb.dlTable[2] = gamma; cb.dlTable[3] = 1.0f / gamma;
 		cb.dlDebug[0] = (float)DebugView; cb.dlDebug[1] = Shadows ? 1.0f : 0.0f; cb.dlDebug[2] = ManyLamps::BinWidth / (float)ManyLamps::TileSize; cb.dlDebug[3] = ManyLamps::BinHeight / (float)ManyLamps::TileSize;
 		const float bias = (std::max)(TheSettingManager->GetSettingF(kSection, "PrecisionBias"), 0.0f) * 0.001f;
-		const bool linearZ = DeferredDistant::CompiledIn() && (depthIsLinear || DeferredDepth::Ready());
+		const bool linearZ = !Vm.on && DeferredDistant::CompiledIn() && (depthIsLinear || DeferredDepth::Ready());
 		cb.dlShadow[2] = bias; cb.dlShadow[3] = linearZ ? 1.0f : 0.0f;
-		cb.dlDepth[0] = drawn._33; cb.dlDepth[1] = drawn._43; cb.dlDepth[2] = 0.01f; cb.dlDepth[3] = 2.0f;
+		cb.dlDepth[0] = Vm.on ? Vm.depth[0] : drawn._33;
+		cb.dlDepth[1] = Vm.on ? Vm.depth[1] : drawn._43;
+		cb.dlDepth[2] = 0.01f; cb.dlDepth[3] = 2.0f;
 
 		float fog[4] = {};
-		const bool fogExact = FogCompiled() && DebugView < 2 && DeferredFog::Params(fog);
+		const bool fogExact = !Vm.on && FogCompiled() && DebugView < 2 && DeferredFog::Params(fog);
 		if (fogExact) memcpy(cb.dlFog, fog, 16);
 
 		bool landLive = false;
@@ -654,7 +639,7 @@ namespace DeferredLamps {
 			const float* terrain = constant("TESR_TerrainData");
 			const float* terrainExtra = constant("TESR_TerrainExtraData");
 			const float* linearLighting = constant("TESR_LinearLighting");
-			if (CapturedNormals::V2CompiledIn() && LandLampModel && terrain && terrainExtra && TheShaderManager->GameState.isExterior) {
+			if (!Vm.on && CapturedNormals::V2CompiledIn() && LandLampModel && terrain && terrainExtra && TheShaderManager->GameState.isExterior) {
 				const float g = linearLighting ? linearLighting[0] : 1.0f, s = terrain[2];
 				cb.dlLand[0] = 1.0f;
 				cb.dlLand[1] = terrainExtra[0] != 0.0f ? 1.0f : 0.0f;
@@ -702,7 +687,7 @@ namespace DeferredLamps {
 
 		UINT flags = 0;
 		if (CapturedNormals::V2CompiledIn()) flags |= 1u << 0u;
-		if (TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0) flags |= 1u << 1u;
+		flags |= 1u << 1u;	// Shaders.PBR.Linear.Enabled locked on for DeferredRenderer = 2
 		if (SkinCompiledIn()) flags |= 1u << 2u;
 		if (SkinCompiledIn() && SkinSpecSurface) flags |= 1u << 3u;
 		if (landLive) flags |= 1u << 4u;
@@ -736,6 +721,7 @@ namespace DeferredLamps {
 			const int sssMode = MaterialSSSProto::EffectiveMode();
 			if (sssMode >= 1 && sssMode <= 3) flags |= 1u << 21u;
 		}
+		if (Vm.on) flags |= 1u << 22u;
 		if (TheShaderManager && TheShaderManager->Shaders.PBR) {
 			cb.spare[0] = TheShaderManager->Shaders.PBR->MetalSettings.Clearcoat;
 			cb.spare[1] = TheShaderManager->Shaders.PBR->MetalSettings.Pearlescence;
@@ -770,8 +756,8 @@ namespace DeferredLamps {
 		dispatch.GroupsY = (vp.Height + 7u) / 8u;
 		dispatch.GroupsZ = 1u;
 
-		static GpuTimer computeTimer("Deferred lamps (compute)");
-		GpuProfileScope gpu(computeTimer, d);
+		static GpuTimer computeTimer("Deferred lamps (compute)"), vmComputeTimer("Deferred lamps (first person, compute)");
+		GpuProfileScope gpu(Vm.on ? vmComputeTimer : computeTimer, d);
 		DxvkCompute::PreLoad(bindings, _countof(bindings));
 		// Unbind target from D3D9 RT0 before storage-image RMW, then restore RT0 + viewport immediately after.
 		d->SetRenderTarget(0, ComputeRt0DummySurf);
@@ -783,7 +769,7 @@ namespace DeferredLamps {
 			Logger::Log("[WARNING] UNOFFICIAL DeferredLamps: compute dispatch failed (%08lX); falling back to D3D9 passes", hr);
 			return false;
 		}
-		if (Shadows) ShadowedThisFrame = true;
+		if (!Vm.on && Shadows) ShadowedThisFrame = true;
 		if (linearZ) StatLinearZ++;
 		if (fogExact) StatFogExact++;
 		if (landLive) StatLand++;
@@ -794,7 +780,6 @@ namespace DeferredLamps {
 
 	// The pass: after CapturedNormals::EndSpan (G-buffer unbound and resolved), before LinearScene::EndSpan (DeferredSpan, Render.cpp).
 	inline void Apply(IDirect3DDevice9* d) {
-		ManyLamps::FinishTable();	// UNOFFICIAL 2026-11-14 LampTableThread: the lists complete and the table unlocked before the pass reads it
 		const unsigned binds = DeferredBindsThisSpan;
 		DeferredBindsThisSpan = 0;
 		const InteriorDirData intDir = InteriorDir;
@@ -816,7 +801,7 @@ namespace DeferredLamps {
 		// (ShadowManager.cpp), so loading an outdoor save at night left AtlasTexture null and skipped the entire outdoor
 		// lamp pass (buildings, terrain, skin). Outdoors PutTiles writes no tiles (sTile.z == 0), so stage 8 is never sampled.
 		if (!CapturedNormals::Drawn || !CapturedNormals::AlbedoTexture || !CapturedNormals::MaterialTexture || !CapturedNormals::Texture ||
-			!ManyLamps::Table || !EnsurePass() || skipDraw) { StatSkipped++; return; }
+			!ManyLamps::Table || skipDraw) { StatSkipped++; return; }
 		if (!intDir.active && !Vm.on && DebugView == 0 && ManyLamps::TableFrame == ManyLamps::FrameId &&
 			ManyLamps::ListsFrame == ManyLamps::FrameId && ManyLamps::ActiveLamps.empty()) {
 			if (Shadows) ShadowedThisFrame = true;
@@ -829,7 +814,15 @@ namespace DeferredLamps {
 		D3DSURFACE_DESC t = {};
 		target->GetDesc(&t);
 		if (TryApplyCompute(d, target, t, binds != 0, intDir)) { target->Release(); return; }
-		if (!binds) { target->Release(); return; }
+		if (!Vm.on && binds) {
+			static bool d3Logged = false;
+			if (!d3Logged) {
+				d3Logged = true;
+				Logger::Log("[D3-FALLBACK] DeferredLamps fell back to D3D9 (computeFailed=%d, fmt=%u, listTexels=%d)",
+					ComputeFailed ? 1 : 0, (unsigned)t.Format, ManyLamps::ListTexelsNow());
+			}
+		}
+		if (!binds || !EnsurePass()) { if (binds) StatSkipped++; target->Release(); return; }
 		if (DeferredDistant::CompiledIn() && !Vm.on) DeferredDepth::EnsureLinear(d);
 		const bool linear = LinearScene::Linear || Vm.on;	// (DeferredFirstPerson: the light target, added ONE / ONE)
 		// UNOFFICIAL 2026-11-14 the stored-curve fog (core/DeferredFog.h; DeferredLamps.hlsl DL_FOG_EXACT, compiled in with the lighting-free

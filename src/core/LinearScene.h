@@ -68,12 +68,12 @@ namespace LinearScene {
 		}
 		Made = t;
 		if (!ConvertPS) {
-			// c0: x the exponent, y 1 = the target is multisampled (add the difference to every sample instead of writing).
+			// c0.x: gamma exponent
 			static const char* kPS =
 				"sampler2D S : register(s0); float4 E : register(c0);"
 				"float4 main(float2 uv : TEXCOORD0) : COLOR0 {"
 				"  float4 c = tex2D(S, uv); float3 v = max(c.rgb, 0.0); float3 f = pow(v, E.x);"
-				"  return E.y > 0.5 ? float4(f - v, 0.0) : float4(f, c.a); }";
+				"  return float4(f, c.a); }";
 			ID3DXBuffer* code = nullptr; ID3DXBuffer* errors = nullptr;
 			if (FAILED(D3DXCompileShader(kPS, (UINT)strlen(kPS), NULL, NULL, "main", "ps_3_0", 0, &code, &errors, NULL)) || !code ||
 				FAILED(d->CreatePixelShader((const DWORD*)code->GetBufferPointer(), &ConvertPS))) {
@@ -84,7 +84,7 @@ namespace LinearScene {
 			if (code) code->Release();
 			if (!ConvertPS) return false;
 		}
-		Logger::Log("UNOFFICIAL LinearScene: on (frame copy %ux%u format %u, msaa %u)", t.Width, t.Height, (unsigned)t.Format, (unsigned)t.MultiSampleType);
+		Logger::Log("UNOFFICIAL LinearScene: on (frame copy %ux%u format %u)", t.Width, t.Height, (unsigned)t.Format);
 		return true;
 	}
 
@@ -97,7 +97,6 @@ namespace LinearScene {
 		d->GetViewport(&vp);
 		// (2026-11-16 fd-batchB) a refused copy: the latch (FdTestFault 903 forces one, test only)
 		if (FdTestFault::Take(903) || FAILED(d->StretchRect(target, NULL, Copy, NULL, D3DTEXF_NONE))) { Logger::Log("UNOFFICIAL LinearScene: frame copy failed"); Fail.Set("its frame copy failed"); return false; }
-		const bool msaa = t.MultiSampleType != D3DMULTISAMPLE_NONE;
 
 		// Save what the draw needs.
 		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;
@@ -110,8 +109,8 @@ namespace LinearScene {
 		static const D3DRENDERSTATETYPE kRS[] = { D3DRS_ZENABLE, D3DRS_ZWRITEENABLE, D3DRS_ALPHABLENDENABLE, D3DRS_SRCBLEND, D3DRS_DESTBLEND,
 			D3DRS_BLENDOP, D3DRS_SEPARATEALPHABLENDENABLE, D3DRS_ALPHATESTENABLE, D3DRS_STENCILENABLE, D3DRS_SCISSORTESTENABLE, D3DRS_CULLMODE,
 			D3DRS_COLORWRITEENABLE, D3DRS_FILLMODE, D3DRS_SRGBWRITEENABLE, D3DRS_FOGENABLE, D3DRS_CLIPPLANEENABLE };
-		const DWORD want[] = { FALSE, FALSE, msaa ? TRUE : FALSE, D3DBLEND_ONE, D3DBLEND_ONE, D3DBLENDOP_ADD, FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE,
-			msaa ? 7u : 0xFu, D3DFILL_SOLID, FALSE, FALSE, 0 };
+		const DWORD want[] = { FALSE, FALSE, FALSE, D3DBLEND_ONE, D3DBLEND_ONE, D3DBLENDOP_ADD, FALSE, FALSE, FALSE, FALSE, D3DCULL_NONE,
+			0xFu, D3DFILL_SOLID, FALSE, FALSE, 0 };
 		static_assert(sizeof(kRS) / sizeof(kRS[0]) == sizeof(want) / sizeof(want[0]), "one value per state");
 		DWORD saved[sizeof(kRS) / sizeof(kRS[0])];
 		for (unsigned i = 0; i < sizeof(kRS) / sizeof(kRS[0]); i++) { if (FAILED(d->GetRenderState(kRS[i], &saved[i]))) saved[i] = want[i]; if (saved[i] != want[i]) d->SetRenderState(kRS[i], want[i]); }
@@ -122,7 +121,7 @@ namespace LinearScene {
 
 		d->SetVertexShader(nullptr);
 		d->SetPixelShader(ConvertPS);
-		const float e[4] = { toLinear ? Gamma : 1.0f / Gamma, msaa ? 1.0f : 0.0f, 0.0f, 0.0f };
+		const float e[4] = { toLinear ? Gamma : 1.0f / Gamma, 0.0f, 0.0f, 0.0f };
 		d->SetPixelShaderConstantF(0, e, 1);
 		d->SetTexture(0, CopyTex);
 		d->SetFVF(D3DFVF_XYZRHW | D3DFVF_TEX1);
@@ -232,12 +231,12 @@ namespace LinearScene {
 	inline void BeginFrame(IDirect3DDevice9* d) {
 		if (!Checked) {
 			Checked = true;
-			Compiled = TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "LinearScene");
-			Logger::Log("UNOFFICIAL LinearScene: %s", Compiled ? "compiled into the lit shaders (the world's main list is kept in linear light)" : "off (not compiled into the shaders)");
+			Compiled = true;
+			Logger::Log("UNOFFICIAL LinearScene: compiled into the lit shaders (the world's main list is kept in linear light)");
 		}
 		const D3DXVECTOR4& l = TheShaderManager->Shaders.PBR->Constants.Linear;
 		Gamma = l.x;
-		Live = Compiled && !Fail.Blocked() && Gamma > 1.0f && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "LinearScene") != 0;
+		Live = Compiled && !Fail.Blocked() && Gamma > 1.0f;
 		SharedWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "SharedDrawState") != 0;
 		if (Live && !Hooked) Hook(d);
 		if (Live && ++Frames >= 600) {

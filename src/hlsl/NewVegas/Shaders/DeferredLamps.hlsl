@@ -178,19 +178,10 @@ float DLViewZ(float4 uv4, float storedViewZ) {
 
 // UNOFFICIAL 2026-11-14 GBufferV2 (CAPTURED_NORMALS_ON 4, Includes/CapturedNormals.hlsl): a deferred record's pixel is marked by the albedo's
 // alpha, 1 + (1 - fog) (forward records write 1), and its normal-mapped normal is in the material's g / a at full precision (g 4 and up:
-// none there, the smooth normal). Without it: the old codes, a in 1.01 .. 1.99 with the normal's y in it.
+// none there, the smooth normal).
 #if CAPTURED_NORMALS_ON >= 4
     #define DL_DEFERRED_CLIP(material0, uv4) clip(tex2Dlod(DL_Albedo, uv4).a - 1.0001f)
     #define DL_NORMAL(m, uv4) (abs((m).g) <= 1.001f ? ShadowDecodeNormal((m).ga) : ShadowDecodeNormal(tex2Dlod(DL_Normals, uv4).rg))
-#elif defined(FD_LIGHT_FREE) && FD_LIGHT_FREE
-    // UNOFFICIAL 2026-11-14 DeferredSun (Includes/DeferredPixel.hlsl): the lighting-free records' pixels too (their lamps are this pass's), and
-    // their normal: the older code where a record wrote it (the table family, the land), else COLOR3's smooth normal
-    #define DL_OLD_CODE(m) ((m).a > 1.005f && (m).a < 1.995f)
-    #define DL_DEFERRED_CLIP(material0, uv4) clip(max(FDLightFreePixel(tex2Dlod(DL_Albedo, uv4).a), DL_OLD_CODE(material0) ? 1.0f : 0.0f) - 0.5f)
-    #define DL_NORMAL(m, uv4) (DL_OLD_CODE(m) ? ShadowDecodeNormal(float2((m).g, ((m).a - 1.01f) / 0.49f - 1.0f)) : ShadowDecodeNormal(tex2Dlod(DL_Normals, uv4).rg))
-#else
-    #define DL_DEFERRED_CLIP(material0, uv4) clip((material0).a - 1.005f); clip(1.995f - (material0).a)
-    #define DL_NORMAL(m, uv4) ShadowDecodeNormal(float2((m).g, ((m).a - 1.01f) / 0.49f - 1.0f))
 #endif
 
 // UNOFFICIAL 2026-11-14 (claude/fd-interiors, DeferredRenderer) one lamp's light on the pixel. Under GBufferV2 the record's specular bit

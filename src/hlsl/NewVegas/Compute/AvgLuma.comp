@@ -52,8 +52,8 @@ layout(push_constant) uniform Push {
     uint  groupsY;                                      // 12
     uint  phase;                                        // 16
     uint  samplerIndex;                                 // 20: linear, clamp (low 16 bits)
-    uint  pad0;                                         // 24
-    uint  pad1;                                         // 28
+    float scaleX;                                       // 24: RenderRect X scale (1.0 when off)
+    float scaleY;                                       // 28: RenderRect Y scale (1.0 when off)
     vec4  motionBlurData;                               // 32: TESR_MotionBlurData
     vec4  depthOfFieldData;                             // 48: TESR_DepthOfFieldData
     vec4  gameTime;                                     // 64: TESR_GameTime (w: frame time)
@@ -77,7 +77,9 @@ float luma(vec3 c) {
 // ---- Depth.hlsl ------------------------------------------------------------------
 float readDepth(vec2 uv) {
     float farZ = pc.cameraData.y;
-    return texture(sampler2D(t_depth, s_samplers[pc.samplerIndex & 0xFFFFu]), uv).x * farZ;
+    vec2 scale = vec2(pc.scaleX, pc.scaleY);
+    vec2 ruv = clamp(uv * scale, vec2(0.0), scale);
+    return texture(sampler2D(t_depth, s_samplers[pc.samplerIndex & 0xFFFFu]), ruv).x * farZ;
 }
 
 // ---- AvgLuma.fx.hlsl -------------------------------------------------------------

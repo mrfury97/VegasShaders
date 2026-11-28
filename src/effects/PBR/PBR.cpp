@@ -34,6 +34,11 @@ void PBRShaders::RegisterConstants() {
 // The first-person model's metal strength and grey parts' metal (GreyMetal) for its pass; the world's (World, WorldGreyMetal)
 // after it. Shaders upload their constants when bound, so the one still bound from the world pass gets it directly (c34:
 // TESR_PBRMetal in Object.hlsl).
+static bool IsEnvTemplateBound() {
+	const char* name = ShaderRecordPixel::Current ? ShaderRecordPixel::Current->Name : nullptr;
+	return name && (!strcmp(name, "SLS2057.pso") || !strcmp(name, "SLS2058.pso"));
+}
+
 void PBRShaders::BeginFirstPerson(IDirect3DDevice9* Device) {
 	FirstPersonActive = true;
 	FirstPersonWeapon = false;
@@ -43,7 +48,7 @@ void PBRShaders::BeginFirstPerson(IDirect3DDevice9* Device) {
 	Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
 	if (Device) {
 		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
-		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+		if (!IsEnvTemplateBound()) Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
 	}
 }
 
@@ -64,7 +69,7 @@ void PBRShaders::SetFirstPersonWeapon(IDirect3DDevice9* Device, bool isWeapon) {
 	}
 	if (Device) {
 		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
-		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+		if (!IsEnvTemplateBound()) Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
 	}
 }
 
@@ -77,7 +82,7 @@ void PBRShaders::EndFirstPerson(IDirect3DDevice9* Device) {
 	Constants.MetalLook.z = MetalSettings.Reflections * reflectivity;
 	if (Device) {
 		Device->SetPixelShaderConstantF(34, (const float*)&Constants.Metal, 1);
-		Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
+		if (!IsEnvTemplateBound()) Device->SetPixelShaderConstantF(36, (const float*)&Constants.MetalLook, 1);
 	}
 }
 
@@ -164,9 +169,9 @@ void PBRShaders::UpdateSettings() {
 	Constants.SharpSky.z = MetalSettings.Pearlescence;
 	Constants.SharpSky.w = 0.0f;	// GlowScale, filled each frame in UpdateConstants (it needs the frame's gamma)
 
-	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate). Enabled is read at startup
-	// (ShaderRecord::LoadShader compiles it in); Gamma is live, and 1 returns every colour unchanged.
-	LinearSettings.Enabled = TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0;
+	// UNOFFICIAL linear lighting (Includes/LinearLight.hlsl: ObjectTemplate, TerrainTemplate). Always compiled in for DeferredRenderer = 2;
+	// Gamma is live, and 1.0 or below floors to 2.2 in SettingManager::GetSettingF.
+	LinearSettings.Enabled = true;
 	LinearSettings.Gamma = std::clamp(TheSettingManager->GetSettingF("Shaders.PBR.Linear", "Gamma"), 1.0f, 3.0f);
 	// UNOFFICIAL 2026-10-20 NightGamma (user request): the gamma outside at night, live; 0 = the same as Gamma.
 	const float nightGamma = TheSettingManager->GetSettingF("Shaders.PBR.Linear", "NightGamma");
@@ -248,7 +253,6 @@ void PBRShaders::UpdateSettings() {
 		SettingManager* cfg = TheSettingManager;
 		PBRSettings& out = *g.into;
 		out.Saturation = cfg->GetSettingF(g.section, "Saturation");
-		out.Metallicness = cfg->GetSettingF(g.section, "Metallicness");
 		out.Roughness = cfg->GetSettingF(g.section, "Roughness");
 		out.LightScale = cfg->GetSettingF(g.section, "LightingScale");
 		out.AmbientScale = cfg->GetSettingF(g.section, "AmbientScale");
@@ -257,7 +261,7 @@ void PBRShaders::UpdateSettings() {
 		out.SkylightingSaturation = cfg->GetSettingF(g.section, "SkylightingSaturation");
 		out.RmaosMetalnessScale = std::clamp(RmaosScaleOr1(g.section, "MetalnessScale"), 0.0f, 1.0f);	// UNOFFICIAL 2026-10-18 (_rmaos maps)
 		out.RmaosAOScale = std::clamp(RmaosScaleOr1(g.section, "AOScale"), 0.0f, 1.0f);
-		out.RmaosRoughnessScale = std::clamp(cfg->GetSettingF(g.section, "RoughnessScale"), 1.0f, 2.0f);
+		out.RmaosRoughnessScale = std::clamp(RmaosScaleOr1(g.section, "RoughnessScale"), 0.25f, 2.0f);
 	}
 }
 
@@ -418,7 +422,7 @@ void PBRShaders::UpdateConstants() {
 	// carry MetalnessScale - 1 and RoughnessScale - 1 (0 = the map as it is, also for a register never written); AOScale scales the
 	// Occlusion that RmaosDraw sends per object (c220.y). All 1.0 by default: the picture exactly as without them.
 	Constants.Math.z = std::clamp(weather(&PBRSettings::RmaosMetalnessScale), 0.0f, 1.0f) - 1.0f;
-	Constants.Math.w = std::clamp(weather(&PBRSettings::RmaosRoughnessScale), 1.0f, 2.0f) - 1.0f;
+	Constants.Math.w = std::clamp(weather(&PBRSettings::RmaosRoughnessScale), 0.25f, 2.0f) - 1.0f;
 	RmaosSettings.OcclusionNow = RmaosSettings.Occlusion * std::clamp(weather(&PBRSettings::RmaosAOScale), 0.0f, 1.0f);
 
 	// UNOFFICIAL 2026-10-25 Reflectivity ([Shaders.PBR.Main] ReflectivityExterior / ReflectivityInterior): the highlights (TESR_PBRMath.y,

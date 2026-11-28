@@ -31,7 +31,6 @@
 #include "PassSums.h"
 #include "FailOnce.h"	// UNOFFICIAL 2026-11-02 RetryFailedEffects
 #include "FdTestFault.h"	// UNOFFICIAL 2026-11-16 fd-batchB (test only: DebugVar4 904 / 905, the self-check)
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-16 fd-batchB: ShadowContrast refused while the deferred renderer is on (item 23)
 #include "FlashlightLamp.h"	// UNOFFICIAL 2026-11-04 the flashlight's game lamp: which objects the G-buffer holds
 #include "WaterMask.h"	// UNOFFICIAL 2026-11-12 PTGrassOwnPixel: grass without records goes into the path tracer's mask of the game's own pixels
 #include "GpuProfiler.h"	// UNOFFICIAL ShadowContrast step timer	// UNOFFICIAL 2026-10-29 lean hook: AfterStateBlock
@@ -43,11 +42,10 @@ namespace CapturedNormals {
 
 	inline bool Checked = false, Compiled = false;	// on at startup (the templates write COLOR3)
 	inline bool Live = false;					// this frame: compiled, wanted by a reader, not failed
-	inline bool Failed = false, Hooked = false, MsaaWarned = false;
+	inline bool Failed = false, Hooked = false;
 	inline bool InSpan = false, Bound = false, Drawn = false;
 	inline IDirect3DSurface9* SpanTarget = nullptr;	// the scene target the list began with
 	inline IDirect3DTexture9* Texture = nullptr;  inline IDirect3DSurface9* TextureSurface = nullptr;	// what the readers sample (TESR_CapturedNormalsBuffer)
-	inline IDirect3DSurface9* MsaaSurface = nullptr;	// with the game's MSAA: what the draws write, resolved into Texture after the list
 	inline D3DSURFACE_DESC Made = {};
 	inline int Recreations = 0;
 	inline UInt32 RecreationsSince = 0;	// UNOFFICIAL 2026-11-02 RetryFailedEffects: LiveFrames when the Recreations window began
@@ -201,6 +199,15 @@ namespace CapturedNormals {
 	inline float VmContrastSaved = 0.0f;
 	inline IDirect3DTexture9* VmSkinTex = nullptr;  inline IDirect3DSurface9* VmSkinSurface = nullptr;
 	inline IDirect3DPixelShader9* VmSkinFillPS = nullptr;
+	// UNOFFICIAL 2026-11-26 FirstPersonNativeScale + DeferredFirstPerson: dedicated full-size G-buffer targets swapped in for the view-model span.
+	inline IDirect3DTexture9* VmNativeTex = nullptr;     inline IDirect3DSurface9* VmNativeSurf = nullptr;
+	inline IDirect3DTexture9* VmNativeMatTex = nullptr;  inline IDirect3DSurface9* VmNativeMatSurf = nullptr;
+	inline IDirect3DTexture9* VmNativeAlbTex = nullptr;  inline IDirect3DSurface9* VmNativeAlbSurf = nullptr;
+	inline UINT VmNativeW = 0, VmNativeH = 0;
+	inline bool VmNativeSwapped = false;
+	inline IDirect3DTexture9* SavedWorldTex = nullptr;     inline IDirect3DSurface9* SavedWorldSurf = nullptr;
+	inline IDirect3DTexture9* SavedWorldMatTex = nullptr;  inline IDirect3DSurface9* SavedWorldMatSurf = nullptr;
+	inline IDirect3DTexture9* SavedWorldAlbTex = nullptr;  inline IDirect3DSurface9* SavedWorldAlbSurf = nullptr;
 
 	// UNOFFICIAL 2026-10-29 MaterialBuffer ([Main.Main.Quality] MaterialBuffer, restart, with CapturedNormals; CAPTURED_NORMALS_ON 2; ROOT-ASSUMPTIONS-
 	// PLAN B2, format sent to the RT sessions): the same span, a second fp16 target on stage 2 (TESR_MaterialBuffer), written by the
@@ -208,7 +215,7 @@ namespace CapturedNormals {
 	// drawn object's bound radius (thickness), b roughness (-1 none), a 1. Stage 2 is taken only while it is free: the skin blur binds its own
 	// target there round skin draws (SkinScattering), and the skin templates are no material writers.
 	inline bool MaterialChecked = false, MaterialCompiled = false;
-	inline IDirect3DTexture9* MaterialTexture = nullptr;  inline IDirect3DSurface9* MaterialSurface = nullptr;  inline IDirect3DSurface9* MaterialMsaa = nullptr;
+	inline IDirect3DTexture9* MaterialTexture = nullptr;  inline IDirect3DSurface9* MaterialSurface = nullptr;
 	inline D3DXVECTOR4 MaterialData = { 0.0f, 0.0f, 0.0f, 0.0f };	// TESR_MaterialBufferData: x 1 = holds this frame's
 	inline std::unordered_set<IDirect3DPixelShader9*> MaterialWriters;
 	inline bool LastMaterialWriter = false, MaterialBound = false, MaterialDrawn = false, ForwardSkinDrawn = false, VmForwardSkinDrawn = false;
@@ -227,10 +234,10 @@ namespace CapturedNormals {
 	inline void NoteMaterialWriter(IDirect3DPixelShader9* handle) { if (handle) MaterialWriters.insert(handle); }
 	inline bool CompiledIn();
 	inline bool MaterialCompiledIn() {
-		if (!MaterialChecked) { MaterialChecked = true; MaterialCompiled = CompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "MaterialBuffer") != 0; }
+		if (!MaterialChecked) { MaterialChecked = true; MaterialCompiled = true; }
 		return MaterialCompiled;
 	}
-	inline IDirect3DSurface9* MaterialDrawSurface() { return MaterialMsaa ? MaterialMsaa : MaterialSurface; }
+	inline IDirect3DSurface9* MaterialDrawSurface() { return MaterialSurface; }
 
 	// UNOFFICIAL 2026-10-31 AlbedoBuffer ([Main.Main.Quality] AlbedoBuffer, restart, with CapturedNormals + MaterialBuffer; CAPTURED_NORMALS_ON 3;
 	// docs/next/DEFERRED-RENDERING-PLAN.md rung A, results in DEFERRED-RESULTS.md): the same span, a third fp16 target on stage 1 (TESR_AlbedoBuffer),
@@ -243,7 +250,7 @@ namespace CapturedNormals {
 	// normals' a marks an actor, after the list (needs SkinScattering's screen-space blur; otherwise skin stays unwritten).
 	// Readers: DlssRRGuides (RRAlbedo 2), AmbientLight's bounce (AlbedoBuffer); they ask for the capture through AlbedoWanted (Render.cpp).
 	inline bool AlbedoChecked = false, AlbedoCompiled = false;
-	inline IDirect3DTexture9* AlbedoTexture = nullptr;  inline IDirect3DSurface9* AlbedoSurface = nullptr;  inline IDirect3DSurface9* AlbedoMsaa = nullptr;
+	inline IDirect3DTexture9* AlbedoTexture = nullptr;  inline IDirect3DSurface9* AlbedoSurface = nullptr;
 	inline D3DXVECTOR4 AlbedoData = { 0.0f, 0.0f, 0.0f, 0.0f };	// TESR_AlbedoBufferData: x 1 = holds this frame's
 	inline std::unordered_set<IDirect3DPixelShader9*> AlbedoWriters, AlbedoLightOnlyWriters;	// the latter: the ONLY_LIGHT / DIFFUSE records (their albedo is the texture a later pass multiplies in)
 	inline bool LastAlbedoWriter = false, LastAlbedoLightOnly = false, AlbedoBound = false, AlbedoDrawn = false;
@@ -255,42 +262,30 @@ namespace CapturedNormals {
 	inline bool SunGIWantsAlbedo = false;	// UNOFFICIAL 2026-11-12 (sungi p4) set by AmbientLight (SunGI on, outdoors): AlbedoBuffer's reader asks for the capture without the AL key
 	inline void NoteSkinAlbedo(IDirect3DTexture9* tex, IDirect3DSurface9* msaa, IDirect3DSurface9* surface) { SkinAlbedoTex = tex; SkinAlbedoMsaa = msaa; SkinAlbedoSurface = surface; }
 	inline bool AlbedoCompiledIn() {
-		if (!AlbedoChecked) { AlbedoChecked = true; AlbedoCompiled = MaterialCompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "AlbedoBuffer") != 0; }
+		if (!AlbedoChecked) { AlbedoChecked = true; AlbedoCompiled = MaterialCompiledIn(); }
 		return AlbedoCompiled;
 	}
-	inline IDirect3DSurface9* AlbedoDrawSurface() { return AlbedoMsaa ? AlbedoMsaa : AlbedoSurface; }
-	// UNOFFICIAL 2026-11-14 GBufferV2 ([Main.Main.Quality] GBufferV2, restart, off by default; CAPTURED_NORMALS_ON 4; Includes/CapturedNormals.hlsl;
-	// docs/next/FD-GBUFFER-RESULTS.md): the MaterialBuffer's layout v2 of the full deferred renderer (FULL-DEFERRED-RENDERER-PLAN.md 4.2). r the
-	// shading model (+16 specular) + 0.49 metal, g / a the normal-mapped normal (octahedral; g 4 and up = none here), b the roughness; written =
-	// r > 0.5. Needs the AlbedoBuffer level (CapturedNormals + MaterialBuffer + AlbedoBuffer): refused with a log line without it.
+	inline IDirect3DSurface9* AlbedoDrawSurface() { return AlbedoSurface; }
+	// UNOFFICIAL 2026-11-14 GBufferV2 (CAPTURED_NORMALS_ON 4; Includes/CapturedNormals.hlsl): permanently enabled for DeferredRenderer = 2.
 	inline bool V2Checked = false, V2Compiled = false;
 	inline bool V2CompiledIn() {
 		if (!V2Checked) {
 			V2Checked = true;
-			const bool wanted = TheSettingManager->GetSettingI("Main.Main.Quality", "GBufferV2") != 0;
-			V2Compiled = wanted && AlbedoCompiledIn();
-			if (wanted && !V2Compiled) Logger::Log("[WARNING] UNOFFICIAL GBufferV2: needs [Main.Main.Quality] CapturedNormals + MaterialBuffer + AlbedoBuffer on (restart): the G-buffer stays in its old layout");
-			else if (V2Compiled) Logger::Log("UNOFFICIAL GBufferV2: the G-buffer's material target in layout v2 (shading model + specular bit + metal, the normal-mapped normal, roughness)");
+			V2Compiled = AlbedoCompiledIn();
+			if (V2Compiled) Logger::Log("UNOFFICIAL GBufferV2: the G-buffer's material target in layout v2 (shading model + specular bit + metal, the normal-mapped normal, roughness)");
 		}
 		return V2Compiled;
 	}
-	// UNOFFICIAL 2026-11-16 fd-batchB (deferred gaps audit item 23): ShadowContrast's game-pass route (ContrastStrength above) needs the
-	// DIFFUSE lamp passes to add their lost light into MaterialBuffer's alpha. With the deferred renderer on ([Main.Main.Quality]
-	// DeferredRenderer 1 or 2 at startup) those passes are skipped for every deferred object, and its G-buffer layout v2 (forced on by it)
-	// keeps the shading normal's y in that alpha: the passes still drawn would bend the normal and ApplyContrast would darken by a normal.
-	// Refused while either holds (a startup state, so it does not come and go with DeferredRendererLive), with one log line. The
-	// in-shader half (TESR_ShadowContrast in the one-pass lamp shader, effects/PBR/PBR.cpp) is not touched here: it darkens only the
-	// draws still lit forward, each by its own shadows. Off (ShadowContrast 0, the default): nothing changes.
+	// UNOFFICIAL 2026-11-16 fd-batchB: ShadowContrast's game-pass route is permanently disabled under DeferredRenderer = 2 (the deferred
+	// renderer skips lamp passes for deferred objects, and GBufferV2 uses MaterialBuffer.a for the shading normal).
 	inline bool ContrastLive() {
 		if (ContrastStrength <= 0.0f) return false;
-		const int mode = SettingForce::Mode();
-		if (mode < 1 && !V2Compiled) return true;
 		static bool told = false;
 		if (!told) {
 			told = true;
-			Logger::Log("[WARNING] UNOFFICIAL ShadowContrast ([Shaders.ShadowsInteriors.Forward] ShadowContrast %.2f): refused while %s: its game-pass step needs the lamp passes the "
-				"deferred renderer skips, and writes the alpha that holds the G-buffer's shading normal there. The rest of the look is unchanged (logged once)",
-				ContrastStrength, mode >= 1 ? "the deferred renderer is on (DeferredRenderer 1 or 2)" : "the G-buffer layout v2 is on (GBufferV2)");
+			Logger::Log("[WARNING] UNOFFICIAL ShadowContrast ([Shaders.ShadowsInteriors.Forward] ShadowContrast %.2f): refused while the deferred renderer is on: "
+				"its game-pass step needs the lamp passes the deferred renderer skips, and writes the alpha that holds the G-buffer's shading normal there. "
+				"The rest of the look is unchanged (logged once)", ContrastStrength);
 		}
 		return false;
 	}
@@ -892,21 +887,11 @@ namespace CapturedNormals {
 
 	// Read once (the shaders are compiled with it): any reader's switch at startup.
 	inline bool CompiledIn() {
-		if (!Checked) {
-			Checked = true;
-			Compiled = TheSettingManager->GetSettingI("Shaders.SnowAccumulation.Main", "CapturedNormals") != 0 ||
-				TheSettingManager->GetSettingI("Main.Main.Quality", "CapturedNormals") != 0;
-		}
+		if (!Checked) { Checked = true; Compiled = true; }
 		return Compiled;
 	}
 
-	// UNOFFICIAL 2026-10-28 [Main.Main.Quality] CapturedNormals: the captured normals written INTO TESR_NormalsBuffer (the normal rebuilt
-	// from depth that every effect reads: AmbientOcclusion, AmbientLight, the sun / cloud / far shadows, Specular, point-shadow darkening,
-	// SnowAccumulation...), right after it is drawn and smoothed (ShaderManager::RenderDepthAndNormals). One full-screen pass: where this
-	// pixel's surface wrote its smooth normal, the distance matches the depth buffer and the normal is within ~60 degrees of the depth
-	// buffer's own facet there (CapturedNormalAgrees' rule), the buffer takes it (view space, as Normals.fx writes it); every other pixel
-	// is clipped and keeps the depth-rebuilt normal. Live (the templates need the switch at startup).
-	inline bool MergeWanted() { return CompiledIn() && TheSettingManager->GetSettingI("Main.Main.Quality", "CapturedNormals") != 0; }
+	inline bool MergeWanted() { return CompiledIn(); }
 	inline IDirect3DPixelShader9* MergePS = nullptr;
 	inline bool MergeFailed = false, MergeLogged = false;
 	inline UInt32 Merges = 0;
@@ -1041,17 +1026,77 @@ namespace CapturedNormals {
 	inline UINT LastClearedW = 0, LastClearedH = 0;
 	inline UINT VmClearedW = 0, VmClearedH = 0;
 
+	inline void PopVmNativeGBuffer() {
+		if (!VmNativeSwapped) return;
+		Texture = SavedWorldTex;            TextureSurface = SavedWorldSurf;
+		MaterialTexture = SavedWorldMatTex; MaterialSurface = SavedWorldMatSurf;
+		AlbedoTexture = SavedWorldAlbTex;   AlbedoSurface = SavedWorldAlbSurf;
+		SavedWorldTex = nullptr;            SavedWorldSurf = nullptr;
+		SavedWorldMatTex = nullptr;         SavedWorldMatSurf = nullptr;
+		SavedWorldAlbTex = nullptr;         SavedWorldAlbSurf = nullptr;
+		VmNativeSwapped = false;
+	}
+
+	inline bool PushVmNativeGBuffer(IDirect3DDevice9* d, UINT w, UINT h) {
+		if (!d || !w || !h || !Live || !Texture || !MaterialCompiled || !AlbedoCompiled) return false;
+		if (VmNativeSwapped) return VmNativeW == w && VmNativeH == h;
+		auto releasePair = [](IDirect3DTexture9*& tex, IDirect3DSurface9*& surf) {
+			if (surf) { surf->Release(); surf = nullptr; }
+			if (tex) { tex->Release(); tex = nullptr; }
+		};
+		auto ensurePair = [&](IDirect3DTexture9*& tex, IDirect3DSurface9*& surf) -> bool {
+			if (tex && surf) return true;
+			releasePair(tex, surf);
+			if (FAILED(d->CreateTexture(w, h, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &tex, NULL)) || !tex ||
+				FAILED(tex->GetSurfaceLevel(0, &surf)) || !surf) {
+				releasePair(tex, surf);
+				return false;
+			}
+			return true;
+		};
+		if (VmNativeW != w || VmNativeH != h) {
+			releasePair(VmNativeTex, VmNativeSurf);
+			releasePair(VmNativeMatTex, VmNativeMatSurf);
+			releasePair(VmNativeAlbTex, VmNativeAlbSurf);
+			VmNativeW = VmNativeH = 0;
+		}
+		if (!ensurePair(VmNativeTex, VmNativeSurf) || !ensurePair(VmNativeMatTex, VmNativeMatSurf) || !ensurePair(VmNativeAlbTex, VmNativeAlbSurf)) {
+			releasePair(VmNativeTex, VmNativeSurf);
+			releasePair(VmNativeMatTex, VmNativeMatSurf);
+			releasePair(VmNativeAlbTex, VmNativeAlbSurf);
+			VmNativeW = VmNativeH = 0;
+			return false;
+		}
+		VmNativeW = w; VmNativeH = h;
+		ClearSurface(d, VmNativeSurf, w, h, D3DCOLOR_ARGB(0, 0, 0, 0), true);
+		ClearSurface(d, VmNativeMatSurf, w, h, D3DCOLOR_ARGB(0, 0, 0, 0), true);
+		ClearSurface(d, VmNativeAlbSurf, w, h, D3DCOLOR_ARGB(0, 0, 0, 0), true);
+		SavedWorldTex = Texture;            SavedWorldSurf = TextureSurface;
+		SavedWorldMatTex = MaterialTexture; SavedWorldMatSurf = MaterialSurface;
+		SavedWorldAlbTex = AlbedoTexture;   SavedWorldAlbSurf = AlbedoSurface;
+		Texture = VmNativeTex;              TextureSurface = VmNativeSurf;
+		MaterialTexture = VmNativeMatTex;   MaterialSurface = VmNativeMatSurf;
+		AlbedoTexture = VmNativeAlbTex;     AlbedoSurface = VmNativeAlbSurf;
+		VmNativeSwapped = true;
+		return true;
+	}
+
 	inline void Release() {
+		PopVmNativeGBuffer();
 		ReleasePassStateBlocks();
 		LastClearedW = LastClearedH = 0;
 		VmClearedW = VmClearedH = 0;
-		if (MsaaSurface) { MsaaSurface->Release(); MsaaSurface = nullptr; }
+		VmNativeW = VmNativeH = 0;
+		if (VmNativeSurf) { VmNativeSurf->Release(); VmNativeSurf = nullptr; }
+		if (VmNativeTex) { VmNativeTex->Release(); VmNativeTex = nullptr; }
+		if (VmNativeMatSurf) { VmNativeMatSurf->Release(); VmNativeMatSurf = nullptr; }
+		if (VmNativeMatTex) { VmNativeMatTex->Release(); VmNativeMatTex = nullptr; }
+		if (VmNativeAlbSurf) { VmNativeAlbSurf->Release(); VmNativeAlbSurf = nullptr; }
+		if (VmNativeAlbTex) { VmNativeAlbTex->Release(); VmNativeAlbTex = nullptr; }
 		if (TextureSurface) { TextureSurface->Release(); TextureSurface = nullptr; }
 		if (Texture) { Texture->Release(); Texture = nullptr; }
-		if (MaterialMsaa) { MaterialMsaa->Release(); MaterialMsaa = nullptr; }
 		if (MaterialSurface) { MaterialSurface->Release(); MaterialSurface = nullptr; }
 		if (MaterialTexture) { MaterialTexture->Release(); MaterialTexture = nullptr; }
-		if (AlbedoMsaa) { AlbedoMsaa->Release(); AlbedoMsaa = nullptr; }	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		if (AlbedoSurface) { AlbedoSurface->Release(); AlbedoSurface = nullptr; }
 		if (AlbedoTexture) { AlbedoTexture->Release(); AlbedoTexture = nullptr; }
 		if (CheckCopyClear) { CheckCopyClear->Release(); CheckCopyClear = nullptr; }
@@ -1065,10 +1110,10 @@ namespace CapturedNormals {
 		GrassOwnOk = false; GrassOwnTarget = nullptr;	// (PTGrassOwnPixel)
 	}
 
-	inline IDirect3DSurface9* DrawSurface() { return MsaaSurface ? MsaaSurface : TextureSurface; }
+	inline IDirect3DSurface9* DrawSurface() { return TextureSurface; }
 
 	inline bool Ensure(IDirect3DDevice9* d, const D3DSURFACE_DESC& t) {
-		if (Texture && Made.Width == t.Width && Made.Height == t.Height && Made.MultiSampleType == t.MultiSampleType && Made.MultiSampleQuality == t.MultiSampleQuality) return true;
+		if (Texture && Made.Width == t.Width && Made.Height == t.Height) return true;
 		// UNOFFICIAL 2026-11-02 RetryFailedEffects: the stop counted every size change of the session, so the 5th render-scale or upscaler
 		// change switched the normals off for good. With RetryFailedEffects on it counts within 600 captured frames (a real thrash is
 		// several a second), and the stop is a FailOnce latch: tried again after the next cell change. Off: as before.
@@ -1083,17 +1128,11 @@ namespace CapturedNormals {
 		Release();
 		bool ok = SUCCEEDED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &Texture, NULL)) &&
 			SUCCEEDED(Texture->GetSurfaceLevel(0, &TextureSurface));
-		// MRT targets must share the scene's multisampling: a multisampled copy, resolved into the texture after the list.
-		if (ok && t.MultiSampleType != D3DMULTISAMPLE_NONE)
-			ok = SUCCEEDED(d->CreateRenderTarget(t.Width, t.Height, D3DFMT_A16B16G16R16F, t.MultiSampleType, t.MultiSampleQuality, FALSE, &MsaaSurface, NULL));
 		if (ok && MaterialCompiledIn()) {	// UNOFFICIAL 2026-10-29 MaterialBuffer: its target, alike (failing it leaves the normals working)
 			bool made = SUCCEEDED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &MaterialTexture, NULL)) &&
 				SUCCEEDED(MaterialTexture->GetSurfaceLevel(0, &MaterialSurface));
-			if (made && t.MultiSampleType != D3DMULTISAMPLE_NONE)
-				made = SUCCEEDED(d->CreateRenderTarget(t.Width, t.Height, D3DFMT_A16B16G16R16F, t.MultiSampleType, t.MultiSampleQuality, FALSE, &MaterialMsaa, NULL));
 			if (!made) {
 				Logger::Log("[WARNING] MaterialBuffer: could not make its %ux%u target: off for the session (the captured normals keep working)", t.Width, t.Height);
-				if (MaterialMsaa) { MaterialMsaa->Release(); MaterialMsaa = nullptr; }
 				if (MaterialSurface) { MaterialSurface->Release(); MaterialSurface = nullptr; }
 				if (MaterialTexture) { MaterialTexture->Release(); MaterialTexture = nullptr; }
 				MaterialCompiled = false;
@@ -1102,25 +1141,22 @@ namespace CapturedNormals {
 		if (ok && MaterialCompiled && AlbedoCompiledIn()) {	// UNOFFICIAL 2026-10-31 AlbedoBuffer: its target, alike (failing it leaves the other two working)
 			bool made = SUCCEEDED(d->CreateTexture(t.Width, t.Height, 1, D3DUSAGE_RENDERTARGET, D3DFMT_A16B16G16R16F, D3DPOOL_DEFAULT, &AlbedoTexture, NULL)) &&
 				SUCCEEDED(AlbedoTexture->GetSurfaceLevel(0, &AlbedoSurface));
-			if (made && t.MultiSampleType != D3DMULTISAMPLE_NONE)
-				made = SUCCEEDED(d->CreateRenderTarget(t.Width, t.Height, D3DFMT_A16B16G16R16F, t.MultiSampleType, t.MultiSampleQuality, FALSE, &AlbedoMsaa, NULL));
 			if (!made) {
 				Logger::Log("[WARNING] AlbedoBuffer: could not make its %ux%u target: off for the session (the normals and the material buffer keep working)", t.Width, t.Height);
-				if (AlbedoMsaa) { AlbedoMsaa->Release(); AlbedoMsaa = nullptr; }
 				if (AlbedoSurface) { AlbedoSurface->Release(); AlbedoSurface = nullptr; }
 				if (AlbedoTexture) { AlbedoTexture->Release(); AlbedoTexture = nullptr; }
 				AlbedoCompiled = false;
 			}
 		}
 		if (!ok) {
-			Logger::Log("[ERROR] CapturedNormals: could not make the %ux%u target (msaa %u)", t.Width, t.Height, (unsigned)t.MultiSampleType);
+			Logger::Log("[ERROR] CapturedNormals: could not make the %ux%u target", t.Width, t.Height);
 			Release();
 			Failed = true;
 			MakeFail.Set("could not make its target");
 			return false;
 		}
 		Made = t;
-		Logger::Log("CapturedNormals: target %ux%u, msaa %u", t.Width, t.Height, (unsigned)t.MultiSampleType);
+		Logger::Log("CapturedNormals: target %ux%u", t.Width, t.Height);
 		return true;
 	}
 
@@ -1206,90 +1242,6 @@ namespace CapturedNormals {
 	}
 	inline void AfterStateBlock(IDirect3DDevice9* d) { if (InSpan && Tracked) Resync(d); }
 
-	// UNOFFICIAL 2026-11-04 [Main.Main.Performance] DrawStateTracking (live; cpu-workers follow-up, bench\deep-roadmap\cpuworkers\REPORT.md):
-	// the same lean tracking on native D3D9 and stock DXVK, where the device-table hooks above cannot be trusted (the native runtime puts its
-	// own entries back between our reinstalls, and a Set call made meanwhile left a stale record). Here the device's own SetRenderTarget and
-	// SetRenderState BODIES are detoured (the code every table entry ends in, so a restored entry still lands in it), and the pixel shader,
-	// state-block Apply / EndStateBlock and Reset come from ConstantFilter's detours of those bodies (SharedDrawState::PixelShaderSet /
-	// StateLost). A lost state makes the record stale: it is read from the device again at the next draw (never inside those calls: the
-	// native runtime crashed on device calls made there, ConstantFilter 2026-10-27). Every CheckEvery-th draw the record is compared with
-	// the device (DrawStateTrackingCheck, 0 = every 1024th): a difference is logged and the tracking stays off for the session (the per-draw
-	// device queries, as before). Measured before: the queries cost ~5 % of the Ultra-Luxe's main thread on native D3D9 (~1 ms).
-	inline bool BodyTracked = false, BodyFailed = false, BodyWanted = false, BodyDisabled = false;
-	inline SetRTFn OrigBodySetRT = nullptr;
-	inline SetRSFn OrigBodySetRS = nullptr;
-	inline UInt32 BodyChecks = 0, BodyMismatches = 0, BodyDrawCounter = 0, BodyResyncs = 0, BodyCheckEvery = 1024;
-	inline HRESULT STDMETHODCALLTYPE BodySetRT(IDirect3DDevice9* d, DWORD i, IDirect3DSurface9* s) {
-		const HRESULT r = OrigBodySetRT(d, i, s);
-		if (i < 4 && SUCCEEDED(r)) T.rt[i] = s;
-		return r;
-	}
-	inline HRESULT STDMETHODCALLTYPE BodySetRS(IDirect3DDevice9* d, D3DRENDERSTATETYPE st, DWORD v) {
-		switch (st) {
-		case D3DRS_COLORWRITEENABLE: T.colorWrite = v; break;
-		case D3DRS_ALPHABLENDENABLE: T.blend = v; break;
-		case D3DRS_SRCBLEND: T.src = v; break;
-		case D3DRS_DESTBLEND: T.dst = v; break;
-		case D3DRS_COLORWRITEENABLE2: T.colorWrite2 = v; break;
-		case D3DRS_COLORWRITEENABLE3: T.colorWrite3 = v; break;
-		case D3DRS_COLORWRITEENABLE1: T.colorWrite1 = v; break;
-		case D3DRS_ZWRITEENABLE: T.zWrite = v; break;
-		default: break;
-		}
-		return OrigBodySetRS(d, st, v);
-	}
-	inline void BodyPixelShader(IDirect3DPixelShader9* ps) { T.ps = ps; }
-	inline void BodyStateLost() { if (BodyTracked) { Tracked = false; SharedDrawState::Valid = false; } }
-	inline bool BodyLean() { return BodyTracked && BodyWanted && !BodyDisabled; }
-	// Once, with the device: the bodies the table points at now, only when they are the graphics runtime's own code (d3d9.dll, native or
-	// DXVK's); anything else (a wrapper on top of it) is left alone and the tracking stays off.
-	inline void InstallBodyTracking(IDirect3DDevice9* d) {
-		if (BodyTracked || BodyFailed || !d) return;
-		BodyFailed = true;	// (until it worked)
-		if (!SharedDrawState::ObserversLive) { Logger::Log("DrawStateTracking: ConstantFilter's device detours are not in: off (the per-draw device queries, as before)"); return; }
-		void** table = *(void***)d;
-		HMODULE runtime = DxvkLoader::Runtime(), owner37 = nullptr, owner57 = nullptr;
-		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)table[37], &owner37);
-		GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)table[57], &owner57);
-		if (!runtime || owner37 != runtime || owner57 != runtime) {
-			Logger::Log("DrawStateTracking: SetRenderTarget / SetRenderState are not d3d9.dll's own here (%p %p, d3d9.dll %p): off (the per-draw device queries, as before)",
-				table[37], table[57], (void*)runtime);
-			return;
-		}
-		OrigBodySetRT = (SetRTFn)table[37];
-		OrigBodySetRS = (SetRSFn)table[57];
-		DetourTransactionBegin();
-		DetourUpdateThread(GetCurrentThread());
-		DetourAttach(&(PVOID&)OrigBodySetRT, (PVOID)&BodySetRT);
-		DetourAttach(&(PVOID&)OrigBodySetRS, (PVOID)&BodySetRS);
-		const LONG result = DetourTransactionCommit();
-		if (result != NO_ERROR) { Logger::Log("DrawStateTracking: detours failed (%ld): off (the per-draw device queries, as before)", result); return; }
-		SharedDrawState::PixelShaderSet = &BodyPixelShader;
-		SharedDrawState::StateLost = &BodyStateLost;
-		BodyFailed = false;
-		BodyTracked = true;
-		Logger::Log("DrawStateTracking: on (the device's SetRenderTarget / SetRenderState bodies detoured; render targets, pixel shader and blend states kept from them)");
-	}
-	// The record against the device (BeforeDraw, every CheckEvery-th draw while the record is used): false on any difference.
-	inline bool BodyVerify(IDirect3DDevice9* d) {
-		TrackedState now = {};
-		for (DWORD i = 0; i < 4; i++) { IDirect3DSurface9* s = nullptr; if (SUCCEEDED(d->GetRenderTarget(i, &s)) && s) s->Release(); now.rt[i] = s; }
-		IDirect3DPixelShader9* ps = nullptr; d->GetPixelShader(&ps); if (ps) ps->Release(); now.ps = ps;
-		d->GetRenderState(D3DRS_COLORWRITEENABLE, &now.colorWrite); d->GetRenderState(D3DRS_ALPHABLENDENABLE, &now.blend);
-		d->GetRenderState(D3DRS_SRCBLEND, &now.src); d->GetRenderState(D3DRS_DESTBLEND, &now.dst);
-		d->GetRenderState(D3DRS_COLORWRITEENABLE2, &now.colorWrite2); d->GetRenderState(D3DRS_COLORWRITEENABLE3, &now.colorWrite3);
-		d->GetRenderState(D3DRS_COLORWRITEENABLE1, &now.colorWrite1);
-		BodyChecks++;
-		const char* which = nullptr;
-		for (DWORD i = 0; i < 4 && !which; i++) if (now.rt[i] != T.rt[i]) which = "a render target";
-		if (!which && now.ps != T.ps) which = "the pixel shader";
-		if (!which && (now.colorWrite != T.colorWrite || now.colorWrite1 != T.colorWrite1 || now.colorWrite2 != T.colorWrite2 || now.colorWrite3 != T.colorWrite3)) which = "a write mask";
-		if (!which && (now.blend != T.blend || now.src != T.src || now.dst != T.dst)) which = "the blend";
-		if (!which) return true;
-		BodyMismatches++;
-		if (BodyMismatches <= 5) Logger::Log("[WARNING] DrawStateTracking: the kept record differs from the device (%s) after %u checks: off for this session (the per-draw device queries, as before)", which, BodyChecks);
-		return false;
-	}
 	inline void HookTracking(IDirect3DDevice9* d) {
 		if (LeanHooked || !d) return;
 		void** table = *(void***)d;
@@ -1305,7 +1257,7 @@ namespace CapturedNormals {
 	}
 	// DXVK only: the native runtime puts its own device-table entries back now and then (EnsureHooked), and a Set call that slipped past
 	// the tracking would leave a stale record; there the hook keeps asking the device.
-	inline bool Lean() { return Tracked && ((LeanHooked && LeanWanted && DxvkCompute::Available()) || BodyLean()); }	// (BodyLean: DrawStateTracking, below)
+	inline bool Lean() { return Tracked && LeanHooked && LeanWanted && DxvkCompute::HasExtension(); }
 	inline IDirect3DSurface9* TargetNow(IDirect3DDevice9* d, DWORD i) {
 		if (Lean()) return T.rt[i];
 		IDirect3DSurface9* s = nullptr;
@@ -1398,9 +1350,6 @@ namespace CapturedNormals {
 		d->SetRenderState(D3DRS_COLORWRITEENABLE1, 0xF);
 		d->SetRenderState(D3DRS_COLORWRITEENABLE2, 0xF);
 		d->SetRenderState(D3DRS_COLORWRITEENABLE3, 0xF);
-		if (MsaaSurface && TextureSurface) d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);
-		if (MaterialMsaa && MaterialSurface) d->StretchRect(MaterialMsaa, NULL, MaterialSurface, NULL, D3DTEXF_NONE);
-		if (AlbedoMsaa && AlbedoSurface) d->StretchRect(AlbedoMsaa, NULL, AlbedoSurface, NULL, D3DTEXF_NONE);
 	}
 	// A draw outside the span while a grass shader was the last thing bound (GrassArmed). The device is asked (nothing is tracked here);
 	// the first draw that is not a grass writer's ends it, so the rest of the frame's draws pay one flag test.
@@ -1487,13 +1436,6 @@ namespace CapturedNormals {
 			if (zw != FALSE) SharedDrawState::DepthWrittenSinceCopy = true;
 		}
 		if (!InSpan) { if (GrassArmed) GrassLateDraw(d); return; }	// (2026-11-12 grass records after the main list)
-		if (BodyLean()) {	// UNOFFICIAL 2026-11-04 DrawStateTracking: a lost record read again; every CheckEvery-th draw compared
-			if (!Tracked) { Resync(d); BodyResyncs++; SharedDrawState::Valid = true; }
-			else if (++BodyDrawCounter >= BodyCheckEvery) {
-				BodyDrawCounter = 0;
-				if (!BodyVerify(d)) { BodyDisabled = true; Tracked = false; SharedDrawState::Valid = false; }
-			}
-		}
 		// Is it bound now? Read every draw: LinearScene's conversion takes targets 1-3 off and puts them back itself.
 		IDirect3DSurface9* rt3 = TargetNow(d, 3);
 		Bound = rt3 && rt3 == DrawSurface();
@@ -1865,8 +1807,7 @@ namespace CapturedNormals {
 			// records for the path tracer then: the land leaves the covered samples unwritten, the trace takes every partly written pixel
 			// as the game's own (its anti-aliased blend), and the grass drawn after the land goes into the mask (PTGrassOwnPixel).
 			bool msaaOwn = false;
-			if (traced && AlbedoMsaa) { SettingManager::Configuration::ConfigNode ck; msaaOwn = !TheSettingManager->Config.FillNode(&ck, "Main.Main.RayTracing", "PTAlbedoCoverage") || ck.BoolValue; }
-			GrassNow = ((traced && !msaaOwn) || forGI) && GrassKey && !GrassWriters.empty();
+			GrassNow = (traced || forGI) && GrassKey && !GrassWriters.empty();
 			// (2026-11-17 fast-restart) for SunFar's shadows: the tuft's normal (see SunFarDrew). Not under path tracing (its own rules above), nor
 			// while the grass lights itself by the deferred flashlight's beam (as forGI), nor with CapturedGrassNormals off (nothing would merge it).
 			SunFarRecent = SunFarDrew; SunFarDrew = false;
@@ -1921,9 +1862,6 @@ namespace CapturedNormals {
 			if (MaterialCompiled && !ContrastWriters.empty())	// UNOFFICIAL ShadowContrast (the game's passes)
 				Logger::Log("ShadowContrast: per frame %.1f lamp passes gave their shadows' light to MaterialBuffer (%.1f with another added blend, left out), applied %.2f times; strength %.2f; %u lamp-pass shaders",
 					ContrastWrites / (double)Frames, ContrastOtherBlend / (double)Frames, ContrastApplied / (double)Frames, ContrastStrength, (unsigned)ContrastWriters.size());
-			if (BodyTracked)	// UNOFFICIAL 2026-11-04 DrawStateTracking
-				Logger::Log("DrawStateTracking: %s; %u checks against the device so far, %u differed; %u records read again after a state block or reset",
-					BodyDisabled ? "OFF after a difference (the per-draw device queries)" : BodyWanted ? "in use" : "switched off", BodyChecks, BodyMismatches, BodyResyncs);
 			// UNOFFICIAL 2026-11-12 foliage records + CapturedCoverage
 			if (AlbedoCompiled)
 				Logger::Log("CapturedNormals: foliage records %s (CapturedGrass %s, %u grass shaders; CapturedLeaves %s, %u leaf shaders; written while path tracing replaces the picture, the grass's also for the RT GI: %s): per frame %.1f grass draws wrote them before / in the main list (the span opened early on %.2f of the frames), %.1f after it (%.2f found a target stage taken), %.1f leaf draws in the main list. CapturedCoverage %s: %.1f blended writer draws a frame recorded only where their own alpha is 0.5 or more",
@@ -1954,22 +1892,11 @@ namespace CapturedNormals {
 		rt0->GetDesc(&t);
 		// Reflections, menus and other views draw the list into smaller targets: the main view only.
 		if (t.Width != TheRenderManager->width || t.Height != TheRenderManager->height) { rt0->Release(); return; }
-		// Measured by SkinScattering on a GTX 1070 (native D3D9): with multisampled extra targets bound a draw writes nothing at all to
-		// target 0. Under DXVK it works; on native D3D9 the game's MSAA keeps the depth-rebuilt normals.
-		if (t.MultiSampleType != D3DMULTISAMPLE_NONE && !DxvkCompute::Available()) {
-			if (!MsaaWarned) { MsaaWarned = true; Logger::Log("[WARNING] CapturedNormals: the scene is multisampled (the game's MSAA) on native D3D9, where extra multisampled targets draw nothing: off while MSAA is on (fine under Vegas Shaders DXVK)"); }
-			rt0->Release();
-			return;
-		}
 		if (!Ensure(d, t)) { rt0->Release(); return; }
 		EnsureHooked(d);	// (native D3D9 puts its own table entries back; see EnsureHooked)
 		// UNOFFICIAL 2026-10-29 CapturedNormalsLeanHook: the tracked state from the device, once per span
 		LeanWanted = TheSettingManager->GetSettingI("Main.Main.Quality", "CapturedNormalsLeanHook") != 0;
-		// UNOFFICIAL 2026-11-04 DrawStateTracking: elsewhere (native D3D9, stock DXVK) the detoured bodies keep the record (see BodySetRT)
-		BodyWanted = TheSettingManager->GetSettingI("Main.Main.Performance", "DrawStateTracking") != 0;
-		{ const int every = TheSettingManager->GetSettingI("Main.Main.Performance", "DrawStateTrackingCheck"); BodyCheckEvery = every > 0 ? (UInt32)every : 1024; }
-		if (LeanWanted && DxvkCompute::Available()) { HookTracking(d); Resync(d); }
-		else if (BodyWanted && !DxvkCompute::Available()) { InstallBodyTracking(d); if (BodyLean()) Resync(d); else Tracked = false; }
+		if (LeanWanted && DxvkCompute::HasExtension()) { HookTracking(d); Resync(d); }
 		else Tracked = false;
 		SpanTarget = rt0;	// (holds the reference until EndSpan)
 		const UINT activeW = RenderRect::Active() ? RenderRect::Width(t.Width) : t.Width;
@@ -2000,7 +1927,6 @@ namespace CapturedNormals {
 		}
 		if (!PendingCheckFrame && (FdTestFault::Broken || FdTestFault::Armed == 904)) CheckThisFrame = true;
 		if (CheckThisFrame && !PendingCheckFrame) {	// the self-check's first half: queue clear copy without stalling the GPU
-			if (MsaaSurface) d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);
 			PendingCheckHasClear = QueueCheckCopy(d, false);
 			if (!PendingCheckHasClear) { CheckThisFrame = false; if (!CheckReported) { CheckReported = true; Logger::Log("CapturedNormals: self-check could not read the target back (skipped)"); } }
 			else { PendingCheckFrame = LiveFrames; PendingCheckHasList = false; PendingReadAt = LiveFrames + 4; }
@@ -2022,9 +1948,6 @@ namespace CapturedNormals {
 		SkinScatteringBound = false;
 		Tracked = false;	// UNOFFICIAL lean hook: resynced at the next span
 		SharedDrawState::Valid = false;
-		if (MsaaSurface) d->StretchRect(MsaaSurface, NULL, TextureSurface, NULL, D3DTEXF_NONE);	// the game's MSAA: resolved for the readers
-		if (MaterialMsaa && MaterialSurface) d->StretchRect(MaterialMsaa, NULL, MaterialSurface, NULL, D3DTEXF_NONE);	// UNOFFICIAL MaterialBuffer
-		if (AlbedoMsaa && AlbedoSurface) d->StretchRect(AlbedoMsaa, NULL, AlbedoSurface, NULL, D3DTEXF_NONE);	// UNOFFICIAL 2026-10-31 AlbedoBuffer
 		if (ContrastDrawn && ContrastLive()) ApplyContrast(d, SpanTarget);	// UNOFFICIAL ShadowContrast (the game's lamp passes; 2026-11-16 ContrastLive: item 23)
 		ContrastDrawn = false;
 		if (MaterialDrawn && !Failed && Drawn && ForwardSkinDrawn) SkinFill(d);	// UNOFFICIAL 2026-10-31 MaterialBufferSkin (after the contrast step: it reads the alpha)
@@ -2115,14 +2038,16 @@ namespace CapturedNormals {
 		// UNOFFICIAL 2026-11-20: capture the 1st-person viewmodel into the G-buffer whenever CapturedNormals is live (non-MSAA),
 		// so TESR_NormalsBuffer, FdIndirect::ShadingNormals, and Reflections get smooth/bumped viewmodel normals and material instead of
 		// faceted depth normals or stale background G-buffer texels.
-		if (!Live || InSpan || Failed || Data.x <= 0.0f || !Texture || MsaaSurface || AlbedoMsaa) return;
+		if (!Live || InSpan || Failed || Data.x <= 0.0f || !Texture) return;
 		if ((VmWanted || VmDeferred) && (AlbedoData.x <= 0.0f || !AlbedoSurface)) return;
 		IDirect3DSurface9* rt0 = nullptr;
 		if (FAILED(d->GetRenderTarget(0, &rt0)) || !rt0) return;
 		D3DSURFACE_DESC t = {};
 		rt0->GetDesc(&t);
-		if (t.Width != Made.Width || t.Height != Made.Height || t.MultiSampleType != D3DMULTISAMPLE_NONE) {
-			if (!VmRefusedLogged) { VmRefusedLogged = true; Logger::Log("UNOFFICIAL RT path trace: the first-person model draws into a %ux%u target (msaa %u), the G-buffer is %ux%u: its colour and normals are not captured, it keeps the game's own pixels (logged once)", t.Width, t.Height, (unsigned)t.MultiSampleType, Made.Width, Made.Height); }
+		const UINT expectW = VmNativeSwapped ? VmNativeW : Made.Width;
+		const UINT expectH = VmNativeSwapped ? VmNativeH : Made.Height;
+		if (t.Width != expectW || t.Height != expectH || t.MultiSampleType != D3DMULTISAMPLE_NONE) {
+			if (!VmRefusedLogged) { VmRefusedLogged = true; Logger::Log("UNOFFICIAL RT path trace: the first-person model draws into a %ux%u target (msaa %u), the G-buffer is %ux%u: its colour and normals are not captured, it keeps the game's own pixels (logged once)", t.Width, t.Height, (unsigned)t.MultiSampleType, expectW, expectH); }
 			rt0->Release();
 			return;
 		}
@@ -2138,16 +2063,15 @@ namespace CapturedNormals {
 				VmClearedW = VmClearedH = 0;
 			}
 			if (VmSkinSurface) {
-				const UINT vmW = RenderRect::Active() ? RenderRect::Width(t.Width) : t.Width;
-				const UINT vmH = RenderRect::Active() ? RenderRect::Height(t.Height) : t.Height;
-				const bool vmForceFull = VmClearedW == 0 || vmW < VmClearedW || vmH < VmClearedH;
+				const UINT vmW = !VmNativeSwapped && RenderRect::Active() ? RenderRect::Width(t.Width) : t.Width;
+				const UINT vmH = !VmNativeSwapped && RenderRect::Active() ? RenderRect::Height(t.Height) : t.Height;
+				const bool vmForceFull = VmNativeSwapped || VmClearedW == 0 || vmW < VmClearedW || vmH < VmClearedH;
 				VmClearedW = vmW; VmClearedH = vmH;
 				ClearSurface(d, VmSkinSurface, t.Width, t.Height, D3DCOLOR_ARGB(0, 0, 0, 0), vmForceFull);
 			}
 		}
 		EnsureHooked(d);
-		if (LeanWanted && DxvkCompute::Available()) { HookTracking(d); Resync(d); }
-		else if (BodyLean()) Resync(d);
+		if (LeanWanted && DxvkCompute::HasExtension()) { HookTracking(d); Resync(d); }
 		else Tracked = false;
 		SpanTarget = rt0;	// (holds the reference until EndViewModelSpan)
 		VmContrastSaved = ContrastStrength;

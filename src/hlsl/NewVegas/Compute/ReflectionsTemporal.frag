@@ -19,7 +19,7 @@ void main() {
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) continue;
-            vec2 tapUV = uv + vec2(x, y) * LowTexel;
+            vec2 tapUV = clampToRect(uv + vec2(x, y) * LowTexel, LowTexel);
             vec2 tapPixelUV = tapUV - 0.5 * (LowTexel - cb.reciprocalResolution.xy);
             if (WeaponAt(tapPixelUV) != centerWeapon) continue;
             vec4 tap = textureLod(sampler2D(t_trace, POINT_S), tapUV, 0.0);

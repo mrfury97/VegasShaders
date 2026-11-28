@@ -32,6 +32,7 @@ layout(set = 2, binding = 0, std140) uniform Constants {
     vec4 extraPre[16];              // x 1 / radius, y weight (both unpacked from extraLights[e].w)
     vec4 nearPre;                   // x 1 / pointShadowNear.y, y 1 / (1 - pointShadowNear.z), z 1 / spot radius, w spot weight
     vec4 spotPre;                   // x cos(spot angle), y 1 / (cos(half of it) - x)
+    vec4 renderScale;               // TESR_RenderScale (xy scale, zw 1/scale)
 } cb;
 
 const float BIAS = 0.018;   // Shadows.hlsl

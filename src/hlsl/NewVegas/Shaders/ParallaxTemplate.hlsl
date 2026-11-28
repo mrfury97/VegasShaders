@@ -142,12 +142,6 @@
 #if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED
     #include "includes/DeferredPixel.hlsl"	// UNOFFICIAL 2026-11-14 DeferredSun: the deferred records' codes in COLOR1.a (values 1, 2, 3: see the outputs)
 #endif
-// UNOFFICIAL 2026-11-14 full deferred renderer, phase 2 (ObjectTemplate.hlsl NVR_LAMPS_OUT, docs/next/FD-INTERIORS-RESULTS.md): LAMPS_DEFERRED 3 =
-// the lamps-deferred record: the lamps (lights 1-9) compiled out, the sun slot kept; with 2 and 3 the record writes the deferred mark for
-// the lamp pass (COLOR2.g / .a). Without it nothing below changes.
-#if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED == 3
-    #define NVR_LAMPS_OUT
-#endif
 #if defined(LAMPS_DEFERRED) && LAMPS_DEFERRED >= 2
     #define NVR_GBUFFER_LIT
 #endif
@@ -711,11 +705,6 @@ PS_OUTPUT main(PS_INPUT pin)
     float4 nvrNoDirect[10];
     [unroll] for (int nvrLight = 0; nvrLight < 10; nvrLight++) nvrNoDirect[nvrLight] = float4(0.0f, 0.0f, 0.0f, PSLightColor[nvrLight].a);
     #define PSLightColor nvrNoDirect
-#elif defined(NVR_LAMPS_OUT) && !defined(NO_LIGHT)
-    // UNOFFICIAL 2026-11-14 the lamps-deferred record (LAMPS_DEFERRED 3): the lamps' colours (lights 1-9) a compile-time 0, the sun kept
-    float4 nvrNoLamps[10];
-    [unroll] for (int nvrLamp = 0; nvrLamp < 10; nvrLamp++) nvrNoLamps[nvrLamp] = float4(nvrLamp < 1 ? PSLightColor[nvrLamp].rgb : (0.0f).xxx, PSLightColor[nvrLamp].a);
-    #define PSLightColor nvrNoLamps
 #endif
     
     #ifdef PAR_FULL
@@ -1070,31 +1059,6 @@ PS_OUTPUT main(PS_INPUT pin)
             po.capturedPad1.a = FD_LF_CODE(FD_LF_MATTE, FD_LF_KEEP);
         #endif
         #undef FD_LF_KEEP
-    #elif defined(NVR_LAMPS_OUT) && CAPTURED_NORMALS_ON >= 3 && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)
-        // UNOFFICIAL 2026-11-14 the lamps-deferred record (LAMPS_DEFERRED 3): the "sun kept" code (ObjectTemplate.hlsl, Includes/DeferredPixel.hlsl)
-        #if defined(PAR_FOG) && defined(PAR_TOGGLES)
-            #define FD_LD_KEEP (useFog <= 0.0 ? 1.0f : 1.0f - pin.fogColor.a)
-        #elif defined(PAR_FOG)
-            #define FD_LD_KEEP (1.0f - pin.fogColor.a)
-        #elif defined(PAR_AD_GBUFFER) && defined(AD_FOG_KEEP_ON)
-            #define FD_LD_KEEP (1.0f - pin.adExtra.a)	// UNOFFICIAL 2026-11-16 fd-batchE: AD's fog comes in the game's later FOG pass (see the top)
-        #else
-            #define FD_LD_KEEP 1.0f
-        #endif
-        #if FD_GBUFFER_V2
-            po.capturedPad1.a = po.capturedPad1.a > 0.5f ? FD_LAMPS_CODE(FD_LD_KEEP) : 0.0f;
-        #else
-            po.capturedPad1.a *= FD_LD_KEEP;
-        #endif
-        #undef FD_LD_KEEP
-    #endif
-    #if defined(NVR_LAMPS_OUT) && CAPTURED_NORMALS_ON == 3 && !defined(DIFFUSE) && !defined(ONLY_SPECULAR)	// (G-buffer v2, CAPTURED_NORMALS_ON 4: its own mark, COLOR1.a in (1, 2])
-        // UNOFFICIAL 2026-11-14 (LAMPS_DEFERRED 2 / 3) the deferred mark (ObjectTemplate.hlsl): COLOR2.g / .a = the recorded normal, a in
-        // 1.01..1.99. FD_SHADING_NORMAL hook: G-buffer v2's shading normal (claude/fd-gbuffer) replaces the smooth one here.
-        [flatten] if (po.capturedNormal.a > 0.5f) {
-            po.capturedPad2.g = po.capturedNormal.r;
-            po.capturedPad2.a = 1.01f + 0.49f * (po.capturedNormal.g + 1.0f);
-        }
     #endif
     // UNOFFICIAL 2026-11-12 CapturedCoverage (Includes/CapturedNormals.hlsl): a blended draw records only where its own alpha is 0.5 or
     // more; below, alpha 0 = the texels stay as they were. An opaque draw: x 1, as before.

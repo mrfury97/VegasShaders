@@ -854,9 +854,9 @@ void SessionLog::OnDevice(IDirect3DDevice9* device) {
 			z.Width, z.Height, (unsigned)z.Format, (unsigned)z.MultiSampleType, (unsigned)z.MultiSampleQuality);
 	}
 	SettingManager* s = TheSettingManager;
-	Logger::Log("SESSION anti-aliasing / upscaling: TAA %s, FSR %s (version %d, RenderScale %.2f), DLSS %s (RenderScale %.2f, Ray Reconstruction %s), SMAA %s",
+	Logger::Log("SESSION anti-aliasing / upscaling: TAA %s, FSR %s (RenderScale %.2f), DLSS %s (RenderScale %.2f, Ray Reconstruction %s), SMAA %s",
 		s->GetSettingI("Shaders.TAA.Status", "Enabled") ? "on" : "off", s->GetSettingI("Shaders.TAA.FSR", "Enabled") ? "on" : "off",
-		s->GetSettingI("Shaders.TAA.FSR", "Version"), s->GetSettingF("Shaders.TAA.FSR", "RenderScale"), s->GetSettingI("Shaders.TAA.DLSS", "Enabled") ? "on" : "off",
+		s->GetSettingF("Shaders.TAA.FSR", "RenderScale"), s->GetSettingI("Shaders.TAA.DLSS", "Enabled") ? "on" : "off",
 		s->GetSettingF("Shaders.TAA.DLSS", "RenderScale"), s->GetSettingI("Shaders.TAA.DLSS", "RayReconstruction") ? "on" : "off",
 		s->GetSettingI("Shaders.SMAA.Status", "Enabled") ? "on" : "off");
 }

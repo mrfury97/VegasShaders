@@ -33,10 +33,12 @@ public:
 
 private:
 	struct ComputePush {	// AvgLuma.comp's push block (112 bytes), and AvgLumaHistogram.comp's (+ histogram: 128)
-		UINT32		width, height, groupsX, groupsY, phase, samplerIndex, pad0, pad1;
+		UINT32		width, height, groupsX, groupsY, phase, samplerIndex;
+		float		scaleX, scaleY;
 		D3DXVECTOR4	motionBlurData, depthOfFieldData, gameTime, exposureData, cameraData;
 		D3DXVECTOR4	histogram;	// x low fraction, y high fraction, z log2 of the lowest bin's top, w log2 of the top bin's bottom
 	};
+	static_assert(sizeof(ComputePush) == 128, "ComputePush must match AvgLumaHistogram.comp Push block");
 	bool	ComputeReady();		// creates the pipeline and buffers on first use; false once anything failed
 	void	ComputeRelease();
 

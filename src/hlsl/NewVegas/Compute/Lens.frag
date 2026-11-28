@@ -27,13 +27,14 @@ vec4 sampleLod(texture2D t, uint samplerIndex, vec2 at) {
 }
 
 void main() {
+    vec2 ruv = gl_FragCoord.xy / vec2(textureSize(sampler2D(t_source, NVR_SAMPLER(pc.samplerIndex)), 0));
     float strength = pc.lensData.x;
     float bloomExponent = pc.lensData.y;
     float smudginess = pc.lensData.z;
 
-    vec3 source = sampleLod(t_source, pc.samplerIndex, uv).rgb;
+    vec3 source = sampleLod(t_source, pc.samplerIndex, ruv).rgb;
 
-    vec3 bloom = sampleLod(t_bloom, pc.samplerIndex, uv).rgb;
+    vec3 bloom = sampleLod(t_bloom, pc.samplerIndex, ruv).rgb;
     float bloomLuma = max(dot(bloom, vec3(0.2126, 0.7152, 0.0722)), 1.0e-6);
     vec3 shapedBloom = (bloom / bloomLuma) * pow(bloomLuma, bloomExponent);
 

@@ -9,7 +9,7 @@ Run with Python 3.11+ (py -3.11). exit 0 = consistent
 import os, re, sys
 
 root = sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(__file__), '..')
-sm = open(os.path.join(root, 'src/core/SettingManager.cpp'), encoding='utf-8', errors='replace').read()
+sm = open(os.path.join(root, 'src/core/SettingMigrations.cpp'), encoding='utf-8', errors='replace').read()
 hdr = open(os.path.join(root, 'src/core/StalePresetValues.h'), encoding='utf-8', errors='replace').read()
 
 body = sm[sm.index('void SettingManager::Configuration::UpdateOldDefaults()'):]
@@ -19,7 +19,16 @@ table = {}
 for sec, key, val in re.findall(r'\{ "([^"]+)", "([^"]+)", ([0-9.]+)f, \d+(?:, true)? \}', hdr):
     table[(sec.lower(), key.lower())] = float(val)
 
-GONE = {('shaders.shadowsexteriors.shadowmaps', 'mode')}   # 70's key is no longer a setting (ignored by the build itself)
+GONE = {
+    ('shaders.shadowsexteriors.shadowmaps', 'mode'),   # 70's key is no longer a setting (ignored by the build itself)
+    ('shaders.pbr.linear', 'linearscene'),
+    ('main.main.quality', 'materialbuffer'),
+    ('main.main.quality', 'albedobuffer'),
+    ('shaders.shadowsinteriors.atlas', 'enabled'),
+    ('shaders.shadowsinteriors.deferred', 'enabled'),
+    ('main.main.quality', 'deferredrenderer'),
+    ('shaders.taa.fsr', 'version'),
+}
 
 LOOK_OR_CHOICE = {
     ('shaders.ambientlight.status', 'enabled'),            # 68: an effect switch

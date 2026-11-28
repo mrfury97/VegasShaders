@@ -192,9 +192,7 @@ namespace {
 }
 
 bool TAAEffect::IsDeferredV1Unsafe() {
-	return TheSettingManager &&
-		TheSettingManager->GetSettingI("Main.Main.Quality", "DeferredRenderer") > 0 &&
-		TheSettingManager->GetSettingI("Main.Main.Misc", "ForceMSAA") == 0;
+	return true;	// DeferredRenderer is always active and MSAA is always off
 }
 
 void TAAEffect::ForceRenderScaleV1(const char* reason) {
@@ -800,13 +798,7 @@ bool TAAEffect::UpscaleRun(IDirect3DDevice9* Device, bool resolveDepth, bool has
 	in.Hdr = Up.Hdr;
 	in.Reset = reset || lastPathFSR;	// after FSR at native resolution the shared history is that path's
 	Upscaler::IUpscaler* upscaler = Upscaler::Choose(FSRSettings.Upscaler);
-	bool evaluated = upscaler->Evaluate(Device, in);
-	if (!evaluated && upscaler == Upscaler::Fsr31() && upscaler->Failed()) {
-		// UNOFFICIAL 2026-10-28: FSR 3.1 failing (logged by it) hands this frame and the rest of the session to FSR 2.
-		upscaler = Upscaler::Choose(FSRSettings.Upscaler);
-		in.Reset = true;
-		evaluated = upscaler->Evaluate(Device, in);
-	}
+	const bool evaluated = upscaler->Evaluate(Device, in);
 	if (!evaluated) { fail("the upscaler failed"); return false; }
 
 	// 5. Into the world's targets.

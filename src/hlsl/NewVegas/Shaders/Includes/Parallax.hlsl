@@ -333,7 +333,7 @@ float2 getParallaxCoords(float viewDist, float2 uv0, float2 gx, float2 gy, float
 
 #ifdef TERRAIN
 float getParallaxShadowMultipler(float viewDist, float2 uv0, float2 gx, float2 gy, float3 lightTS, int layerN, float blendIn[7], float hasH[7], sampler2D maps[7]) {
-    if (!TESR_TerrainParallaxData.y)
+    if (!TESR_TerrainParallaxData.y || lightTS.z <= 0.0f)
         return 1.0;
 
     float fadeEnd = TESR_TerrainParallaxExtraData.x;

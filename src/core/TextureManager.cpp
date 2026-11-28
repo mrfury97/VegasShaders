@@ -173,7 +173,7 @@ void TextureManager::ReadTargetSettings() {
 	SettingManager::Configuration::ConfigNode node;
 	// (a build whose defaults lack the keys: 20 s, no inventory)
 	TargetReleaseSeconds = TheSettingManager->Config.FillNode(&node, "Main.Main.Performance", "TargetReleaseSeconds") ?
-		std::clamp(TheSettingManager->GetSettingF("Main.Main.Performance", "TargetReleaseSeconds"), 0.0f, 3600.0f) : 20.0f;
+		std::clamp(TheSettingManager->GetSettingF("Main.Main.Performance", "TargetReleaseSeconds"), 0.0f, 3600.0f) : 0.0f;
 	TargetInventory = TheSettingManager->Config.FillNode(&node, "Main.Develop.Main", "TargetInventory") && node.BoolValue;
 }
 

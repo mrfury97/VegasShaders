@@ -7,12 +7,13 @@
 #define SHARP_STEPS 16
 
 void main() {
-    vec4 color = sampleShadow(uv);
+    vec2 ruv = toRectUV(uv);
+    vec4 color = sampleShadow(ruv);
     if (cb.screenSpaceData.x == 0.0) { o_color = vec4(1.0, color.g, 0.0, 1.0); return; }
     vec3 pos = reconstructPosition(uv);
     if (pos.z > SSS_MAXDEPTH) { o_color = vec4(1.0, color.g, 0.0, 1.0); return; }
     vec3 light = normalize(cb.viewSpaceLightDir.xyz);
-    float facing = saturate(dot(GetNormal(uv), light) * 8.0);
+    float facing = saturate(dot(GetNormal(ruv), light) * 8.0);
     if (facing <= 0.0) { o_color = vec4(1.0, color.g, 0.0, 1.0); return; }
     float bias = max(0.01, pos.z * 0.002);
 
@@ -26,7 +27,7 @@ void main() {
     for (int i = 1; i <= SHARP_STEPS; i++) {
         float t = float(i) / float(SHARP_STEPS);
         float rayZ = 1.0 / mix(invZ0, invZ1, t);
-        float delta = rayZ - readDepthLod(mix(uv, endUV, t));
+        float delta = rayZ - readDepthLod(toRectUV(mix(uv, endUV, t)));
         float w = 1.0 / (1.0 + t * 4.0);                    // nearer steps count more, as the old 1 / step
         occlusion += ((delta > bias && delta < SSS_THICKNESS) ? 1.0 : 0.0) * w;
         total += w;

@@ -13,10 +13,12 @@ float HistoryAt(vec2 position, float expected01, out vec2 history) {
     position = position / LowTexel - 0.5;
     vec2 base = floor(position);
     vec2 f = position - base;
-    vec4 t00 = POINT_LOD(t_history, (base + 0.5) * LowTexel);
-    vec4 t10 = POINT_LOD(t_history, (base + vec2(1.5, 0.5)) * LowTexel);
-    vec4 t01 = POINT_LOD(t_history, (base + vec2(0.5, 1.5)) * LowTexel);
-    vec4 t11 = POINT_LOD(t_history, (base + 1.5) * LowTexel);
+    vec2 lo = 0.5 * LowTexel;
+    vec2 hi = max(cb.renderScale.xy - 0.5 * LowTexel, lo);
+    vec4 t00 = POINT_LOD(t_history, clamp((base + 0.5) * LowTexel, lo, hi));
+    vec4 t10 = POINT_LOD(t_history, clamp((base + vec2(1.5, 0.5)) * LowTexel, lo, hi));
+    vec4 t01 = POINT_LOD(t_history, clamp((base + vec2(0.5, 1.5)) * LowTexel, lo, hi));
+    vec4 t11 = POINT_LOD(t_history, clamp((base + 1.5) * LowTexel, lo, hi));
     vec4 w = vec4((1.0 - f.x) * (1.0 - f.y), f.x * (1.0 - f.y), (1.0 - f.x) * f.y, f.x * f.y);
     float tolerance = max(expected01 * 0.05, 0.0002);
     w *= vec4(lessThan(abs(vec4(t00.b, t10.b, t01.b, t11.b) - expected01), vec4(tolerance)));
@@ -28,24 +30,26 @@ float HistoryAt(vec2 position, float expected01, out vec2 history) {
 void main() {
     vec2 vpos = floor(gl_FragCoord.xy);
     vec2 coord = (vpos + 0.5) * LowTexel;
-    vec4 current = POINT_LOD(t_march, coord);
+    vec2 lo = 0.5 * LowTexel;
+    vec2 hi = max(cb.renderScale.xy - 0.5 * LowTexel, lo);
+    vec4 current = POINT_LOD(t_march, clamp(coord, lo, hi));
 
     float tolerance = max(current.b * 0.05, 0.00002);
     vec2 low = current.rg, high = current.rg;
     for (int y = -1; y <= 1; y++) {
         for (int x = -1; x <= 1; x++) {
             if (x == 0 && y == 0) continue;
-            vec4 tap = POINT_LOD(t_march, coord + vec2(x, y) * LowTexel);
+            vec4 tap = POINT_LOD(t_march, clamp(coord + vec2(x, y) * LowTexel, lo, hi));
             if (abs(tap.b - current.b) < tolerance) { low = min(low, tap.rg); high = max(high, tap.rg); }
         }
     }
 
-    vec3 position = toWorld(coord) * (current.b * farZ);
+    vec3 position = toWorld(coord * cb.renderScale.zw) * (current.b * farZ);
     vec4 clip = cb.reproject * vec4(position, 1.0);
     float w = max(clip.w, 0.001);
     vec2 last = vec2(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5);
     vec2 history;
-    float found = HistoryAt(last, clip.w / farZ, history);
+    float found = HistoryAt(last * cb.renderScale.xy, clip.w / farZ, history);
     found *= (all(greaterThan(last, vec2(0.0))) && all(lessThan(last, vec2(1.0)))) ? 1.0 : 0.0;
 
     vec2 margin = 0.1 * (high - low) + 1.0e-4;

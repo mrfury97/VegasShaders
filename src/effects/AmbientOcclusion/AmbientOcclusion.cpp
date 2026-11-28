@@ -741,6 +741,10 @@ IDirect3DTexture9* AmbientOcclusionEffect::RtDenoisedGI(IDirect3DDevice9* Device
 	s.MovingHistory = RtAmbient::Current.GIMovingHistory;	// (2026-10-31, rt-ao-sky) with DenoiseBackbone only
 	s.Kernel = RtAmbient::Current.DenoiseKernel;	// (2026-10-30) 3 by default: ~2.5x cheaper (rt-sun 1f5d987e)
 	s.AntiLag = RtAmbient::Current.GIDenoiseAntiLag;	// UNOFFICIAL 2026-11-08 (rtgi-ghost): the path tracer's anti-lag (0 = off, as before)
+	// UNOFFICIAL 2026-11-27 RTGI AntiFirefly: clamp single-frame bounce + GlowDirect spikes via RtDenoiseFirefly.frag
+	s.AntiFirefly = RtAmbient::Current.GIDenoiseAntiFirefly && RtAmbient::Current.GIDenoiseFireflyK > 0.0f
+		? RtAmbient::Current.GIDenoiseFireflyK + 128.0f * (float)RtAmbient::Current.GIDenoiseFireflySpread
+		: 0.0f;
 	// UNOFFICIAL 2026-11-15 (rt-denoise-inputs, docs/next/RT-DENOISE-INPUTS.md) [Main.Main.RayTracing] GIDenoiseConfidence: the 1/5-size history
 	// confidence (RtDenoise Settings.Confidence; 0 / a missing key = off, as before)
 	s.Confidence = (std::max)(0.0f, (std::min)(16.0f, TheSettingManager->GetSettingF("Main.Main.RayTracing", "GIDenoiseConfidence")));

@@ -11,7 +11,7 @@ layout(set = 1, binding = 2) uniform texture2D t_viewModel;  // NVR_ALViewModel
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec2 uv = frameUV();
+    vec2 uv = frameRectUV();
     float viewZ = PositionFromLinear(uv, pointLod(t_depth, uv).x).z;
     if (IsViewModel(t_viewModel, uv)) viewZ = 1.0e6;
     vec3 normal = normalize(pointLod(t_normals, uv).xyz * 2.0 - 1.0);

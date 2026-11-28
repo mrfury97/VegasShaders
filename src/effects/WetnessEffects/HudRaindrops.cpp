@@ -1,5 +1,6 @@
 #include <algorithm>
 
+#include "../../core/DxvkCompute.h"
 #include "HudRaindrops.h"
 #include "../../core/FrameClock.h"
 
@@ -140,6 +141,107 @@ void HudRaindropsEffect::SetDrawConstants(bool firstPerson) {
 // The menu the game has just rendered into the Pip-Boy's screen texture, copied and drawn back into it with the drops (technique 2).
 // Inside the game's own rendering: what this changes on the device (the render target, viewport, vertex stream and format) goes back
 // as it was; the effect restores its own states at End.
+bool HudRaindropsEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	if (techniqueIndex > 1 || ClearRenderTarget || !DxvkCompute::Available() || !RenderTarget) return false;
+	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+	if (!point) return false;
+	struct Push { UInt32 pointSampler; UInt32 pad[3]; } push = {};
+
+	if (techniqueIndex == 1) {
+		if (!Textures.NewTexture) return false;
+		if (!extKeep.Tried) {
+			extKeep.Tried = true;
+			NVR_EXT_BINDING_DESC bindings[2] = {};
+			bindings[0].Set = 1; bindings[0].Binding = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].Slot = 0; bindings[0].ViewType = NVR_EXT_VIEW_2D;
+			bindings[1].Type = NVR_EXT_BIND_SAMPLER; bindings[1].Slot = 0; bindings[1].PushOffset = 0;
+			extKeep.Pipeline = DxvkCompute::CreateGraphicsPipeline("HudRainKeep", bindings, _countof(bindings), sizeof(push), true);
+		}
+		if (!extKeep.Pipeline) return false;
+		NVR_EXT_RESOURCE_BINDING res[2] = {};
+		res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = Textures.NewTexture;
+		res[1].Slot = 0; res[1].Type = NVR_EXT_BIND_SAMPLER; res[1].pResource = point;
+		return ExtDrawTo(extKeep.Pipeline, &RenderTarget, 1, res, _countof(res), &push, sizeof(push), nullptr, ExtUv::ScreenQuad);
+	}
+
+	auto orthoIt = TheTextureManager->TextureNames.find("TESR_OrthoMapBuffer");
+	IDirect3DBaseTexture9* ortho = (orthoIt != TheTextureManager->TextureNames.end() && orthoIt->second) ? *orthoIt->second : nullptr;
+	if (!ortho) ortho = Textures.StateTexture;
+	if (!ortho || !Textures.StateTexture) return false;
+
+	struct HudRainUpdateUniforms {
+		float shadowOrtho[16];
+		float data[4], time[4], shade[4], debug[4];
+	} uniforms = {};
+	auto orthoMatIt = TheShaderManager->ConstantsTable.find("TESR_ShadowCameraToLightTransformOrtho");
+	if (orthoMatIt != TheShaderManager->ConstantsTable.end() && orthoMatIt->second) {
+		memcpy(uniforms.shadowOrtho, orthoMatIt->second, sizeof(uniforms.shadowOrtho));
+	}
+	else if (Constants.Data.x > 0.0f && Constants.Shade.z < 0.5f) return false;
+	memcpy(uniforms.data, &Constants.Data, sizeof(uniforms.data));
+	memcpy(uniforms.time, &Constants.Time, sizeof(uniforms.time));
+	memcpy(uniforms.shade, &Constants.Shade, sizeof(uniforms.shade));
+	memcpy(uniforms.debug, &Constants.Debug, sizeof(uniforms.debug));
+
+	ID3D9NvrExtBuffer* cb = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
+	if (!cb) return false;
+	if (!extUpdate.Tried) {
+		extUpdate.Tried = true;
+		NVR_EXT_BINDING_DESC bindings[4] = {};
+		bindings[0].Set = 1; bindings[0].Binding = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].Slot = 0; bindings[0].ViewType = NVR_EXT_VIEW_2D;
+		bindings[1].Set = 1; bindings[1].Binding = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].Slot = 1; bindings[1].ViewType = NVR_EXT_VIEW_2D;
+		bindings[2].Set = 2; bindings[2].Binding = 0; bindings[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[2].Slot = 0; bindings[2].ViewType = NVR_EXT_VIEW_2D;
+		bindings[3].Type = NVR_EXT_BIND_SAMPLER; bindings[3].Slot = 0; bindings[3].PushOffset = 0;
+		extUpdate.Pipeline = DxvkCompute::CreateGraphicsPipeline("HudRainUpdate", bindings, _countof(bindings), sizeof(push), true);
+	}
+	if (!extUpdate.Pipeline) return false;
+	NVR_EXT_RESOURCE_BINDING res[4] = {};
+	res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = ortho;
+	res[1].Slot = 1; res[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[1].pResource = Textures.StateTexture;
+	res[2].Slot = 0; res[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; res[2].pResource = cb;
+	res[3].Slot = 0; res[3].Type = NVR_EXT_BIND_SAMPLER; res[3].pResource = point;
+	return ExtDrawTo(extUpdate.Pipeline, &RenderTarget, 1, res, _countof(res), &push, sizeof(push), nullptr, ExtUv::ScreenQuad);
+}
+
+bool HudRaindropsEffect::ExtDrawOnScreen(IDirect3DDevice9* Device, IDirect3DSurface9* TargetSurface) {
+	if (!DxvkCompute::Available() || !Textures.StateTexture || !Textures.ScreenCopy || !TargetSurface) return false;
+	IDirect3DBaseTexture9* dropTex = ExtFileTexture("TESR_HudRainTexture");
+	if (!dropTex) dropTex = TheTextureManager->GetFileTexture("Data\\Textures\\Effects\\hud_raindrops.dds", TextureRecord::TextureRecordType::PlanarBuffer);
+	if (!dropTex) return false;
+	ID3D9NvrExtSampler* point = DxvkCompute::PointClamp();
+	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
+	ID3D9NvrExtSampler* mipWrap = DxvkCompute::MipSampler(false, NVR_EXT_ADDRESS_WRAP);
+	if (!mipWrap) mipWrap = DxvkCompute::LinearWrap();
+	if (!point || !linear || !mipWrap) return false;
+
+	struct Push {
+		float screen[4];
+		UInt32 pointSampler, linearClamp, mipWrap, pad;
+	} push = {};
+	memcpy(push.screen, &Constants.Screen, sizeof(push.screen));
+
+	if (!extScreen.Tried) {
+		extScreen.Tried = true;
+		NVR_EXT_BINDING_DESC bindings[6] = {};
+		bindings[0].Set = 1; bindings[0].Binding = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].Slot = 0; bindings[0].ViewType = NVR_EXT_VIEW_2D;
+		bindings[1].Set = 1; bindings[1].Binding = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].Slot = 1; bindings[1].ViewType = NVR_EXT_VIEW_2D;
+		bindings[2].Set = 1; bindings[2].Binding = 2; bindings[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[2].Slot = 2; bindings[2].ViewType = NVR_EXT_VIEW_2D;
+		bindings[3].Type = NVR_EXT_BIND_SAMPLER; bindings[3].Slot = 0; bindings[3].PushOffset = 16;
+		bindings[4].Type = NVR_EXT_BIND_SAMPLER; bindings[4].Slot = 1; bindings[4].PushOffset = 20;
+		bindings[5].Type = NVR_EXT_BIND_SAMPLER; bindings[5].Slot = 2; bindings[5].PushOffset = 24;
+		extScreen.Pipeline = DxvkCompute::CreateGraphicsPipeline("HudRainScreen", bindings, _countof(bindings), sizeof(push), true);
+	}
+	if (!extScreen.Pipeline) return false;
+
+	NVR_EXT_RESOURCE_BINDING res[6] = {};
+	res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = Textures.StateTexture;
+	res[1].Slot = 1; res[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[1].pResource = Textures.ScreenCopy;
+	res[2].Slot = 2; res[2].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[2].pResource = dropTex;
+	res[3].Slot = 0; res[3].Type = NVR_EXT_BIND_SAMPLER; res[3].pResource = point;
+	res[4].Slot = 1; res[4].Type = NVR_EXT_BIND_SAMPLER; res[4].pResource = linear;
+	res[5].Slot = 2; res[5].Type = NVR_EXT_BIND_SAMPLER; res[5].pResource = mipWrap;
+	return ExtDrawTo(extScreen.Pipeline, &TargetSurface, 1, res, _countof(res), &push, sizeof(push), nullptr, ExtUv::ScreenQuad);
+}
+
 void HudRaindropsEffect::DrawOnScreen(BSRenderedTexture* Target) {
 	if (!Enabled || !Effect || !Cleared || !ShouldRender() || !Target || !Target->GetTexture(0)) return;
 	IDirect3DTexture9* TargetTexture = Target->GetD3DTexture(0);
@@ -166,6 +268,11 @@ void HudRaindropsEffect::DrawOnScreen(BSRenderedTexture* Target) {
 	IDirect3DSurface9* TargetSurface = nullptr;
 	if (FAILED(TargetTexture->GetSurfaceLevel(0, &TargetSurface))) return;
 	Device->StretchRect(TargetSurface, NULL, Textures.ScreenCopySurface, NULL, D3DTEXF_NONE);
+
+	if (!ExtFailed && DxvkCompute::PassesOnRect() && !DxvkCompute::KeptOnD3D9(Name) && ExtDrawOnScreen(Device, TargetSurface)) {
+		TargetSurface->Release();
+		return;
+	}
 
 	IDirect3DSurface9* OldTarget = nullptr;
 	D3DVIEWPORT9 OldViewport;

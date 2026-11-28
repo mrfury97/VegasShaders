@@ -1,9 +1,88 @@
 #include "PixelInspector.h"
-#include "ShaderCounters.h"
+#include "DxvkCompute.h"
 #include "Diagnostics.h"	// UNOFFICIAL 2026-11-01: the stage probes share AfterFrame's call sites
 #include "imgui.h"
 
 // UNOFFICIAL 2026-10-26 (debugging tool): see PixelInspector.h and docs\next\FORK-DEBUG-PIXEL.md.
+
+namespace DebugReadback {
+	inline ID3D9NvrExtReadback* Ext = nullptr;
+	inline bool Tried = false;
+
+	inline ID3D9NvrExtReadback* Interface() {
+		if (Tried) return Ext;
+		Tried = true;
+		ID3D9NvrExt* ext = DxvkCompute::Extension();
+		if (!ext || !DxvkCompute::Available()) {
+			Logger::Log("UNOFFICIAL debugging tools: need Vegas Shaders DXVK (the Vegas Shaders extension is not present: native D3D9 or stock DXVK); nothing is done.");
+			return nullptr;
+		}
+		if (FAILED(ext->QueryInterface(__uuidof(ID3D9NvrExtReadback), (void**)&Ext)) || !Ext) {
+			Ext = nullptr;
+			Logger::Log("UNOFFICIAL debugging tools: need Vegas Shaders DXVK 1.5-debug (fork patch 0016, non-waiting readback); this d3d9.dll has extension %u.%u without it: nothing is done.",
+				DxvkCompute::Info().ExtVersionMajor, DxvkCompute::Info().ExtVersionMinor);
+			return nullptr;
+		}
+		Logger::Log("UNOFFICIAL debugging tools: Vegas Shaders DXVK 1.5-debug readback available (never waits).");
+		return Ext;
+	}
+}
+
+class DebugReadbackRing {
+public:
+	static const int Slots = 4;
+
+	bool Ready() const { return Size != 0; }
+
+	bool Init(UINT size, const char* name) {
+		if (Size == size) return true;
+		Release();
+		ID3D9NvrExtReadback* rb = DebugReadback::Interface();
+		if (!rb) return false;
+		for (int i = 0; i < Slots; i++) {
+			if (FAILED(rb->CreateReadbackBuffer(size, name, &Buffers[i])) || !Buffers[i]) {
+				Logger::Log("UNOFFICIAL debugging tools: CreateReadbackBuffer(%s, %u bytes) failed", name ? name : "", size);
+				Release();
+				return false;
+			}
+		}
+		Size = size;
+		return true;
+	}
+
+	int Submit(ID3D9NvrExtBuffer* Source, UINT Bytes) {
+		ID3D9NvrExtReadback* rb = DebugReadback::Interface();
+		if (!rb || !Size || !Source || Bytes > Size) return -1;
+		if (Count >= Slots) { Skipped++; return -1; }
+		const int slot = (Oldest + Count) % Slots;
+		if (FAILED(rb->CopyToReadback(Buffers[slot], 0, Source, 0, Bytes))) return -1;
+		Count++;
+		return slot;
+	}
+
+	bool Poll(void* Out, UINT Bytes, int& slot) {
+		ID3D9NvrExtReadback* rb = DebugReadback::Interface();
+		if (!rb || !Count || Bytes > Size) return false;
+		const HRESULT result = rb->TryReadback(Buffers[Oldest], 0, Bytes, Out);
+		if (result == S_FALSE) return false;
+		slot = Oldest;
+		Oldest = (Oldest + 1) % Slots;
+		Count--;
+		return result == S_OK;
+	}
+
+	void Release() {
+		for (int i = 0; i < Slots; i++) DxvkCompute::Drop(Buffers[i]);
+		Size = 0; Oldest = 0; Count = 0;
+	}
+
+	UINT Skipped = 0;
+
+private:
+	ID3D9NvrExtBuffer*	Buffers[Slots] = {};
+	UINT				Size = 0;
+	int					Oldest = 0, Count = 0;
+};
 
 namespace PixelInspector {
 
@@ -325,9 +404,7 @@ bool PixelFor(UINT Width, UINT Height, int& x, int& y) {
 }
 
 void DrawUI() {
-	bool countersOn = false;
-	for (ShaderCounters* c : ShaderCounters::All()) if (!c->Summary().empty()) countersOn = true;
-	if (!Enabled && !countersOn) { Picking = false; return; }
+	if (!Enabled) { Picking = false; return; }
 
 	ImGuiIO& io = ImGui::GetIO();
 	const float toScreenX = io.DisplaySize.x / (float)max(1u, (UINT)TheRenderManager->width);
@@ -382,14 +459,6 @@ void DrawUI() {
 			else if (!HaveLatest && !NeedsDxvk) ImGui::TextDisabled("Waiting for the first result (a few frames)...");
 		}
 		else ImGui::TextDisabled("Pixel inspector off ([Main.Develop.PixelInspector] Enabled).");
-		for (ShaderCounters* c : ShaderCounters::All()) {
-			if (c->Summary().empty()) continue;
-			ImGui::Separator();
-			ImGui::Text("Shader counters: %s (per frame, last second)", c->Name());
-			ImGui::PushTextWrapPos(0.0f);
-			ImGui::TextDisabled("%s", c->Summary().c_str());
-			ImGui::PopTextWrapPos();
-		}
 	}
 	ImGui::End();
 

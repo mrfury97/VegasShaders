@@ -54,7 +54,7 @@ verifies it). An effect without a "yes" in the Doc column has no section yet.
 | [PointShadows2](#pointshadows2) | - | yes | 3 | 0 | PointShadows2.cpp, PointShadows2.h | PointShadows2 darkens or lights the scene for point lamps that PointShadows does not handle. It is a screen-space pass over the point-shadow buffer: for every p |
 | [Precipitations](#precipitations) | true | yes | 3 | 2 | Rain.cpp, Rain.h | While it rains outdoors, the picture gets falling rain streaks laid over the view. Drops are drawn in layers at increasing distance from the camera, so near str |
 | [Puddles](#puddles) | true | yes | 6 | 3 | PuddleMap.h, Puddles.cpp, Puddles.h | Puddles that behave like a modern engine's: they sit where water would gather (dips in the noise field, the land's crevices, flat open ground), grow while it ra |
-| [Reflections](#reflections) | false | yes | 44 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
+| [Reflections](#reflections) | false | yes | 35 | 3 | Reflections.cpp, Reflections.h, RtReflLamps.h |  |
 | [SMAA](../src/effects/SMAA/) | false | - | 12 | 2 | SMAA.cpp, SMAA.h |  |
 | [Sandstorm](../src/effects/Sandstorm/) | false | - | 16 | 2 | Sandstorm.cpp, Sandstorm.h |  |
 | [ShadowsExteriors](#shadowsexteriors) | true | yes | 5 | 12 | ShadowsExterior.cpp, ShadowsExterior.h | Outdoors, the sun's shadow term is stored in a screen-sized shadow buffer, one value per pixel. This pass reads the finished frame and darkens each pixel by tha |
@@ -5754,16 +5754,21 @@ Owner: the deferred sun must run in Vulkan; D3D9 stays only as the fallback for 
   `shadowOld{Near,Middle,Far,Lod}` (`TESR_ShadowOldCameraToLightTransform*`), `shadowOld*Center`, `shadowCrossFade`, `shadowDynamicData`,
   all copied by name from the ConstantsTable only while fading. Flags: bit 24 `kFlagSunCrossFade` (fading and the kept atlas exists),
   25 `kFlagShadowDynamic` (the movers' atlas drawn this frame), 26 `kFlagWetFilm` (`FilmLive`). Push block unchanged (16 bytes).
-- Still on D3D9: the first-person pass (`Vm.on`; SunSheen is 0 there anyway), `SkylightingMode` 1, a non-PCF shadow mode, a target that
+- (2026-11-28 upstream 1.1.6-test2 merge) The first-person pass (`Vm.on`) runs in compute too (upstream's view-model path, its depth
+  `Vm.depthTex` with a far-plane reject): flag bit 27 `kFlagViewModel` (upstream had it at 24, ours keeps 23-26), the sun-step fade and
+  micro shadow, no wet film (the film target holds the world's pixels) and no SunSheen. The first-person lamps also take compute
+  (`DeferredLamps.comp` flag 22). Our `PBRSun` (land F90, diffuse keep) lives in the shared `Compute/DeferredCommon.glsl`; upstream's
+  11-argument overload calls it with (false, true). The renderer is deferred only (DeferredRenderer locked at 2) and needs the fork.
+- Still on D3D9: `SkylightingMode` 1, a non-PCF shadow mode, a target that
   is not single-sample FP16, DebugView on a stored-curve frame, `DxvkCompute::KeptOnD3D9("DeferredSun")`, a failed set-up or dispatch,
-  and every frame without the DXVK fork (stock DXVK, native D3D9). The D3D9 fade record stays lean with FD_SKIN.
+  and (before 1.1.6) every frame without the DXVK fork. The D3D9 fade record stays lean with FD_SKIN.
 - `[Main.Main.Performance] NvrDxvkDeferred` true by default (settings step 111 moves a saved false, not in an upstream-built file). It also
   switches on: the Vulkan lamp pass (`DeferredLamps.comp`, `DeferredLamps::EnsureComputeReady`; it stands aside while a lamp
   screen-space-shadow mask is made, section 13, and with a lamp list not 16 texels), the interior directional light folded into that lamp
   dispatch (`DeferredLamps::CanFoldInteriorDir`), and `DeferredDistant::ComputeHandlesStoredCurve` (the far world's frame is not converted
   to linear light before the deferred passes; the compute passes read the stored curve). It needs `NvrDxvkPasses` and the fork.
-  Known differences of the Vulkan lamp pass, now visible by default: it uses the non-metal F0 0.04, not the record's `DLSpecF0` (see the
-  PBR notes above); and it has no wet film, so on frames with the film live and `DeferredWetLampFilm` on it stands aside for the D3D9
+  Known differences of the Vulkan lamp pass, now visible by default: (until the 1.1.6 merge it used the non-metal F0 0.04; since then it
+  takes the G-buffer's `dlSpecF0` as the D3D9 pass does, upstream's PBR overhaul, and 0.04 on the land with our land F90); and it has no wet film, so on frames with the film live and `DeferredWetLampFilm` on it stands aside for the D3D9
   passes (the lamps' shadowed streaks on wet ground). `NvrDxvkDeferred` is in `StalePresetValues.h` (step 111): a preset's false is not replayed.
 - Land parity fix (bench 2026-11-27, the owner's `sunsheen` save, frozen time, SunSheen 0: runs 20261127-182332-slotA D3D9 vs
   20261127-182220-slotA Vulkan): the flicker was gone, but the Vulkan sun lit the land darker (ground mean 96.3 D3D9, 86.9 Vulkan; objects,

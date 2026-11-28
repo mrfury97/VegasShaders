@@ -324,13 +324,13 @@ namespace PassSums {
 	inline int ModeFromSettings() {
 		if (!LampSumsChecked) {
 			LampSumsChecked = true;
-			LampSumsCompiled = TheSettingManager->GetSettingI("Shaders.PBR.Main", "LampSums") != 0 && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0;
+			LampSumsCompiled = TheSettingManager->GetSettingI("Shaders.PBR.Main", "LampSums") != 0;
 			Logger::Log("UNOFFICIAL LampSums: %s", LampSumsCompiled ? "compiled in (the extra lamp passes add their light in linear light)" :
 				"off (not compiled into the shaders)");
 		}
 		if (!HighlightSumsChecked) {	// UNOFFICIAL 2026-10-25 HighlightSums (HIGHLIGHT_SUMS_ON), the same way
 			HighlightSumsChecked = true;
-			HighlightSumsCompiled = TheSettingManager->GetSettingI("Shaders.PBR.Main", "HighlightSums") != 0 && TheSettingManager->GetSettingI("Shaders.PBR.Linear", "Enabled") != 0;
+			HighlightSumsCompiled = TheSettingManager->GetSettingI("Shaders.PBR.Main", "HighlightSums") != 0;
 			Logger::Log("UNOFFICIAL HighlightSums: %s", HighlightSumsCompiled ? "compiled in (the highlight passes FoldHighlights leaves to the game add their light in linear light)" :
 				"off (not compiled into the shaders)");
 		}

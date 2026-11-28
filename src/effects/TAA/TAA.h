@@ -46,7 +46,7 @@ public:
 		// screen's width and height and FSR 2 upscales it to the screen before NVR's effects, instead of resolving at native
 		// resolution after tonemapping. 1 (default) = off: native, exactly as before.
 		float	RenderScale;	// [0.5-1]
-		int		Upscaler;		// 0 FSR 2, 1 DLSS, 2 FSR 3.1 ([Shaders.TAA.FSR] Version 1) (Upscaler::Choose, core/Upscaler.h)
+		int		Upscaler;		// 0 FSR 3.1, 1 DLSS (Upscaler::Choose, core/Upscaler.h)
 		int		DebugView;		// RenderScale: 0 off, 1 the low-resolution world as drawn (its corner), 2 it stretched without FSR, 3 FSR's motion input
 		bool	LowResEffects;	// UNOFFICIAL 2026-10-27 RenderScale v2: the weapon and NVR's pre-tonemap effects run small too, upscaled after them
 		bool	SmoothEffects = true;	// UNOFFICIAL 2026-11-01: frames upscaled before the effects (LowResEffects off) get TAA's own resolve after them

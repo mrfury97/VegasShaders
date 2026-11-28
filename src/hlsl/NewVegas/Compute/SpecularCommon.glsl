@@ -59,9 +59,10 @@ float readDepthLod(texture2D depthTex, uint samp, vec2 coord) {
 
 // Depth.hlsl: toWorld
 vec3 toWorld(vec2 tex) {
+    vec2 s = tex * cb.renderScale.zw;
     vec3 v = vec3(cb.viewTransform[0][2], cb.viewTransform[1][2], cb.viewTransform[2][2]);
-    v += (1.0 / cb.projectionTransform[0][0] * (2.0 * tex.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
-    v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * tex.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
+    v += (1.0 / cb.projectionTransform[0][0] * (2.0 * s.x - 1.0)) * vec3(cb.viewTransform[0][0], cb.viewTransform[1][0], cb.viewTransform[2][0]);
+    v += (-1.0 / cb.projectionTransform[1][1] * (2.0 * s.y - 1.0)) * vec3(cb.viewTransform[0][1], cb.viewTransform[1][1], cb.viewTransform[2][1]);
     return v;
 }
 

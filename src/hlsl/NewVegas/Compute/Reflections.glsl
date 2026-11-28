@@ -163,6 +163,9 @@ float readDepthLod(vec2 coord) { return textureLod(sampler2D(t_depth, POINT_S), 
 // screenToRect of it. In a native frame renderScale is 1 and every function here changes nothing.
 vec2 rectToScreen(vec2 uv) { return uv * cb.renderScale.zw; }
 vec2 screenToRect(vec2 s01) { return s01 * cb.renderScale.xy; }
+vec2 clampToRect(vec2 ruv, vec2 texel) {
+    return clamp(ruv, 0.5 * texel, max(cb.renderScale.xy - 0.5 * texel, 0.5 * texel));
+}
 
 vec3 toWorld(vec2 tex) {
     tex = rectToScreen(tex);   // (2026-11-03, as Includes/Depth.hlsl)
@@ -435,10 +438,12 @@ vec3 SurfacePosition(vec2 uv, float depth) {
 vec3 AboveSurface(vec2 uv, vec3 p, vec3 R) {
     bool w0 = IsWeapon(uv);
     vec2 dx = vec2(LowTexel.x, 0.0), dy = vec2(0.0, LowTexel.y);
-    vec3 xp = SurfacePosition(uv + dx, readDepthLod(uv + dx)), xm = SurfacePosition(uv - dx, readDepthLod(uv - dx));
-    vec3 yp = SurfacePosition(uv + dy, readDepthLod(uv + dy)), ym = SurfacePosition(uv - dy, readDepthLod(uv - dy));
-    bool wXp = IsWeapon(uv + dx) == w0, wXm = IsWeapon(uv - dx) == w0;
-    bool wYp = IsWeapon(uv + dy) == w0, wYm = IsWeapon(uv - dy) == w0;
+    vec2 uvXp = clampToRect(uv + dx, cb.reciprocalResolution.xy), uvXm = clampToRect(uv - dx, cb.reciprocalResolution.xy);
+    vec2 uvYp = clampToRect(uv + dy, cb.reciprocalResolution.xy), uvYm = clampToRect(uv - dy, cb.reciprocalResolution.xy);
+    vec3 xp = SurfacePosition(uvXp, readDepthLod(uvXp)), xm = SurfacePosition(uvXm, readDepthLod(uvXm));
+    vec3 yp = SurfacePosition(uvYp, readDepthLod(uvYp)), ym = SurfacePosition(uvYm, readDepthLod(uvYm));
+    bool wXp = IsWeapon(uvXp) == w0, wXm = IsWeapon(uvXm) == w0;
+    bool wYp = IsWeapon(uvYp) == w0, wYm = IsWeapon(uvYm) == w0;
     if (!(wXp || wXm) || !(wYp || wYm)) return R;
     vec3 ddx = (!wXm || (wXp && abs(xp.z - p.z) < abs(p.z - xm.z))) ? xp - p : p - xm;
     vec3 ddy = (!wYm || (wYp && abs(yp.z - p.z) < abs(p.z - ym.z))) ? yp - p : p - ym;
@@ -466,6 +471,7 @@ float WaterReflectivity(float depth, out float roughness) {
 
 // REFL_MATERIAL_ON: the material buffer.
 float SurfaceMetal = 0.0;     // set by Reflectivity: the surface's metal (0 without material data)
+bool SurfaceRmaos = false;     // true when surface material came explicitly from an _rmaos map
 float SurfaceWetGloss = 0.0;  // 2026-11-19 WetnessEffects water film gloss (0..1)
 float SurfaceWetRough = 1.0;  // 2026-11-19 WetnessEffects water film roughness
 vec4 MaterialAt(vec2 uv) { return cb.material.x > 0.5 ? textureLod(sampler2D(t_material, POINT_S), uv, 0.0) : vec4(0.0); }
@@ -552,6 +558,7 @@ float MaterialReflectivity(vec2 uv, float depth, float floorShare, vec4 material
     SurfaceWetShare = saturate(wetness / max(amount, 1.0e-4)) * (1.0 - FilmDamp);   // (2026-11-26 puddle mirror)
     SurfaceStanding = saturate(max(FilmStanding * SurfaceWetShare, standing));   // (2026-11-26 mirror puddles)
     SurfaceMetal = material.g;
+    SurfaceRmaos = (material.a > 0.5);
     float fade = 1.0 - smoothstep(0.7 * DrawDistance, DrawDistance, depth);
     return min(amount, 2.0) * fade;
 }
@@ -565,6 +572,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     roughness = DryRoughness;
     SurfaceWetGloss = 0.0;
     SurfaceWetRough = 1.0;
+    SurfaceRmaos = false;
     if (MaterialOn || GBufferOn) SurfaceMetal = 0.0;
     SurfaceGBuffer = false;
     // UNOFFICIAL 2026-10-31 RT water: the water (flat, at the water height) at any distance, before DrawDistance's cut.
@@ -598,31 +606,37 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
                 hasPartRough = true;
             }
         }
+        SurfaceRmaos = explicitRmaos;
+        if (explicitRmaos) {
+            if (MatBufRoughOn && VmGBufferOn) {
+                vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
+                if (written.r > 0.5 && written.b >= 0.0) {
+                    partRough = saturate(written.b);
+                    partMetal = saturate((written.r - floor(written.r + 0.004)) / 0.49);
+                }
+            }
+            roughness = clamp(partRough, 0.02, 1.0);
+            SurfaceMetal = cb.material2.w > 0.0 ? saturate(partMetal * min(cb.material2.w, 1.0)) : 0.0;
+            return cb.weapon.z;
+        }
         roughness = hasPartRough ? clamp(cb.weapon.w * mix(0.6, 1.5, partRough), 0.02, cb.weapon.w <= 0.025 ? 0.028 : 1.0) : cb.weapon.w;
         vec3 weaponLit = vec3(0.0);
         float weaponTop = 0.0;
         float weaponPMax = 0.0;
-        if (!explicitRmaos) {
-            weaponLit = linearize(textureLod(sampler2D(t_rendered, POINT_S), uv, 0.0).rgb);
-            weaponTop = max(weaponLit.r, max(weaponLit.g, weaponLit.b));
-            weaponPMax = sqrt(saturate(weaponTop));
-            if (cb.weapon.w > 0.05) {
-                float brightMetal = smoothstep(0.22, 0.72, weaponPMax);
-                roughness = mix(max(roughness, 0.34), max(roughness * 0.75, 0.12), brightMetal);
-            }
+        weaponLit = linearize(textureLod(sampler2D(t_rendered, POINT_S), uv, 0.0).rgb);
+        weaponTop = max(weaponLit.r, max(weaponLit.g, weaponLit.b));
+        weaponPMax = sqrt(saturate(weaponTop));
+        if (cb.weapon.w > 0.05) {
+            float brightMetal = smoothstep(0.22, 0.72, weaponPMax);
+            roughness = mix(max(roughness, 0.34), max(roughness * 0.75, 0.12), brightMetal);
         }
         if (cb.material2.w > 0.0) {
-            float baseMetal;
-            if (explicitRmaos) {
-                baseMetal = partMetal;
-            } else {
-                float saturation = weaponTop > 1.0e-4 ? (weaponTop - min(weaponLit.r, min(weaponLit.g, weaponLit.b))) / weaponTop : 0.0;
-                float satMetal = (1.0 - smoothstep(0.12, 0.35, saturation)) * smoothstep(0.06, 0.24, weaponPMax);
-                baseMetal = partMetal >= 0.0 ? max(partMetal, satMetal * 0.75) : satMetal;
-            }
+            float saturation = weaponTop > 1.0e-4 ? (weaponTop - min(weaponLit.r, min(weaponLit.g, weaponLit.b))) / weaponTop : 0.0;
+            float satMetal = (1.0 - smoothstep(0.12, 0.35, saturation)) * smoothstep(0.06, 0.24, weaponPMax);
+            float baseMetal = partMetal >= 0.0 ? max(partMetal, satMetal * 0.75) : satMetal;
             SurfaceMetal = saturate(cb.material2.w * baseMetal);
         }
-        return cb.weapon.z * mix(1.0, 0.25, smoothstep(0.5, 1.0, roughness));
+        return cb.weapon.z;
     }
     if (cb.material.w > 0.0 && textureLod(sampler2D(t_glass, POINT_S), uv, 0.0).r > 0.5) {
         roughness = GlassRoughness;
@@ -642,7 +656,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     // (upstream 1.1.1) walls and steep faces: only Wetness Effects' forward film (no G-buffer film this frame: the C++ leaves wetFx.x 0 then)
     if (floorShare <= 0.0) {
         if (!FilmOn && SurfaceWetGloss > 0.01) {
-            if (MaterialOn || GBufferOn) { vec4 merged = material; if (merged.b > 0.25 && merged.b <= 0.75) SurfaceMetal = merged.g; }
+            if (MaterialOn || GBufferOn) { vec4 merged = material; if (merged.b > 0.25 && merged.b <= 0.75) { SurfaceMetal = merged.g; SurfaceRmaos = (merged.a > 0.5); } }
             roughness = SurfaceWetRough;
             return SurfaceWetGloss * (1.0 - smoothstep(0.35, 0.75, SurfaceWetRough)) * fade;
         }
@@ -662,7 +676,7 @@ float ReflectivityOwn(vec2 uv, float depth, vec3 viewNormal, out float roughness
     // r class > 0, b roughness, -1 none), the dry surface takes it instead of the one DryRoughness (polished floors sharp, carpets blurred).
     float dryRoughness = DryRoughness;
     // UNOFFICIAL 2026-10-31: the copy with MaterialAware on carries it already (b 0.5, core/CapturedNormals.h MergeIntoReflMaterial)
-    if (MaterialOn || GBufferOn) { vec4 merged = material; if (merged.b > 0.25 && merged.b <= 0.75) { dryRoughness = max(merged.r, 0.02); SurfaceMetal = merged.g; } }
+    if (MaterialOn || GBufferOn) { vec4 merged = material; if (merged.b > 0.25 && merged.b <= 0.75) { dryRoughness = max(merged.r, 0.02); SurfaceMetal = merged.g; SurfaceRmaos = (merged.a > 0.5); } }
     if (MatBufRoughOn) {
         vec4 written = textureLod(sampler2D(t_matbuf, POINT_S), uv, 0.0);
         if (written.r > 0.5 && written.b >= 0.0) dryRoughness = saturate(written.b);

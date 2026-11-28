@@ -1,5 +1,4 @@
 #pragma once
-#include "SettingForce.h"
 
 // UNOFFICIAL 2026-10-30 ReactiveMask ([Shaders.TAA.FSR] ReactiveMask, 0 = off; docs/next/ROOT-ASSUMPTIONS-PLAN.md D1: the reactive mask).
 // FSR keeps a pixel's history unless its reactive mask says "this changed by itself": NVR's mask held only the first-person weapon, so
@@ -45,7 +44,7 @@ namespace ReactiveMask {
 	inline double StatShare = 0.0;
 
 	inline float MaxDistance() { return (std::max)(0.0f, TheSettingManager->GetSettingF("Shaders.TAA.FSR", "ReactiveMaxDistance")); }
-	inline float Scale() { return SettingForce::NoDxvkFork ? 0.0f : (std::max)(0.0f, TheSettingManager->GetSettingF("Shaders.TAA.FSR", "ReactiveMask")); }
+	inline float Scale() { return (std::max)(0.0f, TheSettingManager->GetSettingF("Shaders.TAA.FSR", "ReactiveMask")); }
 	inline UInt32 FrameNumber() { return TheFrameRateManager ? TheFrameRateManager->FrameNumber : 0; }
 	// This frame's mask is made (the readers' switch).
 	inline bool Ready() { return !Failed && Texture && ReadyFrame == FrameNumber() && Scale() > 0.0f; }

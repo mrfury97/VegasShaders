@@ -1,4 +1,5 @@
 #include <regex>
+#include <unordered_set>
 #include "DxvkCompute.h"	// UNOFFICIAL 2026-10-23 (NVR DXVK)
 #include "SessionLog.h"	// 2026-11-04: the effect's name as the CRASH lines' stage
 #include "FrameWorker.h"	// UNOFFICIAL 2026-11-03 SkyOnWorker
@@ -525,6 +526,17 @@ void EffectRecord::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTar
 			return ExtRender(Device, RenderTarget, RenderedSurface, techniqueIndex, ClearRenderTarget, SourceBuffer); }()) {
 		finishOnTarget("EffectRecord::ExtRender ");
 		return;
+	}
+	{
+		const char* why = ExtFailed ? "ExtFailed" :
+			DxvkCompute::KeptOnD3D9(Name) ? "KeptOnD3D9" :
+			!extAllowed ? (RenderRect::Active() && !ExtSupportsRenderRect() ? "RenderRect_not_supported" : "PassesOff") :
+			Sm6Covers(techniqueIndex) ? "Sm6Covers" : "ExtRender_returned_false";
+		static std::unordered_set<std::string> d3Logged;
+		if (d3Logged.insert(std::string(Name) + "|" + why).second) {
+			Logger::Log("[D3-FALLBACK] Effect %s fell back to D3D9 (%s, tech=%u, rect=%d)",
+				Name, why, techniqueIndex, RenderRect::Active() ? 1 : 0);
+		}
 	}
 
 	ID3DXEffect* const fx = Effect;

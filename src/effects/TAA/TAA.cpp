@@ -82,11 +82,7 @@ void TAAEffect::UpdateSettings() {
 	// UNOFFICIAL 2026-10-27 (user: "0.1 should look pretty compressed, yet it does not"): down to 0.33, FSR 2's and DLSS's lowest
 	// ("Ultra Performance", 3x per axis); below that neither is made to work. Was 0.5.
 	FSRSettings.RenderScale = scale > 0.0f ? std::clamp(scale, 0.33f, 1.0f) : 1.0f;
-	// UNOFFICIAL 2026-10-28 ([Shaders.TAA.FSR] Version, 0 when missing): 0 AMD FSR 2.2.1 (as before), 1 AMD FSR 3.1 (core/UpscalerFsr31.cpp).
-	// Not the key "Upscaler": until 2026-10-27 "Upscaler = 1" meant DLSS, and old settings files still have it.
-	// DLSS keeps its own switch above and wins over both.
-	const bool fsr31 = TheSettingManager->GetSettingI("Shaders.TAA.FSR", "Version") == 1;
-	FSRSettings.Upscaler = dlss ? 1 : (fsr31 ? 2 : 0);
+	FSRSettings.Upscaler = dlss ? 1 : 0;
 	// UNOFFICIAL 2026-10-29: every change of the upscaler or of its RenderScale says so (the RenderScale lines below only come from the
 	// upscaling path: a switch to a RenderScale of 1 -- native resolution, TAA / FSR as anti-aliasing only -- was silent).
 	{
@@ -94,7 +90,7 @@ void TAAEffect::UpdateSettings() {
 		if (FSRSettings.Upscaler != loggedUpscaler || FSRSettings.RenderScale != loggedScale || FSRSettings.Enabled != loggedEnabled) {
 			if (loggedUpscaler >= 0 || FSRSettings.Enabled)
 				Logger::Log("UNOFFICIAL TAA: %s, RenderScale %.2f (%s)%s", !FSRSettings.Enabled ? "TAA's own resolve" :
-					FSRSettings.Upscaler == 1 ? "DLSS (helper; FSR 2 while it cannot run)" : FSRSettings.Upscaler == 2 ? "FSR 3.1" : "FSR 2.2.1",
+					FSRSettings.Upscaler == 1 ? "DLSS (helper; FSR 3.1 while it cannot run)" : "FSR 3.1",
 					FSRSettings.RenderScale, FSRSettings.RenderScale < 1.0f ? "upscaled" : "native resolution, no upscale",
 					FSRSettings.Enabled && FSRSettings.RenderScale >= 1.0f && loggedScale > 0.0f && loggedScale < 1.0f ?
 					" -- was upscaled before: each of [Shaders.TAA.FSR] and [Shaders.TAA.DLSS] has its own RenderScale" : "");
@@ -693,10 +689,10 @@ void TAAEffect::Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget
 std::string TAAEffect::UpscaleDiagText() const {
 	char t[400];
 	sprintf_s(t, "%s | history %s, %u frames accumulated | jitter step %d of %d (%.3f, %.3f px) | %ux%u -> %ux%u%s | frame gap %.1f ms | "
-		"[Shaders.TAA.FSR] Enabled %s RenderScale %.2f Version %d, [Shaders.TAA.DLSS] Enabled %s RenderScale %.2f, Upscaler %d, LowResEffects %s | last described frame f%u",
+		"[Shaders.TAA.FSR] Enabled %s RenderScale %.2f, [Shaders.TAA.DLSS] Enabled %s RenderScale %.2f, Upscaler %d, LowResEffects %s | last described frame f%u",
 		Diag.path, Diag.reset ? "RESET that frame" : "kept", Diag.sinceReset, Diag.jitter, JitterSequenceLength, Diag.jitterX, Diag.jitterY, Diag.inW, Diag.inH,
 		Diag.outW, Diag.outH, Diag.hdr ? " (HDR input)" : "", Diag.deltaMs, FSRSettings.Enabled ? "on" : "off", TheSettingManager->GetSettingF("Shaders.TAA.FSR", "RenderScale"),
-		TheSettingManager->GetSettingI("Shaders.TAA.FSR", "Version"), TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "Enabled") ? "on" : "off",
+		TheSettingManager->GetSettingI("Shaders.TAA.DLSS", "Enabled") ? "on" : "off",
 		TheSettingManager->GetSettingF("Shaders.TAA.DLSS", "RenderScale"), FSRSettings.Upscaler, FSRSettings.LowResEffects ? "on" : "off", Diag.frame);
 	std::string text = t;
 	if (!Diag.upscaler.empty()) text += " | " + Diag.upscaler;

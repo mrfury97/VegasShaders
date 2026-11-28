@@ -1,0 +1,252 @@
+// UNOFFICIAL 2026-11-26: Vulkan Compute FlashlightDeferred pass (Shaders/FlashlightDeferred.hlsl).
+// Adds the player's deferred spotlight directly into i_scene (HDR RT0) over [vp.xy, vp.xy + vp.zw).
+#version 450
+#extension GL_GOOGLE_include_directive : enable
+#extension GL_EXT_samplerless_texture_functions : require
+#include "Common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 1, binding = 0) uniform texture2D t_albedo;     // TESR_AlbedoBuffer
+layout(set = 1, binding = 1) uniform texture2D t_material;   // TESR_MaterialBuffer
+layout(set = 1, binding = 2) uniform texture2D t_normals;    // TESR_CapturedNormalsBuffer
+layout(set = 1, binding = 3) uniform texture2D t_depth;      // DeferredDepth::LinearTexture or INTZ
+layout(set = 1, binding = 4) uniform texture2D t_shadowMap;  // spot shadow map (POINT, CLAMP)
+layout(set = 1, binding = 5) uniform texture2D t_cookie;     // flashlight cookie (LINEAR, CLAMP)
+layout(set = 1, binding = 6, rgba16f) uniform image2D i_scene; // Scene HDR RT0
+
+layout(push_constant) uniform Push {
+    uint linearSampler;   // 0: LINEAR, CLAMP (cookie)
+    uint pointSampler;    // 4: POINT, CLAMP (shadow map)
+    uint flags;           // 8: feature flags bitmask
+    uint pad;             // 12
+} pc;
+
+layout(set = 2, binding = 0, std140) uniform Constants {
+    ivec4 viewport;            // 0: vp.X, vp.Y, vp.Width, vp.Height
+    vec4  flDepth;             // 1: proj._33, proj._43, 0.01, depthPull
+    vec4  flView;              // 2: 1/vp.W, 1/vp.H, vp.X, vp.Y
+    vec4  flRight;             // 3: right.xyz, tanX
+    vec4  flUp;                // 4: up.xyz, tanY
+    vec4  flFwd;               // 5: fwd.xyz (with jitter), linearScene
+    vec4  flPos;               // 6: light cam-relative xyz, reach
+    vec4  flDir;               // 7: beam axis xyz, cos(outer)
+    vec4  flColor;             // 8: light linear rgb, cos(inner)
+    vec4  flGamma;             // 9: HotspotLimit, SoftEdges, gamma, 1/gamma
+    vec4  flShadow;            // 10: shadowed, 1/mapSize, bias, softnessTexels
+    vec4  flLook;              // 11: cookieStrength, DebugView, Falloff, NearFade
+    vec4  flLightViewProj[4];  // 12..15: camera-relative world -> spot shadow clip rows
+    vec4  flModel;             // 16: SpecularBit, Clearcoat, Pearlescence, 0
+    vec4  pbrData;             // 17: TESR_PBRData
+    vec4  pbrExtraData;        // 18: TESR_PBRExtraData (.x saturation)
+    vec4  linearScales;        // 19: TESR_LinearScales (.x light scale)
+    vec4  linearLighting;      // 20: TESR_LinearLighting
+    vec4  lampFalloff;         // 21: TESR_LampFalloff
+    vec4  pbrMath;             // 22: TESR_PBRMath
+} cb;
+
+const uint kFlagGBufferV2       = 1u << 0u;
+const uint kFlagLinearLighting  = 1u << 1u;
+const uint kFlagDepthIsLinear   = 1u << 2u;
+const uint kFlagReversedZ       = 1u << 3u;
+const uint kFlagLampFallShaped  = 1u << 4u;
+const uint kFlagLampFallMatch   = 1u << 5u;
+const uint kFlagSmithCorrelated = 1u << 6u;
+const uint kFlagSmithCorrTest   = 1u << 7u;
+const uint kFlagDiffuseKeep     = 1u << 8u;
+const uint kFlagViewModel       = 1u << 9u;
+
+bool HasFlag(uint bit) { return (pc.flags & bit) != 0u; }
+
+#include "DeferredCommon.glsl"
+
+float vanillaAtt(vec3 toLight, float radius) {
+    float r = max(radius, 1.0e-3);
+    float d2 = dot(toLight, toLight);
+    return clamp(1.0 - d2 / (r * r), 0.0, 1.0);
+}
+
+float LampAtt(float att) {
+    bool lin = HasFlag(kFlagLinearLighting);
+    float linG = cb.linearLighting.x;
+    if (HasFlag(kFlagLampFallShaped) && cb.lampFalloff.x > 0.0) {
+        float q = 1.0 - att;
+        float win = 1.0 - q * q;
+        win *= win;
+        float base = cb.lampFalloff.z * win / (1.0 + q * cb.lampFalloff.y);
+        float shapeExp = lin ? (max(linG, 1.0) * (1.0 / 2.2)) : (1.0 / 2.2);
+        return pow(max(abs(base), 0.0), shapeExp);
+    }
+    float oldExp = (lin && linG > 1.0) ? (cb.linearLighting.z > 0.0 ? cb.linearLighting.z : linG) : 1.0;
+    return oldExp == 1.0 ? max(att, 0.0) : pow(max(abs(att), 0.0), oldExp);
+}
+
+float FLShadowTap(vec2 uv, float distShare, float bias) {
+    float size = 1.0 / cb.flShadow.y;
+    vec2 t = uv * size - 0.5;
+    vec2 f = fract(t);
+    vec2 base = (floor(t) + 0.5) * cb.flShadow.y;
+    float s00 = textureLod(sampler2D(t_shadowMap, NVR_SAMPLER(pc.pointSampler)), base, 0.0).r + bias > distShare ? 1.0 : 0.0;
+    float s10 = textureLod(sampler2D(t_shadowMap, NVR_SAMPLER(pc.pointSampler)), base + vec2(cb.flShadow.y, 0.0), 0.0).r + bias > distShare ? 1.0 : 0.0;
+    float s01 = textureLod(sampler2D(t_shadowMap, NVR_SAMPLER(pc.pointSampler)), base + vec2(0.0, cb.flShadow.y), 0.0).r + bias > distShare ? 1.0 : 0.0;
+    float s11 = textureLod(sampler2D(t_shadowMap, NVR_SAMPLER(pc.pointSampler)), base + vec2(cb.flShadow.y), 0.0).r + bias > distShare ? 1.0 : 0.0;
+    return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);
+}
+
+float FLShadow(vec3 position, vec3 smoothFacingN, float ndl, float dist) {
+    float texelWorld = max(dist * cb.flShadow.y * 1.5, 0.25);
+    vec3 shadowPos = position + smoothFacingN * (texelWorld * (0.5 + 1.5 * (1.0 - saturate(ndl))));
+    vec4 clip = vec4(dot(vec4(shadowPos, 1.0), cb.flLightViewProj[0]),
+                     dot(vec4(shadowPos, 1.0), cb.flLightViewProj[1]),
+                     dot(vec4(shadowPos, 1.0), cb.flLightViewProj[2]),
+                     dot(vec4(shadowPos, 1.0), cb.flLightViewProj[3]));
+    vec2 mapUV = clip.xy / max(clip.w, 1.0e-4) * vec2(0.5, -0.5) + 0.5;
+    if (cb.flShadow.x < 0.5 || clip.w <= 0.0 || any(lessThan(mapUV, vec2(0.0))) || any(greaterThan(mapUV, vec2(1.0)))) return 1.0;
+    float shadowDistShare = length(cb.flPos.xyz - shadowPos) / cb.flPos.w;
+    float radius = cb.flShadow.y * cb.flShadow.w;
+    float bias = cb.flShadow.z * (1.0 + 1.5 * shadowDistShare);
+    vec2 dir = vec2(1.0, 0.0);
+    float lit = 0.0;
+    for (int i = 0; i < 16; i++) {
+        lit += FLShadowTap(mapUV + dir * (radius * sqrt((float(i) + 0.5) / 16.0)), shadowDistShare, bias);
+        dir = vec2(-0.7373688 * dir.x - 0.6754904 * dir.y, 0.6754904 * dir.x - 0.7373688 * dir.y);
+    }
+    return lit / 16.0;
+}
+
+void main() {
+    ivec2 localPx = ivec2(gl_GlobalInvocationID.xy);
+    if (localPx.x >= cb.viewport.z || localPx.y >= cb.viewport.w) return;
+    ivec2 px = cb.viewport.xy + localPx;
+
+    vec4 stored = texelFetch(t_normals, px, 0);
+    if (stored.b < 1.0e-3) return;
+
+    vec4 albedo4 = texelFetch(t_albedo, px, 0);
+    vec4 m = texelFetch(t_material, px, 0);
+    bool v2 = HasFlag(kFlagGBufferV2);
+    float landClass = floor(m.r + 0.01) - (v2 ? 16.0 : 0.0);
+    float keep = abs(landClass - 4.0) < 0.5 ? 1.0 : FDAddedLightKeep(albedo4.a);
+    if (keep < 1.0e-4) return;
+
+    vec2 local = vec2(localPx) * cb.flView.xy;
+    vec3 ray = normalize(cb.flFwd.xyz + cb.flRight.xyz * ((local.x * 2.0 - 1.0) * cb.flRight.w) + cb.flUp.xyz * ((1.0 - local.y * 2.0) * cb.flUp.w));
+    vec3 position = ray * stored.b;
+
+    float rawDepth = texelFetch(t_depth, px, 0).x;
+    if (HasFlag(kFlagViewModel)) {
+        if (HasFlag(kFlagReversedZ) ? (rawDepth <= 1.0e-5) : (rawDepth >= 1.0 - 1.0e-5)) return;
+    } else {
+        float viewZ = max(dot(position, cb.flFwd.xyz) * (1.0 - cb.flDepth.z) - cb.flDepth.w, 1.0);
+        float gbufProjZ = clamp(cb.flDepth.x + cb.flDepth.y / viewZ, 0.0, 1.0);
+        if (HasFlag(kFlagDepthIsLinear)) {
+            float sceneProjZ = rawDepth > 1.0e-4 ? clamp(cb.flDepth.x + cb.flDepth.y / rawDepth, 0.0, 1.0) : (HasFlag(kFlagReversedZ) ? 0.0 : 1.0);
+            if (HasFlag(kFlagReversedZ) ? (gbufProjZ < sceneProjZ) : (gbufProjZ > sceneProjZ)) return;
+        } else {
+            if (HasFlag(kFlagReversedZ) ? (gbufProjZ < rawDepth) : (gbufProjZ > rawDepth)) return;
+        }
+    }
+
+    vec3 toLight = cb.flPos.xyz - position;
+    float dist = length(toLight);
+    if (dist > cb.flPos.w) return;
+    vec3 lightDir = toLight / max(dist, 1.0e-3);
+    float coneCos = dot(-lightDir, cb.flDir.xyz);
+    if (coneCos < cb.flDir.w) return;
+
+    float cone = smoothstep(cb.flDir.w, cb.flColor.w, coneCos);
+    float reachShare2 = dot(toLight, toLight) / (cb.flPos.w * cb.flPos.w);
+    float window = saturate(1.0 - reachShare2);
+    float falloff = cb.flLook.z > 0.0 ? window * window / (1.0 + cb.flLook.z * reachShare2) : vanillaAtt(toLight, cb.flPos.w);
+    float nearFade = cb.flLook.w > 0.0 ? smoothstep(0.0, cb.flLook.w, dist) : 1.0;
+    float att = falloff * cone * cone * nearFade;
+
+    vec3 smoothN = ShadowDecodeNormal(stored.rg);
+    vec3 smoothFacingN = smoothN * (dot(smoothN, position) > 0.0 ? -1.0 : 1.0);
+    vec3 N = (v2 && abs(m.g) <= 1.001) ? ShadowDecodeNormal(m.ga) : smoothN;
+    float ndl = dot(N, lightDir);
+
+    float shadow = FLShadow(position, smoothFacingN, ndl, dist);
+    float cookie = 1.0;
+    if (cb.flLook.x > 0.0) {
+        vec3 side = cross(vec3(0.0, 0.0, 1.0), -cb.flDir.xyz);
+        side /= max(length(side), 1.0e-4);
+        vec3 upAxis = cross(-cb.flDir.xyz, side);
+        float invTan = cb.flDir.w / sqrt(max(1.0 - cb.flDir.w * cb.flDir.w, 1.0e-6));
+        vec2 cookieUV = vec2(dot(-toLight, side), -dot(-toLight, upAxis)) * (invTan / max(dot(-toLight, cb.flDir.xyz), 1.0e-3)) * 0.5 + 0.5;
+        cookie = mix(1.0, textureLod(sampler2D(t_cookie, NVR_SAMPLER(pc.linearSampler)), cookieUV, 0.0).r * 2.0, saturate(cb.flLook.x));
+    }
+
+    float roughness = GBufferRoughness(m.b);
+    float metal = saturate((m.r - floor(m.r)) / 0.49);
+    float diffKeep = DiffuseEnergyKeep(max(shades(N, -ray), 0.00001), roughness);
+    vec3 albedo = albedo4.rgb;
+    vec3 graded = mix(vec3(luma(albedo)), albedo, cb.pbrExtraData.x);
+
+    float linScaleLight = HasFlag(kFlagLinearLighting) ? cb.linearScales.x : cb.pbrData.z;
+    vec3 scaledRad = cb.flColor.rgb * linScaleLight;
+    float shaped = LampAtt(att);
+
+    float model = FDModel(m.r);
+    bool isSkin = v2 && abs(model - 6.0) < 0.5;
+    float specF0Scalar = v2 ? (isSkin ? 0.028 : (abs(model - 4.0) < 0.5 ? 0.04 : FDSpecF0Decode(stored.a))) : 0.04;
+
+    vec3 lit;
+    if (v2 && cb.flModel.x > 0.5 && floor(m.r + 0.01) < 15.5) {
+        lit = shaped * ((1.0 - metal) * graded * (shades(N, lightDir) * scaledRad));
+    } else {
+        vec3 V = -ray;
+        float rawNdotL = shades(N, lightDir);
+        float NdotL = max(rawNdotL, 0.00001);
+        float NdotV = max(shades(N, V), 0.00001);
+        vec3 H = normalize(V + lightDir);
+        float NdotH = shades(N, H);
+        float LdotH = shades(lightDir, H);
+        float pearl = clamp(cb.flModel.z, 0.0, 1.0);
+        float clearcoat = clamp(cb.flModel.y, 0.0, 1.0);
+        vec3 metalCol = ApplyPearlescence(graded, NdotV, pearl, metal);
+        vec3 pearlF90Tint = PearlF90Tint(metalCol, pearl, metal);
+        vec3 f0Base = ReflectivityF0(mix(vec3(specF0Scalar), metalCol, metal));
+        vec3 fres = Fresnel(f0Base, max(RoughReflectivityF90(f0Base, roughness, metal) * pearlF90Tint, f0Base), LdotH);
+        vec3 diff = (1.0 - metal) * (1.0 - fres) * graded * diffKeep;
+        vec3 specOut = BRDFPi(roughness, fres, NdotV, NdotL, NdotH) * MultiScatterMetalBoost(f0Base, roughness, NdotV, metal);
+        if (clearcoat > 0.001 && metal > 0.05) specOut *= CandyCoatAbsorption(metalCol, NdotV, clearcoat, metal);
+        lit = (diff + specOut) * (rawNdotL * scaledRad);
+        if (clearcoat > 0.001 && metal > 0.05 && rawNdotL > 0.0) {
+            float coatW = clearcoat * metal;
+            float omc = 1.0 - LdotH;
+            float omc2 = omc * omc;
+            float Fc = 0.04 + 0.96 * (omc2 * omc2 * omc);
+            float coatSpec = BRDFPi(0.06, vec3(Fc), NdotV, NdotL, NdotH).x * rawNdotL;
+            lit = lit * (1.0 - 0.25 * coatW * Fc) + scaledRad * (coatSpec * coatW);
+        }
+        lit *= shaped;
+    }
+
+    if (isSkin) {
+        float skinWrap = saturate((ndl + 0.35) / 1.35);
+        float terminatorShift = max(skinWrap * skinWrap - saturate(ndl), 0.0);
+        lit += shaped * graded * scaledRad * terminatorShift * vec3(1.0, 0.55, 0.38);
+    }
+
+    if (cb.flGamma.y > 0.5) {
+        float wrap = saturate(ndl * 0.5 + 0.5);
+        float geomHorizon = smoothstep(-0.25, 0.1, dot(smoothFacingN, lightDir));
+        lit = max(lit + shaped * (1.0 - metal) * graded * scaledRad * ((0.75 * wrap * wrap - saturate(ndl)) * geomHorizon), vec3(0.0));
+    }
+
+    vec3 light = lit * (shadow * cookie * keep);
+    if (cb.flGamma.x > 0.0) {
+        float limit = 1.0 / cb.flGamma.x;
+        light *= limit / max(limit, falloff * cone * cone);
+    }
+
+    if (cb.flLook.y > 0.5) {
+        vec3 dbg = cb.flLook.y < 1.5 ? light : cb.flLook.y < 2.5 ? vec3(shadow) : N * 0.5 + 0.5;
+        imageStore(i_scene, px, vec4(dbg, 1.0));
+        return;
+    }
+
+    vec4 dst = imageLoad(i_scene, px);
+    imageStore(i_scene, px, vec4(dst.rgb + light, dst.a));
+}

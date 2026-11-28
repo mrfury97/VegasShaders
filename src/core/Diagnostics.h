@@ -77,31 +77,5 @@ namespace Diagnostics {
 	//      (0: all of it). At most 4 named probes; one per name and frame.
 	void HistoryProbe(const char* name, IDirect3DSurface9* input, unsigned inputWidth, unsigned inputHeight, IDirect3DSurface9* output, std::string (*state)());
 	std::string HistoryWatchText();	// its probes' last verdicts, for the REPORT block
-
-	// --- the report burst's volumetric light stages (Diagnostics.cpp "VL stages") ---
-	// True only while a report burst captures (from the end of its first frame to the end of its last). The effect's hooks
-	// (VolumetricLight.cpp RenderBuffers, ShaderManager.cpp around the composite) test this alone: outside a burst nothing else runs.
-	inline bool VLCapturing = false;
-	enum VLStage { VLMarch, VLHistory, VLTemporal, VLBlur, VLBefore, VLAfter, VLStageCount };
-	// The effect's own values in this frame (RenderBuffers, before its passes)
-	struct VLValues {
-		float	noise = 0.0f;			// Constants.Data2.w: the march's noise index
-		float	weight = 0.0f;			// Constants.Data3.x: the history weight used (0: no history this frame)
-		float	fade = 0.0f;			// Constants.Data2.z
-		float	strength = 0.0f, darken = 0.0f;	// Constants.Data.x / .y (the day / night blend)
-		bool	temporal = false, usable = false, haveHistory = false, drewLastFrame = false;
-		bool	sharedNoise = false, historyValid = true;	// [Main.Main.Quality] SharedNoise, TemporalBackbone::HistoryValid()
-		bool	rect = false, scaleChanged = false;			// RenderRect::Active(), ScaleChanged()
-		double	cameraMove = 0.0;		// game units since the frame the effect last drew
-		unsigned technique = 0;			// CompositeTechnique() (8: the froxel grid, no march stages)
-	};
-	void VLNote(const VLValues& values);
-	// A volumetric light buffer's content now (its stage: march, history, temporal, blur), into this burst frame's slot
-	void VLCapture(IDirect3DDevice9* device, VLStage stage, IDirect3DSurface9* surface);
-	// The frame right before (after = false: what the composite reads) or right after the composite (the picture it wrote)
-	void VLFrame(IDirect3DDevice9* device, bool after);
-	// The path a technique took this frame (0 / 8 composite, 1 march, 2 blur X, 3 temporal, 4 blur Y): true = the Vulkan pass
-	// (ExtRender drew it), false = the D3D9 technique
-	void VLPass(unsigned technique, bool vulkan);
 }
 #define EFFECT_PROBE(name, surface) do { Diagnostics::ProbeOwn(name, surface); } while (0)

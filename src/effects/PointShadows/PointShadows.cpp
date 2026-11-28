@@ -2,6 +2,7 @@
 #include <string>
 #include "PointShadows.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/RenderRect.h"	// UNOFFICIAL 2026-10-27 RenderScale v2
 
 IDirect3DTexture9* LampMaskHalfTexture();	// UNOFFICIAL 2026-10-16 MaskHalfRes (effects\ShadowsExterior.cpp)
 
@@ -25,6 +26,7 @@ struct PointShadowsUniforms {
 	D3DXVECTOR4 extraPre[ExtraLightsMax];				// x 1 / radius (floor(w / 8)), y weight (w - radius * 8)
 	D3DXVECTOR4 nearPre;								// x 1 / PointShadowNear.y (edge window), y 1 / (1 - PointShadowNear.z) (lamp reach), z 1 / spot radius, w spot weight
 	D3DXVECTOR4 spotPre;								// x cos(the cone's angle), y 1 / (cos(half of it) - x)
+	D3DXVECTOR4 renderScale;							// TESR_RenderScale (xy scale, zw 1/scale)
 };
 
 // The push block: the two sampler heap indices (bindings write them at 0 and 4) and the pass's mode.
@@ -74,7 +76,7 @@ void FillPreshader(PointShadowsUniforms& u) {
 }
 
 bool FillUniforms(PointShadowsUniforms& u) {
-	return CopyConstant(u.shadowLightPosition, "TESR_ShadowLightPosition", ShadowCubeMapsScreen) &&
+	if (!(CopyConstant(u.shadowLightPosition, "TESR_ShadowLightPosition", ShadowCubeMapsScreen) &&
 		CopyConstant(u.lightPosition, "TESR_LightPosition", TrackedLightsMax) &&
 		CopyConstant(u.lightColor, "TESR_LightColor", TrackedLightsMax + ShadowCubeMapsScreen) &&
 		CopyConstant(u.extraLights, "TESR_ExtraLights", ExtraLightsMax) &&
@@ -85,7 +87,12 @@ bool FillUniforms(PointShadowsUniforms& u) {
 		CopyConstant(&u.lampContactBias, "TESR_LampContactBias", 1) && CopyConstant(&u.lampContactNoise, "TESR_LampContactNoise", 1) &&
 		CopyConstant(&u.reciprocalResolution, "TESR_ReciprocalResolution", 1) && CopyConstant(&u.cameraPosition, "TESR_CameraPosition", 1) &&
 		CopyConstant(&u.cameraData, "TESR_CameraData", 1) &&
-		CopyConstant(&u.viewTransform, "TESR_ViewTransform", 4) && CopyConstant(&u.projectionTransform, "TESR_ProjectionTransform", 4);
+		CopyConstant(&u.viewTransform, "TESR_ViewTransform", 4) && CopyConstant(&u.projectionTransform, "TESR_ProjectionTransform", 4)))
+		return false;
+	u.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
+	return true;
 }
 
 }
@@ -132,6 +139,13 @@ bool PointShadowsEffect::ExtDraw(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 	PointShadowsPush push = {};
 	push.mode = mode;
 	if (clear) Device->Clear(0L, NULL, D3DCLEAR_TARGET, D3DCOLOR_ARGB(255, 0, 0, 0), 1.0f, 0L);	// (EffectRecord::Render's clear)
+	if (mode == 2 && RenderRect::Active()) {
+		D3DSURFACE_DESC desc = {};
+		if (FAILED(RenderTarget->GetDesc(&desc))) return false;
+		const RECT vp = { 0, 0, (LONG)RenderRect::Width(desc.Width), (LONG)RenderRect::Height(desc.Height) };
+		if (vp.right <= 0 || vp.bottom <= 0) return false;
+		return ExtDrawTo(pipeline, &RenderTarget, 1, resources, r, &push, sizeof(push), &vp, ExtUv::TexelCentre);
+	}
 	return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, pipeline, resources, r, &push, sizeof(push), true);
 }
 

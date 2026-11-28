@@ -38,10 +38,11 @@ void main() {
     float hits = 0.0, empty = 0.0;
     for (int j = 0; j < 4; j++) {
         for (int i = 0; i < 4; i++) {
-            vec2 uv = screen.xy + ((vec2(float(i), float(j)) + 0.5) / 4.0 * 2.0 - 1.0) * extent;
-            if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) continue;
+            vec2 s01 = screen.xy + ((vec2(float(i), float(j)) + 0.5) / 4.0 * 2.0 - 1.0) * extent;
+            if (any(lessThan(s01, vec2(0.0))) || any(greaterThan(s01, vec2(1.0)))) continue;
+            vec2 uv = clampToRect(screenToRect(s01), cb.reciprocalResolution.xy);
             float depth = readDepthLod(t_depth, uv);
-            vec3 p = toWorld(uv) * depth;
+            vec3 p = toWorld(s01) * depth;
             vec3 inCell = p - low;
             if (all(greaterThanEqual(inCell, vec3(0.0))) && all(lessThan(inCell, vec3(size)))) {
                 vec3 light = min(pows(linearLod(t_source, uv).rgb, 2.2), vec3(4.0));

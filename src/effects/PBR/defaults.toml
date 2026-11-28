@@ -29,8 +29,7 @@ FoldHighlights = true                # UNOFFICIAL, BUG FIX (2026-10-21), needs a
 LampDistanceFix = true               # UNOFFICIAL, BUG FIX (2026-10-22), needs a restart: lamps light big flat surfaces again (rugs, floors, wall tiles, posters, walls). Objects lit by 2 or 3 lamps worked each lamp's falloff out at the corners of each triangle and blended it across, which on a big triangle with the lamp over its middle left almost no lamp light (the Prospector saloon's rug 3-4x darker than the game's). Now worked out per pixel, as the game's own shaders do. Off: the shaders exactly as before.
 LampSums = true                      # UNOFFICIAL, BUG FIX (2026-10-21; on by default 2026-10-25: owner, the hard steps in indoor lamp light at tile and object edges), needs a restart (then live), with linear lighting: surfaces reached by 3 or more lamps (many floors and walls indoors) add the light of their extra lamps exactly, the way a surface lit in one pass does. The game draws those lamps in a pass of their own and adds it on top, which with linear lighting came out too bright: lamp-rich rooms like the Ultra-Luxe hazier and brighter than the same surface lit in one pass (with FoldHighlights on, what is left of that). On, those rooms get darker and cleaner; costs about 0.3-0.4 ms indoors where such surfaces are on screen (one copy of the frame). Off: the shaders and passes exactly as before.
 HighlightSums = true                 # UNOFFICIAL, BUG FIX (2026-10-25), needs a restart (then live), with linear lighting: the highlight layers the game adds on top of some objects (parallax rubble, rocks and roads above all, and anything FoldHighlights cannot handle) are added in linear light, like the rest of the object, instead of in the stored curve. Lamp-rich pieces (3 or more lamps reaching them, common in towns like Novac even by day) came out a lot lighter than identical pieces next to them, with sharp edges, and lowering Roughness or the linear Gamma only hid it. Off: those layers exactly as before.
-Roughness = 1.0                      # Roughness scale.
-Metallicness = 0.0                   # Metalicness scale - unused, no metalic maps yet.
+Roughness = 1.0                      # Non-_rmaos (vanilla) roughness scale outdoors in dry daylight. _rmaos.dds maps use RoughnessScale instead.
 AmbientScale = 0.5                   # Ambient lighting scale.
 SkylightingScale = 0.5               # Sky-colour ambient boost. 0 disables it.
 SkylightingMode = 0                  # 0 spherical harmonics, 1 directional sample. Recompiles shaders.
@@ -43,11 +42,10 @@ LightingScale = 1.15                # Directional and point light scale. UNOFFIC
 Saturation = 1.0                     # Color saturation.
 MetalnessScale = 1.0                 # UNOFFICIAL (2026-10-18), materials with an _rmaos map only: [0.0-1.0] their metal (green channel) times this, in this weather/time (idea from the Physically-Based-Reloaded fork). Metal is lit almost only by what it reflects, so with little around to reflect (night) it goes dark: lower keeps some of its colour. 1.0 = the map as it is. Applies immediately.
 AOScale = 1.0                        # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.0-1.0] how much of their ambient occlusion applies in this weather/time (times [Shaders.PBR.Rmaos] Occlusion). 1.0 = as authored.
-RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [1.0-2.0] their roughness times this in this weather/time (rougher only, at most 1). 1.0 = the map as it is.
+RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.25-2.0] their roughness (red channel) times this in this weather/time (<1 smoother, >1 rougher, clamped to [0, 1]). 1.0 = as authored.
 
 [_Shaders.PBR.Rain]
-Roughness = 1.0                      # Roughness scale.
-Metallicness = 0.0                   # Metalicness scale - unused, no metalic maps yet.
+Roughness = 1.0                      # Non-_rmaos (vanilla) roughness scale outdoors in rain. _rmaos.dds maps use RoughnessScale instead.
 AmbientScale = 0.5                   # Ambient lighting scale.
 SkylightingScale = 0.5               # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
@@ -56,11 +54,10 @@ LightingScale = 1.15                # Directional and point light scale. UNOFFIC
 Saturation = 1.0                     # Color saturation.
 MetalnessScale = 1.0                 # UNOFFICIAL (2026-10-18), materials with an _rmaos map only: [0.0-1.0] their metal (green channel) times this, in this weather/time (idea from the Physically-Based-Reloaded fork). Metal is lit almost only by what it reflects, so with little around to reflect (night) it goes dark: lower keeps some of its colour. 1.0 = the map as it is. Applies immediately.
 AOScale = 1.0                        # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.0-1.0] how much of their ambient occlusion applies in this weather/time (times [Shaders.PBR.Rmaos] Occlusion). 1.0 = as authored.
-RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [1.0-2.0] their roughness times this in this weather/time (rougher only, at most 1). 1.0 = the map as it is.
+RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.25-2.0] their roughness (red channel) times this in this weather/time (<1 smoother, >1 rougher, clamped to [0, 1]). 1.0 = as authored.
 
 [_Shaders.PBR.Night]
-Roughness = 1.0                      # Roughness scale.
-Metallicness = 0.0                   # Metalicness scale - unused, no metalic maps yet.
+Roughness = 1.0                      # Non-_rmaos (vanilla) roughness scale outdoors at night. _rmaos.dds maps use RoughnessScale instead.
 AmbientScale = 0.5                   # Ambient lighting scale.
 SkylightingScale = 0.5               # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
@@ -69,11 +66,10 @@ LightingScale = 1.0                  # Directional and point light scale.
 Saturation = 1.0                     # Color saturation.
 MetalnessScale = 1.0                 # UNOFFICIAL (2026-10-18), materials with an _rmaos map only: [0.0-1.0] their metal (green channel) times this, in this weather/time (idea from the Physically-Based-Reloaded fork). Metal is lit almost only by what it reflects, so with little around to reflect (night) it goes dark: lower keeps some of its colour. 1.0 = the map as it is. Applies immediately.
 AOScale = 1.0                        # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.0-1.0] how much of their ambient occlusion applies in this weather/time (times [Shaders.PBR.Rmaos] Occlusion). 1.0 = as authored.
-RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [1.0-2.0] their roughness times this in this weather/time (rougher only, at most 1). 1.0 = the map as it is.
+RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.25-2.0] their roughness (red channel) times this in this weather/time (<1 smoother, >1 rougher, clamped to [0, 1]). 1.0 = as authored.
 
 [_Shaders.PBR.NightRain]
-Roughness = 1.0                      # Roughness scale.
-Metallicness = 0.0                   # Metalicness scale - unused, no metalic maps yet.
+Roughness = 1.0                      # Non-_rmaos (vanilla) roughness scale outdoors in night rain. _rmaos.dds maps use RoughnessScale instead.
 AmbientScale = 0.5                   # Ambient lighting scale.
 SkylightingScale = 0.5               # Sky-colour ambient boost. 0 disables it.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
@@ -82,11 +78,10 @@ LightingScale = 1.0                  # Directional and point light scale.
 Saturation = 1.0                     # Color saturation.
 MetalnessScale = 1.0                 # UNOFFICIAL (2026-10-18), materials with an _rmaos map only: [0.0-1.0] their metal (green channel) times this, in this weather/time (idea from the Physically-Based-Reloaded fork). Metal is lit almost only by what it reflects, so with little around to reflect (night) it goes dark: lower keeps some of its colour. 1.0 = the map as it is. Applies immediately.
 AOScale = 1.0                        # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.0-1.0] how much of their ambient occlusion applies in this weather/time (times [Shaders.PBR.Rmaos] Occlusion). 1.0 = as authored.
-RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [1.0-2.0] their roughness times this in this weather/time (rougher only, at most 1). 1.0 = the map as it is.
+RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.25-2.0] their roughness (red channel) times this in this weather/time (<1 smoother, >1 rougher, clamped to [0, 1]). 1.0 = as authored.
 
 [_Shaders.PBR.Interiors]
-Roughness = 1.0                      # Roughness scale.
-Metallicness = 0.0                   # Metalicness scale - unused, no metalic maps yet.
+Roughness = 1.0                      # Non-_rmaos (vanilla) roughness scale indoors. _rmaos.dds maps use RoughnessScale instead.
 AmbientScale = 0.5                   # Ambient lighting scale.
 SkylightingScale = 0.0               # Sky-colour ambient boost. Off indoors: the coefficients describe the exterior sky.
 SkylightingDirectionality = 0.6      # Mode 1 only: 0 samples straight up, 1 along the normal.
@@ -95,19 +90,19 @@ LightingScale = 1.0                  # Directional and point light scale.
 Saturation = 1.0                     # Color saturation.
 MetalnessScale = 1.0                 # UNOFFICIAL (2026-10-18), materials with an _rmaos map only: [0.0-1.0] their metal (green channel) times this, in this weather/time (idea from the Physically-Based-Reloaded fork). Metal is lit almost only by what it reflects, so with little around to reflect (night) it goes dark: lower keeps some of its colour. 1.0 = the map as it is. Applies immediately.
 AOScale = 1.0                        # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.0-1.0] how much of their ambient occlusion applies in this weather/time (times [Shaders.PBR.Rmaos] Occlusion). 1.0 = as authored.
-RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [1.0-2.0] their roughness times this in this weather/time (rougher only, at most 1). 1.0 = the map as it is.
+RoughnessScale = 1.0                 # UNOFFICIAL (2026-10-18), _rmaos maps only: [0.25-2.0] their roughness (red channel) times this in this weather/time (<1 smoother, >1 rougher, clamped to [0, 1]). 1.0 = as authored.
 
 [_Shaders.PBR.Metal]
 MetalOn = true                       # UNOFFICIAL: switches the metal look below on and off (the Enabled button at the top of the panel switches ALL of the PBR shaders, not just this).
-FirstPerson = 1.0                    # [0-1] UNOFFICIAL: metal on your first-person weapon (0 = off, 1 = full). New Vegas has no metal maps, so every surface was lit like plastic: white highlights in the sun, flat and matte in the shade. Metal is guessed from the textures (grey colour, and the shininess mask the artists painted) and then has no flat diffuse light: it shows tinted highlights and reflects the sky and its surroundings. DebugView shows what counts as metal.
-World = 0.5                          # [0-1] The same for everything else in the world (0 = exactly as before). Grey concrete or cloth can be taken for metal, so it starts off.
+FirstPerson = 1.0                    # [0-1] UNOFFICIAL: non-_rmaos heuristic metal strength on your first-person weapon (0 = off, 1 = full). On _rmaos weapons with MetalFromMap on, acts as an on/off gate (>0 enables authored green channel; use MetalnessScale to scale _rmaos metal).
+World = 0.5                          # [0-1] Non-_rmaos heuristic metal strength for everything else in the world (0 = off). On _rmaos world objects with MetalFromMap on, acts as an on/off gate (>0 enables authored green channel; use MetalnessScale to scale _rmaos metal).
 FadeDistance = 0.0                   # [0-4000] How far away the metal look on the world is gone, in game units (about 70 to a metre); it fades out from 60% of that. 0, or anything further, uses the distance where the game starts dropping highlights from objects (fSpecularLODStartFade in Fallout.ini, usually 2000): past it the game draws objects without highlights, and the metal would vanish at once.
-GreyMetal = 0.45                     # [0.0-1.0] Your first-person weapon: how metal a grey part is where the shininess mask is bare (most of a gun's body). The painted mask always makes it fully metal.
-WorldGreyMetal = 0.0                 # [0.0-1.0] The same for everything else in the world (2026-11-16). 0 = only where the artist painted the shininess mask is a world surface metal, so bare grey rock and concrete stay stone; 0.5 = as before (it made rocks look wet or metallic on games without _rmaos maps). Applies immediately.
-ColourStart = 0.25                   # [0.0-1.0] Colour saturation from which a part starts to count as painted or plastic instead of metal...
-ColourEnd = 0.55                     # [0.0-1.0] ...and from which it never counts as metal (wood, coloured paint, brass is in between).
-Roughness = 0.36                     # [0.05-1.0] Finish of bare metal: 0.05 mirror, 0.5 satin, 1 rough cast.
-PolishedRoughness = 0.16             # [0.05-1.0] Finish where the shininess mask is painted fully (edges, worn spots).
+GreyMetal = 0.45                     # [0.0-1.0] Non-_rmaos heuristic only (bypassed when MetalFromMap reads an _rmaos map): how metal a grey first-person weapon part is where the normal-map alpha mask is bare.
+WorldGreyMetal = 0.0                 # [0.0-1.0] Non-_rmaos heuristic only (bypassed when MetalFromMap reads an _rmaos map): same for world objects. 0 = only where the normal-map alpha mask is bright, so bare grey rock and concrete stay stone. Applies immediately.
+ColourStart = 0.25                   # [0.0-1.0] Non-_rmaos heuristic only (bypassed when MetalFromMap reads an _rmaos map): colour saturation where a part starts to count as painted/plastic instead of metal.
+ColourEnd = 0.55                     # [0.0-1.0] Non-_rmaos heuristic only (bypassed when MetalFromMap reads an _rmaos map): colour saturation from which a part never counts as metal.
+Roughness = 0.36                     # [0.05-1.0] Non-_rmaos heuristic only (bypassed by _rmaos maps): finish of bare heuristic metal (0.05 mirror, 0.5 satin, 1 rough cast).
+PolishedRoughness = 0.16             # [0.05-1.0] Non-_rmaos heuristic only (bypassed by _rmaos maps): finish where the normal-map shine mask is painted fully.
 Reflections = 0.75                    # [0.0-4.0] Strength of what metal reflects from its surroundings (the sky and the ambient light).
 DebugView = 0                        # 1: metal shown in orange (brighter = more metal) over a dim grey image.
 SharpSky = 0.5                       # [0-1] UNOFFICIAL: 0-1. Reflections on metal and shiny objects take the sky's light from the direction they reflect (a gun facing a sunset turns warm on that side). 0 = as before.
@@ -117,8 +112,8 @@ Pearlescence = 0.0                   # [0.0-1.0] UNOFFICIAL (2026-11-26): viewin
 
 [_Shaders.PBR.EnvMaps]
 Lighting = 0.45                      # [0-1] UNOFFICIAL: the "chrome" reflections the game draws on guns, glass and metal props follow the light round them (1), or keep the game's fixed brightness (0), which gleams the same in a dark cave as at noon.
-Strength = 1.8                       # [0.0-8.0] Brightness of those reflections in the light: about the game's at 1.5 in daylight, dimmer in shade and at night, faint in the dark.
-WithMetal = 0.85                     # [0.0-1.0] Where the metal look ([Shaders.PBR.Metal]) is on, it already reflects the surroundings, so these reflections are scaled by this (1 = both in full).
+Strength = 1.8                       # [0.0-8.0] UNOFFICIAL (upstream 1.1.6 default 1.2; this fork keeps 1.8 (the owner's call)): brightness of those reflections in the light, tuned so diffuse colors remain visible under linear lighting.
+WithMetal = 0.85                     # [0.0-1.0] UNOFFICIAL (upstream 1.1.6 default 0.25; this fork keeps 0.85 (the owner's call)): where the metal look ([Shaders.PBR.Metal]) is on, it already reflects the surroundings, so legacy env-map passes are scaled down to avoid double-reflecting (skipped completely on _rmaos assets).
 CubeReflections = 1.0                # [0-1] UNOFFICIAL: 0-1. The game's chrome and glass reflections show what is really around them (the live surroundings cube from Shaders > Reflections, needs Reflections on with CubeMap on) instead of the game's painted picture. Switching it on or off from 0 needs a restart. 0: as before.
 FromGameData = false                 # UNOFFICIAL, EXPERIMENTAL (2026-11-09), needs a restart to turn on (then applies immediately), needs [Shaders.PBR.Rmaos] Enabled: which surfaces look like metal (mirror-like) follows the game's own data instead of the mod's guess from grey colour and shine. The game marks the surfaces it gives a chrome shine (the env-map flag) with a strength and, where the artist made one, a mask (the "_m" texture): flag + mask = metal where the mask is white; flag without a mask = see FromGameDataNoMask; no flag = no metal at all, whatever the colour. An _rmaos material map still decides where there is one. The metal strengths in [Shaders.PBR.Metal] (World, FirstPerson) still scale it. Eyes and windows are never made metal. false = the guess, as before.
 FromGameDataNoMask = 1.0             # [0.0-1.0] UNOFFICIAL (2026-11-09), applies immediately, with FromGameData: an env-mapped surface WITHOUT a mask: 1 = the whole surface at the flag's strength; 0 = only where its normal map's alpha (the shine mask) is bright, which is what the game's own chrome pass uses when there is no mask.
@@ -163,9 +158,7 @@ Strength = 1.0                       # [0.0-3.0] (2026-11-04) How much of it: 0 
 Bounce = 0.3                         # UNOFFICIAL (2026-11-12) [0.0-1.0], applies immediately: the least light a crevice keeps. Micro-shadowing took the sun and lamp light in a crevice toward nothing, so at Strength 2-3 crevices went pure black. With this the darkened part keeps this share of the light, as if its walls threw some back in: depth instead of black holes. 0 = as before.
 
 [_Shaders.PBR.Linear]
-LinearScene = true                  # UNOFFICIAL (2026-10-28; on by default since 2026-10-28: user, it "completely resolved the pop in issue"), needs a restart (then live), with linear lighting: THE fix for pieces looking lighter than the same surface next to them (floor tiles, rubble, road pieces, by day and at night): the game draws some surfaces in several passes (light, extra lamps, texture, highlights) and adds them in the picture, and each pass used to add its own already-encoded colour, which comes out too bright. On, the world is kept in linear light while it is drawn, so the passes add up exactly, and encoded once afterwards; LampSums, HighlightSums and ExactPassSums are then not needed (switched off by themselves). Surfaces drawn in one pass look as before; the game's own shaders (texture passes, signs, sky, water, glass) draw as before. Costs a few full-screen steps a frame (the log's "LinearScene" line counts them). Eyes keep the mod's shader while it is on. false = as before.
 ExactPassSums = 0                    # UNOFFICIAL TEST (2026-10-16): objects lit in several passes add them up in linear light (the extra lamp passes and the highlight passes were each added in the stored curve: up to 3.7x too bright indoors). 0 off, 1 lamps, 2 highlights, 3 both (the numbers were listed the other way round until 2026-10-25). Test only (a full-screen fold-in per run); LampSums and HighlightSums are the play versions. Applies immediately
-Enabled = true                       # UNOFFICIAL: linear lighting on objects and the ground. The game adds light up in gamma space, so lit sides drop off too fast into shade, two lamps add up too dark and coloured light tints too little. On, colours are decoded to linear, lit, and encoded back: softer, fuller light falloff and truer colour mixing. Changes the look (brighter mid-tones and ambient), so the exposure and ambient may want retuning. Switching it on or off needs a restart (off, the shaders are exactly as before and cost nothing).
 PreDecode = true                     # UNOFFICIAL (2026-10-17), needs a restart: with linear lighting on, the light and ambient colours of each object are converted to linear once (on the CPU, as the game sends them) instead of again in every pixel. Same picture; measured indoors: lit objects up to -0.47 ms. Off: as before.
 Gamma = 2.2                          # [1.0-3.0] The gamma the colours are decoded with, live. 2.2 is standard; 1.0 looks the same as off.
 NightGamma = 0.0                     # [0, 1.0-3.0] UNOFFICIAL (2026-10-20), live: linear lighting's gamma outside at night; Gamma blends into it over dusk and dawn like the other day/night settings (Transitions curve). Interiors keep Gamma. 0 = the same as Gamma (off).

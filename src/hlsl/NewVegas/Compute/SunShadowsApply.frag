@@ -227,7 +227,8 @@ float GetLightAmount(vec4 positionWS, vec3 normal) {
 
 // Shadow: a shadow value from the darkness setting (full shadow) to 1 (full light)
 void main() {
-    vec4 Shadow = sampleShadow(uv);
+    vec2 ruv = toRectUV(uv);
+    vec4 Shadow = sampleShadow(ruv);
     Shadow = pow(Shadow, vec4(cb.screenSpaceData.w));
     if (cb.shadowFade.y == 0.0) { o_color = Shadow; return; }
 
@@ -236,7 +237,7 @@ void main() {
 
     float viewDepth;
     vec4 worldPos = reconstructWorldPositionLod(uv, viewDepth);
-    vec3 normal = GetWorldNormalLod(uv);
+    vec3 normal = GetWorldNormalLod(ruv);
     float cascades = GetLightAmount(worldPos, normal);
     // UNOFFICIAL 2026-10-28 RT sun shadows, Mode 1 (replace; flags.w = the RT range, 0 = off): the cascades only from where the
     // traced shadows fade out (the last 15% of the range) on; the traced visibility is multiplied in afterwards (RtSunCombine).

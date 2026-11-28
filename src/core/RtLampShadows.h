@@ -100,7 +100,7 @@ namespace RtLampShadows {
 			gSettings.physicalLampSize = TheSettingManager->GetSettingI(kSection, "PhysicalLampSize") != 0;
 			gSettings.physicalLampSizeAll = TheSettingManager->GetSettingI(kSection, "PhysicalLampSizeAll") != 0;
 			gSettings.manyLightsSampleFix = TheSettingManager->GetSettingI(kSection, "ManyLightsSampleFix") != 0;
-			gSettings.forwardEnabled = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Forward", "Enabled") != 0;
+			gSettings.forwardEnabled = true;	// Shaders.ShadowsInteriors.Forward.Enabled locked on for DeferredRenderer = 2
 			gSettings.manyLightsMax = TheSettingManager->GetSettingI(kSection, "ManyLightsMax");
 			gSettings.maxLamps = TheSettingManager->GetSettingI(kSection, "MaxLamps");
 			gSettings.debugView = TheSettingManager->GetSettingI(kSection, "DebugView");

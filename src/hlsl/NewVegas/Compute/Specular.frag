@@ -21,9 +21,10 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    vec4 color = sampleLod(t_rendered, pc.pointSampler, uv);
+    vec2 ruv = uv * cb.renderScale.xy;
+    vec4 color = sampleLod(t_rendered, pc.pointSampler, ruv);
     vec3 lin = linearize(color.rgb);
-    if (!addSpecular(uv, readDepthLod(t_depth, pc.pointSampler, uv), pc.pointSampler, pc.linearSampler,
+    if (!addSpecular(ruv, readDepthLod(t_depth, pc.pointSampler, ruv), pc.pointSampler, pc.linearSampler,
                      t_depthViewModel, t_normals, t_pointShadow, t_specularBuffer, lin)) {
         o_color = color;
         return;

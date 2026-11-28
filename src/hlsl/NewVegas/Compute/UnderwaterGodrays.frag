@@ -35,8 +35,10 @@ void main() {
         return;
     }
 
+    vec2 ruv2 = uv2 * cb.renderScale.xy;
     vec3 eyeVector = toWorld(uv2);
-    float depth = length(readDepth(uv2, t_depth, pc.linearIndex) * eyeVector);
+    vec2 px = cb.reciprocalResolution.xy;
+    float depth = length(readDepth(clamp(ruv2, 0.5 * px, max(cb.renderScale.xy - 0.5 * px, 0.5 * px)), t_depth, pc.linearIndex) * eyeVector);
 
     float godraysMaxDistance = 1000.0;
     float stepSize = godraysMaxDistance / 50.0;
@@ -48,7 +50,7 @@ void main() {
     float sunL = sunLuma();
     for (int i = 1; i < 50; i++) {
         float fi = float(i);
-        samplingUV += stepVector * mix(vec3(0.5), vec3(1.0), random(uv2 + cb.reciprocalResolution.xx * fi));
+        samplingUV += stepVector * mix(vec3(0.5), vec3(1.0), random(ruv2 + cb.reciprocalResolution.xx * fi));
         float rayDistance = stepSize * fi;
         float samplingDepthFade = hsmooth(800.0, 0.0, cb.waterSettings.x - samplingUV.z);
         float samplingDistanceFade = 1.0 - rayDistance / godraysMaxDistance;

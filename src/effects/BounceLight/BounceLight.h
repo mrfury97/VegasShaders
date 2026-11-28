@@ -138,6 +138,7 @@ public:
 	ExtPass				extPrepare, extGather, extBlur, extCombine;
 	ExtUniformBuffer	extUniforms;
 	bool	ShouldRender() override;
+	bool	ExtSupportsRenderRect() const override { return true; }
 	void	Render(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget,
 		IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget,
 		IDirect3DSurface9* SourceBuffer) override;

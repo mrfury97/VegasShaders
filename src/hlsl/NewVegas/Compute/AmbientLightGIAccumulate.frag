@@ -17,7 +17,7 @@ layout(location = 0) out vec4 o_bounce;
 layout(location = 1) out vec4 o_occlusion;
 
 void main() {
-    vec2 uv = frameUV();
+    vec2 uv = frameRectUV();
     vec4 current = pointLod(t_buffer, uv);
     float viewZ = pointLod(t_prep, uv).x;
     o_bounce = vec4(current.rgb, viewZ);
@@ -27,11 +27,12 @@ void main() {
     vec4 clip = cb.reproject * vec4(origin, 1.0);   // mul(float4(origin, 1), NVR_ALReproject)
     float w = max(clip.w, 0.001);
     vec3 last = vec3(clip.x / w * 0.5 + 0.5, 0.5 - clip.y / w * 0.5, clip.w);
-    vec2 position = last.xy / cb.alLayout.zw - 0.5;
+    vec2 lastUV = screenToRect(last.xy + vec2(cb.alTemporal.w, cb.alEdges.w));
+    vec2 position = lastUV / cb.alLayout.zw - 0.5;
     vec2 base = floor(position);
     vec2 f = position - base;
-    vec2 uv00 = (base + 0.5) * cb.alLayout.zw, uv10 = (base + vec2(1.5, 0.5)) * cb.alLayout.zw;
-    vec2 uv01 = (base + vec2(0.5, 1.5)) * cb.alLayout.zw, uv11 = (base + 1.5) * cb.alLayout.zw;
+    vec2 uv00 = clampToRect((base + 0.5) * cb.alLayout.zw, cb.alLayout.zw), uv10 = clampToRect((base + vec2(1.5, 0.5)) * cb.alLayout.zw, cb.alLayout.zw);
+    vec2 uv01 = clampToRect((base + vec2(0.5, 1.5)) * cb.alLayout.zw, cb.alLayout.zw), uv11 = clampToRect((base + 1.5) * cb.alLayout.zw, cb.alLayout.zw);
     vec2 t00 = pointLod(t_occlusionHistory, uv00).rg;
     vec2 t10 = pointLod(t_occlusionHistory, uv10).rg;
     vec2 t01 = pointLod(t_occlusionHistory, uv01).rg;
@@ -46,7 +47,7 @@ void main() {
     vec3 lowC = current.rgb, highC = current.rgb;
     for (int i = 0; i < 4; i++) {
         vec2 offset = (i < 2 ? vec2(float(i * 2 - 1), 0.0) : vec2(0.0, float(i * 2 - 5))) * cb.alLayout.zw;
-        vec4 n = pointLod(t_buffer, uv + offset);
+        vec4 n = pointLod(t_buffer, clampToRect(uv + offset, cb.alLayout.zw));
         low = min(low, n.a);
         high = max(high, n.a);
         lowC = min(lowC, n.rgb);
@@ -57,7 +58,7 @@ void main() {
     vec3 marginC = (highC - lowC) * 0.25;
     bounceHistory = clamp(bounceHistory, lowC - marginC, highC + marginC);
     float inside = (all(greaterThan(last.xy, vec2(0.0))) && all(lessThan(last.xy, vec2(1.0))) && last.z > NearFade) ? 1.0 : 0.0;
-    float moved = length((last.xy - uv) / cb.alLayout.zw);
+    float moved = length((lastUV - uv) / cb.alLayout.zw);
     float keep = cb.alTemporal.x / (1.0 + moved / cb.alTemporal.y) * saturate(found * 2.0) * inside;
     o_occlusion = vec4(mix(current.a, occlusionHistory, keep), viewZ, 0.0, 1.0);
     // UNOFFICIAL 2026-11-11 (sungi) GISingleHistory (STUDY F7): variant bit 0 = the GI came through the RT denoiser (own history): keep 0

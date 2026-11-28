@@ -47,7 +47,7 @@ public:
 	std::vector<EffectSpan>		EffectSpans;
 	EffectRecord*			StartingEffect = nullptr;	// the effect being registered at start-up (its Enabled is not set yet) ...
 	bool					StartingWanted = false;		// ... and its switch in the settings
-	float					TargetReleaseSeconds = 20.0f;
+	float					TargetReleaseSeconds = 0.0f;
 	bool					TargetInventory = false;	// [Main.Develop.Main] TargetInventory: a log line per target made
 	unsigned long long		TargetBytesParked = 0;		// the real sizes of the targets parked now
 	void					NoteEffect(EffectRecord* Effect, size_t Bytes, bool WantedAtStart);

@@ -61,6 +61,7 @@ public:
 	// For the composites that bind it themselves (VolumetricFog, AmbientLight): the factor's texture when it holds this frame's.
 	IDirect3DTexture9*	FactorTexture() const { return Constants.Apply.x > 0.5f ? Texture : nullptr; }
 	// UNOFFICIAL 2026-10-25 (NVR DXVK): the pass as src\hlsl\NewVegas\Compute\SunFar.frag (EffectRecord::ExtRender); see SunFar.cpp.
+	bool	ExtSupportsRenderRect() const override { return true; }
 	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 
 private:

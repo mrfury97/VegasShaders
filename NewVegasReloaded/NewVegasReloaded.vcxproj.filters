@@ -729,9 +729,6 @@
     <ClCompile Include="..\src\effects\TAA\TAAUpscale.cpp">
       <Filter>Effects</Filter>
     </ClCompile>
-    <ClCompile Include="..\src\core\Upscaler.cpp">
-      <Filter>Core</Filter>
-    </ClCompile>
     <ClCompile Include="..\src\core\UpscalerDlss.cpp">
       <Filter>Core</Filter>
     </ClCompile>

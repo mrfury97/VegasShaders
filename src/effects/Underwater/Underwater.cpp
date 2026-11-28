@@ -1,5 +1,6 @@
 #include "Underwater.h"
 #include "../../core/DxvkCompute.h"	// UNOFFICIAL 2026-10-25 (NVR DXVK)
+#include "../../core/RenderRect.h"	// UNOFFICIAL 2026-11-27 RenderScale v2
 
 bool UnderwaterEffect::ShouldRender() {
 	return TheShaderManager->GameState.isUnderwater || Player->inWater;
@@ -13,12 +14,14 @@ namespace {
 		return found == TheShaderManager->ConstantsTable.end() ? nullptr : found->second;
 	}
 
-	// Underwater.glsl's Constants block (std140): fifteen float4s, then the two matrices as D3DX stores them.
+	// Underwater.glsl's Constants block (std140): fifteen float4s, then the two matrices as D3DX stores them, then renderScale.
 	struct UnderwaterUniforms {
 		D3DXVECTOR4 reciprocalResolution, sunDirection, gameTime, waterCoefficients, sunColor, waterFog, waterVolume, waveParams,
 			waterSettings, waterShallowColor, waterDeepColor, horizonColor, skyColor, cameraPosition, cameraData;
 		D3DXMATRIX projectionTransform, viewTransform;
+		D3DXVECTOR4 renderScale;
 	};
+	static_assert(sizeof(UnderwaterUniforms) == 16 * 16 + 2 * 64, "UnderwaterUniforms size mismatch");
 
 	// The push blocks; the sampler heap indices are filled in by the extension at PushOffset.
 	struct GodraysPush { UInt32 linearIndex, noiseIndex, causticsIndex, pad; };
@@ -136,6 +139,9 @@ bool UnderwaterEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* Re
 	if (!found || !projection || !view) return false;
 	memcpy(&uniforms.projectionTransform, projection, sizeof(D3DXMATRIX));
 	memcpy(&uniforms.viewTransform, view, sizeof(D3DXMATRIX));
+	uniforms.renderScale = RenderRect::Active()
+		? D3DXVECTOR4(RenderRect::ScaleX, RenderRect::ScaleY, 1.0f / RenderRect::ScaleX, 1.0f / RenderRect::ScaleY)
+		: D3DXVECTOR4(1.0f, 1.0f, 1.0f, 1.0f);
 	ID3D9NvrExtBuffer* buffer = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
 	if (!buffer) return false;
 

@@ -3,7 +3,7 @@
 // (docs/next/FULL-DEFERRED-RENDERER-PLAN.md 4.6 and phase 6; results, numbers and bench requests: docs/next/FD-GI-RESULTS.md).
 //
 // Every switch below is live, test only, off by default, and does something only while [Main.Main.Quality] DeferredRenderer is on at
-// startup (1 or 2; it forces GBufferV2, CapturedNormals, MaterialBuffer and AlbedoBuffer: core/SettingForce.h) and the G-buffer holds this
+// startup (2026-11-28: always, the renderer is locked to mode 2 since the upstream 1.1.6 merge) and the G-buffer holds this
 // frame's targets. Off, or the renderer off: nothing here runs, nothing is made, every effect reads what it read before. No shader file is
 // touched by these three: the passes are the C++ strings in core/FdIndirectShaders.h, and the effects get a different texture on a stage
 // they already read (the shader code and its constants as before).
@@ -17,15 +17,14 @@
 // The fourth phase-6 item (RT sun shadows as DeferredSun's visibility term) is a shader define of the sun pass: DeferredRtSunFirst
 // (core/DeferredSun.h, DeferredSun.hlsl DS_RT_SUN_FIRST).
 #include "CapturedNormals.h"
-#include "SettingForce.h"
 #include "FdIndirectShaders.h"
 #include "RtAmbient.h"
 
 namespace FdIndirect {
 	inline const char* kSection = "Main.Main.Quality";
 
-	// The renderer on at startup, G-buffer v2 compiled in, the captured targets alive.
-	inline bool Base() { return SettingForce::Mode() > 0 && CapturedNormals::V2CompiledIn() && !CapturedNormals::Failed; }
+	// G-buffer v2 compiled in, the captured targets alive.
+	inline bool Base() { return CapturedNormals::V2CompiledIn() && !CapturedNormals::Failed; }
 	inline bool Key(const char* key) { return TheSettingManager->GetSettingI(kSection, key) != 0; }
 	inline bool MaterialNow() { return CapturedNormals::MaterialTexture && CapturedNormals::MaterialData.x > 0.5f; }
 	inline bool ReflectionsOn() { return Base() && MaterialNow() && Key("DeferredReflections"); }
@@ -35,16 +34,16 @@ namespace FdIndirect {
 	// UNOFFICIAL 2026-11-20 UnifiedReflections (live, test only, off; docs/DESIGN.md "Unified reflections design" step 1): with the renderer in mode 2
 	// the Reflections effect reads its material (COLOR2: roughness, metal, model, specular bit; COLOR1: the metal's colour; COLOR3: is the
 	// record the visible surface) straight from the G-buffer instead of MaterialAware's copy, and always the shading normals below. True only
-	// in a frame whose three targets hold this frame's records. Mode 0 / 1: false (MaterialAware stays the material source).
+	// in a frame whose three targets hold this frame's records (the renderer is always mode 2 since the 1.1.6 merge).
 	inline bool UnifiedReflectionsOn() {
-		return Base() && SettingForce::Mode() == 2 && MaterialNow() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f &&
+		return Base() && MaterialNow() && CapturedNormals::AlbedoTexture && CapturedNormals::AlbedoData.x > 0.5f &&
 			CapturedNormals::Texture && CapturedNormals::Data.x > 0.0f && Key("UnifiedReflections");
 	}
 	// The D3D9 technique's half (Effects/Reflections.fx.hlsl REFL_GBUFFER_ON): compiled in only when the switch is on at startup with the
 	// renderer in mode 2, so that off the effect's preprocessed source is exactly what it was. The Vulkan passes follow the switch live.
 	inline int UnifiedStartup = -1;
 	inline bool UnifiedCompiledIn() {
-		if (UnifiedStartup < 0) UnifiedStartup = SettingForce::Mode() == 2 && CapturedNormals::V2CompiledIn() && Key("UnifiedReflections") ? 1 : 0;
+		if (UnifiedStartup < 0) UnifiedStartup = CapturedNormals::V2CompiledIn() && Key("UnifiedReflections") ? 1 : 0;
 		return UnifiedStartup == 1;
 	}
 	// UNOFFICIAL 2026-11-18/19 DeferredBumpedNormals (live; default off in this fork, on upstream since 1.1.1: the owner decides;

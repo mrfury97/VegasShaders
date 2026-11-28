@@ -50,6 +50,8 @@ namespace ViewModelMotion {
 	inline IDirect3DSurface9* ProjTarget = nullptr;
 	inline bool InvProjSwapped = false;
 	inline D3DXMATRIX SavedWorldInvProj;
+	inline bool InvViewSwapped = false;
+	inline D3DXMATRIX SavedWorldInvView;
 
 	inline bool Ready() {
 		return !Failed && Data.x > 0.0f && Texture && TheFrameRateManager && ReadyFrame == TheFrameRateManager->FrameNumber;
@@ -149,12 +151,22 @@ namespace ViewModelMotion {
 			This->device->SetVertexShaderConstantF(240, (const float*)&fpInvProj, 4);
 			InvProjSwapped = true;
 		}
-
-		if (!doCapture || !kWorldLoc) return;
-
 		D3DXMATRIX camRelView = This->viewMatrix;
 		camRelView._41 = camRelView._42 = camRelView._43 = 0.0f;
 		camRelView._44 = 1.0f;
+		D3DXMATRIX fpInvView;
+		if (TheRenderManager && D3DXMatrixInverse(&fpInvView, nullptr, &camRelView)) {
+			fpInvView._14 = fpInvView._24 = fpInvView._34 = 0.0f;
+			fpInvView._41 = fpInvView._42 = fpInvView._43 = 0.0f;
+			fpInvView._44 = 1.0f;
+			TheRenderManager->InvViewMatrix = fpInvView;
+			This->device->SetVertexShaderConstantF(104, (const float*)&fpInvView, 4);
+			This->device->SetVertexShaderConstantF(244, (const float*)&fpInvView, 4);
+			InvViewSwapped = true;
+		}
+
+		if (!doCapture || !kWorldLoc) return;
+
 		const D3DXMATRIX& jitProj = This->projMatrix;
 		D3DXMATRIX unjitProj = This->projMatrix;
 		unjitProj._31 = -(kFrustum->Right + kFrustum->Left) / fw;
@@ -225,6 +237,7 @@ namespace ViewModelMotion {
 		CaptureWanted = false;
 		TrackProj = false;
 		InvProjSwapped = false;
+		InvViewSwapped = false;
 		if (SceneTarget) { SceneTarget->Release(); SceneTarget = nullptr; }
 		if (ProjTarget) { ProjTarget->Release(); ProjTarget = nullptr; }
 		if (Failed || !TheFrameRateManager) return;
@@ -259,12 +272,14 @@ namespace ViewModelMotion {
 		CurrentCamIndex = -1;
 		TrackProj = false;
 		InvProjSwapped = false;
+		InvViewSwapped = false;
 		if (SceneTarget) { SceneTarget->Release(); SceneTarget = nullptr; }
 		if (ProjTarget) { ProjTarget->Release(); ProjTarget = nullptr; }
 
 		if (HooksInstalled && d && TheRenderManager && Player && Player->IsDrawnFirstPerson() &&
 			!InterfaceManager->IsPipBoyOpen() && !TheShaderManager->GameState.PipBoyIsOn && !TheShaderManager->GameState.OverlayIsOn) {
 			SavedWorldInvProj = TheRenderManager->InvProjMatrix;
+			SavedWorldInvView = TheRenderManager->InvViewMatrix;
 			if (SUCCEEDED(d->GetRenderTarget(0, &ProjTarget)) && ProjTarget) TrackProj = true;
 		}
 
@@ -363,6 +378,12 @@ namespace ViewModelMotion {
 			TheRenderManager->device->SetVertexShaderConstantF(100, (const float*)&SavedWorldInvProj, 4);
 			TheRenderManager->device->SetVertexShaderConstantF(240, (const float*)&SavedWorldInvProj, 4);
 			InvProjSwapped = false;
+		}
+		if (InvViewSwapped && TheRenderManager && TheRenderManager->device) {
+			TheRenderManager->InvViewMatrix = SavedWorldInvView;
+			TheRenderManager->device->SetVertexShaderConstantF(104, (const float*)&SavedWorldInvView, 4);
+			TheRenderManager->device->SetVertexShaderConstantF(244, (const float*)&SavedWorldInvView, 4);
+			InvViewSwapped = false;
 		}
 		if (SceneTarget) { SceneTarget->Release(); SceneTarget = nullptr; }
 		if (ProjTarget) { ProjTarget->Release(); ProjTarget = nullptr; }

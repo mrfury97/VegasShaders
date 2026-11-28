@@ -19,10 +19,13 @@ layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 o_color;
 
 void main() {
-    float depth = readDepth(uv, t_depth, pc.linearIndex);
+    vec2 minUV = 0.5 * cb.reciprocalResolution.xy;
+    vec2 maxUV = max(cb.renderScale.xy - minUV, minUV);
+    vec2 ruv = clamp(uv * cb.renderScale.xy, minUV, maxUV);
+    float depth = readDepth(ruv, t_depth, pc.linearIndex);
     vec3 eyeVector = toWorld(uv);
     vec3 worldPos = cb.cameraPosition.xyz + eyeVector * depth;
-    vec4 color = texture(sampler2D(t_source, NVR_SAMPLER(pc.linearIndex)), uv);
+    vec4 color = texture(sampler2D(t_source, NVR_SAMPLER(pc.linearIndex)), ruv);
     if (aboveWater(cb.cameraPosition.z, worldPos.z, cb.waterSettings.x)) {
         o_color = color;
         return;
@@ -32,7 +35,7 @@ void main() {
     vec2 uvD = uv;
     uvD.x += sin(frame * 3.0 + uv.x * 60.0) * 0.001;
     uvD.y += cos(frame * 3.0 + uv.y * 60.0) * 0.001;
-    color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.linearIndex)), uvD);
+    color = texture(sampler2D(t_rendered, NVR_SAMPLER(pc.linearIndex)), clamp(uvD * cb.renderScale.xy, minUV, maxUV));
     color.a = 1.0;
     o_color = color;
 }

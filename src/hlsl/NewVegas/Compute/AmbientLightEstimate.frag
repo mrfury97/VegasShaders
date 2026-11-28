@@ -87,6 +87,8 @@ vec4 Estimate(vec2 uv) {
     // preshader): GLSL's division is a full-precision one per sample and per component.
     float invFalloff = 1.0 / (Radius - falloffStart);
     vec2 invTexel = 1.0 / cb.alLayout.zw;
+    vec2 scale = renderScaleXY();
+    vec2 maxUV = max(scale - 0.5 * cb.alLayout.zw, vec2(0.0));
 #ifdef NVR_GI
     float chance = fract(noise.z + (cb.alTemporal.x > 0.0 ? cb.alTemporal.z : 0.0) * 0.569840);
     float thickness = max(pc.gi.x, 1.0);
@@ -121,19 +123,19 @@ vec4 Estimate(vec2 uv) {
         [[unroll]] for (int k = 0; k < AL_STEPS; k++) {
             float s = (float(k) + fract(noise.y + float(k) * 0.618034)) / float(AL_STEPS);
             s *= s;
-            vec2 offset = omega * screenRadius * max(s, 2.0 * cb.alLayout.z);
+            vec2 offset = omega * screenRadius * max(s, 2.0 * cb.alLayout.z) * scale;
             // UNOFFICIAL 2026-11-08 (alsky) MinReach, as the D3D9 Estimate's since 2026-11-01 (NVR_ALReach x / y, here cb.sunFarFlags.y / z;
             // tester at native 4K on these passes: AmbientLight darkened the far ground with a hard line): the max above compares a share of
             // the radius with a texel size, so far away the nearest reads fell on the pixel's own texel, a read at distance 0 that counts as
             // a 90-degree horizon, and the ground darkened itself from that distance on. On: every read at least MinReachTexels texels out.
             if (cb.sunFarFlags.y > 0.5) {
-                vec2 reach = screenRadius * s;
+                vec2 reach = screenRadius * s * scale;
                 offset = omega * reach * max(1.0, cb.sunFarFlags.z * cb.alLayout.z / max(reach.x, 1.0e-6));
             }
             [[unroll]] for (int side = 0; side < 2; side++) {
                 vec2 sampleUV = uv + (side == 0 ? offset : -offset);
-                float onScreen = step(0.0, sampleUV.x) * step(sampleUV.x, 1.0) * step(0.0, sampleUV.y) * step(sampleUV.y, 1.0);
-                sampleUV = (floor(clamp(sampleUV, 0.0, 1.0) * invTexel) + 0.5) * cb.alLayout.zw;
+                float onScreen = step(0.0, sampleUV.x) * step(sampleUV.x, scale.x) * step(0.0, sampleUV.y) * step(sampleUV.y, scale.y);
+                sampleUV = (floor(clamp(sampleUV, vec2(0.0), maxUV) * invTexel) + 0.5) * cb.alLayout.zw;
                 vec4 texel = pointLod(t_prep, sampleUV);
                 vec3 delta = PositionFromViewZ(sampleUV, texel.x) - origin;
                 float dist = length(delta) + 1e-4;
@@ -193,4 +195,4 @@ vec4 Estimate(vec2 uv) {
 #endif
 }
 
-void main() { o_color = Estimate(frameUV()); }
+void main() { o_color = Estimate(frameRectUV()); }

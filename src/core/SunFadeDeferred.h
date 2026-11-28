@@ -33,8 +33,7 @@ namespace SunFadeDeferred {
 	// Decided once, at the first call (ShaderRecord's define list, the effect's textures, DeferredSun::LoadShaders: all at startup).
 	inline bool CompiledIn() {
 		if (Compiled < 0 && TheSettingManager)
-			Compiled = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Deferred", "LightFreeRecords") &&	// (DeferredSun::WantedAtStartup)
-				TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") &&
+			Compiled = TheSettingManager->GetSettingI("Shaders.ShadowsExteriors.Main", "ForwardShadows") &&
 				TheSettingManager->GetSettingI(kSection, "DeferredFade") ? 1 : 0;
 		return Compiled == 1;
 	}

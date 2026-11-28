@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "../../core/DxvkCompute.h"
 #include "Dream.h"
 
 namespace {
@@ -193,6 +194,66 @@ bool DreamEffect::EnsureHistory(IDirect3DDevice9* Device) {
 	HistoryValid = false;
 	Logger::Log("Dream: tracer history made (%ux%u)", desc.Width, desc.Height);
 	return true;
+}
+
+bool DreamEffect::ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex,
+	bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) {
+	if (techniqueIndex > 2 || ClearRenderTarget || !DxvkCompute::Available()) return false;
+	ID3D9NvrExtSampler* linear = DxvkCompute::LinearClamp();
+	if (!linear) return false;
+
+	struct DreamUniforms {
+		float level[4];
+		float trails[4];
+		float melt[4];
+		float finish[4];
+		float grid[4];
+	} uniforms;
+	static_assert(sizeof(DreamUniforms) == sizeof(Constants), "Dream UBO matches Constants");
+	memcpy(&uniforms, &Constants, sizeof(uniforms));
+	ID3D9NvrExtBuffer* cb = ExtUniforms(extUniforms, &uniforms, sizeof(uniforms));
+	if (!cb) return false;
+
+	struct Push { UInt32 linearSampler; UInt32 pad[3]; } push = {};
+
+	if (techniqueIndex == 0) {
+		IDirect3DBaseTexture9* rendered = TheTextureManager->RenderedTexture;
+		IDirect3DBaseTexture9* history = HistoryRead ? HistoryRead : StandIn;
+		if (!rendered || !history || !RenderTarget) return false;
+		if (!extMix.Tried) {
+			extMix.Tried = true;
+			NVR_EXT_BINDING_DESC bindings[4] = {};
+			bindings[0].Set = 1; bindings[0].Binding = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].Slot = 0; bindings[0].ViewType = NVR_EXT_VIEW_2D;
+			bindings[1].Set = 1; bindings[1].Binding = 1; bindings[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[1].Slot = 1; bindings[1].ViewType = NVR_EXT_VIEW_2D;
+			bindings[2].Set = 2; bindings[2].Binding = 0; bindings[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[2].Slot = 0; bindings[2].ViewType = NVR_EXT_VIEW_2D;
+			bindings[3].Type = NVR_EXT_BIND_SAMPLER; bindings[3].Slot = 0; bindings[3].PushOffset = 0;
+			extMix.Pipeline = DxvkCompute::CreateGraphicsPipeline("DreamMix", bindings, _countof(bindings), sizeof(push), true);
+		}
+		if (!extMix.Pipeline) return false;
+		NVR_EXT_RESOURCE_BINDING res[4] = {};
+		res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = rendered;
+		res[1].Slot = 1; res[1].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[1].pResource = history;
+		res[2].Slot = 0; res[2].Type = NVR_EXT_BIND_UNIFORM_BUFFER; res[2].pResource = cb;
+		res[3].Slot = 0; res[3].Type = NVR_EXT_BIND_SAMPLER; res[3].pResource = linear;
+		return ExtDrawTo(extMix.Pipeline, &RenderTarget, 1, res, _countof(res), &push, sizeof(push), nullptr, ExtUv::ScreenQuad);
+	}
+
+	IDirect3DBaseTexture9* source = (techniqueIndex == 1) ? HistoryRead : TheTextureManager->RenderedTexture;
+	if (!source) return false;
+	if (!extPost.Tried) {
+		extPost.Tried = true;
+		NVR_EXT_BINDING_DESC bindings[3] = {};
+		bindings[0].Set = 1; bindings[0].Binding = 0; bindings[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; bindings[0].Slot = 0; bindings[0].ViewType = NVR_EXT_VIEW_2D;
+		bindings[1].Set = 2; bindings[1].Binding = 0; bindings[1].Type = NVR_EXT_BIND_UNIFORM_BUFFER; bindings[1].Slot = 0; bindings[1].ViewType = NVR_EXT_VIEW_2D;
+		bindings[2].Type = NVR_EXT_BIND_SAMPLER; bindings[2].Slot = 0; bindings[2].PushOffset = 0;
+		extPost.Pipeline = DxvkCompute::CreateGraphicsPipeline("DreamPost", bindings, _countof(bindings), sizeof(push), true);
+	}
+	if (!extPost.Pipeline) return false;
+	NVR_EXT_RESOURCE_BINDING res[3] = {};
+	res[0].Slot = 0; res[0].Type = NVR_EXT_BIND_SAMPLED_IMAGE; res[0].pResource = source;
+	res[1].Slot = 0; res[1].Type = NVR_EXT_BIND_UNIFORM_BUFFER; res[1].pResource = cb;
+	res[2].Slot = 0; res[2].Type = NVR_EXT_BIND_SAMPLER; res[2].pResource = linear;
+	return ExtFullScreen(Device, RenderTarget, RenderedSurface, SourceBuffer, extPost.Pipeline, res, _countof(res), &push, sizeof(push), true);
 }
 
 // Two passes when tracers, the tunnel or datamosh are live: the mix (this frame and the history) into the other history target,

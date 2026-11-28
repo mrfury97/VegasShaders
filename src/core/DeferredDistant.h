@@ -49,8 +49,7 @@ namespace DeferredDistant {
 	inline bool Installed = false;
 	// The switch at startup (SettingForce's overlay applies: the deferred renderer's mode 2 reads it as on).
 	inline bool WantedAtStartup() {
-		if (Wanted < 0) Wanted = TheSettingManager->GetSettingI(kSection, "DeferredDistant") != 0;
-		return Wanted != 0;
+		return true;
 	}
 	// The far land's records are compiled with the G-buffer outputs (ShaderRecord::BuildDefines: DISTANT_GBUFFER for TerrainLODTemplate).
 	inline bool CompiledIn() { return WantedAtStartup() && CapturedNormals::CompiledIn(); }
@@ -110,7 +109,6 @@ namespace DeferredDistant {
 		if (!Installed || !accumulator) return;
 		const UInt32 frame = FrameNow();
 		if (frame != StatLastFrame) { StatLastFrame = frame; StatFrames++; }
-		if (TheSettingManager->GetSettingI(kSection, "DeferredDistant") == 0) return;	// (live: the draw order's A/B; the records stay)
 		const UInt8* a = (const UInt8*)accumulator;
 		// the G-buffer span open (the world's main view), the standard render mode (not the depth-only modes 7 / 8), not a water pass
 		if (!CapturedNormals::InSpan || *(const UInt32*)(a + 0x19C) != 0 || a[0x164] || a[0x165]) { StatRefused++; return; }

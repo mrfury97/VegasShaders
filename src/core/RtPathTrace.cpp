@@ -869,7 +869,7 @@ namespace {
 			// viewport its water draws had, top-left) of its own size. 1, 1 whenever the mask and the depth buffer share one layout
 			{ water ? 1.0f : 0.0f, water && WaterMask::Made.Width ? (tw ? (float)w / (float)tw : 1.0f) * (float)WaterMask::Rect.Width / (float)WaterMask::Made.Width : 0.0f,
 			  water && WaterMask::Made.Height ? (th ? (float)h / (float)th : 1.0f) * (float)WaterMask::Rect.Height / (float)WaterMask::Made.Height : 0.0f,
-			  S.albedoCoverage && CapturedNormals::AlbedoMsaa ? 0.1f : 0.0f } };	// (w: 2026-11-13 PTAlbedoCoverage, the mask's threshold under the game's MSAA; 0 = 0.45)
+			  0.0f } };	// (w: 2026-11-13 PTAlbedoCoverage, 0 = 0.45; game MSAA is retired)
 		// one full-screen draw, everything it changes put back (as CapturedNormals::MergeIntoNormals)
 		IDirect3DVertexShader9* vs = nullptr; IDirect3DPixelShader9* ps = nullptr; IDirect3DVertexDeclaration9* decl = nullptr;
 		IDirect3DVertexBuffer9* vb = nullptr; UINT vbOffset = 0, vbStride = 0; IDirect3DBaseTexture9* tex[6] = {};	// (PTWaterMask: + s5, c9)
@@ -1119,8 +1119,7 @@ namespace {
 		// material / colour buffers hold AVERAGES of class codes and flags at edges (material rims, dark outlines), and the first-person
 		// model is not captured (it stays the game's raster pixel), as at a RenderScale below 1.
 		if (primary) {
-			static bool toldMsaa = false, toldRect = false;
-			if (!toldMsaa && (CapturedNormals::AlbedoMsaa || CapturedNormals::MsaaSurface)) { toldMsaa = true; Logger::Log("[WARNING] RT path trace: the game's MSAA is on (iMultiSample). Path tracing reads the screen's material buffers, which MSAA averages at edges: expect thin wrong-material outlines, and your first-person arms and gun stay raster-lit. Turn the game's MSAA off and use TAA / DLSS with path tracing."); }
+			static bool toldRect = false;
 			if (!toldRect && RenderRect::On) { toldRect = true; Logger::Log("UNOFFICIAL RT path trace: RenderScale is below 1: the first-person arms and gun are not path traced at a reduced render size (they keep the game's own lighting)."); }
 		}
 		const D3DXVECTOR4* albedoData = constant("TESR_AlbedoBufferData");
@@ -1145,7 +1144,7 @@ namespace {
 		if (waterWant) WaterMask::Request(TheFrameRateManager->FrameNumber);
 		bool prepped = false;
 		const bool maskWant = primary && (WaterMask::Enabled || WaterMask::GrassOn);	// (2026-11-12 PTGrassOwnPixel: the mask may hold grass alone)
-		const bool f0Want = primary && S.specular && !CapturedNormals::MsaaSurface && !CapturedNormals::AlbedoMsaa && capturedData && capturedData->x > 0.5f;
+		const bool f0Want = primary && S.specular && capturedData && capturedData->x > 0.5f;
 		if ((vmWant || ownWant || f0Want || (maskWant && WaterMask::WrittenFrame == TheFrameRateManager->FrameNumber)) && gNormals && albedoData && albedoData->x > 0.5f) {
 			prepped = ViewModelPrep(Device, gNormals, w, h, vmWant, ownWant, tw, th, c.rect[0], c.rect[1], f0Want);
 			vmThisFrame = prepped && vmWant;
@@ -1377,15 +1376,14 @@ namespace {
 							// UNOFFICIAL 2026-11-12 PTAlbedoCoverage (RtPathTrace.comp gAlbedoCover), texel 297.x (294-296 are another change's): only in a
 							// frame whose records are multisampled (the game's MSAA: their resolve is the samples' mean); 297.y free
 							static_assert(kEmCostTexel + 8 < kLightTexels, "PTAlbedoCoverage: frame row texel 297");
-							row[2 * (kEmCostTexel + 8)] = S.albedoCoverage && CapturedNormals::AlbedoMsaa ? 1.0f : 0.0f; row[2 * (kEmCostTexel + 8) + 1] = 0.0f;
+							row[2 * (kEmCostTexel + 8)] = 0.0f; row[2 * (kEmCostTexel + 8) + 1] = 0.0f;
 							{	// one line whenever what is sent changes (a run's log then says whether the key reached the trace)
 								static float toldCover = -1.0f;
 								const float sent = row[2 * (kEmCostTexel + 8)];
-								if (toldCover != sent && (sent > 0.5f || toldCover >= 0.0f || CapturedNormals::AlbedoMsaa)) {
+								if (toldCover != sent && (sent > 0.5f || toldCover >= 0.0f)) {
 									toldCover = sent;
-									Logger::Log("UNOFFICIAL RT path trace: PTAlbedoCoverage %s (key %s, the records %s): %s", sent > 0.5f ? "ACTIVE" : "not active", S.albedoCoverage ? "on" : "off",
-										CapturedNormals::AlbedoMsaa ? "multisampled: the game's MSAA" : "not multisampled",
-										sent > 0.5f ? "a pixel whose samples were not all written by a recording surface is the game's own pixel; grass writes no records; the water / grass mask counts from one sample" : "a pixel counts as written from half its alpha, as without MSAA");
+									Logger::Log("UNOFFICIAL RT path trace: PTAlbedoCoverage %s (key %s, the records not multisampled): a pixel counts as written from half its alpha, as without MSAA",
+										sent > 0.5f ? "ACTIVE" : "not active", S.albedoCoverage ? "on" : "off");
 								}
 							}
 							{	// UNOFFICIAL 2026-11-13 the flashlight's keys (RtPathTrace.comp gFlashOwn, FlashShape), texels 305, 306 and 298; written every

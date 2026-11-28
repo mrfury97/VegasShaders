@@ -23,11 +23,13 @@ float GradientNoise(vec2 pixel) {
 void main() {
     vec2 vpos = floor(gl_FragCoord.xy);
     vec2 coord = (vpos + 0.5) * LowTexel;
-    float depth = readDepthLod(coord - 0.5 * (LowTexel - cb.reciprocalResolution.xy));
+    vec2 rr = cb.reciprocalResolution.xy;
+    vec2 depthUV = clamp(coord - 0.5 * (LowTexel - rr), 0.5 * rr, max(cb.renderScale.xy - 0.5 * rr, 0.5 * rr));
+    float depth = readDepthLod(depthUV);
     float isSky = depth >= farZ * 0.996 ? 1.0 : 0.0;
     float planar = isSky > 0.0 ? MarchDistance : min(depth, MarchDistance);
 
-    vec3 ray = toWorld(coord);
+    vec3 ray = toWorld(coord * cb.renderScale.zw);
     float sigma = Density * length(ray);
     float dt = planar / Steps;
     float offset = GradientNoise(vpos);

@@ -58,7 +58,9 @@ public:
 	void	RegisterTextures();
 	void	UpdateSettings();
 	bool	ShouldRender();
+	bool	ExtSupportsRenderRect() const override { return true; }
 	void	UpdateWetness(IDirect3DDevice9* Device);
+	bool	ExtRender(IDirect3DDevice9* Device, IDirect3DSurface9* RenderTarget, IDirect3DSurface9* RenderedSurface, UINT techniqueIndex, bool ClearRenderTarget, IDirect3DSurface9* SourceBuffer) override;
 
 	// The per-draw constants of Shaders/Includes/HudRain.hlsl (c221, c222, c170), for each geometry pass. firstPerson: the pass
 	// draws the first-person arms and weapon (ShaderSplit's context).
@@ -68,6 +70,9 @@ public:
 	void	DrawOnScreen(BSRenderedTexture* Target);
 
 private:
+	ExtPass				extUpdate{}, extKeep{}, extScreen{};
+	ExtUniformBuffer	extUniforms{};
+	bool	ExtDrawOnScreen(IDirect3DDevice9* Device, IDirect3DSurface9* TargetSurface);
 	bool	Cleared = false;     // the wetness reset to 0 once its texture exists; until then no drops
 	float	Clock = 0.0f;        // the drops' clock: runs while it rains
 	float	DryingLeft = 0.0f;   // seconds the drops may still be drying (the passes run until then)

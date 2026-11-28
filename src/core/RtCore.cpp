@@ -1616,7 +1616,9 @@ namespace {
 			// game's inputs on the CPU and submits with no GPU wait (NvrRtHelper.cpp --wait cpu), 0 = its submission waits on the GPU (as before)
 			SettingManager::Configuration::ConfigNode node;
 			bool cpuWait = TheSettingManager->Config.FillNode(&node, "Main.Main.RayTracing", "HelperWait") && node.IntValue != 0;
+#if NVR_TEST_TOOLS
 			if (const char* e = getenv("NVR_RT_HELPER_WAIT")) cpuWait = !strcmp(e, "cpu");	// (bench A/B without touching the settings file: cpu / gpu)
+#endif
 			cmdLine += cpuWait ? L" --wait cpu" : L" --wait gpu";
 			// UNOFFICIAL 2026-11-24 [Main.Main.RayTracing] HelperGpuPriority (read at each helper start; a missing key: 1, as [Shaders.TAA.DLSS]
 			// HelperGpuPriority): 1 = the helper's queue and process at the high GPU priority (NvrRtHelper.cpp --gpu-priority high), and the
@@ -1627,14 +1629,19 @@ namespace {
 			// system's timer, as before. The NVR_ environment switches still override it for bench A/B runs.
 			SettingManager::Configuration::ConfigNode priorityNode;
 			bool highPriority = TheSettingManager->Config.FillNode(&priorityNode, "Main.Main.RayTracing", "HelperGpuPriority") ? priorityNode.IntValue != 0 : true;
-			if (const char* e = getenv("NVR_RT_HELPER_PRIORITY")) highPriority = !strcmp(e, "high");	// (bench: high / normal)
-			cmdLine += highPriority ? L" --gpu-priority high" : L" --gpu-priority normal";
 			bool helperTimer = highPriority, gameTimer = highPriority;
+#if NVR_TEST_TOOLS
+			if (const char* e = getenv("NVR_RT_HELPER_PRIORITY")) highPriority = !strcmp(e, "high");	// (bench: high / normal)
+			helperTimer = highPriority; gameTimer = highPriority;
 			if (const char* e = getenv("NVR_RT_HELPER_TIMER")) helperTimer = strcmp(e, "0") != 0;	// (bench: 0 = off, anything else on)
 			if (const char* e = getenv("NVR_GAME_TIMER")) gameTimer = strcmp(e, "0") != 0;
+#endif
+			cmdLine += highPriority ? L" --gpu-priority high" : L" --gpu-priority normal";
 			if (helperTimer) cmdLine += L" --timer-1ms";
+#if NVR_TEST_TOOLS
 			if (getenv("NVR_RT_HELPER_MEASURE")) cmdLine += L" --measure";
 			if (const char* e = getenv("NVR_RT_HELPER_SIGNAL")) if (!strcmp(e, "cpu")) cmdLine += L" --signal cpu";	// (bench only, 2026-11-10; with --wait cpu)
+#endif
 			static bool gameTimerSet = false;	// (once a session: timeBeginPeriod counts its calls, and the helper can start again)
 			if (gameTimer && !gameTimerSet) {	// the game process's timer: the DXVK submission thread's and the driver's waits tick on it
 				typedef UINT(WINAPI* TimeBegin)(UINT);
@@ -4208,8 +4215,12 @@ namespace {
 			// UNOFFICIAL 2026-11-10, BENCH ONLY (env NVR_RT_WAIT_PREV): the game waits for the PREVIOUS frame's results instead of this frame's, to
 			// measure what the two cross-process hand-overs cost a frame (the driver reported the helper's work done ~3 ms late on an L4). The
 			// copies below then read images the helper may still be writing: the picture is wrong, only the frame time counts.
+#if NVR_TEST_TOOLS
 			static const bool waitPrev = getenv("NVR_RT_WAIT_PREV") != nullptr;
 			if (waitPrev) { static bool told = false; if (!told) { told = true; Logger::Log("UNOFFICIAL Vegas Shaders DXVK: NVR_RT_WAIT_PREV: the game waits for the PREVIOUS frame's ray tracing results (bench timing only: the pictures are wrong)"); } }
+#else
+			constexpr bool waitPrev = false;
+#endif
 			if (!waitPrev) c.share->WaitShared(c.outputReady, n);
 			else if (n > 1) c.share->WaitShared(c.outputReady, n - 1);
 			if (timedTrip) timerTrip.End();
@@ -4458,6 +4469,7 @@ bool RtCore::ExchangeEarly(IDirect3DDevice9* Device, const User& user) {	// UNOF
 
 // UNOFFICIAL 2026-11-10 (PT early kick, docs/next/PT-EARLY-KICK-PLAN-2026-11-10.md; RtCore.h). Bench only: unset, nothing below runs.
 bool RtCore::EarlyPtWanted() {
+#if NVR_TEST_TOOLS
 	static const bool wanted = getenv("NVR_RT_EARLY_PT") != nullptr;
 	static bool told = false;
 	if (wanted && !told) {
@@ -4466,6 +4478,9 @@ bool RtCore::EarlyPtWanted() {
 			"show pass (no G-buffer inputs; grass left out of those frames' scene; last frame's lamp list)");
 	}
 	return wanted;
+#else
+	return false;
+#endif
 }
 
 // UNOFFICIAL 2026-11-16 (fd-batchH; RtCore.h)
@@ -4482,8 +4497,12 @@ bool RtCore::LateCamera(D3DXMATRIX& outView, D3DXMATRIX& outProj, D3DXVECTOR4& o
 namespace {
 	// (fd-batchH) the two bench envs own what OverlapExchange would change: NVR_RT_EARLY_PT the pending slot, NVR_RT_WAIT_PREV the wait
 	bool Core::OverlapStandsDown() const {
+#if NVR_TEST_TOOLS
 		static const bool waitPrev = getenv("NVR_RT_WAIT_PREV") != nullptr;
 		return waitPrev || RtCore::EarlyPtWanted();
+#else
+		return false;
+#endif
 	}
 
 	void Core::ReadOverlap() {

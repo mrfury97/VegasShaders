@@ -7,7 +7,6 @@
 #include "ShadowPool.h"	// UNOFFICIAL 2026-10-29 ShadowPool (ShadowPoolMax)
 #include "ShadowHold.h"	// UNOFFICIAL 2026-10-30 ShadowHold (FadeIn across live / pool)
 #include "ScopeCamera.h"	// UNOFFICIAL 2026-11-12 [Main.Main.Scope] Detect / OwnCamera: the picture-in-picture scope's scene (OtherCamera)
-#include "SettingForce.h"	// UNOFFICIAL 2026-11-14 full deferred renderer (AtlasRuns)
 #include <unordered_set>	// UNOFFICIAL 2026-10-30 TerrainRecords
 
 // UNOFFICIAL interior forward point-light shadows (NVR-Lunacy\docs\interior-forward-shadows.md).
@@ -174,23 +173,16 @@ namespace PointShadowForward {
 	inline bool AtlasWanted() {
 		if (AtlasWantedCache < 0) {
 			if (!TheRenderManager) return false;
-			const bool on = TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Atlas", "Enabled") != 0;
 			const bool dxvk = !strncmp(TheRenderManager->D3D9RuntimeDescription(), "DXVK", 4);
-			AtlasWantedCache = on && dxvk ? 1 : 0;
-			if (on && !dxvk) Logger::Log(SettingForce::Mode() > 0 ? "UNOFFICIAL ShadowAtlas: native D3D9 with the deferred renderer: the atlas is made for its lamp pass only; the object shaders keep the lamp cube maps" :
-				"UNOFFICIAL ShadowAtlas: on in the settings, but it runs under DXVK only: native D3D9 keeps the lamp cube maps (and the deferred lamps, which need it, stay off)");
+			AtlasWantedCache = dxvk ? 1 : 0;
 		}
 		return AtlasWantedCache != 0;
 	}
-	// UNOFFICIAL 2026-11-14 full deferred renderer (core/DeferredRenderer.h): the atlas is MADE (ShadowAtlas) when the object shaders read it
-	// (AtlasWanted: DXVK) or, on native D3D9, for the deferred lamp pass alone while [Main.Main.Quality] DeferredRenderer is on. Only
-	// AtlasWanted puts POINT_SHADOW_ATLAS into the object records and binds the atlas to their draws (native's records keep the cube maps:
-	// with the atlas they did not fit the slot cap, DEFERRED-RESULTS.md stage 0c).
 	inline int AtlasRunsCache = -1;
 	inline bool AtlasRuns() {
 		if (AtlasRunsCache < 0) {
 			if (!TheRenderManager) return false;
-			AtlasRunsCache = AtlasWanted() || (SettingForce::Mode() > 0 && TheSettingManager->GetSettingI("Shaders.ShadowsInteriors.Atlas", "Enabled") != 0) ? 1 : 0;
+			AtlasRunsCache = 1;
 		}
 		return AtlasRunsCache != 0;
 	}
